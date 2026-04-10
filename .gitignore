@@ -1,0 +1,20 @@
+# Build artifacts
+/pyry
+/dist/
+*.test
+*.out
+
+# Go
+/vendor/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Local env
+.env
+.env.local

@@ -1,0 +1,62 @@
+# Pyrycode
+
+A process supervisor and runtime for [Claude Code](https://claude.com/claude-code). Run `pyry` instead of `claude` to get a long-lived, self-healing, extensible host for your AI assistant.
+
+**Status:** Phase 0 — early scaffolding. Not ready for general use. See [the project plan](docs/plan.md).
+
+## What it does (Phase 0)
+
+- Spawns `claude` inside a pseudo-terminal and bridges stdin/stdout transparently
+- Restarts the child on exit with exponential backoff
+- Resumes the most recent Claude Code session after a crash so conversation history survives
+- Forwards `SIGWINCH` so terminal resizes propagate to the child
+
+## What it will do (later phases)
+
+1. **Phase 1 — Multi-session.** Spawn N Claude Code processes, route inbound events to the right one.
+2. **Phase 2 — Channels integration.** Replace the current hook-based Discord/Telegram plumbing.
+3. **Phase 3 — In-process services.** Knowledge capture, memsearch, scheduled jobs as first-class components.
+4. **Phase 4 — Remote access.** Self-hosted relay, E2E encryption via Noise Protocol, QR-code pairing, mobile and desktop clients.
+5. **Phase 5 — Voice chat.** WebRTC peer-to-peer audio, STT/TTS pipeline, realtime conversation.
+6. **Phase 6 — Distribution.** Homebrew tap, AUR, Nix flake, Docker images.
+
+## Install
+
+Pyrycode is not yet published. For development:
+
+```bash
+git clone https://github.com/pyrycode/pyrycode
+cd pyrycode
+go build -o pyry ./cmd/pyry
+./pyry version
+```
+
+Requires Go 1.23 or later and a working `claude` binary on `PATH`.
+
+## Usage
+
+```bash
+pyry                                # run claude under supervision
+pyry -verbose                       # with debug logging
+pyry -- --channels plugin:discord   # pass args through to claude
+pyry version
+pyry help
+```
+
+When run under systemd, use the unit file in [`systemd/pyry.service`](systemd/pyry.service):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/pyry.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now pyry
+journalctl --user -u pyry -f
+```
+
+## Design
+
+See [`docs/plan.md`](docs/plan.md) for the full roadmap, and [`docs/architecture.md`](docs/architecture.md) for the deeper technical background (relay vs P2P, Noise Protocol, comparison with Anthropic Remote Control and Happy).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
