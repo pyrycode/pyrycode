@@ -20,6 +20,10 @@ A process supervisor and runtime for [Claude Code](https://claude.com/claude-cod
 5. **Phase 5 — Voice chat.** WebRTC peer-to-peer audio, STT/TTS pipeline, realtime conversation.
 6. **Phase 6 — Distribution.** Homebrew tap, AUR, Nix flake, Docker images.
 
+## Platform support
+
+Pyrycode targets **Linux** and **macOS**. Windows is out of scope — it would require a separate PTY backend (ConPTY) and different signal handling.
+
 ## Install
 
 Pyrycode is not yet published. For development:
@@ -33,6 +37,14 @@ go build -o pyry ./cmd/pyry
 
 Requires Go 1.23 or later and a working `claude` binary on `PATH`.
 
+Cross-compile:
+
+```bash
+GOOS=linux  GOARCH=amd64 go build -o dist/pyry-linux-amd64  ./cmd/pyry
+GOOS=darwin GOARCH=arm64 go build -o dist/pyry-darwin-arm64 ./cmd/pyry
+GOOS=darwin GOARCH=amd64 go build -o dist/pyry-darwin-amd64 ./cmd/pyry
+```
+
 ## Usage
 
 ```bash
@@ -43,7 +55,9 @@ pyry version
 pyry help
 ```
 
-When run under systemd, use the unit file in [`systemd/pyry.service`](systemd/pyry.service):
+### Run as a service (Linux, systemd)
+
+Use the unit file in [`systemd/pyry.service`](systemd/pyry.service):
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -51,6 +65,23 @@ cp systemd/pyry.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now pyry
 journalctl --user -u pyry -f
+```
+
+### Run as a service (macOS, launchd)
+
+Edit [`launchd/dev.pyrycode.pyry.plist`](launchd/dev.pyrycode.pyry.plist) to set your binary path and working directory, then:
+
+```bash
+install -d ~/Library/LaunchAgents
+cp launchd/dev.pyrycode.pyry.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
+tail -f /tmp/pyry.out.log /tmp/pyry.err.log
+```
+
+To stop and unload:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
 ```
 
 ## Design

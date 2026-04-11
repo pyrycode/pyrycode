@@ -15,6 +15,8 @@ The smallest thing that can replace `tmux` + the bash restart loop and host Pyry
 - [x] Structured logging via `log/slog`
 - [x] Graceful shutdown on SIGINT / SIGTERM
 - [x] systemd user unit template
+- [x] launchd plist for macOS (cross-platform: Linux + macOS targeted; Windows out of scope)
+- [x] Cross-compile verified for darwin/amd64 and darwin/arm64
 - [ ] Real test on pyrybox: `pyry` replaces the tmux setup for Pyry itself
 - [ ] Unix control socket (`pyry status`, `pyry logs`, `pyry attach`)
 - [ ] Session ID tracking with explicit persistence across restarts (beyond `--resume` heuristics)
