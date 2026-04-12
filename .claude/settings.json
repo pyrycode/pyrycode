@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push * --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git checkout -- *)",
+      "Bash(git restore . *)",
+      "Bash(git clean -f*)",
+      "Bash(git branch -D*)",
+      "Bash(git stash drop*)",
+      "Bash(git stash clear*)",
+      "Bash(rm -rf*)"
+    ],
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(go test*)",
+      "Bash(go build*)",
+      "Bash(go vet*)",
+      "Bash(go fmt*)",
+      "Bash(go run*)",
+      "Bash(go mod*)",
+      "Bash(go install*)",
+      "Bash(staticcheck*)",
+      "Bash(qmd *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(mkdir *)",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "mcp__qmd__query",
+      "mcp__qmd__get",
+      "mcp__qmd__multi_get",
+      "mcp__qmd__status",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs"
+    ]
+  },
+  "enableAllProjectMcpServers": true
+}
