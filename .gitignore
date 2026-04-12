@@ -21,3 +21,6 @@
 
 # MCP config (machine-specific paths)
 .mcp.json
+
+# Agents (separate repo: pyrycode/agents)
+agents/
