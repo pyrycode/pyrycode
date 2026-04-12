@@ -18,3 +18,6 @@
 # Local env
 .env
 .env.local
+
+# MCP config (machine-specific paths)
+.mcp.json
