@@ -45,6 +45,10 @@ type Config struct {
 	BackoffInitial time.Duration
 	BackoffMax     time.Duration
 	BackoffReset   time.Duration
+
+	// helperEnv is extra environment variables appended to the child process
+	// environment. Used only in tests (TestHelperProcess pattern).
+	helperEnv []string
 }
 
 // Supervisor owns a single Claude Code child process and restarts it on exit.
@@ -81,7 +85,7 @@ func New(cfg Config) (*Supervisor, error) {
 // exponential backoff before respawning. The backoff counter resets if a child
 // stayed up longer than Config.BackoffReset.
 func (s *Supervisor) Run(ctx context.Context) error {
-	backoff := s.cfg.BackoffInitial
+	bo := newBackoffTimer(s.cfg.BackoffInitial, s.cfg.BackoffMax, s.cfg.BackoffReset)
 	firstRun := true
 
 	for {
@@ -109,22 +113,13 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		}
 
 		firstRun = false
+		delay := bo.next(uptime)
 
-		// Reset backoff if the last child stayed up for a while.
-		if uptime > s.cfg.BackoffReset {
-			backoff = s.cfg.BackoffInitial
-		}
-
-		s.log.Info("restarting after backoff", "delay", backoff)
+		s.log.Info("restarting after backoff", "delay", delay)
 		select {
-		case <-time.After(backoff):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return ctx.Err()
-		}
-
-		backoff *= 2
-		if backoff > s.cfg.BackoffMax {
-			backoff = s.cfg.BackoffMax
 		}
 	}
 }
@@ -136,7 +131,7 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string) error {
 	if s.cfg.WorkDir != "" {
 		cmd.Dir = s.cfg.WorkDir
 	}
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), s.cfg.helperEnv...)
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
