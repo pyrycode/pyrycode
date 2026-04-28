@@ -31,6 +31,22 @@ func Status(ctx context.Context, socketPath string) (*StatusPayload, error) {
 	return resp.Status, nil
 }
 
+// Logs fetches the recent supervisor log lines from the daemon. Lines are
+// returned oldest first.
+func Logs(ctx context.Context, socketPath string) (*LogsPayload, error) {
+	resp, err := request(ctx, socketPath, Request{Verb: VerbLogs})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	if resp.Logs == nil {
+		return nil, errors.New("control: empty logs response")
+	}
+	return resp.Logs, nil
+}
+
 // Stop asks the daemon to shut down. Returns when the server has acknowledged
 // the request — the supervisor may still be unwinding its child process and
 // removing the socket file. Callers that need to wait for full shutdown can

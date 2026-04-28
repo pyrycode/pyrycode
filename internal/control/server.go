@@ -32,6 +32,7 @@ type StateProvider interface {
 type Server struct {
 	socketPath string
 	state      StateProvider
+	logs       LogProvider
 	shutdown   func()
 	log        *slog.Logger
 
@@ -42,17 +43,23 @@ type Server struct {
 
 // NewServer constructs a Server. The socket is not opened until Listen.
 //
-// shutdown, if non-nil, is invoked when a VerbStop request arrives. Typically
-// this is the signal-driven context's cancel function, so a successful stop
-// request walks the same shutdown path as SIGINT/SIGTERM. nil is allowed —
-// VerbStop will then return an error response.
-func NewServer(socketPath string, state StateProvider, shutdown func(), log *slog.Logger) *Server {
+// state must be non-nil — the supervisor is the canonical source of state.
+//
+// logs is optional. When nil, VerbLogs returns an error response. When set,
+// it is the read view over the supervisor's recent-log ring buffer.
+//
+// shutdown is optional. When nil, VerbStop returns an error response. When
+// set, a successful VerbStop invokes it after acknowledging the client —
+// typically the signal-driven context's cancel function so a stop request
+// walks the same shutdown path as SIGINT/SIGTERM.
+func NewServer(socketPath string, state StateProvider, logs LogProvider, shutdown func(), log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Server{
 		socketPath: socketPath,
 		state:      state,
+		logs:       logs,
 		shutdown:   shutdown,
 		log:        log,
 	}
@@ -182,6 +189,17 @@ func (s *Server) handle(conn net.Conn) {
 	switch req.Verb {
 	case VerbStatus:
 		_ = enc.Encode(Response{Status: buildStatus(s.state.State())})
+	case VerbLogs:
+		if s.logs == nil {
+			_ = enc.Encode(Response{Error: "logs: no log provider configured"})
+			return
+		}
+		lines := s.logs.Snapshot()
+		capacity := 0
+		if r, ok := s.logs.(*RingBuffer); ok {
+			capacity = r.Cap()
+		}
+		_ = enc.Encode(Response{Logs: &LogsPayload{Lines: lines, Capacity: capacity}})
 	case VerbStop:
 		if s.shutdown == nil {
 			_ = enc.Encode(Response{Error: "stop: no shutdown handler configured"})
