@@ -191,13 +191,22 @@ func (s *Server) Close() error {
 	return firstErr
 }
 
-// handle services a single client connection: decode one Request, write
-// one Response (and possibly stream raw bytes for VerbAttach), close.
+// handshakeTimeout caps how long the server waits for a client to send its
+// JSON request after connecting. Cleared for streaming verbs (VerbAttach)
+// before the ack, since they hold the connection open indefinitely.
+const handshakeTimeout = 5 * time.Second
+
+// handle dispatches a single client connection. One-shot verbs reply with one
+// JSON Response and close. Streaming verbs (currently just VerbAttach) hand
+// off connection ownership to a streaming handler; the deferred close in
+// handle is suppressed for them.
 //
-// VerbAttach is the only verb that holds the connection open beyond a single
-// JSON ack. After the ack, the connection is "upgraded" — both sides switch
-// to raw bytes flowing between the client's terminal and the PTY. The
-// connection closes when either side disconnects.
+// TODO: a misbehaving client could open a connection, write a partial JSON
+// payload, and hold it. The handshake deadline + per-conn goroutine model
+// bounds the damage to ~handshakeTimeout × N concurrent slow clients. With
+// the 0600 socket perms the realistic N is "other processes the same user
+// runs", which is fine for Phase 0. Revisit if the socket is ever exposed
+// beyond that boundary.
 func (s *Server) handle(conn net.Conn) {
 	closeConn := true
 	defer func() {
@@ -205,16 +214,7 @@ func (s *Server) handle(conn net.Conn) {
 			_ = conn.Close()
 		}
 	}()
-	// Short deadline for the JSON handshake. Cleared before raw-byte streaming
-	// so the attach connection can stay open indefinitely.
-	//
-	// TODO: a misbehaving client could open a connection, write a partial
-	// JSON payload, and hold it. The 5s deadline + per-conn goroutine model
-	// bounds the damage to ~5s × N concurrent slow clients. With the 0600
-	// socket perms the realistic N is "other processes the same user runs",
-	// which is fine for Phase 0. Revisit if the socket is ever exposed
-	// beyond that boundary.
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
@@ -229,64 +229,82 @@ func (s *Server) handle(conn net.Conn) {
 	case VerbStatus:
 		_ = enc.Encode(Response{Status: buildStatus(s.state.State())})
 	case VerbLogs:
-		if s.logs == nil {
-			_ = enc.Encode(Response{Error: "logs: no log provider configured"})
-			return
-		}
-		_ = enc.Encode(Response{Logs: &LogsPayload{
-			Lines:    s.logs.Snapshot(),
-			Capacity: s.logs.Cap(),
-		}})
+		s.handleLogs(enc)
 	case VerbStop:
-		if s.shutdown == nil {
-			_ = enc.Encode(Response{Error: "stop: no shutdown handler configured"})
-			return
-		}
-		// Acknowledge first, then trigger shutdown. The Response is in
-		// the kernel's socket buffer by the time shutdown() returns, so
-		// even if the listener closes immediately the client still reads
-		// its OK.
-		_ = enc.Encode(Response{OK: true})
-		s.log.Info("control: stop requested")
-		s.shutdown()
+		s.handleStop(enc)
 	case VerbAttach:
-		if s.attach == nil {
-			_ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
-			return
+		// Streaming verb. handleAttach takes ownership of conn on
+		// success and is responsible for closing it.
+		if s.handleAttach(conn, enc) {
+			closeConn = false
 		}
-		// Clear the handshake deadline BEFORE registering the bridge or
-		// writing the ack. Once attach starts, both directions are streaming
-		// — the bridge's input goroutine reads from conn until EOF, and the
-		// supervisor's PTY output goroutine writes to conn at unpredictable
-		// times. A 5-second deadline still on the conn would mistakenly
-		// terminate either side after a quiet window. A successful attach
-		// should keep the conn alive indefinitely.
-		_ = conn.SetDeadline(time.Time{})
-
-		// Bridge bytes for the lifetime of the attachment. The Response
-		// ack ({OK:true}) tells the client to switch to raw-byte mode.
-		// After that, conn → PTY input, PTY output → conn.
-		done, err := s.attach.Attach(conn, conn)
-		if err != nil {
-			_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-			return
-		}
-		s.log.Info("control: client attached")
-		_ = enc.Encode(Response{OK: true})
-
-		// Hand off the connection: don't close it from this goroutine. The
-		// AttachProvider's `done` fires when the client's input ends; at
-		// that point we close the conn to release any blocked PTY → conn
-		// writes.
-		closeConn = false
-		go func() {
-			<-done
-			_ = conn.Close()
-			s.log.Info("control: client detached")
-		}()
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
+}
+
+// handleLogs serves a VerbLogs request: snapshot the ring buffer, write the
+// payload, return.
+func (s *Server) handleLogs(enc *json.Encoder) {
+	if s.logs == nil {
+		_ = enc.Encode(Response{Error: "logs: no log provider configured"})
+		return
+	}
+	_ = enc.Encode(Response{Logs: &LogsPayload{
+		Lines:    s.logs.Snapshot(),
+		Capacity: s.logs.Cap(),
+	}})
+}
+
+// handleStop serves a VerbStop request: ack, then invoke the configured
+// shutdown callback. The ack is written before shutdown so the client reads
+// confirmation even if the listener closes immediately.
+func (s *Server) handleStop(enc *json.Encoder) {
+	if s.shutdown == nil {
+		_ = enc.Encode(Response{Error: "stop: no shutdown handler configured"})
+		return
+	}
+	_ = enc.Encode(Response{OK: true})
+	s.log.Info("control: stop requested")
+	s.shutdown()
+}
+
+// handleAttach serves a VerbAttach request. Returns true iff connection
+// ownership has been transferred to the streaming bridge — in which case the
+// caller MUST NOT close conn (a goroutine spawned here handles that when the
+// attach ends). Returns false on any pre-attach failure (no provider, bridge
+// busy, etc.); in those cases the caller continues to own conn and will
+// close it normally.
+func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder) (handedOff bool) {
+	if s.attach == nil {
+		_ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
+		return false
+	}
+	// Clear the handshake deadline BEFORE registering the bridge or writing
+	// the ack. Once attach starts, both directions are streaming — the
+	// bridge's input goroutine reads from conn until EOF, and the supervisor's
+	// PTY output goroutine writes to conn at unpredictable times. A handshake
+	// deadline still on the conn would mistakenly terminate either side after
+	// a quiet window. A successful attach should keep the conn alive
+	// indefinitely.
+	_ = conn.SetDeadline(time.Time{})
+
+	done, err := s.attach.Attach(conn, conn)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
+		return false
+	}
+	s.log.Info("control: client attached")
+	_ = enc.Encode(Response{OK: true})
+
+	// Connection ownership transferred. Close it when the bridge's input
+	// pump ends (typically: client disconnected).
+	go func() {
+		<-done
+		_ = conn.Close()
+		s.log.Info("control: client detached")
+	}()
+	return true
 }
 
 // buildStatus converts a supervisor.State snapshot into the wire format.
