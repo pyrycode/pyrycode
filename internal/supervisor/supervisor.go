@@ -23,6 +23,14 @@ import (
 	"golang.org/x/term"
 )
 
+// goroutineDrainTimeout caps how long runOnce waits for its I/O bridge
+// goroutines to finish after the child has exited. The output goroutine
+// returns promptly when ptmx is closed; the input goroutine in foreground
+// mode is blocked on os.Stdin and will only unblock on the next user
+// keystroke. The timeout exists to bound runOnce's return latency without
+// requiring stdin to be closed.
+const goroutineDrainTimeout = 100 * time.Millisecond
+
 // Phase describes the supervisor's current lifecycle state.
 type Phase string
 
@@ -256,7 +264,7 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 		_ = ptmx.Close()
 		select {
 		case <-done:
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(goroutineDrainTimeout):
 		}
 		return waitErr
 	}
