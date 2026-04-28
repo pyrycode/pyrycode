@@ -16,11 +16,33 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
+
+// Phase describes the supervisor's current lifecycle state.
+type Phase string
+
+const (
+	PhaseStarting Phase = "starting" // before the first child has been spawned
+	PhaseRunning  Phase = "running"  // a child process is alive
+	PhaseBackoff  Phase = "backoff"  // waiting before the next restart
+	PhaseStopped  Phase = "stopped"  // Run has returned
+)
+
+// State is a snapshot of the supervisor's runtime state. Returned by
+// (*Supervisor).State for the control plane.
+type State struct {
+	Phase        Phase         // current lifecycle phase
+	ChildPID     int           // PID of the running child, or 0 when none
+	StartedAt    time.Time     // when the supervisor entered Run
+	RestartCount int           // number of times the child has exited
+	LastUptime   time.Duration // uptime of the most recent child, zero if first run
+	NextBackoff  time.Duration // delay scheduled before the next spawn, zero when running
+}
 
 // Config controls a Supervisor instance.
 type Config struct {
@@ -55,6 +77,23 @@ type Config struct {
 type Supervisor struct {
 	cfg Config
 	log *slog.Logger
+
+	mu    sync.Mutex
+	state State
+}
+
+// State returns a snapshot of the current supervisor state. Safe to call from
+// any goroutine.
+func (s *Supervisor) State() State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
+func (s *Supervisor) updateState(fn func(*State)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(&s.state)
 }
 
 // New constructs a Supervisor from a Config, applying defaults.
@@ -77,7 +116,11 @@ func New(cfg Config) (*Supervisor, error) {
 	if cfg.BackoffReset == 0 {
 		cfg.BackoffReset = 60 * time.Second
 	}
-	return &Supervisor{cfg: cfg, log: cfg.Logger}, nil
+	return &Supervisor{
+		cfg:   cfg,
+		log:   cfg.Logger,
+		state: State{Phase: PhaseStarting},
+	}, nil
 }
 
 // Run supervises the claude child until ctx is cancelled. Each iteration spawns
@@ -87,6 +130,17 @@ func New(cfg Config) (*Supervisor, error) {
 func (s *Supervisor) Run(ctx context.Context) error {
 	bo := newBackoffTimer(s.cfg.BackoffInitial, s.cfg.BackoffMax, s.cfg.BackoffReset)
 	firstRun := true
+
+	startedAt := time.Now()
+	s.updateState(func(st *State) {
+		st.Phase = PhaseStarting
+		st.StartedAt = startedAt
+	})
+	defer s.updateState(func(st *State) {
+		st.Phase = PhaseStopped
+		st.ChildPID = 0
+		st.NextBackoff = 0
+	})
 
 	for {
 		if ctx.Err() != nil {
@@ -100,7 +154,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 		start := time.Now()
 		s.log.Info("spawning claude", "args", args, "workdir", s.cfg.WorkDir)
-		err := s.runOnce(ctx, args)
+		onSpawn := func(pid int) {
+			s.updateState(func(st *State) {
+				st.Phase = PhaseRunning
+				st.ChildPID = pid
+				st.NextBackoff = 0
+			})
+		}
+		err := s.runOnce(ctx, args, onSpawn)
 		uptime := time.Since(start)
 
 		switch {
@@ -115,6 +176,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		firstRun = false
 		delay := bo.next(uptime)
 
+		s.updateState(func(st *State) {
+			st.Phase = PhaseBackoff
+			st.ChildPID = 0
+			st.RestartCount++
+			st.LastUptime = uptime
+			st.NextBackoff = delay
+		})
+
 		s.log.Info("restarting after backoff", "delay", delay)
 		select {
 		case <-time.After(delay):
@@ -125,8 +194,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 }
 
 // runOnce spawns claude in a PTY, bridges it to the controlling terminal,
-// and returns when the child exits or ctx is cancelled.
-func (s *Supervisor) runOnce(ctx context.Context, args []string) error {
+// and returns when the child exits or ctx is cancelled. onSpawn, if non-nil,
+// is called once with the child PID after the PTY has been allocated.
+func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pid int)) error {
 	cmd := exec.CommandContext(ctx, s.cfg.ClaudeBin, args...)
 	if s.cfg.WorkDir != "" {
 		cmd.Dir = s.cfg.WorkDir
@@ -138,6 +208,10 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string) error {
 		return fmt.Errorf("pty start: %w", err)
 	}
 	defer func() { _ = ptmx.Close() }()
+
+	if onSpawn != nil && cmd.Process != nil {
+		onSpawn(cmd.Process.Pid)
+	}
 
 	// Put the controlling terminal into raw mode if it is a TTY so that
 	// keystrokes pass through unmodified to the child.
