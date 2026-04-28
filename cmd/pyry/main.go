@@ -39,6 +39,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
+	"golang.org/x/term"
 )
 
 // Version is set at build time via -ldflags "-X main.Version=...".
@@ -120,6 +121,8 @@ func run() error {
 			return runStop(os.Args[2:])
 		case "logs":
 			return runLogs(os.Args[2:])
+		case "attach":
+			return runAttach(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -234,11 +237,21 @@ func runSupervisor(args []string) error {
 		logRing,
 	))
 
+	// Service vs foreground mode is detected from stdin: if there's no
+	// controlling terminal (e.g. launchd / systemd / nohup), the supervisor
+	// runs detached and PTY I/O routes through a Bridge so a `pyry attach`
+	// client can take over interactively.
+	var bridge *supervisor.Bridge
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		bridge = supervisor.NewBridge()
+	}
+
 	cfg := supervisor.Config{
 		ClaudeBin:  *claudeBin,
 		WorkDir:    *workdir,
 		ResumeLast: *resume,
 		ClaudeArgs: claudeArgs,
+		Bridge:     bridge,
 		Logger:     logger,
 	}
 
@@ -250,7 +263,15 @@ func runSupervisor(args []string) error {
 		return fmt.Errorf("supervisor init: %w", err)
 	}
 
-	ctrl := control.NewServer(*socketPath, sup, logRing, cancel, logger)
+	// Only expose VerbAttach when we're in service mode (a Bridge exists).
+	// Foreground-mode pyry already has the PTY bound to the local terminal,
+	// so attach would have nothing to do.
+	var attachProvider control.AttachProvider
+	if bridge != nil {
+		attachProvider = bridge
+	}
+
+	ctrl := control.NewServer(*socketPath, sup, logRing, attachProvider, cancel, logger)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -333,6 +354,34 @@ func runLogs(args []string) error {
 	return nil
 }
 
+// runAttach implements `pyry attach`: connect to a running daemon's control
+// socket, hand the local terminal over to the supervised claude session.
+// Press Ctrl-B d to detach (leaves pyry running).
+func runAttach(args []string) error {
+	fs := flag.NewFlagSet("pyry attach", flag.ContinueOnError)
+	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Read local terminal geometry so the supervised claude knows the
+	// initial window size.
+	cols, rows := 0, 0
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		w, h, err := term.GetSize(int(os.Stdout.Fd()))
+		if err == nil {
+			cols, rows = w, h
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "pyry: attached. Press Ctrl-B d to detach.")
+	if err := control.Attach(context.Background(), *socketPath, cols, rows); err != nil {
+		return fmt.Errorf("attach: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "\npyry: detached.")
+	return nil
+}
+
 // runStop implements `pyry stop`: dial the control socket and ask the daemon
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
@@ -367,6 +416,8 @@ Usage:
   pyry status [flags]                            query the running daemon
   pyry stop [flags]                              ask the daemon to shut down
   pyry logs [flags]                              print recent supervisor logs
+  pyry attach [flags]                            attach local terminal to daemon
+                                                  (Ctrl-B d to detach)
   pyry version                                   print version
   pyry help                                      show this help
 

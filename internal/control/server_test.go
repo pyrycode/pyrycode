@@ -55,7 +55,7 @@ func startServer(t *testing.T, fs *fakeState) (sock string, stop func()) {
 	dir := shortTempDir(t)
 	sock = filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, fs, nil, nil, nil)
+	srv := NewServer(sock, fs, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestServer_StaleSocketIsReplaced(t *testing.T) {
 		t.Fatalf("seed stale: %v", err)
 	}
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil)
+	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen with stale file should succeed: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestServer_CloseRemovesSocket(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil)
+	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestServer_Stop(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	shutdownCalled := make(chan struct{}, 1)
-	srv := NewServer(sock, &fakeState{}, nil, func() {
+	srv := NewServer(sock, &fakeState{}, nil, nil, func() {
 		select {
 		case shutdownCalled <- struct{}{}:
 		default:
@@ -303,7 +303,7 @@ func TestServer_StopWithoutHandler(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil)
+	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

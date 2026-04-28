@@ -101,6 +101,23 @@ pyry stop
 
 Sends a shutdown request over the control socket. Pyry kills the supervised claude child, removes the socket, and exits — same code path as SIGINT / SIGTERM / `launchctl unload`.
 
+### Attaching to a daemon (service mode)
+
+When pyry runs as a service (launchd / systemd / no controlling terminal), the supervised claude session has no terminal of its own. Connect to it on demand:
+
+```bash
+pyry attach
+# → "pyry: attached. Press Ctrl-B d to detach."
+# Your terminal is now claude's terminal. Type away.
+# Press Ctrl-B then d to detach — pyry and claude stay running.
+```
+
+Detach leaves the daemon untouched. Reattach later (different shell, after a laptop sleep, over SSH from your phone) and you're back in the same session. To actually shut the daemon down, use `pyry stop`.
+
+Only one client can attach at a time. A second `pyry attach` while another is connected gets a clean error.
+
+Pyry switches between **foreground mode** (running `pyry` from a terminal — bridges PTY directly to your terminal, today's behavior) and **service mode** (no controlling terminal — output buffered, accessible via `pyry attach`) automatically based on whether stdin is a TTY.
+
 ### Run as a service (Linux, systemd)
 
 Use the unit file in [`systemd/pyry.service`](systemd/pyry.service):
