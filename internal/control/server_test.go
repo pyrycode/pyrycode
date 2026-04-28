@@ -28,12 +28,6 @@ func (f *fakeState) State() supervisor.State {
 	return f.st
 }
 
-func (f *fakeState) set(st supervisor.State) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.st = st
-}
-
 // shortTempDir returns a short tempdir suitable for Unix socket paths.
 // t.TempDir() lives under /var/folders/... on macOS, which combined with
 // long test names blows past the 104-byte sun_path limit. /tmp is short.
