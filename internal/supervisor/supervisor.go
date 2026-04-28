@@ -270,6 +270,21 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 	}
 
 	// Foreground mode: bridge directly to the supervisor's own terminal.
+	//
+	// Known limitation: io.Copy(ptmx, os.Stdin) below blocks on stdin.Read
+	// after the child exits — closing ptmx unblocks the *output* goroutine
+	// promptly, but the *input* goroutine sits on stdin until the user types
+	// again. Each child restart can therefore strand one stdin-bound
+	// goroutine that lives until the next keystroke.
+	//
+	// The leak is bounded by typing frequency, not by restart frequency, so
+	// in practice it stays at "one or two goroutines" for an interactive
+	// user. Service mode (Bridge != nil) has no equivalent issue — the
+	// bridge's pipe-based input pump is per-supervisor, not per-child.
+	// We accept this for foreground mode rather than retrofitting a
+	// cancellable stdin reader, since foreground mode is dev-convenience
+	// only; the production deployment uses service mode.
+	//
 	// Put the controlling terminal into raw mode if it is a TTY so that
 	// keystrokes pass through unmodified to the child.
 	stdinFd := int(os.Stdin.Fd())
