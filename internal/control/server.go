@@ -244,6 +244,15 @@ func (s *Server) handle(conn net.Conn) {
 			_ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
 			return
 		}
+		// Clear the handshake deadline BEFORE registering the bridge or
+		// writing the ack. Once attach starts, both directions are streaming
+		// — the bridge's input goroutine reads from conn until EOF, and the
+		// supervisor's PTY output goroutine writes to conn at unpredictable
+		// times. A 5-second deadline still on the conn would mistakenly
+		// terminate either side after a quiet window. A successful attach
+		// should keep the conn alive indefinitely.
+		_ = conn.SetDeadline(time.Time{})
+
 		// Bridge bytes for the lifetime of the attachment. The Response
 		// ack ({OK:true}) tells the client to switch to raw-byte mode.
 		// After that, conn → PTY input, PTY output → conn.
@@ -254,10 +263,6 @@ func (s *Server) handle(conn net.Conn) {
 		}
 		s.log.Info("control: client attached")
 		_ = enc.Encode(Response{OK: true})
-
-		// Clear the handshake deadline — raw-byte streaming has no a priori
-		// upper bound on how long a session lasts.
-		_ = conn.SetDeadline(time.Time{})
 
 		// Hand off the connection: don't close it from this goroutine. The
 		// AttachProvider's `done` fires when the client's input ends; at
