@@ -32,6 +32,7 @@ type StateProvider interface {
 type Server struct {
 	socketPath string
 	state      StateProvider
+	shutdown   func()
 	log        *slog.Logger
 
 	mu       sync.Mutex
@@ -40,13 +41,19 @@ type Server struct {
 }
 
 // NewServer constructs a Server. The socket is not opened until Listen.
-func NewServer(socketPath string, state StateProvider, log *slog.Logger) *Server {
+//
+// shutdown, if non-nil, is invoked when a VerbStop request arrives. Typically
+// this is the signal-driven context's cancel function, so a successful stop
+// request walks the same shutdown path as SIGINT/SIGTERM. nil is allowed —
+// VerbStop will then return an error response.
+func NewServer(socketPath string, state StateProvider, shutdown func(), log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Server{
 		socketPath: socketPath,
 		state:      state,
+		shutdown:   shutdown,
 		log:        log,
 	}
 }
@@ -175,6 +182,18 @@ func (s *Server) handle(conn net.Conn) {
 	switch req.Verb {
 	case VerbStatus:
 		_ = enc.Encode(Response{Status: buildStatus(s.state.State())})
+	case VerbStop:
+		if s.shutdown == nil {
+			_ = enc.Encode(Response{Error: "stop: no shutdown handler configured"})
+			return
+		}
+		// Acknowledge first, then trigger shutdown. The Response is in
+		// the kernel's socket buffer by the time shutdown() returns, so
+		// even if the listener closes immediately the client still reads
+		// its OK.
+		_ = enc.Encode(Response{OK: true})
+		s.log.Info("control: stop requested")
+		s.shutdown()
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}

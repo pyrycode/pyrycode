@@ -54,6 +54,8 @@ func run() error {
 			return nil
 		case "status":
 			return runStatus(os.Args[2:])
+		case "stop":
+			return runStop(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -98,7 +100,7 @@ func runSupervisor(args []string) error {
 		return fmt.Errorf("supervisor init: %w", err)
 	}
 
-	ctrl := control.NewServer(*socketPath, sup, logger)
+	ctrl := control.NewServer(*socketPath, sup, cancel, logger)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -159,12 +161,33 @@ func runStatus(args []string) error {
 	return nil
 }
 
+// runStop implements `pyry stop`: dial the control socket and ask the daemon
+// to shut down. Returns when the server has acknowledged — the daemon may
+// still be unwinding its child.
+func runStop(args []string) error {
+	fs := flag.NewFlagSet("pyry stop", flag.ContinueOnError)
+	socketPath := fs.String("socket", defaultSocketPath(), "control socket path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := control.Stop(ctx, *socketPath); err != nil {
+		return fmt.Errorf("stop: %w", err)
+	}
+	fmt.Println("pyry: stop requested")
+	return nil
+}
+
 func printHelp() {
 	fmt.Print(`pyry — Pyrycode daemon, a supervisor for Claude Code
 
 Usage:
   pyry [flags] [-- claude args...]   start a supervised claude session
   pyry status [flags]                query the running daemon
+  pyry stop [flags]                  ask the running daemon to shut down
   pyry version                       print version
   pyry help                          show this help
 
@@ -175,7 +198,7 @@ Supervisor flags:
   -verbose         verbose logging
   -socket string   control socket path (default ~/.pyry/pyry.sock)
 
-Status flags:
+Status / Stop flags:
   -socket string   control socket path (default ~/.pyry/pyry.sock)
 
 Examples:
@@ -183,6 +206,7 @@ Examples:
   pyry -verbose                       # with debug logging
   pyry -- --channels plugin:discord   # pass args through to claude
   pyry status                         # check on the running daemon
+  pyry stop                           # graceful shutdown via the control socket
 
 See https://github.com/pyrycode/pyrycode for documentation.
 `)

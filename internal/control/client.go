@@ -31,6 +31,24 @@ func Status(ctx context.Context, socketPath string) (*StatusPayload, error) {
 	return resp.Status, nil
 }
 
+// Stop asks the daemon to shut down. Returns when the server has acknowledged
+// the request — the supervisor may still be unwinding its child process and
+// removing the socket file. Callers that need to wait for full shutdown can
+// poll Status until it returns a dial error.
+func Stop(ctx context.Context, socketPath string) error {
+	resp, err := request(ctx, socketPath, Request{Verb: VerbStop})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: stop response missing ok flag")
+	}
+	return nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {
