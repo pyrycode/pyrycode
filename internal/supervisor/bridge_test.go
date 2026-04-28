@@ -12,7 +12,7 @@ import (
 func TestBridge_DiscardsWhenUnattached(t *testing.T) {
 	t.Parallel()
 
-	b := NewBridge()
+	b := NewBridge(nil)
 	n, err := b.Write([]byte("hello"))
 	if err != nil {
 		t.Fatalf("Write: %v", err)
@@ -28,7 +28,7 @@ func TestBridge_DiscardsWhenUnattached(t *testing.T) {
 func TestBridge_OutputForwardsWhenAttached(t *testing.T) {
 	t.Parallel()
 
-	b := NewBridge()
+	b := NewBridge(nil)
 	var out bytes.Buffer
 
 	done, err := b.Attach(strings.NewReader(""), &out)
@@ -55,7 +55,7 @@ func TestBridge_OutputForwardsWhenAttached(t *testing.T) {
 func TestBridge_InputFlowsToReader(t *testing.T) {
 	t.Parallel()
 
-	b := NewBridge()
+	b := NewBridge(nil)
 	in := strings.NewReader("greetings")
 	var out bytes.Buffer
 
@@ -80,7 +80,7 @@ func TestBridge_InputFlowsToReader(t *testing.T) {
 func TestBridge_RejectsConcurrentAttach(t *testing.T) {
 	t.Parallel()
 
-	b := NewBridge()
+	b := NewBridge(nil)
 	pr, pw := io.Pipe()
 	defer pr.Close()
 	defer pw.Close()
@@ -109,7 +109,7 @@ func TestBridge_RejectsConcurrentAttach(t *testing.T) {
 func TestBridge_BlocksReadUntilAttached(t *testing.T) {
 	t.Parallel()
 
-	b := NewBridge()
+	b := NewBridge(nil)
 
 	readDone := make(chan struct{})
 	var got []byte

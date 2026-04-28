@@ -3,6 +3,7 @@ package supervisor
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 )
 
@@ -26,6 +27,7 @@ var ErrBridgeBusy = errors.New("supervisor: bridge already has an attached clien
 type Bridge struct {
 	pipeR *io.PipeReader
 	pipeW *io.PipeWriter
+	log   *slog.Logger
 
 	mu       sync.Mutex
 	output   io.Writer // attached client output, or nil = discard
@@ -33,10 +35,15 @@ type Bridge struct {
 }
 
 // NewBridge constructs an empty bridge. No output is attached yet; PTY writes
-// are discarded until the first Attach.
-func NewBridge() *Bridge {
+// are discarded until the first Attach. log, if nil, falls back to
+// slog.Default — used to surface non-EOF input-pump errors so an
+// abnormally-closed client doesn't disappear silently.
+func NewBridge(log *slog.Logger) *Bridge {
+	if log == nil {
+		log = slog.Default()
+	}
 	r, w := io.Pipe()
-	return &Bridge{pipeR: r, pipeW: w}
+	return &Bridge{pipeR: r, pipeW: w, log: log}
 }
 
 // Read implements io.Reader. The supervisor copies from this into the PTY
@@ -82,7 +89,13 @@ func (b *Bridge) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err 
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		_, _ = io.Copy(b.pipeW, in)
+		// EOF on `in` is the normal detach path (client closed the conn).
+		// Anything else (a network reset, an unexpected I/O error) is
+		// noteworthy — log it so a vanishing attach doesn't leave operators
+		// guessing.
+		if _, err := io.Copy(b.pipeW, in); err != nil && !errors.Is(err, io.EOF) {
+			b.log.Warn("supervisor: attach input copy ended with error", "err", err)
+		}
 
 		b.mu.Lock()
 		// Only clear output if we're still the attached client. (Defensive:

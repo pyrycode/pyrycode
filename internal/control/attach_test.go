@@ -239,7 +239,7 @@ func TestServer_BridgeAttach(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	bridge := supervisor.NewBridge()
+	bridge := supervisor.NewBridge(nil)
 	srv := NewServer(sock, &fakeState{}, nil, bridge, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
