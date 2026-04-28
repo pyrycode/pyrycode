@@ -1,10 +1,23 @@
 // Command pyry is the Pyrycode daemon — a process supervisor for Claude Code.
 //
-// Usage:
+// pyry is designed to be a near-drop-in replacement for the `claude` CLI:
+// arguments and flags it doesn't recognize are forwarded to claude verbatim.
+// pyry's own configuration uses an explicit -pyry-* prefix so it never
+// collides with claude's namespace, no matter how claude evolves.
 //
-//	pyry                Start a supervised Claude Code session in the foreground
+//	pyry                              # supervised claude, no extra args
+//	pyry "summarize foo.md"           # forwards as claude's initial prompt
+//	pyry --model sonnet -p "..."      # any claude flags pass through
+//	pyry -pyry-verbose -- --resume    # pyry flags first, then claude flags
+//
+// Reserved control verbs (pyry's own, no -pyry- prefix needed since they
+// don't collide with anything claude does today):
+//
 //	pyry version        Print version and exit
 //	pyry status         Query the running daemon via its control socket
+//	pyry stop           Graceful shutdown via the control socket
+//	pyry logs           Recent supervisor log lines
+//	pyry help           Show help
 //
 // See https://github.com/pyrycode/pyrycode for documentation.
 package main
@@ -18,6 +31,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -67,16 +81,95 @@ func run() error {
 	return runSupervisor(os.Args[1:])
 }
 
+// pyryFlagBools are pyry-specific boolean flags. Recognised by their exact
+// name (with or without a leading -- and with or without =value).
+var pyryFlagBools = map[string]bool{
+	"pyry-resume":  true,
+	"pyry-verbose": true,
+}
+
+// pyryFlagValues are pyry-specific flags that take a value. The value can
+// be glued (`-pyry-claude=/path`) or in the next arg (`-pyry-claude /path`).
+var pyryFlagValues = map[string]bool{
+	"pyry-claude":  true,
+	"pyry-workdir": true,
+	"pyry-socket":  true,
+}
+
+// splitArgs walks args left-to-right and partitions them into pyry's own
+// flags and the rest (forwarded to claude). The split rules are:
+//
+//   - "--" is an explicit separator: everything before it is pyry's, every-
+//     thing after is claude's.
+//   - Args matching a known pyry-* flag pattern (with or without a value) are
+//     pyry's. Boolean flags consume only themselves; value flags also consume
+//     the next arg if no `=value` was glued on.
+//   - The first arg that isn't a recognised pyry flag (and isn't "--") tips
+//     into claude territory: it and everything after go to claude.
+//
+// This means pyry-* flags must come BEFORE any claude arguments — same
+// convention as `sudo`, `time`, `xargs`. Use "--" if you need to mix.
+func splitArgs(args []string) (pyryArgs, claudeArgs []string) {
+	i := 0
+	for i < len(args) {
+		a := args[i]
+
+		if a == "--" {
+			claudeArgs = append(claudeArgs, args[i+1:]...)
+			return
+		}
+
+		name, _, hasVal := parseFlagSyntax(a)
+
+		if pyryFlagBools[name] {
+			pyryArgs = append(pyryArgs, a)
+			i++
+			continue
+		}
+		if pyryFlagValues[name] {
+			pyryArgs = append(pyryArgs, a)
+			if !hasVal && i+1 < len(args) {
+				pyryArgs = append(pyryArgs, args[i+1])
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+
+		// Not a pyry flag — everything from here goes to claude.
+		claudeArgs = append(claudeArgs, args[i:]...)
+		return
+	}
+	return
+}
+
+// parseFlagSyntax extracts the flag name from a "-foo", "--foo", "-foo=bar",
+// or "--foo=bar" arg. Returns (name, value, hasValue). For non-flag args
+// (e.g. "summarize this") returns ("", "", false).
+func parseFlagSyntax(a string) (name, value string, hasValue bool) {
+	if !strings.HasPrefix(a, "-") {
+		return "", "", false
+	}
+	a = strings.TrimLeft(a, "-")
+	if eq := strings.IndexByte(a, '='); eq >= 0 {
+		return a[:eq], a[eq+1:], true
+	}
+	return a, "", false
+}
+
 // runSupervisor starts the supervisor and the control server together, blocks
 // until the context is cancelled by SIGINT/SIGTERM, then drains both.
 func runSupervisor(args []string) error {
+	pyryArgs, claudeArgs := splitArgs(args)
+
 	fs := flag.NewFlagSet("pyry", flag.ContinueOnError)
-	claudeBin := fs.String("claude", "claude", "path to the claude binary")
-	workdir := fs.String("workdir", "", "working directory for claude (default: current)")
-	resume := fs.Bool("resume", true, "resume the most recent session on restart")
-	verbose := fs.Bool("verbose", false, "verbose logging")
-	socketPath := fs.String("socket", defaultSocketPath(), "control socket path")
-	if err := fs.Parse(args); err != nil {
+	claudeBin := fs.String("pyry-claude", "claude", "path to the claude binary")
+	workdir := fs.String("pyry-workdir", "", "working directory for claude (default: current)")
+	resume := fs.Bool("pyry-resume", true, "resume the most recent session on restart")
+	verbose := fs.Bool("pyry-verbose", false, "verbose pyry logging")
+	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
+	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
 
@@ -97,7 +190,7 @@ func runSupervisor(args []string) error {
 		ClaudeBin:  *claudeBin,
 		WorkDir:    *workdir,
 		ResumeLast: *resume,
-		ClaudeArgs: fs.Args(),
+		ClaudeArgs: claudeArgs,
 		Logger:     logger,
 	}
 
@@ -141,7 +234,7 @@ func runSupervisor(args []string) error {
 // fetch a status snapshot, pretty-print it.
 func runStatus(args []string) error {
 	fs := flag.NewFlagSet("pyry status", flag.ContinueOnError)
-	socketPath := fs.String("socket", defaultSocketPath(), "control socket path")
+	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -174,7 +267,7 @@ func runStatus(args []string) error {
 // the daemon's in-memory ring buffer and print them.
 func runLogs(args []string) error {
 	fs := flag.NewFlagSet("pyry logs", flag.ContinueOnError)
-	socketPath := fs.String("socket", defaultSocketPath(), "control socket path")
+	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -197,7 +290,7 @@ func runLogs(args []string) error {
 // still be unwinding its child.
 func runStop(args []string) error {
 	fs := flag.NewFlagSet("pyry stop", flag.ContinueOnError)
-	socketPath := fs.String("socket", defaultSocketPath(), "control socket path")
+	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -215,31 +308,37 @@ func runStop(args []string) error {
 func printHelp() {
 	fmt.Print(`pyry — Pyrycode daemon, a supervisor for Claude Code
 
+pyry is a near-drop-in replacement for ` + "`claude`" + `: anything it doesn't
+recognize is forwarded to claude verbatim. pyry's own configuration uses an
+explicit -pyry-* prefix so it never collides with claude's namespace.
+
 Usage:
-  pyry [flags] [-- claude args...]   start a supervised claude session
-  pyry status [flags]                query the running daemon
-  pyry stop [flags]                  ask the running daemon to shut down
-  pyry logs [flags]                  print recent supervisor log lines
-  pyry version                       print version
-  pyry help                          show this help
+  pyry [pyry-flags] [claude-flags-and-args...]   supervised claude session
+  pyry [pyry-flags] -- [claude-args-with-dashes] (use -- if claude args begin
+                                                  with -pyry-* by accident)
+  pyry status [flags]                            query the running daemon
+  pyry stop [flags]                              ask the daemon to shut down
+  pyry logs [flags]                              print recent supervisor logs
+  pyry version                                   print version
+  pyry help                                      show this help
 
-Supervisor flags:
-  -claude string   path to the claude binary (default "claude")
-  -workdir string  working directory for claude (default: current)
-  -resume          resume the most recent session on restart (default true)
-  -verbose         verbose logging
-  -socket string   control socket path (default ~/.pyry/pyry.sock)
-
-Status / Stop / Logs flags:
-  -socket string   control socket path (default ~/.pyry/pyry.sock)
+Pyry flags (must come before claude args, or after a -- separator):
+  -pyry-claude string   path to the claude binary (default "claude")
+  -pyry-workdir string  working directory for claude (default: current)
+  -pyry-resume          --continue most recent session on restart (default true)
+  -pyry-verbose         verbose pyry logging
+  -pyry-socket string   control socket path (default ~/.pyry/pyry.sock)
 
 Examples:
-  pyry                                # run claude under supervision
-  pyry -verbose                       # with debug logging
-  pyry -- --channels plugin:discord   # pass args through to claude
-  pyry status                         # check on the running daemon
-  pyry stop                           # graceful shutdown via the control socket
-  pyry logs                           # last 200 lines of supervisor logs
+  pyry                                  # run claude under supervision
+  pyry "summarize foo.md"               # initial prompt forwarded to claude
+  pyry --model sonnet -p "..."          # any claude flag passes through
+  pyry -pyry-verbose                    # debug-level pyry logs
+  pyry -pyry-verbose -- --resume        # explicit separator if claude flag
+                                        #   names happen to start with -pyry-
+  pyry status                           # check on the running daemon
+  pyry stop                             # graceful shutdown via control socket
+  pyry logs                             # last 200 lines of supervisor logs
 
 See https://github.com/pyrycode/pyrycode for documentation.
 `)

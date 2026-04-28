@@ -9,7 +9,7 @@ Type=simple
 WorkingDirectory=%h/pyry-workspace
 # Make sure `claude` is on PATH; override as needed.
 Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
-# -resume is the default; pass any additional claude args after --
+# -pyry-resume is the default; pass any claude args after pyry's own flags.
 ExecStart=%h/.local/bin/pyry
 Restart=always
 RestartSec=2
