@@ -53,8 +53,16 @@ type Config struct {
 	// Empty means the supervisor's current directory.
 	WorkDir string
 
-	// ResumeLast causes restarts after the first run to pass --resume to claude,
+	// ResumeLast causes restarts after the first run to pass --continue to
+	// claude. Claude resumes the most recent session for the working directory,
 	// so conversation history survives supervisor restarts and crashes.
+	//
+	// We use --continue rather than --resume <id> so that if the user runs
+	// /clear inside claude (which rotates the session ID on disk), the next
+	// restart picks up the post-clear session rather than reattaching to the
+	// orphaned pre-clear one. Bare --resume would open claude's interactive
+	// session picker — usable interactively but wrong for an unattended
+	// supervisor restart.
 	ResumeLast bool
 
 	// ClaudeArgs are forwarded to the claude binary as positional arguments.
@@ -147,10 +155,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		args := append([]string(nil), s.cfg.ClaudeArgs...)
-		if !firstRun && s.cfg.ResumeLast {
-			args = append([]string{"--resume"}, args...)
-		}
+		args := buildClaudeArgs(s.cfg.ClaudeArgs, firstRun, s.cfg.ResumeLast)
 
 		start := time.Now()
 		s.log.Info("spawning claude", "args", args, "workdir", s.cfg.WorkDir)
@@ -191,6 +196,17 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// buildClaudeArgs prepends --continue to claude's argument list on every spawn
+// after the first, when ResumeLast is enabled. Pure function — no Supervisor
+// state, easy to unit-test.
+func buildClaudeArgs(claudeArgs []string, firstRun, continueLast bool) []string {
+	args := append([]string(nil), claudeArgs...)
+	if !firstRun && continueLast {
+		args = append([]string{"--continue"}, args...)
+	}
+	return args
 }
 
 // runOnce spawns claude in a PTY, bridges it to the controlling terminal,
