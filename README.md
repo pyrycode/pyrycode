@@ -10,6 +10,7 @@ A process supervisor and runtime for [Claude Code](https://claude.com/claude-cod
 - Restarts the child on exit with exponential backoff
 - Resumes the most recent Claude Code session after a crash so conversation history survives
 - Forwards `SIGWINCH` so terminal resizes propagate to the child
+- Exposes a local Unix domain socket so `pyry status` can query the running daemon
 
 ## What it will do (later phases)
 
@@ -54,6 +55,21 @@ pyry -- --channels plugin:discord   # pass args through to claude
 pyry version
 pyry help
 ```
+
+### Querying a running daemon
+
+While `pyry` is running, query its state from another shell:
+
+```bash
+$ pyry status
+Phase:         running
+Child PID:     29059
+Restart count: 0
+Started at:    2026-04-28T14:58:36Z
+Uptime:        1m23s
+```
+
+The control socket lives at `~/.pyry/pyry.sock` by default (override with `-socket`). Permissions are `0600` so only the owner can connect.
 
 ### Run as a service (Linux, systemd)
 
