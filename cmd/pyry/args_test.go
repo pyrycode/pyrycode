@@ -94,6 +94,18 @@ func TestSplitArgs(t *testing.T) {
 			wantPyry:   []string{"-pyry-resume=false"},
 			wantClaude: []string{"summarize"},
 		},
+		{
+			name:       "pyry-name with separate value",
+			args:       []string{"-pyry-name", "elli", "summarize"},
+			wantPyry:   []string{"-pyry-name", "elli"},
+			wantClaude: []string{"summarize"},
+		},
+		{
+			name:       "pyry-name with glued value",
+			args:       []string{"-pyry-name=elli", "summarize"},
+			wantPyry:   []string{"-pyry-name=elli"},
+			wantClaude: []string{"summarize"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -141,91 +153,58 @@ func TestParseFlagSyntax(t *testing.T) {
 	}
 }
 
-func TestSocketPathForCwd(t *testing.T) {
+func TestResolveSocketPath(t *testing.T) {
 	t.Parallel()
 
-	const home = "/Users/me"
-
-	t.Run("lives under ~/.pyry/sockets", func(t *testing.T) {
+	t.Run("explicit -pyry-socket wins over name", func(t *testing.T) {
 		t.Parallel()
-		got := socketPathForCwd(home, "/Users/me/Projects/foo")
-		want := filepath.Join(home, ".pyry", "sockets")
-		if !strings.HasPrefix(got, want) {
-			t.Errorf("socket path %q does not live under %q", got, want)
-		}
-		if !strings.HasSuffix(got, ".sock") {
-			t.Errorf("socket path %q does not end in .sock", got)
+		got := resolveSocketPath("/custom/path.sock", "elli")
+		if got != "/custom/path.sock" {
+			t.Errorf("got %q, want /custom/path.sock", got)
 		}
 	})
 
-	t.Run("includes the basename for human readability", func(t *testing.T) {
+	t.Run("name with no socket flag uses ~/.pyry/<name>.sock pattern", func(t *testing.T) {
 		t.Parallel()
-		got := filepath.Base(socketPathForCwd(home, "/Users/me/Projects/foo"))
-		if !strings.HasPrefix(got, "foo-") {
-			t.Errorf("filename %q should start with foo-", got)
+		got := resolveSocketPath("", "elli")
+		// Don't assert the home prefix — that depends on the test runner's
+		// $HOME. Just check the filename and the .pyry component.
+		if filepath.Base(got) != "elli.sock" {
+			t.Errorf("filename = %q, want elli.sock", filepath.Base(got))
+		}
+		if !strings.Contains(got, ".pyry") {
+			t.Errorf("path %q should contain .pyry", got)
 		}
 	})
 
-	t.Run("deterministic for the same cwd", func(t *testing.T) {
+	t.Run("default name yields pyry.sock", func(t *testing.T) {
 		t.Parallel()
-		a := socketPathForCwd(home, "/Users/me/Projects/foo")
-		b := socketPathForCwd(home, "/Users/me/Projects/foo")
-		if a != b {
-			t.Errorf("same cwd produced different paths: %q vs %q", a, b)
+		got := resolveSocketPath("", DefaultName)
+		if filepath.Base(got) != "pyry.sock" {
+			t.Errorf("filename = %q, want pyry.sock", filepath.Base(got))
 		}
 	})
 
-	t.Run("different cwds produce different paths", func(t *testing.T) {
+	t.Run("unsafe name is sanitised", func(t *testing.T) {
 		t.Parallel()
-		a := socketPathForCwd(home, "/Users/me/Projects/foo")
-		b := socketPathForCwd(home, "/Users/me/Projects/bar")
-		if a == b {
-			t.Errorf("different cwds produced the same path: %q", a)
-		}
-	})
-
-	t.Run("same basename in different parent dirs does not collide", func(t *testing.T) {
-		t.Parallel()
-		// Both end in /pyrycode but live under different parents — the
-		// hash should disambiguate.
-		a := socketPathForCwd(home, "/Users/me/Workspace/Projects/pyrycode")
-		b := socketPathForCwd(home, "/Users/me/Backups/pyrycode")
-		if a == b {
-			t.Errorf("same-basename different-parent collided: %q", a)
-		}
-		if !strings.Contains(filepath.Base(a), "pyrycode-") {
-			t.Errorf("expected basename in filename: %q", a)
-		}
-	})
-
-	t.Run("unsafe characters in basename are sanitised", func(t *testing.T) {
-		t.Parallel()
-		got := filepath.Base(socketPathForCwd(home, "/tmp/with spaces/and:colons"))
-		// Spaces, colons, etc. should not appear in the filename portion
-		// before the hash. The basename portion should be sanitised.
-		for _, bad := range []string{" ", ":", "/"} {
-			if strings.Contains(got, bad) {
-				t.Errorf("filename %q contains unsafe character %q", got, bad)
+		got := resolveSocketPath("", "../etc/passwd")
+		base := filepath.Base(got)
+		// Path traversal must not survive — no slashes, no colons.
+		for _, bad := range []string{"/", ":", " "} {
+			if strings.Contains(base, bad) {
+				t.Errorf("sanitised filename %q still contains %q", base, bad)
 			}
-		}
-	})
-
-	t.Run("root cwd does not crash", func(t *testing.T) {
-		t.Parallel()
-		got := socketPathForCwd(home, "/")
-		if got == "" {
-			t.Errorf("empty result for root cwd")
 		}
 	})
 }
 
-func TestSanitizeBasename(t *testing.T) {
+func TestSanitizeName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		in, want string
 	}{
-		{"foo", "foo"},
+		{"pyry", "pyry"},
 		{"foo-bar_baz.txt", "foo-bar_baz.txt"},
 		{"with spaces", "with_spaces"},
 		{"emoji-🎯-here", "emoji-_-here"},
@@ -233,15 +212,34 @@ func TestSanitizeBasename(t *testing.T) {
 		{"colons:and;semis", "colons_and_semis"},
 		{"", "_"},
 		{"/", "_"},
+		{"../etc/passwd", ".._etc_passwd"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
 			t.Parallel()
-			got := sanitizeBasename(tt.in)
+			got := sanitizeName(tt.in)
 			if got != tt.want {
-				t.Errorf("sanitizeBasename(%q) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("sanitizeName(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
+}
+
+func TestDefaultName(t *testing.T) {
+	// Not parallel — mutates the environment.
+
+	t.Run("returns DefaultName when PYRY_NAME is unset", func(t *testing.T) {
+		t.Setenv("PYRY_NAME", "")
+		if got := defaultName(); got != DefaultName {
+			t.Errorf("got %q, want %q", got, DefaultName)
+		}
+	})
+
+	t.Run("returns PYRY_NAME when set", func(t *testing.T) {
+		t.Setenv("PYRY_NAME", "elli")
+		if got := defaultName(); got != "elli" {
+			t.Errorf("got %q, want elli", got)
+		}
+	})
 }

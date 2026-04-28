@@ -24,8 +24,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -45,45 +43,42 @@ import (
 // Version is set at build time via -ldflags "-X main.Version=...".
 var Version = "dev"
 
-// defaultSocketPath returns the default control socket path for the current
-// working directory. It is derived from cwd so multiple pyry instances in
-// different project directories get different sockets automatically — the
-// supervisor mode and the control verbs (status / stop / logs / attach)
-// agree on the same path as long as the user runs them from the same
-// directory.
-//
-// Path shape: ~/.pyry/sockets/<basename>-<8 hex of sha256(cwd)>.sock
-//
-// The basename keeps it human-recognisable; the hash makes it collision-free
-// across same-named directories in different parts of the filesystem.
-//
-// Falls back to ~/.pyry/pyry.sock if either home or cwd can't be resolved.
-func defaultSocketPath() string {
+// DefaultName is the instance name used when -pyry-name is unset and the
+// PYRY_NAME environment variable is empty. It produces socket
+// ~/.pyry/pyry.sock — the right thing for a single-pyry-per-user setup.
+const DefaultName = "pyry"
+
+// defaultName returns the instance name to use when -pyry-name was not given
+// on the command line. The PYRY_NAME environment variable wins over
+// DefaultName, so shell aliasing (`alias pyry-elli='PYRY_NAME=elli pyry'`)
+// works for both supervisor mode and the control verbs.
+func defaultName() string {
+	if n := os.Getenv("PYRY_NAME"); n != "" {
+		return n
+	}
+	return DefaultName
+}
+
+// resolveSocketPath returns the socket path to use given the parsed flags.
+// If -pyry-socket was set explicitly, it wins. Otherwise the path is
+// derived from the (sanitized) instance name as ~/.pyry/<name>.sock. Falls
+// back to a CWD-relative path if $HOME can't be resolved.
+func resolveSocketPath(socketFlag, name string) string {
+	if socketFlag != "" {
+		return socketFlag
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return "pyry.sock"
+		return sanitizeName(name) + ".sock"
 	}
-	cwd, err := os.Getwd()
-	if err != nil || cwd == "" {
-		return filepath.Join(home, ".pyry", "pyry.sock")
-	}
-	return socketPathForCwd(home, cwd)
+	return filepath.Join(home, ".pyry", sanitizeName(name)+".sock")
 }
 
-// socketPathForCwd is the pure (testable) form of defaultSocketPath: given
-// home and cwd, return the derived socket path. Same inputs always yield
-// the same output.
-func socketPathForCwd(home, cwd string) string {
-	sum := sha256.Sum256([]byte(cwd))
-	hash := hex.EncodeToString(sum[:4]) // 8 hex chars
-	base := sanitizeBasename(filepath.Base(cwd))
-	return filepath.Join(home, ".pyry", "sockets", fmt.Sprintf("%s-%s.sock", base, hash))
-}
-
-// sanitizeBasename keeps a-z, A-Z, 0-9, _, ., - and replaces anything else
-// with _. Empty input becomes "_". Used to keep the socket filename safe
-// across filesystems and visually parseable.
-func sanitizeBasename(s string) string {
+// sanitizeName keeps a-z, A-Z, 0-9, _, ., - and replaces anything else with
+// _. Empty input becomes "_". Defends the on-disk socket filename against
+// path-traversal and other filesystem-unsafe input (e.g. PYRY_NAME from a
+// careless shell setup).
+func sanitizeName(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
@@ -145,6 +140,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-claude":  true,
 	"pyry-workdir": true,
 	"pyry-socket":  true,
+	"pyry-name":    true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -219,10 +215,12 @@ func runSupervisor(args []string) error {
 	workdir := fs.String("pyry-workdir", "", "working directory for claude (default: current)")
 	resume := fs.Bool("pyry-resume", true, "resume the most recent session on restart")
 	verbose := fs.Bool("pyry-verbose", false, "verbose pyry logging")
-	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
+	name := fs.String("pyry-name", defaultName(), "instance name (socket: ~/.pyry/<name>.sock)")
+	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
+	socketPath := resolveSocketPath(*socketFlag, *name)
 
 	level := slog.LevelInfo
 	if *verbose {
@@ -271,7 +269,7 @@ func runSupervisor(args []string) error {
 		attachProvider = bridge
 	}
 
-	ctrl := control.NewServer(*socketPath, sup, logRing, attachProvider, cancel, logger)
+	ctrl := control.NewServer(socketPath, sup, logRing, attachProvider, cancel, logger)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -282,8 +280,9 @@ func runSupervisor(args []string) error {
 
 	logger.Info("pyrycode starting",
 		"version", Version,
+		"name", *name,
 		"claude", cfg.ClaudeBin,
-		"socket", *socketPath,
+		"socket", socketPath,
 	)
 	supErr := sup.Run(ctx)
 
@@ -299,19 +298,31 @@ func runSupervisor(args []string) error {
 	return nil
 }
 
+// parseClientFlags handles the shared flags every control verb accepts:
+// -pyry-name (instance name → ~/.pyry/<name>.sock) and -pyry-socket (explicit
+// path that overrides the name). Returns the resolved socket path.
+func parseClientFlags(name string, args []string) (socketPath string, err error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	nameFlag := fs.String("pyry-name", defaultName(), "instance name (socket: ~/.pyry/<name>.sock)")
+	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	return resolveSocketPath(*socketFlag, *nameFlag), nil
+}
+
 // runStatus implements the `pyry status` subcommand: dial the control socket,
 // fetch a status snapshot, pretty-print it.
 func runStatus(args []string) error {
-	fs := flag.NewFlagSet("pyry status", flag.ContinueOnError)
-	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
-	if err := fs.Parse(args); err != nil {
+	socketPath, err := parseClientFlags("pyry status", args)
+	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := control.Status(ctx, *socketPath)
+	resp, err := control.Status(ctx, socketPath)
 	if err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
@@ -335,16 +346,15 @@ func runStatus(args []string) error {
 // runLogs implements `pyry logs`: fetch the recent supervisor log lines from
 // the daemon's in-memory ring buffer and print them.
 func runLogs(args []string) error {
-	fs := flag.NewFlagSet("pyry logs", flag.ContinueOnError)
-	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
-	if err := fs.Parse(args); err != nil {
+	socketPath, err := parseClientFlags("pyry logs", args)
+	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := control.Logs(ctx, *socketPath)
+	resp, err := control.Logs(ctx, socketPath)
 	if err != nil {
 		return fmt.Errorf("logs: %w", err)
 	}
@@ -358,9 +368,8 @@ func runLogs(args []string) error {
 // socket, hand the local terminal over to the supervised claude session.
 // Press Ctrl-B d to detach (leaves pyry running).
 func runAttach(args []string) error {
-	fs := flag.NewFlagSet("pyry attach", flag.ContinueOnError)
-	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
-	if err := fs.Parse(args); err != nil {
+	socketPath, err := parseClientFlags("pyry attach", args)
+	if err != nil {
 		return err
 	}
 
@@ -375,7 +384,7 @@ func runAttach(args []string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "pyry: attached. Press Ctrl-B d to detach.")
-	if err := control.Attach(context.Background(), *socketPath, cols, rows); err != nil {
+	if err := control.Attach(context.Background(), socketPath, cols, rows); err != nil {
 		return fmt.Errorf("attach: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "\npyry: detached.")
@@ -386,16 +395,15 @@ func runAttach(args []string) error {
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
 func runStop(args []string) error {
-	fs := flag.NewFlagSet("pyry stop", flag.ContinueOnError)
-	socketPath := fs.String("pyry-socket", defaultSocketPath(), "control socket path")
-	if err := fs.Parse(args); err != nil {
+	socketPath, err := parseClientFlags("pyry stop", args)
+	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := control.Stop(ctx, *socketPath); err != nil {
+	if err := control.Stop(ctx, socketPath); err != nil {
 		return fmt.Errorf("stop: %w", err)
 	}
 	fmt.Println("pyry: stop requested")
@@ -426,21 +434,20 @@ Pyry flags (must come before claude args, or after a -- separator):
   -pyry-workdir string  working directory for claude (default: current)
   -pyry-resume          --continue most recent session on restart (default true)
   -pyry-verbose         verbose pyry logging
-  -pyry-socket string   control socket path
-                        (default ~/.pyry/sockets/<basename>-<hash>.sock,
-                        derived from the working directory so each
-                        project gets its own socket automatically)
+  -pyry-name string     instance name; socket is ~/.pyry/<name>.sock
+                        (default "pyry"; PYRY_NAME env var overrides default)
+  -pyry-socket string   explicit socket path (overrides -pyry-name)
 
 Examples:
-  pyry                                  # run claude under supervision
+  pyry                                  # supervised claude (default instance)
   pyry "summarize foo.md"               # initial prompt forwarded to claude
   pyry --model sonnet -p "..."          # any claude flag passes through
-  pyry -pyry-verbose                    # debug-level pyry logs
-  pyry -pyry-verbose -- --resume        # explicit separator if claude flag
-                                        #   names happen to start with -pyry-
+  pyry -pyry-name elli                  # second instance, socket ~/.pyry/elli.sock
+  PYRY_NAME=elli pyry status            # status of the elli instance via env
   pyry status                           # check on the running daemon
   pyry stop                             # graceful shutdown via control socket
   pyry logs                             # last 200 lines of supervisor logs
+  pyry attach                           # interactive bridge to a service-mode daemon
 
 See https://github.com/pyrycode/pyrycode for documentation.
 `)
