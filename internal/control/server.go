@@ -115,6 +115,11 @@ func (s *Server) Listen() error {
 	}
 
 	// Single-user permissions — only the owner can talk to the daemon.
+	// This 0600 chmod is currently the only authentication boundary on the
+	// control socket. Any process running as the owning user can connect,
+	// send VerbStop, and shut the daemon down. Acceptable for Phase 0
+	// (single-user dev/service deployment); revisit before exposing the
+	// socket across user boundaries (containers, multi-tenant hosts).
 	if err := os.Chmod(s.socketPath, 0o600); err != nil {
 		_ = ln.Close()
 		_ = os.Remove(s.socketPath)
@@ -202,6 +207,13 @@ func (s *Server) handle(conn net.Conn) {
 	}()
 	// Short deadline for the JSON handshake. Cleared before raw-byte streaming
 	// so the attach connection can stay open indefinitely.
+	//
+	// TODO: a misbehaving client could open a connection, write a partial
+	// JSON payload, and hold it. The 5s deadline + per-conn goroutine model
+	// bounds the damage to ~5s × N concurrent slow clients. With the 0600
+	// socket perms the realistic N is "other processes the same user runs",
+	// which is fine for Phase 0. Revisit if the socket is ever exposed
+	// beyond that boundary.
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	enc := json.NewEncoder(conn)
