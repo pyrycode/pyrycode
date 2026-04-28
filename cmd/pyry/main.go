@@ -24,6 +24,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,15 +44,61 @@ import (
 // Version is set at build time via -ldflags "-X main.Version=...".
 var Version = "dev"
 
-// defaultSocketPath returns ~/.pyry/pyry.sock with $HOME expanded. If $HOME
-// can't be resolved we fall back to a CWD-relative path so error messages
-// stay helpful.
+// defaultSocketPath returns the default control socket path for the current
+// working directory. It is derived from cwd so multiple pyry instances in
+// different project directories get different sockets automatically — the
+// supervisor mode and the control verbs (status / stop / logs / attach)
+// agree on the same path as long as the user runs them from the same
+// directory.
+//
+// Path shape: ~/.pyry/sockets/<basename>-<8 hex of sha256(cwd)>.sock
+//
+// The basename keeps it human-recognisable; the hash makes it collision-free
+// across same-named directories in different parts of the filesystem.
+//
+// Falls back to ~/.pyry/pyry.sock if either home or cwd can't be resolved.
 func defaultSocketPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return "pyry.sock"
 	}
-	return filepath.Join(home, ".pyry", "pyry.sock")
+	cwd, err := os.Getwd()
+	if err != nil || cwd == "" {
+		return filepath.Join(home, ".pyry", "pyry.sock")
+	}
+	return socketPathForCwd(home, cwd)
+}
+
+// socketPathForCwd is the pure (testable) form of defaultSocketPath: given
+// home and cwd, return the derived socket path. Same inputs always yield
+// the same output.
+func socketPathForCwd(home, cwd string) string {
+	sum := sha256.Sum256([]byte(cwd))
+	hash := hex.EncodeToString(sum[:4]) // 8 hex chars
+	base := sanitizeBasename(filepath.Base(cwd))
+	return filepath.Join(home, ".pyry", "sockets", fmt.Sprintf("%s-%s.sock", base, hash))
+}
+
+// sanitizeBasename keeps a-z, A-Z, 0-9, _, ., - and replaces anything else
+// with _. Empty input becomes "_". Used to keep the socket filename safe
+// across filesystems and visually parseable.
+func sanitizeBasename(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '_', r == '.', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "_"
+	}
+	return b.String()
 }
 
 func main() {
@@ -327,7 +375,10 @@ Pyry flags (must come before claude args, or after a -- separator):
   -pyry-workdir string  working directory for claude (default: current)
   -pyry-resume          --continue most recent session on restart (default true)
   -pyry-verbose         verbose pyry logging
-  -pyry-socket string   control socket path (default ~/.pyry/pyry.sock)
+  -pyry-socket string   control socket path
+                        (default ~/.pyry/sockets/<basename>-<hash>.sock,
+                        derived from the working directory so each
+                        project gets its own socket automatically)
 
 Examples:
   pyry                                  # run claude under supervision

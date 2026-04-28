@@ -1,7 +1,9 @@
 package main
 
 import (
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -134,6 +136,111 @@ func TestParseFlagSyntax(t *testing.T) {
 			if name != tt.wantName || val != tt.wantVal || has != tt.wantHas {
 				t.Errorf("parseFlagSyntax(%q) = (%q, %q, %v), want (%q, %q, %v)",
 					tt.in, name, val, has, tt.wantName, tt.wantVal, tt.wantHas)
+			}
+		})
+	}
+}
+
+func TestSocketPathForCwd(t *testing.T) {
+	t.Parallel()
+
+	const home = "/Users/me"
+
+	t.Run("lives under ~/.pyry/sockets", func(t *testing.T) {
+		t.Parallel()
+		got := socketPathForCwd(home, "/Users/me/Projects/foo")
+		want := filepath.Join(home, ".pyry", "sockets")
+		if !strings.HasPrefix(got, want) {
+			t.Errorf("socket path %q does not live under %q", got, want)
+		}
+		if !strings.HasSuffix(got, ".sock") {
+			t.Errorf("socket path %q does not end in .sock", got)
+		}
+	})
+
+	t.Run("includes the basename for human readability", func(t *testing.T) {
+		t.Parallel()
+		got := filepath.Base(socketPathForCwd(home, "/Users/me/Projects/foo"))
+		if !strings.HasPrefix(got, "foo-") {
+			t.Errorf("filename %q should start with foo-", got)
+		}
+	})
+
+	t.Run("deterministic for the same cwd", func(t *testing.T) {
+		t.Parallel()
+		a := socketPathForCwd(home, "/Users/me/Projects/foo")
+		b := socketPathForCwd(home, "/Users/me/Projects/foo")
+		if a != b {
+			t.Errorf("same cwd produced different paths: %q vs %q", a, b)
+		}
+	})
+
+	t.Run("different cwds produce different paths", func(t *testing.T) {
+		t.Parallel()
+		a := socketPathForCwd(home, "/Users/me/Projects/foo")
+		b := socketPathForCwd(home, "/Users/me/Projects/bar")
+		if a == b {
+			t.Errorf("different cwds produced the same path: %q", a)
+		}
+	})
+
+	t.Run("same basename in different parent dirs does not collide", func(t *testing.T) {
+		t.Parallel()
+		// Both end in /pyrycode but live under different parents — the
+		// hash should disambiguate.
+		a := socketPathForCwd(home, "/Users/me/Workspace/Projects/pyrycode")
+		b := socketPathForCwd(home, "/Users/me/Backups/pyrycode")
+		if a == b {
+			t.Errorf("same-basename different-parent collided: %q", a)
+		}
+		if !strings.Contains(filepath.Base(a), "pyrycode-") {
+			t.Errorf("expected basename in filename: %q", a)
+		}
+	})
+
+	t.Run("unsafe characters in basename are sanitised", func(t *testing.T) {
+		t.Parallel()
+		got := filepath.Base(socketPathForCwd(home, "/tmp/with spaces/and:colons"))
+		// Spaces, colons, etc. should not appear in the filename portion
+		// before the hash. The basename portion should be sanitised.
+		for _, bad := range []string{" ", ":", "/"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("filename %q contains unsafe character %q", got, bad)
+			}
+		}
+	})
+
+	t.Run("root cwd does not crash", func(t *testing.T) {
+		t.Parallel()
+		got := socketPathForCwd(home, "/")
+		if got == "" {
+			t.Errorf("empty result for root cwd")
+		}
+	})
+}
+
+func TestSanitizeBasename(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in, want string
+	}{
+		{"foo", "foo"},
+		{"foo-bar_baz.txt", "foo-bar_baz.txt"},
+		{"with spaces", "with_spaces"},
+		{"emoji-🎯-here", "emoji-_-here"},
+		{"slash/inside", "slash_inside"},
+		{"colons:and;semis", "colons_and_semis"},
+		{"", "_"},
+		{"/", "_"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got := sanitizeBasename(tt.in)
+			if got != tt.want {
+				t.Errorf("sanitizeBasename(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

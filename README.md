@@ -70,7 +70,7 @@ These configure pyry itself and must come **before** any claude args (or after a
 | `-pyry-workdir` | current dir | Working directory for the supervised child |
 | `-pyry-resume` | `true` | Pass `--continue` to claude on restart so the session survives crashes |
 | `-pyry-verbose` | `false` | Debug-level pyry logging |
-| `-pyry-socket` | `~/.pyry/pyry.sock` | Control socket path |
+| `-pyry-socket` | `~/.pyry/sockets/<basename>-<hash>.sock` (derived from cwd) | Control socket path |
 
 ### Querying a running daemon
 
@@ -85,7 +85,13 @@ Started at:    2026-04-28T14:58:36Z
 Uptime:        1m23s
 ```
 
-The control socket lives at `~/.pyry/pyry.sock` by default (override with `-pyry-socket`). Permissions are `0600` so only the owner can connect.
+The default socket path is derived from the working directory: `~/.pyry/sockets/<basename>-<hash>.sock`. This means `pyry status` / `stop` / `logs` automatically find the pyry that's running for *this* project — no need to pass `-pyry-socket` explicitly. Multiple pyry instances can coexist as long as each runs in its own directory. Permissions are `0600` so only the owner can connect.
+
+```bash
+cd ~/Projects/foo && pyry &       # runs supervised claude for foo
+cd ~/Projects/bar && pyry &       # different cwd → different socket → no conflict
+cd ~/Projects/foo && pyry status  # finds foo's pyry, not bar's
+```
 
 ### Stopping a running daemon
 
