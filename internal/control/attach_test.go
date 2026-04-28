@@ -79,13 +79,18 @@ func TestCopyWithEscape(t *testing.T) {
 }
 
 // fakeAttachProvider is a test double for AttachProvider that captures
-// client input into a bytes.Buffer for later assertions. It does not write
-// anything back to the client — output direction is verified separately via
-// the real Bridge in TestServer_BridgeAttach.
+// client input for later assertions. It does not write anything back to
+// the client — output direction is verified separately via the real
+// Bridge in TestServer_BridgeAttach.
+//
+// All access to the buffer is mutex-protected: writes happen via lockedWrite
+// (called from the input pump goroutine), reads happen via received() (called
+// from the test goroutine). This avoids the race detector flagging the
+// concurrent buffer access that bytes.Buffer doesn't guard internally.
 type fakeAttachProvider struct {
 	mu              sync.Mutex
 	attached        bool
-	receivedFromCli bytes.Buffer
+	receivedFromCli []byte
 	rejectWithErr   error
 }
 
@@ -105,10 +110,18 @@ func (f *fakeAttachProvider) Attach(in io.Reader, out io.Writer) (<-chan struct{
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.mu.Lock()
-		dst := &f.receivedFromCli
-		f.mu.Unlock()
-		_, _ = io.Copy(dst, in)
+		buf := make([]byte, 4096)
+		for {
+			n, err := in.Read(buf)
+			if n > 0 {
+				f.mu.Lock()
+				f.receivedFromCli = append(f.receivedFromCli, buf[:n]...)
+				f.mu.Unlock()
+			}
+			if err != nil {
+				break
+			}
+		}
 
 		f.mu.Lock()
 		f.attached = false
@@ -120,7 +133,7 @@ func (f *fakeAttachProvider) Attach(in io.Reader, out io.Writer) (<-chan struct{
 func (f *fakeAttachProvider) received() []byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]byte(nil), f.receivedFromCli.Bytes()...)
+	return append([]byte(nil), f.receivedFromCli...)
 }
 
 func TestServer_AttachHandshakeAndStream(t *testing.T) {
