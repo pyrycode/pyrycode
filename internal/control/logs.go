@@ -14,6 +14,10 @@ import (
 type LogProvider interface {
 	// Snapshot returns a copy of the recent log lines, oldest first.
 	Snapshot() []string
+	// Cap returns the configured buffer capacity. The server reports this
+	// to clients so they know whether they have the full history or a
+	// tail of a longer one.
+	Cap() int
 }
 
 // RingBuffer holds the most recent N supervisor log lines for `pyry logs`.

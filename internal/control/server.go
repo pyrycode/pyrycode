@@ -221,12 +221,10 @@ func (s *Server) handle(conn net.Conn) {
 			_ = enc.Encode(Response{Error: "logs: no log provider configured"})
 			return
 		}
-		lines := s.logs.Snapshot()
-		capacity := 0
-		if r, ok := s.logs.(*RingBuffer); ok {
-			capacity = r.Cap()
-		}
-		_ = enc.Encode(Response{Logs: &LogsPayload{Lines: lines, Capacity: capacity}})
+		_ = enc.Encode(Response{Logs: &LogsPayload{
+			Lines:    s.logs.Snapshot(),
+			Capacity: s.logs.Cap(),
+		}})
 	case VerbStop:
 		if s.shutdown == nil {
 			_ = enc.Encode(Response{Error: "stop: no shutdown handler configured"})
