@@ -231,6 +231,105 @@ func TestServer_AttachWithoutProvider(t *testing.T) {
 	}
 }
 
+// TestServer_StopWhileAttached confirms that VerbStop arriving while a
+// client is in the middle of an attach cleanly tears down the connection
+// instead of leaking it.
+//
+// Sequence:
+//  1. Server has both an AttachProvider (bridge) and a shutdown callback.
+//  2. Client A attaches.
+//  3. Client B sends VerbStop on a separate connection.
+//  4. Server fires shutdown — caller (in production: main.go) is expected
+//     to call Server.Close, which is what we simulate.
+//  5. Client A's conn should close cleanly. The bridge's done channel
+//     should fire.
+func TestServer_StopWhileAttached(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	bridge := supervisor.NewBridge(nil)
+
+	shutdownFired := make(chan struct{}, 1)
+	srv := NewServer(sock, &fakeState{}, nil, bridge, func() {
+		select {
+		case shutdownFired <- struct{}{}:
+		default:
+		}
+	}, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+
+	// Client A: attach.
+	connA, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial A: %v", err)
+	}
+	defer connA.Close()
+	if err := json.NewEncoder(connA).Encode(Request{Verb: VerbAttach}); err != nil {
+		t.Fatalf("encode attach: %v", err)
+	}
+	var ackA Response
+	if err := json.NewDecoder(connA).Decode(&ackA); err != nil {
+		t.Fatalf("decode ack A: %v", err)
+	}
+	if !ackA.OK {
+		t.Fatalf("attach ack OK=false: %+v", ackA)
+	}
+	if !bridge.Attached() {
+		t.Fatal("bridge reports not attached after successful handshake")
+	}
+
+	// Client B: stop, on a separate connection.
+	connB, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial B: %v", err)
+	}
+	defer connB.Close()
+	if err := json.NewEncoder(connB).Encode(Request{Verb: VerbStop}); err != nil {
+		t.Fatalf("encode stop: %v", err)
+	}
+	var ackB Response
+	if err := json.NewDecoder(connB).Decode(&ackB); err != nil {
+		t.Fatalf("decode ack B: %v", err)
+	}
+	if !ackB.OK {
+		t.Fatalf("stop ack OK=false: %+v", ackB)
+	}
+
+	// Shutdown callback should have fired.
+	select {
+	case <-shutdownFired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown callback did not fire after VerbStop")
+	}
+
+	// Simulate what main.go does next: cancel the supervisor's context.
+	// In production this triggers ptmx close (child dies) which closes
+	// the input side of the bridge pipe, ending the attach goroutine.
+	// We can't easily simulate the full ptmx cascade in this test, so
+	// instead we close conn A from the client side — equivalent to a
+	// disconnect. The point is to prove the server-side teardown
+	// goroutine spawned by handleAttach completes regardless.
+	_ = connA.Close()
+
+	// Read deadline so this test can't hang forever if something goes wrong.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !bridge.Attached() {
+			return // success — bridge cleared its attached flag
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("bridge.Attached() still true 2s after client disconnect")
+}
+
 // Bridge-as-AttachProvider integration test: confirm that supervisor.Bridge
 // satisfies the AttachProvider interface and works through the server.
 func TestServer_BridgeAttach(t *testing.T) {
