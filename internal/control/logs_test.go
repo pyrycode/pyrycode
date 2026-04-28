@@ -122,7 +122,7 @@ func TestServer_Logs(t *testing.T) {
 	ring.Add("second")
 	ring.Add("third")
 
-	srv := NewServer(sock, &fakeState{}, ring, nil, nil)
+	srv := NewServer(sock, &fakeState{}, ring, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestServer_LogsWithoutProvider(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil)
+	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

@@ -23,11 +23,25 @@ const (
 	// VerbLogs returns the most recent supervisor log lines from an
 	// in-memory ring buffer.
 	VerbLogs Verb = "logs"
+
+	// VerbAttach upgrades the connection: after a JSON ack from the server,
+	// the rest of the connection is raw bytes bridged to the supervised
+	// claude process's PTY. Standard "protocol upgrade" pattern.
+	VerbAttach Verb = "attach"
 )
 
 // Request is the wire format for a single client request.
 type Request struct {
-	Verb Verb `json:"verb"`
+	Verb   Verb           `json:"verb"`
+	Attach *AttachPayload `json:"attach,omitempty"` // populated for VerbAttach
+}
+
+// AttachPayload carries the client's terminal geometry at attach time.
+// Phase 0: window size is fixed for the lifetime of the attach. Live
+// SIGWINCH propagation can come later as a small follow-up.
+type AttachPayload struct {
+	Cols int `json:"cols,omitempty"`
+	Rows int `json:"rows,omitempty"`
 }
 
 // Response is the wire format for a single server response. On success

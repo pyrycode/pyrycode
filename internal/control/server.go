@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -22,6 +23,16 @@ type StateProvider interface {
 	State() supervisor.State
 }
 
+// AttachProvider is the supervisor view the control server depends on for
+// VerbAttach. Implementations bind a client's input/output streams to the
+// supervised PTY for the lifetime of the attachment. Returns the done
+// channel that fires when the input source ends (client disconnected),
+// or an error if the attach can't proceed (e.g. another client already
+// attached).
+type AttachProvider interface {
+	Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
+}
+
 // Server listens on a Unix domain socket and answers control requests.
 //
 // Lifecycle: NewServer → Listen → Serve(ctx) → Close. Listen creates the
@@ -33,6 +44,7 @@ type Server struct {
 	socketPath string
 	state      StateProvider
 	logs       LogProvider
+	attach     AttachProvider
 	shutdown   func()
 	log        *slog.Logger
 
@@ -45,14 +57,17 @@ type Server struct {
 //
 // state must be non-nil — the supervisor is the canonical source of state.
 //
-// logs is optional. When nil, VerbLogs returns an error response. When set,
-// it is the read view over the supervisor's recent-log ring buffer.
+// logs is optional. When nil, VerbLogs returns an error response.
+//
+// attach is optional. When nil, VerbAttach returns an error response — the
+// daemon is in foreground mode and the supervised child is already bound
+// to a local terminal.
 //
 // shutdown is optional. When nil, VerbStop returns an error response. When
 // set, a successful VerbStop invokes it after acknowledging the client —
 // typically the signal-driven context's cancel function so a stop request
 // walks the same shutdown path as SIGINT/SIGTERM.
-func NewServer(socketPath string, state StateProvider, logs LogProvider, shutdown func(), log *slog.Logger) *Server {
+func NewServer(socketPath string, state StateProvider, logs LogProvider, attach AttachProvider, shutdown func(), log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -60,6 +75,7 @@ func NewServer(socketPath string, state StateProvider, logs LogProvider, shutdow
 		socketPath: socketPath,
 		state:      state,
 		logs:       logs,
+		attach:     attach,
 		shutdown:   shutdown,
 		log:        log,
 	}
@@ -170,11 +186,22 @@ func (s *Server) Close() error {
 	return firstErr
 }
 
-// handle services a single client connection: decode one Request, write one
-// Response, close. A short read deadline keeps a misbehaving client from
-// pinning a goroutine indefinitely.
+// handle services a single client connection: decode one Request, write
+// one Response (and possibly stream raw bytes for VerbAttach), close.
+//
+// VerbAttach is the only verb that holds the connection open beyond a single
+// JSON ack. After the ack, the connection is "upgraded" — both sides switch
+// to raw bytes flowing between the client's terminal and the PTY. The
+// connection closes when either side disconnects.
 func (s *Server) handle(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
+	closeConn := true
+	defer func() {
+		if closeConn {
+			_ = conn.Close()
+		}
+	}()
+	// Short deadline for the JSON handshake. Cleared before raw-byte streaming
+	// so the attach connection can stay open indefinitely.
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	enc := json.NewEncoder(conn)
@@ -212,6 +239,36 @@ func (s *Server) handle(conn net.Conn) {
 		_ = enc.Encode(Response{OK: true})
 		s.log.Info("control: stop requested")
 		s.shutdown()
+	case VerbAttach:
+		if s.attach == nil {
+			_ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
+			return
+		}
+		// Bridge bytes for the lifetime of the attachment. The Response
+		// ack ({OK:true}) tells the client to switch to raw-byte mode.
+		// After that, conn → PTY input, PTY output → conn.
+		done, err := s.attach.Attach(conn, conn)
+		if err != nil {
+			_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
+			return
+		}
+		s.log.Info("control: client attached")
+		_ = enc.Encode(Response{OK: true})
+
+		// Clear the handshake deadline — raw-byte streaming has no a priori
+		// upper bound on how long a session lasts.
+		_ = conn.SetDeadline(time.Time{})
+
+		// Hand off the connection: don't close it from this goroutine. The
+		// AttachProvider's `done` fires when the client's input ends; at
+		// that point we close the conn to release any blocked PTY → conn
+		// writes.
+		closeConn = false
+		go func() {
+			<-done
+			_ = conn.Close()
+			s.log.Info("control: client detached")
+		}()
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}

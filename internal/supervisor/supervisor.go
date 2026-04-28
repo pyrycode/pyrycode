@@ -68,6 +68,14 @@ type Config struct {
 	// ClaudeArgs are forwarded to the claude binary as positional arguments.
 	ClaudeArgs []string
 
+	// Bridge, if non-nil, mediates PTY I/O instead of bridging to the
+	// supervisor's own stdin/stdout. Used in service mode (no controlling
+	// terminal): an attaching client (e.g. `pyry attach`) can take over
+	// the bridge to interact with the child. When nil, the supervisor
+	// runs in foreground mode and bridges PTY I/O directly to its own
+	// stdin/stdout — current behavior.
+	Bridge *Bridge
+
 	// Logger is used for structured logging.
 	Logger *slog.Logger
 
@@ -229,6 +237,31 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 		onSpawn(cmd.Process.Pid)
 	}
 
+	if s.cfg.Bridge != nil {
+		// Service mode: route PTY I/O through the bridge so an attaching
+		// client can take over interactively. No raw-mode setup, no SIGWINCH
+		// forwarding — those belong to whichever client attaches and apply
+		// to its own terminal.
+		done := make(chan error, 2)
+		go func() {
+			_, err := io.Copy(ptmx, s.cfg.Bridge)
+			done <- err
+		}()
+		go func() {
+			_, err := io.Copy(s.cfg.Bridge, ptmx)
+			done <- err
+		}()
+
+		waitErr := cmd.Wait()
+		_ = ptmx.Close()
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+		}
+		return waitErr
+	}
+
+	// Foreground mode: bridge directly to the supervisor's own terminal.
 	// Put the controlling terminal into raw mode if it is a TTY so that
 	// keystrokes pass through unmodified to the child.
 	stdinFd := int(os.Stdin.Fd())
