@@ -14,6 +14,11 @@ type Verb string
 const (
 	// VerbStatus asks for a snapshot of supervisor state.
 	VerbStatus Verb = "status"
+
+	// VerbStop asks the daemon to shut down. The server acknowledges with
+	// Response.OK before initiating shutdown so the client gets confirmation
+	// even though the socket disappears moments later.
+	VerbStop Verb = "stop"
 )
 
 // Request is the wire format for a single client request.
@@ -21,11 +26,15 @@ type Request struct {
 	Verb Verb `json:"verb"`
 }
 
-// Response is the wire format for a single server response. Exactly one of
-// the verb-specific fields (Status) is populated on success; Error is set
-// when the server rejects the request.
+// Response is the wire format for a single server response. On success
+// exactly one of the verb-specific fields is populated:
+//   - Status: payload for VerbStatus
+//   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
+//
+// Error is set when the server rejects the request.
 type Response struct {
 	Status *StatusPayload `json:"status,omitempty"`
+	OK     bool           `json:"ok,omitempty"`
 	Error  string         `json:"error,omitempty"`
 }
 

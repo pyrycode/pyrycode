@@ -55,7 +55,7 @@ func startServer(t *testing.T, fs *fakeState) (sock string, stop func()) {
 	dir := shortTempDir(t)
 	sock = filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, fs, nil)
+	srv := NewServer(sock, fs, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestServer_StaleSocketIsReplaced(t *testing.T) {
 		t.Fatalf("seed stale: %v", err)
 	}
 
-	srv := NewServer(sock, &fakeState{}, nil)
+	srv := NewServer(sock, &fakeState{}, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen with stale file should succeed: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestServer_CloseRemovesSocket(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil)
+	srv := NewServer(sock, &fakeState{}, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -244,6 +244,80 @@ func TestClient_DialFailsCleanly(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dial") {
 		t.Errorf("error should mention dial, got: %v", err)
+	}
+}
+
+func TestServer_Stop(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	shutdownCalled := make(chan struct{}, 1)
+	srv := NewServer(sock, &fakeState{}, func() {
+		select {
+		case shutdownCalled <- struct{}{}:
+		default:
+		}
+	}, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+
+	if err := Stop(context.Background(), sock); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	select {
+	case <-shutdownCalled:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown callback was not invoked after stop request")
+	}
+
+	// The integration: shutdown() in the real wiring is the supervisor
+	// context's cancel. main.go cancels its own ctx, the goroutine in
+	// Serve sees ctx.Done() and closes the listener. Simulate that here
+	// — Stop fired the callback, now we cancel and verify Serve returns.
+	cancel()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Errorf("Serve returned: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after cancel")
+	}
+}
+
+func TestServer_StopWithoutHandler(t *testing.T) {
+	t.Parallel()
+
+	// Server constructed without a shutdown handler should report a clean
+	// error response rather than panicking on nil.
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	srv := NewServer(sock, &fakeState{}, nil, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+
+	err := Stop(context.Background(), sock)
+	if err == nil {
+		t.Fatal("expected error when shutdown handler is nil")
+	}
+	if !strings.Contains(err.Error(), "stop") {
+		t.Errorf("error should mention stop, got: %v", err)
 	}
 }
 

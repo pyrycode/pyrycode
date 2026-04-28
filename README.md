@@ -71,6 +71,14 @@ Uptime:        1m23s
 
 The control socket lives at `~/.pyry/pyry.sock` by default (override with `-socket`). Permissions are `0600` so only the owner can connect.
 
+### Stopping a running daemon
+
+```bash
+pyry stop
+```
+
+Sends a shutdown request over the control socket. Pyry kills the supervised claude child, removes the socket, and exits — same code path as SIGINT / SIGTERM / `launchctl unload`.
+
 ### Run as a service (Linux, systemd)
 
 Use the unit file in [`systemd/pyry.service`](systemd/pyry.service):
