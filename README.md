@@ -48,13 +48,29 @@ GOOS=darwin GOARCH=amd64 go build -o dist/pyry-darwin-amd64 ./cmd/pyry
 
 ## Usage
 
+`pyry` is a near-drop-in replacement for `claude`. Anything pyry doesn't recognize is forwarded to `claude` verbatim. Pyry's own configuration uses an explicit `-pyry-*` prefix so it never collides with claude's namespace.
+
 ```bash
 pyry                                # run claude under supervision
-pyry -verbose                       # with debug logging
-pyry -- --channels plugin:discord   # pass args through to claude
+pyry "summarize foo.md"             # initial prompt forwarded to claude
+pyry --model sonnet -p "..."        # any claude flag passes through
+pyry -pyry-verbose                  # debug-level pyry logs
+pyry -pyry-verbose -- --resume      # use -- if claude args collide with -pyry-*
 pyry version
 pyry help
 ```
+
+### Pyry-specific flags
+
+These configure pyry itself and must come **before** any claude args (or after a `--` separator):
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-pyry-claude` | `claude` | Path to the claude binary |
+| `-pyry-workdir` | current dir | Working directory for the supervised child |
+| `-pyry-resume` | `true` | Pass `--continue` to claude on restart so the session survives crashes |
+| `-pyry-verbose` | `false` | Debug-level pyry logging |
+| `-pyry-socket` | `~/.pyry/pyry.sock` | Control socket path |
 
 ### Querying a running daemon
 
@@ -69,7 +85,7 @@ Started at:    2026-04-28T14:58:36Z
 Uptime:        1m23s
 ```
 
-The control socket lives at `~/.pyry/pyry.sock` by default (override with `-socket`). Permissions are `0600` so only the owner can connect.
+The control socket lives at `~/.pyry/pyry.sock` by default (override with `-pyry-socket`). Permissions are `0600` so only the owner can connect.
 
 ### Stopping a running daemon
 
