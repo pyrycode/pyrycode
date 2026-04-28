@@ -19,6 +19,10 @@ const (
 	// Response.OK before initiating shutdown so the client gets confirmation
 	// even though the socket disappears moments later.
 	VerbStop Verb = "stop"
+
+	// VerbLogs returns the most recent supervisor log lines from an
+	// in-memory ring buffer.
+	VerbLogs Verb = "logs"
 )
 
 // Request is the wire format for a single client request.
@@ -29,13 +33,23 @@ type Request struct {
 // Response is the wire format for a single server response. On success
 // exactly one of the verb-specific fields is populated:
 //   - Status: payload for VerbStatus
+//   - Logs: payload for VerbLogs
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
 type Response struct {
 	Status *StatusPayload `json:"status,omitempty"`
+	Logs   *LogsPayload   `json:"logs,omitempty"`
 	OK     bool           `json:"ok,omitempty"`
 	Error  string         `json:"error,omitempty"`
+}
+
+// LogsPayload carries recent supervisor log lines, oldest first. Capacity
+// is the ring buffer's configured size — useful for the client to know
+// whether the response is the full history or a tail of a longer one.
+type LogsPayload struct {
+	Lines    []string `json:"lines"`
+	Capacity int      `json:"capacity"`
 }
 
 // StatusPayload describes the supervisor's runtime state. All durations are

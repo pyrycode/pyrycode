@@ -56,6 +56,8 @@ func run() error {
 			return runStatus(os.Args[2:])
 		case "stop":
 			return runStop(os.Args[2:])
+		case "logs":
+			return runLogs(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -82,7 +84,14 @@ func runSupervisor(args []string) error {
 	if *verbose {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	// Tee the supervisor's logger to a ring buffer so `pyry logs` can replay
+	// recent lifecycle events from another shell. 200 entries is enough for
+	// several minutes of normal activity at debug level.
+	logRing := control.NewRingBuffer(200)
+	logger := slog.New(control.SlogTee(
+		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}),
+		logRing,
+	))
 
 	cfg := supervisor.Config{
 		ClaudeBin:  *claudeBin,
@@ -100,7 +109,7 @@ func runSupervisor(args []string) error {
 		return fmt.Errorf("supervisor init: %w", err)
 	}
 
-	ctrl := control.NewServer(*socketPath, sup, cancel, logger)
+	ctrl := control.NewServer(*socketPath, sup, logRing, cancel, logger)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -161,6 +170,28 @@ func runStatus(args []string) error {
 	return nil
 }
 
+// runLogs implements `pyry logs`: fetch the recent supervisor log lines from
+// the daemon's in-memory ring buffer and print them.
+func runLogs(args []string) error {
+	fs := flag.NewFlagSet("pyry logs", flag.ContinueOnError)
+	socketPath := fs.String("socket", defaultSocketPath(), "control socket path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := control.Logs(ctx, *socketPath)
+	if err != nil {
+		return fmt.Errorf("logs: %w", err)
+	}
+	for _, line := range resp.Lines {
+		fmt.Println(line)
+	}
+	return nil
+}
+
 // runStop implements `pyry stop`: dial the control socket and ask the daemon
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
@@ -188,6 +219,7 @@ Usage:
   pyry [flags] [-- claude args...]   start a supervised claude session
   pyry status [flags]                query the running daemon
   pyry stop [flags]                  ask the running daemon to shut down
+  pyry logs [flags]                  print recent supervisor log lines
   pyry version                       print version
   pyry help                          show this help
 
@@ -198,7 +230,7 @@ Supervisor flags:
   -verbose         verbose logging
   -socket string   control socket path (default ~/.pyry/pyry.sock)
 
-Status / Stop flags:
+Status / Stop / Logs flags:
   -socket string   control socket path (default ~/.pyry/pyry.sock)
 
 Examples:
@@ -207,6 +239,7 @@ Examples:
   pyry -- --channels plugin:discord   # pass args through to claude
   pyry status                         # check on the running daemon
   pyry stop                           # graceful shutdown via the control socket
+  pyry logs                           # last 200 lines of supervisor logs
 
 See https://github.com/pyrycode/pyrycode for documentation.
 `)
