@@ -227,6 +227,27 @@ func TestServer_CloseRemovesSocket(t *testing.T) {
 	}
 }
 
+func TestNewServer_PanicsOnNilState(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected NewServer(nil state) to panic, did not")
+		}
+		if msg, ok := r.(string); ok {
+			if !strings.Contains(msg, "state") {
+				t.Errorf("panic message %q should mention state", msg)
+			}
+		}
+	}()
+
+	// Note: we don't reach the lines below if the panic fires (which it
+	// must), but they document the contract being tested.
+	_ = NewServer("/tmp/p.sock", nil, nil, nil, nil, nil)
+	t.Fatal("NewServer returned without panicking")
+}
+
 func TestClient_DialFailsCleanly(t *testing.T) {
 	t.Parallel()
 
