@@ -11,17 +11,18 @@ The smallest thing that can replace `tmux` + the bash restart loop and host Pyry
 - [x] Transparent stdin/stdout bridging with raw mode on the controlling terminal
 - [x] SIGWINCH forwarding so terminal resizes propagate to the child
 - [x] Crash detection + exponential backoff restart
-- [x] `--resume` flag: subsequent runs after the first resume the most recent session
+- [x] Session continuity across crashes: subsequent runs after the first pass `--continue` to claude, resuming the most recent session for the cwd
 - [x] Structured logging via `log/slog`
 - [x] Graceful shutdown on SIGINT / SIGTERM
 - [x] systemd user unit template
 - [x] launchd plist for macOS (cross-platform: Linux + macOS targeted; Windows out of scope)
 - [x] Cross-compile verified for darwin/amd64 and darwin/arm64
-- [ ] Real test on pyrybox: `pyry` replaces the tmux setup for Pyry itself
-- [ ] Unix control socket (`pyry status`, `pyry logs`, `pyry attach`)
-- [ ] Session ID tracking with explicit persistence across restarts (beyond `--resume` heuristics)
-- [ ] Backoff-loop cooldown: if crashes happen N times in T seconds, bail out
-- [ ] Tests (unit + a small integration test with a fake child)
+- [x] Unix control socket — `pyry status`, `pyry stop`, `pyry logs`, `pyry attach` all live
+- [x] Tests (unit + integration) for supervisor, bridge, and control plane
+- [x] CLI transparency — pyry forwards unknown args to claude verbatim; pyry's own flags use `-pyry-*` prefix
+- [x] Named instances — `~/.pyry/<name>.sock` socket layout, `-pyry-name` flag, `PYRY_NAME` env var
+- [ ] Real test on pyrybox: `pyry` replaces the tmux setup for Pyry itself (Phase 0.5)
+- [ ] Backoff-loop cooldown: if crashes happen N times in T seconds, bail out (deferred — current loop retries forever, which is the right behaviour for the always-on service)
 
 ## Phase 1 — Multi-session
 

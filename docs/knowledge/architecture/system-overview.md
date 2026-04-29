@@ -40,7 +40,7 @@ supervisor.Run()
     │
     ├── child exited? ──> apply backoff delay
     │                     if uptime > resetAfter: reset backoff to initial
-    │                     respawn with --resume (after first run)
+    │                     respawn with --continue (after first run, when ResumeLast is true)
     │
     └── ctx cancelled? ──> graceful shutdown
 ```
@@ -58,7 +58,7 @@ supervisor.Run()
 
 All supervisor configuration in a single struct. Passed to `supervisor.New()`.
 
-Fields: ClaudeBin (path to claude), WorkDir (child's cwd), ResumeLast (use --resume after first run), ClaudeArgs (pass-through args), Logger (*slog.Logger), backoff params (Initial, Max, Reset durations).
+Fields: ClaudeBin (path to claude), WorkDir (child's cwd), ResumeLast (use --continue after first run), ClaudeArgs (pass-through args), Bridge (optional service-mode I/O mediator), Logger (*slog.Logger), backoff params (Initial, Max, Reset durations).
 
 ### `supervisor.Supervisor`
 

@@ -241,7 +241,7 @@ func runSupervisor(args []string) error {
 	// client can take over interactively.
 	var bridge *supervisor.Bridge
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		bridge = supervisor.NewBridge()
+		bridge = supervisor.NewBridge(logger)
 	}
 
 	cfg := supervisor.Config{

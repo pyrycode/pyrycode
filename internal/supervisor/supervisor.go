@@ -23,6 +23,14 @@ import (
 	"golang.org/x/term"
 )
 
+// goroutineDrainTimeout caps how long runOnce waits for its I/O bridge
+// goroutines to finish after the child has exited. The output goroutine
+// returns promptly when ptmx is closed; the input goroutine in foreground
+// mode is blocked on os.Stdin and will only unblock on the next user
+// keystroke. The timeout exists to bound runOnce's return latency without
+// requiring stdin to be closed.
+const goroutineDrainTimeout = 100 * time.Millisecond
+
 // Phase describes the supervisor's current lifecycle state.
 type Phase string
 
@@ -256,12 +264,27 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 		_ = ptmx.Close()
 		select {
 		case <-done:
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(goroutineDrainTimeout):
 		}
 		return waitErr
 	}
 
 	// Foreground mode: bridge directly to the supervisor's own terminal.
+	//
+	// Known limitation: io.Copy(ptmx, os.Stdin) below blocks on stdin.Read
+	// after the child exits — closing ptmx unblocks the *output* goroutine
+	// promptly, but the *input* goroutine sits on stdin until the user types
+	// again. Each child restart can therefore strand one stdin-bound
+	// goroutine that lives until the next keystroke.
+	//
+	// The leak is bounded by typing frequency, not by restart frequency, so
+	// in practice it stays at "one or two goroutines" for an interactive
+	// user. Service mode (Bridge != nil) has no equivalent issue — the
+	// bridge's pipe-based input pump is per-supervisor, not per-child.
+	// We accept this for foreground mode rather than retrofitting a
+	// cancellable stdin reader, since foreground mode is dev-convenience
+	// only; the production deployment uses service mode.
+	//
 	// Put the controlling terminal into raw mode if it is a TTY so that
 	// keystrokes pass through unmodified to the child.
 	stdinFd := int(os.Stdin.Fd())
