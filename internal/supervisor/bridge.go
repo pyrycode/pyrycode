@@ -54,9 +54,19 @@ func (b *Bridge) Read(p []byte) (int, error) {
 
 // Write implements io.Writer. The supervisor copies from the PTY master into
 // this. Bytes are forwarded to the attached output writer, or discarded if
-// none is attached. Discard always reports a successful write so io.Copy
-// keeps draining the PTY (otherwise the child would block on a full stdout
-// buffer).
+// none is attached.
+//
+// Write NEVER returns an error. This is load-bearing: the supervisor's
+// io.Copy(bridge, ptmx) goroutine must keep draining the PTY for the entire
+// child lifetime — if it returns, the PTY's master read buffer fills, the
+// slave's writes block, and the child wedges. So even when the attached
+// client's conn is mid-disconnect (closed faster than the bridge's input
+// pump cleared b.output to nil), we silently drop the bytes and report
+// success rather than letting the conn error escape to the supervisor.
+//
+// The discard-on-detach is a minor visible cost — a few bytes of claude
+// output that would have shown on the now-departed client get lost. The
+// alternative (a wedged daemon that needs SIGKILL to recover) is much worse.
 func (b *Bridge) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	out := b.output
@@ -64,7 +74,11 @@ func (b *Bridge) Write(p []byte) (int, error) {
 	if out == nil {
 		return len(p), nil
 	}
-	return out.Write(p)
+	if _, err := out.Write(p); err != nil {
+		// See doc comment: bytes lost, daemon stays alive.
+		return len(p), nil
+	}
+	return len(p), nil
 }
 
 // Attach binds a client to the bridge: bytes from `in` flow toward the PTY,

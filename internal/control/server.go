@@ -51,6 +51,12 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	closed   bool
+	closedCh chan struct{} // closed by Close, lets Serve's ctx-watcher exit
+
+	// streamingWG tracks streaming-handler goroutines (currently: the
+	// per-attach detach watcher). Serve waits on it before returning so a
+	// caller blocked on Serve can be sure no per-conn goroutines are left.
+	streamingWG sync.WaitGroup
 }
 
 // NewServer constructs a Server. The socket is not opened until Listen.
@@ -85,6 +91,7 @@ func NewServer(socketPath string, state StateProvider, logs LogProvider, attach 
 		attach:     attach,
 		shutdown:   shutdown,
 		log:        log,
+		closedCh:   make(chan struct{}),
 	}
 }
 
@@ -149,34 +156,41 @@ func (s *Server) Serve(ctx context.Context) error {
 		return errors.New("control: Listen must be called before Serve")
 	}
 
-	// Closing the listener unblocks Accept. We wire it to ctx so callers
-	// can stop the server simply by cancelling the context.
+	// Closing the listener unblocks Accept. We wire it to BOTH ctx
+	// cancellation and explicit Close so direct callers of Close (without
+	// cancelling ctx) don't leave the watcher goroutine alive forever.
 	go func() {
-		<-ctx.Done()
-		_ = s.Close()
+		select {
+		case <-ctx.Done():
+			_ = s.Close()
+		case <-s.closedCh:
+			// Close already fired; nothing to do.
+		}
 	}()
 
-	var wg sync.WaitGroup
+	var handleWG sync.WaitGroup
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			// If we're shutting down, this is expected.
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				wg.Wait()
+				handleWG.Wait()        // wait for in-flight handlers
+				s.streamingWG.Wait()   // wait for active attach detach-watchers
 				return nil
 			}
 			s.log.Warn("control: accept failed", "err", err)
 			continue
 		}
-		wg.Add(1)
+		handleWG.Add(1)
 		go func() {
-			defer wg.Done()
+			defer handleWG.Done()
 			s.handle(conn)
 		}()
 	}
 }
 
-// Close shuts the listener and removes the socket file. Idempotent.
+// Close shuts the listener and removes the socket file. Idempotent. Safe to
+// call from any goroutine, including the ctx-watcher goroutine in Serve.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -184,6 +198,7 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	close(s.closedCh) // wakes Serve's ctx-watcher goroutine
 	var firstErr error
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -305,8 +320,11 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder) (handedOff bool)
 	_ = enc.Encode(Response{OK: true})
 
 	// Connection ownership transferred. Close it when the bridge's input
-	// pump ends (typically: client disconnected).
+	// pump ends (typically: client disconnected). Tracked on streamingWG
+	// so Serve waits for it before returning.
+	s.streamingWG.Add(1)
 	go func() {
+		defer s.streamingWG.Done()
 		<-done
 		_ = conn.Close()
 		s.log.Info("control: client detached")
