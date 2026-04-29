@@ -17,6 +17,59 @@ import (
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
+// errReader reports the configured error on every Read.
+type errReader struct{ err error }
+
+func (e *errReader) Read(p []byte) (int, error) { return 0, e.err }
+
+// errCopyWriter implements io.Writer and returns the configured error on
+// every Write. Used to drive copyWithEscape's write-failure paths.
+type errCopyWriter struct{ err error }
+
+func (e *errCopyWriter) Write(p []byte) (int, error) { return 0, e.err }
+
+func TestCopyWithEscape_NonEOFReadError(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("read failed")
+	err := copyWithEscape(&bytes.Buffer{}, &errReader{err: want})
+	if err == nil {
+		t.Fatal("expected non-EOF read error to propagate")
+	}
+	if !errors.Is(err, want) && err.Error() != want.Error() {
+		t.Errorf("err = %v, want %v", err, want)
+	}
+}
+
+func TestCopyWithEscape_WriteErrorInNormalState(t *testing.T) {
+	t.Parallel()
+
+	// Closed-pipe error → writerErr coerces to nil (clean detach).
+	err := copyWithEscape(&errCopyWriter{err: io.ErrClosedPipe}, bytes.NewReader([]byte("a")))
+	if err != nil {
+		t.Errorf("io.ErrClosedPipe should be coerced to nil, got %v", err)
+	}
+
+	// Other write error → propagates.
+	other := errors.New("disk full")
+	err = copyWithEscape(&errCopyWriter{err: other}, bytes.NewReader([]byte("a")))
+	if err == nil || !errors.Is(err, other) {
+		t.Errorf("expected %v to propagate, got %v", other, err)
+	}
+}
+
+func TestCopyWithEscape_WriteErrorInPendingFlush(t *testing.T) {
+	t.Parallel()
+
+	// Escape + non-detach byte triggers the pending-flush write path.
+	// Error there should propagate (or be coerced if it's a closed-pipe).
+	other := errors.New("flush failed")
+	err := copyWithEscape(&errCopyWriter{err: other}, bytes.NewReader([]byte("\x02x")))
+	if err == nil || !errors.Is(err, other) {
+		t.Errorf("expected %v from pending-flush write, got %v", other, err)
+	}
+}
+
 func TestWriterErr(t *testing.T) {
 	t.Parallel()
 
