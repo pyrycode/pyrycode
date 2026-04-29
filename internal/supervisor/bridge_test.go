@@ -9,6 +9,50 @@ import (
 	"time"
 )
 
+// errWriter implements io.Writer and returns the configured error on every
+// call. Used to exercise the "attached output goes bad mid-write" path.
+type errWriter struct{ err error }
+
+func (e *errWriter) Write(p []byte) (int, error) { return 0, e.err }
+
+// TestBridge_WriteSwallowsAttachedWriteErrors is the regression test for
+// the "daemon wedges after detach" bug. If Bridge.Write propagates conn
+// errors back to the supervisor's io.Copy(bridge, ptmx), the OUTPUT
+// goroutine dies, the PTY stops being drained, and the supervised child
+// blocks on stdout writes until the process is killed.
+//
+// Bridge.Write is required to return (len(p), nil) regardless of whether
+// the attached writer succeeded — bytes lost are acceptable, a wedged
+// daemon is not.
+func TestBridge_WriteSwallowsAttachedWriteErrors(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+
+	// Pipe so the input pump (io.Copy(pipeW, in)) stays alive and the
+	// bridge keeps `output` set — exactly the race window where a PTY
+	// write would hit a half-broken conn.
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	if _, err := b.Attach(pr, &errWriter{err: errors.New("conn closed")}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// PTY emits a byte while attached output is broken — this is the
+	// supervisor.runOnce code path: io.Copy(bridge, ptmx) calls bridge.Write.
+	// We assert the write reports success even though the underlying
+	// out.Write failed.
+	n, err := b.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write must not propagate attached-writer errors: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("n = %d, want 5 (full slice reported as written even on discard)", n)
+	}
+}
+
 func TestBridge_DiscardsWhenUnattached(t *testing.T) {
 	t.Parallel()
 
