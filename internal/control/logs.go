@@ -77,16 +77,36 @@ func (r *RingBuffer) Cap() int { return r.size }
 // supervisor's primary logger so `pyry logs` can replay recent lifecycle
 // events from another shell.
 //
-// The text format mirrors slog.NewTextHandler with default options — the
-// same shape users see on stderr. We construct a fresh text handler per
-// record (cheap; this is operational logging, not a hot path).
+// WithAttrs and WithGroup are propagated to BOTH the primary handler (so
+// stderr stays consistent with what callers asked for) AND the parallel
+// text formatter that feeds the ring. Without that propagation, attrs
+// added via slog.Logger.With(...) would silently drop from `pyry logs`.
 func SlogTee(next slog.Handler, ring *RingBuffer) slog.Handler {
-	return &teeHandler{next: next, ring: ring}
+	buf := &bytes.Buffer{}
+	return &teeHandler{
+		next:   next,
+		ring:   ring,
+		fmtH:   slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		fmtBuf: buf,
+		fmtMu:  &sync.Mutex{},
+	}
 }
 
+// teeHandler is the slog.Handler returned by SlogTee. Each derived handler
+// (via WithAttrs / WithGroup) shares the buffer + mutex with its parent so
+// formatted output from concurrently-used derivatives doesn't interleave;
+// only fmtH is per-handler, carrying the right With/Group chain for that
+// handler's records.
 type teeHandler struct {
 	next slog.Handler
 	ring *RingBuffer
+
+	// Shared across all teeHandlers in one SlogTee chain:
+	fmtBuf *bytes.Buffer
+	fmtMu  *sync.Mutex
+
+	// Per-handler — fresh on each WithAttrs/WithGroup derivation:
+	fmtH slog.Handler
 }
 
 func (t *teeHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -94,18 +114,31 @@ func (t *teeHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (t *teeHandler) Handle(ctx context.Context, r slog.Record) error {
-	var buf bytes.Buffer
-	txt := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	if err := txt.Handle(ctx, r); err == nil {
-		t.ring.Add(strings.TrimRight(buf.String(), "\n"))
+	t.fmtMu.Lock()
+	t.fmtBuf.Reset()
+	if err := t.fmtH.Handle(ctx, r); err == nil {
+		t.ring.Add(strings.TrimRight(t.fmtBuf.String(), "\n"))
 	}
+	t.fmtMu.Unlock()
 	return t.next.Handle(ctx, r)
 }
 
 func (t *teeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &teeHandler{next: t.next.WithAttrs(attrs), ring: t.ring}
+	return &teeHandler{
+		next:   t.next.WithAttrs(attrs),
+		ring:   t.ring,
+		fmtBuf: t.fmtBuf,
+		fmtMu:  t.fmtMu,
+		fmtH:   t.fmtH.WithAttrs(attrs),
+	}
 }
 
 func (t *teeHandler) WithGroup(name string) slog.Handler {
-	return &teeHandler{next: t.next.WithGroup(name), ring: t.ring}
+	return &teeHandler{
+		next:   t.next.WithGroup(name),
+		ring:   t.ring,
+		fmtBuf: t.fmtBuf,
+		fmtMu:  t.fmtMu,
+		fmtH:   t.fmtH.WithGroup(name),
+	}
 }

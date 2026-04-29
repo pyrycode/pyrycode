@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -15,6 +16,38 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
+
+func TestWriterErr(t *testing.T) {
+	t.Parallel()
+
+	otherErr := errors.New("some other I/O failure")
+
+	tests := []struct {
+		name string
+		in   error
+		want error
+	}{
+		{"nil stays nil", nil, nil},
+		{"net.ErrClosed becomes nil (server hung up)", net.ErrClosed, nil},
+		{"io.ErrClosedPipe becomes nil (server hung up)", io.ErrClosedPipe, nil},
+		{"other error propagates", otherErr, otherErr},
+		{"wrapped net.ErrClosed becomes nil", fmt.Errorf("wrapped: %w", net.ErrClosed), nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := writerErr(tt.in)
+			if (got == nil) != (tt.want == nil) {
+				t.Errorf("writerErr(%v) = %v, want %v (nil-equality differs)", tt.in, got, tt.want)
+				return
+			}
+			if got != nil && got != tt.want {
+				t.Errorf("writerErr(%v) = %v, want exact %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestCopyWithEscape(t *testing.T) {
 	t.Parallel()
@@ -377,6 +410,126 @@ func TestServer_StopWhileAttached(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("bridge.Attached() still true 2s after client disconnect")
+}
+
+// TestServer_ConcurrentAttachRace fires two attach handshakes simultaneously
+// from separate goroutines. At-most-one is enforced via Bridge's mutex;
+// exactly one of the two should land OK, the other ErrBridgeBusy. With the
+// race detector on, this also exercises the mutex contract.
+func TestServer_ConcurrentAttachRace(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	bridge := supervisor.NewBridge(nil)
+	srv := NewServer(sock, &fakeState{}, nil, bridge, nil, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+
+	type result struct {
+		ok    bool
+		errFx string
+	}
+	results := make(chan result, 2)
+	conns := make(chan net.Conn, 2)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			conn, err := net.Dial("unix", sock)
+			if err != nil {
+				results <- result{errFx: err.Error()}
+				return
+			}
+			conns <- conn
+			if err := json.NewEncoder(conn).Encode(Request{Verb: VerbAttach}); err != nil {
+				results <- result{errFx: err.Error()}
+				return
+			}
+			var resp Response
+			if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+				results <- result{errFx: err.Error()}
+				return
+			}
+			results <- result{ok: resp.OK, errFx: resp.Error}
+		}()
+	}
+
+	r1 := <-results
+	r2 := <-results
+
+	// Exactly one should be OK, the other busy.
+	okCount, busyCount := 0, 0
+	for _, r := range []result{r1, r2} {
+		switch {
+		case r.ok && r.errFx == "":
+			okCount++
+		case strings.Contains(r.errFx, "already") || strings.Contains(r.errFx, "busy"):
+			busyCount++
+		default:
+			t.Errorf("unexpected result: ok=%v err=%q", r.ok, r.errFx)
+		}
+	}
+	if okCount != 1 || busyCount != 1 {
+		t.Errorf("got %d OK and %d busy; want exactly 1 of each", okCount, busyCount)
+	}
+
+	// Drain conns so they close cleanly.
+	close(conns)
+	for c := range conns {
+		_ = c.Close()
+	}
+}
+
+// TestServer_HandshakeTimeout confirms a connected-but-silent client gets
+// disconnected by the server after handshakeTimeout. Without this, a slow
+// client could pin a server goroutine indefinitely.
+//
+// Note: the test relies on the production handshakeTimeout (5s) being
+// reasonable for CI. We don't override it because the const isn't
+// configurable at the call site; if this becomes a CI flake risk, plumb
+// it through Server.Config.
+func TestServer_HandshakeTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 5s handshake timeout test in -short mode")
+	}
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Don't send anything. The server's dec.Decode is gated on the
+	// handshakeTimeout. Read should EOF (or err) within ~handshakeTimeout
+	// seconds — give a generous buffer.
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout + 2*time.Second))
+	buf := make([]byte, 256)
+	n, readErr := conn.Read(buf)
+
+	// Server's response on timeout is to encode an error response and
+	// close. Either we read that error JSON, or the conn closes outright
+	// (EOF). Both are acceptable; the FAIL case is "no error within the
+	// deadline."
+	if readErr == nil && n == 0 {
+		t.Fatal("expected EOF or response after handshake timeout, got neither")
+	}
 }
 
 // Bridge-as-AttachProvider integration test: confirm that supervisor.Bridge

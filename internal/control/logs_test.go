@@ -111,6 +111,53 @@ func TestSlogTee_WritesToBoth(t *testing.T) {
 	}
 }
 
+// TestSlogTee_WithAttrsCarriesThroughTee confirms slog.Logger.With(...)
+// produces a sub-logger whose records still get teed into the ring buffer.
+// Without forwarding through teeHandler.WithAttrs, records made on the
+// sub-logger would skip the ring entirely.
+func TestSlogTee_WithAttrsCarriesThroughTee(t *testing.T) {
+	t.Parallel()
+
+	ring := NewRingBuffer(10)
+	logger := slog.New(SlogTee(slog.NewTextHandler(discardWriter{}, nil), ring))
+
+	sub := logger.With("subsystem", "supervisor")
+	sub.Info("spawning", "pid", 42)
+
+	lines := ring.Snapshot()
+	if len(lines) != 1 {
+		t.Fatalf("ring captured %d lines, want 1", len(lines))
+	}
+	if !strings.Contains(lines[0], "subsystem=supervisor") {
+		t.Errorf("captured line %q lost the With() attr", lines[0])
+	}
+	if !strings.Contains(lines[0], "pid=42") {
+		t.Errorf("captured line %q lost the per-record attr", lines[0])
+	}
+}
+
+// TestSlogTee_WithGroupCarriesThroughTee confirms slog.Logger.WithGroup
+// nesting also gets teed. Without forwarding through teeHandler.WithGroup,
+// grouped attrs would be silently dropped.
+func TestSlogTee_WithGroupCarriesThroughTee(t *testing.T) {
+	t.Parallel()
+
+	ring := NewRingBuffer(10)
+	logger := slog.New(SlogTee(slog.NewTextHandler(discardWriter{}, nil), ring))
+
+	grouped := logger.WithGroup("child")
+	grouped.Info("event", "pid", 99)
+
+	lines := ring.Snapshot()
+	if len(lines) != 1 {
+		t.Fatalf("ring captured %d lines, want 1", len(lines))
+	}
+	// slog's TextHandler renders WithGroup as "child.pid=99"
+	if !strings.Contains(lines[0], "child.pid=99") {
+		t.Errorf("captured line %q lost the WithGroup nesting", lines[0])
+	}
+}
+
 func TestServer_Logs(t *testing.T) {
 	t.Parallel()
 

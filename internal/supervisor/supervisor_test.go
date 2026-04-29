@@ -6,9 +6,103 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestSupervisor_NewRejectsMissingClaudeBin covers the early-validation
+// path in New: if the binary is not on PATH, construction fails with a
+// wrapped "claude binary not found" error rather than letting Run discover
+// the problem on first spawn.
+func TestSupervisor_NewRejectsMissingClaudeBin(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{ClaudeBin: "/nonexistent/path/to/claude/" + t.Name()}
+	if _, err := New(cfg); err == nil {
+		t.Fatal("New with missing binary should error, did not")
+	} else if !strings.Contains(err.Error(), "claude binary not found") {
+		t.Errorf("error %q should mention 'claude binary not found'", err)
+	}
+}
+
+// TestSupervisor_StateInitial confirms the State snapshot reflects the
+// PhaseStarting setup that New does, with all other fields zeroed.
+func TestSupervisor_StateInitial(t *testing.T) {
+	t.Parallel()
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	st := sup.State()
+	if st.Phase != PhaseStarting {
+		t.Errorf("Phase = %q, want %q", st.Phase, PhaseStarting)
+	}
+	if st.ChildPID != 0 {
+		t.Errorf("ChildPID = %d, want 0 before Run", st.ChildPID)
+	}
+	if st.RestartCount != 0 {
+		t.Errorf("RestartCount = %d, want 0", st.RestartCount)
+	}
+	if !st.StartedAt.IsZero() {
+		t.Errorf("StartedAt should be zero before Run, got %v", st.StartedAt)
+	}
+}
+
+// TestSupervisor_StateAcrossPhases observes State() through a full lifecycle:
+// PhaseStarting → PhaseRunning (with a real child PID) → PhaseStopped via
+// ctx-cancel.
+func TestSupervisor_StateAcrossPhases(t *testing.T) {
+	t.Parallel()
+
+	// "sleep 5s" — gives us a stable PhaseRunning window to observe in.
+	cfg := helperConfig("sleep", "GO_TEST_HELPER_SLEEP=5s")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+
+	// Poll until the supervisor reports a running child with a real PID.
+	deadline := time.Now().Add(5 * time.Second)
+	var observed State
+	for time.Now().Before(deadline) {
+		observed = sup.State()
+		if observed.Phase == PhaseRunning && observed.ChildPID > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if observed.Phase != PhaseRunning {
+		t.Fatalf("never observed PhaseRunning; last state = %+v", observed)
+	}
+	if observed.ChildPID == 0 {
+		t.Fatalf("PhaseRunning but ChildPID = 0; state = %+v", observed)
+	}
+	if observed.StartedAt.IsZero() {
+		t.Errorf("PhaseRunning but StartedAt = zero")
+	}
+
+	// Cancel and confirm State drains to PhaseStopped via the deferred
+	// updateState in Run.
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+	final := sup.State()
+	if final.Phase != PhaseStopped {
+		t.Errorf("final Phase = %q, want PhaseStopped", final.Phase)
+	}
+	if final.ChildPID != 0 {
+		t.Errorf("final ChildPID = %d, want 0 after stop", final.ChildPID)
+	}
+}
 
 // TestHelperProcess is not a real test. It is used as a fake child process by
 // integration tests. The test binary re-execs itself with GO_TEST_HELPER_PROCESS=1,
