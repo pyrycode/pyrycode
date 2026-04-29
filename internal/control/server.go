@@ -55,7 +55,11 @@ type Server struct {
 
 // NewServer constructs a Server. The socket is not opened until Listen.
 //
-// state must be non-nil — the supervisor is the canonical source of state.
+// state must be non-nil — the supervisor is the canonical source of state,
+// and VerbStatus would otherwise nil-pointer-panic on the first request.
+// Passing a nil state is a programmer error and panics at construction
+// time so the failure surfaces immediately rather than on a request from
+// a future shell.
 //
 // logs is optional. When nil, VerbLogs returns an error response.
 //
@@ -68,6 +72,9 @@ type Server struct {
 // typically the signal-driven context's cancel function so a stop request
 // walks the same shutdown path as SIGINT/SIGTERM.
 func NewServer(socketPath string, state StateProvider, logs LogProvider, attach AttachProvider, shutdown func(), log *slog.Logger) *Server {
+	if state == nil {
+		panic("control.NewServer: state is required, got nil")
+	}
 	if log == nil {
 		log = slog.Default()
 	}

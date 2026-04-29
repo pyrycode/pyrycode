@@ -37,8 +37,18 @@ type Request struct {
 }
 
 // AttachPayload carries the client's terminal geometry at attach time.
-// Phase 0: window size is fixed for the lifetime of the attach. Live
-// SIGWINCH propagation can come later as a small follow-up.
+//
+// Phase 0 caveat: the server currently ACCEPTS this payload but does NOT
+// propagate Cols/Rows to the PTY — the bridge has no API for setting
+// window size yet. Clients send the values for forward compatibility (so
+// no protocol change is needed when the server starts honoring them). Until
+// the supervised child is taught to react to handshake-time geometry, all
+// claude sessions render at whatever size the server's PTY was allocated
+// with (typically 80×24 from creack/pty defaults).
+//
+// Live SIGWINCH propagation while attached is also out of scope for Phase 0;
+// it would need a small framing change to multiplex resize events into the
+// raw byte stream, or a side-channel control verb.
 type AttachPayload struct {
 	Cols int `json:"cols,omitempty"`
 	Rows int `json:"rows,omitempty"`
