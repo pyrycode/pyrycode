@@ -7,6 +7,64 @@ import (
 	"testing"
 )
 
+func TestParseClientFlags(t *testing.T) {
+	// Not parallel — t.Setenv mutates the environment.
+
+	t.Run("default name yields ~/.pyry/pyry.sock", func(t *testing.T) {
+		t.Setenv("PYRY_NAME", "")
+		got, err := parseClientFlags("pyry status", nil)
+		if err != nil {
+			t.Fatalf("parseClientFlags: %v", err)
+		}
+		if filepath.Base(got) != "pyry.sock" {
+			t.Errorf("filename = %q, want pyry.sock", filepath.Base(got))
+		}
+	})
+
+	t.Run("-pyry-name override wins over PYRY_NAME", func(t *testing.T) {
+		t.Setenv("PYRY_NAME", "fromenv")
+		got, err := parseClientFlags("pyry status", []string{"-pyry-name", "fromflag"})
+		if err != nil {
+			t.Fatalf("parseClientFlags: %v", err)
+		}
+		if filepath.Base(got) != "fromflag.sock" {
+			t.Errorf("filename = %q, want fromflag.sock (flag should win over env)", filepath.Base(got))
+		}
+	})
+
+	t.Run("PYRY_NAME wins when no flag given", func(t *testing.T) {
+		t.Setenv("PYRY_NAME", "fromenv")
+		got, err := parseClientFlags("pyry status", nil)
+		if err != nil {
+			t.Fatalf("parseClientFlags: %v", err)
+		}
+		if filepath.Base(got) != "fromenv.sock" {
+			t.Errorf("filename = %q, want fromenv.sock", filepath.Base(got))
+		}
+	})
+
+	t.Run("-pyry-socket beats both", func(t *testing.T) {
+		t.Setenv("PYRY_NAME", "fromenv")
+		got, err := parseClientFlags("pyry status", []string{
+			"-pyry-name", "fromflag",
+			"-pyry-socket", "/custom/explicit.sock",
+		})
+		if err != nil {
+			t.Fatalf("parseClientFlags: %v", err)
+		}
+		if got != "/custom/explicit.sock" {
+			t.Errorf("got = %q, want /custom/explicit.sock", got)
+		}
+	})
+
+	t.Run("unknown flag returns error", func(t *testing.T) {
+		_, err := parseClientFlags("pyry status", []string{"-unknown"})
+		if err == nil {
+			t.Fatal("expected error on unknown flag")
+		}
+	})
+}
+
 func TestSplitArgs(t *testing.T) {
 	t.Parallel()
 
