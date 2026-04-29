@@ -196,6 +196,55 @@ func TestServer_AttachHandshakeAndStream(t *testing.T) {
 	t.Errorf("provider never received the client bytes; got %q", provider.received())
 }
 
+// TestServer_AttachIgnoresGeometryToday locks in the current Phase 0
+// contract: clients send Cols/Rows in the handshake but the server discards
+// them — the bridge has no window-size setter yet. When that gap is closed,
+// this test will need to assert the values were propagated instead, which
+// is the right moment to remember the contract changed.
+func TestServer_AttachIgnoresGeometryToday(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	provider := &fakeAttachProvider{}
+	srv := NewServer(sock, &fakeState{}, nil, provider, nil, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Send Cols and Rows. They should be accepted.
+	if err := json.NewEncoder(conn).Encode(Request{
+		Verb:   VerbAttach,
+		Attach: &AttachPayload{Cols: 200, Rows: 50},
+	}); err != nil {
+		t.Fatalf("encode handshake: %v", err)
+	}
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("attach with geometry should succeed; got %+v", resp)
+	}
+
+	// fakeAttachProvider.Attach takes (in, out). It has no concept of
+	// window size — there is no place in the server-to-bridge plumbing
+	// where Cols/Rows could land today. The "passes" criterion for this
+	// test is just that the server accepted the payload without error.
+	// When the contract changes, expand this test: assert provider saw
+	// Cols=200, Rows=50.
+}
+
 func TestServer_AttachWithoutProvider(t *testing.T) {
 	t.Parallel()
 
