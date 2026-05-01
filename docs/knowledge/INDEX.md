@@ -24,4 +24,5 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 |------|-------|
 | [sessions-package.md](features/sessions-package.md) | `internal/sessions` — `SessionID`, `Session`, `Pool`; supervisor wrapper for multi-session readiness |
 | [sessions-registry.md](features/sessions-registry.md) | `~/.pyry/<name>/sessions.json` — schema, atomic write, load semantics; sessions survive `pyry stop` |
+| [jsonl-reconciliation.md](features/jsonl-reconciliation.md) | Startup scan of `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`; `Pool.RotateID` self-heals registry across `/clear` |
 | [control-plane.md](features/control-plane.md) | `internal/control` — Unix-socket JSON server, `SessionResolver` seam, verb dispatch, attach handoff |

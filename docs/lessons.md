@@ -36,6 +36,12 @@ Gotchas, anti-patterns, and mistakes. Read this before every session so you don'
 - **Map-iteration order is not stable.** Before serializing a Go map to disk, copy to a slice and sort by a stable key — otherwise round-tripping the same in-memory state produces different bytes each time, and "load twice → same state" stops being a real property. For `sessions.json`: sort by `created_at` then `id`.
 - **Default `encoding/json` decoder is the right call for forward compat.** Don't reach for `DisallowUnknownFields` on a file format you intend to evolve — it converts "future field added" into a load failure. Reserve strict decoding for wire protocols where unknown fields signal a real client/server mismatch.
 
+## Claude session storage on disk
+
+- **Don't trust ticket bodies on filesystem layout — observe.** The #38 ticket body said `~/.claude/projects/<encoded-cwd>/sessions/<uuid>.jsonl`. Reality (verified 2026-05-02): files live **directly** in `<encoded-cwd>/`, no `sessions/` subdir. Always observe an existing entry under `~/.claude/projects/` before coding against the path; same goes for the encoding rule.
+- **Claude's cwd encoding replaces both `/` AND `.` with `-`.** A leading `/` becomes a leading `-`; a hidden `.dir` collapses to `--`. Example: `/Users/juhana/.pyrycode-worktrees/x` → `-Users-juhana--pyrycode-worktrees-x`. The doubled dash is real, not a typo. A naive "replace `/` with `-`" implementation will miss the `.dir` case and look in the wrong directory forever.
+- **`/clear` rotates claude's session UUID — even with `--resume <uuid>`.** Claude stops writing to the original `<uuid>.jsonl` and starts a fresh `<new-uuid>.jsonl`. Pyry can't prevent this; the registry has to self-heal by following the most-recently-modified JSONL on the next read. The pre-`/clear` JSONL is preserved on disk (frozen mid-conversation), so destructive recovery is unnecessary — just move the pointer.
+
 ## Test helpers across packages
 
 - **`supervisor.Config.helperEnv` is unexported.** External packages (e.g. `internal/sessions`) cannot reuse the supervisor's `TestHelperProcess` re-exec pattern without one of: (a) exporting the field, (b) `t.Setenv` (pollutes parent process env, fights `t.Parallel`), or (c) using a real benign binary like `/bin/sleep` as the fake claude. Option (c) is what `internal/sessions` adopted — zero new test infra, supervisor's surface unchanged, and it exercises the only contract that matters (ctx-cancel delegation).

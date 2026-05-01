@@ -8,6 +8,8 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 
 - **Phase 1.0a (#28):** package introduced, fully tested, no production consumers.
 - **Phase 1.0b (#29):** consumers wired. `cmd/pyry/main.go` constructs the `Pool`; `internal/control` resolves session state via a `SessionResolver` interface defined in the control package. Wire protocol unchanged; `pyry status`/`stop`/`logs`/`attach` are byte-identical to Phase 0.
+- **Phase 1.2a (#34):** `Config.RegistryPath`, on-disk `sessions.json`, cold/warm-start in `Pool.New`. See [sessions-registry.md](sessions-registry.md).
+- **Phase 1.2b-A (#38):** `Config.ClaudeSessionsDir`, startup reconciliation pass in `Pool.New`, `Pool.RotateID` seam. See [jsonl-reconciliation.md](jsonl-reconciliation.md).
 - **Phase 1.1+:** `Pool.Add(SessionConfig)`, errgroup fan-out in `Pool.Run`, `Request.SessionID` on the wire, `claude --session-id <uuid>` invocation, per-session log lines.
 
 ## Package Layout
@@ -16,7 +18,9 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 internal/sessions/
   id.go         SessionID, NewID()
   session.go    Session: wraps one supervisor + optional bridge
-  pool.go       Pool: registry, lifecycle, Config, SessionConfig
+  pool.go       Pool: registry, lifecycle, Config, SessionConfig, RotateID
+  registry.go   On-disk sessions.json (loadRegistry, saveRegistryLocked)
+  reconcile.go  Startup JSONL scan (encodeWorkdir, mostRecentJSONL, reconcileBootstrapOnNew)
 ```
 
 ## Key Types
@@ -61,6 +65,7 @@ func New(cfg Config) (*Pool, error)
 func (p *Pool) Lookup(id SessionID) (*Session, error)
 func (p *Pool) Default() *Session
 func (p *Pool) Run(ctx context.Context) error
+func (p *Pool) RotateID(oldID, newID SessionID) error
 ```
 
 `New` generates a `SessionID`, constructs the underlying `*supervisor.Supervisor` from `cfg.Bootstrap`, and installs the result as the single bootstrap entry. Both `NewID` failure and `supervisor.New` failure are wrapped (`sessions: generate bootstrap id: %w`, `sessions: bootstrap supervisor: %w`) and treated as fatal-at-startup.
@@ -75,12 +80,16 @@ func (p *Pool) Run(ctx context.Context) error
 
 `Run` calls `bootstrap.Run(ctx)` directly; **no errgroup in 1.0**. The errgroup fan-out is the Phase 1.1 extension point and lands with the first multi-session test.
 
+`RotateID` (1.2b-A) atomically swaps the in-memory entry keyed by `oldID` with one keyed by `newID`, updates the bootstrap pointer if `oldID` was the bootstrap, bumps `last_active_at`, and persists. `p.mu` (write) is held across the entire operation. `RotateID(x, x)` is a no-op; unknown `oldID` returns `ErrSessionNotFound`. This is the load-bearing seam shared between startup reconciliation and the upcoming live-detection (`/clear` while claude is running) work — see [jsonl-reconciliation.md](jsonl-reconciliation.md).
+
 ### `Config` / `SessionConfig`
 
 ```go
 type Config struct {
-    Bootstrap SessionConfig
-    Logger    *slog.Logger
+    Bootstrap         SessionConfig
+    Logger            *slog.Logger
+    RegistryPath      string  // sessions.json path; "" disables persistence (test-only)
+    ClaudeSessionsDir string  // claude's <uuid>.jsonl dir; "" disables startup reconcile
 }
 
 type SessionConfig struct {

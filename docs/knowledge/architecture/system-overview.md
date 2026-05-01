@@ -15,8 +15,9 @@ pyrycode/
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand
 │   ├── session.go             Session: wraps one supervisor + optional bridge; persisted metadata (label, created/last-active, bootstrap)
-│   ├── pool.go                Pool: in-memory registry, Config (incl. RegistryPath), load-or-mint bootstrap on New, saveLocked seam
-│   └── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
+│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir), load-or-mint bootstrap on New, RotateID seam, saveLocked
+│   ├── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
+│   └── reconcile.go           Startup JSONL scan: encodeWorkdir, mostRecentJSONL, reconcileBootstrapOnNew, DefaultClaudeSessionsDir
 ├── internal/control/          Control-plane server (Unix socket, JSON)
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
@@ -109,6 +110,16 @@ Extracted backoff logic. Computes the next delay based on how long the previous 
 `saveLocked` writes via `os.CreateTemp` → fsync → `os.Rename` in the same directory. Rename is the commit point; partial JSON is unreachable in the target file. Called under `Pool.mu` (write) by mutating ops; in 1.2a only `Pool.New`'s cold-start path invokes it.
 
 Forward-compat: `version` is a future hook; unknown top-level and per-session fields are silently ignored on read.
+
+### Startup JSONL Reconciliation (Phase 1.2b-A)
+
+```
+~/.claude/projects/<encoded-cwd>/<uuid>.jsonl    (claude's own files)
+```
+
+`Pool.New` scans the per-workdir claude session dir, finds the most-recently-modified `<uuid>.jsonl`, and rotates the registry's bootstrap entry to that UUID if it disagrees. Self-heals across `/clear` (claude rotates UUIDs on `/clear`; without reconciliation, post-`pyry stop` the registry would still point at the pre-`/clear` UUID).
+
+`encodeWorkdir` maps cwd → claude's path component by replacing both `/` and `.` with `-`. The pre-rotation JSONL is never modified — only the registry pointer moves. Missing/unreadable claude dir is logged and ignored (startup proceeds with the existing bootstrap). The mutation goes through `Pool.RotateID`, the load-bearing seam reused by Phase 1.2b-B's live-detection watcher.
 
 ## Future Architecture (not yet implemented)
 
