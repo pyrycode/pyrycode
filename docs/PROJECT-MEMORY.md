@@ -13,6 +13,10 @@ Repo-level session memory. Read this at the start of every session.
 - **Service configs** — systemd user unit (`systemd/pyry.service`), macOS launchd plist (`launchd/dev.pyrycode.pyry.plist`)
 - **~1700 source + ~1100 test Go lines** as of late Apr 2026, 10+ PRs merged
 
+### Codebase (Phase 1.0a, ticket #28)
+- **`internal/sessions` package** — `SessionID` (UUIDv4 via `crypto/rand`, stdlib only), `Session` (wraps one `*supervisor.Supervisor` + optional `*supervisor.Bridge`), `Pool` (single-bootstrap registry with `RWMutex`-protected map). Sentinel errors `ErrSessionNotFound`, `ErrAttachUnavailable`. `Pool.Lookup("")` resolves to the bootstrap entry — the seam Phase 1.1's `Request.SessionID` plugs into. **No production consumers yet** — `cmd/pyry/main.go` and `internal/control` still use `*supervisor.Supervisor` directly. Child B (#29) flips them.
+- See [knowledge/features/sessions-package.md](knowledge/features/sessions-package.md) and [ADR 003](knowledge/decisions/003-session-addressable-runtime.md).
+
 ### Documentation
 - README, plan.md (phase roadmap), CLAUDE.md, CODING-STYLE.md
 - Knowledge base: system-overview, 2 ADRs (Go language, PTY supervisor)
@@ -30,6 +34,8 @@ Repo-level session memory. Read this at the start of every session.
 - **Structured logging** — `log/slog` with injected logger, not a global
 - **Exponential backoff with stability reset** — backoff doubles on restart, resets to initial if child stayed up longer than `BackoffReset`
 - **Deferred cleanup** — `defer` for terminal restore, PTY close, signal stop
+- **Empty ID resolves to default** — `Pool.Lookup("")` returns the bootstrap session, so future `req.SessionID` fields can be added with no handler-side branching (old clients send empty, get the bootstrap; new clients send a real ID, get the right entry)
+- **Introduce-then-rewire slicing** — split #27 into #28 (new package + tests, no consumers) and #29 (mechanical consumer rewiring) to keep each PR focused
 
 ## Open Questions
 
