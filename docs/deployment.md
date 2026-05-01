@@ -6,25 +6,39 @@ The steps are nearly identical between the two service managers — the differen
 
 ## Prerequisites
 
-- Pyry binary built or cross-compiled for the target machine. From the repo: `make linux` produces `dist/pyry-linux-amd64`; `make build` produces `./pyry` for the current machine.
+- Pyry installed on the target machine. The fastest path is `curl -fsSL https://raw.githubusercontent.com/pyrycode/pyrycode/main/install.sh | bash`; see the [README install section](../README.md#install) for `brew`, `go install`, and from-source alternatives.
 - A working `claude` binary on the target machine, and `~/.claude/` already initialised (run `claude` once interactively before installing pyry as a service).
 - Knowledge of which claude flags you want pyry to forward: typically the same ones you'd run claude with manually (`--dangerously-skip-permissions`, `--channels …`, etc.).
 
 ## Linux — systemd user unit
 
-### Install the binary
+### Write the unit file
+
+`pyry install-service` writes `~/.config/systemd/user/pyry.service` with sensible defaults — no manual file editing needed for the common case. The simplest invocation:
 
 ```bash
-mkdir -p ~/.local/bin
-cp pyry-linux-amd64 ~/.local/bin/pyry
-chmod +x ~/.local/bin/pyry
+pyry install-service -- \
+  --dangerously-skip-permissions \
+  --channels plugin:discord@claude-plugins-official \
+  --channels plugin:telegram@claude-plugins-official
 ```
 
-Confirm `~/.local/bin` is on your `$PATH` and `pyry version` prints something sensible.
+Everything after `--` is baked into `ExecStart=` as the claude flags pyry will forward. The unit's `Environment="PATH=…"` is inherited from your current shell's `$PATH`, with `$HOME/...` rewritten to systemd's `%h/...` for portability — so nvm, pyenv, brew, and other shimmed tooling come along automatically. `pyry install-service` prints back the captured PATH entries so you can spot anything unexpected before enabling.
 
-### Install the unit file
+Other knobs:
 
-The repo ships a template at [`systemd/pyry.service`](../systemd/pyry.service). Copy it to your user-systemd directory:
+| Flag | Default | Notes |
+|---|---|---|
+| `-pyry-name NAME` | `pyry` | Instance name. Filename becomes `<name>.service`, ExecStart includes `-pyry-name <name>`, socket is `~/.pyry/<name>.sock`. Useful for running multiple pyrys side-by-side. |
+| `--workdir DIR` | `%h/pyry-workspace` | `WorkingDirectory=` baked into the unit. Anchors `claude`'s session storage at `~/.claude/projects/<encoded-cwd>/sessions/...`. |
+| `--path PATH` | inherited from `$PATH` | Override the captured PATH if you want a curated set instead. |
+| `--force` | refuse to overwrite | Required to clobber an existing `~/.config/systemd/user/<name>.service`. |
+
+If you run `pyry install-service` without claude flags after `--`, the unit ships with commented suggestions for common claude flags and you edit `ExecStart=` before enabling. Either path works.
+
+### Manual install (if you'd rather not use `install-service`)
+
+The repo ships a template at [`systemd/pyry.service`](../systemd/pyry.service):
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -42,7 +56,7 @@ ExecStart=%h/.local/bin/pyry --dangerously-skip-permissions \
   --channels plugin:telegram@claude-plugins-official
 ```
 
-- Confirm `Environment="PATH=…"` covers the directories `claude` needs. If you use `nvm`, `pyenv`, or any other shimmed tooling, those paths must be in `PATH` here — service-manager processes don't inherit your interactive shell environment.
+- Confirm `Environment="PATH=…"` covers the directories `claude` needs. If you use `nvm`, `pyenv`, or any other shimmed tooling, those paths must be in `PATH` here — service-manager processes don't inherit your interactive shell environment. (`pyry install-service` solves this automatically; doing it by hand means listing the right paths yourself.)
 
 ### Stop any prior `tmux + bash` setup
 
@@ -90,8 +104,20 @@ This keeps the user's systemd instance alive across logout, so `pyry.service` ru
 
 ### Updating the binary
 
+Whichever install path you used:
+
 ```bash
-cp dist/pyry-linux-amd64 ~/.local/bin/pyry
+# install.sh — re-fetch latest
+curl -fsSL https://raw.githubusercontent.com/pyrycode/pyrycode/main/install.sh | bash
+# Homebrew
+brew upgrade pyrycode/tap/pyry
+# go install
+go install github.com/pyrycode/pyrycode/cmd/pyry@latest
+```
+
+Then restart so systemd picks up the new binary:
+
+```bash
 systemctl --user restart pyry
 ```
 
@@ -107,19 +133,23 @@ pyry stop                                # equivalent — same shutdown path via
 
 ## macOS — launchd
 
-### Install the binary
+### Write the plist
+
+`pyry install-service` writes `~/Library/LaunchAgents/dev.pyrycode.pyry.plist` with sensible defaults — same UX as the systemd path, just generates a plist instead. Detection is automatic on macOS; pass `--launchd` explicitly if you want to be sure.
 
 ```bash
-mkdir -p ~/.local/bin
-cp pyry ~/.local/bin/
-chmod +x ~/.local/bin/pyry
+pyry install-service --launchd -- \
+  --dangerously-skip-permissions \
+  --channels plugin:discord@claude-plugins-official
 ```
 
-(Or wherever your `$PATH` points — `/usr/local/bin` is also fine if you have write access.)
+Everything after `--` is baked into `ProgramArguments` as separate `<string>` elements. `WorkingDirectory` defaults to `~/pyry-workspace` (override with `--workdir`). `EnvironmentVariables.PATH` is inherited from your current shell's `$PATH` (override with `--path`); on macOS that typically picks up `/opt/homebrew/bin`, `~/.nvm/versions/node/<v>/bin`, etc. without any further work.
 
-### Install the launchd plist
+The flags work the same as the systemd path — see the [Linux flag table above](#write-the-unit-file).
 
-The repo ships a template at [`launchd/dev.pyrycode.pyry.plist`](../launchd/dev.pyrycode.pyry.plist). Copy it to your launch agents directory:
+### Manual install (if you'd rather not use `install-service`)
+
+The repo ships a template at [`launchd/dev.pyrycode.pyry.plist`](../launchd/dev.pyrycode.pyry.plist):
 
 ```bash
 install -d ~/Library/LaunchAgents
@@ -171,12 +201,24 @@ LaunchAgents (under `~/Library/LaunchAgents/`) start when you log in. They do **
 
 ### Updating the binary
 
+Whichever install path you used:
+
 ```bash
-cp pyry ~/.local/bin/
+# install.sh — re-fetch latest
+curl -fsSL https://raw.githubusercontent.com/pyrycode/pyrycode/main/install.sh | bash
+# Homebrew
+brew upgrade pyrycode/tap/pyry
+# go install
+go install github.com/pyrycode/pyrycode/cmd/pyry@latest
+```
+
+Then kickstart the service so launchd picks up the new binary:
+
+```bash
 launchctl kickstart -k gui/$UID/dev.pyrycode.pyry
 ```
 
-`kickstart -k` kills and restarts the service, picking up the new binary. As with systemd, `--continue` preserves the claude session.
+`kickstart -k` kills and restarts the service. As with systemd, `--continue` preserves the claude session.
 
 ### Stopping
 

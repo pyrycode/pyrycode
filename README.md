@@ -4,7 +4,7 @@ A process supervisor and runtime for [Claude Code](https://claude.com/claude-cod
 
 ## Status
 
-**Phase 0 complete and exercised.** Foreground mode is a drop-in `claude` wrapper with auto-restart. Service mode runs `pyry` under launchd or systemd and exposes a Unix-socket control plane. The next milestone (Phase 0.5) is using pyry as the daily-driver supervisor on a real Linux box, replacing the prior `tmux` + bash restart-loop setup.
+**Phase 0 complete and dogfooded.** Foreground mode is a drop-in `claude` wrapper with auto-restart. Service mode runs `pyry` under launchd or systemd and exposes a Unix-socket control plane. As of `v0.5.2` pyry is daily-driver-grade on Linux: pyrybox now runs claude under systemd via the public install path described below, replacing the prior `tmux` + bash restart-loop setup.
 
 Production hardening — multi-session routing, Channels integration, in-process knowledge capture, remote access, voice — is on the roadmap (see [`docs/plan.md`](docs/plan.md)).
 
@@ -22,23 +22,37 @@ Linux and macOS. Windows is out of scope (different PTY backend, different signa
 
 ## Install
 
-Pyrycode is not yet published as a binary release. Build from source:
+**Universal one-liner** (Linux / macOS, amd64 / arm64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pyrycode/pyrycode/main/install.sh | bash
+```
+
+Drops `pyry` in `~/.local/bin/`. Set `PYRY_VERSION=v0.5.2` to pin a release; set `PYRY_INSTALL_DIR=/usr/local/bin` (run with `sudo bash`) for a system-wide install.
+
+**Homebrew** (macOS, Linuxbrew):
+
+```bash
+brew install pyrycode/tap/pyry
+```
+
+**Go-native** (any platform Go supports):
+
+```bash
+go install github.com/pyrycode/pyrycode/cmd/pyry@latest
+```
+
+**From source:**
 
 ```bash
 git clone https://github.com/pyrycode/pyrycode
 cd pyrycode
-make build           # ./pyry
-./pyry version
+make build           # ./pyry — current platform
+make linux           # cross-compile dist/pyry-linux-amd64
+make dist            # adds darwin × {amd64, arm64}
 ```
 
-Requires Go 1.23 or later and a working `claude` binary on `PATH`.
-
-Cross-compile for a remote machine:
-
-```bash
-make linux           # dist/pyry-linux-amd64
-make dist            # adds darwin/arm64 and darwin/amd64
-```
+Requires a working `claude` binary on `PATH` to actually do anything useful. Building from source needs Go 1.26 or later.
 
 ## Quickstart
 
@@ -51,16 +65,29 @@ pyry --model sonnet -p "..."      # any claude flag passes through
 
 If `claude` exits, pyry restarts it with `--continue` so you keep your session.
 
-**Service mode (production).** Run `pyry` under launchd or systemd. The supervised `claude` has no terminal of its own; you connect to it on demand:
+**Service mode (production).** Two commands. `pyry install-service` writes a systemd unit (Linux) or launchd plist (macOS), inheriting your shell's `$PATH` so nvm / pyenv / brew tools come along automatically:
+
+```bash
+pyry install-service -- \
+  --dangerously-skip-permissions \
+  --channels plugin:discord@claude-plugins-official
+
+systemctl --user daemon-reload
+systemctl --user enable --now pyry
+```
+
+(macOS: `launchctl load ~/Library/LaunchAgents/dev.pyrycode.pyry.plist` in place of the systemctl lines.)
+
+The supervised `claude` has no terminal of its own; connect to it on demand:
 
 ```bash
 pyry attach    # your terminal becomes claude's terminal
                # press Ctrl-B d to detach — pyry stays running
 ```
 
-`pyry status`, `pyry logs`, and `pyry stop` work from any shell.
+`pyry status`, `pyry logs`, and `pyry stop` work from any shell, talking to the daemon over its Unix socket at `~/.pyry/pyry.sock`.
 
-For the full walkthrough — including multi-instance, deployment under systemd / launchd, and troubleshooting — see [**`docs/guide.md`**](docs/guide.md).
+For the full walkthrough — multi-instance, troubleshooting, hooks under service-mode `PATH`, boot persistence — see [**`docs/guide.md`**](docs/guide.md) and [**`docs/deployment.md`**](docs/deployment.md).
 
 ## Documentation
 
