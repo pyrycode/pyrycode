@@ -13,19 +13,61 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
-// fakeState implements StateProvider for tests. Safe under concurrent use.
-type fakeState struct {
-	mu sync.Mutex
-	st supervisor.State
+// fakeSession satisfies control.Session for tests. Safe under concurrent use.
+// Set attachFn to drive the Attach behaviour; nil means "no attach configured"
+// (i.e. tests that exercise non-attach verbs).
+type fakeSession struct {
+	mu       sync.Mutex
+	state    supervisor.State
+	attachFn func(in io.Reader, out io.Writer) (<-chan struct{}, error)
 }
 
-func (f *fakeState) State() supervisor.State {
+func (f *fakeSession) State() supervisor.State {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.st
+	return f.state
+}
+
+func (f *fakeSession) Attach(in io.Reader, out io.Writer) (<-chan struct{}, error) {
+	f.mu.Lock()
+	fn := f.attachFn
+	f.mu.Unlock()
+	if fn == nil {
+		return nil, errors.New("fakeSession: no attach configured")
+	}
+	return fn(in, out)
+}
+
+// fakeResolver returns its single fakeSession for any id. Set lookupErr to
+// drive the not-found / error path.
+type fakeResolver struct {
+	sess      *fakeSession
+	lookupErr error
+}
+
+func (r *fakeResolver) Lookup(id sessions.SessionID) (Session, error) {
+	if r.lookupErr != nil {
+		return nil, r.lookupErr
+	}
+	return r.sess, nil
+}
+
+// recordingResolver wraps a delegate and notifies a record callback on each
+// Lookup. Used by TestServer_Status_ResolvesDefaultSession to assert the
+// handler passes the empty id today (the seam Phase 1.1 will swap to
+// req.SessionID).
+type recordingResolver struct {
+	delegate SessionResolver
+	record   func(sessions.SessionID)
+}
+
+func (r *recordingResolver) Lookup(id sessions.SessionID) (Session, error) {
+	r.record(id)
+	return r.delegate.Lookup(id)
 }
 
 // shortTempDir returns a short tempdir suitable for Unix socket paths.
@@ -44,12 +86,12 @@ func shortTempDir(t *testing.T) string {
 // startServer wires up a Server on a tempdir socket and runs Serve in a
 // goroutine. Returns a stop function that cancels the context, waits for
 // Serve to return, and asserts no error.
-func startServer(t *testing.T, fs *fakeState) (sock string, stop func()) {
+func startServer(t *testing.T, resolver SessionResolver) (sock string, stop func()) {
 	t.Helper()
 	dir := shortTempDir(t)
 	sock = filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, fs, nil, nil, nil, nil)
+	srv := NewServer(sock, resolver, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -76,15 +118,15 @@ func TestServer_Status(t *testing.T) {
 	t.Parallel()
 
 	startedAt := time.Now().Add(-2 * time.Minute)
-	fs := &fakeState{st: supervisor.State{
+	resolver := &fakeResolver{sess: &fakeSession{state: supervisor.State{
 		Phase:        supervisor.PhaseRunning,
 		ChildPID:     12345,
 		StartedAt:    startedAt,
 		RestartCount: 3,
 		LastUptime:   310 * time.Millisecond,
-	}}
+	}}}
 
-	sock, stop := startServer(t, fs)
+	sock, stop := startServer(t, resolver)
 	defer stop()
 
 	resp, err := Status(context.Background(), sock)
@@ -114,16 +156,16 @@ func TestServer_Status(t *testing.T) {
 func TestServer_StatusInBackoff(t *testing.T) {
 	t.Parallel()
 
-	fs := &fakeState{st: supervisor.State{
+	resolver := &fakeResolver{sess: &fakeSession{state: supervisor.State{
 		Phase:        supervisor.PhaseBackoff,
 		ChildPID:     0,
 		StartedAt:    time.Now(),
 		RestartCount: 1,
 		LastUptime:   270 * time.Millisecond,
 		NextBackoff:  500 * time.Millisecond,
-	}}
+	}}}
 
-	sock, stop := startServer(t, fs)
+	sock, stop := startServer(t, resolver)
 	defer stop()
 
 	resp, err := Status(context.Background(), sock)
@@ -144,7 +186,7 @@ func TestServer_StatusInBackoff(t *testing.T) {
 func TestServer_UnknownVerb(t *testing.T) {
 	t.Parallel()
 
-	sock, stop := startServer(t, &fakeState{})
+	sock, stop := startServer(t, &fakeResolver{sess: &fakeSession{}})
 	defer stop()
 
 	conn, err := net.Dial("unix", sock)
@@ -182,7 +224,7 @@ func TestServer_StaleSocketIsReplaced(t *testing.T) {
 		t.Fatalf("seed stale: %v", err)
 	}
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen with stale file should succeed: %v", err)
 	}
@@ -206,7 +248,7 @@ func TestServer_CloseRemovesSocket(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -247,7 +289,7 @@ func TestServer_ListenRefusesActiveInstance(t *testing.T) {
 	// second Listen would hang on the kernel-side accept queue rather
 	// than completing the handshake. Serving makes the live-instance
 	// probe symmetric with what a real client would see.
-	srvA := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srvA := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	if err := srvA.Listen(); err != nil {
 		t.Fatalf("Listen A: %v", err)
 	}
@@ -258,7 +300,7 @@ func TestServer_ListenRefusesActiveInstance(t *testing.T) {
 	go func() { _ = srvA.Serve(ctx) }()
 
 	// Second pyry tries to take the same path.
-	srvB := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srvB := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	err := srvB.Listen()
 	if !errors.Is(err, ErrInstanceRunning) {
 		t.Fatalf("Listen B = %v, want ErrInstanceRunning", err)
@@ -287,7 +329,7 @@ func TestServer_ListenFailsWhenParentDirIsAFile(t *testing.T) {
 	}
 	sock := filepath.Join(parent, "p.sock") // parent isn't a directory
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	err := srv.Listen()
 	if err == nil {
 		t.Fatal("Listen should fail when parent is a regular file")
@@ -306,7 +348,7 @@ func TestServer_ConcurrentClose(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -327,24 +369,24 @@ func TestServer_ConcurrentClose(t *testing.T) {
 	}
 }
 
-func TestNewServer_PanicsOnNilState(t *testing.T) {
+func TestNewServer_PanicsOnNilSessions(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
 		r := recover()
 		if r == nil {
-			t.Fatal("expected NewServer(nil state) to panic, did not")
+			t.Fatal("expected NewServer(nil sessions) to panic, did not")
 		}
 		if msg, ok := r.(string); ok {
-			if !strings.Contains(msg, "state") {
-				t.Errorf("panic message %q should mention state", msg)
+			if !strings.Contains(msg, "sessions") {
+				t.Errorf("panic message %q should mention sessions", msg)
 			}
 		}
 	}()
 
 	// Note: we don't reach the lines below if the panic fires (which it
 	// must), but they document the contract being tested.
-	_ = NewServer("/tmp/p.sock", nil, nil, nil, nil, nil)
+	_ = NewServer("/tmp/p.sock", nil, nil, nil, nil)
 	t.Fatal("NewServer returned without panicking")
 }
 
@@ -369,7 +411,7 @@ func TestServer_Stop(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	shutdownCalled := make(chan struct{}, 1)
-	srv := NewServer(sock, &fakeState{}, nil, nil, func() {
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, func() {
 		select {
 		case shutdownCalled <- struct{}{}:
 		default:
@@ -418,7 +460,7 @@ func TestServer_StopWithoutHandler(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -433,6 +475,51 @@ func TestServer_StopWithoutHandler(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stop") {
 		t.Errorf("error should mention stop, got: %v", err)
+	}
+}
+
+// TestServer_Status_ResolvesDefaultSession verifies the resolver path: a
+// VerbStatus request with no session field flows through Lookup("") to the
+// default session. Phase 1.1 will populate req.SessionID; this test pins
+// the empty-id-resolves-to-default behaviour as the seam.
+func TestServer_Status_ResolvesDefaultSession(t *testing.T) {
+	t.Parallel()
+
+	sess := &fakeSession{state: supervisor.State{
+		Phase:        supervisor.PhaseRunning,
+		ChildPID:     999,
+		StartedAt:    time.Now(),
+		RestartCount: 7,
+	}}
+	var (
+		mu          sync.Mutex
+		lookupCalls []sessions.SessionID
+	)
+	resolver := &recordingResolver{
+		delegate: &fakeResolver{sess: sess},
+		record: func(id sessions.SessionID) {
+			mu.Lock()
+			defer mu.Unlock()
+			lookupCalls = append(lookupCalls, id)
+		},
+	}
+
+	sock, stop := startServer(t, resolver)
+	defer stop()
+
+	resp, err := Status(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if resp.ChildPID != 999 || resp.RestartCount != 7 {
+		t.Errorf("status payload did not come from the resolved session: %+v", resp)
+	}
+
+	mu.Lock()
+	calls := append([]sessions.SessionID(nil), lookupCalls...)
+	mu.Unlock()
+	if len(calls) != 1 || calls[0] != "" {
+		t.Errorf("expected exactly one Lookup call with empty id, got %v", calls)
 	}
 }
 

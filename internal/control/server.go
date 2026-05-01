@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
@@ -28,21 +29,19 @@ var ErrInstanceRunning = errors.New("another pyry instance is already running")
 // long enough to absorb a loaded system.
 const dialProbeTimeout = 200 * time.Millisecond
 
-// StateProvider is the supervisor view the control server depends on. Defining
-// it here (where it is consumed) keeps the supervisor package free of
-// control-plane concerns and makes the server trivial to test with a fake.
-type StateProvider interface {
+// Session is the per-session view the control server depends on. *sessions.Session
+// satisfies it structurally; tests fake it directly. Defining it here (where it
+// is consumed) keeps the sessions package free of control-plane concerns.
+type Session interface {
 	State() supervisor.State
+	Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
 }
 
-// AttachProvider is the supervisor view the control server depends on for
-// VerbAttach. Implementations bind a client's input/output streams to the
-// supervised PTY for the lifetime of the attachment. Returns the done
-// channel that fires when the input source ends (client disconnected),
-// or an error if the attach can't proceed (e.g. another client already
-// attached).
-type AttachProvider interface {
-	Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
+// SessionResolver maps a SessionID to a Session. An empty id resolves to the
+// default (bootstrap) entry — the seam Phase 1.1 will swap from Lookup("")
+// to Lookup(req.SessionID) without changing handler shape.
+type SessionResolver interface {
+	Lookup(id sessions.SessionID) (Session, error)
 }
 
 // Server listens on a Unix domain socket and answers control requests.
@@ -54,9 +53,8 @@ type AttachProvider interface {
 // times and removes the socket file.
 type Server struct {
 	socketPath string
-	state      StateProvider
+	sessions   SessionResolver
 	logs       LogProvider
-	attach     AttachProvider
 	shutdown   func()
 	log        *slog.Logger
 
@@ -73,34 +71,36 @@ type Server struct {
 
 // NewServer constructs a Server. The socket is not opened until Listen.
 //
-// state must be non-nil — the supervisor is the canonical source of state,
-// and VerbStatus would otherwise nil-pointer-panic on the first request.
-// Passing a nil state is a programmer error and panics at construction
+// sessions must be non-nil — every verb that needs session state resolves
+// through it, and the first VerbStatus would otherwise nil-pointer-panic.
+// Passing a nil resolver is a programmer error and panics at construction
 // time so the failure surfaces immediately rather than on a request from
 // a future shell.
 //
 // logs is optional. When nil, VerbLogs returns an error response.
 //
-// attach is optional. When nil, VerbAttach returns an error response — the
-// daemon is in foreground mode and the supervised child is already bound
-// to a local terminal.
-//
 // shutdown is optional. When nil, VerbStop returns an error response. When
 // set, a successful VerbStop invokes it after acknowledging the client —
 // typically the signal-driven context's cancel function so a stop request
 // walks the same shutdown path as SIGINT/SIGTERM.
-func NewServer(socketPath string, state StateProvider, logs LogProvider, attach AttachProvider, shutdown func(), log *slog.Logger) *Server {
-	if state == nil {
-		panic("control.NewServer: state is required, got nil")
+//
+// Foreground vs service mode is no longer surfaced as a distinct
+// constructor parameter; it is a property of the resolved session's
+// bridge. A foreground-mode session's Attach returns
+// [sessions.ErrAttachUnavailable], which the attach handler maps back to
+// the existing "no attach provider configured (daemon may be in
+// foreground mode)" wire string for byte-identical client output.
+func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, shutdown func(), log *slog.Logger) *Server {
+	if sessions == nil {
+		panic("control.NewServer: sessions is required, got nil")
 	}
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Server{
 		socketPath: socketPath,
-		state:      state,
+		sessions:   sessions,
 		logs:       logs,
-		attach:     attach,
 		shutdown:   shutdown,
 		log:        log,
 		closedCh:   make(chan struct{}),
@@ -276,7 +276,14 @@ func (s *Server) handle(conn net.Conn) {
 
 	switch req.Verb {
 	case VerbStatus:
-		_ = enc.Encode(Response{Status: buildStatus(s.state.State())})
+		// Phase 1.1 will swap "" → req.SessionID; the empty-id seam
+		// resolves to the bootstrap session today.
+		sess, err := s.sessions.Lookup("")
+		if err != nil {
+			_ = enc.Encode(Response{Error: err.Error()})
+			return
+		}
+		_ = enc.Encode(Response{Status: buildStatus(sess.State())})
 	case VerbLogs:
 		s.handleLogs(enc)
 	case VerbStop:
@@ -325,8 +332,11 @@ func (s *Server) handleStop(enc *json.Encoder) {
 // busy, etc.); in those cases the caller continues to own conn and will
 // close it normally.
 func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder) (handedOff bool) {
-	if s.attach == nil {
-		_ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
+	// Phase 1.1 will swap "" → req.SessionID; the empty-id seam resolves
+	// to the bootstrap session today.
+	sess, err := s.sessions.Lookup("")
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
 		return false
 	}
 	// Clear the handshake deadline BEFORE registering the bridge or writing
@@ -338,8 +348,16 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder) (handedOff bool)
 	// indefinitely.
 	_ = conn.SetDeadline(time.Time{})
 
-	done, err := s.attach.Attach(conn, conn)
+	done, err := sess.Attach(conn, conn)
 	if err != nil {
+		// Foreground-mode session has no bridge. Map sessions.ErrAttachUnavailable
+		// to the Phase 0 wire string verbatim — a bare fmt.Sprintf("attach: %v")
+		// would surface "attach: sessions: attach unavailable (no bridge)",
+		// observable drift versus today's client output.
+		if errors.Is(err, sessions.ErrAttachUnavailable) {
+			_ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
+			return false
+		}
 		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
 		return false
 	}

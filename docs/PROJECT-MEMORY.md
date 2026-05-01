@@ -13,9 +13,10 @@ Repo-level session memory. Read this at the start of every session.
 - **Service configs** — systemd user unit (`systemd/pyry.service`), macOS launchd plist (`launchd/dev.pyrycode.pyry.plist`)
 - **~1700 source + ~1100 test Go lines** as of late Apr 2026, 10+ PRs merged
 
-### Codebase (Phase 1.0a, ticket #28)
-- **`internal/sessions` package** — `SessionID` (UUIDv4 via `crypto/rand`, stdlib only), `Session` (wraps one `*supervisor.Supervisor` + optional `*supervisor.Bridge`), `Pool` (single-bootstrap registry with `RWMutex`-protected map). Sentinel errors `ErrSessionNotFound`, `ErrAttachUnavailable`. `Pool.Lookup("")` resolves to the bootstrap entry — the seam Phase 1.1's `Request.SessionID` plugs into. **No production consumers yet** — `cmd/pyry/main.go` and `internal/control` still use `*supervisor.Supervisor` directly. Child B (#29) flips them.
-- See [knowledge/features/sessions-package.md](knowledge/features/sessions-package.md) and [ADR 003](knowledge/decisions/003-session-addressable-runtime.md).
+### Codebase (Phase 1.0, tickets #28 + #29)
+- **`internal/sessions` package** — `SessionID` (UUIDv4 via `crypto/rand`, stdlib only), `Session` (wraps one `*supervisor.Supervisor` + optional `*supervisor.Bridge`), `Pool` (single-bootstrap registry with `RWMutex`-protected map). Sentinel errors `ErrSessionNotFound`, `ErrAttachUnavailable`. `Pool.Lookup("")` resolves to the bootstrap entry — the seam Phase 1.1's `Request.SessionID` plugs into.
+- **Production consumers wired (#29)** — `cmd/pyry/main.go` constructs `*sessions.Pool` (with the supervisor.Config template inside `SessionConfig`); `internal/control` consumes a single `SessionResolver` interface (replaces Phase 0's `StateProvider` + `AttachProvider` pair). A 5-line `poolResolver` adapter in `cmd/pyry` bridges `Pool` → `SessionResolver` (covariant-return workaround). Wire protocol unchanged; `pyry status`/`stop`/`logs`/`attach` byte-identical to Phase 0. Foreground-mode attach error string preserved verbatim via `errors.Is(err, sessions.ErrAttachUnavailable)` mapping in `handleAttach`.
+- See [knowledge/features/sessions-package.md](knowledge/features/sessions-package.md), [knowledge/features/control-plane.md](knowledge/features/control-plane.md), and [ADR 003](knowledge/decisions/003-session-addressable-runtime.md).
 
 ### Documentation
 - README, plan.md (phase roadmap), CLAUDE.md, CODING-STYLE.md
@@ -36,6 +37,8 @@ Repo-level session memory. Read this at the start of every session.
 - **Deferred cleanup** — `defer` for terminal restore, PTY close, signal stop
 - **Empty ID resolves to default** — `Pool.Lookup("")` returns the bootstrap session, so future `req.SessionID` fields can be added with no handler-side branching (old clients send empty, get the bootstrap; new clients send a real ID, get the right entry)
 - **Introduce-then-rewire slicing** — split #27 into #28 (new package + tests, no consumers) and #29 (mechanical consumer rewiring) to keep each PR focused
+- **Consumer-side interface definition** — `internal/control` defines the interfaces it consumes (`SessionResolver`, `Session`) rather than importing them from the producer package. Keeps `internal/sessions` free of control-plane concerns and lets tests fake the surface without exporting test seams from the producer.
+- **Wire-string preservation via `errors.Is` mapping** — when refactoring an error path that crosses package boundaries, map the new sentinel back to the old wire string explicitly (`if errors.Is(err, sessions.ErrAttachUnavailable) { … Phase 0 string … }`) rather than letting `fmt.Sprintf("%v", err)` change client output. Required when an AC says "byte-identical."
 
 ## Open Questions
 
