@@ -439,7 +439,7 @@ func runInstallService(args []string) error {
 	systemdFlag := fs.Bool("systemd", false, "force systemd output (default: detect from OS)")
 	launchdFlag := fs.Bool("launchd", false, "force launchd output (default: detect from OS)")
 	workdir := fs.String("workdir", "", "WorkingDirectory baked into the unit (default: ~/pyry-workspace)")
-	pathEnv := fs.String("path", "", "PATH baked into the unit (default: a conservative system + ~/.local/bin)")
+	pathEnv := fs.String("path", "", "PATH baked into the unit (default: inherit your current shell's PATH)")
 	force := fs.Bool("force", false, "overwrite an existing unit file")
 	if err := fs.Parse(pyrySide); err != nil {
 		return err
@@ -471,6 +471,18 @@ func runInstallService(args []string) error {
 	}
 
 	fmt.Printf("Wrote %s (%s)\n\n", path, resolved)
+	if *pathEnv == "" {
+		// Tell the user what we inherited so surprises surface here, not
+		// after a service starts and a hook silently fails.
+		fmt.Printf("Inherited PATH from current shell (review with: systemctl --user cat %s):\n", *name)
+		for _, entry := range strings.Split(os.Getenv("PATH"), ":") {
+			if entry == "" {
+				continue
+			}
+			fmt.Printf("    %s\n", entry)
+		}
+		fmt.Println()
+	}
 	switch resolved {
 	case install.PlatformSystemd:
 		if len(claudeSide) == 0 {

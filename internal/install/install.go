@@ -80,7 +80,11 @@ type Options struct {
 	Binary string
 
 	// PathEnv is the PATH environment variable baked into the unit. Defaults
-	// to a conservative set of system + user-local bins.
+	// to the value of $PATH at install time (with $HOME/ rewritten to %h/
+	// for systemd portability). Users typically don't set this — the
+	// inherited PATH already covers nvm, pyenv, brew, and other shimmed
+	// tools their interactive shell sees. Falls back to a conservative
+	// system PATH if $PATH is unset.
 	PathEnv string
 
 	// ClaudeArgs, if non-empty, are baked into ExecStart after the pyry
@@ -95,6 +99,10 @@ type Options struct {
 	// HomeDir is the user's home directory. Defaults to os.UserHomeDir().
 	// Exposed for testing.
 	HomeDir string
+
+	// EnvPath is the value of $PATH inherited from the install-time shell.
+	// Defaults to os.Getenv("PATH"). Exposed for testing.
+	EnvPath string
 }
 
 // ErrFileExists is returned when the unit file already exists and Force is
@@ -135,12 +143,11 @@ func Install(opt Options) (path string, plat Platform, err error) {
 	}
 
 	if opt.PathEnv == "" {
-		switch plat {
-		case PlatformSystemd:
-			opt.PathEnv = "%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
-		default:
-			opt.PathEnv = filepath.Join(opt.HomeDir, ".local/bin") + ":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+		envPath := opt.EnvPath
+		if envPath == "" {
+			envPath = os.Getenv("PATH")
 		}
+		opt.PathEnv = derivePathEnv(plat, envPath, opt.HomeDir)
 	}
 
 	// Build the ExecStart args: [binary, optional -pyry-name name, ...claudeArgs].
@@ -258,6 +265,52 @@ func needsShellQuote(s string) bool {
 		}
 	}
 	return false
+}
+
+// derivePathEnv returns the PATH string to bake into the unit. If envPath is
+// non-empty, it's used (with $HOME/ rewritten to %h/ for systemd portability,
+// and stripped to a conservative system PATH if there's nothing usable).
+// Otherwise falls back to a hardcoded conservative default.
+//
+// Empty entries (`::`) and duplicates are stripped. The caller can split the
+// result on `:` to display entries to the user.
+func derivePathEnv(plat Platform, envPath, homeDir string) string {
+	if envPath == "" {
+		switch plat {
+		case PlatformSystemd:
+			return "%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+		default:
+			return filepath.Join(homeDir, ".local/bin") + ":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+		}
+	}
+
+	homePrefix := homeDir
+	if !strings.HasSuffix(homePrefix, "/") {
+		homePrefix += "/"
+	}
+
+	seen := make(map[string]bool)
+	out := make([]string, 0, 8)
+	for _, entry := range strings.Split(envPath, ":") {
+		if entry == "" {
+			continue
+		}
+		// Replace $HOME/ prefix with %h/ for systemd portability. For
+		// launchd the literal absolute path is what we want.
+		if plat == PlatformSystemd && homePrefix != "/" && strings.HasPrefix(entry, homePrefix) {
+			entry = "%h/" + strings.TrimPrefix(entry, homePrefix)
+		}
+		if seen[entry] {
+			continue
+		}
+		seen[entry] = true
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		// Pathological PATH (only colons / duplicates of empty). Fall back.
+		return derivePathEnv(plat, "", homeDir)
+	}
+	return strings.Join(out, ":")
 }
 
 // xmlEscape escapes a string for XML attribute / element content.

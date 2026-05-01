@@ -16,6 +16,7 @@ func TestInstall_Systemd_BareTemplate(t *testing.T) {
 		Name:     "pyry",
 		Binary:   "/home/test/.local/bin/pyry",
 		HomeDir:  home,
+		EnvPath:  "", // explicitly empty → fall back to conservative default
 	})
 	if err != nil {
 		t.Fatalf("Install: %v", err)
@@ -37,7 +38,6 @@ func TestInstall_Systemd_BareTemplate(t *testing.T) {
 	for _, want := range []string{
 		"[Unit]",
 		"WorkingDirectory=%h/pyry-workspace",
-		`Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"`,
 		"ExecStart=/home/test/.local/bin/pyry",
 		"customize the claude flags pyry forwards",
 		"Restart=always",
@@ -246,6 +246,62 @@ func TestPlatformAuto_Detect(t *testing.T) {
 		if plat != PlatformLaunchd {
 			t.Errorf("on darwin, Detect() = %v, want launchd", plat)
 		}
+	}
+}
+
+func TestDerivePathEnv_Systemd_RewritesHomePrefix(t *testing.T) {
+	home := "/home/pyry"
+	envPath := "/home/pyry/.local/bin:/home/pyry/.nvm/versions/node/v24/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin"
+	got := derivePathEnv(PlatformSystemd, envPath, home)
+	want := "%h/.local/bin:%h/.nvm/versions/node/v24/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin"
+	if got != want {
+		t.Errorf("derivePathEnv:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestDerivePathEnv_Launchd_KeepsAbsolutePaths(t *testing.T) {
+	home := "/Users/test"
+	envPath := "/Users/test/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+	got := derivePathEnv(PlatformLaunchd, envPath, home)
+	// Launchd doesn't have a %h equivalent — paths stay literal.
+	want := "/Users/test/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+	if got != want {
+		t.Errorf("derivePathEnv:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestDerivePathEnv_DropsDuplicatesAndEmpty(t *testing.T) {
+	got := derivePathEnv(PlatformSystemd,
+		"/usr/bin::/usr/bin:/bin:/usr/bin:", "/home/test")
+	want := "/usr/bin:/bin"
+	if got != want {
+		t.Errorf("derivePathEnv:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestDerivePathEnv_FallsBackOnEmpty(t *testing.T) {
+	got := derivePathEnv(PlatformSystemd, "", "/home/test")
+	if !strings.Contains(got, "%h/.local/bin") {
+		t.Errorf("empty PATH should fall back to a conservative default with %%h, got: %s", got)
+	}
+}
+
+func TestInstall_InheritsEnvPath(t *testing.T) {
+	home := t.TempDir()
+	_, _, err := Install(Options{
+		Platform: PlatformSystemd,
+		Binary:   "/home/test/.local/bin/pyry",
+		HomeDir:  home,
+		EnvPath:  home + "/.local/bin:" + home + "/.nvm/versions/node/v24/bin:/usr/bin:/bin",
+	})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	body, _ := os.ReadFile(filepath.Join(home, ".config/systemd/user/pyry.service"))
+	got := string(body)
+	want := `Environment="PATH=%h/.local/bin:%h/.nvm/versions/node/v24/bin:/usr/bin:/bin"`
+	if !strings.Contains(got, want) {
+		t.Errorf("inherited PATH not rewritten with %%h prefix\nwant substring: %s\n--- file ---\n%s", want, got)
 	}
 }
 
