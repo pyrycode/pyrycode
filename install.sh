@@ -17,6 +17,12 @@ REPO="pyrycode/pyrycode"
 INSTALL_DIR="${PYRY_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${PYRY_VERSION:-}"
 
+# Hoisted so the EXIT trap can see it (set -u would error otherwise once
+# main() returns and tmpdir is out of scope).
+tmpdir=""
+cleanup() { [ -n "$tmpdir" ] && rm -rf "$tmpdir"; }
+trap cleanup EXIT
+
 # ---------- helpers ----------
 
 err() {
@@ -78,7 +84,7 @@ main() {
   require_cmd curl
   require_cmd tar
 
-  local os arch tarball_name url_base tmpdir
+  local os arch tarball_name url_base
   os=$(detect_os)
   arch=$(detect_arch)
 
@@ -95,7 +101,6 @@ main() {
   info "installing pyry ${VERSION} (${os}/${arch}) to ${INSTALL_DIR}"
 
   tmpdir=$(mktemp -d)
-  trap 'rm -rf "$tmpdir"' EXIT
 
   info "downloading ${tarball_name}"
   curl -fsSL -o "${tmpdir}/${tarball_name}"  "${url_base}/${tarball_name}"
