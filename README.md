@@ -18,7 +18,7 @@ Production hardening — multi-session routing, Channels integration, in-process
 
 ## Platforms
 
-Linux and macOS. Windows is out of scope (different PTY backend, different signal model).
+Linux and macOS, including Apple Silicon (arm64) — prebuilt `darwin_arm64` binaries ship with every release. Windows is out of scope (different PTY backend, different signal model).
 
 ## Install
 
