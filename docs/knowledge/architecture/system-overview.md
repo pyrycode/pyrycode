@@ -12,10 +12,11 @@ pyrycode/
 │   ├── supervisor.go          Supervisor type: PTY spawn, I/O bridge, restart loop
 │   ├── backoff.go             Backoff timer: exponential delay with stability reset
 │   └── winsize.go             SIGWINCH → PTY size sync
-├── internal/sessions/         Session-addressable runtime (Phase 1.0)
+├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand
-│   ├── session.go             Session: wraps one supervisor + optional bridge
-│   └── pool.go                Pool: registry, lifecycle, Config / SessionConfig
+│   ├── session.go             Session: wraps one supervisor + optional bridge; persisted metadata (label, created/last-active, bootstrap)
+│   ├── pool.go                Pool: in-memory registry, Config (incl. RegistryPath), load-or-mint bootstrap on New, saveLocked seam
+│   └── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
 ├── internal/control/          Control-plane server (Unix socket, JSON)
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
@@ -95,6 +96,19 @@ Extracted backoff logic. Computes the next delay based on how long the previous 
 | `creack/pty` | PTY allocation and size management | No stdlib PTY support |
 | `golang.org/x/term` | Terminal raw mode, state save/restore | Extended terminal ops not in stdlib |
 | `golang.org/x/sys` | System calls (indirect, via x/term) | — |
+
+### Session Registry (Phase 1.2a)
+
+```
+~/.pyry/<sanitized-name>/sessions.json    (file 0600, dir 0700)
+~/.pyry/<sanitized-name>.sock             (sibling — single-writer per name)
+```
+
+`Pool.New` reads the registry on startup. Missing or empty file → cold start (mint UUID, write file). Valid file → warm start (reuse persisted UUID, no rewrite). Malformed JSON → fatal at startup.
+
+`saveLocked` writes via `os.CreateTemp` → fsync → `os.Rename` in the same directory. Rename is the commit point; partial JSON is unreachable in the target file. Called under `Pool.mu` (write) by mutating ops; in 1.2a only `Pool.New`'s cold-start path invokes it.
+
+Forward-compat: `version` is a future hook; unknown top-level and per-session fields are silently ignored on read.
 
 ## Future Architecture (not yet implemented)
 
