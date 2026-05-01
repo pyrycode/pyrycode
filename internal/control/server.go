@@ -16,6 +16,18 @@ import (
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
+// ErrInstanceRunning is returned by [Server.Listen] when another live pyry
+// is already answering on the configured socket path. Distinct from a
+// stale-file scenario so callers can present a polished diagnostic without
+// grepping the error message.
+var ErrInstanceRunning = errors.New("another pyry instance is already running")
+
+// dialProbeTimeout is how long Listen waits for a live-instance probe to
+// connect before treating the socket as stale. Short enough not to delay
+// the common case (no prior pyry — connection refused fires instantly),
+// long enough to absorb a loaded system.
+const dialProbeTimeout = 200 * time.Millisecond
+
 // StateProvider is the supervisor view the control server depends on. Defining
 // it here (where it is consumed) keeps the supervisor package free of
 // control-plane concerns and makes the server trivial to test with a fake.
@@ -101,12 +113,12 @@ func (s *Server) SocketPath() string {
 }
 
 // Listen creates the socket file. It is split from Serve so callers can
-// surface "socket already in use" or "permission denied" errors before
-// starting the supervisor proper.
+// surface "another pyry is running", "socket already in use", or
+// "permission denied" errors before starting the supervisor proper.
 //
-// Stale sockets from a prior crash are removed transparently — net.Listen
-// would otherwise fail with "address already in use" since unix sockets
-// don't auto-clean.
+// Stale sockets from a prior crash are removed transparently. A LIVE pyry
+// on the same path is detected via a short Dial probe and rejected with
+// [ErrInstanceRunning], rather than silently hijacking the path — see #17.
 func (s *Server) Listen() error {
 	if dir := filepath.Dir(s.socketPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -114,11 +126,26 @@ func (s *Server) Listen() error {
 		}
 	}
 
-	// Best-effort cleanup of a stale socket. We deliberately don't check
-	// whether something is listening on the path — if a previous pyry
-	// crashed without removing it, the file is dead. If a different live
-	// pyry is using it, net.Listen below will fail and the user can
-	// figure out which.
+	// Detect a live pyry on this path before touching the socket file. The
+	// previous behaviour — unconditional os.Remove + net.Listen — would
+	// silently unlink a running pyry's socket file and replace it with a
+	// fresh listener, leaving the original pyry alive but unreachable
+	// (issue #17).
+	//
+	// The probe distinguishes "stale file from a prior crash" (no peer
+	// answers; Dial fails) from "live pyry already bound" (peer answers;
+	// Dial succeeds). On Linux & macOS, dialling an unbound Unix socket
+	// path returns ECONNREFUSED instantly; the timeout absorbs only the
+	// case where a peer accepted but is unresponsive.
+	if probe, err := net.DialTimeout("unix", s.socketPath, dialProbeTimeout); err == nil {
+		_ = probe.Close()
+		return fmt.Errorf("%w on %s — run `pyry status` to inspect, `pyry stop` to shut it down, or start this instance under a different name with -pyry-name",
+			ErrInstanceRunning, s.socketPath)
+	}
+
+	// Dial failed — file is either absent or a stale leftover from a prior
+	// crash that didn't run [Server.Close]. Either way, os.Remove is safe
+	// here: a live listener would have answered the probe above.
 	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale socket: %w", err)
 	}

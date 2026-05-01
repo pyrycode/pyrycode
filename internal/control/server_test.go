@@ -227,38 +227,51 @@ func TestServer_CloseRemovesSocket(t *testing.T) {
 	}
 }
 
-// TestServer_ListenFailsWhenAnotherIsBound covers the race where two pyrys
-// try to bind the same socket path. The stale-socket cleanup in Listen
-// removes any FILE at the path, but if a real listener owns the socket,
-// net.Listen below should fail rather than silently stealing it.
+// TestServer_ListenRefusesActiveInstance verifies #17: when a live pyry is
+// already answering on the socket path, a second pyry's Listen must fail
+// fast with ErrInstanceRunning instead of silently unlinking the path and
+// hijacking it.
 //
-// Implementation: bind socket A, then try to bind socket B at the same
-// path. Stale-cleanup os.Remove unlinks the directory entry; net.Listen
-// then succeeds at creating a NEW socket at the same path... and clients
-// dialling the path would now reach B, not A. This is the documented
-// behaviour but it's worth a test that LOCKS IN the current contract so
-// nobody accidentally tries to "fix" the cleanup later.
-func TestServer_ListenReplacesActiveSocket(t *testing.T) {
+// The previous behaviour was the opposite — a second Listen would unlink
+// the file and bind a fresh listener, leaving the first pyry's listener
+// alive in the kernel but unreachable via the filesystem. Both pyrys
+// would then race for ~/.claude/projects/<cwd>/sessions/ files.
+func TestServer_ListenRefusesActiveInstance(t *testing.T) {
 	t.Parallel()
 
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
+	// Stand up the first pyry. It must be Serving — a Listen-only server
+	// has its FD bound but isn't accepting, and the dial-probe in the
+	// second Listen would hang on the kernel-side accept queue rather
+	// than completing the handshake. Serving makes the live-instance
+	// probe symmetric with what a real client would see.
 	srvA := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
 	if err := srvA.Listen(); err != nil {
 		t.Fatalf("Listen A: %v", err)
 	}
-	defer srvA.Close()
+	defer func() { _ = srvA.Close() }()
 
-	// Second server at the same path. Documented behaviour: stale-
-	// socket cleanup unconditionally unlinks the file, then the new
-	// listener takes over the path. The original listener (srvA) keeps
-	// its FD but new clients reach srvB.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srvA.Serve(ctx) }()
+
+	// Second pyry tries to take the same path.
 	srvB := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
-	if err := srvB.Listen(); err != nil {
-		t.Fatalf("Listen B at the same path should succeed (stale cleanup): %v", err)
+	err := srvB.Listen()
+	if !errors.Is(err, ErrInstanceRunning) {
+		t.Fatalf("Listen B = %v, want ErrInstanceRunning", err)
 	}
-	defer srvB.Close()
+
+	// Original socket file must still belong to srvA — the rejected
+	// Listen must not have unlinked it. Dialling the path should still
+	// reach a live peer.
+	conn, err := net.DialTimeout("unix", sock, dialProbeTimeout)
+	if err != nil {
+		t.Fatalf("first pyry's socket should still be reachable after refused second Listen: %v", err)
+	}
+	_ = conn.Close()
 }
 
 // TestServer_ListenFailsWhenParentDirIsAFile covers the os.MkdirAll error
