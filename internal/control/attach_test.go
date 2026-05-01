@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
@@ -164,7 +165,7 @@ func TestCopyWithEscape(t *testing.T) {
 	}
 }
 
-// fakeAttachProvider is a test double for AttachProvider that captures
+// fakeAttachProvider drives the attachFn on a fakeSession; it captures
 // client input for later assertions. It does not write anything back to
 // the client — output direction is verified separately via the real
 // Bridge in TestServer_BridgeAttach.
@@ -229,7 +230,7 @@ func TestServer_AttachHandshakeAndStream(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	provider := &fakeAttachProvider{}
-	srv := NewServer(sock, &fakeState{}, nil, provider, nil, nil)
+	srv := NewServer(sock, sessionResolverWith(provider.Attach), nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -294,7 +295,7 @@ func TestServer_AttachIgnoresGeometryToday(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	provider := &fakeAttachProvider{}
-	srv := NewServer(sock, &fakeState{}, nil, provider, nil, nil)
+	srv := NewServer(sock, sessionResolverWith(provider.Attach), nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -331,13 +332,21 @@ func TestServer_AttachIgnoresGeometryToday(t *testing.T) {
 	// Cols=200, Rows=50.
 }
 
-func TestServer_AttachWithoutProvider(t *testing.T) {
+// TestServer_AttachOnForegroundSession exercises the foreground-mode wire
+// contract: a session whose Attach returns sessions.ErrAttachUnavailable
+// (no bridge) must surface verbatim as the Phase 0 "no attach provider
+// configured (daemon may be in foreground mode)" error string. This pins
+// the byte-identical AC for `pyry attach` against a foreground-mode pyry.
+func TestServer_AttachOnForegroundSession(t *testing.T) {
 	t.Parallel()
 
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	resolver := sessionResolverWith(func(in io.Reader, out io.Writer) (<-chan struct{}, error) {
+		return nil, sessions.ErrAttachUnavailable
+	})
+	srv := NewServer(sock, resolver, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -358,12 +367,17 @@ func TestServer_AttachWithoutProvider(t *testing.T) {
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		t.Fatalf("read ack: %v", err)
 	}
-	if resp.Error == "" {
-		t.Fatal("expected error response when no attach provider configured")
+	const want = "attach: no attach provider configured (daemon may be in foreground mode)"
+	if resp.Error != want {
+		t.Errorf("Error = %q, want %q (byte-identical to Phase 0)", resp.Error, want)
 	}
-	if !strings.Contains(resp.Error, "attach") {
-		t.Errorf("error = %q, expected to mention attach", resp.Error)
-	}
+}
+
+// sessionResolverWith returns a SessionResolver whose default session's
+// Attach delegates to fn. Used by attach tests that need to drive the
+// per-session Attach path without instantiating a real *sessions.Session.
+func sessionResolverWith(fn func(in io.Reader, out io.Writer) (<-chan struct{}, error)) SessionResolver {
+	return &fakeResolver{sess: &fakeSession{attachFn: fn}}
 }
 
 // TestServer_StopWhileAttached confirms that VerbStop arriving while a
@@ -387,7 +401,7 @@ func TestServer_StopWhileAttached(t *testing.T) {
 	bridge := supervisor.NewBridge(nil)
 
 	shutdownFired := make(chan struct{}, 1)
-	srv := NewServer(sock, &fakeState{}, nil, bridge, func() {
+	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, func() {
 		select {
 		case shutdownFired <- struct{}{}:
 		default:
@@ -476,7 +490,7 @@ func TestServer_ConcurrentAttachRace(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	bridge := supervisor.NewBridge(nil)
-	srv := NewServer(sock, &fakeState{}, nil, bridge, nil, nil)
+	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -555,7 +569,7 @@ func TestServer_HandshakeTimeout(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeState{}, nil, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -594,7 +608,7 @@ func TestServer_BridgeAttach(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	bridge := supervisor.NewBridge(nil)
-	srv := NewServer(sock, &fakeState{}, nil, bridge, nil, nil)
+	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

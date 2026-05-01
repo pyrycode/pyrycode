@@ -39,6 +39,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/install"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"golang.org/x/term"
 )
@@ -249,32 +250,24 @@ func runSupervisor(args []string) error {
 		bridge = supervisor.NewBridge(logger)
 	}
 
-	cfg := supervisor.Config{
-		ClaudeBin:  *claudeBin,
-		WorkDir:    *workdir,
-		ResumeLast: *resume,
-		ClaudeArgs: claudeArgs,
-		Bridge:     bridge,
-		Logger:     logger,
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	sup, err := supervisor.New(cfg)
+	pool, err := sessions.New(sessions.Config{
+		Logger: logger,
+		Bootstrap: sessions.SessionConfig{
+			ClaudeBin:  *claudeBin,
+			WorkDir:    *workdir,
+			ResumeLast: *resume,
+			ClaudeArgs: claudeArgs,
+			Bridge:     bridge,
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("supervisor init: %w", err)
+		return fmt.Errorf("pool init: %w", err)
 	}
 
-	// Only expose VerbAttach when we're in service mode (a Bridge exists).
-	// Foreground-mode pyry already has the PTY bound to the local terminal,
-	// so attach would have nothing to do.
-	var attachProvider control.AttachProvider
-	if bridge != nil {
-		attachProvider = bridge
-	}
-
-	ctrl := control.NewServer(socketPath, sup, logRing, attachProvider, cancel, logger)
+	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, cancel, logger)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -286,21 +279,32 @@ func runSupervisor(args []string) error {
 	logger.Info("pyrycode starting",
 		"version", Version,
 		"name", *name,
-		"claude", cfg.ClaudeBin,
+		"claude", *claudeBin,
 		"socket", socketPath,
 	)
-	supErr := sup.Run(ctx)
+	runErr := pool.Run(ctx)
 
 	// Stop the control server (already wired to ctx but Close is idempotent
 	// and ensures the socket file is gone before we return).
 	_ = ctrl.Close()
 	<-ctrlDone
 
-	if supErr != nil && !errors.Is(supErr, context.Canceled) {
-		return fmt.Errorf("supervisor: %w", supErr)
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return fmt.Errorf("supervisor: %w", runErr)
 	}
 	logger.Info("pyrycode stopped")
 	return nil
+}
+
+// poolResolver adapts *sessions.Pool to control.SessionResolver. The shapes
+// differ only in the return type: Pool.Lookup returns *sessions.Session,
+// SessionResolver.Lookup returns control.Session (an interface satisfied
+// structurally by *sessions.Session). Go's lack of covariant return types on
+// interface satisfaction is the only reason this adapter exists.
+type poolResolver struct{ p *sessions.Pool }
+
+func (r poolResolver) Lookup(id sessions.SessionID) (control.Session, error) {
+	return r.p.Lookup(id)
 }
 
 // parseClientFlags handles the shared flags every control verb accepts:
