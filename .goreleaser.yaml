@@ -1,0 +1,76 @@
+# goreleaser config — see https://goreleaser.com
+#
+# Triggered by tag pushes (`v*`). The `release` workflow in
+# `.github/workflows/release.yml` runs `goreleaser release --clean`,
+# which builds the matrix below, packages tarballs, generates checksums,
+# and creates a GitHub Release.
+#
+# To validate locally:
+#   goreleaser check                       # config syntax
+#   goreleaser build --snapshot --clean    # dry-run the build matrix
+
+version: 2
+
+project_name: pyry
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pyry
+    main: ./cmd/pyry
+    binary: pyry
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+
+archives:
+  - id: pyry
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+      - docs/*.md
+      - systemd/pyry.service
+      - launchd/dev.pyrycode.pyry.plist
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^Merge'
+
+release:
+  github:
+    owner: pyrycode
+    name: pyrycode
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    See [docs/guide.md](https://github.com/pyrycode/pyrycode/blob/main/docs/guide.md) for the user guide and [docs/deployment.md](https://github.com/pyrycode/pyrycode/blob/main/docs/deployment.md) for service-mode setup.
