@@ -18,6 +18,11 @@ var ErrSessionNotFound = errors.New("sessions: session not found")
 type Config struct {
 	Bootstrap SessionConfig
 	Logger    *slog.Logger
+
+	// RegistryPath is the on-disk path of the sessions.json registry. Empty
+	// disables persistence (test-only). In production this is always
+	// ~/.pyry/<sanitized-name>/sessions.json — see cmd/pyry resolveRegistryPath.
+	RegistryPath string
 }
 
 // SessionConfig is the per-session invocation shape. Phase 1.0 uses it only
@@ -43,23 +48,53 @@ type SessionConfig struct {
 // Pool owns the set of sessions managed by one pyry process. Phase 1.0
 // constructs exactly one entry — the bootstrap session — at New().
 type Pool struct {
-	mu        sync.RWMutex
-	sessions  map[SessionID]*Session
-	bootstrap SessionID
-	log       *slog.Logger
+	mu           sync.RWMutex
+	sessions     map[SessionID]*Session
+	bootstrap    SessionID
+	log          *slog.Logger
+	registryPath string
 }
 
-// New constructs a Pool, generating an ID for the bootstrap entry and
-// constructing the underlying *supervisor.Supervisor. Returns an error if
-// the rng or supervisor.New fails — both are fatal-at-startup conditions.
+// New constructs a Pool. If a registry exists at cfg.RegistryPath, the
+// bootstrap session reuses the persisted UUID and metadata; otherwise a
+// fresh UUID is minted and the registry is written before New returns.
+// Returns an error if the rng, supervisor.New, registry load, or registry
+// save fails — all are fatal-at-startup conditions.
 func New(cfg Config) (*Pool, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	id, err := NewID()
-	if err != nil {
-		return nil, fmt.Errorf("sessions: generate bootstrap id: %w", err)
+
+	var reg *registryFile
+	if cfg.RegistryPath != "" {
+		var err error
+		reg, err = loadRegistry(cfg.RegistryPath)
+		if err != nil {
+			return nil, fmt.Errorf("sessions: load registry: %w", err)
+		}
 	}
+
+	var (
+		bootstrapID  SessionID
+		label        string
+		createdAt    time.Time
+		lastActiveAt time.Time
+	)
+	if entry := pickBootstrap(reg); entry != nil {
+		bootstrapID = entry.ID
+		label = entry.Label
+		createdAt = entry.CreatedAt
+		lastActiveAt = entry.LastActiveAt
+	} else {
+		id, err := NewID()
+		if err != nil {
+			return nil, fmt.Errorf("sessions: generate bootstrap id: %w", err)
+		}
+		bootstrapID = id
+		now := time.Now().UTC()
+		createdAt, lastActiveAt = now, now
+	}
+
 	supCfg := supervisor.Config{
 		ClaudeBin:      cfg.Bootstrap.ClaudeBin,
 		WorkDir:        cfg.Bootstrap.WorkDir,
@@ -76,16 +111,31 @@ func New(cfg Config) (*Pool, error) {
 		return nil, fmt.Errorf("sessions: bootstrap supervisor: %w", err)
 	}
 	sess := &Session{
-		id:     id,
-		sup:    sup,
-		bridge: cfg.Bootstrap.Bridge,
-		log:    cfg.Logger,
+		id:           bootstrapID,
+		sup:          sup,
+		bridge:       cfg.Bootstrap.Bridge,
+		log:          cfg.Logger,
+		label:        label,
+		createdAt:    createdAt,
+		lastActiveAt: lastActiveAt,
+		bootstrap:    true,
 	}
-	return &Pool{
-		sessions:  map[SessionID]*Session{id: sess},
-		bootstrap: id,
-		log:       cfg.Logger,
-	}, nil
+	p := &Pool{
+		sessions:     map[SessionID]*Session{bootstrapID: sess},
+		bootstrap:    bootstrapID,
+		log:          cfg.Logger,
+		registryPath: cfg.RegistryPath,
+	}
+
+	// Persist on cold start (no prior file). Warm starts do not rewrite —
+	// the AC promises "writes only on state-changing operations", and a
+	// warm reload is not a state change.
+	if cfg.RegistryPath != "" && reg == nil {
+		if err := p.saveLocked(); err != nil {
+			return nil, fmt.Errorf("sessions: save registry: %w", err)
+		}
+	}
+	return p, nil
 }
 
 // Lookup resolves a SessionID to a Session. An empty id resolves to the
@@ -124,4 +174,28 @@ func (p *Pool) Run(ctx context.Context) error {
 	bootstrap := p.sessions[p.bootstrap]
 	p.mu.RUnlock()
 	return bootstrap.Run(ctx)
+}
+
+// saveLocked snapshots the current in-memory sessions into a registryFile and
+// writes it atomically. Caller MUST hold p.mu (write). No-op when
+// registryPath is empty (test-only persistence-disabled mode).
+func (p *Pool) saveLocked() error {
+	if p.registryPath == "" {
+		return nil
+	}
+	reg := &registryFile{
+		Version:  1,
+		Sessions: make([]registryEntry, 0, len(p.sessions)),
+	}
+	for _, s := range p.sessions {
+		reg.Sessions = append(reg.Sessions, registryEntry{
+			ID:           s.id,
+			Label:        s.label,
+			CreatedAt:    s.createdAt,
+			LastActiveAt: s.lastActiveAt,
+			Bootstrap:    s.bootstrap,
+		})
+	}
+	sortEntriesByCreatedAt(reg.Sessions)
+	return saveRegistryLocked(p.registryPath, reg)
 }

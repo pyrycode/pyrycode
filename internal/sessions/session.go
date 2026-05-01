@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
@@ -24,6 +25,14 @@ type Session struct {
 	sup    *supervisor.Supervisor
 	bridge *supervisor.Bridge // nil in foreground mode
 	log    *slog.Logger
+
+	// Persisted metadata. Read by saveRegistryLocked; written by Pool.New
+	// (and by Phase 1.1's Pool.Add / Pool.Rename / Pool.Remove). Mutations
+	// must happen with Pool.mu held (write).
+	label        string
+	createdAt    time.Time
+	lastActiveAt time.Time
+	bootstrap    bool
 }
 
 // ID returns the session's stable identifier.
