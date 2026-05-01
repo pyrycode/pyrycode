@@ -229,6 +229,38 @@ pyry stop                                # equivalent control-socket path
 
 `unload` also unregisters the service from auto-start at login. `pyry stop` only stops the current run; the service starts again next login. Use whichever matches your intent.
 
+## Updating PATH after installing new tools
+
+After enabling pyry as a service, installing a new shimmed tool (a fresh `nvm` Node version, a new `pyenv` Python, a new Linuxbrew package, etc.) does not propagate into the running service. The symptom is a silent `exit 127` from a claude hook or from claude itself when it tries to invoke the new binary — nothing visible surfaces from the pyry side.
+
+The cause is that `PATH` is captured at `pyry install-service` time and baked into the unit file (systemd `Environment="PATH=…"`) or plist (`EnvironmentVariables.PATH`). Service-manager processes do not inherit the user's interactive shell environment, so newly-installed shim directories stay invisible until the unit is rewritten.
+
+The recovery is to re-run `pyry install-service --force` with your original claude flags so the unit is re-rendered against your current shell's `$PATH`, then ask the service manager to reload. On systemd:
+
+```bash
+pyry install-service --force -- \
+  --dangerously-skip-permissions \
+  --channels plugin:discord@claude-plugins-official
+systemctl --user daemon-reload
+systemctl --user restart pyry
+```
+
+On launchd:
+
+```bash
+pyry install-service --launchd --force -- \
+  --dangerously-skip-permissions \
+  --channels plugin:discord@claude-plugins-official
+launchctl unload ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
+launchctl load   ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
+```
+
+The flags after `--` are illustrative — substitute the ones you originally used. `--force` re-renders `ExecStart=` / `ProgramArguments` wholesale, so anything not on the new command line is dropped.
+
+Note that you have to supply the original claude flags again — pyry does not remember them between runs. If you are not sure what you used last time, search your shell history (`history | grep install-service`) or read the existing `ExecStart=` / `ProgramArguments` line out of the unit file before overwriting it.
+
+`pyry status` should show `Phase: running` again; if a hook was failing, re-trigger it and confirm it no longer exits 127.
+
 ## Common pitfalls
 
 **Service starts but immediately enters a backoff loop.** Almost always means `claude` is failing to launch. Check `pyry logs` for the exit reason. Common causes:
@@ -243,7 +275,7 @@ pyry stop                                # equivalent control-socket path
 
 **Two pyrys racing for the same socket.** One starts, the other's `Listen` either fails (if the first is genuinely listening) or silently replaces the first's socket file (if the first crashed leaving a stale file). Always `systemctl --user status pyry` / `launchctl list | grep pyrycode` before manually starting another instance — and if you want a second instance deliberately, use `-pyry-name`.
 
-**Channel hooks not firing under pyry.** Pyry doesn't intercept claude's hook execution — hooks fire from inside the claude child. If `~/pyry-workspace/.claude/hooks/*.sh` worked under tmux+bash but not under pyry, the most likely cause is the systemd / launchd `PATH` not including the directories your hook scripts call out to (`gh`, `curl`, etc.). Add them to `Environment=` / `EnvironmentVariables`.
+**Channel hooks not firing under pyry.** Pyry doesn't intercept claude's hook execution — hooks fire from inside the claude child. If `~/pyry-workspace/.claude/hooks/*.sh` worked under tmux+bash but not under pyry, the most likely cause is the systemd / launchd `PATH` not including the directories your hook scripts call out to (`gh`, `curl`, etc.). Add them to `Environment=` / `EnvironmentVariables` — or, if you have just installed a new shimmed tool after enabling the service, see [Updating PATH after installing new tools](#updating-path-after-installing-new-tools) for the refresh procedure.
 
 **Pyry logs say "spawning claude" but `pyry attach` produces nothing.** You're attaching to the right pyry, but claude has buffered output and isn't sending it until something changes. Type something — anything from your end of the attach — and claude will respond. This is normal terminal-buffering behavior, not a pyry bug.
 
