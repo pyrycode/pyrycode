@@ -12,15 +12,19 @@ pyrycode/
 │   ├── supervisor.go          Supervisor type: PTY spawn, I/O bridge, restart loop
 │   ├── backoff.go             Backoff timer: exponential delay with stability reset
 │   └── winsize.go             SIGWINCH → PTY size sync
-├── internal/sessions/         Session-addressable runtime (Phase 1.0a)
+├── internal/sessions/         Session-addressable runtime (Phase 1.0)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand
 │   ├── session.go             Session: wraps one supervisor + optional bridge
 │   └── pool.go                Pool: registry, lifecycle, Config / SessionConfig
+├── internal/control/          Control-plane server (Unix socket, JSON)
+│   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
+│   ├── attach.go              Attach handoff to supervisor bridge
+│   └── logs.go                Ring-buffer log streaming
 ├── systemd/pyry.service       Linux systemd user unit
 └── launchd/dev.pyrycode.pyry.plist   macOS launchd plist
 ```
 
-Note: `internal/sessions` is built but **not yet consumed in production** — `cmd/pyry/main.go` and `internal/control` still construct `*supervisor.Supervisor` directly. Phase 1.0b (#29) flips both consumers to `*sessions.Pool`.
+Dependency direction: `cmd/pyry → internal/sessions → internal/supervisor`, with `internal/control` importing `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/supervisor` has no upward imports — verifiable with `go list -deps ./internal/supervisor/...`.
 
 ## Data Flow
 
@@ -94,7 +98,6 @@ Extracted backoff logic. Computes the next delay based on how long the previous 
 
 ## Future Architecture (not yet implemented)
 
-- **Phase 1.0b (#29):** Wire `*sessions.Pool` into `cmd/pyry/main.go` and `internal/control` (mechanical follow-up to #28)
 - **Phase 1.1+:** `Pool.Add(SessionConfig)`, errgroup fan-out in `Pool.Run`, `Request.SessionID` on the wire, `pyry sessions new`, `pyry attach <id>`, `claude --session-id <uuid>` invocation, per-session log lines
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process

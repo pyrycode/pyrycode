@@ -1,6 +1,6 @@
 # 003 — Session-Addressable Runtime via `internal/sessions` Pool
 
-**Status:** Accepted (Phase 1.0a, ticket #28; consumer rewiring in #29)
+**Status:** Accepted and shipped (Phase 1.0a #28 + Phase 1.0b #29)
 **Date:** 2026-05-01
 
 ## Context
@@ -23,7 +23,7 @@ Key shape:
 - `Pool` owns the set of sessions (today: one bootstrap entry).
 - `Session` wraps one `*supervisor.Supervisor` plus an optional `*supervisor.Bridge`.
 - `Pool.Lookup(id SessionID)` resolves to a `*Session`. **Empty `SessionID` resolves to the default (bootstrap) entry.**
-- `internal/control` consumes a single `SessionResolver` interface (Phase 1.0b/#29) instead of the `StateProvider` + `AttachProvider` pair.
+- `internal/control` consumes a single `SessionResolver` interface (defined in `internal/control` where it is used — see [feature doc](../features/control-plane.md)) instead of the `StateProvider` + `AttachProvider` pair from Phase 0.
 - Dependency direction: `cmd/pyry → internal/sessions → internal/supervisor`. `internal/control` will (after 1.0b) import `internal/sessions`. The supervisor never imports upward.
 
 The slice was split into two children of #27:
@@ -65,7 +65,8 @@ The slice was split into two children of #27:
 
 - An extra layer of indirection between `cmd/pyry` and `supervisor` (one more package boundary, one more constructor).
 - `Session.log` is dead in 1.0 — written, never read. Justified by the spec to avoid reshaping the struct in 1.1.
-- The package ships unused-by-production for one merge cycle (between #28 and #29). Acceptable: the test binary imports it, and #29 is queued in the same feature branch.
+- A 5-line `poolResolver` adapter in `cmd/pyry/main.go` exists only because Go does not do covariant return types on interface satisfaction (`Pool.Lookup` returns `*sessions.Session`; `SessionResolver.Lookup` returns `control.Session`). The alternative — defining the resolver to return the concrete `*sessions.Session` — would force `internal/control`'s tests to construct real sessions or push a tests-only state injector into `internal/sessions`. The adapter is the cheapest seam.
+- The attach handler holds a load-bearing `errors.Is(err, sessions.ErrAttachUnavailable)` translation to preserve Phase 0's foreground-mode wire string verbatim.
 
 **Forward-looking**
 

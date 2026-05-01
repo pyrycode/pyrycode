@@ -6,8 +6,8 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 
 ## Status
 
-- **Phase 1.0a (#28):** package introduced, fully tested, no production consumers. Built into the binary but unimported by `cmd/pyry/main.go` or `internal/control` — those still consume `*supervisor.Supervisor` directly.
-- **Phase 1.0b (#29):** mechanical follow-up that flips `internal/control` and `cmd/pyry/main.go` to consume `*sessions.Pool` via a `SessionResolver` interface.
+- **Phase 1.0a (#28):** package introduced, fully tested, no production consumers.
+- **Phase 1.0b (#29):** consumers wired. `cmd/pyry/main.go` constructs the `Pool`; `internal/control` resolves session state via a `SessionResolver` interface defined in the control package. Wire protocol unchanged; `pyry status`/`stop`/`logs`/`attach` are byte-identical to Phase 0.
 - **Phase 1.1+:** `Pool.Add(SessionConfig)`, errgroup fan-out in `Pool.Run`, `Request.SessionID` on the wire, `claude --session-id <uuid>` invocation, per-session log lines.
 
 ## Package Layout
@@ -149,20 +149,18 @@ The chosen workaround is to use a real benign binary (`/bin/sleep`) as the fake 
 
 `/bin/sleep` exists on both Linux and macOS; CI runs both. If a future CI environment lacks it, `t.Skipf` on `exec.LookPath` failure rather than silently passing.
 
-## Behavioural Invariants After 1.0a
+## Production Consumers (Phase 1.0b)
 
-The new package is built but unimported by production code. Verifiable by:
+After #29, `cmd/pyry/main.go` constructs `*sessions.Pool` and `internal/control` consumes a `SessionResolver` (defined inside `internal/control` — see [control-plane.md](control-plane.md)). External behaviour is unchanged:
 
-```bash
-grep -r 'internal/sessions' cmd/ internal/control/ internal/supervisor/   # empty
-```
+- `Request`/`Response` JSON shapes unchanged. No `session_id` field yet.
+- No new log lines; the bootstrap session ID is **not** logged.
+- Startup log line preserved verbatim (`pyrycode starting` with the same fields).
+- `pyry status`/`stop`/`logs`/`attach` are byte-identical to Phase 0.
+- Foreground vs service mode keys off `term.IsTerminal(os.Stdin.Fd())` in `cmd/pyry/main.go`, unchanged.
+- Restart still uses `--continue`. `claude --session-id <uuid>` is **not** plumbed in 1.0.
 
-Therefore post-merge of 1.0a:
-
-- `Request`/`Response` JSON unchanged.
-- No new log lines; bootstrap session ID is **not** logged.
-- No CLI surface changes.
-- `cmd/pyry/main.go`, `internal/control/*`, `internal/supervisor/*` are byte-identical to pre-1.0a.
+`*sessions.Pool` does not satisfy `control.SessionResolver` directly: `Pool.Lookup` returns the concrete `*sessions.Session`, while the resolver interface returns `control.Session`. Go does not do covariant return types on interface satisfaction, so `cmd/pyry` defines a 5-line `poolResolver` adapter to bridge the two. See [lessons.md](../../lessons.md#interface-adapters-for-covariant-returns) and [control-plane.md](control-plane.md).
 
 ## References
 
