@@ -287,6 +287,390 @@ func TestPool_New_PersistenceDisabled_NoFile(t *testing.T) {
 	}
 }
 
+// helperPoolReconciling builds a Pool with both registry and claude sessions
+// dir wired. Bootstrap target is /bin/sleep, never spawned.
+func helperPoolReconciling(t *testing.T, registryPath, claudeSessionsDir string) (*Pool, error) {
+	t.Helper()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	return New(Config{
+		Bootstrap:         SessionConfig{ClaudeBin: "/bin/sleep"},
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:      registryPath,
+		ClaudeSessionsDir: claudeSessionsDir,
+	})
+}
+
+// TestPool_New_Reconciles_RotatesToNewest: registry seeded with bootstrap A,
+// claude dir contains <B>.jsonl newer than <A>.jsonl. Pool's default ID
+// becomes B, registry on disk records B, A's JSONL is preserved untouched.
+func TestPool_New_Reconciles_RotatesToNewest(t *testing.T) {
+	t.Parallel()
+	regDir := t.TempDir()
+	regPath := filepath.Join(regDir, "sessions.json")
+	claudeDir := t.TempDir()
+
+	idA := SessionID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	idB := SessionID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+	when, _ := time.Parse(time.RFC3339Nano, "2026-04-01T00:00:00Z")
+	if err := saveRegistryLocked(regPath, &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID: idA, CreatedAt: when, LastActiveAt: when, Bootstrap: true,
+		}},
+	}); err != nil {
+		t.Fatalf("seed registry: %v", err)
+	}
+
+	now := time.Now()
+	pathA := filepath.Join(claudeDir, string(idA)+".jsonl")
+	pathB := filepath.Join(claudeDir, string(idB)+".jsonl")
+	if err := os.WriteFile(pathA, []byte("a-content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(pathA, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathB, []byte("b-content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(pathB, now, now); err != nil {
+		t.Fatal(err)
+	}
+	bytesABefore, err := os.ReadFile(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := helperPoolReconciling(t, regPath, claudeDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if got := pool.Default().ID(); got != idB {
+		t.Errorf("Default().ID() = %q, want %q (rotated)", got, idB)
+	}
+	reg, err := loadRegistry(regPath)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	if reg == nil || len(reg.Sessions) != 1 {
+		t.Fatalf("registry = %+v, want one session", reg)
+	}
+	if reg.Sessions[0].ID != idB {
+		t.Errorf("registry id = %q, want %q", reg.Sessions[0].ID, idB)
+	}
+	if !reg.Sessions[0].Bootstrap {
+		t.Errorf("rotated entry lost bootstrap flag")
+	}
+	// Pre-rotation JSONL must remain untouched.
+	bytesAAfter, err := os.ReadFile(pathA)
+	if err != nil {
+		t.Fatalf("pre-rotation jsonl was deleted: %v", err)
+	}
+	if string(bytesABefore) != string(bytesAAfter) {
+		t.Errorf("pre-rotation jsonl content changed")
+	}
+}
+
+// TestPool_New_Reconciles_NoRotationWhenMatch: registry's bootstrap matches
+// the only on-disk JSONL. No rotation, registry bytes/mtime unchanged.
+func TestPool_New_Reconciles_NoRotationWhenMatch(t *testing.T) {
+	t.Parallel()
+	regDir := t.TempDir()
+	regPath := filepath.Join(regDir, "sessions.json")
+	claudeDir := t.TempDir()
+
+	id := SessionID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	when, _ := time.Parse(time.RFC3339Nano, "2026-04-01T00:00:00Z")
+	if err := saveRegistryLocked(regPath, &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID: id, CreatedAt: when, LastActiveAt: when, Bootstrap: true,
+		}},
+	}); err != nil {
+		t.Fatalf("seed registry: %v", err)
+	}
+	beforeBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStat, err := os.Stat(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(claudeDir, string(id)+".jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := helperPoolReconciling(t, regPath, claudeDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := pool.Default().ID(); got != id {
+		t.Errorf("Default().ID() = %q, want %q", got, id)
+	}
+	afterBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeBytes) != string(afterBytes) {
+		t.Errorf("registry rewritten on warm match:\nbefore=%s\nafter =%s", beforeBytes, afterBytes)
+	}
+	afterStat, err := os.Stat(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beforeStat.ModTime().Equal(afterStat.ModTime()) {
+		t.Errorf("registry mtime changed: before=%v after=%v", beforeStat.ModTime(), afterStat.ModTime())
+	}
+}
+
+// TestPool_New_Reconciles_MissingDir_ProceedsWithBootstrap: when the claude
+// sessions dir does not exist, New succeeds and the seeded UUID is preserved.
+func TestPool_New_Reconciles_MissingDir_ProceedsWithBootstrap(t *testing.T) {
+	t.Parallel()
+	regDir := t.TempDir()
+	regPath := filepath.Join(regDir, "sessions.json")
+	claudeDir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	id := SessionID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+	when, _ := time.Parse(time.RFC3339Nano, "2026-04-01T00:00:00Z")
+	if err := saveRegistryLocked(regPath, &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID: id, CreatedAt: when, LastActiveAt: when, Bootstrap: true,
+		}},
+	}); err != nil {
+		t.Fatalf("seed registry: %v", err)
+	}
+	beforeBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := helperPoolReconciling(t, regPath, claudeDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := pool.Default().ID(); got != id {
+		t.Errorf("Default().ID() = %q, want %q", got, id)
+	}
+	afterBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeBytes) != string(afterBytes) {
+		t.Errorf("registry rewritten when claude dir missing")
+	}
+}
+
+// TestPool_New_Reconciles_EmptyDir_NoOp: claude dir exists but contains no
+// JSONLs. New succeeds, registry unchanged.
+func TestPool_New_Reconciles_EmptyDir_NoOp(t *testing.T) {
+	t.Parallel()
+	regDir := t.TempDir()
+	regPath := filepath.Join(regDir, "sessions.json")
+	claudeDir := t.TempDir()
+
+	id := SessionID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+	when, _ := time.Parse(time.RFC3339Nano, "2026-04-01T00:00:00Z")
+	if err := saveRegistryLocked(regPath, &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID: id, CreatedAt: when, LastActiveAt: when, Bootstrap: true,
+		}},
+	}); err != nil {
+		t.Fatalf("seed registry: %v", err)
+	}
+	beforeBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := helperPoolReconciling(t, regPath, claudeDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := pool.Default().ID(); got != id {
+		t.Errorf("Default().ID() = %q, want %q", got, id)
+	}
+	afterBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeBytes) != string(afterBytes) {
+		t.Errorf("registry rewritten on empty claude dir")
+	}
+}
+
+// TestPool_New_Reconciles_ColdStart_PicksNewestImmediately: cold start (no
+// registry) with an existing JSONL on disk. After New, the registry's
+// bootstrap entry is the on-disk UUID, not a freshly-minted one.
+func TestPool_New_Reconciles_ColdStart_PicksNewestImmediately(t *testing.T) {
+	t.Parallel()
+	regDir := t.TempDir()
+	regPath := filepath.Join(regDir, "sessions.json")
+	claudeDir := t.TempDir()
+
+	idX := SessionID("ffffffff-ffff-4fff-8fff-ffffffffffff")
+	if err := os.WriteFile(filepath.Join(claudeDir, string(idX)+".jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := helperPoolReconciling(t, regPath, claudeDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := pool.Default().ID(); got != idX {
+		t.Errorf("Default().ID() = %q, want %q (cold start should adopt on-disk UUID)", got, idX)
+	}
+	reg, err := loadRegistry(regPath)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	if reg == nil || len(reg.Sessions) != 1 || reg.Sessions[0].ID != idX {
+		t.Fatalf("registry = %+v, want single bootstrap entry with id %q", reg, idX)
+	}
+	if !reg.Sessions[0].Bootstrap {
+		t.Errorf("cold-start rotated entry lost bootstrap flag")
+	}
+}
+
+// TestPool_RotateID_HappyPath: rotate bootstrap id, assert map keys, bootstrap
+// pointer, lastActiveAt advance, and registry on-disk reflect the new id.
+func TestPool_RotateID_HappyPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	pool := helperPoolPersistent(t, regPath)
+
+	oldID := pool.Default().ID()
+	oldLA := pool.Default().lastActiveAt
+
+	newID := SessionID("99999999-9999-4999-8999-999999999999")
+	if err := pool.RotateID(oldID, newID); err != nil {
+		t.Fatalf("RotateID: %v", err)
+	}
+
+	if got := pool.Default().ID(); got != newID {
+		t.Errorf("Default().ID() = %q, want %q", got, newID)
+	}
+	if _, err := pool.Lookup(oldID); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("Lookup(old) err = %v, want ErrSessionNotFound", err)
+	}
+	if got, err := pool.Lookup(newID); err != nil {
+		t.Errorf("Lookup(new) err = %v, want nil", err)
+	} else if got != pool.Default() {
+		t.Errorf("Lookup(new) returned %p, want Default %p", got, pool.Default())
+	}
+	if !pool.Default().lastActiveAt.After(oldLA) {
+		t.Errorf("lastActiveAt did not advance: old=%v new=%v", oldLA, pool.Default().lastActiveAt)
+	}
+
+	reg, err := loadRegistry(regPath)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	if reg == nil || len(reg.Sessions) != 1 || reg.Sessions[0].ID != newID {
+		t.Fatalf("registry = %+v, want single entry with id %q", reg, newID)
+	}
+	if !reg.Sessions[0].Bootstrap {
+		t.Errorf("rotated entry lost bootstrap flag on disk")
+	}
+}
+
+// TestPool_RotateID_UnknownOldID: ErrSessionNotFound, no map mutation, no
+// registry rewrite.
+func TestPool_RotateID_UnknownOldID(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	pool := helperPoolPersistent(t, regPath)
+
+	bootstrapID := pool.Default().ID()
+	beforeBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStat, err := os.Stat(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unknown := SessionID("00000000-0000-4000-8000-000000000000")
+	target := SessionID("11111111-1111-4111-8111-111111111111")
+	err = pool.RotateID(unknown, target)
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("RotateID(unknown) err = %v, want ErrSessionNotFound", err)
+	}
+
+	if got := pool.Default().ID(); got != bootstrapID {
+		t.Errorf("bootstrap id mutated after failed RotateID: got %q, want %q", got, bootstrapID)
+	}
+	afterBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeBytes) != string(afterBytes) {
+		t.Errorf("registry rewritten on failed RotateID")
+	}
+	afterStat, err := os.Stat(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beforeStat.ModTime().Equal(afterStat.ModTime()) {
+		t.Errorf("registry mtime changed on failed RotateID")
+	}
+}
+
+// TestPool_RotateID_Idempotent: RotateID(x, x) is a no-op — same id, no
+// registry rewrite, no lastActiveAt bump.
+func TestPool_RotateID_Idempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	pool := helperPoolPersistent(t, regPath)
+
+	id := pool.Default().ID()
+	beforeLA := pool.Default().lastActiveAt
+	beforeBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStat, err := os.Stat(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pool.RotateID(id, id); err != nil {
+		t.Errorf("RotateID(x,x) err = %v, want nil", err)
+	}
+	if got := pool.Default().ID(); got != id {
+		t.Errorf("Default().ID() = %q, want %q", got, id)
+	}
+	if !pool.Default().lastActiveAt.Equal(beforeLA) {
+		t.Errorf("lastActiveAt advanced on idempotent rotate: before=%v after=%v",
+			beforeLA, pool.Default().lastActiveAt)
+	}
+	afterBytes, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeBytes) != string(afterBytes) {
+		t.Errorf("registry rewritten on idempotent RotateID")
+	}
+	afterStat, err := os.Stat(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beforeStat.ModTime().Equal(afterStat.ModTime()) {
+		t.Errorf("registry mtime changed on idempotent RotateID")
+	}
+}
+
 // TestPool_New_MalformedRegistryIsFatal: a corrupt sessions.json must surface
 // a startup error rather than silently wiping the file.
 func TestPool_New_MalformedRegistryIsFatal(t *testing.T) {

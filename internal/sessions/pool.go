@@ -23,6 +23,13 @@ type Config struct {
 	// disables persistence (test-only). In production this is always
 	// ~/.pyry/<sanitized-name>/sessions.json — see cmd/pyry resolveRegistryPath.
 	RegistryPath string
+
+	// ClaudeSessionsDir is the directory containing claude's <uuid>.jsonl
+	// files for this WorkDir. Empty disables startup reconciliation (test
+	// default, and the production fallback when $HOME is unresolvable).
+	// Production callers in cmd/pyry resolve this via
+	// DefaultClaudeSessionsDir from cfg.Bootstrap.WorkDir.
+	ClaudeSessionsDir string
 }
 
 // SessionConfig is the per-session invocation shape. Phase 1.0 uses it only
@@ -135,7 +142,42 @@ func New(cfg Config) (*Pool, error) {
 			return nil, fmt.Errorf("sessions: save registry: %w", err)
 		}
 	}
+
+	if err := reconcileBootstrapOnNew(p, cfg.ClaudeSessionsDir, cfg.Logger); err != nil {
+		return nil, fmt.Errorf("sessions: reconcile bootstrap: %w", err)
+	}
 	return p, nil
+}
+
+// RotateID atomically replaces the in-memory entry keyed by oldID with one
+// keyed by newID, updates the bootstrap pointer if oldID was the bootstrap,
+// and persists. p.mu is held (write) across the whole operation, matching
+// the 1.2a saveLocked invariant.
+//
+// Returns ErrSessionNotFound if oldID is unknown. Returns the save error
+// verbatim if persistence fails — the in-memory rotation is already applied
+// at that point; callers decide whether to treat the save error as fatal.
+// RotateID(x, x) is a no-op.
+//
+// This is the load-bearing seam the live-detection ticket reuses.
+func (p *Pool) RotateID(oldID, newID SessionID) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sess, ok := p.sessions[oldID]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if oldID == newID {
+		return nil
+	}
+	sess.id = newID
+	sess.lastActiveAt = time.Now().UTC()
+	delete(p.sessions, oldID)
+	p.sessions[newID] = sess
+	if p.bootstrap == oldID {
+		p.bootstrap = newID
+	}
+	return p.saveLocked()
 }
 
 // Lookup resolves a SessionID to a Session. An empty id resolves to the

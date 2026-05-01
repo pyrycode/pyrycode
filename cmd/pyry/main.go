@@ -89,6 +89,25 @@ func resolveRegistryPath(name string) string {
 	return filepath.Join(home, ".pyry", sanitizeName(name), "sessions.json")
 }
 
+// resolveClaudeSessionsDir returns the directory where claude writes
+// <uuid>.jsonl files for the given workdir. An empty workdir is resolved to
+// the process cwd (matching claude's behaviour). Returns "" when the path
+// cannot be resolved — startup proceeds without on-disk reconciliation.
+func resolveClaudeSessionsDir(workdir string) string {
+	if workdir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		workdir = cwd
+	}
+	abs, err := filepath.Abs(workdir)
+	if err != nil {
+		return ""
+	}
+	return sessions.DefaultClaudeSessionsDir(abs)
+}
+
 // sanitizeName keeps a-z, A-Z, 0-9, _, ., - and replaces anything else with
 // _. Empty input becomes "_". Defends the on-disk socket filename against
 // path-traversal and other filesystem-unsafe input (e.g. PYRY_NAME from a
@@ -239,6 +258,7 @@ func runSupervisor(args []string) error {
 	}
 	socketPath := resolveSocketPath(*socketFlag, *name)
 	registryPath := resolveRegistryPath(*name)
+	claudeSessionsDir := resolveClaudeSessionsDir(*workdir)
 
 	level := slog.LevelInfo
 	if *verbose {
@@ -266,8 +286,9 @@ func runSupervisor(args []string) error {
 	defer cancel()
 
 	pool, err := sessions.New(sessions.Config{
-		Logger:       logger,
-		RegistryPath: registryPath,
+		Logger:            logger,
+		RegistryPath:      registryPath,
+		ClaudeSessionsDir: claudeSessionsDir,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    *workdir,
