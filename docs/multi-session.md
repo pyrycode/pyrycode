@@ -41,7 +41,8 @@ The structural change for Phase 1 is to lift that single supervisor into a pool.
                          - project memory at
                            ~/.claude/projects/<encoded-cwd>/
                        Each child has its own:
-                         - sessions/<uuid>.jsonl
+                         - <uuid>.jsonl  (in the encoded-cwd dir,
+                                          no `sessions/` subdir)
                          - PTY, stdin/stdout
                          - lifecycle state (running, evicted, ...)
 ```

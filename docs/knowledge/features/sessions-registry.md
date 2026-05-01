@@ -5,6 +5,7 @@ On-disk persistence for `internal/sessions.Pool`. The registry stores per-pyry-n
 ## Status
 
 - **Phase 1.2a (#34):** registry introduced for the bootstrap entry. Cold start mints a UUID and writes the file; warm start reuses the persisted UUID without rewriting the file.
+- **Phase 1.2b-A (#38):** `Pool.RotateID` now mutates the bootstrap entry's UUID when startup reconciliation detects a `/clear` rotation; persists via `saveLocked`. See [jsonl-reconciliation.md](jsonl-reconciliation.md).
 - **Phase 1.1+:** `Pool.Add` / `Rename` / `Remove` plug into the same `saveLocked` seam introduced here.
 - **Phase 1.2c:** `last_active_at` becomes a live-updated value used by idle eviction.
 
@@ -39,7 +40,7 @@ Lives as a sibling to the per-name socket `~/.pyry/<name>.sock`. Resolution is i
 | `id` | string (UUIDv4) | The `SessionID`. |
 | `label` | string | Always `""` in 1.2a. Phase 1.1's `pyry sessions rename` populates it. |
 | `created_at` | RFC3339Nano | Set once at session creation. |
-| `last_active_at` | RFC3339Nano | Equal to `created_at` in 1.2a. Phase 1.2c starts updating it. |
+| `last_active_at` | RFC3339Nano | Equal to `created_at` in 1.2a. Bumped on `RotateID` (1.2b-A). Phase 1.2c starts live-updating it. |
 | `bootstrap` | bool | Marks the entry resolved by `Pool.Lookup("")`. Omitted on disk when false (`omitempty`). |
 
 **Forward compatibility:** unknown top-level and per-session fields are tolerated on read (default `encoding/json` decoder; `DisallowUnknownFields` is *not* set). New fields land additively in later phases without breaking old pyry binaries.
