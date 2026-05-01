@@ -13,11 +13,13 @@
 // Reserved control verbs (pyry's own, no -pyry- prefix needed since they
 // don't collide with anything claude does today):
 //
-//	pyry version        Print version and exit
-//	pyry status         Query the running daemon via its control socket
-//	pyry stop           Graceful shutdown via the control socket
-//	pyry logs           Recent supervisor log lines
-//	pyry help           Show help
+//	pyry version          Print version and exit
+//	pyry status           Query the running daemon via its control socket
+//	pyry stop             Graceful shutdown via the control socket
+//	pyry logs             Recent supervisor log lines
+//	pyry attach           Attach local terminal to a service-mode daemon
+//	pyry install-service  Write a systemd / launchd unit file for pyry
+//	pyry help             Show help
 //
 // See https://github.com/pyrycode/pyrycode for documentation.
 package main
@@ -36,6 +38,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/control"
+	"github.com/pyrycode/pyrycode/internal/install"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"golang.org/x/term"
 )
@@ -118,6 +121,8 @@ func run() error {
 			return runLogs(os.Args[2:])
 		case "attach":
 			return runAttach(os.Args[2:])
+		case "install-service":
+			return runInstallService(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -410,6 +415,91 @@ func runStop(args []string) error {
 	return nil
 }
 
+// runInstallService implements `pyry install-service`: write a systemd unit
+// (Linux) or launchd plist (macOS) for pyry, ready to enable. The user's
+// claude flags are split off after `--` and baked into ExecStart; without
+// them, the unit is written as a documented template the user edits before
+// enabling.
+func runInstallService(args []string) error {
+	// Split pyry-side flags from claude flags at the first "--".
+	var pyrySide, claudeSide []string
+	for i, a := range args {
+		if a == "--" {
+			pyrySide = args[:i]
+			claudeSide = args[i+1:]
+			break
+		}
+	}
+	if pyrySide == nil {
+		pyrySide = args
+	}
+
+	fs := flag.NewFlagSet("pyry install-service", flag.ContinueOnError)
+	name := fs.String("pyry-name", defaultName(), "instance name (filename + ExecStart suffix)")
+	systemdFlag := fs.Bool("systemd", false, "force systemd output (default: detect from OS)")
+	launchdFlag := fs.Bool("launchd", false, "force launchd output (default: detect from OS)")
+	workdir := fs.String("workdir", "", "WorkingDirectory baked into the unit (default: ~/pyry-workspace)")
+	pathEnv := fs.String("path", "", "PATH baked into the unit (default: a conservative system + ~/.local/bin)")
+	force := fs.Bool("force", false, "overwrite an existing unit file")
+	if err := fs.Parse(pyrySide); err != nil {
+		return err
+	}
+	if *systemdFlag && *launchdFlag {
+		return fmt.Errorf("--systemd and --launchd are mutually exclusive")
+	}
+	plat := install.PlatformAuto
+	switch {
+	case *systemdFlag:
+		plat = install.PlatformSystemd
+	case *launchdFlag:
+		plat = install.PlatformLaunchd
+	}
+
+	path, resolved, err := install.Install(install.Options{
+		Platform:   plat,
+		Name:       *name,
+		WorkDir:    *workdir,
+		PathEnv:    *pathEnv,
+		ClaudeArgs: claudeSide,
+		Force:      *force,
+	})
+	if err != nil {
+		if errors.Is(err, install.ErrFileExists) {
+			return fmt.Errorf("%w: %s", err, path)
+		}
+		return fmt.Errorf("install-service: %w", err)
+	}
+
+	fmt.Printf("Wrote %s (%s)\n\n", path, resolved)
+	switch resolved {
+	case install.PlatformSystemd:
+		if len(claudeSide) == 0 {
+			fmt.Printf("Edit ExecStart for your claude flags, then:\n")
+		} else {
+			fmt.Printf("Next:\n")
+		}
+		fmt.Printf("    systemctl --user daemon-reload\n")
+		fmt.Printf("    systemctl --user enable --now %s\n\n", *name)
+		fmt.Printf("Verify with:\n")
+		fmt.Printf("    pyry status\n")
+		fmt.Printf("    pyry logs\n")
+		fmt.Printf("    journalctl --user -u %s -f\n\n", *name)
+		fmt.Printf("For boot-before-login persistence: sudo loginctl enable-linger $USER\n")
+	case install.PlatformLaunchd:
+		if len(claudeSide) == 0 {
+			fmt.Printf("Edit ProgramArguments for your claude flags, then:\n")
+		} else {
+			fmt.Printf("Next:\n")
+		}
+		fmt.Printf("    launchctl load %s\n\n", path)
+		fmt.Printf("Verify with:\n")
+		fmt.Printf("    pyry status\n")
+		fmt.Printf("    pyry logs\n")
+		fmt.Printf("    tail -f /tmp/pyry.%s.{out,err}.log\n", *name)
+	}
+	return nil
+}
+
 func printHelp() {
 	fmt.Print(`pyry — Pyrycode daemon, a supervisor for Claude Code
 
@@ -426,6 +516,8 @@ Usage:
   pyry logs [flags]                              print recent supervisor logs
   pyry attach [flags]                            attach local terminal to daemon
                                                   (Ctrl-B d to detach)
+  pyry install-service [flags] [-- claude-args]  write a systemd or launchd
+                                                  unit file for pyry
   pyry version                                   print version
   pyry help                                      show this help
 
@@ -448,6 +540,9 @@ Examples:
   pyry stop                             # graceful shutdown via control socket
   pyry logs                             # last 200 lines of supervisor logs
   pyry attach                           # interactive bridge to a service-mode daemon
+  pyry install-service                  # write a systemd/launchd unit (template)
+  pyry install-service -- --dangerously-skip-permissions \
+        --channels plugin:discord@claude-plugins-official  # bake flags into ExecStart
 
 See https://github.com/pyrycode/pyrycode for documentation.
 `)

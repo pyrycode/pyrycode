@@ -1,0 +1,48 @@
+[Unit]
+Description=Pyrycode daemon — Claude Code process supervisor ({{.Name}})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{.WorkDir}}
+
+# PATH must cover everywhere claude or its hooks can reach. Common additions
+# (uncomment / replace the line below as needed):
+#   nvm:        %h/.nvm/versions/node/<version>/bin
+#   linuxbrew:  /home/linuxbrew/.linuxbrew/bin
+#   homebrew:   /opt/homebrew/bin (rare on Linux)
+#   pyenv:      %h/.pyenv/shims
+Environment="PATH={{.PathEnv}}"
+
+{{- if .HasClaudeArgs}}
+
+ExecStart={{joinShell .ExecArgs}}
+{{- else}}
+
+# ExecStart: customize the claude flags pyry forwards. Common flags (combine
+# as needed by appending them to the ExecStart line below):
+#   --dangerously-skip-permissions
+#       Skip permission prompts. Essential for unattended service mode.
+#   --channels plugin:discord@claude-plugins-official
+#       Wire up a chat channel. Repeat the flag for each channel, or pass
+#       multiple plugin: values to a single --channels.
+#   --model sonnet
+#       Pin a specific model.
+#   --add-dir /path/to/extra/context
+#       Mount additional directories into claude's context.
+#
+# See `claude --help` for the full list. Flags after pyry's own flags are
+# forwarded to claude verbatim.
+ExecStart={{joinShell .ExecArgs}}
+{{- end}}
+
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

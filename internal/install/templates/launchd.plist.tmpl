@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.pyrycode.{{.Name}}</string>
+{{if .HasClaudeArgs}}
+    <key>ProgramArguments</key>
+    <array>
+{{- range .ExecArgs}}
+        <string>{{xmlEscape .}}</string>
+{{- end}}
+    </array>
+{{else}}
+    <!--
+      ProgramArguments: customize the claude flags pyry forwards. Add
+      additional <string> elements as needed. Common flags:
+        <string>- -dangerously-skip-permissions</string>
+        <string>- -channels</string>
+        <string>plugin:discord@claude-plugins-official</string>
+        <string>- -model</string>
+        <string>sonnet</string>
+      (Spaces between dashes above are to keep this comment XML-legal — the
+      real flags use no internal spaces, e.g. --dangerously-skip-permissions.)
+
+      See `claude --help` for the full list of claude flags.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+{{- range .ExecArgs}}
+        <string>{{xmlEscape .}}</string>
+{{- end}}
+    </array>
+{{end}}
+    <key>WorkingDirectory</key>
+    <string>{{xmlEscape .WorkDir}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{{xmlEscape .PathEnv}}</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/pyry.{{.Name}}.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/pyry.{{.Name}}.err.log</string>
+</dict>
+</plist>
