@@ -30,3 +30,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with `repo` scope for pushing the auto-generated formula
+          # to pyrycode/homebrew-tap. Create as a repo secret on
+          # pyrycode/pyrycode. See docs/release-tooling.md for setup.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

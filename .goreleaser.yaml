@@ -74,3 +74,26 @@ release:
   mode: replace
   header: |
     See [docs/guide.md](https://github.com/pyrycode/pyrycode/blob/main/docs/guide.md) for the user guide and [docs/deployment.md](https://github.com/pyrycode/pyrycode/blob/main/docs/deployment.md) for service-mode setup.
+
+# NOTE: `brews:` is deprecated in favor of `homebrew_casks:` per goreleaser's
+# 2026 deprecation note, but the cask schema doesn't support the `install:`
+# and `test:` blocks formulas use. Stay on `brews:` until pyry's CLI-binary
+# use case maps cleanly to the cask model. See:
+#   https://goreleaser.com/deprecations#brews
+brews:
+  - name: pyry
+    repository:
+      owner: pyrycode
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/pyrycode/pyrycode
+    description: "Process supervisor for Claude Code"
+    license: MIT
+    install: |
+      bin.install "pyry"
+    test: |
+      system "#{bin}/pyry", "version"
+    caveats: |
+      To run pyry as a long-lived daemon, see:
+        https://github.com/pyrycode/pyrycode/blob/main/docs/deployment.md
