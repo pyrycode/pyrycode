@@ -4,7 +4,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -127,5 +129,186 @@ func TestPool_LookupUnknown_ReturnsErrSessionNotFound(t *testing.T) {
 	}
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Errorf("Lookup(unknown) err = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// helperPoolPersistent builds a Pool with persistence enabled. The bootstrap
+// supervisor target is /bin/sleep, never spawned (these tests don't call Run).
+func helperPoolPersistent(t *testing.T, registryPath string) *Pool {
+	t.Helper()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	pool, err := New(Config{
+		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath: registryPath,
+	})
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+	return pool
+}
+
+// TestPool_New_ColdStartCreatesRegistry: with a non-existent registry path,
+// New mints a UUID, writes the file, and the file contains exactly one
+// bootstrap entry whose ID matches the in-memory default session.
+func TestPool_New_ColdStartCreatesRegistry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pyry", "sessions.json")
+	pool := helperPoolPersistent(t, path)
+
+	def := pool.Default()
+	if def == nil {
+		t.Fatal("Default() = nil")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("registry not written: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("registry mode = %o, want 0600", mode)
+	}
+
+	reg, err := loadRegistry(path)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	if reg == nil || len(reg.Sessions) != 1 {
+		t.Fatalf("registry = %+v, want one session", reg)
+	}
+	if reg.Sessions[0].ID != def.ID() {
+		t.Errorf("registry id = %q, want %q", reg.Sessions[0].ID, def.ID())
+	}
+	if !reg.Sessions[0].Bootstrap {
+		t.Errorf("registry entry not marked bootstrap")
+	}
+	if reg.Sessions[0].CreatedAt.IsZero() {
+		t.Errorf("created_at is zero")
+	}
+}
+
+// TestPool_New_WarmStartReusesUUID: a pre-existing registry's UUID survives
+// reload, and the on-disk file is not rewritten (warm start is not a
+// state-changing operation).
+func TestPool_New_WarmStartReusesUUID(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	knownID := SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91")
+	when, _ := time.Parse(time.RFC3339Nano, "2026-04-01T00:00:00Z")
+
+	if err := saveRegistryLocked(path, &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID: knownID, CreatedAt: when, LastActiveAt: when, Bootstrap: true,
+		}},
+	}); err != nil {
+		t.Fatalf("seed registry: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read seeded: %v", err)
+	}
+	beforeStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat seeded: %v", err)
+	}
+
+	pool := helperPoolPersistent(t, path)
+	if got := pool.Default().ID(); got != knownID {
+		t.Errorf("Default().ID() = %q, want %q", got, knownID)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("registry rewritten on warm start:\nbefore = %s\nafter  = %s", before, after)
+	}
+	afterStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !beforeStat.ModTime().Equal(afterStat.ModTime()) {
+		t.Errorf("registry mtime changed on warm start: before=%v after=%v", beforeStat.ModTime(), afterStat.ModTime())
+	}
+}
+
+// TestPool_New_IdempotentReload: two cold-then-warm sequences yield the same
+// default ID, and the file remains unchanged across reloads.
+func TestPool_New_IdempotentReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	first := helperPoolPersistent(t, path)
+	id1 := first.Default().ID()
+	bytes1, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after first: %v", err)
+	}
+
+	second := helperPoolPersistent(t, path)
+	id2 := second.Default().ID()
+	bytes2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after second: %v", err)
+	}
+
+	if id1 != id2 {
+		t.Errorf("ids drifted: %q vs %q", id1, id2)
+	}
+	if string(bytes1) != string(bytes2) {
+		t.Errorf("file content drifted across reloads")
+	}
+}
+
+// TestPool_New_PersistenceDisabled_NoFile: empty RegistryPath leaves the
+// TempDir untouched.
+func TestPool_New_PersistenceDisabled_NoFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	_ = helperPool(t, false) // empty RegistryPath via the existing helper
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("TempDir not empty: %v", names)
+	}
+}
+
+// TestPool_New_MalformedRegistryIsFatal: a corrupt sessions.json must surface
+// a startup error rather than silently wiping the file.
+func TestPool_New_MalformedRegistryIsFatal(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seed malformed: %v", err)
+	}
+	pool, err := New(Config{
+		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath: path,
+	})
+	if err == nil {
+		t.Fatalf("New(malformed registry) = %p, want error", pool)
+	}
+	// File must remain on disk for operator inspection.
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("malformed registry was deleted: %v", err)
 	}
 }

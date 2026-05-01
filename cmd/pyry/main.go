@@ -78,6 +78,17 @@ func resolveSocketPath(socketFlag, name string) string {
 	return filepath.Join(home, ".pyry", sanitizeName(name)+".sock")
 }
 
+// resolveRegistryPath returns ~/.pyry/<sanitized-name>/sessions.json. Falls
+// back to a CWD-relative path if $HOME can't be resolved (matches
+// resolveSocketPath's contract).
+func resolveRegistryPath(name string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(sanitizeName(name), "sessions.json")
+	}
+	return filepath.Join(home, ".pyry", sanitizeName(name), "sessions.json")
+}
+
 // sanitizeName keeps a-z, A-Z, 0-9, _, ., - and replaces anything else with
 // _. Empty input becomes "_". Defends the on-disk socket filename against
 // path-traversal and other filesystem-unsafe input (e.g. PYRY_NAME from a
@@ -227,6 +238,7 @@ func runSupervisor(args []string) error {
 		return err
 	}
 	socketPath := resolveSocketPath(*socketFlag, *name)
+	registryPath := resolveRegistryPath(*name)
 
 	level := slog.LevelInfo
 	if *verbose {
@@ -254,7 +266,8 @@ func runSupervisor(args []string) error {
 	defer cancel()
 
 	pool, err := sessions.New(sessions.Config{
-		Logger: logger,
+		Logger:       logger,
+		RegistryPath: registryPath,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    *workdir,
