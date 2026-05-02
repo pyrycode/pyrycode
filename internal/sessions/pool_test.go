@@ -47,20 +47,29 @@ func helperPool(t *testing.T, withBridge bool) *Pool {
 // spawn `/bin/sleep 3600` — a long-lived benign child the test can tear down
 // via context cancellation. Backoff is shortened so any unexpected restart
 // path triggers quickly rather than hiding behind the 500ms default.
+//
+// Bridge is set so the supervisor uses service-mode I/O (per-supervisor
+// pipes) instead of foreground-mode (shared os.Stdin / os.Stdout). Tests
+// using foreground mode at scale (e.g. TestPool_Supervise_ConcurrentCalls_RaceClean
+// running 33 concurrent supervisors) accumulate stranded io.Copy goroutines on
+// os.Stdin's fdMutex and deadlock at shutdown. Production runs as a service
+// (Bridge always non-nil); tests should match the production code path.
 func helperPoolWithSleepArgs(t *testing.T) *Pool {
 	t.Helper()
 	if _, err := exec.LookPath("/bin/sleep"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
 	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
+			Bridge:         supervisor.NewBridge(logger),
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: logger,
 	}
 	pool, err := New(cfg)
 	if err != nil {
@@ -992,9 +1001,12 @@ func helperDummySession(t *testing.T, pool *Pool) *Session {
 		t.Fatalf("NewID: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Bridge non-nil → service mode (per-supervisor pipes, no os.Stdin
+	// contention). Foreground mode at scale is the deadlock path.
 	sup, err := supervisor.New(supervisor.Config{
 		ClaudeBin:      "/bin/sleep",
 		ClaudeArgs:     []string{"60"},
+		Bridge:         supervisor.NewBridge(logger),
 		Logger:         logger,
 		BackoffInitial: 10 * time.Millisecond,
 		BackoffMax:     10 * time.Millisecond,
