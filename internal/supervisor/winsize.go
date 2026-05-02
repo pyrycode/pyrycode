@@ -6,6 +6,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"golang.org/x/term"
 )
 
 // watchWindowSize forwards SIGWINCH from the controlling terminal to the PTY
@@ -37,7 +38,15 @@ func (s *Supervisor) watchWindowSize(ptmx *os.File) func() {
 }
 
 func resizeOnce(ptmx *os.File) {
-	if !isTerminal(os.Stdin.Fd()) {
+	// term.IsTerminal uses ioctl directly without wrapping the fd in an
+	// *os.File. Earlier code used `pty.GetsizeFull(os.NewFile(fd, ""))`,
+	// which leaks the wrapper to GC; the wrapper's finalizer eventually
+	// calls syscall.close on the underlying fd. Under heavy parallel test
+	// load the kernel reuses fd numbers fast — a stale finalizer from one
+	// resizeOnce call can close a different test's fd, surfacing as
+	// intermittent EBADF on f.Close (e.g. saveRegistryLocked's temp file).
+	// See PROJECT-MEMORY 2026-05-02 for the diagnostic chain.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return
 	}
 	size, err := pty.GetsizeFull(os.Stdin)
@@ -45,9 +54,4 @@ func resizeOnce(ptmx *os.File) {
 		return
 	}
 	_ = pty.Setsize(ptmx, size)
-}
-
-func isTerminal(fd uintptr) bool {
-	_, err := pty.GetsizeFull(os.NewFile(fd, ""))
-	return err == nil
 }
