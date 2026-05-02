@@ -31,4 +31,4 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 | [rotation-watcher.md](features/rotation-watcher.md) | Live `/clear` detection: fsnotify on the claude dir + per-PID FD probe (Linux `/proc/<pid>/fd`, macOS `lsof`) drives `Pool.RotateID` |
 | [control-plane.md](features/control-plane.md) | `internal/control` — Unix-socket JSON server, `SessionResolver` seam, verb dispatch, attach handoff |
 | [idle-eviction.md](features/idle-eviction.md) | Per-session active↔evicted state machine; idle timer + concurrent-active-cap (LRU) eviction triggers; `Activate` / `Evict` primitives |
-| [e2e-harness.md](features/e2e-harness.md) | `internal/e2e` (build tag `e2e`) — `Harness` + `Start(t)` spawn pyry in temp HOME, poll socket for ready, SIGTERM/SIGKILL teardown, leak verification via re-exec |
+| [e2e-harness.md](features/e2e-harness.md) | `internal/e2e` (build tag `e2e`) — `Harness` + `Start(t)` spawn pyry in temp HOME, `Harness.Run(t, verb, args...)` drives CLI verbs with auto-injected socket, SIGTERM/SIGKILL teardown, leak verification via re-exec |
