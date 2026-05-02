@@ -17,6 +17,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.1a-A2 (#73):** `Pool.Create(ctx, label) (SessionID, error)` — mint, persist, activate primitive. New unexported fields `Pool.sessionTpl` (per-session template snapshotted from `cfg.Bootstrap`) and `Pool.idleTimeoutDefault` (mirror of `Config.IdleTimeout`). `claude --session-id <uuid>` is now baked on the spawn path for non-bootstrap sessions. Bootstrap behaviour unchanged.
 - **Phase 1.1b-A (#60):** `Pool.List() []SessionInfo` read primitive + new `SessionInfo` value type. Operator-visible snapshot (id, label, lifecycle state, last-active timestamp, bootstrap flag) for every session in the pool, sorted by `LastActiveAt` desc with `SessionID` asc tiebreak. Synthetic `"bootstrap"` label substitution for empty-on-disk bootstrap labels lives at this layer (consumers get the same UX guarantee). Read-only; no on-disk mutation. The internal seam Phase 1.1b-B's `pyry sessions list` CLI verb (46-B) consumes.
 - **Phase 1.1c-A (#62):** `Pool.Rename(id, newLabel) error` write primitive — typed mutator for the `label` field that flows through `saveLocked`. Empty `newLabel` clears the on-disk value to `""` (synthetic `"bootstrap"` substitution from #60 then resumes for the bootstrap entry); non-empty labels persist verbatim and are reflected by `Pool.List`. Unknown id returns `ErrSessionNotFound` with on-disk and in-memory state byte-identical to before. The internal seam Phase 1.1c-B's `pyry sessions rename` CLI verb (47-B) consumes.
+- **Phase 1.1d-A1 (#94):** `Pool.Remove(ctx, id) error` write primitive + `ErrCannotRemoveBootstrap` sentinel — terminates the named session's claude process and drops its registry entry. JSONL on disk is **not** touched (disposition lands in 64-A2 / #95). Bootstrap is rejected via the sentinel; unknown ids reuse `ErrSessionNotFound`. Delete-then-evict ordering: `Pool.mu` covers the in-memory delete + persist, then is released before `Session.Evict` so the lifecycle goroutine's `transitionTo → Pool.persist` can reacquire the mutex without deadlock. Save-failure rolls the in-memory delete back. The internal seam the future `pyry sessions rm` CLI verb (#65) consumes.
 - **Phase 1.1+:** `Request.SessionID` on the wire (#71 — `sessions.new` verb consumes `Pool.Create`), per-session log lines, channel-driven auto-mint.
 
 ## Package Layout
@@ -281,6 +282,40 @@ The substitution rule lives in `List`, not in `Rename` — keeping the writer si
 
 **Strict full-`SessionID` only.** UUID-prefix resolution is a CLI/UX concern; the pool primitive matches on the full id to keep the API surface and the test matrix small. Phase 1.1c-B can resolve a prefix via `Pool.List` and then call `Rename` with the full id.
 
+### Pool.Remove (1.1d-A1)
+
+The typed delete primitive the future `pyry sessions rm` CLI verb (#65) calls instead of touching processes or `sessions.json` directly. One method, one new exported sentinel (`ErrCannotRemoveBootstrap`), no other type additions.
+
+```go
+var ErrCannotRemoveBootstrap = errors.New("sessions: cannot remove bootstrap session")
+func (p *Pool) Remove(ctx context.Context, id SessionID) error
+```
+
+**Sequence — delete-then-evict.**
+
+1. Take `Pool.mu` (write).
+2. Resolve `id` in `p.sessions`. Unknown ⇒ release `Pool.mu`, return `ErrSessionNotFound` (in-memory + on-disk state byte-identical, no `saveLocked` call).
+3. If `sess.bootstrap` ⇒ release `Pool.mu`, return `ErrCannotRemoveBootstrap` (bytes-identical, same as above).
+4. `delete(p.sessions, id)`, then `saveLocked()`. On save failure: restore `p.sessions[id] = sess`, release the lock, return the error verbatim. (Mirrors `Pool.Rename`'s rollback discipline.)
+5. Release `Pool.mu`.
+6. Call `sess.Evict(ctx)`. Returns only after the child has exited (or `ctx` cancels). The on-disk JSONL is **not** touched — disposition (archive / purge) is 64-A2 / #95.
+
+**Why delete-then-evict (not evict-then-delete).** Holding `Pool.mu` across `Session.Evict` deadlocks: the lifecycle goroutine's `transitionTo` calls `Pool.persist`, which reacquires `Pool.mu` (write). The cap-policy path (#41) hits the same constraint and uses `capMu` as the outer mutex; here the simpler resolution is to release `Pool.mu` after the in-memory delete commits — concurrent `Lookup` / `Activate` / `Rename` / `List` callers see the session as gone from that moment on, so there's no half-removed state for any observer to witness, and no risk of a re-spawn race against a session that's about to die.
+
+**Why `ctx` (not the AC's bare `id` shape).** `Session.Evict` already accepts a context; passing one through keeps the (potentially long-lived) termination interruptible and matches `Pool.Activate(ctx, id)` / `Pool.Create(ctx, label)`.
+
+**Bootstrap rejection is structural, not policy.** The bootstrap is the per-process invariant `Pool.Lookup("")` resolves to. Removing it would leave the pool in a state no caller can satisfy without an explicit re-bootstrap pass. The sentinel surface lets the CLI distinguish "operator targeted bootstrap" from "id not found" without string-matching error text.
+
+**Termination reuse.** `Pool.Remove` does not re-implement SIGTERM/SIGKILL/grace logic. `Session.Evict` already drives the supervisor's child via `exec.CommandContext` cancel ⇒ SIGKILL ⇒ `cmd.Wait` returns. The supervisor today does not have a SIGTERM grace window — earlier docs that referenced one describe an aspiration, not the current behaviour. SIGKILL is uncatchable, so no fallback path is needed.
+
+**Already-evicted sessions are a fast path.** If `sess` is already in `stateEvicted` (prior idle eviction, prior cap-policy eviction, or warm-started in evicted), `Session.Evict` is an immediate no-op — no second persist runs, the registry write in step 4 is the only mutation.
+
+**Lifecycle goroutine after Remove.** Once `Pool.Remove` returns, `sess.Run`'s loop transitions to `runEvicted` and parks on `<-s.activateCh` and `<-ctx.Done()`. The session is no longer reachable via `Pool.sessions`, so no caller can signal `activateCh`; the goroutine survives until `Pool.Run`'s `runCtx` cancels at pool shutdown (typically pyry exit). Bounded resource cost: one orphan goroutine + ~kilobyte `*Session` per `Remove` per pool lifetime. For pyrycode's expected workload (low-tens of sessions per pool, operator-driven removes) this is operationally invisible. Per the project's evidence-based fix selection, do not add a per-session terminate signal until observed.
+
+**No `Session.lcMu` taken.** `Pool.Remove` does not read `lcState` / `lastActiveAt` / `attached`; the lifecycle goroutine continues to take `lcMu` inside `transitionTo` exactly as before. Lock-order graph (`Pool.capMu → Pool.mu → Session.lcMu`) is unchanged.
+
+**Strict full-`SessionID` only.** Same posture as `Pool.Rename`. Empty-id is *not* the bootstrap shorthand it is in `Pool.Lookup` — empty falls through to the "not in map" branch and returns `ErrSessionNotFound`. Destructive operations require an explicit id.
+
 ## Concurrency
 
 `sync.RWMutex` on `Pool.sessions`:
@@ -308,12 +343,16 @@ The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH
 | `Pool.Lookup` unknown id | `ErrSessionNotFound` (sentinel). |
 | `Pool.Rename` unknown id | `ErrSessionNotFound` (sentinel). On-disk + in-memory state byte-identical to before. |
 | `Pool.Rename` save failure | Wrapped error from `saveLocked` propagated verbatim; in-memory label rolled back to prior value. |
+| `Pool.Remove` unknown id | `ErrSessionNotFound` (sentinel). On-disk + in-memory state + JSONL byte-identical to before. |
+| `Pool.Remove` bootstrap target | `ErrCannotRemoveBootstrap` (sentinel). On-disk + in-memory state + JSONL byte-identical to before. |
+| `Pool.Remove` save failure | Error from `saveLocked` propagated verbatim; in-memory delete rolled back; child not terminated. |
+| `Pool.Remove` ctx cancellation during Evict | `ctx.Err()` from `Session.Evict`. Registry entry already deleted and persisted; child terminates asynchronously under the pool's `runCtx`. |
 | `Pool.supervise` before/after `Run` | `ErrPoolNotRunning` (sentinel). |
 | `Session.Attach` with nil bridge | `ErrAttachUnavailable` (sentinel). |
 | `Session.Attach` while bridge busy | `supervisor.ErrBridgeBusy` propagated **verbatim** — no wrap. |
 | `Session.Run` / `Pool.Run` ctx cancel | `context.Canceled` from the supervisor. |
 
-Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
+Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
 
 ## Dependency Direction
 
@@ -332,6 +371,7 @@ Three test files mirror the production layout. Stdlib `testing` only.
 - **`pool_create_test.go`** (1.1a-A2) — `HappyPath` (UUID + entry shape after `Run` is live); `BootstrapUnchanged` (`Default()` returns the same `*Session` pointer pre/post `Create`); `LabelRoundTrip` (empty + non-empty labels round-trip via JSON unmarshal, not string match); `CapPassthrough_EvictsLRU` (`ActiveCap=1` evicts the bootstrap when `Create` activates); `SuperviseFails_EntryOnDisk` (no `Run` ⇒ `ErrPoolNotRunning`, valid id, entry on disk, ChildPID=0); `PersistFails_NoEntry_NoSpawn` (`registryPath` set to a non-directory path ⇒ empty id, no entry, only bootstrap in `Snapshot`).
 - **`pool_list_test.go`** (1.1b-A) — `BootstrapOnly` (single entry, `Bootstrap=true`, `Label="bootstrap"`, on-disk `label` re-read from `sessions.json` is still empty); `OrderingByLastActive` (mutate three sessions' `lastActiveAt` under `lcMu` directly to `t0` / `t0+1m` / `t0+2m`, assert desc order; add a fourth equal-time entry, assert id-asc tiebreak is stable across two `List` calls); `BootstrapLabelPassthrough` (warm-start from a `sessions.json` whose bootstrap entry has `label: "main"` — synthetic substitution does NOT clobber); `RaceClean` (N goroutines × 100 `List` calls plus a mutator goroutine, `-race`-clean).
 - **`pool_rename_test.go`** (1.1c-A) — `RoundTrip` (rename bootstrap to `"main"`; assert in-memory via `List`, on-disk by re-reading `sessions.json`); `EmptyClears` (rename to `"foo"` then to `""`; assert on-disk label is empty AND `List[0].Label == "bootstrap"` synthetic substitution resumes); `UnknownID` (zero-UUID returns `ErrSessionNotFound`, `bytes.Equal(before, after)` for the on-disk file, `List` snapshot deep-equal); `RaceWithList` (concurrent `Rename` + `List` goroutines under `-race`); `BootstrapPersistsAndShows` (rename bootstrap to `"primary"`; assert on-disk `Bootstrap=true` AND `Label="primary"`, `List[0].Label == "primary"` — no synthetic substitution).
+- **`pool_remove_test.go`** (1.1d-A1) — `HappyPath` (Create + Remove a non-bootstrap session: assert child PID gone, `Lookup` returns `ErrSessionNotFound`, registry on disk has bootstrap only, stub JSONL byte-identical); `Bootstrap_Rejected` (Remove bootstrap returns `ErrCannotRemoveBootstrap`; registry bytes/mtime + `List` snapshot + JSONL byte-identical); `UnknownID` (zero-UUID returns `ErrSessionNotFound`; same byte-identity assertions); `RaceWithList` (concurrent Create+Remove writers and `List` readers under `-race`); `TerminatesUncooperativeChild` (`/bin/sh -c 'trap "" TERM INT HUP; exec sleep 86400'` as the fake claude — SIGKILL via `exec.CommandContext` cancel terminates it inside a 10s budget, no real-time `time.Sleep` in the assertion).
 - **`session_test.go`** — `State` delegation, `Attach` with no bridge, `Attach` busy via `io.Pipe` (first attach blocks on input, second races and gets `supervisor.ErrBridgeBusy`), `Run` ctx-cancel via a real `/bin/sleep 3600` child.
 
 ### Why no `TestHelperProcess` re-exec helper

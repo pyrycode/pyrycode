@@ -27,6 +27,12 @@ var newProbe = rotation.DefaultProbe
 // ErrSessionNotFound is returned by Pool.Lookup for a non-empty unknown id.
 var ErrSessionNotFound = errors.New("sessions: session not found")
 
+// ErrCannotRemoveBootstrap is returned by Pool.Remove for the bootstrap
+// session. The bootstrap is a per-process invariant, not an operator
+// resource — removing it would leave the pool in a state Pool.Lookup("")
+// can't satisfy. Matchable via errors.Is.
+var ErrCannotRemoveBootstrap = errors.New("sessions: cannot remove bootstrap session")
+
 // ErrPoolNotRunning is returned by supervise when called before Pool.Run has
 // wired the supervisor handle, or after Run has cleared it. Callers must
 // invoke supervise only while Pool.Run is active.
@@ -410,6 +416,56 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 		return err
 	}
 	return nil
+}
+
+// Remove terminates the named session's claude process (if running) and
+// drops its registry entry. The on-disk JSONL is NOT touched — disposition
+// (archive / purge) is the caller's concern (see #95).
+//
+// Returns ErrSessionNotFound for an unknown id, ErrCannotRemoveBootstrap
+// for the bootstrap entry, or ctx.Err() if termination is cancelled. On
+// any of those error paths, the in-memory pool, on-disk sessions.json,
+// and the JSONL on disk are byte-identical to their prior state.
+//
+// Returns only after the child has exited (modulo ctx cancellation).
+//
+// Ordering — delete-then-evict. Pool.mu is taken (write) for the in-memory
+// delete + saveLocked, then released BEFORE calling sess.Evict. The
+// alternative (holding p.mu across Evict) deadlocks: Session.transitionTo
+// calls Pool.persist, which reacquires p.mu. Releasing p.mu before Evict
+// is safe because the entry is already gone from p.sessions — concurrent
+// Lookup/Activate/Rename/List paths see the session as removed from the
+// moment p.mu drops, so no caller can re-spawn or observe a half-removed
+// state. Same outer-mutex pattern as the cap-policy eviction (#41).
+//
+// On saveLocked failure, the in-memory delete is rolled back so the disk
+// and memory remain consistent (mirrors Pool.Rename).
+//
+// Lifecycle goroutine after Remove: sess.Run's loop transitions to
+// runEvicted and parks on activateCh / ctx.Done(). The session is no
+// longer reachable via Pool.sessions, so no caller can signal activateCh;
+// the goroutine survives until pool.Run's runCtx cancels at pool shutdown.
+// Bounded resource cost — see ticket #94 design notes.
+func (p *Pool) Remove(ctx context.Context, id SessionID) error {
+	p.mu.Lock()
+	sess, ok := p.sessions[id]
+	if !ok {
+		p.mu.Unlock()
+		return ErrSessionNotFound
+	}
+	if sess.bootstrap {
+		p.mu.Unlock()
+		return ErrCannotRemoveBootstrap
+	}
+	delete(p.sessions, id)
+	if err := p.saveLocked(); err != nil {
+		p.sessions[id] = sess
+		p.mu.Unlock()
+		return err
+	}
+	p.mu.Unlock()
+
+	return sess.Evict(ctx)
 }
 
 // Lookup resolves a SessionID to a Session. An empty id resolves to the
