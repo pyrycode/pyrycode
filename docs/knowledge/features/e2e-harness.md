@@ -1,11 +1,11 @@
-# E2E Harness — Spawn + Cleanup Primitive
+# E2E Harness
 
 `internal/e2e` is a build-tag-isolated test harness that spawns `pyry` as a real
 daemon in an isolated temp `$HOME`, blocks until the control socket is dialable,
-and tears down reliably on test cleanup. It's the process-lifecycle primitive that
-later e2e tickets (CLI-driver wrappers, session-verb e2es) layer on top of.
+drives CLI verbs against it, and tears down reliably on test cleanup.
 
-Phase: ticket #68, split from #51.
+Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e), split
+from #51.
 
 ## What It Does
 
@@ -19,7 +19,8 @@ Phase: ticket #68, split from #51.
 
 ## Public API
 
-Three exported names — `Harness`, `Start`, plus the struct fields:
+Five exported names — `Harness`, `Start`, `RunResult`, `(*Harness).Run`, plus the
+struct fields:
 
 ```go
 type Harness struct {
@@ -31,9 +32,19 @@ type Harness struct {
 }
 
 func Start(t *testing.T) *Harness  // fail-fast: t.Fatalf on any error
+
+type RunResult struct {
+    ExitCode int
+    Stdout   []byte
+    Stderr   []byte
+}
+
+func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult
 ```
 
-No `Option`s in this iteration. They land when the first consumer needs one.
+No `Option`s in this iteration. Per-verb typed wrappers (`Status()`, `Stop()`,
+`Attach()`) land when the consuming session-verb tickets (#52, #54, #55, #56)
+make them useful.
 
 ## Invocation
 
@@ -84,6 +95,108 @@ sufficient for the "daemon is alive" contract.
 A second `select` watches `doneCh` (closed by the wait goroutine on
 `cmd.Wait` return). An early pyry exit short-circuits the deadline and surfaces
 captured stderr in the `t.Fatalf` message.
+
+## CLI Driver (`Harness.Run`)
+
+`Run(t, verb, args...)` invokes the cached pyry binary with `<verb>
+-pyry-socket=<h.SocketPath> <args...>`, waits for it to exit (10s
+`context.WithTimeout`), and returns a `RunResult{ExitCode, Stdout, Stderr}`.
+
+```go
+func TestStatusReportsRunning(t *testing.T) {
+    h := e2e.Start(t)
+
+    r := h.Run(t, "status")
+    if r.ExitCode != 0 {
+        t.Fatalf("pyry status exit=%d stderr=%s", r.ExitCode, r.Stderr)
+    }
+    if !bytes.Contains(r.Stdout, []byte("Phase:")) {
+        t.Fatalf("status output missing Phase: line: %s", r.Stdout)
+    }
+}
+```
+
+### Argument Layout
+
+```
+[binPath]
+"status"                          // verb (caller-provided, positional)
+"-pyry-socket=" + h.SocketPath    // injected
+<caller's args...>
+```
+
+Verb is positional because pyry dispatches subcommands on `os.Args[1]` — flags
+must come *after* the verb. Encoding that into the signature
+(`verb string, args ...string`) prevents the obvious footgun of writing
+`h.Run(t, "-pyry-socket=other", "status")`.
+
+Caller-side override is naturally available: Go's `flag` package takes the
+*last* value, so `h.Run(t, "status", "-pyry-socket=somewhere-else")` wins
+without any special-case logic in the harness.
+
+### Why `RunResult` (struct), not a tuple
+
+Future-proofs for `Duration`/`Combined`/`OOMed` additions without call-site
+churn. Named fields prevent the obvious `[]byte` mix-up between stdout and
+stderr that a positional tuple invites.
+
+### Reusing harness state
+
+- `binPath` is the package-level var written by `ensurePyryBuilt` inside
+  `Start`. `sync.Once`'s happens-before guarantee means any post-`Start`
+  read is safe — no need to plumb the path through `Harness`.
+- `childEnv(h.HomeDir)` is reused verbatim. The CLI client doesn't strictly
+  *need* `HOME` redirection (`-pyry-socket=` is explicit), but stripping
+  `PYRY_NAME` defends against the operator's shell alias leaking into a
+  future verb that resolves an instance by name independently of the socket.
+
+### Failure Posture
+
+| Failure | Response |
+|---|---|
+| `cmd.Run` returns `*exec.ExitError` | `RunResult` with non-zero `ExitCode` (caller asserts) |
+| `cmd.Run` returns any other error | `t.Fatalf` (exec/fork failure — caller can't recover) |
+| 10s deadline expires | `t.Fatalf` with stdout + stderr (daemon-side hang) |
+| `cmd.Run` returns nil | `RunResult` with `ExitCode = 0` |
+
+The asymmetry — non-zero exit returned, exec failure fatal — is intentional:
+non-zero exit is *data the test asserts on*; a fork failure is infrastructure
+breaking, with no useful recovery in test code.
+
+The 10s timeout is the wrapper budget; `pyry status` itself uses a 5s
+socket-dial timeout in `runStatus`, so the wrapper budget gives a comfortable
+margin without letting a hung daemon stall a test indefinitely. No regression
+test for the timeout path — constructing a daemon that hangs `pyry status`
+for >10s would require either a real claude that doesn't respond or test-only
+socket injection, both significantly more invasive than the safety net buys
+us. Per evidence-based fix selection, the deadline branch is defensive only.
+
+## First Feature E2E (`TestStatus_E2E`)
+
+```go
+func TestStatus_E2E(t *testing.T) {
+    h := Start(t)
+
+    r := h.Run(t, "status")
+    if r.ExitCode != 0 {
+        t.Fatalf("pyry status exit=%d\nstdout:\n%s\nstderr:\n%s",
+            r.ExitCode, r.Stdout, r.Stderr)
+    }
+    if !bytes.Contains(r.Stdout, []byte("Phase:")) {
+        t.Errorf("status stdout missing %q line:\n%s", "Phase:", r.Stdout)
+    }
+}
+```
+
+`"Phase:"` is the leading literal in `runStatus`'s output (`fmt.Printf("Phase:
+        %s\n", resp.Phase)`) and is stable across phase values, restart counts,
+and future field additions. Asserting on the *value* (`PhaseRunning` etc.)
+would couple the test to claude-child startup timing — exactly what
+`/bin/sleep infinity` was chosen to avoid. The contract this test verifies is
+"daemon is up, socket answers, status verb round-trips."
+
+`pyry version` was rejected: it short-circuits in `main.go` before parsing
+flags, so it doesn't exercise the socket plumbing the harness sells.
 
 ## Concurrency Model
 
@@ -176,20 +289,22 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   (SIGTERM, SIGKILL) and Unix sockets; no build constraint beyond the e2e tag
   is needed because pyry itself is Linux + Darwin only.
 
-## Deliberately Out of Scope (deferred to #51 follow-up)
+## Deliberately Out of Scope
 
-- `Harness.Status()`, `Harness.Stop()`, `Harness.Attach()`, generic
-  `Harness.Run(args...)` CLI-verb wrappers
-- `Option` type and any `WithFoo(...)` constructors
-- First feature-flavoured e2e test (sessions verbs etc.)
-- CI wiring (`make e2e`, GitHub Actions matrix)
-
-The build-tag isolation means the existing `go test ./...` CI job keeps
-passing untouched until that follow-up lands.
+- Per-verb typed wrappers (`Harness.Status()`, `Harness.Stop()`,
+  `Harness.Attach()`) — land per-ticket as session verbs are built (#52, #54,
+  #55, #56) if useful.
+- `Option` type and any `WithFoo(...)` constructors.
+- Stdin plumbing on `Run` — no current verb reads stdin; add when one does.
+- CI wiring (`make e2e`, GitHub Actions matrix). Build-tag isolation means
+  existing `go test ./...` keeps passing untouched.
+- Race-mode harness build (`go build -race` inside `ensurePyryBuilt` when the
+  parent suite uses `-race`).
 
 ## Related
 
-- Spec: `docs/specs/architecture/68-e2e-harness-primitive.md`
+- Specs: `docs/specs/architecture/68-e2e-harness-primitive.md`,
+  `docs/specs/architecture/69-e2e-cli-driver.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude)
-- Future: CLI-driver layer + first feature e2e (#51 follow-up)
+- Consumers: Phase 1.1 session-verb tickets (#52, #54, #55, #56)

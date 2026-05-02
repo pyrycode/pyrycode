@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -100,6 +101,23 @@ func TestHarness_NoLeakOnFatal(t *testing.T) {
 	// AC's "no socket file leaks" property holds.
 	if _, err := os.Stat(sock); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("socket %s not removed: %v", sock, err)
+	}
+}
+
+// TestStatus_E2E spawns the daemon and exercises the pyry status verb
+// end-to-end against its control socket. Asserts on a stable substring
+// rather than exact whitespace so a future status-formatting change
+// doesn't break the test.
+func TestStatus_E2E(t *testing.T) {
+	h := Start(t)
+
+	r := h.Run(t, "status")
+	if r.ExitCode != 0 {
+		t.Fatalf("pyry status exit=%d\nstdout:\n%s\nstderr:\n%s",
+			r.ExitCode, r.Stdout, r.Stderr)
+	}
+	if !bytes.Contains(r.Stdout, []byte("Phase:")) {
+		t.Errorf("status stdout missing %q line:\n%s", "Phase:", r.Stdout)
 	}
 }
 

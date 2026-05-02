@@ -11,10 +11,29 @@
 //
 // Set PYRY_E2E_BIN to a pre-built pyry binary to skip the per-test-process
 // `go build`.
+//
+// Typical usage — spawn a daemon and drive a CLI verb against it:
+//
+//	func TestStatusReportsRunning(t *testing.T) {
+//	    h := e2e.Start(t)
+//
+//	    r := h.Run(t, "status")
+//	    if r.ExitCode != 0 {
+//	        t.Fatalf("pyry status exit=%d stderr=%s", r.ExitCode, r.Stderr)
+//	    }
+//	    if !bytes.Contains(r.Stdout, []byte("Phase:")) {
+//	        t.Fatalf("status output missing Phase: line: %s", r.Stdout)
+//	    }
+//	}
+//
+// h.Run auto-injects -pyry-socket=<h.SocketPath> after the verb so callers
+// don't thread it through. Exit code, stdout, and stderr are all available
+// on the returned RunResult regardless of success.
 package e2e
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -32,6 +51,7 @@ const (
 	readyPollGap  = 50 * time.Millisecond
 	termGrace     = 3 * time.Second
 	killGrace     = 1 * time.Second
+	runTimeout    = 10 * time.Second
 )
 
 // Harness owns one running pyry daemon. Returned by Start; cleanup is
@@ -183,6 +203,57 @@ func (h *Harness) waitForReady() error {
 		}
 	}
 	return fmt.Errorf("pyry not ready within %s", readyDeadline)
+}
+
+// RunResult is the outcome of a CLI invocation against the harness's daemon.
+// All three fields are populated regardless of exit code; an erroring command
+// still has its captured Stdout/Stderr available for assertion.
+type RunResult struct {
+	ExitCode int
+	Stdout   []byte
+	Stderr   []byte
+}
+
+// Run invokes the cached pyry binary with `<verb> -pyry-socket=<h.SocketPath> <args...>`,
+// waits for it to exit, and returns its captured streams. The harness's
+// socket path is auto-injected so callers don't thread it through.
+//
+// The verb is positional because pyry dispatches subcommands on os.Args[1];
+// flags must come after the verb.
+//
+// Fails the test (t.Fatalf) on exec failure (binary not found, fork error)
+// or if the command runs longer than runTimeout. A non-zero exit code is
+// not a test failure — the caller asserts on RunResult.ExitCode.
+func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+
+	full := append([]string{verb, "-pyry-socket=" + h.SocketPath}, args...)
+	cmd := exec.CommandContext(ctx, binPath, full...)
+	cmd.Env = childEnv(h.HomeDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("e2e: pyry %s timed out after %s\nstdout:\n%s\nstderr:\n%s",
+			verb, runTimeout, stdout.String(), stderr.String())
+	}
+
+	var exitCode int
+	switch e := err.(type) {
+	case nil:
+		exitCode = 0
+	case *exec.ExitError:
+		exitCode = e.ExitCode()
+	default:
+		t.Fatalf("e2e: pyry %s exec failed: %v", verb, err)
+	}
+
+	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 }
 
 // teardown sends SIGTERM, escalates to SIGKILL after a short grace, then
