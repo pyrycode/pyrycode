@@ -6,7 +6,8 @@ drives CLI verbs against it, and tears down reliably on test cleanup.
 
 Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e),
 #52 (CLI verbs e2e coverage — `stop`, `logs`, `version`, `status` stopped path
-+ `RunBare` helper), split from #51.
++ `RunBare` helper), #106 (restart primitive — `StartIn` / `Stop` + restart-
+survival test), split from #51.
 
 ## What It Does
 
@@ -20,8 +21,8 @@ Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e),
 
 ## Public API
 
-Six exported names — `Harness`, `Start`, `RunResult`, `(*Harness).Run`,
-`RunBare`, plus the struct fields:
+Eight exported names — `Harness`, `Start`, `StartIn`, `(*Harness).Stop`,
+`RunResult`, `(*Harness).Run`, `RunBare`, plus the struct fields:
 
 ```go
 type Harness struct {
@@ -33,6 +34,18 @@ type Harness struct {
 }
 
 func Start(t *testing.T) *Harness  // fail-fast: t.Fatalf on any error
+
+// StartIn behaves like Start but uses the caller-supplied home directory
+// instead of allocating a fresh t.TempDir(). Pre-populate it (e.g.
+// <home>/.pyry/test/sessions.json) before calling to drive a daemon
+// against a chosen on-disk state. Caller owns the directory's lifecycle.
+func StartIn(t *testing.T, home string) *Harness
+
+// Stop gracefully terminates the daemon (SIGTERM, grace, escalate to
+// SIGKILL — same path as t.Cleanup teardown), waits for exit, and
+// removes the socket. HomeDir is left intact. Idempotent with t.Cleanup
+// teardown via sync.Once.
+func (h *Harness) Stop(t *testing.T)
 
 type RunResult struct {
     ExitCode int
@@ -51,7 +64,12 @@ func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult
 func RunBare(t *testing.T, args ...string) RunResult
 ```
 
-No `Option`s in this iteration. Per-verb typed wrappers (`Status()`, `Stop()`,
+`Start(t) *Harness` is now a one-line `return StartIn(t, t.TempDir())` —
+existing call sites unchanged. `StartIn` is the workhorse; `Start` is the
+common-case sugar. `Stop` is a public wrapper around the internal `teardown`
+(name kept private to make the public/private split obvious to readers).
+
+No `Option`s in this iteration. Per-verb typed wrappers (`Status()`,
 `Attach()`) intentionally not added — `Harness.Run` + `RunBare` cover every
 shipped non-interactive verb. Wrappers land if a consumer materially benefits.
 
@@ -229,9 +247,9 @@ Two use cases motivated the helper:
    path and assert the failure shape" — no spawn-then-stop-then-race-the-
    teardown ordering glue.
 
-The helper is the *only* harness API added in #52. `Harness.Stop()` mid-test,
-typed `Status()` / `Logs()` wrappers, etc. were explicitly declined to keep the
-harness surface minimal.
+The helper is the *only* harness API added in #52. (`Harness.Stop()` mid-test
+was deferred at the time and shipped later in #106 — see the Restart Pattern
+section above. Typed `Status()` / `Logs()` wrappers remain declined.)
 
 ## CLI Verb Coverage Tests (`cli_verbs_test.go`)
 
@@ -281,6 +299,110 @@ Three conservative substrings catch panics and stack traces without coupling
 to the exact wording. The same pattern fits any "clean error, not a crash"
 assertion.
 
+## Restart Pattern (`StartIn` + `Stop`)
+
+`StartIn` + `Stop` together let a test prove on-disk invariants survive
+daemon restart: pre-populate `HOME` → `Start` → `Stop` → second `StartIn`
+against the same `HOME` → assert the file directly.
+
+```go
+home, err := os.MkdirTemp("", "pyry-rs-*")
+if err != nil { t.Fatalf("mkdir home: %v", err) }
+t.Cleanup(func() { _ = os.RemoveAll(home) })
+
+regDir := filepath.Join(home, ".pyry", "test")
+_ = os.MkdirAll(regDir, 0o700)
+_ = os.WriteFile(filepath.Join(regDir, "sessions.json"), []byte(registryJSON), 0o600)
+
+h1 := e2e.StartIn(t, home)
+h1.Stop(t)
+
+h2 := e2e.StartIn(t, home) // same socket path, same registry; reads back the pre-write
+_ = h2
+// Inspect the registry file at <home>/.pyry/test/sessions.json directly.
+```
+
+### Why `os.MkdirTemp` instead of `t.TempDir()` for the HOME
+
+Unix sockets cap `sun_path` at 104 bytes on macOS (108 on Linux).
+`t.TempDir()` embeds the (long) test name into its path; for tests with
+descriptive names (e.g. `TestE2E_Restart_PreservesActiveSessions`) the
+appended `pyry.sock` overflows the limit. `os.MkdirTemp("", "pyry-rs-*")`
+keeps the prefix tiny. Tests using `Start(t)` (short name or short dir) are
+unaffected; the restart test's tighter budget motivates the explicit
+`os.MkdirTemp` + `t.Cleanup(os.RemoveAll)`. See `lessons.md § Unix-socket
+sun_path limits and t.TempDir()`.
+
+### Why the same socket path works across the two spawns
+
+`StartIn` derives `socket := filepath.Join(home, "pyry.sock")` — both
+spawns use the same path. The second daemon's `Server.Listen`
+(`internal/control/server.go`) handles a stale socket file via dial-probe
+→ ECONNREFUSED → `os.Remove` → `net.Listen`; no test-level coordination
+needed. By the time `Stop` returns, `cmd.Wait` has reaped the first
+process, the listener fd is closed, and ECONNREFUSED is deterministic.
+The defensive `os.Remove(h.SocketPath)` in teardown belt-and-suspenders
+the SIGKILL path.
+
+### Idempotency invariant
+
+`cleanupOnce` (a `sync.Once`) guards a single teardown. Whichever fires
+first — explicit `Stop(t)` or `t.Cleanup`'s deferred call — wins; the
+other is a no-op. Two harnesses (`h1`, `h2`) own independent
+`cleanupOnce` / `doneCh` / `cmd`; `t.Cleanup` runs LIFO, so `h2.teardown`
+fires first against the live second daemon, then `h1.teardown` (no-op,
+already torn down via `Stop`).
+
+### `restart_test.go` — `TestE2E_Restart_PreservesActiveSessions`
+
+The first concrete consumer of the restart primitive (#106). Pre-writes a
+registry with two `lifecycle_state: active` entries (one bootstrap, one
+non-bootstrap), cycles `StartIn → Stop → StartIn`, and asserts:
+
+- Registry file still exists after the first `Stop`.
+- `version` field preserved.
+- Session count preserved (the non-bootstrap entry is the canary — catches
+  "pyry rewrote the file with only the bootstrap entry").
+- Per-session: `lifecycle_state` and `bootstrap` flag preserved.
+
+Deliberately **not** asserted: byte-identity of the file, `LastActiveAt`
+equality. Coupling to byte-identity inverts the dependency direction (a
+benign `MarshalIndent` change would break the test); pinning
+`LastActiveAt` would couple to today's no-save invariant in a way that
+breaks the moment a benign state-change ships.
+
+#### Why this works against today's pyry without behaviour changes
+
+The restart-time code path against a pre-populated registry is:
+`loadRegistry` reads → `pickBootstrap` selects the lone `bootstrap: true`
+entry; non-bootstrap entries are *not* materialised into `Pool.sessions` →
+`reg != nil` skips the cold-start save → `reconcileBootstrapOnNew`
+no-ops because `~/.claude/projects/<encoded-cwd>` doesn't exist under the
+test HOME → bootstrap enters `runActive`, idle timer disabled → SIGTERM
+cancels ctx → `runActive` returns `ctx.Err` *before* `transitionTo
+(stateEvicted)`, so no terminal save fires. Net: nothing in pyry calls
+`saveLocked` between pre-write and the second `loadRegistry`. The non-
+bootstrap entries persist on disk *because pyry doesn't touch them*, not
+because pyry materialises them — that is the realistic-today shape of the
+guarantee, and the test locks in the no-save-without-state-change
+invariant. Future tickets that materialise non-bootstrap entries will need
+to preserve their lifecycle state across restart explicitly; this test
+will then catch any regression.
+
+#### File split rationale
+
+Lives in its own `restart_test.go` rather than extending
+`cli_verbs_test.go`. The latter is *CLI surface coverage* (one test per
+shipped verb); this test is *daemon-level disk-state survival* and doesn't
+drive a CLI verb. Mirrors the `harness_test.go` (mechanics) vs.
+`cli_verbs_test.go` (verb surface) split #52 established.
+
+The local `registryFile` / `registryEntry` mirror types are duplicated
+intentionally — `internal/sessions`'s on-disk types are unexported, and
+exporting them solely for one test would invert the dependency direction.
+The schema is small and stable; if a field is added, the mirror grows it
+too.
+
 ## Concurrency Model
 
 | Goroutine | Owns | Lifetime |
@@ -304,10 +426,12 @@ Registered via `t.Cleanup`:
 4. On SIGKILL grace expiry: `t.Logf` warning; let leak verification surface it.
 5. `os.Remove(SocketPath)` — defensive, since SIGKILL bypasses pyry's own
    socket cleanup.
-6. `HomeDir` is auto-cleaned by `t.TempDir`.
+6. `HomeDir` is auto-cleaned by `t.TempDir` when allocated by `Start(t)`.
+   Under `StartIn(t, home)` the caller owns the directory's lifecycle —
+   teardown leaves `HomeDir` intact so a subsequent `StartIn` can reuse it.
 
-The `sync.Once` makes this safe to call from a future manual `Stop()` plus
-`t.Cleanup` without double-firing.
+The `sync.Once` makes this safe to call from a manual `Stop()` (shipped in
+#106) plus `t.Cleanup` without double-firing.
 
 ## Failure Posture
 
@@ -374,11 +498,12 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
 
 ## Deliberately Out of Scope
 
-- Per-verb typed wrappers (`Harness.Status()`, `Harness.Stop()`,
-  `Harness.Attach()`) — `Run` + `RunBare` cover every shipped verb; add
-  wrappers if a consumer materially benefits.
-- `Harness.Stop()` mid-test helper — `Run(t, "stop")` plus the bounded
-  `processAlive`/`os.Stat` poll covers the only consumer that needs it.
+- Per-verb typed wrappers (`Harness.Status()`, `Harness.Attach()`) — `Run`
+  + `RunBare` cover every shipped verb; add wrappers if a consumer
+  materially benefits.
+- `Options` struct for `StartIn` — today there's exactly one knob (`home`).
+  Migration to `Options{Home: ..., ...}` is mechanical and non-breaking
+  (`StartIn` becomes a thin alias) when a second knob lands.
 - `Option` type and any `WithFoo(...)` constructors.
 - Stdin plumbing on `Run` — no current verb reads stdin; add when one does.
 - `pyry attach` e2e — interactive PTY, separate work; the harness's
@@ -399,9 +524,13 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
 - Specs: `docs/specs/architecture/68-e2e-harness-primitive.md`,
   `docs/specs/architecture/69-e2e-cli-driver.md`,
   `docs/specs/architecture/52-cli-verbs-e2e-coverage.md`,
-  `docs/specs/architecture/80-e2e-install-systemd-roundtrip.md`
+  `docs/specs/architecture/80-e2e-install-systemd-roundtrip.md`,
+  `docs/specs/architecture/106-e2e-restart-primitive.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
-  benign fake claude)
+  benign fake claude); lessons.md § Unix-socket sun_path limits and
+  t.TempDir()
 - Consumers: shipped CLI verbs (#52: `stop`, `logs`, `version`,
-  `status` stopped path; #69: `status` running path), Phase 1.1 session-verb
-  tickets (#54, #55, #56), install-service round-trip ([install-e2e.md](install-e2e.md))
+  `status` stopped path; #69: `status` running path), restart-survival
+  proof (#106: `TestE2E_Restart_PreservesActiveSessions`), Phase 1.1
+  session-verb tickets (#54, #55, #56), install-service round-trip
+  ([install-e2e.md](install-e2e.md))

@@ -179,6 +179,12 @@ Gotchas, anti-patterns, and mistakes. Read this before every session so you don'
   If you copy-paste assertions between platforms, this is the line that has
   to differ.
 
+## Unix-socket sun_path limits and `t.TempDir()`
+
+- **`sun_path` caps at 104 bytes on macOS, 108 on Linux — `t.TempDir()` can overflow it.** `t.TempDir()` embeds the sanitised test name in its path (`/var/folders/.../TestSomeReallyLongDescriptiveName/001/`). Append `pyry.sock` and a descriptive name like `TestE2E_Restart_PreservesActiveSessions` and the resulting `sun_path` can exceed 104 bytes on darwin. `bind(2)` returns `EINVAL`; in pyry that surfaces as a daemon startup failure and a harness "ready-deadline exceeded" — neither obviously points at path length.
+- **Use `os.MkdirTemp("", "<short-prefix>-*")` + `t.Cleanup(os.RemoveAll)` for path-budget-tight cases.** Keeps the prefix tiny so `<home>/pyry.sock` fits. Tests with short names or short HOME budgets can keep `t.TempDir()`; only switch when the test name + macOS folder prefix puts the path over the limit. Used by `TestE2E_Restart_PreservesActiveSessions` (#106).
+- **Heuristic.** An e2e test that passes on Linux but fails the readiness gate on macOS, or fails after a benign test rename, is the path-length shape — suspect it before suspecting timing.
+
 ## Closing a fd to interrupt a goroutine's Read requires O_NONBLOCK
 
 - **Plain `os.OpenFile("/dev/tty", os.O_RDONLY, 0)` produces a blocking fd that `Close()` cannot interrupt.** Without `O_NONBLOCK`, `internal/poll.(*FD).Read` calls `syscall.Read` directly and parks in the kernel; POSIX `close(2)` on another goroutine is a no-op for the in-flight read. The Go runtime poller only mediates Reads when the syscall returns `EAGAIN` — i.e., the fd must be non-blocking. With `os.O_RDONLY|syscall.O_NONBLOCK`, Read returns EAGAIN, the goroutine parks on the poller, and `Close()` calls `runtime_pollUnblock` which wakes it with `os.ErrClosed`. This is the entire mechanism that makes "open a side fd, close it to drain the goroutine" work — drop O_NONBLOCK and you reproduce the original `os.Stdin` leak (#78). Sockets and pipes get this for free; character devices like /dev/tty do not.
