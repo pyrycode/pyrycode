@@ -10,7 +10,9 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.0b (#29):** consumers wired. `cmd/pyry/main.go` constructs the `Pool`; `internal/control` resolves session state via a `SessionResolver` interface defined in the control package. Wire protocol unchanged; `pyry status`/`stop`/`logs`/`attach` are byte-identical to Phase 0.
 - **Phase 1.2a (#34):** `Config.RegistryPath`, on-disk `sessions.json`, cold/warm-start in `Pool.New`. See [sessions-registry.md](sessions-registry.md).
 - **Phase 1.2b-A (#38):** `Config.ClaudeSessionsDir`, startup reconciliation pass in `Pool.New`, `Pool.RotateID` seam. See [jsonl-reconciliation.md](jsonl-reconciliation.md).
-- **Phase 1.1+:** `Pool.Add(SessionConfig)`, errgroup fan-out in `Pool.Run`, `Request.SessionID` on the wire, `claude --session-id <uuid>` invocation, per-session log lines.
+- **Phase 1.2b-B (#39):** errgroup wrap in `Pool.Run` (bootstrap + rotation watcher); `RegisterAllocatedUUID` skip set on `Pool`. See [rotation-watcher.md](rotation-watcher.md).
+- **Phase 1.2c-A (#40):** per-session `active ↔ evicted` lifecycle goroutine, `Config.IdleTimeout` / `SessionConfig.IdleTimeout`, `Session.Activate` / `Pool.Activate`, registry `lifecycle_state`. `Session.Run` rewritten as the lifecycle loop; `Session.Attach` gains attach bookkeeping. See [idle-eviction.md](idle-eviction.md).
+- **Phase 1.1+:** `Pool.Add(SessionConfig)`, N-session fan-out in `Pool.Run`'s errgroup, `Request.SessionID` on the wire, `claude --session-id <uuid>` invocation, per-session log lines.
 
 ## Package Layout
 
@@ -40,19 +42,23 @@ The empty `SessionID` (`""`) is the **unset sentinel**, never a valid generated 
 ### `Session`
 
 ```go
-type Session struct { /* id, sup, bridge, log */ }
+type Session struct { /* id, sup, bridge, log, lifecycle fields */ }
 
 func (s *Session) ID() SessionID
 func (s *Session) State() supervisor.State
+func (s *Session) LifecycleState() lifecycleState
 func (s *Session) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
+func (s *Session) Activate(ctx context.Context) error
 func (s *Session) Run(ctx context.Context) error
 ```
 
-One supervised claude instance plus the bridge that mediates its I/O in service mode. All four methods are pure delegation to the underlying `*supervisor.Supervisor` / `*supervisor.Bridge`:
+One supervised claude instance plus the bridge that mediates its I/O in service mode. As of 1.2c-A each Session owns a lifecycle goroutine driving an `active ↔ evicted` state machine (see [idle-eviction.md](idle-eviction.md)).
 
-- `State()` returns the supervisor's snapshot — same safe-from-any-goroutine contract.
-- `Attach` returns `ErrAttachUnavailable` when `bridge == nil` (foreground mode); otherwise delegates to `(*supervisor.Bridge).Attach`. `supervisor.ErrBridgeBusy` is propagated **verbatim** so callers' `errors.Is` checks keep working.
-- `Run(ctx)` blocks until ctx cancellation. The supervisor's `Run` returns `ctx.Err()` regardless of how the child exits; `Session.Run` inherits that.
+- `State()` returns the supervisor's snapshot — same safe-from-any-goroutine contract. In `evicted`, the supervisor reports `PhaseStopped` (faithful — it really isn't running).
+- `LifecycleState()` returns the current lifecycle state under `lcMu`. Used by tests and (eventually) richer status payloads.
+- `Attach` returns `ErrAttachUnavailable` when `bridge == nil` (foreground mode); otherwise delegates to `(*supervisor.Bridge).Attach`. `supervisor.ErrBridgeBusy` is propagated **verbatim** so callers' `errors.Is` checks keep working. Bumps `attached` under `lcMu`; the wrapper goroutine spawned here decrements on bridge `done`. **Contract:** callers must `Activate` first — `bridge.Attach` on an evicted session would block on the pipe forever.
+- `Activate(ctx)` moves an evicted session to `active`, blocking until the supervisor has started (or `ctx` cancels). No-op when already active. Idempotent under concurrent calls.
+- `Run(ctx)` blocks until ctx cancellation, driving the lifecycle loop (`runActive` ↔ `runEvicted`). The supervisor is started on an inner ctx during active periods and drained when the ctx cancels.
 
 The `log` field is written by the constructor but not read in 1.0 (no per-session log lines yet — see [parent ADR](../decisions/003-session-addressable-runtime.md)). Kept on the struct so 1.1 can attach without reshaping.
 
@@ -66,6 +72,7 @@ func (p *Pool) Lookup(id SessionID) (*Session, error)
 func (p *Pool) Default() *Session
 func (p *Pool) Run(ctx context.Context) error
 func (p *Pool) RotateID(oldID, newID SessionID) error
+func (p *Pool) Activate(ctx context.Context, id SessionID) error
 ```
 
 `New` generates a `SessionID`, constructs the underlying `*supervisor.Supervisor` from `cfg.Bootstrap`, and installs the result as the single bootstrap entry. Both `NewID` failure and `supervisor.New` failure are wrapped (`sessions: generate bootstrap id: %w`, `sessions: bootstrap supervisor: %w`) and treated as fatal-at-startup.
@@ -78,7 +85,9 @@ func (p *Pool) RotateID(oldID, newID SessionID) error
 
 `Default()` is a separate accessor with the same body minus the empty-string branch — startup paths that need the bootstrap don't carry an `error` return they know is impossible.
 
-`Run` calls `bootstrap.Run(ctx)` directly; **no errgroup in 1.0**. The errgroup fan-out is the Phase 1.1 extension point and lands with the first multi-session test.
+`Run` wraps the bootstrap session and (when `ClaudeSessionsDir` is set) the rotation watcher under `errgroup.WithContext`. The 1.2b-B errgroup wrap is the extension point Phase 1.1's N-session fan-out reuses by adding one `g.Go(sess.Run)` per pool entry.
+
+`Activate(ctx, id)` (1.2c-A) is a thin wrapper that resolves `id` and calls `Session.Activate`. Symmetry with the rest of the surface; future routers get a single entry point. Returns `ErrSessionNotFound` for unknown ids.
 
 `RotateID` (1.2b-A) atomically swaps the in-memory entry keyed by `oldID` with one keyed by `newID`, updates the bootstrap pointer if `oldID` was the bootstrap, bumps `last_active_at`, and persists. `p.mu` (write) is held across the entire operation. `RotateID(x, x)` is a no-op; unknown `oldID` returns `ErrSessionNotFound`. This is the load-bearing seam shared between startup reconciliation and the upcoming live-detection (`/clear` while claude is running) work — see [jsonl-reconciliation.md](jsonl-reconciliation.md).
 
@@ -88,8 +97,9 @@ func (p *Pool) RotateID(oldID, newID SessionID) error
 type Config struct {
     Bootstrap         SessionConfig
     Logger            *slog.Logger
-    RegistryPath      string  // sessions.json path; "" disables persistence (test-only)
-    ClaudeSessionsDir string  // claude's <uuid>.jsonl dir; "" disables startup reconcile
+    RegistryPath      string        // sessions.json path; "" disables persistence (test-only)
+    ClaudeSessionsDir string        // claude's <uuid>.jsonl dir; "" disables startup reconcile
+    IdleTimeout       time.Duration // default per-session eviction window; 0 disables
 }
 
 type SessionConfig struct {
@@ -102,6 +112,8 @@ type SessionConfig struct {
     BackoffInitial time.Duration
     BackoffMax     time.Duration
     BackoffReset   time.Duration
+
+    IdleTimeout    time.Duration  // 0 inherits Config.IdleTimeout
 }
 ```
 
@@ -114,12 +126,18 @@ type SessionConfig struct {
 `sync.RWMutex` on `Pool.sessions`:
 
 - `Lookup` and `Default` take the read lock.
-- `Run` takes the read lock once briefly to grab the bootstrap pointer.
-- No writers in 1.0. Phase 1.1's `Pool.Add(SessionConfig)` will take the write lock without changing `Run`.
+- `Run` takes the read lock once briefly to grab the bootstrap pointer and `claudeSessionsDir`.
+- Writers: `RotateID` (1.2b-A), `RegisterAllocatedUUID` / `IsAllocated` mutations (1.2b-B), `persist` (1.2c-A; called from `Session.transitionTo`). Phase 1.1's `Pool.Add(SessionConfig)` plugs in the same way.
 
-The RLock around the bootstrap read in `Run` is overkill today (no writers exist) but documents the contract: `p.sessions` is shared, all reads take the read lock. When 1.1 introduces writers there is no "but here we don't lock" rule.
+`sync.Mutex` on each `Session.lcMu` (1.2c-A): protects `lcState`, `attached`, `activeCh`, `lastActiveAt`. **Lock order: `Pool.mu → Session.lcMu`**. `Session.transitionTo` releases `lcMu` *before* calling `Pool.persist` so `saveLocked`'s per-session re-acquire can't deadlock. `RotateID` mutates `session.id` without `lcMu` — documented invariant: today's only callers run before any lifecycle goroutine begins observing the id.
 
-No new goroutines are introduced in this layer. The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH watcher all remain in their existing packages.
+Goroutines introduced in this layer (1.2c-A):
+
+1. **Per-Session lifecycle goroutine** — body of `Session.Run`, owns the `active ↔ evicted` state machine and idle timer.
+2. **Per-active-period supervisor goroutine** — wraps `s.sup.Run(subCtx)` and pipes the result to `runErr`.
+3. **Per-attach detach-watcher** — decrements `attached` when the bridge's done channel fires.
+
+The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH watcher all remain in their existing packages.
 
 ## Errors
 

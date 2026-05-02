@@ -14,8 +14,8 @@ pyrycode/
 │   └── winsize.go             SIGWINCH → PTY size sync
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand
-│   ├── session.go             Session: wraps one supervisor + optional bridge; persisted metadata (label, created/last-active, bootstrap)
-│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir), load-or-mint bootstrap on New, RotateID seam, saveLocked, errgroup Run, allocated-UUID skip set, Snapshot
+│   ├── session.go             Session: wraps one supervisor + optional bridge; lifecycle goroutine (active↔evicted state machine, idle timer); Activate / Run / Attach with attach bookkeeping
+│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir + IdleTimeout), load-or-mint bootstrap on New, RotateID seam, saveLocked + persist, errgroup Run, allocated-UUID skip set, Snapshot, Activate
 │   ├── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
 │   ├── reconcile.go           Startup JSONL scan: encodeWorkdir, mostRecentJSONL, reconcileBootstrapOnNew, DefaultClaudeSessionsDir
 │   └── rotation/              Live /clear watcher (Phase 1.2b-B)
@@ -148,6 +148,27 @@ Pool.Run (errgroup)
 ```
 
 `internal/sessions/rotation` is its own package, dependency-direction-respecting (no import of `internal/sessions`). The contract is `rotation.Config` closures over primitive types, wired in `Pool.Run`. Watcher disabled (and pyry startup proceeds) when `ClaudeSessionsDir` is empty, `fsnotify` init fails, or — on darwin — `lsof` is missing from PATH (`noopProbe` fallback). See [features/rotation-watcher.md](../features/rotation-watcher.md) and [ADR 004](../decisions/004-fsnotify-for-rotation-detection.md).
+
+### Idle Eviction + Lazy Respawn (Phase 1.2c-A)
+
+```
+Session.Run (per-session lifecycle goroutine)
+    │
+    ├── runActive   → supervisor up, idle timer armed
+    │     │
+    │     ├── attached>0 on fire → re-arm (poll-with-grace)
+    │     ├── attached==0 on fire → cancel inner ctx → drain runErr → evict
+    │     └── outer ctx done    → cancel inner ctx → drain runErr → return
+    │
+    └── runEvicted  → no supervisor; wait on activateCh or ctx
+              │
+              ▼
+    transitionTo(state) → Pool.persist → registry write
+```
+
+Each `*Session` owns a per-session lifecycle goroutine that drives an `active ↔ evicted` two-state machine. Activity = "at least one client attached" (`attached > 0`). On the idle timeout with no attaches, the supervisor's inner ctx is cancelled and claude exits cleanly — the JSONL on disk is preserved untouched. `Session.Activate(ctx)` (called by `handleAttach` before `Attach`) wakes the session and respawns the supervisor pointing at the same JSONL.
+
+Registry gains `lifecycle_state` (`omitempty`, defaults to `"active"`). Bootstrap warm-starts in whatever state the registry says. Lock order: `Pool.mu → Session.lcMu`. CLI: `-pyry-idle-timeout` (default `15m`, `0` disables). See [features/idle-eviction.md](../features/idle-eviction.md) and [ADR 005](../decisions/005-idle-eviction-state-machine.md).
 
 ## Future Architecture (not yet implemented)
 
