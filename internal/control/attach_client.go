@@ -26,6 +26,11 @@ const (
 // initial window size. Subsequent live resize events are not propagated in
 // Phase 0 — detach and reattach to update.
 //
+// sessionID selects which session the server should attach to: a full UUID,
+// a unique prefix, or empty to mean "the bootstrap session". The string is
+// passed through verbatim; resolution rules live in the server's
+// Pool.ResolveID.
+//
 // Local stdin is put into raw mode for the duration of the attach so
 // keystrokes pass through unmodified to the child. The terminal is restored
 // when Attach returns.
@@ -34,7 +39,7 @@ const (
 //   - The user types EscapeKey + DetachKey (Ctrl-B d): clean detach.
 //   - The server closes the connection: returns nil.
 //   - The local stdin or socket errors: returns the error.
-func Attach(ctx context.Context, socketPath string, cols, rows int) error {
+func Attach(ctx context.Context, socketPath string, cols, rows int, sessionID string) error {
 	conn, err := dial(ctx, socketPath)
 	if err != nil {
 		return err
@@ -43,7 +48,7 @@ func Attach(ctx context.Context, socketPath string, cols, rows int) error {
 
 	if err := json.NewEncoder(conn).Encode(Request{
 		Verb:   VerbAttach,
-		Attach: &AttachPayload{Cols: cols, Rows: rows},
+		Attach: &AttachPayload{Cols: cols, Rows: rows, SessionID: sessionID},
 	}); err != nil {
 		return fmt.Errorf("send handshake: %w", err)
 	}

@@ -350,21 +350,23 @@ func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 
 // parseClientFlags handles the shared flags every control verb accepts:
 // -pyry-name (instance name → ~/.pyry/<name>.sock) and -pyry-socket (explicit
-// path that overrides the name). Returns the resolved socket path.
-func parseClientFlags(name string, args []string) (socketPath string, err error) {
+// path that overrides the name). Returns the resolved socket path and any
+// positionals after the recognised flags. Verbs that don't take positionals
+// can bind rest to _ — same silent-ignore behaviour as before.
+func parseClientFlags(name string, args []string) (socketPath string, rest []string, err error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	nameFlag := fs.String("pyry-name", defaultName(), "instance name (socket: ~/.pyry/<name>.sock)")
 	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
 	if err := fs.Parse(args); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return resolveSocketPath(*socketFlag, *nameFlag), nil
+	return resolveSocketPath(*socketFlag, *nameFlag), fs.Args(), nil
 }
 
 // runStatus implements the `pyry status` subcommand: dial the control socket,
 // fetch a status snapshot, pretty-print it.
 func runStatus(args []string) error {
-	socketPath, err := parseClientFlags("pyry status", args)
+	socketPath, _, err := parseClientFlags("pyry status", args)
 	if err != nil {
 		return err
 	}
@@ -396,7 +398,7 @@ func runStatus(args []string) error {
 // runLogs implements `pyry logs`: fetch the recent supervisor log lines from
 // the daemon's in-memory ring buffer and print them.
 func runLogs(args []string) error {
-	socketPath, err := parseClientFlags("pyry logs", args)
+	socketPath, _, err := parseClientFlags("pyry logs", args)
 	if err != nil {
 		return err
 	}
@@ -414,13 +416,43 @@ func runLogs(args []string) error {
 	return nil
 }
 
-// runAttach implements `pyry attach`: connect to a running daemon's control
-// socket, hand the local terminal over to the supervised claude session.
-// Press Ctrl-B d to detach (leaves pyry running).
+// errTooManyAttachArgs is returned by attachSelectorFromArgs when more than
+// one positional follows the recognised -pyry-* flags. runAttach turns this
+// into a usage line + os.Exit(2); the helper exists separately so the
+// argument-shape rule is unit-testable without intercepting os.Exit.
+var errTooManyAttachArgs = errors.New("too many arguments")
+
+// attachSelectorFromArgs returns the session selector string from the
+// post-flag remainder. Empty rest → "" (bootstrap). One arg → that arg
+// passed through verbatim — no trimming, no UUID parsing, no prefix logic.
+// More than one → errTooManyAttachArgs.
+func attachSelectorFromArgs(rest []string) (string, error) {
+	switch len(rest) {
+	case 0:
+		return "", nil
+	case 1:
+		return rest[0], nil
+	default:
+		return "", errTooManyAttachArgs
+	}
+}
+
+// runAttach implements `pyry attach [<id>]`: connect to a running daemon's
+// control socket, hand the local terminal over to a supervised claude
+// session. The optional <id> selects the session — full UUID or unique
+// prefix; omitted means the bootstrap session. Press Ctrl-B d to detach
+// (leaves pyry running).
 func runAttach(args []string) error {
-	socketPath, err := parseClientFlags("pyry attach", args)
+	socketPath, rest, err := parseClientFlags("pyry attach", args)
 	if err != nil {
 		return err
+	}
+
+	sessionID, err := attachSelectorFromArgs(rest)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pyry attach: too many arguments")
+		fmt.Fprintln(os.Stderr, "usage: pyry attach [flags] [<id>]")
+		os.Exit(2)
 	}
 
 	// Read local terminal geometry so the supervised claude knows the
@@ -434,7 +466,7 @@ func runAttach(args []string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "pyry: attached. Press Ctrl-B d to detach.")
-	if err := control.Attach(context.Background(), socketPath, cols, rows); err != nil {
+	if err := control.Attach(context.Background(), socketPath, cols, rows, sessionID); err != nil {
 		return fmt.Errorf("attach: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "\npyry: detached.")
@@ -445,7 +477,7 @@ func runAttach(args []string) error {
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
 func runStop(args []string) error {
-	socketPath, err := parseClientFlags("pyry stop", args)
+	socketPath, _, err := parseClientFlags("pyry stop", args)
 	if err != nil {
 		return err
 	}
@@ -571,8 +603,11 @@ Usage:
   pyry status [flags]                            query the running daemon
   pyry stop [flags]                              ask the daemon to shut down
   pyry logs [flags]                              print recent supervisor logs
-  pyry attach [flags]                            attach local terminal to daemon
-                                                  (Ctrl-B d to detach)
+  pyry attach [flags] [<id>]                     attach local terminal to daemon
+                                                  (Ctrl-B d to detach; <id>
+                                                  selects a session — full
+                                                  UUID or unique prefix; omit
+                                                  for the bootstrap session)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry version                                   print version

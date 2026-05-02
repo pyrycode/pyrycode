@@ -12,7 +12,7 @@ func TestParseClientFlags(t *testing.T) {
 
 	t.Run("default name yields ~/.pyry/pyry.sock", func(t *testing.T) {
 		t.Setenv("PYRY_NAME", "")
-		got, err := parseClientFlags("pyry status", nil)
+		got, _, err := parseClientFlags("pyry status", nil)
 		if err != nil {
 			t.Fatalf("parseClientFlags: %v", err)
 		}
@@ -23,7 +23,7 @@ func TestParseClientFlags(t *testing.T) {
 
 	t.Run("-pyry-name override wins over PYRY_NAME", func(t *testing.T) {
 		t.Setenv("PYRY_NAME", "fromenv")
-		got, err := parseClientFlags("pyry status", []string{"-pyry-name", "fromflag"})
+		got, _, err := parseClientFlags("pyry status", []string{"-pyry-name", "fromflag"})
 		if err != nil {
 			t.Fatalf("parseClientFlags: %v", err)
 		}
@@ -34,7 +34,7 @@ func TestParseClientFlags(t *testing.T) {
 
 	t.Run("PYRY_NAME wins when no flag given", func(t *testing.T) {
 		t.Setenv("PYRY_NAME", "fromenv")
-		got, err := parseClientFlags("pyry status", nil)
+		got, _, err := parseClientFlags("pyry status", nil)
 		if err != nil {
 			t.Fatalf("parseClientFlags: %v", err)
 		}
@@ -45,7 +45,7 @@ func TestParseClientFlags(t *testing.T) {
 
 	t.Run("-pyry-socket beats both", func(t *testing.T) {
 		t.Setenv("PYRY_NAME", "fromenv")
-		got, err := parseClientFlags("pyry status", []string{
+		got, _, err := parseClientFlags("pyry status", []string{
 			"-pyry-name", "fromflag",
 			"-pyry-socket", "/custom/explicit.sock",
 		})
@@ -58,11 +58,88 @@ func TestParseClientFlags(t *testing.T) {
 	})
 
 	t.Run("unknown flag returns error", func(t *testing.T) {
-		_, err := parseClientFlags("pyry status", []string{"-unknown"})
+		_, _, err := parseClientFlags("pyry status", []string{"-unknown"})
 		if err == nil {
 			t.Fatal("expected error on unknown flag")
 		}
 	})
+}
+
+// TestParseClientFlags_ReturnsRest pins the seam that runAttach relies on:
+// positionals after the recognised -pyry-* flags must be surfaced verbatim
+// via the rest return so the caller can apply its own arity rules.
+func TestParseClientFlags_ReturnsRest(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		// flag.FlagSet.Args returns []string{} when there are no positionals;
+		// the helper surfaces that as len==0, which is what attachSelector
+		// FromArgs ranges over. Compare on len-and-contents, not nil-vs-empty.
+		{"nil args → empty rest", nil, []string{}},
+		{"only flags → empty rest", []string{"-pyry-name", "elli"}, []string{}},
+		{"single positional", []string{"abc-123"}, []string{"abc-123"}},
+		{"flag then positional", []string{"-pyry-name", "elli", "abc-123"}, []string{"abc-123"}},
+		{"two positionals (caller decides what to do)", []string{"abc-123", "extra"}, []string{"abc-123", "extra"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, rest, err := parseClientFlags("pyry attach", tt.args)
+			if err != nil {
+				t.Fatalf("parseClientFlags: %v", err)
+			}
+			if len(rest) != len(tt.want) {
+				t.Fatalf("rest = %v (len %d), want %v (len %d)", rest, len(rest), tt.want, len(tt.want))
+			}
+			for i := range rest {
+				if rest[i] != tt.want[i] {
+					t.Errorf("rest[%d] = %q, want %q", i, rest[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestAttachSelectorFromArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		in      []string
+		want    string
+		wantErr bool
+	}{
+		{"nil → bootstrap", nil, "", false},
+		{"empty slice → bootstrap", []string{}, "", false},
+		{"one positional flows through verbatim", []string{"abc"}, "abc", false},
+		{"empty-string positional flows through (server lints)", []string{""}, "", false},
+		{"whitespace-only positional flows through", []string{" "}, " ", false},
+		{"two positionals → error", []string{"abc", "def"}, "", true},
+		{"three positionals → error", []string{"abc", "def", "ghi"}, "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := attachSelectorFromArgs(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (sel=%q)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestSplitArgs(t *testing.T) {
