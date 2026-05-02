@@ -344,6 +344,10 @@ func (r poolResolver) Lookup(id sessions.SessionID) (control.Session, error) {
 	return r.p.Lookup(id)
 }
 
+func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
+	return r.p.ResolveID(arg)
+}
+
 // parseClientFlags handles the shared flags every control verb accepts:
 // -pyry-name (instance name → ~/.pyry/<name>.sock) and -pyry-socket (explicit
 // path that overrides the name). Returns the resolved socket path.

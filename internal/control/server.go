@@ -47,6 +47,10 @@ type Session interface {
 // to Lookup(req.SessionID) without changing handler shape.
 type SessionResolver interface {
 	Lookup(id sessions.SessionID) (Session, error)
+	// ResolveID maps a loose-input session selector (full UUID, unique
+	// prefix, or empty for bootstrap) to a concrete SessionID. Errors are
+	// returned verbatim — handleAttach wraps them as "attach: <err>".
+	ResolveID(arg string) (sessions.SessionID, error)
 }
 
 // Server listens on a Unix domain socket and answers control requests.
@@ -296,7 +300,11 @@ func (s *Server) handle(conn net.Conn) {
 	case VerbAttach:
 		// Streaming verb. handleAttach takes ownership of conn on
 		// success and is responsible for closing it.
-		if s.handleAttach(conn, enc) {
+		var sessionID string
+		if req.Attach != nil {
+			sessionID = req.Attach.SessionID
+		}
+		if s.handleAttach(conn, enc, sessionID) {
 			closeConn = false
 		}
 	default:
@@ -336,10 +344,19 @@ func (s *Server) handleStop(enc *json.Encoder) {
 // attach ends). Returns false on any pre-attach failure (no provider, bridge
 // busy, etc.); in those cases the caller continues to own conn and will
 // close it normally.
-func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder) (handedOff bool) {
-	// Phase 1.1 will swap "" → req.SessionID; the empty-id seam resolves
-	// to the bootstrap session today.
-	sess, err := s.sessions.Lookup("")
+func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, sessionID string) (handedOff bool) {
+	// Two-step resolve-then-lookup. ResolveID maps the loose-input
+	// selector (full UUID, unique prefix, or empty → bootstrap) to a
+	// concrete SessionID; Lookup then guards against the session being
+	// removed between the two RLock acquires. Both errors encode as
+	// "attach: <err>" before any bridge work, leaving the bridge state
+	// untouched on the failure path.
+	id, err := s.sessions.ResolveID(sessionID)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
+		return false
+	}
+	sess, err := s.sessions.Lookup(id)
 	if err != nil {
 		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
 		return false

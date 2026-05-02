@@ -239,7 +239,7 @@ test-only override on `Options.Binary`. See
 ## Future Architecture (not yet implemented)
 
 - **Phase 1.1a-A1 (#72) — landed:** `Pool.supervise(sess)` seam + `runGroup`/`runCtx` handle on `*Pool`. Bootstrap fan-out in `Pool.Run` flows through the helper; the watcher fan-out stays inline (not a `*Session`). `ErrPoolNotRunning` sentinel for before/after-`Run` calls.
-- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam), `Request.SessionID` on the wire, `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>`, per-session log lines
+- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam, landed), `AttachPayload.SessionID` on the wire (1.1e-C, landed — server routes via `Pool.ResolveID`; CLI surface still pending), `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>` CLI positional (1.1e-D), per-session log lines
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing
