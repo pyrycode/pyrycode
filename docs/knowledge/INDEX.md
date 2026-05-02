@@ -19,6 +19,7 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 | 003 | [003-session-addressable-runtime.md](decisions/003-session-addressable-runtime.md) | `internal/sessions` Pool wraps the supervisor for additive Phase 1.1+ |
 | 004 | [004-fsnotify-for-rotation-detection.md](decisions/004-fsnotify-for-rotation-detection.md) | `fsnotify` for live `/clear` detection (over polling or raw inotify+kqueue) |
 | 005 | [005-idle-eviction-state-machine.md](decisions/005-idle-eviction-state-machine.md) | Per-session two-state machine + explicit `Activate` for idle eviction / lazy respawn |
+| 006 | [006-concurrent-active-cap-lru.md](decisions/006-concurrent-active-cap-lru.md) | `Config.ActiveCap` + LRU victim selection at `Pool.Activate`; force-eviction `Session.Evict` primitive |
 
 ## Features
 
@@ -29,4 +30,4 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 | [jsonl-reconciliation.md](features/jsonl-reconciliation.md) | Startup scan of `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`; `Pool.RotateID` self-heals registry across `/clear` |
 | [rotation-watcher.md](features/rotation-watcher.md) | Live `/clear` detection: fsnotify on the claude dir + per-PID FD probe (Linux `/proc/<pid>/fd`, macOS `lsof`) drives `Pool.RotateID` |
 | [control-plane.md](features/control-plane.md) | `internal/control` — Unix-socket JSON server, `SessionResolver` seam, verb dispatch, attach handoff |
-| [idle-eviction.md](features/idle-eviction.md) | Per-session active↔evicted state machine; idle timer evicts claude (~zero RAM); `Activate` respawns on attach |
+| [idle-eviction.md](features/idle-eviction.md) | Per-session active↔evicted state machine; idle timer + concurrent-active-cap (LRU) eviction triggers; `Activate` / `Evict` primitives |

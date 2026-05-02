@@ -83,13 +83,15 @@ type Session struct {
 	// (test default and operator escape hatch).
 	idleTimeout time.Duration
 
-	// Lifecycle state, attach bookkeeping, and Activate signalling.
+	// Lifecycle state, attach bookkeeping, and Activate/Evict signalling.
 	// lcMu protects all fields below it.
 	lcMu         sync.Mutex
 	lcState      lifecycleState
 	attached     int           // number of currently-bound bridge clients
 	activeCh     chan struct{} // closed when stateActive; replaced when stateEvicted
+	evictedCh    chan struct{} // closed when stateEvicted; replaced when stateActive
 	activateCh   chan struct{} // buffered(1); Activate sends, runEvicted reads
+	evictCh      chan struct{} // buffered(1); Evict sends, runActive reads
 	lastActiveAt time.Time
 }
 
@@ -177,6 +179,47 @@ func (s *Session) Activate(ctx context.Context) error {
 	}
 }
 
+// Evict moves the session into stateEvicted if it is currently active,
+// blocking until the lifecycle goroutine has stopped the supervisor (or ctx
+// is cancelled). No-op when the session is already evicted. Safe from any
+// goroutine; idempotent under concurrent calls.
+//
+// Used by the cap-policy spawn path (Phase 1.2c-B): when activating one more
+// session would exceed Pool.activeCap, the LRU peer is evicted via this
+// primitive before the new spawn proceeds. Force-eviction — unlike the idle
+// timer, it does not defer for attached>0. The cap is a hard limit; an
+// attached caller will see EOF on its bridge.
+func (s *Session) Evict(ctx context.Context) error {
+	s.lcMu.Lock()
+	if s.lcState == stateEvicted {
+		s.lcMu.Unlock()
+		return nil
+	}
+	ch := s.evictedCh
+	select {
+	case s.evictCh <- struct{}{}:
+	default:
+	}
+	s.lcMu.Unlock()
+
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// touchLastActive bumps lastActiveAt to time.Now().UTC() under lcMu. Called
+// by the cap-policy spawn path on an Activate against an already-active
+// session so LRU ordering reflects the most recent touch. Not persisted —
+// the registry's lastActiveAt is only flushed on state transitions.
+func (s *Session) touchLastActive() {
+	s.lcMu.Lock()
+	s.lastActiveAt = time.Now().UTC()
+	s.lcMu.Unlock()
+}
+
 // Run blocks until ctx is cancelled, driving the session's active↔evicted
 // state machine. The body alternates between runActive (supervisor running,
 // idle timer armed) and runEvicted (no supervisor; waiting for an Activate).
@@ -262,6 +305,11 @@ func (s *Session) runActive(ctx context.Context) error {
 			cancelSup()
 			drainSup()
 			return nil
+		case <-s.evictCh:
+			// Cap-policy eviction: forced, regardless of attached count.
+			cancelSup()
+			drainSup()
+			return nil
 		}
 	}
 }
@@ -292,9 +340,14 @@ func (s *Session) transitionTo(newState lifecycleState) error {
 		// close when entering active from evicted, and runEvicted's
 		// channel is fresh.
 		close(s.activeCh)
+		// Fresh open channel for the next Evict to wait on.
+		s.evictedCh = make(chan struct{})
 	case stateEvicted:
 		// Fresh open channel for the next Activate to wait on.
 		s.activeCh = make(chan struct{})
+		// Wake any Evict waiters. Same logic — runActive's evictedCh
+		// was fresh on entry, so closing it here is single-shot.
+		close(s.evictedCh)
 	}
 	s.lcMu.Unlock()
 	if s.pool == nil {

@@ -48,6 +48,25 @@ type Config struct {
 	// callers in cmd/pyry default this to 15 minutes via the
 	// -pyry-idle-timeout flag.
 	IdleTimeout time.Duration
+
+	// ActiveCap is the maximum number of concurrently active claude
+	// processes this Pool will run. Zero (the unset default) means
+	// uncapped — preserves Phase 1.2c-A's idle-only behaviour
+	// byte-for-byte (no LRU bookkeeping cost on the hot path).
+	//
+	// When set (>= 1), an Activate that would push the count past the
+	// cap first evicts the least-recently-active currently-active peer
+	// via Session.Evict. The evicted session transitions to `evicted`
+	// exactly as it would from an idle timeout — same on-disk state
+	// change, same registry write.
+	//
+	// Idle eviction (1.2c-A) and cap eviction compose: same Evict
+	// mechanism, different victim picker. The idle timer runs per
+	// session and picks itself; the cap path runs at Pool.Activate's
+	// entry and picks the LRU peer.
+	//
+	// Values <= 0 are treated as unset.
+	ActiveCap int
 }
 
 // SessionConfig is the per-session invocation shape. Phase 1.0 uses it only
@@ -87,6 +106,20 @@ type Pool struct {
 	registryPath      string
 	claudeSessionsDir string
 	allocated         map[SessionID]time.Time
+
+	// activeCap mirrors Config.ActiveCap. Read-only after New, so no lock
+	// is needed to read it. Zero means uncapped — see Config.ActiveCap.
+	activeCap int
+
+	// capMu serializes the Pool.Activate cap-check + victim-eviction +
+	// new-spawn sequence so two concurrent Activates can't both observe
+	// active < cap and both proceed. Held only on the cap path
+	// (activeCap > 0); the uncapped path is byte-identical to 1.2c-A.
+	//
+	// Lock order: capMu is the outermost lock; while it is held the
+	// caller may go on to take Pool.mu (read or write) and per-session
+	// lcMu, in that order. capMu is never re-acquired by callees.
+	capMu sync.Mutex
 }
 
 // SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. Carries
@@ -170,11 +203,14 @@ func New(cfg Config) (*Pool, error) {
 		idleTimeout:  idleTimeout,
 		lcState:      lcState,
 		activateCh:   make(chan struct{}, 1),
+		evictCh:      make(chan struct{}, 1),
 	}
 	if lcState == stateActive {
 		sess.activeCh = closedChan()
+		sess.evictedCh = make(chan struct{})
 	} else {
 		sess.activeCh = make(chan struct{})
+		sess.evictedCh = closedChan()
 	}
 	p := &Pool{
 		sessions:          map[SessionID]*Session{bootstrapID: sess},
@@ -183,6 +219,7 @@ func New(cfg Config) (*Pool, error) {
 		registryPath:      cfg.RegistryPath,
 		claudeSessionsDir: cfg.ClaudeSessionsDir,
 		allocated:         make(map[SessionID]time.Time),
+		activeCap:         cfg.ActiveCap,
 	}
 	sess.pool = p
 
@@ -430,14 +467,84 @@ func (p *Pool) persist() error {
 	return p.saveLocked()
 }
 
-// Activate is a thin wrapper that resolves an id and calls Session.Activate.
-// Provided for symmetry with the rest of Pool's surface — the control plane
-// can hold a *Session and call Activate directly, but a single Pool entry
-// point gives future routers something cleaner to import.
+// Activate is the spawn-path entry: resolves an id and calls Session.Activate,
+// enforcing the concurrent-active cap (Config.ActiveCap) along the way.
+//
+// When the cap is unset (activeCap <= 0), this is a thin wrapper around
+// Session.Activate — byte-identical to Phase 1.2c-A's behaviour, no LRU
+// bookkeeping cost on the hot path.
+//
+// When the cap is set, capMu serializes the cap-check + victim-eviction +
+// new-spawn sequence. Two concurrent Activates against the same Pool can't
+// both observe active < cap and both proceed. If the target is already
+// active, lastActiveAt is bumped (LRU touch) and the call returns. Otherwise,
+// when activating one more would exceed the cap, the LRU peer is evicted via
+// Session.Evict before this Activate proceeds.
 func (p *Pool) Activate(ctx context.Context, id SessionID) error {
 	sess, err := p.Lookup(id)
 	if err != nil {
 		return err
 	}
+	if p.activeCap <= 0 {
+		return sess.Activate(ctx)
+	}
+
+	p.capMu.Lock()
+	defer p.capMu.Unlock()
+
+	// Already active: refresh LRU stamp and return. The slot is already
+	// counted; no eviction needed.
+	if sess.LifecycleState() == stateActive {
+		sess.touchLastActive()
+		return nil
+	}
+
+	if victim := p.pickLRUVictim(sess.id); victim != nil {
+		if err := victim.Evict(ctx); err != nil {
+			return fmt.Errorf("cap: evict lru victim %s: %w", victim.id, err)
+		}
+	}
 	return sess.Activate(ctx)
+}
+
+// pickLRUVictim returns the least-recently-active currently-active session
+// (by Session.lastActiveAt) when activating one more session would exceed
+// p.activeCap. Returns nil when the cap would not bind, when no eligible
+// peer exists (target is the only candidate), or when activeCap <= 0.
+//
+// Excludes target from the victim set: you cannot evict the session you are
+// about to activate to make room for itself. Caller must hold p.capMu.
+func (p *Pool) pickLRUVictim(target SessionID) *Session {
+	if p.activeCap <= 0 {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var (
+		active int
+		victim *Session
+		oldest time.Time
+	)
+	for id, s := range p.sessions {
+		s.lcMu.Lock()
+		isActive := s.lcState == stateActive
+		la := s.lastActiveAt
+		s.lcMu.Unlock()
+		if !isActive {
+			continue
+		}
+		active++
+		if id == target {
+			continue
+		}
+		if victim == nil || la.Before(oldest) {
+			victim = s
+			oldest = la
+		}
+	}
+	if active < p.activeCap {
+		return nil
+	}
+	return victim
 }
