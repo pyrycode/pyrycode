@@ -18,6 +18,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.1b-A (#60):** `Pool.List() []SessionInfo` read primitive + new `SessionInfo` value type. Operator-visible snapshot (id, label, lifecycle state, last-active timestamp, bootstrap flag) for every session in the pool, sorted by `LastActiveAt` desc with `SessionID` asc tiebreak. Synthetic `"bootstrap"` label substitution for empty-on-disk bootstrap labels lives at this layer (consumers get the same UX guarantee). Read-only; no on-disk mutation. The internal seam Phase 1.1b-B's `pyry sessions list` CLI verb (46-B) consumes.
 - **Phase 1.1c-A (#62):** `Pool.Rename(id, newLabel) error` write primitive — typed mutator for the `label` field that flows through `saveLocked`. Empty `newLabel` clears the on-disk value to `""` (synthetic `"bootstrap"` substitution from #60 then resumes for the bootstrap entry); non-empty labels persist verbatim and are reflected by `Pool.List`. Unknown id returns `ErrSessionNotFound` with on-disk and in-memory state byte-identical to before. The internal seam Phase 1.1c-B's `pyry sessions rename` CLI verb (47-B) consumes.
 - **Phase 1.1d-A1 (#94):** `Pool.Remove(ctx, id) error` write primitive + `ErrCannotRemoveBootstrap` sentinel — terminates the named session's claude process and drops its registry entry. JSONL on disk is **not** touched (disposition lands in 64-A2 / #95). Bootstrap is rejected via the sentinel; unknown ids reuse `ErrSessionNotFound`. Delete-then-evict ordering: `Pool.mu` covers the in-memory delete + persist, then is released before `Session.Evict` so the lifecycle goroutine's `transitionTo → Pool.persist` can reacquire the mutex without deadlock. Save-failure rolls the in-memory delete back. The internal seam the future `pyry sessions rm` CLI verb (#65) consumes.
+- **Phase 1.1d-A2 (#95):** `Pool.Remove` signature evolves to `(ctx, id, opts RemoveOptions) error` + `JSONLPolicy` enum (`JSONLLeave` / `JSONLArchive` / `JSONLPurge`). Zero-value `RemoveOptions{}` preserves 1.1d-A1 behaviour byte-for-byte. Archive moves the live JSONL into `<pyry-data-dir>/archived-sessions/<uuid>.jsonl` (data-dir = parent of `registryPath`; subdir auto-created; errors wrapping `fs.ErrExist` if destination exists; source-absent is a no-op). Purge deletes the JSONL (source-absent is a no-op). Disposition runs under `Pool.mu` after `saveLocked` so the registry+JSONL transition is observably atomic; on disposition failure the registry is already committed and `Session.Evict` still runs.
 - **Phase 1.1+:** `Request.SessionID` on the wire (#71 — `sessions.new` verb consumes `Pool.Create`), per-session log lines, channel-driven auto-mint.
 
 ## Package Layout
@@ -316,6 +317,44 @@ func (p *Pool) Remove(ctx context.Context, id SessionID) error
 
 **Strict full-`SessionID` only.** Same posture as `Pool.Rename`. Empty-id is *not* the bootstrap shorthand it is in `Pool.Lookup` — empty falls through to the "not in map" branch and returns `ErrSessionNotFound`. Destructive operations require an explicit id.
 
+### Pool.Remove JSONL disposition (1.1d-A2 / #95)
+
+Phase 1.1d-A2 adds a `RemoveOptions` parameter so callers pick the on-disk disposition. The signature became `Pool.Remove(ctx, id, opts RemoveOptions) error`; `RemoveOptions{}` (zero value) is byte-identical to the 1.1d-A1 behaviour above (JSONL untouched).
+
+```go
+type JSONLPolicy uint8
+
+const (
+    JSONLLeave   JSONLPolicy = iota // do not touch the JSONL (default)
+    JSONLArchive                    // mv to <pyry-data-dir>/archived-sessions/<uuid>.jsonl
+    JSONLPurge                      // delete the JSONL
+)
+
+type RemoveOptions struct {
+    JSONL JSONLPolicy
+}
+
+func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) error
+```
+
+**Why an enum, not two booleans.** A `bool Archive`/`bool Purge` shape makes (true, true) a representable-but-illegal state. The enum makes the "exactly one disposition" property type-level, the zero value is well-defined (Leave), and the dispatch switch is exhaustive.
+
+**Why a struct, not a positional `JSONLPolicy` parameter.** Future options (`Force`, `Reason`, …) stay additive at zero call-site churn. Same precedent as stdlib `os.RemoveAll` would have been if it took options.
+
+**Pyry data-dir resolution.** No new config knob — the per-instance data-dir is the **parent of `Pool.registryPath`** (`~/.pyry/<sanitized-name>/sessions.json` ⇒ `~/.pyry/<sanitized-name>/`). `claudeSessionsDir` is claude's directory (the JSONL *source*), not the pyry-owned destination root. When `registryPath == ""` (test/disabled mode), `JSONLArchive` errors with `"sessions: archive requires a registry path"`; `JSONLPurge` and `JSONLLeave` are no-ops.
+
+**Disposition runs under `Pool.mu` after `saveLocked`.** Single critical section, single observable transition: a concurrent `Pool.List` either sees the session present (registry + JSONL both untouched) or absent (registry + JSONL both at their final state). The held-lock window grows by one stat + one rename or unlink — single-syscall granularity, well inside the existing `saveLocked` envelope. POSIX inode semantics keep the operation safe even though claude may still hold the JSONL fd open (rename preserves the fd→inode binding; unlink lets pending writes drain into the soon-to-be-orphaned inode).
+
+**Source-absent semantics.** Both `JSONLArchive` and `JSONLPurge` are success no-ops when the live JSONL is missing — symmetric "ensure the file is at its target state" intent.
+
+**Destination-exists semantics.** Archive errors (wrapping `fs.ErrExist`) when `<archiveDir>/<uuid>.jsonl` already exists. Re-archiving the same UUID is almost always a bug; silent overwrite would lose transcript history. The `errors.Is(err, fs.ErrExist)` shape leaves room for a future CLI `--force`.
+
+**`os.Rename`, not copy + unlink.** Source and destination both live under `$HOME` in normal deployments — same filesystem. EXDEV would surface as a clear error rather than silent corruption. No copy-then-delete fallback today; defer until observed.
+
+**Failure ordering — registry committed before disposition.** On `saveLocked` failure: in-memory delete rolls back, JSONL untouched, child not terminated. On `disposeJSONLLocked` failure: registry already removed (in-memory + on-disk), `Session.Evict` is *still* called (the registry says the session is gone, the child must follow), the disposition error is returned. If disposition and Evict both fail, disposition wins (the new failure mode this signature introduces, and the more actionable one).
+
+**Bootstrap and unknown-id rejection still run before disposition.** `Remove(bootstrapID, {JSONL: JSONLPurge})` does *not* touch the bootstrap's JSONL — structural invariants take precedence over destructive opts.
+
 ## Concurrency
 
 `sync.RWMutex` on `Pool.sessions`:
@@ -347,6 +386,8 @@ The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH
 | `Pool.Remove` bootstrap target | `ErrCannotRemoveBootstrap` (sentinel). On-disk + in-memory state + JSONL byte-identical to before. |
 | `Pool.Remove` save failure | Error from `saveLocked` propagated verbatim; in-memory delete rolled back; child not terminated. |
 | `Pool.Remove` ctx cancellation during Evict | `ctx.Err()` from `Session.Evict`. Registry entry already deleted and persisted; child terminates asynchronously under the pool's `runCtx`. |
+| `Pool.Remove` archive destination exists | Wrapped error matching `errors.Is(err, fs.ErrExist)`. Registry entry already removed (disposition runs after persist); live JSONL and existing archive both untouched; child still terminated by Evict. |
+| `Pool.Remove` archive when registry persistence disabled | `"sessions: archive requires a registry path"`. Registry entry already removed; child still terminated by Evict. |
 | `Pool.supervise` before/after `Run` | `ErrPoolNotRunning` (sentinel). |
 | `Session.Attach` with nil bridge | `ErrAttachUnavailable` (sentinel). |
 | `Session.Attach` while bridge busy | `supervisor.ErrBridgeBusy` propagated **verbatim** — no wrap. |
