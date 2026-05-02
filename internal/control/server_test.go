@@ -52,10 +52,13 @@ func (f *fakeSession) Activate(ctx context.Context) error {
 }
 
 // fakeResolver returns its single fakeSession for any id. Set lookupErr to
-// drive the not-found / error path.
+// drive the not-found / error path. Set resolveFn to drive ResolveID; the
+// default returns the empty id with nil error, which makes existing tests
+// (which only exercise Lookup) behave identically to the pre-1.1e-C world.
 type fakeResolver struct {
 	sess      *fakeSession
 	lookupErr error
+	resolveFn func(arg string) (sessions.SessionID, error)
 }
 
 func (r *fakeResolver) Lookup(id sessions.SessionID) (Session, error) {
@@ -65,18 +68,33 @@ func (r *fakeResolver) Lookup(id sessions.SessionID) (Session, error) {
 	return r.sess, nil
 }
 
+func (r *fakeResolver) ResolveID(arg string) (sessions.SessionID, error) {
+	if r.resolveFn != nil {
+		return r.resolveFn(arg)
+	}
+	return sessions.SessionID(arg), nil
+}
+
 // recordingResolver wraps a delegate and notifies a record callback on each
 // Lookup. Used by TestServer_Status_ResolvesDefaultSession to assert the
 // handler passes the empty id today (the seam Phase 1.1 will swap to
-// req.SessionID).
+// req.SessionID). resolveRecord, if non-nil, is notified on each ResolveID.
 type recordingResolver struct {
-	delegate SessionResolver
-	record   func(sessions.SessionID)
+	delegate      SessionResolver
+	record        func(sessions.SessionID)
+	resolveRecord func(string)
 }
 
 func (r *recordingResolver) Lookup(id sessions.SessionID) (Session, error) {
 	r.record(id)
 	return r.delegate.Lookup(id)
+}
+
+func (r *recordingResolver) ResolveID(arg string) (sessions.SessionID, error) {
+	if r.resolveRecord != nil {
+		r.resolveRecord(arg)
+	}
+	return r.delegate.ResolveID(arg)
 }
 
 // shortTempDir returns a short tempdir suitable for Unix socket paths.

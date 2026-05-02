@@ -36,7 +36,15 @@ type Request struct {
 	Attach *AttachPayload `json:"attach,omitempty"` // populated for VerbAttach
 }
 
-// AttachPayload carries the client's terminal geometry at attach time.
+// AttachPayload carries the client's terminal geometry at attach time and
+// (Phase 1.1+) selects which session to attach to.
+//
+// SessionID is a loose-input selector: a full UUID, a unique prefix, or
+// empty to mean "the bootstrap session". The server resolves it through
+// Pool.ResolveID; see that method for resolution rules. The omitempty tag
+// is load-bearing — an empty SessionID must marshal to no field on the
+// wire so v0.5.x clients (which don't know the field) keep round-tripping
+// byte-identically against a v0.7.x server during the rollover window.
 //
 // Phase 0 caveat: the server currently ACCEPTS this payload but does NOT
 // propagate Cols/Rows to the PTY — the bridge has no API for setting
@@ -50,8 +58,9 @@ type Request struct {
 // it would need a small framing change to multiplex resize events into the
 // raw byte stream, or a side-channel control verb.
 type AttachPayload struct {
-	Cols int `json:"cols,omitempty"`
-	Rows int `json:"rows,omitempty"`
+	Cols      int    `json:"cols,omitempty"`
+	Rows      int    `json:"rows,omitempty"`
+	SessionID string `json:"sessionID,omitempty"`
 }
 
 // Response is the wire format for a single server response. On success
