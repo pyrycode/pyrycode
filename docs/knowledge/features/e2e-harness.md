@@ -6,8 +6,10 @@ drives CLI verbs against it, and tears down reliably on test cleanup.
 
 Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e),
 #52 (CLI verbs e2e coverage — `stop`, `logs`, `version`, `status` stopped path
-+ `RunBare` helper), #106 (restart primitive — `StartIn` / `Stop` + restart-
-survival test), split from #51.
++ `RunBare` helper), #106 (restart primitive — `StartIn` / `Stop` + first
+restart-survival test), #107 (two more restart-survival tests — evicted
+state + `lastActiveAt` timestamps — plus file-local `newRegistryHome`
+helper), split from #51.
 
 ## What It Does
 
@@ -353,23 +355,86 @@ other is a no-op. Two harnesses (`h1`, `h2`) own independent
 fires first against the live second daemon, then `h1.teardown` (no-op,
 already torn down via `Stop`).
 
-### `restart_test.go` — `TestE2E_Restart_PreservesActiveSessions`
+### `restart_test.go` — three restart-survival tests
 
-The first concrete consumer of the restart primitive (#106). Pre-writes a
-registry with two `lifecycle_state: active` entries (one bootstrap, one
-non-bootstrap), cycles `StartIn → Stop → StartIn`, and asserts:
+Three tests live in `restart_test.go`, all built on the same `StartIn → Stop
+→ StartIn` cycle against a pre-populated `<HOME>/.pyry/test/sessions.json`:
 
-- Registry file still exists after the first `Stop`.
-- `version` field preserved.
-- Session count preserved (the non-bootstrap entry is the canary — catches
-  "pyry rewrote the file with only the bootstrap entry").
-- Per-session: `lifecycle_state` and `bootstrap` flag preserved.
+| Test | Ticket | Asserts |
+|---|---|---|
+| `TestE2E_Restart_PreservesActiveSessions` | #106 | registry file present after first `Stop`; `version` preserved; session count preserved; per-session `lifecycle_state` and `bootstrap` flag preserved |
+| `TestE2E_Restart_PreservesEvictedSessions` | #107 | a non-bootstrap entry pre-written with `lifecycle_state: "evicted"` is still `"evicted"` after restart (no silent warm-promotion); paired with bootstrap-active and a non-bootstrap-active control so "evicted stays evicted" is meaningful next to a sibling that's provably not evicted |
+| `TestE2E_Restart_LastActiveAtSurvives` | #107 | three sessions with `lastActiveAt` values spread by 10 min and 1 hour roundtrip across restart via `time.Time.Equal` (catches a re-stamp to `time.Now()` that would silently break the cap-policy LRU order) |
 
-Deliberately **not** asserted: byte-identity of the file, `LastActiveAt`
-equality. Coupling to byte-identity inverts the dependency direction (a
-benign `MarshalIndent` change would break the test); pinning
-`LastActiveAt` would couple to today's no-save invariant in a way that
-breaks the moment a benign state-change ships.
+Deliberately **not** asserted by any of them: byte-identity of the file
+(coupling to `MarshalIndent` output inverts the dependency direction — a
+benign formatting change would break the tests). The first test also
+deliberately omits `LastActiveAt` equality; that property is the dedicated
+subject of the third test.
+
+#### Helper: `newRegistryHome` (rule of three)
+
+Once #107 landed, all three tests share the same four-line HOME bootstrap
+(`os.MkdirTemp` for sun_path safety, `t.Cleanup(RemoveAll)`, `mkdir -p
+<home>/.pyry/test`). #107 extracted this into a file-local helper —
+package-internal, intentionally not promoted to `harness.go`'s public
+surface (three callers ≠ a public API):
+
+```go
+// newRegistryHome creates a short-named temp HOME (sun_path-safe), pre-creates
+// <home>/.pyry/test/, registers cleanup, and returns the home dir and the
+// sessions.json path the harness's -pyry-name=test daemon will read.
+func newRegistryHome(t *testing.T) (home, regPath string)
+```
+
+`registryEntry` / `registryFile` mirror types and the `writeRegistry` /
+`readRegistry` / `mustReadFile` helpers from #106 stay file-local and
+unchanged — same dependency-direction reasoning (importing the unexported
+production schema solely for tests would invert it).
+
+#### Fixture choice: bootstrap-active anchors every restart test
+
+Each restart test pre-writes exactly one `bootstrap: true, lifecycle_state:
+"active"` entry alongside the entries it cares about. The bootstrap-active
+anchor keeps the harness's ready gate working the conventional way: the
+supervisor spawns `/bin/sleep infinity`, the control server comes up, the
+ready-poll succeeds. This deliberately avoids the bootstrap-evicted
+permutation (warm-starting the bootstrap *itself* in `stateEvicted` enters
+`runEvicted` instead of spawning the child). That path is functionally
+distinct — "daemon comes up cleanly with an evicted bootstrap" — and
+deserves its own ticket so failures isolate cleanly. The three current
+tests are scoped to non-bootstrap survival.
+
+The lifecycle strings written to disk are `"active"` and `"evicted"` —
+exactly what `lifecycleState.String()` (`internal/sessions/session.go`)
+emits and `parseLifecycleState` parses. Don't invent or guess values; the
+production code is the source of truth.
+
+#### Equality, not byte-identity, for `LastActiveAt`
+
+`TestE2E_Restart_LastActiveAtSurvives` uses `time.Time.Equal` per entry,
+not byte-equal on the file:
+
+- **What `Equal` accepts.** Today's roundtrip is byte-exact for any UTC,
+  monotonic-stripped `time.Time`. `Equal` also tolerates a future
+  re-encode through `time.Now().UTC()` (which strips monotonic but
+  preserves wall time) — the AC's "tight tolerance".
+- **What `Equal` rejects.** A re-stamp to `time.Now()` produces a delta of
+  seconds-to-hours against the 10-min and 1-hour pre-write offsets;
+  `Equal` rejects loudly. The 10-min / 1-hour spread is far larger than
+  any plausible JSON-roundtrip drift or test wall-clock.
+- **Monotonic-clock trap.** The "want" values are obtained by re-reading
+  the file with `readRegistry` *after* `writeRegistry`, not by reusing the
+  in-memory pre-write struct. `time.Time` written via `MarshalIndent`
+  retains monotonic-clock state in the original Go value but strips it
+  after the JSON unmarshal trip the daemon takes. Comparing pre-write
+  in-memory vs. post-restart parsed would diverge on monotonic alone even
+  though the bytes on disk are identical. See `lessons.md § JSON
+  roundtrip strips monotonic-clock state from time.Time`.
+
+Cross-axis combinations (lifecycle × timestamp survival in one test) are
+not the AC's ask and would confuse failure isolation. Each test pins one
+invariant.
 
 #### Why this works against today's pyry without behaviour changes
 
@@ -525,12 +590,15 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   `docs/specs/architecture/69-e2e-cli-driver.md`,
   `docs/specs/architecture/52-cli-verbs-e2e-coverage.md`,
   `docs/specs/architecture/80-e2e-install-systemd-roundtrip.md`,
-  `docs/specs/architecture/106-e2e-restart-primitive.md`
+  `docs/specs/architecture/106-e2e-restart-primitive.md`,
+  `docs/specs/architecture/107-e2e-restart-evicted-and-lastactiveat.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude); lessons.md § Unix-socket sun_path limits and
   t.TempDir()
 - Consumers: shipped CLI verbs (#52: `stop`, `logs`, `version`,
   `status` stopped path; #69: `status` running path), restart-survival
-  proof (#106: `TestE2E_Restart_PreservesActiveSessions`), Phase 1.1
-  session-verb tickets (#54, #55, #56), install-service round-trip
+  proofs (#106: `TestE2E_Restart_PreservesActiveSessions`; #107:
+  `TestE2E_Restart_PreservesEvictedSessions`,
+  `TestE2E_Restart_LastActiveAtSurvives`), Phase 1.1 session-verb
+  tickets (#54, #55, #56), install-service round-trip
   ([install-e2e.md](install-e2e.md))
