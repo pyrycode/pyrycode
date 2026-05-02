@@ -15,9 +15,14 @@ pyrycode/
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand
 │   ├── session.go             Session: wraps one supervisor + optional bridge; persisted metadata (label, created/last-active, bootstrap)
-│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir), load-or-mint bootstrap on New, RotateID seam, saveLocked
+│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir), load-or-mint bootstrap on New, RotateID seam, saveLocked, errgroup Run, allocated-UUID skip set, Snapshot
 │   ├── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
-│   └── reconcile.go           Startup JSONL scan: encodeWorkdir, mostRecentJSONL, reconcileBootstrapOnNew, DefaultClaudeSessionsDir
+│   ├── reconcile.go           Startup JSONL scan: encodeWorkdir, mostRecentJSONL, reconcileBootstrapOnNew, DefaultClaudeSessionsDir
+│   └── rotation/              Live /clear watcher (Phase 1.2b-B)
+│       ├── watcher.go         fsnotify lifecycle, event loop, probe orchestration with bounded retry
+│       ├── probe.go           Probe interface, parseProcFD, parseLsofOutput, noopProbe fallback
+│       ├── probe_linux.go     //go:build linux  — /proc/<pid>/fd walk
+│       └── probe_darwin.go    //go:build darwin — lsof -nP -p <pid> -F fn shell-out
 ├── internal/control/          Control-plane server (Unix socket, JSON)
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
@@ -26,7 +31,7 @@ pyrycode/
 └── launchd/dev.pyrycode.pyry.plist   macOS launchd plist
 ```
 
-Dependency direction: `cmd/pyry → internal/sessions → internal/supervisor`, with `internal/control` importing `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/supervisor` has no upward imports — verifiable with `go list -deps ./internal/supervisor/...`.
+Dependency direction: `cmd/pyry → internal/sessions → internal/supervisor`, with `internal/control` importing `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/sessions/rotation` is downstream of `internal/sessions` (no back-edge — the contract is closures over primitive types so the rotation package never imports its host). `internal/supervisor` has no upward imports — verifiable with `go list -deps ./internal/supervisor/...`.
 
 ## Data Flow
 
@@ -95,8 +100,10 @@ Extracted backoff logic. Computes the next delay based on how long the previous 
 | Module | Purpose | Why not stdlib |
 |--------|---------|----------------|
 | `creack/pty` | PTY allocation and size management | No stdlib PTY support |
+| `fsnotify/fsnotify` | Live `/clear` rotation detection on the claude sessions dir (Phase 1.2b-B) | Cross-platform inotify+kqueue without owning two stacks. See [ADR 004](../decisions/004-fsnotify-for-rotation-detection.md). |
 | `golang.org/x/term` | Terminal raw mode, state save/restore | Extended terminal ops not in stdlib |
-| `golang.org/x/sys` | System calls (indirect, via x/term) | — |
+| `golang.org/x/sync` | `errgroup` for `Pool.Run`'s bootstrap+watcher fan-out (Phase 1.1+ extends to N sessions) | Semi-official extension; clearer than ad-hoc 2-goroutine coordination |
+| `golang.org/x/sys` | System calls (indirect, via x/term and fsnotify) | — |
 
 ### Session Registry (Phase 1.2a)
 
@@ -121,9 +128,30 @@ Forward-compat: `version` is a future hook; unknown top-level and per-session fi
 
 `encodeWorkdir` maps cwd → claude's path component by replacing both `/` and `.` with `-`. The pre-rotation JSONL is never modified — only the registry pointer moves. Missing/unreadable claude dir is logged and ignored (startup proceeds with the existing bootstrap). The mutation goes through `Pool.RotateID`, the load-bearing seam reused by Phase 1.2b-B's live-detection watcher.
 
+### Live `/clear` Rotation Watcher (Phase 1.2b-B)
+
+```
+Pool.Run (errgroup)
+    ├── bootstrap.Run(gctx)
+    └── rotation.Watcher.Run(gctx)
+              │
+              ▼
+        fsnotify CREATE on ~/.claude/projects/<encoded-cwd>/<new>.jsonl
+              │
+              ▼
+        IsAllocated(<new>)? → consume + skip (Phase 1.1's --session-id mints)
+        Snapshot()         → [{id: <old>, pid}, ...]
+        probeWithRetry(pid) → /proc/<pid>/fd walk (Linux) or `lsof -F fn` (Darwin)
+              │
+              ▼
+        match → OnRotate(<old>, <new>) → Pool.RotateID
+```
+
+`internal/sessions/rotation` is its own package, dependency-direction-respecting (no import of `internal/sessions`). The contract is `rotation.Config` closures over primitive types, wired in `Pool.Run`. Watcher disabled (and pyry startup proceeds) when `ClaudeSessionsDir` is empty, `fsnotify` init fails, or — on darwin — `lsof` is missing from PATH (`noopProbe` fallback). See [features/rotation-watcher.md](../features/rotation-watcher.md) and [ADR 004](../decisions/004-fsnotify-for-rotation-detection.md).
+
 ## Future Architecture (not yet implemented)
 
-- **Phase 1.1+:** `Pool.Add(SessionConfig)`, errgroup fan-out in `Pool.Run`, `Request.SessionID` on the wire, `pyry sessions new`, `pyry attach <id>`, `claude --session-id <uuid>` invocation, per-session log lines
+- **Phase 1.1+:** `Pool.Add(SessionConfig)`, N-session fan-out in `Pool.Run`'s errgroup (the wrapper landed in 1.2b-B), `Request.SessionID` on the wire, `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>`, per-session log lines
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing

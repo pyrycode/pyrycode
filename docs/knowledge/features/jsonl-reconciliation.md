@@ -5,7 +5,7 @@ On `Pool.New`, pyry scans claude's per-workdir session directory, finds the most
 ## Status
 
 - **Phase 1.2b-A (#38):** startup-side reconciliation introduced. `Pool.RotateID` established as the load-bearing seam.
-- **Phase 1.2b-B (next):** live-detection while claude is running (fsnotify watcher + per-PID FD probe). Reuses `RotateID` unchanged.
+- **Phase 1.2b-B (#39, shipped):** live-detection while claude is running (fsnotify watcher + per-PID FD probe). Reuses `RotateID` unchanged. See [`rotation-watcher.md`](rotation-watcher.md).
 - **Phase 1.2c:** idle eviction + lazy respawn. Reads the reconciled UUID via the existing registry.
 
 ## Why
