@@ -29,6 +29,7 @@ The control plane consumes session state through one interface pair, both define
 type Session interface {
     State() supervisor.State
     Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
+    Activate(ctx context.Context) error  // 1.2c-A
 }
 
 // SessionResolver maps a SessionID to a Session. Empty id resolves to the
@@ -74,6 +75,24 @@ if errors.Is(err, sessions.ErrAttachUnavailable) {
 A bare `fmt.Sprintf("attach: %v", err)` would surface `attach: sessions: attach unavailable (no bridge)` — observable client drift. The mapping is **load-bearing** for byte-identical output.
 
 `supervisor.ErrBridgeBusy` (second client tries to attach while another is connected) flows through the unchanged `fmt.Sprintf` path, preserving Phase 0's wire surface for that case.
+
+## Attach: Activate-before-bind (1.2c-A)
+
+`handleAttach` calls `Session.Activate(ctx)` before `Session.Attach(conn, conn)` so an evicted session is woken before the bridge is bound:
+
+```go
+activateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+if err := sess.Activate(activateCtx); err != nil {
+    _ = enc.Encode(Response{Error: fmt.Sprintf("attach: activate: %v", err)})
+    return false
+}
+done, err := sess.Attach(conn, conn)
+```
+
+The 30s window caps the documented 2-15s respawn latency with safety margin. A busted respawn surfaces as a clean `attach: activate: <err>` rather than a hung attach. `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it) — the Activate-first contract is load-bearing.
+
+`handleStatus` does **not** activate. Status on an evicted session reports the supervisor's `PhaseStopped` (faithful — the supervisor really isn't running) and avoids spurious wakeups from a poll. See [idle-eviction.md](idle-eviction.md).
 
 ## Process-Global vs Per-Session
 

@@ -21,9 +21,11 @@ import (
 // Set attachFn to drive the Attach behaviour; nil means "no attach configured"
 // (i.e. tests that exercise non-attach verbs).
 type fakeSession struct {
-	mu       sync.Mutex
-	state    supervisor.State
-	attachFn func(in io.Reader, out io.Writer) (<-chan struct{}, error)
+	mu             sync.Mutex
+	state          supervisor.State
+	attachFn       func(in io.Reader, out io.Writer) (<-chan struct{}, error)
+	activateCalls  int
+	activateErr    error
 }
 
 func (f *fakeSession) State() supervisor.State {
@@ -40,6 +42,13 @@ func (f *fakeSession) Attach(in io.Reader, out io.Writer) (<-chan struct{}, erro
 		return nil, errors.New("fakeSession: no attach configured")
 	}
 	return fn(in, out)
+}
+
+func (f *fakeSession) Activate(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activateCalls++
+	return f.activateErr
 }
 
 // fakeResolver returns its single fakeSession for any id. Set lookupErr to

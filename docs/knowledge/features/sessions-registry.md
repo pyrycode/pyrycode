@@ -6,8 +6,9 @@ On-disk persistence for `internal/sessions.Pool`. The registry stores per-pyry-n
 
 - **Phase 1.2a (#34):** registry introduced for the bootstrap entry. Cold start mints a UUID and writes the file; warm start reuses the persisted UUID without rewriting the file.
 - **Phase 1.2b-A (#38):** `Pool.RotateID` now mutates the bootstrap entry's UUID when startup reconciliation detects a `/clear` rotation; persists via `saveLocked`. See [jsonl-reconciliation.md](jsonl-reconciliation.md).
+- **Phase 1.2b-B (#39):** live-detection rotation watcher drives the same `RotateID` → `saveLocked` seam.
+- **Phase 1.2c-A (#40):** `lifecycle_state` field added (`"active"` / `"evicted"`, `omitempty`). `last_active_at` now bumped on every state transition — the LRU follow-up consumes it for victim selection. See [idle-eviction.md](idle-eviction.md).
 - **Phase 1.1+:** `Pool.Add` / `Rename` / `Remove` plug into the same `saveLocked` seam introduced here.
-- **Phase 1.2c:** `last_active_at` becomes a live-updated value used by idle eviction.
 
 ## Path
 
@@ -28,7 +29,8 @@ Lives as a sibling to the per-name socket `~/.pyry/<name>.sock`. Resolution is i
       "label": "",
       "created_at": "2026-05-01T12:34:56.789123456Z",
       "last_active_at": "2026-05-01T12:34:56.789123456Z",
-      "bootstrap": true
+      "bootstrap": true,
+      "lifecycle_state": "evicted"
     }
   ]
 }
@@ -40,8 +42,9 @@ Lives as a sibling to the per-name socket `~/.pyry/<name>.sock`. Resolution is i
 | `id` | string (UUIDv4) | The `SessionID`. |
 | `label` | string | Always `""` in 1.2a. Phase 1.1's `pyry sessions rename` populates it. |
 | `created_at` | RFC3339Nano | Set once at session creation. |
-| `last_active_at` | RFC3339Nano | Equal to `created_at` in 1.2a. Bumped on `RotateID` (1.2b-A). Phase 1.2c starts live-updating it. |
+| `last_active_at` | RFC3339Nano | Equal to `created_at` in 1.2a. Bumped on `RotateID` (1.2b-A) and on every lifecycle state transition (1.2c-A). |
 | `bootstrap` | bool | Marks the entry resolved by `Pool.Lookup("")`. Omitted on disk when false (`omitempty`). |
+| `lifecycle_state` | string | `"active"` or `"evicted"` (1.2c-A). Omitted on disk when `"active"` (`omitempty`) — preserves the dominant-case byte-stability. Missing field on read defaults to `"active"`. |
 
 **Forward compatibility:** unknown top-level and per-session fields are tolerated on read (default `encoding/json` decoder; `DisallowUnknownFields` is *not* set). New fields land additively in later phases without breaking old pyry binaries.
 
