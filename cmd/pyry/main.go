@@ -173,10 +173,11 @@ var pyryFlagBools = map[string]bool{
 // pyryFlagValues are pyry-specific flags that take a value. The value can
 // be glued (`-pyry-claude=/path`) or in the next arg (`-pyry-claude /path`).
 var pyryFlagValues = map[string]bool{
-	"pyry-claude":  true,
-	"pyry-workdir": true,
-	"pyry-socket":  true,
-	"pyry-name":    true,
+	"pyry-claude":       true,
+	"pyry-workdir":      true,
+	"pyry-socket":       true,
+	"pyry-name":         true,
+	"pyry-idle-timeout": true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -253,6 +254,7 @@ func runSupervisor(args []string) error {
 	verbose := fs.Bool("pyry-verbose", false, "verbose pyry logging")
 	name := fs.String("pyry-name", defaultName(), "instance name (socket: ~/.pyry/<name>.sock)")
 	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
+	idleTimeout := fs.Duration("pyry-idle-timeout", 15*time.Minute, "evict idle claudes after this duration (0 disables)")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -289,6 +291,7 @@ func runSupervisor(args []string) error {
 		Logger:            logger,
 		RegistryPath:      registryPath,
 		ClaudeSessionsDir: claudeSessionsDir,
+		IdleTimeout:       *idleTimeout,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    *workdir,
@@ -579,6 +582,8 @@ Pyry flags (must come before claude args, or after a -- separator):
   -pyry-name string     instance name; socket is ~/.pyry/<name>.sock
                         (default "pyry"; PYRY_NAME env var overrides default)
   -pyry-socket string   explicit socket path (overrides -pyry-name)
+  -pyry-idle-timeout    evict idle claudes after this duration (default 15m;
+                        0 disables; respawn latency 2-15s on next attach)
 
 Examples:
   pyry                                  # supervised claude (default instance)
