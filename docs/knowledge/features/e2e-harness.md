@@ -10,7 +10,9 @@ Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e),
 restart-survival test), #107 (two more restart-survival tests — evicted
 state + `lastActiveAt` timestamps — plus file-local `newRegistryHome`
 helper), #111 (failed-start primitive — `StartExpectingFailureIn` + the
-corrupt-registry fail-loud test), split from #51.
+corrupt-registry fail-loud test), #112 (positive-outcome startup test —
+`TestE2E_Startup_MissingClaudeProjectsDir`, no harness changes), split
+from #51.
 
 ## What It Does
 
@@ -583,6 +585,87 @@ test" constraint, they earn their keep as crash-loud guards, not as
 behaviours under coverage. Future failed-start tests that reuse the helper
 provide additional implicit coverage as they land.
 
+### `startup_test.go` — `TestE2E_Startup_MissingClaudeProjectsDir` (#112)
+
+Positive-outcome sibling of the corrupt-registry test — same file, opposite
+verdict. A first-run user has never invoked `claude`, so
+`~/.claude/projects/` does not exist. The reconcile path's `MissingDir`
+branch (`internal/sessions/pool.go`) treats `os.Stat` returning
+`fs.ErrNotExist` as "no transcripts to reconcile," not as an error; the
+daemon must come up with an empty registry. Unit tests already cover this;
+the e2e adds binary-boundary proof.
+
+Sketch:
+
+```go
+func TestE2E_Startup_MissingClaudeProjectsDir(t *testing.T) {
+    home, err := os.MkdirTemp("", "pyry-mp-*")
+    if err != nil { t.Fatalf("mkdir home: %v", err) }
+    t.Cleanup(func() { _ = os.RemoveAll(home) })
+
+    claudeProjects := filepath.Join(home, ".claude", "projects")
+    if _, err := os.Stat(claudeProjects); !errors.Is(err, fs.ErrNotExist) {
+        t.Fatalf(".claude/projects/ unexpectedly exists at %s (err=%v); test premise invalidated",
+            claudeProjects, err)
+    }
+
+    h := StartIn(t, home)
+    r := h.Run(t, "status")
+    if r.ExitCode != 0 {
+        t.Fatalf("pyry status exit=%d\nstdout:\n%s\nstderr:\n%s",
+            r.ExitCode, r.Stdout, r.Stderr)
+    }
+    h.Stop(t)
+}
+```
+
+| Assertion | What it pins |
+|---|---|
+| `fs.ErrNotExist` on `<home>/.claude/projects/` | Test premise: the missing-dir case is what's actually under test. If a future harness change pre-creates that directory, this test fails loudly instead of silently passing on a different path. |
+| `Start`/`StartIn` returns | Daemon reaches ready with the missing dir — the `MissingDir` branch did not return an error up the stack. |
+| `pyry status` exit 0 | Control socket is responsive; the daemon is functional, not just up. |
+| `h.Stop(t)` | Shutdown is verdict-bearing: explicit `Stop` surfaces shutdown errors at the assertion point rather than from `t.Cleanup` after the test has already passed. |
+
+No log-line assertion: production may or may not log the no-op, and tying
+the test to a specific line would lock production into emitting it.
+
+#### Why `StartIn` + `os.MkdirTemp` instead of `Start(t)` + `t.TempDir()`
+
+`Start(t)` would suffice for the missing-dir case in principle (a fresh
+`t.TempDir()` HOME has no `.claude/projects/` by construction). Two reasons
+to use `StartIn` + `os.MkdirTemp` here:
+
+1. **`sun_path` budget.** `TestE2E_Startup_MissingClaudeProjectsDir` is a
+   long test name; `t.TempDir()` embeds it into the path and overflows
+   macOS's 104-byte socket-path limit. `os.MkdirTemp("", "pyry-mp-*")` keeps
+   the prefix tiny — same lesson the restart tests apply.
+2. **Caller-owned cleanup.** The failed-start test next door uses
+   `os.MkdirTemp` + `t.Cleanup(os.RemoveAll)` for the same reason. Keeping
+   the two startup tests structurally similar makes the file scannable.
+
+#### Why explicit `Stop(t)` despite `t.Cleanup`
+
+`StartIn(t, home)` registers `h.teardown` via `t.Cleanup`, which handles
+process liveness and socket removal. But cleanup runs *after* the test
+function returns, so any `t.Logf` about a stuck shutdown gets attributed
+"after the test." Calling `h.Stop(t)` inside the test body makes "shuts
+down cleanly" a verdict-bearing step. `cleanupOnce` (existing `sync.Once`)
+makes this idempotent with the cleanup hook — the second fire is a no-op.
+
+#### Why not a table-driven test combining both startup cases
+
+The two startup tests assert opposite outcomes: ready+responsive vs.
+exit-before-ready. They use different harness entry points (`StartIn` vs.
+`StartExpectingFailureIn`) returning different types (`*Harness` vs.
+`RunResult`). A table that switches on outcome shape is more code than two
+flat tests. Per #111's spec and #112's guidance, keep them flat.
+
+#### Production diff is zero
+
+The `MissingDir` branch already exists in `internal/sessions/pool.go`. This
+ticket adds binary-boundary coverage; no harness changes either. Test diff
+is one new test in the existing `startup_test.go`, ~25 LOC.
+
 ## Concurrency Model
 
 | Goroutine | Owns | Lifetime |
@@ -707,7 +790,8 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   `docs/specs/architecture/80-e2e-install-systemd-roundtrip.md`,
   `docs/specs/architecture/106-e2e-restart-primitive.md`,
   `docs/specs/architecture/107-e2e-restart-evicted-and-lastactiveat.md`,
-  `docs/specs/architecture/111-e2e-corrupt-registry.md`
+  `docs/specs/architecture/111-e2e-corrupt-registry.md`,
+  `docs/specs/architecture/112-e2e-missing-claude-projects-dir.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude); lessons.md § Unix-socket sun_path limits and
   t.TempDir()
@@ -716,6 +800,8 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   proofs (#106: `TestE2E_Restart_PreservesActiveSessions`; #107:
   `TestE2E_Restart_PreservesEvictedSessions`,
   `TestE2E_Restart_LastActiveAtSurvives`), startup-failure proofs
-  (#111: `TestE2E_Startup_CorruptRegistryFailsClean`), Phase 1.1
+  (#111: `TestE2E_Startup_CorruptRegistryFailsClean`),
+  startup positive-outcome proofs (#112:
+  `TestE2E_Startup_MissingClaudeProjectsDir`), Phase 1.1
   session-verb tickets (#54, #55, #56), install-service round-trip
   ([install-e2e.md](install-e2e.md))
