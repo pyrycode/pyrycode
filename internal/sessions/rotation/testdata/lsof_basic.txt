@@ -1,0 +1,17 @@
+p4711
+fcwd
+n/Users/jane/Workspace
+ftxt
+n/usr/local/bin/claude
+f0
+n/dev/ttys003
+f1
+n/dev/ttys003
+f2
+n/dev/ttys003
+f3
+nsocket:0x12345
+f4
+n/Users/jane/.claude/projects/-Users-jane-Workspace/8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91.jsonl
+f5
+npipe:0x9999

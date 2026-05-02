@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
@@ -669,6 +671,224 @@ func TestPool_RotateID_Idempotent(t *testing.T) {
 	if !beforeStat.ModTime().Equal(afterStat.ModTime()) {
 		t.Errorf("registry mtime changed on idempotent RotateID")
 	}
+}
+
+// TestPool_Snapshot_BootstrapNoChild: a fresh pool whose bootstrap session
+// has not been Run yet snapshots as PID = 0.
+func TestPool_Snapshot_BootstrapNoChild(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	snap := pool.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("len(snap) = %d, want 1", len(snap))
+	}
+	if snap[0].ID != pool.Default().ID() {
+		t.Errorf("snap[0].ID = %q, want %q", snap[0].ID, pool.Default().ID())
+	}
+	if snap[0].PID != 0 {
+		t.Errorf("snap[0].PID = %d, want 0 (no child Run)", snap[0].PID)
+	}
+}
+
+// TestPool_RegisterAllocatedUUID_Consumed: registering then consulting the
+// skip set returns true once and false thereafter.
+func TestPool_RegisterAllocatedUUID_Consumed(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	id := SessionID("11111111-1111-4111-8111-111111111111")
+	pool.RegisterAllocatedUUID(id)
+	if !pool.IsAllocated(id) {
+		t.Errorf("IsAllocated(%q) = false on first call, want true", id)
+	}
+	if pool.IsAllocated(id) {
+		t.Errorf("IsAllocated(%q) = true on second call, want false (consumed)", id)
+	}
+}
+
+// TestPool_RegisterAllocatedUUID_Expires: an entry past its TTL must report
+// false even on the first IsAllocated call.
+func TestPool_RegisterAllocatedUUID_Expires(t *testing.T) {
+	prev := allocatedTTL
+	allocatedTTL = 50 * time.Millisecond
+	defer func() { allocatedTTL = prev }()
+
+	pool := helperPool(t, false)
+	id := SessionID("22222222-2222-4222-8222-222222222222")
+	pool.RegisterAllocatedUUID(id)
+	time.Sleep(120 * time.Millisecond)
+	if pool.IsAllocated(id) {
+		t.Errorf("IsAllocated(%q) = true after expiry, want false", id)
+	}
+}
+
+// TestPool_RegisterAllocatedUUID_PrunesOnWrite: an expired entry is pruned
+// when a fresh entry is registered.
+func TestPool_RegisterAllocatedUUID_PrunesOnWrite(t *testing.T) {
+	prev := allocatedTTL
+	allocatedTTL = 50 * time.Millisecond
+	defer func() { allocatedTTL = prev }()
+
+	pool := helperPool(t, false)
+	idA := SessionID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1")
+	idB := SessionID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1")
+	pool.RegisterAllocatedUUID(idA)
+	time.Sleep(120 * time.Millisecond)
+	pool.RegisterAllocatedUUID(idB)
+
+	// A should have been pruned by the second Register's prune sweep.
+	pool.mu.RLock()
+	_, present := pool.allocated[idA]
+	pool.mu.RUnlock()
+	if present {
+		t.Errorf("expired entry %q not pruned on subsequent register", idA)
+	}
+	if !pool.IsAllocated(idB) {
+		t.Errorf("IsAllocated(%q) = false, want true", idB)
+	}
+}
+
+// TestPool_Run_NoWatcherWhenDirEmpty: with ClaudeSessionsDir empty, Run
+// supervises the bootstrap and exits cleanly on context cancellation, with
+// no watcher constructed.
+func TestPool_Run_NoWatcherWhenDirEmpty(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolWithSleepArgs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- pool.Run(ctx) }()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want nil or context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit within 2s after cancel")
+	}
+}
+
+// TestPool_Run_StartsWatcher: with ClaudeSessionsDir set and a fake probe,
+// writing a UUID-shaped JSONL during the watcher's window triggers RotateID
+// before context cancellation.
+func TestPool_Run_StartsWatcher(t *testing.T) {
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+
+	dir := t.TempDir()
+	regPath := filepath.Join(t.TempDir(), "sessions.json")
+
+	// Replace the platform probe factory with a fake that returns whatever
+	// path was just created in `dir`. The path is captured by closure on
+	// each OpenJSONL call by reading the dir.
+	prevNewProbe := newProbe
+	defer func() { newProbe = prevNewProbe }()
+	newProbe = func(_ *slog.Logger) rotation.Probe {
+		return &dirProbe{dir: dir}
+	}
+
+	pool, err := New(Config{
+		Bootstrap: SessionConfig{
+			ClaudeBin:      "/bin/sleep",
+			ClaudeArgs:     []string{"3600"},
+			BackoffInitial: 10 * time.Millisecond,
+			BackoffMax:     10 * time.Millisecond,
+			BackoffReset:   1 * time.Second,
+		},
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:      regPath,
+		ClaudeSessionsDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	oldID := pool.Default().ID()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- pool.Run(ctx) }()
+
+	// Give the bootstrap supervisor a moment to spawn /bin/sleep so the
+	// snapshot has a non-zero PID.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.Default().State().ChildPID > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pool.Default().State().ChildPID == 0 {
+		t.Fatal("bootstrap child never started")
+	}
+
+	newID := SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91")
+	if err := os.WriteFile(filepath.Join(dir, string(newID)+".jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Poll the on-disk registry — RotateID's saveLocked is the
+	// synchronization point that makes the rotation observable from this
+	// goroutine without racing with Session.id.
+	deadline = time.Now().Add(2 * time.Second)
+	rotated := false
+	for time.Now().Before(deadline) {
+		reg, err := loadRegistry(regPath)
+		if err == nil && reg != nil && len(reg.Sessions) == 1 && reg.Sessions[0].ID == newID {
+			rotated = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after cancel")
+	}
+
+	if !rotated {
+		t.Fatalf("registry id never became %q (watcher did not rotate)", newID)
+	}
+	if oldID == newID {
+		t.Fatal("test setup error: oldID == newID")
+	}
+}
+
+// dirProbe always reports the most-recently-modified .jsonl in dir as PID's
+// open file. Used by TestPool_Run_StartsWatcher to fake the per-PID FD probe
+// without actually reading /proc or shelling out to lsof.
+type dirProbe struct{ dir string }
+
+func (p *dirProbe) OpenJSONL(int) (string, error) {
+	entries, err := os.ReadDir(p.dir)
+	if err != nil {
+		return "", nil
+	}
+	var bestPath string
+	var bestMT int64 = -1
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if filepath.Ext(name) != ".jsonl" {
+			continue
+		}
+		full := filepath.Join(p.dir, name)
+		info, err := os.Stat(full)
+		if err != nil {
+			continue
+		}
+		if mt := info.ModTime().UnixNano(); mt > bestMT {
+			bestMT = mt
+			bestPath = full
+		}
+	}
+	return bestPath, nil
 }
 
 // TestPool_New_MalformedRegistryIsFatal: a corrupt sessions.json must surface

@@ -8,8 +8,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
+	"golang.org/x/sync/errgroup"
 )
+
+// allocatedTTL bounds how long a UUID stays in the freshly-allocated skip
+// set before being pruned. Defined as a var (not const) so tests can shrink
+// it.
+var allocatedTTL = 30 * time.Second
+
+// newProbe is the rotation.Probe factory. Indirected via a package var so
+// tests can inject a fake without touching the platform-specific build files.
+var newProbe = rotation.DefaultProbe
 
 // ErrSessionNotFound is returned by Pool.Lookup for a non-empty unknown id.
 var ErrSessionNotFound = errors.New("sessions: session not found")
@@ -55,11 +66,21 @@ type SessionConfig struct {
 // Pool owns the set of sessions managed by one pyry process. Phase 1.0
 // constructs exactly one entry — the bootstrap session — at New().
 type Pool struct {
-	mu           sync.RWMutex
-	sessions     map[SessionID]*Session
-	bootstrap    SessionID
-	log          *slog.Logger
-	registryPath string
+	mu                sync.RWMutex
+	sessions          map[SessionID]*Session
+	bootstrap         SessionID
+	log               *slog.Logger
+	registryPath      string
+	claudeSessionsDir string
+	allocated         map[SessionID]time.Time
+}
+
+// SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. Carries
+// only primitive types so the rotation package can consume snapshots without
+// importing internal/sessions.
+type SnapshotEntry struct {
+	ID  SessionID
+	PID int
 }
 
 // New constructs a Pool. If a registry exists at cfg.RegistryPath, the
@@ -128,10 +149,12 @@ func New(cfg Config) (*Pool, error) {
 		bootstrap:    true,
 	}
 	p := &Pool{
-		sessions:     map[SessionID]*Session{bootstrapID: sess},
-		bootstrap:    bootstrapID,
-		log:          cfg.Logger,
-		registryPath: cfg.RegistryPath,
+		sessions:          map[SessionID]*Session{bootstrapID: sess},
+		bootstrap:         bootstrapID,
+		log:               cfg.Logger,
+		registryPath:      cfg.RegistryPath,
+		claudeSessionsDir: cfg.ClaudeSessionsDir,
+		allocated:         make(map[SessionID]time.Time),
 	}
 
 	// Persist on cold start (no prior file). Warm starts do not rewrite —
@@ -207,15 +230,119 @@ func (p *Pool) Default() *Session {
 	return p.sessions[p.bootstrap]
 }
 
-// Run blocks until ctx is cancelled, supervising every session in the pool.
-// Phase 1.0: one session, one direct call to bootstrap.Run(ctx) — no errgroup.
-// Phase 1.1+ replaces the body with errgroup fan-out; the call shape is the
-// extension point.
+// Run blocks until ctx is cancelled, supervising every session in the pool
+// and (when ClaudeSessionsDir is set) running the rotation watcher alongside
+// it. errgroup ties the goroutines together: cancellation propagates, and
+// Wait returns the first non-nil error.
+//
+// Phase 1.1+ extends the fan-out to one supervisor.Run goroutine per session
+// — the errgroup wrapper introduced here is the extension point.
 func (p *Pool) Run(ctx context.Context) error {
 	p.mu.RLock()
 	bootstrap := p.sessions[p.bootstrap]
+	dir := p.claudeSessionsDir
 	p.mu.RUnlock()
-	return bootstrap.Run(ctx)
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return bootstrap.Run(gctx) })
+
+	if dir != "" {
+		w, err := rotation.New(rotation.Config{
+			Dir:    dir,
+			Probe:  newProbe(p.log),
+			Logger: p.log,
+			Snapshot: func() []rotation.SessionRef {
+				return p.snapshotForRotation()
+			},
+			IsAllocated: func(id string) bool {
+				return p.IsAllocated(SessionID(id))
+			},
+			OnRotate: func(oldID, newID string) error {
+				return p.RotateID(SessionID(oldID), SessionID(newID))
+			},
+		})
+		if err != nil {
+			// AC: pyry startup proceeds without a watcher rather than
+			// failing.
+			p.log.Warn("rotation watcher disabled", "err", err)
+		} else {
+			g.Go(func() error { return w.Run(gctx) })
+		}
+	}
+
+	return g.Wait()
+}
+
+// Snapshot returns one entry per session, capturing the current
+// supervisor.State().ChildPID. PID == 0 means no live child. Safe for
+// concurrent use; takes RLock only.
+func (p *Pool) Snapshot() []SnapshotEntry {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]SnapshotEntry, 0, len(p.sessions))
+	for _, s := range p.sessions {
+		out = append(out, SnapshotEntry{ID: s.id, PID: s.State().ChildPID})
+	}
+	return out
+}
+
+// snapshotForRotation translates Pool.Snapshot into the primitive-typed
+// shape rotation.Watcher expects. Lives on Pool so the conversion happens
+// in exactly one place.
+func (p *Pool) snapshotForRotation() []rotation.SessionRef {
+	snap := p.Snapshot()
+	out := make([]rotation.SessionRef, len(snap))
+	for i, s := range snap {
+		out[i] = rotation.SessionRef{ID: string(s.ID), PID: s.PID}
+	}
+	return out
+}
+
+// RegisterAllocatedUUID records that id is a UUID pyry just minted (and is
+// about to write to disk via claude --session-id). The watcher consults this
+// set on every CREATE; matching entries skip the rotation path. Entries are
+// consumed on first IsAllocated hit, or pruned after allocatedTTL.
+//
+// Phase 1.2b-B has no live caller — pyry currently launches claude with
+// --continue, so claude picks the UUID. The scaffolding lands now so Phase
+// 1.1's `pyry sessions new` and `claude --session-id` wiring is a one-liner.
+func (p *Pool) RegisterAllocatedUUID(id SessionID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.allocated == nil {
+		p.allocated = make(map[SessionID]time.Time)
+	}
+	p.pruneAllocatedLocked()
+	p.allocated[id] = time.Now().Add(allocatedTTL)
+}
+
+// IsAllocated reports whether id is in the freshly-allocated set, consuming
+// the entry on a true return. Opportunistically prunes expired entries.
+// Safe for concurrent use.
+func (p *Pool) IsAllocated(id SessionID) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pruneAllocatedLocked()
+	deadline, ok := p.allocated[id]
+	if !ok {
+		return false
+	}
+	if time.Now().After(deadline) {
+		delete(p.allocated, id)
+		return false
+	}
+	delete(p.allocated, id) // consume on first hit
+	return true
+}
+
+// pruneAllocatedLocked drops expired entries. Caller must hold p.mu (write).
+func (p *Pool) pruneAllocatedLocked() {
+	now := time.Now()
+	for id, d := range p.allocated {
+		if now.After(d) {
+			delete(p.allocated, id)
+		}
+	}
 }
 
 // saveLocked snapshots the current in-memory sessions into a registryFile and
