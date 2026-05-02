@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -134,6 +135,18 @@ type Pool struct {
 	// half-initialised handle.
 	runGroup *errgroup.Group
 	runCtx   context.Context
+
+	// sessionTpl is the per-session template captured from cfg.Bootstrap
+	// at New(). Pool.Create copies this, overrides ResumeLast/ClaudeArgs,
+	// and (in service mode, Bridge != nil) mints a fresh Bridge so each
+	// new session gets its own I/O channel. Read-only after New — no lock
+	// needed.
+	sessionTpl SessionConfig
+
+	// idleTimeoutDefault mirrors Config.IdleTimeout. Pool.Create uses it as
+	// the same fallback New() applies to the bootstrap when the per-session
+	// IdleTimeout is zero. Read-only after New.
+	idleTimeoutDefault time.Duration
 }
 
 // SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. Carries
@@ -227,13 +240,15 @@ func New(cfg Config) (*Pool, error) {
 		sess.evictedCh = closedChan()
 	}
 	p := &Pool{
-		sessions:          map[SessionID]*Session{bootstrapID: sess},
-		bootstrap:         bootstrapID,
-		log:               cfg.Logger,
-		registryPath:      cfg.RegistryPath,
-		claudeSessionsDir: cfg.ClaudeSessionsDir,
-		allocated:         make(map[SessionID]time.Time),
-		activeCap:         cfg.ActiveCap,
+		sessions:           map[SessionID]*Session{bootstrapID: sess},
+		bootstrap:          bootstrapID,
+		log:                cfg.Logger,
+		registryPath:       cfg.RegistryPath,
+		claudeSessionsDir:  cfg.ClaudeSessionsDir,
+		allocated:          make(map[SessionID]time.Time),
+		activeCap:          cfg.ActiveCap,
+		sessionTpl:         cfg.Bootstrap,
+		idleTimeoutDefault: cfg.IdleTimeout,
 	}
 	sess.pool = p
 
@@ -392,6 +407,117 @@ func (p *Pool) supervise(sess *Session) error {
 	}
 	g.Go(func() error { return sess.Run(gctx) })
 	return nil
+}
+
+// Create mints a fresh session, persists it, and brings it up under the
+// cap-aware spawn path. Returns the new SessionID and an error.
+//
+// The returned id is empty only when the failure happened before (or during)
+// the persist step — in that case nothing is on disk and nothing in memory
+// changed. A non-empty id means the registry entry is on disk; the caller
+// uses errors.Is to decide whether the failure was ErrPoolNotRunning (no
+// lifecycle goroutine yet — fix and retry by calling Run + Activate) or an
+// Activate error (lifecycle goroutine is running and may transition to
+// active anyway — see ctx-cancellation note below).
+//
+// Sequence: NewID → build *Session in stateEvicted → register under p.mu and
+// persist (rollback the in-memory entry on save failure) → register the UUID
+// in the rotation skip-set → schedule sess.Run on Pool.Run's errgroup via
+// supervise → call Pool.Activate (cap-aware) to wake the lifecycle goroutine.
+//
+// We persist BEFORE activating: a save failure with claude already running
+// would leave an unsupervised orphan whose JSONL has no on-disk record. A
+// registry-only entry that didn't activate is benign — the same shape as a
+// session that ran and then idled out, recoverable on next Activate.
+//
+// Concurrency: safe for concurrent use. Each call serialises through Pool.mu
+// briefly (registration + persist), then runs supervise/Activate off-lock
+// under the cap path's existing capMu serialisation.
+//
+// Note: if ctx is cancelled after supervise succeeded but before Activate
+// returns, the lifecycle goroutine still observes the buffered activate
+// signal and may transition to active anyway. The lifecycle goroutine
+// respects the pool's run-context, not the caller's. Tests should not
+// assume "Activate returned ctx.Err → claude is not running."
+func (p *Pool) Create(ctx context.Context, label string) (SessionID, error) {
+	id, err := NewID()
+	if err != nil {
+		return "", fmt.Errorf("sessions: create id: %w", err)
+	}
+
+	tpl := p.sessionTpl
+	args := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
+	var bridge *supervisor.Bridge
+	if tpl.Bridge != nil {
+		bridge = supervisor.NewBridge(p.log)
+	}
+
+	supCfg := supervisor.Config{
+		ClaudeBin:      tpl.ClaudeBin,
+		WorkDir:        tpl.WorkDir,
+		ResumeLast:     false,
+		ClaudeArgs:     args,
+		Bridge:         bridge,
+		Logger:         p.log,
+		BackoffInitial: tpl.BackoffInitial,
+		BackoffMax:     tpl.BackoffMax,
+		BackoffReset:   tpl.BackoffReset,
+	}
+	sup, err := supervisor.New(supCfg)
+	if err != nil {
+		return "", fmt.Errorf("sessions: create supervisor: %w", err)
+	}
+
+	idleTimeout := tpl.IdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = p.idleTimeoutDefault
+	}
+
+	now := time.Now().UTC()
+	sess := &Session{
+		id:           id,
+		sup:          sup,
+		bridge:       bridge,
+		log:          p.log,
+		label:        label,
+		createdAt:    now,
+		lastActiveAt: now,
+		bootstrap:    false,
+		pool:         p,
+		idleTimeout:  idleTimeout,
+		lcState:      stateEvicted,
+		activeCh:     make(chan struct{}),
+		evictedCh:    closedChan(),
+		activateCh:   make(chan struct{}, 1),
+		evictCh:      make(chan struct{}, 1),
+	}
+
+	// Persist before activating: if saveLocked fails, roll the in-memory
+	// registration back so a retry sees a clean slate. See docstring
+	// rationale ("save failure with claude running would leave an
+	// unsupervised orphan").
+	p.mu.Lock()
+	p.sessions[id] = sess
+	if err := p.saveLocked(); err != nil {
+		delete(p.sessions, id)
+		p.mu.Unlock()
+		return "", err
+	}
+	p.mu.Unlock()
+
+	// Prime the rotation watcher's skip-set BEFORE the lifecycle goroutine
+	// can spawn claude — claude opening the JSONL would otherwise look like
+	// a /clear rotation. allocatedTTL (30s) is well clear of the sub-second
+	// spawn path.
+	p.RegisterAllocatedUUID(id)
+
+	if err := p.supervise(sess); err != nil {
+		return id, err
+	}
+	if err := p.Activate(ctx, id); err != nil {
+		return id, err
+	}
+	return id, nil
 }
 
 // Snapshot returns one entry per session, capturing the current
