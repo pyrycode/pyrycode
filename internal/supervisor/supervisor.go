@@ -17,18 +17,16 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
-// goroutineDrainTimeout caps how long runOnce waits for its I/O bridge
-// goroutines to finish after the child has exited. The output goroutine
-// returns promptly when ptmx is closed; the input goroutine in foreground
-// mode is blocked on os.Stdin and will only unblock on the next user
-// keystroke. The timeout exists to bound runOnce's return latency without
-// requiring stdin to be closed.
+// goroutineDrainTimeout caps how long runOnce waits for the I/O bridge
+// goroutines after the child exits and the bridges have been closed. Both
+// should drain promptly; the timeout is a safety net.
 const goroutineDrainTimeout = 100 * time.Millisecond
 
 // Phase describes the supervisor's current lifecycle state.
@@ -271,20 +269,6 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 
 	// Foreground mode: bridge directly to the supervisor's own terminal.
 	//
-	// Known limitation: io.Copy(ptmx, os.Stdin) below blocks on stdin.Read
-	// after the child exits — closing ptmx unblocks the *output* goroutine
-	// promptly, but the *input* goroutine sits on stdin until the user types
-	// again. Each child restart can therefore strand one stdin-bound
-	// goroutine that lives until the next keystroke.
-	//
-	// The leak is bounded by typing frequency, not by restart frequency, so
-	// in practice it stays at "one or two goroutines" for an interactive
-	// user. Service mode (Bridge != nil) has no equivalent issue — the
-	// bridge's pipe-based input pump is per-supervisor, not per-child.
-	// We accept this for foreground mode rather than retrofitting a
-	// cancellable stdin reader, since foreground mode is dev-convenience
-	// only; the production deployment uses service mode.
-	//
 	// Put the controlling terminal into raw mode if it is a TTY so that
 	// keystrokes pass through unmodified to the child.
 	stdinFd := int(os.Stdin.Fd())
@@ -305,10 +289,21 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 	stopResize := s.watchWindowSize(ptmx)
 	defer stopResize()
 
-	// Bridge stdin/stdout.
+	// Open /dev/tty as a separate fd for the input bridge. When the child
+	// exits we Close this fd, the in-flight Read returns, and the input
+	// goroutine drains cleanly. Reading os.Stdin directly would leave the
+	// goroutine blocked on os.Stdin's fdMutex — see #78.
+	input, inputErr := openTTYInput()
+	if inputErr != nil {
+		s.log.Debug("foreground: /dev/tty unavailable, falling back to os.Stdin",
+			"err", inputErr)
+		input = stdinFallback{}
+	}
+	defer func() { _ = input.Close() }()
+
 	done := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(ptmx, os.Stdin)
+		_, err := io.Copy(ptmx, input)
 		done <- err
 	}()
 	go func() {
@@ -317,13 +312,46 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 	}()
 
 	waitErr := cmd.Wait()
-	// After the child exits, unblock the copy goroutines.
+	// Unblock both copy goroutines: ptmx.Close() drains the output
+	// goroutine; input.Close() drains the input goroutine.
 	_ = ptmx.Close()
-	// Drain at least one of the copy results to avoid leaking a goroutine for
-	// a read that will never complete (stdin).
-	select {
-	case <-done:
-	case <-time.After(100 * time.Millisecond):
+	_ = input.Close()
+
+	// Drain both. Under normal operation each returns within microseconds
+	// of its source closing; the timeout is a safety net.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(goroutineDrainTimeout):
+			s.log.Warn("io bridge goroutine drain timeout")
+		}
 	}
 	return waitErr
 }
+
+// openTTYInput returns a reader for the controlling terminal. The returned
+// ReadCloser is owned by the caller and must be Closed to unblock any
+// in-flight Read (typically the input-bridge goroutine).
+//
+// /dev/tty is opened with O_NONBLOCK so the Go runtime poller mediates the
+// Read. Without it, syscall.Read blocks in the kernel and Close on another
+// goroutine has no way to interrupt it (POSIX close-during-read is a no-op
+// for a blocking fd). With it, Read returns EAGAIN, the runtime parks the
+// goroutine on the poller, and Close wakes it via runtime_pollUnblock —
+// which is the whole reason we open /dev/tty rather than reusing os.Stdin.
+//
+// On platforms or in environments where /dev/tty is unavailable (headless
+// processes, certain containers), it returns the platform open error
+// verbatim. Foreground mode is TTY-only by construction.
+func openTTYInput() (io.ReadCloser, error) {
+	return os.OpenFile("/dev/tty", os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
+// stdinFallback adapts os.Stdin to io.ReadCloser with a no-op Close. Used
+// only when /dev/tty is unavailable; preserves the legacy stdin-bound
+// goroutine leak in that environment rather than breaking the process by
+// closing os.Stdin.
+type stdinFallback struct{}
+
+func (stdinFallback) Read(p []byte) (int, error) { return os.Stdin.Read(p) }
+func (stdinFallback) Close() error               { return nil }
