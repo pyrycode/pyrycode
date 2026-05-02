@@ -374,6 +374,44 @@ func (p *Pool) RotateID(oldID, newID SessionID) error {
 	return p.saveLocked()
 }
 
+// Rename updates the named session's label and persists the change to the
+// registry. Empty newLabel is permitted and clears the on-disk label to "";
+// Pool.List's synthetic "bootstrap" substitution continues to apply when the
+// bootstrap's on-disk label is empty.
+//
+// Returns ErrSessionNotFound when id is not present in the pool. On the
+// not-found path the in-memory registry and the on-disk sessions.json are
+// byte-identical to their prior state — saveLocked is not invoked. A no-op
+// rename (newLabel equals the current label) also skips saveLocked, keeping
+// the registry mtime stable.
+//
+// Concurrency: takes p.mu (write) for the read-modify-write and holds it
+// across the persisted file write, matching the RotateID/saveLocked
+// invariant. Concurrent Pool.List/Lookup/Snapshot calls block on Pool.mu
+// briefly; nothing else needs synchronisation.
+//
+// Lock order: Pool.mu (write). Does not take Session.lcMu — Session.label is
+// guarded by Pool.mu (the only other readers are List and saveLocked, both
+// under Pool.mu).
+func (p *Pool) Rename(id SessionID, newLabel string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sess, ok := p.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if sess.label == newLabel {
+		return nil
+	}
+	prev := sess.label
+	sess.label = newLabel
+	if err := p.saveLocked(); err != nil {
+		sess.label = prev
+		return err
+	}
+	return nil
+}
+
 // Lookup resolves a SessionID to a Session. An empty id resolves to the
 // default (bootstrap) entry — this is the mechanism that lets the Phase 1.0
 // control plane (after Child B) call Lookup(req.SessionID) with the

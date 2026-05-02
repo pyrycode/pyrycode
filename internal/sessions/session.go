@@ -68,9 +68,11 @@ type Session struct {
 	bridge *supervisor.Bridge // nil in foreground mode
 	log    *slog.Logger
 
-	// Persisted metadata. label/createdAt/bootstrap are immutable post-New
-	// from the lifecycle goroutine's perspective. lastActiveAt is bumped
-	// under lcMu on every state transition.
+	// Persisted metadata. createdAt and bootstrap are immutable post-New.
+	// label is immutable from the lifecycle goroutine's perspective but may
+	// be mutated by Pool.Rename under Pool.mu (write); other readers hold
+	// Pool.mu (RLock or Lock). lastActiveAt is bumped under lcMu on every
+	// state transition.
 	label     string
 	createdAt time.Time
 	bootstrap bool
