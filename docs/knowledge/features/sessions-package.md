@@ -19,6 +19,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.1c-A (#62):** `Pool.Rename(id, newLabel) error` write primitive — typed mutator for the `label` field that flows through `saveLocked`. Empty `newLabel` clears the on-disk value to `""` (synthetic `"bootstrap"` substitution from #60 then resumes for the bootstrap entry); non-empty labels persist verbatim and are reflected by `Pool.List`. Unknown id returns `ErrSessionNotFound` with on-disk and in-memory state byte-identical to before. The internal seam Phase 1.1c-B's `pyry sessions rename` CLI verb (47-B) consumes.
 - **Phase 1.1d-A1 (#94):** `Pool.Remove(ctx, id) error` write primitive + `ErrCannotRemoveBootstrap` sentinel — terminates the named session's claude process and drops its registry entry. JSONL on disk is **not** touched (disposition lands in 64-A2 / #95). Bootstrap is rejected via the sentinel; unknown ids reuse `ErrSessionNotFound`. Delete-then-evict ordering: `Pool.mu` covers the in-memory delete + persist, then is released before `Session.Evict` so the lifecycle goroutine's `transitionTo → Pool.persist` can reacquire the mutex without deadlock. Save-failure rolls the in-memory delete back. The internal seam the future `pyry sessions rm` CLI verb (#65) consumes.
 - **Phase 1.1d-A2 (#95):** `Pool.Remove` signature evolves to `(ctx, id, opts RemoveOptions) error` + `JSONLPolicy` enum (`JSONLLeave` / `JSONLArchive` / `JSONLPurge`). Zero-value `RemoveOptions{}` preserves 1.1d-A1 behaviour byte-for-byte. Archive moves the live JSONL into `<pyry-data-dir>/archived-sessions/<uuid>.jsonl` (data-dir = parent of `registryPath`; subdir auto-created; errors wrapping `fs.ErrExist` if destination exists; source-absent is a no-op). Purge deletes the JSONL (source-absent is a no-op). Disposition runs under `Pool.mu` after `saveLocked` so the registry+JSONL transition is observably atomic; on disposition failure the registry is already committed and `Session.Evict` still runs.
+- **Phase 1.1e-A (#66):** `Pool.ResolveID(arg string) (SessionID, error)` prefix resolver + new `ErrAmbiguousSessionID` sentinel. Maps a user-supplied UUID-or-prefix string to a canonical `SessionID` under `Pool.mu` (RLock). Empty arg → bootstrap (same seam as `Pool.Lookup("")`); exact full-UUID match short-circuits via single map lookup; otherwise scan for unique prefix match. Zero matches → `ErrSessionNotFound` (reused); ≥2 → `ErrAmbiguousSessionID` wrapped via `fmt.Errorf("%w:\n%s", …)` so the message lists `<uuid> (<label>)` pairs on their own lines, sorted by `SessionID` ascending. The internal seam Phase 1.1e-B's `pyry attach <id>` wire + CLI consumes; 47-B / 48-B may opportunistically refactor onto it when next touched.
 - **Phase 1.1+:** `Request.SessionID` on the wire (#71 — `sessions.new` verb consumes `Pool.Create`), per-session log lines, channel-driven auto-mint.
 
 ## Package Layout
@@ -83,6 +84,7 @@ func (p *Pool) Activate(ctx context.Context, id SessionID) error
 func (p *Pool) Create(ctx context.Context, label string) (SessionID, error)
 func (p *Pool) List() []SessionInfo
 func (p *Pool) Rename(id SessionID, newLabel string) error
+func (p *Pool) ResolveID(arg string) (SessionID, error)
 ```
 
 `New` generates a `SessionID`, constructs the underlying `*supervisor.Supervisor` from `cfg.Bootstrap`, and installs the result as the single bootstrap entry. Both `NewID` failure and `supervisor.New` failure are wrapped (`sessions: generate bootstrap id: %w`, `sessions: bootstrap supervisor: %w`) and treated as fatal-at-startup.
@@ -355,6 +357,45 @@ func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) err
 
 **Bootstrap and unknown-id rejection still run before disposition.** `Remove(bootstrapID, {JSONL: JSONLPurge})` does *not* touch the bootstrap's JSONL — structural invariants take precedence over destructive opts.
 
+### Pool.ResolveID (1.1e-A)
+
+The typed prefix resolver Phase 1.1e-B's `pyry attach <id>` wire + CLI surface (and any future verb taking a session selector) consumes instead of inlining the same `strings.HasPrefix` walk over `Pool.List`. The natural pairing with `Pool.Lookup`:
+
+| Caller-supplied input | API |
+|---|---|
+| canonical `SessionID` (or `""`) | `Pool.Lookup(id)` |
+| user input string (UUID, prefix, or `""`) | `Pool.ResolveID(arg)` |
+
+```go
+var ErrAmbiguousSessionID = errors.New("sessions: ambiguous session id")
+
+func (p *Pool) ResolveID(arg string) (SessionID, error)
+```
+
+**Resolution order, all under `Pool.mu` (RLock):**
+
+1. `arg == ""` ⇒ bootstrap id, no error. Same seam as `Pool.Lookup("")`.
+2. `arg` is an exact key in the in-memory `p.sessions` map ⇒ that id, no error. Single map lookup; the short-circuit never falls through to the prefix scan, so a full-UUID match always wins over any coincidental prefix overlap with no extra scan cost.
+3. Scan `p.sessions`, collect every `*Session` whose `SessionID` has `arg` as a prefix (`strings.HasPrefix`). Exactly one match ⇒ that id. Zero ⇒ `ErrSessionNotFound` (reused). ≥2 ⇒ `ambiguousError(matches)`.
+
+**Sentinel + `fmt.Errorf("%w: …")` over a struct error type.** The AC required "the simpler shape that keeps `errors.Is` matching cheap" and "no new exported types beyond the new typed error." A struct error with `Matches []SessionRef` would expose a second exported type and force every consumer to either type-assert or duplicate the formatting. The chosen shape — `var ErrAmbiguousSessionID = errors.New(...)` plus `fmt.Errorf("%w:\n%s", ErrAmbiguousSessionID, lines)` — gives `errors.Is` one pointer compare via the wrapped chain, lets the CLI consumer `fmt.Fprintln(os.Stderr, err)` and get a human-readable list verbatim, and stays within the AC's exported-surface budget.
+
+**Match list formatting.** Sorted by `SessionID` ascending (same tiebreak as `Pool.List`) so the error message is deterministic and tests can pin the exact substring. Each line is `<uuid> (<label>)`. The synthetic `"bootstrap"` substitution from `Pool.List` is mirrored one-for-one — when the bootstrap entry's on-disk label is empty, the formatter writes `<uuid> (bootstrap)` rather than `<uuid> ()`. Otherwise operators would see one name in `pyry sessions ls` and another in the disambiguation prompt.
+
+**No `Session.lcMu` taken.** `ResolveID` reads only `id` (mutated by `RotateID` under `Pool.mu` write — invariant documented at that site) and `label` (mutated by `Pool.Rename` under `Pool.mu` write). Both sit under `Pool.mu`'s reader set; no new lock-order edges. `lcState` and `lastActiveAt` are not consulted — `ResolveID` does **not** filter by lifecycle state. An evicted session is still a registry entry, and `pyry sessions rename <prefix>` / `pyry sessions rm <prefix>` must still resolve it. Filtering, if any, is a verb-layer policy (e.g. a future `pyry attach` may bounce active-vs-idle differently).
+
+**No minimum prefix length.** A one-character prefix is accepted as long as it is unique. Refusing short prefixes (1- or 2-char) for safety is a CLI-layer guard, not a pool invariant — the same posture as `Pool.Rename` declining to validate `newLabel` and `Pool.Create` declining to validate `label`.
+
+**No whitespace trimming.** The pool primitive accepts whatever string the caller hands it. Trimming is the CLI's responsibility (`flag` already handles positional args; an explicit `strings.TrimSpace` at the CLI layer is one line).
+
+**Returns `SessionID`, not `*Session` / `SessionInfo`.** Smallest possible surface, symmetric with the rest of the wire/CLI flow: 1.1e-B unmarshals an id from the request, calls `ResolveID`, then routes to `Lookup` / `Activate` / `Remove` with the resolved id. Returning `*Session` would tempt callers to short-circuit the second lookup — but the second lookup is the lock-clean way to guard against a session being removed between resolve and use, and saving the second hashmap probe is not worth the sharp edge.
+
+**Concurrency.** `Pool.mu` (RLock) for the whole call. Concurrent `ResolveID + List` share the read lock and run truly concurrently. Concurrent `ResolveID + writer` (`Rename` / `Create` / `Remove` / `RotateID`) blocks briefly behind the writer and observes either pre- or post-write state — the same race-clean shape callers were already prepared for. Concurrent `ResolveID + ResolveID` share the read lock with no contention. The lock-order graph (`Pool.capMu → Pool.mu → Session.lcMu`) is unchanged.
+
+**A session removed mid-resolve** either appears in the scan (caller then races on the second `Lookup` and sees `ErrSessionNotFound`) or doesn't — both outcomes are valid races the consumer was already prepared for. No error wrapping prefix is added (the wrapped sentinel already begins with `sessions: …`; double-wrapping would just produce `sessions: resolve: sessions: …`).
+
+**Out of scope** (handed to 1.1e-B): wire protocol field carrying the resolved/unresolved id, control verb routing, CLI argument parsing, refactoring 47-B / 48-B's inlined prefix resolvers (opportunistic when those callers are next touched).
+
 ## Concurrency
 
 `sync.RWMutex` on `Pool.sessions`:
@@ -388,12 +429,14 @@ The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH
 | `Pool.Remove` ctx cancellation during Evict | `ctx.Err()` from `Session.Evict`. Registry entry already deleted and persisted; child terminates asynchronously under the pool's `runCtx`. |
 | `Pool.Remove` archive destination exists | Wrapped error matching `errors.Is(err, fs.ErrExist)`. Registry entry already removed (disposition runs after persist); live JSONL and existing archive both untouched; child still terminated by Evict. |
 | `Pool.Remove` archive when registry persistence disabled | `"sessions: archive requires a registry path"`. Registry entry already removed; child still terminated by Evict. |
+| `Pool.ResolveID` no match | `ErrSessionNotFound` (sentinel). |
+| `Pool.ResolveID` ≥2 prefix matches | `ErrAmbiguousSessionID` (sentinel) wrapped with `fmt.Errorf("%w:\n%s", …)`; message lists each `<uuid> (<label>)` pair on its own line, sorted by `SessionID` asc; bootstrap-empty-label substituted with `"bootstrap"`. |
 | `Pool.supervise` before/after `Run` | `ErrPoolNotRunning` (sentinel). |
 | `Session.Attach` with nil bridge | `ErrAttachUnavailable` (sentinel). |
 | `Session.Attach` while bridge busy | `supervisor.ErrBridgeBusy` propagated **verbatim** — no wrap. |
 | `Session.Run` / `Pool.Run` ctx cancel | `context.Canceled` from the supervisor. |
 
-Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
+Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`, `ErrAmbiguousSessionID`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
 
 ## Dependency Direction
 
@@ -412,6 +455,7 @@ Three test files mirror the production layout. Stdlib `testing` only.
 - **`pool_create_test.go`** (1.1a-A2) — `HappyPath` (UUID + entry shape after `Run` is live); `BootstrapUnchanged` (`Default()` returns the same `*Session` pointer pre/post `Create`); `LabelRoundTrip` (empty + non-empty labels round-trip via JSON unmarshal, not string match); `CapPassthrough_EvictsLRU` (`ActiveCap=1` evicts the bootstrap when `Create` activates); `SuperviseFails_EntryOnDisk` (no `Run` ⇒ `ErrPoolNotRunning`, valid id, entry on disk, ChildPID=0); `PersistFails_NoEntry_NoSpawn` (`registryPath` set to a non-directory path ⇒ empty id, no entry, only bootstrap in `Snapshot`).
 - **`pool_list_test.go`** (1.1b-A) — `BootstrapOnly` (single entry, `Bootstrap=true`, `Label="bootstrap"`, on-disk `label` re-read from `sessions.json` is still empty); `OrderingByLastActive` (mutate three sessions' `lastActiveAt` under `lcMu` directly to `t0` / `t0+1m` / `t0+2m`, assert desc order; add a fourth equal-time entry, assert id-asc tiebreak is stable across two `List` calls); `BootstrapLabelPassthrough` (warm-start from a `sessions.json` whose bootstrap entry has `label: "main"` — synthetic substitution does NOT clobber); `RaceClean` (N goroutines × 100 `List` calls plus a mutator goroutine, `-race`-clean).
 - **`pool_rename_test.go`** (1.1c-A) — `RoundTrip` (rename bootstrap to `"main"`; assert in-memory via `List`, on-disk by re-reading `sessions.json`); `EmptyClears` (rename to `"foo"` then to `""`; assert on-disk label is empty AND `List[0].Label == "bootstrap"` synthetic substitution resumes); `UnknownID` (zero-UUID returns `ErrSessionNotFound`, `bytes.Equal(before, after)` for the on-disk file, `List` snapshot deep-equal); `RaceWithList` (concurrent `Rename` + `List` goroutines under `-race`); `BootstrapPersistsAndShows` (rename bootstrap to `"primary"`; assert on-disk `Bootstrap=true` AND `Label="primary"`, `List[0].Label == "primary"` — no synthetic substitution).
+- **`pool_resolve_id_test.go`** (1.1e-A) — `EmptyReturnsBootstrap`; `FullUUID`; `UniquePrefix` (1/4/8/16/35-char prefixes against a single-bootstrap pool); `FullUUIDBeatsPrefix` (synthetic two-session pool built via in-package `pool.sessions[id] = &Session{…}` writes; passes a full id whose prefix would also match a sibling and asserts the exact match wins); `AmbiguousPrefix` (synthetic two-session pool sharing a prefix; asserts `errors.Is(err, ErrAmbiguousSessionID)` plus the exact sorted match-list substring including the `"bootstrap"` substitution); `NoMatch` (zero-UUID + clearly-non-prefix `"zzzz"` both return `ErrSessionNotFound`); `RaceWithList` (concurrent `ResolveID` + `List` goroutines under `-race`).
 - **`pool_remove_test.go`** (1.1d-A1) — `HappyPath` (Create + Remove a non-bootstrap session: assert child PID gone, `Lookup` returns `ErrSessionNotFound`, registry on disk has bootstrap only, stub JSONL byte-identical); `Bootstrap_Rejected` (Remove bootstrap returns `ErrCannotRemoveBootstrap`; registry bytes/mtime + `List` snapshot + JSONL byte-identical); `UnknownID` (zero-UUID returns `ErrSessionNotFound`; same byte-identity assertions); `RaceWithList` (concurrent Create+Remove writers and `List` readers under `-race`); `TerminatesUncooperativeChild` (`/bin/sh -c 'trap "" TERM INT HUP; exec sleep 86400'` as the fake claude — SIGKILL via `exec.CommandContext` cancel terminates it inside a 10s budget, no real-time `time.Sleep` in the assertion).
 - **`session_test.go`** — `State` delegation, `Attach` with no bridge, `Attach` busy via `io.Pipe` (first attach blocks on input, second races and gets `supervisor.ErrBridgeBusy`), `Run` ctx-cancel via a real `/bin/sleep 3600` child.
 
