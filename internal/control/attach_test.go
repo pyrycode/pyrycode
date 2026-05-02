@@ -599,6 +599,126 @@ func TestServer_HandshakeTimeout(t *testing.T) {
 	}
 }
 
+// TestAttach_ClientSendsSessionID pins the wire shape produced by the
+// client-side Attach helper. Phase 1.1e-D runs the selector argument
+// straight from the CLI positional through to AttachPayload.SessionID;
+// this test is the seam check that nothing in the client layer mangles or
+// drops it. The server side just records the Request and returns an error
+// ack so Attach returns before entering raw bridge mode (no terminal in the
+// test environment).
+func TestAttach_ClientSendsSessionID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		sessionID string
+	}{
+		{"empty selector → bootstrap on the server", ""},
+		{"full UUID flows through verbatim", "11111111-2222-3333-4444-555555555555"},
+		{"prefix flows through verbatim", "1111"},
+		{"whitespace-only flows through (server lints)", " "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := shortTempDir(t)
+			sock := filepath.Join(dir, "p.sock")
+
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			defer func() { _ = ln.Close() }()
+
+			gotReq := make(chan Request, 1)
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				var req Request
+				if err := json.NewDecoder(conn).Decode(&req); err != nil {
+					return
+				}
+				gotReq <- req
+				// Force Attach to return early without entering bridge mode.
+				_ = json.NewEncoder(conn).Encode(Response{Error: "test: short-circuit"})
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = Attach(ctx, sock, 80, 24, tt.sessionID)
+			if err == nil || !strings.Contains(err.Error(), "test: short-circuit") {
+				t.Fatalf("Attach: want short-circuit error, got %v", err)
+			}
+
+			select {
+			case req := <-gotReq:
+				if req.Verb != VerbAttach {
+					t.Errorf("Verb = %q, want %q", req.Verb, VerbAttach)
+				}
+				if req.Attach == nil {
+					t.Fatalf("Attach payload missing")
+				}
+				if req.Attach.SessionID != tt.sessionID {
+					t.Errorf("SessionID = %q, want %q", req.Attach.SessionID, tt.sessionID)
+				}
+				if req.Attach.Cols != 80 || req.Attach.Rows != 24 {
+					t.Errorf("Cols/Rows = %d/%d, want 80/24", req.Attach.Cols, req.Attach.Rows)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("server did not receive a request")
+			}
+		})
+	}
+}
+
+// TestAttach_EmptySessionIDOmittedOnWire confirms the byte-shape promise
+// in protocol.go: an empty SessionID must marshal to no field, so a v0.5.x
+// client (which doesn't know the field) and a v0.7.x client passing "" are
+// indistinguishable to the server during the rollover window.
+func TestAttach_EmptySessionIDOmittedOnWire(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	gotRaw := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 4096)
+		n, _ := conn.Read(buf)
+		gotRaw <- append([]byte(nil), buf[:n]...)
+		_ = json.NewEncoder(conn).Encode(Response{Error: "test: short-circuit"})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = Attach(ctx, sock, 80, 24, "")
+
+	select {
+	case raw := <-gotRaw:
+		if bytes.Contains(raw, []byte("sessionID")) {
+			t.Errorf("empty SessionID leaked onto the wire: %s", raw)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive bytes")
+	}
+}
+
 // Bridge-as-AttachProvider integration test: confirm that supervisor.Bridge
 // satisfies the AttachProvider interface and works through the server.
 func TestServer_BridgeAttach(t *testing.T) {
