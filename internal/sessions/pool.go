@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,12 @@ var ErrCannotRemoveBootstrap = errors.New("sessions: cannot remove bootstrap ses
 // wired the supervisor handle, or after Run has cleared it. Callers must
 // invoke supervise only while Pool.Run is active.
 var ErrPoolNotRunning = errors.New("sessions: pool not running")
+
+// ErrAmbiguousSessionID is returned by Pool.ResolveID when a non-empty,
+// non-full-UUID arg matches the prefix of two or more sessions. The wrapped
+// error's Error() lists each match as `<uuid> (<label>)` on its own line so
+// a CLI consumer can print it verbatim. Matchable via errors.Is.
+var ErrAmbiguousSessionID = errors.New("sessions: ambiguous session id")
 
 // Config is what cmd/pyry hands to sessions.New.
 type Config struct {
@@ -597,6 +604,85 @@ func (p *Pool) Lookup(id SessionID) (*Session, error) {
 		return nil, ErrSessionNotFound
 	}
 	return sess, nil
+}
+
+// ResolveID maps a user-supplied UUID-or-prefix string to the canonical
+// SessionID of a session in the pool. Empty arg returns the bootstrap
+// session's id (same seam as Pool.Lookup("")).
+//
+// Resolution order:
+//
+//  1. arg == "" → bootstrap id, no error.
+//  2. arg is an exact key in the in-memory session map → that id, no error.
+//     This short-circuit is a single map lookup; it never falls through to
+//     the prefix scan, so an exact full-UUID match wins even if the same
+//     string would also be a HasPrefix hit on the same session.
+//  3. otherwise, scan the in-memory map and collect every session whose
+//     SessionID has arg as a prefix (strings.HasPrefix). Exactly one match
+//     → that id, no error. Zero matches → ErrSessionNotFound. Two or more
+//     → ErrAmbiguousSessionID with a list of matches in the wrapped message.
+//
+// No minimum prefix length is enforced. A one-character prefix is accepted
+// when it is unique; refusing short prefixes is a CLI-layer policy concern,
+// not a pool invariant.
+//
+// Concurrency: takes p.mu (RLock) for the entire resolution. The in-memory
+// map is the source of truth — sessions.json is not re-read. Concurrent
+// Pool.List/Lookup/Snapshot share the read lock; concurrent writers
+// (Rename/Create/Remove/RotateID/saveLocked) serialise behind the write
+// lock as today.
+//
+// Lock order: Pool.mu (RLock) only. Does not take Session.lcMu — `id` and
+// `label` are guarded by Pool.mu (RotateID and Rename mutate them under
+// Pool.mu write), so no torn reads.
+func (p *Pool) ResolveID(arg string) (SessionID, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if arg == "" {
+		return p.bootstrap, nil
+	}
+	// Exact-match short-circuit. AC #1: full UUID always wins, with no
+	// extra scan cost beyond the existing map lookup.
+	if _, ok := p.sessions[SessionID(arg)]; ok {
+		return SessionID(arg), nil
+	}
+
+	var matches []*Session
+	for id, s := range p.sessions {
+		if strings.HasPrefix(string(id), arg) {
+			matches = append(matches, s)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", ErrSessionNotFound
+	case 1:
+		return matches[0].id, nil
+	default:
+		return "", ambiguousError(matches)
+	}
+}
+
+// ambiguousError formats an ErrAmbiguousSessionID-wrapping error whose
+// message lists each match as `<uuid> (<label>)` on its own line, sorted by
+// SessionID ascending (same tiebreak as Pool.List). The bootstrap entry's
+// empty on-disk label is substituted with the synthetic string "bootstrap"
+// to mirror Pool.List one-for-one.
+func ambiguousError(matches []*Session) error {
+	sort.Slice(matches, func(i, j int) bool { return matches[i].id < matches[j].id })
+	var b strings.Builder
+	for i, s := range matches {
+		label := s.label
+		if s.bootstrap && label == "" {
+			label = "bootstrap"
+		}
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "%s (%s)", s.id, label)
+	}
+	return fmt.Errorf("%w:\n%s", ErrAmbiguousSessionID, b.String())
 }
 
 // Default returns the bootstrap session. Equivalent to Lookup("") today;
