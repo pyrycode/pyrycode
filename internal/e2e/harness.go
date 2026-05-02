@@ -256,6 +256,48 @@ func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult {
 	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 }
 
+// RunBare invokes the cached pyry binary with args verbatim — no daemon
+// spawn, no auto-injected -pyry-socket. For verbs that don't touch the
+// control socket (e.g. `version`) or for negative tests where the caller
+// wants to drive a verb against a deliberately-bogus socket path. Reuses
+// the same binary cache (ensurePyryBuilt) and the same exit-code /
+// timeout / capture machinery as Harness.Run.
+//
+// Unlike Harness.Run, RunBare uses the test process env unchanged — no
+// HOME isolation. The bare verbs we drive (version, status against a
+// bogus socket) don't read $HOME, and adding HOME isolation we don't
+// use is dead weight.
+func RunBare(t *testing.T, args ...string) RunResult {
+	t.Helper()
+	bin := ensurePyryBuilt(t)
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("e2e: pyry %v timed out after %s\nstdout:\n%s\nstderr:\n%s",
+			args, runTimeout, stdout.String(), stderr.String())
+	}
+
+	var exitCode int
+	switch e := err.(type) {
+	case nil:
+		exitCode = 0
+	case *exec.ExitError:
+		exitCode = e.ExitCode()
+	default:
+		t.Fatalf("e2e: pyry %v exec failed: %v", args, err)
+	}
+
+	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+}
+
 // teardown sends SIGTERM, escalates to SIGKILL after a short grace, then
 // removes the socket file. The temp HomeDir is cleaned up by t.TempDir.
 // Wrapped in sync.Once so a future manual Stop() and t.Cleanup don't
