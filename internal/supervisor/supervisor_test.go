@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -341,4 +342,66 @@ func TestSupervisor_GracefulShutdown(t *testing.T) {
 
 func isContextErr(err error) bool {
 	return err == context.Canceled || err == context.DeadlineExceeded
+}
+
+// TestSupervisor_Foreground_NoStdinReaderLeak exercises the foreground-mode
+// supervisor across multiple child restart cycles and asserts no goroutine
+// accumulation. Pre-fix, each cycle stranded one io.Copy(ptmx, os.Stdin)
+// goroutine on os.Stdin's fdMutex; post-fix, closing the per-cycle /dev/tty
+// fd unblocks the read and the goroutine drains.
+//
+// Skips when /dev/tty is unavailable (CI containers, headless), since the
+// supervisor falls back to os.Stdin in that case and the legacy leak shape
+// is preserved by design.
+func TestSupervisor_Foreground_NoStdinReaderLeak(t *testing.T) {
+	f, err := os.Open("/dev/tty")
+	if err != nil {
+		t.Skipf("no controlling tty: %v", err)
+	}
+	_ = f.Close()
+
+	cfg := helperConfig("count_exits")
+	countFile := t.TempDir() + "/count"
+	cfg.helperEnv = append(cfg.helperEnv,
+		"GO_TEST_HELPER_COUNT_FILE="+countFile,
+		"GO_TEST_HELPER_MAX_EXITS=3",
+	)
+
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Let any pending GC / runtime goroutines settle before snapshot.
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	pre := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		// Cancel after enough time for ~3 child exits + restarts.
+		time.Sleep(4 * time.Second)
+		cancel()
+	}()
+
+	if err := sup.Run(ctx); err != nil && !isContextErr(err) {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Allow goroutine teardown to complete. The drain timeout in runOnce
+	// is bounded by goroutineDrainTimeout * 2 per cycle.
+	time.Sleep(500 * time.Millisecond)
+	runtime.GC()
+
+	post := runtime.NumGoroutine()
+	// Tolerance: 2 goroutines for incidental runtime/test churn. The leak
+	// under the old code was at least one per child exit (3+ here). On
+	// failure, dump goroutine stacks to make the leaking call site
+	// obvious.
+	if post > pre+2 {
+		buf := make([]byte, 1<<16)
+		n := runtime.Stack(buf, true)
+		t.Errorf("goroutine leak: pre=%d, post=%d (delta=%d)\n%s", pre, post, post-pre, buf[:n])
+	}
 }
