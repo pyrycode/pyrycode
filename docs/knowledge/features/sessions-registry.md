@@ -74,7 +74,7 @@ We do not also fsync the directory after rename — pyry's registry is operator-
 | File missing | `(nil, nil)` | Cold start: mint a fresh UUID and write the registry. |
 | File present, empty | `(nil, nil)` | Cold start (same as missing). |
 | File present, valid JSON | `(*registryFile, nil)` | Warm start: reuse the bootstrap entry's UUID/metadata. **No rewrite.** |
-| File present, malformed JSON | `(nil, error)` | `Pool.New` returns the error. Operator must fix or remove the file. |
+| File present, malformed JSON | `(nil, error)` | `Pool.New` returns the error. The error wraps as `pool init: sessions: load registry: registry: parse <path>: <unmarshal err>`, the daemon prints to stderr and exits non-zero, and the corrupt file is **not** rewritten — silent data loss is the worst-possible outcome and explicitly excluded. Operator must fix or remove the file. Pinned at the binary boundary by `TestE2E_Startup_CorruptRegistryFailsClean` (#111, see [e2e-harness.md § Failed-Start Pattern](e2e-harness.md)); the unit-level proof is `internal/sessions/registry_test.go`. |
 
 The "no rewrite on warm start" property is what makes the AC's "writes only on state-changing operations" honest — and what `TestPool_New_WarmStartReusesUUID` asserts.
 

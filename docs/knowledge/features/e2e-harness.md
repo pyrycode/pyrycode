@@ -9,7 +9,8 @@ Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e),
 + `RunBare` helper), #106 (restart primitive — `StartIn` / `Stop` + first
 restart-survival test), #107 (two more restart-survival tests — evicted
 state + `lastActiveAt` timestamps — plus file-local `newRegistryHome`
-helper), split from #51.
+helper), #111 (failed-start primitive — `StartExpectingFailureIn` + the
+corrupt-registry fail-loud test), split from #51.
 
 ## What It Does
 
@@ -23,8 +24,9 @@ helper), split from #51.
 
 ## Public API
 
-Eight exported names — `Harness`, `Start`, `StartIn`, `(*Harness).Stop`,
-`RunResult`, `(*Harness).Run`, `RunBare`, plus the struct fields:
+Nine exported names — `Harness`, `Start`, `StartIn`, `StartExpectingFailureIn`,
+`(*Harness).Stop`, `RunResult`, `(*Harness).Run`, `RunBare`, plus the struct
+fields:
 
 ```go
 type Harness struct {
@@ -48,6 +50,14 @@ func StartIn(t *testing.T, home string) *Harness
 // removes the socket. HomeDir is left intact. Idempotent with t.Cleanup
 // teardown via sync.Once.
 func (h *Harness) Stop(t *testing.T)
+
+// StartExpectingFailureIn spawns pyry against the given home, expects it
+// to exit before the readiness deadline elapses, and returns the captured
+// exit code, stdout, and stderr. Fails the test if pyry instead becomes
+// ready (control socket dialable) or if it neither exits nor becomes
+// ready within the readiness deadline. No Harness is returned: there is
+// no live daemon to drive, no socket to clean up.
+func StartExpectingFailureIn(t *testing.T, home string) RunResult
 
 type RunResult struct {
     ExitCode int
@@ -468,6 +478,111 @@ exporting them solely for one test would invert the dependency direction.
 The schema is small and stable; if a field is added, the mirror grows it
 too.
 
+## Failed-Start Pattern (`StartExpectingFailureIn`)
+
+`StartExpectingFailureIn(t, home) RunResult` is the failure-side sibling of
+`StartIn`. The caller pre-populates HOME with state designed to make pyry
+refuse to come up (e.g. a corrupt `<home>/.pyry/test/sessions.json`); the
+helper spawns pyry, watches the readiness window for an early exit, and
+returns the captured exit code + streams. No `Harness` is returned — there
+is no live daemon to drive and no socket to clean up.
+
+```go
+home, regPath := newRegistryHome(t)
+_ = os.WriteFile(regPath, []byte("{not valid json"), 0o600)
+
+res := e2e.StartExpectingFailureIn(t, home)
+if res.ExitCode == 0 {
+    t.Errorf("exit code = 0, want non-zero (stderr=%s)", res.Stderr)
+}
+if !bytes.Contains(res.Stderr, []byte("registry")) {
+    t.Errorf("stderr does not mention registry: %s", res.Stderr)
+}
+```
+
+### Internal shape: shared `spawn` helper
+
+`StartIn` and `StartExpectingFailureIn` both forward to an unexported
+`spawn(t, home) (socket, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, doneCh)`
+that does the fork + wait-goroutine + child-env wiring (the body that used
+to live inline in `StartIn`). `spawn` deliberately does **not** register
+`t.Cleanup`, build the `Harness`, or call `waitForReady` — each caller
+owns those policies:
+
+- `StartIn` builds the `Harness`, registers cleanup, then waits for ready.
+- `StartExpectingFailureIn` runs a select-driven loop bounded by
+  `readyDeadline` over `(net.Dial, doneCh, time.After(readyPollGap))`,
+  returns `RunResult` populated from `cmd.ProcessState` on `<-doneCh`,
+  and tears the daemon down + `t.Fatalf`s on either of the defensive
+  branches (daemon unexpectedly came up; deadline elapsed with neither).
+
+The defensive teardown reuses a small `killSpawned(t, cmd, doneCh)` helper
+that mirrors `Harness.teardown`'s SIGTERM → `termGrace` → SIGKILL →
+`killGrace` escalation. Inlined into a function rather than constructing a
+throwaway `Harness` for the cleanup path: ~10 lines, no leak risk.
+
+### Why an alternate constructor (not Options on `StartIn`)
+
+The shape was chosen against three alternatives:
+
+| Option                       | Why not                                                              |
+|------------------------------|----------------------------------------------------------------------|
+| `Options` field on `StartIn` | Forces a polymorphic return — `*Harness` doesn't fit the failure path |
+| Lower-level `spawn` helper   | Bigger public surface than the one test needs                         |
+| **Alternate constructor**    | Single-purpose; mirrors `Run` / `RunBare`; shared body via private `spawn` |
+
+`StartExpectingFailure(t)` (zero-arg) deliberately not added — the failure
+path always wants caller-supplied HOME (to seed the on-disk failure state),
+so the `In` suffix is the only useful shape. Adding the no-`In` form would
+be unused surface.
+
+### Constants reuse
+
+Reuses the existing `readyDeadline = 5 * time.Second` and `readyPollGap`.
+The corrupt-registry path exits in milliseconds (synchronous JSON parse),
+so 5 seconds is generous; no new constant.
+
+### `startup_test.go` — `TestE2E_Startup_CorruptRegistryFailsClean` (#111)
+
+Lives in its own file rather than extending `restart_test.go` — domain is
+*startup failure*, not *restart survival*. Future startup-shaped e2e tests
+(missing claude binary, unreachable workdir, port-in-use socket) have a
+natural home next to it.
+
+The test reuses `newRegistryHome(t)` from `restart_test.go` (same package,
+same `e2e` build tag), seeds `<home>/.pyry/test/sessions.json` with
+`{not valid json`, calls `StartExpectingFailureIn`, then asserts:
+
+| Assertion | What it pins |
+|---|---|
+| `res.ExitCode != 0` | Daemon refused to come up. Any non-zero is sufficient — exit code is not over-specified. |
+| `bytes.Contains(res.Stderr, []byte("registry"))` | Operator-facing diagnostic still names the failing subsystem. |
+| `bytes.Equal(diskBytes, corrupt)` | Daemon left the corrupt file untouched on disk. |
+
+The byte-equal assertion is the load-bearing one — it catches the
+worst-possible regression ("corrupt file → empty registry → drop
+everything") without depending on JSON-parsing the corrupt input. The
+substring `registry` is chosen over the path or `sessions.json` because
+the path varies per run and `sessions.json` is just the filename, while
+"registry" is the domain concept the operator needs to recognise. The
+production error chain happens to contain `registry` twice (`pool init:
+sessions: load registry: registry: parse <path>: <unmarshal err>`); a
+future refactor that changes the wrap chain but still names "registry"
+keeps the test green; one that loses the word fails loudly — the right
+outcome (operator diagnostic regressed).
+
+### Coverage of the helper's defensive branches
+
+The test exercises only the success path of `StartExpectingFailureIn` (the
+child exits before ready). The two `t.Fatalf` branches — "daemon
+unexpectedly came up" and "neither exit nor readiness within
+`readyDeadline`" — are defensive and would only trigger on a production
+regression (corrupt JSON stops failing) or a hung test environment. No
+unit tests added for them; per the ticket's "exercised exclusively by this
+test" constraint, they earn their keep as crash-loud guards, not as
+behaviours under coverage. Future failed-start tests that reuse the helper
+provide additional implicit coverage as they land.
+
 ## Concurrency Model
 
 | Goroutine | Owns | Lifetime |
@@ -591,7 +706,8 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   `docs/specs/architecture/52-cli-verbs-e2e-coverage.md`,
   `docs/specs/architecture/80-e2e-install-systemd-roundtrip.md`,
   `docs/specs/architecture/106-e2e-restart-primitive.md`,
-  `docs/specs/architecture/107-e2e-restart-evicted-and-lastactiveat.md`
+  `docs/specs/architecture/107-e2e-restart-evicted-and-lastactiveat.md`,
+  `docs/specs/architecture/111-e2e-corrupt-registry.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude); lessons.md § Unix-socket sun_path limits and
   t.TempDir()
@@ -599,6 +715,7 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   `status` stopped path; #69: `status` running path), restart-survival
   proofs (#106: `TestE2E_Restart_PreservesActiveSessions`; #107:
   `TestE2E_Restart_PreservesEvictedSessions`,
-  `TestE2E_Restart_LastActiveAtSurvives`), Phase 1.1 session-verb
-  tickets (#54, #55, #56), install-service round-trip
+  `TestE2E_Restart_LastActiveAtSurvives`), startup-failure proofs
+  (#111: `TestE2E_Startup_CorruptRegistryFailsClean`), Phase 1.1
+  session-verb tickets (#54, #55, #56), install-service round-trip
   ([install-e2e.md](install-e2e.md))
