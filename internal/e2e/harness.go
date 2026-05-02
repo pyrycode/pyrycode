@@ -153,6 +153,76 @@ func Start(t *testing.T) *Harness {
 // it with t.Cleanup. Use Start(t) for the common case.
 func StartIn(t *testing.T, home string) *Harness {
 	t.Helper()
+	socket, cmd, stdout, stderr, doneCh := spawn(t, home)
+
+	h := &Harness{
+		SocketPath: socket,
+		HomeDir:    home,
+		PID:        cmd.Process.Pid,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		cmd:        cmd,
+		doneCh:     doneCh,
+	}
+
+	t.Cleanup(func() { h.teardown(t) })
+
+	if err := h.waitForReady(); err != nil {
+		t.Fatalf("e2e: %v", err)
+	}
+	return h
+}
+
+// StartExpectingFailureIn spawns pyry against the given home, expects it to
+// exit before the readiness deadline elapses, and returns the captured exit
+// code, stdout, and stderr. Fails the test if pyry instead becomes ready
+// (control socket dialable) or if it neither exits nor becomes ready within
+// the readiness deadline.
+//
+// Unlike StartIn, no Harness is returned: there is no live daemon to drive,
+// no socket to clean up. The caller pre-populates HOME (e.g. with a corrupt
+// sessions.json) and asserts on the RunResult.
+func StartExpectingFailureIn(t *testing.T, home string) RunResult {
+	t.Helper()
+	socket, cmd, stdout, stderr, doneCh := spawn(t, home)
+
+	deadline := time.Now().Add(readyDeadline)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(socket); err == nil {
+			c, err := net.Dial("unix", socket)
+			if err == nil {
+				_ = c.Close()
+				killSpawned(t, cmd, doneCh)
+				_ = os.Remove(socket)
+				t.Fatalf("e2e: pyry unexpectedly became ready; expected failed start\nstderr:\n%s",
+					stderr.String())
+			}
+		}
+		select {
+		case <-doneCh:
+			return RunResult{
+				ExitCode: cmd.ProcessState.ExitCode(),
+				Stdout:   stdout.Bytes(),
+				Stderr:   stderr.Bytes(),
+			}
+		case <-time.After(readyPollGap):
+		}
+	}
+	killSpawned(t, cmd, doneCh)
+	_ = os.Remove(socket)
+	t.Fatalf("e2e: pyry neither exited nor became ready within %s\nstderr:\n%s",
+		readyDeadline, stderr.String())
+	return RunResult{}
+}
+
+// spawn forks pyry against the given home with the standard test flag set
+// (sleep-as-claude, idle eviction off, -pyry-name=test). Returns the socket
+// path, the running command, captured stdout/stderr buffers, and a channel
+// closed when the wait goroutine observes process exit. Used by StartIn
+// and StartExpectingFailureIn; no t.Cleanup is registered here — the
+// caller decides how to tear down.
+func spawn(t *testing.T, home string) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
+	t.Helper()
 	bin := ensurePyryBuilt(t)
 	socket := filepath.Join(home, "pyry.sock")
 
@@ -174,27 +244,36 @@ func StartIn(t *testing.T, home string) *Harness {
 		t.Fatalf("e2e: pyry start: %v", err)
 	}
 
-	h := &Harness{
-		SocketPath: socket,
-		HomeDir:    home,
-		PID:        cmd.Process.Pid,
-		Stdout:     stdout,
-		Stderr:     stderr,
-		cmd:        cmd,
-		doneCh:     make(chan struct{}),
-	}
-
+	doneCh := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
-		close(h.doneCh)
+		close(doneCh)
 	}()
 
-	t.Cleanup(func() { h.teardown(t) })
+	return socket, cmd, stdout, stderr, doneCh
+}
 
-	if err := h.waitForReady(); err != nil {
-		t.Fatalf("e2e: %v", err)
+// killSpawned tears down a spawn'd child via the same SIGTERM→grace→SIGKILL
+// escalation as Harness.teardown. Used by StartExpectingFailureIn's defensive
+// branches when the daemon either came up unexpectedly or hung.
+func killSpawned(t *testing.T, cmd *exec.Cmd, doneCh chan struct{}) {
+	t.Helper()
+	if cmd.Process == nil {
+		return
 	}
-	return h
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-doneCh:
+		return
+	case <-time.After(termGrace):
+	}
+	_ = cmd.Process.Signal(syscall.SIGKILL)
+	select {
+	case <-doneCh:
+	case <-time.After(killGrace):
+		t.Logf("e2e: spawned pyry pid=%d did not exit after SIGKILL+%s",
+			cmd.Process.Pid, killGrace)
+	}
 }
 
 // childEnv returns the parent env with HOME replaced and PYRY_NAME stripped
