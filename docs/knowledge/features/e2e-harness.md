@@ -4,8 +4,9 @@
 daemon in an isolated temp `$HOME`, blocks until the control socket is dialable,
 drives CLI verbs against it, and tears down reliably on test cleanup.
 
-Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e), split
-from #51.
+Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e),
+#52 (CLI verbs e2e coverage — `stop`, `logs`, `version`, `status` stopped path
++ `RunBare` helper), split from #51.
 
 ## What It Does
 
@@ -19,8 +20,8 @@ from #51.
 
 ## Public API
 
-Five exported names — `Harness`, `Start`, `RunResult`, `(*Harness).Run`, plus the
-struct fields:
+Six exported names — `Harness`, `Start`, `RunResult`, `(*Harness).Run`,
+`RunBare`, plus the struct fields:
 
 ```go
 type Harness struct {
@@ -40,11 +41,19 @@ type RunResult struct {
 }
 
 func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult
+
+// RunBare invokes the cached pyry binary with args verbatim — no daemon
+// spawn, no auto-injected -pyry-socket, no HOME redirection. For verbs
+// that don't touch the control socket (e.g. `version`) or for negative
+// tests that want to drive a verb against a deliberately-bogus socket
+// path. Reuses the same binary cache and exit-code/timeout/capture
+// machinery as Harness.Run.
+func RunBare(t *testing.T, args ...string) RunResult
 ```
 
 No `Option`s in this iteration. Per-verb typed wrappers (`Status()`, `Stop()`,
-`Attach()`) land when the consuming session-verb tickets (#52, #54, #55, #56)
-make them useful.
+`Attach()`) intentionally not added — `Harness.Run` + `RunBare` cover every
+shipped non-interactive verb. Wrappers land if a consumer materially benefits.
 
 ## Invocation
 
@@ -199,8 +208,78 @@ would couple the test to claude-child startup timing — exactly what
 `/bin/sleep infinity` was chosen to avoid. The contract this test verifies is
 "daemon is up, socket answers, status verb round-trips."
 
-`pyry version` was rejected: it short-circuits in `main.go` before parsing
-flags, so it doesn't exercise the socket plumbing the harness sells.
+`pyry version` was rejected as the *proof-of-life* verb (it short-circuits in
+`main.go` before parsing flags, so it doesn't exercise the socket plumbing the
+harness sells), but is covered by `TestVersion_E2E` below via `RunBare`.
+
+## Bare CLI Driver (`RunBare`)
+
+`RunBare(t, args...)` is the daemon-free sibling of `Harness.Run`. Same binary
+cache (`ensurePyryBuilt`), same `runTimeout` (10s), same exit-code mapping —
+but no daemon spawn, no auto-injected `-pyry-socket`, no `childEnv(h.HomeDir)`.
+The test process env passes through unchanged.
+
+Two use cases motivated the helper:
+
+1. **Verbs that don't touch the socket.** `pyry version` short-circuits in
+   `main.go` before flag parsing. Spinning up a daemon to test it is wasted
+   wall-clock and inverts the test's intent.
+2. **Negative tests against a known-bad socket path.** "Run `status` against a
+   socket with no daemon" is most cleanly expressed as "point at a fresh temp
+   path and assert the failure shape" — no spawn-then-stop-then-race-the-
+   teardown ordering glue.
+
+The helper is the *only* harness API added in #52. `Harness.Stop()` mid-test,
+typed `Status()` / `Logs()` wrappers, etc. were explicitly declined to keep the
+harness surface minimal.
+
+## CLI Verb Coverage Tests (`cli_verbs_test.go`)
+
+`internal/e2e/cli_verbs_test.go` (build tag `//go:build e2e`) covers the
+remaining shipped non-interactive verbs. Lives in its own file alongside
+`harness_test.go` — the latter is about *harness behaviour* (smoke,
+no-leak-on-fatal, the canonical `TestStatus_E2E` proof-of-life), the former
+about *CLI surface coverage*. `processAlive` from `harness_test.go` is reused
+via package scope.
+
+| Test | What it asserts |
+|---|---|
+| `TestStop_E2E` | exit 0, stdout contains `"stop requested"` fragment, then bounded poll (3s deadline, 50ms gap) until both `!processAlive(pid)` AND `os.Stat(sock)` returns `fs.ErrNotExist` |
+| `TestStatus_E2E_Stopped` | `RunBare("status", "-pyry-socket="+bogusSock)` against a fresh non-existent path: exit != 0, non-empty stderr, no `panic` / `goroutine ` / `runtime/` substrings |
+| `TestLogs_E2E` | exit 0, non-empty `bytes.TrimSpace(r.Stdout)` (the supervisor's in-memory ring captures startup lines, so a healthy daemon's log buffer is never empty by the time `Start(t)` returns) |
+| `TestVersion_E2E` | `RunBare("version")`: exit 0, output starts with literal `"pyry "` prefix, remaining token is non-empty (`dev` in test builds, real version under `-ldflags`) |
+
+### Why bogus-socket, not spawn-then-stop, for the stopped-status test
+
+The spawn-then-stop-then-status path needs the test to wait for the daemon to
+actually shut down (otherwise status hits a still-listening socket and
+succeeds, defeating the test). That's the same poll loop as `TestStop_E2E`,
+plus ordering glue, plus a second `Run` call. The bogus-socket variant
+exercises the same code path (`net.Dial` fails → error surfaces clean to
+stderr → non-zero exit) without any timing dependency. Strictly simpler,
+strictly more deterministic.
+
+### Why poll *both* `processAlive` and `os.Stat(sock)` in `TestStop_E2E`
+
+`pyry stop` returns once the server has acknowledged the request, but the
+daemon's child unwind and the supervisor's deferred socket cleanup happen
+asynchronously after `Wait` returns. Asserting on either condition alone
+admits a flake. Both in the same iteration costs nothing (each probe is
+syscall-cheap) and avoids racing the cleanup defer.
+
+### Negative assertion vocabulary for "clean error"
+
+`TestStatus_E2E_Stopped` deliberately doesn't pin the dial-failure error
+wording (today: `pyry: status: ... connect: no such file or directory`) — that
+string is allowed to evolve. Instead it asserts the *shape* of the failure:
+
+- `panic` — Go's panic header
+- `goroutine ` — Go's stack-trace header (`goroutine N [state]:`)
+- `runtime/` — Go runtime frames in tracebacks
+
+Three conservative substrings catch panics and stack traces without coupling
+to the exact wording. The same pattern fits any "clean error, not a crash"
+assertion.
 
 ## Concurrency Model
 
@@ -296,21 +375,33 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
 ## Deliberately Out of Scope
 
 - Per-verb typed wrappers (`Harness.Status()`, `Harness.Stop()`,
-  `Harness.Attach()`) — land per-ticket as session verbs are built (#52, #54,
-  #55, #56) if useful.
+  `Harness.Attach()`) — `Run` + `RunBare` cover every shipped verb; add
+  wrappers if a consumer materially benefits.
+- `Harness.Stop()` mid-test helper — `Run(t, "stop")` plus the bounded
+  `processAlive`/`os.Stat` poll covers the only consumer that needs it.
 - `Option` type and any `WithFoo(...)` constructors.
 - Stdin plumbing on `Run` — no current verb reads stdin; add when one does.
+- `pyry attach` e2e — interactive PTY, separate work; the harness's
+  non-interactive `Run` is not the right driver for it.
+- Asserting on specific log line content (couples tests to supervisor
+  wording) or specific dial-error wording (couples to platform/syscall
+  library).
 - CI wiring (`make e2e`, GitHub Actions matrix). Build-tag isolation means
   existing `go test ./...` keeps passing untouched.
 - Race-mode harness build (`go build -race` inside `ensurePyryBuilt` when the
   parent suite uses `-race`).
+- `t.Parallel` migration on the e2e tests — defer until wall-clock pressure
+  surfaces. Each test owns its own `t.TempDir` HOME, so parallelism is safe
+  in principle.
 
 ## Related
 
 - Specs: `docs/specs/architecture/68-e2e-harness-primitive.md`,
   `docs/specs/architecture/69-e2e-cli-driver.md`,
+  `docs/specs/architecture/52-cli-verbs-e2e-coverage.md`,
   `docs/specs/architecture/80-e2e-install-systemd-roundtrip.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude)
-- Consumers: Phase 1.1 session-verb tickets (#52, #54, #55, #56),
-  install-service round-trip ([install-e2e.md](install-e2e.md))
+- Consumers: shipped CLI verbs (#52: `stop`, `logs`, `version`,
+  `status` stopped path; #69: `status` running path), Phase 1.1 session-verb
+  tickets (#54, #55, #56), install-service round-trip ([install-e2e.md](install-e2e.md))
