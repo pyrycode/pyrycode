@@ -103,19 +103,21 @@ Gotchas, anti-patterns, and mistakes. Read this before every session so you don'
 - **`exec.Cmd` synchronizes its `Stdout`/`Stderr` writers with `Wait`.** Wiring `cmd.Stdout = &buf` and reading `buf.String()` from the test goroutine *after* `<-doneCh` (where `doneCh` is closed by a goroutine that called `cmd.Wait()`) is race-free without an additional mutex. Reading concurrently with `Wait` is undefined.
 - **Don't keep the wait goroutine "for cleanup only."** It serves double duty: closing `doneCh` is the readiness-poll's early-exit signal (so a daemon that crashes during startup short-circuits the 5s deadline) AND the gate that makes captured I/O safe to read. One goroutine, two contracts.
 
-## E2E against the operator's real systemd `--user`
+## E2E against the operator's real systemd `--user` / launchd `gui/<uid>`
 
-- **`systemctl --user` doesn't honor a redirected `$HOME`.** The user systemd
-  manager runs in the operator's real session; redirecting the test child's
-  `HOME` to `t.TempDir()` (the standard e2e isolation envelope) does *not*
-  redirect where `systemctl --user` looks for unit files. The install round-trip
-  test must use the real `~/.config/systemd/user/` and clean up rigorously —
-  unique per-invocation unit names (`pyry-e2e-<pid>-<unixnano>`), `t.Cleanup`
-  registered before any state-changing step (so `t.Fatal` mid-test still
-  removes the unit), and an idempotent best-effort cleanup helper that
-  swallows errors from already-stopped/already-removed steps. The PATH
-  inheritance test, which doesn't touch real systemd, can stay
-  `t.TempDir()`-isolated.
+- **Neither `systemctl --user` nor `launchctl bootstrap gui/<uid>` honors a
+  redirected `$HOME`.** The user systemd manager runs in the operator's real
+  session; launchd's GUI domain inherits `HOME` from the user's GUI login,
+  not from the test process. Redirecting the test child's `HOME` to
+  `t.TempDir()` (the standard e2e isolation envelope) does *not* redirect
+  where these service managers look for unit/plist files. Round-trip tests
+  must use the real `~/.config/systemd/user/` (Linux) or
+  `~/Library/LaunchAgents/` (macOS) and clean up rigorously — unique
+  per-invocation names (`pyry-e2e-<pid>-<unixnano>`), `t.Cleanup` registered
+  before any state-changing step (so `t.Fatal` mid-test still removes the
+  unit/plist), and an idempotent best-effort cleanup helper that swallows
+  errors from already-stopped/already-removed steps. PATH-inheritance tests,
+  which don't touch the service manager, can stay `t.TempDir()`-isolated.
 - **`is-system-running` exits non-zero on degraded but usable states.** Using
   exit code alone as the "system is usable" check would over-skip: degraded /
   maintenance / starting / stopping all return non-zero but are still usable.
@@ -135,6 +137,47 @@ Gotchas, anti-patterns, and mistakes. Read this before every session so you don'
   General rule: when the test needs a knob, prefer the existing `Options`
   surface (`EnvPath` was already there for testing) over inventing a new
   production-side seam.
+
+## launchd-specific E2E gotchas
+
+- **`launchctl bootstrap` is asynchronous — poll for `state = running`.** The
+  command returns once launchd has *accepted* the bootstrap request, not when
+  the job is actually running. Polling `launchctl print gui/<uid>/<label>`
+  for `state = running` (100ms gap, 10s deadline) is the right liveness
+  signal. `launchctl print` is technically a debug command whose output
+  format Apple reserves the right to reformat, but `state = running` has
+  been stable since macOS 10.10. If a future release breaks the matcher,
+  the test fails loudly with the last `print` output dumped for diagnosis
+  — accept the rare-future risk over a more contorted check.
+- **Use `plutil -extract`, not `encoding/xml`, to read plist contents.**
+  Plist XML is a flat alternation of `<key>` / `<string>|<dict>|...` siblings
+  inside a `<dict>` — awkward to walk with `encoding/xml`. `plutil -extract
+  EnvironmentVariables.PATH raw -o - <plist>` returns the value as a plain
+  string in one shell-out, with crisp error messages if the key is missing.
+  `plutil` is part of `/usr/bin` on macOS — its absence is a broken host,
+  not a skip condition. Reimplementing the parser in Go reinvents what
+  Apple's tool does correctly.
+- **`gui/<uid>` is for non-root users; system-domain bootstrap is a different
+  product.** Skip the test when running as root (`os.Getuid() == 0`). The
+  system domain (`launchctl bootstrap system/`) is what root daemons use;
+  pyry's install-service doesn't ship that path.
+- **`gui/<uid>` requires a logged-in GUI session for that uid.** GitHub
+  `macos-latest` runners have one for the runner user; pure sshd-only
+  headless contexts don't. The fallback is `launchctl bootstrap user/<uid>`
+  (background-only domain) — defer it until the failure is observed on real
+  CI rather than pre-emptively branching.
+- **launchd template hardcodes `/tmp/pyry.<name>.{out,err}.log`.** Unlike
+  systemd (which streams to journald), launchd jobs need explicit log file
+  paths. The cleanup helper must best-effort `os.Remove` both log files in
+  addition to the plist and runtime artefacts (`~/.pyry/<name>` registry
+  dir, `<name>.sock`). Leftover logs aren't a correctness leak but they
+  pile up in `/tmp` across runs.
+- **`derivePathEnv` substitutes `$HOME/` → `%h/` only for systemd.** The
+  launchd plist gets literal absolute paths in `EnvironmentVariables.PATH`,
+  so the macOS PATH-inheritance assertion is "every non-empty `$PATH` entry
+  appears verbatim" — simpler than the Linux sibling's substitution check.
+  If you copy-paste assertions between platforms, this is the line that has
+  to differ.
 
 ## Closing a fd to interrupt a goroutine's Read requires O_NONBLOCK
 
