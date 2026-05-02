@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — except `VerbAttach`, which hands the connection off to the supervisor's I/O bridge for the lifetime of the attachment.
 
-Verbs today: `status`, `stop`, `logs`, `attach`. The wire shape (`Request`/`Response` JSON) is held stable across phases — Phase 1.1 will add `Request.SessionID` additively without changing existing fields.
+Verbs today: `status`, `stop`, `logs`, `attach`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window.
 
 ## Server Construction
 
@@ -32,16 +32,19 @@ type Session interface {
     Activate(ctx context.Context) error  // 1.2c-A
 }
 
-// SessionResolver maps a SessionID to a Session. Empty id resolves to the
-// default (bootstrap) entry.
+// SessionResolver maps a SessionID to a Session and resolves loose-input
+// selectors (full UUID / unique prefix / empty) to a canonical SessionID.
 type SessionResolver interface {
     Lookup(id sessions.SessionID) (Session, error)
+    // ResolveID maps a loose-input selector to a concrete SessionID.
+    // Errors flow verbatim — handleAttach wraps them as "attach: <err>".
+    ResolveID(arg string) (sessions.SessionID, error)
 }
 ```
 
-`*sessions.Session` satisfies `Session` structurally. `*sessions.Pool` does **not** satisfy `SessionResolver` directly because `Pool.Lookup` returns the concrete `*sessions.Session` rather than the `control.Session` interface — Go does not do covariant return types on interface satisfaction. A 5-line `poolResolver` adapter in `cmd/pyry/main.go` bridges the two.
+`*sessions.Session` satisfies `Session` structurally. `*sessions.Pool` does **not** satisfy `SessionResolver` directly because `Pool.Lookup` returns the concrete `*sessions.Session` rather than the `control.Session` interface — Go does not do covariant return types on interface satisfaction. A small `poolResolver` adapter in `cmd/pyry/main.go` bridges the two; both `Lookup` and `ResolveID` are 1-line passthroughs.
 
-The empty-id-resolves-to-default convention is the seam Phase 1.1 swaps. Today every verb that needs session state calls `s.sessions.Lookup("")`. When `Request.SessionID` lands, those calls become `s.sessions.Lookup(req.SessionID)` — no handler-side branching, no special "if id == \"\"" cases scattered across verbs.
+The empty-id-resolves-to-default convention is shared across both methods: `Lookup("")` and `ResolveID("")` both resolve to the bootstrap session (the latter via `Pool.ResolveID`'s empty-arg fast path). `handleAttach` (1.1e-C) takes loose input from `AttachPayload.SessionID` and routes it through `ResolveID` first, then `Lookup` — see [Attach: ResolveID-then-Lookup](#attach-resolveid-then-lookup-11e-c) below. Other verbs that don't yet take a selector (`status`, `logs`, `stop`) continue to call `Lookup("")` directly.
 
 ### Why a single resolver instead of `StateProvider` + `AttachProvider`
 
@@ -54,6 +57,42 @@ if err != nil { /* encode error */; return }
 ```
 
 `VerbLogs` and `VerbStop` are intentionally process-global today (logs come from the ring buffer; stop calls the supervisor-context cancel). They do **not** call the resolver. Phase 1.1 may revisit `VerbStop` if per-session stop becomes a verb.
+
+## Attach: ResolveID-then-Lookup (1.1e-C)
+
+`handleAttach` resolves the client's session selector through `Pool.ResolveID` before any bridge work, then re-fetches the session with `Pool.Lookup`. Two sequential calls, two sequential `Pool.mu` RLocks:
+
+```go
+id, err := s.sessions.ResolveID(sessionID) // sessionID = req.Attach.SessionID, or "" if Attach is nil
+if err != nil {
+    _ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
+    return false
+}
+sess, err := s.sessions.Lookup(id)
+if err != nil {
+    _ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
+    return false
+}
+// ... unchanged: clear deadline, Activate, Attach, hand off conn.
+```
+
+Why two calls instead of one `ResolveSession` API:
+
+- **`Pool.ResolveID` returns `SessionID`, not `*Session` (decision from #66).** Returning `*Session` would tempt callers to skip the second lookup, but the second `Lookup` is the lock-clean way to guard against a session being removed between resolve and use. Window is microseconds (one RLock release + one RLock acquire); race outcome is `ErrSessionNotFound` from `Lookup`, which encodes to the same `"attach: sessions: session not found"` wire string the resolver itself produces. Operator-visible diagnostic is identical either way.
+- **Each call takes its own `Pool.mu` RLock — no new locking required.** Concurrent attaches against different sessions remain fully parallel; the dispatcher spawns one goroutine per accept, and `Pool` is the only shared state.
+
+A `nil` `req.Attach` (no payload at all) is treated identically to an empty `SessionID` — both pass `""` into `ResolveID`, which returns the bootstrap id. Phase 0 / v0.5.x clients that omit the payload entirely keep working.
+
+Resolution errors encode as `"attach: <err>"` verbatim through `fmt.Sprintf("%v", err)`:
+
+| Failure | Wire `Response.Error` |
+|---|---|
+| `ErrSessionNotFound` (no match, or resolve-then-lookup race) | `"attach: sessions: session not found"` |
+| `ErrAmbiguousSessionID` (≥2 matches) | `"attach: sessions: ambiguous session id:\n<uuid> (<label>)\n<uuid> (<label>)"` |
+
+The bridge state is **untouched** on the error path — `ResolveID` and `Lookup` both return before `conn.SetDeadline(time.Time{})`, before `Activate`, before `Attach`. Tests assert this via the fake session's attach-call counter, not just by string-matching the response. The `errors.Is(err, sessions.ErrAmbiguousSessionID)` discriminator continues to work server-side; only the message reaches the wire.
+
+The 1.1e-C slice is wire + server only — `internal/control/attach_client.go` and `cmd/pyry/main.go` `runAttach` are untouched. The CLI surface (`pyry attach <id>` positional) lands in 1.1e-D.
 
 ## Attach: Foreground-mode Wire String
 
@@ -116,7 +155,9 @@ Shutdown is unchanged: `SIGINT`/`SIGTERM` → `signal.NotifyContext` cancels the
 
 ## Testing
 
-`server_test.go`, `attach_test.go`, `logs_test.go` exercise the full surface with `fakeResolver` + `fakeSession` test doubles satisfying `SessionResolver` + `Session`. `recordingResolver` (used in `TestServer_Status_ResolvesDefaultSession`) wraps a `fakeResolver` to record `Lookup` arguments — pinning the empty-id-resolves-to-default seam so Phase 1.1's swap to `req.SessionID` is visible at review time.
+`server_test.go`, `attach_test.go`, `attach_resolve_test.go`, `logs_test.go` exercise the full surface with `fakeResolver` + `fakeSession` test doubles satisfying `SessionResolver` + `Session`. `recordingResolver` records both `Lookup` and `ResolveID` arguments — pinning the resolve-then-lookup ordering visible at review time.
+
+`attach_resolve_test.go` covers the 1.1e-C surface: byte-identical wire output for empty-`SessionID` payloads against a v0.5.x baseline, full-UUID resolution, unique-prefix resolution, ambiguous-prefix error before bridge open, and unknown-id error before bridge open. The "before bridge open" assertion uses the fake session's attach-call counter, not just response-string matching.
 
 Tests that need a real bridge (`TestServer_StopWhileAttached`, `TestServer_BridgeAttach`, `TestServer_ConcurrentAttachRace`) wrap a real `*supervisor.Bridge` in a `fakeSession` whose `attachFn` delegates to `bridge.Attach`.
 
