@@ -14,6 +14,12 @@ import (
 // records.
 type darwinProbe struct{}
 
+// noopProbe is the fallback when lsof is missing. Returns ("", nil) so the
+// watcher silently skips rotation detection rather than failing pyry startup.
+type noopProbe struct{}
+
+func (noopProbe) OpenJSONL(int) (string, error) { return "", nil }
+
 // DefaultProbe returns the Darwin probe, or a noopProbe if lsof is not on
 // PATH. Logging at construction time means a missing-lsof shows up at
 // startup, not on the first event.

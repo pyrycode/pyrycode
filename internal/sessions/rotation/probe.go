@@ -25,13 +25,6 @@ type OpenFile struct {
 	Name string // path
 }
 
-// noopProbe is the fallback when no real probe is available (e.g. lsof
-// missing on darwin). It always returns ("", nil) so the watcher silently
-// skips rotation detection rather than failing pyry startup.
-type noopProbe struct{}
-
-func (noopProbe) OpenJSONL(int) (string, error) { return "", nil }
-
 // parseProcFD interprets a single readlink target from /proc/<pid>/fd/<n>.
 // Returns the path if it looks like a regular file path (rooted at "/"),
 // otherwise "" (sockets like "socket:[123]", pipes like "pipe:[456]",
