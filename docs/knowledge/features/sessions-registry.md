@@ -8,7 +8,9 @@ On-disk persistence for `internal/sessions.Pool`. The registry stores per-pyry-n
 - **Phase 1.2b-A (#38):** `Pool.RotateID` now mutates the bootstrap entry's UUID when startup reconciliation detects a `/clear` rotation; persists via `saveLocked`. See [jsonl-reconciliation.md](jsonl-reconciliation.md).
 - **Phase 1.2b-B (#39):** live-detection rotation watcher drives the same `RotateID` → `saveLocked` seam.
 - **Phase 1.2c-A (#40):** `lifecycle_state` field added (`"active"` / `"evicted"`, `omitempty`). `last_active_at` now bumped on every state transition — the LRU follow-up consumes it for victim selection. See [idle-eviction.md](idle-eviction.md).
-- **Phase 1.1+:** `Pool.Add` / `Rename` / `Remove` plug into the same `saveLocked` seam introduced here.
+- **Phase 1.1a-A2 (#73):** `Pool.Create` writes new non-bootstrap entries via `saveLocked` with `bootstrap=false`. See [sessions-package.md § Pool.Create](sessions-package.md).
+- **Phase 1.1c-A (#62):** `Pool.Rename(id, newLabel)` mutates the `label` field via `saveLocked`. Empty `newLabel` clears the on-disk value to `""`; non-empty values persist verbatim. See [sessions-package.md § Pool.Rename](sessions-package.md).
+- **Phase 1.1+:** `Pool.Remove` plugs into the same `saveLocked` seam.
 
 ## Path
 
@@ -40,7 +42,7 @@ Lives as a sibling to the per-name socket `~/.pyry/<name>.sock`. Resolution is i
 |---|---|---|
 | `version` | int | Forward-marker. 1.2a writes `1` and accepts any value on read. |
 | `id` | string (UUIDv4) | The `SessionID`. |
-| `label` | string | Always `""` in 1.2a. Phase 1.1's `pyry sessions rename` populates it. |
+| `label` | string | Operator-set label. `""` for the bootstrap entry until set; `Pool.Create` accepts an initial value, `Pool.Rename` (1.1c-A) mutates it. `Pool.List` substitutes the synthetic `"bootstrap"` for the bootstrap entry when the on-disk value is empty (read-side only — disk record is unchanged). |
 | `created_at` | RFC3339Nano | Set once at session creation. |
 | `last_active_at` | RFC3339Nano | Equal to `created_at` in 1.2a. Bumped on `RotateID` (1.2b-A) and on every lifecycle state transition (1.2c-A). |
 | `bootstrap` | bool | Marks the entry resolved by `Pool.Lookup("")`. Omitted on disk when false (`omitempty`). |

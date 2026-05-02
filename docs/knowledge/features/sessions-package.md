@@ -16,6 +16,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.1a-A1 (#72):** `Pool.runGroup` / `Pool.runCtx` supervisor handle, unexported `Pool.supervise(sess)` helper, `ErrPoolNotRunning` sentinel. Bootstrap fan-out refactored onto the helper; the watcher fan-out is unchanged (not a `*Session`). The seam Phase 1.1a-A2's `Pool.Create` consumes.
 - **Phase 1.1a-A2 (#73):** `Pool.Create(ctx, label) (SessionID, error)` — mint, persist, activate primitive. New unexported fields `Pool.sessionTpl` (per-session template snapshotted from `cfg.Bootstrap`) and `Pool.idleTimeoutDefault` (mirror of `Config.IdleTimeout`). `claude --session-id <uuid>` is now baked on the spawn path for non-bootstrap sessions. Bootstrap behaviour unchanged.
 - **Phase 1.1b-A (#60):** `Pool.List() []SessionInfo` read primitive + new `SessionInfo` value type. Operator-visible snapshot (id, label, lifecycle state, last-active timestamp, bootstrap flag) for every session in the pool, sorted by `LastActiveAt` desc with `SessionID` asc tiebreak. Synthetic `"bootstrap"` label substitution for empty-on-disk bootstrap labels lives at this layer (consumers get the same UX guarantee). Read-only; no on-disk mutation. The internal seam Phase 1.1b-B's `pyry sessions list` CLI verb (46-B) consumes.
+- **Phase 1.1c-A (#62):** `Pool.Rename(id, newLabel) error` write primitive — typed mutator for the `label` field that flows through `saveLocked`. Empty `newLabel` clears the on-disk value to `""` (synthetic `"bootstrap"` substitution from #60 then resumes for the bootstrap entry); non-empty labels persist verbatim and are reflected by `Pool.List`. Unknown id returns `ErrSessionNotFound` with on-disk and in-memory state byte-identical to before. The internal seam Phase 1.1c-B's `pyry sessions rename` CLI verb (47-B) consumes.
 - **Phase 1.1+:** `Request.SessionID` on the wire (#71 — `sessions.new` verb consumes `Pool.Create`), per-session log lines, channel-driven auto-mint.
 
 ## Package Layout
@@ -79,6 +80,7 @@ func (p *Pool) RotateID(oldID, newID SessionID) error
 func (p *Pool) Activate(ctx context.Context, id SessionID) error
 func (p *Pool) Create(ctx context.Context, label string) (SessionID, error)
 func (p *Pool) List() []SessionInfo
+func (p *Pool) Rename(id SessionID, newLabel string) error
 ```
 
 `New` generates a `SessionID`, constructs the underlying `*supervisor.Supervisor` from `cfg.Bootstrap`, and installs the result as the single bootstrap entry. Both `NewID` failure and `supervisor.New` failure are wrapped (`sessions: generate bootstrap id: %w`, `sessions: bootstrap supervisor: %w`) and treated as fatal-at-startup.
@@ -248,6 +250,37 @@ func (p *Pool) List() []SessionInfo
 
 **Concurrent List:** standard RWMutex semantics — concurrent `List` callers don't contend with each other; concurrent `List + Create` (or `List + RotateID`) sees one ordering or the other, neither corrupts the result. Race-clean under `-race`.
 
+### Pool.Rename (1.1c-A)
+
+The typed write primitive Phase 1.1c-B's `pyry sessions rename` CLI verb (#47-B) calls instead of poking at `sessions.json` directly. One method, no new types, no new sentinel errors.
+
+```go
+func (p *Pool) Rename(id SessionID, newLabel string) error
+```
+
+**Sequence under `Pool.mu` (write):**
+
+1. Resolve `id` in `p.sessions`. Unknown ⇒ `ErrSessionNotFound`; in-memory and on-disk state byte-identical to before (no `saveLocked` call).
+2. If `sess.label == newLabel`, no-op return — skips `saveLocked` so the registry mtime stays stable for an idempotent rename. Same precedent as `RotateID(x, x)`.
+3. Otherwise: snapshot `prev := sess.label`, set `sess.label = newLabel`, call `saveLocked()`. On save failure, restore `sess.label = prev` and return the error verbatim.
+
+**Why `Pool.mu`, not `Session.lcMu`.** `Session.label` is read under `Pool.mu` by `List` (RLock) and `saveRegistryLocked` (Lock — caller holds write). The lifecycle goroutine in `Session.Run` does not read `label`. So `Pool.mu` is the correct guard; taking `lcMu` would add a lock-order edge for no benefit. The doc-comment on `Session.label` (`session.go:68-72`) was updated to reflect that `label` is mutable via `Pool.Rename` under `Pool.mu` (write).
+
+**Why hold `Pool.mu` across the disk write.** Releasing it between the in-memory mutation and the disk write would let a concurrent `Lookup` observe the new label while the disk still has the old one — exactly the in-memory-vs-on-disk drift the existing locking discipline rules out. Matches `RotateID` and every `Pool.persist`-from-`Session.transitionTo` callback.
+
+**Save-failure rollback is belt-and-suspenders.** `saveRegistryLocked`'s temp+rename discipline makes the rename the commit point — partial writes are unreachable, so disk state never disagrees with the rolled-back in-memory state. The rollback exists so a subsequent retry has consistent inputs and a `Lookup` after a failed `Rename` doesn't return a label that isn't on disk. Error returned verbatim (no `Rename:`-specific wrap) — `saveLocked`/`saveRegistryLocked` already produce well-prefixed `registry: …` errors and double-wrapping breaks `errors.Is` symmetry with other persist sites (`RotateID`, `Create`, `Session.transitionTo`).
+
+**Bootstrap-label semantics.** `Rename` writes the verbatim string through to disk and does **not** branch on `sess.bootstrap`. Two cases fall out for free:
+
+- `Rename(bootstrapID, "")` — clears on-disk label; `Pool.List` then re-applies the synthetic `"bootstrap"` substitution introduced in #60.
+- `Rename(bootstrapID, "primary")` — persists `"primary"`; `Pool.List` reflects it verbatim (no synthetic substitution, since the on-disk value is non-empty). The disk record is still bootstrap-flagged (`Bootstrap: true`).
+
+The substitution rule lives in `List`, not in `Rename` — keeping the writer simple and the substitution uniform across consumers.
+
+**No validation.** Empty strings are explicitly permitted by the AC; nothing else is mentioned. Length caps, character-class restrictions, and uniqueness checks belong at the CLI layer (47-B) where operator-input policy lives. Same posture as `Pool.Create`'s unvalidated `label` parameter.
+
+**Strict full-`SessionID` only.** UUID-prefix resolution is a CLI/UX concern; the pool primitive matches on the full id to keep the API surface and the test matrix small. Phase 1.1c-B can resolve a prefix via `Pool.List` and then call `Rename` with the full id.
+
 ## Concurrency
 
 `sync.RWMutex` on `Pool.sessions`:
@@ -273,6 +306,8 @@ The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH
 | `NewID` rng failure | `sessions.New` returns wrapped error. Fatal. |
 | `supervisor.New` failure | Wrapped: `sessions: bootstrap supervisor: %w`. Fatal. |
 | `Pool.Lookup` unknown id | `ErrSessionNotFound` (sentinel). |
+| `Pool.Rename` unknown id | `ErrSessionNotFound` (sentinel). On-disk + in-memory state byte-identical to before. |
+| `Pool.Rename` save failure | Wrapped error from `saveLocked` propagated verbatim; in-memory label rolled back to prior value. |
 | `Pool.supervise` before/after `Run` | `ErrPoolNotRunning` (sentinel). |
 | `Session.Attach` with nil bridge | `ErrAttachUnavailable` (sentinel). |
 | `Session.Attach` while bridge busy | `supervisor.ErrBridgeBusy` propagated **verbatim** — no wrap. |
@@ -296,6 +331,7 @@ Three test files mirror the production layout. Stdlib `testing` only.
 - **`pool_test.go`** — bootstrap installation, `Lookup("")` ↔ `Default()` identity, lookup by ID, unknown-ID sentinel match. Uses `/bin/sleep` as the "claude" binary; tests never call `Run`, so it's never spawned.
 - **`pool_create_test.go`** (1.1a-A2) — `HappyPath` (UUID + entry shape after `Run` is live); `BootstrapUnchanged` (`Default()` returns the same `*Session` pointer pre/post `Create`); `LabelRoundTrip` (empty + non-empty labels round-trip via JSON unmarshal, not string match); `CapPassthrough_EvictsLRU` (`ActiveCap=1` evicts the bootstrap when `Create` activates); `SuperviseFails_EntryOnDisk` (no `Run` ⇒ `ErrPoolNotRunning`, valid id, entry on disk, ChildPID=0); `PersistFails_NoEntry_NoSpawn` (`registryPath` set to a non-directory path ⇒ empty id, no entry, only bootstrap in `Snapshot`).
 - **`pool_list_test.go`** (1.1b-A) — `BootstrapOnly` (single entry, `Bootstrap=true`, `Label="bootstrap"`, on-disk `label` re-read from `sessions.json` is still empty); `OrderingByLastActive` (mutate three sessions' `lastActiveAt` under `lcMu` directly to `t0` / `t0+1m` / `t0+2m`, assert desc order; add a fourth equal-time entry, assert id-asc tiebreak is stable across two `List` calls); `BootstrapLabelPassthrough` (warm-start from a `sessions.json` whose bootstrap entry has `label: "main"` — synthetic substitution does NOT clobber); `RaceClean` (N goroutines × 100 `List` calls plus a mutator goroutine, `-race`-clean).
+- **`pool_rename_test.go`** (1.1c-A) — `RoundTrip` (rename bootstrap to `"main"`; assert in-memory via `List`, on-disk by re-reading `sessions.json`); `EmptyClears` (rename to `"foo"` then to `""`; assert on-disk label is empty AND `List[0].Label == "bootstrap"` synthetic substitution resumes); `UnknownID` (zero-UUID returns `ErrSessionNotFound`, `bytes.Equal(before, after)` for the on-disk file, `List` snapshot deep-equal); `RaceWithList` (concurrent `Rename` + `List` goroutines under `-race`); `BootstrapPersistsAndShows` (rename bootstrap to `"primary"`; assert on-disk `Bootstrap=true` AND `Label="primary"`, `List[0].Label == "primary"` — no synthetic substitution).
 - **`session_test.go`** — `State` delegation, `Attach` with no bridge, `Attach` busy via `io.Pipe` (first attach blocks on input, second races and gets `supervisor.ErrBridgeBusy`), `Run` ctx-cancel via a real `/bin/sleep 3600` child.
 
 ### Why no `TestHelperProcess` re-exec helper
