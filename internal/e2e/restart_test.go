@@ -28,7 +28,11 @@ type registryFile struct {
 	Sessions []registryEntry `json:"sessions"`
 }
 
-func TestE2E_Restart_PreservesActiveSessions(t *testing.T) {
+// newRegistryHome creates a short-named temp HOME (sun_path-safe), pre-creates
+// <home>/.pyry/test/, registers cleanup, and returns the home dir and the
+// sessions.json path the harness's -pyry-name=test daemon will read.
+func newRegistryHome(t *testing.T) (home, regPath string) {
+	t.Helper()
 	// os.MkdirTemp keeps the socket path under macOS's 104-byte sun_path
 	// limit; t.TempDir() embeds the (long) test name and overflows.
 	home, err := os.MkdirTemp("", "pyry-rs-*")
@@ -41,7 +45,11 @@ func TestE2E_Restart_PreservesActiveSessions(t *testing.T) {
 	if err := os.MkdirAll(regDir, 0o700); err != nil {
 		t.Fatalf("mkdir registry dir: %v", err)
 	}
-	regPath := filepath.Join(regDir, "sessions.json")
+	return home, filepath.Join(regDir, "sessions.json")
+}
+
+func TestE2E_Restart_PreservesActiveSessions(t *testing.T) {
+	home, regPath := newRegistryHome(t)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	pre := registryFile{
@@ -137,4 +145,131 @@ func mustReadFile(t *testing.T, path string) string {
 		return "(unreadable: " + err.Error() + ")"
 	}
 	return string(data)
+}
+
+func TestE2E_Restart_PreservesEvictedSessions(t *testing.T) {
+	home, regPath := newRegistryHome(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	pre := registryFile{
+		Version: 1,
+		Sessions: []registryEntry{
+			{
+				ID:             "11111111-1111-4111-8111-111111111111",
+				CreatedAt:      now,
+				LastActiveAt:   now,
+				Bootstrap:      true,
+				LifecycleState: "active",
+			},
+			{
+				ID:             "22222222-2222-4222-8222-222222222222",
+				Label:          "evicted-one",
+				CreatedAt:      now,
+				LastActiveAt:   now,
+				LifecycleState: "evicted",
+			},
+			{
+				ID:             "33333333-3333-4333-8333-333333333333",
+				Label:          "active-control",
+				CreatedAt:      now,
+				LastActiveAt:   now,
+				LifecycleState: "active",
+			},
+		},
+	}
+	writeRegistry(t, regPath, pre)
+
+	h1 := StartIn(t, home)
+	h1.Stop(t)
+	h2 := StartIn(t, home)
+	_ = h2
+
+	got := readRegistry(t, regPath)
+
+	byID := make(map[string]registryEntry, len(got.Sessions))
+	for _, e := range got.Sessions {
+		byID[e.ID] = e
+	}
+	for _, want := range pre.Sessions {
+		have, ok := byID[want.ID]
+		if !ok {
+			t.Errorf("session %s missing after restart", want.ID)
+			continue
+		}
+		if have.LifecycleState != want.LifecycleState {
+			t.Errorf("session %s lifecycle_state: got %q want %q\nfile:\n%s",
+				want.ID, have.LifecycleState, want.LifecycleState,
+				mustReadFile(t, regPath))
+		}
+	}
+	if len(got.Sessions) != len(pre.Sessions) {
+		t.Errorf("session count: got %d want %d\nfile:\n%s",
+			len(got.Sessions), len(pre.Sessions), mustReadFile(t, regPath))
+	}
+}
+
+func TestE2E_Restart_LastActiveAtSurvives(t *testing.T) {
+	home, regPath := newRegistryHome(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	pre := registryFile{
+		Version: 1,
+		Sessions: []registryEntry{
+			{
+				ID:             "11111111-1111-4111-8111-111111111111",
+				CreatedAt:      now,
+				LastActiveAt:   now,
+				Bootstrap:      true,
+				LifecycleState: "active",
+			},
+			{
+				ID:             "22222222-2222-4222-8222-222222222222",
+				Label:          "ten-min-old",
+				CreatedAt:      now.Add(-10 * time.Minute),
+				LastActiveAt:   now.Add(-10 * time.Minute),
+				LifecycleState: "active",
+			},
+			{
+				ID:             "33333333-3333-4333-8333-333333333333",
+				Label:          "one-hour-old",
+				CreatedAt:      now.Add(-1 * time.Hour),
+				LastActiveAt:   now.Add(-1 * time.Hour),
+				LifecycleState: "active",
+			},
+		},
+	}
+	writeRegistry(t, regPath, pre)
+
+	// Re-read the file so "want" values come through the same JSON
+	// marshal/unmarshal trip the daemon will use; otherwise the in-memory
+	// time.Time values still carry monotonic clock state and would diverge
+	// from the post-restart parsed values even when bytes are identical.
+	want := readRegistry(t, regPath)
+	wantByID := make(map[string]registryEntry, len(want.Sessions))
+	for _, e := range want.Sessions {
+		wantByID[e.ID] = e
+	}
+
+	h1 := StartIn(t, home)
+	h1.Stop(t)
+	h2 := StartIn(t, home)
+	_ = h2
+
+	got := readRegistry(t, regPath)
+	if len(got.Sessions) != len(want.Sessions) {
+		t.Fatalf("session count: got %d want %d\nfile:\n%s",
+			len(got.Sessions), len(want.Sessions), mustReadFile(t, regPath))
+	}
+	for _, have := range got.Sessions {
+		w, ok := wantByID[have.ID]
+		if !ok {
+			t.Errorf("unexpected session %s after restart", have.ID)
+			continue
+		}
+		if !have.LastActiveAt.Equal(w.LastActiveAt) {
+			t.Errorf("session %s last_active_at: got %s want %s",
+				have.ID, have.LastActiveAt.Format(time.RFC3339Nano),
+				w.LastActiveAt.Format(time.RFC3339Nano))
+		}
+	}
 }
