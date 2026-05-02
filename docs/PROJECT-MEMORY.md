@@ -80,6 +80,7 @@ Repo-level session memory. Read this at the start of every session.
 - GitHub Actions CI: go vet, staticcheck, go test -race
 - QMD search: pyrycode-docs, pyrycode-root collections
 - .claude/settings.json with safety rules
+- **Dispatcher closed-sweep branch cleanup (#58)** — `pyrycode/agents` dispatcher's `runClosedSweep` now deletes orphaned `feature/<N>` refs on origin after moving the ticket to Done. Pure helper `findFeatureBranch(n, branches)` in `lib.ts` (exact-match, prefix-collision-safe); `listFeatureBranches` + `deleteRef` GraphQL methods on `GitHubProjectClient`. Best-effort: status moves take priority, list/delete failures warn-and-continue. Pairs with GitHub's repo-level `delete_branch_on_merge` setting (handles the merged class) to keep the merged + split-parent classes both cleaned. See [knowledge/features/dispatcher-closed-sweep.md](knowledge/features/dispatcher-closed-sweep.md).
 
 ## Patterns Established
 
