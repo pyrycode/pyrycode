@@ -280,6 +280,8 @@ Reuses the `/bin/sleep` fake-claude pattern from `internal/sessions` — no new 
 
 `internal/control/server_test.go` covers `handleAttach` calling `Activate` exactly once, and the `Activate`-error path surfacing as `attach: activate: <err>` on the wire.
 
+`internal/e2e/idle_test.go` (build tag `e2e`, ticket #115) covers the binary-boundary integration: `TestE2E_IdleEviction_EvictsBootstrap` runs pyry with `-pyry-idle-timeout=1s` and asserts the bootstrap evicts (registry `lifecycle_state == "evicted"`, `pyry status` not reporting `Phase: running`); `TestE2E_IdleEviction_LazyRespawn` issues a raw `VerbAttach` over the control socket post-eviction and asserts the session returns to active and the supervisor reaches `Phase: running` while the conn is held. See [e2e-harness.md § Idle-Eviction + Lazy-Respawn Pattern](e2e-harness.md).
+
 ## Manual smoke
 
 ```bash

@@ -91,6 +91,7 @@ Gotchas, anti-patterns, and mistakes. Read this before every session so you don'
 
 - **`supervisor.Config.helperEnv` is unexported.** External packages (e.g. `internal/sessions`) cannot reuse the supervisor's `TestHelperProcess` re-exec pattern without one of: (a) exporting the field, (b) `t.Setenv` (pollutes parent process env, fights `t.Parallel`), or (c) using a real benign binary like `/bin/sleep` as the fake claude. Option (c) is what `internal/sessions` adopted — zero new test infra, supervisor's surface unchanged, and it exercises the only contract that matters (ctx-cancel delegation).
 - **`/bin/sleep` exists on Linux and macOS.** Safe default for "I just need a child that won't exit until killed." If `exec.LookPath` ever fails, `t.Skipf` rather than passing silently.
+- **`/bin/sleep infinity` is GNU coreutils only — macOS BSD sleep rejects it (and the unit-suffixed forms its man page advertises don't all work either).** On macOS Tahoe (26.3) the man page lists `s/m/h/d` as accepted units, but `/bin/sleep 99999d` exits immediately with the usage banner. A plain integer (`99999` ≈ 27h) works on both Linux GNU sleep and macOS BSD sleep — the only argv form actually portable across hosts. The e2e harness uses `99999`; tests that depend on the supervised child staying alive long enough to observe `Phase: running` (e.g. lazy respawn) will go into perpetual backoff if they pass `infinity`.
 
 ## E2E harness: same-process `t.Fatal` doesn't exercise cleanup-on-failure
 

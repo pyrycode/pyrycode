@@ -136,10 +136,13 @@ func ensurePyryBuilt(t *testing.T) string {
 // dialable, and registers teardown via t.Cleanup. Fails the test on any
 // error before returning a usable Harness.
 //
-// The supervised "claude" is /bin/sleep infinity — exists on Linux and
+// The supervised "claude" is /bin/sleep 99999 — exists on Linux and
 // macOS, survives until SIGTERM, and the readiness gate doesn't depend on
-// the child being a real claude. Idle eviction is disabled
-// (-pyry-idle-timeout=0) so the smoke path isn't racing the timer.
+// the child being a real claude. A plain integer (seconds) is portable:
+// `infinity` is GNU coreutils only and was never accepted by macOS BSD
+// sleep. 99999 seconds is ~27h, longer than any test could run. Idle
+// eviction is disabled (-pyry-idle-timeout=0) so the smoke path isn't
+// racing the timer.
 func Start(t *testing.T) *Harness {
 	t.Helper()
 	return StartIn(t, t.TempDir())
@@ -151,9 +154,14 @@ func Start(t *testing.T) *Harness {
 // calling StartIn to drive a daemon against a chosen on-disk state. The
 // caller still owns the directory's lifecycle — StartIn does not register
 // it with t.Cleanup. Use Start(t) for the common case.
-func StartIn(t *testing.T, home string) *Harness {
+//
+// Optional extraFlags are appended to the standard test flag set before
+// the `--` claude-arg sentinel. Go's flag package is last-wins, so a
+// caller-supplied `-pyry-idle-timeout=1s` overrides the harness default
+// of `=0`.
+func StartIn(t *testing.T, home string, extraFlags ...string) *Harness {
 	t.Helper()
-	socket, cmd, stdout, stderr, doneCh := spawn(t, home)
+	socket, cmd, stdout, stderr, doneCh := spawn(t, home, extraFlags...)
 
 	h := &Harness{
 		SocketPath: socket,
@@ -221,7 +229,12 @@ func StartExpectingFailureIn(t *testing.T, home string) RunResult {
 // closed when the wait goroutine observes process exit. Used by StartIn
 // and StartExpectingFailureIn; no t.Cleanup is registered here — the
 // caller decides how to tear down.
-func spawn(t *testing.T, home string) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
+//
+// Optional extraFlags are appended after the standard set and before the
+// `--` claude-arg sentinel. Go's flag package processes args left-to-right
+// with last-wins semantics, so a duplicate flag in extraFlags overrides
+// the standard default (e.g. `-pyry-idle-timeout=1s` to enable eviction).
+func spawn(t *testing.T, home string, extraFlags ...string) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
 	t.Helper()
 	bin := ensurePyryBuilt(t)
 	socket := filepath.Join(home, "pyry.sock")
@@ -229,13 +242,15 @@ func spawn(t *testing.T, home string) (string, *exec.Cmd, *bytes.Buffer, *bytes.
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
-	cmd := exec.Command(bin,
-		"-pyry-socket="+socket,
+	args := []string{
+		"-pyry-socket=" + socket,
 		"-pyry-name=test",
 		"-pyry-claude=/bin/sleep",
 		"-pyry-idle-timeout=0",
-		"--", "infinity",
-	)
+	}
+	args = append(args, extraFlags...)
+	args = append(args, "--", "99999")
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = childEnv(home)
