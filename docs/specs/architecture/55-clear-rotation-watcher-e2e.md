@@ -5,6 +5,22 @@ status: spec
 size: S
 ---
 
+# Files to read first
+
+Read these before doing any exploration of your own. They're the load-bearing surfaces this spec composes; reading them up front is cheaper than rediscovering them via grep.
+
+- `internal/sessions/pool.go:371-415` — `RotateID` semantics + error contract (the production code path the test exercises end-to-end)
+- `internal/sessions/rotation/watcher.go` — full file; **line 167** has the exact-match probe check; the rotation order in the fake claude (close OLD before open NEW) exists to satisfy this check deterministically
+- `internal/sessions/rotation/probe.go` — platform probe contract (`/proc/<pid>/fd` Linux, `lsof` Mac); the test relies on the real probe doing real work on the fake claude's fd table — do not mock it
+- `internal/sessions/reconcile.go` — bootstrap reconciliation that picks up the pre-created `<initialUUID>.jsonl` so the test starts from a known UUID
+- `internal/sessions/pool_test.go:785` — existing `TestPool_Run_StartsWatcher` (the unit test this e2e supplements; out-of-scope to retire here)
+- `internal/e2e/harness.go` — `Harness`, `Start` / `StartIn`, environment plumbing; the new `StartRotation` constructor mirrors `StartIn`'s shape (custom env + flag wiring)
+- `internal/e2e/restart_test.go` — reuse `newRegistryHome` and `readRegistry` helpers; do not reinvent
+- `cmd/pyry/main.go` (verb dispatch + `runStatus`/`list` plumbing) — needed for the AC#3c control-plane re-check via `pyry list`
+- `docs/lessons.md` § "Claude session storage on disk" — encoded-cwd rule: replace BOTH `/` AND `.` with `-` (naive `/`→`-` silently looks in the wrong dir)
+
+(Section added 2026-05-03 as a manual augment to validate the new architect "Files to read first" rule. The ticket itself was reset after #55's developer hit max_turns at 50; combined with the new 60-turn budget, this read list should give the next developer run comfortable headroom.)
+
 # Context
 
 `internal/sessions/rotation` watches `~/.claude/projects/<encoded-cwd>/` for
