@@ -27,9 +27,10 @@ pyrycode/
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
 │   └── logs.go                Ring-buffer log streaming
-├── internal/e2e/              End-to-end test harness (//go:build e2e)
+├── internal/e2e/              End-to-end test harness (//go:build e2e || e2e_install)
 │   ├── harness.go             Harness, Start(t), pyry build helper, readiness poll, teardown
-│   └── harness_test.go        Smoke + failure-injection (re-exec + processAlive)
+│   ├── harness_test.go        Smoke + failure-injection (re-exec + processAlive)
+│   └── install_linux_test.go  //go:build linux && e2e_install — systemd round-trip, PATH inheritance, cleanup-on-fatal (#80)
 ├── systemd/pyry.service       Linux systemd user unit
 └── launchd/dev.pyrycode.pyry.plist   macOS launchd plist
 ```
@@ -203,6 +204,37 @@ process; the parent reads the state file and asserts the pid is gone (POSIX
 CLI-driver wrappers (`Harness.Status()`, `Stop()`, generic `Run(args...)`),
 `Option`s, the first feature-flavoured e2e, and CI wiring are deferred to the
 #51 follow-up.
+
+### Install-Service E2E (Phase test-infra, ticket #80)
+
+```
+internal/e2e/install_linux_test.go (//go:build linux && e2e_install)
+    │
+    ├── TestE2EInstall_RoundTrip_Linux
+    │     install.Install → daemon-reload → start → waitForActive
+    │     → pyry status -pyry-name=<name> → stop → waitForInactive
+    │     → t.Cleanup(stop/disable/remove/daemon-reload)
+    │
+    ├── TestE2EInstall_PathInheritance_Linux        (no systemd needed)
+    │     install.Install with EnvPath = $PATH, HomeDir = t.TempDir()
+    │     → assert every entry of $PATH appears in Environment="PATH=..."
+    │       with $HOME/ → %h/ substitution (bug-#19 regression guard)
+    │
+    └── TestE2EInstall_CleanupOnFatal_Linux         (re-exec)
+          exec.Command(os.Args[0], -test.run=^TestInstallFatalChild$)
+          ↓ child installs + starts + t.Fatal
+          → parent: stat(unitPath) is ErrNotExist
+                    is-active <name> != "active"
+```
+
+Build tag `e2e_install` is **separate** from `e2e` so default e2e CI doesn't
+require a running systemd `--user` session. `harness.go`'s tag was widened to
+`e2e || e2e_install` so the install tests reuse `ensurePyryBuilt` /
+`childEnv`. Tests skip cleanly when `systemctl --user is-system-running`
+reports `offline` / `unknown` / missing (CI runners, containers without D-Bus).
+`install.Install` is called directly rather than via the CLI binary to avoid a
+test-only override on `Options.Binary`. See
+[features/install-e2e.md](../features/install-e2e.md).
 
 ## Future Architecture (not yet implemented)
 

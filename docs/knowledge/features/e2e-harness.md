@@ -50,11 +50,15 @@ make them useful.
 
 ```
 go test -tags=e2e ./internal/e2e/...
+go test -tags=e2e_install ./internal/e2e/...   # install-service round-trip (Linux)
 ```
 
-Default `go test ./...` does not compile the package — every file carries
-`//go:build e2e`. Setting `PYRY_E2E_BIN=/path/to/pyry` skips the per-process
-`go build` (CI optimization).
+Default `go test ./...` does not compile the package. The harness file's
+build tag is `//go:build e2e || e2e_install` so the binary cache and
+`childEnv` helper are reusable from the install-e2e tests (see
+[install-e2e.md](install-e2e.md)) without duplicating boilerplate. Setting
+`PYRY_E2E_BIN=/path/to/pyry` skips the per-process `go build` (CI
+optimization).
 
 ## Isolation Strategy
 
@@ -304,7 +308,9 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
 ## Related
 
 - Specs: `docs/specs/architecture/68-e2e-harness-primitive.md`,
-  `docs/specs/architecture/69-e2e-cli-driver.md`
+  `docs/specs/architecture/69-e2e-cli-driver.md`,
+  `docs/specs/architecture/80-e2e-install-systemd-roundtrip.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude)
-- Consumers: Phase 1.1 session-verb tickets (#52, #54, #55, #56)
+- Consumers: Phase 1.1 session-verb tickets (#52, #54, #55, #56),
+  install-service round-trip ([install-e2e.md](install-e2e.md))
