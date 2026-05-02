@@ -30,6 +30,13 @@ type Config struct {
 	// Production callers in cmd/pyry resolve this via
 	// DefaultClaudeSessionsDir from cfg.Bootstrap.WorkDir.
 	ClaudeSessionsDir string
+
+	// IdleTimeout is the default per-session idle eviction window. A
+	// SessionConfig with IdleTimeout==0 inherits this value at New().
+	// Zero here means "never evict" — the test default. Production
+	// callers in cmd/pyry default this to 15 minutes via the
+	// -pyry-idle-timeout flag.
+	IdleTimeout time.Duration
 }
 
 // SessionConfig is the per-session invocation shape. Phase 1.0 uses it only
@@ -50,6 +57,13 @@ type SessionConfig struct {
 	BackoffInitial time.Duration
 	BackoffMax     time.Duration
 	BackoffReset   time.Duration
+
+	// IdleTimeout, when positive, causes the session's claude process to
+	// exit after the configured period with no attached clients. The
+	// JSONL on disk is preserved; a subsequent Activate spawns a fresh
+	// claude that reads the prior conversation. Zero inherits
+	// Config.IdleTimeout; if both are zero, eviction is disabled.
+	IdleTimeout time.Duration
 }
 
 // Pool owns the set of sessions managed by one pyry process. Phase 1.0
@@ -86,12 +100,14 @@ func New(cfg Config) (*Pool, error) {
 		label        string
 		createdAt    time.Time
 		lastActiveAt time.Time
+		lcState      lifecycleState // defaults to stateActive
 	)
 	if entry := pickBootstrap(reg); entry != nil {
 		bootstrapID = entry.ID
 		label = entry.Label
 		createdAt = entry.CreatedAt
 		lastActiveAt = entry.LastActiveAt
+		lcState = parseLifecycleState(entry.LifecycleState)
 	} else {
 		id, err := NewID()
 		if err != nil {
@@ -117,6 +133,10 @@ func New(cfg Config) (*Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sessions: bootstrap supervisor: %w", err)
 	}
+	idleTimeout := cfg.Bootstrap.IdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = cfg.IdleTimeout
+	}
 	sess := &Session{
 		id:           bootstrapID,
 		sup:          sup,
@@ -126,6 +146,14 @@ func New(cfg Config) (*Pool, error) {
 		createdAt:    createdAt,
 		lastActiveAt: lastActiveAt,
 		bootstrap:    true,
+		idleTimeout:  idleTimeout,
+		lcState:      lcState,
+		activateCh:   make(chan struct{}, 1),
+	}
+	if lcState == stateActive {
+		sess.activeCh = closedChan()
+	} else {
+		sess.activeCh = make(chan struct{})
 	}
 	p := &Pool{
 		sessions:     map[SessionID]*Session{bootstrapID: sess},
@@ -133,6 +161,7 @@ func New(cfg Config) (*Pool, error) {
 		log:          cfg.Logger,
 		registryPath: cfg.RegistryPath,
 	}
+	sess.pool = p
 
 	// Persist on cold start (no prior file). Warm starts do not rewrite —
 	// the AC promises "writes only on state-changing operations", and a
@@ -159,6 +188,12 @@ func New(cfg Config) (*Pool, error) {
 // at that point; callers decide whether to treat the save error as fatal.
 // RotateID(x, x) is a no-op.
 //
+// Invariant: this mutates session.id without taking session.lcMu. Today the
+// only callers (startup reconciliation, future fsnotify-driven /clear
+// detection) run before any lifecycle goroutine begins observing the id, so
+// no concurrent reader exists. lastActiveAt IS protected by lcMu and is
+// taken briefly. Lock order remains Pool.mu → Session.lcMu.
+//
 // This is the load-bearing seam the live-detection ticket reuses.
 func (p *Pool) RotateID(oldID, newID SessionID) error {
 	p.mu.Lock()
@@ -171,7 +206,9 @@ func (p *Pool) RotateID(oldID, newID SessionID) error {
 		return nil
 	}
 	sess.id = newID
+	sess.lcMu.Lock()
 	sess.lastActiveAt = time.Now().UTC()
+	sess.lcMu.Unlock()
 	delete(p.sessions, oldID)
 	p.sessions[newID] = sess
 	if p.bootstrap == oldID {
@@ -221,6 +258,10 @@ func (p *Pool) Run(ctx context.Context) error {
 // saveLocked snapshots the current in-memory sessions into a registryFile and
 // writes it atomically. Caller MUST hold p.mu (write). No-op when
 // registryPath is empty (test-only persistence-disabled mode).
+//
+// Each session's lifecycle state and lastActiveAt are read under Session.lcMu.
+// Lock order: Pool.mu (held by caller) → Session.lcMu. transitionTo enforces
+// the symmetric rule (release lcMu before acquiring Pool.mu via persist).
 func (p *Pool) saveLocked() error {
 	if p.registryPath == "" {
 		return nil
@@ -230,14 +271,46 @@ func (p *Pool) saveLocked() error {
 		Sessions: make([]registryEntry, 0, len(p.sessions)),
 	}
 	for _, s := range p.sessions {
-		reg.Sessions = append(reg.Sessions, registryEntry{
+		s.lcMu.Lock()
+		state := s.lcState
+		lastActive := s.lastActiveAt
+		s.lcMu.Unlock()
+		entry := registryEntry{
 			ID:           s.id,
 			Label:        s.label,
 			CreatedAt:    s.createdAt,
-			LastActiveAt: s.lastActiveAt,
+			LastActiveAt: lastActive,
 			Bootstrap:    s.bootstrap,
-		})
+		}
+		// omitempty on the JSON tag keeps the stable on-disk shape for
+		// the dominant active case — important for the existing
+		// idempotent-reload guarantee.
+		if state == stateEvicted {
+			entry.LifecycleState = state.String()
+		}
+		reg.Sessions = append(reg.Sessions, entry)
 	}
 	sortEntriesByCreatedAt(reg.Sessions)
 	return saveRegistryLocked(p.registryPath, reg)
+}
+
+// persist takes Pool.mu (write) and writes the registry. Called by
+// Session.transitionTo after a state transition; the transition's lcMu is
+// already released before this is called.
+func (p *Pool) persist() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.saveLocked()
+}
+
+// Activate is a thin wrapper that resolves an id and calls Session.Activate.
+// Provided for symmetry with the rest of Pool's surface — the control plane
+// can hold a *Session and call Activate directly, but a single Pool entry
+// point gives future routers something cleaner to import.
+func (p *Pool) Activate(ctx context.Context, id SessionID) error {
+	sess, err := p.Lookup(id)
+	if err != nil {
+		return err
+	}
+	return sess.Activate(ctx)
 }

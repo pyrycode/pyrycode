@@ -20,11 +20,12 @@ type registryFile struct {
 }
 
 type registryEntry struct {
-	ID           SessionID `json:"id"`
-	Label        string    `json:"label"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastActiveAt time.Time `json:"last_active_at"`
-	Bootstrap    bool      `json:"bootstrap,omitempty"`
+	ID             SessionID `json:"id"`
+	Label          string    `json:"label"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastActiveAt   time.Time `json:"last_active_at"`
+	Bootstrap      bool      `json:"bootstrap,omitempty"`
+	LifecycleState string    `json:"lifecycle_state,omitempty"`
 }
 
 // loadRegistry reads sessions.json from path. Returns (nil, nil) when the file

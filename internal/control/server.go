@@ -35,6 +35,11 @@ const dialProbeTimeout = 200 * time.Millisecond
 type Session interface {
 	State() supervisor.State
 	Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
+	// Activate wakes an evicted session and blocks until the supervisor
+	// is running again (or ctx cancels). A no-op on an already-active
+	// session. handleAttach calls this before Attach so the bridge has a
+	// live claude on the other side.
+	Activate(ctx context.Context) error
 }
 
 // SessionResolver maps a SessionID to a Session. An empty id resolves to the
@@ -347,6 +352,17 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder) (handedOff bool)
 	// a quiet window. A successful attach should keep the conn alive
 	// indefinitely.
 	_ = conn.SetDeadline(time.Time{})
+
+	// Wake an evicted session before binding the bridge. The 30s window
+	// caps the documented 2-15s respawn latency with safety margin; a
+	// busted respawn surfaces as a clean error to the client rather than
+	// a hung attach.
+	activateCtx, cancelActivate := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelActivate()
+	if err := sess.Activate(activateCtx); err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: activate: %v", err)})
+		return false
+	}
 
 	done, err := sess.Attach(conn, conn)
 	if err != nil {

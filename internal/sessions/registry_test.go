@@ -112,6 +112,77 @@ func TestLoad_MalformedJSON(t *testing.T) {
 	}
 }
 
+// TestRegistry_LifecycleStateRoundTrip: writing entry with LifecycleState
+// "evicted" and reloading preserves the field.
+func TestRegistry_LifecycleStateRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	when := fixedTime(t)
+	in := &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID:             SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91"),
+			CreatedAt:      when,
+			LastActiveAt:   when,
+			Bootstrap:      true,
+			LifecycleState: "evicted",
+		}},
+	}
+	if err := saveRegistryLocked(path, in); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := loadRegistry(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got == nil || len(got.Sessions) != 1 {
+		t.Fatalf("got = %+v, want 1 session", got)
+	}
+	if got.Sessions[0].LifecycleState != "evicted" {
+		t.Errorf("LifecycleState = %q, want %q", got.Sessions[0].LifecycleState, "evicted")
+	}
+	if parseLifecycleState(got.Sessions[0].LifecycleState) != stateEvicted {
+		t.Errorf("parseLifecycleState mismatch")
+	}
+}
+
+// TestRegistry_LifecycleStateBackwardsCompat: an entry with no
+// lifecycle_state field (simulating old pyry) defaults to active.
+func TestRegistry_LifecycleStateBackwardsCompat(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	raw := `{
+      "version": 1,
+      "sessions": [
+        {
+          "id": "8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91",
+          "label": "",
+          "created_at": "2026-05-01T12:34:56.789Z",
+          "last_active_at": "2026-05-01T12:34:56.789Z",
+          "bootstrap": true
+        }
+      ]
+    }`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := loadRegistry(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got == nil || len(got.Sessions) != 1 {
+		t.Fatalf("got = %+v, want 1 session", got)
+	}
+	if got.Sessions[0].LifecycleState != "" {
+		t.Errorf("LifecycleState = %q, want empty (omitted in old file)", got.Sessions[0].LifecycleState)
+	}
+	if parseLifecycleState(got.Sessions[0].LifecycleState) != stateActive {
+		t.Errorf("parseLifecycleState(missing) should default to stateActive")
+	}
+}
+
 func TestLoad_TolerateUnknownFields(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

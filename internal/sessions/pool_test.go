@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -668,6 +669,66 @@ func TestPool_RotateID_Idempotent(t *testing.T) {
 	}
 	if !beforeStat.ModTime().Equal(afterStat.ModTime()) {
 		t.Errorf("registry mtime changed on idempotent RotateID")
+	}
+}
+
+// TestPool_BootstrapWarmStartsEvicted: a registry with lifecycle_state
+// "evicted" round-trips into a Session with stateEvicted at construction.
+// No supervisor activity happens because Run is never called.
+func TestPool_BootstrapWarmStartsEvicted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	id := SessionID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	when, _ := time.Parse(time.RFC3339Nano, "2026-04-01T00:00:00Z")
+	if err := saveRegistryLocked(path, &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID: id, CreatedAt: when, LastActiveAt: when,
+			Bootstrap: true, LifecycleState: "evicted",
+		}},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pool := helperPoolPersistent(t, path)
+	if got := pool.Default().LifecycleState(); got != stateEvicted {
+		t.Errorf("LifecycleState = %v, want stateEvicted", got)
+	}
+}
+
+// TestPool_ParityWhenIdleDisabled: with IdleTimeout 0, no transition occurs
+// even after several timer windows. Regression guard for the AC's parity
+// claim ("Phase 0 / 1.0 / 1.2a behaviour is byte-identical").
+func TestPool_ParityWhenIdleDisabled(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	cfg := Config{
+		Bootstrap: SessionConfig{
+			ClaudeBin:      "/bin/sleep",
+			ClaudeArgs:     []string{"3600"},
+			IdleTimeout:    0, // disabled
+			BackoffInitial: 10 * time.Millisecond,
+			BackoffMax:     10 * time.Millisecond,
+			BackoffReset:   1 * time.Second,
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sess := pool.Default()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = sess.Run(ctx) }()
+
+	// Sleep a meaningful interval and confirm the state never flipped.
+	time.Sleep(300 * time.Millisecond)
+	if got := sess.LifecycleState(); got != stateActive {
+		t.Errorf("LifecycleState after 300ms with idle disabled = %v, want stateActive", got)
 	}
 }
 
