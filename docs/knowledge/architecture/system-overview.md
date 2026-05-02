@@ -27,6 +27,9 @@ pyrycode/
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
 │   └── logs.go                Ring-buffer log streaming
+├── internal/e2e/              End-to-end test harness (//go:build e2e)
+│   ├── harness.go             Harness, Start(t), pyry build helper, readiness poll, teardown
+│   └── harness_test.go        Smoke + failure-injection (re-exec + processAlive)
 ├── systemd/pyry.service       Linux systemd user unit
 └── launchd/dev.pyrycode.pyry.plist   macOS launchd plist
 ```
@@ -169,6 +172,37 @@ Session.Run (per-session lifecycle goroutine)
 Each `*Session` owns a per-session lifecycle goroutine that drives an `active ↔ evicted` two-state machine. Activity = "at least one client attached" (`attached > 0`). On the idle timeout with no attaches, the supervisor's inner ctx is cancelled and claude exits cleanly — the JSONL on disk is preserved untouched. `Session.Activate(ctx)` (called by `handleAttach` before `Attach`) wakes the session and respawns the supervisor pointing at the same JSONL.
 
 Registry gains `lifecycle_state` (`omitempty`, defaults to `"active"`). Bootstrap warm-starts in whatever state the registry says. Lock order: `Pool.mu → Session.lcMu`. CLI: `-pyry-idle-timeout` (default `15m`, `0` disables). See [features/idle-eviction.md](../features/idle-eviction.md) and [ADR 005](../decisions/005-idle-eviction-state-machine.md).
+
+### E2E Harness (Phase test-infra, ticket #68)
+
+```
+internal/e2e (//go:build e2e)
+    │
+    ├── ensurePyryBuilt(t) ──> sync.Once go build  (or $PYRY_E2E_BIN)
+    │
+    └── Start(t) *Harness
+          ├── HOME=t.TempDir(), -pyry-socket=<tmp>/pyry.sock,
+          │   -pyry-claude=/bin/sleep -- infinity, -pyry-idle-timeout=0
+          ├── cmd.Start
+          ├── go { cmd.Wait; close(doneCh) }
+          ├── waitForReady: os.Stat + net.Dial loop, 5s deadline,
+          │                 short-circuit on doneCh
+          └── t.Cleanup(SIGTERM → 3s → SIGKILL → 1s → os.Remove(socket))
+```
+
+Build-tag-isolated package; default `go test ./...` does not compile it. Invoke
+with `go test -tags=e2e ./internal/e2e/...`. The supervised "claude" is
+`/bin/sleep infinity` (exists on Linux + macOS, survives until SIGTERM); idle
+eviction disabled so the smoke path isn't racing the timer. Failure-injection
+verification re-execs the test binary (`-test.run=^TestInnerFatalChild$` +
+`PYRY_E2E_INNER_FATAL_OUT` env var) so an inner `t.Fatal` runs in a fresh
+process; the parent reads the state file and asserts the pid is gone (POSIX
+`Signal(0)` probe) and the socket is `fs.ErrNotExist`. See
+[features/e2e-harness.md](../features/e2e-harness.md).
+
+CLI-driver wrappers (`Harness.Status()`, `Stop()`, generic `Run(args...)`),
+`Option`s, the first feature-flavoured e2e, and CI wiring are deferred to the
+#51 follow-up.
 
 ## Future Architecture (not yet implemented)
 
