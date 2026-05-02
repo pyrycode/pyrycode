@@ -12,7 +12,9 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.2b-A (#38):** `Config.ClaudeSessionsDir`, startup reconciliation pass in `Pool.New`, `Pool.RotateID` seam. See [jsonl-reconciliation.md](jsonl-reconciliation.md).
 - **Phase 1.2b-B (#39):** errgroup wrap in `Pool.Run` (bootstrap + rotation watcher); `RegisterAllocatedUUID` skip set on `Pool`. See [rotation-watcher.md](rotation-watcher.md).
 - **Phase 1.2c-A (#40):** per-session `active ↔ evicted` lifecycle goroutine, `Config.IdleTimeout` / `SessionConfig.IdleTimeout`, `Session.Activate` / `Pool.Activate`, registry `lifecycle_state`. `Session.Run` rewritten as the lifecycle loop; `Session.Attach` gains attach bookkeeping. See [idle-eviction.md](idle-eviction.md).
-- **Phase 1.1+:** `Pool.Add(SessionConfig)`, N-session fan-out in `Pool.Run`'s errgroup, `Request.SessionID` on the wire, `claude --session-id <uuid>` invocation, per-session log lines.
+- **Phase 1.2c-B (#41):** `Config.ActiveCap` + LRU eviction at `Pool.Activate`; `Session.Evict` public primitive; `Pool.capMu` outermost lock. See [idle-eviction.md](idle-eviction.md) and [ADR 006](../decisions/006-concurrent-active-cap-lru.md).
+- **Phase 1.1a-A1 (#72):** `Pool.runGroup` / `Pool.runCtx` supervisor handle, unexported `Pool.supervise(sess)` helper, `ErrPoolNotRunning` sentinel. Bootstrap fan-out refactored onto the helper; the watcher fan-out is unchanged (not a `*Session`). The seam Phase 1.1a-A2's `Pool.Create` consumes.
+- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling #71-line follow-up), `Request.SessionID` on the wire, `claude --session-id <uuid>` invocation, per-session log lines.
 
 ## Package Layout
 
@@ -85,7 +87,7 @@ func (p *Pool) Activate(ctx context.Context, id SessionID) error
 
 `Default()` is a separate accessor with the same body minus the empty-string branch — startup paths that need the bootstrap don't carry an `error` return they know is impossible.
 
-`Run` wraps the bootstrap session and (when `ClaudeSessionsDir` is set) the rotation watcher under `errgroup.WithContext`. The 1.2b-B errgroup wrap is the extension point Phase 1.1's N-session fan-out reuses by adding one `g.Go(sess.Run)` per pool entry.
+`Run` wraps the bootstrap session and (when `ClaudeSessionsDir` is set) the rotation watcher under `errgroup.WithContext`. The 1.2b-B errgroup wrap is the extension point Phase 1.1's N-session fan-out reuses by adding one `g.Go(sess.Run)` per pool entry. As of 1.1a-A1 (#72), `Run` exposes the live group on `*Pool` (see *Supervisor handle* below) so post-`Run` code paths can join the same supervised set; the bootstrap itself is now scheduled through that seam.
 
 `Activate(ctx, id)` (1.2c-A) is a thin wrapper that resolves `id` and calls `Session.Activate`. Symmetry with the rest of the surface; future routers get a single entry point. Returns `ErrSessionNotFound` for unknown ids.
 
@@ -121,6 +123,31 @@ type SessionConfig struct {
 
 `ResumeLast` maps to `--continue` on restart, as today. The locked-design `claude --session-id <uuid>` invocation is deliberately **not** plumbed in 1.0 — Phase 1.1+ adds it.
 
+### Supervisor handle (1.1a-A1)
+
+Two unexported fields on `*Pool` hold the live errgroup while `Run` is in progress:
+
+```go
+runGroup *errgroup.Group   // set in Pool.Run, cleared on return
+runCtx   context.Context   // the gctx returned by errgroup.WithContext
+```
+
+Both are guarded by `Pool.mu` and read together so a caller never sees a half-initialised handle. `Pool.Run` writes them under `Pool.mu` (write) right after `errgroup.WithContext`, and clears them in a `defer` so a panicking goroutine still resets the handle.
+
+```go
+func (p *Pool) supervise(sess *Session) error
+```
+
+`supervise` schedules `sess.Run(gctx)` on the live group. RLock-snapshots `runGroup` + `runCtx`, releases the lock, then calls `g.Go` off-lock. Returns `ErrPoolNotRunning` (`var ErrPoolNotRunning = errors.New("sessions: pool not running")`) when the handle is `nil` — i.e. before `Run` has wired it or after `Run` has cleared it. Matchable with `errors.Is`.
+
+The helper is unexported. Phase 1.1a-A2's `Pool.Create(ctx, label)` is the consumer: build a `*Session`, then `p.supervise(sess)` to fan it onto the same supervised set as the bootstrap. The bootstrap fan-out inside `Pool.Run` is itself rewritten to call `supervise` (the helper is exercised in production from day one rather than living dormant).
+
+The watcher fan-out (`g.Go(func() error { return w.Run(gctx) })`) does **not** go through `supervise` — the watcher is not a `*Session`.
+
+**Lock discipline.** `supervise` takes only `Pool.mu` (RLock) briefly; it does not call into `Session.lcMu`. The documented orders (`Pool.mu → Session.lcMu`, `Pool.capMu → Pool.mu → Session.lcMu`) are unchanged. Concurrent `supervise` callers contend only with `Run`'s one-shot setup and one-shot teardown, never with each other.
+
+**Race windows.** A `supervise` call racing teardown either acquires RLock first (sees the handle, schedules onto a group whose ctx is about to be cancelled — `Session.Run` handles `ctx.Done` cleanly) or after (sees `nil`, returns the sentinel). The "scheduled onto a soon-cancelled group" case is safe: `errgroup.Group.Go` is documented as concurrency-safe and the scheduled func observes the cancelled ctx immediately, exiting via the existing shutdown path.
+
 ## Concurrency
 
 `sync.RWMutex` on `Pool.sessions`:
@@ -146,11 +173,12 @@ The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH
 | `NewID` rng failure | `sessions.New` returns wrapped error. Fatal. |
 | `supervisor.New` failure | Wrapped: `sessions: bootstrap supervisor: %w`. Fatal. |
 | `Pool.Lookup` unknown id | `ErrSessionNotFound` (sentinel). |
+| `Pool.supervise` before/after `Run` | `ErrPoolNotRunning` (sentinel). |
 | `Session.Attach` with nil bridge | `ErrAttachUnavailable` (sentinel). |
 | `Session.Attach` while bridge busy | `supervisor.ErrBridgeBusy` propagated **verbatim** — no wrap. |
 | `Session.Run` / `Pool.Run` ctx cancel | `context.Canceled` from the supervisor. |
 
-Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
+Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
 
 ## Dependency Direction
 

@@ -15,7 +15,7 @@ pyrycode/
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand
 │   ├── session.go             Session: wraps one supervisor + optional bridge; lifecycle goroutine (active↔evicted state machine, idle timer); Activate / Run / Attach with attach bookkeeping
-│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir + IdleTimeout), load-or-mint bootstrap on New, RotateID seam, saveLocked + persist, errgroup Run, allocated-UUID skip set, Snapshot, Activate
+│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir + IdleTimeout + ActiveCap), load-or-mint bootstrap on New, RotateID seam, saveLocked + persist, errgroup Run with supervise() fan-out seam, allocated-UUID skip set, Snapshot, Activate (cap-aware), capMu
 │   ├── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
 │   ├── reconcile.go           Startup JSONL scan: encodeWorkdir, mostRecentJSONL, reconcileBootstrapOnNew, DefaultClaudeSessionsDir
 │   └── rotation/              Live /clear watcher (Phase 1.2b-B)
@@ -172,7 +172,8 @@ Registry gains `lifecycle_state` (`omitempty`, defaults to `"active"`). Bootstra
 
 ## Future Architecture (not yet implemented)
 
-- **Phase 1.1+:** `Pool.Add(SessionConfig)`, N-session fan-out in `Pool.Run`'s errgroup (the wrapper landed in 1.2b-B), `Request.SessionID` on the wire, `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>`, per-session log lines
+- **Phase 1.1a-A1 (#72) — landed:** `Pool.supervise(sess)` seam + `runGroup`/`runCtx` handle on `*Pool`. Bootstrap fan-out in `Pool.Run` flows through the helper; the watcher fan-out stays inline (not a `*Session`). `ErrPoolNotRunning` sentinel for before/after-`Run` calls.
+- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam), `Request.SessionID` on the wire, `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>`, per-session log lines
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing
