@@ -103,6 +103,39 @@ Gotchas, anti-patterns, and mistakes. Read this before every session so you don'
 - **`exec.Cmd` synchronizes its `Stdout`/`Stderr` writers with `Wait`.** Wiring `cmd.Stdout = &buf` and reading `buf.String()` from the test goroutine *after* `<-doneCh` (where `doneCh` is closed by a goroutine that called `cmd.Wait()`) is race-free without an additional mutex. Reading concurrently with `Wait` is undefined.
 - **Don't keep the wait goroutine "for cleanup only."** It serves double duty: closing `doneCh` is the readiness-poll's early-exit signal (so a daemon that crashes during startup short-circuits the 5s deadline) AND the gate that makes captured I/O safe to read. One goroutine, two contracts.
 
+## E2E against the operator's real systemd `--user`
+
+- **`systemctl --user` doesn't honor a redirected `$HOME`.** The user systemd
+  manager runs in the operator's real session; redirecting the test child's
+  `HOME` to `t.TempDir()` (the standard e2e isolation envelope) does *not*
+  redirect where `systemctl --user` looks for unit files. The install round-trip
+  test must use the real `~/.config/systemd/user/` and clean up rigorously —
+  unique per-invocation unit names (`pyry-e2e-<pid>-<unixnano>`), `t.Cleanup`
+  registered before any state-changing step (so `t.Fatal` mid-test still
+  removes the unit), and an idempotent best-effort cleanup helper that
+  swallows errors from already-stopped/already-removed steps. The PATH
+  inheritance test, which doesn't touch real systemd, can stay
+  `t.TempDir()`-isolated.
+- **`is-system-running` exits non-zero on degraded but usable states.** Using
+  exit code alone as the "system is usable" check would over-skip: degraded /
+  maintenance / starting / stopping all return non-zero but are still usable.
+  The unusable states are `offline` (no manager running) and `unknown` (no
+  D-Bus session — the common CI-runner shape). Skip on those plus a missing
+  `systemctl` binary; everything else proceeds. `loginctl enable-linger
+  <user>` may be needed once on dedicated test hosts where the test runs
+  outside an interactive login session.
+- **Reject hidden env vars added "just for the test."** `install.Install`
+  defaults `Options.Binary` to `os.Executable()` — for a test process, that's
+  the test binary, not pyry. The CLI exposes no `--binary` override. The
+  tempting fix is `PYRY_INSTALL_BINARY=...`-as-a-test-seam in production code,
+  but that's exactly the pattern #34/#38/#69 already rejected. Better: import
+  `internal/install` and call `install.Install(opts)` directly with
+  `opts.Binary = bin` — the e2e value is in the systemd round-trip, not in
+  re-testing the flag-parsing layer (`install_test.go` already covers that).
+  General rule: when the test needs a knob, prefer the existing `Options`
+  surface (`EnvPath` was already there for testing) over inventing a new
+  production-side seam.
+
 ## Closing a fd to interrupt a goroutine's Read requires O_NONBLOCK
 
 - **Plain `os.OpenFile("/dev/tty", os.O_RDONLY, 0)` produces a blocking fd that `Close()` cannot interrupt.** Without `O_NONBLOCK`, `internal/poll.(*FD).Read` calls `syscall.Read` directly and parks in the kernel; POSIX `close(2)` on another goroutine is a no-op for the in-flight read. The Go runtime poller only mediates Reads when the syscall returns `EAGAIN` — i.e., the fd must be non-blocking. With `os.O_RDONLY|syscall.O_NONBLOCK`, Read returns EAGAIN, the goroutine parks on the poller, and `Close()` calls `runtime_pollUnblock` which wakes it with `os.ErrClosed`. This is the entire mechanism that makes "open a side fd, close it to drain the goroutine" work — drop O_NONBLOCK and you reproduce the original `os.Stdin` leak (#78). Sockets and pipes get this for free; character devices like /dev/tty do not.
