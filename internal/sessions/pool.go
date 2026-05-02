@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -155,6 +156,73 @@ type Pool struct {
 type SnapshotEntry struct {
 	ID  SessionID
 	PID int
+}
+
+// SessionInfo is one session's operator-visible metadata, returned by
+// Pool.List. Field types are deep-copy-safe: SessionID and string are values,
+// time.Time is a value, and lifecycleState is a uint8 enum. Mutating a
+// SessionInfo does not affect Pool state or the on-disk registry.
+type SessionInfo struct {
+	ID SessionID
+	// Label is the operator-set label, except that the bootstrap entry's
+	// empty on-disk label is substituted with the synthetic string
+	// "bootstrap" here. The on-disk value is unchanged.
+	Label          string
+	LifecycleState lifecycleState
+	LastActiveAt   time.Time
+	// Bootstrap is true for the bootstrap entry; lets consumers
+	// disambiguate without re-checking IDs.
+	Bootstrap bool
+}
+
+// List returns a snapshot of every session in the pool — bootstrap and minted
+// alike — sorted by LastActiveAt descending (most recent first). Ties break
+// on SessionID ascending for deterministic ordering. The returned slice and
+// its elements are deep-copied: callers may mutate freely without affecting
+// pool or registry state.
+//
+// The bootstrap entry's Label field is the synthetic string "bootstrap" when
+// the on-disk label is empty; the on-disk registry entry is NOT mutated by
+// this substitution. Non-empty bootstrap labels (operator-set) pass through
+// verbatim.
+//
+// Read-only: this method does not bump LastActiveAt, transition lifecycle
+// state, or persist anything. Safe for concurrent use; takes Pool.mu (read)
+// and each Session.lcMu briefly.
+//
+// Lock order: Pool.mu (RLock) → Session.lcMu (Lock). Same order as
+// Pool.saveLocked and Pool.pickLRUVictim — no new lock-order edges.
+func (p *Pool) List() []SessionInfo {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make([]SessionInfo, 0, len(p.sessions))
+	for _, s := range p.sessions {
+		s.lcMu.Lock()
+		state := s.lcState
+		lastActive := s.lastActiveAt
+		s.lcMu.Unlock()
+
+		label := s.label
+		if s.bootstrap && label == "" {
+			label = "bootstrap"
+		}
+
+		out = append(out, SessionInfo{
+			ID:             s.id,
+			Label:          label,
+			LifecycleState: state,
+			LastActiveAt:   lastActive,
+			Bootstrap:      s.bootstrap,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].LastActiveAt.Equal(out[j].LastActiveAt) {
+			return out[i].LastActiveAt.After(out[j].LastActiveAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }
 
 // New constructs a Pool. If a registry exists at cfg.RegistryPath, the

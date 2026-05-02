@@ -15,6 +15,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.2c-B (#41):** `Config.ActiveCap` + LRU eviction at `Pool.Activate`; `Session.Evict` public primitive; `Pool.capMu` outermost lock. See [idle-eviction.md](idle-eviction.md) and [ADR 006](../decisions/006-concurrent-active-cap-lru.md).
 - **Phase 1.1a-A1 (#72):** `Pool.runGroup` / `Pool.runCtx` supervisor handle, unexported `Pool.supervise(sess)` helper, `ErrPoolNotRunning` sentinel. Bootstrap fan-out refactored onto the helper; the watcher fan-out is unchanged (not a `*Session`). The seam Phase 1.1a-A2's `Pool.Create` consumes.
 - **Phase 1.1a-A2 (#73):** `Pool.Create(ctx, label) (SessionID, error)` — mint, persist, activate primitive. New unexported fields `Pool.sessionTpl` (per-session template snapshotted from `cfg.Bootstrap`) and `Pool.idleTimeoutDefault` (mirror of `Config.IdleTimeout`). `claude --session-id <uuid>` is now baked on the spawn path for non-bootstrap sessions. Bootstrap behaviour unchanged.
+- **Phase 1.1b-A (#60):** `Pool.List() []SessionInfo` read primitive + new `SessionInfo` value type. Operator-visible snapshot (id, label, lifecycle state, last-active timestamp, bootstrap flag) for every session in the pool, sorted by `LastActiveAt` desc with `SessionID` asc tiebreak. Synthetic `"bootstrap"` label substitution for empty-on-disk bootstrap labels lives at this layer (consumers get the same UX guarantee). Read-only; no on-disk mutation. The internal seam Phase 1.1b-B's `pyry sessions list` CLI verb (46-B) consumes.
 - **Phase 1.1+:** `Request.SessionID` on the wire (#71 — `sessions.new` verb consumes `Pool.Create`), per-session log lines, channel-driven auto-mint.
 
 ## Package Layout
@@ -77,6 +78,7 @@ func (p *Pool) Run(ctx context.Context) error
 func (p *Pool) RotateID(oldID, newID SessionID) error
 func (p *Pool) Activate(ctx context.Context, id SessionID) error
 func (p *Pool) Create(ctx context.Context, label string) (SessionID, error)
+func (p *Pool) List() []SessionInfo
 ```
 
 `New` generates a `SessionID`, constructs the underlying `*supervisor.Supervisor` from `cfg.Bootstrap`, and installs the result as the single bootstrap entry. Both `NewID` failure and `supervisor.New` failure are wrapped (`sessions: generate bootstrap id: %w`, `sessions: bootstrap supervisor: %w`) and treated as fatal-at-startup.
@@ -213,6 +215,39 @@ Critically: `Create` does NOT hold `p.mu` across `supervise`, `Activate`, or `Re
 
 **No new public types or sentinels.** `Pool.Create` is the only new exported name. `ErrPoolNotRunning` (from #72) is the only sentinel `Create` propagates.
 
+### Pool.List (1.1b-A)
+
+The typed read primitive Phase 1.1b-B's `pyry sessions list` CLI verb (#46-B) calls instead of poking at `sessions.json` directly. One method, one new value type, no error path.
+
+```go
+type SessionInfo struct {
+    ID             SessionID
+    Label          string         // synthetic "bootstrap" substituted for the
+                                  // bootstrap entry when its on-disk label is
+                                  // empty; on-disk value is unchanged.
+    LifecycleState lifecycleState
+    LastActiveAt   time.Time
+    Bootstrap      bool           // true for the bootstrap entry; lets
+                                  // consumers disambiguate without re-checking IDs.
+}
+
+func (p *Pool) List() []SessionInfo
+```
+
+**Deep-copy by construction.** Every field is a value type (`SessionID`/`string`/`time.Time` are values; `lifecycleState` is a `uint8` enum). Mutating a `SessionInfo` cannot affect pool state or registry contents — no defensive cloning, no documentation contract that callers can violate.
+
+**Sort: `LastActiveAt` desc, `SessionID` asc tiebreak.** Most-recent-first matches operator intuition (the session you just used is at the top). The id tiebreak makes ordering deterministic across calls — important for unit tests where time freezes; degenerate at runtime. Uses `sort.Slice` to match `registry.go`'s style.
+
+**Bootstrap label substitution lives here, not in 46-B's renderer.** The wire payload is self-explanatory (every consumer gets `"bootstrap"` instead of the empty string for the unlabelled bootstrap entry) and the on-disk registry entry is **not** mutated. An operator-set bootstrap label passes through verbatim — `Bootstrap` (the bool) is the discriminator, not the label string.
+
+**Why a new type, not extending `SnapshotEntry`.** `SnapshotEntry{ID, PID}` exists for the rotation watcher's closure-over-primitives boundary (`internal/sessions/rotation` cannot import `internal/sessions`). Adding `lifecycleState` to it would either bloat every rotation snapshot or push the enum into `rotation`'s import set. Two distinct types, one per consumer, is cleaner than a shared shape.
+
+**Lock order — unchanged.** `Pool.mu` (RLock) → `Session.lcMu` (Lock). Identical to `Pool.saveLocked` and `Pool.pickLRUVictim`. The bootstrap flag, label, and id are immutable post-`New` / post-`RotateID` from any reader holding `Pool.mu`, so they're read off-`lcMu`; `lcState` and `lastActiveAt` MUST be read under `lcMu` (the lifecycle goroutine writes them under `lcMu` in `transitionTo` and `touchLastActive`). Each session's pair is read under one `lcMu` acquire — no torn reads.
+
+**Read-only.** No `lastActiveAt` bump, no state transition, no `persist()` call. The AC's "registry fields unchanged on disk after the call" is a direct consequence of not calling `saveLocked`.
+
+**Concurrent List:** standard RWMutex semantics — concurrent `List` callers don't contend with each other; concurrent `List + Create` (or `List + RotateID`) sees one ordering or the other, neither corrupts the result. Race-clean under `-race`.
+
 ## Concurrency
 
 `sync.RWMutex` on `Pool.sessions`:
@@ -260,6 +295,7 @@ Three test files mirror the production layout. Stdlib `testing` only.
 - **`id_test.go`** — format regex match, 1000-iteration uniqueness smoke test for `crypto/rand` wiring.
 - **`pool_test.go`** — bootstrap installation, `Lookup("")` ↔ `Default()` identity, lookup by ID, unknown-ID sentinel match. Uses `/bin/sleep` as the "claude" binary; tests never call `Run`, so it's never spawned.
 - **`pool_create_test.go`** (1.1a-A2) — `HappyPath` (UUID + entry shape after `Run` is live); `BootstrapUnchanged` (`Default()` returns the same `*Session` pointer pre/post `Create`); `LabelRoundTrip` (empty + non-empty labels round-trip via JSON unmarshal, not string match); `CapPassthrough_EvictsLRU` (`ActiveCap=1` evicts the bootstrap when `Create` activates); `SuperviseFails_EntryOnDisk` (no `Run` ⇒ `ErrPoolNotRunning`, valid id, entry on disk, ChildPID=0); `PersistFails_NoEntry_NoSpawn` (`registryPath` set to a non-directory path ⇒ empty id, no entry, only bootstrap in `Snapshot`).
+- **`pool_list_test.go`** (1.1b-A) — `BootstrapOnly` (single entry, `Bootstrap=true`, `Label="bootstrap"`, on-disk `label` re-read from `sessions.json` is still empty); `OrderingByLastActive` (mutate three sessions' `lastActiveAt` under `lcMu` directly to `t0` / `t0+1m` / `t0+2m`, assert desc order; add a fourth equal-time entry, assert id-asc tiebreak is stable across two `List` calls); `BootstrapLabelPassthrough` (warm-start from a `sessions.json` whose bootstrap entry has `label: "main"` — synthetic substitution does NOT clobber); `RaceClean` (N goroutines × 100 `List` calls plus a mutator goroutine, `-race`-clean).
 - **`session_test.go`** — `State` delegation, `Attach` with no bridge, `Attach` busy via `io.Pipe` (first attach blocks on input, second races and gets `supervisor.ErrBridgeBusy`), `Run` ctx-cancel via a real `/bin/sleep 3600` child.
 
 ### Why no `TestHelperProcess` re-exec helper
