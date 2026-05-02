@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e || e2e_install
 
 // Package e2e provides a test harness that spawns pyry as a real daemon in
 // an isolated temp HOME, blocks until the control socket is dialable, and
