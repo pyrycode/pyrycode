@@ -25,6 +25,11 @@ var newProbe = rotation.DefaultProbe
 // ErrSessionNotFound is returned by Pool.Lookup for a non-empty unknown id.
 var ErrSessionNotFound = errors.New("sessions: session not found")
 
+// ErrPoolNotRunning is returned by supervise when called before Pool.Run has
+// wired the supervisor handle, or after Run has cleared it. Callers must
+// invoke supervise only while Pool.Run is active.
+var ErrPoolNotRunning = errors.New("sessions: pool not running")
+
 // Config is what cmd/pyry hands to sessions.New.
 type Config struct {
 	Bootstrap SessionConfig
@@ -120,6 +125,15 @@ type Pool struct {
 	// caller may go on to take Pool.mu (read or write) and per-session
 	// lcMu, in that order. capMu is never re-acquired by callees.
 	capMu sync.Mutex
+
+	// runGroup and runCtx are set when Pool.Run begins and cleared before
+	// Run returns. supervise(sess) reads them under p.mu (RLock) and calls
+	// runGroup.Go off-lock so future Pool.Create can hand a freshly-built
+	// Session into the same errgroup that supervises the bootstrap. nil
+	// when Run is not active. Read together so a caller never sees a
+	// half-initialised handle.
+	runGroup *errgroup.Group
+	runCtx   context.Context
 }
 
 // SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. Carries
@@ -318,7 +332,19 @@ func (p *Pool) Run(ctx context.Context) error {
 	p.mu.RUnlock()
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return bootstrap.Run(gctx) })
+
+	p.mu.Lock()
+	p.runGroup, p.runCtx = g, gctx
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.runGroup, p.runCtx = nil, nil
+		p.mu.Unlock()
+	}()
+
+	if err := p.supervise(bootstrap); err != nil {
+		return fmt.Errorf("sessions: supervise bootstrap: %w", err)
+	}
 
 	if dir != "" {
 		w, err := rotation.New(rotation.Config{
@@ -345,6 +371,27 @@ func (p *Pool) Run(ctx context.Context) error {
 	}
 
 	return g.Wait()
+}
+
+// supervise schedules sess.Run on Pool.Run's live errgroup. Returns
+// ErrPoolNotRunning when the handle is not set. Callers must invoke
+// supervise only while Pool.Run is active; the sentinel turns the
+// race-prone "supervise after shutdown" case into a clean error rather
+// than a silent leak.
+//
+// Lock discipline: takes p.mu (RLock) briefly to snapshot runGroup and
+// runCtx, then releases the lock before calling g.Go. Does not touch
+// Session.lcMu. Preserves Pool.mu → Session.lcMu and
+// Pool.capMu → Pool.mu → Session.lcMu lock orders.
+func (p *Pool) supervise(sess *Session) error {
+	p.mu.RLock()
+	g, gctx := p.runGroup, p.runCtx
+	p.mu.RUnlock()
+	if g == nil {
+		return ErrPoolNotRunning
+	}
+	g.Go(func() error { return sess.Run(gctx) })
+	return nil
 }
 
 // Snapshot returns one entry per session, capturing the current

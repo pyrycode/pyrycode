@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -974,5 +975,148 @@ func TestPool_New_MalformedRegistryIsFatal(t *testing.T) {
 	// File must remain on disk for operator inspection.
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("malformed registry was deleted: %v", err)
+	}
+}
+
+// helperDummySession builds a minimal *Session attached to pool that, when
+// Run, will spawn `/bin/sleep 60` via its own supervisor. Not added to
+// pool.sessions — it's only used to feed Pool.supervise. Backoff is shortened
+// so a respawn after ctx cancellation triggers quickly rather than hiding.
+func helperDummySession(t *testing.T, pool *Pool) *Session {
+	t.Helper()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	id, err := NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sup, err := supervisor.New(supervisor.Config{
+		ClaudeBin:      "/bin/sleep",
+		ClaudeArgs:     []string{"60"},
+		Logger:         logger,
+		BackoffInitial: 10 * time.Millisecond,
+		BackoffMax:     10 * time.Millisecond,
+		BackoffReset:   1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("supervisor.New: %v", err)
+	}
+	now := time.Now().UTC()
+	sess := &Session{
+		id:           id,
+		sup:          sup,
+		log:          logger,
+		createdAt:    now,
+		lastActiveAt: now,
+		pool:         pool,
+		lcState:      stateActive,
+		activeCh:     closedChan(),
+		evictedCh:    make(chan struct{}),
+		activateCh:   make(chan struct{}, 1),
+		evictCh:      make(chan struct{}, 1),
+	}
+	return sess
+}
+
+// TestPool_Supervise_BeforeRun_ReturnsErrPoolNotRunning: the helper returns
+// the sentinel before Pool.Run has wired the supervisor handle.
+func TestPool_Supervise_BeforeRun_ReturnsErrPoolNotRunning(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	err := pool.supervise(pool.Default())
+	if !errors.Is(err, ErrPoolNotRunning) {
+		t.Errorf("supervise before Run = %v, want ErrPoolNotRunning", err)
+	}
+}
+
+// TestPool_Supervise_AfterRunReturns_ReturnsErrPoolNotRunning: drive Pool.Run
+// to return (cancel its ctx), then call supervise — the deferred clear must
+// have zeroed the handle.
+func TestPool_Supervise_AfterRunReturns_ReturnsErrPoolNotRunning(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolWithSleepArgs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- pool.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.Default().State().ChildPID > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pool.Default().State().ChildPID == 0 {
+		cancel()
+		<-done
+		t.Fatal("bootstrap child never started")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit within 2s after cancel")
+	}
+
+	err := pool.supervise(pool.Default())
+	if !errors.Is(err, ErrPoolNotRunning) {
+		t.Errorf("supervise after Run returned = %v, want ErrPoolNotRunning", err)
+	}
+}
+
+// TestPool_Supervise_ConcurrentCalls_RaceClean: while Pool.Run is active,
+// fire N goroutines each calling supervise on its own dummy session. All
+// return nil; `go test -race` is the assertion.
+func TestPool_Supervise_ConcurrentCalls_RaceClean(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolWithSleepArgs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- pool.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pool.Default().State().ChildPID > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pool.Default().State().ChildPID == 0 {
+		cancel()
+		<-done
+		t.Fatal("bootstrap child never started")
+	}
+
+	const n = 32
+	dummies := make([]*Session, n)
+	for i := range dummies {
+		dummies[i] = helperDummySession(t, pool)
+	}
+
+	errs := make(chan error, n)
+	var start sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < n; i++ {
+		sess := dummies[i]
+		go func() {
+			start.Wait()
+			errs <- pool.supervise(sess)
+		}()
+	}
+	start.Done()
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("supervise #%d returned %v, want nil", i, err)
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s after cancel")
 	}
 }
