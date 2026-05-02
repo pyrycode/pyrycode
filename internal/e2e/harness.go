@@ -29,6 +29,25 @@
 // h.Run auto-injects -pyry-socket=<h.SocketPath> after the verb so callers
 // don't thread it through. Exit code, stdout, and stderr are all available
 // on the returned RunResult regardless of success.
+//
+// To prove an on-disk invariant survives daemon restart, pre-populate HOME
+// before the first Start, Stop the first daemon, and StartIn a second
+// daemon against the same HOME:
+//
+//	home := t.TempDir()
+//	if err := os.MkdirAll(filepath.Join(home, ".pyry", "test"), 0o700); err != nil {
+//	    t.Fatal(err)
+//	}
+//	if err := os.WriteFile(filepath.Join(home, ".pyry", "test", "sessions.json"),
+//	    []byte(registryJSON), 0o600); err != nil {
+//	    t.Fatal(err)
+//	}
+//
+//	h1 := e2e.StartIn(t, home)
+//	h1.Stop(t)
+//
+//	h2 := e2e.StartIn(t, home)
+//	// h2.HomeDir == home; assert on the registry file directly.
 package e2e
 
 import (
@@ -123,8 +142,18 @@ func ensurePyryBuilt(t *testing.T) string {
 // (-pyry-idle-timeout=0) so the smoke path isn't racing the timer.
 func Start(t *testing.T) *Harness {
 	t.Helper()
+	return StartIn(t, t.TempDir())
+}
+
+// StartIn behaves like Start but uses the caller-supplied home directory
+// instead of allocating a fresh t.TempDir(). The directory must already
+// exist; pre-populate it (e.g. <home>/.pyry/test/sessions.json) before
+// calling StartIn to drive a daemon against a chosen on-disk state. The
+// caller still owns the directory's lifecycle — StartIn does not register
+// it with t.Cleanup. Use Start(t) for the common case.
+func StartIn(t *testing.T, home string) *Harness {
+	t.Helper()
 	bin := ensurePyryBuilt(t)
-	home := t.TempDir()
 	socket := filepath.Join(home, "pyry.sock")
 
 	stdout := &bytes.Buffer{}
@@ -298,10 +327,22 @@ func RunBare(t *testing.T, args ...string) RunResult {
 	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 }
 
+// Stop gracefully terminates the daemon (SIGTERM, grace, escalate to
+// SIGKILL matching t.Cleanup teardown), waits for the process to exit,
+// and removes the socket file. HomeDir is left intact on disk so the
+// same directory can be passed to a subsequent StartIn for a
+// restart-shaped test.
+//
+// Idempotent with the t.Cleanup teardown registered by Start/StartIn:
+// whichever path fires first wins; the other is a no-op (sync.Once).
+func (h *Harness) Stop(t *testing.T) {
+	t.Helper()
+	h.teardown(t)
+}
+
 // teardown sends SIGTERM, escalates to SIGKILL after a short grace, then
 // removes the socket file. The temp HomeDir is cleaned up by t.TempDir.
-// Wrapped in sync.Once so a future manual Stop() and t.Cleanup don't
-// double-fire.
+// Wrapped in sync.Once so a manual Stop() and t.Cleanup don't double-fire.
 func (h *Harness) teardown(t *testing.T) {
 	h.cleanupOnce.Do(func() {
 		if h.cmd != nil && h.cmd.Process != nil {
