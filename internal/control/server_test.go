@@ -141,7 +141,7 @@ func startServer(t *testing.T, resolver SessionResolver) (sock string, stop func
 	dir := shortTempDir(t)
 	sock = filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, resolver, nil, nil, nil)
+	srv := NewServer(sock, resolver, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestServer_StaleSocketIsReplaced(t *testing.T) {
 		t.Fatalf("seed stale: %v", err)
 	}
 
-	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen with stale file should succeed: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestServer_CloseRemovesSocket(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestServer_ListenRefusesActiveInstance(t *testing.T) {
 	// second Listen would hang on the kernel-side accept queue rather
 	// than completing the handshake. Serving makes the live-instance
 	// probe symmetric with what a real client would see.
-	srvA := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srvA := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	if err := srvA.Listen(); err != nil {
 		t.Fatalf("Listen A: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestServer_ListenRefusesActiveInstance(t *testing.T) {
 	go func() { _ = srvA.Serve(ctx) }()
 
 	// Second pyry tries to take the same path.
-	srvB := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srvB := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	err := srvB.Listen()
 	if !errors.Is(err, ErrInstanceRunning) {
 		t.Fatalf("Listen B = %v, want ErrInstanceRunning", err)
@@ -379,7 +379,7 @@ func TestServer_ListenFailsWhenParentDirIsAFile(t *testing.T) {
 	}
 	sock := filepath.Join(parent, "p.sock") // parent isn't a directory
 
-	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	err := srv.Listen()
 	if err == nil {
 		t.Fatal("Listen should fail when parent is a regular file")
@@ -398,7 +398,7 @@ func TestServer_ConcurrentClose(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestNewServer_PanicsOnNilSessions(t *testing.T) {
 
 	// Note: we don't reach the lines below if the panic fires (which it
 	// must), but they document the contract being tested.
-	_ = NewServer("/tmp/p.sock", nil, nil, nil, nil)
+	_ = NewServer("/tmp/p.sock", nil, nil, nil, nil, nil)
 	t.Fatal("NewServer returned without panicking")
 }
 
@@ -466,7 +466,7 @@ func TestServer_Stop(t *testing.T) {
 		case shutdownCalled <- struct{}{}:
 		default:
 		}
-	}, nil)
+	}, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestServer_StopWithoutHandler(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

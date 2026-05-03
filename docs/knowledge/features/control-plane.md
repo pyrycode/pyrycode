@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — except `VerbAttach`, which hands the connection off to the supervisor's I/O bridge for the lifetime of the attachment.
 
-Verbs today: `status`, `stop`, `logs`, `attach`, `resize`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output.
+Verbs today: `status`, `stop`, `logs`, `attach`, `resize`, `sessions.new`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output. `VerbSessionsNew` (#75) extends the pattern: a new `Request.Sessions *SessionsPayload` field with `omitempty` keeps existing-verb wire output byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`).
 
 ## Server Construction
 
@@ -13,12 +13,13 @@ func NewServer(
     logs       LogProvider,
     shutdown   func(),
     log        *slog.Logger,
+    sessioner  Sessioner,
 ) *Server
 ```
 
 `sessions` is the only required dependency that nil-panics at construction. Programmer error surfaces immediately, not on the first request from a future shell.
 
-`logs` and `shutdown` are optional. When nil, the corresponding verb returns an error response — used in tests that care about isolated verbs.
+`logs`, `shutdown`, and `sessioner` are optional. When nil, the corresponding verb returns an error response — used in tests that care about isolated verbs. `sessioner` is nil at server boot today (Phase 1.1a-B1); the CLI ticket wires `*sessions.Pool` here. See `docs/specs/architecture/75-control-sessions-new.md` for the seam design.
 
 ## Resolver Seam
 
