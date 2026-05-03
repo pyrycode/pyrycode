@@ -308,6 +308,8 @@ func (s *Server) handle(conn net.Conn) {
 		if s.handleAttach(conn, enc, req.Attach) {
 			closeConn = false
 		}
+	case VerbResize:
+		s.handleResize(enc, req.Resize)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -427,6 +429,46 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, payload *AttachP
 		s.log.Info("control: client detached")
 	}()
 	return true
+}
+
+// handleResize serves a VerbResize request. Geometry is best-effort: any
+// failure inside the seam (transient EBADF on a closed fd, foreground
+// session with no bridge) is logged and the client gets an OK ack. The
+// only error responses are pre-seam routing failures (resolver lookup
+// failure, missing payload). Decoding errors on the request body itself
+// land in handle's existing decode-error branch and never reach here.
+//
+// The resize conn is independent of the attach conn (each control request
+// is a fresh connection), so a malformed or routing-failed resize cannot
+// tear down an attached session — that property is structural, not coded.
+func (s *Server) handleResize(enc *json.Encoder, payload *ResizePayload) {
+	if payload == nil {
+		_ = enc.Encode(Response{Error: "resize: missing payload"})
+		return
+	}
+	id, err := s.sessions.ResolveID(payload.SessionID)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("resize: %v", err)})
+		return
+	}
+	sess, err := s.sessions.Lookup(id)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("resize: %v", err)})
+		return
+	}
+	// Zero in either dim is the "unknown / don't touch" sentinel — see
+	// ResizePayload omitempty tags. Cols-then-rows on the wire, swapped
+	// here to match Bridge.Resize's rows-then-cols (mirroring pty.Winsize).
+	if payload.Cols > 0 && payload.Rows > 0 {
+		rows := clampUint16(payload.Rows)
+		cols := clampUint16(payload.Cols)
+		if err := sess.Resize(rows, cols); err != nil &&
+			!errors.Is(err, sessions.ErrAttachUnavailable) {
+			s.log.Warn("control: resize failed",
+				"err", err, "rows", rows, "cols", cols, "session", id)
+		}
+	}
+	_ = enc.Encode(Response{OK: true})
 }
 
 // clampUint16 narrows a non-negative int to uint16, clamping out-of-range

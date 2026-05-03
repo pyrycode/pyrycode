@@ -65,6 +65,32 @@ func Stop(ctx context.Context, socketPath string) error {
 	return nil
 }
 
+// SendResize asks the daemon to apply a window-size update to the named
+// session. Empty sessionID selects the bootstrap session. cols/rows are
+// the client's local terminal dimensions; either being zero is treated by
+// the server as "no change". A successful return means the server received
+// and dispatched the request — the seam's own success is best-effort and
+// not visible to the client.
+//
+// Callers (e.g. a SIGWINCH handler) should not retry on transient failure;
+// the next SIGWINCH will re-emit a fresh resize.
+func SendResize(ctx context.Context, socketPath, sessionID string, cols, rows int) error {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:   VerbResize,
+		Resize: &ResizePayload{SessionID: sessionID, Cols: cols, Rows: rows},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: resize response missing ok flag")
+	}
+	return nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {
