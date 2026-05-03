@@ -18,6 +18,7 @@
 //	pyry stop             Graceful shutdown via the control socket
 //	pyry logs             Recent supervisor log lines
 //	pyry attach           Attach local terminal to a service-mode daemon
+//	pyry sessions <verb>  Multi-session management (verbs: new)
 //	pyry install-service  Write a systemd / launchd unit file for pyry
 //	pyry help             Show help
 //
@@ -152,6 +153,8 @@ func run() error {
 			return runLogs(os.Args[2:])
 		case "attach":
 			return runAttach(os.Args[2:])
+		case "sessions":
+			return runSessions(os.Args[2:])
 		case "install-service":
 			return runInstallService(os.Args[2:])
 		case "help", "-h", "--help":
@@ -480,6 +483,83 @@ func runAttach(args []string) error {
 	return nil
 }
 
+// sessionsVerbList is the displayed verb list in `pyry sessions` usage
+// errors. Update in lockstep with the switch in runSessions — Phase
+// 1.1b/c/d/e each append one verb here in the same edit that adds the
+// case.
+const sessionsVerbList = "new"
+
+// errSessionsUsage formats a help-style error listing the implemented
+// `pyry sessions` verbs. Mapped to a non-zero exit by main's top-level
+// error printer.
+func errSessionsUsage(detail string) error {
+	return fmt.Errorf("sessions: %s\nverbs: %s", detail, sessionsVerbList)
+}
+
+// runSessions implements `pyry sessions <verb>`: peel the global pyry
+// flags via parseClientFlags, then dispatch on the first positional.
+//
+// Convention (matches the top-level CLI: "pyry flags must come before
+// claude args"): -pyry-socket / -pyry-name must precede the sub-verb.
+// Sub-verb flags (e.g. --name on `new`) come after.
+//
+// New verbs in this family (1.1b list, 1.1c rename, 1.1d rm, 1.1e
+// attach refactor) each add one switch case + one runSessions<Verb>
+// helper.
+func runSessions(args []string) error {
+	socketPath, rest, err := parseClientFlags("pyry sessions", args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		return errSessionsUsage("missing subcommand")
+	}
+	sub, subArgs := rest[0], rest[1:]
+	switch sub {
+	case "new":
+		return runSessionsNew(socketPath, subArgs)
+	default:
+		return errSessionsUsage(fmt.Sprintf("unknown verb %q", sub))
+	}
+}
+
+// parseSessionsNewArgs is the flag-parse + arity check for
+// `pyry sessions new [--name LABEL]`. Extracted from runSessionsNew so
+// the parsing rules can be unit-tested without dialling the control
+// socket. Mirrors attachSelectorFromArgs's split.
+func parseSessionsNewArgs(args []string) (label string, err error) {
+	fs := flag.NewFlagSet("pyry sessions new", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	labelFlag := fs.String("name", "", "human-friendly label for the new session")
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() > 0 {
+		return "", fmt.Errorf("unexpected positional %q", fs.Arg(0))
+	}
+	return *labelFlag, nil
+}
+
+// runSessionsNew implements `pyry sessions new [--name LABEL]`: dial
+// the daemon's control socket, ask it to mint a session, print the
+// UUID. Empty label maps to a no-label session per AC#1.
+func runSessionsNew(socketPath string, args []string) error {
+	label, err := parseSessionsNewArgs(args)
+	if err != nil {
+		return fmt.Errorf("sessions new: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	id, err := control.SessionsNew(ctx, socketPath, label)
+	if err != nil {
+		return fmt.Errorf("sessions new: %w", err)
+	}
+	fmt.Println(id)
+	return nil
+}
+
 // runStop implements `pyry stop`: dial the control socket and ask the daemon
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
@@ -615,6 +695,8 @@ Usage:
                                                   selects a session — full
                                                   UUID or unique prefix; omit
                                                   for the bootstrap session)
+  pyry sessions <verb> [flags]                   manage sessions on a running
+                                                  daemon (verbs: new)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry version                                   print version
