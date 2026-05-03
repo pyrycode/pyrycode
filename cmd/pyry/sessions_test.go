@@ -1,8 +1,12 @@
 package main
 
 import (
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/control"
 )
 
 // TestRunSessions_NoSubcommand pins the empty-rest error path: bare
@@ -60,6 +64,81 @@ func TestRunSessions_GlobalFlagAfterSubcommand_FailsCleanly(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pyry-name") {
 		t.Errorf("error %q does not name the offending flag", err)
+	}
+}
+
+// TestRunSessions_RmDispatch pins AC#1's router wiring: the
+// `case "rm":` arm exists and routes to runSessionsRm. Verified by
+// passing a deliberately-bogus socket path and observing the resulting
+// error path is the dial failure, not the help-style "unknown verb"
+// router error.
+func TestRunSessions_RmDispatch(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+	bogusSock := filepath.Join(t.TempDir(), "no-such.sock")
+
+	err := runSessions([]string{"-pyry-socket", bogusSock, "rm", "abc"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "unknown verb") {
+		t.Errorf("router did not dispatch rm: %v", err)
+	}
+	if !strings.Contains(msg, "sessions rm:") {
+		t.Errorf("error %q missing %q wrap fragment", msg, "sessions rm:")
+	}
+}
+
+func TestParseSessionsRmArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantID     string
+		wantPolicy control.JSONLPolicy
+		wantUsage  bool   // expect errors.Is(err, errSessionsRmUsage)
+		wantErr    string // substring match against err.Error(); empty means no error
+	}{
+		{"no args", nil, "", "", true, "expected <id>"},
+		{"only --archive flag", []string{"--archive"}, "", "", true, "expected <id>"},
+		{"id only", []string{"abc"}, "abc", "", false, ""},
+		{"--archive id", []string{"--archive", "abc"}, "abc", control.JSONLPolicyArchive, false, ""},
+		{"--purge id", []string{"--purge", "abc"}, "abc", control.JSONLPolicyPurge, false, ""},
+		{"--archive --purge id", []string{"--archive", "--purge", "abc"}, "", "", true, "mutually exclusive"},
+		{"--purge --archive id", []string{"--purge", "--archive", "abc"}, "", "", true, "mutually exclusive"},
+		{"id then extra positional", []string{"abc", "extra"}, "", "", true, "expected <id>"},
+		{"flag after positional halts at id", []string{"abc", "--archive"}, "", "", true, "expected <id>"},
+		{"unknown flag", []string{"--unknown", "abc"}, "", "", true, "flag provided but not defined"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			id, policy, err := parseSessionsRmArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil (id=%q, policy=%q)",
+						tt.wantErr, id, policy)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error %q does not contain %q", err, tt.wantErr)
+				}
+				if tt.wantUsage && !errors.Is(err, errSessionsRmUsage) {
+					t.Errorf("error %q does not match errSessionsRmUsage sentinel", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if id != tt.wantID {
+				t.Errorf("id = %q, want %q", id, tt.wantID)
+			}
+			if policy != tt.wantPolicy {
+				t.Errorf("policy = %q, want %q", policy, tt.wantPolicy)
+			}
+		})
 	}
 }
 
