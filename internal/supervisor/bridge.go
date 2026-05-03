@@ -2,9 +2,13 @@ package supervisor
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
+
+	"github.com/creack/pty"
 )
 
 // ErrBridgeBusy is returned by Bridge.Attach when another client is already
@@ -57,6 +61,12 @@ type Bridge struct {
 	mu       sync.Mutex
 	output   io.Writer // attached client output, or nil = discard
 	attached bool
+
+	// ptyMu guards ptmx. Held briefly across pty.Setsize so a concurrent
+	// SetPTY/ClearPTY can't swap the file mid-call. Leaf-only — never
+	// acquired while holding mu, cancelMu, or leftMu.
+	ptyMu sync.Mutex
+	ptmx  *os.File // current PTY master, or nil between iterations
 }
 
 // NewBridge constructs an empty bridge. No output is attached yet; PTY writes
@@ -227,4 +237,35 @@ func (b *Bridge) Attached() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.attached
+}
+
+// SetPTY registers (or clears, when f is nil) the PTY master for the current
+// runOnce iteration. Subsequent Resize calls target this fd. runOnce calls
+// SetPTY(ptmx) after pty.Start succeeds and SetPTY(nil) before EndIteration
+// so a Resize racing with iteration teardown sees nil rather than a closed fd.
+func (b *Bridge) SetPTY(f *os.File) {
+	b.ptyMu.Lock()
+	b.ptmx = f
+	b.ptyMu.Unlock()
+}
+
+// Resize applies the given window size to the registered PTY master via
+// pty.Setsize. Returns nil silently when no PTY is registered (between
+// iterations, or in foreground mode where no Bridge exists at all). Errors
+// from pty.Setsize are wrapped and returned for the caller to log; the
+// control plane does not fail the attach on resize errors.
+//
+// rows-then-cols matches pty.Winsize field order. The wire protocol uses
+// cols-then-rows in AttachPayload; the boundary swap happens at the
+// handleAttach call site.
+func (b *Bridge) Resize(rows, cols uint16) error {
+	b.ptyMu.Lock()
+	defer b.ptyMu.Unlock()
+	if b.ptmx == nil {
+		return nil
+	}
+	if err := pty.Setsize(b.ptmx, &pty.Winsize{Rows: rows, Cols: cols}); err != nil {
+		return fmt.Errorf("pty setsize: %w", err)
+	}
+	return nil
 }

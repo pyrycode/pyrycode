@@ -21,6 +21,7 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 | 005 | [005-idle-eviction-state-machine.md](decisions/005-idle-eviction-state-machine.md) | Per-session two-state machine + explicit `Activate` for idle eviction / lazy respawn |
 | 006 | [006-concurrent-active-cap-lru.md](decisions/006-concurrent-active-cap-lru.md) | `Config.ActiveCap` + LRU victim selection at `Pool.Activate`; force-eviction `Session.Evict` primitive |
 | 007 | [007-bridge-iteration-boundaries.md](decisions/007-bridge-iteration-boundaries.md) | `Bridge` input path moves from `io.Pipe` to `chan []byte` + per-iteration cancel (`BeginIteration` / `EndIteration`) so the input pump terminates per `runOnce` iteration instead of leaking and racing the next one for typed bytes during a restart |
+| 008 | [008-bridge-resize-seam.md](decisions/008-bridge-resize-seam.md) | `Bridge.Resize(rows, cols)` + `SetPTY(*os.File)` is the supervisor-side resize seam (over a method on `*Supervisor` or a `Run`-wired callback); reuses the `Session → Bridge` chain and `BeginIteration`/`EndIteration` hook points |
 
 ## Features
 

@@ -46,17 +46,13 @@ type Request struct {
 // wire so v0.5.x clients (which don't know the field) keep round-tripping
 // byte-identically against a v0.7.x server during the rollover window.
 //
-// Phase 0 caveat: the server currently ACCEPTS this payload but does NOT
-// propagate Cols/Rows to the PTY — the bridge has no API for setting
-// window size yet. Clients send the values for forward compatibility (so
-// no protocol change is needed when the server starts honoring them). Until
-// the supervised child is taught to react to handshake-time geometry, all
-// claude sessions render at whatever size the server's PTY was allocated
-// with (typically 80×24 from creack/pty defaults).
+// Handshake Cols/Rows are applied to the supervised PTY at attach time via
+// Bridge.Resize (see #136). Either dimension being zero is the "unknown /
+// don't touch" sentinel — no resize is issued.
 //
-// Live SIGWINCH propagation while attached is also out of scope for Phase 0;
-// it would need a small framing change to multiplex resize events into the
-// raw byte stream, or a side-channel control verb.
+// Live SIGWINCH propagation while attached is still out of scope here; it
+// needs either a small framing change to multiplex resize events into the
+// raw byte stream or a side-channel control verb. Tracked by #137.
 type AttachPayload struct {
 	Cols      int    `json:"cols,omitempty"`
 	Rows      int    `json:"rows,omitempty"`

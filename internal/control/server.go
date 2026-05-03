@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -40,6 +41,10 @@ type Session interface {
 	// session. handleAttach calls this before Attach so the bridge has a
 	// live claude on the other side.
 	Activate(ctx context.Context) error
+	// Resize applies the given window size (rows-then-cols) to the
+	// session's PTY. Returns sessions.ErrAttachUnavailable for sessions
+	// with no bridge (foreground mode); handleAttach swallows that case.
+	Resize(rows, cols uint16) error
 }
 
 // SessionResolver maps a SessionID to a Session. An empty id resolves to the
@@ -300,11 +305,7 @@ func (s *Server) handle(conn net.Conn) {
 	case VerbAttach:
 		// Streaming verb. handleAttach takes ownership of conn on
 		// success and is responsible for closing it.
-		var sessionID string
-		if req.Attach != nil {
-			sessionID = req.Attach.SessionID
-		}
-		if s.handleAttach(conn, enc, sessionID) {
+		if s.handleAttach(conn, enc, req.Attach) {
 			closeConn = false
 		}
 	default:
@@ -344,7 +345,11 @@ func (s *Server) handleStop(enc *json.Encoder) {
 // attach ends). Returns false on any pre-attach failure (no provider, bridge
 // busy, etc.); in those cases the caller continues to own conn and will
 // close it normally.
-func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, sessionID string) (handedOff bool) {
+func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, payload *AttachPayload) (handedOff bool) {
+	var sessionID string
+	if payload != nil {
+		sessionID = payload.SessionID
+	}
 	// Two-step resolve-then-lookup. ResolveID maps the loose-input
 	// selector (full UUID, unique prefix, or empty → bootstrap) to a
 	// concrete SessionID; Lookup then guards against the session being
@@ -381,6 +386,20 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, sessionID string
 		return false
 	}
 
+	// Apply handshake geometry. Zero in either dimension is the protocol
+	// "unknown / don't touch" sentinel — see AttachPayload omitempty tags.
+	// int → uint16 boundary: pathological client sizes >65535 are clamped
+	// silently. The wire's cols-then-rows order is swapped here to match
+	// Bridge.Resize's rows-then-cols (which mirrors pty.Winsize).
+	if payload != nil && payload.Cols > 0 && payload.Rows > 0 {
+		rows := clampUint16(payload.Rows)
+		cols := clampUint16(payload.Cols)
+		if err := sess.Resize(rows, cols); err != nil &&
+			!errors.Is(err, sessions.ErrAttachUnavailable) {
+			s.log.Warn("control: attach geometry resize failed", "err", err, "rows", rows, "cols", cols)
+		}
+	}
+
 	done, err := sess.Attach(conn, conn)
 	if err != nil {
 		// Foreground-mode session has no bridge. Map sessions.ErrAttachUnavailable
@@ -408,6 +427,18 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, sessionID string
 		s.log.Info("control: client detached")
 	}()
 	return true
+}
+
+// clampUint16 narrows a non-negative int to uint16, clamping out-of-range
+// values to math.MaxUint16. Callers guard against negative inputs (the
+// wire protocol's omitempty + > 0 check). No logging on clamp — a client
+// reporting dimensions over 65535 is buggy or hostile, and logging it
+// would just amplify the noise.
+func clampUint16(v int) uint16 {
+	if v > math.MaxUint16 {
+		return math.MaxUint16
+	}
+	return uint16(v)
 }
 
 // buildStatus converts a supervisor.State snapshot into the wire format.

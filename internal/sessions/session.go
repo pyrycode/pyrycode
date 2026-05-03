@@ -153,6 +153,21 @@ func (s *Session) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err
 	return wrapped, nil
 }
 
+// Resize applies the given window size to the session's PTY via the bridge.
+// Returns ErrAttachUnavailable when the session has no bridge (foreground
+// mode); the control plane's attach handler swallows that case since
+// foreground mode has its own SIGWINCH watcher.
+//
+// rows-then-cols matches Bridge.Resize and pty.Winsize. No lifecycle locking:
+// Resize doesn't bump lastActiveAt or interact with the active↔evicted state
+// machine. The bridge's own ptyMu serializes against iteration boundaries.
+func (s *Session) Resize(rows, cols uint16) error {
+	if s.bridge == nil {
+		return ErrAttachUnavailable
+	}
+	return s.bridge.Resize(rows, cols)
+}
+
 // Activate moves the session into stateActive if it is currently evicted,
 // blocking until the lifecycle goroutine has started the supervisor (or ctx
 // is cancelled). No-op when the session is already active. Safe from any
