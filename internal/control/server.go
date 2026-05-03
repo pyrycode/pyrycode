@@ -71,16 +71,36 @@ type Remover interface {
 	Remove(ctx context.Context, id sessions.SessionID, opts sessions.RemoveOptions) error
 }
 
-// Sessioner aggregates the lifecycle methods the control server dispatches
-// to. Phase 1.1a-B1 added Create; Phase 1.1d-B1 adds Remove via the
-// embedded Remover. Phase 1.1b/c/e (list, rename, attach orchestration)
-// will continue this pattern — one method per verb, embedded onto Sessioner
-// so NewServer's signature stays stable across the namespace's growth.
+// Renamer is the per-pool view the control server depends on for session
+// rename. *sessions.Pool satisfies it structurally via Pool.Rename. Defined
+// here, where it is consumed; tests fake it directly.
 //
-// *sessions.Pool satisfies Sessioner structurally — Pool.Create and
-// Pool.Remove match the embedded interfaces' signatures exactly, so no
-// covariant-return adapter is needed (contrast with poolResolver's Lookup).
-// Defined here, where it is consumed; tests fake it directly.
+// Rename updates the named session's label and persists the change to the
+// registry. Empty newLabel is permitted and clears the on-disk label to "".
+// Returns sessions.ErrSessionNotFound when id is not present in the pool.
+// See Pool.Rename for the full contract, including the no-op shape
+// (newLabel == current label) returning nil without persisting.
+//
+// Rename does not take a context — Pool.Rename's signature is
+// (id, newLabel) error and the operation is bounded by a single Pool.mu
+// critical section + saveLocked. The seam mirrors Pool.Rename's shape so
+// *sessions.Pool satisfies it adapter-free.
+type Renamer interface {
+	Rename(id sessions.SessionID, newLabel string) error
+}
+
+// Sessioner aggregates the lifecycle methods the control server dispatches
+// to. Phase 1.1a-B1 added Create; Phase 1.1d-B1 added Remove via the
+// embedded Remover; Phase 1.1c-B1 adds Rename via the embedded Renamer.
+// Phase 1.1e (attach orchestration) will continue this pattern — one method
+// (or named sub-interface) per verb, embedded onto Sessioner so NewServer's
+// signature stays stable across the namespace's growth.
+//
+// *sessions.Pool satisfies Sessioner structurally — Pool.Create,
+// Pool.Remove and Pool.Rename match the embedded interfaces' signatures
+// exactly, so no covariant-return adapter is needed (contrast with
+// poolResolver's Lookup). Defined here, where it is consumed; tests fake
+// it directly.
 //
 // Create mints a new supervised session with the given (possibly empty)
 // label and returns the new SessionID. Errors are surfaced to the client
@@ -88,6 +108,7 @@ type Remover interface {
 type Sessioner interface {
 	Create(ctx context.Context, label string) (sessions.SessionID, error)
 	Remover
+	Renamer
 }
 
 // Server listens on a Unix domain socket and answers control requests.
@@ -352,6 +373,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleSessionsNew(enc, req.Sessions)
 	case VerbSessionsRm:
 		s.handleSessionsRm(enc, req.Sessions)
+	case VerbSessionsRename:
+		s.handleSessionsRename(enc, req.Sessions)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -453,6 +476,43 @@ func (s *Server) handleSessionsRm(enc *json.Encoder, payload *SessionsPayload) {
 			resp.ErrorCode = ErrCodeSessionNotFound
 		case errors.Is(err, sessions.ErrCannotRemoveBootstrap):
 			resp.ErrorCode = ErrCodeCannotRemoveBootstrap
+		}
+		_ = enc.Encode(resp)
+		return
+	}
+	_ = enc.Encode(Response{OK: true})
+}
+
+// handleSessionsRename serves a VerbSessionsRename request: invoke the
+// sessioner to update the named session's label and acknowledge success.
+//
+// Unlike handleSessionsNew / handleSessionsRm there is no
+// context.WithTimeout — Pool.Rename does not take ctx and the operation
+// is bounded by a single Pool.mu critical section + saveLocked. The
+// conn's existing handshake deadline already bounds slow-write
+// pathologies; introducing a seam-level ctx the implementation would
+// discard would lie about cancellability.
+//
+// Empty NewLabel is forwarded unchanged — Pool.Rename treats it as
+// "clear the label" per #62. Empty ID is rejected at the boundary
+// (a missing-input condition, not a "not found" one) for symmetry
+// with handleSessionsRm. The typed sentinel ErrSessionNotFound from
+// Pool.Rename surfaces through Response.ErrorCode so the client can
+// reconstruct the sentinel for errors.Is matching after the JSON
+// round-trip; untyped errors flow through Response.Error verbatim.
+func (s *Server) handleSessionsRename(enc *json.Encoder, payload *SessionsPayload) {
+	if s.sessioner == nil {
+		_ = enc.Encode(Response{Error: "sessions.rename: no sessioner configured"})
+		return
+	}
+	if payload == nil || payload.ID == "" {
+		_ = enc.Encode(Response{Error: "sessions.rename: missing id"})
+		return
+	}
+	if err := s.sessioner.Rename(sessions.SessionID(payload.ID), payload.NewLabel); err != nil {
+		resp := Response{Error: err.Error()}
+		if errors.Is(err, sessions.ErrSessionNotFound) {
+			resp.ErrorCode = ErrCodeSessionNotFound
 		}
 		_ = enc.Encode(resp)
 		return

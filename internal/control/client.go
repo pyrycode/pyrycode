@@ -153,6 +153,38 @@ func SessionsRm(ctx context.Context, socketPath, id string, policy JSONLPolicy) 
 	return nil
 }
 
+// SessionsRename asks the daemon to update the named session's
+// human-friendly label. Empty newLabel is a valid argument meaning "clear
+// the label" — Pool.Rename treats it as such (per #62) and the wire
+// forwards it unchanged via SessionsPayload.NewLabel's omitempty tag (an
+// empty string elides the field, and the server decodes the absent field
+// as "").
+//
+// Typed errors propagate via Response.ErrorCode — a server response
+// carrying ErrCodeSessionNotFound returns sessions.ErrSessionNotFound
+// directly so callers can errors.Is against it. Other server errors (no
+// sessioner configured, missing id, registry persist failures, ...)
+// return as errors.New(resp.Error) verbatim.
+func SessionsRename(ctx context.Context, socketPath, id, newLabel string) error {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:     VerbSessionsRename,
+		Sessions: &SessionsPayload{ID: id, NewLabel: newLabel},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		if resp.ErrorCode == ErrCodeSessionNotFound {
+			return sessions.ErrSessionNotFound
+		}
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: sessions.rename response missing ok flag")
+	}
+	return nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {

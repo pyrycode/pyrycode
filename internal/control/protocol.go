@@ -48,6 +48,16 @@ const (
 	// ErrCannotRemoveBootstrap) propagate through Response.ErrorCode so the
 	// CLI can match them with errors.Is.
 	VerbSessionsRm Verb = "sessions.rm"
+
+	// VerbSessionsRename updates an existing session's human-friendly
+	// label. Request.Sessions carries the session ID and the new label
+	// (empty newLabel clears the on-disk label, per Pool.Rename's
+	// contract); Response.OK acknowledges success. The typed
+	// ErrSessionNotFound from the pool propagates through
+	// Response.ErrorCode == ErrCodeSessionNotFound so the CLI can match
+	// it with errors.Is. No new ErrorCode constants are introduced —
+	// ErrCodeSessionNotFound (1.1d-B1) is reused.
+	VerbSessionsRename Verb = "sessions.rename"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -118,19 +128,26 @@ type AttachPayload struct {
 
 // SessionsPayload carries arguments shared across the sessions.* verb
 // family. Today Label is used by sessions.new; ID and JSONLPolicy are used
-// by sessions.rm. Phase 1.1b/c/e (list, rename, attach) will add further
-// omitempty fields to the same struct.
+// by sessions.rm; ID and NewLabel are used by sessions.rename. Phase 1.1e
+// (attach) will add further omitempty fields to the same struct.
 //
 // Label is the human-friendly name supplied by the client. Empty maps to
 // a no-label session — Pool.Create accepts it verbatim and the registry
 // stores ""; not an error.
 //
-// ID and JSONLPolicy are populated for VerbSessionsRm. Empty JSONLPolicy
-// is treated by the server as JSONLPolicyLeave.
+// ID is populated for VerbSessionsRm and VerbSessionsRename.
+//
+// JSONLPolicy is populated for VerbSessionsRm. Empty JSONLPolicy is
+// treated by the server as JSONLPolicyLeave.
+//
+// NewLabel is populated for VerbSessionsRename. An empty NewLabel on the
+// wire (omitted via omitempty) is forwarded to Pool.Rename as the empty
+// string and clears the on-disk label per #62's contract.
 type SessionsPayload struct {
 	Label       string      `json:"label,omitempty"`       // sessions.new
-	ID          string      `json:"id,omitempty"`          // sessions.rm
+	ID          string      `json:"id,omitempty"`          // sessions.rm, sessions.rename
 	JSONLPolicy JSONLPolicy `json:"jsonlPolicy,omitempty"` // sessions.rm
+	NewLabel    string      `json:"newLabel,omitempty"`    // sessions.rename
 }
 
 // ResizePayload carries a live window-size update for an attached session.
