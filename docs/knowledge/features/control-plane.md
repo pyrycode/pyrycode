@@ -664,6 +664,53 @@ The wire enum (`JSONLPolicy` string) and the internal enum (`sessions.JSONLPolic
 
 See `docs/specs/architecture/98-control-sessions-rm.md` for the full design.
 
+## Sessions: rename seam (1.1c-B1)
+
+The third `sessions.*` verb is `sessions.rename`. The control server consumes session-rename commands through the `Renamer` interface in `internal/control`, embedded into `Sessioner` alongside `Remover`:
+
+```go
+type Renamer interface {
+    Rename(id sessions.SessionID, newLabel string) error
+}
+
+type Sessioner interface {
+    Create(ctx context.Context, label string) (sessions.SessionID, error)
+    Remover
+    Renamer
+}
+```
+
+`*sessions.Pool` satisfies `Renamer` directly via `Pool.Rename` (#62). `Renamer` does not take a context — `Pool.Rename`'s signature is `(id, newLabel) error` and the operation is bounded by a single `Pool.mu` critical section + `saveLocked`, so the seam mirrors that shape adapter-free. Adding `Renamer` to `Sessioner` keeps `NewServer`'s signature stable; the rationale documented under "Sessions: removal seam" applies identically.
+
+### Wire shape
+
+`SessionsPayload` gains one omitempty field used by `sessions.rename`:
+
+```go
+type SessionsPayload struct {
+    Label       string      `json:"label,omitempty"`       // sessions.new
+    ID          string      `json:"id,omitempty"`          // sessions.rm, sessions.rename
+    JSONLPolicy JSONLPolicy `json:"jsonlPolicy,omitempty"` // sessions.rm
+    NewLabel    string      `json:"newLabel,omitempty"`    // sessions.rename
+}
+```
+
+`sessions.rename` uses the `OK`/`Error` envelope — no typed result. Empty `NewLabel` on the wire is forwarded to `Pool.Rename` as the empty string, which clears the on-disk label per #62's contract.
+
+### Typed errors via Response.ErrorCode
+
+One sentinel propagates from `Pool.Rename`:
+
+```
+Response.ErrorCode == "session_not_found"  → sessions.ErrSessionNotFound
+```
+
+The client maps this to the corresponding sentinel error so callers can match with `errors.Is`. Untyped errors (e.g. registry persist failures) flow through `Response.Error` verbatim with no `ErrorCode`.
+
+The `ErrorCode` envelope and the `ErrCodeSessionNotFound` token are reused verbatim from #98 — no new wire constants. This is the intended dividend of #98's wire-error infrastructure landing first: subsequent verbs reuse the envelope at zero incremental wire cost.
+
+See `docs/specs/architecture/90-control-sessions-rename.md` for the full design.
+
 ## Process-Global vs Per-Session
 
 | Concern | Scope today | Source |
