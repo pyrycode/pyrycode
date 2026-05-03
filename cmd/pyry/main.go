@@ -18,7 +18,7 @@
 //	pyry stop             Graceful shutdown via the control socket
 //	pyry logs             Recent supervisor log lines
 //	pyry attach           Attach local terminal to a service-mode daemon
-//	pyry sessions <verb>  Multi-session management (verbs: new)
+//	pyry sessions <verb>  Multi-session management (verbs: new, rm)
 //	pyry install-service  Write a systemd / launchd unit file for pyry
 //	pyry help             Show help
 //
@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -487,7 +488,7 @@ func runAttach(args []string) error {
 // errors. Update in lockstep with the switch in runSessions — Phase
 // 1.1b/c/d/e each append one verb here in the same edit that adds the
 // case.
-const sessionsVerbList = "new"
+const sessionsVerbList = "new, rm"
 
 // errSessionsUsage formats a help-style error listing the implemented
 // `pyry sessions` verbs. Mapped to a non-zero exit by main's top-level
@@ -518,6 +519,8 @@ func runSessions(args []string) error {
 	switch sub {
 	case "new":
 		return runSessionsNew(socketPath, subArgs)
+	case "rm":
+		return runSessionsRm(socketPath, subArgs)
 	default:
 		return errSessionsUsage(fmt.Sprintf("unknown verb %q", sub))
 	}
@@ -557,6 +560,166 @@ func runSessionsNew(socketPath string, args []string) error {
 		return fmt.Errorf("sessions new: %w", err)
 	}
 	fmt.Println(id)
+	return nil
+}
+
+// errSessionsRmUsage marks every parse-time failure of `pyry sessions rm`
+// as a usage error. runSessionsRm matches via errors.Is and exits 2 with
+// the wrapped message printed verbatim (no `pyry:` prefix). One sentinel
+// covers arity, mutually-exclusive flags, and any other handler-side
+// usage rule — the wire-call path is reached only on parse-success, so
+// runSessionsRm doesn't need to discriminate further.
+var errSessionsRmUsage = errors.New("usage")
+
+// errAmbiguousPrefix carries the formatted multi-line "ambiguous prefix"
+// message produced by resolveSessionIDViaList. The unexported sentinel
+// exists so runSessionsRm can branch with errors.Is rather than
+// string-matching the message text. Mirrors sessions.ErrAmbiguousSessionID
+// in spirit — Pool.ResolveID's server-side equivalent — but lives at the
+// CLI layer because prefix resolution here is client-side via
+// control.SessionsList.
+var errAmbiguousPrefix = errors.New("ambiguous session id prefix")
+
+// parseSessionsRmArgs parses `[--archive|--purge] <id>`. Returns
+// (id, policy, err); policy is the wire enum (control.JSONLPolicy) —
+// empty when neither --archive nor --purge was set, which the server
+// treats as JSONLPolicyLeave.
+//
+// Mirrors parseSessionsNewArgs's shape: extracted from runSessionsRm
+// so flag-parsing rules are unit-testable without dialling the
+// control socket. Every error returned wraps errSessionsRmUsage so
+// runSessionsRm can map the whole class to exit 2 with a single
+// errors.Is check.
+func parseSessionsRmArgs(args []string) (id string, policy control.JSONLPolicy, err error) {
+	fs := flag.NewFlagSet("pyry sessions rm", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	archive := fs.Bool("archive", false, "archive the on-disk JSONL transcript")
+	purge := fs.Bool("purge", false, "delete the on-disk JSONL transcript (default: leave)")
+	if err := fs.Parse(args); err != nil {
+		return "", "", fmt.Errorf("%w: %v", errSessionsRmUsage, err)
+	}
+	if *archive && *purge {
+		return "", "", fmt.Errorf("%w: --archive and --purge are mutually exclusive", errSessionsRmUsage)
+	}
+	if fs.NArg() != 1 {
+		return "", "", fmt.Errorf("%w: expected <id>, got %d positional args", errSessionsRmUsage, fs.NArg())
+	}
+	switch {
+	case *archive:
+		policy = control.JSONLPolicyArchive
+	case *purge:
+		policy = control.JSONLPolicyPurge
+	default:
+		// Empty policy — wire layer normalises to JSONLPolicyLeave.
+		policy = ""
+	}
+	return fs.Arg(0), policy, nil
+}
+
+// resolveSessionIDViaList resolves a user-supplied UUID-or-prefix to a
+// canonical SessionID by listing every session via the wire and
+// filtering client-side. Mirrors Pool.ResolveID's resolution order:
+// exact match wins outright; otherwise scan with strings.HasPrefix —
+// one match returns its ID; zero returns sessions.ErrSessionNotFound;
+// multiple returns errAmbiguousPrefix wrapping a sorted "<uuid> <label>"
+// list (one per line, matching AC#3's space-separated form).
+//
+// Empty arg is rejected at parse time; callers may assume arg != "".
+func resolveSessionIDViaList(ctx context.Context, socketPath, arg string) (string, error) {
+	list, err := control.SessionsList(ctx, socketPath)
+	if err != nil {
+		return "", err
+	}
+	for _, s := range list {
+		if s.ID == arg {
+			return s.ID, nil
+		}
+	}
+	var matches []control.SessionInfo
+	for _, s := range list {
+		if strings.HasPrefix(s.ID, arg) {
+			matches = append(matches, s)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", sessions.ErrSessionNotFound
+	case 1:
+		return matches[0].ID, nil
+	default:
+		sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+		var b strings.Builder
+		for i, m := range matches {
+			label := m.Label
+			if m.Bootstrap && label == "" {
+				label = "bootstrap"
+			}
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			fmt.Fprintf(&b, "%s %s", m.ID, label)
+		}
+		return "", fmt.Errorf("%w:\n%s", errAmbiguousPrefix, b.String())
+	}
+}
+
+// runSessionsRm implements `pyry sessions rm [--archive|--purge] <id>`:
+// resolve the (possibly-prefix) <id> via sessions.list, dial the
+// daemon's control socket, ask it to terminate the named session,
+// remove its registry entry, and apply the JSONL disposition policy.
+//
+// Exit codes match the rest of cmd/pyry:
+//
+//	0 — removal succeeded.
+//	1 — runtime error (ambiguous prefix, unknown id, bootstrap
+//	    rejection, server-side error, or no-daemon dial failure).
+//	2 — usage error (parse failure, mutually-exclusive flags, or
+//	    wrong arity). Mirrors runAttach's exit-2 policy.
+//
+// The three AC-prescribed messages (ambiguous, unknown, bootstrap) are
+// printed to stderr without the `pyry:` outer-error prefix; other
+// errors flow through `fmt.Errorf("sessions rm: %w", err)`, which
+// main's top-level error printer prepends with `pyry: `.
+func runSessionsRm(socketPath string, args []string) error {
+	id, policy, err := parseSessionsRmArgs(args)
+	if err != nil {
+		if errors.Is(err, errSessionsRmUsage) {
+			fmt.Fprintln(os.Stderr, "pyry sessions rm:", err)
+		}
+		os.Exit(2)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	canonical, err := resolveSessionIDViaList(ctx, socketPath, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, errAmbiguousPrefix):
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		case errors.Is(err, sessions.ErrSessionNotFound):
+			fmt.Fprintf(os.Stderr, "no session with id %q\n", id)
+			os.Exit(1)
+		}
+		return fmt.Errorf("sessions rm: %w", err)
+	}
+
+	if err := control.SessionsRm(ctx, socketPath, canonical, policy); err != nil {
+		switch {
+		case errors.Is(err, sessions.ErrCannotRemoveBootstrap):
+			fmt.Fprintln(os.Stderr, "cannot remove bootstrap session")
+			os.Exit(1)
+		case errors.Is(err, sessions.ErrSessionNotFound):
+			// Race window: list returned the canonical UUID, then
+			// another caller removed it before our SessionsRm landed.
+			// Surface the original (typed) <id> — that's the string
+			// the operator typed.
+			fmt.Fprintf(os.Stderr, "no session with id %q\n", id)
+			os.Exit(1)
+		}
+		return fmt.Errorf("sessions rm: %w", err)
+	}
 	return nil
 }
 
@@ -696,7 +859,7 @@ Usage:
                                                   UUID or unique prefix; omit
                                                   for the bootstrap session)
   pyry sessions <verb> [flags]                   manage sessions on a running
-                                                  daemon (verbs: new)
+                                                  daemon (verbs: new, rm)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry version                                   print version
