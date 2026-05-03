@@ -119,16 +119,16 @@ func TestSessionsNew_E2E_UnknownVerb(t *testing.T) {
 	_ = waitForBootstrap(t, regPath, 5*time.Second)
 	before := readRegistry(t, regPath)
 
-	r := h.Run(t, "sessions", "list")
+	r := h.Run(t, "sessions", "bogus")
 	if r.ExitCode == 0 {
-		t.Fatalf("pyry sessions list unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s",
+		t.Fatalf("pyry sessions bogus unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s",
 			r.Stdout, r.Stderr)
 	}
 	if !bytes.Contains(r.Stderr, []byte("unknown verb")) {
 		t.Errorf("stderr missing %q fragment:\n%s", "unknown verb", r.Stderr)
 	}
-	if !bytes.Contains(r.Stderr, []byte("list")) {
-		t.Errorf("stderr missing offending verb %q:\n%s", "list", r.Stderr)
+	if !bytes.Contains(r.Stderr, []byte("bogus")) {
+		t.Errorf("stderr missing offending verb %q:\n%s", "bogus", r.Stderr)
 	}
 
 	after := readRegistry(t, regPath)

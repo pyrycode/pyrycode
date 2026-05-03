@@ -780,6 +780,20 @@ The seam returns whatever order `Pool.List` returned (LastActiveAt descending, S
 
 See `docs/specs/architecture/87-control-sessions-list.md` for the full design.
 
+### CLI renderer (1.1b-B2)
+
+The operator-facing `pyry sessions list [--json]` verb consumes `control.SessionsList` and renders the snapshot in either of two formats. The renderer choices made here are the template the rest of Phase 1.1 follows for tabular output.
+
+- **Columns.** `UUID`, `LABEL`, `STATE`, `LAST-ACTIVE`. UUIDs render in their full 36-character canonical form — no truncation. The "operators copy/paste UUIDs" property is load-bearing.
+- **Padding.** Two spaces between columns via `text/tabwriter` (stdlib, no deps). Standard Go-CLI convention (`go list -m`, `go env`). Padding=1 cramps the table; padding=3+ wastes terminal width.
+- **Time format.** `LAST-ACTIVE` renders as RFC3339 in the table. RFC3339Nano in `--json` (passed through verbatim from the wire's `time.Time`). Locale-aware "3m ago" formatting deferred — absolute timestamps are unambiguous across timezones and across log-paste-into-issue boundaries.
+- **JSON envelope.** `{"sessions":[...]}`, intentionally not a bare array — leaves room for future top-level fields (e.g. `generated_at`, `schema_version`) without a breaking change. Per-element shape is `control.SessionInfo` JSON-encoded verbatim. Single trailing newline (`json.Encoder.Encode` default; what jq pipelines expect).
+- **Sort policy.** The renderer re-sorts by `LastActive` desc with `ID` asc tiebreak (`sort.SliceStable` + `time.Time.Equal`). `Pool.List` already returns this order, but the renderer enforces it as a defence against future wire changes that would otherwise reshuffle every operator's table.
+- **Bootstrap label.** The wire substitutes the bootstrap entry's empty on-disk label with `"bootstrap"` (per `Pool.List`'s contract); this layer renders verbatim. Empty `Label` for a non-bootstrap entry renders as the empty cell.
+- **Timeout.** 5s, matching `runStatus`/`runLogs`. Diverges from rm/rename's 30s because list does not wait on `Pool.mu` against active sessions.
+
+See `docs/specs/architecture/88-cli-sessions-list.md` for the full design.
+
 ## Sessions: CLI Router (1.1a-B2)
 
 `pyry sessions <verb>` is the operator-facing surface for the `sessions.*` namespace. The router lives in `cmd/pyry/main.go` (`runSessions`) and dispatches `new` (#76) and `rm` (#99) today; 1.1b/c plug in as one switch case + one `runSessions<Verb>` helper each. The structural invariant — "one line per future verb" — is what the architect's choice of dispatch shape buys.
@@ -798,7 +812,7 @@ Adding 1.1b/c/d/e never touches this site again — the sub-router owns the rest
 ### Sub-router
 
 ```go
-const sessionsVerbList = "new, rm, rename" // appended by 1.1b/c/d/e in lockstep with the switch
+const sessionsVerbList = "new, rm, rename, list" // appended by future verbs in lockstep with the switch
 
 func runSessions(args []string) error {
     socketPath, rest, err := parseClientFlags("pyry sessions", args)
@@ -946,8 +960,8 @@ Each sub-verb's flag parser is its own `flag.NewFlagSet("pyry sessions <verb>", 
 
 | Scenario | Operator-visible message | Source |
 |---|---|---|
-| `pyry sessions` (no verb) | `pyry: sessions: missing subcommand\nverbs: new, rm, rename` (exit 1) | `errSessionsUsage` |
-| `pyry sessions list` (1.1b not yet landed) | `pyry: sessions: unknown verb "list"\nverbs: new, rm, rename` (exit 1) | `errSessionsUsage` |
+| `pyry sessions` (no verb) | `pyry: sessions: missing subcommand\nverbs: new, rm, rename, list` (exit 1) | `errSessionsUsage` |
+| `pyry sessions bogus` (unknown verb) | `pyry: sessions: unknown verb "bogus"\nverbs: new, rm, rename, list` (exit 1) | `errSessionsUsage` |
 | `pyry sessions new` against stopped daemon | `pyry: sessions new: dial …: connect: no such file or directory` (exit 1) | `request()` → `dial()` wrap |
 | `pyry sessions new --name foo bar` | `pyry: sessions new: unexpected positional "bar"` (exit 1) | `parseSessionsNewArgs` arity check |
 | Server-side `Pool.Create` failure | `pyry: sessions new: sessions: create supervisor: <claude err>` (exit 1) | `Response.Error` propagated by `SessionsNew` |
@@ -962,7 +976,7 @@ Activation failure is **not** distinguishable from a generic error at the wire b
 
 ```
   pyry sessions <verb> [flags]                   manage sessions on a running
-                                                  daemon (verbs: new, rm, rename)
+                                                  daemon (verbs: new, rm, rename, list)
 ```
 
 Phase 1.1b/c/d/e each append one verb to the parenthesised list, in lockstep with `sessionsVerbList`.
