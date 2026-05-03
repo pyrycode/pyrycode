@@ -8,7 +8,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
@@ -23,8 +26,10 @@ const (
 // JSON handshake, and bridges the local terminal to the PTY.
 //
 // Cols/rows are sent in the handshake so the supervised child knows the
-// initial window size. Subsequent live resize events are not propagated in
-// Phase 0 — detach and reattach to update.
+// initial window size. Subsequent live resize events are forwarded as
+// VerbResize requests on fresh control connections (see SendResize) by an
+// internal SIGWINCH watcher; the supervised child receives the new
+// dimensions via the daemon's Bridge.Resize seam.
 //
 // sessionID selects which session the server should attach to: a full UUID,
 // a unique prefix, or empty to mean "the bootstrap session". The string is
@@ -63,6 +68,17 @@ func Attach(ctx context.Context, socketPath string, cols, rows int, sessionID st
 	if !resp.OK {
 		return errors.New("control: attach ack missing")
 	}
+
+	// Live resize forwarding. Installed only after the handshake has
+	// succeeded (so resize messages can't reach the server before any session
+	// is bound) and torn down before Attach returns (synchronous — see
+	// startWinsizeWatcher). The deferred conn.Close() above runs after
+	// stopWinsize because defer order is LIFO: stop the SIGWINCH watcher
+	// first, then let conn.Close() unblock the output copy goroutine.
+	stopWinsize := startWinsizeWatcher(ctx, readTerminalSize, func(ctx context.Context, cols, rows int) error {
+		return SendResize(ctx, socketPath, sessionID, cols, rows)
+	})
+	defer stopWinsize()
 
 	// Connection is now in raw-bytes mode. Bridge to local terminal.
 	stdinFd := int(os.Stdin.Fd())
@@ -137,4 +153,80 @@ func writerErr(err error) error {
 		return nil
 	}
 	return err
+}
+
+// terminalSizeReader reports the current TTY geometry (cols, rows). The
+// bool is false when no terminal is attached or when the ioctl fails — in
+// that case the watcher emits no resize, mirroring the daemon-side
+// resizeOnce guard in internal/supervisor/winsize.go.
+type terminalSizeReader func() (cols, rows int, ok bool)
+
+// readTerminalSize is the production reader. It uses os.Stdin directly
+// rather than wrapping a raw fd in a fresh *os.File — see
+// supervisor/winsize.go:40-48 for the finalizer-induced fd reuse race that
+// motivated the same convention there.
+func readTerminalSize() (cols, rows int, ok bool) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return 0, 0, false
+	}
+	size, err := pty.GetsizeFull(os.Stdin)
+	if err != nil {
+		return 0, 0, false
+	}
+	return int(size.Cols), int(size.Rows), true
+}
+
+// startWinsizeWatcher installs a SIGWINCH handler. On each signal it reads
+// the terminal size and emits a VerbResize via send. Returns a stop
+// function that:
+//
+//  1. Calls signal.Stop on the SIGWINCH channel so further signals are
+//     no-ops to this handler.
+//  2. Closes done so the watcher goroutine breaks out of its select.
+//  3. Blocks until the watcher goroutine has actually exited.
+//
+// Step 3 is the load-bearing guarantee: stop is synchronous. No goroutine
+// or signal subscription outlives the call site's defer.
+//
+// The watcher does NOT prime an initial size at startup — initial geometry
+// flows through the handshake AttachPayload.
+//
+// SendResize already honors ctx and bounds itself by DialTimeout, so a
+// misbehaving daemon cannot hang detach past that bound.
+func startWinsizeWatcher(
+	ctx context.Context,
+	read terminalSizeReader,
+	send func(ctx context.Context, cols, rows int) error,
+) (stop func()) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+	done := make(chan struct{})
+	gone := make(chan struct{})
+
+	go func() {
+		defer close(gone)
+		for {
+			select {
+			case <-sigCh:
+				cols, rows, ok := read()
+				if !ok {
+					continue
+				}
+				// Best-effort. SendResize errors (transient daemon
+				// hiccup, ctx cancelled mid-flight) are silently
+				// dropped; the next SIGWINCH retries. This matches
+				// the server-side posture (handleResize returns OK
+				// even on seam errors) and SendResize's own godoc.
+				_ = send(ctx, cols, rows)
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		signal.Stop(sigCh)
+		close(done)
+		<-gone
+	}
 }

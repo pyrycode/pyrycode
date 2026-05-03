@@ -59,7 +59,7 @@ type Request struct {
 //
 // Live resize updates while attached are carried by VerbResize on a
 // separate control connection (see ResizePayload), emitted from the client
-// by the SIGWINCH handler in pyry attach (deferred to #133).
+// by the SIGWINCH handler in pyry attach (startWinsizeWatcher).
 type AttachPayload struct {
 	Cols      int    `json:"cols,omitempty"`
 	Rows      int    `json:"rows,omitempty"`
