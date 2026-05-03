@@ -17,18 +17,26 @@ import (
 
 // fakeSessioner satisfies control.Sessioner for tests. Safe under concurrent
 // use. Mirrors fakeSession's mu-guarded recorded-call shape. Phase 1.1d-B1
-// (#98) extended this with Remove + recordedRemoves for sessions.rm tests.
+// (#98) extended this with Remove + recordedRemoves for sessions.rm tests;
+// Phase 1.1c-B1 (#90) extended it with Rename + recordedRenames for
+// sessions.rename tests.
 type fakeSessioner struct {
 	mu          sync.Mutex
 	createCalls []string // labels in invocation order
 	removeCalls []removeCall
+	renameCalls []renameCall
 	returnID    sessions.SessionID
-	returnErr   error // shared across Create and Remove (each test owns its own fake)
+	returnErr   error // shared across Create / Remove / Rename (each test owns its own fake)
 }
 
 type removeCall struct {
 	ID   sessions.SessionID
 	Opts sessions.RemoveOptions
+}
+
+type renameCall struct {
+	ID       sessions.SessionID
+	NewLabel string
 }
 
 func (f *fakeSessioner) Create(_ context.Context, label string) (sessions.SessionID, error) {
@@ -47,6 +55,14 @@ func (f *fakeSessioner) Remove(_ context.Context, id sessions.SessionID, opts se
 	return err
 }
 
+func (f *fakeSessioner) Rename(id sessions.SessionID, newLabel string) error {
+	f.mu.Lock()
+	f.renameCalls = append(f.renameCalls, renameCall{ID: id, NewLabel: newLabel})
+	err := f.returnErr
+	f.mu.Unlock()
+	return err
+}
+
 func (f *fakeSessioner) recordedCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -57,6 +73,12 @@ func (f *fakeSessioner) recordedRemoves() []removeCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]removeCall(nil), f.removeCalls...)
+}
+
+func (f *fakeSessioner) recordedRenames() []renameCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]renameCall(nil), f.renameCalls...)
 }
 
 // startServerWithSessioner mirrors startServer but plumbs a Sessioner. Kept
@@ -109,9 +131,14 @@ func TestProtocol_SessionsRoundTripBackCompat(t *testing.T) {
 			want: []byte(`{"verb":"status"}`),
 		},
 		{
-			name: "sessions.new with label-only payload is byte-identical (omitempty on new ID/JSONLPolicy)",
+			name: "sessions.new with label-only payload is byte-identical (omitempty on new ID/JSONLPolicy/NewLabel)",
 			v:    Request{Verb: VerbSessionsNew, Sessions: &SessionsPayload{Label: "x"}},
 			want: []byte(`{"verb":"sessions.new","sessions":{"label":"x"}}`),
+		},
+		{
+			name: "sessions.rm payload is byte-identical (omitempty on NewLabel holds after #90)",
+			v:    Request{Verb: VerbSessionsRm, Sessions: &SessionsPayload{ID: "x", JSONLPolicy: JSONLPolicyArchive}},
+			want: []byte(`{"verb":"sessions.rm","sessions":{"id":"x","jsonlPolicy":"archive"}}`),
 		},
 		{
 			name: "empty Response is {} (omitempty on ErrorCode)",

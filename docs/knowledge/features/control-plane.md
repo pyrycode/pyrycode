@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — except `VerbAttach`, which hands the connection off to the supervisor's I/O bridge for the lifetime of the attachment.
 
-Verbs today: `status`, `stop`, `logs`, `attach`, `resize`, `sessions.new`, `sessions.rm`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output. `VerbSessionsNew` (#75) extends the pattern: a new `Request.Sessions *SessionsPayload` field with `omitempty` keeps existing-verb wire output byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output.
+Verbs today: `status`, `stop`, `logs`, `attach`, `resize`, `sessions.new`, `sessions.rm`, `sessions.rename`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output. `VerbSessionsNew` (#75) extends the pattern: a new `Request.Sessions *SessionsPayload` field with `omitempty` keeps existing-verb wire output byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants.
 
 ## Server Construction
 
@@ -663,6 +663,53 @@ The string-token rather than message-string approach means renaming a sentinel's
 The wire enum (`JSONLPolicy` string) and the internal enum (`sessions.JSONLPolicy` uint8) are deliberately distinct. `protocol.go` stays import-free; the translation (`toSessionsPolicy` in `server.go`) lives next to the handler. Strings are jq-debuggable on the wire and durable across protocol versions if the underlying enum order ever changes. Empty wire value maps to `JSONLLeave` (matches the internal zero value); unknown values surface as `"sessions.rm: unknown jsonl policy %q"` in `Response.Error` rather than silent fallback.
 
 See `docs/specs/architecture/98-control-sessions-rm.md` for the full design.
+
+## Sessions: rename seam (1.1c-B1)
+
+The third `sessions.*` verb is `sessions.rename`. The control server consumes session-rename commands through the `Renamer` interface in `internal/control`, embedded into `Sessioner` alongside `Remover`:
+
+```go
+type Renamer interface {
+    Rename(id sessions.SessionID, newLabel string) error
+}
+
+type Sessioner interface {
+    Create(ctx context.Context, label string) (sessions.SessionID, error)
+    Remover
+    Renamer
+}
+```
+
+`*sessions.Pool` satisfies `Renamer` directly via `Pool.Rename` (#62). `Renamer` does not take a context — `Pool.Rename`'s signature is `(id, newLabel) error` and the operation is bounded by a single `Pool.mu` critical section + `saveLocked`, so the seam mirrors that shape adapter-free. Adding `Renamer` to `Sessioner` keeps `NewServer`'s signature stable; the rationale documented under "Sessions: removal seam" applies identically.
+
+### Wire shape
+
+`SessionsPayload` gains one omitempty field used by `sessions.rename`:
+
+```go
+type SessionsPayload struct {
+    Label       string      `json:"label,omitempty"`       // sessions.new
+    ID          string      `json:"id,omitempty"`          // sessions.rm, sessions.rename
+    JSONLPolicy JSONLPolicy `json:"jsonlPolicy,omitempty"` // sessions.rm
+    NewLabel    string      `json:"newLabel,omitempty"`    // sessions.rename
+}
+```
+
+`sessions.rename` uses the `OK`/`Error` envelope — no typed result. Empty `NewLabel` on the wire is forwarded to `Pool.Rename` as the empty string, which clears the on-disk label per #62's contract.
+
+### Typed errors via Response.ErrorCode
+
+One sentinel propagates from `Pool.Rename`:
+
+```
+Response.ErrorCode == "session_not_found"  → sessions.ErrSessionNotFound
+```
+
+The client maps this to the corresponding sentinel error so callers can match with `errors.Is`. Untyped errors (e.g. registry persist failures) flow through `Response.Error` verbatim with no `ErrorCode`.
+
+The `ErrorCode` envelope and the `ErrCodeSessionNotFound` token are reused verbatim from #98 — no new wire constants. This is the intended dividend of #98's wire-error infrastructure landing first: subsequent verbs reuse the envelope at zero incremental wire cost.
+
+See `docs/specs/architecture/90-control-sessions-rename.md` for the full design.
 
 ## Process-Global vs Per-Session
 
