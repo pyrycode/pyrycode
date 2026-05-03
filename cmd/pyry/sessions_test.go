@@ -142,6 +142,78 @@ func TestParseSessionsRmArgs(t *testing.T) {
 	}
 }
 
+// TestRunSessions_RenameDispatch pins AC#4's router wiring: the
+// `case "rename":` arm exists and routes to runSessionsRename. Verified
+// by passing a deliberately-bogus socket path and observing the
+// resulting error path is the dial failure (wrapped as
+// "sessions rename:"), not the help-style "unknown verb" router error.
+func TestRunSessions_RenameDispatch(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+	bogusSock := filepath.Join(t.TempDir(), "no-such.sock")
+
+	err := runSessions([]string{"-pyry-socket", bogusSock, "rename", "abc", "alpha"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "unknown verb") {
+		t.Errorf("router did not dispatch rename: %v", err)
+	}
+	if !strings.Contains(msg, "sessions rename:") {
+		t.Errorf("error %q missing %q wrap fragment", msg, "sessions rename:")
+	}
+}
+
+func TestParseSessionsRenameArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		args      []string
+		wantID    string
+		wantLabel string
+		wantUsage bool   // expect errors.Is(err, errSessionsRenameUsage)
+		wantErr   string // substring match against err.Error(); empty means no error
+	}{
+		{"no args", nil, "", "", true, "expected <id> <new-label>"},
+		{"only id", []string{"abc"}, "", "", true, "expected <id> <new-label>"},
+		{"id and label", []string{"abc", "alpha"}, "abc", "alpha", false, ""},
+		{"empty label clears", []string{"abc", ""}, "abc", "", false, ""},
+		{"too many positionals", []string{"abc", "alpha", "extra"}, "", "", true, "expected <id> <new-label>"},
+		{"label with spaces", []string{"abc", "hello world"}, "abc", "hello world", false, ""},
+		{"unknown flag", []string{"--unknown", "abc", "alpha"}, "", "", true, "flag provided but not defined"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			id, label, err := parseSessionsRenameArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil (id=%q, label=%q)",
+						tt.wantErr, id, label)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error %q does not contain %q", err, tt.wantErr)
+				}
+				if tt.wantUsage && !errors.Is(err, errSessionsRenameUsage) {
+					t.Errorf("error %q does not match errSessionsRenameUsage sentinel", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if id != tt.wantID {
+				t.Errorf("id = %q, want %q", id, tt.wantID)
+			}
+			if label != tt.wantLabel {
+				t.Errorf("label = %q, want %q", label, tt.wantLabel)
+			}
+		})
+	}
+}
+
 func TestParseSessionsNewArgs(t *testing.T) {
 	t.Parallel()
 

@@ -18,7 +18,7 @@
 //	pyry stop             Graceful shutdown via the control socket
 //	pyry logs             Recent supervisor log lines
 //	pyry attach           Attach local terminal to a service-mode daemon
-//	pyry sessions <verb>  Multi-session management (verbs: new, rm)
+//	pyry sessions <verb>  Multi-session management (verbs: new, rm, rename)
 //	pyry install-service  Write a systemd / launchd unit file for pyry
 //	pyry help             Show help
 //
@@ -488,7 +488,7 @@ func runAttach(args []string) error {
 // errors. Update in lockstep with the switch in runSessions — Phase
 // 1.1b/c/d/e each append one verb here in the same edit that adds the
 // case.
-const sessionsVerbList = "new, rm"
+const sessionsVerbList = "new, rm, rename"
 
 // errSessionsUsage formats a help-style error listing the implemented
 // `pyry sessions` verbs. Mapped to a non-zero exit by main's top-level
@@ -521,6 +521,8 @@ func runSessions(args []string) error {
 		return runSessionsNew(socketPath, subArgs)
 	case "rm":
 		return runSessionsRm(socketPath, subArgs)
+	case "rename":
+		return runSessionsRename(socketPath, subArgs)
 	default:
 		return errSessionsUsage(fmt.Sprintf("unknown verb %q", sub))
 	}
@@ -723,6 +725,71 @@ func runSessionsRm(socketPath string, args []string) error {
 	return nil
 }
 
+// errSessionsRenameUsage marks every parse-time failure of
+// `pyry sessions rename` as a usage error. runSessionsRename matches via
+// errors.Is and exits 2 with the wrapped message printed verbatim (no
+// `pyry:` prefix). One sentinel covers arity and any future handler-side
+// usage rule. Mirrors errSessionsRmUsage's shape.
+var errSessionsRenameUsage = errors.New("usage")
+
+// parseSessionsRenameArgs parses `<id> <new-label>`. Returns
+// (id, newLabel, err). Both positionals are required; the empty string is
+// a valid value for <new-label> (Pool.Rename treats it as "clear the
+// on-disk label" per #62), so the arity check counts positionals (must
+// be exactly 2) rather than testing for non-empty strings.
+//
+// No flags today — the FlagSet exists for symmetry with `new` and `rm`
+// and so a future flag slots in mechanically.
+func parseSessionsRenameArgs(args []string) (id, newLabel string, err error) {
+	fs := flag.NewFlagSet("pyry sessions rename", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return "", "", fmt.Errorf("%w: %v", errSessionsRenameUsage, err)
+	}
+	if fs.NArg() != 2 {
+		return "", "", fmt.Errorf("%w: expected <id> <new-label>, got %d positional args", errSessionsRenameUsage, fs.NArg())
+	}
+	return fs.Arg(0), fs.Arg(1), nil
+}
+
+// runSessionsRename implements `pyry sessions rename <id> <new-label>`:
+// dial the daemon's control socket and ask it to update the named
+// session's human-friendly label. <id> is forwarded verbatim — no prefix
+// resolution in this slice (follow-up ergonomic slice).
+//
+// Exit codes match the rest of cmd/pyry:
+//
+//	0 — rename succeeded.
+//	1 — runtime error (unknown id, server-side error, or no-daemon
+//	    dial failure).
+//	2 — usage error (parse failure or wrong arity).
+//
+// The AC-prescribed unknown-id message is printed to stderr without the
+// `pyry:` outer-error prefix; other errors flow through
+// `fmt.Errorf("sessions rename: %w", err)`, which main's top-level error
+// printer prepends with `pyry: `.
+func runSessionsRename(socketPath string, args []string) error {
+	id, newLabel, err := parseSessionsRenameArgs(args)
+	if err != nil {
+		if errors.Is(err, errSessionsRenameUsage) {
+			fmt.Fprintln(os.Stderr, "pyry sessions rename:", err)
+		}
+		os.Exit(2)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := control.SessionsRename(ctx, socketPath, id, newLabel); err != nil {
+		if errors.Is(err, sessions.ErrSessionNotFound) {
+			fmt.Fprintf(os.Stderr, "no session with id %q\n", id)
+			os.Exit(1)
+		}
+		return fmt.Errorf("sessions rename: %w", err)
+	}
+	return nil
+}
+
 // runStop implements `pyry stop`: dial the control socket and ask the daemon
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
@@ -859,7 +926,7 @@ Usage:
                                                   UUID or unique prefix; omit
                                                   for the bootstrap session)
   pyry sessions <verb> [flags]                   manage sessions on a running
-                                                  daemon (verbs: new, rm)
+                                                  daemon (verbs: new, rm, rename)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry version                                   print version

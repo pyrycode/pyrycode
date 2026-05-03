@@ -798,7 +798,7 @@ Adding 1.1b/c/d/e never touches this site again — the sub-router owns the rest
 ### Sub-router
 
 ```go
-const sessionsVerbList = "new, rm" // appended by 1.1b/c in lockstep with the switch
+const sessionsVerbList = "new, rm, rename" // appended by 1.1b/c/d/e in lockstep with the switch
 
 func runSessions(args []string) error {
     socketPath, rest, err := parseClientFlags("pyry sessions", args)
@@ -812,6 +812,8 @@ func runSessions(args []string) error {
         return runSessionsNew(socketPath, subArgs)
     case "rm":
         return runSessionsRm(socketPath, subArgs)
+    case "rename":
+        return runSessionsRename(socketPath, subArgs)
     default:
         return errSessionsUsage(fmt.Sprintf("unknown verb %q", sub))
     }
@@ -899,6 +901,43 @@ A single TOCTOU race exists: `SessionsList` returns the canonical UUID, then ano
 
 `parseSessionsRmArgs(args) (id string, policy control.JSONLPolicy, err error)` is the unit-testable seam — flag-parse + arity + mutual-exclusion guard, no network. Empty policy on the wire normalises to `JSONLPolicyLeave` server-side.
 
+### `runSessionsRename` handler (1.1c-B2a)
+
+```go
+func runSessionsRename(socketPath string, args []string) error {
+    id, newLabel, err := parseSessionsRenameArgs(args)
+    if err != nil {
+        if errors.Is(err, errSessionsRenameUsage) {
+            fmt.Fprintln(os.Stderr, "pyry sessions rename:", err)
+        }
+        os.Exit(2)
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    if err := control.SessionsRename(ctx, socketPath, id, newLabel); err != nil {
+        if errors.Is(err, sessions.ErrSessionNotFound) {
+            fmt.Fprintf(os.Stderr, "no session with id %q\n", id)
+            os.Exit(1)
+        }
+        return fmt.Errorf("sessions rename: %w", err)
+    }
+    return nil
+}
+```
+
+The simplest `runSessions<Verb>` so far — strictly fewer branches than `runSessionsRm`:
+
+- **No prefix resolution.** `<id>` is forwarded verbatim to `control.SessionsRename`. AC#4 explicitly forbids prefix support in this slice; non-UUID input falls through to the server's `ErrSessionNotFound` mapping. The follow-up ergonomic slice lifts `resolveSessionIDViaList` into a shared helper at that point (the third caller of prefix resolution — currently only `rm`).
+- **One typed-sentinel branch.** `Pool.Rename`'s only typed sentinel is `ErrSessionNotFound` (#62 has no bootstrap-rejection — renaming the bootstrap is allowed). #90's wire surface only propagates `ErrCodeSessionNotFound` for this verb. The matched case prints `no session with id "<id>"` to stderr (no `pyry:` prefix) and `os.Exit(1)`; everything else flows through `fmt.Errorf("sessions rename: %w", err)` to main's top-level `pyry: ` printer.
+- **Empty `<new-label>` is a valid value, not an arity hole.** `parseSessionsRenameArgs` checks `fs.NArg() == 2`, not "two non-empty values" — so `pyry sessions rename <uuid> ""` parses as `(uuid, "")` and forwards through. `Pool.Rename` treats `""` as "clear the on-disk label" per #62. AC#1 explicitly requires this; no separate `--clear` flag.
+- **Exactly 2 positionals (not "≥2").** Three or more is rejected as a usage error so multi-word labels must be quoted: `pyry sessions rename <uuid> "hello world"`. Same shape `git config` and `kubectl label` use; prevents silent token loss like `pyry sessions rename <uuid> hello world` discarding `world`.
+- **No second positional split into a `--name`-style flag.** `<old> <new>` mirrors `git mv` / `kubectl rename`. Reusing `--name` (the create-time label flag on `pyry sessions new`) on rename would conflate two distinct semantics across verbs.
+- **`<id>` is echoed back in the unknown-id message** (the operator's input string, not a normalised form). Today `<id>` must be the full canonical UUID, so input and canonical are identical — but using the raw input keeps the message format identical when prefix resolution arrives in the follow-up slice.
+
+`parseSessionsRenameArgs(args) (id, newLabel string, err error)` is the unit-testable seam — flag-parse + arity, no network. The FlagSet exists for symmetry with `new` and `rm` (no flags today).
+
 ### Sub-verb flag parsing — own FlagSet per verb
 
 Each sub-verb's flag parser is its own `flag.NewFlagSet("pyry sessions <verb>", flag.ContinueOnError)`. Mirrors `runInstallService`'s precedent. Phase 1.1c's `--new-name` and 1.1d's `--archive`/`--purge` will reuse the same shape — no namespace-specific options accumulate on the top-level FlagSet, no name collision possible across sub-verbs.
@@ -907,12 +946,15 @@ Each sub-verb's flag parser is its own `flag.NewFlagSet("pyry sessions <verb>", 
 
 | Scenario | Operator-visible message | Source |
 |---|---|---|
-| `pyry sessions` (no verb) | `pyry: sessions: missing subcommand\nverbs: new, rm` (exit 1) | `errSessionsUsage` |
-| `pyry sessions list` (1.1b not yet landed) | `pyry: sessions: unknown verb "list"\nverbs: new, rm` (exit 1) | `errSessionsUsage` |
+| `pyry sessions` (no verb) | `pyry: sessions: missing subcommand\nverbs: new, rm, rename` (exit 1) | `errSessionsUsage` |
+| `pyry sessions list` (1.1b not yet landed) | `pyry: sessions: unknown verb "list"\nverbs: new, rm, rename` (exit 1) | `errSessionsUsage` |
 | `pyry sessions new` against stopped daemon | `pyry: sessions new: dial …: connect: no such file or directory` (exit 1) | `request()` → `dial()` wrap |
 | `pyry sessions new --name foo bar` | `pyry: sessions new: unexpected positional "bar"` (exit 1) | `parseSessionsNewArgs` arity check |
 | Server-side `Pool.Create` failure | `pyry: sessions new: sessions: create supervisor: <claude err>` (exit 1) | `Response.Error` propagated by `SessionsNew` |
 | Server-side activation failure (id valid, lifecycle goroutine respawns later) | `pyry: sessions new: <activate err>` (exit 1). **Registry entry remains** — operator can `pyry attach <uuid>` once 1.1e ships. | per AC#4 |
+| `pyry sessions rename <uuid>` (only one positional) | `pyry sessions rename: usage: expected <id> <new-label>, got 1 positional args` (exit 2) | `parseSessionsRenameArgs` arity check |
+| `pyry sessions rename <unknown-uuid> alpha` | `no session with id "<unknown-uuid>"` (exit 1, no `pyry:` prefix) | `errors.Is(err, sessions.ErrSessionNotFound)` |
+| `pyry sessions rename` against stopped daemon | `pyry: sessions rename: dial …: connect: no such file or directory` (exit 1) | `request()` → `dial()` wrap |
 
 Activation failure is **not** distinguishable from a generic error at the wire boundary (the wire has no separate "id valid despite error" channel). The registry entry persists because `Pool.Create` saves before the activation step, so AC#4 is satisfied server-side.
 
@@ -920,10 +962,10 @@ Activation failure is **not** distinguishable from a generic error at the wire b
 
 ```
   pyry sessions <verb> [flags]                   manage sessions on a running
-                                                  daemon (verbs: new, rm)
+                                                  daemon (verbs: new, rm, rename)
 ```
 
-Phase 1.1b/c each append one verb to the parenthesised list, in lockstep with `sessionsVerbList`.
+Phase 1.1b/c/d/e each append one verb to the parenthesised list, in lockstep with `sessionsVerbList`.
 
 ### Tests
 
@@ -931,6 +973,8 @@ Phase 1.1b/c each append one verb to the parenthesised list, in lockstep with `s
 - **`internal/e2e/sessions_new_test.go`** (e2e, build tag `e2e`, ~165 LOC) — daemon-up against the `writeSleepClaude` stand-in (#116): `TestSessionsNew_E2E_Labelled` / `_Unlabelled` (stdout regex + registry post-condition: ID present, `Label`, `Bootstrap=false`); `TestSessionsNew_E2E_UnknownVerb` (registry session count unchanged before/after — AC#3); `TestSessionsNew_E2E_NoDaemon` (`RunBare` against bogus socket; non-zero exit, non-empty stderr, no `panic`/`goroutine`/`runtime/` substrings — AC#2).
 - **`cmd/pyry/sessions_test.go`** (extended for #99) — `TestParseSessionsRmArgs` table over no-args, only-flags, id-only, `--archive`, `--purge`, both flags (mutually exclusive), trailing positional, flag-after-positional (Go `flag` halts at first non-flag), unknown flag. `TestRunSessions_RmDispatch` pins the router wiring against a bogus socket (asserts the failure is a dial error, not the "unknown verb" router diagnostic).
 - **`internal/e2e/sessions_rm_test.go`** (e2e, build tag `e2e`, ~290 LOC) — nine tests covering: happy path on full UUID and unique prefix, `--archive` and `--purge` plumbing, ambiguous-prefix rendering (mints sessions until pigeonhole-collision on first hex char — bound 17 over 16 hex digits), unknown UUID, bootstrap rejection, mutually-exclusive flags (exit 2), no-daemon dial failure (clean error, no panic).
+- **`cmd/pyry/sessions_test.go`** (extended for #92) — `TestParseSessionsRenameArgs` table over no-args, only-`<id>`, `<id> <label>`, `<id> ""` (empty-label clear is valid), trailing positional (rejected — multi-word labels must be quoted), label with embedded space (single token — passes), unknown flag. `TestRunSessions_RenameDispatch` pins the router wiring against a bogus socket (asserts the error wraps `sessions rename:`, not the `unknown verb` router diagnostic).
+- **`internal/e2e/sessions_rename_test.go`** (e2e, build tag `e2e`, ~163 LOC) — five tests: happy-path rename (label flips `before` → `after` in the registry); empty-label clear (`pyry sessions rename <uuid> ""` clears the on-disk label); unknown UUID (typed-error mapping → `no session with id "<uuid>"`, exit 1, registry untouched); no-daemon dial failure (`RunBare` against bogus socket; non-zero exit, no `panic`/`goroutine`/`runtime/` substrings); wrong-arity (one positional, exit **2** with `expected <id> <new-label>` on stderr, registry untouched).
 
 `Pool.Create` failure surfacing (typed sentinels, nil-Sessioner branch, etc.) is **not** re-tested through the CLI shell — `internal/control/sessions_new_test.go` (#75) covers it exhaustively against the wire. The CLI is `fmt.Errorf("sessions new: %w", err)` over a wire client we trust.
 
