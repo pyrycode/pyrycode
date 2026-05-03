@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -44,6 +45,116 @@ func TestSessionsRename_E2E_Success(t *testing.T) {
 	}
 	t.Fatalf("session %s label did not become %q within 2s\nfile:\n%s",
 		id, "after", mustReadFile(t, regPath))
+}
+
+// TestSessionsRename_E2E_Success_Prefix pins AC#1 prefix-resolution
+// branch: mint a session labelled "before", run
+// `pyry sessions rename <first-8-chars> after`, exit 0, registry entry's
+// label flips to "after".
+func TestSessionsRename_E2E_Success_Prefix(t *testing.T) {
+	home, regPath := newRegistryHome(t)
+	claudeBin := writeSleepClaude(t, home)
+	h := StartIn(t, home, "-pyry-claude="+claudeBin)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	id, err := control.SessionsNew(ctx, h.SocketPath, "before")
+	if err != nil {
+		t.Fatalf("sessions.new: %v", err)
+	}
+	prefix := id[:8]
+
+	r := h.Run(t, "sessions", "rename", prefix, "after")
+	if r.ExitCode != 0 {
+		t.Fatalf("pyry sessions rename %q after exit=%d\nstdout:\n%s\nstderr:\n%s",
+			prefix, r.ExitCode, r.Stdout, r.Stderr)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		reg := readRegistry(t, regPath)
+		if entry, ok := findSession(reg, id); ok && entry.Label == "after" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session %s label did not become %q within 2s\nfile:\n%s",
+		id, "after", mustReadFile(t, regPath))
+}
+
+// TestSessionsRename_E2E_AmbiguousPrefix pins AC#2's ambiguous-prefix
+// path. Mints sessions via the wire until two share the same first hex
+// char (pigeonhole guarantees a collision within 17 mints over 16 hex
+// digits). Running `pyry sessions rename <shared-char> should-not-apply`
+// must exit non-zero with every matching UUID and its label printed on
+// stderr, and leave both sessions' labels unchanged on disk — the
+// resolver bails before any wire mutation.
+func TestSessionsRename_E2E_AmbiguousPrefix(t *testing.T) {
+	home, regPath := newRegistryHome(t)
+	claudeBin := writeSleepClaude(t, home)
+	h := StartIn(t, home, "-pyry-claude="+claudeBin)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Bound: pigeonhole guarantees a collision in <=17 mints over the
+	// 16 hex-digit first-char alphabet. Failure here means UUIDv4
+	// generation is broken, not flakiness.
+	const maxMints = 17
+
+	type minted struct {
+		id    string
+		label string
+	}
+	byFirstChar := make(map[byte]minted, 16)
+	prefix := ""
+	var collided [2]minted
+	for i := 0; i < maxMints && prefix == ""; i++ {
+		label := fmt.Sprintf("amb-%d", i)
+		id, err := control.SessionsNew(ctx, h.SocketPath, label)
+		if err != nil {
+			t.Fatalf("sessions.new amb-%d: %v", i, err)
+		}
+		first := id[0]
+		if other, ok := byFirstChar[first]; ok {
+			prefix = string(first)
+			collided = [2]minted{other, {id: id, label: label}}
+			break
+		}
+		byFirstChar[first] = minted{id: id, label: label}
+	}
+	if prefix == "" {
+		t.Fatalf("no first-char collision after %d mints — UUID generation broken?", maxMints)
+	}
+
+	r := h.Run(t, "sessions", "rename", prefix, "should-not-apply")
+	if r.ExitCode == 0 {
+		t.Fatalf("pyry sessions rename %q unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s",
+			prefix, r.Stdout, r.Stderr)
+	}
+	for _, m := range collided {
+		if !bytes.Contains(r.Stderr, []byte(m.id)) {
+			t.Errorf("stderr missing matched id %q:\n%s", m.id, r.Stderr)
+		}
+		if !bytes.Contains(r.Stderr, []byte(m.label)) {
+			t.Errorf("stderr missing matched label %q:\n%s", m.label, r.Stderr)
+		}
+	}
+
+	reg := readRegistry(t, regPath)
+	for _, m := range collided {
+		entry, ok := findSession(reg, m.id)
+		if !ok {
+			t.Errorf("session %s missing after ambiguous rename\nfile:\n%s",
+				m.id, mustReadFile(t, regPath))
+			continue
+		}
+		if entry.Label != m.label {
+			t.Errorf("session %s label = %q, want unchanged %q",
+				m.id, entry.Label, m.label)
+		}
+	}
 }
 
 // TestSessionsRename_E2E_EmptyLabelClear pins AC#1 empty-label clear:
