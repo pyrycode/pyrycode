@@ -178,6 +178,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-socket":       true,
 	"pyry-name":         true,
 	"pyry-idle-timeout": true,
+	"pyry-active-cap":   true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -255,6 +256,7 @@ func runSupervisor(args []string) error {
 	name := fs.String("pyry-name", defaultName(), "instance name (socket: ~/.pyry/<name>.sock)")
 	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
 	idleTimeout := fs.Duration("pyry-idle-timeout", 15*time.Minute, "evict idle claudes after this duration (0 disables)")
+	activeCap := fs.Int("pyry-active-cap", 0, "max concurrently active claudes (0 = uncapped)")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -292,6 +294,7 @@ func runSupervisor(args []string) error {
 		RegistryPath:      registryPath,
 		ClaudeSessionsDir: claudeSessionsDir,
 		IdleTimeout:       *idleTimeout,
+		ActiveCap:         *activeCap,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    *workdir,
@@ -304,10 +307,10 @@ func runSupervisor(args []string) error {
 		return fmt.Errorf("pool init: %w", err)
 	}
 
-	// sessioner intentionally nil here — the pool wiring lands in the
-	// cmd/pyry sessions new CLI ticket. Until then VerbSessionsNew
-	// returns "sessions.new: no sessioner configured" to any caller.
-	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, cancel, logger, nil)
+	// Pool satisfies control.Sessioner directly — Pool.Create returns
+	// sessions.SessionID, matching Sessioner.Create's signature with no
+	// adapter (contrast with poolResolver for the read-side Lookup).
+	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, cancel, logger, pool)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
