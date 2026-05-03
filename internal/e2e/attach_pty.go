@@ -84,7 +84,14 @@ func StartAttach(t *testing.T, sessionID string) *AttachHarness {
 		}
 	}
 
-	home := t.TempDir()
+	// os.MkdirTemp with a short prefix keeps the socket path under macOS's
+	// 104-byte sun_path limit; t.TempDir() embeds the (long) test name and
+	// overflows for callers like TestE2E_Attach_SurvivesClaudeRestart.
+	home, err := os.MkdirTemp("", "pyry-at-*")
+	if err != nil {
+		t.Fatalf("e2e: mkdtemp home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	socket, daemonCmd, daemonOut, daemonErr, daemonDone := spawnAttachableDaemon(t, home)
 
 	a := &AttachHarness{
@@ -159,6 +166,9 @@ func spawnAttachableDaemon(t *testing.T, home string) (string, *exec.Cmd, *bytes
 		"-pyry-name=test",
 		"-pyry-claude=" + os.Args[0],
 		"-pyry-idle-timeout=0",
+		// Default ResumeLast prepends --continue on respawn; the test
+		// helper is a Go test binary that doesn't recognize that flag.
+		"-pyry-resume=false",
 		"--",
 		"-test.run=TestHelperProcess",
 	}

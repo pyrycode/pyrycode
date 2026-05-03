@@ -248,6 +248,12 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 		// client can take over interactively. No raw-mode setup, no SIGWINCH
 		// forwarding — those belong to whichever client attaches and apply
 		// to its own terminal.
+		//
+		// BeginIteration/EndIteration scope the bridge's input cancel so
+		// the input goroutine returns cleanly when the child exits, instead
+		// of leaking and racing with the next iteration's goroutine for
+		// queued attach-client bytes.
+		s.cfg.Bridge.BeginIteration()
 		done := make(chan error, 2)
 		go func() {
 			_, err := io.Copy(ptmx, s.cfg.Bridge)
@@ -260,9 +266,15 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 
 		waitErr := cmd.Wait()
 		_ = ptmx.Close()
-		select {
-		case <-done:
-		case <-time.After(goroutineDrainTimeout):
+		s.cfg.Bridge.EndIteration()
+		// Wait for both goroutines: the output pump exits when ptmx.Close
+		// fails the read; the input pump exits when EndIteration makes
+		// bridge.Read return EOF.
+		for i := 0; i < 2; i++ {
+			select {
+			case <-done:
+			case <-time.After(goroutineDrainTimeout):
+			}
 		}
 		return waitErr
 	}

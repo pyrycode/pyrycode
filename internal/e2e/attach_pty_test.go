@@ -23,7 +23,25 @@ import (
 //
 // Mode "echo": disable ECHO/ICANON on stdin (raw mode) so the kernel
 // does not double-emit bytes through the supervisor's PTY line
-// discipline, then io.Copy stdin → stdout until stdin closes.
+// discipline. On startup the helper emits a deterministic marker line
+// (`PYRY_E2E_STARTED pid=<pid>\n`) so restart-survival tests can observe
+// each respawn distinctly. Then it line-buffers stdin → stdout. Two
+// special lines are intercepted:
+//
+//   - `__EXIT__\n` — exit non-zero before echoing, so the supervisor
+//     observes a child crash and respawns. Used by
+//     TestE2E_Attach_SurvivesClaudeRestart.
+//
+//   - `__PID__\n` — re-emit the startup marker (with the helper's
+//     current PID) without echoing the probe. The on-startup marker
+//     races against attach-client connection — when no client is
+//     attached yet, the bridge silently discards the bytes. The probe
+//     gives tests a deterministic way to capture the PID after the
+//     attach is wired. Not echoed back so it doesn't pollute round-trip
+//     verifications.
+//
+// All other input round-trips through stdout at line granularity, which
+// preserves the byte contract TestE2E_Attach_RoundTripsBytes relies on.
 //
 // Process exit on stdin EOF (pyry SIGKILLs the child via the
 // exec.CommandContext deadline, which closes the supervisor's PTY
@@ -40,8 +58,42 @@ func TestHelperProcess(t *testing.T) {
 				os.Exit(98)
 			}
 		}
-		_, _ = io.Copy(os.Stdout, os.Stdin)
-		os.Exit(0)
+		fmt.Fprintf(os.Stdout, "PYRY_E2E_STARTED pid=%d\n", os.Getpid())
+
+		buf := make([]byte, 4096)
+		var line []byte
+		for {
+			n, err := os.Stdin.Read(buf)
+			for i := 0; i < n; i++ {
+				b := buf[i]
+				if b == '\n' {
+					switch string(line) {
+					case "__EXIT__":
+						os.Exit(1)
+					case "__PID__":
+						fmt.Fprintf(os.Stdout, "PYRY_E2E_STARTED pid=%d\n", os.Getpid())
+						line = line[:0]
+						continue
+					}
+					line = append(line, b)
+					if _, werr := os.Stdout.Write(line); werr != nil {
+						os.Exit(97)
+					}
+					line = line[:0]
+				} else {
+					line = append(line, b)
+				}
+			}
+			if err != nil {
+				if len(line) > 0 {
+					_, _ = os.Stdout.Write(line)
+				}
+				if err == io.EOF {
+					os.Exit(0)
+				}
+				os.Exit(96)
+			}
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_TEST_HELPER_MODE: %q\n", mode)
 		os.Exit(99)

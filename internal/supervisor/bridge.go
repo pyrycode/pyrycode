@@ -11,6 +11,17 @@ import (
 // attached.
 var ErrBridgeBusy = errors.New("supervisor: bridge already has an attached client")
 
+// inputChunkBufferSize is the high-water mark for buffered input chunks
+// between the attached client and the supervisor's input pump. Sized
+// generously so a brief stall in the input pump (e.g. during a child
+// restart) does not push back on the attach client. Each chunk is up
+// to attachReadBufferSize bytes.
+const inputChunkBufferSize = 64
+
+// attachReadBufferSize is the buffer the input pump uses to read chunks
+// from the attach client before forwarding them to the bridge.
+const attachReadBufferSize = 4096
+
 // Bridge mediates I/O between the PTY and a (possibly absent) external
 // endpoint. It is the seam that lets the supervisor run in service mode —
 // the PTY master lives in the supervisor, and an attaching client (e.g.
@@ -22,13 +33,27 @@ var ErrBridgeBusy = errors.New("supervisor: bridge already has an attached clien
 // or get discarded when no client is attached. Reads (bridge → PTY) block
 // until a client attaches and starts feeding bytes through.
 //
+// Iteration boundaries: each runOnce iteration calls BeginIteration before
+// launching the input pump and EndIteration after the child exits. Read
+// returns io.EOF when the iteration ends, allowing the input pump to exit
+// cleanly without consuming buffered bytes intended for the next iteration.
+// Bytes already in flight on Read are preserved by Go's select semantics —
+// an unselected channel receive does not remove the value from the channel.
+//
 // At most one attacher at a time. A second Attach call while another client
 // is already attached returns ErrBridgeBusy.
 type Bridge struct {
-	pipeR *io.PipeReader
-	pipeW *io.PipeWriter
-	log   *slog.Logger
+	log *slog.Logger
 
+	// Input path (attach client → bridge → supervisor → PTY).
+	in       chan []byte
+	leftover []byte // bytes from a partial Read; drained before next channel recv
+	leftMu   sync.Mutex
+
+	cancelMu   sync.Mutex
+	iterCancel chan struct{} // closed by EndIteration to make Read return EOF
+
+	// Output path (PTY → bridge → attach client).
 	mu       sync.Mutex
 	output   io.Writer // attached client output, or nil = discard
 	attached bool
@@ -42,14 +67,76 @@ func NewBridge(log *slog.Logger) *Bridge {
 	if log == nil {
 		log = slog.Default()
 	}
-	r, w := io.Pipe()
-	return &Bridge{pipeR: r, pipeW: w, log: log}
+	return &Bridge{
+		log:        log,
+		in:         make(chan []byte, inputChunkBufferSize),
+		iterCancel: make(chan struct{}),
+	}
 }
 
 // Read implements io.Reader. The supervisor copies from this into the PTY
-// master. Blocks while no client is attached.
+// master. Blocks until a buffered chunk is available or EndIteration fires.
+//
+// Returns io.EOF when the current iteration's cancel signal is closed AND
+// no buffered bytes remain. Critically, when cancel fires concurrently with
+// a chunk arriving, Go's select non-determinism means we may return either
+// the chunk (good) or EOF (also good — the chunk stays in the channel for
+// the next iteration's Read to consume). Either way, no bytes are lost.
 func (b *Bridge) Read(p []byte) (int, error) {
-	return b.pipeR.Read(p)
+	b.leftMu.Lock()
+	if len(b.leftover) > 0 {
+		n := copy(p, b.leftover)
+		b.leftover = b.leftover[n:]
+		b.leftMu.Unlock()
+		return n, nil
+	}
+	b.leftMu.Unlock()
+
+	b.cancelMu.Lock()
+	cancel := b.iterCancel
+	b.cancelMu.Unlock()
+
+	select {
+	case chunk := <-b.in:
+		n := copy(p, chunk)
+		if n < len(chunk) {
+			b.leftMu.Lock()
+			b.leftover = append(b.leftover, chunk[n:]...)
+			b.leftMu.Unlock()
+		}
+		return n, nil
+	case <-cancel:
+		return 0, io.EOF
+	}
+}
+
+// BeginIteration prepares the bridge for a new ptmx iteration. Resets the
+// per-iteration cancel signal so subsequent Reads block on input again.
+// Idempotent if called repeatedly without EndIteration in between, but
+// runOnce pairs them.
+func (b *Bridge) BeginIteration() {
+	b.cancelMu.Lock()
+	select {
+	case <-b.iterCancel:
+		// Previous iteration ended; create a fresh cancel.
+		b.iterCancel = make(chan struct{})
+	default:
+		// Cancel is still open; nothing to do.
+	}
+	b.cancelMu.Unlock()
+}
+
+// EndIteration signals the current Read to return io.EOF. Buffered chunks
+// in the input channel are preserved for the next iteration.
+func (b *Bridge) EndIteration() {
+	b.cancelMu.Lock()
+	select {
+	case <-b.iterCancel:
+		// Already closed; nothing to do.
+	default:
+		close(b.iterCancel)
+	}
+	b.cancelMu.Unlock()
 }
 
 // Write implements io.Writer. The supervisor copies from the PTY master into
@@ -103,12 +190,23 @@ func (b *Bridge) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err 
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		// EOF on `in` is the normal detach path (client closed the conn).
-		// Anything else (a network reset, an unexpected I/O error) is
-		// noteworthy — log it so a vanishing attach doesn't leave operators
-		// guessing.
-		if _, err := io.Copy(b.pipeW, in); err != nil && !errors.Is(err, io.EOF) {
-			b.log.Warn("supervisor: attach input copy ended with error", "err", err)
+		buf := make([]byte, attachReadBufferSize)
+		for {
+			n, rerr := in.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				b.in <- chunk
+			}
+			if rerr != nil {
+				// EOF on `in` is the normal detach path (client closed
+				// the conn). Anything else is noteworthy — log it so a
+				// vanishing attach doesn't leave operators guessing.
+				if !errors.Is(rerr, io.EOF) {
+					b.log.Warn("supervisor: attach input copy ended with error", "err", rerr)
+				}
+				break
+			}
 		}
 
 		b.mu.Lock()

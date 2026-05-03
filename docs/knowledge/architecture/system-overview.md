@@ -81,6 +81,10 @@ All supervisor configuration in a single struct. Passed to `supervisor.New()`.
 
 Fields: ClaudeBin (path to claude), WorkDir (child's cwd), ResumeLast (use --continue after first run), ClaudeArgs (pass-through args), Bridge (optional service-mode I/O mediator), Logger (*slog.Logger), backoff params (Initial, Max, Reset durations).
 
+### `supervisor.Bridge`
+
+Service-mode I/O mediator. A single `Bridge` instance persists across child restarts; the supervisor brackets each `runOnce` iteration with `Bridge.BeginIteration()` / `Bridge.EndIteration()` so the input pump goroutine terminates cleanly per iteration instead of leaking and racing the next one for queued attach-client bytes. Input path: `chan []byte` + per-iteration cancel (`Bridge.Read` selects between an incoming chunk and EOF on iteration end — Go's `select` non-determinism preserves any in-flight chunk for the next iteration). Output path: forward to attached writer or discard; `Write` never returns an error so the PTY-drain goroutine cannot wedge mid-disconnect. See [ADR 007](../decisions/007-bridge-iteration-boundaries.md).
+
 ### `supervisor.Supervisor`
 
 Owns the child process lifecycle. Two methods:
