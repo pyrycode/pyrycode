@@ -88,5 +88,5 @@ property to preserve.
   this verb consumes).
 - `docs/knowledge/features/control-plane.md` § Resize: Live Wire Message
   and Applier (#137) — the consumer-side documentation.
-- `internal/control/attach_client.go:25-27` — the remaining caveat about
-  the client-side SIGWINCH handler, cleared by #133.
+- `docs/knowledge/features/control-plane.md` § Resize: Live SIGWINCH
+  Watcher (#133) — the client-side producer that emits this verb.
