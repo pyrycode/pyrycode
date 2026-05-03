@@ -474,12 +474,20 @@ type RunResult struct {
 // not a test failure — the caller asserts on RunResult.ExitCode.
 func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult {
 	t.Helper()
+	return runVerb(t, h.SocketPath, h.HomeDir, verb, args...)
+}
+
+// runVerb invokes the cached pyry binary against socket with the verb,
+// auto-injecting -pyry-socket= and using HOME=home. Shared body for
+// Harness.Run and AttachHarness.Run.
+func runVerb(t *testing.T, socket, home, verb string, args ...string) RunResult {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
 	defer cancel()
 
-	full := append([]string{verb, "-pyry-socket=" + h.SocketPath}, args...)
+	full := append([]string{verb, "-pyry-socket=" + socket}, args...)
 	cmd := exec.CommandContext(ctx, binPath, full...)
-	cmd.Env = childEnv(h.HomeDir)
+	cmd.Env = childEnv(home)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -21,7 +21,14 @@ flow at the binary boundary), #123 (rotation primitive — `StartRotation(t,
 home, sessionsDir, initialUUID, trigger)` constructor wires #122's
 fake-claude binary as the supervised child via `-pyry-claude=<fakeBin>` +
 three `PYRY_FAKE_CLAUDE_*` env vars; refactors `spawn` over a shared
-`spawnWith(t, home, spawnOpts)` core), split from #51.
+`spawnWith(t, home, spawnOpts)` core), #127 (attach clean-detach proof —
+`AttachHarness.WaitDetach(t, timeout)` + `AttachHarness.Run(t, verb,
+args...)` methods on the existing struct, `runVerb` extracted from
+`Harness.Run` as the shared body, plus
+`TestE2E_Attach_DetachesCleanly` driving the documented `Ctrl-B d`
+sequence and asserting the triple invariant attach-exits-0 +
+daemon-survives + supervised-child-still-`Phase: running`), split
+from #51.
 
 ## What It Does
 
@@ -845,6 +852,19 @@ type AttachHarness struct {
 // bridge-mode daemon with the e2e test binary as claude, then spawns
 // pyry attach with the slave on stdio. sessionID="" → bootstrap.
 func StartAttach(t *testing.T, sessionID string) *AttachHarness
+
+// WaitDetach blocks until the attach client process exits or timeout
+// elapses, then returns its exit code. Fails the test on timeout.
+// Safe to call after writing the detach sequence to Master; subsequent
+// calls return the same exit code (#127).
+func (a *AttachHarness) WaitDetach(t *testing.T, timeout time.Duration) int
+
+// Run invokes the cached pyry binary against this harness's daemon
+// socket with HOME=a.HomeDir. Mirrors Harness.Run — same auto-injection
+// of -pyry-socket=, same RunResult shape, same timeout. Used by tests
+// that need to drive a CLI verb against the same daemon the attach
+// client is bound to (#127).
+func (a *AttachHarness) Run(t *testing.T, verb string, args ...string) RunResult
 ```
 
 Cleanup is registered via `t.Cleanup`: master+slave close, SIGTERM-grace-
@@ -952,12 +972,13 @@ darwin do not support SetReadDeadline`.
 ### What this slice does not verify
 
 - SIGWINCH propagation (#126).
-- Clean detach via Ctrl-B d (#127).
 - Restart survival across daemon SIGTERM/respawn (#128).
-- Per-session attach exclusivity (`ErrBridgeBusy`) — out of scope, may arrive with #127.
+- Per-session attach exclusivity (`ErrBridgeBusy`).
 
-The harness's `SocketPath` field is exposed so #127 can drive a second
-`pyry attach` against an already-bound bridge.
+Clean detach via `Ctrl-B d` is covered by #127 (see § Attach Detach
+Pattern below). The harness's `SocketPath` field is exposed so a
+follow-up can drive a second `pyry attach` against an already-bound
+bridge to assert `ErrBridgeBusy`.
 
 ### Production diff is zero
 
@@ -1085,6 +1106,95 @@ prefix tiny.
 contract all already shipped (#122 for the binary; pyry's flag/supervisor
 are pre-Phase-1.0). #123 is harness + test diff: ~130 LOC across
 `harness.go` and `fakeclaude_test.go`.
+
+## Attach Detach Pattern (`attach_detach_test.go`, #127)
+
+`TestE2E_Attach_DetachesCleanly` drives the documented `Ctrl-B d`
+sequence (bytes `0x02 0x64`) into a live attach session and asserts
+the triple invariant of clean detach: attach client exits 0, daemon
+survives, supervised child still in `Phase: running`. Builds on the
+PTY harness from #125 with two new methods on the existing
+`*AttachHarness` and one shared-body refactor in `harness.go`.
+
+### Methods added to `*AttachHarness`
+
+- `WaitDetach(t, timeout) int` — blocks on `attachDone` (the channel
+  the wait goroutine closes after `attachCmd.Wait()` returns), then
+  reads `attachCmd.ProcessState.ExitCode()`. Channel close is the
+  happens-before edge that makes `ProcessState` safe to read on the
+  test goroutine. `t.Fatalf` on timeout (clean detach is near-instant
+  in practice; the 5s budget is a safety net).
+- `Run(t, verb, args...) RunResult` — mirror of `Harness.Run` against
+  the attach harness's `SocketPath` + `HomeDir`. Used to drive
+  `pyry status` against the same daemon the attach client is bound to.
+
+### `runVerb` — shared body extracted from `Harness.Run`
+
+Both methods needed the same body: `exec.CommandContext(ctx, binPath,
+verb, "-pyry-socket="+socket, args...)`, `cmd.Env = childEnv(home)`,
+stdout/stderr capture, `runTimeout` deadline, exit-code mapping. The
+body moved into a package-private `runVerb(t, socket, home, verb,
+args...) RunResult` free function; `Harness.Run` and
+`AttachHarness.Run` are 2-line wrappers (`return runVerb(t,
+h.SocketPath, h.HomeDir, verb, args...)`). Net effect: ~25 lines move
+out of `Harness.Run`; behaviour for existing callers is unchanged.
+
+The refactor is bounded — `Harness.Run` had no callers outside the
+harness package, so the rename is private and `gofmt`-clean. A 25-line
+duplication would have been acceptable for an XS ticket; extraction
+won because the two methods diverge only in two field reads.
+
+### Master-drain goroutine — load-bearing for the test
+
+`pyry attach` writes `pyry: detached.` to its own stderr after
+`copyWithEscape` returns on `Ctrl-B d`. With `cmd.Stderr = slave`
+that write goes through the kernel PTY into the master buffer; if no
+goroutine is reading the master, the buffer fills and the slave write
+blocks — the attach client never returns from `runAttach` and
+`cmd.Wait()` never fires. Symptom: `WaitDetach` hits its 5s deadline
+even though `Ctrl-B d` was correctly recognised.
+
+The fix lives in the test, not the harness: spawn a background
+master-drain goroutine before writing the detach sequence and let it
+ride until teardown closes `Master` and `Read` errors out. The #125
+round-trip test got away without one because `readUntilContains`
+consumed the master continuously through the assertion phase. See
+`lessons.md § PTY master backpressure stalls slave-side process
+exit`.
+
+### Why a generous timeout, not a tight one
+
+`WaitDetach`'s timeout is a safety net, not a steady-state
+expectation. Steady-state detach is single-digit milliseconds (no I/O
+between `Ctrl-B d` recognition and process exit). The 5s budget gives
+1–2 orders of magnitude of headroom and lets a flaky CI scheduler
+skate. A tight deadline would convert scheduler jitter into
+intermittent failures without catching real regressions any earlier.
+
+### Acceptance-criteria mapping
+
+| AC | Asserted by |
+|---|---|
+| Daemon spawn + attach via PTY harness; detach bytes written to PTY | `StartAttach(t, "")` + `a.Master.Write([]byte{0x02, 0x64})` |
+| Attach client exits 0 within ≥5s | `a.WaitDetach(t, 5*time.Second)` + exit-code check |
+| Daemon alive after detach | `a.Run(t, "status")` exit 0 check |
+| Supervised child in `Phase: running` | `bytes.Contains(r.Stdout, []byte("Phase:         running"))` (multi-space gap is significant — column-aligned status output, mirrors `idle_test.go`) |
+| Skip cleanly on hosts without usable PTY | inherited from `StartAttach`'s `pty.Open` skip |
+
+### What this test does not verify
+
+- Detach against a non-bootstrap session (`StartAttach` accepts
+  `sessionID` but the test passes `""`).
+- Behaviour when the user holds `Ctrl-B` but never types `d` — that's
+  a `control.Attach` unit-test concern, not e2e.
+- Bridge-busy semantics on a second concurrent attach.
+
+### Production diff is zero
+
+`pyry attach`, `control.Attach`'s prefix-key state machine, and the
+detach handshake all shipped pre-#127. Test diff: ~55 LOC for the new
+test, ~32 LOC for the two `*AttachHarness` methods, ~12 LOC for the
+`runVerb` extraction.
 
 ## Concurrency Model
 
@@ -1214,10 +1324,12 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   `docs/specs/architecture/112-e2e-missing-claude-projects-dir.md`,
   `docs/specs/architecture/115-e2e-idle-eviction-lazy-respawn.md`,
   `docs/specs/architecture/125-e2e-attach-pty-harness.md`,
-  `docs/specs/architecture/123-e2e-startrotation-primitive.md`
+  `docs/specs/architecture/123-e2e-startrotation-primitive.md`,
+  `docs/specs/architecture/127-e2e-attach-detach-clean.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude); lessons.md § Unix-socket sun_path limits and
-  t.TempDir()
+  t.TempDir(); lessons.md § PTY master backpressure stalls slave-side
+  process exit
 - Consumers: shipped CLI verbs (#52: `stop`, `logs`, `version`,
   `status` stopped path; #69: `status` running path), restart-survival
   proofs (#106: `TestE2E_Restart_PreservesActiveSessions`; #107:
@@ -1231,5 +1343,7 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
   (#125: `TestE2E_Attach_RoundTripsBytes` via `AttachHarness`),
   rotation primitive (#123: `TestE2E_StartRotation_PrimitiveWiresFakeClaude`
   via `StartRotation` + [fakeclaude-binary.md](fakeclaude-binary.md)),
-  Phase 1.1 session-verb tickets (#54, #55, #56), install-service
-  round-trip ([install-e2e.md](install-e2e.md))
+  attach clean-detach proof (#127:
+  `TestE2E_Attach_DetachesCleanly` via `AttachHarness.WaitDetach` +
+  `AttachHarness.Run`), Phase 1.1 session-verb tickets (#54, #55, #56),
+  install-service round-trip ([install-e2e.md](install-e2e.md))

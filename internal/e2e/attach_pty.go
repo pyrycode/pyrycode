@@ -206,6 +206,38 @@ func waitDaemonReady(socket string, doneCh chan struct{}, errBuf *bytes.Buffer) 
 	return fmt.Errorf("pyry not ready within %s", readyDeadline)
 }
 
+// WaitDetach blocks until the attach client process exits or timeout
+// elapses, then returns its exit code. Fails the test on timeout — a
+// clean detach should be near-instant; a generous deadline here is a
+// safety net, not a steady-state expectation.
+//
+// Safe to call after writing the detach sequence to Master. Subsequent
+// calls return the same exit code (the attachDone channel stays closed
+// once Wait() returns; ProcessState is set).
+func (a *AttachHarness) WaitDetach(t *testing.T, timeout time.Duration) int {
+	t.Helper()
+	select {
+	case <-a.attachDone:
+		if a.attachCmd.ProcessState == nil {
+			t.Fatalf("attach process state nil after Wait")
+		}
+		return a.attachCmd.ProcessState.ExitCode()
+	case <-time.After(timeout):
+		t.Fatalf("attach client did not exit within %s after detach", timeout)
+		return -1 // unreachable
+	}
+}
+
+// Run invokes the cached pyry binary against this harness's daemon
+// socket with HOME=a.HomeDir and the verb's args appended. Mirrors
+// Harness.Run — same auto-injection of -pyry-socket=, same RunResult
+// shape, same timeout. Used by tests that need to drive a CLI verb
+// against the same daemon the attach client is bound to.
+func (a *AttachHarness) Run(t *testing.T, verb string, args ...string) RunResult {
+	t.Helper()
+	return runVerb(t, a.SocketPath, a.HomeDir, verb, args...)
+}
+
 // teardown closes master and slave (delivering SIGHUP/EOF to the attach
 // client), then SIGTERM-grace-SIGKILLs both the attach client and the
 // daemon, then removes the socket and restores the parent's terminal
