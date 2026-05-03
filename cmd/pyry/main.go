@@ -308,8 +308,9 @@ func runSupervisor(args []string) error {
 	}
 
 	// Pool satisfies control.Sessioner directly — Pool.Create returns
-	// sessions.SessionID, matching Sessioner.Create's signature with no
-	// adapter (contrast with poolResolver for the read-side Lookup).
+	// sessions.SessionID and Pool.Remove returns plain error, matching
+	// Sessioner.Create / Sessioner.Remove (via embedded Remover) signatures
+	// with no adapter (contrast with poolResolver for the read-side Lookup).
 	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, cancel, logger, pool)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)

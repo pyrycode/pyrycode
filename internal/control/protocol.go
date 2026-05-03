@@ -41,6 +41,48 @@ const (
 	// family — the dot in the verb string is a documentation convention,
 	// not a parser rule.
 	VerbSessionsNew Verb = "sessions.new"
+
+	// VerbSessionsRm removes an existing session. Request.Sessions carries
+	// the session ID and JSONL disposition policy; Response.OK acknowledges
+	// success. Typed errors from the pool (ErrSessionNotFound,
+	// ErrCannotRemoveBootstrap) propagate through Response.ErrorCode so the
+	// CLI can match them with errors.Is.
+	VerbSessionsRm Verb = "sessions.rm"
+)
+
+// JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
+// removed session's on-disk JSONL transcript file. Empty string is treated
+// as JSONLPolicyLeave (backward-compat / zero-value ergonomics, same default
+// as sessions.JSONLLeave).
+//
+// Kept distinct from sessions.JSONLPolicy (a uint8) so protocol.go stays
+// import-free and the wire bytes are jq-debuggable strings rather than
+// integers.
+type JSONLPolicy string
+
+const (
+	JSONLPolicyLeave   JSONLPolicy = "leave"
+	JSONLPolicyArchive JSONLPolicy = "archive"
+	JSONLPolicyPurge   JSONLPolicy = "purge"
+)
+
+// ErrorCode is a stable wire token identifying a typed server-side error.
+// Empty when the response carries no typed sentinel; the server still
+// populates Response.Error with the human-readable message in every error
+// case. Decoupling the token from the message string lets the client map
+// it back to a Go sentinel for errors.Is matching without coupling the
+// wire contract to error message text.
+type ErrorCode string
+
+const (
+	// ErrCodeSessionNotFound is set by the server when Pool.Remove returns
+	// sessions.ErrSessionNotFound. The client maps this back to the same
+	// sentinel so callers can errors.Is against it.
+	ErrCodeSessionNotFound ErrorCode = "session_not_found"
+
+	// ErrCodeCannotRemoveBootstrap is set by the server when Pool.Remove
+	// returns sessions.ErrCannotRemoveBootstrap.
+	ErrCodeCannotRemoveBootstrap ErrorCode = "cannot_remove_bootstrap"
 )
 
 // Request is the wire format for a single client request.
@@ -75,14 +117,20 @@ type AttachPayload struct {
 }
 
 // SessionsPayload carries arguments shared across the sessions.* verb
-// family. Today only Label is used (sessions.new); Phase 1.1b/c/d/e add
-// further omitempty fields (Selector, NewName, ...) to the same struct.
+// family. Today Label is used by sessions.new; ID and JSONLPolicy are used
+// by sessions.rm. Phase 1.1b/c/e (list, rename, attach) will add further
+// omitempty fields to the same struct.
 //
 // Label is the human-friendly name supplied by the client. Empty maps to
 // a no-label session — Pool.Create accepts it verbatim and the registry
 // stores ""; not an error.
+//
+// ID and JSONLPolicy are populated for VerbSessionsRm. Empty JSONLPolicy
+// is treated by the server as JSONLPolicyLeave.
 type SessionsPayload struct {
-	Label string `json:"label,omitempty"`
+	Label       string      `json:"label,omitempty"`       // sessions.new
+	ID          string      `json:"id,omitempty"`          // sessions.rm
+	JSONLPolicy JSONLPolicy `json:"jsonlPolicy,omitempty"` // sessions.rm
 }
 
 // ResizePayload carries a live window-size update for an attached session.
@@ -111,6 +159,7 @@ type Response struct {
 	SessionsNew *SessionsNewResult `json:"sessionsNew,omitempty"` // populated for VerbSessionsNew
 	OK          bool               `json:"ok,omitempty"`
 	Error       string             `json:"error,omitempty"`
+	ErrorCode   ErrorCode          `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
 }
 
 // SessionsNewResult carries the result of a successful sessions.new
