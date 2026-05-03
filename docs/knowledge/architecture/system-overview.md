@@ -83,7 +83,7 @@ Fields: ClaudeBin (path to claude), WorkDir (child's cwd), ResumeLast (use --con
 
 ### `supervisor.Bridge`
 
-Service-mode I/O mediator. A single `Bridge` instance persists across child restarts; the supervisor brackets each `runOnce` iteration with `Bridge.BeginIteration()` / `Bridge.EndIteration()` so the input pump goroutine terminates cleanly per iteration instead of leaking and racing the next one for queued attach-client bytes. Input path: `chan []byte` + per-iteration cancel (`Bridge.Read` selects between an incoming chunk and EOF on iteration end — Go's `select` non-determinism preserves any in-flight chunk for the next iteration). Output path: forward to attached writer or discard; `Write` never returns an error so the PTY-drain goroutine cannot wedge mid-disconnect. See [ADR 007](../decisions/007-bridge-iteration-boundaries.md).
+Service-mode I/O mediator. A single `Bridge` instance persists across child restarts; the supervisor brackets each `runOnce` iteration with `Bridge.BeginIteration()` / `Bridge.EndIteration()` so the input pump goroutine terminates cleanly per iteration instead of leaking and racing the next one for queued attach-client bytes. Input path: `chan []byte` + per-iteration cancel (`Bridge.Read` selects between an incoming chunk and EOF on iteration end — Go's `select` non-determinism preserves any in-flight chunk for the next iteration). Output path: forward to attached writer or discard; `Write` never returns an error so the PTY-drain goroutine cannot wedge mid-disconnect. Resize seam: `SetPTY(*os.File)` registers the per-iteration PTY master under a leaf-only `ptyMu`; `Resize(rows, cols uint16)` calls `pty.Setsize` (silently no-ops between iterations). `runOnce` clears the registration with `SetPTY(nil)` **before** `EndIteration` so a racing `Resize` sees nil rather than a closed fd. See [ADR 007](../decisions/007-bridge-iteration-boundaries.md), [ADR 008](../decisions/008-bridge-resize-seam.md).
 
 ### `supervisor.Supervisor`
 
@@ -243,7 +243,7 @@ test-only override on `Options.Binary`. See
 ## Future Architecture (not yet implemented)
 
 - **Phase 1.1a-A1 (#72) — landed:** `Pool.supervise(sess)` seam + `runGroup`/`runCtx` handle on `*Pool`. Bootstrap fan-out in `Pool.Run` flows through the helper; the watcher fan-out stays inline (not a `*Session`). `ErrPoolNotRunning` sentinel for before/after-`Run` calls.
-- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam, landed), `AttachPayload.SessionID` on the wire (1.1e-C, landed — server routes via `Pool.ResolveID`; CLI surface still pending), `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>` CLI positional (1.1e-D), per-session log lines
+- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam, landed), `AttachPayload.SessionID` on the wire (1.1e-C, landed — server routes via `Pool.ResolveID`; CLI surface still pending), `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>` CLI positional (1.1e-D), per-session log lines, live SIGWINCH propagation on the wire (#137 — stacks on top of `Bridge.Resize` from #136) + client-side SIGWINCH emitter (#133)
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing

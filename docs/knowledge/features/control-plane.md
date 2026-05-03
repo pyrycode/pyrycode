@@ -196,6 +196,69 @@ A bare `fmt.Sprintf("attach: %v", err)` would surface `attach: sessions: attach 
 
 `supervisor.ErrBridgeBusy` (second client tries to attach while another is connected) flows through the unchanged `fmt.Sprintf` path, preserving Phase 0's wire surface for that case.
 
+## Attach: Handshake Geometry (#136)
+
+Between `Activate` and `Attach`, `handleAttach` applies the client's terminal
+size to the supervised PTY through a typed seam:
+
+```go
+if payload != nil && payload.Cols > 0 && payload.Rows > 0 {
+    rows := clampUint16(payload.Rows)
+    cols := clampUint16(payload.Cols)
+    if err := sess.Resize(rows, cols); err != nil &&
+        !errors.Is(err, sessions.ErrAttachUnavailable) {
+        s.log.Warn("control: attach geometry resize failed", ...)
+    }
+}
+```
+
+Three boundary rules:
+
+- **Zero is the "don't touch" sentinel.** Either `Cols` or `Rows` being zero
+  (or `payload` being nil) issues no resize. Matches the `omitempty` tags on
+  `AttachPayload`.
+- **`int → uint16` clamps silently.** `clampUint16` returns `math.MaxUint16`
+  for out-of-range positives. A real terminal will never report dimensions
+  that large; a client that does is buggy or hostile. No log on clamp.
+- **Argument order swap at the boundary.** The wire is cols-then-rows
+  (`AttachPayload`); `Session.Resize` / `Bridge.Resize` are rows-then-cols
+  (matching `pty.Winsize`). `handleAttach` is the only site that deals with
+  both orders.
+
+The `Session` interface gains `Resize(rows, cols uint16) error`:
+
+```go
+type Session interface {
+    State() supervisor.State
+    Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
+    Activate(ctx context.Context) error
+    Resize(rows, cols uint16) error // #136
+}
+```
+
+`*sessions.Session.Resize` is a one-line delegator to `Bridge.Resize` (or
+returns `ErrAttachUnavailable` in foreground mode — swallowed by
+`handleAttach` since foreground mode has its own SIGWINCH watcher in
+`winsize.go`). No lifecycle locking; does not touch `lcMu`, does not bump
+`lastActiveAt`, does not interact with the active↔evicted state machine.
+
+`Bridge.Resize` is the supervisor-side seam — see [ADR 008](../decisions/008-bridge-resize-seam.md)
+for why it lives on `*Bridge` and not on `*Supervisor`. The bridge holds a
+leaf-only `ptyMu` mutex over the per-iteration `*os.File`; `runOnce` calls
+`SetPTY(ptmx)` after `pty.Start` and `SetPTY(nil)` **before** `EndIteration`
+so an in-flight `Resize` that races iteration teardown sees nil rather than
+a closed fd.
+
+**Resize errors never fail the attach.** A `pty.Setsize` error (e.g. `EBADF`
+on a closed fd in the narrow race window) is logged at Warn and the attach
+proceeds. Geometry is best-effort; a wrong window size is recoverable on the
+user's next keystroke.
+
+The wire-protocol resize message and live-resize applier loop are #137; the
+client-side SIGWINCH handler that emits the message is #133. This ticket
+lands the seam and the handshake-time application; the others stack on top
+without further supervisor changes.
+
 ## Attach: Activate-before-bind (1.2c-A)
 
 `handleAttach` calls `Session.Activate(ctx)` before `Session.Attach(conn, conn)` so an evicted session is woken before the bridge is bound:
