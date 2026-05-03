@@ -245,6 +245,8 @@ The contract: rotation detection failures are **never fatal**. Pyry startup proc
 
 The `watcher_test` does not depend on real `/proc` or real `lsof` — it injects `Probe` directly. The probe parsers are validated separately. Combined coverage is cross-platform without a CI matrix dependency.
 
+`internal/e2e/rotation_test.go` (#120, build tag `e2e`) — `TestE2E_RotationWatcher_DetectsClear` drives a real `pyry` daemon through one `/clear`-shaped JSONL rotation against the **real** platform probe (`/proc/<pid>/fd` on Linux, `lsof` on macOS) using #122's `fakeclaude` test binary as the supervised child. Pre-creates `<initialUUID>.jsonl` so `reconcileBootstrapOnNew` settles before the readiness gate releases, drops a trigger file to make fakeclaude rotate, polls the registry until the bootstrap id changes, asserts UUIDv4 stem + `lastActiveAt` advance + post-sleep stability. Closes the gap the unit-only `TestPool_Run_StartsWatcher` (which uses a `dirProbe` substitute) leaves at the binary boundary. See [e2e-harness § Rotation Watcher Pattern](e2e-harness.md).
+
 ## Manual smoke (cross-platform)
 
 1. `pyry` in a workdir with no prior claude session.
