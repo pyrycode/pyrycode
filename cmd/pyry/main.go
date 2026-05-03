@@ -758,19 +758,19 @@ func parseSessionsRenameArgs(args []string) (id, newLabel string, err error) {
 }
 
 // runSessionsRename implements `pyry sessions rename <id> <new-label>`:
-// dial the daemon's control socket and ask it to update the named
-// session's human-friendly label. <id> is forwarded verbatim — no prefix
-// resolution in this slice (follow-up ergonomic slice).
+// resolve the (possibly-prefix) <id> via sessions.list, dial the daemon's
+// control socket, ask it to update the named session's human-friendly
+// label.
 //
 // Exit codes match the rest of cmd/pyry:
 //
 //	0 — rename succeeded.
-//	1 — runtime error (unknown id, server-side error, or no-daemon
-//	    dial failure).
+//	1 — runtime error (ambiguous prefix, unknown id, server-side
+//	    error, or no-daemon dial failure).
 //	2 — usage error (parse failure or wrong arity).
 //
-// The AC-prescribed unknown-id message is printed to stderr without the
-// `pyry:` outer-error prefix; other errors flow through
+// The AC-prescribed messages (ambiguous, unknown) are printed to stderr
+// without the `pyry:` outer-error prefix; other errors flow through
 // `fmt.Errorf("sessions rename: %w", err)`, which main's top-level error
 // printer prepends with `pyry: `.
 func runSessionsRename(socketPath string, args []string) error {
@@ -785,8 +785,24 @@ func runSessionsRename(socketPath string, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := control.SessionsRename(ctx, socketPath, id, newLabel); err != nil {
+	canonical, err := resolveSessionIDViaList(ctx, socketPath, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, errAmbiguousPrefix):
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		case errors.Is(err, sessions.ErrSessionNotFound):
+			fmt.Fprintf(os.Stderr, "no session with id %q\n", id)
+			os.Exit(1)
+		}
+		return fmt.Errorf("sessions rename: %w", err)
+	}
+
+	if err := control.SessionsRename(ctx, socketPath, canonical, newLabel); err != nil {
 		if errors.Is(err, sessions.ErrSessionNotFound) {
+			// Race window: resolver returned the canonical UUID, then
+			// another caller removed it before our wire call landed.
+			// Surface the operator's original <id> — the string they typed.
 			fmt.Fprintf(os.Stderr, "no session with id %q\n", id)
 			os.Exit(1)
 		}
