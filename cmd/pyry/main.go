@@ -18,7 +18,7 @@
 //	pyry stop             Graceful shutdown via the control socket
 //	pyry logs             Recent supervisor log lines
 //	pyry attach           Attach local terminal to a service-mode daemon
-//	pyry sessions <verb>  Multi-session management (verbs: new, rm, rename)
+//	pyry sessions <verb>  Multi-session management (verbs: new, rm, rename, list)
 //	pyry install-service  Write a systemd / launchd unit file for pyry
 //	pyry help             Show help
 //
@@ -27,9 +27,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -37,6 +39,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/control"
@@ -488,7 +491,7 @@ func runAttach(args []string) error {
 // errors. Update in lockstep with the switch in runSessions — Phase
 // 1.1b/c/d/e each append one verb here in the same edit that adds the
 // case.
-const sessionsVerbList = "new, rm, rename"
+const sessionsVerbList = "new, rm, rename, list"
 
 // errSessionsUsage formats a help-style error listing the implemented
 // `pyry sessions` verbs. Mapped to a non-zero exit by main's top-level
@@ -523,6 +526,8 @@ func runSessions(args []string) error {
 		return runSessionsRm(socketPath, subArgs)
 	case "rename":
 		return runSessionsRename(socketPath, subArgs)
+	case "list":
+		return runSessionsList(socketPath, subArgs)
 	default:
 		return errSessionsUsage(fmt.Sprintf("unknown verb %q", sub))
 	}
@@ -790,6 +795,112 @@ func runSessionsRename(socketPath string, args []string) error {
 	return nil
 }
 
+// parseSessionsListArgs parses `[--json]`. Returns (jsonOut, err). No
+// positional arguments accepted — `pyry sessions list` lists every session
+// in one shot. Mirrors parseSessionsNewArgs's shape: extracted so flag
+// rules are unit-testable without dialling the control socket. Errors are
+// returned verbatim (no usage sentinel) — runSessionsList wraps via
+// fmt.Errorf("sessions list: %w", err) and exits 1, matching
+// runSessionsNew's exit-1-on-parse-error precedent.
+func parseSessionsListArgs(args []string) (jsonOut bool, err error) {
+	fs := flag.NewFlagSet("pyry sessions list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	jsonFlag := fs.Bool("json", false, "emit JSON instead of a human table")
+	if err := fs.Parse(args); err != nil {
+		return false, err
+	}
+	if fs.NArg() > 0 {
+		return false, fmt.Errorf("unexpected positional %q", fs.Arg(0))
+	}
+	return *jsonFlag, nil
+}
+
+// sortSessionsForDisplay applies the renderer's deterministic order in
+// place: LastActive descending (most recent first), ID ascending as the
+// tiebreak. Pool.List already returns this order today, but the AC says
+// the renderer enforces it — defence against future wire changes that
+// would otherwise reshuffle every operator's table. time.Time.Equal (not
+// ==) handles JSON-roundtripped values that have lost their monotonic
+// component (see lessons.md § "JSON roundtrip strips monotonic-clock
+// state").
+func sortSessionsForDisplay(list []control.SessionInfo) {
+	sort.SliceStable(list, func(i, j int) bool {
+		if !list[i].LastActive.Equal(list[j].LastActive) {
+			return list[i].LastActive.After(list[j].LastActive)
+		}
+		return list[i].ID < list[j].ID
+	})
+}
+
+// writeSessionsTable renders the snapshot as a tabwriter-aligned table to
+// w. Columns: UUID, LABEL, STATE, LAST-ACTIVE. UUIDs render in their full
+// 36-character canonical form (no truncation — operators copy/paste them).
+// LAST-ACTIVE is rendered as RFC3339; jq consumers wanting nanos use
+// --json. Empty Label renders as the empty cell — the wire substitutes
+// the bootstrap entry's empty on-disk label with "bootstrap" before
+// returning, so this layer renders verbatim.
+func writeSessionsTable(w io.Writer, list []control.SessionInfo) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "UUID\tLABEL\tSTATE\tLAST-ACTIVE"); err != nil {
+		return err
+	}
+	for _, s := range list {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+			s.ID, s.Label, s.State, s.LastActive.Format(time.RFC3339)); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+// writeSessionsJSON encodes the snapshot as a single JSON object with a
+// top-level "sessions" array. Envelope is intentionally NOT a bare array —
+// leaves room for future top-level fields (e.g. "generated_at") without a
+// breaking change. Per-element shape is whatever encoding/json produces
+// from control.SessionInfo (id, label, state, last_active, optional
+// bootstrap). Encoder.Encode appends a single \n — what jq pipelines
+// expect.
+func writeSessionsJSON(w io.Writer, list []control.SessionInfo) error {
+	payload := struct {
+		Sessions []control.SessionInfo `json:"sessions"`
+	}{Sessions: list}
+	enc := json.NewEncoder(w)
+	return enc.Encode(payload)
+}
+
+// runSessionsList implements `pyry sessions list [--json]`: dial the
+// daemon's control socket, fetch the session snapshot, render it as
+// either a human-readable table or a single JSON object. Empty pool
+// (would only ever contain bootstrap) renders a one-row table or a
+// one-element sessions array.
+func runSessionsList(socketPath string, args []string) error {
+	jsonOut, err := parseSessionsListArgs(args)
+	if err != nil {
+		return fmt.Errorf("sessions list: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	list, err := control.SessionsList(ctx, socketPath)
+	if err != nil {
+		return fmt.Errorf("sessions list: %w", err)
+	}
+
+	sortSessionsForDisplay(list)
+
+	if jsonOut {
+		if err := writeSessionsJSON(os.Stdout, list); err != nil {
+			return fmt.Errorf("sessions list: %w", err)
+		}
+		return nil
+	}
+	if err := writeSessionsTable(os.Stdout, list); err != nil {
+		return fmt.Errorf("sessions list: %w", err)
+	}
+	return nil
+}
+
 // runStop implements `pyry stop`: dial the control socket and ask the daemon
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
@@ -926,7 +1037,7 @@ Usage:
                                                   UUID or unique prefix; omit
                                                   for the bootstrap session)
   pyry sessions <verb> [flags]                   manage sessions on a running
-                                                  daemon (verbs: new, rm, rename)
+                                                  daemon (verbs: new, rm, rename, list)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry version                                   print version
