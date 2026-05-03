@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
@@ -43,6 +46,13 @@ import (
 // All other input round-trips through stdout at line granularity, which
 // preserves the byte contract TestE2E_Attach_RoundTripsBytes relies on.
 //
+// On every SIGWINCH the helper emits a deterministic line of the form
+// `winsize rows=N cols=M\n` (rows-first to match Bridge.Resize /
+// Session.Resize field order). TestE2E_Attach_HandlesSIGWINCH uses this
+// to observe live resize propagation. Other tests match their own
+// payloads via bytes.Contains / regex with unique anchors, so the extra
+// line is harmless to them.
+//
 // Process exit on stdin EOF (pyry SIGKILLs the child via the
 // exec.CommandContext deadline, which closes the supervisor's PTY
 // master and surfaces as EOF on the slave).
@@ -59,6 +69,28 @@ func TestHelperProcess(t *testing.T) {
 			}
 		}
 		fmt.Fprintf(os.Stdout, "PYRY_E2E_STARTED pid=%d\n", os.Getpid())
+
+		// SIGWINCH watcher. Emits a deterministic `winsize rows=N cols=M\n`
+		// line per signal so TestE2E_Attach_HandlesSIGWINCH can observe
+		// live resize propagation without races. Pattern mirrors
+		// internal/supervisor/winsize.go: signal.Notify + buffered chan(1)
+		// + goroutine + pty.GetsizeFull(os.Stdin) guarded by IsTerminal.
+		// No teardown plumbing — the helper exits on stdin EOF / __EXIT__,
+		// which terminates the goroutine implicitly.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGWINCH)
+		go func() {
+			for range sigCh {
+				if !term.IsTerminal(int(os.Stdin.Fd())) {
+					continue
+				}
+				size, err := pty.GetsizeFull(os.Stdin)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(os.Stdout, "winsize rows=%d cols=%d\n", size.Rows, size.Cols)
+			}
+		}()
 
 		buf := make([]byte, 4096)
 		var line []byte
@@ -167,5 +199,37 @@ func readUntilContains(r *os.File, needle []byte, total time.Duration) error {
 		case <-time.After(time.Until(deadline)):
 			return fmt.Errorf("timeout after %s; seen %d bytes: %q", total, seen.Len(), seen.Bytes())
 		}
+	}
+}
+
+// TestE2E_Attach_HandlesSIGWINCH proves live SIGWINCH propagation through
+// the full attach pipeline by resizing the harness's client-side master
+// PTY and asserting the supervised child observes the new dimensions on
+// stdout within a generous deadline.
+//
+// Path under test:
+//
+//	pty.Setsize(master) → kernel SIGWINCH on slave's process group (the
+//	attach client) → startWinsizeWatcher → SendResize → server
+//	handleResize → Session.Resize → Bridge.Resize → pty.Setsize on
+//	supervisor's ptmx → kernel SIGWINCH on helper → helper emits
+//	"winsize rows=42 cols=117\n".
+//
+// The PTY availability skip lives in StartAttach; this test does not
+// re-probe.
+func TestE2E_Attach_HandlesSIGWINCH(t *testing.T) {
+	a := StartAttach(t, "")
+
+	// Pick dimensions unlikely to match the slave's default initial size
+	// so any handshake-driven initial resize emission cannot collide
+	// with the marker we're matching for.
+	target := &pty.Winsize{Rows: 42, Cols: 117}
+	if err := pty.Setsize(a.Master, target); err != nil {
+		t.Fatalf("Setsize master: %v", err)
+	}
+
+	needle := []byte("winsize rows=42 cols=117\n")
+	if err := readUntilContains(a.Master, needle, 5*time.Second); err != nil {
+		t.Fatalf("did not observe new winsize: %v", err)
 	}
 }
