@@ -24,6 +24,7 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 | 008 | [008-bridge-resize-seam.md](decisions/008-bridge-resize-seam.md) | `Bridge.Resize(rows, cols)` + `SetPTY(*os.File)` is the supervisor-side resize seam (over a method on `*Supervisor` or a `Run`-wired callback); reuses the `Session → Bridge` chain and `BeginIteration`/`EndIteration` hook points |
 | 009 | [009-resize-wire-shape.md](decisions/009-resize-wire-shape.md) | Live SIGWINCH propagation rides a side-channel `VerbResize` on a fresh control connection (over a framed escape inside the attach byte stream); raw byte purity preserved, AC#2 satisfied structurally |
 | 010 | [010-sessions-cli-sub-router.md](decisions/010-sessions-cli-sub-router.md) | `pyry sessions <verb>` dispatches via a `runSessions` sub-router that peels global pyry flags via `parseClientFlags` then dispatches on the first positional; each sub-verb owns its own `flag.NewFlagSet`; `sessionsVerbList` constant over a derived list |
+| 011 | [011-cli-prefix-resolution.md](decisions/011-cli-prefix-resolution.md) | UUID-or-prefix resolution for `sessions.*` CLI verbs is client-side via `control.SessionsList` (mirroring `Pool.ResolveID`'s exact-then-prefix order) over extending the wire with a prefix-aware `sessions.rm` or a dedicated `sessions.resolve` verb |
 
 ## Features
 
