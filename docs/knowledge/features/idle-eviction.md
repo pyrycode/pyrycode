@@ -12,7 +12,8 @@ Claude's identity lives in the JSONL on disk under `~/.claude/projects/<encoded-
 ## Status
 
 - **Phase 1.2c-A (#40):** lifecycle primitive. Per-session lifecycle goroutine, configurable `IdleTimeout`, `lifecycle_state` persisted to the registry, `Pool.Activate` / `Session.Activate` wake-on-attach in the control plane.
-- **Phase 1.2c-B (#41):** concurrent active cap. `Config.ActiveCap`, `Session.Evict` public primitive, LRU victim selection at `Pool.Activate`'s spawn-path entry. Wiring `ActiveCap` into `cmd/pyry`'s flag parsing is deferred to Phase 2.0 (no operator needs it before then).
+- **Phase 1.2c-B (#41):** concurrent active cap. `Config.ActiveCap`, `Session.Evict` public primitive, LRU victim selection at `Pool.Activate`'s spawn-path entry.
+- **Phase 1.2c-B+ (#116):** `-pyry-active-cap=N` flag (default `0` = uncapped) wired through to `Config.ActiveCap` in `runSupervisor`. Shipped alongside the e2e tests that consume it; `cmd/pyry/main.go` also wires `*sessions.Pool` as the `control.Sessioner` so the existing `sessions.new` verb (#75) can mint sessions against the daemon at the binary boundary.
 - **Phase 2.0:** first-message lazy bind makes eviction load-bearing — RAM scales with active conversations, not total sessions.
 
 ## Lifecycle states
@@ -50,11 +51,10 @@ type SessionConfig struct {
 }
 ```
 
-CLI flag (`cmd/pyry/main.go`): `-pyry-idle-timeout` (default `15m`). `0` disables idle eviction entirely. Production default: 15 minutes. Unit-test default: `0` (eviction off, parity with pre-1.2c behaviour).
+CLI flags (`cmd/pyry/main.go`):
 
-The flag also exists as the operator escape hatch and the smoke-test knob (`-pyry-idle-timeout 30s`).
-
-`Config.ActiveCap` has **no CLI flag yet** — Phase 2.0 will wire one when the auto-mint workload makes it load-bearing. Today the field is reachable from test-only consumers; production callers leave it at zero.
+- `-pyry-idle-timeout` (default `15m`). `0` disables idle eviction entirely. Operator escape hatch and smoke-test knob (`-pyry-idle-timeout 30s`).
+- `-pyry-active-cap` (default `0` = uncapped). Negative values map to "unset" via `Pool.New`'s contract (`<=0` → uncapped); no validation in `runSupervisor`. Today's primary consumer is the e2e suite (#116); production operators leave it at zero until Phase 2.0's auto-mint workload makes it load-bearing.
 
 ## `Session` surface
 
@@ -282,6 +282,8 @@ Reuses the `/bin/sleep` fake-claude pattern from `internal/sessions` — no new 
 
 `internal/e2e/idle_test.go` (build tag `e2e`, ticket #115) covers the binary-boundary integration: `TestE2E_IdleEviction_EvictsBootstrap` runs pyry with `-pyry-idle-timeout=1s` and asserts the bootstrap evicts (registry `lifecycle_state == "evicted"`, `pyry status` not reporting `Phase: running`); `TestE2E_IdleEviction_LazyRespawn` issues a raw `VerbAttach` over the control socket post-eviction and asserts the session returns to active and the supervisor reaches `Phase: running` while the conn is held. See [e2e-harness.md § Idle-Eviction + Lazy-Respawn Pattern](e2e-harness.md).
 
+`internal/e2e/cap_test.go` (build tag `e2e`, ticket #116) covers the cap-policy binary-boundary gap and the cap+idle interleave: `TestE2E_ActiveCap_EvictsLRU` (cap=2, three `sessions.new` mints with 50ms gaps; asserts each new spawn cap-evicts the LRU peer); `TestE2E_ActiveCap_IdleInterleave` (cap=2 + idle=2s; asserts the cap-evict victim and a subsequent idle-evict of the surviving non-most-recent session interleave consistently). Both use a tiny shell-script `claude` stand-in (`Pool.Create` appends `--session-id <uuid>` to `ClaudeArgs`, which both BSD and GNU `sleep(1)` reject). See [e2e-harness.md § Active-Cap Eviction Pattern](e2e-harness.md).
+
 ## Manual smoke
 
 ```bash
@@ -299,7 +301,7 @@ pyry stop
 
 ## References
 
-- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41)
+- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116)
 - Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md)
 - ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md)
 - Sibling docs: [`sessions-package.md`](sessions-package.md), [`sessions-registry.md`](sessions-registry.md), [`control-plane.md`](control-plane.md)
