@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — except `VerbAttach`, which hands the connection off to the supervisor's I/O bridge for the lifetime of the attachment.
 
-Verbs today: `status`, `stop`, `logs`, `attach`, `resize`, `sessions.new`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output. `VerbSessionsNew` (#75) extends the pattern: a new `Request.Sessions *SessionsPayload` field with `omitempty` keeps existing-verb wire output byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`).
+Verbs today: `status`, `stop`, `logs`, `attach`, `resize`, `sessions.new`, `sessions.rm`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output. `VerbSessionsNew` (#75) extends the pattern: a new `Request.Sessions *SessionsPayload` field with `omitempty` keeps existing-verb wire output byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output.
 
 ## Server Construction
 
@@ -611,6 +611,58 @@ done, err := sess.Attach(conn, conn)
 The 30s window caps the documented 2-15s respawn latency with safety margin. A busted respawn surfaces as a clean `attach: activate: <err>` rather than a hung attach. `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it) — the Activate-first contract is load-bearing.
 
 `handleStatus` does **not** activate. Status on an evicted session reports the supervisor's `PhaseStopped` (faithful — the supervisor really isn't running) and avoids spurious wakeups from a poll. See [idle-eviction.md](idle-eviction.md).
+
+## Sessions: removal seam (1.1d-B1)
+
+The second `sessions.*` verb is `sessions.rm`. The control server consumes session-removal commands through the `Remover` interface in `internal/control`, embedded into `Sessioner` so `NewServer`'s signature stays stable as the namespace grows:
+
+```go
+type Remover interface {
+    Remove(ctx context.Context, id sessions.SessionID, opts sessions.RemoveOptions) error
+}
+
+type Sessioner interface {
+    Create(ctx context.Context, label string) (sessions.SessionID, error)
+    Remover
+}
+```
+
+`*sessions.Pool` satisfies `Remover` directly via `Pool.Remove` (#94/#95). Aggregating per-verb sub-interfaces into `Sessioner` (rather than threading a new constructor parameter per seam) keeps the 27-call-site `NewServer` signature unchanged — a deliberate response to the #75 cascade. Phase 1.1b/c/e (`list`, `rename`, `attach` orchestration) will continue this pattern.
+
+### Wire shape
+
+`SessionsPayload` carries the union of all `sessions.*` verb arguments, with `omitempty` per field:
+
+```go
+type SessionsPayload struct {
+    Label       string      `json:"label,omitempty"`       // sessions.new
+    ID          string      `json:"id,omitempty"`          // sessions.rm
+    JSONLPolicy JSONLPolicy `json:"jsonlPolicy,omitempty"` // sessions.rm
+}
+
+type JSONLPolicy string  // "leave" | "archive" | "purge" (empty = leave)
+```
+
+`sessions.rm` uses the `OK`/`Error` envelope — no typed result.
+
+### Typed errors via Response.ErrorCode
+
+`Pool.Remove` returns two sentinels the CLI sibling needs to match on. `Response.ErrorCode` carries a stable wire token decoupled from the message string:
+
+```
+Response.ErrorCode == "session_not_found"        → sessions.ErrSessionNotFound
+Response.ErrorCode == "cannot_remove_bootstrap"  → sessions.ErrCannotRemoveBootstrap
+```
+
+The server detects the sentinel with `errors.Is` (so future server-side wrapping won't break the wire token), encodes both `Error` and `ErrorCode`, and the client's `SessionsRm` returns the bare sentinel directly so callers can `errors.Is` against it. Untyped errors flow through `Response.Error` verbatim with no `ErrorCode`.
+
+The string-token rather than message-string approach means renaming a sentinel's message is no longer a wire-protocol break — only the `ErrorCode` enum is.
+
+### JSONL policy translation
+
+The wire enum (`JSONLPolicy` string) and the internal enum (`sessions.JSONLPolicy` uint8) are deliberately distinct. `protocol.go` stays import-free; the translation (`toSessionsPolicy` in `server.go`) lives next to the handler. Strings are jq-debuggable on the wire and durable across protocol versions if the underlying enum order ever changes. Empty wire value maps to `JSONLLeave` (matches the internal zero value); unknown values surface as `"sessions.rm: unknown jsonl policy %q"` in `Response.Error` rather than silent fallback.
+
+See `docs/specs/architecture/98-control-sessions-rm.md` for the full design.
 
 ## Process-Global vs Per-Session
 
