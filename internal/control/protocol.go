@@ -8,6 +8,8 @@
 // shape stays JSON for forward compatibility.
 package control
 
+import "time"
+
 // Verb identifies a control request.
 type Verb string
 
@@ -58,6 +60,14 @@ const (
 	// it with errors.Is. No new ErrorCode constants are introduced —
 	// ErrCodeSessionNotFound (1.1d-B1) is reused.
 	VerbSessionsRename Verb = "sessions.rename"
+
+	// VerbSessionsList returns a snapshot of every session in the pool.
+	// Request carries no payload. Response.SessionsList carries the
+	// snapshot. First read-side member of the sessions.<verb> namespace;
+	// Pool.List is the only data source the server-side handler calls
+	// (see #60 for the underlying primitive's bootstrap-label
+	// substitution and sort-order guarantees).
+	VerbSessionsList Verb = "sessions.list"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -167,16 +177,18 @@ type ResizePayload struct {
 //   - Status: payload for VerbStatus
 //   - Logs: payload for VerbLogs
 //   - SessionsNew: payload for VerbSessionsNew
+//   - SessionsList: payload for VerbSessionsList
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
 type Response struct {
-	Status      *StatusPayload     `json:"status,omitempty"`
-	Logs        *LogsPayload       `json:"logs,omitempty"`
-	SessionsNew *SessionsNewResult `json:"sessionsNew,omitempty"` // populated for VerbSessionsNew
-	OK          bool               `json:"ok,omitempty"`
-	Error       string             `json:"error,omitempty"`
-	ErrorCode   ErrorCode          `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
+	Status       *StatusPayload       `json:"status,omitempty"`
+	Logs         *LogsPayload         `json:"logs,omitempty"`
+	SessionsNew  *SessionsNewResult   `json:"sessionsNew,omitempty"`  // populated for VerbSessionsNew
+	SessionsList *SessionsListPayload `json:"sessionsList,omitempty"` // populated for VerbSessionsList (1.1b-B1)
+	OK           bool                 `json:"ok,omitempty"`
+	Error        string               `json:"error,omitempty"`
+	ErrorCode    ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
 }
 
 // SessionsNewResult carries the result of a successful sessions.new
@@ -185,6 +197,43 @@ type Response struct {
 // sessions package.
 type SessionsNewResult struct {
 	SessionID string `json:"sessionID"`
+}
+
+// SessionsListPayload carries the result of a successful sessions.list
+// request: a snapshot of every session in the pool, in the order returned
+// by Pool.List (LastActiveAt descending, SessionID ascending tiebreak).
+// Final user-facing ordering is the responsibility of the CLI renderer
+// (61-B); this layer does not re-sort.
+type SessionsListPayload struct {
+	Sessions []SessionInfo `json:"sessions"`
+}
+
+// SessionInfo is one session's operator-visible metadata as carried on
+// the wire. Mirrors sessions.SessionInfo (#60) field-for-field with
+// wire-appropriate types: ID is encoded as a plain string (not the
+// sessions.SessionID newtype), State as a self-documenting string
+// ("active" / "evicted") matching the on-disk registry encoding, and
+// LastActive as a time.Time (encoding/json marshals to RFC3339Nano).
+//
+// Bootstrap carries omitempty so the field elides for non-bootstrap
+// entries — the discriminator is only meaningful for the one entry where
+// it's true. ID, Label, State, and LastActive are always present.
+//
+// Defined here, in protocol.go, rather than reusing sessions.SessionInfo
+// directly so external Go callers / future hand-written clients of the
+// wire don't transitively import internal/sessions for the
+// lifecycleState uint8 enum (kept package-private for the same reason).
+//
+// LastActive: encoding/json strips the monotonic-clock component on
+// roundtrip. Tests that compare a pre-encode time.Time with the
+// post-decode value must use time.Equal, not == or reflect.DeepEqual
+// (see lessons.md § "JSON roundtrip strips monotonic-clock state").
+type SessionInfo struct {
+	ID         string    `json:"id"`
+	Label      string    `json:"label"`
+	State      string    `json:"state"`       // "active" | "evicted"
+	LastActive time.Time `json:"last_active"` // RFC3339Nano on the wire
+	Bootstrap  bool      `json:"bootstrap,omitempty"`
 }
 
 // LogsPayload carries recent supervisor log lines, oldest first. Capacity
