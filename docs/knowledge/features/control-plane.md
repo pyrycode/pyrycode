@@ -915,7 +915,7 @@ A single TOCTOU race exists: `SessionsList` returns the canonical UUID, then ano
 
 `parseSessionsRmArgs(args) (id string, policy control.JSONLPolicy, err error)` is the unit-testable seam — flag-parse + arity + mutual-exclusion guard, no network. Empty policy on the wire normalises to `JSONLPolicyLeave` server-side.
 
-### `runSessionsRename` handler (1.1c-B2a)
+### `runSessionsRename` handler (1.1c-B2a → -B2b)
 
 ```go
 func runSessionsRename(socketPath string, args []string) error {
@@ -930,8 +930,22 @@ func runSessionsRename(socketPath string, args []string) error {
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
 
-    if err := control.SessionsRename(ctx, socketPath, id, newLabel); err != nil {
+    canonical, err := resolveSessionIDViaList(ctx, socketPath, id)
+    if err != nil {
+        switch {
+        case errors.Is(err, errAmbiguousPrefix):
+            fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1)
+        case errors.Is(err, sessions.ErrSessionNotFound):
+            fmt.Fprintf(os.Stderr, "no session with id %q\n", id); os.Exit(1)
+        }
+        return fmt.Errorf("sessions rename: %w", err)
+    }
+
+    if err := control.SessionsRename(ctx, socketPath, canonical, newLabel); err != nil {
         if errors.Is(err, sessions.ErrSessionNotFound) {
+            // Race window: resolver returned a canonical UUID,
+            // then another caller removed the session before our
+            // wire call landed. Echo the operator's typed <id>.
             fmt.Fprintf(os.Stderr, "no session with id %q\n", id)
             os.Exit(1)
         }
@@ -941,16 +955,15 @@ func runSessionsRename(socketPath string, args []string) error {
 }
 ```
 
-The simplest `runSessions<Verb>` so far — strictly fewer branches than `runSessionsRm`:
+Five design points anchor this handler:
 
-- **No prefix resolution.** `<id>` is forwarded verbatim to `control.SessionsRename`. AC#4 explicitly forbids prefix support in this slice; non-UUID input falls through to the server's `ErrSessionNotFound` mapping. The follow-up ergonomic slice lifts `resolveSessionIDViaList` into a shared helper at that point (the third caller of prefix resolution — currently only `rm`).
-- **One typed-sentinel branch.** `Pool.Rename`'s only typed sentinel is `ErrSessionNotFound` (#62 has no bootstrap-rejection — renaming the bootstrap is allowed). #90's wire surface only propagates `ErrCodeSessionNotFound` for this verb. The matched case prints `no session with id "<id>"` to stderr (no `pyry:` prefix) and `os.Exit(1)`; everything else flows through `fmt.Errorf("sessions rename: %w", err)` to main's top-level `pyry: ` printer.
+- **Client-side prefix resolution mirrors `runSessionsRm`.** `<id>` may be the full canonical UUID **or any unique prefix**. `resolveSessionIDViaList` is the same helper #99 introduced for `rm`; rename is its second caller. Exact match wins outright (the full-UUID form continues to work unchanged), otherwise a `strings.HasPrefix` scan over the `sessions.list` snapshot resolves to canonical UUID / `errAmbiguousPrefix` / `sessions.ErrSessionNotFound`. See [ADR 011](../decisions/011-cli-prefix-resolution.md). Per the ticket body and ADR 011, the helper is **not** lifted into `internal/sessions` yet — that defers to Phase 1.1e (`attach`), the third caller.
+- **Two typed-sentinel branches → identical stderr.** Both the resolver-side `ErrSessionNotFound` (prefix matched nothing in the snapshot) and the wire-side one (resolver matched, but the session was removed between resolver enumeration and rename — same TOCTOU window as `runSessionsRm`) collapse to `no session with id "<input>"`. Operator reaction is identical, so distinguishing them buys nothing. The echoed string is the operator's typed `<id>`, not the resolver's canonical — matches `runSessionsRm` and what the operator can correlate against shell history. Renaming the bootstrap is allowed (`Pool.Rename` has no bootstrap-rejection per #62), so there is **no `errCannotRemoveBootstrap` branch** in this handler — that was rm-specific.
+- **Single 30s `ctx` covers both wire calls (list + rename).** Sequential calls on the same socket; splitting into two contexts adds nothing — if the resolver burns 25s for some pathological reason, the rename deserves to be cut short on the same budget. Same shape as `runSessionsRm`.
 - **Empty `<new-label>` is a valid value, not an arity hole.** `parseSessionsRenameArgs` checks `fs.NArg() == 2`, not "two non-empty values" — so `pyry sessions rename <uuid> ""` parses as `(uuid, "")` and forwards through. `Pool.Rename` treats `""` as "clear the on-disk label" per #62. AC#1 explicitly requires this; no separate `--clear` flag.
-- **Exactly 2 positionals (not "≥2").** Three or more is rejected as a usage error so multi-word labels must be quoted: `pyry sessions rename <uuid> "hello world"`. Same shape `git config` and `kubectl label` use; prevents silent token loss like `pyry sessions rename <uuid> hello world` discarding `world`.
-- **No second positional split into a `--name`-style flag.** `<old> <new>` mirrors `git mv` / `kubectl rename`. Reusing `--name` (the create-time label flag on `pyry sessions new`) on rename would conflate two distinct semantics across verbs.
-- **`<id>` is echoed back in the unknown-id message** (the operator's input string, not a normalised form). Today `<id>` must be the full canonical UUID, so input and canonical are identical — but using the raw input keeps the message format identical when prefix resolution arrives in the follow-up slice.
+- **Exactly 2 positionals (not "≥2"); two-arg shape over `--name` flag.** Three or more is rejected as a usage error so multi-word labels must be quoted: `pyry sessions rename <uuid> "hello world"`. Same shape as `git config` / `kubectl label`; prevents silent token loss like `pyry sessions rename <uuid> hello world` discarding `world`. `<old> <new>` mirrors `git mv` / `kubectl rename`; reusing `--name` (the create-time label flag on `pyry sessions new`) would conflate two distinct semantics across verbs.
 
-`parseSessionsRenameArgs(args) (id, newLabel string, err error)` is the unit-testable seam — flag-parse + arity, no network. The FlagSet exists for symmetry with `new` and `rm` (no flags today).
+`parseSessionsRenameArgs(args) (id, newLabel string, err error)` is the unit-testable seam — flag-parse + arity, no network. The FlagSet exists for symmetry with `new` and `rm` (no flags today). The parser does not validate empty `<id>` — an empty first positional is technically parseable as `pyry sessions rename "" "label"`, would reach the resolver, and produce `errAmbiguousPrefix` against every session in the pool (because `strings.HasPrefix(_, "")` matches everything). That is a defensible failure shape (clean exit-1 error, not a panic) and not worth a parser-side guard.
 
 ### Sub-verb flag parsing — own FlagSet per verb
 
@@ -967,7 +980,9 @@ Each sub-verb's flag parser is its own `flag.NewFlagSet("pyry sessions <verb>", 
 | Server-side `Pool.Create` failure | `pyry: sessions new: sessions: create supervisor: <claude err>` (exit 1) | `Response.Error` propagated by `SessionsNew` |
 | Server-side activation failure (id valid, lifecycle goroutine respawns later) | `pyry: sessions new: <activate err>` (exit 1). **Registry entry remains** — operator can `pyry attach <uuid>` once 1.1e ships. | per AC#4 |
 | `pyry sessions rename <uuid>` (only one positional) | `pyry sessions rename: usage: expected <id> <new-label>, got 1 positional args` (exit 2) | `parseSessionsRenameArgs` arity check |
-| `pyry sessions rename <unknown-uuid> alpha` | `no session with id "<unknown-uuid>"` (exit 1, no `pyry:` prefix) | `errors.Is(err, sessions.ErrSessionNotFound)` |
+| `pyry sessions rename <ambiguous-prefix> alpha` | `ambiguous session id prefix:\n<uuid>  <label>\n<uuid>  <label>...` (exit 1, no `pyry:` prefix) — no `sessions.rename` wire call made | `errors.Is(err, errAmbiguousPrefix)` |
+| `pyry sessions rename <unknown-prefix-or-uuid> alpha` | `no session with id "<input>"` (exit 1, no `pyry:` prefix) | resolver-side `errors.Is(err, sessions.ErrSessionNotFound)` |
+| `pyry sessions rename <prefix>` (race: resolved then removed before rename lands) | `no session with id "<input>"` (exit 1, no `pyry:` prefix) — operator's typed `<id>`, not the canonical | wire-side `errors.Is(err, sessions.ErrSessionNotFound)` |
 | `pyry sessions rename` against stopped daemon | `pyry: sessions rename: dial …: connect: no such file or directory` (exit 1) | `request()` → `dial()` wrap |
 
 Activation failure is **not** distinguishable from a generic error at the wire boundary (the wire has no separate "id valid despite error" channel). The registry entry persists because `Pool.Create` saves before the activation step, so AC#4 is satisfied server-side.
@@ -988,7 +1003,7 @@ Phase 1.1b/c/d/e each append one verb to the parenthesised list, in lockstep wit
 - **`cmd/pyry/sessions_test.go`** (extended for #99) — `TestParseSessionsRmArgs` table over no-args, only-flags, id-only, `--archive`, `--purge`, both flags (mutually exclusive), trailing positional, flag-after-positional (Go `flag` halts at first non-flag), unknown flag. `TestRunSessions_RmDispatch` pins the router wiring against a bogus socket (asserts the failure is a dial error, not the "unknown verb" router diagnostic).
 - **`internal/e2e/sessions_rm_test.go`** (e2e, build tag `e2e`, ~290 LOC) — nine tests covering: happy path on full UUID and unique prefix, `--archive` and `--purge` plumbing, ambiguous-prefix rendering (mints sessions until pigeonhole-collision on first hex char — bound 17 over 16 hex digits), unknown UUID, bootstrap rejection, mutually-exclusive flags (exit 2), no-daemon dial failure (clean error, no panic).
 - **`cmd/pyry/sessions_test.go`** (extended for #92) — `TestParseSessionsRenameArgs` table over no-args, only-`<id>`, `<id> <label>`, `<id> ""` (empty-label clear is valid), trailing positional (rejected — multi-word labels must be quoted), label with embedded space (single token — passes), unknown flag. `TestRunSessions_RenameDispatch` pins the router wiring against a bogus socket (asserts the error wraps `sessions rename:`, not the `unknown verb` router diagnostic).
-- **`internal/e2e/sessions_rename_test.go`** (e2e, build tag `e2e`, ~163 LOC) — five tests: happy-path rename (label flips `before` → `after` in the registry); empty-label clear (`pyry sessions rename <uuid> ""` clears the on-disk label); unknown UUID (typed-error mapping → `no session with id "<uuid>"`, exit 1, registry untouched); no-daemon dial failure (`RunBare` against bogus socket; non-zero exit, no `panic`/`goroutine`/`runtime/` substrings); wrong-arity (one positional, exit **2** with `expected <id> <new-label>` on stderr, registry untouched).
+- **`internal/e2e/sessions_rename_test.go`** (e2e, build tag `e2e`) — seven tests after the #93 prefix-resolution lift: happy-path rename on full canonical UUID (label flips `before` → `after`); **prefix-success** (`TestSessionsRename_E2E_Success_Prefix`: rename via the first 8 hex chars of the canonical UUID — pins the resolver's canonical-UUID forwarding to the wire end-to-end, since a wrong forward would surface as the wire's `ErrSessionNotFound`); **ambiguous-prefix** (`TestSessionsRename_E2E_AmbiguousPrefix`: mints sessions until pigeonhole-collision on first hex char — bound 17 over 16 digits — runs `pyry sessions rename <shared-char> should-not-apply`, asserts non-zero exit, both matched ids+labels in stderr, **and both sessions' on-disk labels unchanged**: load-bearing AC#2 check that the resolver bails before the wire mutation); empty-label clear (full UUID); unknown UUID (resolver-side `ErrSessionNotFound` mapping); no-daemon dial failure; wrong-arity (one positional, exit 2). The race-window wire-side `ErrSessionNotFound` branch is covered transitively by the unknown-UUID test (which now traverses the same `errors.Is` arm) — pinning the race deterministically would require harness goroutine plumbing for marginal gain.
 
 `Pool.Create` failure surfacing (typed sentinels, nil-Sessioner branch, etc.) is **not** re-tested through the CLI shell — `internal/control/sessions_new_test.go` (#75) covers it exhaustively against the wire. The CLI is `fmt.Errorf("sessions new: %w", err)` over a wire client we trust.
 

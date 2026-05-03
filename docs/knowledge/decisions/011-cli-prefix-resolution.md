@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (ticket #99, Phase 1.1d-B2).
+Accepted (ticket #99, Phase 1.1d-B2). Second consumer landed in #93 (Phase 1.1c-B2b, `pyry sessions rename` prefix lift) — confirms the helper shape; lift to `internal/sessions` still defers to the third caller (Phase 1.1e `attach`).
 
 ## Context
 
@@ -79,7 +79,7 @@ Any other error (e.g. dial failure on a stopped daemon) flows through `fmt.Error
 
 ### Neutral
 
-- **No shared helper extraction yet.** Phase 1.1c (`rename`) will be the second caller; Phase 1.1e (`attach`) the third. The third-caller architect makes the lift-out call, per the #99 ticket body. The handler shape is small enough (~30 LOC) that two copies is cheaper than premature abstraction.
+- **No shared helper extraction yet.** Phase 1.1c-B2b (`rename`, #93) is now the second caller; Phase 1.1e (`attach`) will be the third. The third-caller architect makes the lift-out call, per the #99 ticket body. Caller #2's surgical insertion (one resolver call + one ambiguous-prefix branch in the existing error switch — the rename handler has no bootstrap-rejection branch, but is otherwise line-for-line `runSessionsRm`'s shape) confirmed the helper's contract scales as-is to a second consumer with zero modification; the lift's case strengthens with each additional consumer but the trigger remains "third caller".
 
 ## Alternatives considered
 
