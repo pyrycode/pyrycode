@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // DialTimeout is the default timeout for client connections to the control
@@ -116,6 +118,39 @@ func SessionsNew(ctx context.Context, socketPath, label string) (string, error) 
 		return "", errors.New("control: empty sessions.new response")
 	}
 	return resp.SessionsNew.SessionID, nil
+}
+
+// SessionsRm asks the daemon to remove the named session and apply the
+// JSONL disposition policy. Empty policy is treated by the server as
+// JSONLPolicyLeave (matches sessions.JSONLLeave's zero-value default).
+//
+// Typed errors propagate via Response.ErrorCode — a server response
+// carrying ErrCodeSessionNotFound returns sessions.ErrSessionNotFound
+// directly so callers can errors.Is against it; same for
+// ErrCodeCannotRemoveBootstrap. Other server errors (no sessioner
+// configured, missing id, evict failures, ...) return as
+// errors.New(resp.Error) verbatim.
+func SessionsRm(ctx context.Context, socketPath, id string, policy JSONLPolicy) error {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:     VerbSessionsRm,
+		Sessions: &SessionsPayload{ID: id, JSONLPolicy: policy},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		switch resp.ErrorCode {
+		case ErrCodeSessionNotFound:
+			return sessions.ErrSessionNotFound
+		case ErrCodeCannotRemoveBootstrap:
+			return sessions.ErrCannotRemoveBootstrap
+		}
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: sessions.rm response missing ok flag")
+	}
+	return nil
 }
 
 // request sends one Request and reads one Response over a fresh connection.

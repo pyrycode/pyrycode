@@ -58,10 +58,27 @@ type SessionResolver interface {
 	ResolveID(arg string) (sessions.SessionID, error)
 }
 
-// Sessioner is the per-pool view the control server depends on for session
-// lifecycle commands (creation today; list/rename/rm/attach orchestration in
-// Phase 1.1b/c/d/e). *sessions.Pool satisfies it structurally — Pool.Create
-// returns sessions.SessionID (a primitive string newtype), so no
+// Remover is the per-pool view the control server depends on for session
+// removal. *sessions.Pool satisfies it structurally via Pool.Remove. Defined
+// here, where it is consumed; tests fake it directly.
+//
+// Remove terminates the named session's child, drops its registry entry,
+// and applies opts.JSONL to the on-disk transcript file. Returns
+// sessions.ErrSessionNotFound for an unknown id,
+// sessions.ErrCannotRemoveBootstrap for the bootstrap entry, or ctx.Err()
+// if termination is cancelled. See Pool.Remove for the full contract.
+type Remover interface {
+	Remove(ctx context.Context, id sessions.SessionID, opts sessions.RemoveOptions) error
+}
+
+// Sessioner aggregates the lifecycle methods the control server dispatches
+// to. Phase 1.1a-B1 added Create; Phase 1.1d-B1 adds Remove via the
+// embedded Remover. Phase 1.1b/c/e (list, rename, attach orchestration)
+// will continue this pattern — one method per verb, embedded onto Sessioner
+// so NewServer's signature stays stable across the namespace's growth.
+//
+// *sessions.Pool satisfies Sessioner structurally — Pool.Create and
+// Pool.Remove match the embedded interfaces' signatures exactly, so no
 // covariant-return adapter is needed (contrast with poolResolver's Lookup).
 // Defined here, where it is consumed; tests fake it directly.
 //
@@ -70,6 +87,7 @@ type SessionResolver interface {
 // verbatim through Response.Error.
 type Sessioner interface {
 	Create(ctx context.Context, label string) (sessions.SessionID, error)
+	Remover
 }
 
 // Server listens on a Unix domain socket and answers control requests.
@@ -332,6 +350,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleResize(enc, req.Resize)
 	case VerbSessionsNew:
 		s.handleSessionsNew(enc, req.Sessions)
+	case VerbSessionsRm:
+		s.handleSessionsRm(enc, req.Sessions)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -392,6 +412,70 @@ func (s *Server) handleSessionsNew(enc *json.Encoder, payload *SessionsPayload) 
 		return
 	}
 	_ = enc.Encode(Response{SessionsNew: &SessionsNewResult{SessionID: string(id)}})
+}
+
+// handleSessionsRm serves a VerbSessionsRm request: invoke the sessioner to
+// terminate the named session, drop its registry entry, and apply the JSONL
+// disposition policy. Mirrors handleSessionsNew (fresh background ctx with a
+// generous 30s deadline; verbatim error pass-through).
+//
+// Typed sentinels from Pool.Remove (sessions.ErrSessionNotFound,
+// sessions.ErrCannotRemoveBootstrap) are detected via errors.Is — survives
+// future wrapping — and surfaced through Response.ErrorCode so the client
+// can reconstruct the sentinel for errors.Is matching after the JSON
+// round-trip. Untyped errors (e.g. evict failures, registry persist
+// failures) flow through Response.Error verbatim with no ErrorCode.
+//
+// Empty ID is rejected at the handler boundary (a missing-input condition,
+// not a "not found" one). Unknown JSONLPolicy values surface as a clear
+// "unknown jsonl policy" error rather than silently falling back.
+func (s *Server) handleSessionsRm(enc *json.Encoder, payload *SessionsPayload) {
+	if s.sessioner == nil {
+		_ = enc.Encode(Response{Error: "sessions.rm: no sessioner configured"})
+		return
+	}
+	if payload == nil || payload.ID == "" {
+		_ = enc.Encode(Response{Error: "sessions.rm: missing id"})
+		return
+	}
+	policy, err := toSessionsPolicy(payload.JSONLPolicy)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("sessions.rm: %v", err)})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = s.sessioner.Remove(ctx, sessions.SessionID(payload.ID), sessions.RemoveOptions{JSONL: policy})
+	if err != nil {
+		resp := Response{Error: err.Error()}
+		switch {
+		case errors.Is(err, sessions.ErrSessionNotFound):
+			resp.ErrorCode = ErrCodeSessionNotFound
+		case errors.Is(err, sessions.ErrCannotRemoveBootstrap):
+			resp.ErrorCode = ErrCodeCannotRemoveBootstrap
+		}
+		_ = enc.Encode(resp)
+		return
+	}
+	_ = enc.Encode(Response{OK: true})
+}
+
+// toSessionsPolicy maps the wire-level JSONLPolicy enum (string) to the
+// internal sessions.JSONLPolicy enum (uint8). Empty string maps to
+// JSONLLeave — matching sessions.JSONLPolicy's zero value, so a client
+// that omits the field gets the documented default. Unknown values
+// return an error rather than silently falling back.
+func toSessionsPolicy(p JSONLPolicy) (sessions.JSONLPolicy, error) {
+	switch p {
+	case "", JSONLPolicyLeave:
+		return sessions.JSONLLeave, nil
+	case JSONLPolicyArchive:
+		return sessions.JSONLArchive, nil
+	case JSONLPolicyPurge:
+		return sessions.JSONLPurge, nil
+	default:
+		return 0, fmt.Errorf("unknown jsonl policy %q", string(p))
+	}
 }
 
 // handleAttach serves a VerbAttach request. Returns true iff connection

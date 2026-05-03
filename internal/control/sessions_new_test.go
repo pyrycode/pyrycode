@@ -16,12 +16,19 @@ import (
 )
 
 // fakeSessioner satisfies control.Sessioner for tests. Safe under concurrent
-// use. Mirrors fakeSession's mu-guarded recorded-call shape.
+// use. Mirrors fakeSession's mu-guarded recorded-call shape. Phase 1.1d-B1
+// (#98) extended this with Remove + recordedRemoves for sessions.rm tests.
 type fakeSessioner struct {
 	mu          sync.Mutex
 	createCalls []string // labels in invocation order
+	removeCalls []removeCall
 	returnID    sessions.SessionID
-	returnErr   error
+	returnErr   error // shared across Create and Remove (each test owns its own fake)
+}
+
+type removeCall struct {
+	ID   sessions.SessionID
+	Opts sessions.RemoveOptions
 }
 
 func (f *fakeSessioner) Create(_ context.Context, label string) (sessions.SessionID, error) {
@@ -32,10 +39,24 @@ func (f *fakeSessioner) Create(_ context.Context, label string) (sessions.Sessio
 	return id, err
 }
 
+func (f *fakeSessioner) Remove(_ context.Context, id sessions.SessionID, opts sessions.RemoveOptions) error {
+	f.mu.Lock()
+	f.removeCalls = append(f.removeCalls, removeCall{ID: id, Opts: opts})
+	err := f.returnErr
+	f.mu.Unlock()
+	return err
+}
+
 func (f *fakeSessioner) recordedCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.createCalls...)
+}
+
+func (f *fakeSessioner) recordedRemoves() []removeCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]removeCall(nil), f.removeCalls...)
 }
 
 // startServerWithSessioner mirrors startServer but plumbs a Sessioner. Kept
@@ -77,13 +98,44 @@ func startServerWithSessioner(t *testing.T, resolver SessionResolver, sessioner 
 func TestProtocol_SessionsRoundTripBackCompat(t *testing.T) {
 	t.Parallel()
 
-	got, err := json.Marshal(Request{Verb: VerbStatus})
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
+	cases := []struct {
+		name string
+		v    any
+		want []byte
+	}{
+		{
+			name: "Request.Verb=status is byte-identical (omitempty on Request.Sessions)",
+			v:    Request{Verb: VerbStatus},
+			want: []byte(`{"verb":"status"}`),
+		},
+		{
+			name: "sessions.new with label-only payload is byte-identical (omitempty on new ID/JSONLPolicy)",
+			v:    Request{Verb: VerbSessionsNew, Sessions: &SessionsPayload{Label: "x"}},
+			want: []byte(`{"verb":"sessions.new","sessions":{"label":"x"}}`),
+		},
+		{
+			name: "empty Response is {} (omitempty on ErrorCode)",
+			v:    Response{},
+			want: []byte(`{}`),
+		},
+		{
+			name: "Response{OK:true} is byte-identical",
+			v:    Response{OK: true},
+			want: []byte(`{"ok":true}`),
+		},
 	}
-	want := []byte(`{"verb":"status"}`)
-	if !bytes.Equal(got, want) {
-		t.Errorf("Marshal Request{Verb:status} = %q, want %q (omitempty on Request.Sessions is load-bearing)", got, want)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := json.Marshal(tc.v)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Errorf("Marshal = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
