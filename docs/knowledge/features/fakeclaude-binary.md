@@ -7,10 +7,12 @@ appearance closes the original fd, opens a fresh `<newUUIDv4>.jsonl` in
 the same directory, removes the trigger, and idles forever. Subsequent
 triggers are ignored.
 
-Phase: ticket #122 ships the binary in isolation. The harness consumer
-(`Harness.StartRotation`, `Harness.ClaudeSessionsDir`,
-`ensureFakeClaudeBuilt`) is the next slice; the rotation-watcher driver
-test that exercises pyry against the binary is the slice after that.
+Phase: ticket #122 ships the binary in isolation. Ticket #123 wires it
+into the e2e harness (`Harness.StartRotation`, `Harness.ClaudeSessionsDir`,
+`ensureFakeClaudeBuilt`) — see
+[e2e-harness.md § Rotation Primitive](e2e-harness.md). The rotation-watcher
+driver test that exercises pyry's watcher against the binary is the slice
+after that.
 
 ## What It Does
 
@@ -145,10 +147,11 @@ affect correctness.
   `internal/sessions/rotation/watcher.go:17-19` (`uuidStemPattern`)
 - Lessons: `docs/lessons.md § Claude session storage on disk` (the
   on-disk shape the binary mimics)
-- Consumers (forthcoming): `Harness.StartRotation` +
-  `ensureFakeClaudeBuilt` (next slice — wires the binary into the e2e
-  harness as the supervised child); rotation-watcher driver test (slice
-  after that — runs pyry's watcher against the binary)
+- Consumers: `Harness.StartRotation` + `ensureFakeClaudeBuilt` (#123,
+  landed — wires the binary into the e2e harness as the supervised child;
+  see [e2e-harness.md § Rotation Primitive](e2e-harness.md)).
+  Forthcoming: rotation-watcher driver test (slice after #123 — runs
+  pyry's watcher against the binary).
 - Pattern: always-split "new package AND its first consumer" — the
   binary lands here without its harness consumer to keep the AC count
   inside the per-ticket budget. Same shape as the introduce-then-rewire

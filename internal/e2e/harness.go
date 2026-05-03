@@ -84,6 +84,11 @@ type Harness struct {
 	// sessions dir, and any other ~-relative paths live underneath.
 	HomeDir string
 
+	// ClaudeSessionsDir is the directory the supervised fake-claude opens
+	// its <uuid>.jsonl files under. Empty unless the harness was created
+	// via StartRotation.
+	ClaudeSessionsDir string
+
 	// PID of the running pyry process. Captured at spawn so failure-injection
 	// tests can verify it is gone after cleanup runs.
 	PID int
@@ -102,6 +107,10 @@ var (
 	binOnce sync.Once
 	binPath string
 	binErr  error
+
+	fakeClaudeOnce sync.Once
+	fakeClaudeBin  string
+	fakeClaudeErr  error
 )
 
 // ensurePyryBuilt builds pyry once per test process. PYRY_E2E_BIN, when set,
@@ -129,6 +138,35 @@ func ensurePyryBuilt(t *testing.T) string {
 		t.Fatalf("e2e: %v", binErr)
 	}
 	return binPath
+}
+
+// ensureFakeClaudeBuilt builds the fake-claude test binary once per test
+// process. PYRY_E2E_FAKE_CLAUDE_BIN, when set, short-circuits to a
+// pre-built binary on disk (CI prebuild).
+func ensureFakeClaudeBuilt(t *testing.T) string {
+	t.Helper()
+	fakeClaudeOnce.Do(func() {
+		if env := os.Getenv("PYRY_E2E_FAKE_CLAUDE_BIN"); env != "" {
+			fakeClaudeBin = env
+			return
+		}
+		dir, err := os.MkdirTemp("", "pyry-e2e-fakeclaude-*")
+		if err != nil {
+			fakeClaudeErr = err
+			return
+		}
+		fakeClaudeBin = filepath.Join(dir, "fakeclaude")
+		cmd := exec.Command("go", "build", "-o", fakeClaudeBin,
+			"github.com/pyrycode/pyrycode/internal/e2e/internal/fakeclaude")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fakeClaudeErr = fmt.Errorf("go build fakeclaude: %w\n%s", err, out)
+		}
+	})
+	if fakeClaudeErr != nil {
+		t.Fatalf("e2e: %v", fakeClaudeErr)
+	}
+	return fakeClaudeBin
 }
 
 // Start builds pyry once per test process, spawns it in an isolated temp
@@ -181,6 +219,57 @@ func StartIn(t *testing.T, home string, extraFlags ...string) *Harness {
 	return h
 }
 
+// StartRotation builds pyry, builds the fake-claude test binary, ensures
+// sessionsDir exists under home, and spawns pyry with fake-claude as the
+// supervised child. The three PYRY_FAKE_CLAUDE_* env vars are set on the
+// pyry process so the supervisor inherits them via os.Environ() and
+// propagates them to the supervised child.
+//
+// home is the daemon's $HOME (caller-owned, mirroring StartIn). sessionsDir
+// is the directory fake-claude opens its <uuid>.jsonl files under; auto-
+// created with 0o700 if missing and recorded on h.ClaudeSessionsDir.
+// initialUUID is the stem for the first jsonl. trigger is the filesystem
+// path the test will create to trigger rotation.
+//
+// Idle eviction is left at the spawn default (-pyry-idle-timeout=0),
+// matching Start/StartIn.
+func StartRotation(t *testing.T, home, sessionsDir, initialUUID, trigger string) *Harness {
+	t.Helper()
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("e2e: mkdir sessions dir: %v", err)
+	}
+	fakeBin := ensureFakeClaudeBuilt(t)
+
+	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
+		claudeBin:  fakeBin,
+		claudeArgs: []string{},
+		extraFlags: []string{"-pyry-workdir=" + home},
+		extraEnv: []string{
+			"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
+			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
+			"PYRY_FAKE_CLAUDE_TRIGGER=" + trigger,
+		},
+	})
+
+	h := &Harness{
+		SocketPath:        socket,
+		HomeDir:           home,
+		ClaudeSessionsDir: sessionsDir,
+		PID:               cmd.Process.Pid,
+		Stdout:            stdout,
+		Stderr:            stderr,
+		cmd:               cmd,
+		doneCh:            doneCh,
+	}
+
+	t.Cleanup(func() { h.teardown(t) })
+
+	if err := h.waitForReady(); err != nil {
+		t.Fatalf("e2e: %v", err)
+	}
+	return h
+}
+
 // StartExpectingFailureIn spawns pyry against the given home, expects it to
 // exit before the readiness deadline elapses, and returns the captured exit
 // code, stdout, and stderr. Fails the test if pyry instead becomes ready
@@ -223,6 +312,25 @@ func StartExpectingFailureIn(t *testing.T, home string) RunResult {
 	return RunResult{}
 }
 
+// spawnOpts captures the per-test variations on top of pyry's standard e2e
+// flag set. Zero-value yields the existing /bin/sleep 99999 behaviour, so
+// spawn() stays a one-liner over spawnWith.
+type spawnOpts struct {
+	// claudeBin is the path passed via -pyry-claude. Empty defaults to
+	// /bin/sleep.
+	claudeBin string
+	// claudeArgs are the args appended after the `--` sentinel. Nil
+	// defaults to {"99999"} (the sleep-as-claude duration).
+	claudeArgs []string
+	// extraEnv is appended verbatim to childEnv(home) before exec. Each
+	// entry is "KEY=VALUE".
+	extraEnv []string
+	// extraFlags are pyry-* flags appended after the standard set and
+	// before `--`. Last-wins semantics: a duplicate flag here overrides
+	// the standard default.
+	extraFlags []string
+}
+
 // spawn forks pyry against the given home with the standard test flag set
 // (sleep-as-claude, idle eviction off, -pyry-name=test). Returns the socket
 // path, the running command, captured stdout/stderr buffers, and a channel
@@ -236,6 +344,22 @@ func StartExpectingFailureIn(t *testing.T, home string) RunResult {
 // the standard default (e.g. `-pyry-idle-timeout=1s` to enable eviction).
 func spawn(t *testing.T, home string, extraFlags ...string) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
 	t.Helper()
+	return spawnWith(t, home, spawnOpts{extraFlags: extraFlags})
+}
+
+// spawnWith is the shared spawn core. Zero-value spawnOpts yields the
+// historical /bin/sleep 99999 behaviour. Callers needing fake-claude or
+// other supervised-child wiring populate spawnOpts and let the defaults
+// fill in the rest.
+func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
+	t.Helper()
+	if o.claudeBin == "" {
+		o.claudeBin = "/bin/sleep"
+	}
+	if o.claudeArgs == nil {
+		o.claudeArgs = []string{"99999"}
+	}
+
 	bin := ensurePyryBuilt(t)
 	socket := filepath.Join(home, "pyry.sock")
 
@@ -245,15 +369,16 @@ func spawn(t *testing.T, home string, extraFlags ...string) (string, *exec.Cmd, 
 	args := []string{
 		"-pyry-socket=" + socket,
 		"-pyry-name=test",
-		"-pyry-claude=/bin/sleep",
+		"-pyry-claude=" + o.claudeBin,
 		"-pyry-idle-timeout=0",
 	}
-	args = append(args, extraFlags...)
-	args = append(args, "--", "99999")
+	args = append(args, o.extraFlags...)
+	args = append(args, "--")
+	args = append(args, o.claudeArgs...)
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = childEnv(home)
+	cmd.Env = append(childEnv(home), o.extraEnv...)
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("e2e: pyry start: %v", err)
