@@ -33,6 +33,19 @@ cmd/pyry → internal/sessions → internal/sessions/rotation → fsnotify, stdl
 
 `internal/sessions/rotation` does **not** import `internal/sessions`. The contract is expressed as closures over primitive types on `rotation.Config` (`Snapshot`, `IsAllocated`, `OnRotate`). The closures are wired in `Pool.Run`, so the `SessionID ↔ string` conversion happens once, in one place. This avoids the import cycle that would arise if `rotation` referenced `sessions.SessionID`.
 
+## Symlink-resolved match path
+
+The watcher resolves `cfg.Dir` once at construction (`filepath.EvalSymlinks`) and stores it as the unexported `resolvedDir` on the `Watcher`. `handleCreate` builds the comparison path as `filepath.Join(resolvedDir, base)` rather than re-using `ev.Name` from fsnotify. This bridges a mismatch between the two sides of the comparison:
+
+- **fsnotify** reports paths *as-watched* — if pyry watches `/var/folders/.../sessions`, CREATE events fire with `/var/folders/.../sessions/<uuid>.jsonl`.
+- **Platform probes** report paths *with symlinks resolved* — `lsof` on macOS canonicalises through the kernel; `/proc/<pid>/fd` readlinks to the canonical inode path on Linux.
+
+On macOS `/var → /private/var` is a default symlink. Without resolving the watched dir, `/var/folders/.../<uuid>.jsonl` (event side) ≠ `/private/var/folders/.../<uuid>.jsonl` (probe side); the gate at the rotation match site rejects, and the rotation event is silently dropped — the symptom is "session UUID stops updating after `/clear`," with no error surfaced. Affects every macOS user whose `~/.claude/projects/` lives behind a symlink (custom HOME, external-drive home) and every `t.TempDir`-based test on macOS.
+
+Resolving once at construction is intentional: zero per-event syscalls, no race window between event and resolution (the directory's lifetime spans the watcher's). If `EvalSymlinks` fails at startup (broken symlink components, permission flake), the watcher logs `Warn` and falls back to `cfg.Dir` unmodified — the watcher remains functional and the symlink-bridge case continues to drop matches for that run, no worse than the pre-fix behaviour.
+
+Locked in by `TestWatcher_DetectsRotationThroughSymlink` (an explicit `os.Symlink` from a side dir to the real sessions dir, watched via the link, probe reports the resolved path) — portable across Linux and macOS regardless of platform tempdir conventions.
+
 ## Key types
 
 ### `rotation.Config`
@@ -89,7 +102,7 @@ watcher event loop:
   - for each ref with pid > 0:
       if ref.ID == <new>: return  (already rotated by another path)
       open := probeWithRetry(pid)  // 0 / 50ms / 200ms attempts
-      if Clean(open) == Clean(ev.Name):
+      if Clean(open) == Join(resolvedDir, base):  // symlink-resolved match (#118)
           cfg.OnRotate(ref.ID, <new>)  →  Pool.RotateID(...)
           return
   │
@@ -216,6 +229,7 @@ The contract: rotation detection failures are **never fatal**. Pyry startup proc
 `watcher_test.go` — `t.TempDir()` + fake `Probe`:
 
 - `TestWatcher_DetectsRotation` — write `<new>.jsonl`; assert `OnRotate("old", "<new>")` fires within 1s.
+- `TestWatcher_DetectsRotationThroughSymlink` (#118) — watch a symlink whose target is the real sessions dir; probe reports the resolved path; `OnRotate` fires only because `EvalSymlinks` ran in `New`. Portable across platforms via explicit `os.Symlink`.
 - `TestWatcher_SkipsAllocated` / `_SkipsNonJSONL` / `_SkipsMalformedUUID`.
 - `TestWatcher_NoSessionsZeroPID` — pid 0 → probe never called.
 - `TestWatcher_ProbePathMismatch` — probe returns wrong path → no rotation.
