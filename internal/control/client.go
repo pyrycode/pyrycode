@@ -185,6 +185,37 @@ func SessionsRename(ctx context.Context, socketPath, id, newLabel string) error 
 	return nil
 }
 
+// SessionsList asks the daemon for a snapshot of every session in the
+// pool and returns the result. In-process Go callers (the future
+// cmd/pyry sessions list) consume this directly. Same one-shot dial →
+// encode → decode → close lifecycle as Status/Logs/Stop/SendResize/
+// SessionsNew/SessionsRm/SessionsRename.
+//
+// Snapshot ordering is whatever the server returned (Pool.List's
+// LastActiveAt desc, SessionID asc tiebreak); callers needing a
+// different order are responsible for re-sorting.
+//
+// A nil SessionsList payload on a non-error response is treated as a
+// malformed response. An explicit zero-length slice
+// ({"sessionsList":{"sessions":[]}}) decodes to a non-nil payload with
+// len(Sessions) == 0 and is returned as a well-formed empty result.
+//
+// No typed-sentinel mapping (Pool.List does not return errors). All
+// server errors flow through Response.Error verbatim.
+func SessionsList(ctx context.Context, socketPath string) ([]SessionInfo, error) {
+	resp, err := request(ctx, socketPath, Request{Verb: VerbSessionsList})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	if resp.SessionsList == nil {
+		return nil, errors.New("control: empty sessions.list response")
+	}
+	return resp.SessionsList.Sessions, nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {

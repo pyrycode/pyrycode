@@ -89,18 +89,38 @@ type Renamer interface {
 	Rename(id sessions.SessionID, newLabel string) error
 }
 
+// Lister is the per-pool view the control server depends on for the
+// sessions.list verb. *sessions.Pool satisfies it structurally via
+// Pool.List. Defined here, where it is consumed; tests fake it directly.
+//
+// List returns a snapshot of every session in the pool — bootstrap and
+// minted alike — sorted by LastActiveAt descending with SessionID
+// ascending tiebreak. The bootstrap entry's empty on-disk label is
+// substituted with "bootstrap" by Pool.List itself; this seam renders
+// verbatim. Read-only: does not bump LastActiveAt or transition state.
+// See Pool.List for the full contract.
+//
+// List does not take a context — Pool.List's signature is
+// () []SessionInfo and the operation is bounded by Pool.mu (RLock) +
+// each Session.lcMu (briefly). The seam mirrors Pool.List's shape so
+// *sessions.Pool satisfies it adapter-free.
+type Lister interface {
+	List() []sessions.SessionInfo
+}
+
 // Sessioner aggregates the lifecycle methods the control server dispatches
 // to. Phase 1.1a-B1 added Create; Phase 1.1d-B1 added Remove via the
-// embedded Remover; Phase 1.1c-B1 adds Rename via the embedded Renamer.
-// Phase 1.1e (attach orchestration) will continue this pattern — one method
-// (or named sub-interface) per verb, embedded onto Sessioner so NewServer's
+// embedded Remover; Phase 1.1c-B1 added Rename via the embedded Renamer;
+// Phase 1.1b-B1 adds List via the embedded Lister. Phase 1.1e (attach
+// orchestration) will continue this pattern — one method (or named
+// sub-interface) per verb, embedded onto Sessioner so NewServer's
 // signature stays stable across the namespace's growth.
 //
 // *sessions.Pool satisfies Sessioner structurally — Pool.Create,
-// Pool.Remove and Pool.Rename match the embedded interfaces' signatures
-// exactly, so no covariant-return adapter is needed (contrast with
-// poolResolver's Lookup). Defined here, where it is consumed; tests fake
-// it directly.
+// Pool.Remove, Pool.Rename and Pool.List match the embedded interfaces'
+// signatures exactly, so no covariant-return adapter is needed (contrast
+// with poolResolver's Lookup). Defined here, where it is consumed; tests
+// fake it directly.
 //
 // Create mints a new supervised session with the given (possibly empty)
 // label and returns the new SessionID. Errors are surfaced to the client
@@ -109,6 +129,7 @@ type Sessioner interface {
 	Create(ctx context.Context, label string) (sessions.SessionID, error)
 	Remover
 	Renamer
+	Lister
 }
 
 // Server listens on a Unix domain socket and answers control requests.
@@ -152,9 +173,10 @@ type Server struct {
 // typically the signal-driven context's cancel function so a stop request
 // walks the same shutdown path as SIGINT/SIGTERM.
 //
-// sessioner is optional. When nil, VerbSessionsNew returns an error
-// response ("sessions.new: no sessioner configured") — same precedent as
-// logs/shutdown. The CLI ticket wires *sessions.Pool here.
+// sessioner is optional. When nil, VerbSessionsNew, VerbSessionsRm,
+// VerbSessionsRename, and VerbSessionsList all return error responses
+// — same precedent as logs/shutdown. The CLI ticket wires
+// *sessions.Pool here.
 //
 // Foreground vs service mode is no longer surfaced as a distinct
 // constructor parameter; it is a property of the resolved session's
@@ -375,6 +397,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleSessionsRm(enc, req.Sessions)
 	case VerbSessionsRename:
 		s.handleSessionsRename(enc, req.Sessions)
+	case VerbSessionsList:
+		s.handleSessionsList(enc)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -518,6 +542,40 @@ func (s *Server) handleSessionsRename(enc *json.Encoder, payload *SessionsPayloa
 		return
 	}
 	_ = enc.Encode(Response{OK: true})
+}
+
+// handleSessionsList serves a VerbSessionsList request: snapshot every
+// session in the pool through Pool.List and write the result back to the
+// client. Mirrors handleSessionsRename's nil-sessioner shape (verbatim
+// error message, no context.WithTimeout — Pool.List's signature does not
+// take ctx and the operation is in-memory).
+//
+// Pool.List does not return errors — the only failure path here is the
+// nil-sessioner branch. Sort order is whatever Pool.List returns
+// (LastActiveAt desc, SessionID asc tiebreak); this layer does not
+// re-sort.
+//
+// LifecycleState is encoded as a string via lifecycleState.String() —
+// the same encoding the on-disk registry uses, so the wire and the
+// registry agree on token spelling. LastActiveAt is passed through as
+// time.Time; encoding/json marshals to RFC3339Nano.
+func (s *Server) handleSessionsList(enc *json.Encoder) {
+	if s.sessioner == nil {
+		_ = enc.Encode(Response{Error: "sessions.list: no sessioner configured"})
+		return
+	}
+	snapshot := s.sessioner.List()
+	out := make([]SessionInfo, 0, len(snapshot))
+	for _, e := range snapshot {
+		out = append(out, SessionInfo{
+			ID:         string(e.ID),
+			Label:      e.Label,
+			State:      e.LifecycleState.String(),
+			LastActive: e.LastActiveAt,
+			Bootstrap:  e.Bootstrap,
+		})
+	}
+	_ = enc.Encode(Response{SessionsList: &SessionsListPayload{Sessions: out}})
 }
 
 // toSessionsPolicy maps the wire-level JSONLPolicy enum (string) to the

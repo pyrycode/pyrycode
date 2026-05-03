@@ -19,7 +19,8 @@ import (
 // use. Mirrors fakeSession's mu-guarded recorded-call shape. Phase 1.1d-B1
 // (#98) extended this with Remove + recordedRemoves for sessions.rm tests;
 // Phase 1.1c-B1 (#90) extended it with Rename + recordedRenames for
-// sessions.rename tests.
+// sessions.rename tests; Phase 1.1b-B1 (#87) extended it with List +
+// listSnapshots / listCalls for sessions.list tests.
 type fakeSessioner struct {
 	mu          sync.Mutex
 	createCalls []string // labels in invocation order
@@ -27,6 +28,13 @@ type fakeSessioner struct {
 	renameCalls []renameCall
 	returnID    sessions.SessionID
 	returnErr   error // shared across Create / Remove / Rename (each test owns its own fake)
+
+	// listSnapshots is a FIFO of canned responses for List. Tests that
+	// don't care about repeated reads can leave it as a single-element
+	// slice — once the FIFO is exhausted, List returns the last entry.
+	// nil entry yields an empty []sessions.SessionInfo.
+	listSnapshots [][]sessions.SessionInfo
+	listCalls     int
 }
 
 type removeCall struct {
@@ -61,6 +69,29 @@ func (f *fakeSessioner) Rename(id sessions.SessionID, newLabel string) error {
 	err := f.returnErr
 	f.mu.Unlock()
 	return err
+}
+
+func (f *fakeSessioner) List() []sessions.SessionInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	idx := f.listCalls
+	f.listCalls++
+	if len(f.listSnapshots) == 0 {
+		return nil
+	}
+	if idx >= len(f.listSnapshots) {
+		idx = len(f.listSnapshots) - 1
+	}
+	snap := f.listSnapshots[idx]
+	out := make([]sessions.SessionInfo, len(snap))
+	copy(out, snap)
+	return out
+}
+
+func (f *fakeSessioner) recordedListCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
 }
 
 func (f *fakeSessioner) recordedCalls() []string {
@@ -141,14 +172,19 @@ func TestProtocol_SessionsRoundTripBackCompat(t *testing.T) {
 			want: []byte(`{"verb":"sessions.rm","sessions":{"id":"x","jsonlPolicy":"archive"}}`),
 		},
 		{
-			name: "empty Response is {} (omitempty on ErrorCode)",
+			name: "empty Response is {} (omitempty on ErrorCode and SessionsList)",
 			v:    Response{},
 			want: []byte(`{}`),
 		},
 		{
-			name: "Response{OK:true} is byte-identical",
+			name: "Response{OK:true} is byte-identical (omitempty on SessionsList holds after #87)",
 			v:    Response{OK: true},
 			want: []byte(`{"ok":true}`),
+		},
+		{
+			name: "Response{SessionsNew} is byte-identical (omitempty on SessionsList holds after #87)",
+			v:    Response{SessionsNew: &SessionsNewResult{SessionID: "abc"}},
+			want: []byte(`{"sessionsNew":{"sessionID":"abc"}}`),
 		},
 	}
 	for _, tc := range cases {
