@@ -58,6 +58,20 @@ type SessionResolver interface {
 	ResolveID(arg string) (sessions.SessionID, error)
 }
 
+// Sessioner is the per-pool view the control server depends on for session
+// lifecycle commands (creation today; list/rename/rm/attach orchestration in
+// Phase 1.1b/c/d/e). *sessions.Pool satisfies it structurally — Pool.Create
+// returns sessions.SessionID (a primitive string newtype), so no
+// covariant-return adapter is needed (contrast with poolResolver's Lookup).
+// Defined here, where it is consumed; tests fake it directly.
+//
+// Create mints a new supervised session with the given (possibly empty)
+// label and returns the new SessionID. Errors are surfaced to the client
+// verbatim through Response.Error.
+type Sessioner interface {
+	Create(ctx context.Context, label string) (sessions.SessionID, error)
+}
+
 // Server listens on a Unix domain socket and answers control requests.
 //
 // Lifecycle: NewServer → Listen → Serve(ctx) → Close. Listen creates the
@@ -71,6 +85,7 @@ type Server struct {
 	logs       LogProvider
 	shutdown   func()
 	log        *slog.Logger
+	sessioner  Sessioner
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -98,13 +113,17 @@ type Server struct {
 // typically the signal-driven context's cancel function so a stop request
 // walks the same shutdown path as SIGINT/SIGTERM.
 //
+// sessioner is optional. When nil, VerbSessionsNew returns an error
+// response ("sessions.new: no sessioner configured") — same precedent as
+// logs/shutdown. The CLI ticket wires *sessions.Pool here.
+//
 // Foreground vs service mode is no longer surfaced as a distinct
 // constructor parameter; it is a property of the resolved session's
 // bridge. A foreground-mode session's Attach returns
 // [sessions.ErrAttachUnavailable], which the attach handler maps back to
 // the existing "no attach provider configured (daemon may be in
 // foreground mode)" wire string for byte-identical client output.
-func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, shutdown func(), log *slog.Logger) *Server {
+func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, shutdown func(), log *slog.Logger, sessioner Sessioner) *Server {
 	if sessions == nil {
 		panic("control.NewServer: sessions is required, got nil")
 	}
@@ -117,6 +136,7 @@ func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, sh
 		logs:       logs,
 		shutdown:   shutdown,
 		log:        log,
+		sessioner:  sessioner,
 		closedCh:   make(chan struct{}),
 	}
 }
@@ -310,6 +330,8 @@ func (s *Server) handle(conn net.Conn) {
 		}
 	case VerbResize:
 		s.handleResize(enc, req.Resize)
+	case VerbSessionsNew:
+		s.handleSessionsNew(enc, req.Sessions)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -339,6 +361,37 @@ func (s *Server) handleStop(enc *json.Encoder) {
 	_ = enc.Encode(Response{OK: true})
 	s.log.Info("control: stop requested")
 	s.shutdown()
+}
+
+// handleSessionsNew serves a VerbSessionsNew request: invoke the sessioner
+// to mint a new session and write the minted UUID back to the client.
+//
+// The handler runs Pool.Create against a fresh background context with a
+// generous 30s deadline (well past the documented 2-15s claude spawn
+// latency). Reusing the conn's handshake deadline would race the
+// 5s handshake timer; a separate ctx is the simpler shape.
+//
+// Errors from sessioner.Create flow to Response.Error verbatim — Pool's own
+// messages already carry package context (e.g. "sessions: create
+// supervisor: ..."). Only the "sessioner not wired" diagnostic carries the
+// "sessions.new: " prefix, mirroring "logs: no log provider configured".
+func (s *Server) handleSessionsNew(enc *json.Encoder, payload *SessionsPayload) {
+	if s.sessioner == nil {
+		_ = enc.Encode(Response{Error: "sessions.new: no sessioner configured"})
+		return
+	}
+	var label string
+	if payload != nil {
+		label = payload.Label
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	id, err := s.sessioner.Create(ctx, label)
+	if err != nil {
+		_ = enc.Encode(Response{Error: err.Error()})
+		return
+	}
+	_ = enc.Encode(Response{SessionsNew: &SessionsNewResult{SessionID: string(id)}})
 }
 
 // handleAttach serves a VerbAttach request. Returns true iff connection

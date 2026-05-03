@@ -304,7 +304,10 @@ func runSupervisor(args []string) error {
 		return fmt.Errorf("pool init: %w", err)
 	}
 
-	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, cancel, logger)
+	// sessioner intentionally nil here — the pool wiring lands in the
+	// cmd/pyry sessions new CLI ticket. Until then VerbSessionsNew
+	// returns "sessions.new: no sessioner configured" to any caller.
+	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, cancel, logger, nil)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}

@@ -91,6 +91,33 @@ func SendResize(ctx context.Context, socketPath, sessionID string, cols, rows in
 	return nil
 }
 
+// SessionsNew asks the daemon to mint a new session with the given
+// (possibly empty) label and returns the new session's UUID. In-process Go
+// callers (the future cmd/pyry sessions new) consume this directly. Same
+// one-shot dial → encode → decode → close lifecycle as Status/Logs/Stop/
+// SendResize.
+//
+// Empty label sends {"verb":"sessions.new","sessions":{}}; the inner
+// SessionsPayload is non-nil so the field is present, but Label's
+// omitempty drops the empty string. The server treats nil and empty-Label
+// identically.
+func SessionsNew(ctx context.Context, socketPath, label string) (string, error) {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:     VerbSessionsNew,
+		Sessions: &SessionsPayload{Label: label},
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", errors.New(resp.Error)
+	}
+	if resp.SessionsNew == nil || resp.SessionsNew.SessionID == "" {
+		return "", errors.New("control: empty sessions.new response")
+	}
+	return resp.SessionsNew.SessionID, nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {

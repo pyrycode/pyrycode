@@ -34,13 +34,21 @@ const (
 	// of the (long-lived) attach connection so a malformed resize never
 	// disturbs the byte stream.
 	VerbResize Verb = "resize"
+
+	// VerbSessionsNew creates a new session. Request.Sessions carries an
+	// optional human-friendly label; Response.SessionsNew carries the
+	// minted session UUID. First member of the Phase 1.1 sessions.* verb
+	// family — the dot in the verb string is a documentation convention,
+	// not a parser rule.
+	VerbSessionsNew Verb = "sessions.new"
 )
 
 // Request is the wire format for a single client request.
 type Request struct {
-	Verb   Verb           `json:"verb"`
-	Attach *AttachPayload `json:"attach,omitempty"` // populated for VerbAttach
-	Resize *ResizePayload `json:"resize,omitempty"` // populated for VerbResize
+	Verb     Verb             `json:"verb"`
+	Attach   *AttachPayload   `json:"attach,omitempty"`   // populated for VerbAttach
+	Resize   *ResizePayload   `json:"resize,omitempty"`   // populated for VerbResize
+	Sessions *SessionsPayload `json:"sessions,omitempty"` // populated for VerbSessionsNew (Phase 1.1+)
 }
 
 // AttachPayload carries the client's terminal geometry at attach time and
@@ -66,6 +74,17 @@ type AttachPayload struct {
 	SessionID string `json:"sessionID,omitempty"`
 }
 
+// SessionsPayload carries arguments shared across the sessions.* verb
+// family. Today only Label is used (sessions.new); Phase 1.1b/c/d/e add
+// further omitempty fields (Selector, NewName, ...) to the same struct.
+//
+// Label is the human-friendly name supplied by the client. Empty maps to
+// a no-label session — Pool.Create accepts it verbatim and the registry
+// stores ""; not an error.
+type SessionsPayload struct {
+	Label string `json:"label,omitempty"`
+}
+
 // ResizePayload carries a live window-size update for an attached session.
 // SessionID resolution mirrors AttachPayload — empty selects bootstrap, full
 // UUID or unique prefix selects a specific session. Cols/Rows are wire ints
@@ -82,14 +101,24 @@ type ResizePayload struct {
 // exactly one of the verb-specific fields is populated:
 //   - Status: payload for VerbStatus
 //   - Logs: payload for VerbLogs
+//   - SessionsNew: payload for VerbSessionsNew
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
 type Response struct {
-	Status *StatusPayload `json:"status,omitempty"`
-	Logs   *LogsPayload   `json:"logs,omitempty"`
-	OK     bool           `json:"ok,omitempty"`
-	Error  string         `json:"error,omitempty"`
+	Status      *StatusPayload     `json:"status,omitempty"`
+	Logs        *LogsPayload       `json:"logs,omitempty"`
+	SessionsNew *SessionsNewResult `json:"sessionsNew,omitempty"` // populated for VerbSessionsNew
+	OK          bool               `json:"ok,omitempty"`
+	Error       string             `json:"error,omitempty"`
+}
+
+// SessionsNewResult carries the result of a successful sessions.new
+// request. SessionID is the minted UUID as a string (not the
+// sessions.SessionID newtype) so external clients need not import the
+// sessions package.
+type SessionsNewResult struct {
+	SessionID string `json:"sessionID"`
 }
 
 // LogsPayload carries recent supervisor log lines, oldest first. Capacity

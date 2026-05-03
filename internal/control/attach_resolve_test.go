@@ -135,7 +135,7 @@ func startServerForResolver(t *testing.T, r SessionResolver) (sock string, stop 
 	dir := shortTempDir(t)
 	sock = filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, r, nil, nil, nil)
+	srv := NewServer(sock, r, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

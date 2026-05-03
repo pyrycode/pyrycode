@@ -230,7 +230,7 @@ func TestServer_AttachHandshakeAndStream(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	provider := &fakeAttachProvider{}
-	srv := NewServer(sock, sessionResolverWith(provider.Attach), nil, nil, nil)
+	srv := NewServer(sock, sessionResolverWith(provider.Attach), nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestServer_AttachAppliesHandshakeGeometry(t *testing.T) {
 
 	provider := &fakeAttachProvider{}
 	sess := &fakeSession{attachFn: provider.Attach}
-	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestServer_AttachZeroGeometryNoOp(t *testing.T) {
 
 			provider := &fakeAttachProvider{}
 			sess := &fakeSession{attachFn: provider.Attach}
-			srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
+			srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil, nil)
 			if err := srv.Listen(); err != nil {
 				t.Fatalf("Listen: %v", err)
 			}
@@ -401,7 +401,7 @@ func TestServer_AttachResizeErrorDoesNotFailAttach(t *testing.T) {
 		attachFn:  provider.Attach,
 		resizeErr: errors.New("synthetic setsize failure"),
 	}
-	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestServer_AttachForegroundSessionResizeSwallowed(t *testing.T) {
 		},
 		resizeErr: sessions.ErrAttachUnavailable,
 	}
-	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestServer_AttachOnForegroundSession(t *testing.T) {
 	resolver := sessionResolverWith(func(in io.Reader, out io.Writer) (<-chan struct{}, error) {
 		return nil, sessions.ErrAttachUnavailable
 	})
-	srv := NewServer(sock, resolver, nil, nil, nil)
+	srv := NewServer(sock, resolver, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestServer_StopWhileAttached(t *testing.T) {
 		case shutdownFired <- struct{}{}:
 		default:
 		}
-	}, nil)
+	}, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -634,7 +634,7 @@ func TestServer_ConcurrentAttachRace(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	bridge := supervisor.NewBridge(nil)
-	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, nil, nil)
+	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestServer_HandshakeTimeout(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
-	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil)
+	srv := NewServer(sock, &fakeResolver{sess: &fakeSession{}}, nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -872,7 +872,7 @@ func TestServer_BridgeAttach(t *testing.T) {
 	sock := filepath.Join(dir, "p.sock")
 
 	bridge := supervisor.NewBridge(nil)
-	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, nil, nil)
+	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
