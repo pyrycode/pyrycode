@@ -19,7 +19,7 @@ func NewServer(
 
 `sessions` is the only required dependency that nil-panics at construction. Programmer error surfaces immediately, not on the first request from a future shell.
 
-`logs`, `shutdown`, and `sessioner` are optional. When nil, the corresponding verb returns an error response — used in tests that care about isolated verbs. `sessioner` is nil at server boot today (Phase 1.1a-B1); the CLI ticket wires `*sessions.Pool` here. See [Sessions: creation seam](#sessions-creation-seam-11a-b1).
+`logs`, `shutdown`, and `sessioner` are optional. When nil, the corresponding verb returns an error response — used in tests that care about isolated verbs. `sessioner` is nil at server boot today (Phase 1.1a-B1); the CLI ticket wires `*sessions.Pool` here. See `docs/specs/architecture/75-control-sessions-new.md` for the seam design.
 
 ## Resolver Seam
 
