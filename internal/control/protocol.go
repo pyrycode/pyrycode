@@ -28,12 +28,19 @@ const (
 	// the rest of the connection is raw bytes bridged to the supervised
 	// claude process's PTY. Standard "protocol upgrade" pattern.
 	VerbAttach Verb = "attach"
+
+	// VerbResize carries a live window-size update for an attached session.
+	// One-shot request/response on a fresh control connection — independent
+	// of the (long-lived) attach connection so a malformed resize never
+	// disturbs the byte stream.
+	VerbResize Verb = "resize"
 )
 
 // Request is the wire format for a single client request.
 type Request struct {
 	Verb   Verb           `json:"verb"`
 	Attach *AttachPayload `json:"attach,omitempty"` // populated for VerbAttach
+	Resize *ResizePayload `json:"resize,omitempty"` // populated for VerbResize
 }
 
 // AttachPayload carries the client's terminal geometry at attach time and
@@ -50,13 +57,25 @@ type Request struct {
 // Bridge.Resize (see #136). Either dimension being zero is the "unknown /
 // don't touch" sentinel — no resize is issued.
 //
-// Live SIGWINCH propagation while attached is still out of scope here; it
-// needs either a small framing change to multiplex resize events into the
-// raw byte stream or a side-channel control verb. Tracked by #137.
+// Live resize updates while attached are carried by VerbResize on a
+// separate control connection (see ResizePayload), emitted from the client
+// by the SIGWINCH handler in pyry attach (deferred to #133).
 type AttachPayload struct {
 	Cols      int    `json:"cols,omitempty"`
 	Rows      int    `json:"rows,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`
+}
+
+// ResizePayload carries a live window-size update for an attached session.
+// SessionID resolution mirrors AttachPayload — empty selects bootstrap, full
+// UUID or unique prefix selects a specific session. Cols/Rows are wire ints
+// for symmetry with AttachPayload; the server narrows + swaps at the seam
+// boundary. Either dimension being zero is the "unknown / don't touch"
+// sentinel — no resize is issued (same rule as the handshake path).
+type ResizePayload struct {
+	SessionID string `json:"sessionID,omitempty"`
+	Cols      int    `json:"cols,omitempty"`
+	Rows      int    `json:"rows,omitempty"`
 }
 
 // Response is the wire format for a single server response. On success
