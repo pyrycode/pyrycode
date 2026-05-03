@@ -95,7 +95,10 @@ const oldUUID = "00000000-0000-4000-8000-000000000001"
 
 func TestWatcher_DetectsRotation(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	newPath := filepath.Join(dir, newUUID+".jsonl")
 	probe := &fakeProbe{pathFn: func() string { return newPath }}
 	rec := &rotateRecord{}
@@ -129,7 +132,10 @@ func TestWatcher_DetectsRotation(t *testing.T) {
 
 func TestWatcher_SkipsAllocated(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	newPath := filepath.Join(dir, newUUID+".jsonl")
 	probe := &fakeProbe{pathFn: func() string { return newPath }}
 	rec := &rotateRecord{}
@@ -164,7 +170,10 @@ func TestWatcher_SkipsAllocated(t *testing.T) {
 
 func TestWatcher_SkipsNonJSONL(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	probe := &fakeProbe{pathFn: func() string { return filepath.Join(dir, "foo.txt") }}
 	rec := &rotateRecord{}
 
@@ -190,7 +199,10 @@ func TestWatcher_SkipsNonJSONL(t *testing.T) {
 
 func TestWatcher_SkipsMalformedUUID(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := &rotateRecord{}
 
 	startWatcher(t, Config{
@@ -214,7 +226,10 @@ func TestWatcher_SkipsMalformedUUID(t *testing.T) {
 
 func TestWatcher_NoSessionsZeroPID(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	probe := &fakeProbe{}
 	rec := &rotateRecord{}
 
@@ -243,7 +258,10 @@ func TestWatcher_NoSessionsZeroPID(t *testing.T) {
 
 func TestWatcher_ProbePathMismatch(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Probe reports the OLD jsonl, not the new one.
 	probe := &fakeProbe{pathFn: func() string {
 		return filepath.Join(dir, oldUUID+".jsonl")
@@ -324,4 +342,51 @@ func TestWatcher_ContextCancelExits(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Run did not exit within 500ms after cancel")
 	}
+}
+
+// TestWatcher_DetectsRotationThroughSymlink locks in the symlink-resolution
+// fix: the watch is set up against a symlink to the real sessions dir, and
+// the probe reports the *resolved* path (mimicking lsof / proc-fd output).
+// Without the EvalSymlinks resolution in New, the comparison gate would
+// reject the match and OnRotate would never fire.
+func TestWatcher_DetectsRotationThroughSymlink(t *testing.T) {
+	t.Parallel()
+	realDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "linked-sessions")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	probedPath := filepath.Join(realDir, newUUID+".jsonl")
+	probe := &fakeProbe{pathFn: func() string { return probedPath }}
+	rec := &rotateRecord{}
+
+	startWatcher(t, Config{
+		Dir:    link,
+		Probe:  probe,
+		Logger: discardLogger(),
+		Snapshot: func() []SessionRef {
+			return []SessionRef{{ID: oldUUID, PID: 1234}}
+		},
+		OnRotate: rec.record,
+	})
+
+	if err := os.WriteFile(filepath.Join(link, newUUID+".jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if calls := rec.snapshot(); len(calls) >= 1 {
+			if calls[0] != [2]string{oldUUID, newUUID} {
+				t.Fatalf("rotate args = %v, want [%q %q]", calls[0], oldUUID, newUUID)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("OnRotate not called within 1s")
 }

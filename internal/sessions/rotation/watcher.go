@@ -65,6 +65,11 @@ type Config struct {
 type Watcher struct {
 	cfg Config
 	fsw *fsnotify.Watcher
+	// resolvedDir is cfg.Dir with symlinks resolved, captured once at New so
+	// the per-event match in handleCreate compares against the same canonical
+	// form the platform probe returns. Falls back to cfg.Dir if EvalSymlinks
+	// fails.
+	resolvedDir string
 }
 
 // New constructs a Watcher. Returns an error only if fsnotify itself fails
@@ -100,7 +105,13 @@ func New(cfg Config) (*Watcher, error) {
 		_ = fsw.Close()
 		return nil, fmt.Errorf("fsnotify add %s: %w", cfg.Dir, err)
 	}
-	return &Watcher{cfg: cfg, fsw: fsw}, nil
+	resolved, err := filepath.EvalSymlinks(cfg.Dir)
+	if err != nil {
+		cfg.Logger.Warn("rotation: EvalSymlinks failed; using unresolved dir for path comparison",
+			"dir", cfg.Dir, "err", err)
+		resolved = cfg.Dir
+	}
+	return &Watcher{cfg: cfg, fsw: fsw, resolvedDir: resolved}, nil
 }
 
 // Run blocks until ctx is cancelled or the underlying fsnotify watcher's
@@ -164,7 +175,8 @@ func (w *Watcher) handleCreate(ctx context.Context, fullPath string) {
 		if open == "" {
 			continue
 		}
-		if filepath.Clean(open) != filepath.Clean(fullPath) {
+		expected := filepath.Join(w.resolvedDir, base)
+		if filepath.Clean(open) != expected {
 			continue
 		}
 		w.cfg.Logger.Info("rotation: detected /clear", "from", ref.ID, "to", stem, "pid", ref.PID)
