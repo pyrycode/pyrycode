@@ -780,6 +780,109 @@ The seam returns whatever order `Pool.List` returned (LastActiveAt descending, S
 
 See `docs/specs/architecture/87-control-sessions-list.md` for the full design.
 
+## Sessions: CLI Router (1.1a-B2)
+
+`pyry sessions <verb>` is the operator-facing surface for the `sessions.*` namespace. The router lives in `cmd/pyry/main.go` (`runSessions`) and dispatches the first verb today (`new`); 1.1b/c/d/e plug in as one switch case + one `runSessions<Verb>` helper each. The structural invariant — "one line per future verb" — is what the architect's choice of dispatch shape buys.
+
+### Top-level dispatch
+
+`run()`'s top-level switch gains a single case:
+
+```go
+case "sessions":
+    return runSessions(os.Args[2:])
+```
+
+Adding 1.1b/c/d/e never touches this site again — the sub-router owns the rest.
+
+### Sub-router
+
+```go
+const sessionsVerbList = "new" // appended by 1.1b/c/d/e in lockstep with the switch
+
+func runSessions(args []string) error {
+    socketPath, rest, err := parseClientFlags("pyry sessions", args)
+    if err != nil { return err }
+    if len(rest) == 0 {
+        return errSessionsUsage("missing subcommand")
+    }
+    sub, subArgs := rest[0], rest[1:]
+    switch sub {
+    case "new":
+        return runSessionsNew(socketPath, subArgs)
+    default:
+        return errSessionsUsage(fmt.Sprintf("unknown verb %q", sub))
+    }
+}
+```
+
+Two design points lock the shape for the follow-on tickets:
+
+- **The sub-router takes the *parsed* `socketPath`, not raw args.** `-pyry-socket` / `-pyry-name` are parsed exactly once by the existing `parseClientFlags` helper, before sub-verb dispatch. The convention "global pyry flags before the sub-verb" is enforced structurally — a `-pyry-name` placed *after* `new` reaches `runSessionsNew`'s own `flag.NewFlagSet` and produces "flag provided but not defined", not silent shadowing. Mirrors the top-level `splitArgs` convention ("pyry flags must come before claude args"). Pinned by `TestRunSessions_GlobalFlagAfterSubcommand_FailsCleanly` in `cmd/pyry/sessions_test.go`.
+- **Constant `sessionsVerbList` over a derived list (map keys / reflection on the switch).** With one verb today and four 1-line additions in 1.1b/c/d/e, the duplication is one token per verb in two places (switch case + constant). A `map[string]func` would derive the list from `range m` but force a sort and pay an iteration cost that only amortizes at 3+ verbs. Dead-simple beats indirection here.
+
+Unknown-verb (`pyry sessions list` before #61 lands) and missing-verb (`pyry sessions`) both surface through `errSessionsUsage` as `sessions: <detail>\nverbs: <list>`, exit 1. The router never falls through to the "forward unknown args to claude" path — the top-level switch returns from `runSessions` before `runSupervisor` is reached, so AC#3 is satisfied structurally.
+
+### `runSessionsNew` handler
+
+```go
+func runSessionsNew(socketPath string, args []string) error {
+    label, err := parseSessionsNewArgs(args)
+    if err != nil { return fmt.Errorf("sessions new: %w", err) }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    id, err := control.SessionsNew(ctx, socketPath, label)
+    if err != nil { return fmt.Errorf("sessions new: %w", err) }
+    fmt.Println(id)
+    return nil
+}
+```
+
+`parseSessionsNewArgs(args) (label string, err error)` is the unit-testable seam — flag-parse + arity check, no network. Mirrors `attachSelectorFromArgs`'s split (1.1e-D); keeps `cmd/pyry/sessions_test.go` table-driven over flag forms (`--name`, `-name`, `--name=`, `--name=glued`, extra positional, unknown flag) without dialling the socket.
+
+Three boundary rules pinned by AC:
+
+- **Stdout is exactly `<uuid>\n`** — `fmt.Println(id)` writes the canonical 36-character UUIDv4 with a single trailing newline, no surrounding text. Pinned by `TestSessionsNew_E2E_Labelled` / `_Unlabelled` against `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$`.
+- **Empty `--name` / no `--name` are equivalent** — both produce `label=""`, which `Pool.Create` stores verbatim as a no-label registry entry. The synthetic `"bootstrap"` substitution in `Pool.List` does *not* apply because `Bootstrap=false`; non-bootstrap empty-label sessions stay empty-labelled.
+- **30s timeout mirrors the server-side ceiling.** `handleSessionsNew` uses `context.WithTimeout(..., 30s)` for `Pool.Create`; the client matches so neither side hangs the other. Lower would race the claude-spawn path (2-15s typical); higher gains nothing operationally — a stuck `Pool.Create` at 30s is a bug to surface, not paper over.
+
+### Sub-verb flag parsing — own FlagSet per verb
+
+Each sub-verb's flag parser is its own `flag.NewFlagSet("pyry sessions <verb>", flag.ContinueOnError)`. Mirrors `runInstallService`'s precedent. Phase 1.1c's `--new-name` and 1.1d's `--archive`/`--purge` will reuse the same shape — no namespace-specific options accumulate on the top-level FlagSet, no name collision possible across sub-verbs.
+
+### Error propagation
+
+| Scenario | Operator-visible message | Source |
+|---|---|---|
+| `pyry sessions` (no verb) | `pyry: sessions: missing subcommand\nverbs: new` (exit 1) | `errSessionsUsage` |
+| `pyry sessions list` (1.1b not yet landed) | `pyry: sessions: unknown verb "list"\nverbs: new` (exit 1) | `errSessionsUsage` |
+| `pyry sessions new` against stopped daemon | `pyry: sessions new: dial …: connect: no such file or directory` (exit 1) | `request()` → `dial()` wrap |
+| `pyry sessions new --name foo bar` | `pyry: sessions new: unexpected positional "bar"` (exit 1) | `parseSessionsNewArgs` arity check |
+| Server-side `Pool.Create` failure | `pyry: sessions new: sessions: create supervisor: <claude err>` (exit 1) | `Response.Error` propagated by `SessionsNew` |
+| Server-side activation failure (id valid, lifecycle goroutine respawns later) | `pyry: sessions new: <activate err>` (exit 1). **Registry entry remains** — operator can `pyry attach <uuid>` once 1.1e ships. | per AC#4 |
+
+Activation failure is **not** distinguishable from a generic error at the wire boundary (the wire has no separate "id valid despite error" channel). The registry entry persists because `Pool.Create` saves before the activation step, so AC#4 is satisfied server-side.
+
+### Help text
+
+```
+  pyry sessions <verb> [flags]                   manage sessions on a running
+                                                  daemon (verbs: new)
+```
+
+Phase 1.1b/c/d/e each append one verb to the parenthesised list, in lockstep with `sessionsVerbList`.
+
+### Tests
+
+- **`cmd/pyry/sessions_test.go`** (unit, ~100 LOC) — pins router shape and flag-parse / arity rules in isolation. `TestRunSessions_NoSubcommand`, `TestRunSessions_UnknownVerb`, `TestRunSessions_GlobalFlagAfterSubcommand_FailsCleanly`, and table-driven `TestParseSessionsNewArgs` over `--name` / `-name` / `--name=` / extra positional / unknown flag.
+- **`internal/e2e/sessions_new_test.go`** (e2e, build tag `e2e`, ~165 LOC) — daemon-up against the `writeSleepClaude` stand-in (#116): `TestSessionsNew_E2E_Labelled` / `_Unlabelled` (stdout regex + registry post-condition: ID present, `Label`, `Bootstrap=false`); `TestSessionsNew_E2E_UnknownVerb` (registry session count unchanged before/after — AC#3); `TestSessionsNew_E2E_NoDaemon` (`RunBare` against bogus socket; non-zero exit, non-empty stderr, no `panic`/`goroutine`/`runtime/` substrings — AC#2).
+
+`Pool.Create` failure surfacing (typed sentinels, nil-Sessioner branch, etc.) is **not** re-tested through the CLI shell — `internal/control/sessions_new_test.go` (#75) covers it exhaustively against the wire. The CLI is `fmt.Errorf("sessions new: %w", err)` over a wire client we trust.
+
+See [ADR 010](../decisions/010-sessions-cli-sub-router.md) for why the sub-router takes a parsed `socketPath` rather than raw args, and why `sessionsVerbList` is a constant rather than derived.
+
 ## Process-Global vs Per-Session
 
 | Concern | Scope today | Source |
@@ -790,7 +893,7 @@ See `docs/specs/architecture/87-control-sessions-list.md` for the full design.
 | `logs` ring buffer | process-global | `LogProvider`, written by all loggers |
 | `stop` shutdown | process-global | `shutdown` cancel func |
 
-Phase 1.1's `pyry sessions list` and `pyry attach <id>` extend the per-session column. Logs and stop stay process-global until a concrete need pushes them otherwise.
+Phase 1.1's `pyry sessions new` (#76) and the upcoming `pyry sessions list` / `pyry attach <id>` extend the per-session column. Logs and stop stay process-global until a concrete need pushes them otherwise.
 
 ## Lifecycle
 
