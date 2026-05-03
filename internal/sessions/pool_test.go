@@ -787,7 +787,10 @@ func TestPool_Run_StartsWatcher(t *testing.T) {
 		t.Skipf("benign binary not available: %v", err)
 	}
 
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	regPath := filepath.Join(t.TempDir(), "sessions.json")
 
 	// Replace the platform probe factory with a fake that returns whatever
