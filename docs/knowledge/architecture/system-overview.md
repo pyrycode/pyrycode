@@ -243,7 +243,7 @@ test-only override on `Options.Binary`. See
 ## Future Architecture (not yet implemented)
 
 - **Phase 1.1a-A1 (#72) — landed:** `Pool.supervise(sess)` seam + `runGroup`/`runCtx` handle on `*Pool`. Bootstrap fan-out in `Pool.Run` flows through the helper; the watcher fan-out stays inline (not a `*Session`). `ErrPoolNotRunning` sentinel for before/after-`Run` calls.
-- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam, landed), `AttachPayload.SessionID` on the wire (1.1e-C, landed — server routes via `Pool.ResolveID`; CLI surface still pending), `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>` CLI positional (1.1e-D), per-session log lines, live SIGWINCH propagation on the wire (#137 — stacks on top of `Bridge.Resize` from #136) + client-side SIGWINCH emitter (#133)
+- **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam, landed), `AttachPayload.SessionID` on the wire (1.1e-C, landed — server routes via `Pool.ResolveID`; CLI surface still pending), `pyry sessions new` calling `Pool.RegisterAllocatedUUID` before `claude --session-id <uuid>`, `pyry attach <id>` CLI positional (1.1e-D), per-session log lines. Live-resize loop landed end-to-end across #136 (`Bridge.Resize` seam) + #137 (`VerbResize` wire + `handleResize` server applier) + #133 (`startWinsizeWatcher` client-side SIGWINCH emitter in `pyry attach`).
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing
