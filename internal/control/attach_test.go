@@ -283,19 +283,18 @@ func TestServer_AttachHandshakeAndStream(t *testing.T) {
 	t.Errorf("provider never received the client bytes; got %q", provider.received())
 }
 
-// TestServer_AttachIgnoresGeometryToday locks in the current Phase 0
-// contract: clients send Cols/Rows in the handshake but the server discards
-// them — the bridge has no window-size setter yet. When that gap is closed,
-// this test will need to assert the values were propagated instead, which
-// is the right moment to remember the contract changed.
-func TestServer_AttachIgnoresGeometryToday(t *testing.T) {
+// TestServer_AttachAppliesHandshakeGeometry asserts the server invokes the
+// resize seam with the handshake Cols/Rows from AttachPayload — rows-then-cols
+// to match the seam's signature (mirroring pty.Winsize). Pins #136 AC#2.
+func TestServer_AttachAppliesHandshakeGeometry(t *testing.T) {
 	t.Parallel()
 
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "p.sock")
 
 	provider := &fakeAttachProvider{}
-	srv := NewServer(sock, sessionResolverWith(provider.Attach), nil, nil, nil)
+	sess := &fakeSession{attachFn: provider.Attach}
+	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -309,7 +308,6 @@ func TestServer_AttachIgnoresGeometryToday(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Send Cols and Rows. They should be accepted.
 	if err := json.NewEncoder(conn).Encode(Request{
 		Verb:   VerbAttach,
 		Attach: &AttachPayload{Cols: 200, Rows: 50},
@@ -324,12 +322,158 @@ func TestServer_AttachIgnoresGeometryToday(t *testing.T) {
 		t.Fatalf("attach with geometry should succeed; got %+v", resp)
 	}
 
-	// fakeAttachProvider.Attach takes (in, out). It has no concept of
-	// window size — there is no place in the server-to-bridge plumbing
-	// where Cols/Rows could land today. The "passes" criterion for this
-	// test is just that the server accepted the payload without error.
-	// When the contract changes, expand this test: assert provider saw
-	// Cols=200, Rows=50.
+	calls := sess.recordedResizeCalls()
+	want := []resizeCall{{Rows: 50, Cols: 200}}
+	if len(calls) != len(want) || calls[0] != want[0] {
+		t.Errorf("resize calls = %v, want %v", calls, want)
+	}
+}
+
+// TestServer_AttachZeroGeometryNoOp asserts that a zero in either dimension
+// (the protocol's "unknown / don't touch" sentinel) suppresses the resize
+// call entirely. A missing Attach payload is also a no-op.
+func TestServer_AttachZeroGeometryNoOp(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		payload *AttachPayload
+	}{
+		{"both zero", &AttachPayload{Cols: 0, Rows: 0}},
+		{"cols zero", &AttachPayload{Cols: 0, Rows: 50}},
+		{"rows zero", &AttachPayload{Cols: 200, Rows: 0}},
+		{"nil payload", nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := shortTempDir(t)
+			sock := filepath.Join(dir, "p.sock")
+
+			provider := &fakeAttachProvider{}
+			sess := &fakeSession{attachFn: provider.Attach}
+			srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
+			if err := srv.Listen(); err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() { _ = srv.Serve(ctx) }()
+
+			conn, err := net.Dial("unix", sock)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+
+			req := Request{Verb: VerbAttach, Attach: tc.payload}
+			if err := json.NewEncoder(conn).Encode(req); err != nil {
+				t.Fatalf("encode handshake: %v", err)
+			}
+			var resp Response
+			if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+				t.Fatalf("decode ack: %v", err)
+			}
+			if !resp.OK {
+				t.Fatalf("attach should still succeed: %+v", resp)
+			}
+
+			if calls := sess.recordedResizeCalls(); len(calls) != 0 {
+				t.Errorf("expected no resize calls, got %v", calls)
+			}
+		})
+	}
+}
+
+// TestServer_AttachResizeErrorDoesNotFailAttach asserts that a Resize error
+// (e.g. transient EBADF on a closed fd between iterations) is logged but
+// does not fail the attach handshake. Geometry is best-effort.
+func TestServer_AttachResizeErrorDoesNotFailAttach(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	provider := &fakeAttachProvider{}
+	sess := &fakeSession{
+		attachFn:  provider.Attach,
+		resizeErr: errors.New("synthetic setsize failure"),
+	}
+	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := json.NewEncoder(conn).Encode(Request{
+		Verb:   VerbAttach,
+		Attach: &AttachPayload{Cols: 80, Rows: 24},
+	}); err != nil {
+		t.Fatalf("encode handshake: %v", err)
+	}
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if !resp.OK {
+		t.Errorf("attach should succeed despite resize error; got %+v", resp)
+	}
+}
+
+// TestServer_AttachForegroundSessionResizeSwallowed pins that the foreground
+// session path (Resize returns ErrAttachUnavailable) does not fail the
+// attach. The attach itself still surfaces the foreground error via Attach
+// returning ErrAttachUnavailable, exercised by TestServer_AttachOnForegroundSession.
+func TestServer_AttachForegroundSessionResizeSwallowed(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	sess := &fakeSession{
+		attachFn: func(io.Reader, io.Writer) (<-chan struct{}, error) {
+			return nil, sessions.ErrAttachUnavailable
+		},
+		resizeErr: sessions.ErrAttachUnavailable,
+	}
+	srv := NewServer(sock, &fakeResolver{sess: sess}, nil, nil, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := json.NewEncoder(conn).Encode(Request{
+		Verb:   VerbAttach,
+		Attach: &AttachPayload{Cols: 80, Rows: 24},
+	}); err != nil {
+		t.Fatalf("encode handshake: %v", err)
+	}
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	const want = "attach: no attach provider configured (daemon may be in foreground mode)"
+	if resp.Error != want {
+		t.Errorf("Error = %q, want %q", resp.Error, want)
+	}
 }
 
 // TestServer_AttachOnForegroundSession exercises the foreground-mode wire

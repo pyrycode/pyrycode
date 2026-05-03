@@ -21,12 +21,18 @@ import (
 // Set attachFn to drive the Attach behaviour; nil means "no attach configured"
 // (i.e. tests that exercise non-attach verbs).
 type fakeSession struct {
-	mu             sync.Mutex
-	state          supervisor.State
-	attachFn       func(in io.Reader, out io.Writer) (<-chan struct{}, error)
-	activateCalls  int
-	activateErr    error
+	mu            sync.Mutex
+	state         supervisor.State
+	attachFn      func(in io.Reader, out io.Writer) (<-chan struct{}, error)
+	activateCalls int
+	activateErr   error
+	resizeCalls   []resizeCall
+	resizeErr     error
 }
+
+// resizeCall records one Session.Resize invocation. Rows-then-cols matches
+// the seam's argument order (mirroring pty.Winsize).
+type resizeCall struct{ Rows, Cols uint16 }
 
 func (f *fakeSession) State() supervisor.State {
 	f.mu.Lock()
@@ -49,6 +55,23 @@ func (f *fakeSession) Activate(ctx context.Context) error {
 	defer f.mu.Unlock()
 	f.activateCalls++
 	return f.activateErr
+}
+
+func (f *fakeSession) Resize(rows, cols uint16) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resizeCalls = append(f.resizeCalls, resizeCall{Rows: rows, Cols: cols})
+	return f.resizeErr
+}
+
+// recordedResizeCalls returns a copy of the recorded resize history under
+// the lock — callers must not access fakeSession.resizeCalls directly.
+func (f *fakeSession) recordedResizeCalls() []resizeCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]resizeCall, len(f.resizeCalls))
+	copy(out, f.resizeCalls)
+	return out
 }
 
 // fakeResolver returns its single fakeSession for any id. Set lookupErr to

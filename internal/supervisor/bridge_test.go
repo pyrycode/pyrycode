@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // errWriter implements io.Writer and returns the configured error on every
@@ -147,6 +149,70 @@ func TestBridge_RejectsConcurrentAttach(t *testing.T) {
 	// Now a fresh attach should succeed.
 	if _, err := b.Attach(strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Errorf("post-detach Attach: %v", err)
+	}
+}
+
+// TestBridge_ResizeAppliesToPTY opens a real PTY pair and verifies that
+// after SetPTY + Resize, pty.Getsize reads back the dimensions we set.
+// Skipped on hosts where pty.Open is unavailable (sandboxed CI etc.) —
+// matches the e2e harness's pattern in internal/e2e/attach_pty.go.
+func TestBridge_ResizeAppliesToPTY(t *testing.T) {
+	t.Parallel()
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty.Open unavailable: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	b := NewBridge(nil)
+	b.SetPTY(master)
+
+	if err := b.Resize(40, 100); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+
+	rows, cols, err := pty.Getsize(master)
+	if err != nil {
+		t.Fatalf("pty.Getsize: %v", err)
+	}
+	if rows != 40 || cols != 100 {
+		t.Errorf("size = (%d rows, %d cols), want (40, 100)", rows, cols)
+	}
+}
+
+// TestBridge_ResizeNoPTYRegistered asserts the seam is silent (returns nil)
+// when no PTY has been registered for the current iteration. This is the
+// race window between EndIteration and the next BeginIteration where an
+// in-flight client resize targets nothing.
+func TestBridge_ResizeNoPTYRegistered(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+	if err := b.Resize(40, 100); err != nil {
+		t.Errorf("Resize on bridge with no PTY: %v, want nil", err)
+	}
+}
+
+// TestBridge_ResizeAfterClearPTY asserts SetPTY(nil) returns Resize to its
+// silent-no-op state — this is what runOnce relies on at iteration teardown.
+func TestBridge_ResizeAfterClearPTY(t *testing.T) {
+	t.Parallel()
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Skipf("pty.Open unavailable: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	b := NewBridge(nil)
+	b.SetPTY(master)
+	b.SetPTY(nil)
+
+	if err := b.Resize(40, 100); err != nil {
+		t.Errorf("Resize after SetPTY(nil): %v, want nil", err)
 	}
 }
 
