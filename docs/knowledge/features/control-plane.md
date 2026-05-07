@@ -1117,7 +1117,9 @@ No human-affordance stderr lines (`--stdio` mode already suppresses them); the d
 
 `cmd/pyry/auto_attach_test.go` covers `extractSessionID`'s shape rules and every fall-through arm of `tryAutoAttach`: no-session-id, env opt-out (strict `"1"`), socket absent (<50ms wall-clock budget), daemon unresponsive (listen but never accept; returns within 1.5s via the 1s probe ctx), has-id returns false, has-id errors on malformed input. The has-id branches use a tiny in-test Unix-socket accept loop that decodes one Request and writes back a canned Response — no full server harness.
 
-The attach-commit branch (has-id true → `AttachStdio` runs) is intentionally **not** unit-tested; e2e coverage of the dispatch lives in #163 (happy path) and #164 (fallback scenarios). `internal/control/attach_stdio_client_test.go` (#154) covers `AttachStdio`'s own contract.
+The attach-commit branch (has-id true → `AttachStdio` runs) is intentionally **not** unit-tested; e2e coverage of the dispatch lives in #163 (happy path — `TestE2E_ForegroundAutoAttach_AttachesWhenDaemonHasSession` in `internal/e2e/auto_attach_happy_test.go`, see [e2e-harness.md § Foreground Auto-Attach Harness Pattern](e2e-harness.md#foreground-auto-attach-harness-pattern-auto_attachgo-auto_attach_happy_testgo-163)) and #164 (fallback scenarios). `internal/control/attach_stdio_client_test.go` (#154) covers `AttachStdio`'s own contract.
+
+#163's test is also the **first end-to-end proof** of `control.AttachStdio` against a real daemon — #161/#162's stdio-attach tests are `t.Skip`'d pending #167, but auto-attach reaches `AttachStdio` directly from `runSupervisor` (no `parseClientFlags`, no verb dispatch), so the bug doesn't reach this code path.
 
 See `docs/specs/architecture/158-foreground-auto-attach.md` for the full ticket-time design; this section is the canonical evergreen reference.
 
