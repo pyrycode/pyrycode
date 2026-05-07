@@ -247,7 +247,7 @@ All new tests in `internal/control/attach_stdio_client_test.go`. Drive both side
 | `TestAttachStdio_InReadErrorPropagates` | Non-EOF read error on `in` propagates wrapped (distinguishes "stdin EOFed" from "pipe broke") |
 | `TestParseAttachArgs` (in `cmd/pyry/args_test.go`) | Flag-parsing rules: `--stdio` alone, `-stdio` (single dash), `--stdio <id>`, `<id> --stdio` (rejected), too many positionals |
 
-E2E coverage (process-level harness driving `pyry attach --stdio` against a real daemon) is deferred to #161; the no-PTY-in-fd-table assertion (`lsof` / `/proc/<pid>/fd`) lands in #162.
+E2E coverage: the process-level harness driving `pyry attach --stdio` against a real daemon landed in #161 (`internal/e2e/attach_stdio.go` — `startStdioAttach` + `StdioAttachClient`; see [e2e-harness.md § Stdio-Attach Harness Pattern](e2e-harness.md#stdio-attach-harness-pattern-attach_stdiogo-attach_stdio_testgo-161)). The accompanying `TestE2E_AttachStdio_BytesRoundTrip` is `t.Skip`'d pending #167 — `pyry attach --stdio` is rejected by `parseClientFlags` before `parseAttachArgs` runs, a gap the unit tests didn't catch because they bypass the global-flag parser. The no-PTY-in-fd-table assertion (`lsof` / `/proc/<pid>/fd`) lands in #162 atop the same harness.
 
 ## Attach: Foreground-mode Wire String
 
