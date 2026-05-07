@@ -2,6 +2,20 @@
 
 This is a repo-local copy of the project plan. The authoritative working doc lives in the Obsidian vault at `📋 Projects/2026-04-10 - Pyrycode/Pyrycode.md`.
 
+## Releases
+
+| Tag | Name | Date | Highlights |
+|---|---|---|---|
+| `v0.8.0` | multi-session | 2026-05-07 | Pool refactor, `pyry sessions new/list/rm/rename` + `attach <id>` CLI, `sessions.json` persistence + idle eviction + lazy respawn (Phase 1 complete) |
+| `v0.5.3` | concurrent-pyry detection | 2026-05-01 | Second `pyry` on the same socket fails with `ErrInstanceRunning` instead of silently hijacking |
+| `v0.5.2` | install-service auto-PATH | 2026-05-01 | `pyry install-service` inherits user PATH by default |
+| `v0.5.1` | install-service subcommand | 2026-05-01 | systemd / launchd unit-file generator |
+| `v0.5.0` | supervisor MVP | 2026-05-01 | First public release; Phase 0 complete |
+
+Semver tags are assigned at release time based on what changed — minor bumps for new features, patches for bug fixes. They are intentionally **decoupled** from the planning phase numbers below: Phase 0 took four patch releases (`v0.5.0`–`v0.5.3`), and Phase 1's three sub-phases (1.0, 1.1, 1.2) shipped as a single `v0.8.0`. Phases group work at planning time; tags identify what shipped at delivery time. Don't pre-assign tags to unshipped phases.
+
+`v1.0.0` is reserved for the first version that commits to wire-protocol stability — likely after Phase 5 (remote access) locks the over-the-wire surface.
+
 ## Phase 0 — Minimum viable supervisor
 
 The smallest thing that can replace `tmux` + the bash restart loop and host Pyry in production. **Done; pyrybox is on systemd pyry as of 2026-05-01.**
@@ -27,15 +41,15 @@ The smallest thing that can replace `tmux` + the bash restart loop and host Pyry
 - [x] **Concurrent-pyry detection:** second `pyry` on the same socket fails with `ErrInstanceRunning` instead of silently hijacking (v0.5.3)
 - [ ] Backoff-loop cooldown: if crashes happen N times in T seconds, bail out (deferred — current loop retries forever, which is the right behaviour for the always-on service)
 
-## Phase 1 — Multi-session pool
+## Phase 1 — Multi-session pool — SHIPPED (`v0.8.0`)
 
-Lift the supervisor from one-claude to N-claudes, addressed by session UUID. **Design locked, implementation pending — see [`multi-session.md`](multi-session.md) for full design notes.**
+Lift the supervisor from one-claude to N-claudes, addressed by session UUID. **Shipped 2026-05-07 as `v0.8.0` — full design in [`multi-session.md`](multi-session.md).**
 
-| Sub-phase | Scope | Tag |
+| Sub-phase | Scope | Status |
 |---|---|---|
-| **1.0** | Pool refactor — internal restructure. Single-session externally; Pool always has exactly one entry. | `v0.6.0` |
-| **1.1** | `pyry sessions new/list/rm/rename` + `pyry attach <id>`. Multi-session works from a terminal. | `v0.7.0` |
-| **1.2** | `sessions.json` persistence + idle eviction + lazy respawn on next message. | `v0.8.0` |
+| **1.0** | Pool refactor — internal restructure. Single-session externally; Pool always has exactly one entry. | shipped in `v0.8.0` |
+| **1.1** | `pyry sessions new/list/rm/rename` + `pyry attach <id>`. Multi-session works from a terminal. | shipped in `v0.8.0` |
+| **1.2** | `sessions.json` persistence + idle eviction + lazy respawn on next message. | shipped in `v0.8.0` |
 
 Locked decisions from the 2026-05-01 design pass:
 
@@ -49,10 +63,10 @@ Locked decisions from the 2026-05-01 design pass:
 
 Pyrycode owns the Discord and Telegram clients directly. The current `--channels plugin:discord@…` plugin is structurally one-claude-only (one bot token can't be shared across N processes), so multi-session over Discord requires pyrycode taking over the bot connection.
 
-| Sub-phase | Scope | Tag |
-|---|---|---|
-| **2.0** | pyrycode-owned Discord client (one bot, gateway connection in pyry) + first-message lazy bind: message in unbound channel → spawn session, register channel→UUID, persist | `v0.9.0` |
-| **2.1** | pyrycode-owned Telegram client (same shape, parallel impl) | `v0.10.0` |
+| Sub-phase | Scope |
+|---|---|
+| **2.0** | pyrycode-owned Discord client (one bot, gateway connection in pyry) + first-message lazy bind: message in unbound channel → spawn session, register channel→UUID, persist |
+| **2.1** | pyrycode-owned Telegram client (same shape, parallel impl) |
 
 Mapping: **Discord channel = session** (one channel binds to one session UUID). Same for Telegram chats. Lazy bind on first message — zero config to start a new conversation in a new channel.
 
@@ -67,10 +81,10 @@ Parallel transport pointing at the same Pool. Stacks on top of Phase 1; doesn't 
 - Auth via per-user tokens (transport-level concern, not pyry's responsibility)
 - One pyry, N sessions, mobile UI lets user create / rename / archive
 
-| Sub-phase | Scope | Tag |
-|---|---|---|
-| **3.0** | Protocol design + minimal HTTP/WS server in pyry | `v1.0.0` |
-| **3.x** | Per-channel UX features (notifications, attachments, typing indicators) | post-`v1.0.0` |
+| Sub-phase | Scope |
+|---|---|
+| **3.0** | Protocol design + minimal HTTP/WS server in pyry |
+| **3.x** | Per-channel UX features (notifications, attachments, typing indicators) |
 
 ## Phase 4 — Cross-cutting services in-process
 
