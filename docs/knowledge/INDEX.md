@@ -25,6 +25,7 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 | 009 | [009-resize-wire-shape.md](decisions/009-resize-wire-shape.md) | Live SIGWINCH propagation rides a side-channel `VerbResize` on a fresh control connection (over a framed escape inside the attach byte stream); raw byte purity preserved, AC#2 satisfied structurally |
 | 010 | [010-sessions-cli-sub-router.md](decisions/010-sessions-cli-sub-router.md) | `pyry sessions <verb>` dispatches via a `runSessions` sub-router that peels global pyry flags via `parseClientFlags` then dispatches on the first positional; each sub-verb owns its own `flag.NewFlagSet`; `sessionsVerbList` constant over a derived list |
 | 011 | [011-cli-prefix-resolution.md](decisions/011-cli-prefix-resolution.md) | UUID-or-prefix resolution for `sessions.*` CLI verbs is client-side via `control.SessionsList` (mirroring `Pool.ResolveID`'s exact-then-prefix order) over extending the wire with a prefix-aware `sessions.rm` or a dedicated `sessions.resolve` verb |
+| 012 | [012-attach-stdio-flag-vs-verb.md](decisions/012-attach-stdio-flag-vs-verb.md) | `pyry attach --stdio` is a flag on the existing verb (over a separate `attach-stdio` verb or auto-detect via `term.IsTerminal`); reuses `VerbAttach` with `Cols=0/Rows=0` riding `omitempty` off the wire — zero server change |
 
 ## Features
 

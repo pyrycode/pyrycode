@@ -430,6 +430,25 @@ func runLogs(args []string) error {
 	return nil
 }
 
+// parseAttachArgs peels the attach-specific sub-flag (--stdio) out of the
+// post-`-pyry-*` remainder and returns the selector positional. Extracted
+// from runAttach so the parsing rules can be unit-tested without dialling
+// the control socket. Mirrors parseSessionsNewArgs's split — flag-set
+// sub-parser first, attachSelectorFromArgs on the post-flag positionals.
+func parseAttachArgs(args []string) (sessionID string, stdio bool, err error) {
+	fs := flag.NewFlagSet("pyry attach", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	stdioFlag := fs.Bool("stdio", false, "no-PTY byte forwarding for SDK consumers")
+	if err := fs.Parse(args); err != nil {
+		return "", false, err
+	}
+	sel, err := attachSelectorFromArgs(fs.Args())
+	if err != nil {
+		return "", false, err
+	}
+	return sel, *stdioFlag, nil
+}
+
 // errTooManyAttachArgs is returned by attachSelectorFromArgs when more than
 // one positional follows the recognised -pyry-* flags. runAttach turns this
 // into a usage line + os.Exit(2); the helper exists separately so the
@@ -451,22 +470,37 @@ func attachSelectorFromArgs(rest []string) (string, error) {
 	}
 }
 
-// runAttach implements `pyry attach [<id>]`: connect to a running daemon's
-// control socket, hand the local terminal over to a supervised claude
+// runAttach implements `pyry attach [--stdio] [<id>]`: connect to a running
+// daemon's control socket, hand stdin/stdout over to a supervised claude
 // session. The optional <id> selects the session — full UUID or unique
-// prefix; omitted means the bootstrap session. Press Ctrl-B d to detach
-// (leaves pyry running).
+// prefix; omitted means the bootstrap session.
+//
+// Default mode allocates a PTY on the client side and prints
+// "pyry: attached…" / "pyry: detached." human-affordance lines; press
+// Ctrl-B d to detach (leaves pyry running).
+//
+// `--stdio` is the no-PTY mode for SDK consumers (stream-json, tooling):
+// stdin/stdout are bridged as raw bytes through the same wire protocol,
+// no raw mode, no SIGWINCH, no escape detection, no stderr noise. EOF on
+// stdin ends the attach cleanly; the session stays alive.
 func runAttach(args []string) error {
 	socketPath, rest, err := parseClientFlags("pyry attach", args)
 	if err != nil {
 		return err
 	}
 
-	sessionID, err := attachSelectorFromArgs(rest)
+	sessionID, stdio, err := parseAttachArgs(rest)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pyry attach: too many arguments")
-		fmt.Fprintln(os.Stderr, "usage: pyry attach [flags] [<id>]")
+		fmt.Fprintln(os.Stderr, "pyry attach: "+err.Error())
+		fmt.Fprintln(os.Stderr, "usage: pyry attach [flags] [--stdio] [<id>]")
 		os.Exit(2)
+	}
+
+	if stdio {
+		if err := control.AttachStdio(context.Background(), socketPath, sessionID, os.Stdin, os.Stdout); err != nil {
+			return fmt.Errorf("attach: %w", err)
+		}
+		return nil
 	}
 
 	// Read local terminal geometry so the supervised claude knows the
@@ -1047,11 +1081,13 @@ Usage:
   pyry status [flags]                            query the running daemon
   pyry stop [flags]                              ask the daemon to shut down
   pyry logs [flags]                              print recent supervisor logs
-  pyry attach [flags] [<id>]                     attach local terminal to daemon
+  pyry attach [flags] [--stdio] [<id>]           attach local terminal to daemon
                                                   (Ctrl-B d to detach; <id>
                                                   selects a session — full
                                                   UUID or unique prefix; omit
-                                                  for the bootstrap session)
+                                                  for the bootstrap session;
+                                                  --stdio: no-PTY raw byte
+                                                  forwarding for SDK consumers)
   pyry sessions <verb> [flags]                   manage sessions on a running
                                                   daemon (verbs: new, rm, rename, list)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd

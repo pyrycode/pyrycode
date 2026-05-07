@@ -142,6 +142,50 @@ func TestAttachSelectorFromArgs(t *testing.T) {
 	}
 }
 
+func TestParseAttachArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		in          []string
+		wantSel     string
+		wantStdio   bool
+		wantErr     bool
+	}{
+		{"empty → bootstrap, stdio off", nil, "", false, false},
+		{"id only, stdio off", []string{"abc-123"}, "abc-123", false, false},
+		{"--stdio alone → bootstrap, stdio on", []string{"--stdio"}, "", true, false},
+		{"-stdio (single dash) accepted by flag pkg", []string{"-stdio"}, "", true, false},
+		{"--stdio plus id", []string{"--stdio", "abc-123"}, "abc-123", true, false},
+		{"id then --stdio is rejected (flags must precede positionals)",
+			[]string{"abc-123", "--stdio"}, "abc-123", false, true},
+		{"unknown flag errors", []string{"--bogus"}, "", false, true},
+		{"too many positionals errors", []string{"--stdio", "a", "b"}, "", false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, stdio, err := parseAttachArgs(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (sel=%q stdio=%v)", sel, stdio)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sel != tt.wantSel {
+				t.Errorf("selector = %q, want %q", sel, tt.wantSel)
+			}
+			if stdio != tt.wantStdio {
+				t.Errorf("stdio = %v, want %v", stdio, tt.wantStdio)
+			}
+		})
+	}
+}
+
 func TestSplitArgs(t *testing.T) {
 	t.Parallel()
 
