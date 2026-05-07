@@ -1040,7 +1040,7 @@ Unlike attach (which calls `ResolveID` to accept loose-input prefixes), `session
 
 `handleSessionsHasID` runs on the per-conn goroutine; no new goroutines spawned. Lock order is `Pool.mu` (RLock) only — no `Session.lcMu` involvement, no new lock-order edges. Read consistency: a session minted between the handler's read and the client's decode will not appear; one removed will still appear. Acceptable for a yes/no query — the caller (1.3c-2's startup detection) treats the answer as a decision input, not a durable contract.
 
-See `docs/specs/architecture/157-control-sessions-has-id.md` for the full design (if/when a spec lands; this section is the canonical reference).
+See `docs/specs/architecture/157-control-sessions-has-id.md` for the full ticket-time design; this section is the canonical evergreen reference.
 
 ## Foreground binary auto-attach (1.3c-2)
 
@@ -1119,7 +1119,7 @@ No human-affordance stderr lines (`--stdio` mode already suppresses them); the d
 
 The attach-commit branch (has-id true → `AttachStdio` runs) is intentionally **not** unit-tested; e2e coverage of the dispatch lives in #163 (happy path) and #164 (fallback scenarios). `internal/control/attach_stdio_client_test.go` (#154) covers `AttachStdio`'s own contract.
 
-See `docs/specs/architecture/158-foreground-auto-attach.md` for the full design (if/when a spec lands; this section is the canonical reference).
+See `docs/specs/architecture/158-foreground-auto-attach.md` for the full ticket-time design; this section is the canonical evergreen reference.
 
 ## Sessions: CLI Router (1.1a-B2)
 
