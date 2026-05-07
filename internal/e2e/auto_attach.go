@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -372,6 +373,204 @@ func (c *ForegroundAutoAttachClient) teardown(t *testing.T) {
 		}
 		_ = os.Remove(c.SocketPath)
 	})
+}
+
+// ForegroundSupervisedClient is a programmatic peer for a foreground
+// pyry binary configured to fall through auto-attach into supervisor
+// mode. Unlike ForegroundAutoAttachClient (which observes a successful
+// auto-attach via stdio round-trip), this client observes only the
+// process tree — fallback tests don't need bytes to flow through stdio.
+type ForegroundSupervisedClient struct {
+	// Pid is the foreground pyry process pid. Pass to pgrepChildren
+	// for the supervisor-mode assertion.
+	Pid int
+
+	// Stderr captures the foreground pyry's stderr (mutex-protected so
+	// concurrent writer/reader doesn't race). Mostly used for failure
+	// diagnostics — supervisor mode emits log lines here in steady
+	// state, so non-empty stderr is expected.
+	Stderr *safeBuffer
+
+	// SocketPath / HomeDir are the foreground's *own* socket and home,
+	// distinct from any daemon spawned by the test. Exposed for
+	// diagnostics.
+	SocketPath string
+	HomeDir    string
+
+	cmd         *exec.Cmd
+	done        chan struct{}
+	stdinSink   *os.File
+	cleanupOnce sync.Once
+}
+
+// startForegroundSupervised spawns a foreground pyry binary expected
+// to fall through auto-attach (its own socket doesn't exist before
+// runSupervisor's Listen runs) and enter supervisor mode with the
+// sleep-claude stand-in.
+//
+// `sessionID` is appended to the foreground's claudeArgs as
+// `--session-id <id>` so extractSessionID returns non-empty (mirrors
+// real-world Claudian invocations, which always supply --session-id).
+//
+// `extraEnv` is appended verbatim to childEnv(home) before exec, so
+// the test can inject PYRY_NO_AUTO_ATTACH=1 without polluting any
+// other process's env. Pass nil when no extra env is needed.
+//
+// Returns once the foreground has both:
+//  1. Survived a 500ms settle window without exiting (early-death
+//     detector mirrors startForegroundAutoAttach's pattern), AND
+//  2. Acquired at least one direct child PID (polled via
+//     pgrepChildren with a 5s deadline).
+//
+// Skips on pgrep unavailability (sandboxed CI).
+func startForegroundSupervised(t *testing.T, sessionID string, extraEnv []string) *ForegroundSupervisedClient {
+	t.Helper()
+
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skipf("e2e: pgrep unavailable: %v", err)
+	}
+
+	// Short prefix keeps the socket path under macOS's 104-byte
+	// sun_path limit; t.TempDir() embeds the long test name.
+	home, err := os.MkdirTemp("", "pyry-fb-*")
+	if err != nil {
+		t.Fatalf("e2e: mkdtemp foreground home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+
+	socketPath := filepath.Join(home, "pyry.sock")
+	claudeBin := writeSleepClaude(t, home)
+	bin := ensurePyryBuilt(t)
+
+	stdinSink, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("e2e: open /dev/null: %v", err)
+	}
+
+	stderr := &safeBuffer{}
+	cmd := exec.Command(bin,
+		"-pyry-socket="+socketPath,
+		"-pyry-claude="+claudeBin,
+		"-pyry-idle-timeout=0",
+		"-pyry-resume=false",
+		"--",
+		"--session-id", sessionID,
+	)
+	cmd.Stdin = stdinSink
+	cmd.Stdout = io.Discard
+	cmd.Stderr = stderr
+	cmd.Env = append(childEnv(home), extraEnv...)
+
+	if err := cmd.Start(); err != nil {
+		_ = stdinSink.Close()
+		t.Fatalf("e2e: foreground pyry start: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+
+	c := &ForegroundSupervisedClient{
+		Pid:        cmd.Process.Pid,
+		Stderr:     stderr,
+		SocketPath: socketPath,
+		HomeDir:    home,
+		cmd:        cmd,
+		done:       done,
+		stdinSink:  stdinSink,
+	}
+	t.Cleanup(func() { c.teardown(t) })
+
+	select {
+	case <-done:
+		exit := -1
+		if cmd.ProcessState != nil {
+			exit = cmd.ProcessState.ExitCode()
+		}
+		t.Fatalf("e2e: foreground pyry exited before settle (exit=%d)\nstderr:\n%s",
+			exit, stderr.String())
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := awaitClaudeChild(c.Pid, 5*time.Second); err != nil {
+		t.Fatalf("e2e: foreground pyry pid=%d did not spawn claude child: %v\nstderr:\n%s",
+			c.Pid, err, stderr.String())
+	}
+
+	return c
+}
+
+// teardown SIGTERMs the foreground, waits up to 2s, escalates to
+// SIGKILL via killSpawned, then removes the socket file. Idempotent.
+func (c *ForegroundSupervisedClient) teardown(t *testing.T) {
+	t.Helper()
+	c.cleanupOnce.Do(func() {
+		if c.stdinSink != nil {
+			_ = c.stdinSink.Close()
+		}
+		if c.cmd != nil && c.cmd.Process != nil {
+			killSpawned(t, c.cmd, c.done)
+		}
+		_ = os.Remove(c.SocketPath)
+	})
+}
+
+// awaitClaudeChild polls pgrepChildren(pid) every 50ms until at least
+// one child appears or `total` elapses. The settle window in
+// startForegroundSupervised closes the early-exit race; this poll
+// closes the supervisor-spawn race (pgrep can outrun the first
+// os.StartProcess inside Pool.Run).
+func awaitClaudeChild(pid int, total time.Duration) error {
+	deadline := time.Now().Add(total)
+	for time.Now().Before(deadline) {
+		children, err := pgrepChildren(pid)
+		if err != nil {
+			return err
+		}
+		if len(children) > 0 {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("no children after %s", total)
+}
+
+// spawnDaemonWithRegisteredSession spawns an auto-attach daemon at a
+// home/socket path *separate from* any foreground binary's socket
+// (see #164's spec, "Why separate sockets"). Registers `label` via
+// SessionsNew and returns the daemon's socket path plus the
+// registered session id, so tests can later call
+// control.SessionsList(socket) to assert the registry is unchanged.
+//
+// The daemon is auto-cleaned up via t.Cleanup.
+func spawnDaemonWithRegisteredSession(t *testing.T, label string) (socket, sessionID string) {
+	t.Helper()
+
+	home, err := os.MkdirTemp("", "pyry-fbd-*")
+	if err != nil {
+		t.Fatalf("e2e: mkdtemp daemon home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+
+	socket, daemonCmd, daemonErr, daemonDone := spawnAutoAttachDaemon(t, home)
+	t.Cleanup(func() {
+		killSpawned(t, daemonCmd, daemonDone)
+		_ = os.Remove(socket)
+	})
+
+	if err := waitDaemonReady(socket, daemonDone, daemonErr); err != nil {
+		t.Fatalf("e2e: daemon ready: %v\nstderr:\n%s", err, daemonErr.String())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id, err := control.SessionsNew(ctx, socket, label)
+	if err != nil {
+		t.Fatalf("e2e: sessions.new: %v", err)
+	}
+	return socket, id
 }
 
 // pgrepChildren returns the PIDs whose direct parent is pid, or an
