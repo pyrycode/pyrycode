@@ -146,30 +146,37 @@ func TestParseAttachArgs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		in          []string
-		wantSel     string
-		wantStdio   bool
-		wantErr     bool
+		name                string
+		in                  []string
+		wantSel             string
+		wantStdio           bool
+		wantCreateIfMissing bool
+		wantErr             bool
 	}{
-		{"empty → bootstrap, stdio off", nil, "", false, false},
-		{"id only, stdio off", []string{"abc-123"}, "abc-123", false, false},
-		{"--stdio alone → bootstrap, stdio on", []string{"--stdio"}, "", true, false},
-		{"-stdio (single dash) accepted by flag pkg", []string{"-stdio"}, "", true, false},
-		{"--stdio plus id", []string{"--stdio", "abc-123"}, "abc-123", true, false},
+		{"empty → bootstrap, all flags off", nil, "", false, false, false},
+		{"id only, all flags off", []string{"abc-123"}, "abc-123", false, false, false},
+		{"--stdio alone → bootstrap, stdio on", []string{"--stdio"}, "", true, false, false},
+		{"-stdio (single dash) accepted by flag pkg", []string{"-stdio"}, "", true, false, false},
+		{"--stdio plus id", []string{"--stdio", "abc-123"}, "abc-123", true, false, false},
+		{"--create-if-missing plus id", []string{"--create-if-missing", "abc-123"}, "abc-123", false, true, false},
+		{"--stdio --create-if-missing plus id (SDK shape)",
+			[]string{"--stdio", "--create-if-missing", "abc-123"}, "abc-123", true, true, false},
+		{"--create-if-missing without positional is parse-clean (server lints)",
+			[]string{"--create-if-missing"}, "", false, true, false},
 		{"id then --stdio is rejected (flags must precede positionals)",
-			[]string{"abc-123", "--stdio"}, "abc-123", false, true},
-		{"unknown flag errors", []string{"--bogus"}, "", false, true},
-		{"too many positionals errors", []string{"--stdio", "a", "b"}, "", false, true},
+			[]string{"abc-123", "--stdio"}, "abc-123", false, false, true},
+		{"unknown flag errors", []string{"--bogus"}, "", false, false, true},
+		{"too many positionals errors", []string{"--stdio", "a", "b"}, "", false, false, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			sel, stdio, err := parseAttachArgs(tt.in)
+			sel, stdio, createIfMissing, err := parseAttachArgs(tt.in)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("expected error, got nil (sel=%q stdio=%v)", sel, stdio)
+					t.Fatalf("expected error, got nil (sel=%q stdio=%v createIfMissing=%v)",
+						sel, stdio, createIfMissing)
 				}
 				return
 			}
@@ -181,6 +188,9 @@ func TestParseAttachArgs(t *testing.T) {
 			}
 			if stdio != tt.wantStdio {
 				t.Errorf("stdio = %v, want %v", stdio, tt.wantStdio)
+			}
+			if createIfMissing != tt.wantCreateIfMissing {
+				t.Errorf("createIfMissing = %v, want %v", createIfMissing, tt.wantCreateIfMissing)
 			}
 		})
 	}

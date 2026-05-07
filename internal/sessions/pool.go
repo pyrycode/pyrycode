@@ -806,51 +806,9 @@ func (p *Pool) Create(ctx context.Context, label string) (SessionID, error) {
 		return "", fmt.Errorf("sessions: create id: %w", err)
 	}
 
-	tpl := p.sessionTpl
-	args := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
-	var bridge *supervisor.Bridge
-	if tpl.Bridge != nil {
-		bridge = supervisor.NewBridge(p.log)
-	}
-
-	supCfg := supervisor.Config{
-		ClaudeBin:      tpl.ClaudeBin,
-		WorkDir:        tpl.WorkDir,
-		ResumeLast:     false,
-		ClaudeArgs:     args,
-		Bridge:         bridge,
-		Logger:         p.log,
-		BackoffInitial: tpl.BackoffInitial,
-		BackoffMax:     tpl.BackoffMax,
-		BackoffReset:   tpl.BackoffReset,
-	}
-	sup, err := supervisor.New(supCfg)
+	sess, err := p.buildSession(id, label)
 	if err != nil {
-		return "", fmt.Errorf("sessions: create supervisor: %w", err)
-	}
-
-	idleTimeout := tpl.IdleTimeout
-	if idleTimeout == 0 {
-		idleTimeout = p.idleTimeoutDefault
-	}
-
-	now := time.Now().UTC()
-	sess := &Session{
-		id:           id,
-		sup:          sup,
-		bridge:       bridge,
-		log:          p.log,
-		label:        label,
-		createdAt:    now,
-		lastActiveAt: now,
-		bootstrap:    false,
-		pool:         p,
-		idleTimeout:  idleTimeout,
-		lcState:      stateEvicted,
-		activeCh:     make(chan struct{}),
-		evictedCh:    closedChan(),
-		activateCh:   make(chan struct{}, 1),
-		evictCh:      make(chan struct{}, 1),
+		return "", err
 	}
 
 	// Persist before activating: if saveLocked fails, roll the in-memory
@@ -879,6 +837,63 @@ func (p *Pool) Create(ctx context.Context, label string) (SessionID, error) {
 		return id, err
 	}
 	return id, nil
+}
+
+// buildSession constructs a per-session supervisor and *Session for a given
+// (id, label). Touches no Pool state (the returned Session is in stateEvicted
+// and its lifecycle goroutine has not yet been scheduled). Caller is
+// responsible for registering it in p.sessions, persisting, and supervising.
+//
+// Used by Pool.Create (UUID-minted) and Pool.GetOrCreate (caller-supplied
+// id). Sharing this helper keeps the supervisor.Config + Session field
+// shape in one place.
+func (p *Pool) buildSession(id SessionID, label string) (*Session, error) {
+	tpl := p.sessionTpl
+	args := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
+	var bridge *supervisor.Bridge
+	if tpl.Bridge != nil {
+		bridge = supervisor.NewBridge(p.log)
+	}
+
+	supCfg := supervisor.Config{
+		ClaudeBin:      tpl.ClaudeBin,
+		WorkDir:        tpl.WorkDir,
+		ResumeLast:     false,
+		ClaudeArgs:     args,
+		Bridge:         bridge,
+		Logger:         p.log,
+		BackoffInitial: tpl.BackoffInitial,
+		BackoffMax:     tpl.BackoffMax,
+		BackoffReset:   tpl.BackoffReset,
+	}
+	sup, err := supervisor.New(supCfg)
+	if err != nil {
+		return nil, fmt.Errorf("sessions: create supervisor: %w", err)
+	}
+
+	idleTimeout := tpl.IdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = p.idleTimeoutDefault
+	}
+
+	now := time.Now().UTC()
+	return &Session{
+		id:           id,
+		sup:          sup,
+		bridge:       bridge,
+		log:          p.log,
+		label:        label,
+		createdAt:    now,
+		lastActiveAt: now,
+		bootstrap:    false,
+		pool:         p,
+		idleTimeout:  idleTimeout,
+		lcState:      stateEvicted,
+		activeCh:     make(chan struct{}),
+		evictedCh:    closedChan(),
+		activateCh:   make(chan struct{}, 1),
+		evictCh:      make(chan struct{}, 1),
+	}, nil
 }
 
 // Snapshot returns one entry per session, capturing the current
@@ -917,6 +932,14 @@ func (p *Pool) snapshotForRotation() []rotation.SessionRef {
 func (p *Pool) RegisterAllocatedUUID(id SessionID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.registerAllocatedUUIDLocked(id)
+}
+
+// registerAllocatedUUIDLocked is the lock-held variant of
+// RegisterAllocatedUUID. Caller MUST hold p.mu (write). Used by GetOrCreate's
+// register-and-supervise critical section to keep skip-set priming inside
+// the same atomic step as registry insertion.
+func (p *Pool) registerAllocatedUUIDLocked(id SessionID) {
 	if p.allocated == nil {
 		p.allocated = make(map[SessionID]time.Time)
 	}

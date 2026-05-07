@@ -794,7 +794,7 @@ func TestAttach_ClientSendsSessionID(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			err = Attach(ctx, sock, 80, 24, tt.sessionID)
+			err = Attach(ctx, sock, 80, 24, tt.sessionID, false)
 			if err == nil || !strings.Contains(err.Error(), "test: short-circuit") {
 				t.Fatalf("Attach: want short-circuit error, got %v", err)
 			}
@@ -851,7 +851,7 @@ func TestAttach_EmptySessionIDOmittedOnWire(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = Attach(ctx, sock, 80, 24, "")
+	_ = Attach(ctx, sock, 80, 24, "", false)
 
 	select {
 	case raw := <-gotRaw:

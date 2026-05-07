@@ -22,12 +22,18 @@ import (
 // sessions.rename tests; Phase 1.1b-B1 (#87) extended it with List +
 // listSnapshots / listCalls for sessions.list tests.
 type fakeSessioner struct {
-	mu          sync.Mutex
-	createCalls []string // labels in invocation order
-	removeCalls []removeCall
-	renameCalls []renameCall
-	returnID    sessions.SessionID
-	returnErr   error // shared across Create / Remove / Rename (each test owns its own fake)
+	mu               sync.Mutex
+	createCalls      []string // labels in invocation order
+	removeCalls      []removeCall
+	renameCalls      []renameCall
+	getOrCreateCalls []getOrCreateCall
+	returnID         sessions.SessionID
+	returnErr        error // shared across Create / Remove / Rename / GetOrCreate (each test owns its own fake)
+
+	// getOrCreateOverride, when set, replaces the default behaviour
+	// (return returnID/returnErr) for GetOrCreate. Used by tests that
+	// need per-call resolution (e.g. asserting input id is echoed).
+	getOrCreateOverride func(id sessions.SessionID, label string) (sessions.SessionID, error)
 
 	// listSnapshots is a FIFO of canned responses for List. Tests that
 	// don't care about repeated reads can leave it as a single-element
@@ -35,6 +41,11 @@ type fakeSessioner struct {
 	// nil entry yields an empty []sessions.SessionInfo.
 	listSnapshots [][]sessions.SessionInfo
 	listCalls     int
+}
+
+type getOrCreateCall struct {
+	ID    sessions.SessionID
+	Label string
 }
 
 type removeCall struct {
@@ -61,6 +72,25 @@ func (f *fakeSessioner) Remove(_ context.Context, id sessions.SessionID, opts se
 	err := f.returnErr
 	f.mu.Unlock()
 	return err
+}
+
+func (f *fakeSessioner) GetOrCreate(_ context.Context, id sessions.SessionID, label string) (sessions.SessionID, error) {
+	f.mu.Lock()
+	f.getOrCreateCalls = append(f.getOrCreateCalls, getOrCreateCall{ID: id, Label: label})
+	override := f.getOrCreateOverride
+	retID := f.returnID
+	retErr := f.returnErr
+	f.mu.Unlock()
+	if override != nil {
+		return override(id, label)
+	}
+	return retID, retErr
+}
+
+func (f *fakeSessioner) recordedGetOrCreates() []getOrCreateCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]getOrCreateCall(nil), f.getOrCreateCalls...)
 }
 
 func (f *fakeSessioner) Rename(id sessions.SessionID, newLabel string) error {

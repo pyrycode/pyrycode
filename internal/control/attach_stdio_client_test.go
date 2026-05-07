@@ -50,7 +50,7 @@ func TestAttachStdio_ByteForwarding(t *testing.T) {
 			go func() { _ = srv.Serve(ctx) }()
 
 			var out bytes.Buffer
-			err := AttachStdio(context.Background(), sock, "", bytes.NewReader(tt.input), &out)
+			err := AttachStdio(context.Background(), sock, "", bytes.NewReader(tt.input), &out, false)
 			if err != nil {
 				t.Fatalf("AttachStdio: %v", err)
 			}
@@ -105,7 +105,7 @@ func TestAttachStdio_ServerToClientStream(t *testing.T) {
 
 	out := newSyncBuffer()
 	doneAttach := make(chan error, 1)
-	go func() { doneAttach <- AttachStdio(context.Background(), sock, "", pr, out) }()
+	go func() { doneAttach <- AttachStdio(context.Background(), sock, "", pr, out, false) }()
 
 	want := []byte("from-server-to-client\x00\x01\xff")
 	if _, err := pw.Write(want); err != nil {
@@ -155,7 +155,7 @@ func TestAttachStdio_EOFReturnsNil(t *testing.T) {
 
 	in := bytes.NewReader([]byte("payload"))
 	var out bytes.Buffer
-	if err := AttachStdio(context.Background(), sock, "", in, &out); err != nil {
+	if err := AttachStdio(context.Background(), sock, "", in, &out, false); err != nil {
 		t.Fatalf("AttachStdio: %v", err)
 	}
 }
@@ -195,7 +195,7 @@ func TestAttachStdio_ServerHangupReturnsNil(t *testing.T) {
 	// once the output goroutine joins (server hangup wakes it).
 	in := bytes.NewReader(nil)
 	var out bytes.Buffer
-	if err := AttachStdio(context.Background(), sock, "", in, &out); err != nil {
+	if err := AttachStdio(context.Background(), sock, "", in, &out, false); err != nil {
 		t.Errorf("AttachStdio after server hangup = %v, want nil", err)
 	}
 }
@@ -231,7 +231,7 @@ func TestAttachStdio_AckErrorPropagates(t *testing.T) {
 		_ = json.NewEncoder(conn).Encode(Response{Error: want})
 	}()
 
-	err = AttachStdio(context.Background(), sock, "", bytes.NewReader(nil), io.Discard)
+	err = AttachStdio(context.Background(), sock, "", bytes.NewReader(nil), io.Discard, false)
 	if err == nil || err.Error() != want {
 		t.Errorf("AttachStdio err = %v, want %q", err, want)
 	}
@@ -264,7 +264,7 @@ func TestAttachStdio_AckMissingOK(t *testing.T) {
 		_ = json.NewEncoder(conn).Encode(Response{}) // OK=false, Error=""
 	}()
 
-	err = AttachStdio(context.Background(), sock, "", bytes.NewReader(nil), io.Discard)
+	err = AttachStdio(context.Background(), sock, "", bytes.NewReader(nil), io.Discard, false)
 	if err == nil || err.Error() != "control: attach ack missing" {
 		t.Errorf("AttachStdio err = %v, want \"control: attach ack missing\"", err)
 	}
@@ -280,7 +280,7 @@ func TestAttachStdio_DialError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := AttachStdio(ctx, sock, "", bytes.NewReader(nil), io.Discard)
+	err := AttachStdio(ctx, sock, "", bytes.NewReader(nil), io.Discard, false)
 	if err == nil {
 		t.Fatal("expected dial error, got nil")
 	}
@@ -335,7 +335,7 @@ func TestAttachStdio_SessionIDOnWire(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			err = AttachStdio(ctx, sock, tt.sessionID, bytes.NewReader(nil), io.Discard)
+			err = AttachStdio(ctx, sock, tt.sessionID, bytes.NewReader(nil), io.Discard, false)
 			if err == nil || !strings.Contains(err.Error(), "test: short-circuit") {
 				t.Fatalf("AttachStdio: want short-circuit error, got %v", err)
 			}
@@ -395,7 +395,7 @@ func TestAttachStdio_NoGeometryOnWire(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = AttachStdio(ctx, sock, "", bytes.NewReader(nil), io.Discard)
+	_ = AttachStdio(ctx, sock, "", bytes.NewReader(nil), io.Discard, false)
 
 	select {
 	case raw := <-gotRaw:
@@ -432,7 +432,7 @@ func TestAttachStdio_InReadErrorPropagates(t *testing.T) {
 	go func() { _ = srv.Serve(ctx) }()
 
 	want := errors.New("synthetic stdin read failure")
-	err := AttachStdio(context.Background(), sock, "", &errReader{err: want}, io.Discard)
+	err := AttachStdio(context.Background(), sock, "", &errReader{err: want}, io.Discard, false)
 	if err == nil || !errors.Is(err, want) {
 		t.Errorf("AttachStdio err = %v, want errors.Is == %v", err, want)
 	}
