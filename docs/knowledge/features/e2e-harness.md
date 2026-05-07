@@ -1825,12 +1825,76 @@ unchanged.
 
 ### What this slice does not verify
 
-- **No PTY fd open in the attach client** — deferred to #162 (will inspect
-  `/proc/<pid>/fd` on Linux / `lsof -p <pid>` on macOS).
 - **Foreground auto-attach scenarios** — deferred to 1.3c-2-e2e-*.
 - **Server-initiated detach, multi-session attach exclusivity, binary-safe
   transport for arbitrary byte sequences** — covered (or out of scope) at
   the unit boundary in `internal/control/attach_stdio_client_test.go`.
+
+### No-PTY-fd assertion (`attach_stdio_no_pty_test.go`, #162)
+
+Sibling test consumer of the stdio harness. Asserts the **negative**
+property the byte-flow test cannot: the attach client process holds no
+PTY-device fd while attached. The unit-level guarantee — that
+`internal/control/attach_stdio_client.go` imports no PTY machinery — is
+supplemented at the binary boundary so a future refactor that wraps
+stdio in a PTY inside `cmd/pyry/runAttach`'s `--stdio` branch fails CI
+instead of shipping. A regression that allocates a useless PTY but
+still passes bytes through fails only this test, not
+`…_BytesRoundTrip`.
+
+```go
+func TestE2E_AttachStdio_NoPTYInProcessTree(t *testing.T) {
+    c := startStdioAttach(t, "stdio-no-pty")
+    pid := c.attachCmd.Process.Pid
+    hits, err := openPTYDeviceTargets(pid)
+    if err != nil {
+        t.Skipf("e2e: fd inspection unavailable: %v", err)
+    }
+    if len(hits) > 0 {
+        t.Fatalf("attach client (pid=%d) holds PTY device fd(s): %v", pid, hits)
+    }
+}
+```
+
+The harness's 500ms early-exit window means `startStdioAttach` only
+returns once the child is past handshake — any PTY allocation during
+init is already visible by probe time. The probe itself is a synchronous
+read from the test goroutine; no new goroutines, no channels, no
+deadlines. The harness's `t.Cleanup` owns teardown.
+
+**Platform dispatch via `runtime.GOOS`, not build tags.** One file with
+two helpers (`openPTYDeviceTargetsLinux` reads `/proc/<pid>/fd/`,
+`openPTYDeviceTargetsDarwin` shells out to `lsof -p <pid> -Fn`) and one
+shared matcher (`isPTYDevicePath`). Build-tagged `_linux.go` /
+`_darwin.go` files would force the matcher into a third file or
+duplicate it — `runtime.GOOS` keeps everything in ~110 LOC. `unsupported
+GOOS` returns an inspection-unavailable error which the test treats as
+a skip per AC#2.
+
+**Matcher set is conservative + explicit.** Matched paths:
+
+| Path | Platforms | Why |
+|---|---|---|
+| `/dev/ptmx` | linux, darwin | The PTY master multiplexer — the canonical signal of "this process allocated a PTY." |
+| `/dev/pts/*` | linux | PTY slave devices on Linux. |
+| `/dev/ttys*` | darwin | PTY slave devices on macOS (`/dev/ttys000`, `/dev/ttys001`, …). `exec.Cmd` with explicit Stdin/Stdout/Stderr does **not** propagate the parent's tty fds; if a slave appears, the client opened it. |
+| `/dev/tty` | both | Controlling-terminal device. A `--stdio` client with stdio wired to pipes has no business touching it; including it surfaces terminal-mode dispatch on the wrong code path. |
+
+Not matched intentionally: `/dev/null`, `/dev/urandom` (not PTYs), and
+the BSD-legacy `/dev/pty[m-z]*` / `/dev/tty[m-z]*` (effectively
+unreachable on supported macOS). If a future failure mode escapes the
+matcher, extend `isPTYDevicePath` and re-run.
+
+**Linux symlink-read race is silently dropped.** A fd may close between
+`os.ReadDir` and `os.Readlink`; the loop ignores `Readlink` errors. A
+stable PTY fd would not race a single-pass directory read, so the bias
+is toward false-negative on a closing fd — acceptable.
+
+**Carries the same `t.Skip("blocked on #167")` as the byte-flow test.**
+Both skips lift in one commit when #167 lands.
+
+**Production diff is zero. Test diff ~110 LOC, one new file.**
+`go test -tags e2e -race ./internal/e2e/...` clean.
 
 ### Production diff is zero
 
