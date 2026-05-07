@@ -66,8 +66,8 @@ func (s *Session) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err
 func (s *Session) Run(ctx context.Context) error
 ```
 
-- **`Activate`** — moves an evicted session to `active`, blocking until the supervisor has started (or `ctx` cancels). No-op when already active. Idempotent under concurrent calls; safe from any goroutine.
-- **`Evict`** — moves an active session to `evicted`, blocking until the supervisor has stopped (or `ctx` cancels). No-op when already evicted. Idempotent under concurrent calls; safe from any goroutine. **Force-eviction:** unlike the idle timer, `Evict` does *not* defer for `attached > 0`. Used by the cap policy at `Pool.Activate`'s spawn path; an attached caller will see EOF on its bridge.
+- **`Activate`** — moves an evicted session to `active`, blocking until the supervisor has started AND the post-transition registry persist has completed (or `ctx` cancels). When already active, returns immediately (the wake channel is already closed). Idempotent under concurrent calls; safe from any goroutine. See [§ Persist seam](#persist-seam) for the disk-consistency guarantee.
+- **`Evict`** — moves an active session to `evicted`, blocking until the supervisor has stopped AND the post-transition persist has completed (or `ctx` cancels). When already evicted, returns immediately. Idempotent under concurrent calls; safe from any goroutine. **Force-eviction:** unlike the idle timer, `Evict` does *not* defer for `attached > 0`. Used by the cap policy at `Pool.Activate`'s spawn path; an attached caller will see EOF on its bridge.
 - **`Attach`** — unchanged signature. Now bumps an `attached` counter under `lcMu`; the wrapper goroutine decrements on bridge `done`. While `attached > 0`, idle eviction is deferred (cap eviction is not).
 - **`Run`** — rewritten as a loop over `runActive` / `runEvicted`, driving the state machine and persisting after every transition.
 
@@ -170,14 +170,14 @@ Mutexes:
 - `Session.lcMu` — protects `lcState`, `attached`, `activeCh`, `evictedCh`, `lastActiveAt` (when read for the registry snapshot).
 - `Supervisor.mu` — unchanged.
 
-**Lock order: `Pool.capMu` → `Pool.mu` → `Session.lcMu`.** `transitionTo` releases `Session.lcMu` *before* calling `Pool.persist` (which then re-takes `lcMu` briefly inside `saveLocked` to read the snapshot). `Session.Evict` is callable while `capMu` is held — its callback into `Pool.persist` takes `Pool.mu`, never `capMu`, so no re-entrancy. No reverse path; no deadlock.
+**Lock order: `Pool.capMu` → `Pool.mu` → `Session.lcMu`.** `transitionTo` releases `Session.lcMu` *before* calling `Pool.persist` (which then re-takes `lcMu` briefly inside `saveLocked` to read the snapshot), then re-acquires `lcMu` after persist returns to close the wake channel — sequential, not nested. `Session.Evict` is callable while `capMu` is held — its callback into `Pool.persist` takes `Pool.mu`, never `capMu`, so no re-entrancy. No reverse path; no deadlock.
 
 Channels (per `Session`):
 
 - `s.activateCh` (buffered 1) — `Activate` sends, `runEvicted` reads. Buffered so concurrent `Activate`s collapse without coordinating with the lifecycle goroutine's exact select position.
-- `s.activeCh` (closed-on-active) — broadcast wakeup to `Activate` waiters. `transitionTo(active)` closes it; `transitionTo(evicted)` replaces it with a fresh open channel. `Activate` snapshots the channel under `lcMu` *before* waiting so a concurrent evict-replace doesn't drop the wakeup.
+- `s.activeCh` (closed-on-active-AND-persisted) — broadcast wakeup to `Activate` waiters. **Closed iff `lcState == stateActive` AND the persist for that transition has completed.** `transitionTo(active)` closes it *after* `pool.persist` returns; `transitionTo(evicted)` replaces it with a fresh open channel up-front. `Activate` snapshots the channel under `lcMu` *before* waiting so a concurrent evict-replace doesn't drop the wakeup.
 - `s.evictCh` (buffered 1) — `Evict` sends, `runActive` reads. Symmetric to `activateCh`.
-- `s.evictedCh` (closed-on-evicted) — broadcast wakeup to `Evict` waiters. Symmetric to `activeCh`: `transitionTo(evicted)` closes it; `transitionTo(active)` replaces it with a fresh open channel.
+- `s.evictedCh` (closed-on-evicted-AND-persisted) — broadcast wakeup to `Evict` waiters. Symmetric to `activeCh`: `transitionTo(evicted)` closes it *after* `pool.persist` returns; `transitionTo(active)` replaces it with a fresh open channel up-front.
 - `runErr` (buffered 1, per active period) — supervisor exit value.
 
 Shutdown sequence:
@@ -208,18 +208,50 @@ The string form (`"active"` / `"evicted"`) is the wire shape; the in-memory form
 
 ## Persist seam
 
-Every state transition writes the registry through `Pool.persist`:
+Every state transition writes the registry through `Pool.persist`. The persist is sequenced **between** the in-memory state flip and the wake of `Activate`/`Evict` waiters, so a caller that sees the channel close is guaranteed to read post-transition state from disk:
 
 ```go
 func (s *Session) transitionTo(newState lifecycleState) error {
+    // 1. Flip lcState; allocate the *opposite-direction* wake channel for the
+    //    next transition. The current direction's channel stays open here.
     s.lcMu.Lock()
     s.lcState = newState
     s.lastActiveAt = time.Now().UTC()
-    if newState == stateActive { close(s.activeCh) } else { s.activeCh = make(chan struct{}) }
+    switch newState {
+    case stateActive:
+        s.evictedCh = make(chan struct{}) // for the next Evict
+    case stateEvicted:
+        s.activeCh = make(chan struct{})  // for the next Activate
+    }
     s.lcMu.Unlock()
-    return s.pool.persist()  // takes Pool.mu (write); saveLocked re-takes lcMu briefly
+
+    // 2. Persist with lcMu released — saveLocked re-takes per-session lcMu.
+    var persistErr error
+    if s.pool != nil {
+        persistErr = s.pool.persist()
+    }
+
+    // 3. Wake waiters. lcMu re-acquired only to serialise the close against
+    //    any concurrent Activate/Evict capturing the channel reference.
+    s.lcMu.Lock()
+    switch newState {
+    case stateActive:
+        close(s.activeCh)
+    case stateEvicted:
+        close(s.evictedCh)
+    }
+    s.lcMu.Unlock()
+    return persistErr
 }
 ```
+
+**Invariant:** `activeCh` is closed iff `lcState == stateActive` AND the persist for that transition has completed; `evictedCh` symmetrically. Cold-start initialisation in `Pool.New` / `Pool.Create` already matches this — a session that warm-starts in `stateActive` initialises `activeCh = closedChan()` (no transition pending, disk already consistent) and `evictedCh = make(chan struct{})`.
+
+`Activate` / `Evict` always wait on the channel — there is no "already in target state" early return. When fully transitioned, the channel is already closed and the receive returns immediately; mid-transition (state flipped, persist still running), the receive correctly blocks until persist completes. The race surfaced by #155 (`sess.Evict(ctx)` returns; subsequent `loadRegistry` reads pre-eviction state) is structurally impossible under this contract — see [ADR 013](../decisions/013-evict-activate-persist-ordering.md).
+
+**Lock ordering.** `lcMu` is released before `pool.persist` (which takes `Pool.mu` and re-acquires per-session `lcMu` inside `saveLocked`). The post-persist `lcMu.Lock(); close(...); lcMu.Unlock()` is sequential, not nested — no new lock-order edge. The two `lcMu` acquisitions don't coalesce with anything; they exist only to order the close against concurrent waiters capturing the channel reference.
+
+**Failure posture.** On persist failure the wake channel still closes — a permanently-stuck waiter is a worse failure mode than a waiter that wakes to stale disk. The persist error propagates up `Run`, which treats it as fatal (`return fmt.Errorf("persist evicted: %w", err)`).
 
 `saveLocked` reads each session's lifecycle state and `lastActiveAt` under `Session.lcMu` when building the registry snapshot. The lock order is the same `Pool.mu → Session.lcMu` enforced everywhere else in the package.
 
@@ -272,6 +304,8 @@ Reuses the `/bin/sleep` fake-claude pattern from `internal/sessions` — no new 
 
 `internal/sessions/session_test.go` covers idle eviction firing, eviction deferral while attached, respawn via `Activate`, no-op `Activate` on active sessions, ctx-cancellation paths, shutdown from both states.
 
+`internal/sessions/session_persist_test.go` (#169) covers the persist-before-wake ordering: `TestSession_EvictBlocksUntilPersisted` asserts `loadRegistry` immediately after `sess.Evict(ctx)` returns shows `lifecycle_state == "evicted"` (no poll); `TestSession_ActivateBlocksUntilPersisted` asserts the symmetric guarantee on a session that warm-starts in `stateEvicted`; a stress wrapper loops 20 evict↔activate transitions asserting disk consistency at each step. Designed to pass deterministically under `go test -race -count=20 ./internal/sessions/...`.
+
 `internal/sessions/registry_test.go` covers `lifecycle_state` round-trip and backwards-compat (missing field defaults to `active`).
 
 `internal/sessions/pool_test.go` covers bootstrap warm-starting in `evicted`, and the parity-when-disabled regression guard (`IdleTimeout: 0` runs for several seconds without transitions).
@@ -301,8 +335,8 @@ pyry stop
 
 ## References
 
-- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116)
-- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md)
-- ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md)
+- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116), [#169](https://github.com/pyrycode/pyrycode/issues/169)
+- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md), [`docs/specs/architecture/169-evict-activate-persist-ordering.md`](../../specs/architecture/169-evict-activate-persist-ordering.md)
+- ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md), [`013-evict-activate-persist-ordering.md`](../decisions/013-evict-activate-persist-ordering.md)
 - Sibling docs: [`sessions-package.md`](sessions-package.md), [`sessions-registry.md`](sessions-registry.md), [`control-plane.md`](control-plane.md)
 - Locked phase design: [`docs/multi-session.md`](../../multi-session.md)
