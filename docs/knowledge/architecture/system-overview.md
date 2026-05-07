@@ -13,9 +13,10 @@ pyrycode/
 │   ├── backoff.go             Backoff timer: exponential delay with stability reset
 │   └── winsize.go             SIGWINCH → PTY size sync
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
-│   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand
+│   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand + ValidID() canonical-shape validator
 │   ├── session.go             Session: wraps one supervisor + optional bridge; lifecycle goroutine (active↔evicted state machine, idle timer); Activate / Run / Attach with attach bookkeeping
-│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir + IdleTimeout + ActiveCap), load-or-mint bootstrap on New, RotateID seam, saveLocked + persist, errgroup Run with supervise() fan-out seam, allocated-UUID skip set, Snapshot, Activate (cap-aware), capMu
+│   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir + IdleTimeout + ActiveCap), load-or-mint bootstrap on New, RotateID seam, saveLocked + persist, errgroup Run with supervise() fan-out seam, allocated-UUID skip set (registerAllocatedUUIDLocked variant), buildSession helper shared with GetOrCreate, Snapshot, Activate (cap-aware), capMu
+│   ├── get_or_create.go       Pool.GetOrCreate take-or-create primitive (1.3b): caller-supplied UUIDv4, atomic register+persist+skip-set+g.Go(sess.Run) under p.mu; ErrInvalidSessionID
 │   ├── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
 │   ├── reconcile.go           Startup JSONL scan: encodeWorkdir, mostRecentJSONL, reconcileBootstrapOnNew, DefaultClaudeSessionsDir
 │   └── rotation/              Live /clear watcher (Phase 1.2b-B)
@@ -244,6 +245,7 @@ test-only override on `Options.Binary`. See
 
 - **Phase 1.1a-A1 (#72) — landed:** `Pool.supervise(sess)` seam + `runGroup`/`runCtx` handle on `*Pool`. Bootstrap fan-out in `Pool.Run` flows through the helper; the watcher fan-out stays inline (not a `*Session`). `ErrPoolNotRunning` sentinel for before/after-`Run` calls.
 - **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam, landed), `AttachPayload.SessionID` on the wire (1.1e-C, landed — server routes via `Pool.ResolveID`; CLI surface in 1.1e-D landed), `pyry sessions new [--name LABEL]` CLI verb + `sessions` sub-router (1.1a-B2 #76, landed — peels global pyry flags via `parseClientFlags` then dispatches on the first positional; each future verb is one switch case + one helper), `pyry sessions rm` (1.1d-B2 #99, landed — client-side prefix resolution via `control.SessionsList`), `pyry sessions rename` (1.1c-B2a #92, landed — full-UUID only), `pyry sessions list [--json]` (1.1b-B2 #88, landed — first text-table sink in `cmd/pyry`, `text/tabwriter` four-column table + `{"sessions":[...]}` JSON envelope; renderer choices template the rest of Phase 1.1's tabular output), per-session log lines. Live-resize loop landed end-to-end across #136 (`Bridge.Resize` seam) + #137 (`VerbResize` wire + `handleResize` server applier) + #133 (`startWinsizeWatcher` client-side SIGWINCH emitter in `pyry attach`).
+- **Phase 1.3 (SDK consumer-shaped attach):** `pyry attach --stdio` (1.3a #154, landed — no-PTY byte forwarding); `pyry attach --create-if-missing <uuid>` (1.3b #155, landed — take-or-create attach via new `Pool.GetOrCreate` primitive + `ValidID` UUIDv4 validator; orthogonal to `--stdio`, the SDK's primary shape is `pyry attach --stdio --create-if-missing <uuid>`); foreground-binary auto-attach (1.3c #158).
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing

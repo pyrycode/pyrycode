@@ -19,6 +19,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.1c-A (#62):** `Pool.Rename(id, newLabel) error` write primitive — typed mutator for the `label` field that flows through `saveLocked`. Empty `newLabel` clears the on-disk value to `""` (synthetic `"bootstrap"` substitution from #60 then resumes for the bootstrap entry); non-empty labels persist verbatim and are reflected by `Pool.List`. Unknown id returns `ErrSessionNotFound` with on-disk and in-memory state byte-identical to before. The internal seam Phase 1.1c-B's `pyry sessions rename` CLI verb (47-B) consumes.
 - **Phase 1.1d-A1 (#94):** `Pool.Remove(ctx, id) error` write primitive + `ErrCannotRemoveBootstrap` sentinel — terminates the named session's claude process and drops its registry entry. JSONL on disk is **not** touched (disposition lands in 64-A2 / #95). Bootstrap is rejected via the sentinel; unknown ids reuse `ErrSessionNotFound`. Delete-then-evict ordering: `Pool.mu` covers the in-memory delete + persist, then is released before `Session.Evict` so the lifecycle goroutine's `transitionTo → Pool.persist` can reacquire the mutex without deadlock. Save-failure rolls the in-memory delete back. The internal seam the future `pyry sessions rm` CLI verb (#65) consumes.
 - **Phase 1.1d-A2 (#95):** `Pool.Remove` signature evolves to `(ctx, id, opts RemoveOptions) error` + `JSONLPolicy` enum (`JSONLLeave` / `JSONLArchive` / `JSONLPurge`). Zero-value `RemoveOptions{}` preserves 1.1d-A1 behaviour byte-for-byte. Archive moves the live JSONL into `<pyry-data-dir>/archived-sessions/<uuid>.jsonl` (data-dir = parent of `registryPath`; subdir auto-created; errors wrapping `fs.ErrExist` if destination exists; source-absent is a no-op). Purge deletes the JSONL (source-absent is a no-op). Disposition runs under `Pool.mu` after `saveLocked` so the registry+JSONL transition is observably atomic; on disposition failure the registry is already committed and `Session.Evict` still runs.
+- **Phase 1.3b (#155):** `Pool.GetOrCreate(ctx, id, label) (SessionID, error)` take-or-create primitive + new `ErrInvalidSessionID` sentinel + new `ValidID(s string) bool` UUIDv4 validator (next to `NewID`). Either returns the existing session for an already-registered UUID or atomically registers a new one under the caller-supplied id. Builds on `Pool.Create`'s helper extraction (`buildSession`, `registerAllocatedUUIDLocked`); the load-bearing change is that the register + persist + skip-set + lifecycle-goroutine schedule all run under one `p.mu` critical section, closing the race where a same-id observer could see the entry before its lifecycle goroutine parks. The internal seam Phase 1.3b's `pyry attach --create-if-missing` consumes via the new `control.GetOrCreator` interface (embedded in `Sessioner`). See [ADR 014](../decisions/014-get-or-create-take-or-create.md).
 - **Phase 1.1e-A (#66):** `Pool.ResolveID(arg string) (SessionID, error)` prefix resolver + new `ErrAmbiguousSessionID` sentinel. Maps a user-supplied UUID-or-prefix string to a canonical `SessionID` under `Pool.mu` (RLock). Empty arg → bootstrap (same seam as `Pool.Lookup("")`); exact full-UUID match short-circuits via single map lookup; otherwise scan for unique prefix match. Zero matches → `ErrSessionNotFound` (reused); ≥2 → `ErrAmbiguousSessionID` wrapped via `fmt.Errorf("%w:\n%s", …)` so the message lists `<uuid> (<label>)` pairs on their own lines, sorted by `SessionID` ascending. The internal seam Phase 1.1e-B's `pyry attach <id>` wire + CLI consumes; 47-B / 48-B may opportunistically refactor onto it when next touched.
 - **Phase 1.1+:** `Request.SessionID` on the wire (#71 — `sessions.new` verb consumes `Pool.Create`), per-session log lines, channel-driven auto-mint.
 
@@ -41,11 +42,14 @@ internal/sessions/
 type SessionID string
 
 func NewID() (SessionID, error)
+func ValidID(s string) bool
 ```
 
 A 36-char canonical UUIDv4 (`8-4-4-4-12` hex with dashes), drawn from `crypto/rand`. No external UUID library — stdlib only, ~15 lines. The version (`b[6] = b[6]&0x0f | 0x40`) and variant (`b[8] = b[8]&0x3f | 0x80`) bits are set explicitly.
 
 The empty `SessionID` (`""`) is the **unset sentinel**, never a valid generated ID. `Pool.Lookup("")` resolves to the default entry — the mechanism that lets future handlers call `Lookup(req.SessionID)` against an empty wire field without a special case.
+
+`ValidID` (1.3b) reports whether `s` matches the canonical shape `NewID` produces: 36 chars, lowercase hex, dashes at positions 8/13/18/23, version-4 nibble (`'4'`) at position 14, RFC 4122 variant (`'8'`/`'9'`/`'a'`/`'b'`) at position 19. Empty input returns false. Lives next to `NewID` so producer + validator share one file. Used by `Pool.GetOrCreate` to reject caller-supplied ids that aren't canonical UUIDv4s. The version + variant checks are belt-and-suspenders: SDK-produced UUIDs are uuidv4 by construction, so the cost is nil and a future contributor passing a v3/v5 id gets a clean error. See [ADR 014](../decisions/014-get-or-create-take-or-create.md).
 
 ### `Session`
 
@@ -82,6 +86,7 @@ func (p *Pool) Run(ctx context.Context) error
 func (p *Pool) RotateID(oldID, newID SessionID) error
 func (p *Pool) Activate(ctx context.Context, id SessionID) error
 func (p *Pool) Create(ctx context.Context, label string) (SessionID, error)
+func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (SessionID, error)
 func (p *Pool) List() []SessionInfo
 func (p *Pool) Rename(id SessionID, newLabel string) error
 func (p *Pool) ResolveID(arg string) (SessionID, error)
@@ -396,6 +401,69 @@ func (p *Pool) ResolveID(arg string) (SessionID, error)
 
 **Out of scope** (handed to 1.1e-B): wire protocol field carrying the resolved/unresolved id, control verb routing, CLI argument parsing, refactoring 47-B / 48-B's inlined prefix resolvers (opportunistic when those callers are next touched).
 
+### Pool.GetOrCreate (1.3b)
+
+The take-or-create primitive Phase 1.3b's `pyry attach --create-if-missing <uuid>` consumes. SDK consumers (Claudian / `@anthropic-ai/claude-agent-sdk`) mint a UUIDv4 per chat upstream and pass it through; pyry must accept the SDK's id even when no session under that UUID is registered yet. Pairs `Pool.Lookup` and `Pool.Create` into one atomic call:
+
+| Caller | API |
+|---|---|
+| Server-minted id (CLI `sessions new`) | `Pool.Create(ctx, label)` |
+| Caller-supplied id (SDK `attach --create-if-missing`) | `Pool.GetOrCreate(ctx, id, label)` |
+
+```go
+var ErrInvalidSessionID = errors.New("sessions: invalid session id")
+
+func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (SessionID, error)
+```
+
+**Take-or-create over insert-or-error.** `GetOrCreate` returns the canonical `SessionID` whether the session was already registered or this call created it — same return contract for both paths. The handler treats both branches identically from the call site onward (`Lookup → Activate → Attach`). The insert-or-error alternative (`CreateWithID` returning `ErrIDInUse`) would force the handler to follow up with a `Lookup`, re-introducing a TOCTOU window that two SDK chats opening simultaneously could race through. See [ADR 014](../decisions/014-get-or-create-take-or-create.md).
+
+**ValidID gate at the Pool boundary.** Empty / non-canonical-UUIDv4 ids return `ErrInvalidSessionID` before any Pool state is touched. The validator runs before the lock is taken, so concurrent calls with different ids contend only briefly through `p.mu`.
+
+**Atomic registration — the load-bearing change.** Unlike `Pool.Create` (which releases `p.mu` between persist and supervise), `GetOrCreate` holds `p.mu` across **all five** of:
+
+1. Duplicate-id short-circuit (`if existing, ok := p.sessions[id]`).
+2. Registry-map insert.
+3. `saveLocked()` (registry persist; rolled back on failure via `delete(p.sessions, id)`).
+4. `registerAllocatedUUIDLocked(id)` — primes the rotation watcher's skip-set so a concurrent watcher snapshot sees register + skip-set atomically.
+5. `g.Go(func() error { return sess.Run(gctx) })` — schedules the lifecycle goroutine.
+
+`g.Go` is non-blocking: the goroutine it spawns parks on `activateCh` / `runCtx.Done()` before doing any pool work. Holding `p.mu` across `g.Go` is therefore safe (no lock-order violations, no deadlock risk). `Activate(ctx)` happens **after** `p.mu` is released — `Activate` has its own (`capMu`, `lcMu`) discipline that would deadlock if held under `p.mu`.
+
+**Why `g.Go` must run inside the critical section.** Without holding `p.mu` across the schedule, a concurrent `GetOrCreate(sameID)` caller could:
+
+1. Acquire `p.mu`, see the registered entry under `if existing, ok := p.sessions[id]`, release `p.mu`, return id.
+2. Call `sess.Activate(ctx)` — which sends on `activateCh` (buffered 1) and waits on `activeCh`.
+3. Block 30s until ctx times out, because the winner's lifecycle goroutine has not been scheduled yet (and will never close `activeCh`).
+
+The race detector cannot catch it; the failure mode is "long hangs at attach time on the loser." Holding `p.mu` across `g.Go` makes the schedule observable as part of the same critical section that registers the entry, so any same-id observer sees both atomically.
+
+**Two concurrent same-id callers.** One wins the lock, registers, persists, schedules `sess.Run`, releases the lock, proceeds to `Activate`, returns id. The other acquires the lock, observes the now-registered session via the duplicate-id short-circuit, releases the lock, returns id (no error). Both then `Lookup → Activate → Attach`; `Activate` is idempotent (already active → LRU touch, no-op). Net result: exactly one registry entry, exactly one supervised child, exactly one rotation skip-set entry.
+
+**Helper extraction shared with `Pool.Create`.** Two private helpers, both new in this ticket:
+
+- `buildSession(id, label) (*Session, error)` — constructs the per-session supervisor + Session. Touches no Pool state. `Pool.Create` and `Pool.GetOrCreate` call it identically; the supervisor.Config + Session field shape lives in one place.
+- `registerAllocatedUUIDLocked(id)` — the lock-held variant of `RegisterAllocatedUUID`. Caller MUST hold `p.mu` (write). The exported `RegisterAllocatedUUID` keeps its current "takes the lock" contract for `Pool.Create`'s caller.
+
+`Pool.Create`'s body shrinks; behaviour is unchanged.
+
+**Failure modes.**
+
+| Failure point | Caller sees | On-disk state | In-memory state |
+|---|---|---|---|
+| `ValidID` rejects (empty / malformed) | `ErrInvalidSessionID`, `""` | unchanged | unchanged |
+| `buildSession` (supervisor.New) | wrapped err, `""` | unchanged | unchanged |
+| Take path (id already registered) | id, no error | unchanged | unchanged; caller's `label` silently dropped |
+| `saveLocked` | err verbatim, `""` | unchanged | rolled back |
+| `runGroup == nil` (Pool.Run not active) | `ErrPoolNotRunning`, `""` | rolled back (best-effort re-save) | rolled back |
+| `Pool.Activate` | err verbatim, valid id | entry persisted | entry in map; lifecycle goroutine running |
+
+The take-path's silent label drop is documented in the docstring. Today's only caller (`handleAttach`) passes `""`; if a future caller wants take-or-create-with-label-update, that's a separate primitive (`Rename` after `GetOrCreate`).
+
+**Lock order — unchanged.** `Pool.mu (write) → Session.lcMu` (briefly inside `saveLocked`) → release → `Pool.Activate` (`capMu → Pool.mu (R) → Session.lcMu`). The `g.Go`-under-`p.mu` edge introduces no new ordering: `errgroup.Group.Go` takes its own internal mutex and the spawned goroutine's parking on `activateCh` does not touch `p.mu`.
+
+**Tests** (in `internal/sessions/pool_get_or_create_test.go`): `TestValidID` (table — empty/short/long/wrong-dash/non-hex/v3/non-RFC-4122-variant + canonical-NewID-output); `TestPool_GetOrCreate_Take_ReturnsExisting` (existing label preserved on take); `TestPool_GetOrCreate_Create_Persists` (caller's id written verbatim, claude spawned); `TestPool_GetOrCreate_PersistsPostDetach` (AC #1 — registry survives evict; this test surfaced ticket #169's persist-ordering race against `-race`); `TestPool_GetOrCreate_InvalidID` (`errors.Is(err, ErrInvalidSessionID)` for empty/malformed/v3); `TestPool_GetOrCreate_PoolNotRunning` (`ErrPoolNotRunning`, registry rolled back); `TestPool_GetOrCreate_ConcurrentSameID` (AC #4 — N=8 goroutines racing on one id, exactly one registry entry, label is one of the inputs, `-race`-clean); `TestPool_GetOrCreate_HonorsCap` (cap=1; bootstrap evicted via `Pool.Activate`'s cap-aware path).
+
 ## Concurrency
 
 `sync.RWMutex` on `Pool.sessions`:
@@ -431,12 +499,15 @@ The PTY spawn / wait / backoff loop, the I/O bridge goroutines, and the SIGWINCH
 | `Pool.Remove` archive when registry persistence disabled | `"sessions: archive requires a registry path"`. Registry entry already removed; child still terminated by Evict. |
 | `Pool.ResolveID` no match | `ErrSessionNotFound` (sentinel). |
 | `Pool.ResolveID` ≥2 prefix matches | `ErrAmbiguousSessionID` (sentinel) wrapped with `fmt.Errorf("%w:\n%s", …)`; message lists each `<uuid> (<label>)` pair on its own line, sorted by `SessionID` asc; bootstrap-empty-label substituted with `"bootstrap"`. |
+| `Pool.GetOrCreate` invalid id (empty / non-canonical UUIDv4) | `ErrInvalidSessionID` (sentinel). On-disk + in-memory state unchanged. |
+| `Pool.GetOrCreate` save failure | Wrapped error from `saveLocked` propagated verbatim; in-memory insert rolled back. |
+| `Pool.GetOrCreate` Pool.Run not active | `ErrPoolNotRunning` (sentinel). In-memory insert rolled back; best-effort re-save of the rolled-back state. |
 | `Pool.supervise` before/after `Run` | `ErrPoolNotRunning` (sentinel). |
 | `Session.Attach` with nil bridge | `ErrAttachUnavailable` (sentinel). |
 | `Session.Attach` while bridge busy | `supervisor.ErrBridgeBusy` propagated **verbatim** — no wrap. |
 | `Session.Run` / `Pool.Run` ctx cancel | `context.Canceled` from the supervisor. |
 
-Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`, `ErrAmbiguousSessionID`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
+Sentinels (`ErrSessionNotFound`, `ErrAttachUnavailable`, `ErrPoolNotRunning`, `ErrCannotRemoveBootstrap`, `ErrAmbiguousSessionID`, `ErrInvalidSessionID`) live in `internal/sessions`. `supervisor.ErrBridgeBusy` stays in `internal/supervisor`.
 
 ## Dependency Direction
 
