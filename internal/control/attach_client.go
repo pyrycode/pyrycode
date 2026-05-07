@@ -36,6 +36,11 @@ const (
 // passed through verbatim; resolution rules live in the server's
 // Pool.ResolveID.
 //
+// createIfMissing opts in to take-or-create attach (Phase 1.3b): if
+// sessionID is not registered, the daemon mints a session under that exact
+// UUID before binding. With createIfMissing set, sessionID MUST be a full
+// canonical UUIDv4 — prefix resolution does not apply.
+//
 // Local stdin is put into raw mode for the duration of the attach so
 // keystrokes pass through unmodified to the child. The terminal is restored
 // when Attach returns.
@@ -44,7 +49,7 @@ const (
 //   - The user types EscapeKey + DetachKey (Ctrl-B d): clean detach.
 //   - The server closes the connection: returns nil.
 //   - The local stdin or socket errors: returns the error.
-func Attach(ctx context.Context, socketPath string, cols, rows int, sessionID string) error {
+func Attach(ctx context.Context, socketPath string, cols, rows int, sessionID string, createIfMissing bool) error {
 	conn, err := dial(ctx, socketPath)
 	if err != nil {
 		return err
@@ -53,7 +58,7 @@ func Attach(ctx context.Context, socketPath string, cols, rows int, sessionID st
 
 	if err := json.NewEncoder(conn).Encode(Request{
 		Verb:   VerbAttach,
-		Attach: &AttachPayload{Cols: cols, Rows: rows, SessionID: sessionID},
+		Attach: &AttachPayload{Cols: cols, Rows: rows, SessionID: sessionID, CreateIfMissing: createIfMissing},
 	}); err != nil {
 		return fmt.Errorf("send handshake: %w", err)
 	}

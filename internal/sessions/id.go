@@ -30,3 +30,40 @@ func NewID() (SessionID, error) {
 	return SessionID(fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])), nil
 }
+
+// ValidID reports whether s is a canonical UUIDv4 string of the shape NewID
+// produces: 36 chars, lowercase hex, dashes at positions 8/13/18/23, version-4
+// nibble (0x4_) at position 14, and RFC 4122 variant (0x8/0x9/0xa/0xb) at
+// position 19. Empty input returns false.
+//
+// The version + variant checks are belt-and-suspenders for callers that
+// accept caller-supplied IDs (Pool.GetOrCreate). The SDK-produced UUIDs are
+// uuidv4 by construction, so the cost is nil and a future contributor
+// mistakenly trying to register a v3/v5 id gets a clean error.
+func ValidID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		case 14:
+			if c != '4' {
+				return false
+			}
+		case 19:
+			if !(c == '8' || c == '9' || c == 'a' || c == 'b') {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+				return false
+			}
+		}
+	}
+	return true
+}

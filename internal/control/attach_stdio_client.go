@@ -16,7 +16,9 @@ import (
 // transparent byte conduit.
 //
 // sessionID resolution rules match Attach (full UUID, unique prefix, or
-// "" → bootstrap; resolved server-side via Pool.ResolveID).
+// "" → bootstrap; resolved server-side via Pool.ResolveID). With
+// createIfMissing set (Phase 1.3b), sessionID must be a full canonical
+// UUIDv4 — prefix resolution does not apply.
 //
 // EOF on `in` ends the attach cleanly; the session itself stays alive
 // (lazy-eviction semantics — detach ≠ destroy). Server-initiated close
@@ -28,7 +30,7 @@ import (
 //
 // ctx scopes the dial only; once the conn is established the attach is
 // driven by I/O on `in`/`out` and `conn`. Cancel by closing `in`.
-func AttachStdio(ctx context.Context, socketPath, sessionID string, in io.Reader, out io.Writer) error {
+func AttachStdio(ctx context.Context, socketPath, sessionID string, in io.Reader, out io.Writer, createIfMissing bool) error {
 	conn, err := dial(ctx, socketPath)
 	if err != nil {
 		return err
@@ -40,7 +42,7 @@ func AttachStdio(ctx context.Context, socketPath, sessionID string, in io.Reader
 	// `payload.Cols > 0 && payload.Rows > 0` guard skips the resize seam.
 	if err := json.NewEncoder(conn).Encode(Request{
 		Verb:   VerbAttach,
-		Attach: &AttachPayload{SessionID: sessionID},
+		Attach: &AttachPayload{SessionID: sessionID, CreateIfMissing: createIfMissing},
 	}); err != nil {
 		return fmt.Errorf("send handshake: %w", err)
 	}

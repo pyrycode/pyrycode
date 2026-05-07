@@ -430,23 +430,31 @@ func runLogs(args []string) error {
 	return nil
 }
 
-// parseAttachArgs peels the attach-specific sub-flag (--stdio) out of the
-// post-`-pyry-*` remainder and returns the selector positional. Extracted
-// from runAttach so the parsing rules can be unit-tested without dialling
-// the control socket. Mirrors parseSessionsNewArgs's split — flag-set
-// sub-parser first, attachSelectorFromArgs on the post-flag positionals.
-func parseAttachArgs(args []string) (sessionID string, stdio bool, err error) {
+// parseAttachArgs peels the attach-specific sub-flags (--stdio,
+// --create-if-missing) out of the post-`-pyry-*` remainder and returns the
+// selector positional. Extracted from runAttach so the parsing rules can be
+// unit-tested without dialling the control socket. Mirrors
+// parseSessionsNewArgs's split — flag-set sub-parser first,
+// attachSelectorFromArgs on the post-flag positionals.
+//
+// --create-if-missing with no positional does NOT error at parse time — the
+// empty SessionID flows through to the server, where GetOrCreate's empty-id
+// rejection produces the canonical ErrInvalidSessionID. Parse-time vs.
+// semantic boundary: parsing is purely about shape; semantic rejection
+// lives at the Pool.
+func parseAttachArgs(args []string) (sessionID string, stdio bool, createIfMissing bool, err error) {
 	fs := flag.NewFlagSet("pyry attach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	stdioFlag := fs.Bool("stdio", false, "no-PTY byte forwarding for SDK consumers")
+	cimFlag := fs.Bool("create-if-missing", false, "create the session if the supplied UUID is not registered")
 	if err := fs.Parse(args); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	sel, err := attachSelectorFromArgs(fs.Args())
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
-	return sel, *stdioFlag, nil
+	return sel, *stdioFlag, *cimFlag, nil
 }
 
 // errTooManyAttachArgs is returned by attachSelectorFromArgs when more than
@@ -489,15 +497,15 @@ func runAttach(args []string) error {
 		return err
 	}
 
-	sessionID, stdio, err := parseAttachArgs(rest)
+	sessionID, stdio, createIfMissing, err := parseAttachArgs(rest)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pyry attach: "+err.Error())
-		fmt.Fprintln(os.Stderr, "usage: pyry attach [flags] [--stdio] [<id>]")
+		fmt.Fprintln(os.Stderr, "usage: pyry attach [flags] [--stdio] [--create-if-missing] [<id>]")
 		os.Exit(2)
 	}
 
 	if stdio {
-		if err := control.AttachStdio(context.Background(), socketPath, sessionID, os.Stdin, os.Stdout); err != nil {
+		if err := control.AttachStdio(context.Background(), socketPath, sessionID, os.Stdin, os.Stdout, createIfMissing); err != nil {
 			return fmt.Errorf("attach: %w", err)
 		}
 		return nil
@@ -514,7 +522,7 @@ func runAttach(args []string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "pyry: attached. Press Ctrl-B d to detach.")
-	if err := control.Attach(context.Background(), socketPath, cols, rows, sessionID); err != nil {
+	if err := control.Attach(context.Background(), socketPath, cols, rows, sessionID, createIfMissing); err != nil {
 		return fmt.Errorf("attach: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "\npyry: detached.")

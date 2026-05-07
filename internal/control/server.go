@@ -108,6 +108,21 @@ type Lister interface {
 	List() []sessions.SessionInfo
 }
 
+// GetOrCreator is the per-pool view the control server depends on for
+// take-or-create attaches (Phase 1.3b). *sessions.Pool satisfies it
+// structurally via Pool.GetOrCreate. Defined here, where it is consumed;
+// tests fake it directly.
+//
+// GetOrCreate returns the canonical SessionID for id, creating a new
+// session under that exact UUID if one is not already registered. Errors:
+// sessions.ErrInvalidSessionID for empty / non-UUIDv4 ids;
+// sessions.ErrPoolNotRunning when Pool.Run is not active. See
+// Pool.GetOrCreate for the full contract, including the atomic
+// register+persist+supervise critical section.
+type GetOrCreator interface {
+	GetOrCreate(ctx context.Context, id sessions.SessionID, label string) (sessions.SessionID, error)
+}
+
 // Sessioner aggregates the lifecycle methods the control server dispatches
 // to. Phase 1.1a-B1 added Create; Phase 1.1d-B1 added Remove via the
 // embedded Remover; Phase 1.1c-B1 added Rename via the embedded Renamer;
@@ -127,6 +142,7 @@ type Lister interface {
 // verbatim through Response.Error.
 type Sessioner interface {
 	Create(ctx context.Context, label string) (sessions.SessionID, error)
+	GetOrCreator
 	Remover
 	Renamer
 	Lister
@@ -604,19 +620,50 @@ func toSessionsPolicy(p JSONLPolicy) (sessions.JSONLPolicy, error) {
 // close it normally.
 func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, payload *AttachPayload) (handedOff bool) {
 	var sessionID string
+	var createIfMissing bool
 	if payload != nil {
 		sessionID = payload.SessionID
+		createIfMissing = payload.CreateIfMissing
 	}
-	// Two-step resolve-then-lookup. ResolveID maps the loose-input
-	// selector (full UUID, unique prefix, or empty → bootstrap) to a
-	// concrete SessionID; Lookup then guards against the session being
-	// removed between the two RLock acquires. Both errors encode as
-	// "attach: <err>" before any bridge work, leaving the bridge state
-	// untouched on the failure path.
-	id, err := s.sessions.ResolveID(sessionID)
-	if err != nil {
-		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-		return false
+
+	// Wake an evicted session before binding the bridge. The 30s window
+	// caps the documented 2-15s respawn latency with safety margin; a
+	// busted respawn surfaces as a clean error to the client rather than
+	// a hung attach. Built early on the create-if-missing path so
+	// GetOrCreate's internal Activate gets the same budget; the existing
+	// sess.Activate below reuses it.
+	activateCtx, cancelActivate := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelActivate()
+
+	var id sessions.SessionID
+	var err error
+	if createIfMissing {
+		// GetOrCreate validates that sessionID is a canonical UUIDv4.
+		// ResolveID's prefix logic does NOT apply on this path — a
+		// "prefix that doesn't match" being interpreted as a fresh UUID
+		// to register would yield non-canonical ids that the registry
+		// and `pyry sessions list` are not designed for.
+		if s.sessioner == nil {
+			_ = enc.Encode(Response{Error: "attach: no sessioner configured"})
+			return false
+		}
+		id, err = s.sessioner.GetOrCreate(activateCtx, sessions.SessionID(sessionID), "")
+		if err != nil {
+			_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
+			return false
+		}
+	} else {
+		// Two-step resolve-then-lookup. ResolveID maps the loose-input
+		// selector (full UUID, unique prefix, or empty → bootstrap) to a
+		// concrete SessionID; Lookup then guards against the session
+		// being removed between the two RLock acquires. Both errors
+		// encode as "attach: <err>" before any bridge work, leaving the
+		// bridge state untouched on the failure path.
+		id, err = s.sessions.ResolveID(sessionID)
+		if err != nil {
+			_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
+			return false
+		}
 	}
 	sess, err := s.sessions.Lookup(id)
 	if err != nil {
@@ -632,12 +679,6 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, payload *AttachP
 	// indefinitely.
 	_ = conn.SetDeadline(time.Time{})
 
-	// Wake an evicted session before binding the bridge. The 30s window
-	// caps the documented 2-15s respawn latency with safety margin; a
-	// busted respawn surfaces as a clean error to the client rather than
-	// a hung attach.
-	activateCtx, cancelActivate := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelActivate()
 	if err := sess.Activate(activateCtx); err != nil {
 		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: activate: %v", err)})
 		return false

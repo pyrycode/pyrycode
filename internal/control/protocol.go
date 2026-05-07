@@ -134,6 +134,13 @@ type AttachPayload struct {
 	Cols      int    `json:"cols,omitempty"`
 	Rows      int    `json:"rows,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`
+	// CreateIfMissing opts in to take-or-create attach: if SessionID is
+	// not registered, the daemon mints a session under that exact UUID
+	// before binding. Off by default — pre-existing callers fail with
+	// "no such session" against an unknown id, byte-for-byte unchanged.
+	// Omitempty is load-bearing for the same v0.5.x rollover guarantee
+	// that pins SessionID's tag.
+	CreateIfMissing bool `json:"createIfMissing,omitempty"`
 }
 
 // SessionsPayload carries arguments shared across the sessions.* verb
