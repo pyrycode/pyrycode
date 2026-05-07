@@ -236,6 +236,77 @@ func splitArgs(args []string) (pyryArgs, claudeArgs []string) {
 	return
 }
 
+// extractSessionID scans claudeArgs for the value of claude's --session-id
+// flag. Accepts the four shapes claude itself accepts: `--session-id <v>`,
+// `--session-id=<v>`, `-session-id <v>`, `-session-id=<v>`. Returns "" when
+// the flag is absent or appears as the last arg with no value. The first
+// occurrence wins.
+//
+// Pure function — no environment, no syscalls. The returned string is
+// opaque to extractSessionID; UUID validation is the daemon's job
+// (sessions.has-id rejects malformed input server-side).
+func extractSessionID(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--session-id" || a == "-session-id":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		case strings.HasPrefix(a, "--session-id="):
+			return strings.TrimPrefix(a, "--session-id=")
+		case strings.HasPrefix(a, "-session-id="):
+			return strings.TrimPrefix(a, "-session-id=")
+		}
+	}
+	return ""
+}
+
+// tryAutoAttach is the foreground-binary auto-attach gate. Called from
+// runSupervisor after pyry-flag parsing but before any supervisor-mode
+// side effect (logger, ring buffer, Bridge, Pool init).
+//
+// Returns (false, nil) on every fall-through path: no --session-id in
+// claudeArgs, PYRY_NO_AUTO_ATTACH=1 in the env, socket file absent, any
+// stat error, transport failure, malformed UUID, or has-id returning
+// false. The caller carries on with the existing supervised-spawn flow.
+//
+// Returns (true, err) when the daemon hosts the requested UUID and we
+// dispatched to control.AttachStdio. err is the AttachStdio result —
+// nil on a clean EOF detach, transport / handshake error otherwise.
+//
+// AC#3 (<50ms in the no-daemon case) is satisfied structurally: when
+// the socket is absent, os.Stat's ENOENT branch returns before any
+// dial / context allocation / goroutine.
+func tryAutoAttach(socketPath string, claudeArgs []string) (handled bool, err error) {
+	if os.Getenv("PYRY_NO_AUTO_ATTACH") == "1" {
+		return false, nil
+	}
+	id := extractSessionID(claudeArgs)
+	if id == "" {
+		return false, nil
+	}
+	if _, statErr := os.Stat(socketPath); statErr != nil {
+		// ENOENT is the common no-daemon path; any other stat error
+		// (EACCES, EPERM, …) also falls through — auto-attach is the
+		// exception, never the default.
+		return false, nil
+	}
+
+	probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	has, hasErr := control.SessionsHasID(probeCtx, socketPath, id)
+	if hasErr != nil || !has {
+		return false, nil
+	}
+
+	if attachErr := control.AttachStdio(context.Background(), socketPath, id, os.Stdin, os.Stdout, false); attachErr != nil {
+		return true, fmt.Errorf("attach: %w", attachErr)
+	}
+	return true, nil
+}
+
 // parseFlagSyntax extracts the flag name from a "-foo", "--foo", "-foo=bar",
 // or "--foo=bar" arg. Returns (name, value, hasValue). For non-flag args
 // (e.g. "summarize this") returns ("", "", false).
@@ -270,6 +341,13 @@ func runSupervisor(args []string) error {
 	socketPath := resolveSocketPath(*socketFlag, *name)
 	registryPath := resolveRegistryPath(*name)
 	claudeSessionsDir := resolveClaudeSessionsDir(*workdir)
+
+	// Phase 1.3c-2: foreground binary auto-attaches when the daemon
+	// hosts the requested --session-id. Conservative — falls through on
+	// every failure mode except "definitely registered".
+	if handled, err := tryAutoAttach(socketPath, claudeArgs); handled {
+		return err
+	}
 
 	level := slog.LevelInfo
 	if *verbose {
