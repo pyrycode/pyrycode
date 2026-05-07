@@ -202,19 +202,24 @@ func TestProtocol_SessionsRoundTripBackCompat(t *testing.T) {
 			want: []byte(`{"verb":"sessions.rm","sessions":{"id":"x","jsonlPolicy":"archive"}}`),
 		},
 		{
-			name: "empty Response is {} (omitempty on ErrorCode and SessionsList)",
+			name: "empty Response is {} (omitempty on ErrorCode, SessionsList, SessionsHasID)",
 			v:    Response{},
 			want: []byte(`{}`),
 		},
 		{
-			name: "Response{OK:true} is byte-identical (omitempty on SessionsList holds after #87)",
+			name: "Response{OK:true} is byte-identical (omitempty on SessionsHasID holds after #157)",
 			v:    Response{OK: true},
 			want: []byte(`{"ok":true}`),
 		},
 		{
-			name: "Response{SessionsNew} is byte-identical (omitempty on SessionsList holds after #87)",
+			name: "Response{SessionsNew} is byte-identical (omitempty on SessionsHasID holds after #157)",
 			v:    Response{SessionsNew: &SessionsNewResult{SessionID: "abc"}},
 			want: []byte(`{"sessionsNew":{"sessionID":"abc"}}`),
+		},
+		{
+			name: "Response{SessionsList} is byte-identical (omitempty on SessionsHasID holds after #157)",
+			v:    Response{SessionsList: &SessionsListPayload{Sessions: []SessionInfo{}}},
+			want: []byte(`{"sessionsList":{"sessions":[]}}`),
 		},
 	}
 	for _, tc := range cases {

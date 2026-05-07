@@ -216,6 +216,35 @@ func SessionsList(ctx context.Context, socketPath string) ([]SessionInfo, error)
 	return resp.SessionsList.Sessions, nil
 }
 
+// SessionsHasID asks the daemon whether a session is currently
+// registered under the given UUID. Returns true for a known UUID,
+// false for a well-formed UUID that is absent, and an error for
+// empty / malformed input or transport failure.
+//
+// In-process Go callers (the future 1.3c-2 foreground auto-attach
+// path) consume this directly. Same one-shot dial → encode → decode →
+// close lifecycle as Status/Logs/Stop/SendResize/SessionsNew/
+// SessionsRm/SessionsRename/SessionsList.
+//
+// No typed-sentinel mapping. Server-side validation errors flow
+// through Response.Error verbatim.
+func SessionsHasID(ctx context.Context, socketPath, id string) (bool, error) {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:     VerbSessionsHasID,
+		Sessions: &SessionsPayload{ID: id},
+	})
+	if err != nil {
+		return false, err
+	}
+	if resp.Error != "" {
+		return false, errors.New(resp.Error)
+	}
+	if resp.SessionsHasID == nil {
+		return false, errors.New("control: empty sessions.has-id response")
+	}
+	return resp.SessionsHasID.Has, nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {

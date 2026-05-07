@@ -68,6 +68,15 @@ const (
 	// (see #60 for the underlying primitive's bootstrap-label
 	// substitution and sort-order guarantees).
 	VerbSessionsList Verb = "sessions.list"
+
+	// VerbSessionsHasID asks whether a session is currently registered
+	// with the given UUID. Request.Sessions.ID carries the UUID;
+	// Response.SessionsHasID carries the boolean answer. Pure registry
+	// read — no claude spawn, no state transition. The 1.3c-2
+	// foreground auto-attach path consumes this as a cheap alternative
+	// to sessions.list. Empty / malformed input returns Response.Error;
+	// a well-formed but absent UUID returns {Has: false}.
+	VerbSessionsHasID Verb = "sessions.has-id"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -185,17 +194,19 @@ type ResizePayload struct {
 //   - Logs: payload for VerbLogs
 //   - SessionsNew: payload for VerbSessionsNew
 //   - SessionsList: payload for VerbSessionsList
+//   - SessionsHasID: payload for VerbSessionsHasID
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
 type Response struct {
-	Status       *StatusPayload       `json:"status,omitempty"`
-	Logs         *LogsPayload         `json:"logs,omitempty"`
-	SessionsNew  *SessionsNewResult   `json:"sessionsNew,omitempty"`  // populated for VerbSessionsNew
-	SessionsList *SessionsListPayload `json:"sessionsList,omitempty"` // populated for VerbSessionsList (1.1b-B1)
-	OK           bool                 `json:"ok,omitempty"`
-	Error        string               `json:"error,omitempty"`
-	ErrorCode    ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
+	Status        *StatusPayload       `json:"status,omitempty"`
+	Logs          *LogsPayload         `json:"logs,omitempty"`
+	SessionsNew   *SessionsNewResult   `json:"sessionsNew,omitempty"`   // populated for VerbSessionsNew
+	SessionsList  *SessionsListPayload `json:"sessionsList,omitempty"`  // populated for VerbSessionsList (1.1b-B1)
+	SessionsHasID *SessionsHasIDResult `json:"sessionsHasID,omitempty"` // populated for VerbSessionsHasID (1.3c-1)
+	OK            bool                 `json:"ok,omitempty"`
+	Error         string               `json:"error,omitempty"`
+	ErrorCode     ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
 }
 
 // SessionsNewResult carries the result of a successful sessions.new
@@ -204,6 +215,15 @@ type Response struct {
 // sessions package.
 type SessionsNewResult struct {
 	SessionID string `json:"sessionID"`
+}
+
+// SessionsHasIDResult carries the boolean answer to a sessions.has-id
+// query. Has is emitted unconditionally (no omitempty) so the wire
+// distinguishes "id absent" ({"has":false}) from a malformed empty
+// response ({}). Defined here, in protocol.go, so external Go callers
+// don't transitively import internal/sessions.
+type SessionsHasIDResult struct {
+	Has bool `json:"has"`
 }
 
 // SessionsListPayload carries the result of a successful sessions.list

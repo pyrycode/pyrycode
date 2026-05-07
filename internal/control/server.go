@@ -191,7 +191,9 @@ type Server struct {
 //
 // sessioner is optional. When nil, VerbSessionsNew, VerbSessionsRm,
 // VerbSessionsRename, and VerbSessionsList all return error responses
-// — same precedent as logs/shutdown. The CLI ticket wires
+// — same precedent as logs/shutdown. VerbSessionsHasID is independent
+// of sessioner (consults SessionResolver instead) and answers
+// correctly even with sessioner == nil. The CLI ticket wires
 // *sessions.Pool here.
 //
 // Foreground vs service mode is no longer surfaced as a distinct
@@ -415,6 +417,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleSessionsRename(enc, req.Sessions)
 	case VerbSessionsList:
 		s.handleSessionsList(enc)
+	case VerbSessionsHasID:
+		s.handleSessionsHasID(enc, req.Sessions)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -592,6 +596,43 @@ func (s *Server) handleSessionsList(enc *json.Encoder) {
 		})
 	}
 	_ = enc.Encode(Response{SessionsList: &SessionsListPayload{Sessions: out}})
+}
+
+// handleSessionsHasID serves a VerbSessionsHasID request: report whether
+// a session is currently registered under the given UUID. Pure registry
+// read — no claude spawn, no state transition, no context.WithTimeout
+// (s.sessions.Lookup is in-memory and bounded by Pool.mu RLock; the
+// conn's handshake deadline is sufficient).
+//
+// Empty ID is rejected at the boundary (a missing-input condition, not
+// an "absent" one) for symmetry with handleSessionsRm /
+// handleSessionsRename. Malformed (non-UUIDv4) ID is also rejected at
+// the boundary — Pool.Lookup would return ErrSessionNotFound for any
+// non-canonical string regardless, but failing fast at the seam
+// distinguishes "client typed garbage" from "well-formed UUID that
+// happens to be absent". Per AC.
+//
+// Lookup returns (*Session, ErrSessionNotFound) for unknown ids,
+// (*Session, nil) for known. The Session is discarded — the handler
+// only cares whether the entry exists. Any non-ErrSessionNotFound
+// error (theoretically unreachable today; defensive against future
+// Pool.Lookup error growth) is surfaced verbatim.
+func (s *Server) handleSessionsHasID(enc *json.Encoder, payload *SessionsPayload) {
+	if payload == nil || payload.ID == "" {
+		_ = enc.Encode(Response{Error: "sessions.has-id: missing id"})
+		return
+	}
+	if !sessions.ValidID(payload.ID) {
+		_ = enc.Encode(Response{Error: "sessions.has-id: invalid uuid"})
+		return
+	}
+	_, err := s.sessions.Lookup(sessions.SessionID(payload.ID))
+	if err != nil && !errors.Is(err, sessions.ErrSessionNotFound) {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("sessions.has-id: %v", err)})
+		return
+	}
+	has := err == nil
+	_ = enc.Encode(Response{SessionsHasID: &SessionsHasIDResult{Has: has}})
 }
 
 // toSessionsPolicy maps the wire-level JSONLPolicy enum (string) to the
