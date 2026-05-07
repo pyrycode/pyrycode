@@ -169,22 +169,26 @@ func (s *Session) Resize(rows, cols uint16) error {
 }
 
 // Activate moves the session into stateActive if it is currently evicted,
-// blocking until the lifecycle goroutine has started the supervisor (or ctx
-// is cancelled). No-op when the session is already active. Safe from any
-// goroutine; idempotent under concurrent calls.
+// blocking until the lifecycle goroutine has started the supervisor AND the
+// post-transition registry persist has completed (or ctx is cancelled).
+// Safe from any goroutine; idempotent under concurrent calls.
+//
+// No early-return for "already active" — callers always wait on activeCh.
+// When the session is fully active and persisted, activeCh is already closed
+// and the receive returns immediately. When a transition is in flight (state
+// flipped, persist still running), the receive correctly blocks until the
+// persist completes and transitionTo closes activeCh.
 func (s *Session) Activate(ctx context.Context) error {
 	s.lcMu.Lock()
-	if s.lcState == stateActive {
-		s.lcMu.Unlock()
-		return nil
-	}
 	ch := s.activeCh
-	// Buffered(1) — concurrent Activates collapse to one signal; the
-	// lifecycle goroutine drains it once when leaving runEvicted, then the
-	// shared activeCh wakeup picks up any extra waiters.
-	select {
-	case s.activateCh <- struct{}{}:
-	default:
+	if s.lcState != stateActive {
+		// Buffered(1) — concurrent Activates collapse to one signal; the
+		// lifecycle goroutine drains it once when leaving runEvicted, then
+		// the shared activeCh wakeup picks up any extra waiters.
+		select {
+		case s.activateCh <- struct{}{}:
+		default:
+		}
 	}
 	s.lcMu.Unlock()
 
@@ -208,14 +212,12 @@ func (s *Session) Activate(ctx context.Context) error {
 // attached caller will see EOF on its bridge.
 func (s *Session) Evict(ctx context.Context) error {
 	s.lcMu.Lock()
-	if s.lcState == stateEvicted {
-		s.lcMu.Unlock()
-		return nil
-	}
 	ch := s.evictedCh
-	select {
-	case s.evictCh <- struct{}{}:
-	default:
+	if s.lcState != stateEvicted {
+		select {
+		case s.evictCh <- struct{}{}:
+		default:
+		}
 	}
 	s.lcMu.Unlock()
 
@@ -343,32 +345,55 @@ func (s *Session) runEvicted(ctx context.Context) error {
 	}
 }
 
-// transitionTo flips lcState to newState, bumps lastActiveAt, swaps the
-// activeCh as appropriate, and persists the registry. Lock order: this
-// function releases lcMu before calling pool.persist so saveLocked's
-// per-session lcMu re-acquire doesn't deadlock against us.
+// transitionTo flips lcState to newState, bumps lastActiveAt, allocates the
+// fresh wake channel for the *opposite* direction, persists the registry,
+// then closes the wake channel for the current direction. The persist runs
+// between the state flip and the wake so that any Activate/Evict waiter that
+// observes the wake also sees a registry on disk consistent with newState.
+//
+// Lock order: lcMu is released before calling pool.persist so saveLocked's
+// per-session lcMu re-acquire doesn't deadlock against us. lcMu is then
+// re-acquired (after persist returns and releases Pool.mu) only to serialise
+// the close against any concurrent Activate/Evict capturing the channel
+// reference. The two lcMu acquisitions are sequential, not nested.
+//
+// On persist failure the wake channel still closes — a permanently-stuck
+// waiter is a worse failure mode than a waiter that wakes to stale disk.
+// The persist error propagates up Run, which treats it as fatal.
 func (s *Session) transitionTo(newState lifecycleState) error {
 	s.lcMu.Lock()
 	s.lcState = newState
 	s.lastActiveAt = time.Now().UTC()
 	switch newState {
 	case stateActive:
-		// Wake any Activate waiters. Closing twice would panic; we only
-		// close when entering active from evicted, and runEvicted's
-		// channel is fresh.
-		close(s.activeCh)
-		// Fresh open channel for the next Evict to wait on.
+		// Fresh open channel for the next Evict to wait on. The current
+		// direction's activeCh is left open here; closed below after persist.
 		s.evictedCh = make(chan struct{})
 	case stateEvicted:
-		// Fresh open channel for the next Activate to wait on.
+		// Fresh open channel for the next Activate to wait on. The current
+		// direction's evictedCh is left open here; closed below after persist.
 		s.activeCh = make(chan struct{})
-		// Wake any Evict waiters. Same logic — runActive's evictedCh
-		// was fresh on entry, so closing it here is single-shot.
+	}
+	s.lcMu.Unlock()
+
+	var persistErr error
+	if s.pool != nil {
+		persistErr = s.pool.persist()
+	}
+
+	// Wake waiters under lcMu to order the close against any concurrent
+	// Activate/Evict capturing the channel reference. Single-shot per
+	// direction: transitionTo is called only by the lifecycle goroutine, and
+	// Run alternates directions, so each close fires exactly once per fresh
+	// channel.
+	s.lcMu.Lock()
+	switch newState {
+	case stateActive:
+		close(s.activeCh)
+	case stateEvicted:
 		close(s.evictedCh)
 	}
 	s.lcMu.Unlock()
-	if s.pool == nil {
-		return nil
-	}
-	return s.pool.persist()
+
+	return persistErr
 }
