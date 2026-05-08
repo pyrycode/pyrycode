@@ -1,6 +1,7 @@
 // Package identity owns typed identifiers that span subsystems — server-id
-// today; potential future device-id, paired-device-id. Pure types and
-// validation; no I/O.
+// today; potential future device-id, paired-device-id — and the bootstrap
+// of those identifiers from disk. The pure types and validation live next
+// to the I/O wrapper that mints and persists them on first run.
 package identity
 
 import (
