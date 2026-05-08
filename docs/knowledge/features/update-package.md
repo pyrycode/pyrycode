@@ -1,6 +1,6 @@
-# `internal/update` — release parsing, version comparison, asset naming + SHA-256 verification
+# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification + restart-command detection
 
-Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed the JSON parser + semver comparator; #180 adds asset-name templating + checksum parsing + verification. The HTTP fetcher, tar extractor, and atomic-replace land in sister tickets.
+Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 adds restart-command detection. The HTTP fetcher, tar extractor, atomic-replace, and restart probe land in sister tickets.
 
 ## What it does
 
@@ -15,7 +15,12 @@ Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed 
 - `ParseChecksumsFile(text, assetName string) (string, error)` — given a GoReleaser-produced `checksums.txt` body and a target asset name, returns the lowercase SHA-256 hex digest for that asset.
 - `VerifySHA256(data []byte, expectedHex string) error` — returns `nil` iff `sha256(data)` lowercase-hex equals `expectedHex`. Mismatch error includes both digests for diagnostic logging.
 
-All five are stdlib-only and side-effect-free. No I/O, no goroutines, no `context.Context`.
+### Restart-command detection (#181)
+
+- `RestartProbe` struct — bool fields `LaunchdPlistExists` and `SystemdUnitExists` plus a `UID` string templated into the launchctl gui/<uid>/… domain. The wiring ticket fills these from `os.Stat` on the platform-specific service file paths and `strconv.Itoa(os.Getuid())`.
+- `DetectRestartCommand(probe RestartProbe) []string` — returns the argv (program plus args) that restarts a managed pyry daemon, or `nil` when no managed daemon is detected (foreground / unknown — caller should print "restart your pyry yourself" guidance).
+
+All six are stdlib-only and side-effect-free. No I/O, no goroutines, no `context.Context`.
 
 ## Types & errors
 
@@ -107,6 +112,21 @@ The `sawAny` flag distinguishes "checksums.txt was junk" (`ErrMalformedChecksums
 
 Lines that don't split into exactly two non-empty parts on `"  "` are skipped silently (forward-compatible with future header comments or trailing blanks). Per-line digest length / hex-ness is **not** validated — `VerifySHA256` will catch any mangling, and a regex check would couple two layers without observed benefit.
 
+### Restart-command detection
+
+| Probe | Result |
+|-------|--------|
+| `LaunchdPlistExists: true, UID: "501"` | `["launchctl", "kickstart", "-k", "gui/501/dev.pyrycode.pyry"]` |
+| `SystemdUnitExists: true` | `["systemctl", "--user", "restart", "pyry"]` |
+| Both true (tie-breaker) | launchd command — macOS is pyrycode's primary daily-driver platform; a stray systemd user unit on a Mac is more likely cruft than the active manager. The reverse case (a launchd plist on Linux) cannot occur — `launchctl` does not exist on Linux, so the probe returns false. |
+| Neither true | `nil` — caller prints guidance |
+
+`launchctl kickstart -k` SIGTERMs the running instance and starts a fresh one in a single command. `unload`/`load` would round-trip the plist and race with `KeepAlive=true`. `systemctl --user restart` is unconditional (matches the user's intent: "the binary changed; restart it"); `try-restart` would silently no-op if the unit is inactive, and `reload` requires `ExecReload=` which the unit file doesn't define.
+
+`RestartProbe` is a struct rather than three positional bools so the call site labels each signal and survives signal additions in future tickets (e.g. an SMF unit on illumos, a Windows service entry) without breaking existing callers.
+
+No `runtime.GOOS` filter inside `DetectRestartCommand` — the probe **is** the OS filter. The wiring ticket may simply not call `os.Stat` on the launchd path under Linux, in which case `LaunchdPlistExists` stays false and the systemd branch wins. That's a wiring decision, not a decision-half decision.
+
 ### SHA-256 verification
 
 | Input | Outcome |
@@ -152,7 +172,17 @@ GitHub API ──[fetcher: sister ticket]──> []byte (release JSON)
                                   VerifySHA256(tarballBytes, expectedHex)
                                                           │
                                                           ▼
-                          [next ticket: untar + atomic replace + restart]
+                          [next ticket: untar + atomic replace]
+                                                          │
+                                                          ▼
+   [wiring: probe ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
+            + ~/.config/systemd/user/pyry.service + os.Getuid()]
+                                                          │
+                                                          ▼
+                              DetectRestartCommand(probe)
+                                                          │
+                                                          ▼
+                        argv ([]string) or nil → exec.Command(argv[0], argv[1:]...)
 ```
 
 No state, no I/O, no concurrency primitives. Safe for concurrent use by definition. Package-level `osTitles` / `archNames` are written once at var-decl time and only read thereafter — Go's memory model permits concurrent reads of an unmutated map.
@@ -163,6 +193,8 @@ No state, no I/O, no concurrency primitives. Safe for concurrent use by definiti
 - `internal/update/version_test.go` — table-driven coverage for the two #179 functions (~155 LOC, two `t.Parallel` tables).
 - `internal/update/checksum.go` — `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `ErrUnsupportedPlatform`, `ErrAssetNotInChecksums`, `ErrMalformedChecksums`, `ErrChecksumMismatch`, plus the `osTitles` / `archNames` lookup tables (~102 LOC). No package-doc comment — `version.go` already covers the package.
 - `internal/update/checksum_test.go` — table-driven coverage for the three #180 functions (~219 LOC, three `t.Parallel` tables).
+- `internal/update/restart.go` — `RestartProbe`, `DetectRestartCommand` (~37 LOC). Same shape as `checksum.go`'s pure-function siblings.
+- `internal/update/restart_test.go` — table-driven coverage for the four AC cases (~48 LOC, single `t.Parallel` table; uses `slices.Equal` for argv comparison).
 
 ## Configuration
 
@@ -178,7 +210,9 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 
 - HTTP fetcher (GET `releases/latest`, GET `<release>/checksums.txt`, GET `<release>/<assetName>`, retries, timeouts, `context.Context`).
 - Tar extraction of the downloaded asset.
-- Atomic binary replacement / restart detection.
+- Atomic binary replacement.
+- The probe half of restart detection — the wiring ticket performs `os.Stat` on the launchd plist + systemd unit file paths and `os.Getuid()`, then calls `DetectRestartCommand` with the results.
+- Actually running the restart argv (`exec.Command`) and watching for restart success.
 - `pyry update` CLI verb wiring + `--dry-run` flag.
 - A `MapHostPlatform()` helper that wraps `runtime.GOOS` / `runtime.GOARCH` (the wiring ticket can pass the raw runtime constants — adding a host-detection helper before the wiring ticket exists is YAGNI).
 - Streaming-hash variant of `VerifySHA256` (deferred until tarball size demands it).
@@ -191,4 +225,5 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 - `.goreleaser.yaml:24-46` — build matrix and `archives.name_template` that `osTitles` / `archNames` mirror verbatim.
 - [`lessons.md § Atomic on-disk writes`](../../lessons.md) — same "default decoder, not strict" rationale applied to `sessions.json`.
 - [`internal/sessions/id.go`](../../../internal/sessions/id.go) — convention reference for tiny stdlib-only packages with table-driven tests.
-- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md) — build-time architecture specs.
+- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md) — build-time architecture specs.
+- `launchd/dev.pyrycode.pyry.plist`, `systemd/pyry.service` — the service files whose presence the wiring-ticket probe checks; `pyry install-service` writes them.
