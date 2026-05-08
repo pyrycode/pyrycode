@@ -1,8 +1,8 @@
-# `internal/pair` — QR pairing payload encoding
+# `internal/pair` — QR pairing payload encoding + render
 
-The `{server, relay, token}` tuple a paired mobile device needs to connect through the relay back to this binary, encoded as a single ASCII string suitable for embedding in a QR symbol or for one-time paste-fallback display. Pure functions, no I/O. Phase 3 (mobile + relay) foundation; QR rendering and paste-fallback display are sibling #212, `pyry pair` CLI glue lands later.
+The `{server, relay, token}` tuple a paired mobile device needs to connect through the relay back to this binary, encoded as a single ASCII string suitable for embedding in a QR symbol or for one-time paste-fallback display, plus a `Render` surface that draws both the QR symbol and the paste-fallback line to a writer in one shot. Pure transforms; the only I/O is a caller-supplied `io.Writer`. Phase 3 (mobile + relay) foundation; the `pyry pair` CLI glue that wires `os.Stdout` into `Render` lands later.
 
-Stdlib only (`bytes`, `encoding/base64`, `encoding/json`, `errors`, `fmt`, `io`) plus `internal/identity`. No goroutines, no logger, no `Config`, no `context.Context`. Concurrent callers are safe by construction.
+Stdlib (`bytes`, `encoding/base64`, `encoding/json`, `errors`, `fmt`, `io`) plus `internal/identity` and `github.com/mdp/qrterminal/v3` (added in #212; pure-Go, MIT, built on `rsc.io/qr`). No goroutines, no logger, no `Config`, no `context.Context`. Concurrent callers with distinct writers are safe by construction.
 
 ## Surface
 
@@ -15,11 +15,12 @@ type Payload struct {
 
 func Encode(p Payload) string
 func Decode(s string) (Payload, error)
+func Render(p Payload, w io.Writer) error
 
 var ErrInvalidPayload = errors.New("pair: invalid payload")
 ```
 
-Four exports. `Payload` is the value type; `Encode` is the wire-producer; `Decode` is the parse-and-validate inverse; `ErrInvalidPayload` is the sentinel for `errors.Is` branching.
+Five exports. `Payload` is the value type; `Encode` is the wire-producer; `Decode` is the parse-and-validate inverse; `Render` is the user-visible display surface; `ErrInvalidPayload` is the sentinel for `errors.Is` branching.
 
 The encoder and the decoder are the two ends of the same contract — same `Payload`, same wire string, scanned-or-pasted into the phone identically. The decoder exists primarily for the round-trip test (the phone is the production decoder and lives outside this Go module); round-trip parity inside the binary's tests is how we prove the encoding is well-formed without mocking the phone.
 
@@ -63,6 +64,56 @@ Relay URL is **not** parsed/validated here. The protocol contract is "the relay'
 
 On any error, the returned `Payload` is the zero value — matches the `config.Load` discipline ("on any error the returned Config is the zero value"). Callers that ignore `err` see empty fields and break loudly rather than working with partial data.
 
+## `Render` — display
+
+`Render(p Payload, w io.Writer) error` writes four sections to `w` in order:
+
+1. A QR symbol of `Encode(p)`, drawn with UTF-8 half-block code points (`▀`, `▄`, `█`, space) via `qrterminal.GenerateHalfBlock(encoded, qrterminal.M, &tw)`.
+2. A blank line.
+3. `Encode(p)` on its own line.
+4. The fixed instruction line: `Scan the QR with the Pyrycode mobile app, or paste the string above into the app's pairing screen.`
+
+That's the entire output contract. No banner, no server-id summary, no relay summary, no warning copy — those belong to the eventual `pyry pair` CLI ticket. No ANSI color codes, no emoji, no terminal control sequences — paste-fallback users in non-TTY contexts (logs piped to a file) get clean output. No terminal-width sizing — `qrterminal/v3` produces a symbol whose width is fixed by the QR version (encoded length); narrower terminals wrap, that is the user's concern.
+
+### Why `GenerateHalfBlock` and not `Generate`
+
+`qrterminal/v3` exposes two QR drawers. `Generate` uses one terminal cell per QR module (`█` and space) — symbol becomes very tall (each row taller than wide in typical terminal fonts). `GenerateHalfBlock` packs two QR rows per terminal row using `▀`/`▄`/`█`/space — symbol comes out roughly square at typical 2:1 terminal cell aspect ratios and scans more reliably with phone cameras precisely because the printed shape matches QR's expected aspect ratio. The AC explicitly mentions "the half-block variants emitted by `qrterminal/v3`."
+
+### Error-correction level: M
+
+`qrterminal.M` (medium, ~15% recovery) is the library default and a good fit for the payload size (~120-140 base64 characters → version 5–6 QR symbol, well within an 80-column terminal). `L` shrinks the symbol slightly but is fragile to terminal font glitches; `Q`/`H` enlarge the symbol and risk wrapping in 80-column terminals. Locking `M` keeps the symbol predictable across phone-camera + terminal-font combinations. The level is a literal at the call site — no package-level var, no config knob, no exposing the choice in the function signature.
+
+### `errTrackingWriter` — error propagation through a no-error-return library
+
+`qrterminal.GenerateHalfBlock` has signature `func(text string, l Level, w io.Writer)` — no error return. Internally it calls `w.Write` and discards errors. To honor AC #3 ("returns an error if the writer fails; does not panic on writer failure; does not partially-render-and-swallow"), `Render` passes a small unexported `errTrackingWriter` wrapper that captures the first non-nil error and short-circuits all subsequent `Write` calls (returning `(0, t.err)` once errored). After the four ordered writes, `Render` returns `tw.err`.
+
+The "natural error-tracking adapter" pattern matches what stdlib does internally (cf. `bufio.Writer.flush` short-circuit on `b.err`). `TestRender_DoesNotPanicOnBrokenWriter` is the belt-and-suspenders proof: a writer that panics if called more than once is never reached past the first error, because both qrterminal's subsequent writes and the trailing `fmt.Fprintln`s short-circuit through the trap.
+
+The returned error is **the first underlying writer error, raw — not wrapped**. `errors.Is(err, io.ErrShortWrite)` matches in the test because the bare error is propagated. The AC doesn't ask for context-wrapping; the stdlib idiom for "you handed me a writer; here's what your writer told me" is the bare error.
+
+### `Render` does NOT
+
+- Validate `p` (same posture as `Encode`; a zero `Payload` will produce a string `Decode` and the phone reject, surfacing on scan, not on render).
+- Call `Decode` on the encoded string before writing (round-trip is `payload.go`'s invariant; re-running it here would couple this surface to that test for no protocol benefit).
+- Call `Encode(p)` more than once (the encoded bytes are cached in a local — `Encode` is deterministic, but one call is one call).
+- Persist anything. No file I/O, no logging, no copy-to-anywhere. Pure in-memory transform fed to one writer.
+
+### Render tests
+
+`internal/pair/render_test.go`, same package, stdlib `testing` only:
+
+- `TestRender_Format_Happy` — non-empty buffer, contains at least one of `{█, ▀, ▄}`, contains `Encode(p)` as a substring, contains the exact instruction string.
+- `TestRender_FieldOrder` — split the buffer at the `Encode(p)` substring; assert at least one QR block code point in the prefix, the instruction line in the suffix, and at least one blank line between the last QR row and the encoded-payload line.
+- `TestRender_Deterministic` — Render the same `Payload` twice into two buffers; assert `bytes.Equal`. A phone re-scanning shouldn't see a different symbol; pinned via JSON marshal determinism (`payload.go`) and `qrterminal/v3`'s stateless `Generate*`.
+- `TestRender_WriterError` — a writer whose every `Write` returns `io.ErrShortWrite`; assert `errors.Is(err, io.ErrShortWrite)` (bare error propagated, not wrapped).
+- `TestRender_DoesNotPanicOnBrokenWriter` — a writer that panics if called more than once after the first error; pins the `errTrackingWriter` short-circuit.
+
+Test failure messages do NOT echo `Encode(p)` or buffer contents — same `TestDecode_Errors` discipline (no input bytes in error strings) extended into the render tests, hardening the muscle for when this code path runs against real tokens in the future `pyry pair` integration test.
+
+### Token-secrecy contract continues at the render layer
+
+Render's output **contains the plaintext device-token** (visible inside the QR symbol and verbatim on the paste-fallback line). The function doc-comment instructs callers explicitly: never log the writer's destination, never capture this output into any persisted context (CI logs, telemetry, error reports), treat the calling goroutine's stdout as the only intended sink. The future `pyry pair` ticket will pass `os.Stdout`; tests pass a `bytes.Buffer` that goes out of scope at function exit. The QR-screenshot exposure surface is the user's risk (auto-uploaded cloud backup is the documented threat in `protocol-mobile.md:603`); the render layer does not introduce a *third* exposure surface beyond the two already documented.
+
 ## Error wrapping shape
 
 Sentinel + wrap, matching `internal/identity`'s `ErrInvalidServerID`:
@@ -83,7 +134,7 @@ The `Token` field carries the **plaintext** bearer the mobile client will presen
 
 The QR screenshot itself is the user's risk (auto-uploaded cloud backup is the documented threat); this package contributes the encoding layer that does not introduce a *second* exposure surface.
 
-## Tests
+## Tests (`payload_test.go`)
 
 `internal/pair/payload_test.go`, same package, table-driven, `t.Parallel()` everywhere, stdlib `testing` only. Five tests:
 
@@ -97,12 +148,11 @@ No fixtures, no `t.TempDir`, no PTY. Pure-function tests run under `go test -rac
 
 ## Why a separate `internal/pair` package
 
-Pairing is its own concern, owned by neither `internal/identity` (typed identifiers, no transport encoding) nor `internal/devices` (on-disk device entries + token-hash) nor `internal/config` (operator-editable settings). The name mirrors the user-visible verb (`pyry pair`); future siblings land naturally — QR/paste rendering (#212), the `pyry pair` CLI implementation, the `pyry pair list` surface — without bloating an unrelated package.
+Pairing is its own concern, owned by neither `internal/identity` (typed identifiers, no transport encoding) nor `internal/devices` (on-disk device entries + token-hash) nor `internal/config` (operator-editable settings). The name mirrors the user-visible verb (`pyry pair`); future siblings land naturally — the `pyry pair` CLI implementation, the `pyry pair list` surface — without bloating an unrelated package.
 
 ## Out of scope (deferred)
 
-- **QR rendering and paste-fallback display** — sibling #212. This package owns the string; #212 owns the surface that displays it.
-- **`pyry pair` CLI** — later phase-3 ticket. Wires `identity.NewServerID()` + token mint + `config.Load().RelayURL` into a `Payload`, calls `Encode`, hands the string to #212.
+- **`pyry pair` CLI** — later phase-3 ticket. Wires `identity.NewServerID()` + token mint + `config.Load().RelayURL` into a `Payload`, calls `Render` with `os.Stdout`.
 - **Token minting** — later phase-3 ticket. `crypto/rand` 256-bit + hex encode.
 - **On-disk persistence of paired devices** — sibling #208 owns hashing; the registry-CRUD ticket loads/saves rows.
 - **Envelope versioning.** A future v2 (encrypted) payload would land as a separate `EncodeV2` / `DecodeV2` pair or a versioned wire format; out of scope here.
@@ -117,4 +167,5 @@ Pairing is its own concern, owned by neither `internal/identity` (typed identifi
 - `docs/protocol-mobile.md:55-62` — wire contract (server-id, device-token, relay URL roles).
 - `docs/protocol-mobile.md:705-714` — pairing-flow appendix; pins JSON field names and order.
 - `docs/protocol-mobile.md:567-609` — security framing (paste-fallback one-time-only, never display token after pairing, QR-screenshot threat).
-- `docs/specs/architecture/211-pair-qr-payload-encoding.md` — architect's spec for this slice.
+- `docs/specs/architecture/211-pair-qr-payload-encoding.md` — architect's spec for `Payload` + `Encode`/`Decode`.
+- `docs/specs/architecture/212-pair-qr-render.md` — architect's spec for `Render`.
