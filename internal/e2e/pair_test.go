@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,6 +82,58 @@ func TestPair_E2E(t *testing.T) {
 		}
 		if !devices.VerifyToken(payload.Token, entry.TokenHash) {
 			t.Errorf("payload.Token does not hash to entry.TokenHash")
+		}
+	})
+}
+
+// TestPairList_E2E exercises `pyry pair list` against a real binary.
+// The "empty" sub-test asserts the cold-start contract (exact stdout
+// "No paired devices.\n", exit 0). The "after pair" sub-test pairs a
+// device first, then asserts the device Name and 8-char token-hash
+// prefix appear in the list output.
+func TestPairList_E2E(t *testing.T) {
+	t.Run("empty registry", func(t *testing.T) {
+		home := t.TempDir()
+		r := RunBareIn(t, home, "pair", "list")
+		if r.ExitCode != 0 {
+			t.Fatalf("pyry pair list exit=%d\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+		if !bytes.Equal(r.Stdout, []byte("No paired devices.\n")) {
+			t.Errorf("stdout=%q want %q", string(r.Stdout), "No paired devices.\n")
+		}
+	})
+
+	t.Run("after pair", func(t *testing.T) {
+		home := t.TempDir()
+		pairResult := RunBareIn(t, home, "pair", "--name=phone-a")
+		if pairResult.ExitCode != 0 {
+			t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s",
+				pairResult.ExitCode, pairResult.Stdout, pairResult.Stderr)
+		}
+
+		registryPath := filepath.Join(home, ".pyry", "pyry", "devices.json")
+		registry, err := devices.Load(registryPath)
+		if err != nil {
+			t.Fatalf("devices.Load(%q): %v", registryPath, err)
+		}
+		list := registry.List()
+		if len(list) != 1 {
+			t.Fatalf("registry has %d entries, want 1", len(list))
+		}
+		wantPrefix := list[0].TokenHash[:8]
+
+		listResult := RunBareIn(t, home, "pair", "list")
+		if listResult.ExitCode != 0 {
+			t.Fatalf("pyry pair list exit=%d\nstdout:\n%s\nstderr:\n%s",
+				listResult.ExitCode, listResult.Stdout, listResult.Stderr)
+		}
+		out := string(listResult.Stdout)
+		if !strings.Contains(out, "phone-a") {
+			t.Errorf("stdout missing device name 'phone-a':\n%s", out)
+		}
+		if !strings.Contains(out, wantPrefix) {
+			t.Errorf("stdout missing token-prefix %q:\n%s", wantPrefix, out)
 		}
 	})
 }

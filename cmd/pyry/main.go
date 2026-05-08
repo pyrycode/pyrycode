@@ -1205,6 +1205,7 @@ Usage:
                                                  mint a device token, persist it
                                                   in ~/.pyry/<name>/devices.json,
                                                   print QR + paste-fallback payload
+  pyry pair list [flags]                         list paired devices
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry update [--check] [--version <v>]          download and install the latest
