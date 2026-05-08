@@ -35,16 +35,24 @@ cmd/pyry → internal/sessions → internal/sessions/rotation → fsnotify, stdl
 
 ## Symlink-resolved match path
 
-The watcher resolves `cfg.Dir` once at construction (`filepath.EvalSymlinks`) and stores it as the unexported `resolvedDir` on the `Watcher`. `handleCreate` builds the comparison path as `filepath.Join(resolvedDir, base)` rather than re-using `ev.Name` from fsnotify. This bridges a mismatch between the two sides of the comparison:
+The watcher canonicalises **both sides** of the rotation match. There are two sources of paths and either may carry a symlink:
 
-- **fsnotify** reports paths *as-watched* — if pyry watches `/var/folders/.../sessions`, CREATE events fire with `/var/folders/.../sessions/<uuid>.jsonl`.
-- **Platform probes** report paths *with symlinks resolved* — `lsof` on macOS canonicalises through the kernel; `/proc/<pid>/fd` readlinks to the canonical inode path on Linux.
+- **fsnotify event paths and the watched dir** — fsnotify reports `<watchedDir>/<base>` as-watched. If `cfg.Dir` is a symlink (or has a symlinked ancestor), the event side is the symlink form.
+- **Platform probe paths** — `lsof` on macOS and `/proc/<pid>/fd` readlinks on Linux usually canonicalise, but not always: `lsof`'s reported path can include unresolved ancestors (e.g. `/var/folders/...` rather than `/private/var/folders/...`) depending on how the file was opened.
 
-On macOS `/var → /private/var` is a default symlink. Without resolving the watched dir, `/var/folders/.../<uuid>.jsonl` (event side) ≠ `/private/var/folders/.../<uuid>.jsonl` (probe side); the gate at the rotation match site rejects, and the rotation event is silently dropped — the symptom is "session UUID stops updating after `/clear`," with no error surfaced. Affects every macOS user whose `~/.claude/projects/` lives behind a symlink (custom HOME, external-drive home) and every `t.TempDir`-based test on macOS.
+The asymmetry is therefore two-sided. The fix canonicalises each side at the point it enters the comparison:
 
-Resolving once at construction is intentional: zero per-event syscalls, no race window between event and resolution (the directory's lifetime spans the watcher's). If `EvalSymlinks` fails at startup (broken symlink components, permission flake), the watcher logs `Warn` and falls back to `cfg.Dir` unmodified — the watcher remains functional and the symlink-bridge case continues to drop matches for that run, no worse than the pre-fix behaviour.
+1. **Watched directory — once at construction.** `New` calls `filepath.EvalSymlinks(cfg.Dir)` and stores the result as the unexported `resolvedDir`. `handleCreate` builds `expected := filepath.Join(resolvedDir, base)`. Resolving once avoids per-event syscalls and dodges any race between the event and the resolution (the directory's lifetime spans the watcher's). Startup `EvalSymlinks` failure logs `Warn` and falls back to `cfg.Dir` — watcher remains functional.
+2. **Probe-returned path — per event in `handleCreate`.** `filepath.EvalSymlinks(open)` is called once per CREATE just before the equality check. On success: compare the resolved form. On failure (non-existent / dangling target / permission / loop): log at Debug and fall back to `filepath.Clean(open)`. The fallback is correct because a failure most often means the file the probe reported has already been unlinked between the probe and the resolve — a benign mismatch, not a rotation; `continue` falls through to the next ref.
 
-Locked in by `TestWatcher_DetectsRotationThroughSymlink` (an explicit `os.Symlink` from a side dir to the real sessions dir, watched via the link, probe reports the resolved path) — portable across Linux and macOS regardless of platform tempdir conventions.
+Per-event resolve on the probe side cannot be hoisted to construction time: the file the probe will report doesn't exist when the watcher starts. The cost is one `lstat`-walk per CREATE (microseconds) and the `EvalSymlinks` race window (file unlinked between probe and resolve) is absorbed by the fallback path — the worst case is a missed match, never a panic, never a wrong rotation.
+
+The pre-fix gates rejected silently in two distinct shapes, with the same operator-visible symptom ("session UUID stops updating after `/clear`"):
+
+- **#118 — watched dir is symlink, probe canonical.** macOS `/var → /private/var` is a default symlink, so any watcher built off `t.TempDir()` or a custom HOME under `/var` saw fsnotify's `/var/...` ev.Name not match `lsof`'s `/private/var/...` probe output. Closed by resolving `cfg.Dir` once.
+- **#221 — watched dir canonical, probe symlinked.** The inverse case: e2e harness #55 surfaced a probe path under `/var/folders/...` against an `expected` already canonicalised to `/private/var/folders/...`. Closed by resolving the probe path per event with debug-logged fallback.
+
+Locked in by three tests: `TestWatcher_DetectsRotationThroughSymlink` (#118 — symlinked watch dir, canonical probe), `TestWatcher_DetectsRotationProbeReportsSymlinkPath` (#221 — canonical watch dir, symlinked probe), and `TestWatcher_ProbePathUnresolvableNoCrashNoRotate` (#221 — dangling-symlink probe path; no panic, no rotate). All three use explicit `os.Symlink` so they are portable across Linux and macOS regardless of platform tempdir conventions.
 
 ## Key types
 
@@ -102,7 +110,8 @@ watcher event loop:
   - for each ref with pid > 0:
       if ref.ID == <new>: return  (already rotated by another path)
       open := probeWithRetry(pid)  // 0 / 50ms / 200ms attempts
-      if Clean(open) == Join(resolvedDir, base):  // symlink-resolved match (#118)
+      // symlink-resolved match — both sides canonicalised (#118, #221)
+      if EvalSymlinks(open)(fallback Clean(open)) == Join(resolvedDir, base):
           cfg.OnRotate(ref.ID, <new>)  →  Pool.RotateID(...)
           return
   │
@@ -211,6 +220,7 @@ Net result: same shutdown shape as Phase 1.2b-A, plus one extra goroutine that r
 | CREATE for non-`.jsonl` filename or malformed UUID stem | Skip silently. |
 | `IsAllocated(newID)` true | Consume + skip (fresh session, not a rotation). |
 | Probe error (`lsof` missing, /proc unreadable) | Log debug, skip this PID, loop continues. |
+| `EvalSymlinks` on probe path fails (dangling, gone, permission) | Log debug; fall back to `filepath.Clean(open)`; mismatch path falls through to `continue`. (#221) |
 | All probes empty after retry | Skip event, loop continues. |
 | `OnRotate` returns error (save failure) | Log warn; loop continues. The in-memory rotation already applied; the next mutation's `saveLocked` will retry persistence. |
 | `fsw.Errors` non-fatal error | Log warn, loop continues. |
@@ -230,6 +240,8 @@ The contract: rotation detection failures are **never fatal**. Pyry startup proc
 
 - `TestWatcher_DetectsRotation` — write `<new>.jsonl`; assert `OnRotate("old", "<new>")` fires within 1s.
 - `TestWatcher_DetectsRotationThroughSymlink` (#118) — watch a symlink whose target is the real sessions dir; probe reports the resolved path; `OnRotate` fires only because `EvalSymlinks` ran in `New`. Portable across platforms via explicit `os.Symlink`.
+- `TestWatcher_DetectsRotationProbeReportsSymlinkPath` (#221) — canonical watched dir, probe returns the symlink-form path; `OnRotate` fires only because `EvalSymlinks` runs on the probe output per event. Inverse of the #118 case.
+- `TestWatcher_ProbePathUnresolvableNoCrashNoRotate` (#221) — probe returns a path through a dangling symlink (`EvalSymlinks` errors); watcher logs debug, falls back to `filepath.Clean(open)`, the mismatch path takes `continue`, no panic and no `OnRotate`. The 300ms wait covers `probeRetryDelays` (50ms + 200ms) plus slack.
 - `TestWatcher_SkipsAllocated` / `_SkipsNonJSONL` / `_SkipsMalformedUUID`.
 - `TestWatcher_NoSessionsZeroPID` — pid 0 → probe never called.
 - `TestWatcher_ProbePathMismatch` — probe returns wrong path → no rotation.

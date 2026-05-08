@@ -390,3 +390,94 @@ func TestWatcher_DetectsRotationThroughSymlink(t *testing.T) {
 	}
 	t.Fatalf("OnRotate not called within 1s")
 }
+
+// TestWatcher_DetectsRotationProbeReportsSymlinkPath is the inverse of
+// TestWatcher_DetectsRotationThroughSymlink: the watched dir is canonical,
+// but the probe returns the symlink form of the path (e.g. macOS lsof
+// reporting /var/folders/... when the canonical form is /private/var/...).
+// Without the per-event EvalSymlinks on the probe path, the comparison gate
+// would reject the match and OnRotate would never fire.
+func TestWatcher_DetectsRotationProbeReportsSymlinkPath(t *testing.T) {
+	t.Parallel()
+	realDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "linked-sessions")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	probedPath := filepath.Join(link, newUUID+".jsonl")
+	probe := &fakeProbe{pathFn: func() string { return probedPath }}
+	rec := &rotateRecord{}
+
+	startWatcher(t, Config{
+		Dir:    realDir,
+		Probe:  probe,
+		Logger: discardLogger(),
+		Snapshot: func() []SessionRef {
+			return []SessionRef{{ID: oldUUID, PID: 1234}}
+		},
+		OnRotate: rec.record,
+	})
+
+	if err := os.WriteFile(filepath.Join(realDir, newUUID+".jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if calls := rec.snapshot(); len(calls) >= 1 {
+			if calls[0] != [2]string{oldUUID, newUUID} {
+				t.Fatalf("rotate args = %v, want [%q %q]", calls[0], oldUUID, newUUID)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("OnRotate not called within 1s")
+}
+
+// TestWatcher_ProbePathUnresolvableNoCrashNoRotate exercises the negative-path
+// AC: when the probe returns a path whose symlinks cannot be resolved (a
+// dangling symlink), the watcher must not panic and must not invoke OnRotate.
+// The fallback-to-literal comparison naturally rejects the mismatch.
+func TestWatcher_ProbePathUnresolvableNoCrashNoRotate(t *testing.T) {
+	t.Parallel()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	danglingTarget := filepath.Join(t.TempDir(), "does-not-exist")
+	dangling := filepath.Join(t.TempDir(), "dangling-link")
+	if err := os.Symlink(danglingTarget, dangling); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := &fakeProbe{pathFn: func() string {
+		return filepath.Join(dangling, newUUID+".jsonl")
+	}}
+	rec := &rotateRecord{}
+
+	startWatcher(t, Config{
+		Dir:    dir,
+		Probe:  probe,
+		Logger: discardLogger(),
+		Snapshot: func() []SessionRef {
+			return []SessionRef{{ID: oldUUID, PID: 1234}}
+		},
+		OnRotate: rec.record,
+	})
+
+	if err := os.WriteFile(filepath.Join(dir, newUUID+".jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 300ms covers probeRetryDelays (50ms + 200ms = 250ms) plus slack.
+	time.Sleep(300 * time.Millisecond)
+	if calls := rec.snapshot(); len(calls) != 0 {
+		t.Fatalf("OnRotate fired %d times for unresolvable probe path; want 0", len(calls))
+	}
+}
