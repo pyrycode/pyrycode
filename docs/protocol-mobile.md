@@ -532,7 +532,7 @@ These fields exist in the v1 envelope shape but are not used in v1. Implementati
 
 These warrant explicit mention because they have wire-shape implications and clients must implement against them:
 
-- **Multi-device echo: yes.** When phone A sends `send_message`, the binary emits the resulting user-side `message` envelope to phones B, C, …, *and* phone A itself (so the sender's echo confirms binary-side persistence and all paired devices stay in sync). Wire-load implication: every send fans out to N devices total. Justified by the future desktop-client scenario — once a desktop client exists alongside one or more phones, "what I just typed on my phone shows up on my laptop in real time" is the entire UX promise. Every device on the same `server-id` is in the echo set.
+- **Multi-device echo: yes.** When phone A sends `send_message`, the binary emits the resulting user-side `message` envelope to **every other paired device** on the same server-id (phone B, the desktop client, etc.). Phone A itself gets only the `ack` — it already has the message in its local UI from the optimistic send, and the `ack` confirms binary-side persistence. Wire-load implication: every send fans out to N-1 devices. Justified by the future desktop-client scenario — once a desktop client exists alongside one or more phones, "what I just typed on my phone shows up on my laptop in real time" is the entire UX promise. Same principle applies to the assistant's `message` envelopes: the binary fans them out to *all* paired devices since none of them has the assistant's reply locally yet.
 
 ## Open questions
 
