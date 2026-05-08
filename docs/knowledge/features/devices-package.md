@@ -87,13 +87,14 @@ No fuzz target — the input space is fully covered by the table. No `-race` tes
 ## Out of scope (deferred)
 
 - **Token minting.** Sibling ticket: `crypto/rand`-driven 256-bit token + hex encode + display in QR + paste-fallback string. The package here knows nothing about generation.
-- **Registry CRUD.** Sibling ticket: load/save `Device` rows to `~/.pyry/<name>/devices.json` via the same atomic-rename + `0600` pattern `saveRegistryLocked` uses (see [features/sessions-registry.md](sessions-registry.md)).
+- ~~**Registry CRUD.**~~ Delivered by #209 — see [`features/devices-registry.md`](devices-registry.md). Same atomic-rename + `0600` recipe as `saveRegistryLocked`, with a snapshot-then-release Save discipline ([ADR 020](../decisions/020-devices-registry-snapshot-then-write.md)).
 - **Auth wiring.** Phase 3: WS handshake calls `VerifyToken(presented, device.TokenHash)` and on false returns `auth.invalid_token` per `protocol-mobile.md:97-98`.
 - **`pyry pair revoke <name>`.** Per-device revocation falls out of removing the row; structurally supported (each row is independent).
 - **`Device.TokenHashPrefix() string` for `pair list` UI.** The display rule lives in `protocol-mobile.md:663`; defer to whichever ticket builds the UI.
 
 ## Related
 
+- [`features/devices-registry.md`](devices-registry.md) — `~/.pyry/<name>/devices.json` on-disk persistence (#209) for the `Device` rows defined here.
 - [`features/identity-package.md`](identity-package.md) — Phase 3 foundation sibling (`internal/identity`, `ServerID` for relay routing). Same "leaf package, stdlib only, no consumers wired in this slice" shape.
 - [`features/config-package.md`](config-package.md) — Phase 3 foundation sibling (`internal/config`, `RelayURL`).
 - `internal/sessions/registry.go:17-29` — JSON-tag style precedent that `Device` mirrors.
