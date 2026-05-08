@@ -1338,6 +1338,34 @@ Phase 1.1b/c/d/e each append one verb to the parenthesised list, in lockstep wit
 
 See [ADR 010](../decisions/010-sessions-cli-sub-router.md) for why the sub-router takes a parsed `socketPath` rather than raw args, and why `sessionsVerbList` is a constant rather than derived.
 
+## Client dial: transient-startup predicate (#198)
+
+`internal/control/dial.go` houses `isTransientStartupError(err error) bool` — a pure, package-private classifier for the two dial-error shapes that appear during the ~100 ms – 2 s window between an old daemon exiting (after `launchctl kickstart -k`, `pyry update`'s auto-restart on v0.10.1, or a manual `systemctl --user restart pyry`) and the new daemon binding the control socket:
+
+1. **Socket file absent** — surfaces as `*net.OpError` wrapping `*os.PathError{Err: syscall.ENOENT}`.
+2. **Socket file present, no listener accepting** — surfaces as `*net.OpError` wrapping `*os.SyscallError{Err: syscall.ECONNREFUSED}` (also covers a stale socket file from a previously crashed daemon).
+
+Body is two `errors.Is` calls in an `||`:
+
+```go
+return errors.Is(err, syscall.ENOENT) ||
+    errors.Is(err, syscall.ECONNREFUSED)
+```
+
+`errors.Is` walks the unwrap chain through `client.go`'s `fmt.Errorf("dial %s: %w", socketPath, err)`, through `*net.OpError.Unwrap`, through `*os.PathError.Unwrap` / `*os.SyscallError.Unwrap`, and matches at the leaf `syscall.Errno`. `errors.Is(nil, sentinel)` is `false` for any non-nil sentinel, so the nil case falls out without a guard.
+
+**Pure function — no I/O, no goroutines, no `context.Context`.** Production-side imports are exactly `errors` + `syscall`; no `net`, `os`, or `io` at construction time. The wire-shape (`*net.OpError`) is incidental — the contract is "did the unwrap chain reach one of the two named errnos?"
+
+**Unexported by design.** The only intended consumer is the bounded retry loop landing in #199 (same package). Exporting now would be speculative API surface.
+
+**Misclassification semantics.**
+- *False negative* (real transient miss-classified as permanent): #199's retry loop won't kick in; client surfaces the dial error immediately — same behaviour as today (no retry). Acceptable.
+- *False positive* (permanent error miss-classified as transient): #199 would retry up to its bounded budget then surface — slightly worse UX, not incorrect. The two-errno scope keeps the false-positive surface tight.
+
+**Tests.** `dial_test.go` is one table-driven `TestIsTransientStartupError` with six rows. The ENOENT row uses a real `net.Dial("unix", filepath.Join(t.TempDir(), "missing.sock"))` to pin the production unwrap chain end-to-end against the kernel; the ECONNREFUSED row is synthetic (`&net.OpError{Op: "dial", Net: "unix", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}`) because live construction via a short-lived listener is OS-dependent (macOS leaves the socket file on `Listener.Close`; Linux removes it). The four `false` rows pin nil, `io.EOF`, a synthetic timeout-shape (`*net.OpError` wrapping `context.DeadlineExceeded`), and an opaque `errors.New("kaboom")` — the last guards against false-positives on errors with no unwrap chain. Tests for `errors.Is` itself or `*net.OpError` traversal independently are not added — both are stdlib-tested and covered transitively by the ENOENT row.
+
+See [`docs/specs/architecture/198-transient-startup-error-predicate.md`](../../specs/architecture/198-transient-startup-error-predicate.md) for the architect's spec; #199 will document the retry wrapper that consumes this.
+
 ## Process-Global vs Per-Session
 
 | Concern | Scope today | Source |
