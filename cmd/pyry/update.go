@@ -8,7 +8,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,13 +19,14 @@ import (
 )
 
 // runUpdate implements `pyry update`: fetch the latest release, verify the
-// tarball's SHA-256, extract the pyry binary, and atomically replace the
-// running binary on disk. Daemon restart is out of scope for this slice —
-// users `launchctl kickstart` / `systemctl --user restart pyry` themselves.
+// tarball's SHA-256, extract the pyry binary, atomically replace the running
+// binary on disk, and (unless --no-restart is set) restart the managed pyry
+// daemon if a launchd plist or systemd user unit is detected.
 func runUpdate(args []string) error {
 	fs := flag.NewFlagSet("pyry update", flag.ContinueOnError)
 	checkOnly := fs.Bool("check", false, "print current and latest versions, then exit")
 	pinVersion := fs.String("version", "", "install this version instead of the latest release")
+	noRestart := fs.Bool("no-restart", false, "skip daemon restart even if a managed unit is detected")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -42,6 +46,9 @@ func runUpdate(args []string) error {
 		out:            os.Stdout,
 		checkOnly:      *checkOnly,
 		pinVersion:     *pinVersion,
+		noRestart:      *noRestart,
+		probeRestart:   defaultProbeRestart,
+		runRestart:     defaultRunRestart,
 	})
 }
 
@@ -57,8 +64,9 @@ func resolveExecutable() string {
 
 // updateOptions bundles the seams the integration test overrides: the
 // fetcher's BaseURL, the release-asset BaseURL template, the executable-path
-// resolver, the AtomicReplace function, and stdout. Production callers pass
-// real defaults; tests substitute httptest + tempdir equivalents.
+// resolver, the AtomicReplace function, the daemon-restart probe and
+// executor, and stdout. Production callers pass real defaults; tests
+// substitute httptest + tempdir equivalents.
 type updateOptions struct {
 	currentVersion string
 	goos, goarch   string
@@ -70,6 +78,34 @@ type updateOptions struct {
 	out            io.Writer
 	checkOnly      bool
 	pinVersion     string
+	noRestart      bool
+	probeRestart   func() update.RestartProbe
+	runRestart     func(ctx context.Context, argv []string) error
+}
+
+// defaultProbeRestart stats the canonical launchd plist and systemd user-unit
+// paths to determine which (if either) managed pyry daemon is installed.
+// Stat errors of any kind collapse to "not present" — the only question is
+// whether the file is there. If $HOME is unresolvable, both stats fail and
+// DetectRestartCommand returns nil (silent skip).
+func defaultProbeRestart() update.RestartProbe {
+	home, _ := os.UserHomeDir()
+	_, plistErr := os.Stat(filepath.Join(home, "Library/LaunchAgents", "dev.pyrycode.pyry.plist"))
+	_, unitErr := os.Stat(filepath.Join(home, ".config/systemd/user", "pyry.service"))
+	return update.RestartProbe{
+		LaunchdPlistExists: plistErr == nil,
+		SystemdUnitExists:  unitErr == nil,
+		UID:                strconv.Itoa(os.Getuid()),
+	}
+}
+
+// defaultRunRestart execs the restart argv with stdio wired to the real
+// terminal so any launchctl/systemctl diagnostics reach the user verbatim.
+func defaultRunRestart(ctx context.Context, argv []string) error {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func doUpdate(ctx context.Context, o updateOptions) error {
@@ -152,6 +188,20 @@ func doUpdate(ctx context.Context, o updateOptions) error {
 	fmt.Fprintf(o.out, "==> Replacing %s...\n", target)
 	if err := o.replace(target, bin, 0o755); err != nil {
 		return fmt.Errorf("update: replace binary: %w", err)
+	}
+
+	if !o.noRestart {
+		probe := o.probeRestart()
+		if argv := update.DetectRestartCommand(probe); argv != nil {
+			manager := "launchd"
+			if probe.SystemdUnitExists && !probe.LaunchdPlistExists {
+				manager = "systemd"
+			}
+			fmt.Fprintf(o.out, "==> Restarting daemon (%s: %s)...\n", manager, argv[len(argv)-1])
+			if err := o.runRestart(ctx, argv); err != nil {
+				return fmt.Errorf("update: binary replaced to %s, but daemon restart failed: %w", targetVer, err)
+			}
+		}
 	}
 
 	fmt.Fprintf(o.out, "==> Updated to %s.\n", targetVer)

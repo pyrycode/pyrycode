@@ -4,13 +4,16 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -106,6 +109,11 @@ func TestUpdate_Success(t *testing.T) {
 		executablePath: func() string { return targetPath },
 		replace:        update.AtomicReplace,
 		out:            &out,
+		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
+		runRestart: func(context.Context, []string) error {
+			t.Fatalf("runRestart must not be called when no managed unit is detected")
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("doUpdate: %v\n--- output ---\n%s", err, out.String())
@@ -242,6 +250,11 @@ func TestUpdate_PinVersion(t *testing.T) {
 		replace:        update.AtomicReplace,
 		out:            &out,
 		pinVersion:     "v0.9.0",
+		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
+		runRestart: func(context.Context, []string) error {
+			t.Fatalf("runRestart must not be called when no managed unit is detected")
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("doUpdate: %v\n--- output ---\n%s", err, out.String())
@@ -288,5 +301,160 @@ func TestUpdate_DevBuildSkips(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "skipping update") {
 		t.Errorf("missing dev-build skip line; output:\n%s", out.String())
+	}
+}
+
+// restartUpdateOptions builds an updateOptions wired to a fake release server
+// for the restart-focused tests. The probe and runRestart seams are filled by
+// the caller; the rest is the same boilerplate as TestUpdate_Success.
+func restartUpdateOptions(t *testing.T, targetPath string, out *bytes.Buffer, probe update.RestartProbe, runRestart func(context.Context, []string) error, noRestart bool) updateOptions {
+	t.Helper()
+	newBytes := []byte("\x7fELF...new pyry bytes...")
+	asset, tgz, checksums := fakeRelease(t, "v0.9.2", runtime.GOOS, runtime.GOARCH, newBytes)
+	srv := newFakeReleaseServer(t, "v0.9.2", asset, tgz, []byte(checksums))
+	if err := os.WriteFile(targetPath, []byte("OLD pyry bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return updateOptions{
+		currentVersion: "0.9.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return targetPath },
+		replace:        update.AtomicReplace,
+		out:            out,
+		noRestart:      noRestart,
+		probeRestart:   func() update.RestartProbe { return probe },
+		runRestart:     runRestart,
+	}
+}
+
+// TestUpdate_RestartLaunchd asserts the launchd argv shape and progress line
+// when a launchd plist is detected.
+func TestUpdate_RestartLaunchd(t *testing.T) {
+	var got []string
+	var out bytes.Buffer
+	probe := update.RestartProbe{LaunchdPlistExists: true, UID: "501"}
+	opts := restartUpdateOptions(t, filepath.Join(t.TempDir(), "pyry"), &out, probe,
+		func(_ context.Context, argv []string) error {
+			got = argv
+			return nil
+		}, false)
+
+	if err := doUpdate(t.Context(), opts); err != nil {
+		t.Fatalf("doUpdate: %v\n--- output ---\n%s", err, out.String())
+	}
+	want := []string{"launchctl", "kickstart", "-k", "gui/501/dev.pyrycode.pyry"}
+	if !slices.Equal(got, want) {
+		t.Errorf("runRestart argv = %v, want %v", got, want)
+	}
+	output := out.String()
+	if !strings.Contains(output, "==> Restarting daemon (launchd: gui/501/dev.pyrycode.pyry)...") {
+		t.Errorf("missing launchd restart progress line; output:\n%s", output)
+	}
+	if !strings.Contains(output, "==> Updated to v0.9.2.") {
+		t.Errorf("missing success line; output:\n%s", output)
+	}
+}
+
+// TestUpdate_RestartSystemd asserts the systemd argv shape and progress line
+// when a systemd user unit is detected.
+func TestUpdate_RestartSystemd(t *testing.T) {
+	var got []string
+	var out bytes.Buffer
+	probe := update.RestartProbe{SystemdUnitExists: true}
+	opts := restartUpdateOptions(t, filepath.Join(t.TempDir(), "pyry"), &out, probe,
+		func(_ context.Context, argv []string) error {
+			got = argv
+			return nil
+		}, false)
+
+	if err := doUpdate(t.Context(), opts); err != nil {
+		t.Fatalf("doUpdate: %v\n--- output ---\n%s", err, out.String())
+	}
+	want := []string{"systemctl", "--user", "restart", "pyry"}
+	if !slices.Equal(got, want) {
+		t.Errorf("runRestart argv = %v, want %v", got, want)
+	}
+	output := out.String()
+	if !strings.Contains(output, "==> Restarting daemon (systemd: pyry)...") {
+		t.Errorf("missing systemd restart progress line; output:\n%s", output)
+	}
+	if strings.Contains(output, "launchd:") {
+		t.Errorf("manager label should be systemd, not launchd; output:\n%s", output)
+	}
+}
+
+// TestUpdate_NoRestartFlag pins AC #1: --no-restart skips the restart step
+// even when a managed unit is present.
+func TestUpdate_NoRestartFlag(t *testing.T) {
+	var out bytes.Buffer
+	probe := update.RestartProbe{LaunchdPlistExists: true, UID: "501"}
+	opts := restartUpdateOptions(t, filepath.Join(t.TempDir(), "pyry"), &out, probe,
+		func(context.Context, []string) error {
+			t.Fatalf("runRestart must not be called when --no-restart is set")
+			return nil
+		}, true)
+
+	if err := doUpdate(t.Context(), opts); err != nil {
+		t.Fatalf("doUpdate: %v\n--- output ---\n%s", err, out.String())
+	}
+	output := out.String()
+	if !strings.Contains(output, "==> Updated to v0.9.2.") {
+		t.Errorf("missing success line; output:\n%s", output)
+	}
+	if strings.Contains(output, "Restarting daemon") {
+		t.Errorf("--no-restart must suppress restart progress line; output:\n%s", output)
+	}
+}
+
+// TestUpdate_NoManagedUnit pins the silent-skip behaviour: zero-value probe
+// → DetectRestartCommand returns nil → no restart line, runRestart not called.
+func TestUpdate_NoManagedUnit(t *testing.T) {
+	var out bytes.Buffer
+	opts := restartUpdateOptions(t, filepath.Join(t.TempDir(), "pyry"), &out, update.RestartProbe{},
+		func(context.Context, []string) error {
+			t.Fatalf("runRestart must not be called when no managed unit is detected")
+			return nil
+		}, false)
+
+	if err := doUpdate(t.Context(), opts); err != nil {
+		t.Fatalf("doUpdate: %v\n--- output ---\n%s", err, out.String())
+	}
+	output := out.String()
+	if !strings.Contains(output, "==> Updated to v0.9.2.") {
+		t.Errorf("missing success line; output:\n%s", output)
+	}
+	if strings.Contains(output, "Restarting daemon") {
+		t.Errorf("no managed unit must skip restart silently; output:\n%s", output)
+	}
+}
+
+// TestUpdate_RestartFailure pins AC #4: a restart-command failure surfaces a
+// clear error mentioning that the binary was already replaced, and the
+// success line does not print.
+func TestUpdate_RestartFailure(t *testing.T) {
+	var out bytes.Buffer
+	probe := update.RestartProbe{LaunchdPlistExists: true, UID: "501"}
+	opts := restartUpdateOptions(t, filepath.Join(t.TempDir(), "pyry"), &out, probe,
+		func(context.Context, []string) error {
+			return errors.New("exit status 1")
+		}, false)
+
+	err := doUpdate(t.Context(), opts)
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "binary replaced to v0.9.2") {
+		t.Errorf("error must mention binary replaced to v0.9.2: %v", err)
+	}
+	if !strings.Contains(msg, "daemon restart failed") {
+		t.Errorf("error must mention daemon restart failed: %v", err)
+	}
+	if strings.Contains(out.String(), "==> Updated to v0.9.2.") {
+		t.Errorf("success line must NOT print on restart failure; output:\n%s", out.String())
 	}
 }
