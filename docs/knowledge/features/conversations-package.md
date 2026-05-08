@@ -18,6 +18,8 @@ internal/conversations/
   id_test.go              Format / uniqueness / validity table (#217)
   registry.go             Registry + Load/Save/Create/Get/List/Update + ListFilter (#217)
   registry_test.go        Registry CRUD + atomic-write + concurrency tests (#217)
+  archive.go              ShouldArchive predicate (#219) — see features/conversations-auto-archive.md
+  archive_test.go         Boundary tests for ShouldArchive (#219)
 ```
 
 Stdlib only (`crypto/rand` for the ID generator; `encoding/json` / `os` / `path/filepath` / `sort` / `sync` for the registry; `time` for the timestamp).
@@ -78,7 +80,7 @@ None. Pure value type — no goroutines, no channels, no mutexes. Safe to copy b
 ## Out of scope
 
 - Promotion API (`pyry conv promote`, `pyry conv name`) — #218.
-- Auto-archive predicate + sweep — #219, #220.
+- Auto-archive sweep — #220 (the predicate landed in #219; see [`features/conversations-auto-archive.md`](conversations-auto-archive.md)).
 - Migration from existing `Session` registry — TBD ticket once Conversations is proven on disk. Phase 1/2 sessions stay untouched.
 - Schema versioning — defer until first migration.
 - Daemon wiring (Load at startup, Save after mutations) — separate ticket; #217 lands the package leaf.
