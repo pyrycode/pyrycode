@@ -126,6 +126,13 @@ func (h *Harness) Run(t *testing.T, verb string, args ...string) RunResult
 // path. Reuses the same binary cache and exit-code/timeout/capture
 // machinery as Harness.Run.
 func RunBare(t *testing.T, args ...string) RunResult
+
+// RunBareIn behaves like RunBare but pins HOME to the supplied directory
+// via cmd.Env = childEnv(home), so verbs that read ~-relative state (e.g.
+// `pair`) can be driven against a t.TempDir() in isolation. Like RunBare
+// it does NOT auto-inject -pyry-socket — there is no daemon spawned.
+// Added in #213 for TestPair_E2E.
+func RunBareIn(t *testing.T, home string, args ...string) RunResult
 ```
 
 `Start(t) *Harness` is now a one-line `return StartIn(t, t.TempDir())` —
@@ -323,6 +330,21 @@ Two use cases motivated the helper:
 The helper is the *only* harness API added in #52. (`Harness.Stop()` mid-test
 was deferred at the time and shipped later in #106 — see the Restart Pattern
 section above. Typed `Status()` / `Logs()` wrappers remain declined.)
+
+## HOME-Isolated Bare Driver (`RunBareIn`)
+
+`RunBareIn(t, home, args...)` (added in #213) is `RunBare` with one
+line spliced in: `cmd.Env = childEnv(home)`. The pinned `HOME` lets a
+daemon-free verb read its `~`-relative state from a `t.TempDir()`
+without disturbing the test process's environment. `pyry pair` is the
+first consumer — its target paths (`~/.pyry/config.json`,
+`~/.pyry/<name>/devices.json`, `~/.pyry/<name>/server-id`) all resolve
+through `os.UserHomeDir()`, and the e2e test asserts the post-run
+contents of `<home>/.pyry/pyry/devices.json`. Default instance name
+`"pyry"` is used because no `-pyry-name` flag is passed and `childEnv`
+does not set `PYRY_NAME`. See
+[features/pyry-pair-command.md](pyry-pair-command.md) for the
+verb-side contract.
 
 ## CLI Verb Coverage Tests (`cli_verbs_test.go`)
 

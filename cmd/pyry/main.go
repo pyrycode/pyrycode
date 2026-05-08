@@ -19,6 +19,7 @@
 //	pyry logs             Recent supervisor log lines
 //	pyry attach           Attach local terminal to a service-mode daemon
 //	pyry sessions <verb>  Multi-session management (verbs: new, rm, rename, list)
+//	pyry pair             Mint a device token and print the QR / paste payload
 //	pyry install-service  Write a systemd / launchd unit file for pyry
 //	pyry help             Show help
 //
@@ -160,6 +161,8 @@ func run() error {
 			return runAttach(os.Args[2:])
 		case "sessions":
 			return runSessions(os.Args[2:])
+		case "pair":
+			return runPair(os.Args[2:])
 		case "install-service":
 			return runInstallService(os.Args[2:])
 		case "update":
@@ -1198,6 +1201,10 @@ Usage:
                                                   forwarding for SDK consumers)
   pyry sessions <verb> [flags]                   manage sessions on a running
                                                   daemon (verbs: new, rm, rename, list)
+  pyry pair [flags] [--name <label>] [--relay <url>]
+                                                 mint a device token, persist it
+                                                  in ~/.pyry/<name>/devices.json,
+                                                  print QR + paste-fallback payload
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry update [--check] [--version <v>]          download and install the latest
