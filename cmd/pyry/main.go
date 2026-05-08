@@ -32,6 +32,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -1079,7 +1080,7 @@ func runInstallService(args []string) error {
 	name := fs.String("pyry-name", defaultName(), "instance name (filename + ExecStart suffix)")
 	systemdFlag := fs.Bool("systemd", false, "force systemd output (default: detect from OS)")
 	launchdFlag := fs.Bool("launchd", false, "force launchd output (default: detect from OS)")
-	workdir := fs.String("workdir", "", "WorkingDirectory baked into the unit (default: ~/pyry-workspace)")
+	workdir := fs.String("workdir", "", "WorkingDirectory baked into the unit (default: current directory)")
 	pathEnv := fs.String("path", "", "PATH baked into the unit (default: inherit your current shell's PATH)")
 	force := fs.Bool("force", false, "overwrite an existing unit file")
 	if err := fs.Parse(pyrySide); err != nil {
@@ -1096,10 +1097,29 @@ func runInstallService(args []string) error {
 		plat = install.PlatformLaunchd
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("install-service: get cwd: %w", err)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("install-service: home dir: %w", err)
+	}
+	resolvedWorkDir, err := install.ResolveWorkDir(*workdir, cwd, homeDir)
+	if err != nil {
+		return fmt.Errorf("install-service: resolve workdir: %w", err)
+	}
+
+	fmt.Printf("WorkingDirectory: %s\n", resolvedWorkDir)
+	if _, err := os.Stat(resolvedWorkDir); errors.Is(err, iofs.ErrNotExist) {
+		fmt.Printf("warning: %s does not exist; create it with: mkdir -p %s\n",
+			resolvedWorkDir, resolvedWorkDir)
+	}
+
 	path, resolved, err := install.Install(install.Options{
 		Platform:   plat,
 		Name:       *name,
-		WorkDir:    *workdir,
+		WorkDir:    resolvedWorkDir,
 		PathEnv:    *pathEnv,
 		ClaudeArgs: claudeSide,
 		Force:      *force,

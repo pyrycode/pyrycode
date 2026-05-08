@@ -15,6 +15,7 @@ func TestInstall_Systemd_BareTemplate(t *testing.T) {
 		Platform: PlatformSystemd,
 		Name:     "pyry",
 		Binary:   "/home/test/.local/bin/pyry",
+		WorkDir:  "/home/test/projects/foo",
 		HomeDir:  home,
 		EnvPath:  "", // explicitly empty → fall back to conservative default
 	})
@@ -37,7 +38,7 @@ func TestInstall_Systemd_BareTemplate(t *testing.T) {
 
 	for _, want := range []string{
 		"[Unit]",
-		"WorkingDirectory=%h/pyry-workspace",
+		"WorkingDirectory=/home/test/projects/foo",
 		"ExecStart=/home/test/.local/bin/pyry",
 		"customize the claude flags pyry forwards",
 		"Restart=always",
@@ -117,6 +118,7 @@ func TestInstall_Launchd_BareTemplate(t *testing.T) {
 		Platform: PlatformLaunchd,
 		Name:     "pyry",
 		Binary:   "/Users/test/.local/bin/pyry",
+		WorkDir:  "/Users/test/projects/foo",
 		HomeDir:  home,
 	})
 	if err != nil {
@@ -138,7 +140,7 @@ func TestInstall_Launchd_BareTemplate(t *testing.T) {
 		`<key>Label</key>`,
 		`<string>dev.pyrycode.pyry</string>`,
 		`<string>/Users/test/.local/bin/pyry</string>`,
-		filepath.Join(home, "pyry-workspace"), // expanded WorkDir
+		`<string>/Users/test/projects/foo</string>`, // explicit WorkDir
 		`/tmp/pyry.pyry.out.log`,
 		"customize the claude flags",
 	} {
@@ -302,6 +304,93 @@ func TestInstall_InheritsEnvPath(t *testing.T) {
 	want := `Environment="PATH=%h/.local/bin:%h/.nvm/versions/node/v24/bin:/usr/bin:/bin"`
 	if !strings.Contains(got, want) {
 		t.Errorf("inherited PATH not rewritten with %%h prefix\nwant substring: %s\n--- file ---\n%s", want, got)
+	}
+}
+
+func TestResolveWorkDir(t *testing.T) {
+	const home = "/home/test"
+	const cwd = "/home/test/projects/foo"
+
+	tests := []struct {
+		name string
+		flag string
+		want string
+	}{
+		{"empty falls back to cwd", "", cwd},
+		{"tilde alone expands to home", "~", home},
+		{"tilde slash expands to subdir", "~/work", filepath.Join(home, "work")},
+		{"absolute path passes through", "/srv/pyry", "/srv/pyry"},
+		{"absolute path is cleaned", "/srv//pyry/./", "/srv/pyry"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveWorkDir(tt.flag, cwd, home)
+			if err != nil {
+				t.Fatalf("ResolveWorkDir: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ResolveWorkDir(%q, %q, %q) = %q, want %q",
+					tt.flag, cwd, home, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("relative path resolves against cwd", func(t *testing.T) {
+		got, err := ResolveWorkDir("sub/dir", cwd, home)
+		if err != nil {
+			t.Fatalf("ResolveWorkDir: %v", err)
+		}
+		// filepath.Abs("sub/dir") resolves against the *test process'* cwd,
+		// not the cwd argument we pass in — so we just assert the result is
+		// absolute and ends with "sub/dir".
+		if !filepath.IsAbs(got) {
+			t.Errorf("ResolveWorkDir(relative) = %q, want absolute path", got)
+		}
+		if !strings.HasSuffix(got, "sub/dir") {
+			t.Errorf("ResolveWorkDir(relative) = %q, want suffix \"sub/dir\"", got)
+		}
+	})
+}
+
+func TestInstall_Systemd_CwdWorkDir(t *testing.T) {
+	home := t.TempDir()
+	path, _, err := Install(Options{
+		Platform: PlatformSystemd,
+		Name:     "pyry",
+		Binary:   "/home/test/.local/bin/pyry",
+		WorkDir:  "/home/test/projects/foo",
+		HomeDir:  home,
+	})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	body, _ := os.ReadFile(path)
+	got := string(body)
+	// Cwd-derived absolute path must be baked literally — no %h substitution.
+	if !strings.Contains(got, "WorkingDirectory=/home/test/projects/foo") {
+		t.Errorf("WorkingDirectory not baked literally\n--- file ---\n%s", got)
+	}
+	if strings.Contains(got, "WorkingDirectory=%h") {
+		t.Errorf("WorkingDirectory should not use %%h template substitution\n--- file ---\n%s", got)
+	}
+}
+
+func TestInstall_Launchd_CwdWorkDir(t *testing.T) {
+	home := t.TempDir()
+	path, _, err := Install(Options{
+		Platform: PlatformLaunchd,
+		Name:     "pyry",
+		Binary:   "/Users/test/.local/bin/pyry",
+		WorkDir:  "/Users/test/projects/foo",
+		HomeDir:  home,
+	})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	body, _ := os.ReadFile(path)
+	got := string(body)
+	if !strings.Contains(got, "<key>WorkingDirectory</key>\n    <string>/Users/test/projects/foo</string>") {
+		t.Errorf("WorkingDirectory not baked into plist\n--- file ---\n%s", got)
 	}
 }
 

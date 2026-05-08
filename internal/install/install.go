@@ -70,9 +70,10 @@ type Options struct {
 	// -pyry-name <name> so the supervisor binds to ~/.pyry/<name>.sock.
 	Name string
 
-	// WorkDir is what gets baked into WorkingDirectory. Defaults to
-	// "%h/pyry-workspace" for systemd (resolved by systemd at runtime) and
-	// "$HOME/pyry-workspace" expanded for launchd.
+	// WorkDir is what gets baked into WorkingDirectory. The CLI resolves
+	// this via [ResolveWorkDir] before calling [Install]; passing an empty
+	// string is a programming error and will leave the unit's WorkingDirectory
+	// blank.
 	WorkDir string
 
 	// Binary is the absolute path to the pyry binary. Defaults to
@@ -109,6 +110,28 @@ type Options struct {
 // false.
 var ErrFileExists = errors.New("unit file already exists; pass --force to overwrite")
 
+// ResolveWorkDir returns the absolute, canonicalised WorkingDirectory to bake
+// into the unit file, given the user-supplied --workdir flag value (possibly
+// empty), the install-time cwd, and the user's home directory.
+//
+// If flag is empty, cwd is used. A leading "~" or "~/" is expanded against
+// homeDir. The result is always absolute (via [filepath.Abs]).
+func ResolveWorkDir(flag, cwd, homeDir string) (string, error) {
+	raw := flag
+	if raw == "" {
+		raw = cwd
+	} else if raw == "~" {
+		raw = homeDir
+	} else if strings.HasPrefix(raw, "~/") {
+		raw = filepath.Join(homeDir, raw[2:])
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir %q: %w", raw, err)
+	}
+	return abs, nil
+}
+
 // Install writes the unit file and returns the absolute path it was written
 // to plus the resolved Platform. If the destination already exists and
 // Options.Force is false, returns [ErrFileExists] without touching it.
@@ -130,15 +153,6 @@ func Install(opt Options) (path string, plat Platform, err error) {
 		opt.Binary, err = os.Executable()
 		if err != nil {
 			return "", plat, fmt.Errorf("resolve pyry binary path: %w", err)
-		}
-	}
-
-	if opt.WorkDir == "" {
-		switch plat {
-		case PlatformSystemd:
-			opt.WorkDir = "%h/pyry-workspace"
-		default:
-			opt.WorkDir = filepath.Join(opt.HomeDir, "pyry-workspace")
 		}
 	}
 

@@ -23,14 +23,14 @@ pyry install-service -- \
   --channels plugin:telegram@claude-plugins-official
 ```
 
-Everything after `--` is baked into `ExecStart=` as the claude flags pyry will forward. The unit's `Environment="PATH=…"` is inherited from your current shell's `$PATH`, with `$HOME/...` rewritten to systemd's `%h/...` for portability — so nvm, pyenv, brew, and other shimmed tooling come along automatically. `pyry install-service` prints back the captured PATH entries so you can spot anything unexpected before enabling.
+Everything after `--` is baked into `ExecStart=` as the claude flags pyry will forward. The unit's `Environment="PATH=…"` is inherited from your current shell's `$PATH`, with `$HOME/...` rewritten to systemd's `%h/...` for portability — so nvm, pyenv, brew, and other shimmed tooling come along automatically. `pyry install-service` prints back the captured PATH entries (and the resolved `WorkingDirectory:`) so you can spot anything unexpected before enabling.
 
 Other knobs:
 
 | Flag | Default | Notes |
 |---|---|---|
 | `-pyry-name NAME` | `pyry` | Instance name. Filename becomes `<name>.service`, ExecStart includes `-pyry-name <name>`, socket is `~/.pyry/<name>.sock`. Useful for running multiple pyrys side-by-side. |
-| `--workdir DIR` | `%h/pyry-workspace` | `WorkingDirectory=` baked into the unit. Anchors `claude`'s session storage at `~/.claude/projects/<encoded-cwd>/sessions/...`. |
+| `--workdir DIR` | install-time cwd | `WorkingDirectory=` baked into the unit. Anchors `claude`'s session storage at `~/.claude/projects/<encoded-cwd>/sessions/...`. Resolved to an absolute path before being written; `~` and `~/sub` are expanded against `$HOME`. If the resolved directory doesn't exist, install-service prints a `mkdir -p` hint and continues — does not abort. |
 | `--path PATH` | inherited from `$PATH` | Override the captured PATH if you want a curated set instead. |
 | `--force` | refuse to overwrite | Required to clobber an existing `~/.config/systemd/user/<name>.service`. |
 
@@ -47,7 +47,7 @@ cp systemd/pyry.service ~/.config/systemd/user/
 
 Edit `~/.config/systemd/user/pyry.service`:
 
-- Confirm `WorkingDirectory=%h/pyry-workspace` matches where you want claude's session storage to live (and any project-specific files like hooks).
+- Set `WorkingDirectory=` to the absolute directory you want claude to run in (typically a project root or a dedicated workspace). This anchors session storage at `~/.claude/projects/<encoded-cwd>/sessions/...`. The shipped template's value is illustrative — replace it.
 - Edit the `ExecStart=` line to add any claude flags you need:
 
 ```ini
@@ -143,7 +143,7 @@ pyry install-service --launchd -- \
   --channels plugin:discord@claude-plugins-official
 ```
 
-Everything after `--` is baked into `ProgramArguments` as separate `<string>` elements. `WorkingDirectory` defaults to `~/pyry-workspace` (override with `--workdir`). `EnvironmentVariables.PATH` is inherited from your current shell's `$PATH` (override with `--path`); on macOS that typically picks up `/opt/homebrew/bin`, `~/.nvm/versions/node/<v>/bin`, etc. without any further work.
+Everything after `--` is baked into `ProgramArguments` as separate `<string>` elements. `WorkingDirectory` defaults to the install-time cwd (override with `--workdir`; `~` and `~/sub` are expanded). `EnvironmentVariables.PATH` is inherited from your current shell's `$PATH` (override with `--path`); on macOS that typically picks up `/opt/homebrew/bin`, `~/.nvm/versions/node/<v>/bin`, etc. without any further work.
 
 The flags work the same as the systemd path — see the [Linux flag table above](#write-the-unit-file).
 
@@ -275,7 +275,7 @@ Note that you have to supply the original claude flags again — pyry does not r
 
 **Two pyrys racing for the same socket.** One starts, the other's `Listen` either fails (if the first is genuinely listening) or silently replaces the first's socket file (if the first crashed leaving a stale file). Always `systemctl --user status pyry` / `launchctl list | grep pyrycode` before manually starting another instance — and if you want a second instance deliberately, use `-pyry-name`.
 
-**Channel hooks not firing under pyry.** Pyry doesn't intercept claude's hook execution — hooks fire from inside the claude child. If `~/pyry-workspace/.claude/hooks/*.sh` worked under tmux+bash but not under pyry, the most likely cause is the systemd / launchd `PATH` not including the directories your hook scripts call out to (`gh`, `curl`, etc.). Add them to `Environment=` / `EnvironmentVariables` — or, if you have just installed a new shimmed tool after enabling the service, see [Updating PATH after installing new tools](#updating-path-after-installing-new-tools) for the refresh procedure.
+**Channel hooks not firing under pyry.** Pyry doesn't intercept claude's hook execution — hooks fire from inside the claude child. If `<workdir>/.claude/hooks/*.sh` worked under tmux+bash but not under pyry, the most likely cause is the systemd / launchd `PATH` not including the directories your hook scripts call out to (`gh`, `curl`, etc.). Add them to `Environment=` / `EnvironmentVariables` — or, if you have just installed a new shimmed tool after enabling the service, see [Updating PATH after installing new tools](#updating-path-after-installing-new-tools) for the refresh procedure.
 
 **Pyry logs say "spawning claude" but `pyry attach` produces nothing.** You're attaching to the right pyry, but claude has buffered output and isn't sending it until something changes. Type something — anything from your end of the attach — and claude will respond. This is normal terminal-buffering behavior, not a pyry bug.
 
