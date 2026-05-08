@@ -1,0 +1,179 @@
+package conversations
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+)
+
+// registryFile is the on-disk envelope for ~/.pyry/conversations.json. The
+// envelope shape (rather than a bare top-level array) reserves room for
+// future top-level fields without a wire break.
+type registryFile struct {
+	Conversations []Conversation `json:"conversations"`
+}
+
+// Registry is the in-memory conversation list, guarded by a mutex. Construct
+// via Load (cold-start or warm-start from disk); persist via Save. All methods
+// are safe for concurrent use.
+type Registry struct {
+	mu            sync.Mutex
+	conversations []Conversation
+}
+
+// Load reads path. A missing file returns an empty *Registry with no error
+// (cold start). A zero-byte file returns an empty *Registry with no error.
+// Malformed JSON returns a wrapped error and a nil *Registry.
+//
+// The returned *Registry is independent of the on-disk file: subsequent Save
+// calls re-encode from the in-memory slice; the file may move or be deleted
+// between Load and Save without affecting in-memory state.
+func Load(path string) (*Registry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &Registry{}, nil
+		}
+		return nil, fmt.Errorf("registry: read %s: %w", path, err)
+	}
+	if len(data) == 0 {
+		return &Registry{}, nil
+	}
+	var rf registryFile
+	if err := json.Unmarshal(data, &rf); err != nil {
+		return nil, fmt.Errorf("registry: parse %s: %w", path, err)
+	}
+	return &Registry{conversations: rf.Conversations}, nil
+}
+
+// Save writes the registry atomically: temp file in filepath.Dir(path) at
+// mode 0600, fsync, rename into place. Parent directory is created with mode
+// 0700 if missing. Returns a wrapped error on any step failure; on failure
+// the pre-existing target file (if any) is left untouched (rename is the
+// commit point).
+//
+// Entries are sorted by LastUsedAt then ID before serialization to guarantee
+// byte-identical output for the same logical content.
+func (r *Registry) Save(path string) error {
+	r.mu.Lock()
+	snapshot := make([]Conversation, len(r.conversations))
+	copy(snapshot, r.conversations)
+	r.mu.Unlock()
+
+	sort.SliceStable(snapshot, func(i, j int) bool {
+		if !snapshot[i].LastUsedAt.Equal(snapshot[j].LastUsedAt) {
+			return snapshot[i].LastUsedAt.Before(snapshot[j].LastUsedAt)
+		}
+		return snapshot[i].ID < snapshot[j].ID
+	})
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("registry: mkdir %s: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".conversations-*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("registry: create temp: %w", err)
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("registry: chmod temp: %w", err)
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(&registryFile{Conversations: snapshot}); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("registry: encode: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("registry: fsync: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("registry: close temp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("registry: rename: %w", err)
+	}
+	return nil
+}
+
+// Create appends c to the in-memory list. Caller owns uniqueness — Create
+// does not validate that c.ID is unique, well-formed, or non-empty.
+func (r *Registry) Create(c Conversation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.conversations = append(r.conversations, c)
+}
+
+// Get returns the first conversation whose ID equals id, and true if one was
+// found. Comparison is byte-exact.
+func (r *Registry) Get(id ConversationID) (Conversation, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.conversations {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return Conversation{}, false
+}
+
+// ListFilter narrows the result of List. A nil pointer field means "no filter
+// on this field"; a non-nil pointer matches entries whose corresponding field
+// equals the pointed-to value.
+type ListFilter struct {
+	IsPromoted *bool
+}
+
+// List returns a copy of the in-memory conversation list, optionally narrowed
+// by filter. Callers may mutate the returned slice and its elements without
+// affecting registry state.
+//
+// The variadic shape is for ergonomics, not for AND-composition: when more
+// than one ListFilter is supplied, only filter[0] is consulted.
+func (r *Registry) List(filter ...ListFilter) []Conversation {
+	var f ListFilter
+	if len(filter) > 0 {
+		f = filter[0]
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Conversation, 0, len(r.conversations))
+	for _, c := range r.conversations {
+		if f.IsPromoted != nil && c.IsPromoted != *f.IsPromoted {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// Update locates the conversation with matching id, invokes fn with a pointer
+// to that entry under the registry lock, and returns true. On miss, returns
+// false and does not invoke fn.
+//
+// fn runs with r.mu held. fn MUST NOT call back into the registry — sync.Mutex
+// is non-reentrant, and any Registry method would deadlock. fn MUST NOT retain
+// the *Conversation pointer past return: the slice may be reallocated by a
+// future Create. fn may read and mutate any field; the registry does not
+// validate post-mutation state (e.g., does not reject a flip that duplicates
+// another entry's ID).
+func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			fn(&r.conversations[i])
+			return true
+		}
+	}
+	return false
+}
