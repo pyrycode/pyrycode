@@ -1,6 +1,6 @@
-# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification + restart-command detection
+# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, restart-command detection + tar.gz extraction
 
-Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 adds restart-command detection. The HTTP fetcher, tar extractor, atomic-replace, and restart probe land in sister tickets.
+Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 added restart-command detection; #186 adds tar.gz binary extraction. The HTTP fetcher, atomic-replace, and restart probe land in sister tickets.
 
 ## What it does
 
@@ -20,7 +20,11 @@ Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed 
 - `RestartProbe` struct — bool fields `LaunchdPlistExists` and `SystemdUnitExists` plus a `UID` string templated into the launchctl gui/<uid>/… domain. The wiring ticket fills these from `os.Stat` on the platform-specific service file paths and `strconv.Itoa(os.Getuid())`.
 - `DetectRestartCommand(probe RestartProbe) []string` — returns the argv (program plus args) that restarts a managed pyry daemon, or `nil` when no managed daemon is detected (foreground / unknown — caller should print "restart your pyry yourself" guidance).
 
-All six are stdlib-only and side-effect-free. No I/O, no goroutines, no `context.Context`.
+### Tar.gz binary extraction (#186)
+
+- `ExtractBinary(tgzData []byte, binaryName string) ([]byte, error)` — reads a gzipped tar archive entirely from memory and returns the bytes of the regular-file entry whose tar header `Name` (under `filepath.Base`) matches `binaryName`. No temp files, no streaming-to-disk. Skips non-regular entries (directories, symlinks, hard links). Returns the first match. Wraps `ErrMalformedArchive` for invalid gzip or unparseable tar; wraps `ErrBinaryNotInArchive` if no regular-file entry matches.
+
+All seven are stdlib-only and side-effect-free. No I/O, no goroutines, no `context.Context`.
 
 ## Types & errors
 
@@ -39,6 +43,8 @@ var ErrUnsupportedPlatform  = errors.New("unsupported os/arch")
 var ErrAssetNotInChecksums  = errors.New("asset not listed in checksums")
 var ErrMalformedChecksums   = errors.New("malformed checksums file")
 var ErrChecksumMismatch     = errors.New("sha256 checksum mismatch")
+var ErrBinaryNotInArchive   = errors.New("binary not found in archive")
+var ErrMalformedArchive     = errors.New("malformed tar.gz archive")
 ```
 
 `Comparison` mirrors `cmp.Compare` / `strings.Compare` conventions — negative/zero/positive for less/equal/greater. No `String()` method (YAGNI; add when a caller needs it for `slog`).
@@ -127,6 +133,22 @@ Lines that don't split into exactly two non-empty parts on `"  "` are skipped si
 
 No `runtime.GOOS` filter inside `DetectRestartCommand` — the probe **is** the OS filter. The wiring ticket may simply not call `os.Stat` on the launchd path under Linux, in which case `LaunchdPlistExists` stays false and the systemd branch wins. That's a wiring decision, not a decision-half decision.
 
+### Tar.gz extraction
+
+| Input | Outcome |
+|-------|---------|
+| Tarball containing `pyry` plus other files | `(pyryBytes, nil)` — bytes returned unchanged |
+| Tarball missing the requested binary | `nil` + err wrapping `ErrBinaryNotInArchive` |
+| Garbage data (not a valid gzip stream) | `nil` + err wrapping `ErrMalformedArchive` |
+| Valid gzip wrapping non-tar payload | `nil` + err wrapping `ErrMalformedArchive` |
+| Empty input | `nil` + err wrapping `ErrMalformedArchive` |
+
+Matching is `filepath.Base(hdr.Name) == binaryName`. GoReleaser lays files at the archive root (`pyry`, `LICENSE`, `docs/INSTALL.md`, …), so callers pass the bare filename. The `filepath.Base` strip is robust against a future GoReleaser config change that wraps everything in a top-level `pyry_v0.9.1/` directory; the cost is that a hypothetical `subdir/pyry` would also match — accepted because GoReleaser does not produce such archives, and a stricter exact-`hdr.Name` check would force this slice to be revisited the moment the archive layout changes.
+
+Non-regular entries are skipped (`hdr.Typeflag != tar.TypeReg` continues the loop). Defends against a malicious/quirky archive that names its top-level directory `pyry/` (which would otherwise be returned as a zero-length "binary"). Cheap check, silent-and-weird failure mode without it.
+
+No size cap (`io.LimitReader`) and no streaming variant. Release tarballs are ~10–20 MiB; the wiring ticket already holds `tgzData` in memory for checksum verification, and checksum-verifies before extraction, which forecloses the "attacker-controlled tarball" path. Revisit only if pyry ever ships a 1 GiB binary.
+
 ### SHA-256 verification
 
 | Input | Outcome |
@@ -172,7 +194,13 @@ GitHub API ──[fetcher: sister ticket]──> []byte (release JSON)
                                   VerifySHA256(tarballBytes, expectedHex)
                                                           │
                                                           ▼
-                          [next ticket: untar + atomic replace]
+                                ExtractBinary(tarballBytes, "pyry")
+                                                          │
+                                                          ▼
+                                                  pyryBytes []byte
+                                                          │
+                                                          ▼
+                              [next ticket: atomic on-disk replace]
                                                           │
                                                           ▼
    [wiring: probe ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
@@ -195,6 +223,8 @@ No state, no I/O, no concurrency primitives. Safe for concurrent use by definiti
 - `internal/update/checksum_test.go` — table-driven coverage for the three #180 functions (~219 LOC, three `t.Parallel` tables).
 - `internal/update/restart.go` — `RestartProbe`, `DetectRestartCommand` (~37 LOC). Same shape as `checksum.go`'s pure-function siblings.
 - `internal/update/restart_test.go` — table-driven coverage for the four AC cases (~48 LOC, single `t.Parallel` table; uses `slices.Equal` for argv comparison).
+- `internal/update/install.go` — `ExtractBinary`, `ErrBinaryNotInArchive`, `ErrMalformedArchive` (~63 LOC). Stdlib-only (`archive/tar`, `bytes`, `compress/gzip`, `errors`, `fmt`, `io`, `path/filepath`).
+- `internal/update/install_test.go` — table-driven coverage for the AC's three cases plus two sentinel-coverage extensions (`valid_gzip_garbage_tar`, `empty_input`); ~120 LOC. Inline `buildTarGz(t, map[string][]byte) []byte` + `gzipOf(t, []byte) []byte` helpers construct fixtures via `bytes.Buffer` → `gzip.Writer` → `tar.Writer` — no `testdata/` directory.
 
 ## Configuration
 
@@ -209,8 +239,7 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 ## Out of scope (sister tickets)
 
 - HTTP fetcher (GET `releases/latest`, GET `<release>/checksums.txt`, GET `<release>/<assetName>`, retries, timeouts, `context.Context`).
-- Tar extraction of the downloaded asset.
-- Atomic binary replacement.
+- Atomic binary replacement (the wiring ticket lands in `install.go` alongside `ExtractBinary` and consumes its `[]byte` output via `os.CreateTemp` + `os.Rename`).
 - The probe half of restart detection — the wiring ticket performs `os.Stat` on the launchd plist + systemd unit file paths and `os.Getuid()`, then calls `DetectRestartCommand` with the results.
 - Actually running the restart argv (`exec.Command`) and watching for restart success.
 - `pyry update` CLI verb wiring + `--dry-run` flag.
@@ -225,5 +254,5 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 - `.goreleaser.yaml:24-46` — build matrix and `archives.name_template` that `osTitles` / `archNames` mirror verbatim.
 - [`lessons.md § Atomic on-disk writes`](../../lessons.md) — same "default decoder, not strict" rationale applied to `sessions.json`.
 - [`internal/sessions/id.go`](../../../internal/sessions/id.go) — convention reference for tiny stdlib-only packages with table-driven tests.
-- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md) — build-time architecture specs.
+- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md), [`docs/specs/architecture/186-update-extract-binary.md`](../../specs/architecture/186-update-extract-binary.md) — build-time architecture specs.
 - `launchd/dev.pyrycode.pyry.plist`, `systemd/pyry.service` — the service files whose presence the wiring-ticket probe checks; `pyry install-service` writes them.
