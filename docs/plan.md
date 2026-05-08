@@ -6,6 +6,7 @@ This is a repo-local copy of the project plan. The authoritative working doc liv
 
 | Tag | Name | Date | Highlights |
 |---|---|---|---|
+| `v0.10.1` | self-update auto-restart | 2026-05-08 | `pyry update` now restarts the managed daemon automatically after the binary swap (launchctl on Mac, systemctl on Linux). `--no-restart` opt-out for foreground runs and CI. Restart failures don't undo the swap — single-line error notes the binary landed and only the restart failed (#190) |
 | `v0.10.0` | self-update | 2026-05-08 | `pyry update` fetches latest GitHub Release, verifies SHA-256, atomically replaces the running binary; `--check` for version-only, `--version <tag>` to pin. Daemon restart still manual — printed as guidance. New stdlib-only `internal/update` package (#179, #180, #181, #182, #186, #187 wired by #189) |
 | `v0.9.1` | install-service cwd default | 2026-05-08 | `pyry install-service` defaults `WorkingDirectory` to cwd; `--workdir <path>` override (#177) |
 | `v0.9.0` | SDK-consumer integration | 2026-05-08 | `pyry attach --stdio`, `--create-if-missing`, `sessions.has-id` control verb, foreground auto-attach (Phase 1.3) |
