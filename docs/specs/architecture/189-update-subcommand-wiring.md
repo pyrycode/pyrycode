@@ -2,12 +2,15 @@
 
 ## Dependency note (read before starting)
 
-This ticket consumes two `internal/update` primitives that were not yet on `main` at architect time:
+This ticket consumes two `internal/update` I/O primitives plus the four pure-function primitives:
 
-- `update.Fetcher` (struct + `FetchLatestRelease` + `FetchAsset`) — open in PR #193 (#182).
-- `update.AtomicReplace(target, data, mode)` — open in PR #195 (#187).
+- `update.Fetcher` (struct + `FetchLatestRelease` + `FetchAsset`) — landed via PR #193 (#182).
+- `update.AtomicReplace(target, data, mode)` — landed via PR #195 (#187).
+- `update.ParseLatestRelease`, `CompareVersions`, `ErrInvalidVersion` (#179) — already on main.
+- `update.AssetName`, `ParseChecksumsFile`, `VerifySHA256`, sentinel errors (#180) — already on main.
+- `update.ExtractBinary` (#186) — already on main.
 
-Both have stable contracts (frozen by their issue bodies) and the spec below is written against them. Before starting implementation, run `git pull origin main` in your worktree and confirm `internal/update/fetch.go` and `internal/update/replace.go` both exist. If either is missing, stop and route the ticket back via `needs-rework:po` with a `blockedBy` link — do not stub the primitives locally, and do not invent surrogate signatures.
+Before starting implementation, confirm `internal/update/fetch.go` and `internal/update/replace.go` both exist on disk in your worktree. If either is missing (the dispatcher should already have rebased onto main, but verify), stop and route the ticket back via `needs-rework:po` — do not stub the primitives locally, and do not invent surrogate signatures.
 
 ## Files to read first
 
