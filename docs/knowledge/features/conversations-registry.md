@@ -7,6 +7,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 ## Status
 
 - **Phase 3 foundation (#217):** mutex-guarded `Registry` + atomic save + load. ID generator + validator (`NewID`, `ValidID`) co-located in the same package. Six exports on the registry: `Load`, `(*Registry).Save / Create / Get / List / Update`. One `ListFilter` struct.
+- **Promotion primitive (#218):** `(*Registry).Promote(id, name)` flips a discussion to a named channel under the registry lock; four exported sentinel errors (`ErrConversationNotFound`, `ErrConversationAlreadyPromoted`, `ErrPromotionNameInUse`, `ErrPromotionNameEmpty`) cover the refusal cases.
 
 ## Surface
 
@@ -22,12 +23,20 @@ type ListFilter struct {
     IsPromoted *bool
 }
 
+var (
+    ErrConversationNotFound        = errors.New("conversations: conversation not found")
+    ErrConversationAlreadyPromoted = errors.New("conversations: conversation already promoted")
+    ErrPromotionNameInUse          = errors.New("conversations: promotion name already in use")
+    ErrPromotionNameEmpty          = errors.New("conversations: promotion name is empty")
+)
+
 func Load(path string) (*Registry, error)
 func (r *Registry) Save(path string) error
 func (r *Registry) Create(c Conversation)
 func (r *Registry) Get(id ConversationID) (Conversation, bool)
 func (r *Registry) List(filter ...ListFilter) []Conversation
 func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool
+func (r *Registry) Promote(id ConversationID, name string) error
 ```
 
 `Registry` holds the in-memory conversation slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk) or directly via `&Registry{}` (zero value is the empty registry — documented). Methods are safe for concurrent use.
@@ -179,6 +188,29 @@ Pointer-to-slice-element is the right shape because `Conversation` carries a `*s
 
 `Update` returns `bool`, not `(Conversation, bool)`. AC pins the no-return-value-for-the-post-state signature; if a future caller needs a post-mutation snapshot, add it then. Calling `Get(id)` after `Update` returns `true` works but races a concurrent `Update` on the same id — use the callback to read the post-state in place if that matters.
 
+### `Promote(id ConversationID, name string) error`
+
+In-memory primitive that turns a discussion into a named channel: flips `IsPromoted` to `true` and sets `Name` to a non-nil pointer to `name`. Validation, the uniqueness scan, and the two-field mutation all run under `r.mu`; on any refusal the registry is left untouched. Persistence is the caller's job — `Promote` does not call `Save`, matching the `Create` / `Update` convention.
+
+| Refusal | Sentinel | Wire code (mapped by later ticket) |
+|---|---|---|
+| id absent | `ErrConversationNotFound` | `conversation.not_found` |
+| target already `IsPromoted == true` | `ErrConversationAlreadyPromoted` | `conversation.already_promoted` |
+| `name` collides with another *promoted* conversation | `ErrPromotionNameInUse` | TBD (likely `conversation.name_in_use`) |
+| `name` empty or whitespace-only | `ErrPromotionNameEmpty` | TBD (likely `conversation.name_empty` / 400) |
+
+Sentinels are exported and returned naked (`return ErrPromotionNameEmpty`); the primitive has no extra context to add — id and name are caller-supplied. Distinguish via `errors.Is`. The `not_found` sentinel lives in this package even though `internal/sessions` has `ErrSessionNotFound`: the two registries are deliberately decoupled (per ADR 022 and the registry tech notes), so a shared `ErrNotFound` would couple them.
+
+Behavioural fine print:
+
+- **Empty/whitespace check uses `strings.TrimSpace`** — covers ASCII space/tab/newline plus Unicode whitespace. The stored `Name` is the **untrimmed** input; trimming is a refusal predicate, not a normalizer. `Promote(id, "  general  ")` accepts the literal string with surrounding spaces.
+- **Uniqueness scope is "another *promoted* conversation"**, byte-exact `==`, case-sensitive, no Unicode normalization. A historical unpromoted record with a stray non-nil `Name` (e.g. a future `pyry conv name` that names a discussion before promoting) does not block. The `name-conflict-with-unpromoted-OK` test row pins this.
+- **No partial mutation on refusal.** Every refusal returns before touching `r.conversations[idx]`. The mutation is two field assignments at the bottom of the happy path; nothing earlier writes.
+- **Pointer ownership.** The implementation copies `name` into a fresh local before taking its address, so the stored `*Name` never aliases a caller-mutable variable. Strings are immutable so this is defensive idiom rather than necessity.
+- **No `LastUsedAt` bump.** `Promote` only flips `IsPromoted` and sets `Name`. If a consuming layer wants to bump `LastUsedAt` on promote, it calls `Update` after `Promote`. Two registry calls; no atomicity loss for this specific pair.
+
+`Promote` is a new method, not a thin wrapper over `Update`: `Update`'s callback returns no error, so building `Promote` on top of it would force the caller to thread refusal through a captured `*error`, which is uglier than just writing the dedicated method. The duplication is two field assignments under the same lock — trivial.
+
 ## Tests
 
 `internal/conversations/registry_test.go`, same-package, table-driven, `t.Parallel()` everywhere except permission-mutating tests, stdlib only.
@@ -199,6 +231,8 @@ New (no devices counterpart):
 - `TestRegistry_Update_Hit` — Update bumps `LastUsedAt`, flips `IsPromoted`, sets `Name`; subsequent `Get` reflects the mutation.
 - `TestRegistry_Update_Miss` — Update on absent id returns `false`, `fn` never invoked (test-controlled flag), registry untouched.
 - `TestRegistry_Update_PointerStability` — within `fn`, mutating `*Conversation` propagates to subsequent reads (pins the contract; trivially true given `&r.conversations[i]`).
+- `TestRegistry_Promote` (#218) — table-driven, one row per AC bullet: success, unknown id, already promoted, name conflict against another *promoted* record (refused), name conflict against an *unpromoted* record (accepted — pins uniqueness scope), empty name, whitespace-only name. Each refusal row also asserts the target is byte-equal to its pre-call state via `Get`.
+- `TestRegistry_Promote_DoesNotPersist` (#218) — `Save` → `Promote` → `Load` from the same path; the loaded registry shows `IsPromoted == false`, pinning that `Promote` does not call `Save` implicitly.
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -211,7 +245,9 @@ New (no devices counterpart):
 - **`Remove` method.** Not in AC; conversations are not deleted in Phase 3 — they're archived via `IsPromoted` flips and history retention. If a future API ticket needs deletion, that ticket adds it with its own tests.
 - **Schema versioning.** Per AC: defer until first migration. The envelope shape reserves the field; add it then, not now.
 - **Daemon wiring.** This ticket lands the package; the supervisor / API layer that calls `Load` at startup and `Save` after mutations is a separate ticket.
-- **Promotion API (`pyry conv promote`, `pyry conv name`).** #218.
+- **CLI / wire-protocol bindings of `Promote`.** The in-memory primitive landed in #218; `pyry conv promote` and the mobile `promote_conversation` frame (sentinel-to-wire-code mapping for `conversation.not_found` / `conversation.already_promoted` and the `name_in_use` / `name_empty` codes) are the still-deferred consumers.
+- **Cwd-move on promote.** Mobile's `promote_conversation` payload carries an optional `cwd`; physically moving the conversation's working directory to a workspace folder is a separate UX flow layered on top of the primitive, not in #218.
+- **`pyry conv name <id> <name>` for renaming or clearing channel names.** Out of scope; `Promote` cannot create a promoted conversation with `*Name == ""` (rejected by `ErrPromotionNameEmpty`), and a future rename/clear primitive would have its own validation.
 - **Auto-archive predicate + sweep.** #219, #220.
 - **Migration from existing `Session` registry.** TBD ticket once Conversations is proven on disk; Phase 1/2 sessions stay untouched.
 - **Shared atomic-write helper across `devices` and `conversations`.** Issue tech note explicitly forbids; revisit only if real divergence cost surfaces.
@@ -224,4 +260,5 @@ New (no devices counterpart):
 - [ADR 020](../decisions/020-devices-registry-snapshot-then-write.md) — Save snapshots under lock, performs I/O outside (the pattern this registry inherits).
 - [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) — `Update` runs the caller's callback under the registry lock (over snapshot-mutate-swap).
 - `internal/sessions/id.go` — the `NewID` / `ValidID` template `internal/conversations/id.go` clones.
-- `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec.
+- `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec for the CRUD foundation.
+- `docs/specs/architecture/218-conversations-promotion-api.md` — architect's spec for `Promote`.
