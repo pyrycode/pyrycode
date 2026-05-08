@@ -1,6 +1,6 @@
-# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, restart-command detection, HTTP fetcher, tar.gz extraction
+# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, restart-command detection, HTTP fetcher, tar.gz extraction, atomic in-place replace
 
-Pyrycode's self-update logic (`pyry update`), assembled across several pure-function tickets and one network-I/O ticket. #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 added restart-command detection; #182 added the HTTP fetcher; #186 added tar.gz binary extraction. Atomic on-disk replacement, the restart probe, and `pyry update` CLI verb wiring land in sister tickets.
+Pyrycode's self-update logic (`pyry update`), assembled across several pure-function tickets, one network-I/O ticket, and one disk-I/O ticket. #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 added restart-command detection; #182 added the HTTP fetcher; #186 added tar.gz binary extraction; #187 adds the atomic write-temp + fsync + rename primitive that swaps the installed binary on disk. The restart probe and `pyry update` CLI verb land in sister tickets.
 
 ## What it does
 
@@ -30,7 +30,11 @@ Pyrycode's self-update logic (`pyry update`), assembled across several pure-func
 
 - `ExtractBinary(tgzData []byte, binaryName string) ([]byte, error)` — reads a gzipped tar archive entirely from memory and returns the bytes of the regular-file entry whose tar header `Name` (under `filepath.Base`) matches `binaryName`. No temp files, no streaming-to-disk. Skips non-regular entries (directories, symlinks, hard links). Returns the first match. Wraps `ErrMalformedArchive` for invalid gzip or unparseable tar; wraps `ErrBinaryNotInArchive` if no regular-file entry matches.
 
-The seven pure functions (`ParseLatestRelease`, `CompareVersions`, `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `DetectRestartCommand`, `ExtractBinary`) are stdlib-only and side-effect-free — no I/O, no goroutines, no `context.Context`. The `Fetcher` adds two stdlib-only methods that perform HTTP I/O — no retries, no caller-imposed timeouts (caller owns `*http.Client`), no body parsing.
+### Atomic in-place binary replace (#187)
+
+- `AtomicReplace(targetPath string, newData []byte, mode os.FileMode) error` — overwrites `targetPath` with `newData` using the standard POSIX write-temp + fsync + rename dance: `os.CreateTemp` in `filepath.Dir(targetPath)`, write, fchmod to the requested mode, fsync, close, `os.Rename` over the target. SIGKILL anywhere before the rename leaves the original file untouched; after the rename, the new bytes are durable. Temp file is unconditionally removed on any error path before the successful rename.
+
+The seven pure functions (`ParseLatestRelease`, `CompareVersions`, `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `DetectRestartCommand`, `ExtractBinary`) are stdlib-only and side-effect-free — no I/O, no goroutines, no `context.Context`. The `Fetcher` adds two stdlib-only methods that perform HTTP I/O. `AtomicReplace` is the first member of the package to perform disk I/O — also stdlib-only, also no goroutines or `context.Context`.
 
 ## Types & errors
 
@@ -157,6 +161,29 @@ Non-regular entries are skipped (`hdr.Typeflag != tar.TypeReg` continues the loo
 
 No size cap (`io.LimitReader`) and no streaming variant. Release tarballs are ~10–20 MiB; the wiring ticket already holds `tgzData` in memory for checksum verification, and checksum-verifies before extraction, which forecloses the "attacker-controlled tarball" path. Revisit only if pyry ever ships a 1 GiB binary.
 
+### Atomic in-place replace
+
+| Input shape | Outcome |
+|---|---|
+| Target dir exists, target file missing, dir writable | New file created with `newData` and `mode`, returns `nil`. |
+| Target dir exists, target file exists with old contents | New file replaces old atomically (single `rename(2)`); returns `nil`. Old inode unlinked when last open fd closes — running pyry processes keep their mmap'd image, the on-disk path now points to the new bytes. |
+| Target dir does not exist | `CreateTemp` returns `*PathError` wrapping `ENOENT`; we wrap as `"atomic replace: create temp in <dir>: …"`. No temp file exists to clean up. |
+| Target dir not writable | `CreateTemp` returns `*PathError` wrapping `EACCES`. Same wrapping. |
+| Disk full mid-write | `Write` returns `ENOSPC`; we wrap and the deferred `os.Remove(tmp)` reclaims the partial bytes. |
+| Mode `0o000` | File created with mode 0; the caller is honouring whatever mode they asked for — the function does not second-guess. |
+
+Order is **write → fchmod → fsync → close → rename**. Chmod-then-fsync ensures the mode change is durably persisted along with the contents in the same fsync; the reverse would leave the mode change un-fsynced. `f.Chmod` (fchmod on the open fd) over `os.Chmod(path, …)` avoids a TOCTOU between create and chmod. Each f-method failure closes the file before returning rather than relying on `defer f.Close()` so the order with respect to the cleanup `defer` is unambiguous.
+
+Temp-file naming: `os.CreateTemp(dir, "."+base+".*.tmp")`. The leading dot keeps stragglers (which only appear in failure modes) hidden from `ls`; embedding `base` makes accidental collisions during concurrent updates structurally impossible and gives ops a hint about origin if one ever does leak. `os.CreateTemp` substitutes a random suffix for `*`.
+
+A `renamed` bool gates the cleanup `defer`. After `os.Rename` succeeds, `tmp` no longer names a file; calling `os.Remove(tmp)` would either fail with `ENOENT` (harmless) or — in a freak race — remove an unrelated file some other process subsequently created at the same temp name. The flag closes that gate cheaply.
+
+**Same-filesystem caveat.** `rename(2)` is only atomic when source and destination share a filesystem; cross-device rename returns `EXDEV` on POSIX and degrades to copy-then-unlink (not atomic). Creating the temp file in `filepath.Dir(targetPath)` makes this structurally impossible — caller MUST therefore pass a path whose parent directory already exists. `AtomicReplace` does **not** `MkdirAll` the parent: the install directory is where `pyry` is currently running from, so a missing parent is a configuration bug in the caller, not something to silently paper over.
+
+**Out of scope inside `AtomicReplace`.** Parent-directory fsync after the rename (the threat model is "process interrupted mid-write", not "power loss between rename and dirent flush" — `internal/sessions/registry.go`'s `saveRegistryLocked` makes the same trade-off; revisit if a `pyry update` user reports a missing binary after a power outage). `os.MkdirAll` on the parent. Backup / rollback of the old binary as a `.bak` artifact (the wiring layer can `AtomicReplace` to `.bak` first if it wants belt-and-suspenders rollback). Sentinel errors (no current caller needs `errors.Is` branching beyond `fs.ErrNotExist`-style introspection of the wrapped `*PathError` from `CreateTemp`).
+
+**Concurrency.** Reentrant in the formal sense (no package-level state) but two concurrent calls *with the same `targetPath`* race at the rename step — temp names are unique random suffixes, but whichever rename runs last wins on `targetPath` and the loser's bytes are silently overwritten. No corruption; lost update only. The `pyry update` flow is single-goroutine so we don't defend against this; the doc comment doesn't promise anything about concurrent calls.
+
 ### SHA-256 verification
 
 | Input | Outcome |
@@ -230,7 +257,7 @@ GitHub API
                                                                        pyryBytes []byte
                                                                               │
                                                                               ▼
-                                                  [next ticket: atomic on-disk replace]
+                                              AtomicReplace(installPath, pyryBytes, 0o755)
                                                                               │
                                                                               ▼
               [wiring: probe ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
@@ -257,6 +284,8 @@ The pure functions hold no state. The fetcher is also stateless across calls: ea
 - `internal/update/fetch_test.go` — `httptest.NewServer`-driven coverage for the two public methods (~158 LOC). Each subtest constructs its own server with `t.Cleanup(ts.Close)`.
 - `internal/update/install.go` — `ExtractBinary`, `ErrBinaryNotInArchive`, `ErrMalformedArchive` (~63 LOC). Stdlib-only (`archive/tar`, `bytes`, `compress/gzip`, `errors`, `fmt`, `io`, `path/filepath`).
 - `internal/update/install_test.go` — table-driven coverage for the AC's three cases plus two sentinel-coverage extensions (`valid_gzip_garbage_tar`, `empty_input`); ~120 LOC. Inline `buildTarGz(t, map[string][]byte) []byte` + `gzipOf(t, []byte) []byte` helpers construct fixtures via `bytes.Buffer` → `gzip.Writer` → `tar.Writer` — no `testdata/` directory.
+- `internal/update/replace.go` — `AtomicReplace` (~64 LOC). Stdlib-only (`fmt`, `os`, `path/filepath`); first member of the package to perform I/O.
+- `internal/update/replace_test.go` — four targeted subtests using `t.TempDir()` (~90 LOC): creates-new, overwrites-existing, preserves-mode, parent-missing-leaves-no-stragglers. Targeted subtests over a single table because the error case has different setup; mirrors the spec's preferred shape.
 
 ## Configuration
 
@@ -270,7 +299,6 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 
 ## Out of scope (sister tickets)
 
-- Atomic binary replacement (the wiring ticket lands in `install.go` alongside `ExtractBinary` and consumes its `[]byte` output via `os.CreateTemp` + `os.Rename`).
 - The probe half of restart detection — the wiring ticket performs `os.Stat` on the launchd plist + systemd unit file paths and `os.Getuid()`, then calls `DetectRestartCommand` with the results.
 - Actually running the restart argv (`exec.Command`) and watching for restart success.
 - `pyry update` CLI verb wiring + `--dry-run` flag.
@@ -290,5 +318,6 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 - `.goreleaser.yaml:24-46` — build matrix and `archives.name_template` that `osTitles` / `archNames` mirror verbatim.
 - [`lessons.md § Atomic on-disk writes`](../../lessons.md) — same "default decoder, not strict" rationale applied to `sessions.json`.
 - [`internal/sessions/id.go`](../../../internal/sessions/id.go) — convention reference for tiny stdlib-only packages with table-driven tests.
-- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md), [`docs/specs/architecture/182-update-http-fetcher.md`](../../specs/architecture/182-update-http-fetcher.md), [`docs/specs/architecture/186-update-extract-binary.md`](../../specs/architecture/186-update-extract-binary.md) — build-time architecture specs.
+- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md), [`docs/specs/architecture/182-update-http-fetcher.md`](../../specs/architecture/182-update-http-fetcher.md), [`docs/specs/architecture/186-update-extract-binary.md`](../../specs/architecture/186-update-extract-binary.md), [`docs/specs/architecture/187-update-atomic-replace.md`](../../specs/architecture/187-update-atomic-replace.md) — build-time architecture specs.
+- [`internal/sessions/registry.go`](../../../internal/sessions/registry.go) — `saveRegistryLocked` is the in-tree precedent for the same write-temp + fsync + rename pattern; `AtomicReplace` mirrors its structure with two differences (raw bytes instead of a JSON encoder, no `MkdirAll` on the parent).
 - `launchd/dev.pyrycode.pyry.plist`, `systemd/pyry.service` — the service files whose presence the wiring-ticket probe checks; `pyry install-service` writes them.
