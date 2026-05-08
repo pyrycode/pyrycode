@@ -272,7 +272,17 @@ func New(cfg Config) (*Pool, error) {
 		label = entry.Label
 		createdAt = entry.CreatedAt
 		lastActiveAt = entry.LastActiveAt
-		lcState = parseLifecycleState(entry.LifecycleState)
+		// Bootstrap-only: ignore persisted lifecycle_state. The bootstrap
+		// is the per-process auto-spawn entry; daemon-mode startup
+		// contract is "claude is available". Idle eviction within a
+		// process is correct (frees claude after the idle window), but a
+		// fresh daemon process starts with a fresh active state — there
+		// is no carry-over. Persisting "evicted" for the bootstrap and
+		// then waking with no attach client to drive Activate would hang
+		// the daemon forever (see #202). Non-bootstrap sessions keep
+		// their persisted state; lazy respawn on attach is correct there.
+		lcState = stateActive
+		_ = entry.LifecycleState
 	} else {
 		id, err := NewID()
 		if err != nil {

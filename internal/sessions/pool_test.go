@@ -904,10 +904,12 @@ func (p *dirProbe) OpenJSONL(int) (string, error) {
 	return bestPath, nil
 }
 
-// TestPool_BootstrapWarmStartsEvicted: a registry with lifecycle_state
-// "evicted" round-trips into a Session with stateEvicted at construction.
-// No supervisor activity happens because Run is never called.
-func TestPool_BootstrapWarmStartsEvicted(t *testing.T) {
+// TestPool_BootstrapWarmStart_IgnoresPersistedEvicted: a registry with
+// lifecycle_state "evicted" for the bootstrap entry must NOT round-trip into
+// stateEvicted. The bootstrap is always loaded as stateActive on warm-start —
+// idle eviction is an in-process semantic and does not survive across daemon
+// process boundaries (see #202).
+func TestPool_BootstrapWarmStart_IgnoresPersistedEvicted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
@@ -923,8 +925,95 @@ func TestPool_BootstrapWarmStartsEvicted(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	pool := helperPoolPersistent(t, path)
-	if got := pool.Default().LifecycleState(); got != stateEvicted {
-		t.Errorf("LifecycleState = %v, want stateEvicted", got)
+	if got := pool.Default().LifecycleState(); got != stateActive {
+		t.Errorf("LifecycleState = %v, want stateActive (bootstrap ignores persisted evicted)", got)
+	}
+}
+
+// TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart is the #202
+// regression test: a registry whose bootstrap entry persists
+// lifecycle_state "evicted" is the exact on-disk shape produced by an
+// idle-evicted bootstrap that survives a daemon restart. Before the fix,
+// Pool.Run loaded the bootstrap as stateEvicted, parked in runEvicted on
+// activateCh, and never spawned claude — pyry --dangerously-skip-permissions
+// </dev/null hung forever. Post-fix, the bootstrap is loaded as stateActive
+// regardless of disk, the supervisor enters PhaseRunning, and StartedAt is
+// real (not the Go zero-time sentinel surfaced as "0001-01-01" / MaxInt64
+// uptime in pyry status).
+func TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	bootstrapID := SessionID("550e8400-e29b-41d4-a716-446655440000")
+	now := time.Now().UTC()
+	reg := &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID:             bootstrapID,
+			CreatedAt:      now,
+			LastActiveAt:   now,
+			Bootstrap:      true,
+			LifecycleState: "evicted",
+		}},
+	}
+	if err := saveRegistryLocked(regPath, reg); err != nil {
+		t.Fatalf("saveRegistryLocked: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pool, err := New(Config{
+		Logger:       logger,
+		RegistryPath: regPath,
+		Bootstrap: SessionConfig{
+			ClaudeBin:      "/bin/sleep",
+			ClaudeArgs:     []string{"3600"},
+			BackoffInitial: 10 * time.Millisecond,
+			BackoffMax:     10 * time.Millisecond,
+			BackoffReset:   1 * time.Second,
+			// Bridge mode mirrors the non-TTY supervisor path the user
+			// reproduces (cmd/pyry/main.go's stdin-redirected branch). It
+			// also keeps the supervisor's I/O pumps off os.Stdin so the
+			// test doesn't contend with `go test`'s stdin.
+			Bridge: supervisor.NewBridge(logger),
+		},
+	})
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- pool.Run(ctx) }()
+
+	sess := pool.Default()
+	if !pollUntil(t, 5*time.Second, func() bool {
+		st := sess.State()
+		return st.Phase == supervisor.PhaseRunning && st.ChildPID > 0
+	}) {
+		t.Fatalf("supervisor did not reach PhaseRunning within 5s; "+
+			"state=%+v lc=%v (would have failed against the v0.10.1 binary)",
+			sess.State(), sess.LifecycleState())
+	}
+
+	// AC#3: StartedAt is real, not the Go zero-time sentinel that pyry
+	// status surfaces as "0001-01-01T00:00:00Z" / MaxInt64 uptime.
+	if sess.State().StartedAt.IsZero() {
+		t.Errorf("StartedAt is zero after PhaseRunning; want non-zero")
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Pool.Run err = %v, want nil or context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Pool.Run did not return after cancel")
 	}
 }
 
