@@ -1,6 +1,6 @@
-# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, HTTP fetcher
+# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, restart-command detection, HTTP fetcher, tar.gz extraction
 
-Pyrycode's self-update logic (`pyry update`), assembled across pure-function tickets and one network-I/O ticket. #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #182 added the HTTP fetcher. The tar extractor (#183), atomic-replace, and `pyry update` CLI verb wiring land in sister tickets.
+Pyrycode's self-update logic (`pyry update`), assembled across several pure-function tickets and one network-I/O ticket. #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 added restart-command detection; #182 added the HTTP fetcher; #186 added tar.gz binary extraction. Atomic on-disk replacement, the restart probe, and `pyry update` CLI verb wiring land in sister tickets.
 
 ## What it does
 
@@ -15,13 +15,22 @@ Pyrycode's self-update logic (`pyry update`), assembled across pure-function tic
 - `ParseChecksumsFile(text, assetName string) (string, error)` — given a GoReleaser-produced `checksums.txt` body and a target asset name, returns the lowercase SHA-256 hex digest for that asset.
 - `VerifySHA256(data []byte, expectedHex string) error` — returns `nil` iff `sha256(data)` lowercase-hex equals `expectedHex`. Mismatch error includes both digests for diagnostic logging.
 
+### Restart-command detection (#181)
+
+- `RestartProbe` struct — bool fields `LaunchdPlistExists` and `SystemdUnitExists` plus a `UID` string templated into the launchctl gui/<uid>/… domain. The wiring ticket fills these from `os.Stat` on the platform-specific service file paths and `strconv.Itoa(os.Getuid())`.
+- `DetectRestartCommand(probe RestartProbe) []string` — returns the argv (program plus args) that restarts a managed pyry daemon, or `nil` when no managed daemon is detected (foreground / unknown — caller should print "restart your pyry yourself" guidance).
+
 ### HTTP fetcher (#182)
 
 - `Fetcher` struct — zero-value-usable wrapper over `net/http`. Three configurable fields: `BaseURL` (defaults to `https://api.github.com`), `HTTPClient` (defaults to `http.DefaultClient`), `UserAgent` (defaults to `pyry/dev`; the wiring layer sets `"pyry/" + main.Version`).
 - `(*Fetcher).FetchLatestRelease(ctx, repo) ([]byte, error)` — GETs `<BaseURL>/repos/<repo>/releases/latest`, returns the body verbatim. `repo` is `"owner/name"`. Output suitable for `ParseLatestRelease`.
 - `(*Fetcher).FetchAsset(ctx, url) ([]byte, error)` — GETs the URL, returns the body verbatim. Caller passes a fully-formed URL (typically `assets[].browser_download_url` extracted from the release JSON or the URL of the `checksums.txt` asset).
 
-All five pure functions are stdlib-only and side-effect-free (no I/O, no goroutines, no `context.Context`). The fetcher uses stdlib `net/http` only — no retries, no caller-imposed timeouts (caller owns `*http.Client`), no body parsing.
+### Tar.gz binary extraction (#186)
+
+- `ExtractBinary(tgzData []byte, binaryName string) ([]byte, error)` — reads a gzipped tar archive entirely from memory and returns the bytes of the regular-file entry whose tar header `Name` (under `filepath.Base`) matches `binaryName`. No temp files, no streaming-to-disk. Skips non-regular entries (directories, symlinks, hard links). Returns the first match. Wraps `ErrMalformedArchive` for invalid gzip or unparseable tar; wraps `ErrBinaryNotInArchive` if no regular-file entry matches.
+
+The seven pure functions (`ParseLatestRelease`, `CompareVersions`, `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `DetectRestartCommand`, `ExtractBinary`) are stdlib-only and side-effect-free — no I/O, no goroutines, no `context.Context`. The `Fetcher` adds two stdlib-only methods that perform HTTP I/O — no retries, no caller-imposed timeouts (caller owns `*http.Client`), no body parsing.
 
 ## Types & errors
 
@@ -40,6 +49,8 @@ var ErrUnsupportedPlatform  = errors.New("unsupported os/arch")
 var ErrAssetNotInChecksums  = errors.New("asset not listed in checksums")
 var ErrMalformedChecksums   = errors.New("malformed checksums file")
 var ErrChecksumMismatch     = errors.New("sha256 checksum mismatch")
+var ErrBinaryNotInArchive   = errors.New("binary not found in archive")
+var ErrMalformedArchive     = errors.New("malformed tar.gz archive")
 ```
 
 The fetcher introduces no new sentinel errors — the wiring ticket cannot retry (forbidden by AC) and therefore cannot branch on transient-vs-permanent, so a typed sentinel would be unused. Non-2xx responses surface as `fmt.Errorf("GET %s: unexpected status %d", url, resp.StatusCode)` (no `%w` — no inner error). Transport failures wrap the underlying `*url.Error`, which already participates in `errors.Is` traversal for `context.Canceled` / `context.DeadlineExceeded`. If a future caller needs typed branching, add `ErrUnexpectedStatus` then — defer until observed.
@@ -115,6 +126,37 @@ The `sawAny` flag distinguishes "checksums.txt was junk" (`ErrMalformedChecksums
 
 Lines that don't split into exactly two non-empty parts on `"  "` are skipped silently (forward-compatible with future header comments or trailing blanks). Per-line digest length / hex-ness is **not** validated — `VerifySHA256` will catch any mangling, and a regex check would couple two layers without observed benefit.
 
+### Restart-command detection
+
+| Probe | Result |
+|-------|--------|
+| `LaunchdPlistExists: true, UID: "501"` | `["launchctl", "kickstart", "-k", "gui/501/dev.pyrycode.pyry"]` |
+| `SystemdUnitExists: true` | `["systemctl", "--user", "restart", "pyry"]` |
+| Both true (tie-breaker) | launchd command — macOS is pyrycode's primary daily-driver platform; a stray systemd user unit on a Mac is more likely cruft than the active manager. The reverse case (a launchd plist on Linux) cannot occur — `launchctl` does not exist on Linux, so the probe returns false. |
+| Neither true | `nil` — caller prints guidance |
+
+`launchctl kickstart -k` SIGTERMs the running instance and starts a fresh one in a single command. `unload`/`load` would round-trip the plist and race with `KeepAlive=true`. `systemctl --user restart` is unconditional (matches the user's intent: "the binary changed; restart it"); `try-restart` would silently no-op if the unit is inactive, and `reload` requires `ExecReload=` which the unit file doesn't define.
+
+`RestartProbe` is a struct rather than three positional bools so the call site labels each signal and survives signal additions in future tickets (e.g. an SMF unit on illumos, a Windows service entry) without breaking existing callers.
+
+No `runtime.GOOS` filter inside `DetectRestartCommand` — the probe **is** the OS filter. The wiring ticket may simply not call `os.Stat` on the launchd path under Linux, in which case `LaunchdPlistExists` stays false and the systemd branch wins. That's a wiring decision, not a decision-half decision.
+
+### Tar.gz extraction
+
+| Input | Outcome |
+|-------|---------|
+| Tarball containing `pyry` plus other files | `(pyryBytes, nil)` — bytes returned unchanged |
+| Tarball missing the requested binary | `nil` + err wrapping `ErrBinaryNotInArchive` |
+| Garbage data (not a valid gzip stream) | `nil` + err wrapping `ErrMalformedArchive` |
+| Valid gzip wrapping non-tar payload | `nil` + err wrapping `ErrMalformedArchive` |
+| Empty input | `nil` + err wrapping `ErrMalformedArchive` |
+
+Matching is `filepath.Base(hdr.Name) == binaryName`. GoReleaser lays files at the archive root (`pyry`, `LICENSE`, `docs/INSTALL.md`, …), so callers pass the bare filename. The `filepath.Base` strip is robust against a future GoReleaser config change that wraps everything in a top-level `pyry_v0.9.1/` directory; the cost is that a hypothetical `subdir/pyry` would also match — accepted because GoReleaser does not produce such archives, and a stricter exact-`hdr.Name` check would force this slice to be revisited the moment the archive layout changes.
+
+Non-regular entries are skipped (`hdr.Typeflag != tar.TypeReg` continues the loop). Defends against a malicious/quirky archive that names its top-level directory `pyry/` (which would otherwise be returned as a zero-length "binary"). Cheap check, silent-and-weird failure mode without it.
+
+No size cap (`io.LimitReader`) and no streaming variant. Release tarballs are ~10–20 MiB; the wiring ticket already holds `tgzData` in memory for checksum verification, and checksum-verifies before extraction, which forecloses the "attacker-controlled tarball" path. Revisit only if pyry ever ships a 1 GiB binary.
+
 ### SHA-256 verification
 
 | Input | Outcome |
@@ -182,7 +224,23 @@ GitHub API
                                                       VerifySHA256(tarballBytes, expectedHex)
                                                                               │
                                                                               ▼
-                                                  [#183: untar + atomic replace + restart]
+                                                    ExtractBinary(tarballBytes, "pyry")
+                                                                              │
+                                                                              ▼
+                                                                       pyryBytes []byte
+                                                                              │
+                                                                              ▼
+                                                  [next ticket: atomic on-disk replace]
+                                                                              │
+                                                                              ▼
+              [wiring: probe ~/Library/LaunchAgents/dev.pyrycode.pyry.plist
+                       + ~/.config/systemd/user/pyry.service + os.Getuid()]
+                                                                              │
+                                                                              ▼
+                                                      DetectRestartCommand(probe)
+                                                                              │
+                                                                              ▼
+                                  argv ([]string) or nil → exec.Command(argv[0], argv[1:]...)
 ```
 
 The pure functions hold no state. The fetcher is also stateless across calls: each `Fetch*` constructs a fresh `*http.Request`; the `*http.Client` handles connection pooling internally. `*Fetcher` is safe for concurrent use — fields are read-only after construction, `*http.Client.Do` is concurrency-safe, no mutexes or goroutines internally. Package-level `osTitles` / `archNames` are written once at var-decl time and only read thereafter — Go's memory model permits concurrent reads of an unmutated map.
@@ -193,8 +251,12 @@ The pure functions hold no state. The fetcher is also stateless across calls: ea
 - `internal/update/version_test.go` — table-driven coverage for the two #179 functions (~155 LOC, two `t.Parallel` tables).
 - `internal/update/checksum.go` — `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `ErrUnsupportedPlatform`, `ErrAssetNotInChecksums`, `ErrMalformedChecksums`, `ErrChecksumMismatch`, plus the `osTitles` / `archNames` lookup tables (~102 LOC). No package-doc comment — `version.go` already covers the package.
 - `internal/update/checksum_test.go` — table-driven coverage for the three #180 functions (~219 LOC, three `t.Parallel` tables).
+- `internal/update/restart.go` — `RestartProbe`, `DetectRestartCommand` (~37 LOC). Same shape as `checksum.go`'s pure-function siblings.
+- `internal/update/restart_test.go` — table-driven coverage for the four AC cases (~48 LOC, single `t.Parallel` table; uses `slices.Equal` for argv comparison).
 - `internal/update/fetch.go` — `Fetcher` struct + `FetchLatestRelease` + `FetchAsset` + private `get` helper + zero-value default helpers (`baseURL`, `httpClient`, `userAgent`) (~115 LOC). No package-doc comment — `version.go` covers the package.
 - `internal/update/fetch_test.go` — `httptest.NewServer`-driven coverage for the two public methods (~158 LOC). Each subtest constructs its own server with `t.Cleanup(ts.Close)`.
+- `internal/update/install.go` — `ExtractBinary`, `ErrBinaryNotInArchive`, `ErrMalformedArchive` (~63 LOC). Stdlib-only (`archive/tar`, `bytes`, `compress/gzip`, `errors`, `fmt`, `io`, `path/filepath`).
+- `internal/update/install_test.go` — table-driven coverage for the AC's three cases plus two sentinel-coverage extensions (`valid_gzip_garbage_tar`, `empty_input`); ~120 LOC. Inline `buildTarGz(t, map[string][]byte) []byte` + `gzipOf(t, []byte) []byte` helpers construct fixtures via `bytes.Buffer` → `gzip.Writer` → `tar.Writer` — no `testdata/` directory.
 
 ## Configuration
 
@@ -208,8 +270,9 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 
 ## Out of scope (sister tickets)
 
-- Tar extraction of the downloaded asset (#183).
-- Atomic binary replacement / restart detection.
+- Atomic binary replacement (the wiring ticket lands in `install.go` alongside `ExtractBinary` and consumes its `[]byte` output via `os.CreateTemp` + `os.Rename`).
+- The probe half of restart detection — the wiring ticket performs `os.Stat` on the launchd plist + systemd unit file paths and `os.Getuid()`, then calls `DetectRestartCommand` with the results.
+- Actually running the restart argv (`exec.Command`) and watching for restart success.
 - `pyry update` CLI verb wiring + `--dry-run` flag.
 - A `MapHostPlatform()` helper that wraps `runtime.GOOS` / `runtime.GOARCH` (the wiring ticket can pass the raw runtime constants — adding a host-detection helper before the wiring ticket exists is YAGNI).
 - Streaming-hash variant of `VerifySHA256` (deferred until tarball size demands it).
@@ -227,4 +290,5 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 - `.goreleaser.yaml:24-46` — build matrix and `archives.name_template` that `osTitles` / `archNames` mirror verbatim.
 - [`lessons.md § Atomic on-disk writes`](../../lessons.md) — same "default decoder, not strict" rationale applied to `sessions.json`.
 - [`internal/sessions/id.go`](../../../internal/sessions/id.go) — convention reference for tiny stdlib-only packages with table-driven tests.
-- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/182-update-http-fetcher.md`](../../specs/architecture/182-update-http-fetcher.md) — build-time architecture specs.
+- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md), [`docs/specs/architecture/182-update-http-fetcher.md`](../../specs/architecture/182-update-http-fetcher.md), [`docs/specs/architecture/186-update-extract-binary.md`](../../specs/architecture/186-update-extract-binary.md) — build-time architecture specs.
+- `launchd/dev.pyrycode.pyry.plist`, `systemd/pyry.service` — the service files whose presence the wiring-ticket probe checks; `pyry install-service` writes them.
