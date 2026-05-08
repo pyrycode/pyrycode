@@ -30,6 +30,9 @@ pyrycode/
 ├── internal/identity/         Typed routing identifiers (Phase 3 foundation)
 │   ├── server_id.go           ServerID newtype, NewServerID (crypto/rand + UUIDv4 version/variant), ParseServerID (canonical validation), ErrInvalidServerID sentinel
 │   └── server_id_test.go      Same-package, table-driven; format/uniqueness/parse/round-trip
+├── internal/devices/          Paired-device type + token hashing (Phase 3 foundation)
+│   ├── device.go              Device struct (TokenHash/Name/PairedAt/LastSeenAt), HashToken (SHA-256 hex), VerifyToken (crypto/subtle.ConstantTimeCompare)
+│   └── device_test.go         Same-package, table-driven; determinism + verify true/false/empty/malformed
 ├── internal/control/          Control-plane server (Unix socket, JSON)
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
@@ -255,6 +258,7 @@ test-only override on `Options.Binary`. See
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3 foundation (#205, landed):** `internal/config` — typed `Config` schema + `DefaultConfig` + `Load` overlay-decode loader for `~/.pyry/config.json`. First field is `RelayURL` (default `wss://relay.pyrycode.dev`, placeholder), consumed by `pyry pair` and daemon startup in their own follow-up tickets. See [features/config-package.md](../features/config-package.md), [ADR 018](../decisions/018-config-overlay-decode.md).
 - **Phase 3 foundation (#206, landed):** `internal/identity` — typed `ServerID` (UUIDv4-shaped string newtype) + `NewServerID` (crypto/rand-driven generation, panic-on-rng-fail) + `ParseServerID` (canonical UUIDv4 validation, `ErrInvalidServerID` sentinel). Pure types, no I/O; persistence sibling will load/write the raw string from disk and feed it through `ParseServerID`. Server-id is the public routing identifier for one pyrycode-binary instance — surfaced in QR pairing payloads and the relay handshake's `x-pyrycode-server` upgrade header. See [features/identity-package.md](../features/identity-package.md).
+- **Phase 3 foundation (#208, landed):** `internal/devices` — `Device` struct (`TokenHash`, `Name`, `PairedAt`, `LastSeenAt`; snake_case JSON tags mirroring `registryEntry`) + `HashToken(plain) string` (lowercase SHA-256 hex) + `VerifyToken(plain, hash) bool` (`crypto/subtle.ConstantTimeCompare`, length-mismatch falls out via the same path — no early-return guard on empty/malformed `hash`). Pure functions, stdlib only; SECURITY contract documented in package doc-comment ("never log plain, never wrap plain into error context"). Sibling tickets cover token minting, registry CRUD, and WS-handshake auth wiring. No bcrypt / no per-token salt: the token is 256 bits of `crypto/rand`, brute force is infeasible regardless of hash speed; the hash exists only to prevent plaintext-at-rest. See [features/devices-package.md](../features/devices-package.md).
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing
 - **Phase 5:** Voice — WebRTC via pion/webrtc, STT/TTS pipeline
