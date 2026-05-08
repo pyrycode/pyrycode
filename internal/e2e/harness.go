@@ -554,6 +554,42 @@ func RunBare(t *testing.T, args ...string) RunResult {
 	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 }
 
+// RunBareIn behaves like RunBare but pins HOME to the supplied directory
+// so verbs that read ~-relative state (e.g. `pair`) can be driven against
+// a t.TempDir() in isolation. Like RunBare it does not auto-inject
+// -pyry-socket — there is no daemon spawned.
+func RunBareIn(t *testing.T, home string, args ...string) RunResult {
+	t.Helper()
+	bin := ensurePyryBuilt(t)
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = childEnv(home)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("e2e: pyry %v timed out after %s\nstdout:\n%s\nstderr:\n%s",
+			args, runTimeout, stdout.String(), stderr.String())
+	}
+
+	var exitCode int
+	switch e := err.(type) {
+	case nil:
+		exitCode = 0
+	case *exec.ExitError:
+		exitCode = e.ExitCode()
+	default:
+		t.Fatalf("e2e: pyry %v exec failed: %v", args, err)
+	}
+
+	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+}
+
 // Stop gracefully terminates the daemon (SIGTERM, grace, escalate to
 // SIGKILL matching t.Cleanup teardown), waits for the process to exit,
 // and removes the socket file. HomeDir is left intact on disk so the
