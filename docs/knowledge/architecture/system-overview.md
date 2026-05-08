@@ -27,6 +27,9 @@ pyrycode/
 ├── internal/config/           User-configurable values (Phase 3 foundation)
 │   ├── config.go              Config struct, DefaultConfig, Load (overlay-decode over defaults)
 │   └── config_test.go         Same-package, table-driven
+├── internal/identity/         Typed routing identifiers (Phase 3 foundation)
+│   ├── server_id.go           ServerID newtype, NewServerID (crypto/rand + UUIDv4 version/variant), ParseServerID (canonical validation), ErrInvalidServerID sentinel
+│   └── server_id_test.go      Same-package, table-driven; format/uniqueness/parse/round-trip
 ├── internal/control/          Control-plane server (Unix socket, JSON)
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
@@ -251,6 +254,7 @@ test-only override on `Options.Binary`. See
 - **Phase 1.3 (SDK consumer-shaped attach):** `pyry attach --stdio` (1.3a #154, landed — no-PTY byte forwarding); `pyry attach --create-if-missing <uuid>` (1.3b #155, landed — take-or-create attach via new `Pool.GetOrCreate` primitive + `ValidID` UUIDv4 validator; orthogonal to `--stdio`, the SDK's primary shape is `pyry attach --stdio --create-if-missing <uuid>`); foreground-binary auto-attach (1.3c #158).
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
 - **Phase 3 foundation (#205, landed):** `internal/config` — typed `Config` schema + `DefaultConfig` + `Load` overlay-decode loader for `~/.pyry/config.json`. First field is `RelayURL` (default `wss://relay.pyrycode.dev`, placeholder), consumed by `pyry pair` and daemon startup in their own follow-up tickets. See [features/config-package.md](../features/config-package.md), [ADR 018](../decisions/018-config-overlay-decode.md).
+- **Phase 3 foundation (#206, landed):** `internal/identity` — typed `ServerID` (UUIDv4-shaped string newtype) + `NewServerID` (crypto/rand-driven generation, panic-on-rng-fail) + `ParseServerID` (canonical UUIDv4 validation, `ErrInvalidServerID` sentinel). Pure types, no I/O; persistence sibling will load/write the raw string from disk and feed it through `ParseServerID`. Server-id is the public routing identifier for one pyrycode-binary instance — surfaced in QR pairing payloads and the relay handshake's `x-pyrycode-server` upgrade header. See [features/identity-package.md](../features/identity-package.md).
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing
 - **Phase 5:** Voice — WebRTC via pion/webrtc, STT/TTS pipeline
