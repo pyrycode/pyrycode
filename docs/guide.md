@@ -6,6 +6,7 @@ This guide walks through using `pyry` from first install to running it as a long
 
 - [Mental model](#mental-model)
 - [Installing](#installing)
+- [Updating pyry](#updating-pyry)
 - [Foreground mode](#foreground-mode-development)
 - [Service mode](#service-mode-production)
 - [Control verbs](#control-verbs)
@@ -64,6 +65,21 @@ make linux                                          # dist/pyry-linux-amd64
 GOOS=linux  GOARCH=arm64 go build -o /tmp/pyry-arm ./cmd/pyry
 scp dist/pyry-linux-amd64 server:~/.local/bin/pyry
 ```
+
+## Updating pyry
+
+Run `pyry update` to download and install the latest GitHub release in place:
+
+```bash
+pyry update
+```
+
+The command fetches the release manifest, verifies the tarball's SHA-256 against the published `checksums.txt`, and atomically replaces the binary at the path returned by `os.Executable()`. After it returns, restart the daemon if pyry is running as a service:
+
+- macOS (launchd): `launchctl kickstart -k gui/$(id -u)/dev.pyrycode.pyry`
+- Linux (systemd): `systemctl --user restart pyry`
+
+Use `pyry update --check` to print the current and latest versions without downloading. Use `pyry update --version <tag>` to install a specific release (including downgrades). If pyry was installed via Homebrew, prefer `brew upgrade pyry` to keep the cellar consistent — `pyry update` will print a hint to that effect but still proceed if you ask it to.
 
 ## Foreground mode (development)
 

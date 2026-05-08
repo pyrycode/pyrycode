@@ -162,6 +162,8 @@ func run() error {
 			return runSessions(os.Args[2:])
 		case "install-service":
 			return runInstallService(os.Args[2:])
+		case "update":
+			return runUpdate(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -1198,6 +1200,9 @@ Usage:
                                                   daemon (verbs: new, rm, rename, list)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
+  pyry update [--check] [--version <v>]          download and install the latest
+                                                  release (--check: print versions
+                                                  only; --version <v>: pin a tag)
   pyry version                                   print version
   pyry help                                      show this help
 
