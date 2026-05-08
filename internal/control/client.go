@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -268,18 +267,4 @@ func request(ctx context.Context, socketPath string, req Request) (*Response, er
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	return &resp, nil
-}
-
-func dial(ctx context.Context, socketPath string) (net.Conn, error) {
-	var d net.Dialer
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DialTimeout)
-		defer cancel()
-	}
-	conn, err := d.DialContext(ctx, "unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", socketPath, err)
-	}
-	return conn, nil
 }
