@@ -82,42 +82,35 @@ func TestSession_EvictBlocksUntilPersisted(t *testing.T) {
 	}
 }
 
-// TestSession_ActivateBlocksUntilPersisted: warm-start a session in
-// stateEvicted, call Activate, then immediately read the registry — the
+// TestSession_ActivateBlocksUntilPersisted: drive a session into stateEvicted
+// (via Evict), call Activate, then immediately read the registry — the
 // on-disk lifecycleState must be empty (the omitempty encoding for
-// stateActive).
+// stateActive). The contract under test is that Activate's wake follows the
+// persist; an immediate disk read with no poll would otherwise race.
+//
+// Note: the bootstrap is loaded as stateActive on warm-start regardless of
+// disk (see #202 / Pool.New). This test reaches stateEvicted by calling
+// Evict first rather than via a seeded warm-start fixture.
 func TestSession_ActivateBlocksUntilPersisted(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("/bin/sleep"); err != nil {
-		t.Skipf("benign binary not available: %v", err)
-	}
 	dir := t.TempDir()
 	regPath := filepath.Join(dir, "sessions.json")
 
-	knownID := SessionID("c0c0c0c0-c0c0-4c0c-8c0c-c0c0c0c0c0c0")
-	when := time.Now().UTC().Add(-time.Hour)
-	if err := saveRegistryLocked(regPath, &registryFile{
-		Version: 1,
-		Sessions: []registryEntry{{
-			ID:             knownID,
-			CreatedAt:      when,
-			LastActiveAt:   when,
-			Bootstrap:      true,
-			LifecycleState: "evicted",
-		}},
-	}); err != nil {
-		t.Fatalf("seed registry: %v", err)
-	}
-
-	pool := helperPoolPersistentIdle(t, regPath, 0)
-	if pool.Default().ID() != knownID {
-		t.Fatalf("Default().ID() = %q, want %q (warm-start id mismatch)", pool.Default().ID(), knownID)
-	}
+	pool := helperPoolPersistentIdle(t, regPath, 0) // idle eviction disabled
 	ctx, _ := runPoolInBackground(t, pool)
 
 	sess := pool.Default()
+	if !pollUntil(t, 2*time.Second, func() bool {
+		return sess.LifecycleState() == stateActive
+	}) {
+		t.Fatalf("session never reached stateActive; state=%v", sess.LifecycleState())
+	}
+
+	if err := sess.Evict(ctx); err != nil {
+		t.Fatalf("Evict: %v", err)
+	}
 	if got := sess.LifecycleState(); got != stateEvicted {
-		t.Fatalf("warm-start lcState = %v, want stateEvicted", got)
+		t.Fatalf("post-Evict lcState = %v, want stateEvicted", got)
 	}
 
 	if err := sess.Activate(ctx); err != nil {

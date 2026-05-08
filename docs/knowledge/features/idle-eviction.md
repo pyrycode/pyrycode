@@ -202,7 +202,8 @@ type registryEntry struct {
 - `omitempty` keeps the dominant `active` case off disk — preserves the idempotent-reload byte-stability property #34 paid for upfront.
 - Old pyry binaries reading new files ignore the field (default `encoding/json` decoder; `DisallowUnknownFields` is not set).
 - New pyry reading old files defaults the missing field to `"active"`.
-- Bootstrap warm-starts in whatever state the registry says — including `evicted` if pyry was stopped while the session was evicted.
+- **Non-bootstrap sessions** warm-start in whatever state the registry says — including `evicted`. Lazy respawn on attach drives the `Activate` that wakes them.
+- **The bootstrap session** ignores its persisted `lifecycle_state` and always warm-starts active. The bootstrap is the per-process auto-spawn invariant; nothing under non-TTY stdin (launchd, systemd, piped wrapper) calls `Pool.Activate` on it, so a persisted `evicted` would park `runEvicted` on `activateCh` forever. The carve-out lives at the load layer in `Pool.New`'s `pickBootstrap` arm — `lcState = stateActive` regardless of `entry.LifecycleState`. See [ADR 016](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md).
 
 The string form (`"active"` / `"evicted"`) is the wire shape; the in-memory form is the `lifecycleState` enum. `parseLifecycleState` and `(lifecycleState).String()` bridge the two.
 
@@ -308,7 +309,7 @@ Reuses the `/bin/sleep` fake-claude pattern from `internal/sessions` — no new 
 
 `internal/sessions/registry_test.go` covers `lifecycle_state` round-trip and backwards-compat (missing field defaults to `active`).
 
-`internal/sessions/pool_test.go` covers bootstrap warm-starting in `evicted`, and the parity-when-disabled regression guard (`IdleTimeout: 0` runs for several seconds without transitions).
+`internal/sessions/pool_test.go` covers the bootstrap warm-start contract (#202): `TestPool_BootstrapWarmStart_IgnoresPersistedEvicted` asserts that a registry entry with `lifecycle_state: "evicted"` loads as `stateActive` for the bootstrap, and `TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart` runs `Pool.Run` against the seeded fixture with `/bin/sleep` as the supervised child and asserts `Phase: running` + non-zero `StartedAt` within 5s (verified to fail against the pre-fix v0.10.1 binary). Also covers the parity-when-disabled regression guard (`IdleTimeout: 0` runs for several seconds without transitions).
 
 `internal/sessions/pool_cap_test.go` covers the cap policy: `ActiveCap == 0` parity (no enforcement, no LRU bookkeeping cost), cap-binds-evicts-LRU with three sessions, the `cap=1` single-session pathological case, and a race test driving N concurrent `Activate`s against `cap=1` to assert the active count never exceeds the cap. The race test uses Bridge mode (per-supervisor pipes) because foreground mode leaks one stdin-bound `io.Copy` goroutine per `runOnce` that contends on `os.Stdin`'s `fdMutex` under stress.
 
@@ -335,8 +336,8 @@ pyry stop
 
 ## References
 
-- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116), [#169](https://github.com/pyrycode/pyrycode/issues/169)
-- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md), [`docs/specs/architecture/169-evict-activate-persist-ordering.md`](../../specs/architecture/169-evict-activate-persist-ordering.md)
-- ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md), [`013-evict-activate-persist-ordering.md`](../decisions/013-evict-activate-persist-ordering.md)
+- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116), [#169](https://github.com/pyrycode/pyrycode/issues/169), [#202](https://github.com/pyrycode/pyrycode/issues/202)
+- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md), [`docs/specs/architecture/169-evict-activate-persist-ordering.md`](../../specs/architecture/169-evict-activate-persist-ordering.md), [`docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md`](../../specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md)
+- ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md), [`013-evict-activate-persist-ordering.md`](../decisions/013-evict-activate-persist-ordering.md), [`016-bootstrap-ignores-persisted-lifecycle-state.md`](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md)
 - Sibling docs: [`sessions-package.md`](sessions-package.md), [`sessions-registry.md`](sessions-registry.md), [`control-plane.md`](control-plane.md)
 - Locked phase design: [`docs/multi-session.md`](../../multi-session.md)
