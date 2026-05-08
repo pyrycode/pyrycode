@@ -24,6 +24,9 @@ pyrycode/
 │       ├── probe.go           Probe interface, parseProcFD, parseLsofOutput, noopProbe fallback
 │       ├── probe_linux.go     //go:build linux  — /proc/<pid>/fd walk
 │       └── probe_darwin.go    //go:build darwin — lsof -nP -p <pid> -F fn shell-out
+├── internal/config/           User-configurable values (Phase 3 foundation)
+│   ├── config.go              Config struct, DefaultConfig, Load (overlay-decode over defaults)
+│   └── config_test.go         Same-package, table-driven
 ├── internal/control/          Control-plane server (Unix socket, JSON)
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
@@ -247,6 +250,7 @@ test-only override on `Options.Binary`. See
 - **Phase 1.1+:** `Pool.Create(ctx, label)` (sibling A2 — consumer of the supervise seam, landed), `AttachPayload.SessionID` on the wire (1.1e-C, landed — server routes via `Pool.ResolveID`; CLI surface in 1.1e-D landed), `pyry sessions new [--name LABEL]` CLI verb + `sessions` sub-router (1.1a-B2 #76, landed — peels global pyry flags via `parseClientFlags` then dispatches on the first positional; each future verb is one switch case + one helper), `pyry sessions rm` (1.1d-B2 #99, landed — client-side prefix resolution via `control.SessionsList`), `pyry sessions rename` (1.1c-B2a #92, landed — full-UUID only), `pyry sessions list [--json]` (1.1b-B2 #88, landed — first text-table sink in `cmd/pyry`, `text/tabwriter` four-column table + `{"sessions":[...]}` JSON envelope; renderer choices template the rest of Phase 1.1's tabular output), per-session log lines. Live-resize loop landed end-to-end across #136 (`Bridge.Resize` seam) + #137 (`VerbResize` wire + `handleResize` server applier) + #133 (`startWinsizeWatcher` client-side SIGWINCH emitter in `pyry attach`).
 - **Phase 1.3 (SDK consumer-shaped attach):** `pyry attach --stdio` (1.3a #154, landed — no-PTY byte forwarding); `pyry attach --create-if-missing <uuid>` (1.3b #155, landed — take-or-create attach via new `Pool.GetOrCreate` primitive + `ValidID` UUIDv4 validator; orthogonal to `--stdio`, the SDK's primary shape is `pyry attach --stdio --create-if-missing <uuid>`); foreground-binary auto-attach (1.3c #158).
 - **Phase 2:** Channels — inbound event routing from Discord/Telegram
+- **Phase 3 foundation (#205, landed):** `internal/config` — typed `Config` schema + `DefaultConfig` + `Load` overlay-decode loader for `~/.pyry/config.json`. First field is `RelayURL` (default `wss://relay.pyrycode.dev`, placeholder), consumed by `pyry pair` and daemon startup in their own follow-up tickets. See [features/config-package.md](../features/config-package.md), [ADR 018](../decisions/018-config-overlay-decode.md).
 - **Phase 3:** Cross-cutting services — knowledge capture, memsearch, cron runner in-process
 - **Phase 4:** Remote access — relay server, E2E encryption (Noise Protocol), QR pairing
 - **Phase 5:** Voice — WebRTC via pion/webrtc, STT/TTS pipeline
