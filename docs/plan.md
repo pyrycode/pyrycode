@@ -6,13 +6,15 @@ This is a repo-local copy of the project plan. The authoritative working doc liv
 
 | Tag | Name | Date | Highlights |
 |---|---|---|---|
-| `v0.8.0` | multi-session | 2026-05-07 | Pool refactor, `pyry sessions new/list/rm/rename` + `attach <id>` CLI, `sessions.json` persistence + idle eviction + lazy respawn (Phase 1 complete) |
+| `v0.9.1` | install-service cwd default | 2026-05-08 | `pyry install-service` defaults `WorkingDirectory` to cwd; `--workdir <path>` override (#177) |
+| `v0.9.0` | SDK-consumer integration | 2026-05-08 | `pyry attach --stdio`, `--create-if-missing`, `sessions.has-id` control verb, foreground auto-attach (Phase 1.3) |
+| `v0.8.0` | multi-session | 2026-05-07 | Pool refactor, `pyry sessions new/list/rm/rename` + `attach <id>` CLI, `sessions.json` persistence + idle eviction + lazy respawn (Phase 1.0–1.2) |
 | `v0.5.3` | concurrent-pyry detection | 2026-05-01 | Second `pyry` on the same socket fails with `ErrInstanceRunning` instead of silently hijacking |
 | `v0.5.2` | install-service auto-PATH | 2026-05-01 | `pyry install-service` inherits user PATH by default |
 | `v0.5.1` | install-service subcommand | 2026-05-01 | systemd / launchd unit-file generator |
 | `v0.5.0` | supervisor MVP | 2026-05-01 | First public release; Phase 0 complete |
 
-Semver tags are assigned at release time based on what changed — minor bumps for new features, patches for bug fixes. They are intentionally **decoupled** from the planning phase numbers below: Phase 0 took four patch releases (`v0.5.0`–`v0.5.3`), and Phase 1's three sub-phases (1.0, 1.1, 1.2) shipped as a single `v0.8.0`. Phases group work at planning time; tags identify what shipped at delivery time. Don't pre-assign tags to unshipped phases.
+Semver tags are assigned at release time based on what changed — minor bumps for new features, patches for bug fixes. They are intentionally **decoupled** from the planning phase numbers below: Phase 0 took four patch releases (`v0.5.0`–`v0.5.3`), Phase 1's first three sub-phases (1.0, 1.1, 1.2) shipped as a single `v0.8.0`, and Phase 1.3 shipped separately as `v0.9.0`. Phases group work at planning time; tags identify what shipped at delivery time. Don't pre-assign tags to unshipped phases.
 
 `v1.0.0` is reserved for the first version that commits to wire-protocol stability — likely after Phase 5 (remote access) locks the over-the-wire surface.
 
@@ -41,15 +43,16 @@ The smallest thing that can replace `tmux` + the bash restart loop and host Pyry
 - [x] **Concurrent-pyry detection:** second `pyry` on the same socket fails with `ErrInstanceRunning` instead of silently hijacking (v0.5.3)
 - [ ] Backoff-loop cooldown: if crashes happen N times in T seconds, bail out (deferred — current loop retries forever, which is the right behaviour for the always-on service)
 
-## Phase 1 — Multi-session pool — SHIPPED (`v0.8.0`)
+## Phase 1 — Multi-session pool — SHIPPED (`v0.8.0`, `v0.9.0`)
 
-Lift the supervisor from one-claude to N-claudes, addressed by session UUID. **Shipped 2026-05-07 as `v0.8.0` — full design in [`multi-session.md`](multi-session.md).**
+Lift the supervisor from one-claude to N-claudes, addressed by session UUID. **1.0–1.2 shipped 2026-05-07 as `v0.8.0`; 1.3 shipped 2026-05-08 as `v0.9.0` — full design in [`multi-session.md`](multi-session.md).**
 
 | Sub-phase | Scope | Status |
 |---|---|---|
 | **1.0** | Pool refactor — internal restructure. Single-session externally; Pool always has exactly one entry. | shipped in `v0.8.0` |
 | **1.1** | `pyry sessions new/list/rm/rename` + `pyry attach <id>`. Multi-session works from a terminal. | shipped in `v0.8.0` |
 | **1.2** | `sessions.json` persistence + idle eviction + lazy respawn on next message. | shipped in `v0.8.0` |
+| **1.3** | SDK-consumer integration — `pyry attach --stdio`, `--create-if-missing`, `sessions.has-id` control verb, foreground auto-attach. Lets a Claudian-style SDK consumer point at the `pyry` binary and have each chat's UUID either create a new session or attach to an existing one. | shipped in `v0.9.0` |
 
 Locked decisions from the 2026-05-01 design pass:
 
