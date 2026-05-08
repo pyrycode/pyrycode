@@ -1,6 +1,6 @@
-# `internal/update` — release parsing, version comparison, asset naming + SHA-256 verification
+# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, HTTP fetcher
 
-Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed the JSON parser + semver comparator; #180 adds asset-name templating + checksum parsing + verification. The HTTP fetcher, tar extractor, and atomic-replace land in sister tickets.
+Pyrycode's self-update logic (`pyry update`), assembled across pure-function tickets and one network-I/O ticket. #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #182 added the HTTP fetcher. The tar extractor (#183), atomic-replace, and `pyry update` CLI verb wiring land in sister tickets.
 
 ## What it does
 
@@ -15,7 +15,13 @@ Pure-function half of pyrycode's self-update logic (`pyry update`). #179 landed 
 - `ParseChecksumsFile(text, assetName string) (string, error)` — given a GoReleaser-produced `checksums.txt` body and a target asset name, returns the lowercase SHA-256 hex digest for that asset.
 - `VerifySHA256(data []byte, expectedHex string) error` — returns `nil` iff `sha256(data)` lowercase-hex equals `expectedHex`. Mismatch error includes both digests for diagnostic logging.
 
-All five are stdlib-only and side-effect-free. No I/O, no goroutines, no `context.Context`.
+### HTTP fetcher (#182)
+
+- `Fetcher` struct — zero-value-usable wrapper over `net/http`. Three configurable fields: `BaseURL` (defaults to `https://api.github.com`), `HTTPClient` (defaults to `http.DefaultClient`), `UserAgent` (defaults to `pyry/dev`; the wiring layer sets `"pyry/" + main.Version`).
+- `(*Fetcher).FetchLatestRelease(ctx, repo) ([]byte, error)` — GETs `<BaseURL>/repos/<repo>/releases/latest`, returns the body verbatim. `repo` is `"owner/name"`. Output suitable for `ParseLatestRelease`.
+- `(*Fetcher).FetchAsset(ctx, url) ([]byte, error)` — GETs the URL, returns the body verbatim. Caller passes a fully-formed URL (typically `assets[].browser_download_url` extracted from the release JSON or the URL of the `checksums.txt` asset).
+
+All five pure functions are stdlib-only and side-effect-free (no I/O, no goroutines, no `context.Context`). The fetcher uses stdlib `net/http` only — no retries, no caller-imposed timeouts (caller owns `*http.Client`), no body parsing.
 
 ## Types & errors
 
@@ -35,6 +41,8 @@ var ErrAssetNotInChecksums  = errors.New("asset not listed in checksums")
 var ErrMalformedChecksums   = errors.New("malformed checksums file")
 var ErrChecksumMismatch     = errors.New("sha256 checksum mismatch")
 ```
+
+The fetcher introduces no new sentinel errors — the wiring ticket cannot retry (forbidden by AC) and therefore cannot branch on transient-vs-permanent, so a typed sentinel would be unused. Non-2xx responses surface as `fmt.Errorf("GET %s: unexpected status %d", url, resp.StatusCode)` (no `%w` — no inner error). Transport failures wrap the underlying `*url.Error`, which already participates in `errors.Is` traversal for `context.Canceled` / `context.DeadlineExceeded`. If a future caller needs typed branching, add `ErrUnexpectedStatus` then — defer until observed.
 
 `Comparison` mirrors `cmp.Compare` / `strings.Compare` conventions — negative/zero/positive for less/equal/greater. No `String()` method (YAGNI; add when a caller needs it for `slog`).
 
@@ -121,41 +129,63 @@ Takes `[]byte`, not `io.Reader`. The wiring ticket already needs the full tarbal
 
 `crypto/sha256.Sum256` returns `[32]byte`; `hex.EncodeToString(sum[:])` produces 64 lowercase hex chars. No allocation beyond the result string. `strings.EqualFold` accepts mixed-case `expectedHex` cheaply; the error message normalises both to lowercase so logs are consistent regardless of input casing.
 
+### HTTP fetcher
+
+| Trigger | Returned error |
+|---------|----------------|
+| Invalid URL (unparseable) | `building GET <url>: <inner>` |
+| DNS / connection failure | `GET <url>: <*url.Error>` |
+| Non-2xx response (404, 500, …) | `GET <url>: unexpected status <code>` |
+| Body read interrupted mid-stream | `reading response body from <url>: <inner>` |
+| `ctx` cancelled before response | `GET <url>: <*url.Error wrapping context.Canceled>` |
+| `ctx` cancelled during body read | `reading response body from <url>: <wrapped context.Canceled>` |
+
+Both ctx-cancel rows satisfy `errors.Is(err, context.Canceled)` because `*url.Error.Unwrap` and `fmt.Errorf("…: %w", …)` participate in the unwrap chain. Tests assert the predicate, not the message.
+
+`http.NewRequestWithContext` (not `http.NewRequest`) is the constructor — it propagates `ctx` to the transport so cancellation interrupts an in-flight read, not just a queued send. On the non-2xx path the body is drained up to 1 KiB via `io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))` so the underlying TCP connection can be reused; the bound caps reading megabytes of error HTML from a misconfigured server.
+
+`io.ReadAll` on the response body is acceptable despite the tarball being 10–30 MiB — the wiring ticket holds the bytes in memory anyway to compute SHA-256 (`VerifySHA256(data []byte, …)`) and to feed tar extraction. A streaming `io.Reader` return would force the wiring layer to either tee or hash twice; revisit only if profiling shows memory pressure.
+
+GitHub's API blanket-rejects requests with no `User-Agent`, which is why the header is unconditionally set rather than optional. The `pyry/<Version>` shape (vs `pyry/v<Version>`) is whatever `cmd/pyry/main.go`'s `Version` token expands to — match the binary's self-report so log correlation stays grep-friendly.
+
 ## Data flow
 
 ```
-GitHub API ──[fetcher: sister ticket]──> []byte (release JSON)
-                    │
-                    ▼
-       ParseLatestRelease(jsonBytes) ──> tag string
-                                            │
-                              ┌─────────────┴─────────────┐
-                              ▼                           ▼
-       CompareVersions(main.Version, tag)   AssetName(tag, GOOS, GOARCH)
-                    │                                     │
-                    ▼                                     ▼
-              Older/Same/Newer                       assetName string
-                                                          │
-                       [fetcher: GET <release>/checksums.txt]
-                                                          │
-                                                          ▼
-                                  ParseChecksumsFile(body, assetName)
-                                                          │
-                                                          ▼
-                                                  expectedHex string
-                                                          │
-                       [fetcher: GET <release>/<assetName>]
-                                                          │
-                                          tarballBytes []byte
-                                                          │
-                                                          ▼
-                                  VerifySHA256(tarballBytes, expectedHex)
-                                                          │
-                                                          ▼
-                          [next ticket: untar + atomic replace + restart]
+GitHub API
+    │
+    │ Fetcher.FetchLatestRelease(ctx, "owner/name")
+    │   GET <BaseURL>/repos/<owner>/<name>/releases/latest
+    │   User-Agent: pyry/<Version>
+    ▼
+[]byte (release JSON) ──> ParseLatestRelease(jsonBytes) ──> tag string
+                                                              │
+                                              ┌───────────────┴───────────────┐
+                                              ▼                               ▼
+                          CompareVersions(main.Version, tag)   AssetName(tag, GOOS, GOARCH)
+                                              │                               │
+                                              ▼                               ▼
+                                       Older/Same/Newer                  assetName string
+                                                                              │
+                                Fetcher.FetchAsset(ctx, <release>/checksums.txt)
+                                                                              │
+                                                                              ▼
+                                                      ParseChecksumsFile(body, assetName)
+                                                                              │
+                                                                              ▼
+                                                                       expectedHex string
+                                                                              │
+                                  Fetcher.FetchAsset(ctx, <release>/<assetName>)
+                                                                              │
+                                                                  tarballBytes []byte
+                                                                              │
+                                                                              ▼
+                                                      VerifySHA256(tarballBytes, expectedHex)
+                                                                              │
+                                                                              ▼
+                                                  [#183: untar + atomic replace + restart]
 ```
 
-No state, no I/O, no concurrency primitives. Safe for concurrent use by definition. Package-level `osTitles` / `archNames` are written once at var-decl time and only read thereafter — Go's memory model permits concurrent reads of an unmutated map.
+The pure functions hold no state. The fetcher is also stateless across calls: each `Fetch*` constructs a fresh `*http.Request`; the `*http.Client` handles connection pooling internally. `*Fetcher` is safe for concurrent use — fields are read-only after construction, `*http.Client.Do` is concurrency-safe, no mutexes or goroutines internally. Package-level `osTitles` / `archNames` are written once at var-decl time and only read thereafter — Go's memory model permits concurrent reads of an unmutated map.
 
 ## Files
 
@@ -163,10 +193,12 @@ No state, no I/O, no concurrency primitives. Safe for concurrent use by definiti
 - `internal/update/version_test.go` — table-driven coverage for the two #179 functions (~155 LOC, two `t.Parallel` tables).
 - `internal/update/checksum.go` — `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `ErrUnsupportedPlatform`, `ErrAssetNotInChecksums`, `ErrMalformedChecksums`, `ErrChecksumMismatch`, plus the `osTitles` / `archNames` lookup tables (~102 LOC). No package-doc comment — `version.go` already covers the package.
 - `internal/update/checksum_test.go` — table-driven coverage for the three #180 functions (~219 LOC, three `t.Parallel` tables).
+- `internal/update/fetch.go` — `Fetcher` struct + `FetchLatestRelease` + `FetchAsset` + private `get` helper + zero-value default helpers (`baseURL`, `httpClient`, `userAgent`) (~115 LOC). No package-doc comment — `version.go` covers the package.
+- `internal/update/fetch_test.go` — `httptest.NewServer`-driven coverage for the two public methods (~158 LOC). Each subtest constructs its own server with `t.Cleanup(ts.Close)`.
 
 ## Configuration
 
-None. Pure functions take their input via arguments.
+The pure functions take their input via arguments. The fetcher's `Fetcher` struct is zero-value-usable; the wiring ticket sets `UserAgent = "pyry/" + main.Version` and typically installs an `HTTPClient = &http.Client{Timeout: 60*time.Second}`. `BaseURL` stays at the default in production; tests set it to `httptest.NewServer.URL`.
 
 ## GoReleaser drift
 
@@ -176,19 +208,23 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 
 ## Out of scope (sister tickets)
 
-- HTTP fetcher (GET `releases/latest`, GET `<release>/checksums.txt`, GET `<release>/<assetName>`, retries, timeouts, `context.Context`).
-- Tar extraction of the downloaded asset.
+- Tar extraction of the downloaded asset (#183).
 - Atomic binary replacement / restart detection.
 - `pyry update` CLI verb wiring + `--dry-run` flag.
 - A `MapHostPlatform()` helper that wraps `runtime.GOOS` / `runtime.GOARCH` (the wiring ticket can pass the raw runtime constants — adding a host-detection helper before the wiring ticket exists is YAGNI).
 - Streaming-hash variant of `VerifySHA256` (deferred until tarball size demands it).
 - `Comparison.String()` for `slog`-friendly logging.
 - SemVer 2.0.0 pre-release precedence (defer until pyry ships a real pre-release).
+- Retry / exponential backoff on the HTTP fetcher (deliberately omitted; AC explicitly forbids retries — flaky network → operator re-runs `pyry update`).
+- Caller-side timeouts inside the fetcher (caller's responsibility via `*http.Client`).
+- `If-None-Match` / ETag-based caching against GitHub's anonymous 60/hr limit (interactive `pyry update` won't hit it; revisit if a future automated caller does).
+- Exposing GitHub's 4xx body content in fetcher errors (the URL is in the message — operators can `curl` it themselves; revisit if real failures generate "404 unhelpful" complaints).
+- A `Fetcherer` / `Mockable` interface — tests use `httptest.NewServer` directly to exercise the real `Fetcher` end-to-end. The wiring ticket may introduce a small consumer-defined interface there if it needs one.
 
 ## Related
 
-- `cmd/pyry/main.go:53` — `var Version = "dev"` is the input shape that justifies `ErrInvalidVersion` as a clean sentinel for the wiring layer to branch on, and the value the wiring ticket will pass through `AssetName` after stripping the `dev` sentinel via `CompareVersions`'s error path.
+- `cmd/pyry/main.go:53` — `var Version = "dev"` is the input shape that justifies `ErrInvalidVersion` as a clean sentinel for the wiring layer to branch on, the token the fetcher's `UserAgent` field embeds (`"pyry/" + Version`), and the value the wiring ticket will pass through `AssetName` after stripping the `dev` sentinel via `CompareVersions`'s error path.
 - `.goreleaser.yaml:24-46` — build matrix and `archives.name_template` that `osTitles` / `archNames` mirror verbatim.
 - [`lessons.md § Atomic on-disk writes`](../../lessons.md) — same "default decoder, not strict" rationale applied to `sessions.json`.
 - [`internal/sessions/id.go`](../../../internal/sessions/id.go) — convention reference for tiny stdlib-only packages with table-driven tests.
-- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md) — build-time architecture specs.
+- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/182-update-http-fetcher.md`](../../specs/architecture/182-update-http-fetcher.md) — build-time architecture specs.
