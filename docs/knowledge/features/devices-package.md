@@ -88,7 +88,7 @@ No fuzz target — the input space is fully covered by the table. No `-race` tes
 
 - **Token minting.** Sibling ticket: `crypto/rand`-driven 256-bit token + hex encode + display in QR + paste-fallback string. The package here knows nothing about generation.
 - ~~**Registry CRUD.**~~ Delivered by #209 — see [`features/devices-registry.md`](devices-registry.md). Same atomic-rename + `0600` recipe as `saveRegistryLocked`, with a snapshot-then-release Save discipline ([ADR 020](../decisions/020-devices-registry-snapshot-then-write.md)).
-- **Auth wiring.** Phase 3: WS handshake calls `VerifyToken(presented, device.TokenHash)` and on false returns `auth.invalid_token` per `protocol-mobile.md:97-98`.
+- **Auth wiring.** Phase 3: the WS-handshake auth predicate `(*Registry).Validate(plain) (Device, bool)` is delivered by #210 — see [`features/devices-registry.md`](devices-registry.md). The WS handler that calls it (returning `auth.invalid_token` per `protocol-mobile.md:97-98` on a miss, advancing `LastSeenAt` durability via scheduled `Save` on a hit) is a follow-up Phase-3 ticket. `VerifyToken` is intentionally NOT used by `Validate` — see the registry doc and #210's "Why not iterate `VerifyToken` over all devices?" for the reasoning.
 - **`pyry pair revoke <name>`.** Per-device revocation falls out of removing the row; structurally supported (each row is independent).
 - **`Device.TokenHashPrefix() string` for `pair list` UI.** The display rule lives in `protocol-mobile.md:663`; defer to whichever ticket builds the UI.
 

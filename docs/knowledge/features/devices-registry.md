@@ -6,7 +6,8 @@ Lives in the same `internal/devices` package as `Device`, `HashToken`, `VerifyTo
 
 ## Status
 
-- **Phase 3 foundation (#209):** mutex-guarded `Registry` + atomic save + load. Six exports: `Load`, `(*Registry).Save / Add / Remove / List / FindByTokenHash`. No consumers wired in this slice.
+- **Phase 3 foundation (#209):** mutex-guarded `Registry` + atomic save + load. Six exports: `Load`, `(*Registry).Save / Add / Remove / List / FindByTokenHash`.
+- **Phase 3 foundation (#210):** `(*Registry).Validate` — the WS-perimeter auth predicate. Composes `HashToken` + `FindByTokenHash`-shaped scan + in-memory `LastSeenAt` advance. Seventh export. No consumers wired in this slice (the WS auth handler is a follow-up Phase-3 ticket).
 
 ## Surface
 
@@ -19,6 +20,7 @@ func (r *Registry) Add(d Device)
 func (r *Registry) Remove(name string) bool
 func (r *Registry) List() []Device
 func (r *Registry) FindByTokenHash(hash string) (Device, bool)
+func (r *Registry) Validate(plain string) (Device, bool)
 ```
 
 `Registry` holds the in-memory device slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk); persist via `Save`. Methods are safe for concurrent use.
@@ -122,6 +124,64 @@ The returned `*Registry` is independent of the on-disk file — subsequent `Save
 
 `Add` does not validate uniqueness. The pair-mint consumer (#TBD) is the single producer that reaches `Add` and validates against `List()` first if needed. `Remove` returns `true` iff a device with matching `Name` was found and removed — consumers can assert "the device I just revoked actually existed" before logging.
 
+## `Validate` — the WS-perimeter auth predicate (#210)
+
+`Validate(plain string) (Device, bool)` is the single auth-check entry point on the phone-WS path. The handler calls it once per inbound connection: `d, ok := reg.Validate(plain)`. Returns the matched `Device` and `true` on a hit, the zero `Device` and `false` on any miss (no device matches; `plain` is the empty string).
+
+Body shape, in `internal/devices/auth.go`:
+
+```go
+func (r *Registry) Validate(plain string) (Device, bool) {
+    if plain == "" {
+        return Device{}, false
+    }
+    hash := HashToken(plain)
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    for i := range r.devices {
+        if r.devices[i].TokenHash == hash {
+            r.devices[i].LastSeenAt = time.Now()
+            return r.devices[i], true
+        }
+    }
+    return Device{}, false
+}
+```
+
+Five points of structural discipline:
+
+1. **Empty-plain early-out is first** — before `HashToken`, before the lock. The AC requires "no registry lookup on empty input"; this is the structural enforcement. Also defends (cheaply) the unreachable case of a `Device` persisted with `TokenHash == HashToken("")`.
+2. **`HashToken` runs outside the lock.** SHA-256 over a short string is microseconds, but moving it outside the critical section keeps the lock held only for the scan-and-mutate window — important because the auth path is the high-frequency reader.
+3. **Indexed loop (`for i := range r.devices`)** so the `LastSeenAt = time.Now()` assignment mutates the slice element in place. A value-loop (`for _, d := range r.devices`) would assign to a copy and the mutation would silently no-op.
+4. **Mutation and snapshot both inside the lock.** The returned `Device` is a value-type copy taken before the deferred unlock fires, so callers see the just-written timestamp.
+5. **Byte-exact `==` on `TokenHash`, not `subtle.ConstantTimeCompare`.** Constant-time at the plain↔hash boundary is owned by `HashToken`; once the wire plain has been hashed, comparing two 64-char hex strings is byte-exact (any timing leak reveals only a public derivative). Inherits #208 / #209 reasoning verbatim.
+
+### What `Validate` does NOT do
+
+- **No `Save`.** Disk persistence is the caller's concern. Validate runs on the WS hot path; an fsync per auth is a perf footgun. Future consumer schedules `Save` (periodic ticker / graceful-shutdown hook); the in-memory `LastSeenAt` is the source of truth for runtime decisions.
+- **No `context.Context`, no `*slog.Logger`, no error path.** Body is hash + lock + scan + mutate + snapshot — microseconds at p99, never blocks. Auth-event logging (with `conn-id`, `remote-host`, attempt counter) is the WS handler's concern; the predicate is logger-free. AC pins the signature as `(Device, bool)`.
+- **No rate limiting / lockout / observability.** Per-token attempt counters, IP-level lockout, structured auth metrics — all WS-handler concerns. The predicate is a leaf primitive.
+
+### Concurrency
+
+`Validate` takes `Registry.mu` exactly once across the scan + mutation + snapshot, releases on return. No new lock, no ordering, no callbacks, no re-entrance — the single-mutex contract from #209 is preserved.
+
+Two concurrent `Validate` calls of the same token serialize on `mu`. The first writes `T1`; the second observes `T2 ≥ T1` (Go's `time.Now()` is monotonic per process) and writes `T2`. Final stored `LastSeenAt` is `T2` — the "monotonically-non-decreasing" invariant the AC names. A concurrent `Save` snapshots whatever value sits in memory at its lock-acquisition; a concurrent `Remove` between two `Validate` calls makes the second return `(Device{}, false)` cleanly (scan runs after the splice committed; no torn read).
+
+### Why a method on `*Registry`
+
+The mutation (`r.devices[i].LastSeenAt = ...`) is registry-side. A free function `Validate(r *Registry, plain string)` would either re-export `mu` / `devices` (encapsulation leak) or call an unexported helper for no abstraction win. Methods on the type that owns the state — same shape as `Add` / `Remove` / `List` / `FindByTokenHash`. Call-site reads as "ask the registry to validate."
+
+### Tests
+
+`internal/devices/auth_test.go`, same-package, table-driven, `t.Parallel()`, stdlib only.
+
+- `TestRegistry_Validate_Hit` — valid token returns matching device; `LastSeenAt` advanced (asserted both on returned snapshot and via `List()` to pin the in-memory mutation); `PairedAt` unchanged.
+- `TestRegistry_Validate_MissUnknown` — unknown token returns `(Device{}, false)`; `List()` shows no mutation.
+- `TestRegistry_Validate_MissEmpty` — empty plain returns `(Device{}, false)`; no mutation. The "no registry lookup" half is enforced structurally by the early-out; the test asserts the observable consequence (no mutation), which is what consumers care about.
+- `TestRegistry_Validate_EmptyRegistry` — defends against panic on a zero-init `*Registry`.
+- `TestRegistry_Validate_ConcurrentSameToken` — race-detector probe (16 goroutines) plus monotonic-non-decreasing assertion: sort the per-goroutine observed `LastSeenAt` values and check each `>=` the previous; `final.After(when)` proves the structurally-correct lock didn't accidentally skip the mutation (e.g. value-receiver bug). Race detector catches a missing lock on the slice-element write.
+
 ## Tests
 
 `internal/devices/registry_test.go`, same-package, table-driven, `t.Parallel()` everywhere, stdlib only.
@@ -142,8 +202,8 @@ The returned `*Registry` is independent of the on-disk file — subsequent `Save
 - **Schema versioning.** Per AC: defer until first migration. The envelope shape reserves the field; add it then, not now.
 - **`pyry pair` (mint).** Sibling ticket — builds a `Device`, calls `Add` then `Save`.
 - **`pyry pair revoke <name>`.** Sibling ticket — calls `Remove(name)` then `Save`.
-- **WS handshake auth.** Phase 3 — calls `Load` once at daemon startup, then `FindByTokenHash(HashToken(presented))` per phone connect.
-- **Per-device `last_seen_at` updates.** The field is persisted; updating it on each WS connect is the auth handler's concern, not this primitive's.
+- **WS handshake auth.** Phase 3 — calls `Load` once at daemon startup, then `Validate(presented)` per phone connect (#210 delivered the predicate; the handler that calls it is a sibling Phase-3 ticket).
+- ~~**Per-device `last_seen_at` updates.**~~ Delivered by #210 (`Validate` advances `LastSeenAt` in memory on every hit). Disk persistence of the advanced value remains the auth handler's concern (periodic `Save` / graceful-shutdown hook); the predicate intentionally does not call `Save`.
 - **Push-token registration metadata.** Future top-level field (per `protocol-mobile.md:495`); the envelope shape supports additive growth.
 - **Encrypting `devices.json` at rest.** Defer — current threat model doesn't justify the operator UX cost.
 - **Schema migration to a database.** Defer.
