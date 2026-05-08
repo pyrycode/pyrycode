@@ -30,6 +30,12 @@ err() {
   exit 1
 }
 
+fail_with_code() {
+  local code="$1"; shift
+  echo "error: $*" >&2
+  exit "$code"
+}
+
 info() {
   echo "==> $*"
 }
@@ -60,6 +66,115 @@ latest_version() {
     | grep '"tag_name":' \
     | head -n1 \
     | cut -d'"' -f4
+}
+
+# ---------- post-install smoke check (#203) ----------
+#
+# Defends against a class of regression where pyry's control server comes up
+# but the supervisor never progresses past `Phase: starting` (see #202). The
+# observable is `Uptime: 2562047h47m16.854775807s` — the canonical
+# time.Duration(math.MaxInt64).String() sentinel printed when StartedAt is
+# still the zero value.
+
+# math.MaxInt64 nanoseconds rendered as time.Duration.String().
+PYRY_UPTIME_SENTINEL="2562047h47m16.854775807s"
+
+# Returns 0 if a default-named pyry service is currently active on this host.
+# We only consider running services so we don't unintentionally start a unit
+# the operator has deliberately disabled. Custom -pyry-name deployments are
+# out of scope; they fall through to the skip path.
+service_present_darwin() {
+  launchctl print "gui/$(id -u)/dev.pyrycode.pyry" 2>/dev/null \
+    | grep -q 'state = running'
+}
+
+service_present_linux() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  # is-system-running returns "offline"/"unknown" when the invoking user has
+  # no D-Bus session (CI, ssh-without-lingering); treat as "no service".
+  local state
+  state=$(systemctl --user is-system-running 2>/dev/null || true)
+  case "$state" in
+    offline|unknown|"") return 1 ;;
+  esac
+  systemctl --user is-active --quiet pyry
+}
+
+restart_darwin() {
+  launchctl kickstart -k "gui/$(id -u)/dev.pyrycode.pyry"
+}
+
+restart_linux() {
+  systemctl --user restart pyry
+}
+
+# Classify `pyry status` output. Reads:
+#   $1 — captured stdout+stderr from `pyry status`
+#   $2 — exit code from `pyry status`
+# Prints a human message and returns the appropriate exit code (0/2/3).
+classify_status() {
+  local status_out="$1" status_rc="$2"
+
+  if [ "$status_rc" -ne 0 ]; then
+    echo "error: supervisor restart did not bring up the control socket within 5s." >&2
+    echo "  the service manager accepted the restart but pyry's status endpoint is unreachable." >&2
+    echo "  check service-manager logs (\`journalctl --user -u pyry\` / \`tail /tmp/pyry.{out,err}.log\`)." >&2
+    echo "  pyry status output:" >&2
+    printf '%s\n' "$status_out" | sed 's/^/    /' >&2
+    return 3
+  fi
+
+  if printf '%s\n' "$status_out" | grep -Eq "^Uptime: +${PYRY_UPTIME_SENTINEL}\$"; then
+    echo "error: supervisor failed to start — Started at == 0001-01-01T00:00:00Z, Uptime == ${PYRY_UPTIME_SENTINEL} sentinel detected." >&2
+    echo "  see https://github.com/${REPO}/issues/202 for diagnosis steps." >&2
+    return 2
+  fi
+
+  info "supervisor running normally"
+  printf '%s\n' "$status_out" | grep -E '^(Phase|Started at):' || true
+  return 0
+}
+
+smoke_check() {
+  local os="$1"
+
+  local present_fn restart_fn manager
+  case "$os" in
+    Darwin) present_fn=service_present_darwin; restart_fn=restart_darwin; manager=launchctl ;;
+    Linux)  present_fn=service_present_linux;  restart_fn=restart_linux;  manager=systemctl ;;
+    *)      return 0 ;;
+  esac
+
+  if ! "$present_fn"; then
+    info "no running pyry service detected — skipping post-install smoke check"
+    echo "    (run \`pyry install-service\` to set one up; see docs/deployment.md)"
+    return 0
+  fi
+
+  info "restarting pyry service via ${manager}"
+  local restart_output restart_rc
+  set +e
+  restart_output=$("$restart_fn" 2>&1)
+  restart_rc=$?
+  set -e
+  if [ "$restart_rc" -ne 0 ]; then
+    fail_with_code 4 "failed to restart pyry service via ${manager} — exit status ${restart_rc}: ${restart_output}"
+  fi
+
+  info "probing pyry status"
+  local status_out status_rc
+  set +e
+  status_out=$("${INSTALL_DIR}/pyry" status 2>&1)
+  status_rc=$?
+  set -e
+
+  set +e
+  classify_status "$status_out" "$status_rc"
+  local class_rc=$?
+  set -e
+  if [ "$class_rc" -ne 0 ]; then
+    exit "$class_rc"
+  fi
 }
 
 verify_checksum() {
@@ -134,6 +249,8 @@ main() {
   "${INSTALL_DIR}/pyry" version || true
   echo
   info "next: see https://github.com/${REPO}/blob/main/docs/deployment.md for service-mode setup"
+
+  smoke_check "$os"
 }
 
 main "$@"
