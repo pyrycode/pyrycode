@@ -1,6 +1,8 @@
 # `internal/conversations` package
 
-Pure type definition for the Phase 3 `Conversation` entity. Greenfield package alongside the existing `internal/sessions` registry; no I/O, no consumers, no constructors. Foundation for the `conv:` ticket series (#217 registry CRUD, #218 promotion API, #219 auto-archive predicate, #220 auto-archive sweep).
+The Phase 3 `Conversation` entity, its on-disk registry, and the ID generator/validator. Greenfield package alongside the existing `internal/sessions` registry. Foundation for the rest of the `conv:` ticket series (#218 promotion API, #219 auto-archive predicate, #220 auto-archive sweep).
+
+The on-disk registry surface (`Registry`, `Load`, `Save`, `Create`, `Get`, `List`, `Update`, `ListFilter`) is documented separately in [`features/conversations-registry.md`](conversations-registry.md). This doc covers the type definitions and the ID primitives.
 
 ## What it is
 
@@ -10,17 +12,23 @@ A `Conversation` is a long-lived thread that owns a sequence of underlying claud
 
 ```
 internal/conversations/
-  conversation.go         Conversation struct + ConversationID typedef
+  conversation.go         Conversation struct + ConversationID typedef (#216)
   conversation_test.go    Round-trip JSON tests + omitempty assertions
+  id.go                   NewID + ValidID (#217)
+  id_test.go              Format / uniqueness / validity table (#217)
+  registry.go             Registry + Load/Save/Create/Get/List/Update + ListFilter (#217)
+  registry_test.go        Registry CRUD + atomic-write + concurrency tests (#217)
 ```
 
-One package, two files, ~75 LOC production + ~100 LOC test. Stdlib only (`time` for the timestamp; `encoding/json` is consumed by tests, not the production type).
+Stdlib only (`crypto/rand` for the ID generator; `encoding/json` / `os` / `path/filepath` / `sort` / `sync` for the registry; `time` for the timestamp).
 
 ## Types
 
 ### `ConversationID string`
 
-Per-conversation identifier. **Distinct nominal type** from `sessions.SessionID` so a value of one cannot be silently passed where the other is expected — a `Conversation` carries both its own ID and a `CurrentSessionID`, and confusing the two is the most plausible bug in the upcoming registry/API code. The empty `ConversationID("")` is the unset sentinel. Format conventions (UUIDv4 vs. other) are not fixed here; #217 owns the generator and the validity predicate.
+Per-conversation identifier. **Distinct nominal type** from `sessions.SessionID` so a value of one cannot be silently passed where the other is expected — a `Conversation` carries both its own ID and a `CurrentSessionID`, and confusing the two is the most plausible bug in the upcoming registry/API code. The empty `ConversationID("")` is the unset sentinel.
+
+Canonical shape (#217): UUIDv4, 36 chars, lowercase hex, dashes at positions 8/13/18/23, version-4 nibble at position 14, RFC 4122 variant nibble at position 19. `NewID()` mints; `ValidID(s)` checks. Both clone the `internal/sessions/id.go` recipe byte-for-byte with the typed-id alias swapped — duplicated rather than extracted.
 
 ### `Conversation`
 
@@ -69,16 +77,18 @@ None. Pure value type — no goroutines, no channels, no mutexes. Safe to copy b
 
 ## Out of scope
 
-- Persistence — #217 lands `~/.pyry/<name>/conversations.json` registry CRUD with the same atomic-rename + `0600` recipe `internal/sessions/registry.go` and `internal/devices/registry.go` use.
-- Validity predicate (`ValidConversationID`) — #217's concern; mirror `sessions.ValidID` if conversation IDs are also UUIDv4.
 - Promotion API (`pyry conv promote`, `pyry conv name`) — #218.
 - Auto-archive predicate + sweep — #219, #220.
 - Migration from existing `Session` registry — TBD ticket once Conversations is proven on disk. Phase 1/2 sessions stay untouched.
 - Schema versioning — defer until first migration.
+- Daemon wiring (Load at startup, Save after mutations) — separate ticket; #217 lands the package leaf.
 
 ## Related
 
+- [`features/conversations-registry.md`](conversations-registry.md) — `Registry` + `Load` / `Save` / `Create` / `Get` / `List` / `Update` (#217); the on-disk persistence layer for this type.
+- [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) — `Registry.Update` runs the caller's callback under the registry lock.
 - [`internal/sessions`](sessions-package.md) — the existing `Session` model. Lives alongside `internal/conversations`; not coupled.
-- [`internal/sessions/id.go`](../../../internal/sessions/id.go) — `SessionID` typedef pattern this `ConversationID` mirrors.
+- [`internal/sessions/id.go`](../../../internal/sessions/id.go) — `SessionID` typedef + `NewID` / `ValidID` template `ConversationID` mirrors byte-for-byte.
 - [`internal/sessions/registry.go`](../../../internal/sessions/registry.go) — JSON tag style (snake_case, `omitempty` placement) the `Conversation` struct follows.
-- [`docs/specs/architecture/216-conversation-type.md`](../../specs/architecture/216-conversation-type.md) — architect's spec for this ticket.
+- [`docs/specs/architecture/216-conversation-type.md`](../../specs/architecture/216-conversation-type.md) — architect's spec for the type (#216).
+- [`docs/specs/architecture/217-conversations-registry-crud.md`](../../specs/architecture/217-conversations-registry-crud.md) — architect's spec for the registry (#217).
