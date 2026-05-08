@@ -68,6 +68,8 @@ The relay accepts the connection if no other binary is currently holding the sam
 
 The relay does **not** validate the binary's right to claim a server-id. Server-ids are unguessable (UUIDv4); first-claim-wins is the entire authorization model. This is acceptable because the device tokens (the actually sensitive secret) are validated by the binary, not the relay.
 
+> **TODO (post-v1): relay-issued admin token.** Server-ids are UUIDv4 and therefore practically unguessable, but the threat model isn't bulletproof — a leaked server-id (logged somewhere, screenshotted, etc.) lets an attacker race the real binary to the relay. A future hardening pass adds a relay-issued admin token at first registration: the binary registers with the relay once (out-of-band), receives an admin token, and presents it on every `/v1/server` connect. The relay validates the token before accepting the server-id claim. Phones are unaffected; only the binary↔relay handshake changes.
+
 ### Phone → relay → binary
 
 The phone opens `wss://<relay>/v1/client` with:
@@ -526,6 +528,12 @@ These fields exist in the v1 envelope shape but are not used in v1. Implementati
 - `payload_encrypted: true` — reserved for E2E. v1 implementations MUST reject with `protocol.unsupported`. v2 will define the encryption scheme (likely Noise_IK over an X25519 key exchange performed during pairing).
 - New top-level envelope fields starting with `x_` are reserved for experimentation. Receivers MUST NOT error on `x_`-prefixed fields they don't recognise; they MAY log them.
 
+## Locked decisions called out
+
+These warrant explicit mention because they have wire-shape implications and clients must implement against them:
+
+- **Multi-device echo: yes.** When phone A sends `send_message`, the binary emits the resulting user-side `message` envelope to phones B, C, …, *and* phone A itself (so the sender's echo confirms binary-side persistence and all paired devices stay in sync). Wire-load implication: every send fans out to N devices total. Justified by the future desktop-client scenario — once a desktop client exists alongside one or more phones, "what I just typed on my phone shows up on my laptop in real time" is the entire UX promise. Every device on the same `server-id` is in the echo set.
+
 ## Open questions
 
 These are explicitly NOT decided in v1 draft and need answers before the first wire ships:
@@ -533,8 +541,7 @@ These are explicitly NOT decided in v1 draft and need answers before the first w
 1. **TLS termination.** Does the relay terminate TLS itself, or does it sit behind a reverse proxy (Caddy / nginx) that handles TLS? Both work; choice affects relay deployment story.
 2. **Phone idle behaviour.** Should the phone hold the WS connection open while backgrounded, or close it and rely on push to wake? Affects battery + relay load. Likely close-on-background, push-to-wake.
 3. **Clock skew tolerance.** `ts` is sender-stamped. How tolerant is the binary of skewed phone clocks (esp. for `last_seen_ts` driving backfill)? Probably ±5 minutes acceptable; explicit cap TBD.
-4. **Multi-device echo.** When phone A sends `send_message`, do phones B and C receive the user-side `message` echo immediately (so all paired devices stay in sync)? v1 says yes. Wire load implication: every send fans out to N-1 other devices.
-5. **Push token rotation.** FCM/APNs tokens rotate. Should the phone always re-register on each connect, or only on token-rotation? Re-register-on-connect is simpler; one envelope of overhead per connect.
+4. **Push token rotation.** FCM/APNs tokens rotate. Should the phone always re-register on each connect, or only on token-rotation? Re-register-on-connect is simpler; one envelope of overhead per connect.
 
 ## Appendix: example flow — first pairing + first message
 
