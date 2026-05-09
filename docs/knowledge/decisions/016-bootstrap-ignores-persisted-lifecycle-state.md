@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (ticket #202).
+Accepted (ticket #202). E2E regression coverage added in #253 (`internal/e2e/bootstrap_warm_start_test.go`).
 
 ## Context
 
@@ -80,4 +80,6 @@ The fix doesn't paper over the symptom (the zero-time `StartedAt` sentinel surfa
 - [ADR 005](005-idle-eviction-state-machine.md) — the per-session two-state machine this carve-out applies to.
 - [ADR 013](013-evict-activate-persist-ordering.md) — the persist-before-wake contract that makes `Activate` the only legal exit from `evicted`.
 - [`features/idle-eviction.md`](../features/idle-eviction.md) — feature documentation; the bootstrap-warm-start contract is documented there.
+- [`features/e2e-harness.md` § Bootstrap Warm-Start Pattern](../features/e2e-harness.md) — `bootstrap_warm_start_test.go` (#253), the e2e regression test that pins this carve-out plus its non-bootstrap boundary.
 - [`docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md`](../../specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md) — build-time spec.
+- [`docs/specs/architecture/253-e2e-bootstrap-warm-start-ignores-persisted-lifecycle-state.md`](../../specs/architecture/253-e2e-bootstrap-warm-start-ignores-persisted-lifecycle-state.md) — e2e regression spec.
