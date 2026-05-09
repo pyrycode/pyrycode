@@ -1,6 +1,6 @@
 # `internal/conversations` auto-archive
 
-Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Four slices: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract, and the daemon-side wiring (#243) that loads `conversations.json` at startup in `cmd/pyry/main.go` and registers the sweep loop as a sibling goroutine to the rotation watcher inside `Pool.Run`'s errgroup.
+Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Four slices plus an e2e seam: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract, the daemon-side wiring (#243) that loads `conversations.json` at startup in `cmd/pyry/main.go` and registers the sweep loop as a sibling goroutine to the rotation watcher inside `Pool.Run`'s errgroup, and the `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing (#262) that lets out-of-process e2e tests drive the loop deterministically without waiting an hour.
 
 ## What it is
 
@@ -267,17 +267,18 @@ Placed AFTER `tryAutoAttach` returns: auto-attach short-circuits the supervisor 
 
 ### `sessions.Config` plumbing
 
-Two new fields on `sessions.Config` carry the loaded handle and the path:
+Three fields on `sessions.Config` carry the loaded handle, the path, and the optional sweep-interval override:
 
 ```go
 type Config struct {
     // ...
     ConversationsRegistry     *conversations.Registry  // nil disables the sweep
     ConversationsRegistryPath string                    // required when registry non-nil
+    SweepInterval             time.Duration             // 0 = use conversations.SweepInterval (one hour)
 }
 ```
 
-Mirrored by unexported `Pool.convReg` / `Pool.convRegistryPath`, set once in `New`, read-only thereafter. No validation of "non-nil registry implies non-empty path" — the cmd/pyry call site sets both atomically and a misuse surfaces as a Save failure on the first archive-eligible tick (logged + swallowed by `RunSweepLoop`, loop survives).
+Mirrored by unexported `Pool.convReg` / `Pool.convRegistryPath` / `Pool.convSweepInterval`, all set once in `New`, read-only thereafter. `New` resolves `convSweepInterval = cfg.SweepInterval` with a `<= 0` fallback to `conversations.SweepInterval` — negative values degrade to the production default rather than feeding an invalid interval into `RunSweepLoop` (whose precondition is `interval > 0`). No validation of "non-nil registry implies non-empty path" — the cmd/pyry call site sets both atomically and a misuse surfaces as a Save failure on the first archive-eligible tick (logged + swallowed by `RunSweepLoop`, loop survives).
 
 ### `Pool.Run` errgroup wiring
 
@@ -285,7 +286,7 @@ Sibling registration to the rotation watcher block, gated on `p.convReg != nil`:
 
 ```go
 if p.convReg != nil {
-    interval := convSweepInterval
+    interval := p.convSweepInterval
     g.Go(func() error {
         return conversations.RunSweepLoop(gctx, p.convReg, p.convRegistryPath, interval, p.log)
     })
@@ -294,22 +295,45 @@ if p.convReg != nil {
 
 `RunSweepLoop` returns nil on `gctx.Done()`, so the errgroup's first-non-nil-wins post-mortem signal is never claimed by sweep cancellation — whatever caused the cancellation surfaces cleanly.
 
-### Test seam: `convSweepInterval`
+### Single seam: `Config.SweepInterval` (#262)
 
-Unexported package-level `var convSweepInterval = conversations.SweepInterval` lives in `internal/sessions/pool.go` next to `newProbe`. The integration test swaps it via `t.Cleanup` save/restore. Not a `Config.ConversationsSweepInterval` field — there is no operator use case for tuning the sweep cadence (one-hour ticks against a 30-day archive threshold), and a knob would create a documentation obligation for no production benefit.
+The original wiring (#243) used a package-private `var convSweepInterval = conversations.SweepInterval` swapped by a `withConvSweepInterval(t, d)` helper for in-package tests. #251's e2e split-source needs an out-of-process test that drives the loop at ~100ms instead of one hour — and a package-level var is unreachable from a test process that spawns `pyry` as a subprocess.
+
+#262 replaces the package var (and its helper) with a real `Config.SweepInterval` field plus the `-pyry-conv-sweep-interval` flag in `cmd/pyry`. **One seam, not two**: the dual seam (Config field + package var fallback) was rejected because it invites future drift (a new test could set one but not the other). In-package tests now set `pool.convSweepInterval = …` directly after `helperPoolWithSleepArgs`, mirroring the existing `pool.convReg` / `pool.convRegistryPath` pattern.
+
+```go
+// cmd/pyry/main.go
+convSweepInterval := fs.Duration(
+    "pyry-conv-sweep-interval", 0,
+    "override conversations sweep tick interval (testing; 0 = production default)",
+)
+// ...
+sessions.Config{
+    ConversationsRegistry:     convReg,
+    ConversationsRegistryPath: convRegistryPath,
+    SweepInterval:             *convSweepInterval,
+    // ...
+}
+```
+
+The flag default is `0` (not `conversations.SweepInterval`), so "user did not set the flag" and "use the default" share one definition — the zero-value fallback inside `sessions.New`. The flag is visible (not hidden) and listed in `printHelp()` after `-pyry-idle-timeout` with a `(testing; 0 = production default of 1h)` annotation: it is for testing but is not actively dangerous in production, and a visible flag is simpler to reason about. `pyry-conv-sweep-interval` is also added to `pyryFlagValues` so `splitArgs` consumes both the flag and its value before the claude-args split.
 
 ### Integration test (`pool_conv_sweep_test.go`)
 
-In-package, not `internal/e2e`. Two tests:
+In-package, not `internal/e2e`. Four tests:
 
-- `TestPool_Run_RegistersSweepLoop_HappyPath` — seeds 2 archivable + 1 fresh entry on disk, builds `helperPoolWithSleepArgs(t)` with `/bin/sleep 3600` as the bootstrap so `Pool.Run` can shutdown cleanly without a real claude binary, sets `pool.convReg` / `pool.convRegistryPath` directly, and polls the on-disk file via `conversations.Load` until `len(reg2.List()) == 1`. Then cancels and asserts `Pool.Run` returns `nil` or `context.Canceled` within 5s; final on-disk `Load` shows the single fresh survivor.
-- `TestPool_Run_NoSweepLoopWhenRegistryNil` — uses `helperPoolWithSleepArgs` without setting `convReg`; runs the pool for 50ms at a 1ms test interval, cancels, asserts a sentinel path under `t.TempDir()` was never created (`fs.ErrNotExist`). Pins the gate.
+- `TestPool_Run_RegistersSweepLoop_HappyPath` — seeds 2 archivable + 1 fresh entry on disk, builds `helperPoolWithSleepArgs(t)` with `/bin/sleep 3600` as the bootstrap so `Pool.Run` can shutdown cleanly without a real claude binary, sets `pool.convReg` / `pool.convRegistryPath` / `pool.convSweepInterval = 5*time.Millisecond` directly, and polls the on-disk file via `conversations.Load` until `len(reg2.List()) == 1`. Then cancels and asserts `Pool.Run` returns `nil` or `context.Canceled` within 5s; final on-disk `Load` shows the single fresh survivor. Refactored in #262 from the prior `withConvSweepInterval` helper to a direct field assignment.
+- `TestPool_Run_NoSweepLoopWhenRegistryNil` — uses `helperPoolWithSleepArgs` without setting `convReg`; runs the pool for 50ms, cancels, asserts a sentinel path under `t.TempDir()` was never created (`fs.ErrNotExist`). Pins the gate. Does not need to override `convSweepInterval` — the `convReg == nil` short-circuit means the interval is never read.
+- `TestPool_New_HonoursConfigSweepInterval` (#262) — pure constructor test: builds a minimal `Config` with `SweepInterval = 7*time.Millisecond`, calls `New`, asserts `pool.convSweepInterval == 7*time.Millisecond`. No `Pool.Run`, no goroutines, no timing. Pins that a non-zero `Config.SweepInterval` lands verbatim on the resolved field.
+- `TestPool_New_DefaultSweepIntervalWhenConfigZero` (#262) — pure constructor test: builds a minimal `Config` with `SweepInterval` omitted, asserts `pool.convSweepInterval == conversations.SweepInterval`. Pins the zero-value fallback so a future change to the resolution path can't accidentally regress.
 
 `TestResolveConversationsRegistryPath` in `cmd/pyry/args_test.go` covers the resolver: happy path with `t.Setenv("HOME", …)`, plus `name = "../etc"` to confirm `sanitizeName` keeps the result inside `~/.pyry/`.
 
+The cmd/pyry flag-to-Config plumbing is not unit-tested at this layer — `runSupervisor` has only integration-tier coverage (`internal/e2e`), and the e2e test that actually consumes the new flag lives downstream of #251.
+
 ## Out of scope
 
-- A configurable sweep interval flag or env var — AC pins `time.Hour` and "Don't expose it as a flag." If a real operator ask surfaces, layer a `SweepInterval var = time.Hour` later.
+- An operator-tunable sweep interval. The `-pyry-conv-sweep-interval` flag (#262) exists for testing only — production callers leave `Config.SweepInterval` zero and the daemon uses `conversations.SweepInterval` (one hour). No documented operational reason to deviate from the one-hour cadence; the flag is annotated `(testing; 0 = production default of 1h)` in `--help` to discourage drift into operator-config territory.
 - Final on-shutdown sweep — AC explicit "does NOT perform any final on-shutdown sweep."
 - Metrics emission (counter of archive runs, histogram of archived counts) — no Phase 3 metrics surface exists yet; defer until one does.
 - `ConversationsRegistry`-shaped façade types or mockable interfaces — the function takes the concrete `*Registry`; the package owns both. An interface seam is premature.
@@ -328,4 +352,5 @@ In-package, not `internal/e2e`. Two tests:
 - [`docs/specs/architecture/237-conv-sweep-primitive.md`](../../specs/architecture/237-conv-sweep-primitive.md) — architect's spec for the sweep primitive (#237).
 - [`docs/specs/architecture/242-conv-sweep-loop.md`](../../specs/architecture/242-conv-sweep-loop.md) — architect's spec for the loop wrapper (#242).
 - [`docs/specs/architecture/243-conv-daemon-wiring.md`](../../specs/architecture/243-conv-daemon-wiring.md) — architect's spec for the daemon wiring (#243).
+- [`docs/specs/architecture/262-pyry-conv-sweep-interval-flag.md`](../../specs/architecture/262-pyry-conv-sweep-interval-flag.md) — architect's spec for the `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing (#262).
 - [`features/sessions-package.md`](sessions-package.md) — `Pool.Run`'s errgroup hosts the sweep goroutine alongside the rotation watcher; `Config.ConversationsRegistry` / `ConversationsRegistryPath` are the plumbing fields.
