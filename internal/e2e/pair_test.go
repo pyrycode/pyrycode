@@ -3,6 +3,10 @@
 package e2e
 
 import (
+	"bytes"
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,6 +85,180 @@ func TestPair_E2E(t *testing.T) {
 		}
 		if !devices.VerifyToken(payload.Token, entry.TokenHash) {
 			t.Errorf("payload.Token does not hash to entry.TokenHash")
+		}
+	})
+}
+
+// TestPairList_E2E exercises `pyry pair list` against a real binary.
+// The "empty" sub-test asserts the cold-start contract (exact stdout
+// "No paired devices.\n", exit 0). The "after pair" sub-test pairs a
+// device first, then asserts the device Name and 8-char token-hash
+// prefix appear in the list output.
+func TestPairList_E2E(t *testing.T) {
+	t.Run("empty registry", func(t *testing.T) {
+		home := t.TempDir()
+		r := RunBareIn(t, home, "pair", "list")
+		if r.ExitCode != 0 {
+			t.Fatalf("pyry pair list exit=%d\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+		if !bytes.Equal(r.Stdout, []byte("No paired devices.\n")) {
+			t.Errorf("stdout=%q want %q", string(r.Stdout), "No paired devices.\n")
+		}
+	})
+
+	t.Run("after pair", func(t *testing.T) {
+		home := t.TempDir()
+		pairResult := RunBareIn(t, home, "pair", "--name=phone-a")
+		if pairResult.ExitCode != 0 {
+			t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s",
+				pairResult.ExitCode, pairResult.Stdout, pairResult.Stderr)
+		}
+
+		registryPath := filepath.Join(home, ".pyry", "pyry", "devices.json")
+		registry, err := devices.Load(registryPath)
+		if err != nil {
+			t.Fatalf("devices.Load(%q): %v", registryPath, err)
+		}
+		list := registry.List()
+		if len(list) != 1 {
+			t.Fatalf("registry has %d entries, want 1", len(list))
+		}
+		wantPrefix := list[0].TokenHash[:8]
+
+		listResult := RunBareIn(t, home, "pair", "list")
+		if listResult.ExitCode != 0 {
+			t.Fatalf("pyry pair list exit=%d\nstdout:\n%s\nstderr:\n%s",
+				listResult.ExitCode, listResult.Stdout, listResult.Stderr)
+		}
+		out := string(listResult.Stdout)
+		if !strings.Contains(out, "phone-a") {
+			t.Errorf("stdout missing device name 'phone-a':\n%s", out)
+		}
+		if !strings.Contains(out, wantPrefix) {
+			t.Errorf("stdout missing token-prefix %q:\n%s", wantPrefix, out)
+		}
+	})
+}
+
+// TestPairRevoke_E2E exercises `pyry pair revoke` against a real binary.
+// Three sub-tests cover: the success path (one of two devices is removed
+// and the survivor is preserved), the not-found path (exit 1, exact
+// stderr text, on-disk file byte-identical), and the missing-registry
+// case (no file is created).
+func TestPairRevoke_E2E(t *testing.T) {
+	t.Run("removes one of two", func(t *testing.T) {
+		home := t.TempDir()
+		registryPath := filepath.Join(home, ".pyry", "pyry", "devices.json")
+
+		if r := RunBareIn(t, home, "pair", "--name=phone-a"); r.ExitCode != 0 {
+			t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+		if r := RunBareIn(t, home, "pair", "--name=phone-b"); r.ExitCode != 0 {
+			t.Fatalf("pyry pair phone-b exit=%d\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+
+		// Capture phone-b's recorded fields so we can prove they survive
+		// the revoke unchanged.
+		preReg, err := devices.Load(registryPath)
+		if err != nil {
+			t.Fatalf("devices.Load(pre): %v", err)
+		}
+		var preBravo devices.Device
+		for _, d := range preReg.List() {
+			if d.Name == "phone-b" {
+				preBravo = d
+				break
+			}
+		}
+		if preBravo.Name != "phone-b" {
+			t.Fatalf("phone-b missing before revoke; registry=%+v", preReg.List())
+		}
+
+		r := RunBareIn(t, home, "pair", "revoke", "phone-a")
+		if r.ExitCode != 0 {
+			t.Fatalf("pyry pair revoke phone-a exit=%d\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+		if !bytes.Equal(r.Stdout, []byte("Revoked phone-a.\n")) {
+			t.Errorf("stdout=%q want %q", string(r.Stdout), "Revoked phone-a.\n")
+		}
+		if len(r.Stderr) != 0 {
+			t.Errorf("stderr=%q want empty", string(r.Stderr))
+		}
+
+		postReg, err := devices.Load(registryPath)
+		if err != nil {
+			t.Fatalf("devices.Load(post): %v", err)
+		}
+		list := postReg.List()
+		if len(list) != 1 {
+			t.Fatalf("registry has %d entries after revoke, want 1", len(list))
+		}
+		got := list[0]
+		if got.Name != "phone-b" {
+			t.Errorf("survivor.Name=%q want %q", got.Name, "phone-b")
+		}
+		if got.TokenHash != preBravo.TokenHash {
+			t.Errorf("survivor.TokenHash=%q want %q", got.TokenHash, preBravo.TokenHash)
+		}
+		if !got.PairedAt.Equal(preBravo.PairedAt) {
+			t.Errorf("survivor.PairedAt=%v want %v", got.PairedAt, preBravo.PairedAt)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		home := t.TempDir()
+		registryPath := filepath.Join(home, ".pyry", "pyry", "devices.json")
+
+		if r := RunBareIn(t, home, "pair", "--name=phone-a"); r.ExitCode != 0 {
+			t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+
+		preBytes, err := os.ReadFile(registryPath)
+		if err != nil {
+			t.Fatalf("ReadFile(pre): %v", err)
+		}
+
+		r := RunBareIn(t, home, "pair", "revoke", "ghost")
+		if r.ExitCode != 1 {
+			t.Fatalf("pyry pair revoke ghost exit=%d, want 1\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+		if !bytes.Equal(r.Stderr, []byte("pyry pair revoke: no device named ghost\n")) {
+			t.Errorf("stderr=%q want %q", string(r.Stderr), "pyry pair revoke: no device named ghost\n")
+		}
+		if len(r.Stdout) != 0 {
+			t.Errorf("stdout=%q want empty", string(r.Stdout))
+		}
+
+		postBytes, err := os.ReadFile(registryPath)
+		if err != nil {
+			t.Fatalf("ReadFile(post): %v", err)
+		}
+		if !bytes.Equal(preBytes, postBytes) {
+			t.Errorf("registry bytes changed across not-found revoke\npre:\n%s\npost:\n%s",
+				preBytes, postBytes)
+		}
+	})
+
+	t.Run("missing registry", func(t *testing.T) {
+		home := t.TempDir()
+		registryPath := filepath.Join(home, ".pyry", "pyry", "devices.json")
+
+		r := RunBareIn(t, home, "pair", "revoke", "ghost")
+		if r.ExitCode != 1 {
+			t.Fatalf("pyry pair revoke ghost (cold) exit=%d, want 1\nstdout:\n%s\nstderr:\n%s",
+				r.ExitCode, r.Stdout, r.Stderr)
+		}
+		if !bytes.Equal(r.Stderr, []byte("pyry pair revoke: no device named ghost\n")) {
+			t.Errorf("stderr=%q want %q", string(r.Stderr), "pyry pair revoke: no device named ghost\n")
+		}
+		if _, err := os.Stat(registryPath); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("registry file exists or stat error: err=%v (want fs.ErrNotExist)", err)
 		}
 	})
 }
