@@ -188,6 +188,24 @@ func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool {
 	return false
 }
 
+// Delete removes the conversation whose ID equals id. Returns true on hit,
+// false on miss. Mutex-guarded; safe for concurrent use alongside the other
+// Registry methods.
+//
+// Delete does NOT call Save — disk persistence is the caller's concern,
+// matching the Create / Update / Promote convention.
+func (r *Registry) Delete(id ConversationID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			r.conversations = append(r.conversations[:i], r.conversations[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // Promote flips the conversation with id to promoted state and sets its
 // display name to a non-nil pointer to name. Returns one of the exported
 // sentinels on refusal:
