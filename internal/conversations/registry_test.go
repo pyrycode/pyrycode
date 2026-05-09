@@ -1,6 +1,7 @@
 package conversations
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -465,6 +466,230 @@ func TestRegistry_Update_Miss(t *testing.T) {
 	got, _ := r.Get(present)
 	if got.Cwd != "/x" {
 		t.Errorf("present entry mutated: Cwd = %q, want %q", got.Cwd, "/x")
+	}
+}
+
+func TestRegistry_Promote(t *testing.T) {
+	t.Parallel()
+	const targetID ConversationID = "11111111-2222-4333-8444-555555555555"
+	const otherID ConversationID = "22222222-2222-4333-8444-555555555555"
+	const absentID ConversationID = "ffffffff-2222-4333-8444-555555555555"
+
+	tests := []struct {
+		name           string
+		setup          func() *Registry
+		id             ConversationID
+		input          string
+		wantErr        error
+		wantPromoted   bool
+		wantNamePtr    *string
+		assertOther    func(t *testing.T, r *Registry)
+	}{
+		{
+			name: "success",
+			setup: func() *Registry {
+				r := &Registry{}
+				r.Create(Conversation{ID: targetID, Cwd: "/x", IsPromoted: false})
+				return r
+			},
+			id:           targetID,
+			input:        "general",
+			wantErr:      nil,
+			wantPromoted: true,
+			wantNamePtr:  strPtr("general"),
+		},
+		{
+			name: "unknown-id",
+			setup: func() *Registry {
+				r := &Registry{}
+				r.Create(Conversation{ID: targetID, Cwd: "/x", IsPromoted: false})
+				return r
+			},
+			id:           absentID,
+			input:        "general",
+			wantErr:      ErrConversationNotFound,
+			wantPromoted: false,
+			wantNamePtr:  nil,
+		},
+		{
+			name: "already-promoted",
+			setup: func() *Registry {
+				r := &Registry{}
+				r.Create(Conversation{ID: targetID, Cwd: "/x", IsPromoted: true, Name: strPtr("old")})
+				return r
+			},
+			id:           targetID,
+			input:        "new",
+			wantErr:      ErrConversationAlreadyPromoted,
+			wantPromoted: true,
+			wantNamePtr:  strPtr("old"),
+		},
+		{
+			name: "name-conflict-with-promoted",
+			setup: func() *Registry {
+				r := &Registry{}
+				r.Create(Conversation{ID: otherID, Cwd: "/o", IsPromoted: true, Name: strPtr("dup")})
+				r.Create(Conversation{ID: targetID, Cwd: "/x", IsPromoted: false})
+				return r
+			},
+			id:           targetID,
+			input:        "dup",
+			wantErr:      ErrPromotionNameInUse,
+			wantPromoted: false,
+			wantNamePtr:  nil,
+			assertOther: func(t *testing.T, r *Registry) {
+				got, ok := r.Get(otherID)
+				if !ok {
+					t.Fatal("other conversation missing after refusal")
+				}
+				if !got.IsPromoted || got.Name == nil || *got.Name != "dup" {
+					t.Errorf("other conversation mutated: IsPromoted=%v Name=%v", got.IsPromoted, got.Name)
+				}
+			},
+		},
+		{
+			name: "name-conflict-with-unpromoted-OK",
+			setup: func() *Registry {
+				r := &Registry{}
+				r.Create(Conversation{ID: otherID, Cwd: "/o", IsPromoted: false, Name: strPtr("dup")})
+				r.Create(Conversation{ID: targetID, Cwd: "/x", IsPromoted: false})
+				return r
+			},
+			id:           targetID,
+			input:        "dup",
+			wantErr:      nil,
+			wantPromoted: true,
+			wantNamePtr:  strPtr("dup"),
+			assertOther: func(t *testing.T, r *Registry) {
+				got, ok := r.Get(otherID)
+				if !ok {
+					t.Fatal("other conversation missing after success")
+				}
+				if got.IsPromoted {
+					t.Errorf("other conversation IsPromoted = true, want false (left untouched)")
+				}
+				if got.Name == nil || *got.Name != "dup" {
+					t.Errorf("other conversation Name = %v, want pointer to %q", got.Name, "dup")
+				}
+			},
+		},
+		{
+			name: "empty-name",
+			setup: func() *Registry {
+				r := &Registry{}
+				r.Create(Conversation{ID: targetID, Cwd: "/x", IsPromoted: false})
+				return r
+			},
+			id:           targetID,
+			input:        "",
+			wantErr:      ErrPromotionNameEmpty,
+			wantPromoted: false,
+			wantNamePtr:  nil,
+		},
+		{
+			name: "whitespace-name",
+			setup: func() *Registry {
+				r := &Registry{}
+				r.Create(Conversation{ID: targetID, Cwd: "/x", IsPromoted: false})
+				return r
+			},
+			id:           targetID,
+			input:        "   \t\n",
+			wantErr:      ErrPromotionNameEmpty,
+			wantPromoted: false,
+			wantNamePtr:  nil,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := tc.setup()
+			err := r.Promote(tc.id, tc.input)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Promote: err = %v, want nil", err)
+				}
+			} else {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Promote: err = %v, want %v", err, tc.wantErr)
+				}
+			}
+
+			// Inspect the target's post-state. If the target id is absent
+			// from the registry, we expect the call to have refused with
+			// ErrConversationNotFound and there is nothing further to check
+			// on the target — but we still verify Get reports absence.
+			got, ok := r.Get(targetID)
+			switch {
+			case tc.id == absentID:
+				if !ok {
+					t.Fatalf("target missing from registry after unknown-id call")
+				}
+				if got.IsPromoted {
+					t.Errorf("target IsPromoted = true, want false (untouched after unknown-id)")
+				}
+				if got.Name != nil {
+					t.Errorf("target Name = %v, want nil (untouched after unknown-id)", got.Name)
+				}
+			default:
+				if !ok {
+					t.Fatalf("target missing from registry")
+				}
+				if got.IsPromoted != tc.wantPromoted {
+					t.Errorf("target IsPromoted = %v, want %v", got.IsPromoted, tc.wantPromoted)
+				}
+				switch {
+				case tc.wantNamePtr == nil:
+					if got.Name != nil {
+						t.Errorf("target Name = %v, want nil", got.Name)
+					}
+				default:
+					if got.Name == nil {
+						t.Errorf("target Name = nil, want pointer to %q", *tc.wantNamePtr)
+					} else if *got.Name != *tc.wantNamePtr {
+						t.Errorf("target *Name = %q, want %q", *got.Name, *tc.wantNamePtr)
+					}
+				}
+			}
+
+			if tc.assertOther != nil {
+				tc.assertOther(t, r)
+			}
+		})
+	}
+}
+
+func TestRegistry_Promote_DoesNotPersist(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", IsPromoted: false, LastUsedAt: when})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save (pre-promote): %v", err)
+	}
+	if err := r.Promote(id, "general"); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := back.Get(id)
+	if !ok {
+		t.Fatalf("Get after Load: not found")
+	}
+	if got.IsPromoted {
+		t.Errorf("loaded IsPromoted = true, want false (Promote must not persist implicitly)")
+	}
+	if got.Name != nil {
+		t.Errorf("loaded Name = %v, want nil", got.Name)
 	}
 }
 

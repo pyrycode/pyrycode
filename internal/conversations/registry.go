@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -17,6 +18,15 @@ import (
 type registryFile struct {
 	Conversations []Conversation `json:"conversations"`
 }
+
+// Sentinel errors returned by Promote. Callers (CLI, wire-protocol layer)
+// distinguish refusal cases via errors.Is and map to user-facing codes.
+var (
+	ErrConversationNotFound        = errors.New("conversations: conversation not found")
+	ErrConversationAlreadyPromoted = errors.New("conversations: conversation already promoted")
+	ErrPromotionNameInUse          = errors.New("conversations: promotion name already in use")
+	ErrPromotionNameEmpty          = errors.New("conversations: promotion name is empty")
+)
 
 // Registry is the in-memory conversation list, guarded by a mutex. Construct
 // via Load (cold-start or warm-start from disk); persist via Save. All methods
@@ -176,4 +186,59 @@ func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool {
 		}
 	}
 	return false
+}
+
+// Promote flips the conversation with id to promoted state and sets its
+// display name to a non-nil pointer to name. Returns one of the exported
+// sentinels on refusal:
+//
+//   - ErrConversationNotFound        — id is not present in the registry.
+//   - ErrConversationAlreadyPromoted — target already has IsPromoted == true.
+//   - ErrPromotionNameInUse          — another *promoted* conversation already
+//     uses name (case-sensitive byte-exact comparison; unpromoted
+//     conversations do not participate in the uniqueness check).
+//   - ErrPromotionNameEmpty          — name is empty or contains only
+//     whitespace.
+//
+// Validation, uniqueness scan, and mutation all happen under r.mu so a
+// concurrent second Promote with the same name cannot slip through. On any
+// refusal the registry is left untouched and no field of any record is
+// modified. Persistence is the caller's responsibility — Promote does not
+// call Save, matching the Create / Update convention.
+func (r *Registry) Promote(id ConversationID, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return ErrPromotionNameEmpty
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	idx := -1
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return ErrConversationNotFound
+	}
+	if r.conversations[idx].IsPromoted {
+		return ErrConversationAlreadyPromoted
+	}
+	for i := range r.conversations {
+		if i == idx {
+			continue
+		}
+		c := &r.conversations[i]
+		if !c.IsPromoted {
+			continue
+		}
+		if c.Name != nil && *c.Name == name {
+			return ErrPromotionNameInUse
+		}
+	}
+	n := name
+	r.conversations[idx].IsPromoted = true
+	r.conversations[idx].Name = &n
+	return nil
 }
