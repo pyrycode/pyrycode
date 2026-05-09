@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -293,5 +295,159 @@ func TestParsePairListArgs(t *testing.T) {
 				t.Errorf("instanceName=%q want %q", got.instanceName, tc.wantInstance)
 			}
 		})
+	}
+}
+
+// TestParsePairRevokeArgs covers the flag-set surface of `pyry pair
+// revoke`: the happy paths (default instance, custom -pyry-name) and the
+// three error shapes runPairRevoke maps to exit 2.
+func TestParsePairRevokeArgs(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+
+	tests := []struct {
+		name           string
+		args           []string
+		wantInstance   string
+		wantDeviceName string
+		wantErr        string
+	}{
+		{name: "happy", args: []string{"phone"}, wantInstance: defaultName(), wantDeviceName: "phone"},
+		{name: "with instance", args: []string{"-pyry-name=foo", "phone"}, wantInstance: "foo", wantDeviceName: "phone"},
+		{name: "missing positional", args: nil, wantErr: "missing device name"},
+		{name: "extra positional", args: []string{"a", "b"}, wantErr: "unexpected positional"},
+		{name: "unknown flag rejected", args: []string{"--bogus", "phone"}, wantErr: "flag provided but not defined"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePairRevokeArgs(tc.args)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %q missing fragment %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.instanceName != tc.wantInstance {
+				t.Errorf("instanceName=%q want %q", got.instanceName, tc.wantInstance)
+			}
+			if got.deviceName != tc.wantDeviceName {
+				t.Errorf("deviceName=%q want %q", got.deviceName, tc.wantDeviceName)
+			}
+		})
+	}
+}
+
+// TestRunPairRevoke_RemovesEntry verifies the success path: the matching
+// device is removed and the surviving entry is preserved byte-for-byte
+// across the round trip via devices.Load.
+func TestRunPairRevoke_RemovesEntry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	path := resolveDevicesPath(defaultName())
+	registry, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("devices.Load: %v", err)
+	}
+	alpha := devices.Device{
+		Name:       "alpha",
+		TokenHash:  "aaaaaaaa11111111111111111111111111111111111111111111111111111111",
+		PairedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+	}
+	bravo := devices.Device{
+		Name:       "bravo",
+		TokenHash:  "bbbbbbbb22222222222222222222222222222222222222222222222222222222",
+		PairedAt:   time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC),
+	}
+	registry.Add(alpha)
+	registry.Add(bravo)
+	if err := registry.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if err := runPairRevoke([]string{"alpha"}); err != nil {
+		t.Fatalf("runPairRevoke: %v", err)
+	}
+
+	reloaded, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("devices.Load after revoke: %v", err)
+	}
+	list := reloaded.List()
+	if len(list) != 1 {
+		t.Fatalf("registry has %d entries after revoke, want 1", len(list))
+	}
+	got := list[0]
+	if got.Name != bravo.Name {
+		t.Errorf("survivor.Name=%q want %q", got.Name, bravo.Name)
+	}
+	if got.TokenHash != bravo.TokenHash {
+		t.Errorf("survivor.TokenHash=%q want %q", got.TokenHash, bravo.TokenHash)
+	}
+	if !got.PairedAt.Equal(bravo.PairedAt) {
+		t.Errorf("survivor.PairedAt=%v want %v", got.PairedAt, bravo.PairedAt)
+	}
+	if !got.LastSeenAt.Equal(bravo.LastSeenAt) {
+		t.Errorf("survivor.LastSeenAt=%v want %v", got.LastSeenAt, bravo.LastSeenAt)
+	}
+}
+
+// TestRunPairRevoke_SaveFailure confirms the I/O-error path returns a
+// wrapped error with the `pair revoke:` prefix when Save can't persist.
+// Skipped on Windows (we're Linux+macOS only) and skipped if chmod 0500
+// on the parent dir doesn't actually block writes for the test user
+// (e.g. running as root).
+func TestRunPairRevoke_SaveFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix-only permission test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	path := resolveDevicesPath(defaultName())
+	registry, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("devices.Load: %v", err)
+	}
+	registry.Add(devices.Device{
+		Name:      "alpha",
+		TokenHash: "aaaaaaaa11111111111111111111111111111111111111111111111111111111",
+		PairedAt:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err := registry.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	// Pre-flight: ensure 0500 actually blocks writes for this user (root
+	// bypasses DAC). If a probe write succeeds, Save will too — skip.
+	probe := filepath.Join(dir, ".probe.tmp")
+	if f, perr := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0o600); perr == nil {
+		_ = f.Close()
+		_ = os.Remove(probe)
+		t.Skip("chmod 0500 did not block writes for this user (running as root?)")
+	}
+
+	err = runPairRevoke([]string{"alpha"})
+	if err == nil {
+		t.Fatalf("expected error from runPairRevoke, got nil")
+	}
+	if !strings.Contains(err.Error(), "pair revoke:") {
+		t.Errorf("error %q missing prefix %q", err.Error(), "pair revoke:")
 	}
 }

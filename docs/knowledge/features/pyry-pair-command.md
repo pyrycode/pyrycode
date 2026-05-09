@@ -14,18 +14,20 @@ Lives in [`cmd/pyry/pair.go`](../../../cmd/pyry/pair.go). Dispatched from `cmd/p
 |------|--------|
 | (bare) | Mint a token, persist a `Device`, render QR + paste payload to stdout |
 | `list` | Print the registry as a tabular listing (read-only) |
+| `revoke <name>` | Remove the registry entry whose `Name` matches |
 
-Mirrors `runSessions`'s sub-router shape ([ADR 010](../decisions/010-sessions-cli-sub-router.md)) with one deviation: `runPair` does NOT call `parseClientFlags` — the pair family does not dial the daemon, so there is no `-pyry-socket` to peel. Per-verb flag-set parsers (`parsePairArgs`, `parsePairListArgs`) own `-pyry-name` directly.
+Mirrors `runSessions`'s sub-router shape ([ADR 010](../decisions/010-sessions-cli-sub-router.md)) with one deviation: `runPair` does NOT call `parseClientFlags` — the pair family does not dial the daemon, so there is no `-pyry-socket` to peel. Per-verb flag-set parsers (`parsePairArgs`, `parsePairListArgs`, `parsePairRevokeArgs`) own `-pyry-name` directly.
 
-`pairVerbList` is a single string constant updated in lockstep when verbs land (`#215` will append `revoke`). The dispatcher is deliberately ~10 lines, NOT factored into a generic helper — `runSessions` and `runPair` each carry their own switch by design (CLAUDE.md "Simplicity first"; the next sibling verb is one new case, not a refactor).
+`pairVerbList` is a single string constant updated in lockstep when verbs land (today: `"list, revoke"`). The dispatcher is deliberately ~10 lines, NOT factored into a generic helper — `runSessions` and `runPair` each carry their own switch by design (CLAUDE.md "Simplicity first"; each new sibling verb is one switch case, not a refactor).
 
-**Flags-vs-verb disambiguation.** `pyry pair --name=foo` has `--name=foo` as `args[0]`. The dispatcher must not treat that as an unknown verb. Real verbs are bare identifiers (no leading `-`); the `strings.HasPrefix(args[0], "-")` check routes flag-leading args to `runPairDefault` so the bare-pair flow keeps accepting `--name`/`--relay`. Unknown bare-verb tokens (`pyry pair revoke` before #215 lands) hit the usage-error path → exit 2.
+**Flags-vs-verb disambiguation.** `pyry pair --name=foo` has `--name=foo` as `args[0]`. The dispatcher must not treat that as an unknown verb. Real verbs are bare identifiers (no leading `-`); the `strings.HasPrefix(args[0], "-")` check routes flag-leading args to `runPairDefault` so the bare-pair flow keeps accepting `--name`/`--relay`. Unknown bare-verb tokens hit the usage-error path → exit 2.
 
 ## Surface
 
 ```
 pyry pair [-pyry-name=<instance>] [--name <device-label>] [--relay <url>]
 pyry pair list [-pyry-name=<instance>]
+pyry pair revoke [-pyry-name=<instance>] <name>
 ```
 
 | Flag | Purpose | Default |
@@ -215,13 +217,65 @@ E2E (`internal/e2e/pair_test.go`, `//go:build e2e`):
 
 - `TestPairList_E2E` — two sub-tests. "empty registry" runs `pyry pair list` on a fresh `t.TempDir()` HOME and asserts exact stdout `No paired devices.\n` + exit 0. "after pair" runs `pyry pair --name=phone-a` first, loads the registry directly to capture the expected `TokenHash[:8]`, then runs `pyry pair list` and asserts both `phone-a` and the prefix appear in stdout.
 
+## `pyry pair revoke <name>` (#215)
+
+Destructive operator action: remove the registry entry whose `Device.Name` equals `<name>`. Thin wiring on top of `Registry.Remove` + `Registry.Save`.
+
+```
+1. Parse flags + sole positional                              → exit 2 on parse / arg-count error
+2. resolveDevicesPath(name) → path                            (sanitized)
+3. devices.Load(path) → registry                              → exit 1 (wrapped) on I/O / parse error
+4. registry.Remove(<name>) → bool                             → exit 1 (direct) when false
+5. registry.Save(path)                                        → exit 1 (wrapped) on I/O error
+6. fmt.Printf("Revoked %s.\n", <name>) to stdout              → exit 0
+```
+
+`Registry.Remove` does the byte-exact name lookup and slice splice; the runner is deliberately a thin shell — no caller-side index search, no plain comparison. Cold-start (file missing or zero-byte) collapses to "not found" via `Registry.Load`'s contract, so step 3 never errors on a fresh HOME and step 4 returns `false` for any `<name>`.
+
+### Save-only-on-Remove invariant (the key design decision)
+
+`Registry.Save` runs only on the `true` branch of `Remove`. This is necessary for AC#5's "the on-disk registry is not rewritten" guarantee: even though `Save` is idempotent for unchanged content, on an empty cold-start registry it would create the file at `~/.pyry/<name>/devices.json` (`MkdirAll` + atomic rename of an empty `{"devices":[]}\n`). The not-found branch must be byte-identical to the pre-call state, which means short-circuiting before `Save`. The E2E "missing registry" sub-test pins this with `os.Stat == fs.ErrNotExist` after the call.
+
+### Exit-code asymmetry — direct exit on not-found, returned error on I/O
+
+Three exit branches share the value `1` but split on mechanism:
+
+| Failure | Mechanism | Stderr |
+|---|---|---|
+| Not found (`Remove` returns false) | direct `os.Exit(1)` | `pyry pair revoke: no device named <name>\n` |
+| `devices.Load` failure | `return fmt.Errorf("pair revoke: %w", err)` | `pyry: pair revoke: <wrapped>\n` |
+| `registry.Save` failure | `return fmt.Errorf("pair revoke: %w", err)` | `pyry: pair revoke: <wrapped>\n` |
+
+Direct `os.Exit(1)` for not-found suppresses `main.run`'s `pyry: ` prefix so the AC's byte-exact `pyry pair revoke: no device named <name>` is met without a doubled `pyry: pyry pair revoke: …`. I/O errors return-and-wrap so `main.run` adds the standard `pyry: ` for diagnostic value. The architect chose direct exit over a sentinel error (`var errNoDevice` + `errors.Is` check in `main.run`) because the sentinel would touch a second file for one consumer; AC#5 only constrains the byte-exact stderr text. Same pattern as `runPairList`'s exit-2 paths.
+
+Exit `2` is reserved for **usage** errors only — flag parse failure, missing positional (`pyry pair revoke`), extra positional (`pyry pair revoke a b`), or unknown flag (`--bogus`). All four go through `parsePairRevokeArgs` returning an error which `runPairRevoke` maps to direct `os.Exit(2)` with `pyry pair revoke: <err>` + a usage line. Stdlib `flag` stops at the first non-flag token, so `pyry pair revoke phone -pyry-name=foo` (flag-after-positional) would treat `-pyry-name=foo` as a second positional and exit 2 — same constraint as every other sibling subcommand; not a custom reorder pass.
+
+### Concurrency
+
+Same last-writer-wins contract as bare `pair`. Two concurrent `pair revoke` invocations against the same `devices.json` race at the `Load → Remove → Save` boundary; the later `Save` overwrites the earlier one. Out of scope; the fix (file lock at the `internal/devices` boundary) belongs to all callers, not this verb.
+
+### Tests
+
+Unit (`cmd/pyry/pair_test.go`):
+
+- `TestParsePairRevokeArgs` — table: happy (`phone`), with-instance (`-pyry-name=foo phone`), missing positional (`nil` → `missing device name`), extra positional (`a b` → `unexpected positional`), unknown flag (`--bogus phone` → `flag provided but not defined`). Pins `t.Setenv("PYRY_NAME", "")` for deterministic `defaultName()`.
+- `TestRunPairRevoke_RemovesEntry` — two-device fixture; call `runPairRevoke([]string{"alpha"})`; reload via `devices.Load`; assert one survivor (`bravo`) byte-for-byte (`Name`, `TokenHash`, `PairedAt.Equal`, `LastSeenAt.Equal`).
+- `TestRunPairRevoke_SaveFailure` — fixture as above, then `os.Chmod(<dir>, 0o500)`; assert returned error contains `pair revoke:`. Skipped on root and on filesystems where `chmod 0500` doesn't block atomic rename inside a tempdir owned by the test user (gated on a pre-flight `os.WriteFile` attempt that errors out).
+
+Not-found and missing-positional paths can't be unit-tested without `os.Exit` capture machinery (not present in this repo); they're covered E2E.
+
+E2E (`internal/e2e/pair_test.go`, `//go:build e2e`) — `TestPairRevoke_E2E` with three sub-tests, all using `RunBareIn(t, home, "pair", "revoke", …)`:
+
+- **removes one of two** — pair `phone-a`, pair `phone-b`, capture `phone-b`'s on-disk entry, `pyry pair revoke phone-a`; assert exit 0 + stdout exactly `Revoked phone-a.\n` + stderr empty + survivor's `TokenHash` and `PairedAt` byte-identical to the captured snapshot.
+- **not found** — pair `phone-a`, snapshot the file bytes, `pyry pair revoke ghost`; assert exit 1 + stderr exactly `pyry pair revoke: no device named ghost\n` + stdout empty + on-disk bytes unchanged (`bytes.Equal`).
+- **missing registry** — fresh HOME, no prior pair, `pyry pair revoke ghost`; assert exit 1 + same stderr + `os.Stat(<path>) == fs.ErrNotExist` after the call (the AC's "no file created" requirement).
+
 ## Open question (deferred)
 
 **Daemon staleness on warm `devices.json`.** When a Phase 3 daemon-side WS-handshake auth path lands, it will read `devices.json` once at startup and hold the in-memory `Registry`. A `pyry pair` invocation while the daemon is running will append on disk but leave the daemon's copy stale until its next `Load`. Mitigation (reload-on-write via fsnotify on `devices.json`, or a daemon-side `pair` control verb that mints in-process) is owned by the consumer ticket. Current wiring is the right shape: the storage primitive (`devices.Registry`) doesn't know about the daemon; the verb writes through it directly.
 
 ## Out of scope (deferred)
 
-- **`pyry pair revoke <name>`** — sibling (#215), calls `Remove(name)` then `Save`. Will append `revoke` to `pairVerbList` and add one switch case in `runPair`.
 - **Daemon-side `pair` control verb** — mirroring `pyry sessions new` once a WS-handshake auth path actually consumes `devices.json` in-process.
 - **`flock`/`fcntl` on `devices.json`** — fix for two-concurrent-`pair` races; belongs at the `devices.Registry` layer (a property of #209's API, not this wiring).
 - **Empty-relay e2e test** — would require swapping the default constant at build time; pinned by unit test instead.
@@ -241,3 +295,4 @@ E2E (`internal/e2e/pair_test.go`, `//go:build e2e`):
 - [ADR 010](../decisions/010-sessions-cli-sub-router.md) — `runSessions` sub-router shape that `runPair` mirrors (with the `parseClientFlags` deviation noted above).
 - `docs/specs/architecture/213-pair-command.md` — architect's spec for the bare-pair wiring slice.
 - `docs/specs/architecture/214-pair-list.md` — architect's spec for `pyry pair list`.
+- `docs/specs/architecture/215-pair-revoke.md` — architect's spec for `pyry pair revoke`.

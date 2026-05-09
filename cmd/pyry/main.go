@@ -1206,6 +1206,7 @@ Usage:
                                                   in ~/.pyry/<name>/devices.json,
                                                   print QR + paste-fallback payload
   pyry pair list [flags]                         list paired devices
+  pyry pair revoke <name> [flags]                revoke a paired device by Name
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry update [--check] [--version <v>]          download and install the latest

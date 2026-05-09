@@ -20,9 +20,8 @@ import (
 )
 
 // pairVerbList is the displayed verb list in `pyry pair` usage errors.
-// Update in lockstep with the switch in runPair when new sub-verbs land
-// (#215 will append "revoke").
-const pairVerbList = "list"
+// Update in lockstep with the switch in runPair when new sub-verbs land.
+const pairVerbList = "list, revoke"
 
 // resolveDevicesPath returns ~/.pyry/<sanitized-name>/devices.json. Falls
 // back to a CWD-relative path if $HOME can't be resolved (matches
@@ -117,6 +116,8 @@ func runPair(args []string) error {
 		switch args[0] {
 		case "list":
 			return runPairList(args[1:])
+		case "revoke":
+			return runPairRevoke(args[1:])
 		}
 		if !strings.HasPrefix(args[0], "-") {
 			fmt.Fprintf(os.Stderr, "pyry pair: unknown verb %q\n", args[0])
@@ -282,4 +283,66 @@ func renderPairList(list []devices.Device, w io.Writer) error {
 			d.Name, d.PairedAt.Format(time.RFC3339), lastSeen, prefix)
 	}
 	return tw.Flush()
+}
+
+// pairRevokeArgs is the parsed shape of `pyry pair revoke <name>`'s flag set.
+type pairRevokeArgs struct {
+	instanceName string // -pyry-name
+	deviceName   string // sole positional; the entry to remove
+}
+
+// parsePairRevokeArgs parses the flag set for `pyry pair revoke`. Only
+// -pyry-name is accepted, and exactly one positional (the device Name) is
+// required. Zero, two, or more positionals — or any unknown flag — is an
+// error propagated to the caller; runPairRevoke maps these to exit 2.
+func parsePairRevokeArgs(args []string) (pairRevokeArgs, error) {
+	fs := flag.NewFlagSet("pyry pair revoke", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	instance := fs.String("pyry-name", defaultName(), "instance name (state dir: ~/.pyry/<name>/)")
+	if err := fs.Parse(args); err != nil {
+		return pairRevokeArgs{}, err
+	}
+	switch fs.NArg() {
+	case 0:
+		return pairRevokeArgs{}, fmt.Errorf("missing device name")
+	case 1:
+		return pairRevokeArgs{instanceName: *instance, deviceName: fs.Arg(0)}, nil
+	default:
+		return pairRevokeArgs{}, fmt.Errorf("unexpected positional %q", fs.Arg(1))
+	}
+}
+
+// runPairRevoke implements `pyry pair revoke <name>`: load the device
+// registry for the resolved instance, remove the entry whose Name equals
+// <name>, and persist the change.
+//
+// Returns nil on success (writes "Revoked <name>.\n" to stdout, exit 0).
+// Calls os.Exit(2) directly for usage failures (flag parse, missing or
+// extra positional) — bypasses main's `pyry: ` prefix.
+// Calls os.Exit(1) directly for the not-found case ("no device named
+// <name>" stderr) — same prefix-bypass reason.
+// Returns a wrapped `fmt.Errorf("pair revoke: %w", err)` for I/O errors
+// (Load/Save) — main.run prefixes with `pyry: ` to give the full
+// `pyry: pair revoke: …` chain.
+func runPairRevoke(args []string) error {
+	parsed, err := parsePairRevokeArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pyry pair revoke:", err)
+		fmt.Fprintln(os.Stderr, "usage: pyry pair revoke [-pyry-name=<instance>] <name>")
+		os.Exit(2)
+	}
+	devicesPath := resolveDevicesPath(parsed.instanceName)
+	registry, err := devices.Load(devicesPath)
+	if err != nil {
+		return fmt.Errorf("pair revoke: %w", err)
+	}
+	if !registry.Remove(parsed.deviceName) {
+		fmt.Fprintf(os.Stderr, "pyry pair revoke: no device named %s\n", parsed.deviceName)
+		os.Exit(1)
+	}
+	if err := registry.Save(devicesPath); err != nil {
+		return fmt.Errorf("pair revoke: %w", err)
+	}
+	fmt.Printf("Revoked %s.\n", parsed.deviceName)
+	return nil
 }
