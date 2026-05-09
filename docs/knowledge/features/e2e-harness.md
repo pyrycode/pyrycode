@@ -491,12 +491,12 @@ Each restart test pre-writes exactly one `bootstrap: true, lifecycle_state:
 "active"` entry alongside the entries it cares about. The bootstrap-active
 anchor keeps the harness's ready gate working the conventional way: the
 supervisor spawns `/bin/sleep infinity`, the control server comes up, the
-ready-poll succeeds. This deliberately avoids the bootstrap-evicted
-permutation (warm-starting the bootstrap *itself* in `stateEvicted` enters
-`runEvicted` instead of spawning the child). That path is functionally
-distinct — "daemon comes up cleanly with an evicted bootstrap" — and
-deserves its own ticket so failures isolate cleanly. The three current
-tests are scoped to non-bootstrap survival.
+ready-poll succeeds. The bootstrap-evicted permutation — "daemon comes up
+cleanly with an evicted bootstrap on disk" — is functionally distinct
+(pre-fix would enter `runEvicted` instead of spawning the child), so it
+lives in its own file as `bootstrap_warm_start_test.go` (#253, see below).
+The three restart tests stay scoped to non-bootstrap survival; failures
+isolate cleanly between the two files.
 
 The lifecycle strings written to disk are `"active"` and `"evicted"` —
 exactly what `lifecycleState.String()` (`internal/sessions/session.go`)
@@ -560,6 +560,74 @@ intentionally — `internal/sessions`'s on-disk types are unexported, and
 exporting them solely for one test would invert the dependency direction.
 The schema is small and stable; if a field is added, the mirror grows it
 too.
+
+### `bootstrap_warm_start_test.go` — bootstrap warm-start carve-out (#253)
+
+Two tests pin [ADR 016](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md)'s
+load-layer carve-out at the e2e tier. `Pool.New` forces the bootstrap to
+warm-load as `stateActive` regardless of the persisted `lifecycle_state`,
+because nothing in supervisor-mode startup drives `Pool.Activate` on it
+(non-TTY stdin: launchd / systemd / piped wrapper). Non-bootstrap sessions
+keep their persisted state — lazy respawn on attach is the driver there.
+
+- **`TestE2E_BootstrapWarmStart_IgnoresEvictedOnDisk`** drives the
+  v0.10.1 regression class end-to-end. Two-phase shape: (Phase A)
+  `StartIn` cold so the daemon picks its own bootstrap UUID and writes
+  the registry, `waitForBootstrap` to capture it, `Stop`; (Phase B) plain
+  `readRegistry` / mutate `LifecycleState = "evicted"` on the bootstrap
+  entry / `writeRegistry` — race-free because no daemon is running
+  between the two `StartIn`s; (Phase C) `StartIn` warm against the
+  mutated registry, poll `pyry status` for `Phase: running` within 5 s
+  (matches the harness's `readyDeadline`; pre-fix the daemon parks
+  forever so any reasonable deadline fires). Negative-greps the v0.10.1
+  failure-mode signatures: `Started at:    0001-01-01T00:00:00Z` and
+  `Uptime:        2562047h47m16` (prefix-match because
+  `Duration.Round(time.Second)` of `math.MaxInt64` overflows back to the
+  input — the rendered sentinel is the full `2562047h47m16.854775807s`,
+  but matching the prefix keeps the assertion robust to a future change
+  that clamps before rounding). Cross-checks the wire view via
+  `pyry sessions list --json` decoded into `[]control.SessionInfo` and
+  asserts the bootstrap entry's `state == "active"` (`--json`, not the
+  table form, so the assertion rides a stable wire field rather than
+  tabwriter alignment).
+- **`TestE2E_BootstrapWarmStart_NonBootstrapEvictedPersists`** pins the
+  carve-out boundary: the load-layer special-case is bootstrap-only.
+  Single-phase — pre-seed two entries (bootstrap as `active`,
+  non-bootstrap as `evicted`), `StartIn`, then `waitForSessionState` on
+  the non-bootstrap UUID for `"evicted"` (5 s envelope absorbs the
+  warm-load reconciliation pass). Disk is the canonical observation
+  point because non-bootstrap sessions live on disk between minting and
+  the next consumer-driven `Activate`. Cross-checks the bootstrap stays
+  `active` via `pyry sessions list --json`. A future refactor that
+  over-corrects the bootstrap fix into "ignore evicted for *all*
+  sessions" trips this test even though Test 1 still passes.
+
+#### Why two-phase (not pre-seeded only) for Test 1
+
+A pre-seeded registry with `bootstrap=true, lifecycle_state="evicted"` and
+a single `StartIn` reproduces the bug structurally but not the user's
+trigger path (machine boots → daemon starts → idle eviction fires →
+daemon restarts via launchd / systemd / `pyry update` → hang). The
+two-phase shape (cold start → mutate → warm start) is faithful to that
+flow and lets the bootstrap UUID be daemon-authored rather than
+test-invented. The mutation step edits `lifecycle_state` only, leaving
+`UUID` / `created_at` / `last_active_at` / `bootstrap` intact —
+minimum-fidelity stand-in for "idle eviction had a chance to fire."
+
+The alternative (drive the cold daemon with `-pyry-idle-timeout=1s`,
+wait for the eviction, stop, restart) works but adds 1–2 s of timer
+waiting per run and couples the regression test to the idle-eviction
+timing. The two-phase mutate stays decoupled — the regression is in the
+warm-load layer, not the eviction layer.
+
+#### No new helpers
+
+All scaffolding reused verbatim: `newRegistryHome`, `writeRegistry`,
+`readRegistry`, `mustReadFile` from `restart_test.go`;
+`waitForBootstrap` from `cap_test.go`; `waitForSessionState` from
+`cap_test.go`. `registryFile` / `registryEntry` mirrors are package-
+internal under `package e2e` and are usable directly from the new file.
+Zero harness extensions, zero production-code changes.
 
 ## Failed-Start Pattern (`StartExpectingFailureIn`)
 
