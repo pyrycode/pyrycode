@@ -20,16 +20,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// convSweepInterval is the interval Pool.Run passes to
-// conversations.RunSweepLoop. Test-overridable; production callers do not
-// touch it — it stays at conversations.SweepInterval (one hour) for the
-// life of the process.
-//
-// Lives at the sessions-package level (rather than as a Config field) so it
-// is invisible to production callers. The integration test in this package
-// swaps it via t.Cleanup-driven save/restore around a Pool.Run exercise.
-var convSweepInterval = conversations.SweepInterval
-
 // allocatedTTL bounds how long a UUID stays in the freshly-allocated skip
 // set before being pruned. Defined as a var (not const) so tests can shrink
 // it.
@@ -93,6 +83,17 @@ type Config struct {
 	//
 	// Required when ConversationsRegistry is non-nil; ignored when nil.
 	ConversationsRegistryPath string
+
+	// SweepInterval, when > 0, overrides the conversations sweep tick
+	// interval Pool.Run passes to conversations.RunSweepLoop. Zero (the
+	// default) means use conversations.SweepInterval (one hour). Production
+	// callers leave this zero; the cmd/pyry -pyry-conv-sweep-interval flag
+	// (intended for e2e tests) plumbs a small duration here so the sweep
+	// loop can be exercised without waiting an hour.
+	//
+	// Ignored when ConversationsRegistry is nil (the sweep goroutine
+	// doesn't run at all in that case).
+	SweepInterval time.Duration
 
 	// IdleTimeout is the default per-session idle eviction window. A
 	// SessionConfig with IdleTimeout==0 inherits this value at New().
@@ -164,6 +165,16 @@ type Pool struct {
 	// goroutine. No lock needed.
 	convReg          *conversations.Registry
 	convRegistryPath string
+
+	// convSweepInterval is the resolved interval Pool.Run passes to
+	// conversations.RunSweepLoop. Set in New from cfg.SweepInterval, with
+	// conversations.SweepInterval as the zero-value fallback. Read-only
+	// after New — set once, consulted only by Pool.Run. No lock needed.
+	//
+	// In-package tests may overwrite this field directly after construction
+	// (mirrors the existing convReg / convRegistryPath pattern in
+	// pool_conv_sweep_test.go).
+	convSweepInterval time.Duration
 
 	allocated map[SessionID]time.Time
 
@@ -349,6 +360,10 @@ func New(cfg Config) (*Pool, error) {
 	if idleTimeout == 0 {
 		idleTimeout = cfg.IdleTimeout
 	}
+	sweepInterval := cfg.SweepInterval
+	if sweepInterval <= 0 {
+		sweepInterval = conversations.SweepInterval
+	}
 	sess := &Session{
 		id:           bootstrapID,
 		sup:          sup,
@@ -378,6 +393,7 @@ func New(cfg Config) (*Pool, error) {
 		claudeSessionsDir:  cfg.ClaudeSessionsDir,
 		convReg:            cfg.ConversationsRegistry,
 		convRegistryPath:   cfg.ConversationsRegistryPath,
+		convSweepInterval:  sweepInterval,
 		allocated:          make(map[SessionID]time.Time),
 		activeCap:          cfg.ActiveCap,
 		sessionTpl:         cfg.Bootstrap,
@@ -797,7 +813,7 @@ func (p *Pool) Run(ctx context.Context) error {
 	}
 
 	if p.convReg != nil {
-		interval := convSweepInterval
+		interval := p.convSweepInterval
 		g.Go(func() error {
 			return conversations.RunSweepLoop(gctx, p.convReg, p.convRegistryPath, interval, p.log)
 		})

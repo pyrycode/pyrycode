@@ -4,23 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 )
-
-// withConvSweepInterval temporarily overrides convSweepInterval for the
-// duration of t. Restored via t.Cleanup.
-func withConvSweepInterval(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := convSweepInterval
-	convSweepInterval = d
-	t.Cleanup(func() { convSweepInterval = prev })
-}
 
 // seedConvRegistry writes a conversations.json file with `archivable`
 // archive-eligible entries (LastUsedAt 60 days in the past) and `fresh`
@@ -61,13 +55,12 @@ func seedConvRegistry(t *testing.T, archivable, fresh int) (*conversations.Regis
 // sweep goroutine, that the goroutine actually invokes Sweep+Save, and that
 // the on-disk file ends with only the non-archivable survivors.
 func TestPool_Run_RegistersSweepLoop_HappyPath(t *testing.T) {
-	withConvSweepInterval(t, 5*time.Millisecond)
-
 	reg, path := seedConvRegistry(t, 2, 1)
 
 	pool := helperPoolWithSleepArgs(t)
 	pool.convReg = reg
 	pool.convRegistryPath = path
+	pool.convSweepInterval = 5 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -120,8 +113,6 @@ func TestPool_Run_RegistersSweepLoop_HappyPath(t *testing.T) {
 // ConversationsRegistry is nil, no sweep goroutine runs, and no Save happens
 // at any path the loop might have used.
 func TestPool_Run_NoSweepLoopWhenRegistryNil(t *testing.T) {
-	withConvSweepInterval(t, 1*time.Millisecond)
-
 	pool := helperPoolWithSleepArgs(t)
 	if pool.convReg != nil {
 		t.Fatalf("helperPoolWithSleepArgs unexpectedly set convReg")
@@ -147,5 +138,52 @@ func TestPool_Run_NoSweepLoopWhenRegistryNil(t *testing.T) {
 
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected %s to be absent (no sweep should have run); stat err = %v", path, err)
+	}
+}
+
+// TestPool_New_HonoursConfigSweepInterval pins the New-time wiring: a
+// non-zero Config.SweepInterval lands verbatim on Pool.convSweepInterval,
+// where Pool.Run will pick it up.
+func TestPool_New_HonoursConfigSweepInterval(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	cfg := Config{
+		Bootstrap: SessionConfig{
+			ClaudeBin: "/bin/sleep",
+		},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		SweepInterval: 7 * time.Millisecond,
+	}
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := pool.convSweepInterval; got != 7*time.Millisecond {
+		t.Errorf("convSweepInterval = %v, want 7ms", got)
+	}
+}
+
+// TestPool_New_DefaultSweepIntervalWhenConfigZero pins the zero-value
+// fallback: an unset Config.SweepInterval resolves to
+// conversations.SweepInterval.
+func TestPool_New_DefaultSweepIntervalWhenConfigZero(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	cfg := Config{
+		Bootstrap: SessionConfig{
+			ClaudeBin: "/bin/sleep",
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := pool.convSweepInterval; got != conversations.SweepInterval {
+		t.Errorf("convSweepInterval = %v, want %v (default)", got, conversations.SweepInterval)
 	}
 }
