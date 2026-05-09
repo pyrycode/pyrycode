@@ -193,6 +193,107 @@ func TestRegistry_Get(t *testing.T) {
 	}
 }
 
+func TestRegistry_Delete(t *testing.T) {
+	t.Parallel()
+	const aID ConversationID = "11111111-2222-4333-8444-555555555555"
+	const bID ConversationID = "22222222-2222-4333-8444-555555555555"
+	const cID ConversationID = "33333333-2222-4333-8444-555555555555"
+	const absentID ConversationID = "ffffffff-2222-4333-8444-555555555555"
+
+	t.Run("hit", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		if !r.Delete(aID) {
+			t.Fatal("Delete(aID) = false, want true")
+		}
+		if n := len(r.List()); n != 0 {
+			t.Errorf("len(List) after delete = %d, want 0", n)
+		}
+		if _, ok := r.Get(aID); ok {
+			t.Errorf("Get(aID) ok = true after Delete, want false")
+		}
+	})
+
+	t.Run("miss-empty-registry", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		if r.Delete(aID) {
+			t.Errorf("Delete on empty = true, want false")
+		}
+	})
+
+	t.Run("miss-non-matching", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		if r.Delete(absentID) {
+			t.Errorf("Delete(absent) = true, want false")
+		}
+		got, ok := r.Get(aID)
+		if !ok {
+			t.Fatal("Get(aID) = !ok after non-matching Delete, want untouched")
+		}
+		if got.Cwd != "/a" {
+			t.Errorf("Cwd = %q, want %q (untouched)", got.Cwd, "/a")
+		}
+	})
+
+	t.Run("preserves-order", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		r.Create(Conversation{ID: bID, Cwd: "/b"})
+		r.Create(Conversation{ID: cID, Cwd: "/c"})
+		if !r.Delete(bID) {
+			t.Fatal("Delete(bID) = false, want true")
+		}
+		got := r.List()
+		if len(got) != 2 {
+			t.Fatalf("len(List) = %d, want 2", len(got))
+		}
+		if got[0].ID != aID {
+			t.Errorf("got[0].ID = %q, want %q", got[0].ID, aID)
+		}
+		if got[1].ID != cID {
+			t.Errorf("got[1].ID = %q, want %q", got[1].ID, cID)
+		}
+	})
+
+	t.Run("snapshot-safety", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		r.Create(Conversation{ID: bID, Cwd: "/b"})
+
+		snap := r.List()
+		if len(snap) != 2 {
+			t.Fatalf("snapshot len = %d, want 2", len(snap))
+		}
+		if !r.Delete(snap[0].ID) {
+			t.Fatal("Delete(snap[0].ID) = false, want true")
+		}
+		if len(snap) != 2 {
+			t.Errorf("snapshot len after Delete = %d, want 2 (snapshot must be detached)", len(snap))
+		}
+		if snap[0].ID != aID || snap[1].ID != bID {
+			t.Errorf("snapshot mutated: got [%q, %q], want [%q, %q]", snap[0].ID, snap[1].ID, aID, bID)
+		}
+	})
+
+	t.Run("delete-twice-second-misses", func(t *testing.T) {
+		t.Parallel()
+		r := &Registry{}
+		r.Create(Conversation{ID: aID, Cwd: "/a"})
+		if !r.Delete(aID) {
+			t.Fatal("first Delete = false, want true")
+		}
+		if r.Delete(aID) {
+			t.Errorf("second Delete = true, want false")
+		}
+	})
+}
+
 func TestRegistry_SaveFilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix permission semantics required")

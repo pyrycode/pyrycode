@@ -8,6 +8,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 
 - **Phase 3 foundation (#217):** mutex-guarded `Registry` + atomic save + load. ID generator + validator (`NewID`, `ValidID`) co-located in the same package. Six exports on the registry: `Load`, `(*Registry).Save / Create / Get / List / Update`. One `ListFilter` struct.
 - **Promotion primitive (#218):** `(*Registry).Promote(id, name)` flips a discussion to a named channel under the registry lock; four exported sentinel errors (`ErrConversationNotFound`, `ErrConversationAlreadyPromoted`, `ErrPromotionNameInUse`, `ErrPromotionNameEmpty`) cover the refusal cases.
+- **Deletion primitive (#237):** `(*Registry).Delete(id) bool` removes a single entry by ID under the registry lock; consumed by the auto-archive sweep ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)). #217 explicitly deferred deletion until a real consumer surfaced; #220's sweep is that consumer.
 
 ## Surface
 
@@ -36,6 +37,7 @@ func (r *Registry) Create(c Conversation)
 func (r *Registry) Get(id ConversationID) (Conversation, bool)
 func (r *Registry) List(filter ...ListFilter) []Conversation
 func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool
+func (r *Registry) Delete(id ConversationID) bool
 func (r *Registry) Promote(id ConversationID, name string) error
 ```
 
@@ -188,6 +190,16 @@ Pointer-to-slice-element is the right shape because `Conversation` carries a `*s
 
 `Update` returns `bool`, not `(Conversation, bool)`. AC pins the no-return-value-for-the-post-state signature; if a future caller needs a post-mutation snapshot, add it then. Calling `Get(id)` after `Update` returns `true` works but races a concurrent `Update` on the same id — use the callback to read the post-state in place if that matters.
 
+### `Delete(id ConversationID) bool`
+
+Locate the entry whose `ID` matches and remove it via the slice-element-removal idiom (`r.conversations = append(r.conversations[:i], r.conversations[i+1:]...)`). Returns `true` on hit, `false` on miss. Mutex-guarded, no I/O, no validation, no `Save` — disk persistence stays with the caller, matching the `Create` / `Update` / `Promote` convention.
+
+Order-preserving: surrounding entries' relative order is unchanged. O(n) linear scan + O(n) shift, same complexity as `Get` / `Update`. Returns on first match — the registry does not enforce ID uniqueness on `Create`, but the only present consumer (`Sweep`) iterates a `List()` snapshot exactly once per entry, so a duplicated ID is visited and deleted twice.
+
+`List` returns a copy, so a snapshot taken before `Delete` is unaffected by the deletion: a caller iterating the snapshot can call `Delete` mid-loop without disturbing the iteration. This contract is pinned by the `delete-snapshot-safety` test row.
+
+The byte-exact `==` comparison on `ID` matches `Get`'s contract; no normalization. Does not race a concurrent `Create` of the same id — both serialize through `r.mu`.
+
 ### `Promote(id ConversationID, name string) error`
 
 In-memory primitive that turns a discussion into a named channel: flips `IsPromoted` to `true` and sets `Name` to a non-nil pointer to `name`. Validation, the uniqueness scan, and the two-field mutation all run under `r.mu`; on any refusal the registry is left untouched. Persistence is the caller's job — `Promote` does not call `Save`, matching the `Create` / `Update` convention.
@@ -233,6 +245,7 @@ New (no devices counterpart):
 - `TestRegistry_Update_PointerStability` — within `fn`, mutating `*Conversation` propagates to subsequent reads (pins the contract; trivially true given `&r.conversations[i]`).
 - `TestRegistry_Promote` (#218) — table-driven, one row per AC bullet: success, unknown id, already promoted, name conflict against another *promoted* record (refused), name conflict against an *unpromoted* record (accepted — pins uniqueness scope), empty name, whitespace-only name. Each refusal row also asserts the target is byte-equal to its pre-call state via `Get`.
 - `TestRegistry_Promote_DoesNotPersist` (#218) — `Save` → `Promote` → `Load` from the same path; the loaded registry shows `IsPromoted == false`, pinning that `Promote` does not call `Save` implicitly.
+- `TestRegistry_Delete` (#237) — table-driven: `hit` (seed 1, delete returns `true`, `Get` returns `ok=false`); `miss-empty-registry`; `miss-non-matching` (seed `A`, delete `B`, `A` untouched); `preserves-order` (seed `A`, `B`, `C`; delete `B`; `List` returns `[A, C]` in order — pins the order-preserving slice idiom against an accidental swap-with-last optimisation); `delete-snapshot-safety` (seed 2, take `snap := r.List()`, `Delete(snap[0].ID)`, assert `snap` unchanged in length and element identity — pins the documented "List returns a copy" contract from #217); `delete-twice-second-misses` (seed 1, delete returns `true`, second delete returns `false`).
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -242,7 +255,6 @@ New (no devices counterpart):
 
 ## Out of scope (deferred)
 
-- **`Remove` method.** Not in AC; conversations are not deleted in Phase 3 — they're archived via `IsPromoted` flips and history retention. If a future API ticket needs deletion, that ticket adds it with its own tests.
 - **Schema versioning.** Per AC: defer until first migration. The envelope shape reserves the field; add it then, not now.
 - **Daemon wiring.** This ticket lands the package; the supervisor / API layer that calls `Load` at startup and `Save` after mutations is a separate ticket.
 - **CLI / wire-protocol bindings of `Promote`.** The in-memory primitive landed in #218; `pyry conv promote` and the mobile `promote_conversation` frame (sentinel-to-wire-code mapping for `conversation.not_found` / `conversation.already_promoted` and the `name_in_use` / `name_empty` codes) are the still-deferred consumers.

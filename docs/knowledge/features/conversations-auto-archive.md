@@ -1,16 +1,17 @@
 # `internal/conversations` auto-archive
 
-Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Split into a pure predicate (this doc, #219) and a sweep loop that calls it on a timer (#220, not yet built).
+Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Split into a pure predicate (`ShouldArchive`, #219) and a pure iterate-and-apply primitive (`Sweep`, #237) that the future daemon-side ticker calls. The daemon wiring (load registry, ticker goroutine, save) is a sibling ticket downstream — neither piece here does I/O.
 
 ## What it is
 
-A single pure function:
+Two pure functions:
 
 ```go
 func ShouldArchive(c Conversation, now time.Time) bool
+func Sweep(reg *Registry, now time.Time) int
 ```
 
-Returns `true` iff `!c.IsPromoted && now.Sub(c.LastUsedAt) >= 30*24*time.Hour`. No I/O, no clock — the caller passes `now`. Lives in `internal/conversations/archive.go`.
+`ShouldArchive` returns `true` iff `!c.IsPromoted && now.Sub(c.LastUsedAt) >= 30*24*time.Hour`. `Sweep` iterates `reg.List()`, applies the predicate, calls `reg.Delete` on each match, and returns the count archived. No I/O, no clock — the caller passes `now`.
 
 ## Files
 
@@ -18,9 +19,11 @@ Returns `true` iff `!c.IsPromoted && now.Sub(c.LastUsedAt) >= 30*24*time.Hour`. 
 internal/conversations/
   archive.go          ShouldArchive + archiveIdleThreshold const (#219)
   archive_test.go     Table-driven boundary tests (#219)
+  sweep.go            Sweep — pure iterate-and-apply primitive (#237)
+  sweep_test.go       Table-driven seeded-registry tests (#237)
 ```
 
-Stdlib only (`time`). No new package surface beyond the one exported function.
+Stdlib only (`time`). No new package surface beyond two exported functions. `Registry.Delete` (also #237) is the mutation primitive `Sweep` calls — see [`features/conversations-registry.md` § Delete](conversations-registry.md).
 
 ## How it works
 
@@ -38,6 +41,26 @@ func ShouldArchive(c Conversation, now time.Time) bool {
 ```
 
 Pure value semantics. Safe to call from any goroutine. Cannot fail — reads two fields, returns a bool.
+
+`Sweep`'s body is a four-line composition:
+
+```go
+func Sweep(reg *Registry, now time.Time) int {
+    n := 0
+    for _, c := range reg.List() {
+        if ShouldArchive(c, now) {
+            if reg.Delete(c.ID) {
+                n++
+            }
+        }
+    }
+    return n
+}
+```
+
+The for-range walks the snapshot `List()` returns; `Delete`'s mutation of the underlying slice cannot disturb the loop because the snapshot is detached. The `if reg.Delete(...)` check is defensive against a hypothetical concurrent deletion between `List` and `Delete` — `n` only increments on confirmed removal. Returns `int`, not `(int, error)`: the body composes operations that cannot fail (`List`, `ShouldArchive`, `Delete`), so an error slot would be permanently dead. No goroutines spawned; runs on the caller's goroutine.
+
+`Sweep` does NOT call `reg.Save` — disk persistence is the daemon-wiring ticket's concern. Callers responsible for durability call `Save` themselves after `Sweep` returns.
 
 ## Decisions
 
@@ -57,13 +80,27 @@ Pin the established Go idiom for time-dependent rules: take `now time.Time` as a
 
 Per #216, `LastUsedAt` is "always present" on a `Conversation` (it has no `omitempty` JSON tag and is bumped on every user activity by the future API layer). A zero-value `LastUsedAt` would make `ShouldArchive` return `true` (any unpromoted record older than 30 days archives, and `time.Time{}` is far older than any plausible `now`) — that is the correct fallback if the invariant ever breaks. Adding a guard would defend against a failure mode the type's invariants already rule out.
 
-### Predicate-only, no sweep, no consumers
+### Predicate / sweep / wiring split
 
-Splitting the policy into a pure predicate (this ticket) and an I/O-bound sweep loop (#220) keeps each piece testable in isolation: the rule is a table-driven unit test with `time.Date(...)` literals; the sweep, when it lands, is tested by exercising its I/O contract (which records it asks to remove, what it does on `Save` failure) without needing to also re-test the rule. The predicate has zero consumers in this slice.
+Three slices: predicate (`ShouldArchive`, #219), sweep primitive (`Sweep`, #237), daemon wiring (ticker + load + save, future ticket). The first two are pure; the third does I/O. Each is testable in isolation — the rule is a four-row table-driven unit test with `time.Date(...)` literals; the sweep is a six-row table-driven test that seeds an in-memory `Registry` and asserts the count plus the survivors; the daemon wiring will be tested by exercising its I/O contract (load failure, save failure, tick interleave) without re-testing rule or sweep.
+
+### `Sweep` returns `int`, not `(int, error)`
+
+The body composes `List` (cannot fail), `ShouldArchive` (pure predicate), and `Delete` (cannot fail). An error slot would be permanently dead weight. The daemon-wiring ticket downstream is responsible for `Save` errors and any retry / observability around them — those are the operations that can actually fail.
+
+### `Sweep` lives in its own file (`sweep.go`)
+
+`registry.go` is the registry's data-mutation surface; `archive.go` holds the predicate. `Sweep` composes both — placing it in either file would couple unrelated concerns (a registry-internal change wouldn't necessarily touch sweep semantics). A third file keeps the boundary clean and matches the existing `archive.go` precedent.
+
+### `Registry.Delete` is the consumer-driven addition
+
+#217 explicitly deferred `Delete` until a real consumer surfaced ("conversations are not deleted in Phase 3 — they're archived via `IsPromoted` flips"). The auto-archive sweep is that consumer: archival is implemented as removal-from-registry. The two arrived together in #237 to keep the deletion semantics and the sweep semantics evolving in lockstep.
 
 ## Tests
 
-`archive_test.go`, table-driven, stdlib only. One test function `TestShouldArchive` with four rows, all anchored to a single deterministic `now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` and expressing each row's `LastUsedAt` as `now.Add(-d)` for the relevant `d`:
+### `TestShouldArchive` (`archive_test.go`)
+
+Table-driven, stdlib only. One test function `TestShouldArchive` with four rows, all anchored to a single deterministic `now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` and expressing each row's `LastUsedAt` as `now.Add(-d)` for the relevant `d`:
 
 | Name | `IsPromoted` | `LastUsedAt` offset | Expected |
 |---|---|---|---|
@@ -76,15 +113,35 @@ The first row pins the `IsPromoted` short-circuit (a promoted record with arbitr
 
 Use `time.Date(...)` (no monotonic-clock component) so `time.Time` arithmetic is deterministic across machines. See `lessons.md` § "JSON roundtrip strips monotonic-clock state" for the parallel rule on the persistence side.
 
+### `TestSweep` (`sweep_test.go`)
+
+Single primary table, one row per scenario. Each row seeds a `*Registry`, calls `Sweep(reg, now)`, asserts the returned count, the post-sweep `len(reg.List())`, and that every surviving entry passes `!ShouldArchive(c, now) || c.IsPromoted`. Anchored to the same `now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` as the predicate test:
+
+| Row | Seed | Expected count |
+|---|---|---|
+| empty-registry | 0 entries | 0 |
+| all-archivable | 3 unpromoted, `LastUsedAt = now-31d` | 3 |
+| none-archivable-fresh | 2 unpromoted, `LastUsedAt = now-7d` | 0 |
+| none-archivable-promoted-but-idle | 2 promoted, `LastUsedAt = now-365d` | 0 |
+| mixed | 2 archivable + 2 fresh-unpromoted + 2 promoted-but-idle | 2 |
+| boundary-exactly-30-days | 1 unpromoted, `LastUsedAt = now-30d` | 1 |
+
+The `boundary-exactly-30-days` row mirrors the predicate's "exactly 30 days idle" row at the sweep level — pins that the inclusive boundary survives the iterate-and-apply layer. The `none-archivable-promoted-but-idle` row pins that `Sweep` does not delete promoted records regardless of idle time. Promoted-entry name fields stay zero (`*string` nil) — `ShouldArchive` short-circuits on `IsPromoted` before touching `Name`.
+
+Concurrent invocation is not tested here — `Sweep` runs on the caller's goroutine and `TestRegistry_ConcurrentReadWrite` already exercises `Registry`'s mutex discipline. Persistence is not tested either — `Sweep` does not call `Save`; the doc comment is the contract.
+
 ## Out of scope
 
-- Sweep loop / archive action — #220 owns iterating the registry, calling `ShouldArchive`, and removing or moving the matching records.
+- Daemon-side ticker, load-on-tick, save-after-sweep, logging or metrics — separate downstream ticket. `Sweep` is a primitive, not an operator.
 - Archive destination — Phase 3 archives by removing the row (history retention is a separate concern); a future ticket can add an `archived.json` sidecar if recoverable archive is asked for.
 - Configurable threshold — exported knob deferred until a real ask.
 - Integration with `LastUsedAt` bumps — the future conversations API (rotate session, attach, send message) is what advances `LastUsedAt`; the predicate only reads it.
+- Clock interface / `Clock` type for injection — `now time.Time` is the injection point; tests pass deterministic literals, no fake clock needed.
+- Map-based registry indexing for O(1) `Delete` — premature; the registry size and call frequency don't warrant it.
 
 ## Related
 
 - [`features/conversations-package.md`](conversations-package.md) — the `Conversation` type, specifically the `IsPromoted` and `LastUsedAt` fields the predicate reads.
-- [`features/conversations-registry.md`](conversations-registry.md) — the on-disk registry the sweep (#220) will iterate.
-- [`docs/specs/architecture/219-auto-archive-predicate.md`](../../specs/architecture/219-auto-archive-predicate.md) — architect's spec for this ticket.
+- [`features/conversations-registry.md`](conversations-registry.md) — the on-disk registry the sweep iterates; `Registry.Delete` is the mutation primitive `Sweep` calls.
+- [`docs/specs/architecture/219-auto-archive-predicate.md`](../../specs/architecture/219-auto-archive-predicate.md) — architect's spec for the predicate (#219).
+- [`docs/specs/architecture/237-conv-sweep-primitive.md`](../../specs/architecture/237-conv-sweep-primitive.md) — architect's spec for the sweep primitive (#237).
