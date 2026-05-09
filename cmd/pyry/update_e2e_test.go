@@ -34,13 +34,13 @@ import (
 )
 
 const (
-	e2eUpdReadyDeadline   = 5 * time.Second
-	e2eUpdReadyPollGap    = 50 * time.Millisecond
-	e2eUpdTermGrace       = 3 * time.Second
-	e2eUpdKillGrace       = 1 * time.Second
-	e2eUpdRunTimeout      = 10 * time.Second
-	e2eUpdPhaseDeadline   = 3 * time.Second
-	e2eUpdPhasePollGap    = 50 * time.Millisecond
+	e2eUpdReadyDeadline = 5 * time.Second
+	e2eUpdReadyPollGap  = 50 * time.Millisecond
+	e2eUpdTermGrace     = 3 * time.Second
+	e2eUpdKillGrace     = 1 * time.Second
+	e2eUpdRunTimeout    = 10 * time.Second
+	e2eUpdPhaseDeadline = 3 * time.Second
+	e2eUpdPhasePollGap  = 50 * time.Millisecond
 )
 
 type runResult struct {
@@ -50,9 +50,10 @@ type runResult struct {
 }
 
 // TestUpdate_HappyPath_E2E is the release-acceptance gate for the
-// fetch → verify → atomic-replace → restart → smoke chain. It is the
-// regression guard for v0.10.1 (supervisor stuck at Phase: starting after
-// auto-restart with non-TTY stdin).
+// fetch → verify → atomic-replace → restart → smoke chain. It is also
+// the structural smoke check for the supervisor-startup-with-stdin-closed
+// path (the v0.10.1-class shape, though the specific evicted-bootstrap
+// reproducer is exercised by internal/e2e/bootstrap_warm_start_test.go).
 func TestUpdate_HappyPath_E2E(t *testing.T) {
 	srcBin := buildPyryBinE2E(t)
 
@@ -76,7 +77,7 @@ func TestUpdate_HappyPath_E2E(t *testing.T) {
 	// Spawn the pre-update daemon. Stdin defaults to nil → Go's exec
 	// wires /dev/null, satisfying AC#2's "stdin closed" requirement.
 	socket := filepath.Join(home, "pyry.sock")
-	cmd1, stderr1, done1 := spawnDaemonE2E(t, targetPath, home, socket)
+	cmd1, stdout1, stderr1, done1 := spawnDaemonE2E(t, targetPath, home, socket)
 	cmd1Stopped := false
 	t.Cleanup(func() {
 		if cmd1Stopped {
@@ -85,7 +86,7 @@ func TestUpdate_HappyPath_E2E(t *testing.T) {
 		_ = stopDaemonE2E(cmd1, done1, socket)
 	})
 	if err := waitForSocketE2E(socket, done1, e2eUpdReadyDeadline); err != nil {
-		t.Fatalf("daemon 1 not ready: %v\nstderr:\n%s", err, stderr1.String())
+		t.Fatalf("daemon 1 not ready: %v\nstdout:\n%s\nstderr:\n%s", err, stdout1.String(), stderr1.String())
 	}
 	pidBefore := cmd1.Process.Pid
 
@@ -107,6 +108,7 @@ func TestUpdate_HappyPath_E2E(t *testing.T) {
 	// operator's real launchd/systemd.
 	var (
 		cmd2    *exec.Cmd
+		stdout2 *bytes.Buffer
 		stderr2 *bytes.Buffer
 		done2   chan struct{}
 	)
@@ -115,9 +117,9 @@ func TestUpdate_HappyPath_E2E(t *testing.T) {
 			return fmt.Errorf("stop daemon 1: %w", err)
 		}
 		cmd1Stopped = true
-		cmd2, stderr2, done2 = spawnDaemonE2E(t, targetPath, home, socket)
+		cmd2, stdout2, stderr2, done2 = spawnDaemonE2E(t, targetPath, home, socket)
 		if err := waitForSocketE2E(socket, done2, e2eUpdReadyDeadline); err != nil {
-			return fmt.Errorf("daemon 2 not ready: %w (stderr: %s)", err, stderr2.String())
+			return fmt.Errorf("daemon 2 not ready: %w (stdout: %s, stderr: %s)", err, stdout2.String(), stderr2.String())
 		}
 		return nil
 	}
@@ -175,8 +177,8 @@ func TestUpdate_HappyPath_E2E(t *testing.T) {
 	// Phase advances past `starting` within a bounded window. Polling
 	// rather than single-shot because supervisor.Run sets Phase to
 	// Running asynchronously after onSpawn fires; the control socket
-	// can be dialable a few ms before that. v0.10.1's regression would
-	// never clear within e2eUpdPhaseDeadline.
+	// can be dialable a few ms before that. A v0.10.1-shaped startup
+	// hang would never clear within e2eUpdPhaseDeadline.
 	statusRes := waitForPhasePastStartingE2E(t, targetPath, home, socket)
 	if statusRes.ExitCode != 0 {
 		t.Fatalf("pyry status exit=%d\nstdout:\n%s\nstderr:\n%s",
@@ -258,7 +260,7 @@ func childEnvE2E(home string) []string {
 // spawnDaemonE2E forks pyry from bin with the standard test flag set
 // (sleep-as-claude, idle eviction off, -pyry-name=test). Stdin is left nil
 // — Go's exec wires /dev/null. Caller is responsible for stop/cleanup.
-func spawnDaemonE2E(t *testing.T, bin, home, socket string) (*exec.Cmd, *bytes.Buffer, chan struct{}) {
+func spawnDaemonE2E(t *testing.T, bin, home, socket string) (*exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
 	t.Helper()
 	args := []string{
 		"-pyry-socket=" + socket,
@@ -281,7 +283,7 @@ func spawnDaemonE2E(t *testing.T, bin, home, socket string) (*exec.Cmd, *bytes.B
 		_ = cmd.Wait()
 		close(doneCh)
 	}()
-	return cmd, stderr, doneCh
+	return cmd, stdout, stderr, doneCh
 }
 
 // waitForSocketE2E polls until the daemon's control socket is dialable,
@@ -373,8 +375,8 @@ func runVerbE2E(t *testing.T, bin, home, socket, verb string, args ...string) ru
 // waitForPhasePastStartingE2E polls `pyry status` until the reported phase
 // is anything other than `starting`, returning the last successful result.
 // Fails the test if the phase remains `starting` past e2eUpdPhaseDeadline
-// (the v0.10.1 regression signature: socket dialable but supervisor never
-// advances out of the starting phase).
+// (a v0.10.1-shaped failure signature: socket dialable but supervisor
+// never advances out of the starting phase).
 func waitForPhasePastStartingE2E(t *testing.T, bin, home, socket string) runResult {
 	t.Helper()
 	deadline := time.Now().Add(e2eUpdPhaseDeadline)
@@ -384,15 +386,15 @@ func waitForPhasePastStartingE2E(t *testing.T, bin, home, socket string) runResu
 		if last.ExitCode != 0 {
 			return last
 		}
-		phase := parsePhaseE2E(last.Stdout)
-		if phase == "" {
+		phase, ok := parsePhaseE2E(last.Stdout)
+		if !ok {
 			t.Fatalf("pyry status missing Phase: line:\n%s", last.Stdout)
 		}
 		if phase != "starting" {
 			return last
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("post-update daemon stuck at Phase: starting after %s (v0.10.1 regression):\n%s",
+			t.Fatalf("post-update daemon stuck at Phase: starting after %s (v0.10.1-shaped startup hang):\n%s",
 				e2eUpdPhaseDeadline, last.Stdout)
 		}
 		time.Sleep(e2eUpdPhasePollGap)
@@ -400,17 +402,18 @@ func waitForPhasePastStartingE2E(t *testing.T, bin, home, socket string) runResu
 }
 
 // parsePhaseE2E pulls the phase value from a `pyry status` stdout block.
-// Returns the empty string when no `Phase:` line is present.
-func parsePhaseE2E(stdout []byte) string {
+// The bool is false when no `Phase:` line is present; an empty value on a
+// present `Phase:` line returns ("", true).
+func parsePhaseE2E(stdout []byte) (string, bool) {
 	for _, line := range strings.Split(string(stdout), "\n") {
 		if !strings.HasPrefix(line, "Phase:") {
 			continue
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return ""
+			return "", true
 		}
-		return fields[1]
+		return fields[1], true
 	}
-	return ""
+	return "", false
 }
