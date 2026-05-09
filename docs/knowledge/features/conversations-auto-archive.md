@@ -1,6 +1,6 @@
 # `internal/conversations` auto-archive
 
-Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Three slices: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), and the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract. The daemon wiring (load `conversations.json` at startup, plumb the `*Registry` into `Pool.Run`'s errgroup, choose the registry path) is sibling ticket #243.
+Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Four slices: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract, and the daemon-side wiring (#243) that loads `conversations.json` at startup in `cmd/pyry/main.go` and registers the sweep loop as a sibling goroutine to the rotation watcher inside `Pool.Run`'s errgroup.
 
 ## What it is
 
@@ -234,12 +234,81 @@ The re-seed is load-bearing: after the first tick the registry is empty, so with
 
 `discardLogger()` returns a no-op `*slog.Logger` for tests that don't read logs. `captureLogger()` returns a logger writing to a `*syncBuffer` (mutex-wrapped `bytes.Buffer`) — `bytes.Buffer` is not safe for concurrent use, and the loop goroutine writes while the test reads. Text handler is sufficient: `level=INFO` / `level=ERROR` / `count=N` / `archived=N` are visible substrings. Both fixtures and the `seedArchivables` / `brokenSavePath` / `waitFor` / `countSubstring` helpers are co-located in the test file; not promoted (one consumer per package today).
 
+## Daemon wiring (#243)
+
+`cmd/pyry/main.go` owns startup `Load` + path resolution; `internal/sessions/Pool.Run` owns the sweep goroutine's supervision. The split keeps `internal/sessions` path-agnostic about `conversations.json` (the consumer hands it an already-loaded `*Registry`).
+
+### Path resolver
+
+```go
+// cmd/pyry/main.go
+func resolveConversationsRegistryPath(name string) string {
+    home, err := os.UserHomeDir()
+    if err != nil || home == "" {
+        return filepath.Join(sanitizeName(name), "conversations.json")
+    }
+    return filepath.Join(home, ".pyry", sanitizeName(name), "conversations.json")
+}
+```
+
+Mirrors `resolveRegistryPath` byte-for-byte. Co-located with `resolveRegistryPath` so the symmetry is obvious. Not refactored into a shared `resolveDataPath(name, filename)`; per the project's "simplicity first" rule, two file-shaped resolvers is fine — extraction becomes interesting at three.
+
+### Startup `Load`
+
+```go
+// runSupervisor, after tryAutoAttach
+convReg, err := conversations.Load(convRegistryPath)
+if err != nil {
+    return fmt.Errorf("loading conversations: %w", err)
+}
+```
+
+Placed AFTER `tryAutoAttach` returns: auto-attach short-circuits the supervisor entirely, so loading the registry on the auto-attach path is wasted work and would surface a startup-style error in a foreground attach context. A missing file is a benign cold start (per `Load`'s contract); malformed JSON fails startup with `pyry: loading conversations: registry: parse <path>: <err>`.
+
+### `sessions.Config` plumbing
+
+Two new fields on `sessions.Config` carry the loaded handle and the path:
+
+```go
+type Config struct {
+    // ...
+    ConversationsRegistry     *conversations.Registry  // nil disables the sweep
+    ConversationsRegistryPath string                    // required when registry non-nil
+}
+```
+
+Mirrored by unexported `Pool.convReg` / `Pool.convRegistryPath`, set once in `New`, read-only thereafter. No validation of "non-nil registry implies non-empty path" — the cmd/pyry call site sets both atomically and a misuse surfaces as a Save failure on the first archive-eligible tick (logged + swallowed by `RunSweepLoop`, loop survives).
+
+### `Pool.Run` errgroup wiring
+
+Sibling registration to the rotation watcher block, gated on `p.convReg != nil`:
+
+```go
+if p.convReg != nil {
+    interval := convSweepInterval
+    g.Go(func() error {
+        return conversations.RunSweepLoop(gctx, p.convReg, p.convRegistryPath, interval, p.log)
+    })
+}
+```
+
+`RunSweepLoop` returns nil on `gctx.Done()`, so the errgroup's first-non-nil-wins post-mortem signal is never claimed by sweep cancellation — whatever caused the cancellation surfaces cleanly.
+
+### Test seam: `convSweepInterval`
+
+Unexported package-level `var convSweepInterval = conversations.SweepInterval` lives in `internal/sessions/pool.go` next to `newProbe`. The integration test swaps it via `t.Cleanup` save/restore. Not a `Config.ConversationsSweepInterval` field — there is no operator use case for tuning the sweep cadence (one-hour ticks against a 30-day archive threshold), and a knob would create a documentation obligation for no production benefit.
+
+### Integration test (`pool_conv_sweep_test.go`)
+
+In-package, not `internal/e2e`. Two tests:
+
+- `TestPool_Run_RegistersSweepLoop_HappyPath` — seeds 2 archivable + 1 fresh entry on disk, builds `helperPoolWithSleepArgs(t)` with `/bin/sleep 3600` as the bootstrap so `Pool.Run` can shutdown cleanly without a real claude binary, sets `pool.convReg` / `pool.convRegistryPath` directly, and polls the on-disk file via `conversations.Load` until `len(reg2.List()) == 1`. Then cancels and asserts `Pool.Run` returns `nil` or `context.Canceled` within 5s; final on-disk `Load` shows the single fresh survivor.
+- `TestPool_Run_NoSweepLoopWhenRegistryNil` — uses `helperPoolWithSleepArgs` without setting `convReg`; runs the pool for 50ms at a 1ms test interval, cancels, asserts a sentinel path under `t.TempDir()` was never created (`fs.ErrNotExist`). Pins the gate.
+
+`TestResolveConversationsRegistryPath` in `cmd/pyry/args_test.go` covers the resolver: happy path with `t.Setenv("HOME", …)`, plus `name = "../etc"` to confirm `sanitizeName` keeps the result inside `~/.pyry/`.
+
 ## Out of scope
 
-- Loading `conversations.json` at daemon startup — sibling #243, in `cmd/pyry/main.go`.
-- Plumbing `*Registry` through `Pool.Run`'s errgroup or whatever supervision surface #243 picks — sibling #243.
-- Choosing the registry path (likely `~/.pyry/conversations.json` per [`features/conversations-registry.md`](conversations-registry.md)) — sibling #243.
-- e2e via the daemon — explicitly the sibling #243's territory.
 - A configurable sweep interval flag or env var — AC pins `time.Hour` and "Don't expose it as a flag." If a real operator ask surfaces, layer a `SweepInterval var = time.Hour` later.
 - Final on-shutdown sweep — AC explicit "does NOT perform any final on-shutdown sweep."
 - Metrics emission (counter of archive runs, histogram of archived counts) — no Phase 3 metrics surface exists yet; defer until one does.
@@ -258,3 +327,5 @@ The re-seed is load-bearing: after the first tick the registry is empty, so with
 - [`docs/specs/architecture/219-auto-archive-predicate.md`](../../specs/architecture/219-auto-archive-predicate.md) — architect's spec for the predicate (#219).
 - [`docs/specs/architecture/237-conv-sweep-primitive.md`](../../specs/architecture/237-conv-sweep-primitive.md) — architect's spec for the sweep primitive (#237).
 - [`docs/specs/architecture/242-conv-sweep-loop.md`](../../specs/architecture/242-conv-sweep-loop.md) — architect's spec for the loop wrapper (#242).
+- [`docs/specs/architecture/243-conv-daemon-wiring.md`](../../specs/architecture/243-conv-daemon-wiring.md) — architect's spec for the daemon wiring (#243).
+- [`features/sessions-package.md`](sessions-package.md) — `Pool.Run`'s errgroup hosts the sweep goroutine alongside the rotation watcher; `Config.ConversationsRegistry` / `ConversationsRegistryPath` are the plumbing fields.
