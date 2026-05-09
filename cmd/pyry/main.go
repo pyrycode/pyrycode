@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/control"
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/install"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
@@ -94,6 +95,17 @@ func resolveRegistryPath(name string) string {
 		return filepath.Join(sanitizeName(name), "sessions.json")
 	}
 	return filepath.Join(home, ".pyry", sanitizeName(name), "sessions.json")
+}
+
+// resolveConversationsRegistryPath returns
+// ~/.pyry/<sanitized-name>/conversations.json. Falls back to a CWD-relative
+// path if $HOME can't be resolved (matches resolveRegistryPath's contract).
+func resolveConversationsRegistryPath(name string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(sanitizeName(name), "conversations.json")
+	}
+	return filepath.Join(home, ".pyry", sanitizeName(name), "conversations.json")
 }
 
 // resolveClaudeSessionsDir returns the directory where claude writes
@@ -346,6 +358,7 @@ func runSupervisor(args []string) error {
 	}
 	socketPath := resolveSocketPath(*socketFlag, *name)
 	registryPath := resolveRegistryPath(*name)
+	convRegistryPath := resolveConversationsRegistryPath(*name)
 	claudeSessionsDir := resolveClaudeSessionsDir(*workdir)
 
 	// Phase 1.3c-2: foreground binary auto-attaches when the daemon
@@ -353,6 +366,11 @@ func runSupervisor(args []string) error {
 	// every failure mode except "definitely registered".
 	if handled, err := tryAutoAttach(socketPath, claudeArgs); handled {
 		return err
+	}
+
+	convReg, err := conversations.Load(convRegistryPath)
+	if err != nil {
+		return fmt.Errorf("loading conversations: %w", err)
 	}
 
 	level := slog.LevelInfo
@@ -381,11 +399,13 @@ func runSupervisor(args []string) error {
 	defer cancel()
 
 	pool, err := sessions.New(sessions.Config{
-		Logger:            logger,
-		RegistryPath:      registryPath,
-		ClaudeSessionsDir: claudeSessionsDir,
-		IdleTimeout:       *idleTimeout,
-		ActiveCap:         *activeCap,
+		Logger:                    logger,
+		RegistryPath:              registryPath,
+		ClaudeSessionsDir:         claudeSessionsDir,
+		IdleTimeout:               *idleTimeout,
+		ActiveCap:                 *activeCap,
+		ConversationsRegistry:     convReg,
+		ConversationsRegistryPath: convRegistryPath,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    *workdir,

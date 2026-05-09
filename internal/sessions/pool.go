@@ -14,10 +14,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"golang.org/x/sync/errgroup"
 )
+
+// convSweepInterval is the interval Pool.Run passes to
+// conversations.RunSweepLoop. Test-overridable; production callers do not
+// touch it — it stays at conversations.SweepInterval (one hour) for the
+// life of the process.
+//
+// Lives at the sessions-package level (rather than as a Config field) so it
+// is invisible to production callers. The integration test in this package
+// swaps it via t.Cleanup-driven save/restore around a Pool.Run exercise.
+var convSweepInterval = conversations.SweepInterval
 
 // allocatedTTL bounds how long a UUID stays in the freshly-allocated skip
 // set before being pruned. Defined as a var (not const) so tests can shrink
@@ -64,6 +75,24 @@ type Config struct {
 	// Production callers in cmd/pyry resolve this via
 	// DefaultClaudeSessionsDir from cfg.Bootstrap.WorkDir.
 	ClaudeSessionsDir string
+
+	// ConversationsRegistry, when non-nil, enables the periodic auto-archive
+	// sweep goroutine inside Pool.Run. The registry must already be Loaded
+	// by the caller (cmd/pyry handles the conversations.Load call so the
+	// sessions package stays path-agnostic about conversations.json — see
+	// docs/knowledge/features/conversations-registry.md).
+	//
+	// nil disables the sweep goroutine entirely (test default; existing
+	// pool tests construct Config without this field and remain unchanged).
+	ConversationsRegistry *conversations.Registry
+
+	// ConversationsRegistryPath is the on-disk path of conversations.json
+	// — passed to RunSweepLoop's Save call after each non-empty tick. In
+	// production this is always ~/.pyry/<sanitized-name>/conversations.json
+	// — see cmd/pyry resolveConversationsRegistryPath.
+	//
+	// Required when ConversationsRegistry is non-nil; ignored when nil.
+	ConversationsRegistryPath string
 
 	// IdleTimeout is the default per-session idle eviction window. A
 	// SessionConfig with IdleTimeout==0 inherits this value at New().
@@ -128,7 +157,15 @@ type Pool struct {
 	log               *slog.Logger
 	registryPath      string
 	claudeSessionsDir string
-	allocated         map[SessionID]time.Time
+
+	// convReg and convRegistryPath mirror Config.ConversationsRegistry /
+	// .ConversationsRegistryPath. Read-only after New — set once,
+	// consulted only by Pool.Run to decide whether to register the sweep
+	// goroutine. No lock needed.
+	convReg          *conversations.Registry
+	convRegistryPath string
+
+	allocated map[SessionID]time.Time
 
 	// activeCap mirrors Config.ActiveCap. Read-only after New, so no lock
 	// is needed to read it. Zero means uncapped — see Config.ActiveCap.
@@ -339,6 +376,8 @@ func New(cfg Config) (*Pool, error) {
 		log:                cfg.Logger,
 		registryPath:       cfg.RegistryPath,
 		claudeSessionsDir:  cfg.ClaudeSessionsDir,
+		convReg:            cfg.ConversationsRegistry,
+		convRegistryPath:   cfg.ConversationsRegistryPath,
 		allocated:          make(map[SessionID]time.Time),
 		activeCap:          cfg.ActiveCap,
 		sessionTpl:         cfg.Bootstrap,
@@ -704,10 +743,11 @@ func (p *Pool) Default() *Session {
 	return p.sessions[p.bootstrap]
 }
 
-// Run blocks until ctx is cancelled, supervising every session in the pool
-// and (when ClaudeSessionsDir is set) running the rotation watcher alongside
-// it. errgroup ties the goroutines together: cancellation propagates, and
-// Wait returns the first non-nil error.
+// Run blocks until ctx is cancelled, supervising every session in the pool,
+// running the rotation watcher (when ClaudeSessionsDir is set) and the
+// conversations auto-archive sweep loop (when ConversationsRegistry is set)
+// alongside it. errgroup ties the goroutines together: cancellation
+// propagates, and Wait returns the first non-nil error.
 //
 // Phase 1.1+ extends the fan-out to one supervisor.Run goroutine per session
 // — the errgroup wrapper introduced here is the extension point.
@@ -754,6 +794,13 @@ func (p *Pool) Run(ctx context.Context) error {
 		} else {
 			g.Go(func() error { return w.Run(gctx) })
 		}
+	}
+
+	if p.convReg != nil {
+		interval := convSweepInterval
+		g.Go(func() error {
+			return conversations.RunSweepLoop(gctx, p.convReg, p.convRegistryPath, interval, p.log)
+		})
 	}
 
 	return g.Wait()

@@ -387,6 +387,29 @@ func TestResolveSocketPath(t *testing.T) {
 	})
 }
 
+// TestResolveConversationsRegistryPath confirms the per-instance layout
+// (~/.pyry/<sanitized-name>/conversations.json) and that the name is
+// sanitized — defending against PYRY_NAME=../etc / similar.
+func TestResolveConversationsRegistryPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got := resolveConversationsRegistryPath("test")
+	want := filepath.Join(home, ".pyry", "test", "conversations.json")
+	if got != want {
+		t.Errorf("resolveConversationsRegistryPath(%q)=%q want %q", "test", got, want)
+	}
+
+	traversed := resolveConversationsRegistryPath("../etc")
+	rel, err := filepath.Rel(filepath.Join(home, ".pyry"), traversed)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Errorf("resolveConversationsRegistryPath(%q)=%q escapes ~/.pyry (rel=%q)", "../etc", traversed, rel)
+	}
+}
+
 func TestSanitizeName(t *testing.T) {
 	t.Parallel()
 
