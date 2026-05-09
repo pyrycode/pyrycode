@@ -176,7 +176,13 @@ func (w *Watcher) handleCreate(ctx context.Context, fullPath string) {
 			continue
 		}
 		expected := filepath.Join(w.resolvedDir, base)
-		if filepath.Clean(open) != expected {
+		openResolved, resolveErr := filepath.EvalSymlinks(open)
+		if resolveErr != nil {
+			w.cfg.Logger.Debug("rotation: EvalSymlinks on probe path failed; falling back to literal",
+				"path", open, "err", resolveErr)
+			openResolved = filepath.Clean(open)
+		}
+		if openResolved != expected {
 			continue
 		}
 		w.cfg.Logger.Info("rotation: detected /clear", "from", ref.ID, "to", stem, "pid", ref.PID)
