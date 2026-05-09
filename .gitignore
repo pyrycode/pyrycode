@@ -26,5 +26,11 @@
 agents/
 
 # CodeGraph index (used by dispatcher worktree symlink + interactive
-# Claude Code sessions for symbol-level code intel — local cache only)
-.codegraph/
+# Claude Code sessions for symbol-level code intel — local cache only).
+# No trailing slash: matches both directories AND symlinks. The trailing
+# slash variant `.codegraph/` matches directories only, which let the
+# dispatcher's worktree symlink at `<wt>/.codegraph` slip past gitignore
+# and get auto-committed (commit 30f3d53, "architect: auto-commit
+# uncommitted changes for #237"). Result: a tracked symlink-to-self
+# that `git checkout -- .` kept restoring on every cleanup.
+.codegraph
