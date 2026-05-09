@@ -24,11 +24,14 @@ import (
 // fd open in the client; 1.3c-2-e2e-*: foreground auto-attach) reuse
 // startStdioAttach for their own scenarios.
 func TestE2E_AttachStdio_BytesRoundTrip(t *testing.T) {
-	// Blocked on #167 — `pyry attach --stdio` is rejected by
-	// parseClientFlags before parseAttachArgs runs, so the harness can't
-	// drive the CLI through. Once #167 lands, remove this skip and the
-	// existing harness body should make the test pass unchanged.
-	t.Skip("blocked on #167 — pyry attach --stdio rejected by parseClientFlags")
+	// #167's CLI fix landed; the parseClientFlags rejection of --stdio
+	// is gone. The test now exposes a pre-existing harness bug:
+	// spawnAttachableDaemon wires the test binary directly as `claude`,
+	// so Pool.Create's appended `--session-id <uuid>` reaches the Go
+	// test framework's flag parser and is rejected. auto_attach.go
+	// already works around this with a shell wrapper (echoClaudeScript);
+	// the stdio harness needs the same. Tracked in #257.
+	t.Skip("blocked on #257 — stdio harness needs shell-wrapper claude (helper rejects --session-id)")
 
 	c := startStdioAttach(t, "stdio-roundtrip")
 

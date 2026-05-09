@@ -1832,18 +1832,22 @@ capability) — it exercises kernel fd allocation directly. Place the call
 spawning pyry and tearing it down. Never fires on the project's CI
 matrix; defensive against future restrictive environments.
 
-### Round-trip test currently `t.Skip`'d on #167
+### Round-trip test currently `t.Skip`'d on #257
 
-`TestE2E_AttachStdio_BytesRoundTrip` is **skipped pending #167**. The
-harness body works end-to-end against `internal/control` and the daemon,
-but `pyry attach --stdio` is rejected by `parseClientFlags` *before*
-`parseAttachArgs` ever sees the flag — the `--stdio` flag is unknown to
-the global-flag parser. Existing unit tests in
-`internal/control/attach_stdio_client_test.go` and
-`cmd/pyry/args_test.go` bypass `parseClientFlags`, so they didn't catch
-it. The harness was the surface that surfaced the bug. Once #167 lands,
-removing the `t.Skip` should make the test pass against the harness body
-unchanged.
+`TestE2E_AttachStdio_BytesRoundTrip` was **skipped pending #167**, the
+`parseClientFlags` rejection of `--stdio` before `parseAttachArgs` ever
+saw the flag. Unit tests in `internal/control/attach_stdio_client_test.go`
+and `cmd/pyry/args_test.go` bypassed `parseClientFlags`, so the harness
+was the surface that surfaced the bug. #167 has now landed (CLI flag
+pass-through via `splitClientFlags`); removing the skip exposed a
+**different**, pre-existing harness bug: `spawnAttachableDaemon` wires
+the Go test binary directly as `claude`, so `Pool.Create`'s appended
+`--session-id <uuid>` reaches the test framework's `flag.Parse()` and
+is rejected before `TestHelperProcess` runs. `auto_attach.go` (#163)
+already works around this with a shell-wrapper (`echoClaudeScript`);
+the stdio harness needs the same pattern. The skip rotated from #167
+to #257 in the same commit that landed the #167 fix; the harness body
+itself is unchanged.
 
 ### What this slice does not verify
 
@@ -1912,8 +1916,10 @@ matcher, extend `isPTYDevicePath` and re-run.
 stable PTY fd would not race a single-pass directory read, so the bias
 is toward false-negative on a closing fd — acceptable.
 
-**Carries the same `t.Skip("blocked on #167")` as the byte-flow test.**
-Both skips lift in one commit when #167 lands.
+**Carries the same `t.Skip("blocked on #257")` as the byte-flow test.**
+Both skips originally tracked #167 (CLI flag rejection); rotated to
+#257 once #167 landed and exposed the underlying `--session-id`-vs-
+test-binary harness bug. Both lift in one commit when #257 lands.
 
 **Production diff is zero. Test diff ~110 LOC, one new file.**
 `go test -tags e2e -race ./internal/e2e/...` clean.
@@ -2038,20 +2044,24 @@ pyry -pyry-socket=<sock> -- --session-id <uuid> --input-format stream-json --out
   is legible. Setting `-pyry-claude=/bin/false` would mask the real
   failure with a deliberately-bogus path.
 
-### #167 doesn't reach this code path
+### Neither #167 nor #257 reaches this code path
 
-The `pyry attach --stdio` CLI bug (#167) blocks #161/#162's
-`TestE2E_AttachStdio_*` tests because `parseClientFlags` rejects
-`--stdio` before `parseAttachArgs` runs. **#163 is unaffected.**
-`tryAutoAttach` calls `control.AttachStdio` *directly* from inside the
-foreground binary's `runSupervisor` — no verb dispatch, no
-`parseClientFlags`, no `parseAttachArgs`. The bug lives in a code path
-this test never enters. Confirmed against `cmd/pyry/main.go:304`
-(the in-process `control.AttachStdio` call site).
+The `pyry attach --stdio` CLI bug (#167, fixed) blocked #161/#162's
+`TestE2E_AttachStdio_*` tests because `parseClientFlags` rejected
+`--stdio` before `parseAttachArgs` ran. The follow-up harness bug
+(#257, the `--session-id`-vs-test-binary collision exposed when #167's
+fix lifted the skip) keeps those tests skipped today. **#163 is
+unaffected by both.** `tryAutoAttach` calls `control.AttachStdio`
+*directly* from inside the foreground binary's `runSupervisor` — no
+verb dispatch, no `parseClientFlags`, no `parseAttachArgs`; and #163's
+own daemon variant uses a shell-wrapper `claude` (`echoClaudeScript`)
+which dodges #257 by construction. Confirmed against `cmd/pyry/main.go`
+(the in-process `control.AttachStdio` call site in `tryAutoAttach`).
 
 This also means #163's test is the **first end-to-end proof** that the
 `AttachStdio` byte path works against a real daemon — the stdio-attach
-test that was meant to be the first proof is `t.Skip`'d on #167.
+test that was meant to be the first proof remains `t.Skip`'d (now on
+#257).
 
 ### Daemon variant: `spawnAutoAttachDaemon` + `echo-claude.sh` shell wrapper
 
@@ -2084,11 +2094,11 @@ are preserved across the shell `exec` automatically.
 `spawnAutoAttachDaemon` is otherwise structurally identical to
 `spawnAttachableDaemon`: bridge mode, helper-as-claude in echo mode,
 `waitDaemonReady` polls on the same protocol. The existing #161 stdio
-harness has the *same latent bug* (its daemon also drives
-`SessionsNew`) but its byte-flow test is `t.Skip`'d on #167, so the
-bug never surfaces today. Folding `spawnAttachableDaemon` over to the
-shell-wrapper shape is left for the ticket that lifts that skip — out
-of scope for #163 per scope discipline.
+harness has the *same bug* (its daemon also drives `SessionsNew` and
+wires the test binary directly as `claude`); now that #167's CLI fix
+has landed and the skip lifted, the bug surfaces as a real harness
+failure tracked in #257. Folding `spawnAttachableDaemon` over to the
+shell-wrapper shape is the body of #257.
 
 ### `Stderr` is a `safeBuffer`, not a bare `bytes.Buffer`
 
@@ -2102,7 +2112,7 @@ copy goroutine](../../lessons.md#cmdstderr-reads-race-the-osexec-copy-goroutine)
 
 The stdio harness's `StdioAttachClient.Stderr` has the same latent
 race; not refactored here per scope discipline (its proof-of-life is
-`t.Skip`'d on #167; the race never fires).
+`t.Skip`'d on #257; the race never fires).
 
 ### `pgrepChildren` — process-tree primitive
 

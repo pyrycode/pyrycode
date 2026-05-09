@@ -57,10 +57,13 @@ func TestParseClientFlags(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown flag returns error", func(t *testing.T) {
-		_, _, err := parseClientFlags("pyry status", []string{"-unknown"})
-		if err == nil {
-			t.Fatal("expected error on unknown flag")
+	t.Run("unknown flag flows to rest", func(t *testing.T) {
+		_, rest, err := parseClientFlags("pyry status", []string{"-unknown"})
+		if err != nil {
+			t.Fatalf("parseClientFlags: %v", err)
+		}
+		if len(rest) != 1 || rest[0] != "-unknown" {
+			t.Errorf("rest = %v, want [-unknown]", rest)
 		}
 	})
 }
@@ -84,6 +87,12 @@ func TestParseClientFlags_ReturnsRest(t *testing.T) {
 		{"single positional", []string{"abc-123"}, []string{"abc-123"}},
 		{"flag then positional", []string{"-pyry-name", "elli", "abc-123"}, []string{"abc-123"}},
 		{"two positionals (caller decides what to do)", []string{"abc-123", "extra"}, []string{"abc-123", "extra"}},
+		{"sub-verb flag passes through", []string{"--stdio"}, []string{"--stdio"}},
+		{"sub-verb flag plus positional", []string{"--stdio", "abc"}, []string{"--stdio", "abc"}},
+		{"-pyry-socket then sub-verb flag", []string{"-pyry-socket=/tmp/x", "--stdio", "abc"}, []string{"--stdio", "abc"}},
+		{"-pyry-name space-separated then sub-verb flag", []string{"-pyry-name", "elli", "--stdio", "abc"}, []string{"--stdio", "abc"}},
+		{"double-dash pyry flag form", []string{"--pyry-socket", "/tmp/x", "--create-if-missing", "abc"}, []string{"--create-if-missing", "abc"}},
+		{"-- separator passes through verbatim", []string{"-pyry-name", "elli", "--", "abc"}, []string{"--", "abc"}},
 	}
 
 	for _, tt := range tests {
@@ -454,4 +463,163 @@ func TestDefaultName(t *testing.T) {
 			t.Errorf("got %q, want elli", got)
 		}
 	})
+}
+
+func TestSplitClientFlags(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantPyry []string
+		wantRest []string
+	}{
+		{"empty", nil, nil, nil},
+		{"only sub-verb flag", []string{"--stdio"}, nil, []string{"--stdio"}},
+		{"only positional", []string{"abc"}, nil, []string{"abc"}},
+		{"-pyry-name separate value",
+			[]string{"-pyry-name", "elli"},
+			[]string{"-pyry-name", "elli"}, nil},
+		{"-pyry-name=elli glued",
+			[]string{"-pyry-name=elli"},
+			[]string{"-pyry-name=elli"}, nil},
+		{"--pyry-socket=/tmp/x double-dash glued",
+			[]string{"--pyry-socket=/tmp/x"},
+			[]string{"--pyry-socket=/tmp/x"}, nil},
+		{"-pyry-socket /tmp/x separate value",
+			[]string{"-pyry-socket", "/tmp/x"},
+			[]string{"-pyry-socket", "/tmp/x"}, nil},
+		{"mixed: pyry then sub-verb flag plus positional",
+			[]string{"-pyry-socket", "/tmp/x", "--stdio", "abc"},
+			[]string{"-pyry-socket", "/tmp/x"}, []string{"--stdio", "abc"}},
+		{"sub-verb flag first short-circuits",
+			[]string{"--stdio", "-pyry-name", "elli"},
+			nil, []string{"--stdio", "-pyry-name", "elli"}},
+		{"-- separator after pyry flag",
+			[]string{"-pyry-name", "elli", "--", "abc"},
+			[]string{"-pyry-name", "elli"}, []string{"--", "abc"}},
+		{"-- first",
+			[]string{"--", "-pyry-name", "elli"},
+			nil, []string{"--", "-pyry-name", "elli"}},
+		{"trailing -pyry-name with no value",
+			[]string{"-pyry-name"},
+			[]string{"-pyry-name"}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotPyry, gotRest := splitClientFlags(tt.args)
+			if !reflect.DeepEqual(gotPyry, tt.wantPyry) {
+				t.Errorf("pyry args = %v, want %v", gotPyry, tt.wantPyry)
+			}
+			if !reflect.DeepEqual(gotRest, tt.wantRest) {
+				t.Errorf("rest = %v, want %v", gotRest, tt.wantRest)
+			}
+		})
+	}
+}
+
+// TestRunAttachArgPath drives the full runAttach arg-parse composition
+// (parseClientFlags → parseAttachArgs) and asserts the dispatch tuple. This
+// is the regression guard for #167: parseClientFlags must pass verb-specific
+// flags through to parseAttachArgs unchanged.
+func TestRunAttachArgPath(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+
+	tests := []struct {
+		name                string
+		args                []string
+		wantSocketBase      string
+		wantSocketExplicit  string // non-empty → exact match (overrides Base)
+		wantSel             string
+		wantStdio           bool
+		wantCreateIfMissing bool
+	}{
+		{"--stdio plus id (the bug shape)",
+			[]string{"--stdio", "some-id"},
+			"pyry.sock", "", "some-id", true, false},
+		{"-pyry-socket=… then --stdio plus id (also the bug shape)",
+			[]string{"-pyry-socket=/tmp/foo", "--stdio", "some-id"},
+			"", "/tmp/foo", "some-id", true, false},
+		{"-pyry-socket space-separated, --stdio, id",
+			[]string{"-pyry-socket", "/tmp/foo", "--stdio", "some-id"},
+			"", "/tmp/foo", "some-id", true, false},
+		{"--create-if-missing alone reaches parser",
+			[]string{"--create-if-missing", "some-id"},
+			"pyry.sock", "", "some-id", false, true},
+		{"--stdio --create-if-missing plus id (SDK shape)",
+			[]string{"--stdio", "--create-if-missing", "some-id"},
+			"pyry.sock", "", "some-id", true, true},
+		{"-pyry-name then --stdio composes",
+			[]string{"-pyry-name", "elli", "--stdio", "some-id"},
+			"elli.sock", "", "some-id", true, false},
+		{"no sub-verb flags: bare id still works",
+			[]string{"some-id"},
+			"pyry.sock", "", "some-id", false, false},
+		{"no args at all: bootstrap shape",
+			nil, "pyry.sock", "", "", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			socketPath, rest, err := parseClientFlags("pyry attach", tt.args)
+			if err != nil {
+				t.Fatalf("parseClientFlags: %v", err)
+			}
+			sel, stdio, cim, err := parseAttachArgs(rest)
+			if err != nil {
+				t.Fatalf("parseAttachArgs: %v", err)
+			}
+			if tt.wantSocketExplicit != "" {
+				if socketPath != tt.wantSocketExplicit {
+					t.Errorf("socket = %q, want %q", socketPath, tt.wantSocketExplicit)
+				}
+			} else if filepath.Base(socketPath) != tt.wantSocketBase {
+				t.Errorf("socket basename = %q, want %q", filepath.Base(socketPath), tt.wantSocketBase)
+			}
+			if sel != tt.wantSel {
+				t.Errorf("selector = %q, want %q", sel, tt.wantSel)
+			}
+			if stdio != tt.wantStdio {
+				t.Errorf("stdio = %v, want %v", stdio, tt.wantStdio)
+			}
+			if cim != tt.wantCreateIfMissing {
+				t.Errorf("createIfMissing = %v, want %v", cim, tt.wantCreateIfMissing)
+			}
+		})
+	}
+}
+
+func TestRunStatus_RejectsExtraArgs(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+	err := runStatus([]string{"-unknown"})
+	if err == nil {
+		t.Fatal("expected error on extra arg")
+	}
+	if !strings.Contains(err.Error(), "unexpected arguments") {
+		t.Errorf("err = %v, want substring 'unexpected arguments'", err)
+	}
+}
+
+func TestRunLogs_RejectsExtraArgs(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+	err := runLogs([]string{"-unknown"})
+	if err == nil {
+		t.Fatal("expected error on extra arg")
+	}
+	if !strings.Contains(err.Error(), "unexpected arguments") {
+		t.Errorf("err = %v, want substring 'unexpected arguments'", err)
+	}
+}
+
+func TestRunStop_RejectsExtraArgs(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+	err := runStop([]string{"-unknown"})
+	if err == nil {
+		t.Fatal("expected error on extra arg")
+	}
+	if !strings.Contains(err.Error(), "unexpected arguments") {
+		t.Errorf("err = %v, want substring 'unexpected arguments'", err)
+	}
 }
