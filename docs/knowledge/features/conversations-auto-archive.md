@@ -1,6 +1,6 @@
 # `internal/conversations` auto-archive
 
-Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Four slices plus an e2e seam: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract, the daemon-side wiring (#243) that loads `conversations.json` at startup in `cmd/pyry/main.go` and registers the sweep loop as a sibling goroutine to the rotation watcher inside `Pool.Run`'s errgroup, and the `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing (#262) that lets out-of-process e2e tests drive the loop deterministically without waiting an hour.
+Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Four slices plus an e2e seam plus the e2e itself: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract, the daemon-side wiring (#243) that loads `conversations.json` at startup in `cmd/pyry/main.go` and registers the sweep loop as a sibling goroutine to the rotation watcher inside `Pool.Run`'s errgroup, the `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing (#262) that lets out-of-process e2e tests drive the loop deterministically without waiting an hour, and the out-of-process e2e (#263, `internal/e2e/conv_sweep_test.go`) that pins the full daemon lifecycle — `cmd/pyry/main.go`'s `sessions.Config` construction + sweep tick on a real on-disk registry + clean SIGTERM shutdown — at the binary boundary.
 
 ## What it is
 
@@ -329,7 +329,13 @@ In-package, not `internal/e2e`. Four tests:
 
 `TestResolveConversationsRegistryPath` in `cmd/pyry/args_test.go` covers the resolver: happy path with `t.Setenv("HOME", …)`, plus `name = "../etc"` to confirm `sanitizeName` keeps the result inside `~/.pyry/`.
 
-The cmd/pyry flag-to-Config plumbing is not unit-tested at this layer — `runSupervisor` has only integration-tier coverage (`internal/e2e`), and the e2e test that actually consumes the new flag lives downstream of #251.
+The cmd/pyry flag-to-Config plumbing is not unit-tested at this layer — `runSupervisor` has only integration-tier coverage (`internal/e2e`), and the e2e test that actually consumes the new flag is `internal/e2e/conv_sweep_test.go` (#263, see below).
+
+### E2E test (`internal/e2e/conv_sweep_test.go`, #263)
+
+`TestE2E_ConvSweep_RemovesUnpromotedKeepsPromoted` closes the daemon-wiring gap that the in-package `TestPool_Run_RegistersSweepLoop_HappyPath` cannot reach — a regression in `cmd/pyry/main.go`'s `sessions.Config` construction (e.g. forgetting to wire `ConversationsRegistry` / `ConversationsRegistryPath`) leaves `p.convReg == nil` silently and the in-package test still passes. Same regression class as v0.10.1's hang.
+
+Seeds two 60-day-idle conversations (one promoted, one unpromoted) into `<home>/.pyry/test/conversations.json` via the canonical `conversations.Registry.Save`, spawns `pyry` with `-pyry-conv-sweep-interval=100ms`, polls the on-disk file via `conversations.Load` until the unpromoted entry is gone (5 s budget, 50 ms poll gap), then drives `h.Stop(t)` and asserts `processAlive(pid) == false` plus a panic/`runtime/`/`goroutine ` substring scan over `h.Stderr`. The 4 s SIGTERM→SIGKILL escalation sits inside the 5 s clean-exit budget. See [`features/e2e-harness.md` § `conv_sweep_test.go` — conversations sweep loop e2e (#263)](e2e-harness.md) for the full test design.
 
 ## Out of scope
 
@@ -353,4 +359,5 @@ The cmd/pyry flag-to-Config plumbing is not unit-tested at this layer — `runSu
 - [`docs/specs/architecture/242-conv-sweep-loop.md`](../../specs/architecture/242-conv-sweep-loop.md) — architect's spec for the loop wrapper (#242).
 - [`docs/specs/architecture/243-conv-daemon-wiring.md`](../../specs/architecture/243-conv-daemon-wiring.md) — architect's spec for the daemon wiring (#243).
 - [`docs/specs/architecture/262-pyry-conv-sweep-interval-flag.md`](../../specs/architecture/262-pyry-conv-sweep-interval-flag.md) — architect's spec for the `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing (#262).
+- [`docs/specs/architecture/263-e2e-conv-sweep-loop.md`](../../specs/architecture/263-e2e-conv-sweep-loop.md) — architect's spec for the conversations-sweep-loop e2e test (#263).
 - [`features/sessions-package.md`](sessions-package.md) — `Pool.Run`'s errgroup hosts the sweep goroutine alongside the rotation watcher; `Config.ConversationsRegistry` / `ConversationsRegistryPath` are the plumbing fields.
