@@ -158,6 +158,40 @@ Helpers `buildTarGzForTest`, `fakeRelease`, `newFakeReleaseServer` are inline in
 
 Real `os.Stat` paths and the real `exec.CommandContext` wrapper are deliberately not unit-tested. The probe helper is two stats + a `strconv.Itoa`; the executor is three lines. Testing them would require manipulating `$HOME` + creating fake plist/unit files, and putting a fake `launchctl` on `$PATH`. Manual smoke test on a Mac with the daemon installed via `pyry install-service` covers the production paths.
 
+### E2E happy-path (#260)
+
+`cmd/pyry/update_e2e_test.go` (~420 LOC, `//go:build (darwin || linux) && e2e_update`) is the release-acceptance gate for the full fetch → verify → atomic-replace → restart → smoke chain. One test (`TestUpdate_HappyPath_E2E`) drives `doUpdate` against the in-process fake release server, with a real running daemon stapled on the back of the `runRestart` seam.
+
+Run with:
+
+```bash
+go test -tags=e2e_update ./cmd/pyry/...
+PYRY_E2E_BIN=$(pwd)/pyry go test -tags=e2e_update ./cmd/pyry/...   # CI prebuild short-circuit
+```
+
+| AC | Pinned by |
+|----|-----------|
+| Atomic replace happened | inode comparison via `syscall.Stat_t.Ino` before/after on `<home>/bin/pyry`; `os.Rename` swaps in a fresh inode so an inode change is reliable. |
+| Daemon was restarted | `cmd1.Process.Pid != cmd2.Process.Pid`. |
+| Post-update `pyry status` succeeds and Phase advances past `starting` | `waitForPhasePastStartingE2E` polls `pyry status`, parses the `Phase:` line, fails after `e2eUpdPhaseDeadline = 3s` if Phase stays `starting` (the v0.10.1-shaped startup hang signature). |
+| Post-update `pyry sessions list` succeeds | `runVerbE2E(... "sessions", "list")` exit 0 within `e2eUpdRunTimeout = 10s`. |
+| Supervisor-mode-stdin-startup smoke check | Daemons spawn with `cmd.Stdin = nil`; Go's `os/exec` wires `/dev/null` automatically, no `os.Open(os.DevNull)` needed. |
+| No real GitHub round-trip | `fakeRelease` + `newFakeReleaseServer` (reused from `update_test.go` — same package, no build tag) build the tarball + checksums in-process; `doUpdate` is called with `Fetcher.BaseURL` and `releaseBaseURL` pointed at the test server. |
+
+**`runRestart` is a kill-and-respawn stand-in, not a launchctl/systemctl exec.** The test passes a `RestartProbe` whose platform-discriminant flag (`LaunchdPlistExists` on darwin, `SystemdUnitExists` on linux) makes `DetectRestartCommand` return non-nil argv, so the wiring fires `runRestart`. The closure ignores the argv: it stops daemon 1 (SIGTERM → 3s grace → SIGKILL → 1s grace), respawns from the same `targetPath` (now holding the new bytes), and waits for the new socket to be dialable. The test never touches the operator's real launchd/systemd — see [`docs/lessons.md` § "E2E against the operator's real systemd `--user` / launchd `gui/<uid>`"](../../lessons.md).
+
+**Why drive `doUpdate` directly from `package main` rather than exec the binary.** Adding a `--release-base-url` flag or `PYRY_RELEASE_BASE_URL` env var to production code is exactly the "hidden env var added 'just for the test'" pattern lessons.md rejects. The principled alternative — `internal/e2e` imports the package — fails because `cmd/pyry` is `package main`. Same-package e2e is the only seam that satisfies both the AC and the env-var-discipline rule. Cost: the `internal/e2e` harness is unreachable, so the spawn/socket-dial/teardown scaffolding is replicated inline (~120 LOC of helpers) — the same trade `update_test.go` already accepted for `buildTarGzForTest`/`fakeRelease`/`newFakeReleaseServer`.
+
+**Sun_path-safe temp HOME.** Uses `os.MkdirTemp("", "pyry-up-")` rather than `t.TempDir()`. The test name extends `t.TempDir()`'s path past macOS APFS's 104-byte sun_path limit when `<home>/pyry.sock` is appended; same workaround as `internal/e2e/restart_test.go:newRegistryHome`.
+
+**Phase polling, not single-shot.** `supervisor.Run` sets Phase to Running asynchronously after `onSpawn` fires; the control socket can be dialable a few ms before that. `waitForPhasePastStartingE2E` polls every 50ms up to a 3s deadline so a healthy startup never flakes on the timing window, while a v0.10.1-shaped hang (Phase stuck at `starting`) trips the deadline and fails loud with the captured stdout. Single-shot status would race the supervisor's Phase update.
+
+**Helpers (~120 LOC, all `_test.go`-scoped, `_E2E` suffix to avoid collision with `update_test.go`'s helpers):** `buildPyryBinE2E` (honours `PYRY_E2E_BIN`, else `go build`), `copyFileE2E`, `inodeOfE2E` (linux + macOS only — matches the build tag), `childEnvE2E` (HOME isolation + `PYRY_NAME` strip, mirrors `internal/e2e/harness.go:childEnv`), `spawnDaemonE2E` (returns `*exec.Cmd`, `*bytes.Buffer` stdout, `*bytes.Buffer` stderr, `chan struct{}` doneCh; flag set `-pyry-socket=… -pyry-name=test -pyry-claude=/bin/sleep -pyry-idle-timeout=0 -- 99999` — `99999` not `infinity`, see lessons.md), `waitForSocketE2E` (poll-and-dial loop, 50ms gap, short-circuits on doneCh), `stopDaemonE2E` (SIGTERM → 3s → SIGKILL → 1s, idempotent), `runVerbE2E` (`exec.CommandContext` with 10s timeout, auto-injects `-pyry-socket=`), `waitForPhasePastStartingE2E`, `parsePhaseE2E` (returns `(string, bool)` — distinguishes "no Phase: line" from "Phase: line present but empty"). Pre-existing `update_test.go` helpers (`fakeRelease`, `newFakeReleaseServer`, `buildTarGzForTest`) are reused verbatim — they live in the same `package main` with no build tag, so the tagged file picks them up automatically; no extraction was required to satisfy the AC's "reusable helper" criterion.
+
+**`cmd1Stopped` flag avoids double-stop in `t.Cleanup`.** The closure-side stop in `runRestart` and the `t.Cleanup`-side stop both target the same `cmd1`; the boolean ensures only one fires. Same shape as the `cmd2 == nil` guard in the post-test cleanup (handles the "runRestart never fired" case where `doUpdate` errored before the restart step).
+
+**Out of scope for this slice:** failure-path tests (separate ticket — covers checksum mismatch, fetch failure, restart failure, etc., all leaning on this ticket's `fakeRelease`/`newFakeReleaseServer`); cross-architecture updates; a different `Version` string for the served binary (the happy path needs only "different inode + working binary," not behavioural drift).
+
 ## Files
 
 - `cmd/pyry/update.go` (~215 LOC) — `runUpdate`, `resolveExecutable`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`.
