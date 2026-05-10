@@ -629,6 +629,95 @@ All scaffolding reused verbatim: `newRegistryHome`, `writeRegistry`,
 internal under `package e2e` and are usable directly from the new file.
 Zero harness extensions, zero production-code changes.
 
+### `conv_sweep_test.go` — conversations sweep loop e2e (#263)
+
+One test —
+`TestE2E_ConvSweep_RemovesUnpromotedKeepsPromoted` — closes the gap that
+`internal/sessions.TestPool_Run_RegistersSweepLoop_HappyPath` cannot
+reach: the in-package test exercises `Pool.Run`'s `if p.convReg != nil`
+arm directly with already-set `pool.convReg` / `pool.convRegistryPath`
+fields, but a regression in `cmd/pyry/main.go`'s `sessions.Config`
+construction (e.g. forgetting to wire `ConversationsRegistry` /
+`ConversationsRegistryPath`) would leave `p.convReg == nil` silently and
+still pass. Same regression class as v0.10.1's hang — daemon-wiring bugs
+that unit tests cannot see.
+
+The test seeds two conversations with `LastUsedAt = time.Now().UTC().Add
+(-60 * 24 * time.Hour)` (well past the 30-day archive threshold) into
+`<home>/.pyry/test/conversations.json` via the canonical
+`conversations.Registry` writer — one promoted (`IsPromoted: true`), one
+unpromoted. Then `StartIn(t, home, "-pyry-conv-sweep-interval=100ms")`
+spawns pyry with the `#262` flag, polls the on-disk file via
+`conversations.Load(convPath)` every 50 ms with a 5 s deadline until
+`len(loaded.List()) == 1`, asserts the survivor is the promoted entry
+(by ID and `IsPromoted` flag), then `h.Stop(t)` drives a SIGTERM and
+asserts (a) `processAlive(pid) == false` after Stop returns and (b)
+no `panic` / `runtime/` / `goroutine ` substring in `h.Stderr`.
+
+#### Why seed via `conversations.Registry`, not raw JSON
+
+`restart_test.go` mirrors the (unexported) sessions-registry shape
+locally because it has no other choice. This test does have a choice —
+the `conversations` package's `Registry` / `Conversation` / `Load` /
+`Save` / `Create` / `List` are all exported — and using the canonical
+writer kills two failure modes at once: (a) field-tag drift between a
+test's mirror struct and production, (b) atomic-write semantics (the
+seed file lands via the same temp+rename rename the daemon will use, not
+via raw `os.WriteFile`). Side benefit: the seed file exercises the same
+`Save` path that the sweep itself will exercise on tick — the test's
+"before" and "after" use the same on-disk codec.
+
+#### Polling cadence — 50 ms gap, 5 s deadline
+
+50 ms poll gap against the 100 ms tick gives ~10 chances inside the 5 s
+budget. Larger gaps risk flaky misses on a slow CI runner; smaller gaps
+add no signal. The `time.NewTicker` inside `RunSweepLoop` does NOT fire
+immediately — first tick is at `+interval` (~100 ms after `Pool.Run`
+registers the goroutine), well inside the 5 s envelope. If the test
+starts flaking on heavily-loaded macOS CI runners, the right fix is to
+raise the budget (e.g. 10 s), NOT to lower the tick interval — the
+daemon's `time.NewTicker` cadence is what's being measured, and a sub-
+100 ms interval would start interacting with the runner's scheduler
+granularity.
+
+#### Why `h.Stop` plus `processAlive` plus stderr scan, not just `h.Stop`
+
+`h.Stop(t)` is the harness's blessed graceful shutdown path: SIGTERM →
+3 s grace → SIGKILL → 1 s grace. The 4 s upper bound sits comfortably
+under AC#4's 5 s budget, so no custom shutdown helper is needed. Two
+follow-up assertions cover the failure modes Stop alone doesn't fail
+on: (a) Stop hit the killGrace path with `doneCh` still open (Stop only
+`t.Logf`'s that case, doesn't fail) — `processAlive(pid)` catches it,
+and (b) the daemon panicked on its way down (Stop doesn't inspect
+stderr) — the panic / `runtime/` / `goroutine ` substring scan, lifted
+verbatim from `cli_verbs_test.go`'s vocabulary, catches it. Neither
+case is hypothetical — (a) is the regression class this whole test
+exists for; (b) is the v0.10.1 incident shape.
+
+#### What the test does NOT assert
+
+No "fresh-and-unpromoted control" entry to prove the predicate is
+`IsPromoted`-aware AND `LastUsedAt`-aware in the same test — that's
+already covered by the in-package `pool_conv_sweep_test.go` (which
+seeds `archivable=2, fresh=1` against the same predicate). This e2e
+exists to cover the daemon-wiring gap, not to re-assert predicate
+semantics. No goroutine-leak assertion either — AC#4 explicitly says
+"a clean process exit is sufficient evidence." Adding `runtime
+.NumGoroutine()` checks would require probing inside the daemon
+process from out-of-process, which we don't have access to.
+
+#### No new helpers
+
+All scaffolding reused: `newRegistryHome` from `restart_test.go` (its
+sessions-registry path return value is intentionally discarded — we
+want only the `<home>/.pyry/test/` mkdir for `conversations.json`'s
+parent); `mustReadFile` from `restart_test.go` for the polling-timeout
+diagnostic dump; `processAlive` from `harness_test.go`; the panic /
+`runtime/` / `goroutine ` substring vocabulary from `cli_verbs_test.go`.
+The seed and the post-sweep readback both go through
+`conversations.Load` / `Save`, not local JSON helpers. Zero harness
+extensions, zero production-code changes.
+
 ## Failed-Start Pattern (`StartExpectingFailureIn`)
 
 `StartExpectingFailureIn(t, home) RunResult` is the failure-side sibling of

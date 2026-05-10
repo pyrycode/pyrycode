@@ -198,12 +198,13 @@ var pyryFlagBools = map[string]bool{
 // pyryFlagValues are pyry-specific flags that take a value. The value can
 // be glued (`-pyry-claude=/path`) or in the next arg (`-pyry-claude /path`).
 var pyryFlagValues = map[string]bool{
-	"pyry-claude":       true,
-	"pyry-workdir":      true,
-	"pyry-socket":       true,
-	"pyry-name":         true,
-	"pyry-idle-timeout": true,
-	"pyry-active-cap":   true,
+	"pyry-claude":              true,
+	"pyry-workdir":             true,
+	"pyry-socket":              true,
+	"pyry-name":                true,
+	"pyry-idle-timeout":        true,
+	"pyry-active-cap":          true,
+	"pyry-conv-sweep-interval": true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -397,6 +398,7 @@ func runSupervisor(args []string) error {
 	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
 	idleTimeout := fs.Duration("pyry-idle-timeout", 15*time.Minute, "evict idle claudes after this duration (0 disables)")
 	activeCap := fs.Int("pyry-active-cap", 0, "max concurrently active claudes (0 = uncapped)")
+	convSweepInterval := fs.Duration("pyry-conv-sweep-interval", 0, "override conversations sweep tick interval (testing; 0 = production default)")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -450,6 +452,7 @@ func runSupervisor(args []string) error {
 		ActiveCap:                 *activeCap,
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,
+		SweepInterval:             *convSweepInterval,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    *workdir,
@@ -1300,6 +1303,8 @@ Pyry flags (must come before claude args, or after a -- separator):
   -pyry-socket string   explicit socket path (overrides -pyry-name)
   -pyry-idle-timeout    evict idle claudes after this duration (default 15m;
                         0 disables; respawn latency 2-15s on next attach)
+  -pyry-conv-sweep-interval duration  override conversations sweep tick interval
+                        (testing; 0 = production default of 1h)
 
 Examples:
   pyry                                  # supervised claude (default instance)
