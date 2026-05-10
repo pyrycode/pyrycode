@@ -198,12 +198,13 @@ var pyryFlagBools = map[string]bool{
 // pyryFlagValues are pyry-specific flags that take a value. The value can
 // be glued (`-pyry-claude=/path`) or in the next arg (`-pyry-claude /path`).
 var pyryFlagValues = map[string]bool{
-	"pyry-claude":       true,
-	"pyry-workdir":      true,
-	"pyry-socket":       true,
-	"pyry-name":         true,
-	"pyry-idle-timeout": true,
-	"pyry-active-cap":   true,
+	"pyry-claude":              true,
+	"pyry-workdir":             true,
+	"pyry-socket":              true,
+	"pyry-name":                true,
+	"pyry-idle-timeout":        true,
+	"pyry-active-cap":          true,
+	"pyry-conv-sweep-interval": true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -250,6 +251,50 @@ func splitArgs(args []string) (pyryArgs, claudeArgs []string) {
 		// Not a pyry flag — everything from here goes to claude.
 		claudeArgs = append(claudeArgs, args[i:]...)
 		return
+	}
+	return
+}
+
+// clientPyryValueFlags lists the -pyry-* flags every control client accepts.
+// Both take a value (string). Walk-based extraction needs this map so it can
+// decide whether to consume the next token as the value (for the
+// space-separated form: `-pyry-name elli`).
+var clientPyryValueFlags = map[string]bool{
+	"pyry-name":   true,
+	"pyry-socket": true,
+}
+
+// splitClientFlags peels recognised -pyry-name / -pyry-socket tokens off the
+// front of args and returns them as pyryArgs, leaving everything else in
+// rest verbatim. Stops at the first non-pyry-* token: subsequent -pyry-*
+// tokens are not extracted. Mirrors splitArgs's shape; differs only in the
+// recognised flag set.
+//
+// Both `-pyry-name=elli` and `-pyry-name elli` forms are supported, as are
+// the `-` and `--` dash prefixes (parseFlagSyntax normalises both).
+//
+// `--` is treated as a verb-side token: it and everything after go into
+// rest. The verb's own FlagSet is the one that should interpret `--`.
+func splitClientFlags(args []string) (pyryArgs, rest []string) {
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "--" {
+			rest = append(rest, args[i:]...)
+			return
+		}
+		name, _, hasVal := parseFlagSyntax(a)
+		if !clientPyryValueFlags[name] {
+			rest = append(rest, args[i:]...)
+			return
+		}
+		pyryArgs = append(pyryArgs, a)
+		if !hasVal && i+1 < len(args) {
+			pyryArgs = append(pyryArgs, args[i+1])
+			i += 2
+			continue
+		}
+		i++
 	}
 	return
 }
@@ -353,6 +398,7 @@ func runSupervisor(args []string) error {
 	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
 	idleTimeout := fs.Duration("pyry-idle-timeout", 15*time.Minute, "evict idle claudes after this duration (0 disables)")
 	activeCap := fs.Int("pyry-active-cap", 0, "max concurrently active claudes (0 = uncapped)")
+	convSweepInterval := fs.Duration("pyry-conv-sweep-interval", 0, "override conversations sweep tick interval (testing; 0 = production default)")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -406,6 +452,7 @@ func runSupervisor(args []string) error {
 		ActiveCap:                 *activeCap,
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,
+		SweepInterval:             *convSweepInterval,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    *workdir,
@@ -472,21 +519,26 @@ func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 // positionals after the recognised flags. Verbs that don't take positionals
 // can bind rest to _ — same silent-ignore behaviour as before.
 func parseClientFlags(name string, args []string) (socketPath string, rest []string, err error) {
+	pyryArgs, rest := splitClientFlags(args)
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	nameFlag := fs.String("pyry-name", defaultName(), "instance name (socket: ~/.pyry/<name>.sock)")
 	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(pyryArgs); err != nil {
 		return "", nil, err
 	}
-	return resolveSocketPath(*socketFlag, *nameFlag), fs.Args(), nil
+	return resolveSocketPath(*socketFlag, *nameFlag), rest, nil
 }
 
 // runStatus implements the `pyry status` subcommand: dial the control socket,
 // fetch a status snapshot, pretty-print it.
 func runStatus(args []string) error {
-	socketPath, _, err := parseClientFlags("pyry status", args)
+	socketPath, rest, err := parseClientFlags("pyry status", args)
 	if err != nil {
 		return err
+	}
+	if len(rest) > 0 {
+		return fmt.Errorf("status: unexpected arguments: %s", strings.Join(rest, " "))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -516,9 +568,12 @@ func runStatus(args []string) error {
 // runLogs implements `pyry logs`: fetch the recent supervisor log lines from
 // the daemon's in-memory ring buffer and print them.
 func runLogs(args []string) error {
-	socketPath, _, err := parseClientFlags("pyry logs", args)
+	socketPath, rest, err := parseClientFlags("pyry logs", args)
 	if err != nil {
 		return err
+	}
+	if len(rest) > 0 {
+		return fmt.Errorf("logs: unexpected arguments: %s", strings.Join(rest, " "))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1067,9 +1122,12 @@ func runSessionsList(socketPath string, args []string) error {
 // to shut down. Returns when the server has acknowledged — the daemon may
 // still be unwinding its child.
 func runStop(args []string) error {
-	socketPath, _, err := parseClientFlags("pyry stop", args)
+	socketPath, rest, err := parseClientFlags("pyry stop", args)
 	if err != nil {
 		return err
+	}
+	if len(rest) > 0 {
+		return fmt.Errorf("stop: unexpected arguments: %s", strings.Join(rest, " "))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1245,6 +1303,8 @@ Pyry flags (must come before claude args, or after a -- separator):
   -pyry-socket string   explicit socket path (overrides -pyry-name)
   -pyry-idle-timeout    evict idle claudes after this duration (default 15m;
                         0 disables; respawn latency 2-15s on next attach)
+  -pyry-conv-sweep-interval duration  override conversations sweep tick interval
+                        (testing; 0 = production default of 1h)
 
 Examples:
   pyry                                  # supervised claude (default instance)

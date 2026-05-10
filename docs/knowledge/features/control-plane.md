@@ -99,15 +99,21 @@ The 1.1e-C slice was wire + server only. The CLI surface (`pyry attach <id>` pos
 
 The Phase 1.1e end-to-end multi-session attach surface lands in `cmd/pyry/main.go` and `internal/control/attach_client.go`. Three changes, all dumb passthrough — the CLI does **not** parse, validate, or interpret the session selector. It is a string passed straight from `os.Args` to `AttachPayload.SessionID`. All resolution happens server-side in `Pool.ResolveID`.
 
-### `parseClientFlags` returns positionals
+### `parseClientFlags` returns positionals (and passes verb-specific flags through)
 
-`parseClientFlags` (the shared helper for `status` / `stop` / `logs` / `attach`) now surfaces `fs.Args()`:
+`parseClientFlags` (the shared helper for `status` / `stop` / `logs` / `attach` / `sessions`) surfaces `fs.Args()` plus everything the verb's own parser needs to see:
 
 ```go
 func parseClientFlags(name string, args []string) (socketPath string, rest []string, err error)
 ```
 
-`runStatus` / `runLogs` / `runStop` bind `rest` to `_` — same silent-ignore-of-stray-positionals behaviour as before. Only `runAttach` consumes it. Out-of-scope per AC; opportunistic "reject extra args" for sibling verbs is deferred until they take their own positionals.
+A `splitClientFlags` helper (sibling of `splitArgs`, `cmd/pyry/main.go`) walks args left-to-right and peels recognised `-pyry-name` / `-pyry-socket` tokens off the front; everything else (verb-specific flags like `--stdio`, `--create-if-missing`; positionals; `--`) flows verbatim into `rest`. The internal `flag.FlagSet` only ever sees the extracted `pyryArgs`, so unknown-verb-flag errors land at the verb's own parser instead of the shared one (#167).
+
+`splitClientFlags` stops at the first non-pyry-* token: pyry globals must precede sub-verb flags. Both `-pyry-socket=/tmp/x` and `-pyry-socket /tmp/x` (space-separated) forms are supported, as are `-` and `--` dash prefixes (`parseFlagSyntax` is reused). Trailing `-pyry-name` with no value is left in `pyryArgs` so the downstream `flag.FlagSet` produces the same error as before.
+
+`runAttach` and `runSessions` consume `rest` via verb-specific parsers (`parseAttachArgs`, `parseSessionsNewArgs`, …) which already reject malformed input. `runStatus` / `runLogs` / `runStop` take no positionals; each adds an inline `len(rest) > 0` post-check — `fmt.Errorf("<verb>: unexpected arguments: %s", strings.Join(rest, " "))` — so unknown flags surface as errors instead of being silently swallowed (the regression risk introduced by the pass-through).
+
+`TestRunAttachArgPath` (`cmd/pyry/args_test.go`) drives the full `runAttach` arg-parse composition (`parseClientFlags` → `parseAttachArgs`) so a regression of #167 fails CI without depending on the e2e harness — the gap that let the original bug ship.
 
 ### `runAttach` — optional positional after flags
 
@@ -247,7 +253,7 @@ All new tests in `internal/control/attach_stdio_client_test.go`. Drive both side
 | `TestAttachStdio_InReadErrorPropagates` | Non-EOF read error on `in` propagates wrapped (distinguishes "stdin EOFed" from "pipe broke") |
 | `TestParseAttachArgs` (in `cmd/pyry/args_test.go`) | Flag-parsing rules: `--stdio` alone, `-stdio` (single dash), `--stdio <id>`, `<id> --stdio` (rejected), too many positionals |
 
-E2E coverage: the process-level harness driving `pyry attach --stdio` against a real daemon landed in #161 (`internal/e2e/attach_stdio.go` — `startStdioAttach` + `StdioAttachClient`; see [e2e-harness.md § Stdio-Attach Harness Pattern](e2e-harness.md#stdio-attach-harness-pattern-attach_stdiogo-attach_stdio_testgo-161)). The accompanying `TestE2E_AttachStdio_BytesRoundTrip` is `t.Skip`'d pending #167 — `pyry attach --stdio` is rejected by `parseClientFlags` before `parseAttachArgs` runs, a gap the unit tests didn't catch because they bypass the global-flag parser. The no-PTY-in-fd-table assertion (`lsof` / `/proc/<pid>/fd`) lands in #162 atop the same harness.
+E2E coverage: the process-level harness driving `pyry attach --stdio` against a real daemon landed in #161 (`internal/e2e/attach_stdio.go` — `startStdioAttach` + `StdioAttachClient`; see [e2e-harness.md § Stdio-Attach Harness Pattern](e2e-harness.md#stdio-attach-harness-pattern-attach_stdiogo-attach_stdio_testgo-161)). #167 fixed the `parseClientFlags` rejection; removing the skip uncovered a pre-existing harness bug — `spawnAttachableDaemon` wires the Go test binary directly as `claude`, so `Pool.Create`'s appended `--session-id <uuid>` reaches the test framework's `flag.Parse()` and is rejected. `auto_attach.go` already works around this with a shell-wrapper (`echoClaudeScript`); the stdio harness needs the same. Skip rotated to #257; `TestE2E_AttachStdio_BytesRoundTrip` and `TestE2E_AttachStdio_NoPTYInProcessTree` (#162) both lift in one commit when that ticket lands.
 
 ## Attach: --create-if-missing (1.3b)
 
@@ -1119,7 +1125,7 @@ No human-affordance stderr lines (`--stdio` mode already suppresses them); the d
 
 The attach-commit branch (has-id true → `AttachStdio` runs) is intentionally **not** unit-tested; e2e coverage of the dispatch lives in #163 (happy path — `TestE2E_ForegroundAutoAttach_AttachesWhenDaemonHasSession` in `internal/e2e/auto_attach_happy_test.go`, see [e2e-harness.md § Foreground Auto-Attach Harness Pattern](e2e-harness.md#foreground-auto-attach-harness-pattern-auto_attachgo-auto_attach_happy_testgo-163)) and #164 (fallback scenarios). `internal/control/attach_stdio_client_test.go` (#154) covers `AttachStdio`'s own contract.
 
-#163's test is also the **first end-to-end proof** of `control.AttachStdio` against a real daemon — #161/#162's stdio-attach tests are `t.Skip`'d pending #167, but auto-attach reaches `AttachStdio` directly from `runSupervisor` (no `parseClientFlags`, no verb dispatch), so the bug doesn't reach this code path.
+#163's test was the **first end-to-end proof** of `control.AttachStdio` against a real daemon — #161/#162's stdio-attach tests were `t.Skip`'d pending #167, then rotated to #257 once #167 landed (the underlying harness bug was a separate `--session-id`-vs-test-binary collision). Auto-attach reaches `AttachStdio` directly from `runSupervisor` (no `parseClientFlags`, no verb dispatch, no `Pool.Create` argv-append against the test binary), so neither bug reaches this code path.
 
 See `docs/specs/architecture/158-foreground-auto-attach.md` for the full ticket-time design; this section is the canonical evergreen reference.
 

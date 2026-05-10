@@ -491,12 +491,12 @@ Each restart test pre-writes exactly one `bootstrap: true, lifecycle_state:
 "active"` entry alongside the entries it cares about. The bootstrap-active
 anchor keeps the harness's ready gate working the conventional way: the
 supervisor spawns `/bin/sleep infinity`, the control server comes up, the
-ready-poll succeeds. This deliberately avoids the bootstrap-evicted
-permutation (warm-starting the bootstrap *itself* in `stateEvicted` enters
-`runEvicted` instead of spawning the child). That path is functionally
-distinct — "daemon comes up cleanly with an evicted bootstrap" — and
-deserves its own ticket so failures isolate cleanly. The three current
-tests are scoped to non-bootstrap survival.
+ready-poll succeeds. The bootstrap-evicted permutation — "daemon comes up
+cleanly with an evicted bootstrap on disk" — is functionally distinct
+(pre-fix would enter `runEvicted` instead of spawning the child), so it
+lives in its own file as `bootstrap_warm_start_test.go` (#253, see below).
+The three restart tests stay scoped to non-bootstrap survival; failures
+isolate cleanly between the two files.
 
 The lifecycle strings written to disk are `"active"` and `"evicted"` —
 exactly what `lifecycleState.String()` (`internal/sessions/session.go`)
@@ -560,6 +560,163 @@ intentionally — `internal/sessions`'s on-disk types are unexported, and
 exporting them solely for one test would invert the dependency direction.
 The schema is small and stable; if a field is added, the mirror grows it
 too.
+
+### `bootstrap_warm_start_test.go` — bootstrap warm-start carve-out (#253)
+
+Two tests pin [ADR 016](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md)'s
+load-layer carve-out at the e2e tier. `Pool.New` forces the bootstrap to
+warm-load as `stateActive` regardless of the persisted `lifecycle_state`,
+because nothing in supervisor-mode startup drives `Pool.Activate` on it
+(non-TTY stdin: launchd / systemd / piped wrapper). Non-bootstrap sessions
+keep their persisted state — lazy respawn on attach is the driver there.
+
+- **`TestE2E_BootstrapWarmStart_IgnoresEvictedOnDisk`** drives the
+  v0.10.1 regression class end-to-end. Two-phase shape: (Phase A)
+  `StartIn` cold so the daemon picks its own bootstrap UUID and writes
+  the registry, `waitForBootstrap` to capture it, `Stop`; (Phase B) plain
+  `readRegistry` / mutate `LifecycleState = "evicted"` on the bootstrap
+  entry / `writeRegistry` — race-free because no daemon is running
+  between the two `StartIn`s; (Phase C) `StartIn` warm against the
+  mutated registry, poll `pyry status` for `Phase: running` within 5 s
+  (matches the harness's `readyDeadline`; pre-fix the daemon parks
+  forever so any reasonable deadline fires). Negative-greps the v0.10.1
+  failure-mode signatures: `Started at:    0001-01-01T00:00:00Z` and
+  `Uptime:        2562047h47m16` (prefix-match because
+  `Duration.Round(time.Second)` of `math.MaxInt64` overflows back to the
+  input — the rendered sentinel is the full `2562047h47m16.854775807s`,
+  but matching the prefix keeps the assertion robust to a future change
+  that clamps before rounding). Cross-checks the wire view via
+  `pyry sessions list --json` decoded into `[]control.SessionInfo` and
+  asserts the bootstrap entry's `state == "active"` (`--json`, not the
+  table form, so the assertion rides a stable wire field rather than
+  tabwriter alignment).
+- **`TestE2E_BootstrapWarmStart_NonBootstrapEvictedPersists`** pins the
+  carve-out boundary: the load-layer special-case is bootstrap-only.
+  Single-phase — pre-seed two entries (bootstrap as `active`,
+  non-bootstrap as `evicted`), `StartIn`, then `waitForSessionState` on
+  the non-bootstrap UUID for `"evicted"` (5 s envelope absorbs the
+  warm-load reconciliation pass). Disk is the canonical observation
+  point because non-bootstrap sessions live on disk between minting and
+  the next consumer-driven `Activate`. Cross-checks the bootstrap stays
+  `active` via `pyry sessions list --json`. A future refactor that
+  over-corrects the bootstrap fix into "ignore evicted for *all*
+  sessions" trips this test even though Test 1 still passes.
+
+#### Why two-phase (not pre-seeded only) for Test 1
+
+A pre-seeded registry with `bootstrap=true, lifecycle_state="evicted"` and
+a single `StartIn` reproduces the bug structurally but not the user's
+trigger path (machine boots → daemon starts → idle eviction fires →
+daemon restarts via launchd / systemd / `pyry update` → hang). The
+two-phase shape (cold start → mutate → warm start) is faithful to that
+flow and lets the bootstrap UUID be daemon-authored rather than
+test-invented. The mutation step edits `lifecycle_state` only, leaving
+`UUID` / `created_at` / `last_active_at` / `bootstrap` intact —
+minimum-fidelity stand-in for "idle eviction had a chance to fire."
+
+The alternative (drive the cold daemon with `-pyry-idle-timeout=1s`,
+wait for the eviction, stop, restart) works but adds 1–2 s of timer
+waiting per run and couples the regression test to the idle-eviction
+timing. The two-phase mutate stays decoupled — the regression is in the
+warm-load layer, not the eviction layer.
+
+#### No new helpers
+
+All scaffolding reused verbatim: `newRegistryHome`, `writeRegistry`,
+`readRegistry`, `mustReadFile` from `restart_test.go`;
+`waitForBootstrap` from `cap_test.go`; `waitForSessionState` from
+`cap_test.go`. `registryFile` / `registryEntry` mirrors are package-
+internal under `package e2e` and are usable directly from the new file.
+Zero harness extensions, zero production-code changes.
+
+### `conv_sweep_test.go` — conversations sweep loop e2e (#263)
+
+One test —
+`TestE2E_ConvSweep_RemovesUnpromotedKeepsPromoted` — closes the gap that
+`internal/sessions.TestPool_Run_RegistersSweepLoop_HappyPath` cannot
+reach: the in-package test exercises `Pool.Run`'s `if p.convReg != nil`
+arm directly with already-set `pool.convReg` / `pool.convRegistryPath`
+fields, but a regression in `cmd/pyry/main.go`'s `sessions.Config`
+construction (e.g. forgetting to wire `ConversationsRegistry` /
+`ConversationsRegistryPath`) would leave `p.convReg == nil` silently and
+still pass. Same regression class as v0.10.1's hang — daemon-wiring bugs
+that unit tests cannot see.
+
+The test seeds two conversations with `LastUsedAt = time.Now().UTC().Add
+(-60 * 24 * time.Hour)` (well past the 30-day archive threshold) into
+`<home>/.pyry/test/conversations.json` via the canonical
+`conversations.Registry` writer — one promoted (`IsPromoted: true`), one
+unpromoted. Then `StartIn(t, home, "-pyry-conv-sweep-interval=100ms")`
+spawns pyry with the `#262` flag, polls the on-disk file via
+`conversations.Load(convPath)` every 50 ms with a 5 s deadline until
+`len(loaded.List()) == 1`, asserts the survivor is the promoted entry
+(by ID and `IsPromoted` flag), then `h.Stop(t)` drives a SIGTERM and
+asserts (a) `processAlive(pid) == false` after Stop returns and (b)
+no `panic` / `runtime/` / `goroutine ` substring in `h.Stderr`.
+
+#### Why seed via `conversations.Registry`, not raw JSON
+
+`restart_test.go` mirrors the (unexported) sessions-registry shape
+locally because it has no other choice. This test does have a choice —
+the `conversations` package's `Registry` / `Conversation` / `Load` /
+`Save` / `Create` / `List` are all exported — and using the canonical
+writer kills two failure modes at once: (a) field-tag drift between a
+test's mirror struct and production, (b) atomic-write semantics (the
+seed file lands via the same temp+rename rename the daemon will use, not
+via raw `os.WriteFile`). Side benefit: the seed file exercises the same
+`Save` path that the sweep itself will exercise on tick — the test's
+"before" and "after" use the same on-disk codec.
+
+#### Polling cadence — 50 ms gap, 5 s deadline
+
+50 ms poll gap against the 100 ms tick gives ~10 chances inside the 5 s
+budget. Larger gaps risk flaky misses on a slow CI runner; smaller gaps
+add no signal. The `time.NewTicker` inside `RunSweepLoop` does NOT fire
+immediately — first tick is at `+interval` (~100 ms after `Pool.Run`
+registers the goroutine), well inside the 5 s envelope. If the test
+starts flaking on heavily-loaded macOS CI runners, the right fix is to
+raise the budget (e.g. 10 s), NOT to lower the tick interval — the
+daemon's `time.NewTicker` cadence is what's being measured, and a sub-
+100 ms interval would start interacting with the runner's scheduler
+granularity.
+
+#### Why `h.Stop` plus `processAlive` plus stderr scan, not just `h.Stop`
+
+`h.Stop(t)` is the harness's blessed graceful shutdown path: SIGTERM →
+3 s grace → SIGKILL → 1 s grace. The 4 s upper bound sits comfortably
+under AC#4's 5 s budget, so no custom shutdown helper is needed. Two
+follow-up assertions cover the failure modes Stop alone doesn't fail
+on: (a) Stop hit the killGrace path with `doneCh` still open (Stop only
+`t.Logf`'s that case, doesn't fail) — `processAlive(pid)` catches it,
+and (b) the daemon panicked on its way down (Stop doesn't inspect
+stderr) — the panic / `runtime/` / `goroutine ` substring scan, lifted
+verbatim from `cli_verbs_test.go`'s vocabulary, catches it. Neither
+case is hypothetical — (a) is the regression class this whole test
+exists for; (b) is the v0.10.1 incident shape.
+
+#### What the test does NOT assert
+
+No "fresh-and-unpromoted control" entry to prove the predicate is
+`IsPromoted`-aware AND `LastUsedAt`-aware in the same test — that's
+already covered by the in-package `pool_conv_sweep_test.go` (which
+seeds `archivable=2, fresh=1` against the same predicate). This e2e
+exists to cover the daemon-wiring gap, not to re-assert predicate
+semantics. No goroutine-leak assertion either — AC#4 explicitly says
+"a clean process exit is sufficient evidence." Adding `runtime
+.NumGoroutine()` checks would require probing inside the daemon
+process from out-of-process, which we don't have access to.
+
+#### No new helpers
+
+All scaffolding reused: `newRegistryHome` from `restart_test.go` (its
+sessions-registry path return value is intentionally discarded — we
+want only the `<home>/.pyry/test/` mkdir for `conversations.json`'s
+parent); `mustReadFile` from `restart_test.go` for the polling-timeout
+diagnostic dump; `processAlive` from `harness_test.go`; the panic /
+`runtime/` / `goroutine ` substring vocabulary from `cli_verbs_test.go`.
+The seed and the post-sweep readback both go through
+`conversations.Load` / `Save`, not local JSON helpers. Zero harness
+extensions, zero production-code changes.
 
 ## Failed-Start Pattern (`StartExpectingFailureIn`)
 
@@ -1832,18 +1989,22 @@ capability) — it exercises kernel fd allocation directly. Place the call
 spawning pyry and tearing it down. Never fires on the project's CI
 matrix; defensive against future restrictive environments.
 
-### Round-trip test currently `t.Skip`'d on #167
+### Round-trip test currently `t.Skip`'d on #257
 
-`TestE2E_AttachStdio_BytesRoundTrip` is **skipped pending #167**. The
-harness body works end-to-end against `internal/control` and the daemon,
-but `pyry attach --stdio` is rejected by `parseClientFlags` *before*
-`parseAttachArgs` ever sees the flag — the `--stdio` flag is unknown to
-the global-flag parser. Existing unit tests in
-`internal/control/attach_stdio_client_test.go` and
-`cmd/pyry/args_test.go` bypass `parseClientFlags`, so they didn't catch
-it. The harness was the surface that surfaced the bug. Once #167 lands,
-removing the `t.Skip` should make the test pass against the harness body
-unchanged.
+`TestE2E_AttachStdio_BytesRoundTrip` was **skipped pending #167**, the
+`parseClientFlags` rejection of `--stdio` before `parseAttachArgs` ever
+saw the flag. Unit tests in `internal/control/attach_stdio_client_test.go`
+and `cmd/pyry/args_test.go` bypassed `parseClientFlags`, so the harness
+was the surface that surfaced the bug. #167 has now landed (CLI flag
+pass-through via `splitClientFlags`); removing the skip exposed a
+**different**, pre-existing harness bug: `spawnAttachableDaemon` wires
+the Go test binary directly as `claude`, so `Pool.Create`'s appended
+`--session-id <uuid>` reaches the test framework's `flag.Parse()` and
+is rejected before `TestHelperProcess` runs. `auto_attach.go` (#163)
+already works around this with a shell-wrapper (`echoClaudeScript`);
+the stdio harness needs the same pattern. The skip rotated from #167
+to #257 in the same commit that landed the #167 fix; the harness body
+itself is unchanged.
 
 ### What this slice does not verify
 
@@ -1912,8 +2073,10 @@ matcher, extend `isPTYDevicePath` and re-run.
 stable PTY fd would not race a single-pass directory read, so the bias
 is toward false-negative on a closing fd — acceptable.
 
-**Carries the same `t.Skip("blocked on #167")` as the byte-flow test.**
-Both skips lift in one commit when #167 lands.
+**Carries the same `t.Skip("blocked on #257")` as the byte-flow test.**
+Both skips originally tracked #167 (CLI flag rejection); rotated to
+#257 once #167 landed and exposed the underlying `--session-id`-vs-
+test-binary harness bug. Both lift in one commit when #257 lands.
 
 **Production diff is zero. Test diff ~110 LOC, one new file.**
 `go test -tags e2e -race ./internal/e2e/...` clean.
@@ -2038,20 +2201,24 @@ pyry -pyry-socket=<sock> -- --session-id <uuid> --input-format stream-json --out
   is legible. Setting `-pyry-claude=/bin/false` would mask the real
   failure with a deliberately-bogus path.
 
-### #167 doesn't reach this code path
+### Neither #167 nor #257 reaches this code path
 
-The `pyry attach --stdio` CLI bug (#167) blocks #161/#162's
-`TestE2E_AttachStdio_*` tests because `parseClientFlags` rejects
-`--stdio` before `parseAttachArgs` runs. **#163 is unaffected.**
-`tryAutoAttach` calls `control.AttachStdio` *directly* from inside the
-foreground binary's `runSupervisor` — no verb dispatch, no
-`parseClientFlags`, no `parseAttachArgs`. The bug lives in a code path
-this test never enters. Confirmed against `cmd/pyry/main.go:304`
-(the in-process `control.AttachStdio` call site).
+The `pyry attach --stdio` CLI bug (#167, fixed) blocked #161/#162's
+`TestE2E_AttachStdio_*` tests because `parseClientFlags` rejected
+`--stdio` before `parseAttachArgs` ran. The follow-up harness bug
+(#257, the `--session-id`-vs-test-binary collision exposed when #167's
+fix lifted the skip) keeps those tests skipped today. **#163 is
+unaffected by both.** `tryAutoAttach` calls `control.AttachStdio`
+*directly* from inside the foreground binary's `runSupervisor` — no
+verb dispatch, no `parseClientFlags`, no `parseAttachArgs`; and #163's
+own daemon variant uses a shell-wrapper `claude` (`echoClaudeScript`)
+which dodges #257 by construction. Confirmed against `cmd/pyry/main.go`
+(the in-process `control.AttachStdio` call site in `tryAutoAttach`).
 
 This also means #163's test is the **first end-to-end proof** that the
 `AttachStdio` byte path works against a real daemon — the stdio-attach
-test that was meant to be the first proof is `t.Skip`'d on #167.
+test that was meant to be the first proof remains `t.Skip`'d (now on
+#257).
 
 ### Daemon variant: `spawnAutoAttachDaemon` + `echo-claude.sh` shell wrapper
 
@@ -2084,11 +2251,11 @@ are preserved across the shell `exec` automatically.
 `spawnAutoAttachDaemon` is otherwise structurally identical to
 `spawnAttachableDaemon`: bridge mode, helper-as-claude in echo mode,
 `waitDaemonReady` polls on the same protocol. The existing #161 stdio
-harness has the *same latent bug* (its daemon also drives
-`SessionsNew`) but its byte-flow test is `t.Skip`'d on #167, so the
-bug never surfaces today. Folding `spawnAttachableDaemon` over to the
-shell-wrapper shape is left for the ticket that lifts that skip — out
-of scope for #163 per scope discipline.
+harness has the *same bug* (its daemon also drives `SessionsNew` and
+wires the test binary directly as `claude`); now that #167's CLI fix
+has landed and the skip lifted, the bug surfaces as a real harness
+failure tracked in #257. Folding `spawnAttachableDaemon` over to the
+shell-wrapper shape is the body of #257.
 
 ### `Stderr` is a `safeBuffer`, not a bare `bytes.Buffer`
 
@@ -2102,7 +2269,7 @@ copy goroutine](../../lessons.md#cmdstderr-reads-race-the-osexec-copy-goroutine)
 
 The stdio harness's `StdioAttachClient.Stderr` has the same latent
 race; not refactored here per scope discipline (its proof-of-life is
-`t.Skip`'d on #167; the race never fires).
+`t.Skip`'d on #257; the race never fires).
 
 ### `pgrepChildren` — process-tree primitive
 
