@@ -1097,7 +1097,9 @@ Repo-level session memory. Read this at the start of every session.
 - QMD search: pyrycode-docs, pyrycode-root collections
 - .claude/settings.json with safety rules
 
-## Patterns Established
+## Patterns Established (frozen 2026-05-11)
+
+> **FROZEN.** Pre-2026-05-11 patterns. New per-ticket patterns live in `docs/knowledge/codebase/<N>.md` — same per-ticket-file convention as "What's Built" above. Do not append here.
 
 - **Config struct pattern** — all configuration in a single `Config` struct, defaults applied in `New()`
 - **Context-based cancellation** — `context.Context` flows through `Run()` → `runOnce()`, checked at every wait point
