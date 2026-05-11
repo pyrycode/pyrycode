@@ -1,6 +1,10 @@
-# Lessons Learned
+# Lessons Learned (frozen)
 
-Gotchas, anti-patterns, and mistakes. Read this before every session so you don't repeat them.
+**Frozen 2026-05-11.** This file is historical reference only. New lessons go into the relevant ticket's `docs/knowledge/codebase/<N>.md` under a "Lessons learned" section.
+
+The pre-2026-05-11 entries below were collected before the per-ticket file convention. They remain unchanged so existing cross-references still resolve. Future tickets do not append here — the per-ticket file convention eliminates the shared-append conflict surface (same fix shape as `PROJECT-MEMORY.md`'s sections, frozen the same day).
+
+---
 
 ## QMD Indexing
 
@@ -333,6 +337,21 @@ Gotchas, anti-patterns, and mistakes. Read this before every session so you don'
 - **Capturing `slog` output via `slog.NewTextHandler(&bytes.Buffer{}, …)` is fine for synchronous tests, racy for tests that read while a goroutine writes.** `bytes.Buffer` documents no concurrency guarantee; `Write` and `String`/`Bytes`/`Read` racing is a `-race` failure waiting to happen. Loop-shaped tests (`TestRunSweepLoop_*` in `internal/conversations/sweep_loop_test.go`, #242) spawn the loop in a goroutine that emits slog records on every tick while the test polls for them — the unwrapped `bytes.Buffer` was a `-race` reproduction.
 - **Fix: a tiny `syncBuffer` (mutex-wrapped `bytes.Buffer`) co-located with the test.** Implement `Write(p) (int, error)` and `String() string`, both holding the mutex. Don't promote the helper above the package until a second consumer arrives. Single-tick tests that drive the body directly (no goroutine) can keep using `bytes.Buffer` — the wrap is only required when read and write cross goroutines.
 - **The same trap exists for `strings.Builder` and `os.File` writes by the goroutine + reads by the test.** `slog.NewTextHandler(io.Discard, …)` sidesteps the question entirely when the test doesn't need to assert on log output (`TestRunSweepLoop_NoOpDoesNotSave` uses this).
+
+## Don't ship a `Config` field whose semantics another contract already owns
+
+- **#247's AC body listed `Config { ReadTimeout, WriteTimeout time.Duration }` but the architect's security review caught that `ReadTimeout` had no meaning under the heartbeat contract.** The inactivity contract is the 30s idle ping + 30s pong timeout — a stuck conn fires `pongTimeout` within 60s worst case, cancels the recv-pump's child ctx, and unblocks `conn.Read`. A separately-configurable `ReadTimeout` would shadow the heartbeat and produce confusing failure modes if a caller set it lower than `pongTimeout` (the read deadline fires before the pong-timeout reconnect path engages).
+- **Lesson: when the AC names a knob, check that the knob carries a behaviour the rest of the design doesn't already own.** Two contracts pointing at the same observable produce silent misconfiguration bugs that look like "transport is jittery" or "occasional inexplicable reconnects" once a caller picks a smaller timeout. Dropping `ReadTimeout` from `Config` was a one-line fix at design time; debugging the cross-contract interaction six months later would have cost an afternoon.
+- **The discriminator: "what observable does this knob change, and which other contract already binds that observable?"** If another contract already binds it, drop the knob and document the binding (Config doc-comment: "WriteTimeout bounds per-frame send I/O — it is NOT an inactivity timeout; the heartbeat is the inactivity contract"). Flag AC-vs-impl deltas of this shape in the PR description so the PO can update the issue body — the security-review carve-out in #247's architect spec is the template.
+
+## Preserving JSON `null` on the wire: `*T` without `omitempty`, with a mandatory WHY comment
+
+- **`*T` + `omitempty` is the reflexive Go idiom for "optional field," but it drops `null`-on-the-wire.** Spec wire-formats sometimes mandate the key be present with value `null` (e.g. `BackfillSincePayload.ConversationID` in `docs/protocol-mobile.md` § backfill_since, where `"conversation_id": null` literally means "all conversations" — distinct from absent and distinct from empty string). A nil `*string` with `omitempty` marshals as absent (key dropped); a nil `*string` without `omitempty` marshals as `null` — byte-identical to the spec. Dropping `omitempty` is the fix.
+- **The trap: a future contributor sees `*string` without `omitempty`, "fixes" the perceived omission, and silently breaks the wire round-trip.** A golden round-trip test with `bytes.Equal(canonical(out), canonical(raw))` catches it, but only if the fixture explicitly carries the `null` literal — a fixture that uses absent-rather-than-null wouldn't fail.
+- **Mandatory inline WHY comment under the project's "default to no comments" rule.** This is the rare case the rule carves out: the WHY is non-obvious, removing the comment leads to a likely "fix" that silently breaks the wire, and the byte-equal regression detector only catches it post-merge. One-liner on the field: `ConversationID *string `json:"conversation_id"` // *string + no omitempty: spec wire shows literal `null`; omitempty would drop the key.`
+- **Field declaration order must match fixture key order.** Go's `encoding/json` marshals struct fields in declaration order. A future reorderer who swaps `since_ts ⇄ conversation_id` in the struct must update the fixture in lockstep, or the byte-equal check fails.
+- **AC literal-reading vs. AC intent.** AC said "optional / nullable fields use `*T` + `omitempty`." Read literally, that prescribes `omitempty`; read for intent ("the field is optional from the caller's POV"), `*string` alone satisfies the goal. When AC literal conflicts with the spec wire shape, the spec wins — document the exception in the PR description so the AC can be amended.
+- **Reused in #273 for `ConversationSummary.Name *string` (`docs/protocol-mobile.md` § conversations).** Spec example carries one row with `"name": null` and one row with `"name": "<string>"`; the two-row fixture makes both `*string` branches observable in a single byte-equal round-trip. Same `*T` + no `omitempty` + WHY comment + AC-vs-spec carve-out applies verbatim. Treat this as the established pattern for all spec-mandated nullable wire fields going forward.
 
 ## Control socket dialability lags supervisor `Phase: running` — poll, don't single-shot, on post-restart status
 
