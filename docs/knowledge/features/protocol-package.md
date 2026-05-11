@@ -2,7 +2,7 @@
 
 Pure-data leaf package. Declares the wire-format types for the mobile WebSocket protocol v1 — outer envelope, relay↔binary routing wrapper, error-code constants, type-name constants, and the `IsV1Compatible` predicate. No I/O, no goroutines, no `context`, no `slog`. Spec source-of-truth is `docs/protocol-mobile.md`.
 
-Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are #256 sibling tickets and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher; first slice (`RegisterPushTokenPayload`) landed in #275.
+Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are #256 sibling tickets and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher; first slice (`RegisterPushTokenPayload`) landed in #275, second slice (messaging + backfill payloads) landed in #272.
 
 ## Files
 
@@ -11,13 +11,17 @@ internal/protocol/
 ├── envelope.go         Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
 ├── codes.go            12 Code* string constants + 16 Type* string constants
 ├── push.go             RegisterPushTokenPayload (#275) — register_push_token body
+├── messaging.go        SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
 ├── envelope_test.go    golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go      truth-table for IsV1Compatible + drift detectors
 ├── push_test.go        golden round-trip for RegisterPushTokenPayload via Envelope.Payload
-└── testdata/           envelope_full.json, envelope_minimal.json, routing_envelope.json, register_push_token.json
+├── messaging_test.go   golden round-trip for each of the five #272 payloads via Envelope.Payload
+└── testdata/           envelope_full.json, envelope_minimal.json, routing_envelope.json,
+                        register_push_token.json, send_message.json, message.json,
+                        backfill_since.json, message_chunk.json, backfill_done.json
 ```
 
-Three production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` carries the first per-type payload DTO; sibling slices from the #256 catalog will each own their own `*.go` file in the same shape.
+Four production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` carry the per-type payload DTOs, one file per spec-section group; sibling slices from the #256 catalog (handshake/control #271 and the TBD conversations slice) will each own their own `*.go` file in the same shape.
 
 ## Types
 
@@ -40,6 +44,48 @@ type RegisterPushTokenPayload struct {
 Golden round-trip test in `push_test.go` decodes the spec example through `Envelope` → `Envelope.Payload` → `RegisterPushTokenPayload` and re-marshals byte-equivalently against `testdata/register_push_token.json`. The decode-from-`Envelope.Payload` path (not decode-from-raw-payload-bytes) exercises the exact composition the dispatcher will use.
 
 This is the first slice of the #256 per-type payload catalog. Sibling slices for the remaining 15 v1 type discriminators land in their own tickets and own `*.go` files.
+
+### Messaging + backfill payloads (#272)
+
+Bodies of the five conversation-flow envelopes (`docs/protocol-mobile.md` § Message types → `send_message` / `message` / `backfill_since` / `message_chunk` / `backfill_done`). Phone↔binary direction varies by type; all five are grouped because `MessageChunkPayload.Messages` reuses `MessagePayload` per spec ("same shape as `message.payload`, multiple") and splitting them across files would either duplicate the row type or force a cross-slice dependency.
+
+```go
+type SendMessagePayload struct {
+    ConversationID string `json:"conversation_id"`
+    MessageID      string `json:"message_id"`
+    Text           string `json:"text"`
+}
+
+type MessagePayload struct {
+    ConversationID string `json:"conversation_id"`
+    MessageID      string `json:"message_id"`
+    Role           string `json:"role"`
+    Text           string `json:"text"`
+}
+
+type BackfillSincePayload struct {
+    SinceTS        time.Time `json:"since_ts"`
+    ConversationID *string   `json:"conversation_id"` // *string + no omitempty
+    MaxMessages    int       `json:"max_messages"`
+}
+
+type MessageChunkPayload struct {
+    Messages []MessagePayload `json:"messages"`
+}
+
+type BackfillDonePayload struct {
+    Delivered int `json:"delivered"`
+}
+```
+
+- **`MessagePayload.Role` stays `string`, not a named `Role` enum.** Spec defines a closed set (`"user"`, `"assistant"`, `"system"`) but the binary already treats role-strings as `string`-typed elsewhere; a typed `Role` would force a converter at every internal call site for no observable wire-format gain, and the closed-set guarantee belongs at the dispatcher. Matches `RegisterPushTokenPayload.Platform`'s rationale.
+- **`BackfillSincePayload.ConversationID` is `*string` WITHOUT `omitempty` — single subtle interaction.** Spec example shows literal `"conversation_id": null` on the wire (meaning "all conversations"). `*string` distinguishes "null on wire" (nil pointer) from "empty-string conversation id" at the boundary. `omitempty` is dropped because with it a nil pointer marshals as absent (key dropped); without it a nil pointer marshals as `null` — byte-identical to the fixture. A one-line WHY comment on the field is mandatory (the only comment in `messaging.go` under the project's "default to no comments" rule) so a future contributor doesn't "fix" the missing `omitempty` and silently break the round-trip. The byte-equal check in `TestBackfillSincePayload_RoundTrip` is the regression detector.
+- **`BackfillSincePayload.SinceTS` is `time.Time` (RFC3339Nano on the wire) per the envelope timestamp rule.** Consumers compute on it (skew checks, ordering); tests use `time.Time.Equal`, never `==`. Same discipline as `Envelope.TS`.
+- **`MessageChunkPayload.Messages` reuses `MessagePayload` directly — no duplicate row type.** Spec says "same shape as `message.payload`, multiple"; a `MessageChunkRow` clone would silently drift over time. The reuse is an explicit AC, pinned by `TestMessageChunkPayload_RoundTrip` which asserts ≥2 messages with distinct roles and IDs.
+- **All required fields are non-pointer, no `omitempty`.** Encode-side absence surfaces as zero-value `""` / `0` on the wire; the dispatcher rejects malformed frames via shape validation. Empty `text` is wire-legitimate (semantic validation lives at the dispatcher); empty `messages` slice and zero `delivered` are wire-legitimate.
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to `RegisterPushTokenPayload`. Required-field validation, role-set enforcement, ID monotonicity, clock-skew bounds — all dispatcher concerns.
+
+Golden round-trip tests in `messaging_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. `TestBackfillSincePayload_RoundTrip`'s byte-equal check doubles as a regression guard against `omitempty` being re-added to `ConversationID`. `message_chunk.json` carries 2 messages so the slice round-trip is non-trivially covered.
 
 ### `Envelope`
 
@@ -179,7 +225,7 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - `AllV1Types []string` exported slice — no consumer needs it; YAGNI.
 - `go:generate`-driven membership check — overkill for a 16-entry closed set.
 - A `[]string` slice + linear scan for membership — duplicates the constant names twice (slice + constants); the map literal duplicates them once at the same indentation as the constants block, making drift visible at code review.
-- Per-type payload structs beyond `RegisterPushTokenPayload` (#275) — the remaining 15 slices of the #256 catalog land per-ticket, each in its own `*.go` file.
+- Per-type payload structs beyond `RegisterPushTokenPayload` (#275) and the five messaging + backfill payloads (#272) — the remaining 10 slices of the #256 catalog land per-ticket, each in its own `*.go` file.
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.
