@@ -1,0 +1,1 @@
+{"id":99,"type":"error","ts":"2026-05-08T10:33:14.012Z","payload":{"code":"auth.invalid_token","message":"device token not recognised; re-pair via pyry pair on the binary","retryable":false},"in_reply_to":42}

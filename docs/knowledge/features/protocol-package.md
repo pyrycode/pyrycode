@@ -2,7 +2,7 @@
 
 Pure-data leaf package. Declares the wire-format types for the mobile WebSocket protocol v1 — outer envelope, relay↔binary routing wrapper, error-code constants, type-name constants, and the `IsV1Compatible` predicate. No I/O, no goroutines, no `context`, no `slog`. Spec source-of-truth is `docs/protocol-mobile.md`.
 
-Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are #256 sibling tickets and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher; first slice (`RegisterPushTokenPayload`) landed in #275, second slice (messaging + backfill payloads) landed in #272, third slice (conversations-read payloads) landed in #273, fourth slice (conversations-write payloads) landed in #274.
+Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are #256 sibling tickets and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher; first slice (`RegisterPushTokenPayload`) landed in #275, second slice (messaging + backfill payloads) landed in #272, third slice (conversations-read payloads) landed in #273, fourth slice (conversations-write payloads) landed in #274, fifth slice (handshake/control: `HelloServerPayload` / `HelloClientPayload` / `HelloAckPayload` / `ErrorPayload` / `AckPayload`) landed in #271.
 
 ## Files
 
@@ -14,21 +14,24 @@ internal/protocol/
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
 ├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
+├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271)
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsV1Compatible + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
 ├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
 ├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
+├── handshake_test.go            per-type round-trip for handshake/control payloads (#271)
 └── testdata/                    envelope_full.json, envelope_minimal.json, routing_envelope.json,
                                  register_push_token.json, send_message.json, message.json,
                                  backfill_since.json, message_chunk.json, backfill_done.json,
                                  list_conversations.json, conversations.json,
                                  create_conversation.json, conversation_created.json,
-                                 promote_conversation.json, conversation_updated.json
+                                 promote_conversation.json, conversation_updated.json,
+                                 hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json
 ```
 
-Six production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` carry the per-type payload DTOs, one file per spec-section group; remaining sibling slice from the #256 catalog (handshake/control #271) will own its own `*.go` file in the same shape.
+Seven production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the per-type payload DTOs, one file per spec-section group — the full #256 catalog is now wired.
 
 ## Types
 
@@ -201,6 +204,54 @@ type RoutingEnvelope struct {
 
 `Frame` is `json.RawMessage` so the relay can splice without parsing payloads — a structural property of the design (the relay holds zero per-user state). The `routing_envelope.json` round-trip test pins the byte-preservation invariant: a future change to typed `*Envelope` for `Frame` would surface as a fixture mismatch.
 
+## Handshake / control payloads (#271)
+
+Five DTOs that slot into `Envelope.Payload (json.RawMessage)` once the dispatcher reads `Envelope.Type`. Pure data — no methods, no constructors, no validation. Spec source: `docs/protocol-mobile.md` § Message types — `hello`, `hello_ack`, `error`, `ack`.
+
+```go
+type HelloServerPayload struct {
+    Role             string   `json:"role"` // always "server"
+    ServerID         string   `json:"server_id"`
+    BinaryVersion    string   `json:"binary_version"`
+    ProtocolVersions []string `json:"protocol_versions"`
+}
+
+type HelloClientPayload struct {
+    Role             string     `json:"role"` // always "client"
+    DeviceName       string     `json:"device_name"`
+    ClientVersion    string     `json:"client_version"`
+    ProtocolVersions []string   `json:"protocol_versions"`
+    LastSeenTS       *time.Time `json:"last_seen_ts,omitempty"`
+}
+
+type HelloAckPayload struct {
+    ProtocolVersion string `json:"protocol_version"`
+    ServerID        string `json:"server_id"`
+    ConnID          string `json:"conn_id"`
+}
+
+type ErrorPayload struct {
+    Code        string `json:"code"`
+    Message     string `json:"message"`
+    Retryable   bool   `json:"retryable"`
+    RetryAfterS *int   `json:"retry_after_s,omitempty"`
+}
+
+type AckPayload struct{}
+```
+
+Conventions:
+
+- **Two `Hello*Payload` structs, not a union.** The binary's hello and the phone's hello share only the envelope type name (`"hello"`) and dispatch site; field sets diverge. `role` is the discriminator. Modelling as a single struct with mostly-optional fields would lose type-level encoding of which fields belong with which role and force every consumer to validate role-field consistency by hand.
+- **Optional fields are `*T` + `omitempty`; required fields are non-pointer.** Only `LastSeenTS` and `RetryAfterS` carry `omitempty`. `time.Time` zero-value as sentinel for `LastSeenTS` was rejected — `time.Time{}` marshals as `"0001-01-01T00:00:00Z"`, which would pollute the wire.
+- **`AckPayload` is `struct{}`.** `json.Marshal(AckPayload{})` emits `{}` byte-for-byte, matching the spec's `"payload": {}`.
+- **Field declaration order matches the spec example order.** The JSON encoder emits fields in struct-declaration order; that's what the round-trip byte-equivalence check verifies. Reordering breaks tests.
+- **No constructors, no methods, no validation.** Runtime enforcement of `Role` discriminators (a phone sending `role: "server"`, etc.) is the dispatcher's concern (#248–#250). The `Role` constant is documented in struct comments only.
+
+Five fixture files under `testdata/` (one per type, each a complete `Envelope` with the payload inlined) drive five per-type `*_RoundTrip` tests in `handshake_test.go`. The tests reuse `readFixture` and `canonical` helpers from `envelope_test.go`. The byte-equivalence check (`canonical(out) == canonical(raw)`) is the load-bearing assertion; per-type field asserts exist to localise failure messages. The `hello_client.json` fixture's `last_seen_ts: "2026-05-08T08:14:02Z"` (no fractional seconds) pins the `time.RFC3339Nano` no-fractional round-trip behaviour.
+
+Sibling payload slices not yet landed: messaging (`send_message` / `message`), conversations (`list_conversations` / `conversations` / `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated`), backfill (`backfill_since` / `message_chunk` / `backfill_done`), push (`register_push_token`).
+
 ## Predicate: `IsV1Compatible`
 
 ```go
@@ -307,7 +358,7 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - `AllV1Types []string` exported slice — no consumer needs it; YAGNI.
 - `go:generate`-driven membership check — overkill for a 16-entry closed set.
 - A `[]string` slice + linear scan for membership — duplicates the constant names twice (slice + constants); the map literal duplicates them once at the same indentation as the constants block, making drift visible at code review.
-- Per-type payload structs beyond `RegisterPushTokenPayload` (#275), the five messaging + backfill payloads (#272), the conversations-read pair plus row type (#273), and the four conversations-write payloads (#274) — the remaining 4 slices of the #256 catalog (handshake/control: `hello` / `hello_ack` / `error` / `ack`) land per-ticket in their own `*.go` files.
+- Per-type payload structs beyond the now-complete #256 catalog — `RegisterPushTokenPayload` (#275), the five messaging + backfill payloads (#272), the conversations-read pair plus row type (#273), the four conversations-write payloads (#274), and the handshake/control payloads (#271). All slices are wired; no more #256 sub-tickets pending.
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.
@@ -339,4 +390,4 @@ No production consumers in this slice. Future:
 - Spec: `docs/protocol-mobile.md` — single source of truth for field names, optionality, wire semantics
 - Convention: `docs/PROJECT-MEMORY.md` § "Refusal-to-wire-code mapping is the consumer's job"
 - Sentinel-pattern precedent: `internal/conversations` (`ErrConversationNotFound` etc.)
-- Future consumers: `internal/dispatch` (#248), `internal/relay-client`, payload catalog (#256)
+- Future consumers: `internal/dispatch` (#248), `internal/relay-client`, remaining payload slices (sibling tickets to #271)
