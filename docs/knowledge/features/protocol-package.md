@@ -2,7 +2,7 @@
 
 Pure-data leaf package. Declares the wire-format types for the mobile WebSocket protocol v1 — outer envelope, relay↔binary routing wrapper, error-code constants, type-name constants, and the `IsV1Compatible` predicate. No I/O, no goroutines, no `context`, no `slog`. Spec source-of-truth is `docs/protocol-mobile.md`.
 
-Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are a sibling ticket (#256) and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher.
+Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are #256 sibling tickets and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher; first slice (`RegisterPushTokenPayload`) landed in #275.
 
 ## Files
 
@@ -10,14 +10,36 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 internal/protocol/
 ├── envelope.go         Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
 ├── codes.go            12 Code* string constants + 16 Type* string constants
+├── push.go             RegisterPushTokenPayload (#275) — register_push_token body
 ├── envelope_test.go    golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go      truth-table for IsV1Compatible + drift detectors
-└── testdata/           envelope_full.json, envelope_minimal.json, routing_envelope.json
+├── push_test.go        golden round-trip for RegisterPushTokenPayload via Envelope.Payload
+└── testdata/           envelope_full.json, envelope_minimal.json, routing_envelope.json, register_push_token.json
 ```
 
-Two production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order).
+Three production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` carries the first per-type payload DTO; sibling slices from the #256 catalog will each own their own `*.go` file in the same shape.
 
 ## Types
+
+### `RegisterPushTokenPayload` (#275)
+
+Body of a `register_push_token` frame (`docs/protocol-mobile.md` § Message types → `register_push_token`). Phone → binary, sent on every WS connect; the future dispatch handler persists `(platform, token, device_name)` to `devices.json` and de-duplicates against the stored triple.
+
+```go
+type RegisterPushTokenPayload struct {
+    Platform   string `json:"platform"`
+    Token      string `json:"token"`
+    DeviceName string `json:"device_name"`
+}
+```
+
+- `Platform` is one of `"fcm"` (Android) or `"apns"` (iOS). Stays `string`, not an enum — an enum would force a converter at every internal call site for no observable wire-format gain, and per-spec the dispatcher is the validation point.
+- All three fields are required (no `omitempty`, no pointers). Encode-side absence surfaces as zero-value `""` on the wire, which the dispatcher rejects via shape validation.
+- Pure DTO: no methods, no constructors, no `Validate()`. The dispatcher (future ticket) owns validation and is the only legitimate consumer; logging `Payload` is forbidden (may contain tokens) per the security posture below.
+
+Golden round-trip test in `push_test.go` decodes the spec example through `Envelope` → `Envelope.Payload` → `RegisterPushTokenPayload` and re-marshals byte-equivalently against `testdata/register_push_token.json`. The decode-from-`Envelope.Payload` path (not decode-from-raw-payload-bytes) exercises the exact composition the dispatcher will use.
+
+This is the first slice of the #256 per-type payload catalog. Sibling slices for the remaining 15 v1 type discriminators land in their own tickets and own `*.go` files.
 
 ### `Envelope`
 
@@ -157,7 +179,7 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - `AllV1Types []string` exported slice — no consumer needs it; YAGNI.
 - `go:generate`-driven membership check — overkill for a 16-entry closed set.
 - A `[]string` slice + linear scan for membership — duplicates the constant names twice (slice + constants); the map literal duplicates them once at the same indentation as the constants block, making drift visible at code review.
-- Per-type payload structs — owned by #256.
+- Per-type payload structs beyond `RegisterPushTokenPayload` (#275) — the remaining 15 slices of the #256 catalog land per-ticket, each in its own `*.go` file.
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.
