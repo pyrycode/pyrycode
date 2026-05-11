@@ -1,8 +1,11 @@
 package devices
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Published SHA-256("abc") test vector. Pinned as a regression guard
@@ -93,5 +96,78 @@ func TestVerifyToken(t *testing.T) {
 				t.Errorf("VerifyToken(%q, %q) = %v, want %v", tc.plain, tc.hash, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDevice_LegacyOmitsPushFields(t *testing.T) {
+	t.Parallel()
+
+	in := Device{
+		TokenHash:  HashToken("abc"),
+		Name:       "legacy-device",
+		PairedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte(`"platform"`)) {
+		t.Errorf("encoded form leaked empty platform key: %s", b)
+	}
+	if bytes.Contains(b, []byte(`"push_token"`)) {
+		t.Errorf("encoded form leaked empty push_token key: %s", b)
+	}
+	var out Device
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out != in {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", out, in)
+	}
+}
+
+func TestDevice_PopulatedRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	in := Device{
+		TokenHash:  HashToken("xyz"),
+		Name:       "pixel-8",
+		PairedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		Platform:   "apns",
+		PushToken:  "f0r-test-fixture-not-a-real-token",
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out Device
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out != in {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", out, in)
+	}
+}
+
+func TestDevice_DecodeLegacyDiskShape(t *testing.T) {
+	t.Parallel()
+
+	legacy := []byte(`{
+      "token_hash": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "name": "legacy",
+      "paired_at": "2026-01-01T00:00:00Z",
+      "last_seen_at": "2026-01-02T00:00:00Z"
+    }`)
+	var d Device
+	if err := json.Unmarshal(legacy, &d); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if d.Platform != "" {
+		t.Errorf("Platform = %q, want \"\"", d.Platform)
+	}
+	if d.PushToken != "" {
+		t.Errorf("PushToken = %q, want \"\"", d.PushToken)
 	}
 }

@@ -12,6 +12,9 @@ type Device struct {
     Name       string    `json:"name"`
     PairedAt   time.Time `json:"paired_at"`
     LastSeenAt time.Time `json:"last_seen_at"`
+
+    Platform  string `json:"platform,omitempty"`   // "fcm" | "apns" | ""
+    PushToken string `json:"push_token,omitempty"` // opaque APNs/FCM token
 }
 
 func HashToken(plain string) string
@@ -20,7 +23,9 @@ func VerifyToken(plain, hash string) bool
 
 Three exports. No exported errors, no sentinels — `VerifyToken` returns bool by design. Auth-decision-as-error is the caller's concern, not the crypto primitive's.
 
-JSON tags use snake_case with no `omitempty` — required fields round-trip at their zero value. Mirrors the `registryEntry` pattern in `internal/sessions/registry.go:17-29`, so the sibling registry-CRUD ticket can marshal `Device` with stdlib `encoding/json` unchanged.
+JSON tags use snake_case. The four identity / lifecycle fields have no `omitempty` — required fields round-trip at their zero value. The two push-registration fields (`Platform`, `PushToken`, added by #282) DO carry `omitempty` so a pre-#282 `devices.json` round-trips through load → save without sprouting `"platform": ""` / `"push_token": ""` entries; zero-migration change. Mirrors the `registryEntry` pattern in `internal/sessions/registry.go:17-29`, so the sibling registry CRUD marshals `Device` with stdlib `encoding/json` unchanged.
+
+`Platform`'s doc comment mirrors `protocol.RegisterPushTokenPayload.Platform` verbatim (`"fcm"` Android, `"apns"` iOS) so the on-disk and wire contracts stay aligned. `PushToken` is the opaque platform-supplied wake token; written by the future `register_push_token` handler (#250), never marshalled across the wire (the wire form is `protocol.RegisterPushTokenPayload` from #275).
 
 ## Wire contract
 
