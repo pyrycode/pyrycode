@@ -2,25 +2,175 @@
 
 Pure-data leaf package. Declares the wire-format types for the mobile WebSocket protocol v1 — outer envelope, relay↔binary routing wrapper, error-code constants, type-name constants, and the `IsV1Compatible` predicate. No I/O, no goroutines, no `context`, no `slog`. Spec source-of-truth is `docs/protocol-mobile.md`.
 
-Landed in #255. Handshake/control payload structs (`HelloServerPayload`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `AckPayload`) landed in #271 — the first slice of #256's payload catalog. Sibling slices (messaging, conversations, backfill, push) are not yet wired.
+Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are #256 sibling tickets and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher; first slice (`RegisterPushTokenPayload`) landed in #275, second slice (messaging + backfill payloads) landed in #272, third slice (conversations-read payloads) landed in #273, fourth slice (conversations-write payloads) landed in #274, fifth slice (handshake/control: `HelloServerPayload` / `HelloClientPayload` / `HelloAckPayload` / `ErrorPayload` / `AckPayload`) landed in #271.
 
 ## Files
 
 ```
 internal/protocol/
-├── envelope.go         Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go            12 Code* string constants + 16 Type* string constants
-├── handshake.go        HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271)
-├── envelope_test.go    golden round-trip for Envelope (full + minimal) and RoutingEnvelope
-├── compat_test.go      truth-table for IsV1Compatible + drift detectors
-├── handshake_test.go   per-type round-trip for handshake/control payloads (#271)
-└── testdata/           envelope_full.json, envelope_minimal.json, routing_envelope.json,
-                        hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json
+├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
+├── codes.go                     12 Code* string constants + 16 Type* string constants
+├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
+├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
+├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
+├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
+├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271)
+├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
+├── compat_test.go               truth-table for IsV1Compatible + drift detectors
+├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
+├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload
+├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
+├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
+├── handshake_test.go            per-type round-trip for handshake/control payloads (#271)
+└── testdata/                    envelope_full.json, envelope_minimal.json, routing_envelope.json,
+                                 register_push_token.json, send_message.json, message.json,
+                                 backfill_since.json, message_chunk.json, backfill_done.json,
+                                 list_conversations.json, conversations.json,
+                                 create_conversation.json, conversation_created.json,
+                                 promote_conversation.json, conversation_updated.json,
+                                 hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json
 ```
 
-Three production files. `envelope.go` and `codes.go` carry the framing primitives. `handshake.go` carries the first per-type payload slice (the four handshake/control payloads grouped under one spec subsection). New per-type slices land as siblings (`messaging.go`, `conversations.go`, `backfill.go`, `push.go`) as their tickets ship.
+Seven production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the per-type payload DTOs, one file per spec-section group — the full #256 catalog is now wired.
 
 ## Types
+
+### `RegisterPushTokenPayload` (#275)
+
+Body of a `register_push_token` frame (`docs/protocol-mobile.md` § Message types → `register_push_token`). Phone → binary, sent on every WS connect; the future dispatch handler persists `(platform, token, device_name)` to `devices.json` and de-duplicates against the stored triple.
+
+```go
+type RegisterPushTokenPayload struct {
+    Platform   string `json:"platform"`
+    Token      string `json:"token"`
+    DeviceName string `json:"device_name"`
+}
+```
+
+- `Platform` is one of `"fcm"` (Android) or `"apns"` (iOS). Stays `string`, not an enum — an enum would force a converter at every internal call site for no observable wire-format gain, and per-spec the dispatcher is the validation point.
+- All three fields are required (no `omitempty`, no pointers). Encode-side absence surfaces as zero-value `""` on the wire, which the dispatcher rejects via shape validation.
+- Pure DTO: no methods, no constructors, no `Validate()`. The dispatcher (future ticket) owns validation and is the only legitimate consumer; logging `Payload` is forbidden (may contain tokens) per the security posture below.
+
+Golden round-trip test in `push_test.go` decodes the spec example through `Envelope` → `Envelope.Payload` → `RegisterPushTokenPayload` and re-marshals byte-equivalently against `testdata/register_push_token.json`. The decode-from-`Envelope.Payload` path (not decode-from-raw-payload-bytes) exercises the exact composition the dispatcher will use.
+
+This is the first slice of the #256 per-type payload catalog. Sibling slices for the remaining 15 v1 type discriminators land in their own tickets and own `*.go` files.
+
+### Messaging + backfill payloads (#272)
+
+Bodies of the five conversation-flow envelopes (`docs/protocol-mobile.md` § Message types → `send_message` / `message` / `backfill_since` / `message_chunk` / `backfill_done`). Phone↔binary direction varies by type; all five are grouped because `MessageChunkPayload.Messages` reuses `MessagePayload` per spec ("same shape as `message.payload`, multiple") and splitting them across files would either duplicate the row type or force a cross-slice dependency.
+
+```go
+type SendMessagePayload struct {
+    ConversationID string `json:"conversation_id"`
+    MessageID      string `json:"message_id"`
+    Text           string `json:"text"`
+}
+
+type MessagePayload struct {
+    ConversationID string `json:"conversation_id"`
+    MessageID      string `json:"message_id"`
+    Role           string `json:"role"`
+    Text           string `json:"text"`
+}
+
+type BackfillSincePayload struct {
+    SinceTS        time.Time `json:"since_ts"`
+    ConversationID *string   `json:"conversation_id"` // *string + no omitempty
+    MaxMessages    int       `json:"max_messages"`
+}
+
+type MessageChunkPayload struct {
+    Messages []MessagePayload `json:"messages"`
+}
+
+type BackfillDonePayload struct {
+    Delivered int `json:"delivered"`
+}
+```
+
+- **`MessagePayload.Role` stays `string`, not a named `Role` enum.** Spec defines a closed set (`"user"`, `"assistant"`, `"system"`) but the binary already treats role-strings as `string`-typed elsewhere; a typed `Role` would force a converter at every internal call site for no observable wire-format gain, and the closed-set guarantee belongs at the dispatcher. Matches `RegisterPushTokenPayload.Platform`'s rationale.
+- **`BackfillSincePayload.ConversationID` is `*string` WITHOUT `omitempty` — single subtle interaction.** Spec example shows literal `"conversation_id": null` on the wire (meaning "all conversations"). `*string` distinguishes "null on wire" (nil pointer) from "empty-string conversation id" at the boundary. `omitempty` is dropped because with it a nil pointer marshals as absent (key dropped); without it a nil pointer marshals as `null` — byte-identical to the fixture. A one-line WHY comment on the field is mandatory (the only comment in `messaging.go` under the project's "default to no comments" rule) so a future contributor doesn't "fix" the missing `omitempty` and silently break the round-trip. The byte-equal check in `TestBackfillSincePayload_RoundTrip` is the regression detector.
+- **`BackfillSincePayload.SinceTS` is `time.Time` (RFC3339Nano on the wire) per the envelope timestamp rule.** Consumers compute on it (skew checks, ordering); tests use `time.Time.Equal`, never `==`. Same discipline as `Envelope.TS`.
+- **`MessageChunkPayload.Messages` reuses `MessagePayload` directly — no duplicate row type.** Spec says "same shape as `message.payload`, multiple"; a `MessageChunkRow` clone would silently drift over time. The reuse is an explicit AC, pinned by `TestMessageChunkPayload_RoundTrip` which asserts ≥2 messages with distinct roles and IDs.
+- **All required fields are non-pointer, no `omitempty`.** Encode-side absence surfaces as zero-value `""` / `0` on the wire; the dispatcher rejects malformed frames via shape validation. Empty `text` is wire-legitimate (semantic validation lives at the dispatcher); empty `messages` slice and zero `delivered` are wire-legitimate.
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to `RegisterPushTokenPayload`. Required-field validation, role-set enforcement, ID monotonicity, clock-skew bounds — all dispatcher concerns.
+
+Golden round-trip tests in `messaging_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. `TestBackfillSincePayload_RoundTrip`'s byte-equal check doubles as a regression guard against `omitempty` being re-added to `ConversationID`. `message_chunk.json` carries 2 messages so the slice round-trip is non-trivially covered.
+
+### Conversations-read payloads (#273)
+
+Bodies of the conversation-listing request/response pair (`docs/protocol-mobile.md` § Message types → `list_conversations` / `conversations`). `list_conversations` is phone → binary; `conversations` is the binary's reply with `in_reply_to` set to the request's id. `ConversationSummary` is the row type, exported because it is the element type of `ConversationsPayload.Conversations`.
+
+```go
+type ListConversationsPayload struct{}
+
+type ConversationsPayload struct {
+    Conversations []ConversationSummary `json:"conversations"`
+}
+
+type ConversationSummary struct {
+    ID            string    `json:"id"`
+    Name          *string   `json:"name"` // *string + no omitempty: spec wire shows literal `null`; omitempty would drop the key.
+    IsPromoted    bool      `json:"is_promoted"`
+    Cwd           string    `json:"cwd"`
+    LastMessageTS time.Time `json:"last_message_ts"`
+    LastUsedAt    time.Time `json:"last_used_at"`
+}
+```
+
+- **`ListConversationsPayload` is `struct{}`.** Spec shows `{}` on the wire; the type exists so the dispatcher can decode into a concrete value rather than `json.RawMessage`.
+- **`ConversationSummary.Name` is `*string` WITHOUT `omitempty` — same discipline as `BackfillSincePayload.ConversationID`.** Spec example shows literal `"name": null` on one of the two rows (an unnamed scratch conversation). `*string` distinguishes "null on wire" (nil pointer) from "absent" and from "empty string"; dropping `omitempty` keeps the `null` literal on re-marshal (byte-identical to the spec fixture). The AC body said "`*T` + `omitempty`"; honouring that literally would silently break the byte-equivalent round-trip the same AC requires — spec wire shape wins. A multi-line WHY comment on the field is mandatory (the only field-level comment in `conversations_read.go` under the "default to no comments" rule); `TestConversationsPayload_RoundTrip`'s byte-equal check is the regression detector. The fixture carries both branches (one row `name=<string>`, one row `name=null`) so the round-trip exercises both.
+- **`ConversationsPayload.Conversations` order is preserved verbatim from the wire — this type does not reorder.** Doc comment notes that the binary is the source of truth for ordering (e.g. most-recently-used first); a `Sort` / `SortMRU` helper or any ordering predicate is explicitly out of scope.
+- **`LastMessageTS` / `LastUsedAt` are `time.Time` (RFC3339Nano-on-the-wire envelope rule).** Spec example uses `"2026-05-08T10:31:02Z"` (no fractional seconds); `time.Time.MarshalJSON` emits RFC3339Nano which omits the fractional component when none is present, so the round-trip is byte-identical with no custom marshaller. Tests use `time.Time.Equal`, never `==`. Same discipline as `Envelope.TS`, `BackfillSincePayload.SinceTS`.
+- **Other required fields are non-pointer, no `omitempty`.** `ID` / `Cwd` are required `string`; `IsPromoted` is required `bool` (fixture covers both `true` and `false`). Validation that `IsPromoted == true` implies `Name != nil`, ID uniqueness, ordering invariants — all dispatcher / registry concerns.
+- **`ConversationSummary` field declaration order matches the fixture's per-row key order** (`id, name, is_promoted, cwd, last_message_ts, last_used_at`); Go's `encoding/json` emits in declaration order, so this is what makes the byte-equal round-trip survive.
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to `RegisterPushTokenPayload` and the messaging slice. The future dispatch handler reads `internal/conversations.Registry`, maps each `Conversation` row to a `ConversationSummary`, and sends a `conversations` envelope with `in_reply_to` set to the request id — registry-to-payload mapping is a downstream concern, not this package's.
+
+Golden round-trip tests in `conversations_read_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against `testdata/list_conversations.json` / `testdata/conversations.json`. `TestConversationsPayload_RoundTrip` asserts both rows: row 0 has a non-nil `Name` pointer; row 1 has `Name == nil` (NOT `*c1.Name == ""` — would panic on nil deref AND be the wrong check). The `conversations.json` envelope rides with `in_reply_to: 3`, the first protocol fixture pinning `in_reply_to` alongside an array-carrying payload.
+
+### Conversations-write payloads (#274)
+
+Bodies of the conversation create/promote lifecycle (`docs/protocol-mobile.md` § Message types → `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated`). Phone → binary: `create_conversation`, `promote_conversation`. Binary → phone: `conversation_created` (reply, rides `in_reply_to`), `conversation_updated` (broadcast on the server-id).
+
+```go
+type CreateConversationPayload struct {
+    IsPromoted *bool   `json:"is_promoted"` // *T + no omitempty (see WHY comment on the struct)
+    Name       *string `json:"name"`
+    Cwd        *string `json:"cwd"`
+}
+
+type ConversationCreatedPayload struct {
+    ID         string    `json:"id"`
+    IsPromoted bool      `json:"is_promoted"`
+    Cwd        string    `json:"cwd"`
+    Name       *string   `json:"name"`
+    LastUsedAt time.Time `json:"last_used_at"`
+}
+
+type PromoteConversationPayload struct {
+    ConversationID string `json:"conversation_id"`
+    Name           string `json:"name"`
+    Cwd            string `json:"cwd"`
+}
+
+type ConversationUpdatedPayload struct {
+    ID         string    `json:"id"`
+    IsPromoted bool      `json:"is_promoted"`
+    Name       *string   `json:"name"`
+    Cwd        string    `json:"cwd"`
+    LastUsedAt time.Time `json:"last_used_at"`
+}
+```
+
+- **`*T` WITHOUT `omitempty` for every spec-optional field whose example wire shows `null`** — `CreateConversationPayload.{IsPromoted, Name, Cwd}`, `ConversationCreatedPayload.Name`, `ConversationUpdatedPayload.Name`. Same discipline as `BackfillSincePayload.ConversationID` (#272) and `ConversationSummary.Name` (#273). The rationale is documented once in detail on `CreateConversationPayload` and cross-referenced from the others; this is the only struct in the slice with three optional pointers in a row, so it's the natural home for the comment block. `omitempty` on a nil pointer would drop the key entirely and break byte-equivalent round-trip with the spec example.
+- **`CreateConversationPayload.IsPromoted` is `*bool` — pointer-to-zero round-trips as the scalar.** Wire `false` survives as a pointer-to-false (NOT collapsed to nil); wire `null` would survive as nil. The test pins the pointer-to-false branch (spec example is `"is_promoted": false`); the wire-null branch is covered by `Name` / `Cwd` on the same struct, so the `*bool` shape is exercised end-to-end across the slice.
+- **Field declaration order matches each spec example verbatim** — `_created` has `{ID, IsPromoted, Cwd, Name, LastUsedAt}`, `_updated` has `{ID, IsPromoted, Name, Cwd, LastUsedAt}` (note `Name` / `Cwd` swap). Go's `encoding/json` emits fields in declaration order; the byte-equal round-trip enforces the swap is correct.
+- **`LastUsedAt` is `time.Time` (RFC3339Nano-on-the-wire envelope rule).** Spec example values (`"2026-05-08T10:34:01Z"` / `"2026-05-08T10:34:30Z"`) have no fractional seconds; `time.Time.MarshalJSON` emits RFC3339Nano which omits the fractional component when none is present, so the round-trip is byte-identical with no custom marshaller. Padding fixtures with `.000Z` would break it. Tests use `time.Time.Equal`, never `==`.
+- **`PromoteConversationPayload` is the only fully-required struct in the slice.** All three fields (`ConversationID`, `Name`, `Cwd`) are non-pointer `string`, no `omitempty`. Promotion requires a name and an effective cwd, and the conversation_id must resolve to an existing row — semantic gates the dispatcher / registry (`Registry.Promote`'s `ErrPromotion*` sentinels) enforce.
+- **`conversation_created.json` is the only fixture in the slice carrying `in_reply_to`** (`in_reply_to: 4`, matching the `create_conversation` frame at id 4). The test pins `env.InReplyTo != nil && *env.InReplyTo == 4`.
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to #275, #272, #273. Required-field validation, name uniqueness, ID resolution, broadcast fan-out — all dispatcher / registry concerns.
+
+Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Four flat test functions (no table-driven), each follows the sibling-slice template.
 
 ### `Envelope`
 
@@ -208,7 +358,7 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - `AllV1Types []string` exported slice — no consumer needs it; YAGNI.
 - `go:generate`-driven membership check — overkill for a 16-entry closed set.
 - A `[]string` slice + linear scan for membership — duplicates the constant names twice (slice + constants); the map literal duplicates them once at the same indentation as the constants block, making drift visible at code review.
-- Per-type payload structs for the non-handshake slices — messaging, conversations, backfill, push (#256's remaining slices). Handshake/control payloads landed in #271.
+- Per-type payload structs beyond the now-complete #256 catalog — `RegisterPushTokenPayload` (#275), the five messaging + backfill payloads (#272), the conversations-read pair plus row type (#273), the four conversations-write payloads (#274), and the handshake/control payloads (#271). All slices are wired; no more #256 sub-tickets pending.
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.

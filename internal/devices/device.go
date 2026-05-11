@@ -26,6 +26,20 @@ type Device struct {
 	Name       string    `json:"name"`
 	PairedAt   time.Time `json:"paired_at"`
 	LastSeenAt time.Time `json:"last_seen_at"`
+
+	// Platform is the push notification platform for this device:
+	// "fcm" (Android) or "apns" (iOS). Empty for devices that have
+	// not registered a push token (e.g. CLI peers, or phones that
+	// have not yet completed register_push_token). Matches the
+	// contract on protocol.RegisterPushTokenPayload.Platform.
+	Platform string `json:"platform,omitempty"`
+
+	// PushToken is the opaque FCM / APNs device token used to wake
+	// this device when it is offline. Empty for devices that have
+	// not registered. Written by the register_push_token handler;
+	// never marshalled across the wire (the wire form is
+	// protocol.RegisterPushTokenPayload).
+	PushToken string `json:"push_token,omitempty"`
 }
 
 // HashToken returns the lowercase SHA-256 hex of plain. Output is
