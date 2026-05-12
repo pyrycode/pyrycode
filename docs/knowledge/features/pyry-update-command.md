@@ -190,7 +190,33 @@ PYRY_E2E_BIN=$(pwd)/pyry go test -tags=e2e_update ./cmd/pyry/...   # CI prebuild
 
 **`cmd1Stopped` flag avoids double-stop in `t.Cleanup`.** The closure-side stop in `runRestart` and the `t.Cleanup`-side stop both target the same `cmd1`; the boolean ensures only one fires. Same shape as the `cmd2 == nil` guard in the post-test cleanup (handles the "runRestart never fired" case where `doUpdate` errored before the restart step).
 
-**Out of scope for this slice:** failure-path tests (separate ticket — covers checksum mismatch, fetch failure, restart failure, etc., all leaning on this ticket's `fakeRelease`/`newFakeReleaseServer`); cross-architecture updates; a different `Version` string for the served binary (the happy path needs only "different inode + working binary," not behavioural drift).
+**Out of scope for this slice:** cross-architecture updates; a different `Version` string for the served binary (the happy path needs only "different inode + working binary," not behavioural drift). Failure-path coverage landed in #261 — see below.
+
+### E2E failure paths (#261)
+
+Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tests (+333 LOC). Each test reuses the spawn/dial/teardown helpers from #260, drives `doUpdate` against a server tailored to inject one failure, and asserts a small set of structural properties.
+
+| Test | What's broken | doUpdate exits at | Asserts |
+|------|---------------|-------------------|---------|
+| `TestUpdate_FetchFailure_E2E` | Release-asset URL returns HTTP 500 | `FetchAsset` (before AtomicReplace) | Binary unchanged (inode equal), daemon 1 still answering on socket (PID unchanged), no `.pyry.*.tmp` stragglers in `<home>/bin/`, success line absent. |
+| `TestUpdate_VerifyFailure_E2E` | `checksums.txt` body lists 64-zero digest for the real tarball | `VerifySHA256` (before AtomicReplace) | Binary unchanged, daemon 1 still answering, success line absent. |
+| `TestUpdate_BrokenNewBinary_E2E` | Served tarball contains the `internal/brokenpyry` helper bytes | `runRestart` (AFTER AtomicReplace) | Error message contains `"binary replaced to "` AND `"daemon restart failed"` (version-agnostic, same shape as `TestUpdate_RestartFailure`), inode changed, on-disk bytes equal the broken bytes, broken-pyry stderr contains `BROKEN_PYRY_TOKEN`, success line absent. |
+
+**The broken-binary case is an asserts-the-current-design test, not a rollback test.** Per [Out of scope](#out-of-scope-handled-in-follow-up-tickets-or-deferred) above and `docs/specs/architecture/187-update-atomic-replace.md`: once `AtomicReplace` swaps in the new bytes, the old binary is gone — operator intervention is the only recovery. The error contract pinned by the unit-shaped `TestUpdate_RestartFailure` (`cmd/pyry/update_test.go:438-460`) extends end-to-end here against a real spawned-and-immediately-dead child process.
+
+**`runRestart`-as-sentinel for paths that shouldn't reach it.** Fetch-failure and verify-failure return errors from `doUpdate` BEFORE AtomicReplace, so `runRestart` is structurally unreachable. The tests register a `t.Fatalf`-on-call closure (mirroring `TestUpdate_Success`'s shape at `cmd/pyry/update_test.go:113-116`) — a regression that DID reach `runRestart` on these paths fails loud at the wrong-path-reached moment, instead of producing a misleading "daemon 1 dead" failure several assertions later.
+
+**Fetch failure uses a parallel constructor, not a knob on `newFakeReleaseServer`.** Growing a failure-injection knob for a single caller would contaminate the four happy-path callers in `update_test.go`. `newFetchFailReleaseServer(t, version)` is ~20 lines: serves `/repos/.../releases/latest` (200 with `tag_name`) but returns HTTP 500 on the asset download URL. Verify failure passes a deliberately-wrong checksums body directly to the existing `newFakeReleaseServer` — no new helper needed.
+
+**Shared pre-update setup helper.** `installPreUpdateDaemonE2E(t) *preUpdateState` bundles the install + spawn + waitForSocket + capture-inode-PID block. Returns a struct (`targetPath`, `home`, `socket`, `inodeBefore`, `pidBefore`, `cmd1`, `done1`, `stdout1`, `stderr1`). Deliberately does NOT register `cmd1` cleanup — the broken-binary test's `runRestart` closure stops cmd1 mid-test, and registering cleanup inside the helper would force a `cmd1Stopped` flag visible to the closure, coupling the helper to test-local control flow. Fetch-/verify-failure tests register `stopDaemonE2E(s.cmd1, ...)` in `t.Cleanup` themselves; broken-binary gates on the closure-local `cmd1Stopped`. `TestUpdate_HappyPath_E2E` does NOT switch to this helper — append-only.
+
+**Shared assertion helpers.** `assertBinaryUnchangedE2E` (inode comparison), `assertDaemonAliveE2E` (PID-unchanged + `Signal(0)` localizer + `pyry status` round-trip), `assertNoStragglersE2E` (single-`pyry`-entry assertion on `<home>/bin/`), `assertNoSuccessLineE2E` (substring-not-present on `==> Updated to <v>.`). The stragglers check is skipped on the verify-failure path (structurally identical to fetch-failure — exits before AtomicReplace) and the broken-binary path (AtomicReplace succeeded; the inode + on-disk-bytes assertions already pin post-replace state).
+
+**`internal/brokenpyry/main.go`** is the broken-pyry stand-in: 19 LOC `package main` that writes `BROKEN_PYRY_TOKEN: broken pyry stand-in exiting non-zero` to stderr and `os.Exit(1)` on every invocation. No flag parsing, no signal handling, no `-pyry-socket=` consumer — the binary exits before any of that would run. Built on demand via `buildBrokenPyryBinE2E(t)` which mirrors `buildPyryBinE2E`'s shape (`PYRY_E2E_BROKEN_BIN` short-circuit + `go build` fallback). Location is `internal/brokenpyry/` (not `cmd/pyry/internal/brokenpyry/`): a `package main` directory cannot be imported by other Go code, so the visibility tightening that `cmd/pyry/internal/` would provide doesn't apply (the path is just a build-target string for `go build`); flat `internal/<X>/` matches `internal/e2e/`, `internal/install/`, `internal/update/` repo shape.
+
+**Diagnostic stderr-token assertion.** The broken-binary test asserts `stderr2` contains `BROKEN_PYRY_TOKEN`. Without it, a future regression where the spawn target gets wired to a different broken binary (e.g. `/bin/false`) would still produce a `daemon exited before ready` → `daemon restart failed` chain that passes the structural error-contract assertion — but the test wouldn't actually be exercising the broken-pyry path it claims to. The token assertion localizes "broken helper ran" from "some other binary exited early" the moment the regression lands.
+
+**No `--release-url` flag, no rollback work.** Per ticket #261's AC body and lessons.md: a `--release-url` CLI flag (or `PYRY_RELEASE_BASE_URL` env var) is forbidden — `doUpdate` is driven directly from the same-package test, same seam #260 established. Rollback / `.bak` behaviour stays out of scope; if a future ticket introduces it, that ticket owns the broken-binary test's revised assertions.
 
 ## Files
 
@@ -198,6 +224,8 @@ PYRY_E2E_BIN=$(pwd)/pyry go test -tags=e2e_update ./cmd/pyry/...   # CI prebuild
 - `cmd/pyry/update_test.go` (~460 LOC) — integration tests + httptest fixtures.
 - `cmd/pyry/main.go` — `case "update":` dispatch + `printHelp` entry.
 - `internal/update/restart.go` — `RestartProbe` + `DetectRestartCommand` (#181, consumed unchanged).
+- `internal/brokenpyry/main.go` (#261, ~19 LOC) — deliberately-broken pyry stand-in for `TestUpdate_BrokenNewBinary_E2E`; writes a recognizable stderr token and exits non-zero.
+- `cmd/pyry/update_e2e_test.go` (#260 + #261, ~750 LOC) — happy-path + three failure-path e2e tests, build tag `(darwin || linux) && e2e_update`.
 - `docs/guide.md` — "Updating pyry" section.
 
 ## Related
