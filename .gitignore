@@ -34,3 +34,4 @@ agents/
 # uncommitted changes for #237"). Result: a tracked symlink-to-self
 # that `git checkout -- .` kept restoring on every cleanup.
 .codegraph
+.dispatcher.lock
