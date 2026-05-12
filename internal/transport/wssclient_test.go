@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -520,4 +521,330 @@ func TestNew_PanicsWithoutLogger(t *testing.T) {
 		}
 	}()
 	_ = New(Config{})
+}
+
+func TestConnected_FiresOnEveryConnect(t *testing.T) {
+	t.Parallel()
+	relay := newTestRelay(t)
+	cfg := Config{
+		URL:          relay.URL(),
+		Logger:       testLogger(t),
+		WriteTimeout: time.Second,
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = c.Close()
+	})
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-c.Connected():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Connected did not fire after first connect")
+	}
+	relay.ForceClose()
+	select {
+	case <-c.Connected():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Connected did not fire after reconnect")
+	}
+}
+
+func TestConnected_DropsWhenObserverSlow(t *testing.T) {
+	t.Parallel()
+	relay := newTestRelay(t)
+	cfg := Config{
+		URL:          relay.URL(),
+		Logger:       testLogger(t),
+		WriteTimeout: time.Second,
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = c.Close()
+	})
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	// Let several reconnects happen without reading Connected.
+	for i := 0; i < 3; i++ {
+		select {
+		case <-relay.connectedCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("relay never observed connect %d", i)
+		}
+		relay.ForceClose()
+	}
+	// Late observer must still get at least one event without blocking
+	// the dial loop.
+	select {
+	case <-c.Connected():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Connected delivered no event to late observer")
+	}
+}
+
+// closeCodeRelay closes every accepted WS upgrade with the configured status.
+type closeCodeRelay struct {
+	server    *httptest.Server
+	connCount atomic.Int64
+}
+
+func newCloseCodeRelay(t *testing.T, status websocket.StatusCode, reason string) *closeCodeRelay {
+	t.Helper()
+	r := &closeCodeRelay{}
+	r.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		conn, err := websocket.Accept(w, req, nil)
+		if err != nil {
+			return
+		}
+		r.connCount.Add(1)
+		_ = conn.Close(status, reason)
+	}))
+	t.Cleanup(r.server.Close)
+	return r
+}
+
+func (r *closeCodeRelay) URL() string {
+	return "ws" + strings.TrimPrefix(r.server.URL, "http")
+}
+
+func TestFatalCloseCodes_HaltsReconnect(t *testing.T) {
+	t.Parallel()
+	relay := newCloseCodeRelay(t, websocket.StatusCode(4409), "server-id conflict")
+	cfg := Config{
+		URL:             relay.URL(),
+		Logger:          testLogger(t),
+		WriteTimeout:    time.Second,
+		FatalCloseCodes: []websocket.StatusCode{websocket.StatusCode(4409)},
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = c.Close() })
+
+	err := c.Connect(ctx)
+	if !errors.Is(err, ErrFatalClose) {
+		t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
+	}
+	if status := websocket.CloseStatus(err); status != websocket.StatusCode(4409) {
+		t.Errorf("CloseStatus(err) = %d, want 4409", status)
+	}
+	if got := relay.connCount.Load(); got != 1 {
+		t.Errorf("connCount = %d, want 1 (no reconnect)", got)
+	}
+}
+
+// TestFatalCloseCodes_HaltsOnDialError exercises the path where the relay
+// closes mid-upgrade, so the close status surfaces from Dial directly
+// (not from a subsequent serve Read). Without the dial-path check, the
+// client would back off and retry, defeating ErrServerIDConflict.
+// Deterministic via dialFn injection — no race against upgrade timing.
+func TestFatalCloseCodes_HaltsOnDialError(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		URL:             "wss://example.invalid",
+		Logger:          testLogger(t),
+		WriteTimeout:    time.Second,
+		FatalCloseCodes: []websocket.StatusCode{websocket.StatusCode(4409)},
+	}
+	var dials atomic.Int64
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+		dialFn: func(ctx context.Context) (*websocket.Conn, error) {
+			dials.Add(1)
+			ce := websocket.CloseError{
+				Code:   websocket.StatusCode(4409),
+				Reason: "server-id conflict",
+			}
+			return nil, fmt.Errorf("dial: %w", ce)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = c.Close() })
+
+	err := c.Connect(ctx)
+	if !errors.Is(err, ErrFatalClose) {
+		t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
+	}
+	if status := websocket.CloseStatus(err); status != websocket.StatusCode(4409) {
+		t.Errorf("CloseStatus(err) = %d, want 4409", status)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Errorf("dialFn invocations = %d, want 1 (no retry on fatal close)", got)
+	}
+}
+
+func TestFatalCloseCodes_EmptyPreservesReconnect(t *testing.T) {
+	t.Parallel()
+	relay := newCloseCodeRelay(t, websocket.StatusCode(4409), "server-id conflict")
+	cfg := Config{
+		URL:          relay.URL(),
+		Logger:       testLogger(t),
+		WriteTimeout: time.Second,
+		// FatalCloseCodes intentionally empty.
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = c.Close()
+	})
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	// Empty FatalCloseCodes → client keeps redialing despite 4409.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if relay.connCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := relay.connCount.Load(); got < 2 {
+		t.Errorf("connCount = %d, want ≥ 2 (reconnect not preserved)", got)
+	}
+}
+
+func TestReceive_ReturnsErrDisconnectedOnConnDrop(t *testing.T) {
+	t.Parallel()
+	relay := newTestRelay(t)
+	cfg := Config{
+		URL:          relay.URL(),
+		Logger:       testLogger(t),
+		WriteTimeout: time.Second,
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 200 * time.Millisecond,
+		reconnectMax:     500 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = c.Close()
+	})
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-c.Connected():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Connected did not fire")
+	}
+
+	type recvResult struct {
+		data []byte
+		err  error
+	}
+	resCh := make(chan recvResult, 1)
+	go func() {
+		data, err := c.Receive(context.Background())
+		resCh <- recvResult{data, err}
+	}()
+	// Give Receive a moment to enter the select.
+	time.Sleep(50 * time.Millisecond)
+	relay.ForceClose()
+	select {
+	case res := <-resCh:
+		if !errors.Is(res.err, ErrDisconnected) {
+			t.Errorf("Receive returned err=%v, want ErrDisconnected", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Receive did not return after conn drop")
+	}
+}
+
+func TestReceive_BeforeConnectReturnsErrDisconnected(t *testing.T) {
+	t.Parallel()
+	c := New(Config{Logger: testLogger(t), WriteTimeout: time.Second})
+	t.Cleanup(func() { _ = c.Close() })
+	_, err := c.Receive(context.Background())
+	if !errors.Is(err, ErrDisconnected) {
+		t.Errorf("Receive before Connect: err = %v, want ErrDisconnected", err)
+	}
+}
+
+func TestDropConn_TriggersReconnect(t *testing.T) {
+	t.Parallel()
+	relay := newTestRelay(t)
+	cfg := Config{
+		URL:          relay.URL(),
+		Logger:       testLogger(t),
+		WriteTimeout: time.Second,
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = c.Close()
+	})
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-c.Connected():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Connected did not fire on first conn")
+	}
+	c.DropConn()
+	select {
+	case <-c.Connected():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Connected did not fire after DropConn; ConnCount=%d", relay.ConnCount())
+	}
+}
+
+func TestDropConn_BeforeConnect(t *testing.T) {
+	t.Parallel()
+	c := New(Config{Logger: testLogger(t), WriteTimeout: time.Second})
+	t.Cleanup(func() { _ = c.Close() })
+	// Must not panic when no live conn.
+	c.DropConn()
 }
