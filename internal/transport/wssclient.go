@@ -48,6 +48,13 @@ type Config struct {
 	// Logger receives structured lifecycle logs (dial, reconnect, ping
 	// timeout). Required; nil panics at New() time.
 	Logger *slog.Logger
+
+	// FatalCloseCodes lists WS close codes that terminate Connect's
+	// reconnect loop with ErrFatalClose. Empty (default) preserves the
+	// generic "reconnect on every drop" behaviour. The relay layer (#248)
+	// passes []websocket.StatusCode{4409} so a server-id conflict halts
+	// immediately rather than spinning in backoff.
+	FatalCloseCodes []websocket.StatusCode
 }
 
 // Client maintains a single long-lived WSS connection with auto-reconnect.
@@ -86,6 +93,19 @@ type Client struct {
 	closeOnce sync.Once
 	closeCh   chan struct{}
 
+	// connectedCh emits a value on every successful conn that survives
+	// setConn. Buffered to 1 with drop-on-full semantics: a slow observer
+	// sees the most recent connect event, not every connect since boot.
+	// The handshake layer (#248) is the only consumer.
+	connectedCh chan struct{}
+
+	// connDoneMu guards connDone. connDone is a per-conn signal channel:
+	// closed when the current live conn drops, replaced with a fresh
+	// channel before each new dial. Initial value is a pre-closed channel
+	// so Receive before Connect returns ErrDisconnected immediately.
+	connDoneMu sync.Mutex
+	connDone   chan struct{}
+
 	// mu guards conn (nil when no live conn).
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -99,6 +119,19 @@ var (
 	// ErrClosed is returned by Send and Receive after Close (or the
 	// parent context cancellation) has shut the client down.
 	ErrClosed = errors.New("transport: client closed")
+
+	// ErrDisconnected is returned by Receive when the underlying conn
+	// dropped while Receive was blocked, or when no conn is currently
+	// live. Callers observing this should NOT treat it as a re-handshake
+	// trigger directly — observe Connected() for that. ErrDisconnected
+	// means "your current Receive call returned because the wire dropped,
+	// not because data arrived."
+	ErrDisconnected = errors.New("transport: connection lost")
+
+	// ErrFatalClose wraps a websocket close error whose status is in
+	// Config.FatalCloseCodes. Returned by Connect; the underlying status
+	// is recoverable via websocket.CloseStatus(err).
+	ErrFatalClose = errors.New("transport: fatal close code")
 )
 
 // New returns a Client. The Client is not yet connected; call Connect.
@@ -106,6 +139,8 @@ func New(cfg Config) *Client {
 	if cfg.Logger == nil {
 		panic("transport: Config.Logger is required")
 	}
+	preClosed := make(chan struct{})
+	close(preClosed)
 	c := &Client{
 		cfg:              cfg,
 		pingInterval:     pingInterval,
@@ -117,6 +152,8 @@ func New(cfg Config) *Client {
 		sendCh:           make(chan []byte),
 		recvCh:           make(chan []byte),
 		closeCh:          make(chan struct{}),
+		connectedCh:      make(chan struct{}, 1),
+		connDone:         preClosed,
 	}
 	c.dialFn = c.realDial
 	return c
@@ -173,6 +210,14 @@ func (c *Client) Connect(ctx context.Context) error {
 			"uptime", uptime, "err", serveErr)
 		_ = conn.Close(websocket.StatusInternalError, "client reconnecting")
 
+		if status := websocket.CloseStatus(serveErr); status != -1 {
+			for _, fc := range c.cfg.FatalCloseCodes {
+				if status == fc {
+					return fmt.Errorf("%w (%d): %w", ErrFatalClose, status, serveErr)
+				}
+			}
+		}
+
 		select {
 		case <-c.closeCh:
 			return ErrClosed
@@ -212,13 +257,20 @@ func (c *Client) Send(frame []byte) error {
 	}
 }
 
-// Receive blocks until the next frame arrives, ctx is cancelled, or the
-// client is closed. After a reconnect, Receive resumes delivering frames
-// from the new conn. Callers that need to re-handshake on reconnect must
-// observe the connection state explicitly (a Connected signal channel is
-// deferred to the consumer ticket — see spec § "Connected-channel —
-// deferred decision").
+// Receive blocks until the next frame arrives, ctx is cancelled, the
+// client is closed, or the underlying conn drops. Returns ErrDisconnected
+// when the conn drops (or when no conn is currently live); the caller
+// observes Connected() to learn when a fresh conn becomes available and
+// re-runs any application-layer handshake on it.
 func (c *Client) Receive(ctx context.Context) ([]byte, error) {
+	select {
+	case <-c.closeCh:
+		return nil, ErrClosed
+	default:
+	}
+	c.connDoneMu.Lock()
+	done := c.connDone
+	c.connDoneMu.Unlock()
 	select {
 	case frame := <-c.recvCh:
 		return frame, nil
@@ -226,6 +278,34 @@ func (c *Client) Receive(ctx context.Context) ([]byte, error) {
 		return nil, ctx.Err()
 	case <-c.closeCh:
 		return nil, ErrClosed
+	case <-done:
+		return nil, ErrDisconnected
+	}
+}
+
+// Connected returns a channel that emits a value on every successful
+// underlying conn. Buffer is 1 with drop-on-full semantics: a slow
+// observer sees the most recent connect event, not every connect since
+// boot. Multiple observers are NOT supported.
+func (c *Client) Connected() <-chan struct{} { return c.connectedCh }
+
+// DropConn force-closes the live conn (if any). The serve loop sees the
+// closed conn, returns to the dial loop, and reconnects via backoff.
+// DropConn does NOT halt the dial loop. Idempotent (safe to call when no
+// conn is live).
+//
+// status and reason are advisory: DropConn uses CloseNow so the peer
+// observes an abrupt 1006-like drop rather than waiting up to 10s on a
+// blocking close handshake. The args are retained for future use and to
+// preserve symmetry with websocket.Conn.Close.
+func (c *Client) DropConn(status websocket.StatusCode, reason string) {
+	_ = status
+	_ = reason
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil {
+		_ = conn.CloseNow()
 	}
 }
 
@@ -269,12 +349,25 @@ func (c *Client) realDial(ctx context.Context) (*websocket.Conn, error) {
 func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	fresh := make(chan struct{})
+	c.connDoneMu.Lock()
+	c.connDone = fresh
+	c.connDoneMu.Unlock()
+	defer func() {
+		c.connDoneMu.Lock()
+		close(fresh)
+		c.connDoneMu.Unlock()
+	}()
 	errCh := make(chan error, 3)
 	go func() { errCh <- c.recvPump(ctx, conn) }()
 	go func() { errCh <- c.sendPump(ctx, conn) }()
 	go func() { errCh <- c.pingLoop(ctx, conn) }()
 	c.setConn(conn)
 	defer c.setConn(nil)
+	select {
+	case c.connectedCh <- struct{}{}:
+	default:
+	}
 	first := <-errCh
 	cancel()
 	<-errCh
