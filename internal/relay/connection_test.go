@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -63,10 +62,10 @@ type testRelay struct {
 	connectedCh chan struct{}
 	connCount   atomic.Int64
 
-	// behavior is the configured response. switchAfter, when > 0,
-	// switches behavior after that many accepted conns (used for tests
-	// that fail the first conn then succeed on retry).
-	mu2          sync.Mutex
+	// behavior, nextBehavior, and switchAfter are set by tests before
+	// Connect is called. The HTTP handler goroutines that read them
+	// observe those writes via the happens-before edge from the test
+	// goroutine's `go transport.Connect` launch. No mutex needed.
 	behavior     relayBehavior
 	nextBehavior relayBehavior
 	switchAfter  int
@@ -114,8 +113,6 @@ func (r *testRelay) Close() {
 }
 
 func (r *testRelay) currentBehavior() relayBehavior {
-	r.mu2.Lock()
-	defer r.mu2.Unlock()
 	idx := int(r.connCount.Load())
 	if r.switchAfter > 0 && idx > r.switchAfter {
 		return r.nextBehavior
@@ -705,5 +702,3 @@ func TestConfig_Validation_TableDriven(t *testing.T) {
 	}
 }
 
-// shut up unused-import lint if fmt isn't reached.
-var _ = fmt.Sprintf

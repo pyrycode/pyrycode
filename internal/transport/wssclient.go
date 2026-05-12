@@ -188,6 +188,19 @@ func (c *Client) Connect(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			// A fatal close code can surface from Dial directly when the
+			// relay closes the conn as part of (or immediately after) the
+			// upgrade response — coder/websocket returns the close error
+			// from Dial rather than from a subsequent Read. Apply the
+			// same check here as the post-serve path so 4409 halts the
+			// loop regardless of which path observed it.
+			if status := websocket.CloseStatus(err); status != -1 {
+				for _, fc := range c.cfg.FatalCloseCodes {
+					if status == fc {
+						return fmt.Errorf("%w (%d): %w", ErrFatalClose, status, err)
+					}
+				}
+			}
 			delay := c.backoff(attempt)
 			c.cfg.Logger.Info("transport: dial failed, backing off",
 				"attempt", attempt, "delay", delay, "err", err)
@@ -235,8 +248,10 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 // Send writes a single frame to the relay. Returns ErrNotConnected if no
-// live conn, ErrClosed if Close was called. A nil return means the frame
-// was queued for the send pump, not that it has hit the wire.
+// live conn at call time, ErrClosed if Close was called, or
+// ErrDisconnected if the live conn drops while Send is blocked enqueuing
+// the frame. A nil return means the frame was queued for the send pump,
+// not that it has hit the wire.
 func (c *Client) Send(frame []byte) error {
 	select {
 	case <-c.closeCh:
@@ -249,11 +264,20 @@ func (c *Client) Send(frame []byte) error {
 	if !live {
 		return ErrNotConnected
 	}
+	// Capture connDone AFTER observing live. If a serve teardown lands
+	// between live-observation and the select below, sendPump has already
+	// exited and would never drain c.sendCh — the connDone close is the
+	// only signal that prevents the Send goroutine from wedging forever.
+	c.connDoneMu.Lock()
+	done := c.connDone
+	c.connDoneMu.Unlock()
 	select {
 	case c.sendCh <- frame:
 		return nil
 	case <-c.closeCh:
 		return ErrClosed
+	case <-done:
+		return ErrDisconnected
 	}
 }
 
@@ -289,18 +313,17 @@ func (c *Client) Receive(ctx context.Context) ([]byte, error) {
 // boot. Multiple observers are NOT supported.
 func (c *Client) Connected() <-chan struct{} { return c.connectedCh }
 
-// DropConn force-closes the live conn (if any). The serve loop sees the
-// closed conn, returns to the dial loop, and reconnects via backoff.
-// DropConn does NOT halt the dial loop. Idempotent (safe to call when no
-// conn is live).
+// DropConn force-closes the live conn (if any) abruptly (1006-like),
+// without sending a close frame. The serve loop sees the closed conn,
+// returns to the dial loop, and reconnects via backoff. DropConn does
+// NOT halt the dial loop. Idempotent (safe to call when no conn is live).
 //
-// status and reason are advisory: DropConn uses CloseNow so the peer
-// observes an abrupt 1006-like drop rather than waiting up to 10s on a
-// blocking close handshake. The args are retained for future use and to
-// preserve symmetry with websocket.Conn.Close.
-func (c *Client) DropConn(status websocket.StatusCode, reason string) {
-	_ = status
-	_ = reason
+// CloseNow is used in preference to Close(status, reason) so the caller
+// is not blocked for up to 10s waiting on a close handshake when the
+// only purpose is to recycle the conn. Callers wishing to communicate a
+// status to the peer should use Close on the application channel before
+// invoking DropConn.
+func (c *Client) DropConn() {
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
@@ -368,11 +391,23 @@ func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	case c.connectedCh <- struct{}{}:
 	default:
 	}
-	first := <-errCh
+	errs := make([]error, 0, 3)
+	errs = append(errs, <-errCh)
 	cancel()
-	<-errCh
-	<-errCh
-	return first
+	errs = append(errs, <-errCh, <-errCh)
+	// Prefer an error with a recognizable WS close status. When the peer
+	// closes, recvPump observes a CloseError but sendPump (mid-write) and
+	// pingLoop can return generic "use of closed network connection" net
+	// errors. If sendPump or pingLoop returns first, the close-code
+	// classification in Connect would miss the peer's actual status —
+	// fatal-close handling (e.g. 4409) would silently fall through to
+	// reconnect.
+	for _, e := range errs {
+		if websocket.CloseStatus(e) != -1 {
+			return e
+		}
+	}
+	return errs[0]
 }
 
 func (c *Client) recvPump(ctx context.Context, conn *websocket.Conn) error {

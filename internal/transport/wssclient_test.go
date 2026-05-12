@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -659,6 +660,50 @@ func TestFatalCloseCodes_HaltsReconnect(t *testing.T) {
 	}
 }
 
+// TestFatalCloseCodes_HaltsOnDialError exercises the path where the relay
+// closes mid-upgrade, so the close status surfaces from Dial directly
+// (not from a subsequent serve Read). Without the dial-path check, the
+// client would back off and retry, defeating ErrServerIDConflict.
+// Deterministic via dialFn injection — no race against upgrade timing.
+func TestFatalCloseCodes_HaltsOnDialError(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		URL:             "wss://example.invalid",
+		Logger:          testLogger(t),
+		WriteTimeout:    time.Second,
+		FatalCloseCodes: []websocket.StatusCode{websocket.StatusCode(4409)},
+	}
+	var dials atomic.Int64
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+		dialFn: func(ctx context.Context) (*websocket.Conn, error) {
+			dials.Add(1)
+			ce := websocket.CloseError{
+				Code:   websocket.StatusCode(4409),
+				Reason: "server-id conflict",
+			}
+			return nil, fmt.Errorf("dial: %w", ce)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = c.Close() })
+
+	err := c.Connect(ctx)
+	if !errors.Is(err, ErrFatalClose) {
+		t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
+	}
+	if status := websocket.CloseStatus(err); status != websocket.StatusCode(4409) {
+		t.Errorf("CloseStatus(err) = %d, want 4409", status)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Errorf("dialFn invocations = %d, want 1 (no retry on fatal close)", got)
+	}
+}
+
 func TestFatalCloseCodes_EmptyPreservesReconnect(t *testing.T) {
 	t.Parallel()
 	relay := newCloseCodeRelay(t, websocket.StatusCode(4409), "server-id conflict")
@@ -788,7 +833,7 @@ func TestDropConn_TriggersReconnect(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Connected did not fire on first conn")
 	}
-	c.DropConn(websocket.StatusNormalClosure, "test drop")
+	c.DropConn()
 	select {
 	case <-c.Connected():
 	case <-time.After(2 * time.Second):
@@ -801,5 +846,5 @@ func TestDropConn_BeforeConnect(t *testing.T) {
 	c := New(Config{Logger: testLogger(t), WriteTimeout: time.Second})
 	t.Cleanup(func() { _ = c.Close() })
 	// Must not panic when no live conn.
-	c.DropConn(websocket.StatusNormalClosure, "no live conn")
+	c.DropConn()
 }

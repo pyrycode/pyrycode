@@ -30,20 +30,11 @@ import (
 	"github.com/pyrycode/pyrycode/internal/transport"
 )
 
-// Wire-spec constants. See docs/protocol-mobile.md § Connection lifecycle.
-const (
-	// statusServerIDConflict is the WS close code the relay sends when a
-	// server-id is already claimed (docs/protocol-mobile.md § Error
-	// codes). Typed locally so callers don't have to import the
-	// websocket package for the value.
-	statusServerIDConflict websocket.StatusCode = 4409
-
-	// statusHandshakeAborted is the close code we send when forcing a
-	// reconnect from the consumer side (handshake timeout, malformed
-	// hello_ack). 1000 ("normal closure") communicates to the relay that
-	// we're closing cleanly and don't expect special handling.
-	statusHandshakeAborted = websocket.StatusNormalClosure
-)
+// statusServerIDConflict is the WS close code the relay sends when a
+// server-id is already claimed (docs/protocol-mobile.md § Error codes).
+// Typed locally so callers don't have to import the websocket package
+// for the value.
+const statusServerIDConflict websocket.StatusCode = 4409
 
 // handshakeTimeout is the deadline for receiving hello_ack after sending
 // hello. Wire-spec 5s per docs/protocol-mobile.md § Connection lifecycle.
@@ -212,7 +203,7 @@ func (c *Connection) run(ctx context.Context) {
 			if err := c.handshake(ctx); err != nil {
 				c.cfg.Logger.Warn("relay: handshake failed; recycling conn",
 					"err", err)
-				c.client.DropConn(statusHandshakeAborted, "handshake failed")
+				c.client.DropConn()
 				continue
 			}
 			c.forwardFrames(ctx)
@@ -278,6 +269,11 @@ func (c *Connection) forwardFrames(ctx context.Context) {
 	for {
 		raw, err := c.client.Receive(ctx)
 		if err != nil {
+			// Expected: transport.ErrDisconnected (conn dropped; run will
+			// re-handshake on next Connected), transport.ErrClosed (Close
+			// called), or ctx.Err (shutdown). Logged for diagnosability —
+			// an unrecognised err is a breadcrumb for transport API drift.
+			c.cfg.Logger.Debug("relay: forwardFrames exiting", "err", err)
 			return
 		}
 		var routing protocol.RoutingEnvelope
