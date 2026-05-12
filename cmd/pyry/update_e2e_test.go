@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -416,4 +418,355 @@ func parsePhaseE2E(stdout []byte) (string, bool) {
 		return fields[1], true
 	}
 	return "", false
+}
+
+// preUpdateState bundles the pre-update daemon's identity. Each failure-path
+// test asserts at least two of these fields didn't change.
+type preUpdateState struct {
+	targetPath  string
+	home        string
+	socket      string
+	inodeBefore uint64
+	pidBefore   int
+	cmd1        *exec.Cmd
+	done1       chan struct{}
+	stdout1     *bytes.Buffer
+	stderr1     *bytes.Buffer
+}
+
+// installPreUpdateDaemonE2E installs the freshly-built pyry → <home>/bin/pyry,
+// spawns it, waits for the socket, and captures the pre-update inode + PID.
+// Caller is responsible for stopping cmd1 — either directly via
+// stopDaemonE2E (broken-binary test, where runRestart kills it mid-test) or
+// via t.Cleanup (fetch/verify failures, where daemon 1 outlives doUpdate).
+func installPreUpdateDaemonE2E(t *testing.T) *preUpdateState {
+	t.Helper()
+	srcBin := buildPyryBinE2E(t)
+
+	home, err := os.MkdirTemp("", "pyry-up-")
+	if err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+
+	targetPath := filepath.Join(home, "bin", "pyry")
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	copyFileE2E(t, srcBin, targetPath, 0o755)
+	inodeBefore := inodeOfE2E(t, targetPath)
+
+	socket := filepath.Join(home, "pyry.sock")
+	cmd1, stdout1, stderr1, done1 := spawnDaemonE2E(t, targetPath, home, socket)
+	if err := waitForSocketE2E(socket, done1, e2eUpdReadyDeadline); err != nil {
+		t.Fatalf("daemon 1 not ready: %v\nstdout:\n%s\nstderr:\n%s", err, stdout1.String(), stderr1.String())
+	}
+
+	return &preUpdateState{
+		targetPath:  targetPath,
+		home:        home,
+		socket:      socket,
+		inodeBefore: inodeBefore,
+		pidBefore:   cmd1.Process.Pid,
+		cmd1:        cmd1,
+		done1:       done1,
+		stdout1:     stdout1,
+		stderr1:     stderr1,
+	}
+}
+
+// buildBrokenPyryBinE2E builds the deliberately-broken pyry stand-in into a
+// per-test temp dir. PYRY_E2E_BROKEN_BIN, when set, short-circuits to a
+// pre-built binary — same shape and CI-prebuild contract as buildPyryBinE2E.
+func buildBrokenPyryBinE2E(t *testing.T) string {
+	t.Helper()
+	if env := os.Getenv("PYRY_E2E_BROKEN_BIN"); env != "" {
+		return env
+	}
+	dir, err := os.MkdirTemp("", "pyry-e2eupd-broken-")
+	if err != nil {
+		t.Fatalf("mkdir brokenpyry build dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	binPath := filepath.Join(dir, "brokenpyry")
+	cmd := exec.Command("go", "build", "-o", binPath, "github.com/pyrycode/pyrycode/internal/brokenpyry")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build brokenpyry: %v\n%s", err, out)
+	}
+	return binPath
+}
+
+// newFetchFailReleaseServer hosts the latest-release endpoint successfully
+// but returns HTTP 500 on the asset download URL. Parallel to
+// newFakeReleaseServer; growing newFakeReleaseServer a failure-injection
+// knob for a single caller is not worth the API churn against four
+// happy-path callers in update_test.go.
+func newFetchFailReleaseServer(t *testing.T, version string) *httptest.Server {
+	t.Helper()
+	asset, err := update.AssetName(version, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("AssetName: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/pyrycode/pyrycode/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":%q}`, version)
+	})
+	mux.HandleFunc("/releases/download/"+version+"/"+asset, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "simulated upstream failure", http.StatusInternalServerError)
+	})
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s
+}
+
+func assertBinaryUnchangedE2E(t *testing.T, s *preUpdateState) {
+	t.Helper()
+	if inodeAfter := inodeOfE2E(t, s.targetPath); inodeAfter != s.inodeBefore {
+		t.Errorf("on-disk binary inode changed: before=%d after=%d (AtomicReplace must not run on this path)",
+			s.inodeBefore, inodeAfter)
+	}
+}
+
+// assertDaemonAliveE2E checks that the pre-update daemon's PID is unchanged,
+// the process is still findable, and `pyry status` against its socket
+// returns exit 0. The PID and signal checks are documentation /
+// localization aids — the structural assertion is the status round-trip.
+func assertDaemonAliveE2E(t *testing.T, s *preUpdateState) {
+	t.Helper()
+	if s.cmd1.Process.Pid != s.pidBefore {
+		t.Errorf("daemon 1 PID mutated: before=%d now=%d", s.pidBefore, s.cmd1.Process.Pid)
+	}
+	proc, err := os.FindProcess(s.pidBefore)
+	if err != nil {
+		t.Fatalf("FindProcess(%d): %v", s.pidBefore, err)
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("daemon 1 (pid %d) no longer alive: %v", s.pidBefore, err)
+	}
+	res := runVerbE2E(t, s.targetPath, s.home, s.socket, "status")
+	if res.ExitCode != 0 {
+		t.Errorf("pyry status against original daemon exit=%d\nstdout:\n%s\nstderr:\n%s",
+			res.ExitCode, res.Stdout, res.Stderr)
+	}
+}
+
+// assertNoStragglersE2E asserts that the directory holding targetPath
+// contains only the pyry binary itself — no `.pyry.*.tmp` files left
+// behind by a partial AtomicReplace. Trivially true today on the
+// fetch-failure path (AtomicReplace never runs); the assertion exists to
+// catch regressions where a future change leaks files before the rename.
+func assertNoStragglersE2E(t *testing.T, s *preUpdateState) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Dir(s.targetPath))
+	if err != nil {
+		t.Fatalf("read bin dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "pyry" {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected only 'pyry' in %s, got: %v", filepath.Dir(s.targetPath), names)
+	}
+}
+
+func assertNoSuccessLineE2E(t *testing.T, out *bytes.Buffer, version string) {
+	t.Helper()
+	line := "==> Updated to " + version + "."
+	if strings.Contains(out.String(), line) {
+		t.Errorf("success line %q must NOT print on failure path; output:\n%s", line, out.String())
+	}
+}
+
+// TestUpdate_FetchFailure_E2E exercises the release-asset download failure
+// path: doUpdate must return an error before AtomicReplace runs, the
+// on-disk binary must be untouched, the pre-update daemon must keep
+// answering, and no temp files must be left behind.
+func TestUpdate_FetchFailure_E2E(t *testing.T) {
+	s := installPreUpdateDaemonE2E(t)
+	t.Cleanup(func() { _ = stopDaemonE2E(s.cmd1, s.done1, s.socket) })
+
+	srv := newFetchFailReleaseServer(t, "v999.0.0")
+
+	var out bytes.Buffer
+	err := doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.0.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return s.targetPath },
+		replace:        update.AtomicReplace,
+		out:            &out,
+		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
+		runRestart: func(context.Context, []string) error {
+			t.Fatalf("runRestart must not fire on fetch-failure path")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+
+	assertBinaryUnchangedE2E(t, s)
+	assertDaemonAliveE2E(t, s)
+	assertNoStragglersE2E(t, s)
+	assertNoSuccessLineE2E(t, &out, "v999.0.0")
+}
+
+// TestUpdate_VerifyFailure_E2E exercises the checksum-mismatch path: the
+// tarball downloads cleanly but the published digest doesn't match. As
+// with the fetch-failure case, doUpdate must return before AtomicReplace
+// runs and the daemon must be untouched.
+func TestUpdate_VerifyFailure_E2E(t *testing.T) {
+	s := installPreUpdateDaemonE2E(t)
+	t.Cleanup(func() { _ = stopDaemonE2E(s.cmd1, s.done1, s.socket) })
+
+	// fakeRelease produces a correctly-keyed checksums body; swap it for
+	// a 64-zeros digest line keyed to the same asset. The server still
+	// hands out the (genuine) tarball, so VerifySHA256 returns
+	// ErrChecksumMismatch — surfaced as "update: verify checksum: …".
+	newBytes := []byte("\x7fELF...does-not-matter...")
+	asset, tgz, _ := fakeRelease(t, "v999.0.0", runtime.GOOS, runtime.GOARCH, newBytes)
+	bogusSums := fmt.Sprintf("%s  %s\n", strings.Repeat("0", 64), asset)
+	srv := newFakeReleaseServer(t, "v999.0.0", asset, tgz, []byte(bogusSums))
+
+	var out bytes.Buffer
+	err := doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.0.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return s.targetPath },
+		replace:        update.AtomicReplace,
+		out:            &out,
+		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
+		runRestart: func(context.Context, []string) error {
+			t.Fatalf("runRestart must not fire on verify-failure path")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+
+	assertBinaryUnchangedE2E(t, s)
+	assertDaemonAliveE2E(t, s)
+	assertNoSuccessLineE2E(t, &out, "v999.0.0")
+	// No-stragglers check omitted: verify-failure exits doUpdate before
+	// AtomicReplace runs, structurally identical to the fetch-failure
+	// path that already covers it.
+}
+
+// TestUpdate_BrokenNewBinary_E2E asserts the currently-designed contract:
+// pyry update has NO rollback. Once AtomicReplace swaps in the new bytes,
+// the old binary is gone — if the new binary is broken, the operator must
+// intervene. See docs/knowledge/features/pyry-update-command.md and
+// docs/specs/architecture/187-update-atomic-replace.md.
+//
+// This e2e case mirrors the error contract pinned by the unit test
+// TestUpdate_RestartFailure at cmd/pyry/update_test.go:438-460, end-to-end
+// against a real spawned-and-immediately-dead child process.
+func TestUpdate_BrokenNewBinary_E2E(t *testing.T) {
+	s := installPreUpdateDaemonE2E(t)
+
+	brokenBin := buildBrokenPyryBinE2E(t)
+	brokenBytes, err := os.ReadFile(brokenBin)
+	if err != nil {
+		t.Fatalf("read brokenBin: %v", err)
+	}
+	asset, tgz, sums := fakeRelease(t, "v999.0.0", runtime.GOOS, runtime.GOARCH, brokenBytes)
+	srv := newFakeReleaseServer(t, "v999.0.0", asset, tgz, []byte(sums))
+
+	var (
+		cmd2    *exec.Cmd
+		stderr2 *bytes.Buffer
+		done2   chan struct{}
+	)
+	cmd1Stopped := false
+	runRestart := func(_ context.Context, _ []string) error {
+		if err := stopDaemonE2E(s.cmd1, s.done1, s.socket); err != nil {
+			return fmt.Errorf("stop daemon 1: %w", err)
+		}
+		cmd1Stopped = true
+		cmd2, _, stderr2, done2 = spawnDaemonE2E(t, s.targetPath, s.home, s.socket)
+		// The broken binary writes BROKEN_PYRY_TOKEN to stderr then
+		// os.Exit(1). waitForSocketE2E's doneCh short-circuit picks up
+		// the early exit and returns "daemon exited before ready",
+		// which propagates as the "daemon restart failed" half of the
+		// asserted doUpdate error message.
+		return waitForSocketE2E(s.socket, done2, e2eUpdReadyDeadline)
+	}
+
+	var out bytes.Buffer
+	err = doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.0.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return s.targetPath },
+		replace:        update.AtomicReplace,
+		out:            &out,
+		probeRestart: func() update.RestartProbe {
+			return update.RestartProbe{
+				LaunchdPlistExists: runtime.GOOS == "darwin",
+				SystemdUnitExists:  runtime.GOOS == "linux",
+				UID:                strconv.Itoa(os.Getuid()),
+			}
+		},
+		runRestart: runRestart,
+	})
+
+	t.Cleanup(func() {
+		if !cmd1Stopped {
+			_ = stopDaemonE2E(s.cmd1, s.done1, s.socket)
+		}
+		if cmd2 != nil {
+			_ = stopDaemonE2E(cmd2, done2, s.socket)
+		}
+	})
+
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "binary replaced to ") {
+		t.Errorf("error must mention 'binary replaced to ': %v", err)
+	}
+	if !strings.Contains(msg, "daemon restart failed") {
+		t.Errorf("error must mention 'daemon restart failed': %v", err)
+	}
+
+	// AtomicReplace ran: inode changed AND the on-disk bytes are the
+	// broken bytes. No rollback by design.
+	inodeAfter := inodeOfE2E(t, s.targetPath)
+	if inodeAfter == s.inodeBefore {
+		t.Errorf("inode unchanged: AtomicReplace did not run; inode=%d", s.inodeBefore)
+	}
+	got, readErr := os.ReadFile(s.targetPath)
+	if readErr != nil {
+		t.Fatalf("read targetPath: %v", readErr)
+	}
+	if !bytes.Equal(got, brokenBytes) {
+		t.Errorf("on-disk binary is not the broken bytes (size got=%d want=%d)", len(got), len(brokenBytes))
+	}
+
+	// Diagnostic guard: the broken helper's stderr must contain its
+	// token. If a future change spawns something else, this assertion
+	// localizes the failure cleanly instead of leaving the developer
+	// chasing a generic "daemon exited before ready".
+	var stderr2Bytes []byte
+	if stderr2 != nil {
+		stderr2Bytes = stderr2.Bytes()
+	}
+	if !bytes.Contains(stderr2Bytes, []byte("BROKEN_PYRY_TOKEN")) {
+		t.Errorf("broken pyry stderr missing BROKEN_PYRY_TOKEN; got: %q", stderr2Bytes)
+	}
+
+	assertNoSuccessLineE2E(t, &out, "v999.0.0")
 }
