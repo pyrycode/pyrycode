@@ -215,6 +215,86 @@ func TestRegistry_FindByTokenHash(t *testing.T) {
 	}
 }
 
+func TestRegistry_UpdatePushRegistration(t *testing.T) {
+	t.Parallel()
+	aHash := HashToken("a")
+	bHash := HashToken("b")
+
+	tests := []struct {
+		name          string
+		tokenHash     string
+		platform      string
+		pushToken     string
+		deviceName    string
+		wantOK        bool
+		wantAName     string
+		wantAPlatform string
+		wantAToken    string
+		wantBName     string
+		wantBPlatform string
+		wantBToken    string
+	}{
+		{
+			name:          "hit-updates-row-leaves-other-untouched",
+			tokenHash:     aHash,
+			platform:      "fcm",
+			pushToken:     "fcm-token-xyz",
+			deviceName:    "Alice's Pixel",
+			wantOK:        true,
+			wantAName:     "Alice's Pixel",
+			wantAPlatform: "fcm",
+			wantAToken:    "fcm-token-xyz",
+			wantBName:     "bob",
+			wantBPlatform: "",
+			wantBToken:    "",
+		},
+		{
+			name:          "miss-unknown-hash-leaves-everything",
+			tokenHash:     HashToken("z"),
+			platform:      "apns",
+			pushToken:     "apns-token-abc",
+			deviceName:    "ghost",
+			wantOK:        false,
+			wantAName:     "alice",
+			wantAPlatform: "",
+			wantAToken:    "",
+			wantBName:     "bob",
+			wantBPlatform: "",
+			wantBToken:    "",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &Registry{}
+			r.Add(Device{Name: "alice", TokenHash: aHash})
+			r.Add(Device{Name: "bob", TokenHash: bHash})
+
+			ok := r.UpdatePushRegistration(tc.tokenHash, tc.platform, tc.pushToken, tc.deviceName)
+			if ok != tc.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			got := r.List()
+			byHash := map[string]Device{}
+			for _, d := range got {
+				byHash[d.TokenHash] = d
+			}
+			a := byHash[aHash]
+			if a.Name != tc.wantAName || a.Platform != tc.wantAPlatform || a.PushToken != tc.wantAToken {
+				t.Errorf("alice = %+v, want Name=%q Platform=%q PushToken=%q",
+					a, tc.wantAName, tc.wantAPlatform, tc.wantAToken)
+			}
+			b := byHash[bHash]
+			if b.Name != tc.wantBName || b.Platform != tc.wantBPlatform || b.PushToken != tc.wantBToken {
+				t.Errorf("bob = %+v, want Name=%q Platform=%q PushToken=%q",
+					b, tc.wantBName, tc.wantBPlatform, tc.wantBToken)
+			}
+		})
+	}
+}
+
 func TestRegistry_SaveFilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("posix permission semantics required")

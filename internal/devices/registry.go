@@ -138,6 +138,31 @@ func (r *Registry) List() []Device {
 	return out
 }
 
+// UpdatePushRegistration sets Platform, PushToken, and Name on the device
+// whose TokenHash equals tokenHash. Returns true iff a matching device was
+// found and mutated. Caller is responsible for persisting via Save.
+//
+// The Name overwrite is intentional: the protocol's
+// register_push_token.device_name is the phone's current self-reported name,
+// and pyrycode treats the phone as the source of truth (a user renaming
+// their device in iOS Settings should propagate). The original pairing-time
+// Name carries no protocol-level invariants.
+//
+// Concurrency: serialized under Registry.mu; safe to call from any goroutine.
+func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.devices {
+		if r.devices[i].TokenHash == tokenHash {
+			r.devices[i].Platform = platform
+			r.devices[i].PushToken = pushToken
+			r.devices[i].Name = name
+			return true
+		}
+	}
+	return false
+}
+
 // FindByTokenHash returns the device whose TokenHash equals hash, and true if
 // one was found. Comparison is byte-exact; constant-time comparison is not
 // required at the hash↔hash boundary (VerifyToken owns the plain↔hash
