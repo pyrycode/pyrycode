@@ -34,6 +34,7 @@ type testOpts struct {
 	reconnectInitial time.Duration
 	reconnectMax     time.Duration
 	stabilityReset   time.Duration
+	closeFrameGrace  time.Duration
 	seed             int64
 	dialFn           func(ctx context.Context) (*websocket.Conn, error)
 }
@@ -55,6 +56,9 @@ func newClientForTest(t *testing.T, cfg Config, opts testOpts) *Client {
 	}
 	if opts.stabilityReset > 0 {
 		c.stabilityReset = opts.stabilityReset
+	}
+	if opts.closeFrameGrace > 0 {
+		c.closeFrameGrace = opts.closeFrameGrace
 	}
 	c.rng = rand.New(rand.NewSource(opts.seed))
 	if opts.dialFn != nil {
@@ -865,6 +869,91 @@ func TestFatalCloseCodes_HaltsReconnect_RacingSendError(t *testing.T) {
 
 	close(stopSend)
 	<-sendDone
+}
+
+// TestAwaitCloseStatus_GraceBranchPreservesCloseError is the deterministic
+// regression test for #290: when the first pump error has no close
+// status (sendPump mid-write fail, pingLoop ctx.Done), awaitCloseStatus
+// must wait up to grace for a subsequent CloseError so the
+// FatalCloseCodes check in Connect sees the peer's actual status.
+//
+// Three cases pin the contract:
+//
+//  1. CloseError first → no grace wait, returns immediately. (Order A.)
+//  2. Non-close error first, CloseError second within grace → returns
+//     both, preserving the close status in slot 1. (Order B; the case
+//     #290 exists for. Without the grace branch, slot 1 would be drained
+//     only AFTER cancel(), at which point coder/websocket's
+//     prepareRead.done() override has clobbered the inbound CloseError
+//     with ctx.Err().)
+//  3. Non-close error first, nothing else within grace → returns just
+//     the one error after grace expires. Cancel proceeds as today.
+//
+// Test #2 is the regression-catching one. Revert serve's grace branch
+// (i.e. read once, cancel, drain rest) and the slot-1 CloseError is
+// gone — the equivalent of this test against that helper variant fails.
+func TestAwaitCloseStatus_GraceBranchPreservesCloseError(t *testing.T) {
+	t.Parallel()
+
+	closeErr := fmt.Errorf("recv: %w", websocket.CloseError{Code: websocket.StatusCode(4409), Reason: "x"})
+	nonCloseErr := errors.New("send: use of closed network connection")
+
+	t.Run("close_first_skips_grace", func(t *testing.T) {
+		t.Parallel()
+		errCh := make(chan error, 3)
+		errCh <- closeErr
+		start := time.Now()
+		errs := awaitCloseStatus(errCh, 100*time.Millisecond)
+		if elapsed := time.Since(start); elapsed > 20*time.Millisecond {
+			t.Errorf("awaitCloseStatus blocked %v with close-first; expected near-instant", elapsed)
+		}
+		if len(errs) != 1 {
+			t.Fatalf("len(errs) = %d, want 1", len(errs))
+		}
+		if status := websocket.CloseStatus(errs[0]); status != websocket.StatusCode(4409) {
+			t.Errorf("CloseStatus(errs[0]) = %d, want 4409", status)
+		}
+	})
+
+	t.Run("non_close_first_grace_catches_close", func(t *testing.T) {
+		t.Parallel()
+		errCh := make(chan error, 3)
+		errCh <- nonCloseErr
+		// CloseError arrives shortly after; the grace window must
+		// pick it up so the close status survives into errs[1].
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			errCh <- closeErr
+		}()
+		errs := awaitCloseStatus(errCh, 200*time.Millisecond)
+		if len(errs) != 2 {
+			t.Fatalf("len(errs) = %d, want 2 (grace did not catch close)", len(errs))
+		}
+		var got websocket.StatusCode = -1
+		for _, e := range errs {
+			if s := websocket.CloseStatus(e); s != -1 {
+				got = s
+			}
+		}
+		if got != websocket.StatusCode(4409) {
+			t.Errorf("no slot of errs[] carries close status 4409: %v", errs)
+		}
+	})
+
+	t.Run("non_close_first_grace_expires", func(t *testing.T) {
+		t.Parallel()
+		errCh := make(chan error, 3)
+		errCh <- nonCloseErr
+		start := time.Now()
+		errs := awaitCloseStatus(errCh, 10*time.Millisecond)
+		elapsed := time.Since(start)
+		if elapsed < 10*time.Millisecond {
+			t.Errorf("awaitCloseStatus returned in %v, want ≥ 10ms (grace did not wait)", elapsed)
+		}
+		if len(errs) != 1 {
+			t.Fatalf("len(errs) = %d, want 1 (grace expiry path)", len(errs))
+		}
+	})
 }
 
 func TestFatalCloseCodes_EmptyPreservesReconnect(t *testing.T) {

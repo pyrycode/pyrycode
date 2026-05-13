@@ -33,6 +33,11 @@ const (
 	reconnectMax      = 30 * time.Second
 	stabilityResetMin = 60 * time.Second
 	maxFrameBytes     = 1 << 20 // 1 MiB — see Security review § Network & I/O
+
+	// closeFrameGrace bounds the wait in serve() for recvPump's
+	// close-frame observation when the first pump error has no
+	// recognizable WS close status. See serve() for the full rationale.
+	closeFrameGrace = 50 * time.Millisecond
 )
 
 // Config carries the static configuration for a Client. The caller supplies
@@ -62,15 +67,16 @@ type Config struct {
 type Client struct {
 	cfg Config
 
-	// pingInterval, pongTimeout, reconnectInitial, stabilityReset are
-	// package-constant defaults at construction. Tests substitute shorter
-	// values via newClientForTest so the cadence assertions don't take
-	// minutes to run.
+	// pingInterval, pongTimeout, reconnectInitial, stabilityReset,
+	// closeFrameGrace are package-constant defaults at construction.
+	// Tests substitute shorter values via newClientForTest so the
+	// cadence assertions don't take minutes to run.
 	pingInterval     time.Duration
 	pongTimeout      time.Duration
 	reconnectInitial time.Duration
 	reconnectMax     time.Duration
 	stabilityReset   time.Duration
+	closeFrameGrace  time.Duration
 
 	// dialFn opens one WSS connection. Production points at the real
 	// websocket.Dial; tests substitute a fake to drive backoff/reset
@@ -148,6 +154,7 @@ func New(cfg Config) *Client {
 		reconnectInitial: reconnectInitial,
 		reconnectMax:     reconnectMax,
 		stabilityReset:   stabilityResetMin,
+		closeFrameGrace:  closeFrameGrace,
 		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 		sendCh:           make(chan []byte),
 		recvCh:           make(chan []byte),
@@ -391,23 +398,53 @@ func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	case c.connectedCh <- struct{}{}:
 	default:
 	}
-	errs := make([]error, 0, 3)
-	errs = append(errs, <-errCh)
+	errs := awaitCloseStatus(errCh, c.closeFrameGrace)
 	cancel()
-	errs = append(errs, <-errCh, <-errCh)
+	for len(errs) < 3 {
+		errs = append(errs, <-errCh)
+	}
 	// Prefer an error with a recognizable WS close status. When the peer
 	// closes, recvPump observes a CloseError but sendPump (mid-write) and
 	// pingLoop can return generic "use of closed network connection" net
-	// errors. If sendPump or pingLoop returns first, the close-code
-	// classification in Connect would miss the peer's actual status —
-	// fatal-close handling (e.g. 4409) would silently fall through to
-	// reconnect.
+	// errors.
 	for _, e := range errs {
 		if websocket.CloseStatus(e) != -1 {
 			return e
 		}
 	}
 	return errs[0]
+}
+
+// awaitCloseStatus reads one error from errCh, then — if that error
+// carries no recognizable WS close status — waits up to grace for one
+// more arrival before returning. Returns the slice of errors received
+// (1 or 2 elements); the caller is responsible for draining any
+// remaining slots after cancelling the pump context.
+//
+// Rationale: coder/websocket's prepareRead.done() defers an override
+// that replaces an inbound CloseError with ctx.Err() if ctx fires while
+// the Read is suspended. If sendPump or pingLoop returns an error first
+// and serve cancels immediately, recvPump's pending Read then surfaces
+// the override instead of the peer's actual close frame — no slot of
+// errs[] carries the close status and the FatalCloseCodes check in
+// Connect misses. Waiting briefly for recvPump's natural return when
+// the first arrival has no close status preserves the status in errs[].
+// See #290.
+func awaitCloseStatus(errCh <-chan error, grace time.Duration) []error {
+	errs := make([]error, 0, 3)
+	first := <-errCh
+	errs = append(errs, first)
+	if websocket.CloseStatus(first) != -1 {
+		return errs
+	}
+	t := time.NewTimer(grace)
+	defer t.Stop()
+	select {
+	case e := <-errCh:
+		errs = append(errs, e)
+	case <-t.C:
+	}
+	return errs
 }
 
 func (c *Client) recvPump(ctx context.Context, conn *websocket.Conn) error {
