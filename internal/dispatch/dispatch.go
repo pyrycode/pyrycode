@@ -92,6 +92,23 @@ func (c *Conn) Auth() *devices.Device { return c.auth }
 // accept branch.
 func (c *Conn) setAuth(d *devices.Device) { c.auth = d }
 
+// NewTestConn constructs a *Conn for verb-handler test fixtures. Test
+// fixtures only — do not call from production code. The dispatcher is
+// the sole production Conn factory (see routeConn). The constructor
+// exists so handler tests in sibling packages can drive a real Conn
+// against a caller-supplied outbound channel and a synthesised auth
+// snapshot, without depending on a full Dispatcher.
+//
+// The returned Conn has nextID at zero, so the first NextID() call
+// returns 1 (matching the gate-disabled production path). Tests that
+// want to simulate the post-hello_ack state — where id=1 has been
+// consumed by AuthenticateFirstFrame's reply and the next handler-
+// originated reply lands at id=2 — should call c.NextID() once before
+// invoking the handler.
+func NewTestConn(id string, outbound chan<- protocol.RoutingEnvelope, auth *devices.Device) *Conn {
+	return &Conn{id: id, outbound: outbound, auth: auth}
+}
+
 // NextID returns the next monotonic outbound envelope id for this conn.
 // Starts at 1 on the first call. Concurrent-safe even though the per-conn
 // goroutine is the only writer today — atomic is cheap insurance for
