@@ -352,6 +352,14 @@ func New(cfg Config) (*Pool, error) {
 		BackoffMax:     cfg.Bootstrap.BackoffMax,
 		BackoffReset:   cfg.Bootstrap.BackoffReset,
 	}
+	if reg := cfg.ConversationsRegistry; reg != nil {
+		supCfg.ValidateConversation = func(id string) error {
+			if _, ok := reg.Get(conversations.ConversationID(id)); !ok {
+				return conversations.ErrConversationNotFound
+			}
+			return nil
+		}
+	}
 	sup, err := supervisor.New(supCfg)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: bootstrap supervisor: %w", err)
@@ -938,6 +946,14 @@ func (p *Pool) buildSession(id SessionID, label string) (*Session, error) {
 		BackoffInitial: tpl.BackoffInitial,
 		BackoffMax:     tpl.BackoffMax,
 		BackoffReset:   tpl.BackoffReset,
+	}
+	if reg := p.convReg; reg != nil {
+		supCfg.ValidateConversation = func(id string) error {
+			if _, ok := reg.Get(conversations.ConversationID(id)); !ok {
+				return conversations.ErrConversationNotFound
+			}
+			return nil
+		}
 	}
 	sup, err := supervisor.New(supCfg)
 	if err != nil {
