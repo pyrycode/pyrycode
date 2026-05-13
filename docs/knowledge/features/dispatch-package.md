@@ -1,4 +1,4 @@
-# `internal/dispatch` (#307, extended #308, #318)
+# `internal/dispatch` (#307, extended #308, #318, #319)
 
 Per-phone-conn demultiplexer + handler-table seam sitting between
 `internal/relay.Connection.Frames()` and the per-envelope-type
@@ -51,6 +51,10 @@ func New(cfg Config) *Dispatcher
 func (d *Dispatcher) Register(envType string, h Handler) // pre-Run only
 func (d *Dispatcher) Run(ctx context.Context) error
 func (d *Dispatcher) Outbound() <-chan protocol.RoutingEnvelope
+
+// Test-fixtures only — do not call from production code (#319).
+func NewTestConn(id string, outbound chan<- protocol.RoutingEnvelope,
+                  auth *devices.Device) *Conn
 ```
 
 ## Concurrency model
@@ -222,10 +226,11 @@ the next via channel close; no auxiliary `done` channels needed.
 
 The handler table stays empty in #307. Downstream verb slices add one
 `d.Register(protocol.TypeXxx, ...)` line apiece before `Run` spawns —
-#303 `list_conversations`, #304 `send_message`, #305
-`register_push_token`. Until those land, every inbound phone frame
-falls through to `protocol.unsupported`; that is the intentional
-posture pending auth-gate #308.
+#303 `list_conversations` (landed), #319 `register_push_token` (landed,
+sibling rewrite of the #250 pure handler against the new
+`dispatch.Handler` signature), #304 `send_message` (pending). v1 types
+without a registered handler still fall through to
+`protocol.unsupported`.
 
 ## Security / operational notes
 
@@ -297,6 +302,24 @@ verb-slice integration is enough.
 
 - `internal/protocol` (#255 + #271) — `Envelope`, `RoutingEnvelope`,
   `IsV1Compatible`, `Code*` constants, `ErrorPayload`, `TypeError`.
+
+### Test-only `Conn` constructor (#319)
+
+`NewTestConn(id, outbound, auth) *Conn` is an exported, non-`_test.go`
+constructor reserved for verb-handler test fixtures in sibling packages
+(`internal/relay/handlers/*`). Go does not propagate `_test.go` symbols
+across packages, so the seam has to be a regular export. Three field
+assignments; `nextID` starts at zero (first `NextID()` returns 1).
+Tests that want to simulate post-`hello_ack` state — where the gate
+consumed id=1 and the first handler-originated reply lands at id=2 —
+call `c.NextID()` once before invoking the handler.
+
+The constructor does NOT mutate auth on a dispatcher-owned `*Conn`; it
+only builds a fresh `*Conn` whose outbound channel the caller supplies.
+The dispatcher remains the sole production `*Conn` factory (via
+`routeConn`). Doc-comment opens with **"Test fixtures only — do not
+call from production code."** Code-review checks no `cmd/` package
+calls it.
 
 ## Out of scope (deferred)
 

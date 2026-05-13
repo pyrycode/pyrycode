@@ -6,7 +6,7 @@ The binary side of the binary↔relay wire protocol. Three surfaces:
 
 1. **Outbound dial with server-id handshake** (`connection.go`, #248) — wraps `internal/transport.Client` (#247, the generic WSS primitive) with the v1 handshake state machine: builds the upgrade headers, sends `hello`, awaits `hello_ack` within 5 seconds, classifies WS close-code `4409` as terminal (server-id conflict), and exposes inbound frames as `protocol.RoutingEnvelope` values via `Frames()`. Knows nothing about per-envelope dispatch or supervisor lifecycle.
 2. **Per-phone-conn first-frame token validation** (`auth.go`, #249) — a single pure function `AuthenticateFirstFrame` that returns a structured `AuthOutcome` (response envelope + close-or-keep signal) on top of `devices.Registry.Validate`. Carrier-agnostic with respect to how the token reached the binary. The relay-conn ticket that wires this into actual phone traffic is a future sibling.
-3. **Per-envelope-type handlers** (`handlers/`, #250) — sibling sub-package (`internal/relay/handlers`) of pure functions, one per inbound phone-traffic envelope type. First inhabitant: `Handle` for `register_push_token`. Each handler is routing-envelope-in / routing-envelope-out, knows only payload semantics; the future dispatcher (in `internal/relay`) owns conn state, per-conn id allocation, and conn lifecycle. The sub-package depends on `internal/devices` + `internal/protocol` only — no import of `internal/relay`, keeping it cycle-free.
+3. **Per-envelope-type handlers** (`handlers/`, #250, signature rewrite #319) — sibling sub-package (`internal/relay/handlers`) of `dispatch.Handler` closures, one per inbound phone-traffic envelope type. Inhabitants today: `ListConversations` (#303) for `list_conversations` and `RegisterPushToken` (#250 logic, #319 signature) for `register_push_token`. Each is a factory: `func(deps...) dispatch.Handler` returning a closure with `func(ctx, *dispatch.Conn, protocol.Envelope) error`. The handler reads the authenticated device via `c.Auth()` (#318), allocates response ids via `c.NextID()` (called inside `c.Reply`), and never stamps `id`/`in_reply_to`/`ts` itself. The sub-package imports `internal/devices` + `internal/dispatch` + `internal/protocol` only — no import of `internal/relay`, keeping it cycle-free.
 
 Wire-spec source-of-truth: `docs/protocol-mobile.md` § Authentication, § Connection lifecycle, § Worked example. When that document changes, this package changes.
 
@@ -271,32 +271,45 @@ Stateless. No goroutines spawned. Safe for arbitrary concurrent invocations acro
 Sub-package `internal/relay/handlers`. Each handler is a pure function: routing envelope in, routing envelope out, plus side effects on the registries it is passed. The dispatcher (future, in `internal/relay`) owns conn state, per-conn id allocation, and conn lifecycle; handlers know only payload semantics.
 
 First inhabitant: `register_push_token` (`register_push_token.go`).
+#319 rewrote the original #250 pure handler against `dispatch.Handler`
+and registered it in `cmd/pyry/relay.go` alongside
+`list_conversations`. The pre-#319 `Handle` signature (routing-envelope
+in/out, self-stamping `id`/`ts`/`in_reply_to`, sentinel
+`ErrMalformedFrame`) is gone.
 
 ```go
 package handlers
 
-var ErrMalformedFrame = errors.New("handlers: malformed register_push_token frame")
-
-func Handle(
-    routing      protocol.RoutingEnvelope,
-    device       *devices.Device, // nil = unauth dispatcher bug
-    reg          *devices.Registry,
-    registryPath string,
-    nextID       uint64,          // dispatcher-allocated per-conn id; auth used 1, this is ≥ 2
-    logger       *slog.Logger,
-) (protocol.RoutingEnvelope, error)
+func RegisterPushToken(reg *devices.Registry, registryPath string,
+                       logger *slog.Logger) dispatch.Handler
 ```
+
+The returned closure has signature
+`func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error`.
+`reg`, `registryPath`, and `logger` are captured — no globals; the
+third argument diverges from `ListConversations`'s two-arg shape
+because this handler logs on every branch. The authenticated device is
+read via `c.Auth()` (populated by the gate per #318); the dispatcher
+allocates the response id via `c.NextID()` (called inside `c.Reply`)
+and stamps `in_reply_to` from `env.ID` and `ts` from `time.Now().UTC()`.
+The handler never touches those fields itself.
 
 ### Behavioural contract
 
 | Input case | Response envelope | Side effect |
 |---|---|---|
-| `routing.Frame` or inner payload not JSON-decodable | `(RoutingEnvelope{}, ErrMalformedFrame)` — dispatcher owns the `protocol.malformed` response | none |
-| `device == nil` (dispatcher routed an unauth conn here — bug) | `error`: `Code=auth.invalid_token`, `Retryable=false` | none |
+| `c.Auth() == nil` (dispatcher routed an unauth conn here — bug; defence-in-depth) | `error`: `Code=auth.invalid_token`, `Retryable=false` | none |
+| `env.Payload` not JSON-decodable as `RegisterPushTokenPayload` | `error`: `Code=protocol.malformed`, `Retryable=false`, static message (decode-error text NOT echoed) | none |
 | Payload `(Platform, Token, DeviceName)` equals snapshot `(Platform, PushToken, Name)` | `ack` | **none — does NOT call `UpdatePushRegistration`, does NOT call `Save` (the dedupe contract)** |
 | `reg.UpdatePushRegistration` returns `false` (concurrent revoke between auth-accept and frame arrival) | `error`: `Code=auth.invalid_token`, `Retryable=false` (same UX as unauth) | none |
 | `reg.Save` returns non-nil | `error`: `Code=server.binary_busy`, `Retryable=true`, `RetryAfterS=nil` | **in-memory IS mutated; disk is not** (phone retries; dedupe will succeed on retry) |
 | Triple differs and Save succeeds | `ack` | in-memory + disk both updated |
+
+The outer-frame malformed branch is gone from the contract — the
+dispatcher's `handleOne` decodes `env protocol.Envelope` from the
+routing frame before invoking the handler and replies
+`protocol.malformed` upstream. Only the **inner-payload** decode
+remains the handler's responsibility.
 
 ### Dedupe is load-bearing
 
@@ -312,9 +325,9 @@ Documented post-condition, mirroring `Validate`'s `LastSeenAt` pattern: in-memor
 
 ### Sub-package isolation
 
-`handlers` imports `internal/devices` and `internal/protocol`. **It does NOT import `internal/relay`.** This keeps the future dispatcher (in `internal/relay`) free to import `handlers` without a cycle. `auth.go` stays in `internal/relay` proper because it is the gate into the dispatcher, not a per-type handler — the dispatcher calls it directly during conn setup before any frame dispatch.
+`handlers` imports `internal/devices`, `internal/dispatch`, and `internal/protocol`. **It does NOT import `internal/relay`.** The new `internal/dispatch` edge (added #319) is cycle-free because `internal/dispatch`'s only handler-direction dependency is the `Handler` function type, which `handlers` consumes structurally. `auth.go` stays in `internal/relay` proper because it is the gate into the dispatcher, not a per-type handler — the dispatcher calls it directly during conn setup before any frame dispatch.
 
-The `wrap(connID, inReplyTo, nextID, envType, payload)` helper inside `register_push_token.go` deliberately duplicates `relay.buildResponse` rather than importing across the sub-package boundary. Premature to lift into a shared `handlers/internal/wire` for a single handler; lift when a second handler lands.
+The `wrap(connID, inReplyTo, nextID, envType, payload)` file-local helper from #250 is gone — `c.Reply(ctx, env, type, payloadJSON)` is the central stamping path now (#319). Two file-local helpers (`replyAck`, `replyError`) marshal the payload and call `c.Reply`.
 
 ### Logging discipline
 
@@ -328,25 +341,30 @@ The `wrap(connID, inReplyTo, nextID, envType, payload)` helper inside `register_
 
 Push token (FCM/APNs registration id) is opaque infrastructure data, not a secret on par with the phone-side device token — but is still NOT logged (no operational signal worth the noise). Device-side token from auth is NEVER read or logged. Device name IS logged on every path that has one (write/dedupe/save-failed/gone-mid-conn) — the inverse of #249's reject-path discipline, because the handler runs post-auth: the caller has already cleared the auth gate, so there is nothing to enumerate. Unauth (`device == nil`) by definition has no name to log.
 
-### Test surface
+### Test surface (rewritten #319)
 
-`internal/relay/handlers/register_push_token_test.go` — six flat tests, stdlib only, package `handlers`:
+`internal/relay/handlers/register_push_token_test.go` — seven flat tests, stdlib only, package `handlers`, all under `-race`. The fixture uses `dispatch.NewTestConn(testConnID, out, dev)` to build a `*dispatch.Conn` with a buffered outbound channel the test drains; `_ = c.NextID()` is called once after construction so the first handler reply observes `id=2` (mirroring the gate's `hello_ack=1` accounting).
 
-- `TestHandle_FirstTimeRegister_WritesAndAcks` — happy-path write + reload-and-verify.
-- `TestHandle_ReregisterIdentical_NoWriteAndAcks` — dedupe spy: file deliberately not pre-Saved, asserts `errors.Is(os.Stat, fs.ErrNotExist)` after the call.
-- `TestHandle_ReregisterChanged_WritesAndAcks` — pre-Save, change one field, content-based equality (not mtime — sidesteps CI filesystem mtime-resolution flakes).
-- `TestHandle_SaveFailure_EmitsServerBinaryBusy` — regular file at `<tempdir>/blocker` makes `MkdirAll` fail on `<blocker>/devices.json`. Pins error code/retryable + in-memory-still-mutated post-condition.
-- `TestHandle_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite` — `device=nil`; asserts `auth.invalid_token` shape + no file + unchanged registry.
-- `TestHandle_MalformedFrame_ReturnsSentinel` — pins `errors.Is(err, ErrMalformedFrame)`.
+- `TestRegisterPushToken_FirstTimeRegister_WritesAndAcks` — happy-path write + reload via `devices.Load` and assert the triple.
+- `TestRegisterPushToken_ReregisterIdentical_NoWriteAndAcks` — dedupe spy: file deliberately not pre-Saved, asserts `errors.Is(os.Stat, fs.ErrNotExist)` after the call.
+- `TestRegisterPushToken_ReregisterChanged_WritesAndAcks` — pre-Save, change one field, content-equality post-call (sidesteps CI mtime-resolution flakes).
+- `TestRegisterPushToken_GoneMidConn_EmitsAuthInvalidToken` — `dev`'s TokenHash absent from the registry forces `UpdatePushRegistration` to return false; asserts `auth.invalid_token`, `Retryable=false`.
+- `TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy` — regular file at `<tempdir>/blocker` makes `MkdirAll` fail on `<blocker>/devices.json`. Pins error code/retryable + in-memory-still-mutated post-condition.
+- `TestRegisterPushToken_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite` — `auth=nil`; asserts `auth.invalid_token` shape + no file + unchanged registry.
+- `TestRegisterPushToken_MalformedPayload_EmitsProtocolMalformed` — `env.Payload = []byte("not-json")`; asserts `Code=protocol.malformed`, `Retryable=false`. New case; replaces the deleted `TestHandle_MalformedFrame_ReturnsSentinel` (the dispatcher owns the malformed-frame path now).
 
-`assertEnvelopeShape(t, resp, wantType)` is the file-local helper; returns the decoded envelope so error tests can pull the payload out for further assertions.
+`newTestConn(t, dev)` and `makeRequest(t, payload)` are the file-local helpers; the `assertEnvelopeShape` / `equalRouting` / `makeRegisterRouting` helpers from #250 are gone with the sentinel.
+
+#### e2e (`internal/e2e/register_push_token_test.go`, new #319)
+
+Build tag `e2e`. `TestRelay_RegisterPushToken_AckAndPersists` pairs a device via `RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")`, decodes the plaintext token via `decodePairPayload`, boots the daemon against a `fakerelay` with `PYRY_ALLOW_INSECURE_RELAY=1`, dials a `fakephone` with the paired token, sends `hello` → expects `hello_ack` (`*InReplyTo == 1`), sends `register_push_token` with `ID: 2` → expects `ack` (`*InReplyTo == 2`, `env.ID >= 2` — strictly-greater leaves room for future dispatcher-side replies between `hello_ack` and this ack), then reloads `~/.pyry/test/devices.json` and asserts the `(Platform, PushToken, Name)` triple is persisted.
 
 ## Consumers and roadmap
 
 - **Supervisor wiring** (#301): `cmd/pyry/main.go` + `cmd/pyry/relay.go` resolve the relay URL with precedence `-pyry-relay` > `PYRY_RELAY_URL` > `cfg.RelayURL` > `DefaultConfig`, load the server-id via `identity.LoadOrCreate(resolveServerIDPath(name))` (same on-disk file as `pyry pair`), call `relay.Connect`, and spawn one supervisor-owned goroutine that drains `Frames()` and reads `Wait()`. On `ErrServerIDConflict` the goroutine calls the shared `signal.NotifyContext` cancel, unwinding `pool.Run`; on any other terminal error it logs warn and exits without restart (transport-internal reconnect already absorbed all non-fatal closes); empty `relayURL` is the disabled-relay branch (info log, no goroutine). See [`codebase/301.md`](../codebase/301.md) for the full wiring + e2e harness extensions.
 - **Outbound sending** (#307, landed): `(*Connection).Send(env protocol.RoutingEnvelope) error` marshals the routing envelope and forwards via `transport.Client.Send`. Caller wraps the inner `protocol.Envelope` in `RoutingEnvelope` (the dispatcher's `Conn.Send` does this from the inside). Returns `transport.ErrDisconnected` / `ErrNotConnected` / `ErrClosed` verbatim when the underlying conn is dropped — frames sent during a disconnected window are lost, which is consistent with v1 protocol semantics (reconnect re-runs `hello/hello_ack`, so per-conn state on the relay is implicitly the wrong frame of reference for retry). First consumer is `internal/dispatch` via the dispatcher's `Outbound()` forwarder in `cmd/pyry/relay.go`.
 - **Relay-conn wiring** (#308 + #318, landed): the dispatcher's `FirstFrameGate` extracts the token from `RoutingEnvelope.Token` (relay-populated from the phone's `x-pyrycode-token` header on the first frame per `conn_id`), calls `AuthenticateFirstFrame`, and on reject publishes one routing envelope carrying both `Response.Frame` AND `CloseCode=4401` — the WS close is atomic with the error envelope. The dispatcher owns the `2..N` per-conn envelope-ID counter (#308) and stores the auth'd `*devices.Device` snapshot into `*dispatch.Conn`'s per-conn slot via the unexported `setAuth` seam (#318); downstream handlers read it via `c.Auth()` rather than re-validating.
-- **Per-message dispatch** (future ticket): consumes `Frames()`, branches on `Envelope.Type`, decodes the per-type payload (#256 catalog), and routes to the relevant handler in `internal/relay/handlers/` (e.g. `register_push_token`, future `send_message`, `list_conversations`, …).
+- **Per-message dispatch** (`internal/dispatch`, #307+#308+#318): consumes `Frames()`, runs the optional `FirstFrame` gate, decodes the inner `protocol.Envelope` and branches on `Type`, routing to the registered handler in `internal/relay/handlers/`. `list_conversations` (#303) and `register_push_token` (#319) are wired in `cmd/pyry/relay.go`'s `startRelay`; `send_message` and the rest of the #256 catalog are deferred.
 
 ## Dependencies
 
