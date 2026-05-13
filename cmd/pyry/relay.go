@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/pyrycode/pyrycode/internal/config"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/relay"
 )
@@ -86,17 +87,37 @@ func startRelay(
 		return nil, fmt.Errorf("relay connect: %w", err)
 	}
 
-	done := make(chan struct{})
+	d := dispatch.New(dispatch.Config{
+		Frames: conn.Frames(),
+		Logger: logger,
+	})
+
+	dispatcherDone := make(chan struct{})
 	go func() {
-		defer close(done)
-		// Drain Frames() until the lifecycle closes it. The dispatcher
-		// slice replaces this discard with real handling.
-		for range conn.Frames() {
+		defer close(dispatcherDone)
+		if err := d.Run(ctx); err != nil {
+			logger.Debug("relay: dispatcher run returned", "err", err)
 		}
-		// Frames closing means Wait is about to return — Connection.run
-		// defers close(c.done) then close(c.frames), so the range exit
-		// is the safe signal that Wait will not block beyond the next
-		// statement.
+	}()
+
+	forwarderDone := make(chan struct{})
+	go func() {
+		defer close(forwarderDone)
+		for env := range d.Outbound() {
+			if err := conn.Send(env); err != nil {
+				// Transport-internal reconnect handles transient drops;
+				// a Send error here means the conn is currently dropped
+				// or closed. We log and continue draining so the
+				// dispatcher's Outbound close still unblocks Run.
+				logger.Debug("relay: outbound forward dropped",
+					"conn_id", env.ConnID, "err", err)
+			}
+		}
+	}()
+
+	waitDone := make(chan struct{})
+	go func() {
+		defer close(waitDone)
 		err := conn.Wait()
 		switch {
 		case errors.Is(err, relay.ErrServerIDConflict):
@@ -114,7 +135,12 @@ func startRelay(
 
 	cleanup = func() {
 		_ = conn.Close()
-		<-done
+		// Order: Connection.run defers close(frames) → dispatcher.Run
+		// returns (Frames closed) → dispatcher closes Outbound → forwarder
+		// exits. Wait returns once Connection.run completes.
+		<-dispatcherDone
+		<-forwarderDone
+		<-waitDone
 	}
 	return cleanup, nil
 }
