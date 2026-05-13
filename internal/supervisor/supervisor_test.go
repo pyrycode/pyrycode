@@ -2,12 +2,15 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -173,6 +176,26 @@ func TestHelperProcess(t *testing.T) {
 		}
 		time.Sleep(dur)
 		os.Exit(1)
+	case "stdin_to_file":
+		// Copy stdin to GO_TEST_HELPER_STDIN_FILE until EOF (PTY closed).
+		// Used by TestSupervisor_WriteUserTurn_HappyPath to verify that
+		// WriteUserTurn's payload reaches the child's stdin.
+		path := os.Getenv("GO_TEST_HELPER_STDIN_FILE")
+		if path == "" {
+			fmt.Fprintln(os.Stderr, "stdin_to_file: GO_TEST_HELPER_STDIN_FILE unset")
+			os.Exit(99)
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stdin_to_file: open: %v\n", err)
+			os.Exit(99)
+		}
+		// Disable buffering: copy raw chunks straight through so the test
+		// can poll the file for the expected substring without waiting on
+		// a flush.
+		_, _ = io.Copy(f, os.Stdin)
+		_ = f.Close()
+		os.Exit(0)
 	case "count_exits":
 		// Exit with code 0 the first N times, then block until killed.
 		// Uses a file to track invocation count.
@@ -403,5 +426,229 @@ func TestSupervisor_Foreground_NoStdinReaderLeak(t *testing.T) {
 		buf := make([]byte, 1<<16)
 		n := runtime.Stack(buf, true)
 		t.Errorf("goroutine leak: pre=%d, post=%d (delta=%d)\n%s", pre, post, post-pre, buf[:n])
+	}
+}
+
+// errTestConvNotFound is a local sentinel for validator-failure tests. Keeps
+// the supervisor package's tests decoupled from internal/conversations.
+var errTestConvNotFound = errors.New("test: conversation not found")
+
+// waitForPhase polls sup.State() until it reports phase, or fails the test
+// after the deadline. Used by tests that need a stable PhaseRunning window.
+func waitForPhase(t *testing.T, sup *Supervisor, phase Phase, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if sup.State().Phase == phase {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("never reached phase %q within %v; last state = %+v", phase, timeout, sup.State())
+}
+
+// TestSupervisor_WriteUserTurn_HappyPath verifies the end-to-end flow: a
+// successful WriteUserTurn updates the cursor AND the payload reaches the
+// child's stdin via the PTY master. Uses service mode with a Bridge so the
+// PTY input pump exists, but no attaching client — the bridge sits idle and
+// WriteUserTurn writes directly to ptmx.
+func TestSupervisor_WriteUserTurn_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	stdinFile := t.TempDir() + "/stdin.bin"
+	cfg := helperConfig("stdin_to_file", "GO_TEST_HELPER_STDIN_FILE="+stdinFile)
+	cfg.Bridge = NewBridge(cfg.Logger)
+	cfg.ValidateConversation = func(id string) error { return nil }
+
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+	waitForPhase(t, sup, PhaseRunning, 5*time.Second)
+
+	if err := sup.WriteUserTurn("c-1", []byte("hello\n")); err != nil {
+		t.Fatalf("WriteUserTurn: %v", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-1" {
+		t.Errorf("CurrentConversation = %q, want %q", got, "c-1")
+	}
+
+	// Poll the helper's output file until the payload surfaces, or fail.
+	deadline := time.Now().Add(3 * time.Second)
+	var data []byte
+	for time.Now().Before(deadline) {
+		data, _ = os.ReadFile(stdinFile)
+		if strings.Contains(string(data), "hello") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(string(data), "hello") {
+		t.Errorf("helper stdin file = %q, want it to contain %q", string(data), "hello")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
+
+// TestSupervisor_WriteUserTurn_CursorReadBack confirms the cursor reflects
+// the most recent successful WriteUserTurn. No child needed — the no-PTY
+// drop path still updates the cursor and returns nil, which is enough for
+// this assertion.
+func TestSupervisor_WriteUserTurn_CursorReadBack(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := sup.WriteUserTurn("c-1", []byte("first")); err != nil {
+		t.Fatalf("WriteUserTurn c-1: %v", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-1" {
+		t.Errorf("after first write, CurrentConversation = %q, want %q", got, "c-1")
+	}
+	if err := sup.WriteUserTurn("c-2", []byte("second")); err != nil {
+		t.Fatalf("WriteUserTurn c-2: %v", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-2" {
+		t.Errorf("after second write, CurrentConversation = %q, want %q", got, "c-2")
+	}
+}
+
+// TestSupervisor_WriteUserTurn_UnknownIDDoesNotMutateCursor exercises the
+// validator-refusal path: a non-nil error from ValidateConversation is
+// propagated verbatim and the cursor stays at its prior value.
+func TestSupervisor_WriteUserTurn_UnknownIDDoesNotMutateCursor(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	cfg.ValidateConversation = func(id string) error {
+		if id == "ghost" {
+			return errTestConvNotFound
+		}
+		return nil
+	}
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := sup.WriteUserTurn("c-1", []byte("ok")); err != nil {
+		t.Fatalf("WriteUserTurn c-1: %v", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-1" {
+		t.Fatalf("after good write, cursor = %q, want %q", got, "c-1")
+	}
+
+	err = sup.WriteUserTurn("ghost", []byte("nope"))
+	if !errors.Is(err, errTestConvNotFound) {
+		t.Errorf("WriteUserTurn(ghost) err = %v, want errors.Is == errTestConvNotFound", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-1" {
+		t.Errorf("after refused write, cursor = %q, want %q (unchanged)", got, "c-1")
+	}
+}
+
+// TestSupervisor_WriteUserTurn_NilValidatorSkips confirms that a nil
+// ValidateConversation skips validation entirely — useful for tests and
+// for production paths that don't yet have a registry wired.
+func TestSupervisor_WriteUserTurn_NilValidatorSkips(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	cfg.ValidateConversation = nil
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := sup.WriteUserTurn("anything", []byte("p")); err != nil {
+		t.Errorf("WriteUserTurn: %v", err)
+	}
+	if got := sup.CurrentConversation(); got != "anything" {
+		t.Errorf("CurrentConversation = %q, want %q", got, "anything")
+	}
+}
+
+// TestSupervisor_WriteUserTurn_NoPTYDrops verifies that calling
+// WriteUserTurn before Run (or between iterations) returns nil and silently
+// drops the payload, while still updating the cursor. Matches Bridge.Write's
+// discard-on-unattached behaviour so handlers don't need to special-case the
+// backoff window.
+func TestSupervisor_WriteUserTurn_NoPTYDrops(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := sup.WriteUserTurn("c-1", []byte("dropped")); err != nil {
+		t.Errorf("WriteUserTurn before Run: err = %v, want nil", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-1" {
+		t.Errorf("CurrentConversation = %q, want %q", got, "c-1")
+	}
+}
+
+// TestSupervisor_WriteUserTurn_CursorConcurrency stresses the cursor's
+// mutex under contention. Multiple writers alternate ids while a reader
+// loops on CurrentConversation. The assertion is twofold: -race stays
+// clean, and the final cursor is one of the writers' last-written ids.
+func TestSupervisor_WriteUserTurn_CursorConcurrency(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const iters = 100
+	var writers sync.WaitGroup
+	writers.Add(2)
+	writer := func(id string) {
+		defer writers.Done()
+		for i := 0; i < iters; i++ {
+			_ = sup.WriteUserTurn(id, []byte("x"))
+		}
+	}
+	go writer("c-a")
+	go writer("c-b")
+
+	stop := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = sup.CurrentConversation()
+			}
+		}
+	}()
+
+	writers.Wait()
+	close(stop)
+	<-readerDone
+
+	got := sup.CurrentConversation()
+	if got != "c-a" && got != "c-b" {
+		t.Errorf("final CurrentConversation = %q, want %q or %q", got, "c-a", "c-b")
 	}
 }
