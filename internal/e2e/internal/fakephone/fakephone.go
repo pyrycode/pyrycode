@@ -54,8 +54,10 @@ var (
 type Client struct {
 	conn *websocket.Conn
 
-	mu     sync.Mutex
-	closed bool
+	mu              sync.Mutex
+	closed          bool
+	lastCloseStatus websocket.StatusCode
+	lastCloseSet    bool
 }
 
 // Dial opens /v1/client at baseURL with the three required headers set
@@ -118,6 +120,16 @@ func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
 
 	_, data, err := c.conn.Read(ctx)
 	if err != nil {
+		// Capture peer-side close status (e.g. 4401 for auth.invalid_token)
+		// before unwinding so tests can assert on the close code via
+		// LastCloseStatus. websocket.CloseStatus returns -1 when err is
+		// not a CloseError; only record real close codes.
+		if code := websocket.CloseStatus(err); code != -1 {
+			c.mu.Lock()
+			c.lastCloseStatus = code
+			c.lastCloseSet = true
+			c.mu.Unlock()
+		}
 		c.mu.Lock()
 		closed := c.closed
 		c.mu.Unlock()
@@ -135,6 +147,16 @@ func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
 		return protocol.Envelope{}, fmt.Errorf("fakephone unmarshal: %w", err)
 	}
 	return env, nil
+}
+
+// LastCloseStatus returns the WS close status code observed by the most
+// recent Receive call that failed with a CloseError. ok is false when no
+// such close has been observed yet (e.g. the conn is still open, or was
+// closed locally via Close()).
+func (c *Client) LastCloseStatus() (websocket.StatusCode, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastCloseStatus, c.lastCloseSet
 }
 
 // Close shuts down the WS connection cleanly. Idempotent. After Close,
