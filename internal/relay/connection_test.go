@@ -702,6 +702,66 @@ func TestConfig_Validation_TableDriven(t *testing.T) {
 	}
 }
 
+// TestCloseConn_WireShape pins the marshalled bytes CloseConn emits:
+// conn_id + close_code present, token omitted. (Frame appears as
+// `"frame":null` per the json.RawMessage zero-value; the consumer-side
+// `len(env.Frame) > 0` check is what gates forwarding, so this is
+// option (a) from the spec — accept the null on the wire.)
+func TestCloseConn_WireShape(t *testing.T) {
+	t.Parallel()
+	envBytes, err := json.Marshal(protocol.RoutingEnvelope{ConnID: "c-test-7", CloseCode: 4401})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(envBytes)
+	if !strings.Contains(s, `"conn_id":"c-test-7"`) {
+		t.Errorf("missing conn_id: %s", s)
+	}
+	if !strings.Contains(s, `"close_code":4401`) {
+		t.Errorf("missing close_code: %s", s)
+	}
+	if strings.Contains(s, `"token"`) {
+		t.Errorf("token must be omitted on close-only envelope: %s", s)
+	}
+	var back protocol.RoutingEnvelope
+	if err := json.Unmarshal(envBytes, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.ConnID != "c-test-7" || back.CloseCode != 4401 {
+		t.Errorf("round-trip: got %+v", back)
+	}
+}
+
+// TestCloseConn_PropagatesNotConnected pins that CloseConn surfaces
+// transport.ErrNotConnected when the underlying conn was never
+// established (same contract as transport.Client.Send).
+func TestCloseConn_PropagatesNotConnected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		ServerID:      identity.ServerID(testServerID),
+		RelayURL:      "ws://example.invalid/v1/server",
+		BinaryVersion: "0.10.0-test",
+		Logger:        testLogger(t),
+	}
+	tc := transport.New(transport.Config{
+		URL:          "ws://example.invalid/v1/server",
+		WriteTimeout: time.Second,
+		Logger:       testLogger(t),
+	})
+	c := &Connection{
+		cfg:    cfg,
+		client: tc,
+		frames: make(chan protocol.RoutingEnvelope),
+		closed: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	err := c.CloseConn("c-1", 4401)
+	if !errors.Is(err, transport.ErrNotConnected) {
+		t.Errorf("CloseConn before connect: got %v, want ErrNotConnected", err)
+	}
+	close(c.done)
+}
+
 // TestConfig_AllowInsecureScheme covers the test-only seam that lets
 // ws:// pass Connect's scheme check. We don't run the lifecycle here —
 // just enough of Connect to prove the validator branch. A dial against

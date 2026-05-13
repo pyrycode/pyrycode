@@ -123,7 +123,61 @@ type Config struct {
 
 	// Logger is required. Used for WARN/DEBUG diagnostics; no info-level
 	// lifecycle logging at this layer (the daemon-side wiring logs that).
+	//
+	// SECURITY: the dispatcher never logs RoutingEnvelope.Token at any
+	// level; the gate closure passed via FirstFrame must honor the same
+	// rule (the token is plaintext credential material).
 	Logger *slog.Logger
+
+	// FirstFrame, if non-nil, is invoked on the FIRST inbound frame for
+	// every new conn_id, before normal handler-table dispatch. The
+	// dispatcher uses the returned outcome to either (a) forward
+	// Response and continue dispatching subsequent frames on this conn
+	// normally, (b) forward Response with CloseCode set and stop the
+	// per-conn goroutine, or (c) fall through to the malformed-frame
+	// error path. Nil disables the gate (every frame goes straight to
+	// the handler table — the pre-#308 behavior preserved for tests).
+	//
+	// CloseCode on inbound frames is ignored: it is a binary→relay-only
+	// signal. The gate runs on the inner Frame regardless of any
+	// CloseCode the relay-side attacker may have injected on the wire.
+	FirstFrame FirstFrameGate
+}
+
+// FirstFrameGate is the per-conn first-frame interceptor. Called exactly
+// once per conn_id, on the per-conn goroutine, with the inbound envelope.
+// Returns the response envelope the dispatcher should forward plus a
+// close-or-keep decision.
+//
+// SECURITY: implementations MUST NOT log env.Token at any level. The
+// token is plaintext credential material; only AuthenticateFirstFrame
+// is allowed to consume it.
+type FirstFrameGate func(ctx context.Context, env protocol.RoutingEnvelope) FirstFrameOutcome
+
+// FirstFrameOutcome carries the gate's verdict back to the dispatcher.
+type FirstFrameOutcome struct {
+	// Response is the routing envelope to forward to the relay. The
+	// dispatcher publishes Response verbatim (its ConnID is expected
+	// to match the incoming env.ConnID; the gate owns ID/InReplyTo/TS
+	// construction). Required when Err is nil.
+	Response protocol.RoutingEnvelope
+
+	// CloseConn, when true, causes the dispatcher to set
+	// Response.CloseCode = Code before publishing, and to stop the
+	// per-conn goroutine after Response is sent.
+	CloseConn bool
+
+	// Code is the WS close code (4401 for auth.invalid_token).
+	// Required when CloseConn is true; ignored otherwise.
+	Code uint16
+
+	// Err signals a gate-level failure (e.g. the inbound frame was
+	// malformed JSON). The dispatcher falls through to its existing
+	// protocol.malformed refusal path (no in_reply_to) and does NOT
+	// publish Response. The first-frame status is still consumed so a
+	// buggy phone cannot retry into the gate forever; subsequent frames
+	// flow through the regular handler table.
+	Err error
 }
 
 // Dispatcher demultiplexes frames by conn_id and routes each through the
@@ -146,9 +200,17 @@ type Dispatcher struct {
 
 // connState is the per-conn_id internal record. The Conn pointer is what
 // handlers see; the input channel and exit signal are dispatcher-internal.
+//
+// gateRun is read/written only on the per-conn goroutine (single-writer);
+// no mutex needed. closed is written by the per-conn goroutine just
+// before it returns on a close-intent outcome, and read by the demux
+// under d.mu so a frame arriving for a dead per-conn goroutine cannot
+// block the demux on a channel send with no receiver.
 type connState struct {
-	conn  *Conn
-	input chan protocol.RoutingEnvelope
+	conn    *Conn
+	input   chan protocol.RoutingEnvelope
+	gateRun bool
+	closed  bool
 }
 
 // New constructs a Dispatcher. Panics if cfg.Frames or cfg.Logger is nil
@@ -229,7 +291,15 @@ loop:
 				stop(nil)
 				break loop
 			}
-			st := d.getOrCreateConn(ctx, &wg, env.ConnID)
+			st, dropped := d.routeConn(ctx, &wg, env.ConnID)
+			if dropped {
+				// Per-conn goroutine has exited (auth reject closed
+				// the conn). Drop further frames silently; the relay
+				// has already been asked to close that phone's WS.
+				d.cfg.Logger.Debug("dispatch: drop frame for closed conn",
+					"conn_id", env.ConnID, "len", len(env.Frame))
+				continue
+			}
 			select {
 			case st.input <- env:
 			case <-ctx.Done():
@@ -244,18 +314,26 @@ loop:
 	return runErr
 }
 
-// getOrCreateConn looks up the per-conn state for connID and, if
-// missing, allocates it AND starts the per-conn goroutine — all inside
-// a single d.mu critical section. Splitting lookup, insert, and
-// goroutine-start across separate locked sections would open a window
-// where two frames for the same conn could create two goroutines or
-// the goroutine could observe an input channel that hasn't been
-// registered in d.conns yet. Keep this method atomic.
-func (d *Dispatcher) getOrCreateConn(ctx context.Context, wg *sync.WaitGroup, connID string) *connState {
+// routeConn looks up the per-conn state for connID and, if missing,
+// allocates it AND starts the per-conn goroutine — all inside a single
+// d.mu critical section. Splitting lookup, insert, and goroutine-start
+// across separate locked sections would open a window where two frames
+// for the same conn could create two goroutines or the goroutine could
+// observe an input channel that hasn't been registered in d.conns yet.
+// Keep this method atomic.
+//
+// Returns (nil, true) when the per-conn goroutine has already exited on
+// a close-intent outcome — the caller drops the frame. The closed-flag
+// check happens under the same lock that gates getOrCreate so the demux
+// cannot race with the per-conn goroutine's exit-and-mark sequence.
+func (d *Dispatcher) routeConn(ctx context.Context, wg *sync.WaitGroup, connID string) (*connState, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if st, ok := d.conns[connID]; ok {
-		return st
+		if st.closed {
+			return nil, true
+		}
+		return st, false
 	}
 	st := &connState{
 		conn: &Conn{
@@ -267,14 +345,60 @@ func (d *Dispatcher) getOrCreateConn(ctx context.Context, wg *sync.WaitGroup, co
 	d.conns[connID] = st
 	wg.Add(1)
 	go d.runConn(ctx, wg, st)
-	return st
+	return st, false
 }
 
 func (d *Dispatcher) runConn(ctx context.Context, wg *sync.WaitGroup, st *connState) {
 	defer wg.Done()
 	for routing := range st.input {
+		if !st.gateRun {
+			st.gateRun = true
+			if d.cfg.FirstFrame != nil {
+				if d.runGate(ctx, st, routing) {
+					// Close-intent: mark closed under d.mu so the demux
+					// drops further frames, then exit. wg.Done() fires
+					// via defer.
+					d.mu.Lock()
+					st.closed = true
+					d.mu.Unlock()
+					return
+				}
+				continue
+			}
+		}
 		d.handleOne(ctx, st.conn, routing)
 	}
+}
+
+// runGate invokes the FirstFrame gate and acts on its outcome. Returns
+// true iff the per-conn goroutine should exit (close-intent verdict).
+// The gate runs synchronously on the per-conn goroutine; a slow gate
+// stalls only this conn, never the demux or other conns.
+func (d *Dispatcher) runGate(ctx context.Context, st *connState, routing protocol.RoutingEnvelope) bool {
+	outcome := d.cfg.FirstFrame(ctx, routing)
+	if outcome.Err != nil {
+		d.cfg.Logger.Warn("dispatch: first-frame gate err; replying protocol.malformed",
+			"conn_id", st.conn.ConnID(), "err", outcome.Err)
+		d.sendError(ctx, st.conn, nil, protocol.CodeProtocolMalformed, "malformed envelope")
+		return false
+	}
+	resp := outcome.Response
+	if outcome.CloseConn {
+		resp.CloseCode = outcome.Code
+	}
+	select {
+	case d.outbound <- resp:
+	case <-ctx.Done():
+		return outcome.CloseConn
+	}
+	if !outcome.CloseConn {
+		// Advance the per-conn id counter past the hello_ack (id=1)
+		// that AuthenticateFirstFrame just emitted, so the next
+		// binary-originated frame on this conn (handler reply,
+		// sendError, etc.) gets id=2 — per #308 AC #2.
+		_ = st.conn.NextID()
+	}
+	return outcome.CloseConn
 }
 
 func (d *Dispatcher) handleOne(ctx context.Context, c *Conn, routing protocol.RoutingEnvelope) {

@@ -98,9 +98,30 @@ type phoneConn struct {
 	serverID string
 	connID   string
 	conn     *websocket.Conn
-	sendCh   chan []byte
+	sendCh   chan phoneSend
 	done     chan struct{}
 	cancel   context.CancelFunc
+
+	// token and firstFrameSent are wire-protocol artifacts, not routing
+	// state: token is captured from the phone's x-pyrycode-token header
+	// at WS upgrade and forwarded to the binary on the FIRST routing
+	// envelope only (docs/protocol-mobile.md § Routing envelope). The
+	// mutex guards the single read-then-set on first frame; per-phone
+	// pumps are otherwise serial.
+	tokMu          sync.Mutex
+	token          string
+	firstFrameSent bool
+}
+
+// phoneSend carries one queued action for phoneSendPump: write Frame
+// (when non-empty) and then, if CloseCode is non-zero, close the WS
+// with that code. Routing close-after-write through one pump preserves
+// write ordering — the phone observes the error envelope before the
+// close — without the race that a direct conn.Close at the
+// binaryRecvPump call site would introduce against an in-flight write.
+type phoneSend struct {
+	frame     []byte
+	closeCode uint16
 }
 
 // New returns a running fake relay bound to a random localhost port.
@@ -318,9 +339,10 @@ func (s *Server) handlePhone(w http.ResponseWriter, r *http.Request) {
 		serverID: serverID,
 		connID:   connID,
 		conn:     conn,
-		sendCh:   make(chan []byte),
+		sendCh:   make(chan phoneSend),
 		done:     make(chan struct{}),
 		cancel:   cancel,
+		token:    token,
 	}
 	s.phones[connID] = pc
 	s.mu.Unlock()
@@ -399,8 +421,9 @@ func (s *Server) binaryRecvPump(ctx context.Context, bc *binaryConn) error {
 				"server_id", bc.serverID, "conn_id", env.ConnID)
 			continue
 		}
+		msg := phoneSend{frame: env.Frame, closeCode: env.CloseCode}
 		select {
-		case ph.sendCh <- env.Frame:
+		case ph.sendCh <- msg:
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ph.done:
@@ -494,9 +517,17 @@ func (s *Server) phoneRecvPump(ctx context.Context, pc *phoneConn) error {
 			s.log.Debug("fakerelay: phone sent non-JSON frame", "conn_id", pc.connID)
 			return fmt.Errorf("phone %s: non-JSON frame", pc.connID)
 		}
+		token := ""
+		pc.tokMu.Lock()
+		if !pc.firstFrameSent {
+			token = pc.token
+			pc.firstFrameSent = true
+		}
+		pc.tokMu.Unlock()
 		out, err := json.Marshal(protocol.RoutingEnvelope{
 			ConnID: pc.connID,
 			Frame:  json.RawMessage(data),
+			Token:  token,
 		})
 		if err != nil {
 			return fmt.Errorf("wrap frame for %s: %w", pc.connID, err)
@@ -522,9 +553,18 @@ func (s *Server) phoneSendPump(ctx context.Context, pc *phoneConn) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case frame := <-pc.sendCh:
-			if err := pc.conn.Write(ctx, websocket.MessageText, frame); err != nil {
-				return err
+		case msg := <-pc.sendCh:
+			if len(msg.frame) > 0 {
+				if err := pc.conn.Write(ctx, websocket.MessageText, msg.frame); err != nil {
+					return err
+				}
+			}
+			if msg.closeCode != 0 {
+				// Close synchronously after the frame write returns so the
+				// phone observes the error envelope before the WS close.
+				_ = pc.conn.Close(websocket.StatusCode(msg.closeCode), "")
+				return fmt.Errorf("phone %s: closed by binary (code %d)",
+					pc.connID, msg.closeCode)
 			}
 		}
 	}

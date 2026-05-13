@@ -121,6 +121,13 @@ Frames from the binary back to a phone wrap the envelope in the same shape:
 
 The relay reads `conn_id`, looks up the corresponding phone connection, sends `frame` (without the wrapper) over that connection.
 
+**Relay-prepended fields on the binary↔relay leg only.** Two optional fields extend the routing envelope:
+
+- `token` *(string, phone→binary direction, first frame per `conn_id` only)*: the phone-supplied device-pairing token from the `x-pyrycode-token` HTTP header at WS upgrade. The relay sets this field exactly once per phone WS (on the first frame it forwards from the phone) and leaves it empty on every subsequent frame. The binary uses it to validate the phone via the local device registry; on mismatch the binary replies with `error` (code `auth.invalid_token`) and asks the relay to close the phone WS with code `4401` (see [Error codes](#error-codes)). The phone never sees `token` — it is relay→binary only, and the binary MUST NOT log it.
+- `close_code` *(uint16, binary→relay direction)*: when non-zero, asks the relay to forward `frame` (if non-empty) to the phone and then close that phone's WS with this WS close code. Used today for the auth-reject path (4401); reserved for future binary-side close intents. Phones never see `close_code`; the dispatcher ignores it on phone→binary frames.
+
+Both fields are absent (JSON `omitempty`) on routing envelopes that don't use them. Implementations MUST tolerate unknown fields on the routing envelope for forward compatibility.
+
 ## Connection lifecycle
 
 ### Binary

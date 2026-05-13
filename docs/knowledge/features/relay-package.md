@@ -35,6 +35,7 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error)
 
 func (*Connection) Frames() <-chan protocol.RoutingEnvelope // closes on lifecycle exit
 func (*Connection) Send(env protocol.RoutingEnvelope) error  // binary→relay outbound
+func (*Connection) CloseConn(connID string, code uint16) error // #308; close one phone conn
 func (*Connection) Wait() error                              // blocks until exit
 func (*Connection) Close() error                             // idempotent
 
@@ -183,6 +184,14 @@ Pinned behaviour:
 - `TestContextCancel_ShutsDownCleanly` — `cancel(ctx)` drains the lifecycle.
 - `TestConfig_Validation_TableDriven` — each missing required field; `ws://` / `http://` / unparseable schemes → `ErrInvalidConfig` (with `AllowInsecureScheme=false`).
 - `TestConfig_AllowInsecureScheme` (#301) — pins that `ws://` passes `Connect` when `AllowInsecureScheme=true`; `Close` cancels the lifecycle before the bogus URL's async dial surfaces.
+- `TestCloseConn_WireShape` (#308) — `CloseConn("c-7", 4401)` produces one outbound frame whose JSON has `conn_id=="c-7"`, `close_code==4401`, and no `frame` key.
+- `TestCloseConn_PropagatesNotConnected` (#308) — pre-Connect state returns `transport.ErrNotConnected` verbatim.
+
+## Close-conn surface (`CloseConn`, #308)
+
+`(*Connection).CloseConn(connID string, code uint16) error` asks the relay to close the named phone conn with the given WS close code. Builds a close-only `RoutingEnvelope{ConnID, CloseCode}` (no `Frame`), marshals, and forwards via `transport.Client.Send`. Returns `transport.ErrNotConnected` / `ErrDisconnected` / `ErrClosed` verbatim — fire-and-forget at this layer; the per-conn close ack is implicit (no further inbound frames will arrive for `connID`).
+
+The dispatcher's auth-reject path (#308) does NOT call `CloseConn`. Instead it publishes a single `RoutingEnvelope` with `Frame=<error>` AND `CloseCode=4401` onto `dispatch.Outbound()`; the existing forwarder's one `conn.Send(env)` is the atomic wire op. `CloseConn` is the surface reserved for direct callers that want close-without-payload (none today; the idle/inactivity sweep hinted at in #307's Open Questions is the anticipated future consumer).
 
 ## Auth: per-conn first-frame validation (`auth.go`, #249)
 
@@ -218,11 +227,11 @@ func AuthenticateFirstFrame(
 | `reg.Validate(token)` returns `false` (empty / never-paired / removed-after-pair) | `Response` = routing-wrapped `Envelope{ID:1, Type:TypeError, InReplyTo:&helloID, Payload:ErrorPayload{Code:CodeAuthInvalidToken, Message:MsgInvalidToken, Retryable:false}}` | `true` |
 | `env.Frame` not JSON-decodable as `Envelope` | `AuthOutcome{}` + `ErrMalformedHelloFrame` | — |
 
-The relay-conn caller writes `Response` first, then (if `CloseConn`) closes the phone WS with `StatusUnauthorized`. The outer envelope `ID` is fixed at `1` — the binary's first outbound frame on the phone's conn; the relay-conn layer allocates `2..N` for subsequent frames.
+The outer envelope `ID` is fixed at `1` — the binary's first outbound frame on the phone's conn. #308 wires the caller: `internal/dispatch`'s `FirstFrameGate` (`cmd/pyry/relay.go:authGate`) invokes `AuthenticateFirstFrame`, maps `outcome.CloseConn` to WS close code `4401`, and publishes one routing envelope onto the dispatcher's outbound channel carrying **both** `Response.Frame` AND `CloseCode=4401` — so the error envelope and the close are atomic on the wire (no race between `Send` and a separate `CloseConn` call). On accept the dispatcher advances the per-conn id counter so the next handler reply gets `ID=2`.
 
 ### Carrier-agnostic
 
-The function never parses WS headers, never inspects a hello payload, and never reads `env.Frame`'s payload for a token field. It only reads `env.ConnID` (echoed back) and `env.Frame`'s outer envelope `id` (echoed into `in_reply_to`). The relay-conn ticket that wires this into phone traffic picks the wire mechanism — (a) extended routing envelope, (b) synthesized `connection_opened` control frame ahead of `hello`, or (c) amended `hello` payload — without touching this signature.
+The function never parses WS headers, never inspects a hello payload, and never reads `env.Frame`'s payload for a token field. It only reads `env.ConnID` (echoed back) and `env.Frame`'s outer envelope `id` (echoed into `in_reply_to`). #308 picked option (a) from the three deferred mechanisms: the token rides `RoutingEnvelope.Token` populated by the relay from the phone's `x-pyrycode-token` header on the first frame per `conn_id`. Options (b) synthesized `connection_opened` control frame and (c) amended `hello` payload remain available for future protocol revisions without touching this signature.
 
 ### Revoked-vs-invalid is one code in v1
 

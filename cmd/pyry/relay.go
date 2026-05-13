@@ -7,10 +7,34 @@ import (
 	"log/slog"
 
 	"github.com/pyrycode/pyrycode/internal/config"
+	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/identity"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 )
+
+// authGate builds the dispatcher's FirstFrame closure that bridges
+// dispatch.FirstFrameGate and relay.AuthenticateFirstFrame. The token
+// is read from env.Token (relay-prepended on the first phone→binary
+// frame); the gate never logs the token, never wraps it into an error,
+// and never echoes it.
+func authGate(registry *devices.Registry, serverID string, logger *slog.Logger) dispatch.FirstFrameGate {
+	return func(ctx context.Context, env protocol.RoutingEnvelope) dispatch.FirstFrameOutcome {
+		outcome, err := relay.AuthenticateFirstFrame(env, env.Token, registry, serverID, logger)
+		if err != nil {
+			// Today only ErrMalformedHelloFrame is reachable. Surface to
+			// the dispatcher's malformed-frame fall-through.
+			return dispatch.FirstFrameOutcome{Err: err}
+		}
+		out := dispatch.FirstFrameOutcome{Response: outcome.Response}
+		if outcome.CloseConn {
+			out.CloseConn = true
+			out.Code = uint16(relay.StatusUnauthorized) // 4401
+		}
+		return out
+	}
+}
 
 // resolveRelayURL returns the first non-empty value among:
 //  1. flagValue (from -pyry-relay)
@@ -71,6 +95,14 @@ func startRelay(
 		return nil, fmt.Errorf("load server-id: %w", err)
 	}
 
+	// Load the device registry once at daemon startup. A missing file
+	// (ENOENT) yields an empty registry — every phone rejects until
+	// `pyry pair` runs. Malformed JSON fails fast.
+	registry, err := devices.Load(resolveDevicesPath(instanceName))
+	if err != nil {
+		return nil, fmt.Errorf("load device registry: %w", err)
+	}
+
 	if allowInsecure {
 		logger.Info("relay: PYRY_ALLOW_INSECURE_RELAY=1 — accepting ws:// scheme")
 	}
@@ -88,8 +120,9 @@ func startRelay(
 	}
 
 	d := dispatch.New(dispatch.Config{
-		Frames: conn.Frames(),
-		Logger: logger,
+		Frames:     conn.Frames(),
+		Logger:     logger,
+		FirstFrame: authGate(registry, string(serverID), logger),
 	})
 
 	dispatcherDone := make(chan struct{})

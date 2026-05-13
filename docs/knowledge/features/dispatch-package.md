@@ -1,4 +1,4 @@
-# `internal/dispatch` (#307)
+# `internal/dispatch` (#307, extended #308)
 
 Per-phone-conn demultiplexer + handler-table seam sitting between
 `internal/relay.Connection.Frames()` and the per-envelope-type
@@ -6,6 +6,13 @@ processors (`internal/relay/handlers/*`, downstream verb slices). Pure
 package: imports `internal/protocol` only — no I/O, no transport, no
 `internal/relay`. Carrier-agnostic so a future loopback / unit-test
 transport plugs the same channels in without touching the dispatcher.
+
+#308 plugs the auth gate in: `Config.FirstFrame` (optional) is invoked
+once per new `conn_id` before normal handler-table dispatch and can
+either accept-and-forward, reject-and-close (one envelope carrying
+`Frame=<error>` + `CloseCode=4401`), or fall through to
+`protocol.malformed`. Wired in `cmd/pyry/relay.go` to
+`relay.AuthenticateFirstFrame`.
 
 ## What it is
 
@@ -25,6 +32,16 @@ type Config struct {
     Frames         <-chan protocol.RoutingEnvelope // required
     OutboundBuffer int                              // default 32 when 0
     Logger         *slog.Logger                     // required
+    FirstFrame     FirstFrameGate                   // optional (#308); nil disables gating
+}
+
+type FirstFrameGate func(ctx context.Context, env protocol.RoutingEnvelope) FirstFrameOutcome
+
+type FirstFrameOutcome struct {
+    Response  protocol.RoutingEnvelope // verbatim envelope to forward (gate owns ID/InReplyTo/TS)
+    CloseConn bool                     // true → set Response.CloseCode=Code, stop per-conn goroutine
+    Code      uint16                   // WS close code (4401 for auth.invalid_token)
+    Err       error                    // gate-level failure → dispatcher emits protocol.malformed, no Response
 }
 
 type Dispatcher struct { /* opaque */ }
@@ -79,6 +96,40 @@ Error envelopes carry only the `Code*` string + a static `Message`.
 Decode-error text, stack info, and any byte derived from untrusted
 input never echo back on the wire.
 
+## First-frame gate (#308)
+
+When `Config.FirstFrame` is non-nil, the dispatcher invokes it on the
+**first** inbound frame for every new `conn_id`, on the per-conn
+goroutine (so a slow gate stalls only one conn, never the demux). Three
+outcomes:
+
+| Outcome                       | Dispatcher action                                                                                                         |
+|------------------------------ |---------------------------------------------------------------------------------------------------------------------------|
+| `CloseConn=false` (accept)    | Publish `Response` onto `Outbound()`; advance `Conn.NextID()` one tick (gate's `hello_ack` is `id=1`, next handler reply gets `id=2`); subsequent frames flow through the handler table. |
+| `CloseConn=true` (reject)     | Set `Response.CloseCode = Code` and publish; mark `connState.closed = true` under `d.mu`; per-conn goroutine returns. Further frames for this `conn_id` are dropped silently by the demux. |
+| `Err != nil` (gate-malformed) | Emit `protocol.malformed` (no `in_reply_to`); per-conn goroutine continues with the gate consumed (subsequent frames take the normal handler-table path).                                  |
+
+The closed-conn drop is structural: `routeConn` is the single critical
+section that gates per-conn state, and its lookup-then-check happens
+under the same `d.mu` that protects the per-conn goroutine's
+exit-and-mark. A frame arriving for a just-closed conn returns
+`(nil, true)` and the demux logs at Debug + continues — never blocks
+on a channel send into a dead goroutine.
+
+`CloseCode` is a **binary→relay** wire field. If a relay-side attacker
+injects `CloseCode=4401` onto a phone→binary routing envelope, the
+dispatcher ignores it (the gate runs on the inner frame as usual);
+pinned by `TestFirstFrameGate_IgnoresInboundCloseCode`.
+
+### Security: token in `RoutingEnvelope.Token`
+
+`Token` is plaintext credential material. The dispatcher and any
+`FirstFrameGate` implementation MUST NOT log it at any level. The only
+consumer is `relay.AuthenticateFirstFrame`; the doc-comments on
+`Config.Logger`, `FirstFrameGate`, and `RoutingEnvelope.Token` reiterate
+this. See [codebase/308.md](../codebase/308.md) for the gate closure's
+posture in `cmd/pyry/relay.go`.
+
 ## Register-before-Run is enforced, not advisory
 
 The `handlers map[string]Handler` is read by per-conn goroutines without
@@ -95,12 +146,13 @@ verb slices `Register` at startup, then call `Run`; the shape mirrors
   waits the WaitGroup, closes `Outbound`, returns `ctx.Err()`.
 - **`Frames` closed** (relay lifecycle ended): same teardown, returns
   `nil`.
-- **No per-conn-only close path in v1.** The wire protocol does not
-  emit a `connection_closed` envelope per `conn_id`; per-conn
-  goroutines live until daemon shutdown or whole-stream lifecycle end.
-  The auth-close path (#308) is the first real "close one conn but not
-  the others" requirement; the same mechanism extends naturally to
-  phone-disconnect once the wire spec adds the signal.
+- **Per-conn close intent on auth reject** (#308). When the gate
+  returns `CloseConn=true`, the per-conn goroutine publishes its
+  outbound envelope with `CloseCode` set and exits; `connState.closed`
+  flips under `d.mu` so the demux silently drops any straggler frame
+  for the same `conn_id`. The phone-initiated close path (relay sends
+  a per-conn close signal) is still deferred — the wire spec does not
+  emit `connection_closed` per `conn_id` yet.
 
 ## Daemon wiring (`cmd/pyry/relay.go`)
 
@@ -178,6 +230,22 @@ Same-package, stdlib only, passes under `go test -race`:
 - `TestRegister_DuplicatePanics` / `TestRegister_AfterRunPanics` /
   `TestNew_NilFrames|LoggerPanics` — programmer-error posture.
 
+Plus `internal/dispatch/gate_test.go` (#308):
+
+- `TestFirstFrameGate_Accept` — gate runs once; second frame on the
+  same conn bypasses the gate and hits the handler table.
+- `TestFirstFrameGate_Reject` — one envelope with `Frame=<error>` AND
+  `CloseCode==4401`; further frames for the same `conn_id` dropped.
+- `TestFirstFrameGate_RejectDoesNotAffectOtherConns` — per-conn
+  isolation.
+- `TestFirstFrameGate_Err` — gate-malformed → `protocol.malformed`;
+  gate is consumed, conn stays open.
+- `TestFirstFrameGate_NilDisablesGate` — pre-#308 behaviour byte-stable.
+- `TestFirstFrameGate_IgnoresInboundCloseCode` — pins the
+  "CloseCode is binary→relay-only" wire invariant.
+- `TestFirstFrameGate_ConcurrentConns` — ten conns in parallel
+  under `-race`.
+
 No e2e tests in this slice — the wiring is a strict extension of
 #301's drain-and-discard (additive `Connection.Send`, empty outbound
 until a verb slice registers a handler). Manual smoke at first
@@ -190,20 +258,20 @@ verb-slice integration is enough.
 
 ## Out of scope (deferred)
 
-- **Auth gating the first frame** (#308). Until then, every inbound
-  phone frame after `hello` hits the empty handler table and gets
-  `protocol.unsupported`.
 - **Per-conn close intent on handler error.** Handlers return `error`
-  in v1 but the dispatcher only logs at WARN. #308's
-  `AuthOutcome.CloseConn` introduces the first real close-conn intent;
-  extension is either a typed return (`*Action` struct) or a sentinel
-  (`ErrCloseConn`).
+  in v1 but the dispatcher only logs at WARN. The auth gate is the
+  only close-conn surface today; handlers that want to terminate a
+  conn would need a typed return (`*Action` struct) or a sentinel
+  (`ErrCloseConn`). No consumer requires this yet.
 - **Per-conn close signal from relay.** The wire protocol does not
   emit `connection_closed` per `conn_id`; per-conn goroutines live
-  until whole-stream lifecycle end. Follow-up paired with #308.
+  until whole-stream lifecycle end (or auth-reject). Pairs with a
+  future protocol revision.
 - **Verb handlers.** `list_conversations` (#303), `send_message`
-  (#304), `register_push_token` (#305) each register one route. This
-  slice ships the seam, not the routes.
+  (#304), `register_push_token` (#305) each register one route.
+  Post-#308 the dispatcher is fully wired: a successful auth gate is
+  followed by handler-table dispatch (currently empty → every frame
+  falls through to `protocol.unsupported`).
 
 ## Related
 

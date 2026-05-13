@@ -182,6 +182,33 @@ func (c *Connection) Send(env protocol.RoutingEnvelope) error {
 	return c.client.Send(raw)
 }
 
+// CloseConn asks the relay to close the named phone conn with the given
+// WS close code. Builds a close-only routing envelope (no Frame) with
+// CloseCode set and forwards via the transport. Returns
+// transport.ErrNotConnected when the underlying WS is currently dropped
+// or transport.ErrDisconnected if the live conn drops while Send is
+// blocked (caller decides whether to retry; transport reconnect runs
+// asynchronously). Wire mechanism: docs/protocol-mobile.md § Routing
+// envelope (CloseCode).
+//
+// CloseConn does NOT block on the relay's close-frame being delivered to
+// the phone — the request is fire-and-forget at this layer. The per-conn
+// close ack is implicit (no more inbound frames will arrive for connID).
+//
+// The dispatcher's auth-reject path does NOT call CloseConn; instead it
+// publishes one routing envelope carrying both Frame and CloseCode so
+// the error envelope and the close are atomic on the wire. CloseConn is
+// the explicit surface for callers that want close-without-payload
+// (none today; reserved for the idle/inactivity sweep hinted at in #307).
+func (c *Connection) CloseConn(connID string, code uint16) error {
+	env := protocol.RoutingEnvelope{ConnID: connID, CloseCode: code}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal close envelope: %w", err)
+	}
+	return c.client.Send(raw)
+}
+
 // Wait blocks until the lifecycle terminates and returns the terminal
 // classification: ErrServerIDConflict (fatal), ctx.Err (graceful
 // shutdown), or a wrapped transport error.
