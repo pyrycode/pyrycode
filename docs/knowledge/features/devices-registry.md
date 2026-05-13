@@ -8,6 +8,7 @@ Lives in the same `internal/devices` package as `Device`, `HashToken`, `VerifyTo
 
 - **Phase 3 foundation (#209):** mutex-guarded `Registry` + atomic save + load. Six exports: `Load`, `(*Registry).Save / Add / Remove / List / FindByTokenHash`.
 - **Phase 3 foundation (#210):** `(*Registry).Validate` — the WS-perimeter auth predicate. Composes `HashToken` + `FindByTokenHash`-shaped scan + in-memory `LastSeenAt` advance. Seventh export. No consumers wired in this slice (the WS auth handler is a follow-up Phase-3 ticket).
+- **Phase 3 foundation (#250):** `(*Registry).UpdatePushRegistration(tokenHash, platform, pushToken, name) bool` — the in-memory mutator for `Device.Platform` / `Device.PushToken` / `Device.Name` keyed by `TokenHash`. Returns `true` iff a matching row was found and mutated; caller chains `Save` for durability. Mutates the three fields under `r.mu`. Eighth export, consumed by `internal/relay/handlers.Handle` for the phone's `register_push_token` frame. `Name` is part of the mutation because the protocol's `device_name` makes the phone the source of truth for self-reported name (iOS Settings rename propagates).
 
 ## Surface
 
@@ -21,6 +22,7 @@ func (r *Registry) Remove(name string) bool
 func (r *Registry) List() []Device
 func (r *Registry) FindByTokenHash(hash string) (Device, bool)
 func (r *Registry) Validate(plain string) (Device, bool)
+func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name string) bool
 ```
 
 `Registry` holds the in-memory device slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk); persist via `Save`. Methods are safe for concurrent use.
