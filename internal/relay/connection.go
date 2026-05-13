@@ -65,6 +65,13 @@ type Config struct {
 	RelayURL      string
 	BinaryVersion string
 	Logger        *slog.Logger
+
+	// AllowInsecureScheme, when true, lets RelayURL use plain ws:// in
+	// addition to wss://. Test-only seam so e2e suites can point pyry at
+	// an httptest-hosted fakerelay over plaintext. Production callers
+	// leave this false; cmd/pyry flips it only when the operator sets
+	// PYRY_ALLOW_INSECURE_RELAY=1.
+	AllowInsecureScheme bool
 }
 
 // Connection runs the binary↔relay leg of the wire protocol. Lifecycle is
@@ -110,7 +117,7 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: RelayURL parse: %v", ErrInvalidConfig, err)
 	}
-	if parsedURL.Scheme != "wss" {
+	if parsedURL.Scheme != "wss" && !(cfg.AllowInsecureScheme && parsedURL.Scheme == "ws") {
 		return nil, fmt.Errorf("%w: RelayURL scheme must be wss (got %q)",
 			ErrInvalidConfig, parsedURL.Scheme)
 	}

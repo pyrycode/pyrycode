@@ -32,8 +32,11 @@
 //     error, which is simpler for consumer tests to assert against.
 //   - No 30-second grace period on server-id release: when the binary
 //     disconnects, its server-id is immediately reusable.
-//   - No TLS, no persistence, no rate limiting, no hello/hello_ack
-//     dispatch — this package is the routing seam only.
+//   - No TLS, no persistence, no rate limiting.
+//   - Binary-direct "hello" envelopes (no conn_id) get a synthesized
+//     hello_ack reply so real pyry binaries can complete their
+//     binary↔relay handshake against the harness. Other binary-direct
+//     envelope types are dropped (the dispatcher slice consumes them).
 package fakerelay
 
 import (
@@ -68,6 +71,19 @@ type Server struct {
 	binaries map[string]*binaryConn // serverID -> binary
 	phones   map[string]*phoneConn  // connID    -> phone
 	connSeq  uint64
+
+	// rejectNextBinaryWith4409, when true, causes the next /v1/server
+	// upgrade to accept the WS handshake and immediately close with WS
+	// code 4409 ("server-id already claimed"). The flag clears after
+	// one use. Set via RejectNextBinaryWith4409.
+	rejectNextBinaryWith4409 bool
+
+	// lastBinaryHello records, per server-id, the most recent
+	// binary-direct "hello" envelope observed by binaryRecvPump. Read
+	// via LastBinaryHello. Used by e2e tests to assert the handshake
+	// payload (role, server_id, binary_version, protocol_versions)
+	// without intercepting the WS framing.
+	lastBinaryHello map[string]protocol.Envelope
 }
 
 type binaryConn struct {
@@ -96,9 +112,10 @@ func New(logger *slog.Logger) *Server {
 		panic("fakerelay: logger is required")
 	}
 	s := &Server{
-		log:      logger,
-		binaries: make(map[string]*binaryConn),
-		phones:   make(map[string]*phoneConn),
+		log:             logger,
+		binaries:        make(map[string]*binaryConn),
+		phones:          make(map[string]*phoneConn),
+		lastBinaryHello: make(map[string]protocol.Envelope),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/server", s.handleBinary)
@@ -152,6 +169,26 @@ func (s *Server) handleBinary(w http.ResponseWriter, r *http.Request) {
 	serverID := r.Header.Get("X-Pyrycode-Server")
 	if serverID == "" {
 		http.Error(w, "missing x-pyrycode-server", http.StatusBadRequest)
+		return
+	}
+
+	// Opt-in: simulate the production WS-close-4409 path for the next
+	// binary upgrade. Accept the upgrade, then close with code 4409.
+	// Existing tests rely on the HTTP-409 first-claim-wins path; this
+	// branch is a second mode the e2e suite enables explicitly.
+	s.mu.Lock()
+	fail4409 := s.rejectNextBinaryWith4409
+	if fail4409 {
+		s.rejectNextBinaryWith4409 = false
+	}
+	s.mu.Unlock()
+	if fail4409 {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			s.log.Debug("fakerelay: binary accept failed (4409 path)", "err", err)
+			return
+		}
+		_ = conn.Close(websocket.StatusCode(4409), "server-id already claimed")
 		return
 	}
 
@@ -341,6 +378,19 @@ func (s *Server) binaryRecvPump(ctx context.Context, bc *binaryConn) error {
 				"server_id", bc.serverID, "err", err)
 			continue
 		}
+		// Binary-direct envelopes (no conn_id) are the binary↔relay
+		// handshake / control plane (hello, ack, error). The routing
+		// channel is reserved for binary↔phone traffic, which always
+		// carries a conn_id. We dispatch hello → hello_ack here so
+		// real pyry binaries can complete their handshake against this
+		// harness; other binary-direct types are out of scope until the
+		// dispatcher slice lands.
+		if env.ConnID == "" {
+			if err := s.handleBinaryDirect(ctx, bc, data); err != nil {
+				return err
+			}
+			continue
+		}
 		s.mu.Lock()
 		ph, ok := s.phones[env.ConnID]
 		s.mu.Unlock()
@@ -356,6 +406,63 @@ func (s *Server) binaryRecvPump(ctx context.Context, bc *binaryConn) error {
 		case <-ph.done:
 			// Phone went away mid-route; drop the frame.
 		}
+	}
+}
+
+// handleBinaryDirect handles a binary-direct envelope (no conn_id in the
+// outer routing wrapper). Today only "hello" is dispatched: capture it
+// for test introspection and reply with a wrapped hello_ack. Other types
+// are logged at debug and dropped — the dispatcher slice will take over.
+func (s *Server) handleBinaryDirect(ctx context.Context, bc *binaryConn, raw []byte) error {
+	var env protocol.Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		s.log.Debug("fakerelay: binary-direct envelope: decode failed",
+			"server_id", bc.serverID, "err", err)
+		return nil
+	}
+	if env.Type != protocol.TypeHello {
+		s.log.Debug("fakerelay: binary-direct envelope dropped (no dispatcher yet)",
+			"server_id", bc.serverID, "type", env.Type)
+		return nil
+	}
+
+	s.mu.Lock()
+	s.lastBinaryHello[bc.serverID] = env
+	s.mu.Unlock()
+
+	helloID := env.ID
+	ackPayload, err := json.Marshal(protocol.HelloAckPayload{
+		ProtocolVersion: "v1",
+		ServerID:        bc.serverID,
+		ConnID:          "-",
+	})
+	if err != nil {
+		return fmt.Errorf("marshal hello_ack payload: %w", err)
+	}
+	ack := protocol.Envelope{
+		ID:        1,
+		Type:      protocol.TypeHelloAck,
+		Payload:   ackPayload,
+		InReplyTo: &helloID,
+	}
+	inner, err := json.Marshal(ack)
+	if err != nil {
+		return fmt.Errorf("marshal hello_ack envelope: %w", err)
+	}
+	wrapped, err := json.Marshal(protocol.RoutingEnvelope{
+		ConnID: "-",
+		Frame:  inner,
+	})
+	if err != nil {
+		return fmt.Errorf("wrap hello_ack: %w", err)
+	}
+	select {
+	case bc.sendCh <- wrapped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-bc.done:
+		return nil
 	}
 }
 
@@ -421,4 +528,46 @@ func (s *Server) phoneSendPump(ctx context.Context, pc *phoneConn) error {
 			}
 		}
 	}
+}
+
+// --- e2e test hooks ---
+
+// RejectNextBinaryWith4409 arms a one-shot mode: the next /v1/server
+// upgrade accepts the WS handshake and immediately closes with WS code
+// 4409 ("server-id already claimed"). Subsequent connects follow normal
+// logic. Used by e2e tests to drive the daemon's "fatal close → daemon
+// shuts down" path without racing against the harness's HTTP-409
+// first-claim branch.
+func (s *Server) RejectNextBinaryWith4409() {
+	s.mu.Lock()
+	s.rejectNextBinaryWith4409 = true
+	s.mu.Unlock()
+}
+
+// LastBinaryHello returns the most recent binary-direct "hello" envelope
+// observed from the binary that claimed serverID. The boolean is false
+// when no hello has been observed for that server-id yet — callers poll
+// in e2e tests to wait for the handshake to land.
+func (s *Server) LastBinaryHello(serverID string) (protocol.Envelope, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	env, ok := s.lastBinaryHello[serverID]
+	return env, ok
+}
+
+// ForceCloseBinary closes the WS conn currently bound to serverID with
+// websocket.StatusInternalError (1011), simulating a non-fatal relay-side
+// drop. Returns true if a binary was bound and the close was issued;
+// false if no binary is currently bound to serverID. Used by e2e tests
+// to assert that the daemon's claude child survives a non-fatal close
+// (transport reconnects, supervisor stays up).
+func (s *Server) ForceCloseBinary(serverID string) bool {
+	s.mu.Lock()
+	bc, ok := s.binaries[serverID]
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	_ = bc.conn.Close(websocket.StatusInternalError, "test: force close")
+	return true
 }

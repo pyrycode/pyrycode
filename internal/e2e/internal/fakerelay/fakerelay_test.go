@@ -390,6 +390,112 @@ func TestClose_Idempotent(t *testing.T) {
 	}
 }
 
+func TestBinaryHello_GetsHelloAck(t *testing.T) {
+	t.Parallel()
+	s := newServer(t)
+	ctx, cancel := dialCtx(t)
+	defer cancel()
+
+	bin, _, err := dialBinary(ctx, t, s, "alpha")
+	if err != nil {
+		t.Fatalf("bind binary: %v", err)
+	}
+	t.Cleanup(func() { _ = bin.Close(websocket.StatusNormalClosure, "") })
+
+	hello := protocol.Envelope{
+		ID:      42,
+		Type:    protocol.TypeHello,
+		Payload: json.RawMessage(`{"role":"server","server_id":"alpha","binary_version":"0.10.0","protocol_versions":["v1"]}`),
+	}
+	raw, err := json.Marshal(hello)
+	if err != nil {
+		t.Fatalf("marshal hello: %v", err)
+	}
+	writeText(ctx, t, bin, raw)
+
+	var ackWrap protocol.RoutingEnvelope
+	readJSON(ctx, t, bin, &ackWrap)
+	if ackWrap.ConnID != "-" {
+		t.Errorf("ack conn_id = %q, want %q", ackWrap.ConnID, "-")
+	}
+	var ack protocol.Envelope
+	if err := json.Unmarshal(ackWrap.Frame, &ack); err != nil {
+		t.Fatalf("decode inner ack: %v", err)
+	}
+	if ack.Type != protocol.TypeHelloAck {
+		t.Errorf("ack.Type = %q, want %q", ack.Type, protocol.TypeHelloAck)
+	}
+	if ack.InReplyTo == nil || *ack.InReplyTo != hello.ID {
+		t.Errorf("ack.InReplyTo = %v, want %d", ack.InReplyTo, hello.ID)
+	}
+
+	// Server-side capture mirrors what the binary sent.
+	got, ok := s.LastBinaryHello("alpha")
+	if !ok {
+		t.Fatal("LastBinaryHello(alpha) not recorded")
+	}
+	if got.Type != protocol.TypeHello || got.ID != hello.ID {
+		t.Errorf("LastBinaryHello: got id=%d type=%q, want id=%d type=%q",
+			got.ID, got.Type, hello.ID, protocol.TypeHello)
+	}
+}
+
+func TestRejectNextBinaryWith4409(t *testing.T) {
+	t.Parallel()
+	s := newServer(t)
+	s.RejectNextBinaryWith4409()
+
+	ctx, cancel := dialCtx(t)
+	defer cancel()
+
+	conn, _, err := dialBinary(ctx, t, s, "alpha")
+	if err != nil {
+		// Some dial paths surface the immediate close as a dial error;
+		// that's fine — the assertion below covers the post-accept case.
+		return
+	}
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
+
+	_, _, err = conn.Read(ctx)
+	if err == nil {
+		t.Fatal("expected Read to fail after 4409 close")
+	}
+	if got := websocket.CloseStatus(err); got != websocket.StatusCode(4409) {
+		t.Fatalf("close status = %v, want 4409 (err=%v)", got, err)
+	}
+
+	// Flag is one-shot: a follow-up dial succeeds normally.
+	conn2, _, err := dialBinary(ctx, t, s, "beta")
+	if err != nil {
+		t.Fatalf("post-flag-clear dial: %v", err)
+	}
+	_ = conn2.Close(websocket.StatusNormalClosure, "")
+}
+
+func TestForceCloseBinary(t *testing.T) {
+	t.Parallel()
+	s := newServer(t)
+	ctx, cancel := dialCtx(t)
+	defer cancel()
+
+	bin, _, err := dialBinary(ctx, t, s, "alpha")
+	if err != nil {
+		t.Fatalf("bind binary: %v", err)
+	}
+	t.Cleanup(func() { _ = bin.Close(websocket.StatusNormalClosure, "") })
+
+	if !s.ForceCloseBinary("alpha") {
+		t.Fatal("ForceCloseBinary returned false for live binary")
+	}
+	if _, _, err := bin.Read(ctx); err == nil {
+		t.Fatal("expected Read to fail after force close")
+	}
+
+	if s.ForceCloseBinary("ghost") {
+		t.Error("ForceCloseBinary returned true for unknown server-id")
+	}
+}
+
 func statusOf(resp *http.Response) any {
 	if resp == nil {
 		return "<no response>"

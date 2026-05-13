@@ -673,9 +673,9 @@ func TestConfig_Validation_TableDriven(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		mut   func(*Config)
-		want  string
+		name string
+		mut  func(*Config)
+		want string
 	}{
 		{"missing Logger", func(c *Config) { c.Logger = nil }, "Logger is required"},
 		{"missing ServerID", func(c *Config) { c.ServerID = "" }, "ServerID is required"},
@@ -700,5 +700,28 @@ func TestConfig_Validation_TableDriven(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConfig_AllowInsecureScheme covers the test-only seam that lets
+// ws:// pass Connect's scheme check. We don't run the lifecycle here —
+// just enough of Connect to prove the validator branch. A dial against
+// the bogus URL would fail asynchronously inside the lifecycle goroutine;
+// Close cancels the transport before that surfaces.
+func TestConfig_AllowInsecureScheme(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		ServerID:            identity.ServerID(testServerID),
+		RelayURL:            "ws://example.invalid/v1/server",
+		BinaryVersion:       "0.10.0",
+		Logger:              testLogger(t),
+		AllowInsecureScheme: true,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c, err := Connect(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Connect with AllowInsecureScheme=true rejected ws://: %v", err)
+	}
+	_ = c.Close()
 }
 
