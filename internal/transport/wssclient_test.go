@@ -704,6 +704,169 @@ func TestFatalCloseCodes_HaltsOnDialError(t *testing.T) {
 	}
 }
 
+// racingCloseRelay accepts a single WS upgrade, echoes incoming frames to
+// keep sendPump writes draining (so they remain in-flight and likely to
+// fail mid-write at close time), then closes the conn with the configured
+// status on demand. Subsequent dial attempts are rejected at the HTTP
+// layer so a reconnect attempt is observable via connCount > 1.
+type racingCloseRelay struct {
+	server       *httptest.Server
+	connCount    atomic.Int64
+	triggerClose chan struct{}
+	connectedCh  chan struct{}
+}
+
+func newRacingCloseRelay(t *testing.T, status websocket.StatusCode, reason string) *racingCloseRelay {
+	t.Helper()
+	r := &racingCloseRelay{
+		triggerClose: make(chan struct{}, 1),
+		connectedCh:  make(chan struct{}, 1),
+	}
+	r.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// Reject any dial after the first so a reconnect attempt would
+		// show up as a failed dial rather than a fresh accepted conn —
+		// but connCount only increments on a successful Accept, so the
+		// test's `connCount == 1` assertion catches the reconnect.
+		if !r.connCount.CompareAndSwap(0, 1) {
+			http.Error(w, "single-shot", http.StatusGone)
+			return
+		}
+		conn, err := websocket.Accept(w, req, nil)
+		if err != nil {
+			return
+		}
+		select {
+		case r.connectedCh <- struct{}{}:
+		default:
+		}
+		ctx := req.Context()
+		// Drain client writes until told to close. Without this, sendPump
+		// frames pile up in the OS TCP buffer and Writes don't actually
+		// block, shrinking the window for an in-flight Write at close.
+		echoDone := make(chan struct{})
+		go func() {
+			defer close(echoDone)
+			for {
+				typ, data, err := conn.Read(ctx)
+				if err != nil {
+					return
+				}
+				if err := conn.Write(ctx, typ, data); err != nil {
+					return
+				}
+			}
+		}()
+		select {
+		case <-r.triggerClose:
+		case <-ctx.Done():
+		}
+		_ = conn.Close(status, reason)
+		<-echoDone
+	}))
+	t.Cleanup(r.server.Close)
+	return r
+}
+
+func (r *racingCloseRelay) URL() string {
+	return "ws" + strings.TrimPrefix(r.server.URL, "http")
+}
+
+func (r *racingCloseRelay) TriggerClose() {
+	select {
+	case r.triggerClose <- struct{}{}:
+	default:
+	}
+}
+
+// TestFatalCloseCodes_HaltsReconnect_RacingSendError pins the close-status
+// preference in serve(): when recvPump and sendPump both error from the
+// same peer-close event, the CloseError must be selected regardless of
+// which arrived in errCh first, so the FatalCloseCodes check in Connect
+// catches the peer's status. Without the preference loop, a sendPump
+// "use of closed network connection" error wins half the races and the
+// fatal-close halt silently falls through to reconnect.
+//
+// Determinism: under the fix, the test outcome is invariant across
+// scheduler orderings (close-status preference covers all 3 slots). The
+// busy-Send priming maximizes the rate of in-flight Writes at close time
+// so that a regression (reverting to `return errs[0]`) surfaces on a
+// meaningful fraction of -count=10 iterations.
+func TestFatalCloseCodes_HaltsReconnect_RacingSendError(t *testing.T) {
+	t.Parallel()
+	relay := newRacingCloseRelay(t, websocket.StatusCode(4409), "server-id conflict")
+	cfg := Config{
+		URL:             relay.URL(),
+		Logger:          testLogger(t),
+		WriteTimeout:    50 * time.Millisecond,
+		FatalCloseCodes: []websocket.StatusCode{websocket.StatusCode(4409)},
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = c.Close() })
+
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-c.Connected():
+	case <-ctx.Done():
+		t.Fatal("Connected did not fire before ctx deadline")
+	}
+	select {
+	case <-relay.connectedCh:
+	case <-ctx.Done():
+		t.Fatal("relay did not observe accept before ctx deadline")
+	}
+
+	// Busy-Send loop: keep sendPump's Write in flight so the close-frame
+	// race lands on a mid-write failure for sendPump, exercising the slot
+	// of the preference loop that the existing happy-path test doesn't.
+	stopSend := make(chan struct{})
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		for {
+			select {
+			case <-stopSend:
+				return
+			default:
+			}
+			if err := c.Send([]byte("x")); err != nil {
+				return
+			}
+		}
+	}()
+
+	relay.TriggerClose()
+
+	select {
+	case err := <-connectErr:
+		if !errors.Is(err, ErrFatalClose) {
+			t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
+		}
+		if status := websocket.CloseStatus(err); status != websocket.StatusCode(4409) {
+			t.Errorf("CloseStatus(err) = %d, want 4409", status)
+		}
+	case <-ctx.Done():
+		t.Fatal("Connect did not return before ctx deadline")
+	}
+
+	if got := relay.connCount.Load(); got != 1 {
+		t.Errorf("connCount = %d, want 1 (no reconnect)", got)
+	}
+
+	close(stopSend)
+	<-sendDone
+}
+
 func TestFatalCloseCodes_EmptyPreservesReconnect(t *testing.T) {
 	t.Parallel()
 	relay := newCloseCodeRelay(t, websocket.StatusCode(4409), "server-id conflict")
