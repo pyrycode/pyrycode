@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -30,23 +32,43 @@ func testLogger(t *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func makeRegisterRouting(t *testing.T, payload protocol.RegisterPushTokenPayload) protocol.RoutingEnvelope {
+// newTestConn returns a *dispatch.Conn whose outbound channel feeds a
+// recv helper. The conn's NextID is advanced past id=1 (mirroring the
+// gate's hello_ack accounting) so the first handler-originated reply
+// observes id=2.
+func newTestConn(t *testing.T, dev *devices.Device) (*dispatch.Conn, func() protocol.RoutingEnvelope) {
+	t.Helper()
+	out := make(chan protocol.RoutingEnvelope, 4)
+	c := dispatch.NewTestConn(testConnID, out, dev)
+	_ = c.NextID()
+	recv := func() protocol.RoutingEnvelope {
+		t.Helper()
+		select {
+		case env := <-out:
+			return env
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for outbound envelope")
+			return protocol.RoutingEnvelope{}
+		}
+	}
+	return c, recv
+}
+
+// makeRequest builds the protocol.Envelope that the dispatcher would
+// hand to the handler (already-decoded; the routing envelope is the
+// dispatcher's concern).
+func makeRequest(t *testing.T, payload any) protocol.Envelope {
 	t.Helper()
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	env := protocol.Envelope{
+	return protocol.Envelope{
 		ID:      testRequestID,
 		Type:    protocol.TypeRegisterPushToken,
 		TS:      time.Now().UTC(),
 		Payload: payloadJSON,
 	}
-	envJSON, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return protocol.RoutingEnvelope{ConnID: testConnID, Frame: envJSON}
 }
 
 // freshRegistryWithDevice seeds a Registry with d and returns a
@@ -83,7 +105,7 @@ func assertEnvelopeShape(t *testing.T, resp protocol.RoutingEnvelope, wantType s
 	return env
 }
 
-func TestHandle_FirstTimeRegister_WritesAndAcks(t *testing.T) {
+func TestRegisterPushToken_FirstTimeRegister_WritesAndAcks(t *testing.T) {
 	t.Parallel()
 	d := devices.Device{
 		TokenHash:  devices.HashToken(testPlainToken),
@@ -93,18 +115,19 @@ func TestHandle_FirstTimeRegister_WritesAndAcks(t *testing.T) {
 	}
 	reg, path := freshRegistryWithDevice(t, d)
 	snapshot := d
+	c, recv := newTestConn(t, &snapshot)
 
-	routing := makeRegisterRouting(t, protocol.RegisterPushTokenPayload{
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
 		Platform:   testPlatform,
 		Token:      testPushToken,
 		DeviceName: testDeviceName,
 	})
 
-	resp, err := Handle(routing, &snapshot, reg, path, testNextID, testLogger(t))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
+	h := RegisterPushToken(reg, path, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
 	}
-	assertEnvelopeShape(t, resp, protocol.TypeAck)
+	assertEnvelopeShape(t, recv(), protocol.TypeAck)
 
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected registry file to exist after first register: %v", err)
@@ -123,7 +146,7 @@ func TestHandle_FirstTimeRegister_WritesAndAcks(t *testing.T) {
 	}
 }
 
-func TestHandle_ReregisterIdentical_NoWriteAndAcks(t *testing.T) {
+func TestRegisterPushToken_ReregisterIdentical_NoWriteAndAcks(t *testing.T) {
 	t.Parallel()
 	d := devices.Device{
 		TokenHash:  devices.HashToken(testPlainToken),
@@ -135,25 +158,26 @@ func TestHandle_ReregisterIdentical_NoWriteAndAcks(t *testing.T) {
 	}
 	reg, path := freshRegistryWithDevice(t, d)
 	snapshot := d
+	c, recv := newTestConn(t, &snapshot)
 
-	routing := makeRegisterRouting(t, protocol.RegisterPushTokenPayload{
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
 		Platform:   testPlatform,
 		Token:      testPushToken,
 		DeviceName: testDeviceName,
 	})
 
-	resp, err := Handle(routing, &snapshot, reg, path, testNextID, testLogger(t))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
+	h := RegisterPushToken(reg, path, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
 	}
-	assertEnvelopeShape(t, resp, protocol.TypeAck)
+	assertEnvelopeShape(t, recv(), protocol.TypeAck)
 
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected registry file to NOT exist (dedupe path skips Save); stat err = %v", err)
 	}
 }
 
-func TestHandle_ReregisterChanged_WritesAndAcks(t *testing.T) {
+func TestRegisterPushToken_ReregisterChanged_WritesAndAcks(t *testing.T) {
 	t.Parallel()
 	d := devices.Device{
 		TokenHash:  devices.HashToken(testPlainToken),
@@ -168,18 +192,19 @@ func TestHandle_ReregisterChanged_WritesAndAcks(t *testing.T) {
 		t.Fatalf("Save initial: %v", err)
 	}
 	snapshot := d
+	c, recv := newTestConn(t, &snapshot)
 
-	routing := makeRegisterRouting(t, protocol.RegisterPushTokenPayload{
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
 		Platform:   "fcm",
 		Token:      "new-fcm",
 		DeviceName: "phone",
 	})
 
-	resp, err := Handle(routing, &snapshot, reg, path, testNextID, testLogger(t))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
+	h := RegisterPushToken(reg, path, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
 	}
-	assertEnvelopeShape(t, resp, protocol.TypeAck)
+	assertEnvelopeShape(t, recv(), protocol.TypeAck)
 
 	back, err := devices.Load(path)
 	if err != nil {
@@ -194,7 +219,42 @@ func TestHandle_ReregisterChanged_WritesAndAcks(t *testing.T) {
 	}
 }
 
-func TestHandle_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
+func TestRegisterPushToken_GoneMidConn_EmitsAuthInvalidToken(t *testing.T) {
+	t.Parallel()
+	// Registry is empty; the snapshot device's TokenHash is not present,
+	// so UpdatePushRegistration returns false.
+	reg := &devices.Registry{}
+	path := filepath.Join(t.TempDir(), "devices.json")
+	snapshot := devices.Device{
+		TokenHash: devices.HashToken(testPlainToken),
+		Name:      "phone",
+	}
+	c, recv := newTestConn(t, &snapshot)
+
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
+		Platform:   testPlatform,
+		Token:      testPushToken,
+		DeviceName: testDeviceName,
+	})
+
+	h := RegisterPushToken(reg, path, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	env := assertEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeAuthInvalidToken {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeAuthInvalidToken)
+	}
+	if payload.Retryable {
+		t.Errorf("Retryable = true, want false")
+	}
+}
+
+func TestRegisterPushToken_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 	t.Parallel()
 	d := devices.Device{
 		TokenHash:  devices.HashToken(testPlainToken),
@@ -207,6 +267,7 @@ func TestHandle_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 	reg := &devices.Registry{}
 	reg.Add(d)
 	snapshot := d
+	c, recv := newTestConn(t, &snapshot)
 
 	// Block Save: a regular file at the parent path makes MkdirAll fail.
 	dir := t.TempDir()
@@ -216,17 +277,17 @@ func TestHandle_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 	}
 	registryPath := filepath.Join(blocker, "devices.json")
 
-	routing := makeRegisterRouting(t, protocol.RegisterPushTokenPayload{
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
 		Platform:   "fcm",
 		Token:      "new-fcm",
 		DeviceName: "phone",
 	})
 
-	resp, err := Handle(routing, &snapshot, reg, registryPath, testNextID, testLogger(t))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
+	h := RegisterPushToken(reg, registryPath, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
 	}
-	env := assertEnvelopeShape(t, resp, protocol.TypeError)
+	env := assertEnvelopeShape(t, recv(), protocol.TypeError)
 	var payload protocol.ErrorPayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		t.Fatalf("unmarshal error payload: %v", err)
@@ -253,7 +314,7 @@ func TestHandle_SaveFailure_EmitsServerBinaryBusy(t *testing.T) {
 	}
 }
 
-func TestHandle_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite(t *testing.T) {
+func TestRegisterPushToken_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite(t *testing.T) {
 	t.Parallel()
 	reg := &devices.Registry{}
 	reg.Add(devices.Device{
@@ -261,20 +322,21 @@ func TestHandle_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite(t *testing.T) {
 		Name:      "other",
 	})
 	path := filepath.Join(t.TempDir(), "devices.json")
-
 	before := len(reg.List())
 
-	routing := makeRegisterRouting(t, protocol.RegisterPushTokenPayload{
+	c, recv := newTestConn(t, nil)
+
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
 		Platform:   testPlatform,
 		Token:      testPushToken,
 		DeviceName: testDeviceName,
 	})
 
-	resp, err := Handle(routing, nil, reg, path, testNextID, testLogger(t))
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
+	h := RegisterPushToken(reg, path, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
 	}
-	env := assertEnvelopeShape(t, resp, protocol.TypeError)
+	env := assertEnvelopeShape(t, recv(), protocol.TypeError)
 	var payload protocol.ErrorPayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		t.Fatalf("unmarshal error payload: %v", err)
@@ -294,18 +356,42 @@ func TestHandle_UnauthenticatedConn_EmitsAuthInvalidTokenNoWrite(t *testing.T) {
 	}
 }
 
-func TestHandle_MalformedFrame_ReturnsSentinel(t *testing.T) {
+func TestRegisterPushToken_MalformedPayload_EmitsProtocolMalformed(t *testing.T) {
 	t.Parallel()
-	routing := protocol.RoutingEnvelope{ConnID: testConnID, Frame: []byte("not-json")}
-	resp, err := Handle(routing, nil, &devices.Registry{}, "", testNextID, testLogger(t))
-	if !errors.Is(err, ErrMalformedFrame) {
-		t.Errorf("err = %v, want ErrMalformedFrame", err)
+	d := devices.Device{
+		TokenHash: devices.HashToken(testPlainToken),
+		Name:      "phone",
 	}
-	if !equalRouting(resp, protocol.RoutingEnvelope{}) {
-		t.Errorf("resp = %+v, want zero RoutingEnvelope", resp)
-	}
-}
+	reg := &devices.Registry{}
+	reg.Add(d)
+	path := filepath.Join(t.TempDir(), "devices.json")
+	snapshot := d
+	c, recv := newTestConn(t, &snapshot)
 
-func equalRouting(a, b protocol.RoutingEnvelope) bool {
-	return a.ConnID == b.ConnID && len(a.Frame) == 0 && len(b.Frame) == 0
+	req := protocol.Envelope{
+		ID:      testRequestID,
+		Type:    protocol.TypeRegisterPushToken,
+		TS:      time.Now().UTC(),
+		Payload: []byte("not-json"),
+	}
+
+	h := RegisterPushToken(reg, path, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	env := assertEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeProtocolMalformed {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeProtocolMalformed)
+	}
+	if payload.Retryable {
+		t.Errorf("Retryable = true, want false")
+	}
+
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("expected registry file to NOT exist after malformed reject; stat err = %v", err)
+	}
 }

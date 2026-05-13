@@ -131,6 +131,7 @@ func startRelay(
 		FirstFrame: authGate(registry, string(serverID), logger),
 	})
 	d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
+	d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 
 	dispatcherDone := make(chan struct{})
 	go func() {
