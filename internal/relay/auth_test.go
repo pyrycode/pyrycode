@@ -114,6 +114,13 @@ func TestAuthenticateFirstFrame_ValidToken(t *testing.T) {
 	if !got.LastSeenAt.After(pastSeen) {
 		t.Errorf("LastSeenAt: got %v, want after %v", got.LastSeenAt, pastSeen)
 	}
+
+	if outcome.Device == nil {
+		t.Fatalf("Device: got nil, want matched *devices.Device on accept")
+	}
+	if outcome.Device.Name != testDeviceName {
+		t.Errorf("Device.Name: got %q, want %q", outcome.Device.Name, testDeviceName)
+	}
 }
 
 func TestAuthenticateFirstFrame_UnknownToken(t *testing.T) {
@@ -170,6 +177,9 @@ func TestAuthenticateFirstFrame_MalformedHelloFrame(t *testing.T) {
 	if outcome.CloseConn || outcome.Response.ConnID != "" || outcome.Response.Frame != nil {
 		t.Errorf("outcome: got %+v, want zero value", outcome)
 	}
+	if outcome.Device != nil {
+		t.Errorf("Device: got %+v, want nil on malformed", outcome.Device)
+	}
 }
 
 func TestStatusUnauthorized_Value(t *testing.T) {
@@ -217,5 +227,8 @@ func assertRejectOutcome(t *testing.T, outcome AuthOutcome) {
 	}
 	if payload.RetryAfterS != nil {
 		t.Errorf("RetryAfterS: got %v, want nil", payload.RetryAfterS)
+	}
+	if outcome.Device != nil {
+		t.Errorf("Device: got %+v, want nil on reject", outcome.Device)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -297,6 +298,122 @@ func TestFirstFrameGate_IgnoresInboundCloseCode(t *testing.T) {
 	case <-d.Outbound():
 	case <-time.After(time.Second):
 		t.Fatal("no outbound hello_ack after gate accept")
+	}
+}
+
+// TestConnAuth_NilBeforeGate pins the zero-state contract: an
+// untouched Conn returns nil from Auth() — handlers running before any
+// gate accept (gate-disabled path, or a fresh Conn in tests) must see
+// nil and nil-check before dereferencing.
+func TestConnAuth_NilBeforeGate(t *testing.T) {
+	t.Parallel()
+	c := &Conn{id: "c-1"}
+	if got := c.Auth(); got != nil {
+		t.Errorf("Auth() before gate accept: got %+v, want nil", got)
+	}
+}
+
+// TestFirstFrameGate_AcceptPopulatesAuth pins the accept-path device
+// propagation: the gate's matched *devices.Device flows into the
+// per-conn auth slot and is observable by handlers on the
+// second-and-later frames of the same conn (pointer equality — handlers
+// see the same snapshot, not a copy).
+func TestFirstFrameGate_AcceptPopulatesAuth(t *testing.T) {
+	t.Parallel()
+	sentinel := &devices.Device{
+		TokenHash: devices.HashToken("plain"),
+		Name:      "test-phone",
+	}
+	in := make(chan protocol.RoutingEnvelope, 2)
+	gate := func(ctx context.Context, env protocol.RoutingEnvelope) FirstFrameOutcome {
+		return FirstFrameOutcome{
+			Response: helloAckResponse(t, env.ConnID, 1),
+			Device:   sentinel,
+		}
+	}
+	d := New(Config{Frames: in, Logger: testLogger(), FirstFrame: gate})
+
+	observed := make(chan *devices.Device, 1)
+	d.Register(protocol.TypeSendMessage, func(ctx context.Context, c *Conn, env protocol.Envelope) error {
+		observed <- c.Auth()
+		return nil
+	})
+
+	_, stop := runDispatcher(t, d)
+	defer stop()
+
+	in <- frame(t, "c-1", protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC()})
+	select {
+	case <-d.Outbound(): // drain hello_ack
+	case <-time.After(time.Second):
+		t.Fatal("no hello_ack within 1s")
+	}
+
+	in <- frame(t, "c-1", protocol.Envelope{ID: 2, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
+	select {
+	case got := <-observed:
+		if got == nil {
+			t.Fatal("handler observed Auth() == nil, want sentinel device")
+		}
+		if got != sentinel {
+			t.Errorf("Auth(): got %+v, want pointer equal to sentinel %+v", got, sentinel)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not run within 1s")
+	}
+}
+
+// TestFirstFrameGate_CloseConnDoesNotPopulateAuth pins the close-intent
+// invariant: even a misbehaving gate that supplies a device on the
+// close path MUST NOT cause the dispatcher to populate the slot. The
+// second frame is dropped (existing close-intent behaviour); no handler
+// observes the sentinel.
+func TestFirstFrameGate_CloseConnDoesNotPopulateAuth(t *testing.T) {
+	t.Parallel()
+	sentinel := &devices.Device{
+		TokenHash: devices.HashToken("plain"),
+		Name:      "should-not-leak",
+	}
+	in := make(chan protocol.RoutingEnvelope, 2)
+	gate := func(ctx context.Context, env protocol.RoutingEnvelope) FirstFrameOutcome {
+		return FirstFrameOutcome{
+			Response:  authErrorResponse(t, env.ConnID, 1),
+			CloseConn: true,
+			Code:      4401,
+			Device:    sentinel, // deliberately misbehaving
+		}
+	}
+	d := New(Config{Frames: in, Logger: testLogger(), FirstFrame: gate})
+
+	observed := make(chan *devices.Device, 1)
+	d.Register(protocol.TypeSendMessage, func(ctx context.Context, c *Conn, env protocol.Envelope) error {
+		observed <- c.Auth()
+		return nil
+	})
+
+	_, stop := runDispatcher(t, d)
+	defer stop()
+
+	in <- frame(t, "c-1", protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC()})
+
+	select {
+	case out := <-d.Outbound():
+		if out.CloseCode != 4401 {
+			t.Errorf("CloseCode: got %d, want 4401", out.CloseCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no reject outbound within 1s")
+	}
+
+	in <- frame(t, "c-1", protocol.Envelope{ID: 2, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
+
+	select {
+	case got := <-observed:
+		t.Errorf("handler observed Auth()=%+v on close-intent path; want no handler dispatch", got)
+	case out := <-d.Outbound():
+		t.Errorf("unexpected outbound after close-intent: %+v", out)
+	case <-time.After(150 * time.Millisecond):
+		// expected: per-conn goroutine exited; second frame dropped.
 	}
 }
 

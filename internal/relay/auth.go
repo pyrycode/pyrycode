@@ -44,6 +44,14 @@ var ErrMalformedHelloFrame = errors.New("relay: malformed hello frame")
 type AuthOutcome struct {
 	Response  protocol.RoutingEnvelope
 	CloseConn bool
+
+	// Device is the matched *devices.Device snapshot on the accept path.
+	// Nil on reject and on the ErrMalformedHelloFrame early return. The
+	// dispatcher carries this forward into the per-conn Auth slot so
+	// downstream verb handlers can read the authenticated device without
+	// re-validating the token (see #318 / docs/protocol-mobile.md §
+	// Authentication).
+	Device *devices.Device
 }
 
 // AuthenticateFirstFrame is the per-connection token-validation predicate
@@ -101,7 +109,13 @@ func AuthenticateFirstFrame(
 			"event", "auth.accept",
 			"conn_id", env.ConnID,
 			"device_name", device.Name)
-		return AuthOutcome{Response: resp, CloseConn: false}, nil
+		// Capture the matched device by reference so the dispatcher's
+		// per-conn auth slot holds a pointer to the validated snapshot.
+		// reg.Validate returned a value copy under reg.mu, so this
+		// snapshot is stable for the lifetime of the conn (token
+		// revocation propagation to live conns is a separate concern).
+		snapshot := device
+		return AuthOutcome{Response: resp, CloseConn: false, Device: &snapshot}, nil
 	}
 
 	resp, err := buildResponse(env.ConnID, helloID, protocol.TypeError, protocol.ErrorPayload{
