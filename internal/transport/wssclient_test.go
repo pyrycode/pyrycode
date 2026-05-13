@@ -201,8 +201,7 @@ func TestBackoff_ResetAfterStableConnection(t *testing.T) {
 	cfg := Config{Logger: testLogger(t), WriteTimeout: time.Second}
 
 	// Custom dialFn: first two attempts return error, third dials real.
-	var c *Client
-	c = newClientForTest(t, cfg, testOpts{
+	c := newClientForTest(t, cfg, testOpts{
 		seed:             1,
 		reconnectInitial: 20 * time.Millisecond,
 		reconnectMax:     200 * time.Millisecond,
