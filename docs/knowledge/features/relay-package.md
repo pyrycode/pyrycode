@@ -17,9 +17,16 @@ package relay
 
 type Config struct {
     ServerID      identity.ServerID // caller resolves via identity.LoadOrCreate
-    RelayURL      string            // must be wss://
+    RelayURL      string            // must be wss:// (ws:// accepted only when AllowInsecureScheme=true)
     BinaryVersion string
     Logger        *slog.Logger      // required
+
+    // AllowInsecureScheme, when true, lets RelayURL use ws:// in addition
+    // to wss://. Test-only seam for e2e suites pointing the daemon at an
+    // httptest-hosted fakerelay over plaintext. Production callers leave
+    // this false; cmd/pyry flips it only when the operator sets
+    // PYRY_ALLOW_INSECURE_RELAY=1 (#301).
+    AllowInsecureScheme bool
 }
 
 type Connection struct { /* opaque */ }
@@ -128,8 +135,9 @@ Sentinels are distinguished via `errors.Is`. `ErrServerIDConflict`'s string cont
 
 ## Configuration constraints
 
-- **`RelayURL` must be `wss://`.** Non-wss schemes are rejected as `ErrInvalidConfig` at `Connect` time. Server-id is sent in a request header; a `ws://` misconfiguration would disclose it in cleartext. Server-id is not a credential per `docs/protocol-mobile.md` § Security model Threat 2, but the cleartext-disclosure defense is cheap and structural.
-- **All four `Config` fields are required.** `ServerID` is caller-resolved via `internal/identity.LoadOrCreate` before `Connect` — the relay package never touches the on-disk store, keeping it free of pairing/storage concerns. `Logger` is required (nil → `ErrInvalidConfig`); structured slog only.
+- **`RelayURL` must be `wss://`** in production. Non-wss schemes are rejected as `ErrInvalidConfig` at `Connect` time. Server-id is sent in a request header; a `ws://` misconfiguration would disclose it in cleartext. Server-id is not a credential per `docs/protocol-mobile.md` § Security model Threat 2, but the cleartext-disclosure defense is cheap and structural.
+- **`AllowInsecureScheme = true` is the explicit test-only opt-in** (#301). Relaxes the scheme check to accept `ws://` in addition to `wss://`. `cmd/pyry` flips it only when the operator sets `PYRY_ALLOW_INSECURE_RELAY=1` (env-gated; no flag, no config-file key). Production default stays `wss://`-only.
+- **All four required `Config` fields must be set.** `ServerID` is caller-resolved via `internal/identity.LoadOrCreate` before `Connect` — the relay package never touches the on-disk store, keeping it free of pairing/storage concerns. `Logger` is required (nil → `ErrInvalidConfig`); structured slog only.
 
 ## Logging discipline
 
@@ -157,7 +165,7 @@ Forbidden everywhere: `token`, `payload`, raw `frame` bytes, full `Headers` map 
 
 - `newTestRelay(t)` — `httptest.NewServer` + `websocket.Accept` upgrader with hooks for: pre-emptive close with status, skip-ack, drop-after-hello, drop-after-ack, send-N-frames-after-ack, header introspection.
 - `testLogger(t)` — discarding `slog.Logger`.
-- `connectWithClient(ctx, cfg, client) *Connection` — unexported test seam that wraps a `*transport.Client` (typically wired to the `httptest` URL via a custom `dialFn`) and bypasses production's `wss://` validation. Production callers use `Connect`.
+- `connectWithClient(ctx, cfg, client) *Connection` — unexported test seam that wraps a `*transport.Client` (typically wired to the `httptest` URL via a custom `dialFn`) and bypasses production's URL/scheme validation. Production callers use `Connect`. The newer `Config.AllowInsecureScheme` field (#301) is a *production-shaped* path through `Connect` for callers that just need `ws://` (e2e); two seams, two purposes — keep both.
 - `handshakeTimeout` is a package-level `var` so tests substitute a 200ms value via `t.Cleanup`. Same idiom as `internal/transport`'s test-substituted cadence fields.
 
 Pinned behaviour:
@@ -172,7 +180,8 @@ Pinned behaviour:
 - `TestFrames_DeliversPostHandshakeInOrder` — three frames delivered in arrival order.
 - `TestClose_ShutsDownCleanly` — `Close()` drains `Frames()` and `Wait()` returns; goroutines exit.
 - `TestContextCancel_ShutsDownCleanly` — `cancel(ctx)` drains the lifecycle.
-- `TestConfig_Validation_TableDriven` — each missing required field; `ws://` / `http://` / unparseable schemes → `ErrInvalidConfig`.
+- `TestConfig_Validation_TableDriven` — each missing required field; `ws://` / `http://` / unparseable schemes → `ErrInvalidConfig` (with `AllowInsecureScheme=false`).
+- `TestConfig_AllowInsecureScheme` (#301) — pins that `ws://` passes `Connect` when `AllowInsecureScheme=true`; `Close` cancels the lifecycle before the bogus URL's async dial surfaces.
 
 ## Auth: per-conn first-frame validation (`auth.go`, #249)
 
@@ -321,7 +330,7 @@ Push token (FCM/APNs registration id) is opaque infrastructure data, not a secre
 
 ## Consumers and roadmap
 
-- **Supervisor wiring** (next ticket): `cmd/pyry/main.go` constructs the `relay.Config`, calls `Connect`, fans `Frames()` to a dispatcher, watches `Wait()` for `ErrServerIDConflict` and exits non-zero so launchd/systemd decides whether to restart.
+- **Supervisor wiring** (#301): `cmd/pyry/main.go` + `cmd/pyry/relay.go` resolve the relay URL with precedence `-pyry-relay` > `PYRY_RELAY_URL` > `cfg.RelayURL` > `DefaultConfig`, load the server-id via `identity.LoadOrCreate(resolveServerIDPath(name))` (same on-disk file as `pyry pair`), call `relay.Connect`, and spawn one supervisor-owned goroutine that drains `Frames()` and reads `Wait()`. On `ErrServerIDConflict` the goroutine calls the shared `signal.NotifyContext` cancel, unwinding `pool.Run`; on any other terminal error it logs warn and exits without restart (transport-internal reconnect already absorbed all non-fatal closes); empty `relayURL` is the disabled-relay branch (info log, no goroutine). See [`codebase/301.md`](../codebase/301.md) for the full wiring + e2e harness extensions.
 - **Outbound sending** (future ticket): adds `(*Connection).Send(env protocol.Envelope, connID string)` wrapping the envelope in `RoutingEnvelope` before handing to the transport — required for binary-initiated frames (conversation updates, message echoes) and for the dispatcher to deliver `handlers.Handle`'s response back to the phone.
 - **Relay-conn wiring** (future ticket): on receipt of the phone's first frame, extracts the token from the chosen carrier (extended routing envelope, synthesized `connection_opened`, or amended `hello`), calls `AuthenticateFirstFrame`, writes the returned `Response` back through the binary→relay leg, and (if `CloseConn`) closes the phone WS with `StatusUnauthorized`. Owns the `2..N` per-conn envelope-ID counter and caches the auth'd `*devices.Device` snapshot for forwarding to `handlers.Handle` and its siblings.
 - **Per-message dispatch** (future ticket): consumes `Frames()`, branches on `Envelope.Type`, decodes the per-type payload (#256 catalog), and routes to the relevant handler in `internal/relay/handlers/` (e.g. `register_push_token`, future `send_message`, `list_conversations`, …).
