@@ -47,6 +47,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -63,10 +64,33 @@ type Conn struct {
 	id       string
 	nextID   atomic.Uint64
 	outbound chan<- protocol.RoutingEnvelope
+
+	// auth is the matched device snapshot from the first-frame gate's
+	// accept verdict. Written exactly once by the dispatcher (via
+	// setAuth) on the per-conn goroutine, before the first handler-table
+	// dispatch on this conn. Reads occur strictly after the write on the
+	// same goroutine, so no synchronisation is required for the dominant
+	// (handler-on-per-conn-goroutine) path. Handler-spawned worker
+	// goroutines reading Auth() are happens-before-safe because goroutine
+	// start synchronises with prior writes on the spawning goroutine.
+	auth *devices.Device
 }
 
 // ConnID returns the relay-assigned conn_id this Conn dispatches for.
 func (c *Conn) ConnID() string { return c.id }
+
+// Auth returns the authenticated device snapshot for this conn, or nil
+// if the first-frame gate has not yet accepted on this conn (the
+// gate-disabled test path, a pre-accept frame, or a reject/Err path
+// where the slot was never populated). Verb handlers MUST nil-check
+// the result before dereferencing.
+func (c *Conn) Auth() *devices.Device { return c.auth }
+
+// setAuth is the dispatcher-only seam for populating the auth slot.
+// Unexported so verb handler closures cannot mutate auth state. Called
+// at most once per conn, on the per-conn goroutine, from runGate's
+// accept branch.
+func (c *Conn) setAuth(d *devices.Device) { c.auth = d }
 
 // NextID returns the next monotonic outbound envelope id for this conn.
 // Starts at 1 on the first call. Concurrent-safe even though the per-conn
@@ -178,6 +202,13 @@ type FirstFrameOutcome struct {
 	// buggy phone cannot retry into the gate forever; subsequent frames
 	// flow through the regular handler table.
 	Err error
+
+	// Device is the matched device snapshot from the gate. Populated iff
+	// Err == nil && !CloseConn (the accept-and-continue branch). The
+	// dispatcher MUST NOT propagate Device on the Err or CloseConn
+	// branches; even a misbehaving gate that supplies it there leaves
+	// Conn.Auth() nil.
+	Device *devices.Device
 }
 
 // Dispatcher demultiplexes frames by conn_id and routes each through the
@@ -385,6 +416,12 @@ func (d *Dispatcher) runGate(ctx context.Context, st *connState, routing protoco
 	resp := outcome.Response
 	if outcome.CloseConn {
 		resp.CloseCode = outcome.Code
+	} else {
+		// Accept-and-continue: populate the per-conn auth slot before
+		// any handler runs. The close-intent and Err branches do not
+		// reach this assignment even if a buggy gate supplied
+		// outcome.Device — defence-in-depth lives on the consumer.
+		st.conn.setAuth(outcome.Device)
 	}
 	select {
 	case d.outbound <- resp:

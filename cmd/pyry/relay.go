@@ -29,7 +29,10 @@ func authGate(registry *devices.Registry, serverID string, logger *slog.Logger) 
 			// the dispatcher's malformed-frame fall-through.
 			return dispatch.FirstFrameOutcome{Err: err}
 		}
-		out := dispatch.FirstFrameOutcome{Response: outcome.Response}
+		out := dispatch.FirstFrameOutcome{
+			Response: outcome.Response,
+			Device:   outcome.Device, // nil on reject; populated on accept
+		}
 		if outcome.CloseConn {
 			out.CloseConn = true
 			out.Code = uint16(relay.StatusUnauthorized) // 4401
