@@ -1,4 +1,4 @@
-# `internal/dispatch` (#307, extended #308)
+# `internal/dispatch` (#307, extended #308, #318)
 
 Per-phone-conn demultiplexer + handler-table seam sitting between
 `internal/relay.Connection.Frames()` and the per-envelope-type
@@ -24,6 +24,7 @@ type Handler func(ctx context.Context, c *Conn, env protocol.Envelope) error
 type Conn struct { /* opaque */ }
 func (c *Conn) ConnID() string
 func (c *Conn) NextID() uint64
+func (c *Conn) Auth() *devices.Device // nil before gate accept; set once on accept (#318)
 func (c *Conn) Send(ctx context.Context, env protocol.Envelope) error
 func (c *Conn) Reply(ctx context.Context, req protocol.Envelope,
                     respType string, payload json.RawMessage) error
@@ -42,6 +43,7 @@ type FirstFrameOutcome struct {
     CloseConn bool                     // true → set Response.CloseCode=Code, stop per-conn goroutine
     Code      uint16                   // WS close code (4401 for auth.invalid_token)
     Err       error                    // gate-level failure → dispatcher emits protocol.malformed, no Response
+    Device    *devices.Device          // #318; populated iff Err == nil && !CloseConn (accept-only)
 }
 
 type Dispatcher struct { /* opaque */ }
@@ -120,6 +122,46 @@ on a channel send into a dead goroutine.
 injects `CloseCode=4401` onto a phone→binary routing envelope, the
 dispatcher ignores it (the gate runs on the inner frame as usual);
 pinned by `TestFirstFrameGate_IgnoresInboundCloseCode`.
+
+### Per-conn auth slot (#318)
+
+The accept-and-continue branch of `runGate` calls an unexported
+`(*Conn).setAuth(outcome.Device)` to populate a per-conn auth slot
+**before** any handler-table dispatch runs on that conn. Verb handlers
+read the matched device snapshot via `c.Auth()` rather than re-validating
+the token (which is impossible anyway — `RoutingEnvelope.Token` is only
+populated on the first frame per `conn_id`).
+
+| State                           | `c.Auth()` returns                                |
+|---------------------------------|---------------------------------------------------|
+| Pre-gate (gate not yet run)     | `nil` — handlers MUST nil-check before deref      |
+| Gate accept                     | `outcome.Device` (pointer-equal to gate's value)  |
+| Gate reject (`CloseConn=true`)  | conn closes; no handler runs; slot never written  |
+| Gate `Err`                      | gate consumed; subsequent frames hit handler table with `c.Auth() == nil` |
+
+Concurrency posture is the existing single-writer-per-conn invariant:
+`setAuth` is the sole writer, runs on the per-conn goroutine exactly
+once before any handler dispatches, and `Auth()` is read by handlers on
+the same goroutine. Cross-goroutine reads from handler-spawned workers
+are happens-before-safe via goroutine-start synchronisation. No mutex,
+no atomic — same justification as the `gateRun` flag.
+
+`setAuth` is **unexported** so verb handler closures cannot forge or
+mutate auth state. The dispatcher does not panic on "accept with nil
+device" — defensive code for an unobserved failure mode. Handler
+authors must nil-check `c.Auth()` and the reviewer enforces it.
+
+The `Device` carrier on `FirstFrameOutcome` is filled unconditionally
+by the gate closure in `cmd/pyry/relay.go`, but the dispatcher only
+calls `setAuth` inside the accept-and-continue branch — the `Err`
+branch returns before reaching the call site, and the close-intent
+branch publishes the reject envelope and exits without touching the
+slot. Even a buggy gate that fills `Device` on a close-intent or `Err`
+outcome leaves `Auth()` nil. Pinned by
+`TestFirstFrameGate_CloseConnDoesNotPopulateAuth` and
+`TestConnAuth_NilBeforeGate`.
+
+See [codebase/318.md](../codebase/318.md) for the full design.
 
 ### Security: token in `RoutingEnvelope.Token`
 

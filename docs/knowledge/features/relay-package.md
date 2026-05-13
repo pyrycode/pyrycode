@@ -208,6 +208,7 @@ var ErrMalformedHelloFrame = errors.New("relay: malformed hello frame")
 type AuthOutcome struct {
     Response  protocol.RoutingEnvelope
     CloseConn bool
+    Device    *devices.Device // #318; accept-only — nil on reject and on the malformed early return
 }
 
 func AuthenticateFirstFrame(
@@ -228,6 +229,8 @@ func AuthenticateFirstFrame(
 | `env.Frame` not JSON-decodable as `Envelope` | `AuthOutcome{}` + `ErrMalformedHelloFrame` | — |
 
 The outer envelope `ID` is fixed at `1` — the binary's first outbound frame on the phone's conn. #308 wires the caller: `internal/dispatch`'s `FirstFrameGate` (`cmd/pyry/relay.go:authGate`) invokes `AuthenticateFirstFrame`, maps `outcome.CloseConn` to WS close code `4401`, and publishes one routing envelope onto the dispatcher's outbound channel carrying **both** `Response.Frame` AND `CloseCode=4401` — so the error envelope and the close are atomic on the wire (no race between `Send` and a separate `CloseConn` call). On accept the dispatcher advances the per-conn id counter so the next handler reply gets `ID=2`.
+
+#318 extends the accept path: `AuthOutcome.Device` is set to a pointer to a local `snapshot := device` copy of the value returned by `reg.Validate`. The gate closure in `cmd/pyry/relay.go` forwards this onto `dispatch.FirstFrameOutcome.Device`, which the dispatcher then stores into `*dispatch.Conn`'s per-conn auth slot via the unexported `setAuth` seam — strictly on the accept-and-continue branch. Downstream verb handlers read the matched device through `c.Auth()` and do NOT re-call `reg.Validate` on the second-and-later frames (the token only rides the first frame per `conn_id`). Reject and malformed paths leave `AuthOutcome.Device` nil structurally; see [codebase/318.md](../codebase/318.md).
 
 ### Carrier-agnostic
 
@@ -342,7 +345,7 @@ Push token (FCM/APNs registration id) is opaque infrastructure data, not a secre
 
 - **Supervisor wiring** (#301): `cmd/pyry/main.go` + `cmd/pyry/relay.go` resolve the relay URL with precedence `-pyry-relay` > `PYRY_RELAY_URL` > `cfg.RelayURL` > `DefaultConfig`, load the server-id via `identity.LoadOrCreate(resolveServerIDPath(name))` (same on-disk file as `pyry pair`), call `relay.Connect`, and spawn one supervisor-owned goroutine that drains `Frames()` and reads `Wait()`. On `ErrServerIDConflict` the goroutine calls the shared `signal.NotifyContext` cancel, unwinding `pool.Run`; on any other terminal error it logs warn and exits without restart (transport-internal reconnect already absorbed all non-fatal closes); empty `relayURL` is the disabled-relay branch (info log, no goroutine). See [`codebase/301.md`](../codebase/301.md) for the full wiring + e2e harness extensions.
 - **Outbound sending** (#307, landed): `(*Connection).Send(env protocol.RoutingEnvelope) error` marshals the routing envelope and forwards via `transport.Client.Send`. Caller wraps the inner `protocol.Envelope` in `RoutingEnvelope` (the dispatcher's `Conn.Send` does this from the inside). Returns `transport.ErrDisconnected` / `ErrNotConnected` / `ErrClosed` verbatim when the underlying conn is dropped — frames sent during a disconnected window are lost, which is consistent with v1 protocol semantics (reconnect re-runs `hello/hello_ack`, so per-conn state on the relay is implicitly the wrong frame of reference for retry). First consumer is `internal/dispatch` via the dispatcher's `Outbound()` forwarder in `cmd/pyry/relay.go`.
-- **Relay-conn wiring** (future ticket): on receipt of the phone's first frame, extracts the token from the chosen carrier (extended routing envelope, synthesized `connection_opened`, or amended `hello`), calls `AuthenticateFirstFrame`, writes the returned `Response` back through the binary→relay leg, and (if `CloseConn`) closes the phone WS with `StatusUnauthorized`. Owns the `2..N` per-conn envelope-ID counter and caches the auth'd `*devices.Device` snapshot for forwarding to `handlers.Handle` and its siblings.
+- **Relay-conn wiring** (#308 + #318, landed): the dispatcher's `FirstFrameGate` extracts the token from `RoutingEnvelope.Token` (relay-populated from the phone's `x-pyrycode-token` header on the first frame per `conn_id`), calls `AuthenticateFirstFrame`, and on reject publishes one routing envelope carrying both `Response.Frame` AND `CloseCode=4401` — the WS close is atomic with the error envelope. The dispatcher owns the `2..N` per-conn envelope-ID counter (#308) and stores the auth'd `*devices.Device` snapshot into `*dispatch.Conn`'s per-conn slot via the unexported `setAuth` seam (#318); downstream handlers read it via `c.Auth()` rather than re-validating.
 - **Per-message dispatch** (future ticket): consumes `Frames()`, branches on `Envelope.Type`, decodes the per-type payload (#256 catalog), and routes to the relevant handler in `internal/relay/handlers/` (e.g. `register_push_token`, future `send_message`, `list_conversations`, …).
 
 ## Dependencies
