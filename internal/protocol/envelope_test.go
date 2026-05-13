@@ -123,3 +123,62 @@ func TestRoutingEnvelope_RoundTrip(t *testing.T) {
 		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
 	}
 }
+
+// TestRoutingEnvelope_TokenOmitempty pins that an unset Token does not
+// land on the wire (preserves byte-identical encoding for non-auth
+// paths) and that a non-empty Token round-trips faithfully.
+func TestRoutingEnvelope_TokenOmitempty(t *testing.T) {
+	re := RoutingEnvelope{ConnID: "c-1", Frame: json.RawMessage(`{}`)}
+	out, err := json.Marshal(re)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"token"`)) {
+		t.Errorf("empty Token should be omitted; got %s", out)
+	}
+
+	re.Token = "abc123"
+	out, err = json.Marshal(re)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(out, []byte(`"token":"abc123"`)) {
+		t.Errorf("non-empty Token should encode; got %s", out)
+	}
+	var back RoutingEnvelope
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Token != "abc123" {
+		t.Errorf("Token round-trip: got %q, want %q", back.Token, "abc123")
+	}
+}
+
+// TestRoutingEnvelope_CloseCodeOmitempty pins that CloseCode=0 is
+// omitted and that a non-zero CloseCode round-trips.
+func TestRoutingEnvelope_CloseCodeOmitempty(t *testing.T) {
+	re := RoutingEnvelope{ConnID: "c-1", Frame: json.RawMessage(`{}`)}
+	out, err := json.Marshal(re)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"close_code"`)) {
+		t.Errorf("CloseCode=0 should be omitted; got %s", out)
+	}
+
+	re.CloseCode = 4401
+	out, err = json.Marshal(re)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(out, []byte(`"close_code":4401`)) {
+		t.Errorf("non-zero CloseCode should encode; got %s", out)
+	}
+	var back RoutingEnvelope
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.CloseCode != 4401 {
+		t.Errorf("CloseCode round-trip: got %d, want %d", back.CloseCode, 4401)
+	}
+}
