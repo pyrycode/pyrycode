@@ -99,10 +99,10 @@ unchanged.
 
 ```
 phone → relay:    raw frame bytes
-relay → binary:   {"conn_id": "c-N", "frame": <raw>}
+relay → binary:   {"conn_id": "c-N", "frame": <raw>, "token": "<phone-token>"?}
 
-binary → relay:   {"conn_id": "c-N", "frame": <raw>}
-relay → phone:    raw frame bytes
+binary → relay:   {"conn_id": "c-N", "frame": <raw>, "close_code": <code>?}
+relay → phone:    raw frame bytes  [then WS close(close_code) if non-zero]
 ```
 
 - Wrap uses `protocol.RoutingEnvelope` from #255; `Frame json.RawMessage`
@@ -114,6 +114,19 @@ relay → phone:    raw frame bytes
   **Debug-logged-and-dropped** (not relay-shutdown) — surfaces as a
   missing receive in the consumer test rather than a relay-side shutdown
   that masks the cause.
+- **Token injection (#308).** On the **first** phone→binary frame for
+  each `conn_id`, the harness embeds the upgrade-time
+  `x-pyrycode-token` value into `RoutingEnvelope.Token`; subsequent
+  frames carry `Token: ""`. Captured via a per-conn `firstFrameSent`
+  flag under `tokMu`.
+- **`CloseCode` honor (#308).** On binary→phone frames with
+  `env.CloseCode != 0`, the harness queues a `phoneSend{frame, closeCode}`
+  tuple onto `pc.sendCh`; `phoneSendPump` writes `frame` first (so the
+  phone observes the error envelope before the close) and then issues
+  `pc.conn.Close(websocket.StatusCode(closeCode), "")`. Serialising the
+  close through the same send pump that owns frame writes eliminates
+  the race that a direct `conn.Close` at the `binaryRecvPump` call site
+  would introduce against an in-flight write.
 
 ## Concurrency model
 

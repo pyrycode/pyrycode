@@ -19,6 +19,7 @@ package fakephone
 func Dial(ctx context.Context, baseURL, serverID, token, deviceName string) (*Client, error)
 func (*Client) Send(env protocol.Envelope) error
 func (*Client) Receive(timeout time.Duration) (protocol.Envelope, error)
+func (*Client) LastCloseStatus() (websocket.StatusCode, bool) // #308
 func (*Client) Close() error
 
 var (
@@ -56,11 +57,21 @@ var (
 
 1. Pre-checks `closed` under `mu`; returns zero + `ErrClosed` if set.
 2. Derives a `context.WithTimeout` and calls `conn.Read(ctx)`.
-3. On read error: re-checks `closed` (→ `ErrClosed`); else checks both
+3. On read error: capture peer close status via `websocket.CloseStatus(err)`
+   when not `-1` into `lastCloseStatus` under `mu` (#308); then re-checks
+   `closed` (→ `ErrClosed`); else checks both
    `errors.Is(err, context.DeadlineExceeded)` AND
    `ctx.Err() == context.DeadlineExceeded` (the library may surface
    either) → `ErrReceiveTimeout`; else wraps.
 4. On success, `json.Unmarshal` into `protocol.Envelope`.
+
+### `LastCloseStatus` (#308)
+
+Returns the WS close status code captured by the most recent
+`Receive` whose read failed with a `CloseError`; `ok=false` when no
+peer-side close has been observed (still open, or closed locally via
+`Close`). Used by the `TestRelay_AuthReject_4401` e2e to assert the
+auth-reject `4401` close code.
 
 ### `Close`
 
