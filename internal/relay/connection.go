@@ -167,6 +167,21 @@ func connectWithClient(ctx context.Context, cfg Config, client *transport.Client
 // resume on the new conn).
 func (c *Connection) Frames() <-chan protocol.RoutingEnvelope { return c.frames }
 
+// Send marshals env to JSON and forwards it to the relay over the
+// current transport conn. Returns transport.ErrDisconnected if the
+// underlying conn is currently dropped (caller decides whether to retry
+// or drop the frame); transport reconnect and a fresh hello/hello_ack
+// handshake happen asynchronously, so a frame sent while disconnected
+// is lost — that's consistent with v1 protocol expectations
+// (docs/protocol-mobile.md § Connection lifecycle).
+func (c *Connection) Send(env protocol.RoutingEnvelope) error {
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal routing envelope: %w", err)
+	}
+	return c.client.Send(raw)
+}
+
 // Wait blocks until the lifecycle terminates and returns the terminal
 // classification: ErrServerIDConflict (fatal), ctx.Err (graceful
 // shutdown), or a wrapped transport error.
