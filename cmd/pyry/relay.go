@@ -7,11 +7,13 @@ import (
 	"log/slog"
 
 	"github.com/pyrycode/pyrycode/internal/config"
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 )
 
 // authGate builds the dispatcher's FirstFrame closure that bridges
@@ -84,6 +86,7 @@ func startRelay(
 	instanceName, relayURL, version string,
 	allowInsecure bool,
 	shutdown context.CancelFunc,
+	convReg *conversations.Registry,
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -124,6 +127,7 @@ func startRelay(
 		Logger:     logger,
 		FirstFrame: authGate(registry, string(serverID), logger),
 	})
+	d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
 
 	dispatcherDone := make(chan struct{})
 	go func() {
