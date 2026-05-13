@@ -219,6 +219,36 @@ func StartIn(t *testing.T, home string, extraFlags ...string) *Harness {
 	return h
 }
 
+// StartInWithEnv behaves like StartIn but also appends extraEnv (each
+// "K=V") to the child's environment. extraFlags semantics are unchanged.
+// Sibling helper for tests that need to inject environment variables
+// (e.g. PYRY_ALLOW_INSECURE_RELAY=1) without disturbing every existing
+// StartIn call site.
+func StartInWithEnv(t *testing.T, home string, extraEnv []string, extraFlags ...string) *Harness {
+	t.Helper()
+	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
+		extraEnv:   extraEnv,
+		extraFlags: extraFlags,
+	})
+
+	h := &Harness{
+		SocketPath: socket,
+		HomeDir:    home,
+		PID:        cmd.Process.Pid,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		cmd:        cmd,
+		doneCh:     doneCh,
+	}
+
+	t.Cleanup(func() { h.teardown(t) })
+
+	if err := h.waitForReady(); err != nil {
+		t.Fatalf("e2e: %v", err)
+	}
+	return h
+}
+
 // StartRotation builds pyry, builds the fake-claude test binary, ensures
 // sessionsDir exists under home, and spawns pyry with fake-claude as the
 // supervised child. The three PYRY_FAKE_CLAUDE_* env vars are set on the
@@ -588,6 +618,23 @@ func RunBareIn(t *testing.T, home string, args ...string) RunResult {
 	}
 
 	return RunResult{ExitCode: exitCode, Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
+}
+
+// Done returns a channel that closes when the daemon process exits.
+// Tests use this to assert clean shutdown after an external trigger
+// (e.g. a relay 4409 close). The exit code is then available via
+// h.ExitCode() once the channel has closed.
+func (h *Harness) Done() <-chan struct{} { return h.doneCh }
+
+// ExitCode returns the daemon's exit code. Only meaningful after the
+// Done channel has closed; returns -1 if the process is still running
+// (or if it was reaped without a status, which the OS makes impossible
+// once Wait has returned).
+func (h *Harness) ExitCode() int {
+	if h.cmd == nil || h.cmd.ProcessState == nil {
+		return -1
+	}
+	return h.cmd.ProcessState.ExitCode()
 }
 
 // Stop gracefully terminates the daemon (SIGTERM, grace, escalate to

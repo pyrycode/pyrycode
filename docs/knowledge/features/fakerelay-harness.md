@@ -7,9 +7,12 @@ exists so daemon-side e2e tests can exercise the full WS roundtrip —
 binary ↔ relay ↔ phone — without depending on the `pyrycode-relay`
 binary or live infrastructure.
 
-Phase: #295 ships the package in isolation (no consumers wired). A
-sibling ticket ships the fake-phone client; a third ticket consumes both
-for the appendix-flow roundtrip test.
+Phase: #295 ships the package in isolation (no consumers wired). #296
+ships the sibling fake-phone client. #301 extends the harness with
+binary-direct `hello`/`hello_ack` dispatch and a WS-4409 close mode so
+the real `pyry` daemon can complete its binary↔relay handshake against
+the harness; the e2e test in `internal/e2e/relay_test.go` is the first
+production consumer.
 
 ## Surface
 
@@ -19,6 +22,11 @@ package fakerelay
 func New(logger *slog.Logger) *Server   // returns running; nil logger panics
 func (*Server) URL() string             // ws://127.0.0.1:NNNN — no trailing path
 func (*Server) Close() error            // idempotent, always nil
+
+// e2e test hooks (#301)
+func (*Server) RejectNextBinaryWith4409()                       // arm one-shot WS 4409
+func (*Server) LastBinaryHello(serverID string) (protocol.Envelope, bool)
+func (*Server) ForceCloseBinary(serverID string) bool           // close with 1011 (StatusInternalError)
 ```
 
 Callers append `/v1/server` (binary upgrade) or `/v1/client` (phone
@@ -65,6 +73,27 @@ Production rejections happen post-upgrade as WS close codes (`4409` /
 the status surfaces directly in `websocket.Dial`'s returned error, which
 is simpler for consumer tests to assert on. Documented in the package
 comment as a deliberate deviation.
+
+**Exception (#301):** `RejectNextBinaryWith4409()` arms a one-shot
+opt-in mode for the next `/v1/server` upgrade: accept the WS handshake,
+then immediately close with `websocket.StatusCode(4409)` and reason
+`"server-id already claimed"`. The flag clears after one use; subsequent
+connects follow the normal HTTP-409 first-claim-wins path. Exists for
+the `TestRelay_4409` e2e test that needs the production-shaped WS close
+code rather than the HTTP-409 substitution.
+
+### Binary-direct hello dispatch (#301)
+
+When a binary sends an envelope **without** a `conn_id` in the outer
+routing wrapper, `binaryRecvPump` decodes the raw bytes a second time as
+`protocol.Envelope` and dispatches by `Type`. Today only
+`protocol.TypeHello` is handled: capture under `s.mu` keyed by
+`serverID` (read via `LastBinaryHello`), then reply with a
+routing-wrapped `Envelope{Type:TypeHelloAck, InReplyTo:&helloID,
+Payload:HelloAckPayload{ProtocolVersion:"v1", ServerID, ConnID:"-"}}`.
+Other binary-direct types log at debug and drop — the dispatcher slice
+takes over later. The routing-envelope path (frames with `conn_id`) is
+unchanged.
 
 ## Routing rules (`docs/protocol-mobile.md` § Routing envelope)
 
@@ -141,10 +170,12 @@ doomed conn.
 
 - **TLS termination.** Harness binds plain `ws://`.
 - **30-second server-id release grace period.** AC pins immediate release.
-- **Production WS close codes** (`4409`/`4404`/`4401`). Pre-upgrade HTTP
-  status is the harness's substitution.
+- **Production WS close codes** (`4404`/`4401`). Pre-upgrade HTTP
+  status is the harness's substitution. (`4409` is supported as a
+  one-shot opt-in via `RejectNextBinaryWith4409` — see above.)
 - **Token-contents validation.** Any non-empty token accepted.
-- **`hello` / `hello_ack` envelope dispatch.** Routing seam only.
+- **Binary-direct envelope dispatch beyond `hello`.** Other types log at
+  debug and drop; the dispatcher slice consumes them.
 - **Persistence, rate limiting, throttling.** Maps live for the
   `Server`'s lifetime; no quotas.
 

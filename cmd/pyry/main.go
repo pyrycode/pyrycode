@@ -44,6 +44,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/install"
@@ -205,6 +206,7 @@ var pyryFlagValues = map[string]bool{
 	"pyry-idle-timeout":        true,
 	"pyry-active-cap":          true,
 	"pyry-conv-sweep-interval": true,
+	"pyry-relay":               true,
 }
 
 // splitArgs walks args left-to-right and partitions them into pyry's own
@@ -399,6 +401,7 @@ func runSupervisor(args []string) error {
 	idleTimeout := fs.Duration("pyry-idle-timeout", 15*time.Minute, "evict idle claudes after this duration (0 disables)")
 	activeCap := fs.Int("pyry-active-cap", 0, "max concurrently active claudes (0 = uncapped)")
 	convSweepInterval := fs.Duration("pyry-conv-sweep-interval", 0, "override conversations sweep tick interval (testing; 0 = production default)")
+	relayFlag := fs.String("pyry-relay", "", "relay URL override (default: $PYRY_RELAY_URL or ~/.pyry/config.json)")
 	if err := fs.Parse(pyryArgs); err != nil {
 		return err
 	}
@@ -443,6 +446,18 @@ func runSupervisor(args []string) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	cfg, err := config.Load(resolveConfigPath())
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
+	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, cancel)
+	if err != nil {
+		return fmt.Errorf("relay start: %w", err)
+	}
+	defer relayCleanup()
 
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
@@ -1305,6 +1320,7 @@ Pyry flags (must come before claude args, or after a -- separator):
                         0 disables; respawn latency 2-15s on next attach)
   -pyry-conv-sweep-interval duration  override conversations sweep tick interval
                         (testing; 0 = production default of 1h)
+  -pyry-relay string    relay URL (default: $PYRY_RELAY_URL or ~/.pyry/config.json)
 
 Examples:
   pyry                                  # supervised claude (default instance)

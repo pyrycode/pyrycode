@@ -85,6 +85,14 @@ func Start(t *testing.T) *Harness  // fail-fast: t.Fatalf on any error
 // default of `=0` to enable idle eviction in-test.
 func StartIn(t *testing.T, home string, extraFlags ...string) *Harness
 
+// StartInWithEnv behaves like StartIn but also appends extraEnv (each
+// "K=V") to the child's environment. extraFlags semantics are unchanged.
+// Sibling helper for tests that need to inject env vars (e.g.
+// PYRY_ALLOW_INSECURE_RELAY=1 for the #301 relay e2e tests) without
+// disturbing every existing StartIn call site. Internally just calls
+// spawnWith(t, home, spawnOpts{extraEnv, extraFlags}).
+func StartInWithEnv(t *testing.T, home string, extraEnv []string, extraFlags ...string) *Harness
+
 // Stop gracefully terminates the daemon (SIGTERM, grace, escalate to
 // SIGKILL — same path as t.Cleanup teardown), waits for exit, and
 // removes the socket. HomeDir is left intact. Idempotent with t.Cleanup
