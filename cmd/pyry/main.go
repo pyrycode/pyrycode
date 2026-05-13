@@ -453,7 +453,7 @@ func runSupervisor(args []string) error {
 	}
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
 	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, cancel)
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, cancel, convReg)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
