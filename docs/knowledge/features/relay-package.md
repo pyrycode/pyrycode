@@ -34,6 +34,7 @@ type Connection struct { /* opaque */ }
 func Connect(ctx context.Context, cfg Config) (*Connection, error)
 
 func (*Connection) Frames() <-chan protocol.RoutingEnvelope // closes on lifecycle exit
+func (*Connection) Send(env protocol.RoutingEnvelope) error  // binary→relay outbound
 func (*Connection) Wait() error                              // blocks until exit
 func (*Connection) Close() error                             // idempotent
 
@@ -331,7 +332,7 @@ Push token (FCM/APNs registration id) is opaque infrastructure data, not a secre
 ## Consumers and roadmap
 
 - **Supervisor wiring** (#301): `cmd/pyry/main.go` + `cmd/pyry/relay.go` resolve the relay URL with precedence `-pyry-relay` > `PYRY_RELAY_URL` > `cfg.RelayURL` > `DefaultConfig`, load the server-id via `identity.LoadOrCreate(resolveServerIDPath(name))` (same on-disk file as `pyry pair`), call `relay.Connect`, and spawn one supervisor-owned goroutine that drains `Frames()` and reads `Wait()`. On `ErrServerIDConflict` the goroutine calls the shared `signal.NotifyContext` cancel, unwinding `pool.Run`; on any other terminal error it logs warn and exits without restart (transport-internal reconnect already absorbed all non-fatal closes); empty `relayURL` is the disabled-relay branch (info log, no goroutine). See [`codebase/301.md`](../codebase/301.md) for the full wiring + e2e harness extensions.
-- **Outbound sending** (future ticket): adds `(*Connection).Send(env protocol.Envelope, connID string)` wrapping the envelope in `RoutingEnvelope` before handing to the transport — required for binary-initiated frames (conversation updates, message echoes) and for the dispatcher to deliver `handlers.Handle`'s response back to the phone.
+- **Outbound sending** (#307, landed): `(*Connection).Send(env protocol.RoutingEnvelope) error` marshals the routing envelope and forwards via `transport.Client.Send`. Caller wraps the inner `protocol.Envelope` in `RoutingEnvelope` (the dispatcher's `Conn.Send` does this from the inside). Returns `transport.ErrDisconnected` / `ErrNotConnected` / `ErrClosed` verbatim when the underlying conn is dropped — frames sent during a disconnected window are lost, which is consistent with v1 protocol semantics (reconnect re-runs `hello/hello_ack`, so per-conn state on the relay is implicitly the wrong frame of reference for retry). First consumer is `internal/dispatch` via the dispatcher's `Outbound()` forwarder in `cmd/pyry/relay.go`.
 - **Relay-conn wiring** (future ticket): on receipt of the phone's first frame, extracts the token from the chosen carrier (extended routing envelope, synthesized `connection_opened`, or amended `hello`), calls `AuthenticateFirstFrame`, writes the returned `Response` back through the binary→relay leg, and (if `CloseConn`) closes the phone WS with `StatusUnauthorized`. Owns the `2..N` per-conn envelope-ID counter and caches the auth'd `*devices.Device` snapshot for forwarding to `handlers.Handle` and its siblings.
 - **Per-message dispatch** (future ticket): consumes `Frames()`, branches on `Envelope.Type`, decodes the per-type payload (#256 catalog), and routes to the relevant handler in `internal/relay/handlers/` (e.g. `register_push_token`, future `send_message`, `list_conversations`, …).
 
