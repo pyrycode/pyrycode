@@ -18,6 +18,23 @@
 // publish replies on a shared outbound channel that the caller drains.
 // Bounded backpressure: a slow outbound consumer pauses per-conn
 // goroutines, which is the intended flow control.
+//
+// Security / operational notes (per the spec's Security review, #307):
+//
+//   - Inbound frame size cap is inherited from internal/transport's WS
+//     read path. The dispatcher does not re-enforce; verb slices likewise
+//     rely on the transport cap rather than per-handler limits.
+//   - Head-of-line blocking on the demux: with an empty handler table no
+//     handler runs, so a slow handler cannot stall the demux today. Once
+//     verb slices register a long-running handler (e.g. an LLM-touching
+//     route), revisit and consider per-conn goroutine offload.
+//   - Log policy: dispatcher diagnostics carry conn_id, envelope type,
+//     envelope id, and the decode-error class — never the raw frame
+//     payload. Verb slices crossing this code path (message bodies,
+//     push tokens) must keep the same posture.
+//   - Wire-side error envelopes carry only the Code* string plus a
+//     static descriptive Message. No decode-error text, stack info, or
+//     anything derived from untrusted input is echoed back.
 package dispatch
 
 import (
@@ -116,6 +133,13 @@ type Dispatcher struct {
 	handlers map[string]Handler
 	outbound chan protocol.RoutingEnvelope
 
+	// started flips to true at the top of Run. Register checks it under
+	// no extra synchronisation (atomic) and panics on late registration;
+	// this turns the "Register-only-before-Run" contract from a
+	// convention into an enforced invariant, eliminating a potential
+	// data race on the handlers map.
+	started atomic.Bool
+
 	mu    sync.Mutex
 	conns map[string]*connState
 }
@@ -147,10 +171,15 @@ func New(cfg Config) *Dispatcher {
 	}
 }
 
-// Register installs a handler for envType. Must be called before Run.
-// Panics on duplicate registration (programmer error; downstream verb
-// slices register one route apiece).
+// Register installs a handler for envType. Must be called before Run;
+// panics if Run has already started (the handlers map is otherwise
+// lock-free in the read path, so late registration would be a data
+// race). Also panics on duplicate registration (programmer error;
+// downstream verb slices register one route apiece).
 func (d *Dispatcher) Register(envType string, h Handler) {
+	if d.started.Load() {
+		panic(fmt.Sprintf("dispatch: Register(%q) after Run has started", envType))
+	}
 	if _, dup := d.handlers[envType]; dup {
 		panic(fmt.Sprintf("dispatch: duplicate handler for envelope type %q", envType))
 	}
@@ -165,7 +194,11 @@ func (d *Dispatcher) Outbound() <-chan protocol.RoutingEnvelope { return d.outbo
 // Run blocks until cfg.Frames closes or ctx is done. Returns nil for
 // Frames-close (normal lifecycle end) and ctx.Err() for cancellation.
 // On return, every per-conn goroutine has exited and Outbound is closed.
+//
+// Run flips started before reading from Frames, locking the handlers
+// map against further Register calls.
 func (d *Dispatcher) Run(ctx context.Context) error {
+	d.started.Store(true)
 	var (
 		wg      sync.WaitGroup
 		runErr  error
@@ -211,6 +244,13 @@ loop:
 	return runErr
 }
 
+// getOrCreateConn looks up the per-conn state for connID and, if
+// missing, allocates it AND starts the per-conn goroutine — all inside
+// a single d.mu critical section. Splitting lookup, insert, and
+// goroutine-start across separate locked sections would open a window
+// where two frames for the same conn could create two goroutines or
+// the goroutine could observe an input channel that hasn't been
+// registered in d.conns yet. Keep this method atomic.
 func (d *Dispatcher) getOrCreateConn(ctx context.Context, wg *sync.WaitGroup, connID string) *connState {
 	d.mu.Lock()
 	defer d.mu.Unlock()

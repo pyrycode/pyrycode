@@ -350,6 +350,34 @@ func TestTwoConns_ArrivalOrderPreservedPerConn(t *testing.T) {
 	}
 }
 
+func TestRegister_AfterRunPanics(t *testing.T) {
+	t.Parallel()
+	in := make(chan protocol.RoutingEnvelope)
+	d := New(Config{Frames: in, Logger: testLogger()})
+	_, stop := runDispatcher(t, d)
+	defer stop()
+
+	// Run is started in a goroutine; wait until it has flipped started
+	// before exercising Register. Otherwise the test races with the
+	// goroutine scheduler.
+	deadline := time.Now().Add(time.Second)
+	for !d.started.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("Run did not flip started within 1s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Register must panic to prevent a data race on the handlers map
+	// (read lock-free in the dispatch path).
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("Register: expected panic when called after Run, got none")
+		}
+	}()
+	d.Register(protocol.TypeSendMessage, func(context.Context, *Conn, protocol.Envelope) error { return nil })
+}
+
 func TestRegister_DuplicatePanics(t *testing.T) {
 	t.Parallel()
 	in := make(chan protocol.RoutingEnvelope)
