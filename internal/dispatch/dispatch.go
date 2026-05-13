@@ -391,6 +391,13 @@ func (d *Dispatcher) runGate(ctx context.Context, st *connState, routing protoco
 	case <-ctx.Done():
 		return outcome.CloseConn
 	}
+	if !outcome.CloseConn {
+		// Advance the per-conn id counter past the hello_ack (id=1)
+		// that AuthenticateFirstFrame just emitted, so the next
+		// binary-originated frame on this conn (handler reply,
+		// sendError, etc.) gets id=2 — per #308 AC #2.
+		_ = st.conn.NextID()
+	}
 	return outcome.CloseConn
 }
 

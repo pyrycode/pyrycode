@@ -87,13 +87,18 @@ func TestFirstFrameGate_Accept(t *testing.T) {
 	}
 
 	// Frame 2: send_message — gate must NOT run; falls through to the
-	// empty handler table and returns protocol.unsupported.
+	// empty handler table and returns protocol.unsupported. The inner
+	// envelope id must be 2 (the gate's hello_ack consumed id=1; the
+	// per-conn counter must have advanced past it — AC #2).
 	in <- frame(t, "c-1", protocol.Envelope{ID: 7, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
 	select {
 	case out := <-d.Outbound():
-		_, payload := decodeError(t, out)
+		inner, payload := decodeError(t, out)
 		if payload.Code != protocol.CodeProtocolUnsupported {
 			t.Errorf("code: got %q, want %q", payload.Code, protocol.CodeProtocolUnsupported)
+		}
+		if inner.ID != 2 {
+			t.Errorf("inner.ID: got %d, want 2 (counter must advance past gate's hello_ack id=1)", inner.ID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no second outbound within 1s")
