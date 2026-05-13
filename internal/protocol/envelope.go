@@ -37,9 +37,33 @@ type Envelope struct {
 // Frame is json.RawMessage so the relay can splice without parsing
 // payloads — a structural property of the design (the relay holds zero
 // per-user state).
+//
+// Token and CloseCode are direction-restricted relay-prepended fields,
+// both omitempty so existing fixtures and wire bytes for non-auth /
+// non-close paths are byte-identical to the pre-#308 shape.
 type RoutingEnvelope struct {
 	ConnID string          `json:"conn_id"`
 	Frame  json.RawMessage `json:"frame"`
+
+	// Token carries the phone's device-pairing token from the relay to
+	// the binary on the FIRST phone→binary frame for a given ConnID
+	// only. Empty on subsequent frames and on every binary→phone frame.
+	// Populated by the relay from the phone's x-pyrycode-token HTTP
+	// header at WS upgrade; never echoed back to the phone. Wire spec:
+	// docs/protocol-mobile.md § Routing envelope.
+	//
+	// SECURITY: the binary's dispatcher and gate closure MUST NOT log
+	// Token at any level. The token is plaintext credential material;
+	// AuthenticateFirstFrame is the only consumer.
+	Token string `json:"token,omitempty"`
+
+	// CloseCode, when non-zero on a binary→relay routing envelope, asks
+	// the relay to forward Frame (if non-empty) to the phone and then
+	// close that phone's WS with this WS close code. Zero on every
+	// phone→binary frame; the dispatcher ignores CloseCode on inbound
+	// (phone→binary) frames. Wire spec: docs/protocol-mobile.md
+	// § Routing envelope, § Error codes (close-code row 4401).
+	CloseCode uint16 `json:"close_code,omitempty"`
 }
 
 // Sentinel errors returned by IsV1Compatible. Callers (the future WS
