@@ -120,7 +120,7 @@ supervisor.Run()
 
 All supervisor configuration in a single struct. Passed to `supervisor.New()`.
 
-Fields: ClaudeBin (path to claude), WorkDir (child's cwd), ResumeLast (use --continue after first run), ClaudeArgs (pass-through args), Bridge (optional service-mode I/O mediator), Logger (*slog.Logger), backoff params (Initial, Max, Reset durations).
+Fields: ClaudeBin (path to claude), WorkDir (child's cwd), ResumeLast (use --continue after first run), ClaudeArgs (pass-through args), Bridge (optional service-mode I/O mediator), Logger (*slog.Logger), backoff params (Initial, Max, Reset durations), ValidateConversation (optional `func(id string) error` consulted by `WriteUserTurn` before mutation; production wiring in `internal/sessions/pool.go` synthesises a closure over `conversations.Registry.Get` that returns `conversations.ErrConversationNotFound` on miss — `internal/supervisor` never imports `internal/conversations`, the sentinel travels through the closure verbatim; nil skips validation, #312).
 
 ### `supervisor.Bridge`
 
@@ -128,9 +128,13 @@ Service-mode I/O mediator. A single `Bridge` instance persists across child rest
 
 ### `supervisor.Supervisor`
 
-Owns the child process lifecycle. Two methods:
+Owns the child process lifecycle. Methods:
 - `New(cfg Config) (*Supervisor, error)` — validates config, applies defaults
 - `Run(ctx context.Context) error` — the main loop: spawn, wait, backoff, repeat
+- `WriteUserTurn(id string, payload []byte) error` (#312) — delivers a user-turn payload to the supervised child along a caller-tagged `conversation_id`; runs `Config.ValidateConversation` first (a non-nil result propagates verbatim, typically `conversations.ErrConversationNotFound`); on accept updates the cursor under `convMu` **before** writing to the PTY so concurrent `CurrentConversation()` readers never see a stale cursor; cursor is NOT mutated on validation refusal; no active child (between iterations / pre-spawn) drops the bytes silently and returns `nil` (matches `Bridge.Write`'s discard-on-unattached behaviour); PTY write failures wrap with stable `"supervisor: write user turn:"` prefix.
+- `CurrentConversation() string` (#312) — snapshot read of the cursor under `convMu`; `""` when no `WriteUserTurn` has been accepted yet; persists across child restarts (in-memory supervisor state, not per-iteration). Consumed by #311's assistant-turn → `message` envelope bridge to stamp outbound envelopes.
+
+Internal state added by #312: `convMu` + `currentConvID` (the cursor) and `ptmxMu` + `ptmx *os.File` (the per-iteration PTY master fd). Both leaf-only; never nested with each other or with the pre-existing `mu`/`state` pair. `runOnce` brackets each iteration with private `setPTY(ptmx)` / `setPTY(nil)`, mirroring `Bridge.SetPTY`'s register/clear pair — `setPTY(nil)` runs **before** the actual `ptmx.Close()` so a racing `WriteUserTurn` sees `nil` and drops rather than writing to a closed fd.
 
 ### `supervisor.backoffTimer`
 

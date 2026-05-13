@@ -90,6 +90,14 @@ type Config struct {
 	BackoffMax     time.Duration
 	BackoffReset   time.Duration
 
+	// ValidateConversation, if non-nil, is invoked by WriteUserTurn before
+	// any state mutation or PTY write. A non-nil return is propagated
+	// verbatim — production wiring returns conversations.ErrConversationNotFound
+	// for unknown ids; the supervisor stays decoupled from that package by
+	// receiving the sentinel through the closure. When nil, WriteUserTurn
+	// skips validation (test ergonomics).
+	ValidateConversation func(id string) error
+
 	// helperEnv is extra environment variables appended to the child process
 	// environment. Used only in tests (TestHelperProcess pattern).
 	helperEnv []string
@@ -102,6 +110,17 @@ type Supervisor struct {
 
 	mu    sync.Mutex
 	state State
+
+	// convMu guards currentConvID. Leaf-only; never held while acquiring
+	// ptmxMu or mu.
+	convMu         sync.Mutex
+	currentConvID  string
+
+	// ptmxMu guards ptmx. Leaf-only; never held while acquiring convMu or
+	// mu. setPTY (called from runOnce) and WriteUserTurn (called from
+	// arbitrary handler goroutines) serialize through this lock.
+	ptmxMu sync.Mutex
+	ptmx   *os.File
 }
 
 // State returns a snapshot of the current supervisor state. Safe to call from
@@ -116,6 +135,62 @@ func (s *Supervisor) updateState(fn func(*State)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fn(&s.state)
+}
+
+// WriteUserTurn delivers a user-turn payload to the supervised claude child,
+// tagged with the caller's conversation_id. The cursor (CurrentConversation)
+// is updated to id on every accepted call — including when no child is
+// currently active (the bytes are dropped silently in that case, matching
+// Bridge.Write's discard-on-unattached behaviour). The cursor is NOT mutated
+// when validation refuses the id.
+//
+// Validation, when configured via Config.ValidateConversation, runs first.
+// A non-nil validator result is returned verbatim — production wiring
+// returns conversations.ErrConversationNotFound for unknown ids, which the
+// handler maps to a wire-level refusal code.
+//
+// PTY write failures are wrapped with a stable "supervisor: write user
+// turn:" prefix; the underlying error is preserved for errors.Is checks.
+func (s *Supervisor) WriteUserTurn(id string, payload []byte) error {
+	if s.cfg.ValidateConversation != nil {
+		if err := s.cfg.ValidateConversation(id); err != nil {
+			return err
+		}
+	}
+
+	s.convMu.Lock()
+	s.currentConvID = id
+	s.convMu.Unlock()
+
+	s.ptmxMu.Lock()
+	defer s.ptmxMu.Unlock()
+	if s.ptmx == nil {
+		return nil
+	}
+	if _, err := s.ptmx.Write(payload); err != nil {
+		return fmt.Errorf("supervisor: write user turn: %w", err)
+	}
+	return nil
+}
+
+// CurrentConversation returns the most recently written conversation_id, or
+// "" when no WriteUserTurn has been accepted yet. Safe for concurrent use.
+// Survives child restarts; the cursor is in-memory state on the supervisor,
+// not tied to a particular runOnce iteration.
+func (s *Supervisor) CurrentConversation() string {
+	s.convMu.Lock()
+	defer s.convMu.Unlock()
+	return s.currentConvID
+}
+
+// setPTY registers (or clears, when f is nil) the PTY master for the current
+// runOnce iteration. WriteUserTurn writes to this fd; setPTY(nil) before the
+// actual Close ensures an in-flight WriteUserTurn sees nil rather than a
+// just-closed fd. Mirrors Bridge.SetPTY.
+func (s *Supervisor) setPTY(f *os.File) {
+	s.ptmxMu.Lock()
+	s.ptmx = f
+	s.ptmxMu.Unlock()
 }
 
 // New constructs a Supervisor from a Config, applying defaults.
@@ -260,6 +335,7 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 		// just-closed fd.
 		s.cfg.Bridge.BeginIteration()
 		s.cfg.Bridge.SetPTY(ptmx)
+		s.setPTY(ptmx)
 		done := make(chan error, 2)
 		go func() {
 			_, err := io.Copy(ptmx, s.cfg.Bridge)
@@ -271,6 +347,7 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 		}()
 
 		waitErr := cmd.Wait()
+		s.setPTY(nil)
 		_ = ptmx.Close()
 		s.cfg.Bridge.SetPTY(nil)
 		s.cfg.Bridge.EndIteration()
@@ -288,6 +365,10 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 
 	// Foreground mode: bridge directly to the supervisor's own terminal.
 	//
+	// Register the PTY master for WriteUserTurn. setPTY(nil) below runs
+	// before ptmx.Close so a racing WriteUserTurn sees nil and drops.
+	s.setPTY(ptmx)
+
 	// Put the controlling terminal into raw mode if it is a TTY so that
 	// keystrokes pass through unmodified to the child.
 	stdinFd := int(os.Stdin.Fd())
@@ -333,6 +414,7 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 	waitErr := cmd.Wait()
 	// Unblock both copy goroutines: ptmx.Close() drains the output
 	// goroutine; input.Close() drains the input goroutine.
+	s.setPTY(nil)
 	_ = ptmx.Close()
 	_ = input.Close()
 
