@@ -149,3 +149,39 @@ No tests of the cmd/pyry wiring — that path is covered indirectly by the exist
 - **Handler-return-error semantics.** Logged-and-continued in v1. #308's `AuthOutcome{CloseConn: bool}` introduces the first real close-conn intent; the cleanest extension is a typed return — e.g. `Handler` returns a `*Action` struct or a sentinel `ErrCloseConn` the dispatcher recognises. Leave as-is for the scaffold.
 
 - **Outbound buffer size.** Defaulted to 32. Revisit when verb slices land if the bounded backpressure pauses dispatch under load (unlikely at v1 volumes; phone-side throughput is low).
+
+## Security review
+
+**Verdict:** PASS
+
+**Findings:**
+
+- [Trust boundaries] No findings — the only untrusted→trusted crossing is the JSON decode of `RoutingEnvelope.Frame` inside the per-conn goroutine. Phone-supplied data stays inside `protocol.Envelope`; only `inner.ID` is echoed back as `in_reply_to` on the refusal path (opaque correlator, no privilege attached). Auth gate (the actual "is this phone authorized to address this conn" check) is correctly named as out-of-scope (#308) — until #308 lands, every frame hits the empty table and gets `protocol.unsupported`, which is the intended posture for the scaffold.
+
+- [Tokens, secrets, credentials] N/A — this slice introduces no tokens, no secrets, no credentials. Push tokens (#305) and auth tokens (#308) land in later slices.
+
+- [File operations] N/A — `internal/dispatch` is pure (no I/O). `Connection.Send` is a JSON-marshal-then-`client.Send` wrapper; no filesystem path.
+
+- [Subprocess / external command] N/A — no `exec.Command`, no shell.
+
+- [Cryptographic primitives] N/A — the per-conn outbound `id` is a monotonic correlator (not a secret), so `sync/atomic.Uint64` is the right primitive; `crypto/rand` is not needed here. No comparison of attacker-controlled values to secrets in this slice.
+
+- [Network & I/O] SHOULD FIX (note, not gating):
+  - Inbound frame size: the dispatcher reads from `Connection.Frames()`, which is fed by `internal/transport/wssclient`. Frame-size caps live in the transport's WS read path, not in the dispatcher. The spec should state this dependency explicitly so verb slices know the cap is inherited, not redundantly enforced.
+  - Head-of-line blocking on the demux: the single demux goroutine blocks on `state.input <- env` if a per-conn handler stalls. In v1 (empty table) no handler runs, so this is not exploitable yet; once verb slices land, one slow handler can pause dispatch for *all* conns. Re-evaluate when the first long-running handler is registered (likely the LLM-touching handler in a later slice).
+  - Unbounded per-conn goroutine fan-out: the dispatcher does not cap the number of concurrent `conn_id` values. **OUT OF SCOPE** — the relay enforces its per-binary connection cap per `docs/protocol-mobile.md`, and the dispatcher inherits that cap. The per-conn-lifecycle close path is explicitly deferred to #308 in Open Questions.
+
+- [Error messages, logs, telemetry] SHOULD FIX (note):
+  - Wire-side: error envelopes carry only `code` (no internal detail leakage). This is implicit in the wire-code mapping convention but worth stating: refusal envelopes MUST NOT include decode error text, stack info, or anything beyond the `Code*` string.
+  - Log-side: log `conn_id`, frame `type`, envelope `id`, and the decode-error type — do NOT log the raw frame payload. v1's empty-table dispatch makes payload-logging harmless today, but verb slices will see message bodies and push tokens cross this code path; setting the policy now is cheaper than retrofitting after a leak.
+
+- [Concurrency] SHOULD FIX (note):
+  - The demux's "lookup `conns[conn_id]`, insert-if-missing, start goroutine" must happen as a single critical section under the dispatcher mutex. The spec describes the sequence but doesn't pin it as one atomic op — make explicit, so a future maintainer doesn't split it into two locked sections with a window between.
+  - The "Register-only-before-Run" invariant is currently a convention. Make it an enforced contract: `Register` after `Run` has started either panics (matching the duplicate-registration posture) or returns an error. Without enforcement, a late `Register` is a data race on the handler map.
+
+- [Threat model alignment] No findings beyond Network & I/O above. The v1 protocol's three documented refusals (malformed / unknown_type / unsupported) are each mapped to a `Code*` constant and exercised in tests. Hostile-phone scenarios (malformed frames, unknown types, encrypted payloads) are handled. Relay-compromise / replay / auth-replay are correctly scoped to #308.
+
+No MUST FIX items: nothing in this scaffold is exploitable as designed. SHOULD FIX items are policy notes for the developer and code-reviewer to apply during implementation; none gate the spec.
+
+**Reviewer:** architect (self-review per `agents/architect/security-review.md`)
+**Date:** 2026-05-13
