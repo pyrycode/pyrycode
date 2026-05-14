@@ -90,6 +90,7 @@ func startRelay(
 	allowInsecure bool,
 	shutdown context.CancelFunc,
 	convReg *conversations.Registry,
+	sess handlers.TurnWriter,
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -132,6 +133,7 @@ func startRelay(
 	})
 	d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
 	d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
+	d.Register(protocol.TypeSendMessage, handlers.SendMessage(sess, logger))
 
 	dispatcherDone := make(chan struct{})
 	go func() {

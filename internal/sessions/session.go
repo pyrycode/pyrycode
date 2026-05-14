@@ -106,6 +106,12 @@ func (s *Session) ID() SessionID { return s.id }
 // isn't running.
 func (s *Session) State() supervisor.State { return s.sup.State() }
 
+// WriteUserTurn delegates to the underlying supervisor. Consumed by the
+// send_message handler via the handlers.TurnWriter interface.
+func (s *Session) WriteUserTurn(conversationID string, payload []byte) error {
+	return s.sup.WriteUserTurn(conversationID, payload)
+}
+
 // LifecycleState returns a snapshot of the current lifecycle state. Used by
 // tests and (eventually) status payloads. Safe from any goroutine.
 func (s *Session) LifecycleState() lifecycleState {
