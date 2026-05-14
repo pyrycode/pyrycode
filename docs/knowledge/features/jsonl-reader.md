@@ -1,6 +1,6 @@
 # `internal/agentrun/jsonl` — JSONL line reader + deterministic end-of-turn detector
 
-Pure stdlib reader over claude session JSONL output. Single concern: take an `io.Reader`, surface one parsed assistant-entry `Event` per call to `Next`, and apply a deterministic end-of-turn rule. No filesystem watching, no path resolution, no goroutines. The fsnotify driver (#349) wraps it; the dashed-path encoding ([agentrun-package.md](agentrun-package.md), `EncodeProjectDir`) supplies the directory name.
+Pure stdlib reader over claude session JSONL output. Single concern: take an `io.Reader`, surface one `Event` per parsed JSONL line — every line kind, with verbatim bytes and any embedded `usage` block — and apply a deterministic end-of-turn rule on assistant entries. No filesystem watching, no path resolution, no goroutines. The fsnotify driver (#349) wraps it; the dashed-path encoding ([agentrun-package.md](agentrun-package.md), `EncodeProjectDir`) supplies the directory name.
 
 ## Public API
 
@@ -8,9 +8,19 @@ Pure stdlib reader over claude session JSONL output. Single concern: take an `io
 package jsonl
 
 type Event struct {
-    StopReason string // verbatim message.stop_reason ("end_turn", "tool_use", "max_tokens", "stop_sequence", "")
-    TextChars  int    // sum(len(content[i].text)); thinking/tool_use blocks contribute 0 naturally
-    EndOfTurn  bool   // StopReason == "end_turn" AND TextChars > 0
+    StopReason string          // assistant only; "" on non-assistant
+    TextChars  int             // assistant only; 0 on non-assistant
+    EndOfTurn  bool             // assistant only; StopReason == "end_turn" AND TextChars > 0
+    Raw        json.RawMessage // verbatim line bytes, trailing '\n' stripped (CRLF '\r' preserved)
+    Kind       string           // whitelisted: "assistant"|"user"|"tool_use"|"tool_result"|"system"|"attachment"|""
+    Usage      *UsageBlock      // non-nil only on assistant entries that carry a `usage` object
+}
+
+type UsageBlock struct {
+    InputTokens              int
+    OutputTokens             int
+    CacheCreationInputTokens int
+    CacheReadInputTokens     int
 }
 
 type Config struct {
@@ -26,7 +36,24 @@ func (r *Reader) AssistantCount() int         // includes transitional empty-con
 var ErrLineTooLarge = errors.New("jsonl: line exceeds maximum size")
 ```
 
-One type, one struct, one constructor, three methods. `Reader` is **not safe for concurrent use** — construct one per source.
+Two types, one struct, one constructor, three methods. `Reader` is **not safe for concurrent use** — construct one per source.
+
+### Event semantics across kinds (#353)
+
+| Input line                                            | `Kind`         | `Raw` | `StopReason` | `TextChars` | `EndOfTurn` | `Usage`       |
+| ----------------------------------------------------- | -------------- | ----- | ------------ | ----------- | ----------- | ------------- |
+| assistant + `end_turn` + text                         | `"assistant"`  | yes   | `"end_turn"` | `>0`        | `true`      | nil or set    |
+| assistant + `end_turn` + empty content (transitional) | `"assistant"`  | yes   | `"end_turn"` | `0`         | `false`     | nil or set    |
+| assistant + `tool_use`                                | `"assistant"`  | yes   | `"tool_use"` | sum text    | `false`     | nil or set    |
+| assistant carrying a `usage` object                   | `"assistant"`  | yes   | per-line     | per-line    | per-line    | **non-nil**   |
+| assistant without `usage`                             | `"assistant"`  | yes   | per-line     | per-line    | per-line    | **nil**       |
+| user / tool_use / tool_result / system / attachment   | the kind       | yes   | `""`         | `0`         | `false`     | `nil`         |
+| `{"type":"summary",…}` or any other / missing `type`  | `""`           | yes   | `""`         | `0`         | `false`     | `nil`         |
+| malformed JSON                                        | (not surfaced) | —     | —            | —           | —           | —             |
+
+`Kind` is a closed whitelist. Anything not in the six recognised values — including a missing `type` field — maps to `""`; the verbatim bytes survive on `Raw` so downstream re-emitters can still forward unrecognised line shapes byte-equivalent to claude's output. New claude line kinds land in the unrecognised bucket until the whitelist is widened.
+
+`Usage` is pointer-valued to distinguish "field absent" from "field present with all zeros". It is **never** non-nil on a non-assistant line, even if such a line carries a `usage`-shaped sub-object (defensive contract; not observed in practice).
 
 ## End-of-turn rule
 
@@ -46,11 +73,13 @@ The previously-feared "premature termination" failure mode (an early empty `end_
 
 Single state-machine loop in `Next`:
 
-1. Search the internal buffer for `'\n'`. If found, slice the line, advance `offset` past `len(line)+1`, decode, return (or skip on parse error / non-assistant type).
+1. Search the internal buffer for `'\n'`. If found, slice the line, **copy into a freshly-allocated `[]byte`** so the caller's `Event.Raw` cannot be mutated by subsequent `append` into the reader's backing array, advance `offset` past `len(line)+1`, decode, return (or skip on parse error).
 2. If no `'\n'`, call `src.Read` into a 4 KiB scratch buffer, append to internal buffer, repeat.
 3. EOF is **not sticky**: only surfaced when `Read` returns `(0, io.EOF)` AND the buffer holds no complete line. A later call to `Next` may pull more bytes from a growing source (the fsnotify-tail contract). Partial bytes are retained across calls.
 
 Buffer cap: 16 MiB per single line (well above the ~80 KiB observed real maximum). Exceeding it returns `ErrLineTooLarge` — the stream is structurally broken; the consumer must abort.
+
+**`Raw` aliasing trap.** A `lineCopy := r.buf[:i]` slice would share memory with the reader's growing buffer; a later `append(r.buf, ...)` can write into that same backing array and silently mutate `Event.Raw` after the caller has received it. The reader allocates a fresh slice and `copy`s into it before assigning to `Event.Raw`. Pinned by `TestReader_RawByteEquivalence` which calls `Next` again before inspecting earlier `Raw` slices.
 
 ### Why hand-rolled buffering and not `bufio.Scanner` / `bufio.Reader.ReadBytes`?
 
@@ -72,10 +101,18 @@ type rawAssistantMessage struct {
         Type string `json:"type"`
         Text string `json:"text"`
     } `json:"content"`
+    Usage *struct {
+        InputTokens              int `json:"input_tokens"`
+        OutputTokens             int `json:"output_tokens"`
+        CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+        CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+    } `json:"usage"`
 }
 ```
 
-The outer decode keeps `message` as `RawMessage` so non-assistant entries skip without paying the cost of parsing their differently-shaped messages (e.g. `user` lines have `content` as a string, not an array — single-pass decode would either fail or require pointer-to-`any`). Only when `Type == "assistant"` does the inner decode run. Unknown top-level fields (`parentUuid`, `requestId`, `timestamp`, `cwd`, etc.) are silently ignored by `encoding/json`.
+The outer decode keeps `message` as `RawMessage` so non-assistant entries skip the inner cost (their `content` shapes differ — `user` lines have `content` as a string, not an array — single-pass decode would either fail or require pointer-to-`any`). Only when `Type == "assistant"` does the inner decode run. Unknown top-level fields (`parentUuid`, `requestId`, `timestamp`, `cwd`, etc.) are silently ignored by `encoding/json`.
+
+`Usage` on `rawAssistantMessage` is **pointer-typed** so `encoding/json` leaves it `nil` when the field is absent. When non-nil after unmarshal, the loop builds an exported `UsageBlock` value and assigns its pointer to `Event.Usage`. The exported type is intentionally a value, not a pointer, so the `UsageBlock` itself is concrete; only the optionality of "present on this Event" is pointer-modelled.
 
 `TextChars` is computed as `sum(len(c.Text) for c in raw.Message.Content)`. Content blocks of `type == "thinking"` or `type == "tool_use"` have `text` absent → `c.Text == ""` → contributes 0 naturally. No explicit type-filter needed; the math matches the spec's literal `sum(len(content[i].text))` wording.
 
@@ -95,7 +132,7 @@ Malformed-line logging is **rate-limited**: the first occurrence + every 100th t
 |---|---|
 | Source drained, partial bytes may be buffered | `io.EOF` (sentinel; check via `errors.Is`). The next `Next` call may yield an event if `src.Read` produces more bytes. |
 | Source `Read` failed (file closed, IO error) | Wrapped: `fmt.Errorf("jsonl: read at offset %d: %w", offset+len(buf), err)`. |
-| Malformed JSON line | Logged at Warn (rate-limited), skipped. Does NOT advance `AssistantCount`. Does NOT terminate iteration. Claude is the source of truth; one broken line must not poison the stream. |
+| Malformed JSON line (outer or inner) | Logged at Warn (rate-limited), skipped. Does NOT surface as an Event. Does NOT advance `AssistantCount`. Does NOT terminate iteration. Claude is the source of truth; one broken line must not poison the stream. |
 | Single line exceeded 16 MiB without `'\n'` | `ErrLineTooLarge` (exported sentinel). Consumer must abort. |
 
 ## Concurrency model
@@ -118,8 +155,8 @@ Original source paths recorded in the test file's header comment so a future ope
 
 ## Consumers
 
-- **Sibling #349** (JSONL fsnotify watcher) — wraps this reader with a `fsnotify.Watcher` over `~/.claude/projects/<EncodeProjectDir(workdir)>/`, calls `Next` synchronously on each Write event, persists `Offset()` as the resume point, surfaces `EndOfTurn` to the dispatcher's max-turn enforcement loop.
-- No other consumers in this slice. The reader is greenfield; no migrations, no shims.
+- **Sibling #349** (JSONL fsnotify watcher) — wraps this reader with a `fsnotify.Watcher` over `~/.claude/projects/<EncodeProjectDir(workdir)>/`, calls `Next` synchronously on each Write event, persists `Offset()` as the resume point, surfaces `EndOfTurn` to the dispatcher's max-turn enforcement loop. After #353 the watcher's `OnEvent` fires for every line kind (not just assistant entries); it adds no filtering of its own beyond what the reader does.
+- **Future stream-json emitter** (split from #335) — consumes `Event.Raw` to re-emit lines byte-equivalent to `claude -p --output-format stream-json`, aggregates `Event.Usage` across assistant entries to compose a result trailer. Not in tree yet; #353 only extends the reader contract.
 
 ## Out of scope
 
