@@ -1,11 +1,14 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
 // validArgsFixture builds a fully-valid argv for parseAgentRunArgs. Tests
@@ -270,6 +273,49 @@ func TestParseAgentRunArgs_AllowedToolsForms(t *testing.T) {
 				t.Errorf("allowedTools = %v, want %v", got.allowedTools, tc.want)
 			}
 		})
+	}
+}
+
+// TestRunAgentRun_EmitsSettingsFile drives runAgentRun end-to-end with a
+// valid argv, captures stdout, and asserts the marker line + on-disk
+// settings file. This is the dispatcher's parse contract (sibling #332)
+// and the file consumed by `claude --settings`.
+func TestRunAgentRun_EmitsSettingsFile(t *testing.T) {
+	fx := newValidArgsFixture(t)
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	runErr := runAgentRun(fx.argv)
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	captured, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	if runErr != nil {
+		t.Fatalf("runAgentRun: %v", runErr)
+	}
+
+	wantPath := filepath.Join(fx.workdir, agentrun.SettingsFilename)
+	wantLine := "settings-file: " + wantPath + "\n"
+	if string(captured) != wantLine {
+		t.Errorf("stdout:\n got  = %q\n want = %q", captured, wantLine)
+	}
+
+	got, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("read settings file: %v", err)
+	}
+	wantJSON := `{"permissions":{"allow":["Read","Bash"],"defaultMode":"deny"}}` + "\n"
+	if string(got) != wantJSON {
+		t.Errorf("settings file content:\n got  = %q\n want = %q", got, wantJSON)
 	}
 }
 
