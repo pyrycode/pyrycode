@@ -368,9 +368,10 @@ func TestDispatcher_ActiveConns_Snapshot(t *testing.T) {
 	in <- frame(t, "conn-a", protocol.Envelope{ID: 10, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
 	in <- frame(t, "conn-b", protocol.Envelope{ID: 20, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
 
-	// Wait until both handlers ran. After the handler returns the
-	// gateRun flag has been set under d.mu (no-gate path runs the
-	// gateRun=true assignment before invoking the handler).
+	// Wait until both handlers ran. The no-gate path sets
+	// gateCompleted=true under d.mu before invoking the handler, so by
+	// the time hWait fires the broadcast-eligibility flag is published
+	// and visible to ActiveConns.
 	waitOrFail(t, &hWait, time.Second, "handlers did not both run")
 
 	conns := d.ActiveConns()
@@ -383,6 +384,83 @@ func TestDispatcher_ActiveConns_Snapshot(t *testing.T) {
 	}
 	if !got["conn-a"] || !got["conn-b"] {
 		t.Errorf("ActiveConns ids: got %v, want both conn-a and conn-b", got)
+	}
+}
+
+// TestDispatcher_ActiveConns_ExcludesPreGateConn is the regression test
+// for the broadcast/hello_ack race the gateStarted/gateCompleted split
+// closes. It configures a FirstFrame gate that blocks until the test
+// signals release. While the gate is blocked, the per-conn goroutine
+// has entered runGate and set gateStarted=true, but gateCompleted is
+// still false (it is set ONLY after runGate's accept-path NextID()
+// advance returns). ActiveConns must exclude the conn in that window
+// — otherwise a broadcast would call c.NextID() before the gate, claim
+// id=1, and collide on the wire with the gate's literal-id=1 hello_ack.
+//
+// A single-flag implementation that set the flag at the TOP of the
+// gate path (gateRun=true before runGate) would fail this test by
+// returning the conn in the first assertion.
+func TestDispatcher_ActiveConns_ExcludesPreGateConn(t *testing.T) {
+	t.Parallel()
+	in := make(chan protocol.RoutingEnvelope, 1)
+	gateEntered := make(chan struct{})
+	releaseGate := make(chan struct{})
+	gate := func(ctx context.Context, env protocol.RoutingEnvelope) FirstFrameOutcome {
+		close(gateEntered)
+		<-releaseGate
+		return FirstFrameOutcome{Response: helloAckResponse(t, env.ConnID, 1)}
+	}
+	d := New(Config{Frames: in, Logger: testLogger(), FirstFrame: gate})
+	_, stop := runDispatcher(t, d)
+	defer stop()
+
+	in <- frame(t, "c-pre", protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC()})
+
+	// Wait until the per-conn goroutine has entered runGate. At this
+	// point d.conns has an entry for "c-pre" with gateStarted=true and
+	// gateCompleted=false. ActiveConns must NOT surface this conn.
+	select {
+	case <-gateEntered:
+	case <-time.After(time.Second):
+		t.Fatal("gate did not run within 1s")
+	}
+	if conns := d.ActiveConns(); len(conns) != 0 {
+		t.Fatalf("ActiveConns during in-flight gate: got %d, want 0 (ids=%v)",
+			len(conns), connIDs(conns))
+	}
+
+	// Release the gate. After runGate publishes hello_ack and advances
+	// the per-conn id counter, runConn sets gateCompleted=true under
+	// d.mu; ActiveConns then surfaces the conn.
+	close(releaseGate)
+	select {
+	case out := <-d.Outbound():
+		var inner protocol.Envelope
+		if err := json.Unmarshal(out.Frame, &inner); err != nil {
+			t.Fatalf("decode hello_ack: %v", err)
+		}
+		if inner.Type != protocol.TypeHelloAck {
+			t.Fatalf("Type: got %q, want %q", inner.Type, protocol.TypeHelloAck)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no hello_ack within 1s after gate release")
+	}
+
+	// runConn sets gateCompleted=true after runGate returns; this is
+	// racy with the Outbound observation above (the channel send happens
+	// inside runGate, the flag write happens in the caller). Poll
+	// briefly for the publish to land.
+	deadline := time.Now().Add(time.Second)
+	var conns []*Conn
+	for time.Now().Before(deadline) {
+		conns = d.ActiveConns()
+		if len(conns) == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(conns) != 1 || conns[0].ConnID() != "c-pre" {
+		t.Fatalf("ActiveConns after gate accept: got %v, want [c-pre]", connIDs(conns))
 	}
 }
 

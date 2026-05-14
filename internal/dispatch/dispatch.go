@@ -249,18 +249,21 @@ type Dispatcher struct {
 // connState is the per-conn_id internal record. The Conn pointer is what
 // handlers see; the input channel and exit signal are dispatcher-internal.
 //
-// Both gateRun and closed are written by the per-conn goroutine and read
-// by the demux (closed) and ActiveConns callers (gateRun). Both writes
-// happen under d.mu so the cross-goroutine reads are sound; under the same
-// lock the demux can drop frames for a dead per-conn goroutine and
-// ActiveConns can filter out conns that have not yet completed the
-// first-frame gate (so a broadcast cannot race the gate's literal id=1
-// hello_ack).
+// gateStarted is local to the per-conn goroutine: written and read by the
+// same goroutine inside runConn to prevent double-running the gate on
+// subsequent loop iterations. Lock-free.
+//
+// gateCompleted and closed are written by the per-conn goroutine and read
+// by ActiveConns callers / the demux on other goroutines. Writes happen
+// under d.mu so the cross-goroutine reads are sound. gateCompleted is set
+// ONLY AFTER runGate's accept path has emitted hello_ack AND advanced the
+// per-conn id counter via NextID() — see ActiveConns for the rationale.
 type connState struct {
-	conn    *Conn
-	input   chan protocol.RoutingEnvelope
-	gateRun bool
-	closed  bool
+	conn          *Conn
+	input         chan protocol.RoutingEnvelope
+	gateStarted   bool // local-only; prevents re-entering the gate path
+	gateCompleted bool // under d.mu; gates broadcast eligibility
+	closed        bool // under d.mu; gate-reject / close-intent
 }
 
 // New constructs a Dispatcher. Panics if cfg.Frames or cfg.Logger is nil
@@ -307,26 +310,34 @@ func (d *Dispatcher) Outbound() <-chan protocol.RoutingEnvelope { return d.outbo
 // server-initiated outbound (broadcast). The returned slice excludes:
 //   - conns marked closed (gate-reject path; routeConn drops further
 //     frames for them)
-//   - conns whose first-frame handling has not yet completed
-//     (connState.gateRun == false)
+//   - conns whose first-frame gate has not yet RETURNED on the
+//     accept-and-continue path — i.e. connState.gateCompleted == false.
+//     "Completed" means runGate's `_ = c.NextID()` advance has executed,
+//     so the per-conn id counter has moved past the hello_ack's literal
+//     id=1 and a broadcast call to c.NextID() will return id >= 2.
 //
 // The gate-completed filter is load-bearing: relay.AuthenticateFirstFrame
-// emits hello_ack with literal ID=1, not via c.NextID(); runGate then
-// calls `_ = c.NextID()` to advance the per-conn counter past the gate's
-// hello_ack so the next handler reply lands at id=2. A broadcast that
+// emits hello_ack with literal ID=1, not via c.NextID(); runGate publishes
+// that response onto d.outbound and THEN calls `_ = c.NextID()` so the
+// next binary-originated frame on this conn gets id=2. A broadcast that
 // races the gate would call c.NextID() first, claim id=1 for its message
 // envelope, and collide with hello_ack on the wire (two envelopes both
-// stamped id=1). Filtering on gateRun closes that race.
+// stamped id=1). Filtering on gateCompleted — set ONLY after runGate has
+// returned on the accept path — closes that race deterministically.
 //
 // The slice is fresh; callers may retain it. The returned *Conn pointers
 // remain safe to call Send on — a conn that closes between snapshot and
 // Send is handled by the demux's existing closed-conn drop in routeConn.
+//
+// Concurrency: holds d.mu briefly to copy the conns map under the same
+// lock that guards both closed-flag and gateCompleted mutation; no new
+// lock order.
 func (d *Dispatcher) ActiveConns() []*Conn {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	out := make([]*Conn, 0, len(d.conns))
 	for _, st := range d.conns {
-		if st.gateRun && !st.closed {
+		if st.gateCompleted && !st.closed {
 			out = append(out, st.conn)
 		}
 	}
@@ -431,26 +442,42 @@ func (d *Dispatcher) routeConn(ctx context.Context, wg *sync.WaitGroup, connID s
 func (d *Dispatcher) runConn(ctx context.Context, wg *sync.WaitGroup, st *connState) {
 	defer wg.Done()
 	for routing := range st.input {
-		if !st.gateRun {
-			// gateRun moves under d.mu so ActiveConns (which reads
-			// gateRun on a different goroutine) sees a synchronised
-			// view. The local read above stays lock-free — this
-			// goroutine is the only writer.
-			d.mu.Lock()
-			st.gateRun = true
-			d.mu.Unlock()
+		if !st.gateStarted {
+			// gateStarted is local-only: this goroutine is the only
+			// writer/reader, so the assignment stays lock-free and just
+			// guards against re-entering the gate path on the next loop
+			// iteration. Broadcast-eligibility lives on a separate flag
+			// (gateCompleted) set AFTER runGate returns so a broadcast
+			// cannot race the literal id=1 hello_ack — see ActiveConns.
+			st.gateStarted = true
 			if d.cfg.FirstFrame != nil {
 				if d.runGate(ctx, st, routing) {
 					// Close-intent: mark closed under d.mu so the demux
 					// drops further frames, then exit. wg.Done() fires
-					// via defer.
+					// via defer. gateCompleted stays false — a rejected
+					// conn is never broadcast-eligible.
 					d.mu.Lock()
 					st.closed = true
 					d.mu.Unlock()
 					return
 				}
+				// Gate accepted. runGate has already published hello_ack
+				// onto d.outbound AND advanced the per-conn id counter
+				// past id=1; publish gateCompleted under d.mu so a
+				// broadcast reader on another goroutine observes the
+				// post-advance state. Skip handleOne — the gate consumed
+				// this inbound envelope.
+				d.mu.Lock()
+				st.gateCompleted = true
+				d.mu.Unlock()
 				continue
 			}
+			// No gate configured — there is no hello_ack on the wire to
+			// collide with, so the conn is immediately broadcast-
+			// eligible. Publish under d.mu for the cross-goroutine read.
+			d.mu.Lock()
+			st.gateCompleted = true
+			d.mu.Unlock()
 		}
 		d.handleOne(ctx, st.conn, routing)
 	}
