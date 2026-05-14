@@ -25,6 +25,10 @@ vet:
 test:
 	$(GO) test -race ./...
 
+.PHONY: e2e-realclaude
+e2e-realclaude:
+	$(GO) test -tags e2e_realclaude ./internal/e2e/realclaude/...
+
 .PHONY: staticcheck
 staticcheck:
 	@if [ ! -x "$(STATICCHECK)" ]; then \
