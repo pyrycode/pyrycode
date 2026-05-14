@@ -58,9 +58,10 @@ split from #51.
 
 ## Public API
 
-Ten exported names — `Harness`, `Start`, `StartIn`, `StartRotation`,
-`StartExpectingFailureIn`, `(*Harness).Stop`, `RunResult`, `(*Harness).Run`,
-`RunBare`, plus the struct fields:
+Eleven exported names — `Harness`, `Start`, `StartIn`, `StartInWithEnv`,
+`StartRotation`, `StartRotationWithRelay`, `StartExpectingFailureIn`,
+`(*Harness).Stop`, `RunResult`, `(*Harness).Run`, `RunBare`, `RunBareIn`,
+plus the struct fields:
 
 ```go
 type Harness struct {
@@ -118,6 +119,18 @@ func StartExpectingFailureIn(t *testing.T, home string) RunResult
 // timeout=0). Used by rotation-watcher e2e tests; this primitive ships
 // independent of any consumer (#123).
 func StartRotation(t *testing.T, home, sessionsDir, initialUUID, trigger string) *Harness
+
+// StartRotationWithRelay extends StartRotation with relay wiring so a test
+// can drive phone → relay → binary → fakeclaude end-to-end. relayURL is the
+// /v1/server endpoint (e.g. fakerelay.URL()+"/v1/server"); stdinLog is the
+// path fakeclaude appends its stdin bytes to (additive
+// PYRY_FAKE_CLAUDE_STDIN_LOG observability — see #323).
+// PYRY_ALLOW_INSECURE_RELAY=1 is set automatically so the daemon accepts
+// the ws:// URL. trigger need not refer to an existing file: tests that do
+// not exercise rotation can point it at a never-created path. Composes
+// StartRotation's fakeclaude env shape with StartInWithEnv's relay-flag
+// shape via a single spawnWith call.
+func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigger, stdinLog, relayURL string) *Harness
 
 type RunResult struct {
     ExitCode int
