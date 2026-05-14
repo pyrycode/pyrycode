@@ -249,11 +249,13 @@ type Dispatcher struct {
 // connState is the per-conn_id internal record. The Conn pointer is what
 // handlers see; the input channel and exit signal are dispatcher-internal.
 //
-// gateRun is read/written only on the per-conn goroutine (single-writer);
-// no mutex needed. closed is written by the per-conn goroutine just
-// before it returns on a close-intent outcome, and read by the demux
-// under d.mu so a frame arriving for a dead per-conn goroutine cannot
-// block the demux on a channel send with no receiver.
+// Both gateRun and closed are written by the per-conn goroutine and read
+// by the demux (closed) and ActiveConns callers (gateRun). Both writes
+// happen under d.mu so the cross-goroutine reads are sound; under the same
+// lock the demux can drop frames for a dead per-conn goroutine and
+// ActiveConns can filter out conns that have not yet completed the
+// first-frame gate (so a broadcast cannot race the gate's literal id=1
+// hello_ack).
 type connState struct {
 	conn    *Conn
 	input   chan protocol.RoutingEnvelope
@@ -300,6 +302,36 @@ func (d *Dispatcher) Register(envType string, h Handler) {
 // handlers (and dispatcher-synthesised error replies). Closes after Run
 // returns; callers can range over it.
 func (d *Dispatcher) Outbound() <-chan protocol.RoutingEnvelope { return d.outbound }
+
+// ActiveConns returns a snapshot of currently-active conns eligible for
+// server-initiated outbound (broadcast). The returned slice excludes:
+//   - conns marked closed (gate-reject path; routeConn drops further
+//     frames for them)
+//   - conns whose first-frame handling has not yet completed
+//     (connState.gateRun == false)
+//
+// The gate-completed filter is load-bearing: relay.AuthenticateFirstFrame
+// emits hello_ack with literal ID=1, not via c.NextID(); runGate then
+// calls `_ = c.NextID()` to advance the per-conn counter past the gate's
+// hello_ack so the next handler reply lands at id=2. A broadcast that
+// races the gate would call c.NextID() first, claim id=1 for its message
+// envelope, and collide with hello_ack on the wire (two envelopes both
+// stamped id=1). Filtering on gateRun closes that race.
+//
+// The slice is fresh; callers may retain it. The returned *Conn pointers
+// remain safe to call Send on — a conn that closes between snapshot and
+// Send is handled by the demux's existing closed-conn drop in routeConn.
+func (d *Dispatcher) ActiveConns() []*Conn {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]*Conn, 0, len(d.conns))
+	for _, st := range d.conns {
+		if st.gateRun && !st.closed {
+			out = append(out, st.conn)
+		}
+	}
+	return out
+}
 
 // Run blocks until cfg.Frames closes or ctx is done. Returns nil for
 // Frames-close (normal lifecycle end) and ctx.Err() for cancellation.
@@ -400,7 +432,13 @@ func (d *Dispatcher) runConn(ctx context.Context, wg *sync.WaitGroup, st *connSt
 	defer wg.Done()
 	for routing := range st.input {
 		if !st.gateRun {
+			// gateRun moves under d.mu so ActiveConns (which reads
+			// gateRun on a different goroutine) sees a synchronised
+			// view. The local read above stays lock-free — this
+			// goroutine is the only writer.
+			d.mu.Lock()
 			st.gateRun = true
+			d.mu.Unlock()
 			if d.cfg.FirstFrame != nil {
 				if d.runGate(ctx, st, routing) {
 					// Close-intent: mark closed under d.mu so the demux

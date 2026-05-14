@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,74 @@ func TestBridge_WriteSwallowsAttachedWriteErrors(t *testing.T) {
 	}
 	if n != 5 {
 		t.Errorf("n = %d, want 5 (full slice reported as written even on discard)", n)
+	}
+}
+
+func TestBridge_OutputObserver_InvokedOnWrite(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+
+	var (
+		mu      sync.Mutex
+		seen    [][]byte
+	)
+	b.SetOutputObserver(func(p []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		// Copy because the bridge's contract permits the caller to reuse p.
+		c := make([]byte, len(p))
+		copy(c, p)
+		seen = append(seen, c)
+	})
+
+	if _, err := b.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := b.Write([]byte("world")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("observer invocations: got %d, want 2", len(seen))
+	}
+	if string(seen[0]) != "hello" {
+		t.Errorf("first chunk: got %q, want %q", seen[0], "hello")
+	}
+	if string(seen[1]) != "world" {
+		t.Errorf("second chunk: got %q, want %q", seen[1], "world")
+	}
+}
+
+func TestBridge_OutputObserver_NilSkipped(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+	var out bytes.Buffer
+	done, err := b.Attach(strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	defer func() { <-done }()
+
+	// No observer registered → Write proceeds normally.
+	n, err := b.Write([]byte("hi"))
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("n = %d, want 2", n)
+	}
+	if got := out.String(); got != "hi" {
+		t.Errorf("attached out: got %q, want %q", got, "hi")
+	}
+
+	// SetOutputObserver(nil) is also a no-op (idempotent clear).
+	b.SetOutputObserver(nil)
+	if _, err := b.Write([]byte("!")); err != nil {
+		t.Fatalf("Write after nil-set: %v", err)
 	}
 }
 

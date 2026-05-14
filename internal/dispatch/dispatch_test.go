@@ -350,6 +350,50 @@ func TestTwoConns_ArrivalOrderPreservedPerConn(t *testing.T) {
 	}
 }
 
+func TestDispatcher_ActiveConns_Snapshot(t *testing.T) {
+	t.Parallel()
+	in := make(chan protocol.RoutingEnvelope, 4)
+	d := New(Config{Frames: in, Logger: testLogger()})
+
+	var hWait sync.WaitGroup
+	hWait.Add(2)
+	d.Register(protocol.TypeSendMessage, func(ctx context.Context, c *Conn, env protocol.Envelope) error {
+		hWait.Done()
+		return nil
+	})
+
+	_, stop := runDispatcher(t, d)
+	defer stop()
+
+	in <- frame(t, "conn-a", protocol.Envelope{ID: 10, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
+	in <- frame(t, "conn-b", protocol.Envelope{ID: 20, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
+
+	// Wait until both handlers ran. After the handler returns the
+	// gateRun flag has been set under d.mu (no-gate path runs the
+	// gateRun=true assignment before invoking the handler).
+	waitOrFail(t, &hWait, time.Second, "handlers did not both run")
+
+	conns := d.ActiveConns()
+	if len(conns) != 2 {
+		t.Fatalf("ActiveConns len: got %d, want 2 (got=%v)", len(conns), connIDs(conns))
+	}
+	got := map[string]bool{}
+	for _, c := range conns {
+		got[c.ConnID()] = true
+	}
+	if !got["conn-a"] || !got["conn-b"] {
+		t.Errorf("ActiveConns ids: got %v, want both conn-a and conn-b", got)
+	}
+}
+
+func connIDs(cs []*Conn) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.ConnID())
+	}
+	return out
+}
+
 func TestRegister_AfterRunPanics(t *testing.T) {
 	t.Parallel()
 	in := make(chan protocol.RoutingEnvelope)
