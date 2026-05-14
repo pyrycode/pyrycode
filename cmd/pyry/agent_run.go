@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"unicode"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
 // agentRunArgs is the parsed shape of `pyry agent-run`'s flag set. Field
@@ -168,15 +170,19 @@ func requireDir(path string) error {
 }
 
 // runAgentRun implements `pyry agent-run`: parse and validate the full flag
-// surface, then exit 0 with a single confirmation line on stdout. Scaffold
-// only — sibling tickets layer trust-state merge, settings-file emission,
-// claude spawn, and JSONL watch on top of the parsed struct.
+// surface, emit the per-spawn deny-default settings file, and print its
+// resolved path on stdout behind the stable `settings-file: ` marker so the
+// dispatcher (sibling #332) can scrape it. The marker line is the sole
+// stdout contract — no other line is printed on success.
 func runAgentRun(args []string) error {
 	parsed, err := parseAgentRunArgs(args)
 	if err != nil {
 		return err
 	}
-	_ = parsed // consumed by sibling tickets
-	fmt.Println("pyry agent-run: flag set valid; scaffold-only ticket #337 — no spawn yet")
+	path, err := agentrun.WriteSettings(parsed.workdir, parsed.allowedTools)
+	if err != nil {
+		return fmt.Errorf("agent-run: %w", err)
+	}
+	fmt.Printf("settings-file: %s\n", path)
 	return nil
 }

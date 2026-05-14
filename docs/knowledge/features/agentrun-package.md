@@ -1,12 +1,15 @@
-# `internal/agentrun` — workspace-trust helper
+# `internal/agentrun` — pre-spawn primitives for `pyry agent-run`
 
-Pre-populates the workspace-trust flag in `~/.claude.json` so headless `claude` invocations launched from `pyry agent-run` (#338B) skip the trust-dialog TUI that would otherwise block startup. The package also exports the path-resolution primitive that the JSONL watcher (#333) will consume so the key shape used to talk to claude's on-disk state lives in one place.
+Stdlib-only helpers that prepare claude's environment before `pyry agent-run` (#338B) spawns the supervised `claude` process. Two orthogonal jobs:
 
-Phase A spike (#329) verified pre-writing `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` side-steps the dialog reliably; driving the dialog via PTY would be fragile under timing variance.
+1. **Workspace-trust pre-population** (#341) — set `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` in `~/.claude.json` so the trust-dialog TUI doesn't block headless startup.
+2. **Per-spawn deny-default settings file** (#339) — write `<workdir>/.pyry-agent-run-settings.json` with the `{"permissions":{"allow":[...],"defaultMode":"deny"}}` shape so the dispatcher can pass `claude --settings <path>` (sibling #332) and get the deny-default semantics that interactive claude's `--allowedTools` alone does NOT provide (Phase A spike #329 verified: `--allowedTools "Read"` did NOT block `Bash`).
+
+Both are pure, free-function helpers; no shared state, no goroutines.
 
 ## Public API
 
-Stdlib only. Two functions; no types; no constructor.
+Stdlib only. Three functions; no constructor.
 
 ```go
 // ResolveWorkdir returns the resolved absolute path of workdir, mirroring how
@@ -17,6 +20,13 @@ func ResolveWorkdir(workdir string) (string, error)
 // hasTrustDialogAccepted = true in <homeDir>/.claude.json, under a file lock
 // spanning the entire read-modify-write window. Idempotent. Atomic on-disk.
 func MarkWorkdirTrusted(homeDir, workdir string) error
+
+// WriteSettings emits the per-spawn deny-default claude settings JSON inside
+// workdir and returns the resolved path. Shape is exactly
+// {"permissions": {"allow": <allowed>, "defaultMode": "deny"}}. nil and []
+// both produce "allow": [] (NOT "allow": null). Written atomically at 0o600
+// to <workdir>/.pyry-agent-run-settings.json (constant SettingsFilename).
+func WriteSettings(workdir string, allowed []string) (string, error)
 ```
 
 `homeDir` is explicit (not `os.UserHomeDir`) so tests use `t.TempDir()` directly without `t.Setenv("HOME", ...)` (which blocks `t.Parallel`). Production callers pass `os.UserHomeDir()`. Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
@@ -86,10 +96,33 @@ Error wraps name the step (`encode` / `fsync` / `rename` / `lock acquire` / `rea
 
 No goroutines spawned. Purely sequential within an invocation: lock → read → mutate → write → unlock. No `context.Context` parameter — the operation is fast-bounded. If a future caller needs cancellable-acquire, add a context-taking sibling without changing this signature.
 
+## `WriteSettings` — deny-default settings file
+
+The filename is exported as a constant: `SettingsFilename = ".pyry-agent-run-settings.json"`. Path policy lives in the helper (caller passes only the workdir; helper joins). Bytes on disk are compact (no `SetIndent`) with a trailing `\n` from `json.Encoder.Encode`:
+
+```
+{"permissions":{"allow":["Read","Bash"],"defaultMode":"deny"}}
+```
+
+A nil or empty slice cleanly produces `"allow":[]` — the helper normalises `nil → []string{}` at the entry boundary because `encoding/json` would otherwise serialise `nil` as `null`, which does not match the spec's byte-for-byte AC. The internal `settingsFile` / `permissions` struct field order is load-bearing for the canonical byte sequence; **do not** introduce a typed enum for `defaultMode` (a custom type without explicit `MarshalJSON` serialises as the underlying integer; plain `string` set to the literal `"deny"` is correct).
+
+Atomic write mirrors `MarkWorkdirTrusted` (and `internal/devices/registry.go:Save`): `os.CreateTemp(workdir, ".pyry-agent-run-settings-*.tmp")` → `os.Chmod(0o600)` → encode → `Sync` → `Close` → `Rename`, with `defer os.Remove(tmpName)` as best-effort cleanup. Overwriting a pre-existing file from a prior invocation is safe; the rename is the commit point.
+
+No lock. Unlike `~/.claude.json` (where a sibling claude process can race with pyry), `.pyry-agent-run-settings.json` is written by `pyry agent-run` exclusively per workdir and consumed only by the supervised claude that pyry then spawns. Concurrent `pyry agent-run` against the same workdir would clobber, but the dispatcher serialises per-workdir already; if that ever changes, a `<basename>-<nonce>.json` variant is the obvious follow-up.
+
+Errors wrap a step name (`create temp` / `chmod temp` / `encode` / `fsync` / `close temp` / `rename`) under the prefix `agentrun: write settings:` — symmetric with `MarkWorkdirTrusted`'s wrap shape.
+
+The settings file is the load-bearing mechanism for the deny-default permission boundary verified empirically in spike #329. Schema drift (claude renames a key, changes a default) is caught by sibling #336's boot-time self-check, not by this writer.
+
+## Stdout marker contract (caller-side)
+
+`pyry agent-run` prints the path returned by `WriteSettings` on a line of its own behind the literal prefix `settings-file: ` (single space). The dispatcher (#332) will scrape this with `^settings-file: (.+)$`. This is the verb's sole stdout contract — the #337 scaffold confirmation line was replaced, not augmented, when #339 wired the helper.
+
 ## Consumers
 
-- `pyry agent-run` (#338B, immediately downstream) — calls `MarkWorkdirTrusted(os.UserHomeDir(), args.workdir)` after flag validation, before claude spawn.
+- `pyry agent-run` (#338B for `MarkWorkdirTrusted`; #339 already in for `WriteSettings`) — calls `MarkWorkdirTrusted(os.UserHomeDir(), args.workdir)` after flag validation, then `WriteSettings(args.workdir, args.allowedTools)` before claude spawn.
 - JSONL watcher (#333) — calls `ResolveWorkdir` to compute the same key shape claude uses when associating watched files with workdirs.
+- Dispatcher (sibling #332) — scrapes the `settings-file: <path>` marker line and passes the path via `claude --settings`.
 
 ## Out of scope
 
