@@ -1,15 +1,14 @@
-# `internal/agentrun` — pre-spawn primitives for `pyry agent-run`
+# `internal/agentrun` — pre-spawn primitives and PTY driver for `pyry agent-run`
 
-Stdlib-only helpers that prepare claude's environment before `pyry agent-run` spawns the supervised `claude` process (spawn lands in #332). Two orthogonal jobs:
+Stdlib-only (plus `creack/pty` via `internal/supervisor`) helpers for `pyry agent-run`. Three orthogonal jobs:
 
 1. **Workspace-trust pre-population** (#341) — set `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` in `~/.claude.json` so the trust-dialog TUI doesn't block headless startup.
-2. **Per-spawn deny-default settings file** (#339) — write `<workdir>/.pyry-agent-run-settings.json` with the `{"permissions":{"allow":[...],"defaultMode":"deny"}}` shape so the dispatcher can pass `claude --settings <path>` (sibling #332) and get the deny-default semantics that interactive claude's `--allowedTools` alone does NOT provide (Phase A spike #329 verified: `--allowedTools "Read"` did NOT block `Bash`).
+2. **Per-spawn deny-default settings file** (#339) — write `<workdir>/.pyry-agent-run-settings.json` with the `{"permissions":{"allow":[...],"defaultMode":"deny"}}` shape so the dispatcher can pass `claude --settings <path>` and get the deny-default semantics that interactive claude's `--allowedTools` alone does NOT provide (Phase A spike #329 verified: `--allowedTools "Read"` did NOT block `Bash`).
+3. **Spawn-and-drive a single user-turn** (#332) — launch claude in a PTY via `supervisor.SpawnPTY`, defensively dismiss the workspace-trust dialog, type the user prompt, background-drain PTY output, and tear down on operator SIGTERM.
 
-Both are pure, free-function helpers; no shared state, no goroutines.
+The trust/settings helpers are pure, free-function; the driver owns a `*exec.Cmd` lifecycle and one background goroutine.
 
 ## Public API
-
-Stdlib only. Three functions; no constructor.
 
 ```go
 // ResolveWorkdir returns the resolved absolute path of workdir, mirroring how
@@ -27,6 +26,24 @@ func MarkWorkdirTrusted(homeDir, workdir string) error
 // both produce "allow": [] (NOT "allow": null). Written atomically at 0o600
 // to <workdir>/.pyry-agent-run-settings.json (constant SettingsFilename).
 func WriteSettings(workdir string, allowed []string) (string, error)
+
+// Drive spawns claude in a PTY using supervisor.SpawnPTY, scripts a single
+// user-turn (defensive trust-dialog Enter → typed prompt + CR), background-
+// drains PTY output, and blocks on cmd.Wait. Returns nil on clean exit OR
+// operator-driven ctx cancellation; *exec.ExitError on non-zero child exit
+// that was NOT triggered by ctx cancellation.
+func Drive(ctx context.Context, cfg DriveConfig) error
+
+type DriveConfig struct {
+    ClaudeBin        string         // required
+    WorkDir          string         // required; cmd.Dir
+    Args             []string       // full claude argv (without argv[0])
+    Env              []string       // appended to os.Environ()
+    Logger           *slog.Logger   // optional; defaults to slog.Default()
+    TrustDialogDelay time.Duration  // default 2500ms (spike-validated)
+    PromptDelay      time.Duration  // default 3500ms (spike-validated)
+    PromptBytes      []byte         // typed after PromptDelay; Drive appends "\r"
+}
 ```
 
 `homeDir` is explicit (not `os.UserHomeDir`) so tests use `t.TempDir()` directly without `t.Setenv("HOME", ...)` (which blocks `t.Parallel`). Production callers pass `os.UserHomeDir()`. Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
@@ -116,13 +133,30 @@ The settings file is the load-bearing mechanism for the deny-default permission 
 
 ## Stdout marker contract (caller-side)
 
-`pyry agent-run` prints the path returned by `WriteSettings` on a line of its own behind the literal prefix `settings-file: ` (single space). The dispatcher (#332) will scrape this with `^settings-file: (.+)$`. This is the verb's sole stdout contract — the #337 scaffold confirmation line was replaced, not augmented, when #339 wired the helper.
+`pyry agent-run` prints the path returned by `WriteSettings` on a line of its own behind the literal prefix `settings-file: ` (single space). This remains the verb's sole stdout contract after #332 — claude's PTY output is drained into `io.Discard`, not echoed.
+
+## `Drive` — PTY-script the single user-turn
+
+Composes `supervisor.SpawnPTY` (one-shot spawn primitive with `cmd.Cancel = SIGTERM` and `cmd.WaitDelay = 5s`) with a four-step drive sequence:
+
+1. Spawn the claude child + open the PTY master.
+2. Background `io.Copy(io.Discard, ptmx)` goroutine — **load-bearing**: claude blocks once its kernel PTY buffer fills (~16-64 KiB on the line discipline). Pinned by the `blast`-mode helper test that writes 256 KiB. The goroutine exits when the deferred `ptmx.Close` returns from `cmd.Wait`.
+3. `sleepOrCancel(ctx, TrustDialogDelay)` → write `"\r"` (defensive trust-dialog dismissal, idempotent against the #342 pre-mark).
+4. `sleepOrCancel(ctx, PromptDelay)` → write `PromptBytes` + `"\r"` as a single combined byte slice (matches the spike's drive shape).
+5. `cmd.Wait()`. `waitAndMap` checks `ctx.Err()` first: operator-driven SIGTERM maps to nil (success at this verb).
+
+PTY-write failures during steps 3/4 are logged at WARN and **do not** abort — the eventual `cmd.Wait` surfaces the child's exit, which is the operator-actionable primary cause. `sleepOrCancel` aborts the sleep AND skips the pending write on ctx cancel.
+
+Defaults (`TrustDialogDelay = 2500ms`, `PromptDelay = 3500ms`) are exported as zero-fallback fields on `DriveConfig` so tests compress them to ~50ms. Test-only env knobs (`PYRY_AGENT_RUN_TRUST_DELAY`, `PYRY_AGENT_RUN_PROMPT_DELAY`, `PYRY_CLAUDE_BIN`) are read in `cmd/pyry/agent_run.go`'s `runAgentRun`, not in the helper.
+
+**PTY input line discipline.** The kernel translates input CR → LF by default (`ONLCR`/`ICRNL`). Bytes written as `"\rping\r"` arrive at the child as `"\nping\n"`. Claude's TUI accepts either; tests assert against the post-translation shape (see [codebase/332.md](../codebase/332.md) for the empirical surprise).
+
+**Security note.** `PromptBytes` is operator-controlled (the dispatcher writes the prompt file). It is NOT sanitised — control sequences in the file flow into claude's TUI parser. Trust boundary: pyry trusts its operator's prompt file the same way it trusts `--workdir`.
 
 ## Consumers
 
-- `pyry agent-run` (#342 wired `MarkWorkdirTrusted`; #339 wired `WriteSettings`) — after flag validation, resolves `os.UserHomeDir()` then calls `MarkWorkdirTrusted(home, parsed.workdir)`, then `WriteSettings(parsed.workdir, parsed.allowedTools)`. Order is mark-trust → settings so a trust-mark failure short-circuits before any per-spawn artefact lands in the workdir. Claude spawn lands in #332.
+- `pyry agent-run` (#342 wired `MarkWorkdirTrusted`; #339 wired `WriteSettings`; #332 wired `Drive`) — after flag validation, resolves `os.UserHomeDir()` → `MarkWorkdirTrusted(home, parsed.workdir)` → `WriteSettings(parsed.workdir, parsed.allowedTools)` → print `settings-file:` marker → `os.ReadFile(parsed.promptFile)` → `signal.NotifyContext(SIGTERM, SIGINT)` → `Drive(ctx, …)`. Order is mark-trust → settings → spawn so any prep failure short-circuits before the next step lands artefacts.
 - JSONL watcher (#333) — calls `ResolveWorkdir` to compute the same key shape claude uses when associating watched files with workdirs.
-- Dispatcher (sibling #332) — scrapes the `settings-file: <path>` marker line and passes the path via `claude --settings`.
 
 ## Out of scope
 

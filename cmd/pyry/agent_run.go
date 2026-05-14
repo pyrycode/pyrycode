@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
@@ -170,10 +174,13 @@ func requireDir(path string) error {
 }
 
 // runAgentRun implements `pyry agent-run`: parse and validate the full flag
-// surface, emit the per-spawn deny-default settings file, and print its
-// resolved path on stdout behind the stable `settings-file: ` marker so the
-// dispatcher (sibling #332) can scrape it. The marker line is the sole
-// stdout contract — no other line is printed on success.
+// surface, mark the workspace trusted, emit the per-spawn deny-default
+// settings file, print its resolved path on stdout behind the stable
+// `settings-file: ` marker, then spawn `claude` in a PTY and drive a single
+// user-turn before tearing down.
+//
+// Stdout contract: the `settings-file: ` line is the sole stdout marker —
+// claude's PTY output is drained into io.Discard, not echoed.
 func runAgentRun(args []string) error {
 	parsed, err := parseAgentRunArgs(args)
 	if err != nil {
@@ -186,10 +193,79 @@ func runAgentRun(args []string) error {
 	if err := agentrun.MarkWorkdirTrusted(home, parsed.workdir); err != nil {
 		return fmt.Errorf("agent-run: pre-populating workspace trust: %w", err)
 	}
-	path, err := agentrun.WriteSettings(parsed.workdir, parsed.allowedTools)
+	settingsPath, err := agentrun.WriteSettings(parsed.workdir, parsed.allowedTools)
 	if err != nil {
 		return fmt.Errorf("agent-run: %w", err)
 	}
-	fmt.Printf("settings-file: %s\n", path)
+	fmt.Printf("settings-file: %s\n", settingsPath)
+
+	promptBytes, err := os.ReadFile(parsed.promptFile)
+	if err != nil {
+		return fmt.Errorf("agent-run: read prompt-file: %w", err)
+	}
+
+	// Test-only knob: tests inject a fakeclaude path via PYRY_CLAUDE_BIN
+	// without modifying the flag surface. Production never sets this.
+	claudeBin := os.Getenv("PYRY_CLAUDE_BIN")
+	if claudeBin == "" {
+		claudeBin = "claude"
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	if err := agentrun.Drive(ctx, agentrun.DriveConfig{
+		ClaudeBin:        claudeBin,
+		WorkDir:          parsed.workdir,
+		Args:             buildClaudeArgs(parsed, settingsPath),
+		PromptBytes:      promptBytes,
+		TrustDialogDelay: parseDurationEnv("PYRY_AGENT_RUN_TRUST_DELAY"),
+		PromptDelay:      parseDurationEnv("PYRY_AGENT_RUN_PROMPT_DELAY"),
+	}); err != nil {
+		return fmt.Errorf("agent-run: drive: %w", err)
+	}
 	return nil
+}
+
+// parseDurationEnv reads name as a time.Duration. Empty or unparseable
+// values return zero, which DriveConfig interprets as "use the
+// spike-validated production default". Production never sets these; the
+// knobs exist so unit tests can compress sleeps to milliseconds.
+func parseDurationEnv(name string) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// buildClaudeArgs constructs the argv passed to `claude` (without argv[0]).
+//
+// Two security invariants are pinned by tests:
+//
+//   - `--permission-mode default` MUST appear. The per-spawn settings file
+//     emitted by #339 has `defaultMode: "deny"`; the upstream spike used
+//     `acceptEdits`, which silently overrides the file's default and
+//     defeats the whitelist. The literal flag pair is load-bearing.
+//   - `--allowedTools` MUST NOT appear. In interactive mode under the
+//     settings layer, `--allowedTools` is additive and silently broadens
+//     the allow-list. The settings file is the sole authority.
+//
+// `--max-turns` and `--output-format` are accepted at the pyry CLI surface
+// (the dispatcher requires them for budget bookkeeping and intent
+// declaration respectively) but are NOT propagated to interactive claude:
+// claude's interactive mode does not honour `--max-turns`, and
+// `--output-format stream-json` is a `-p`-mode-only flag.
+func buildClaudeArgs(parsed agentRunArgs, settingsPath string) []string {
+	return []string{
+		"--settings", settingsPath,
+		"--permission-mode", "default",
+		"--model", parsed.model,
+		"--append-system-prompt-file", parsed.systemPromptFile,
+		"--effort", parsed.effort,
+	}
 }

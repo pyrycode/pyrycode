@@ -2,15 +2,69 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
+
+// TestAgentRunFakeClaude is the fake-claude entry point used by the
+// runAgentRun wiring tests. When PYRY_AGENT_RUN_FAKE=1 is set in the
+// environment, the test binary re-exec'd as claude reads stdin and writes
+// to GO_AGENT_RUN_FAKE_STDIN_FILE for the configured lifetime, then exits 0.
+// Optional GO_AGENT_RUN_FAKE_ARGS_FILE captures argv[1:] so argv-shape
+// assertions can compare against the live wiring.
+func TestAgentRunFakeClaude(t *testing.T) {
+	if os.Getenv("PYRY_AGENT_RUN_FAKE") != "1" {
+		return
+	}
+	if path := os.Getenv("GO_AGENT_RUN_FAKE_ARGS_FILE"); path != "" {
+		if err := os.WriteFile(path, []byte(strings.Join(os.Args[1:], "\n")), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "fake: write args: %v\n", err)
+			os.Exit(99)
+		}
+	}
+	go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
+	lifetime := 200 * time.Millisecond
+	if raw := os.Getenv("GO_AGENT_RUN_FAKE_LIFETIME"); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil {
+			lifetime = d
+		}
+	}
+	time.Sleep(lifetime)
+	os.Exit(0)
+}
+
+// configureFakeClaude wires the test-only env knobs so a runAgentRun call
+// spawns a shell wrapper that exec's the test binary in fake-claude mode,
+// with ~ms-scale drive delays. Without this, runAgentRun would try to
+// spawn the real `claude` from PATH and the drive would block for ~6
+// seconds.
+//
+// A shell wrapper is required because buildClaudeArgs (the production
+// argv builder) emits real claude flags like `--settings <path>` which the
+// Go test binary's flag parser would reject. The wrapper drops the
+// production argv on the floor and re-execs the test binary with a fixed
+// `-test.run` pinned to TestAgentRunFakeClaude.
+func configureFakeClaude(t *testing.T) {
+	t.Helper()
+	scriptDir := t.TempDir()
+	script := filepath.Join(scriptDir, "fake-claude.sh")
+	body := fmt.Sprintf("#!/bin/sh\nexec %q -test.run=^TestAgentRunFakeClaude$\n", os.Args[0])
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake-claude script: %v", err)
+	}
+	t.Setenv("PYRY_CLAUDE_BIN", script)
+	t.Setenv("PYRY_AGENT_RUN_FAKE", "1")
+	t.Setenv("PYRY_AGENT_RUN_TRUST_DELAY", "5ms")
+	t.Setenv("PYRY_AGENT_RUN_PROMPT_DELAY", "5ms")
+}
 
 // validArgsFixture builds a fully-valid argv for parseAgentRunArgs. Tests
 // clone the slice and override individual flags to exercise error paths.
@@ -284,6 +338,7 @@ func TestParseAgentRunArgs_AllowedToolsForms(t *testing.T) {
 // and the file consumed by `claude --settings`.
 func TestRunAgentRun_EmitsSettingsFile(t *testing.T) {
 	fx := newValidArgsFixture(t)
+	configureFakeClaude(t)
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -327,6 +382,7 @@ func TestRunAgentRun_EmitsSettingsFile(t *testing.T) {
 // workspace-trust TUI dialog at startup.
 func TestRunAgentRun_MarksWorkdirTrusted(t *testing.T) {
 	fx := newValidArgsFixture(t)
+	configureFakeClaude(t)
 
 	// Discard stdout so the settings-file marker line does not pollute test
 	// output; the marker contract is covered by TestRunAgentRun_EmitsSettingsFile.
@@ -387,6 +443,129 @@ func TestRunAgentRun_MarksWorkdirTrusted(t *testing.T) {
 	}
 	if !got {
 		t.Errorf("projects[%q].hasTrustDialogAccepted = false, want true", wantKey)
+	}
+}
+
+// TestBuildClaudeArgs_Shape pins the production claude argv. Two
+// assertions are load-bearing for the deny-default security model:
+//
+//   - `--permission-mode default` MUST appear so the settings file's
+//     `defaultMode: deny` takes effect (anything else, notably acceptEdits
+//     used in the upstream spike, silently overrides the file).
+//   - `--allowedTools` MUST NOT appear. In interactive mode under the
+//     settings layer it is additive and broadens the allow-list.
+//
+// The remaining flags are fixture-driven so a future flag addition forces
+// an explicit test update.
+func TestBuildClaudeArgs_Shape(t *testing.T) {
+	tests := []struct {
+		name         string
+		parsed       agentRunArgs
+		settingsPath string
+		want         []string
+	}{
+		{
+			name: "canonical happy path",
+			parsed: agentRunArgs{
+				model:            "sonnet-4-6",
+				systemPromptFile: "/tmp/sys.md",
+				effort:           "medium",
+				allowedTools:     []string{"Read", "Bash"},
+			},
+			settingsPath: "/tmp/.pyry-agent-run-settings.json",
+			want: []string{
+				"--settings", "/tmp/.pyry-agent-run-settings.json",
+				"--permission-mode", "default",
+				"--model", "sonnet-4-6",
+				"--append-system-prompt-file", "/tmp/sys.md",
+				"--effort", "medium",
+			},
+		},
+		{
+			name: "max effort",
+			parsed: agentRunArgs{
+				model:            "opus-4-7",
+				systemPromptFile: "/tmp/x.md",
+				effort:           "max",
+				allowedTools:     []string{"Read"},
+			},
+			settingsPath: "/p.json",
+			want: []string{
+				"--settings", "/p.json",
+				"--permission-mode", "default",
+				"--model", "opus-4-7",
+				"--append-system-prompt-file", "/tmp/x.md",
+				"--effort", "max",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildClaudeArgs(tc.parsed, tc.settingsPath)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("buildClaudeArgs:\n got  = %v\n want = %v", got, tc.want)
+			}
+			// Security invariants — explicit, named assertions so a
+			// drift in argv shape that happens to keep slices.Equal
+			// passing still trips here.
+			if idx := slices.Index(got, "--permission-mode"); idx < 0 || idx+1 >= len(got) || got[idx+1] != "default" {
+				t.Errorf("missing `--permission-mode default` in %v", got)
+			}
+			if slices.Contains(got, "--allowedTools") || slices.Contains(got, "--allowed-tools") {
+				t.Errorf("`--allowedTools` / `--allowed-tools` must NOT appear in %v", got)
+			}
+			if slices.Contains(got, "--max-turns") {
+				t.Errorf("`--max-turns` must NOT appear in spawned argv (interactive claude ignores it): %v", got)
+			}
+			if slices.Contains(got, "--output-format") {
+				t.Errorf("`--output-format` must NOT appear in spawned argv (stream-json is `-p`-mode only): %v", got)
+			}
+		})
+	}
+}
+
+// TestRunAgentRun_DrivesFakeClaude verifies the end-to-end wiring:
+// runAgentRun reads the prompt file, builds the argv, spawns the (faked)
+// claude, drives the PTY, and waits for the child to exit cleanly. The
+// fake exits 0 after a short lifetime — Drive's Wait returns nil and
+// runAgentRun returns nil. The settings file on disk is the secondary
+// observable confirming we reached the spawn step.
+func TestRunAgentRun_DrivesFakeClaude(t *testing.T) {
+	fx := newValidArgsFixture(t)
+	configureFakeClaude(t)
+
+	// Discard stdout so the marker line does not pollute test output.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	done := make(chan error, 1)
+	go func() { done <- runAgentRun(fx.argv) }()
+
+	select {
+	case err := <-done:
+		if cerr := w.Close(); cerr != nil {
+			t.Fatalf("close pipe writer: %v", cerr)
+		}
+		if _, derr := io.Copy(io.Discard, r); derr != nil {
+			t.Fatalf("drain pipe: %v", derr)
+		}
+		if err != nil {
+			t.Fatalf("runAgentRun: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runAgentRun did not return within 10s")
+	}
+
+	// Settings file must exist on disk — confirms we got past the
+	// agentrun.WriteSettings step before spawning.
+	settingsPath := filepath.Join(fx.workdir, agentrun.SettingsFilename)
+	if _, err := os.Stat(settingsPath); err != nil {
+		t.Fatalf("settings file missing: %v", err)
 	}
 }
 
