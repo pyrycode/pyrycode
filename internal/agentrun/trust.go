@@ -16,8 +16,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
+
+var projectDirReplacer = strings.NewReplacer("/", "-", ".", "-")
 
 // ResolveWorkdir returns the resolved absolute path of workdir, mirroring how
 // claude resolves a workdir before reading ~/.claude.json's projects map.
@@ -33,6 +36,18 @@ func ResolveWorkdir(workdir string) (string, error) {
 		return "", fmt.Errorf("agentrun: resolve workdir %q: %w", workdir, err)
 	}
 	return resolved, nil
+}
+
+// EncodeProjectDir returns the dashed directory-name segment claude uses
+// under ~/.claude/projects/ for the given workdir. Chains ResolveWorkdir
+// then maps '/' and '.' to '-' in the resolved absolute path. The result
+// does NOT include the ~/.claude/projects/ prefix or any .jsonl suffix.
+func EncodeProjectDir(workdir string) (string, error) {
+	resolved, err := ResolveWorkdir(workdir)
+	if err != nil {
+		return "", err
+	}
+	return projectDirReplacer.Replace(resolved), nil
 }
 
 // MarkWorkdirTrusted sets projects[<ResolveWorkdir(workdir)>].
