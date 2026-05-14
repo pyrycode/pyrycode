@@ -183,7 +183,7 @@ func run() error {
 		case "update":
 			return runUpdate(os.Args[2:])
 		case "agent-run":
-			return runAgentRun(os.Args[2:])
+			return runAgentRun(os.Stdout, os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
