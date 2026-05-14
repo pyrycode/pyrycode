@@ -1,4 +1,4 @@
-# `internal/dispatch` (#307, extended #308, #318, #319)
+# `internal/dispatch` (#307, extended #308, #318, #319, #311)
 
 Per-phone-conn demultiplexer + handler-table seam sitting between
 `internal/relay.Connection.Frames()` and the per-envelope-type
@@ -51,6 +51,7 @@ func New(cfg Config) *Dispatcher
 func (d *Dispatcher) Register(envType string, h Handler) // pre-Run only
 func (d *Dispatcher) Run(ctx context.Context) error
 func (d *Dispatcher) Outbound() <-chan protocol.RoutingEnvelope
+func (d *Dispatcher) ActiveConns() []*Conn  // #311; broadcast-eligibility snapshot
 
 // Test-fixtures only — do not call from production code (#319).
 func NewTestConn(id string, outbound chan<- protocol.RoutingEnvelope,
@@ -148,7 +149,9 @@ Concurrency posture is the existing single-writer-per-conn invariant:
 once before any handler dispatches, and `Auth()` is read by handlers on
 the same goroutine. Cross-goroutine reads from handler-spawned workers
 are happens-before-safe via goroutine-start synchronisation. No mutex,
-no atomic — same justification as the `gateRun` flag.
+no atomic — same justification as the `gateStarted` flag (see
+§"Broadcast and the `gateStarted` / `gateCompleted` split (#311)" for the
+rename history).
 
 `setAuth` is **unexported** so verb handler closures cannot forge or
 mutate auth state. The dispatcher does not panic on "accept with nil
@@ -175,6 +178,62 @@ consumer is `relay.AuthenticateFirstFrame`; the doc-comments on
 `Config.Logger`, `FirstFrameGate`, and `RoutingEnvelope.Token` reiterate
 this. See [codebase/308.md](../codebase/308.md) for the gate closure's
 posture in `cmd/pyry/relay.go`.
+
+## Broadcast and the `gateStarted` / `gateCompleted` split (#311)
+
+`ActiveConns()` returns a snapshot of conns eligible for server-initiated
+outbound (broadcast), used by `cmd/pyry`'s assistant-turn bridge to fan out
+`message` envelopes from supervisor PTY output. Filtered to
+`gateCompleted && !closed`:
+
+```go
+func (d *Dispatcher) ActiveConns() []*Conn  // holds d.mu briefly; fresh slice
+```
+
+The eligibility flag is **not** the same flag that prevents the per-conn
+goroutine from re-running its gate. `connState` carries both:
+
+| Flag             | Writer / reader            | Lock     | Set when                                                                              |
+|------------------|----------------------------|----------|----------------------------------------------------------------------------------------|
+| `gateStarted`    | per-conn goroutine only    | none     | TOP of gate path, before `runGate`. Local short-circuit; never read cross-goroutine. |
+| `gateCompleted`  | per-conn → `ActiveConns`   | `d.mu`   | AFTER `runGate` returns on the accept path (i.e. after its `_ = c.NextID()` advance); OR immediately on the gate-disabled tail. |
+| `closed`         | per-conn → demux           | `d.mu`   | Gate-reject path; unchanged from #308.                                               |
+
+**Why the split is load-bearing.** `relay.AuthenticateFirstFrame` emits
+`hello_ack` with **literal** `ID=1`, not via `c.NextID()`. `runGate`
+publishes that envelope onto `d.outbound` and **then** runs
+`_ = c.NextID()` so the next binary-originated frame on the conn gets
+`id=2`. A broadcast call to `c.NextID()` that ran in the window between
+gate-entry and that advance would claim `id=1` for its `message`
+envelope and collide with `hello_ack` on the wire (two envelopes both
+stamped id=1, both pushed to the shared outbound channel).
+
+Setting `gateCompleted` **after** `runGate` returns — and reading it
+under `d.mu` in `ActiveConns` — makes the collision structurally
+impossible: when `ActiveConns` surfaces a conn, its `NextID` counter has
+already advanced past 1, so any `c.NextID()` from a broadcast returns
+≥ 2. Pinned by `TestDispatcher_ActiveConns_ExcludesPreGateConn`
+(gate blocked on a test channel → 0 conns visible; gate released → 1
+conn visible).
+
+The gate-disabled tail sets `gateCompleted = true` immediately because
+there is no `hello_ack` competing for `id=1` in that configuration —
+the original dispatcher unit tests use gate-disabled config and the
+gate-disabled snapshot path is pinned by
+`TestDispatcher_ActiveConns_Snapshot`.
+
+A conn that closes between `ActiveConns` snapshot and a subsequent
+`c.Send` either has its frame queued onto the shared outbound chan
+(and dropped at the transport layer per #307 reconnect semantics) or
+blocks until ctx-cancel. No new lock order; both flags live under
+the existing `d.mu`.
+
+History: the original fix (PR #326) used a single `gateRun bool`
+flipped at the **top** of the gate path. Code review caught that this
+didn't close the race — `gateRun = true` ran **before** `runGate`,
+leaving the same window open. The split landed in spec rev 2 + commit
+`6f35312`. See [codebase/311.md § gateStarted / gateCompleted](../codebase/311.md)
+for the full audit trail.
 
 ## Register-before-Run is enforced, not advisory
 

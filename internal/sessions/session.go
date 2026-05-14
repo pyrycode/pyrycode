@@ -112,6 +112,17 @@ func (s *Session) WriteUserTurn(conversationID string, payload []byte) error {
 	return s.sup.WriteUserTurn(conversationID, payload)
 }
 
+// Supervisor exposes the underlying supervisor handle. Consumed by the
+// assistant-turn bridge in cmd/pyry to read CurrentConversation() at
+// broadcast time. Returned pointer is owned by the session; callers must
+// not retain it past the session's lifetime.
+func (s *Session) Supervisor() *supervisor.Supervisor { return s.sup }
+
+// Bridge exposes the underlying I/O bridge, or nil in foreground mode.
+// Consumed by the assistant-turn bridge in cmd/pyry to register an output
+// observer on the PTY-drain path.
+func (s *Session) Bridge() *supervisor.Bridge { return s.bridge }
+
 // LifecycleState returns a snapshot of the current lifecycle state. Used by
 // tests and (eventually) status payloads. Safe from any goroutine.
 func (s *Session) LifecycleState() lifecycleState {

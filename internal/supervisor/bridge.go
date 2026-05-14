@@ -58,9 +58,10 @@ type Bridge struct {
 	iterCancel chan struct{} // closed by EndIteration to make Read return EOF
 
 	// Output path (PTY → bridge → attach client).
-	mu       sync.Mutex
-	output   io.Writer // attached client output, or nil = discard
-	attached bool
+	mu             sync.Mutex
+	output         io.Writer    // attached client output, or nil = discard
+	attached       bool
+	outputObserver func([]byte) // optional tap; see SetOutputObserver
 
 	// ptyMu guards ptmx. Held briefly across pty.Setsize so a concurrent
 	// SetPTY/ClearPTY can't swap the file mid-call. Leaf-only — never
@@ -167,7 +168,11 @@ func (b *Bridge) EndIteration() {
 func (b *Bridge) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	out := b.output
+	obs := b.outputObserver
 	b.mu.Unlock()
+	if obs != nil {
+		obs(p)
+	}
 	if out == nil {
 		return len(p), nil
 	}
@@ -176,6 +181,20 @@ func (b *Bridge) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	return len(p), nil
+}
+
+// SetOutputObserver registers (or clears, when fn is nil) a callback invoked
+// from Write with each PTY-output chunk before the chunk is forwarded to the
+// attached writer.
+//
+// The observer runs on the supervisor's PTY-drain goroutine. It MUST NOT
+// block, MUST NOT panic, and MUST NOT retain p past return — the supervisor's
+// io.Copy reuses the buffer for the next read. Production observers must
+// enqueue to a buffered channel and drop on overflow.
+func (b *Bridge) SetOutputObserver(fn func([]byte)) {
+	b.mu.Lock()
+	b.outputObserver = fn
+	b.mu.Unlock()
 }
 
 // Attach binds a client to the bridge: bytes from `in` flow toward the PTY,

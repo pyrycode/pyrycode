@@ -310,13 +310,25 @@ func StartRotation(t *testing.T, home, sessionsDir, initialUUID, trigger string)
 // StartRotation. trigger need not refer to an existing file — a test that
 // does not exercise the rotation path can point it at a path that is never
 // created.
-func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigger, stdinLog, relayURL string) *Harness {
+//
+// extraEnv is appended verbatim (each "K=V") for tests that need to
+// configure additional env vars (e.g. PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER
+// for the assistant-turn e2e).
+func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigger, stdinLog, relayURL string, extraEnv ...string) *Harness {
 	t.Helper()
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("e2e: mkdir sessions dir: %v", err)
 	}
 	fakeBin := ensureFakeClaudeBuilt(t)
 
+	envSet := []string{
+		"PYRY_ALLOW_INSECURE_RELAY=1",
+		"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
+		"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
+		"PYRY_FAKE_CLAUDE_TRIGGER=" + trigger,
+		"PYRY_FAKE_CLAUDE_STDIN_LOG=" + stdinLog,
+	}
+	envSet = append(envSet, extraEnv...)
 	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
 		claudeBin:  fakeBin,
 		claudeArgs: []string{},
@@ -324,13 +336,7 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 			"-pyry-workdir=" + home,
 			"-pyry-relay=" + relayURL,
 		},
-		extraEnv: []string{
-			"PYRY_ALLOW_INSECURE_RELAY=1",
-			"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
-			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
-			"PYRY_FAKE_CLAUDE_TRIGGER=" + trigger,
-			"PYRY_FAKE_CLAUDE_STDIN_LOG=" + stdinLog,
-		},
+		extraEnv: envSet,
 	})
 
 	h := &Harness{

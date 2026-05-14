@@ -14,6 +14,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
+	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // authGate builds the dispatcher's FirstFrame closure that bridges
@@ -91,6 +92,8 @@ func startRelay(
 	shutdown context.CancelFunc,
 	convReg *conversations.Registry,
 	sess handlers.TurnWriter,
+	sup *supervisor.Supervisor,
+	bridge *supervisor.Bridge,
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -135,6 +138,15 @@ func startRelay(
 	d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 	d.Register(protocol.TypeSendMessage, handlers.SendMessage(sess, logger))
 
+	// The assistant-turn bridge taps Bridge.Write so PTY chunks fan out
+	// to every active phone conn as a `message` envelope (#311). Skip in
+	// foreground mode (bridge == nil) — there is no PTY-output observer
+	// surface in that path; inbound `send_message` still works.
+	var bridgeCleanup func()
+	if bridge != nil {
+		bridgeCleanup = startAssistantTurnBridge(ctx, sup, bridge, d, logger)
+	}
+
 	dispatcherDone := make(chan struct{})
 	go func() {
 		defer close(dispatcherDone)
@@ -177,6 +189,12 @@ func startRelay(
 	}()
 
 	cleanup = func() {
+		// Stop the assistant-turn observer first so no new PTY chunks
+		// queue while the dispatcher is winding down. The cleanup waits
+		// for the emitter goroutine on ctx-cancel.
+		if bridgeCleanup != nil {
+			bridgeCleanup()
+		}
 		_ = conn.Close()
 		// Order: Connection.run defers close(frames) → dispatcher.Run
 		// returns (Frames closed) → dispatcher closes Outbound → forwarder

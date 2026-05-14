@@ -17,6 +17,14 @@
 //	                               e2e harness can observe what the
 //	                               supervisor wrote to the PTY. Default
 //	                               off — when unset, stdin is not read.
+//	PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER  optional path watched in parallel
+//	                               with PYRY_FAKE_CLAUDE_TRIGGER. When the
+//	                               file appears, its contents are written
+//	                               to os.Stdout (the supervisor's PTY),
+//	                               then the trigger is removed. Used by
+//	                               the assistant-turn e2e (#311) to script
+//	                               a scripted assistant chunk on demand.
+//	                               Default off — when unset, no watch.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers.
@@ -31,11 +39,13 @@ import (
 )
 
 const (
-	envSessionsDir = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
-	envInitialUUID = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
-	envTrigger     = "PYRY_FAKE_CLAUDE_TRIGGER"
-	envStdinLog    = "PYRY_FAKE_CLAUDE_STDIN_LOG"
-	pollInterval   = 50 * time.Millisecond
+	envSessionsDir       = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
+	envInitialUUID       = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
+	envTrigger           = "PYRY_FAKE_CLAUDE_TRIGGER"
+	envStdinLog          = "PYRY_FAKE_CLAUDE_STDIN_LOG"
+	envAssistantTrigger  = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
+	assistantMaxBytes    = 64 * 1024
+	pollInterval         = 50 * time.Millisecond
 )
 
 func main() {
@@ -46,6 +56,8 @@ func main() {
 	if logPath := os.Getenv(envStdinLog); logPath != "" {
 		startStdinLogger(logPath)
 	}
+
+	asstTrig := os.Getenv(envAssistantTrigger)
 
 	f := openSession(dir, initU)
 	rotated := false
@@ -59,8 +71,31 @@ func main() {
 				rotated = true
 			}
 		}
+		if asstTrig != "" {
+			emitAssistantIfTriggered(asstTrig)
+		}
 		time.Sleep(pollInterval)
 	}
+}
+
+// emitAssistantIfTriggered checks for the assistant-trigger file. When
+// present, reads its contents (capped at assistantMaxBytes), writes them
+// to os.Stdout, and removes the trigger. Repeat-firing is supported —
+// callers can drop the trigger multiple times to script multiple
+// assistant chunks. Errors are silenced; the e2e asserts on the
+// downstream side (the phone receives the message) and a missing trigger
+// is the steady state.
+func emitAssistantIfTriggered(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if len(data) > assistantMaxBytes {
+		data = data[:assistantMaxBytes]
+	}
+	_, _ = os.Stdout.Write(data)
+	_ = os.Stdout.Sync()
+	_ = os.Remove(path)
 }
 
 func openSession(dir, uuid string) *os.File {
