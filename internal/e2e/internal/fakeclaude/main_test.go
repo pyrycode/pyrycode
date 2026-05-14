@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -97,6 +99,78 @@ func TestFakeClaude_OpensInitialAndRotatesOnTrigger(t *testing.T) {
 	case waitErr := <-doneCh:
 		if !signaledBy(cmd.ProcessState, syscall.SIGTERM) {
 			t.Fatalf("unexpected exit: err=%v state=%+v", waitErr, cmd.ProcessState)
+		}
+	case <-time.After(3 * time.Second):
+		_ = cmd.Process.Kill()
+		<-doneCh
+		t.Fatalf("did not exit within 3s of SIGTERM")
+	}
+}
+
+// TestFakeClaude_StdinLog_AppendsBytes covers the additive
+// PYRY_FAKE_CLAUDE_STDIN_LOG path: when set, every byte read from stdin is
+// fsync'd to the log file so a sibling test process can observe it via
+// os.ReadFile.
+func TestFakeClaude_StdinLog_AppendsBytes(t *testing.T) {
+	tmp := t.TempDir()
+	sessionsDir := filepath.Join(tmp, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	triggerPath := filepath.Join(tmp, "rotate.trigger")
+	stdinLog := filepath.Join(tmp, "stdin.log")
+	initialUUID := "22222222-2222-4222-8222-222222222222"
+	binPath := filepath.Join(tmp, "fakeclaude")
+
+	out, err := exec.Command("go", "build", "-o", binPath,
+		"github.com/pyrycode/pyrycode/internal/e2e/internal/fakeclaude").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+
+	const want = "hello-from-test\n"
+	cmd := exec.Command(binPath)
+	cmd.Env = append(os.Environ(),
+		"PYRY_FAKE_CLAUDE_SESSIONS_DIR="+sessionsDir,
+		"PYRY_FAKE_CLAUDE_INITIAL_UUID="+initialUUID,
+		"PYRY_FAKE_CLAUDE_TRIGGER="+triggerPath,
+		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinLog,
+	)
+	cmd.Stdin = strings.NewReader(want)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- cmd.Wait() }()
+
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			<-doneCh
+		}
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	var got []byte
+	for time.Now().Before(deadline) {
+		got, _ = os.ReadFile(stdinLog)
+		if bytes.Contains(got, []byte(want)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !bytes.Contains(got, []byte(want)) {
+		t.Fatalf("stdin log %q did not contain %q within deadline\ngot: %q", stdinLog, want, string(got))
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal SIGTERM: %v", err)
+	}
+	select {
+	case <-doneCh:
+		if !signaledBy(cmd.ProcessState, syscall.SIGTERM) {
+			t.Fatalf("unexpected exit state=%+v", cmd.ProcessState)
 		}
 	case <-time.After(3 * time.Second):
 		_ = cmd.Process.Kill()

@@ -300,6 +300,58 @@ func StartRotation(t *testing.T, home, sessionsDir, initialUUID, trigger string)
 	return h
 }
 
+// StartRotationWithRelay extends StartRotation with relay wiring so a test
+// can drive phone → relay → binary → fakeclaude end-to-end. relayURL is the
+// /v1/server endpoint (e.g. fakerelay.URL()+"/v1/server") and stdinLog is the
+// path fakeclaude appends its stdin bytes to. The PYRY_ALLOW_INSECURE_RELAY
+// env var is set automatically so the daemon accepts the ws:// URL.
+//
+// sessionsDir, initialUUID, and trigger have the same semantics as
+// StartRotation. trigger need not refer to an existing file — a test that
+// does not exercise the rotation path can point it at a path that is never
+// created.
+func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigger, stdinLog, relayURL string) *Harness {
+	t.Helper()
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("e2e: mkdir sessions dir: %v", err)
+	}
+	fakeBin := ensureFakeClaudeBuilt(t)
+
+	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
+		claudeBin:  fakeBin,
+		claudeArgs: []string{},
+		extraFlags: []string{
+			"-pyry-workdir=" + home,
+			"-pyry-relay=" + relayURL,
+		},
+		extraEnv: []string{
+			"PYRY_ALLOW_INSECURE_RELAY=1",
+			"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
+			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
+			"PYRY_FAKE_CLAUDE_TRIGGER=" + trigger,
+			"PYRY_FAKE_CLAUDE_STDIN_LOG=" + stdinLog,
+		},
+	})
+
+	h := &Harness{
+		SocketPath:        socket,
+		HomeDir:           home,
+		ClaudeSessionsDir: sessionsDir,
+		PID:               cmd.Process.Pid,
+		Stdout:            stdout,
+		Stderr:            stderr,
+		cmd:               cmd,
+		doneCh:            doneCh,
+	}
+
+	t.Cleanup(func() { h.teardown(t) })
+
+	if err := h.waitForReady(); err != nil {
+		t.Fatalf("e2e: %v", err)
+	}
+	return h
+}
+
 // StartExpectingFailureIn spawns pyry against the given home, expects it to
 // exit before the readiness deadline elapses, and returns the captured exit
 // code, stdout, and stderr. Fails the test if pyry instead becomes ready
