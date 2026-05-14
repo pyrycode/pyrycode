@@ -1,6 +1,6 @@
 # `internal/agentrun` — pre-spawn primitives for `pyry agent-run`
 
-Stdlib-only helpers that prepare claude's environment before `pyry agent-run` (#338B) spawns the supervised `claude` process. Two orthogonal jobs:
+Stdlib-only helpers that prepare claude's environment before `pyry agent-run` spawns the supervised `claude` process (spawn lands in #332). Two orthogonal jobs:
 
 1. **Workspace-trust pre-population** (#341) — set `projects[<realpath(workdir)>].hasTrustDialogAccepted = true` in `~/.claude.json` so the trust-dialog TUI doesn't block headless startup.
 2. **Per-spawn deny-default settings file** (#339) — write `<workdir>/.pyry-agent-run-settings.json` with the `{"permissions":{"allow":[...],"defaultMode":"deny"}}` shape so the dispatcher can pass `claude --settings <path>` (sibling #332) and get the deny-default semantics that interactive claude's `--allowedTools` alone does NOT provide (Phase A spike #329 verified: `--allowedTools "Read"` did NOT block `Bash`).
@@ -77,7 +77,7 @@ Three terminal classes:
 2. **Malformed input** (unparseable JSON, `projects` not an object, `projects[key]` not an object) — wrapped error. The helper refuses to silently destroy state it doesn't understand. File untouched on these failures (pin: `TestMarkWorkdirTrusted_MalformedJSONFailsLoudly` asserts byte-identical pre/post).
 3. **I/O failure** (read, fsync, rename, flock) — wrapped error with step name.
 
-No retries. The caller (`pyry agent-run` in #338B) surfaces the failure as the verb's exit-1 path.
+No retries. The caller (`pyry agent-run`, wired in #342) surfaces the failure as the verb's exit-1 path with a `pyry: agent-run: pre-populating workspace trust: <err>` stderr line.
 
 ## Logging discipline
 
@@ -90,7 +90,7 @@ pass-through view (preserve fields verbatim) and emits a key+verdict on
 success, not the underlying bytes.
 ```
 
-Error wraps name the step (`encode` / `fsync` / `rename` / `lock acquire` / `read` / `parse`) and the file path. They MUST NOT include file bytes or unmarshalled fields beyond the workdir key the caller already supplied. No `slog` calls inside the helper — the eventual caller (#338B) logs success at the verb level.
+Error wraps name the step (`encode` / `fsync` / `rename` / `lock acquire` / `read` / `parse`) and the file path. They MUST NOT include file bytes or unmarshalled fields beyond the workdir key the caller already supplied. No `slog` calls inside the helper — the verb-level caller (#342) logs success at the verb level (currently silent on success, per the `pyry agent-run` stdout contract).
 
 ## Concurrency model
 
@@ -120,7 +120,7 @@ The settings file is the load-bearing mechanism for the deny-default permission 
 
 ## Consumers
 
-- `pyry agent-run` (#338B for `MarkWorkdirTrusted`; #339 already in for `WriteSettings`) — calls `MarkWorkdirTrusted(os.UserHomeDir(), args.workdir)` after flag validation, then `WriteSettings(args.workdir, args.allowedTools)` before claude spawn.
+- `pyry agent-run` (#342 wired `MarkWorkdirTrusted`; #339 wired `WriteSettings`) — after flag validation, resolves `os.UserHomeDir()` then calls `MarkWorkdirTrusted(home, parsed.workdir)`, then `WriteSettings(parsed.workdir, parsed.allowedTools)`. Order is mark-trust → settings so a trust-mark failure short-circuits before any per-spawn artefact lands in the workdir. Claude spawn lands in #332.
 - JSONL watcher (#333) — calls `ResolveWorkdir` to compute the same key shape claude uses when associating watched files with workdirs.
 - Dispatcher (sibling #332) — scrapes the `settings-file: <path>` marker line and passes the path via `claude --settings`.
 
@@ -132,6 +132,6 @@ The settings file is the load-bearing mechanism for the deny-default permission 
 
 ## Related
 
-- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes `MarkWorkdirTrusted`.
+- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes `MarkWorkdirTrusted` (#342) and `WriteSettings` (#339).
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks` pattern for path comparison against claude-resolved paths.
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe this package mirrors.
