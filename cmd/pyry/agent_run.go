@@ -179,6 +179,13 @@ func runAgentRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("agent-run: resolving home directory: %w", err)
+	}
+	if err := agentrun.MarkWorkdirTrusted(home, parsed.workdir); err != nil {
+		return fmt.Errorf("agent-run: pre-populating workspace trust: %w", err)
+	}
 	path, err := agentrun.WriteSettings(parsed.workdir, parsed.allowedTools)
 	if err != nil {
 		return fmt.Errorf("agent-run: %w", err)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ type validArgsFixture struct {
 
 func newValidArgsFixture(t *testing.T) validArgsFixture {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 
 	promptPath := filepath.Join(dir, "prompt.txt")
@@ -316,6 +318,75 @@ func TestRunAgentRun_EmitsSettingsFile(t *testing.T) {
 	wantJSON := `{"permissions":{"allow":["Read","Bash"],"defaultMode":"deny"}}` + "\n"
 	if string(got) != wantJSON {
 		t.Errorf("settings file content:\n got  = %q\n want = %q", got, wantJSON)
+	}
+}
+
+// TestRunAgentRun_MarksWorkdirTrusted asserts that runAgentRun writes
+// projects[realpath(workdir)].hasTrustDialogAccepted = true into
+// $HOME/.claude.json so the supervised claude (#332) does not block on the
+// workspace-trust TUI dialog at startup.
+func TestRunAgentRun_MarksWorkdirTrusted(t *testing.T) {
+	fx := newValidArgsFixture(t)
+
+	// Discard stdout so the settings-file marker line does not pollute test
+	// output; the marker contract is covered by TestRunAgentRun_EmitsSettingsFile.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	runErr := runAgentRun(fx.argv)
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatalf("drain pipe: %v", err)
+	}
+	if runErr != nil {
+		t.Fatalf("runAgentRun: %v", runErr)
+	}
+
+	homeDir := os.Getenv("HOME")
+	dataPath := filepath.Join(homeDir, ".claude.json")
+	info, err := os.Stat(dataPath)
+	if err != nil {
+		t.Fatalf("stat %s: %v", dataPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("%s: not a regular file", dataPath)
+	}
+
+	data, err := os.ReadFile(dataPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", dataPath, err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("decode %s: %v", dataPath, err)
+	}
+
+	wantKey, err := filepath.EvalSymlinks(fx.workdir)
+	if err != nil {
+		t.Fatalf("eval symlinks %s: %v", fx.workdir, err)
+	}
+
+	projects, ok := root["projects"].(map[string]any)
+	if !ok {
+		t.Fatalf("projects: not an object, got %T", root["projects"])
+	}
+	entry, ok := projects[wantKey].(map[string]any)
+	if !ok {
+		t.Fatalf("projects[%q]: not an object, got %T", wantKey, projects[wantKey])
+	}
+	got, ok := entry["hasTrustDialogAccepted"].(bool)
+	if !ok {
+		t.Fatalf("projects[%q].hasTrustDialogAccepted: not a bool, got %T", wantKey, entry["hasTrustDialogAccepted"])
+	}
+	if !got {
+		t.Errorf("projects[%q].hasTrustDialogAccepted = false, want true", wantKey)
 	}
 }
 
