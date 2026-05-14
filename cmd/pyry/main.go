@@ -21,6 +21,8 @@
 //	pyry sessions <verb>  Multi-session management (verbs: new, rm, rename, list)
 //	pyry pair             Mint a device token and print the QR / paste payload
 //	pyry install-service  Write a systemd / launchd unit file for pyry
+//	pyry agent-run        Drive a single supervised claude turn headlessly
+//	                       (replaces `claude -p` in the dispatcher)
 //	pyry help             Show help
 //
 // See https://github.com/pyrycode/pyrycode for documentation.
@@ -180,6 +182,8 @@ func run() error {
 			return runInstallService(os.Args[2:])
 		case "update":
 			return runUpdate(os.Args[2:])
+		case "agent-run":
+			return runAgentRun(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -1306,6 +1310,11 @@ Usage:
   pyry update [--check] [--version <v>]          download and install the latest
                                                   release (--check: print versions
                                                   only; --version <v>: pin a tag)
+  pyry agent-run [flags]                         drive a single supervised claude
+                                                  turn headlessly; replaces
+                                                  ` + "`claude -p`" + ` in the dispatcher
+                                                  (see --help on the verb for the
+                                                  full flag list)
   pyry version                                   print version
   pyry help                                      show this help
 
