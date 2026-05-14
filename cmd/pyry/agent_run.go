@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -196,6 +197,14 @@ func requireDir(path string) error {
 // exactly one `type:"result"` trailer. The dispatcher's parser consumes
 // this stream as if it were `claude -p --output-format stream-json` output.
 func runAgentRun(stdout io.Writer, args []string) error {
+	// --self-check is a sibling verb mode (#336): boot-time verification
+	// that permissions.defaultMode "deny" in the per-spawn settings file
+	// still enforces the whitelist. Recognised positionally so it
+	// short-circuits before parseAgentRunArgs runs — the eight required
+	// production flags do not apply to the diagnostic verb.
+	if slices.Contains(args, "--self-check") {
+		return runAgentRunSelfCheck(stdout)
+	}
 	parsed, err := parseAgentRunArgs(args)
 	if err != nil {
 		return err
