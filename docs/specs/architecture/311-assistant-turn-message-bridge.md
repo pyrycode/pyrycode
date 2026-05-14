@@ -10,6 +10,18 @@ This is the outbound counterpart to #322's inbound `send_message` path. Together
 they close the bidirectional loop: phone → `send_message` → PTY (#322), then
 PTY → `message` → phone (#311).
 
+> **Revision 2 (2026-05-14).** Spec rework after code-review on PR #326
+> identified a defect in the original `gateRun`-based race fix. The
+> single-flag fix did NOT close the literal-id=1 vs broadcast race
+> because `gateRun = true` was set BEFORE `runGate`'s `NextID()` advance.
+> This revision splits the flag into `gateStarted` (local, prevents
+> double-running the gate) and `gateCompleted` (cross-goroutine, set
+> AFTER `NextID()` advance) — what `ActiveConns` filters on. See
+> §"Component 2" and §"Security review" [Concurrency] for the full
+> audit trail. Implementation delta vs the merged WIP: rename the
+> `connState` field, add the second flag, split the assignment site
+> inside `runConn`, and add a gate-enabled regression test.
+
 ## Files to read first
 
 - `internal/supervisor/bridge.go:49-179` — `Bridge` type; existing
@@ -24,9 +36,19 @@ PTY → `message` → phone (#311).
 - `internal/dispatch/dispatch.go:63-152` — `Conn` API (`ConnID`,
   `NextID`, `Send`, `Reply`); per-conn ID monotonic via
   `atomic.Uint64`. New `ActiveConns()` reads `d.conns` under `d.mu`.
-- `internal/dispatch/dispatch.go:244-262` — `connState` /
-  `closed` flag; the demux's `routeConn` already drops frames for
-  closed conns. Broadcast can safely race conn-close.
+- `internal/dispatch/dispatch.go:249-264` — `connState` /
+  `gateRun` / `closed` flags; the demux's `routeConn` already drops
+  frames for closed conns. Broadcast can safely race conn-close. This
+  ticket renames `gateRun` → `gateStarted` and adds a NEW
+  `gateCompleted` flag — see §"Component 2" for the rationale.
+- `internal/dispatch/dispatch.go:431-457` — `runConn` loop body;
+  this is the file where the `gateStarted` / `gateCompleted` split
+  lands. The accept-path and gate-disabled-tail flag writes are the
+  load-bearing edits.
+- `internal/dispatch/dispatch.go:459-494` — `runGate`; note the
+  `_ = st.conn.NextID()` advance at the tail of the accept path
+  (line ~491). `gateCompleted` MUST be set AFTER this returns —
+  i.e. in the caller (`runConn`), not inside `runGate`.
 - `internal/dispatch/dispatch.go:118-135` — `Conn.Send` is the
   canonical outbound seam; the broadcast loop calls it per-conn.
 - `cmd/pyry/relay.go:86-189` — `startRelay` builds the dispatcher,
@@ -144,46 +166,115 @@ Add one method to `Dispatcher`:
 // server-initiated outbound (broadcast). The returned slice excludes:
 //   - conns marked closed (gate-reject path; routeConn drops further
 //     frames for them)
-//   - conns whose first-frame handling has not yet completed
-//     (connState.gateRun == false)
+//   - conns whose first-frame gate has not yet RETURNED on the
+//     accept-and-continue path — i.e. connState.gateCompleted == false.
+//     "Completed" means the gate's `_ = c.NextID()` advance has executed,
+//     so the per-conn id counter has moved past the hello_ack's literal
+//     id=1 and a broadcast call to c.NextID() will return id >= 2.
 //
 // The gate-completed filter is load-bearing: relay.AuthenticateFirstFrame
 // emits hello_ack with literal ID=1 (auth.go:148), not via c.NextID().
-// runGate then calls `_ = c.NextID()` to advance the per-conn counter
-// past the gate's hello_ack so the next handler reply lands at id=2
-// (dispatch.go:451-454). A broadcast that races the gate would call
-// c.NextID() first, claim id=1 for its message envelope, and collide
-// with hello_ack on the wire (two envelopes both stamped id=1).
-// Filtering on gateRun closes that race.
+// runGate calls `_ = c.NextID()` AFTER publishing hello_ack onto d.outbound
+// so the next binary-originated frame on this conn (handler reply, etc.)
+// gets id=2 (dispatch.go:486-492). A broadcast that races the gate would
+// call c.NextID() first, claim id=1 for its message envelope, and collide
+// with hello_ack on the wire (two envelopes both stamped id=1). Filtering
+// on gateCompleted — set ONLY after runGate's NextID() advance — closes
+// that race deterministically.
 //
 // The slice is fresh; callers may retain it. The returned *Conn pointers
 // remain safe to call Send on — a conn that closes between snapshot and
 // Send is handled by the demux's existing closed-conn drop in routeConn.
 //
 // Concurrency: holds d.mu briefly to copy the conns map under the same
-// lock that guards both closed-flag and gateRun mutation; no new lock order.
+// lock that guards both closed-flag and gateCompleted mutation; no new
+// lock order.
 func (d *Dispatcher) ActiveConns() []*Conn
 ```
 
 Behaviour: iterate `d.conns` under `d.mu`, copy `*Conn` pointers where
-`st.gateRun && !st.closed` into a fresh slice, return.
+`st.gateCompleted && !st.closed` into a fresh slice, return.
 
-**Note on `gateRun` synchronisation.** `connState.gateRun` is set in
-`runConn` on the per-conn goroutine and currently not protected by any
-lock — it is single-writer (the per-conn goroutine) with reads that today
-all happen on that same goroutine. `ActiveConns` introduces the first
-cross-goroutine read, which means the read must happen under `d.mu` AND
-the write must happen under `d.mu`. Concretely:
+**Why two flags, not one.** `connState.gateRun` (as implemented today)
+serves a local single-goroutine purpose: "have we already attempted the
+gate on this conn, so we should NOT run it again on the next inbound
+frame." It is set at the TOP of the gate path, BEFORE `runGate` runs —
+because the whole point is to short-circuit subsequent loop iterations.
+That `set-before-runGate` placement makes `gateRun` unfit as the
+broadcast-eligibility predicate: a broadcast call that reads
+`gateRun == true` between the assignment and `runGate`'s closing
+`_ = c.NextID()` will still race the literal-id=1 hello_ack.
 
-- The `st.gateRun = true` assignment in `runConn` (`dispatch.go:403`)
-  moves under `d.mu` (same critical section that already guards the
-  symmetric `st.closed = true` assignment on the reject path).
-- The `ActiveConns` read is under `d.mu` per above.
+Split the responsibilities:
 
-This is a 2-line change: wrap the `gateRun = true` write in the existing
-locking pattern used for `closed`. Zero behavioural impact on the existing
-gate code (the lock is uncontended in practice; the per-conn goroutine
-is the only writer).
+- **`gateStarted bool`** — renamed from `gateRun`. Local single-writer/
+  reader on the per-conn goroutine. Lock-free, exactly as today. Purpose:
+  prevent double-running the gate inside `runConn`'s loop. No
+  cross-goroutine read.
+- **`gateCompleted bool`** — NEW. Set ONLY after the gate has emitted
+  hello_ack AND advanced the per-conn id counter via `_ = c.NextID()`.
+  Written by the per-conn goroutine, read by `ActiveConns` callers on
+  the emitter goroutine. Both writer and reader operate under `d.mu`
+  (same lock that guards `closed`, no new lock order).
+
+Concretely, `connState` becomes:
+
+```go
+type connState struct {
+    conn          *Conn
+    input         chan protocol.RoutingEnvelope
+    gateStarted   bool  // local-only; prevents re-entering the gate path
+    gateCompleted bool  // under d.mu; gates broadcast eligibility
+    closed        bool  // under d.mu; gate-reject / close-intent
+}
+```
+
+And `runConn`'s loop becomes (sketch — full body in `runConn`):
+
+```go
+for routing := range st.input {
+    if !st.gateStarted {
+        st.gateStarted = true  // local-only write
+        if d.cfg.FirstFrame != nil {
+            if d.runGate(ctx, st, routing) {
+                d.mu.Lock()
+                st.closed = true
+                d.mu.Unlock()
+                return
+            }
+            // Gate accepted. Mark broadcast-eligible AFTER runGate's
+            // _ = c.NextID() advance (which runs inside runGate before
+            // it returns on the accept path).
+            d.mu.Lock()
+            st.gateCompleted = true
+            d.mu.Unlock()
+            continue
+        }
+        // No gate configured — there is no hello_ack on the wire to
+        // collide with, so the conn is immediately broadcast-eligible.
+        // Still publish via d.mu for the cross-goroutine read.
+        d.mu.Lock()
+        st.gateCompleted = true
+        d.mu.Unlock()
+    }
+    d.handleOne(ctx, st.conn, routing)
+}
+```
+
+The accept-path `gateCompleted = true` assignment is sequenced AFTER
+`runGate` returns, and `runGate` only returns on the accept path AFTER
+it has both `select`-published hello_ack onto `d.outbound` AND executed
+`_ = st.conn.NextID()`. So when `ActiveConns` observes
+`gateCompleted == true`, the per-conn id counter is guaranteed to be ≥ 1
+already, and the next `c.NextID()` call (from the broadcast site) returns
+≥ 2 — the literal-id=1 collision is now structurally impossible.
+
+The gate-disabled tail sets `gateCompleted = true` immediately because
+there is no `hello_ack` at all in that configuration — id space starts
+at id=1 for the first handler reply, and a broadcast claiming id=1 is
+not a collision because the gate isn't competing for that id. (This
+matches the existing test posture in `dispatch_test.go`, which uses
+gate-disabled config.)
 
 This is the minimal external surface; the dispatcher does NOT learn about
 `MessagePayload` or `TypeMessage`. Fan-out lives in the wiring closure.
@@ -389,13 +480,33 @@ posture stands.
 
 ### Unit: `internal/dispatch/dispatch_test.go`
 
-One new test:
+Two new tests:
 
-- **`TestDispatcher_ActiveConns_Snapshot`** — feed two `RoutingEnvelope`s
-  with distinct `ConnID`s; wait for the demux to allocate both
-  `connState`s (the test pattern from the existing `two-conns-arrival-order`
-  test); assert `d.ActiveConns()` returns 2 conns whose `ConnID()`
-  values match the seeded IDs.
+- **`TestDispatcher_ActiveConns_Snapshot`** (gate-disabled) — feed two
+  `RoutingEnvelope`s with distinct `ConnID`s; wait for the demux to
+  allocate both `connState`s (the test pattern from the existing
+  `two-conns-arrival-order` test); assert `d.ActiveConns()` returns 2
+  conns whose `ConnID()` values match the seeded IDs. This pins the
+  gate-disabled tail of `runConn` setting `gateCompleted = true`
+  immediately.
+
+- **`TestDispatcher_ActiveConns_ExcludesPreGateConn`** (gate-enabled,
+  REGRESSION) — configure a `FirstFrame` gate that blocks on a test
+  channel (the gate goroutine awaits a signal before returning an
+  accept outcome). Feed an inbound `RoutingEnvelope`; await the demux
+  alloc as above; while the gate is still blocked, assert
+  `d.ActiveConns()` returns ZERO conns (because `gateCompleted` is
+  still false even though the per-conn goroutine has already set
+  `gateStarted` and entered `runGate`). Release the gate; await
+  hello_ack on `d.Outbound()`; assert `d.ActiveConns()` now returns
+  ONE conn. This is the regression test for the original spec defect
+  identified by code-review (#326): a single-flag implementation
+  (set-before-runGate) would return the conn in the first assertion
+  and a broadcast could race the literal-id=1 hello_ack. Required.
+
+  Implementation note: the existing `gate_test.go` already has a
+  blocking-gate test seam — the new test reuses that pattern; no new
+  test helper infrastructure required.
 
 Optionally: a closed-conn variant exercising the gate-reject path
 (closed flag set), asserting `ActiveConns()` excludes the closed conn.
@@ -558,17 +669,57 @@ send_message ack, then awaits the `message` envelope on the phone side.
   slice carry only static message strings (no chunk bytes echoed).
   This is the same posture as `send_message` (#322) and is pinned in
   the doc-comment on `startAssistantTurnBridge`.
-- [Concurrency] **MUST FIX applied during this pass.** Initial design
-  exposed `Dispatcher.ActiveConns()` as a simple non-closed-conn
-  snapshot — that would race the auth gate, since
-  `relay.AuthenticateFirstFrame` emits hello_ack with literal `ID=1`
-  (not via `c.NextID()`) and a broadcast claiming `c.NextID() == 1`
-  before the gate's `_ = c.NextID()` advance would collide on the
-  wire (two envelopes both stamped id=1, both pushed to the shared
-  outbound channel). **Fix:** `ActiveConns` now filters on
-  `gateRun && !closed`, and the `gateRun = true` assignment moves
-  under `d.mu` to make the cross-goroutine read sound. Spec
-  §"Component 2" documents both pieces.
+- [Concurrency] **MUST FIX applied during the second architect pass
+  (rework after code-review on PR #326).** Three pass-states summarised
+  for the audit trail:
+
+  **Pass 1.** Initial design exposed `Dispatcher.ActiveConns()` as a
+  simple non-closed-conn snapshot — that would race the auth gate,
+  since `relay.AuthenticateFirstFrame` emits hello_ack with literal
+  `ID=1` (not via `c.NextID()`) and a broadcast claiming
+  `c.NextID() == 1` before the gate's `_ = c.NextID()` advance would
+  collide on the wire (two envelopes both stamped id=1, both pushed
+  to the shared outbound channel).
+
+  **Pass 2 (defective fix).** Proposed: filter `ActiveConns` on
+  `gateRun && !closed` and move the `gateRun = true` assignment under
+  `d.mu`. Developer implemented faithfully; code-review (#326) found
+  the fix does NOT close the race — `gateRun = true` was set at the
+  TOP of `runConn`'s gate path, BEFORE `runGate` runs, so the window
+  between "gate started" and "hello_ack published with id=1, NextID
+  advanced" remained open. A broadcast that read `gateRun == true` in
+  that window would still race to claim id=1 first.
+
+  **Pass 3 (current — actually closes the race).** Split the flag
+  into two:
+
+  - `gateStarted` (renamed from `gateRun`) — local single-writer/
+    reader on the per-conn goroutine; lock-free; prevents
+    double-running the gate. Set at the TOP of the gate path as
+    before. Not read by `ActiveConns`.
+  - `gateCompleted` — NEW; written under `d.mu` ONLY AFTER
+    `runGate` returns on the accept path (i.e. after `_ =
+    st.conn.NextID()` has executed) OR immediately on the
+    gate-disabled tail (no hello_ack to collide with). Read by
+    `ActiveConns` under `d.mu`.
+
+  `ActiveConns` now filters on `gateCompleted && !closed`. The
+  happens-before chain is:
+
+  `runGate select-publish hello_ack onto d.outbound`
+  → `runGate executes _ = c.NextID()` (counter ≥ 1)
+  → `runGate returns`
+  → `runConn locks d.mu and sets gateCompleted = true, unlocks`
+  → `ActiveConns under d.mu observes gateCompleted == true`
+  → `broadcast calls c.NextID()` returning ≥ 2
+
+  The literal-id=1 collision is now structurally impossible: by the
+  time `ActiveConns` returns a conn, its NextID counter has already
+  advanced past 1. Spec §"Component 2" documents both flags and the
+  required `runConn` body sketch; §"Testing strategy" adds
+  `TestDispatcher_ActiveConns_ExcludesPreGateConn` as the regression
+  test that fails under the Pass 2 implementation and passes under
+  Pass 3.
 - [Threat model alignment] No new threats introduced relative to
   `docs/protocol-mobile.md` § Security model. Relay-trust posture
   (v1 sees plaintext envelopes) is pre-existing; this slice neither
