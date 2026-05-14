@@ -1,19 +1,19 @@
-# `pyry agent-run` — supervised headless claude turn (scaffold)
+# `pyry agent-run` — supervised headless claude turn
 
-The CLI verb (#337, scaffold-only) that replaces `claude -p` in the dispatcher. Phase A spike (#329) greenlit this verb as the dispatcher's headless entry point; this slice lands ONLY the flag surface so subsequent tickets (trust-state merge, per-spawn settings file, claude spawn, JSONL watch) layer behaviour on top of a tested scaffold.
+The CLI verb that replaces `claude -p` in the dispatcher. Phase A spike (#329) greenlit this verb as the dispatcher's headless entry point; behaviour lands in slices (#337 scaffold, #339 settings file, #338B trust-state merge, downstream spawn + JSONL watch).
 
 ## What it does today
 
-Parses and validates the full flag set, then exits 0 with one confirmation line on stdout:
+Parses and validates the full flag set, writes the per-spawn deny-default settings JSON to the workdir (#339), and prints the resolved path behind a stable marker on stdout:
 
 ```
 $ pyry agent-run --prompt-file p.txt --system-prompt-file s.txt \
     --allowed-tools "Read,Bash" --max-turns 3 --effort medium \
     --model sonnet-4-6 --workdir ./repo --output-format stream-json
-pyry agent-run: flag set valid; scaffold-only ticket #337 — no spawn yet
+settings-file: /abs/path/to/repo/.pyry-agent-run-settings.json
 ```
 
-No file writes, no claude spawn, no trust-state changes. The confirmation line text is not load-bearing; sibling tickets overwrite this entry point as they layer behaviour.
+No claude spawn yet; no trust-state changes yet. The marker line is the verb's stable stdout contract — sibling #332 will scrape it with `^settings-file: (.+)$` to pass `--settings <path>` to the supervised claude. No other line is printed to stdout on success.
 
 ## Flags
 
@@ -34,9 +34,9 @@ Errors render via `main()`'s standard wrapper as `pyry: agent-run: --<flag>: <re
 
 ## Implementation
 
-- `cmd/pyry/agent_run.go` — `agentRunArgs` unexported struct (stable field names: `promptFile`, `systemPromptFile`, `allowedTools []string`, `maxTurns`, `effort`, `model`, `workdir`, `outputFormat`), `parseAgentRunArgs(args) (agentRunArgs, error)`, `splitAllowedTools(raw) []string` pure tokeniser (`strings.FieldsFunc` over `r == ',' || unicode.IsSpace(r)` plus trim + empty drop), `validEfforts` package-level set, `requireRegularFile` / `requireDir` helpers that surface `os.Stat` errors verbatim so tests assert only the flag-name prefix.
+- `cmd/pyry/agent_run.go` — `agentRunArgs` unexported struct (stable field names: `promptFile`, `systemPromptFile`, `allowedTools []string`, `maxTurns`, `effort`, `model`, `workdir`, `outputFormat`), `parseAgentRunArgs(args) (agentRunArgs, error)`, `splitAllowedTools(raw) []string` pure tokeniser (`strings.FieldsFunc` over `r == ',' || unicode.IsSpace(r)` plus trim + empty drop), `validEfforts` package-level set, `requireRegularFile` / `requireDir` helpers that surface `os.Stat` errors verbatim so tests assert only the flag-name prefix. `runAgentRun` calls `agentrun.WriteSettings(parsed.workdir, parsed.allowedTools)` after a successful parse and prints `settings-file: <path>\n`.
 - `cmd/pyry/main.go` — `case "agent-run": return runAgentRun(os.Args[2:])` in the top-level dispatch switch (next to `runUpdate`; daemon-free verb shape, no `parseClientFlags` since `agent-run` does not dial the control socket); one help-text entry in `printHelp()`; one bullet in the package-doc comment block.
-- `cmd/pyry/agent_run_test.go` — table-driven tests on `parseAgentRunArgs` directly (not `runAgentRun`). Covers the happy path, every missing-required and bad-value row from AC, each of the five valid `--effort` values, the three `--allowed-tools` shapes (comma / space / mixed), and the standalone `splitAllowedTools` contract (including empty input → empty slice and separators-only → single token).
+- `cmd/pyry/agent_run_test.go` — table-driven tests on `parseAgentRunArgs` directly. Covers the happy path, every missing-required and bad-value row from AC, each of the five valid `--effort` values, the three `--allowed-tools` shapes (comma / space / mixed), and the standalone `splitAllowedTools` contract. End-to-end `TestRunAgentRun_WritesSettingsFile` redirects stdout via `os.Pipe()`, drives `runAgentRun` with a valid argv, and asserts both the on-disk JSON and the exact `settings-file: <abs path>\n` stdout.
 
 ## Field stability
 
@@ -50,8 +50,9 @@ If a sibling needs a field rename, file a separate cleanup ticket rather than re
 
 ## Out of scope (deferred to siblings)
 
-- Trust-state pre-population for `--workdir` (#331 split).
-- Per-spawn `settings.json` emission consuming `--allowed-tools`, `--model`, `--effort` (#331 split).
+- Trust-state pre-population for `--workdir` (#338B wires `agentrun.MarkWorkdirTrusted`).
+- `--settings <path>` argument wiring on the supervised claude (#332 consumes the marker line).
+- Boot-time schema self-check that the settings file still enforces deny-default against a live claude (#336).
 - `claude` process spawn with the resolved argv (downstream of #329 Phase B).
 - JSONL watch / stream-json frame relay (downstream).
 - A pyry-flag surface (`-pyry-name`, etc.); `agent-run` is standalone like `pyry update`, not daemon-attached.
