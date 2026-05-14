@@ -167,7 +167,7 @@ Defaults (`TrustDialogDelay = 2500ms`, `PromptDelay = 3500ms`) are exported as z
 ## Consumers
 
 - `pyry agent-run` (#342 wired `MarkWorkdirTrusted`; #339 wired `WriteSettings`; #332 wired `Drive`) — after flag validation, resolves `os.UserHomeDir()` → `MarkWorkdirTrusted(home, parsed.workdir)` → `WriteSettings(parsed.workdir, parsed.allowedTools)` → print `settings-file:` marker → `os.ReadFile(parsed.promptFile)` → `signal.NotifyContext(SIGTERM, SIGINT)` → `Drive(ctx, …)`. Order is mark-trust → settings → spawn so any prep failure short-circuits before the next step lands artefacts.
-- JSONL watcher (#333) — calls `EncodeProjectDir` (#347) to compute the `~/.claude/projects/<encoded-cwd>/` directory name and `ResolveWorkdir` for any `projects[...]` key comparison.
+- JSONL watcher (#333, fsnotify wrapper #349) — calls `EncodeProjectDir` (#347) to compute the `~/.claude/projects/<encoded-cwd>/` directory name and `ResolveWorkdir` for any `projects[...]` key comparison; consumes [`internal/agentrun/jsonl`](jsonl-reader.md) (#348) for the per-turn line reader + deterministic end-of-turn detector.
 
 ## Out of scope
 
@@ -178,5 +178,6 @@ Defaults (`TrustDialogDelay = 2500ms`, `PromptDelay = 3500ms`) are exported as z
 ## Related
 
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes `MarkWorkdirTrusted` (#342) and `WriteSettings` (#339).
+- [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348), the pure JSONL line reader + deterministic end-of-turn detector the JSONL watcher (#349) wraps.
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks` pattern for path comparison against claude-resolved paths.
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe this package mirrors.
