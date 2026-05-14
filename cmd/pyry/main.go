@@ -451,14 +451,6 @@ func runSupervisor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
-	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, cancel, convReg)
-	if err != nil {
-		return fmt.Errorf("relay start: %w", err)
-	}
-	defer relayCleanup()
-
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
 		RegistryPath:              registryPath,
@@ -479,6 +471,14 @@ func runSupervisor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("pool init: %w", err)
 	}
+
+	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
+	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, cancel, convReg, pool.Default())
+	if err != nil {
+		return fmt.Errorf("relay start: %w", err)
+	}
+	defer relayCleanup()
 
 	// Pool satisfies control.Sessioner directly — Pool.Create returns
 	// sessions.SessionID and Pool.Remove returns plain error, matching
