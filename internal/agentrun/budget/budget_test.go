@@ -1,0 +1,369 @@
+package budget
+
+import (
+	"errors"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
+)
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// signalRecorder counts Terminate / Kill invocations and remembers the
+// timestamp of the first call to each.
+type signalRecorder struct {
+	mu        sync.Mutex
+	terminate int
+	kill      int
+	termAt    time.Time
+	killAt    time.Time
+}
+
+func (r *signalRecorder) Terminate() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.terminate++
+	if r.termAt.IsZero() {
+		r.termAt = time.Now()
+	}
+	return nil
+}
+
+func (r *signalRecorder) Kill() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.kill++
+	if r.killAt.IsZero() {
+		r.killAt = time.Now()
+	}
+	return nil
+}
+
+func (r *signalRecorder) counts() (term, kill int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.terminate, r.kill
+}
+
+func assistantEvent(endOfTurn bool) jsonl.Event {
+	return jsonl.Event{Kind: "assistant", EndOfTurn: endOfTurn}
+}
+
+func mustNew(t *testing.T, cfg Config) *Counter {
+	t.Helper()
+	if cfg.Logger == nil {
+		cfg.Logger = discardLogger()
+	}
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return c
+}
+
+func TestNew_Validation(t *testing.T) {
+	t.Parallel()
+	noop := func() error { return nil }
+	cases := []struct {
+		name string
+		cfg  Config
+	}{
+		{"zero MaxTurns", Config{MaxTurns: 0, Terminate: noop, Kill: noop}},
+		{"negative MaxTurns", Config{MaxTurns: -1, Terminate: noop, Kill: noop}},
+		{"nil Terminate", Config{MaxTurns: 1, Terminate: nil, Kill: noop}},
+		{"nil Kill", Config{MaxTurns: 1, Terminate: noop, Kill: nil}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := New(tc.cfg); err == nil {
+				t.Fatalf("New(%+v): expected error, got nil", tc.cfg)
+			}
+		})
+	}
+}
+
+func TestOnEvent_NonAssistantKindsDoNotCount(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	c := mustNew(t, Config{
+		MaxTurns:    3,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: 50 * time.Millisecond,
+	})
+	nonAssistant := []string{"user", "tool_use", "tool_result", "system", "attachment", ""}
+	for _, kind := range nonAssistant {
+		c.OnEvent(jsonl.Event{Kind: kind})
+	}
+	if term, _ := rec.counts(); term != 0 {
+		t.Fatalf("non-assistant kinds triggered Terminate: %d calls", term)
+	}
+	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEvent(false))
+	if term, _ := rec.counts(); term != 0 {
+		t.Fatalf("Terminate called before budget: %d calls", term)
+	}
+	c.OnEvent(assistantEvent(false))
+	if term, _ := rec.counts(); term != 1 {
+		t.Fatalf("Terminate not called at budget: %d calls", term)
+	}
+}
+
+func TestOnEvent_SIGTERMFiresExactlyAtBudget(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	c := mustNew(t, Config{
+		MaxTurns:    3,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: 50 * time.Millisecond,
+	})
+	defer c.Stop()
+
+	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEvent(false))
+	if term, _ := rec.counts(); term != 0 {
+		t.Fatalf("Terminate fired before budget: %d", term)
+	}
+	c.OnEvent(assistantEvent(false))
+	if term, _ := rec.counts(); term != 1 {
+		t.Fatalf("Terminate did not fire at budget: %d", term)
+	}
+	// Subsequent assistant events must not re-fire Terminate.
+	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEvent(false))
+	if term, _ := rec.counts(); term != 1 {
+		t.Fatalf("Terminate fired more than once: %d", term)
+	}
+	if got := c.Reason(); got != ReasonMaxTurns {
+		t.Fatalf("Reason = %q, want %q", got, ReasonMaxTurns)
+	}
+}
+
+func TestOnEvent_SIGKILLFiresAfterGrace(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	const grace = 80 * time.Millisecond
+	c := mustNew(t, Config{
+		MaxTurns:    1,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: grace,
+	})
+	defer c.Stop()
+
+	c.OnEvent(assistantEvent(false))
+	term, kill := rec.counts()
+	if term != 1 {
+		t.Fatalf("Terminate not fired at budget: %d", term)
+	}
+	if kill != 0 {
+		t.Fatalf("Kill fired before grace elapsed: %d", kill)
+	}
+
+	// Halfway through the grace period — Kill must not have fired.
+	time.Sleep(grace / 2)
+	if _, kill := rec.counts(); kill != 0 {
+		t.Fatalf("Kill fired before grace elapsed: %d", kill)
+	}
+
+	// Past the grace period — Kill must have fired exactly once.
+	time.Sleep(grace)
+	if _, kill := rec.counts(); kill != 1 {
+		t.Fatalf("Kill not fired after grace: %d", kill)
+	}
+
+	rec.mu.Lock()
+	elapsed := rec.killAt.Sub(rec.termAt)
+	rec.mu.Unlock()
+	if elapsed < grace {
+		t.Fatalf("Kill fired %v after Terminate, want >= %v", elapsed, grace)
+	}
+}
+
+func TestStop_CancelsPendingSIGKILL(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	const grace = 50 * time.Millisecond
+	c := mustNew(t, Config{
+		MaxTurns:    1,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: grace,
+	})
+
+	c.OnEvent(assistantEvent(false))
+	if term, _ := rec.counts(); term != 1 {
+		t.Fatalf("Terminate not fired: %d", term)
+	}
+	c.Stop()
+
+	time.Sleep(grace * 3)
+	if _, kill := rec.counts(); kill != 0 {
+		t.Fatalf("Kill fired after Stop: %d", kill)
+	}
+	// Stop is idempotent.
+	c.Stop()
+}
+
+func TestStop_WithoutBudgetHit(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	c := mustNew(t, Config{
+		MaxTurns:    5,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: 10 * time.Millisecond,
+	})
+	// Calling Stop with no pending timer is a no-op.
+	c.Stop()
+	if term, kill := rec.counts(); term != 0 || kill != 0 {
+		t.Fatalf("Stop without budget hit triggered signals: term=%d kill=%d", term, kill)
+	}
+}
+
+func TestOnEndOfTurn_ReasonCompletion(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	c := mustNew(t, Config{
+		MaxTurns:    5,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: 10 * time.Millisecond,
+	})
+	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEvent(true))
+	c.OnEndOfTurn()
+	if got := c.Reason(); got != ReasonCompletion {
+		t.Fatalf("Reason = %q, want %q", got, ReasonCompletion)
+	}
+	if term, kill := rec.counts(); term != 0 || kill != 0 {
+		t.Fatalf("completion path triggered signals: term=%d kill=%d", term, kill)
+	}
+}
+
+func TestOnEndOfTurn_DoesNotOverwriteMaxTurns(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	c := mustNew(t, Config{
+		MaxTurns:    1,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: 50 * time.Millisecond,
+	})
+	defer c.Stop()
+	c.OnEvent(assistantEvent(false)) // hits budget, reason=max_turns
+	c.OnEndOfTurn()                  // must NOT overwrite to completion
+	if got := c.Reason(); got != ReasonMaxTurns {
+		t.Fatalf("Reason = %q, want %q (first-terminal-wins)", got, ReasonMaxTurns)
+	}
+}
+
+func TestOnEvent_BudgetBoundaryEndOfTurnIsCompletion(t *testing.T) {
+	// MaxTurns assistant events arrive, the last with EndOfTurn=true. Per
+	// the spec's default classification, this is completion, not max_turns.
+	t.Parallel()
+	rec := &signalRecorder{}
+	c := mustNew(t, Config{
+		MaxTurns:    3,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: 50 * time.Millisecond,
+	})
+	defer c.Stop()
+	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEvent(true)) // exactly at the budget, but natural end
+	c.OnEndOfTurn()
+	if term, _ := rec.counts(); term != 0 {
+		t.Fatalf("Terminate fired on budget-boundary end_turn: %d", term)
+	}
+	if got := c.Reason(); got != ReasonCompletion {
+		t.Fatalf("Reason = %q, want %q", got, ReasonCompletion)
+	}
+}
+
+func TestReason_ZeroValueBeforeTerminalEvent(t *testing.T) {
+	t.Parallel()
+	rec := &signalRecorder{}
+	c := mustNew(t, Config{
+		MaxTurns:    5,
+		Terminate:   rec.Terminate,
+		Kill:        rec.Kill,
+		GracePeriod: 10 * time.Millisecond,
+	})
+	c.OnEvent(assistantEvent(false))
+	c.OnEvent(jsonl.Event{Kind: "user"})
+	if got := c.Reason(); got != "" {
+		t.Fatalf("Reason = %q, want zero value before terminal event", got)
+	}
+}
+
+func TestTerminateError_DoesNotBlockKill(t *testing.T) {
+	// If Terminate returns an error (e.g. ESRCH because the child already
+	// died), the grace timer must still arm and Kill must still fire.
+	t.Parallel()
+	const grace = 50 * time.Millisecond
+	var killCalls atomic.Int32
+	c := mustNew(t, Config{
+		MaxTurns:    1,
+		Terminate:   func() error { return errors.New("simulated ESRCH") },
+		Kill:        func() error { killCalls.Add(1); return nil },
+		GracePeriod: grace,
+	})
+	defer c.Stop()
+	c.OnEvent(assistantEvent(false))
+	time.Sleep(grace * 3)
+	if got := killCalls.Load(); got != 1 {
+		t.Fatalf("Kill calls = %d, want 1 after Terminate error", got)
+	}
+}
+
+func TestKillError_IsLogged(t *testing.T) {
+	// Kill errors are non-fatal — surface them at Warn but don't panic.
+	t.Parallel()
+	buf := &syncWriter{w: &strings.Builder{}}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	c := mustNew(t, Config{
+		MaxTurns:    1,
+		Terminate:   func() error { return nil },
+		Kill:        func() error { return errors.New("simulated kill failure") },
+		GracePeriod: 20 * time.Millisecond,
+		Logger:      logger,
+	})
+	defer c.Stop()
+	c.OnEvent(assistantEvent(false))
+	time.Sleep(80 * time.Millisecond)
+	out := buf.String()
+	if !strings.Contains(out, "kill failed") {
+		t.Fatalf("expected kill-failure log line, got: %q", out)
+	}
+}
+
+// syncWriter serialises Write calls for the slog test handler; slog handlers
+// may write concurrently from time.AfterFunc and the test goroutine.
+type syncWriter struct {
+	mu sync.Mutex
+	w  *strings.Builder
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+func (s *syncWriter) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.String()
+}
