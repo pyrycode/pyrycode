@@ -28,7 +28,11 @@ func TestReader_CleanSingleEndTurn(t *testing.T) {
 
 	endOfTurns := 0
 	lastEOTIndex := -1
+	lastAssistantIndex := -1
 	for i, e := range events {
+		if e.Kind == "assistant" {
+			lastAssistantIndex = i
+		}
 		if e.EndOfTurn {
 			endOfTurns++
 			lastEOTIndex = i
@@ -37,8 +41,8 @@ func TestReader_CleanSingleEndTurn(t *testing.T) {
 	if endOfTurns != 1 {
 		t.Fatalf("want exactly 1 EndOfTurn event, got %d", endOfTurns)
 	}
-	if lastEOTIndex != len(events)-1 {
-		t.Fatalf("want EndOfTurn on the last assistant event (index %d), got index %d", len(events)-1, lastEOTIndex)
+	if lastEOTIndex != lastAssistantIndex {
+		t.Fatalf("want EndOfTurn on the last assistant event (index %d), got index %d", lastAssistantIndex, lastEOTIndex)
 	}
 	if got, want := r.AssistantCount(), 25; got != want {
 		t.Fatalf("AssistantCount = %d, want %d", got, want)
@@ -141,32 +145,158 @@ func TestReader_PartialLine_BuffersUntilNewline(t *testing.T) {
 	}
 }
 
-func TestReader_NonAssistantLinesSkipped(t *testing.T) {
+func TestReader_NonAssistantLinesSurfaced(t *testing.T) {
 	t.Parallel()
 
-	var b strings.Builder
-	b.WriteString(`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")
-	b.WriteString(`{"type":"system","message":{}}` + "\n")
-	b.WriteString(`{"type":"summary","summary":"x"}` + "\n")
-	b.WriteString(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}` + "\n")
-	src := b.String()
+	lines := []string{
+		`{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"system","message":{}}`,
+		`{"type":"summary","summary":"x"}`,
+		`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}`,
+	}
+	src := strings.Join(lines, "\n") + "\n"
 
 	r := NewReader(strings.NewReader(src), Config{})
 	events, err := drainAll(t, r)
 	if err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	if len(events) != 1 {
-		t.Fatalf("want 1 event, got %d", len(events))
+	if len(events) != 4 {
+		t.Fatalf("want 4 events, got %d", len(events))
 	}
-	if !events[0].EndOfTurn {
-		t.Fatalf("want EndOfTurn=true, got %+v", events[0])
+	wantKinds := []string{"user", "system", "", "assistant"}
+	for i, ev := range events {
+		if ev.Kind != wantKinds[i] {
+			t.Fatalf("events[%d].Kind = %q, want %q", i, ev.Kind, wantKinds[i])
+		}
+		if string(ev.Raw) != lines[i] {
+			t.Fatalf("events[%d].Raw = %q, want %q", i, string(ev.Raw), lines[i])
+		}
+	}
+	// Only the last (assistant end_turn) event signals end-of-turn.
+	for i, ev := range events[:3] {
+		if ev.EndOfTurn || ev.StopReason != "" || ev.TextChars != 0 || ev.Usage != nil {
+			t.Fatalf("events[%d] non-assistant should be zero-valued, got %+v", i, ev)
+		}
+	}
+	if !events[3].EndOfTurn {
+		t.Fatalf("want events[3].EndOfTurn=true, got %+v", events[3])
 	}
 	if got, want := r.Offset(), int64(len(src)); got != want {
 		t.Fatalf("Offset = %d, want %d (past all four lines)", got, want)
 	}
 	if got, want := r.AssistantCount(), 1; got != want {
 		t.Fatalf("AssistantCount = %d, want %d", got, want)
+	}
+}
+
+func TestReader_RawByteEquivalence(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		`{"type":"user","message":{"content":[{"type":"text","text":"héllo 世界"}]}}`,
+		`{"type":"tool_use","message":{"id":"abc","input":{"nested":{"k":"v"}}}}`,
+		`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"  spaces  "}]}}`,
+	}
+	src := strings.Join(lines, "\n") + "\n"
+	r := NewReader(strings.NewReader(src), Config{})
+
+	// Read all events first, then inspect Raw — this catches a buffer-aliasing
+	// regression where Event.Raw shares memory with the reader's internal buf.
+	events, err := drainAll(t, r)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if len(events) != len(lines) {
+		t.Fatalf("got %d events, want %d", len(events), len(lines))
+	}
+	for i, ev := range events {
+		if string(ev.Raw) != lines[i] {
+			t.Fatalf("events[%d].Raw = %q, want %q", i, string(ev.Raw), lines[i])
+		}
+	}
+}
+
+func TestReader_KindClassification(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"assistant", `{"type":"assistant","message":{"stop_reason":"tool_use","content":[]}}`, "assistant"},
+		{"user", `{"type":"user","message":{"content":"hi"}}`, "user"},
+		{"tool_use", `{"type":"tool_use","id":"a"}`, "tool_use"},
+		{"tool_result", `{"type":"tool_result","id":"a"}`, "tool_result"},
+		{"system", `{"type":"system","message":{}}`, "system"},
+		{"attachment", `{"type":"attachment","path":"/x"}`, "attachment"},
+		{"summary unknown", `{"type":"summary","summary":"x"}`, ""},
+		{"missing type", `{}`, ""},
+		{"unrelated field only", `{"foo":"bar"}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewReader(strings.NewReader(tc.line+"\n"), Config{})
+			ev, err := r.Next()
+			if err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+			if ev.Kind != tc.want {
+				t.Fatalf("Kind = %q, want %q", ev.Kind, tc.want)
+			}
+		})
+	}
+}
+
+func TestReader_UsageParsedOnAssistant(t *testing.T) {
+	t.Parallel()
+
+	line := `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":11,"output_tokens":22,"cache_creation_input_tokens":33,"cache_read_input_tokens":44}}}`
+	r := NewReader(strings.NewReader(line+"\n"), Config{})
+	ev, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if ev.Usage == nil {
+		t.Fatalf("Usage = nil, want non-nil")
+	}
+	want := UsageBlock{InputTokens: 11, OutputTokens: 22, CacheCreationInputTokens: 33, CacheReadInputTokens: 44}
+	if *ev.Usage != want {
+		t.Fatalf("Usage = %+v, want %+v", *ev.Usage, want)
+	}
+}
+
+func TestReader_UsageNilOnAssistantWithoutUsage(t *testing.T) {
+	t.Parallel()
+
+	line := `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}`
+	r := NewReader(strings.NewReader(line+"\n"), Config{})
+	ev, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if ev.Usage != nil {
+		t.Fatalf("Usage = %+v, want nil", *ev.Usage)
+	}
+}
+
+func TestReader_UsageNilOnNonAssistant(t *testing.T) {
+	t.Parallel()
+
+	// Defensive: even if a non-assistant line carries a usage-shaped object,
+	// the reader contract says Usage is always nil on non-assistant Events.
+	line := `{"type":"user","message":{"content":"hi","usage":{"input_tokens":1,"output_tokens":2}}}`
+	r := NewReader(strings.NewReader(line+"\n"), Config{})
+	ev, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if ev.Kind != "user" {
+		t.Fatalf("Kind = %q, want %q", ev.Kind, "user")
+	}
+	if ev.Usage != nil {
+		t.Fatalf("Usage = %+v, want nil", *ev.Usage)
 	}
 }
 

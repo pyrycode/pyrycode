@@ -241,11 +241,11 @@ func TestWatcher_LateCreate(t *testing.T) {
 	if endTurns != 1 {
 		t.Fatalf("endTurns = %d, want 1", endTurns)
 	}
-	if len(events) != 2 {
-		t.Fatalf("events = %d, want 2 (two assistant entries)", len(events))
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3 (assistant + user + assistant)", len(events))
 	}
-	if !events[1].EndOfTurn {
-		t.Fatalf("events[1].EndOfTurn = false, want true")
+	if !events[len(events)-1].EndOfTurn {
+		t.Fatalf("last event EndOfTurn = false, want true")
 	}
 }
 
@@ -354,7 +354,10 @@ func TestWatcher_FixtureIntegration(t *testing.T) {
 	if endTurns != 1 {
 		t.Fatalf("endTurns = %d, want 1", endTurns)
 	}
-	if got, want := len(events), 25; got != want {
+	// clean.jsonl has 64 lines; the sole end_turn assistant entry sits at
+	// line 62, so the watcher stops draining there. With every line kind
+	// now surfaced, that is 62 Events total.
+	if got, want := len(events), 62; got != want {
 		t.Fatalf("events = %d, want %d", got, want)
 	}
 	if !events[len(events)-1].EndOfTurn {
