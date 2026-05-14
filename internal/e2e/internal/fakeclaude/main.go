@@ -11,6 +11,12 @@
 //	PYRY_FAKE_CLAUDE_SESSIONS_DIR  directory that must already exist
 //	PYRY_FAKE_CLAUDE_INITIAL_UUID  stem for the first <uuid>.jsonl
 //	PYRY_FAKE_CLAUDE_TRIGGER       path watched for the rotation signal
+//	PYRY_FAKE_CLAUDE_STDIN_LOG     optional filesystem path; when set,
+//	                               every byte read from os.Stdin is
+//	                               appended (with fsync per write) so the
+//	                               e2e harness can observe what the
+//	                               supervisor wrote to the PTY. Default
+//	                               off — when unset, stdin is not read.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers.
@@ -28,6 +34,7 @@ const (
 	envSessionsDir = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
 	envInitialUUID = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
 	envTrigger     = "PYRY_FAKE_CLAUDE_TRIGGER"
+	envStdinLog    = "PYRY_FAKE_CLAUDE_STDIN_LOG"
 	pollInterval   = 50 * time.Millisecond
 )
 
@@ -35,6 +42,10 @@ func main() {
 	dir := mustEnv(envSessionsDir)
 	initU := mustEnv(envInitialUUID)
 	trig := mustEnv(envTrigger)
+
+	if logPath := os.Getenv(envStdinLog); logPath != "" {
+		startStdinLogger(logPath)
+	}
 
 	f := openSession(dir, initU)
 	rotated := false
@@ -65,6 +76,33 @@ func openSession(dir, uuid string) *os.File {
 		fatalf("fsync %s: %v", path, err)
 	}
 	return f
+}
+
+// startStdinLogger fsyncs after every Read so a sibling test process polling
+// the file from outside sees bytes promptly (macOS APFS otherwise can defer
+// visibility across processes).
+func startStdinLogger(path string) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		fatalf("open stdin log %s: %v", path, err)
+	}
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				if _, werr := f.Write(buf[:n]); werr != nil {
+					return
+				}
+				if serr := f.Sync(); serr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 }
 
 func uuidV4() string {
