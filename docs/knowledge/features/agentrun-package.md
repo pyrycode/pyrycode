@@ -15,6 +15,11 @@ The trust/settings helpers are pure, free-function; the driver owns a `*exec.Cmd
 // claude resolves a workdir before reading ~/.claude.json's projects map.
 func ResolveWorkdir(workdir string) (string, error)
 
+// EncodeProjectDir returns the dashed directory-name segment claude uses
+// under ~/.claude/projects/ for the given workdir. Chains ResolveWorkdir
+// then maps '/' AND '.' to '-' in the resolved absolute path.
+func EncodeProjectDir(workdir string) (string, error)
+
 // MarkWorkdirTrusted sets projects[<ResolveWorkdir(workdir)>].
 // hasTrustDialogAccepted = true in <homeDir>/.claude.json, under a file lock
 // spanning the entire read-modify-write window. Idempotent. Atomic on-disk.
@@ -52,7 +57,13 @@ type DriveConfig struct {
 
 `projects` map keys are the **resolved** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. `ResolveWorkdir` does `filepath.Abs` then `filepath.EvalSymlinks`. The same pattern is used in `internal/sessions/rotation/watcher.go` for path comparison against the platform probe.
 
-Scope note: the dashed `-private-var-folders-...` encoding used under `~/.claude/projects/` directory naming is a **different** encoding, not handled by this package.
+## Two output shapes, two helpers
+
+`ResolveWorkdir` produces the resolved abs path (`/private/var/folders/...`) used as the `projects[...]` key inside `~/.claude.json`. `EncodeProjectDir` (#347) chains it and applies `strings.NewReplacer("/", "-", ".", "-")` to produce the dashed directory-name segment claude uses under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`. The two encodings are distinct: same input, different transforms for different consumers. Both helpers share the resolve half so the macOS realpath rule lives in one place; only the post-resolve transform differs.
+
+The substitution rule covers **both** `/` and `.`. Direct observation of `~/.claude/projects/` shows entries where a workdir segment like `/.pyrycode-worktrees/` encodes to `--pyrycode-worktrees-` — a doubled dash from `/` + `.`. The #347 ticket body specified only `/` → `-`; the architect spec amended the rule from observation and `docs/lessons.md:53`. Shipping the AC-literal rule would silently produce keys that never match claude's directory names for any workdir containing a `.` segment (`.git`, `.venv`, hidden-dir parents).
+
+`EncodeProjectDir` returns `ResolveWorkdir`'s error **unchanged** on failure — `errors.Is(err, fs.ErrNotExist)` continues to work through the chain. Result does NOT include the `~/.claude/projects/` prefix or any `.jsonl` suffix; it is the directory-name segment only.
 
 ## Lock strategy — sibling file, not data file
 
@@ -156,7 +167,7 @@ Defaults (`TrustDialogDelay = 2500ms`, `PromptDelay = 3500ms`) are exported as z
 ## Consumers
 
 - `pyry agent-run` (#342 wired `MarkWorkdirTrusted`; #339 wired `WriteSettings`; #332 wired `Drive`) — after flag validation, resolves `os.UserHomeDir()` → `MarkWorkdirTrusted(home, parsed.workdir)` → `WriteSettings(parsed.workdir, parsed.allowedTools)` → print `settings-file:` marker → `os.ReadFile(parsed.promptFile)` → `signal.NotifyContext(SIGTERM, SIGINT)` → `Drive(ctx, …)`. Order is mark-trust → settings → spawn so any prep failure short-circuits before the next step lands artefacts.
-- JSONL watcher (#333) — calls `ResolveWorkdir` to compute the same key shape claude uses when associating watched files with workdirs.
+- JSONL watcher (#333) — calls `EncodeProjectDir` (#347) to compute the `~/.claude/projects/<encoded-cwd>/` directory name and `ResolveWorkdir` for any `projects[...]` key comparison.
 
 ## Out of scope
 
