@@ -48,6 +48,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -593,6 +594,37 @@ func (s *Server) LastBinaryHello(serverID string) (protocol.Envelope, bool) {
 	defer s.mu.Unlock()
 	env, ok := s.lastBinaryHello[serverID]
 	return env, ok
+}
+
+// WaitBinary blocks until a binary is registered for serverID, the
+// context is done, or the deadline expires. Returns true if the binary
+// became registered before ctx expired; false otherwise. Unit and e2e
+// tests call this between dialing a binary and probing server-side
+// state (e.g. ForceCloseBinary) to close the upgrade→registration
+// race: websocket.Accept unblocks the client before the server-side
+// handler finishes inserting into s.binaries.
+func (s *Server) WaitBinary(ctx context.Context, serverID string) bool {
+	s.mu.Lock()
+	_, ok := s.binaries[serverID]
+	s.mu.Unlock()
+	if ok {
+		return true
+	}
+	t := time.NewTicker(2 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			s.mu.Lock()
+			_, ok := s.binaries[serverID]
+			s.mu.Unlock()
+			if ok {
+				return true
+			}
+		}
+	}
 }
 
 // ForceCloseBinary closes the WS conn currently bound to serverID with

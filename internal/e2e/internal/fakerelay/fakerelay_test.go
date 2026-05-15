@@ -484,6 +484,10 @@ func TestForceCloseBinary(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = bin.Close(websocket.StatusNormalClosure, "") })
 
+	if !s.WaitBinary(ctx, "alpha") {
+		t.Fatal("binary registration did not complete")
+	}
+
 	if !s.ForceCloseBinary("alpha") {
 		t.Fatal("ForceCloseBinary returned false for live binary")
 	}
@@ -494,6 +498,38 @@ func TestForceCloseBinary(t *testing.T) {
 	if s.ForceCloseBinary("ghost") {
 		t.Error("ForceCloseBinary returned true for unknown server-id")
 	}
+}
+
+func TestWaitBinary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("happy path", func(t *testing.T) {
+		t.Parallel()
+		s := newServer(t)
+		ctx, cancel := dialCtx(t)
+		defer cancel()
+
+		bin, _, err := dialBinary(ctx, t, s, "alpha")
+		if err != nil {
+			t.Fatalf("bind binary: %v", err)
+		}
+		t.Cleanup(func() { _ = bin.Close(websocket.StatusNormalClosure, "") })
+
+		if !s.WaitBinary(ctx, "alpha") {
+			t.Fatal("WaitBinary returned false for live binary")
+		}
+	})
+
+	t.Run("timeout path", func(t *testing.T) {
+		t.Parallel()
+		s := newServer(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+
+		if s.WaitBinary(ctx, "ghost") {
+			t.Fatal("WaitBinary returned true for unregistered server-id")
+		}
+	})
 }
 
 func statusOf(resp *http.Response) any {
