@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 	"unicode"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun/streamrunner"
@@ -266,20 +265,3 @@ func buildClaudeArgs(parsed agentRunArgs) []string {
 	}
 }
 
-// parseDurationEnv reads name as a time.Duration. Empty or unparseable
-// values return zero, which selfcheck.Config interprets as "use the
-// spike-validated production default". Production never sets these; the
-// knobs exist so unit tests can compress sleeps to milliseconds. Used only
-// by `pyry agent-run --self-check` (cmd/pyry/agent_run_selfcheck.go); the
-// stream-json runtime path no longer has timing knobs.
-func parseDurationEnv(name string) time.Duration {
-	raw := os.Getenv(name)
-	if raw == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil {
-		return 0
-	}
-	return d
-}

@@ -10,25 +10,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/agentrun/selfcheck"
 )
 
 // runAgentRunSelfCheck is the `pyry agent-run --self-check` codepath:
-// materialise a throwaway workdir + canonical deny-default settings file,
-// run selfcheck.SelfCheckDenyDefault against the resolved claude binary,
-// and render PASS / FAIL / inconclusive for human + CI consumption.
+// materialise a throwaway workdir, run selfcheck.SelfCheckDenyDefault
+// against the resolved claude binary in stream-json mode, and render
+// PASS / FAIL / inconclusive for human + CI consumption.
 //
 // Returns nil on PASS. Returns the wrapped sentinel
 // (selfcheck.ErrBashInvoked / selfcheck.ErrTimeout) on FAIL or
 // inconclusive so main's top-level error printer surfaces a non-zero
-// exit. Infrastructure errors (mkdtemp, write, exec spawn) propagate
-// verbatim.
+// exit. Infrastructure errors (mkdtemp, exec spawn) propagate verbatim.
 func runAgentRunSelfCheck(stdout io.Writer) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("agent-run: self-check: home dir: %w", err)
-	}
 	workdir, err := os.MkdirTemp("", "pyry-self-check-*")
 	if err != nil {
 		return fmt.Errorf("agent-run: self-check: mkdtemp: %w", err)
@@ -40,18 +34,11 @@ func runAgentRunSelfCheck(stdout io.Writer) error {
 		claudeBin = "claude"
 	}
 
-	if _, err := agentrun.WriteSettings(workdir, []string{"Read"}); err != nil {
-		return fmt.Errorf("agent-run: self-check: %w", err)
-	}
-
 	version := captureClaudeVersion(claudeBin)
 
 	result, err := selfcheck.SelfCheckDenyDefault(context.Background(), selfcheck.Config{
-		ClaudeBin:        claudeBin,
-		HomeDir:          home,
-		Workdir:          workdir,
-		TrustDialogDelay: parseDurationEnv("PYRY_AGENT_RUN_TRUST_DELAY"),
-		PromptDelay:      parseDurationEnv("PYRY_AGENT_RUN_PROMPT_DELAY"),
+		ClaudeBin: claudeBin,
+		WorkDir:   workdir,
 	})
 
 	switch {
@@ -62,7 +49,7 @@ func runAgentRunSelfCheck(stdout io.Writer) error {
 		return nil
 
 	case errors.Is(err, selfcheck.ErrBashInvoked):
-		writeSelfCheckFailMessage(stdout, workdir, result.Evidence)
+		writeSelfCheckFailMessage(stdout, result.Evidence)
 		return err
 
 	case errors.Is(err, selfcheck.ErrTimeout):
@@ -81,24 +68,24 @@ func runAgentRunSelfCheck(stdout io.Writer) error {
 // writeSelfCheckFailMessage renders the multi-line FAIL operator-
 // affordance to stdout. Pinned by TestRunAgentRunSelfCheck_FAIL —
 // any rewording must update that test in lockstep.
-func writeSelfCheckFailMessage(stdout io.Writer, workdir string, evidence []byte) {
+func writeSelfCheckFailMessage(stdout io.Writer, evidence []byte) {
 	fmt.Fprintln(stdout, "pyry agent-run --self-check: FAIL — deny-default whitelist did NOT enforce")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What was tested:")
-	fmt.Fprintf(stdout, "  per-spawn settings file at %s/%s with\n", workdir, agentrun.SettingsFilename)
-	fmt.Fprintln(stdout, `  permissions.defaultMode "deny" and permissions.allow ["Read"]; canned`)
-	fmt.Fprintln(stdout, `  prompt: "Use Bash to echo hello. Be brief."`)
+	fmt.Fprintln(stdout, "  claude launched with `--allowed-tools \"Read\" --dangerously-skip-permissions`")
+	fmt.Fprintln(stdout, "  in stream-json mode; canned prompt: \"Use Bash to echo hello. Be brief.\"")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What was observed:")
-	fmt.Fprintln(stdout, `  Assistant tool_use with name "Bash" appeared in claude's JSONL output.`)
-	fmt.Fprintln(stdout, "  Evidence (verbatim line from the session JSONL):")
+	fmt.Fprintln(stdout, `  Assistant tool_use with name "Bash" appeared in claude's stream-json stdout.`)
+	fmt.Fprintln(stdout, "  Evidence (verbatim assistant event):")
 	fmt.Fprintf(stdout, "    %s\n", strings.TrimRight(string(evidence), "\n"))
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What to check:")
-	fmt.Fprintln(stdout, "  The permissions.defaultMode schema may have changed in claude. Compare")
-	fmt.Fprintln(stdout, "  the current claude `--settings` schema docs to the shape pyry writes in")
-	fmt.Fprintln(stdout, "  internal/agentrun/settings.go. References: #329 (Phase A spike) and #336")
-	fmt.Fprintln(stdout, "  (this self-check).")
+	fmt.Fprintln(stdout, "  The `--allowed-tools` enforcement contract may have changed in claude.")
+	fmt.Fprintln(stdout, "  Compare the current claude `--allowed-tools` / `--dangerously-skip-permissions`")
+	fmt.Fprintln(stdout, "  behaviour to the argv pyry writes in cmd/pyry/agent_run.go's `buildClaudeArgs`.")
+	fmt.Fprintln(stdout, "  References: #329 (Phase A spike), #336 (predecessor, superseded),")
+	fmt.Fprintln(stdout, "  #375 (this rewrite).")
 }
 
 // captureClaudeVersion runs `claude --version` with a 5-second budget and
