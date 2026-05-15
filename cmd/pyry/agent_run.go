@@ -2,27 +2,20 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unicode"
 
-	"golang.org/x/sync/errgroup"
-
-	"github.com/pyrycode/pyrycode/internal/agentrun"
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl/tail"
-	"github.com/pyrycode/pyrycode/internal/agentrun/streamjson"
+	"github.com/pyrycode/pyrycode/internal/agentrun/streamrunner"
 )
 
 // agentRunArgs is the parsed shape of `pyry agent-run`'s flag set. Field
@@ -185,17 +178,14 @@ func requireDir(path string) error {
 }
 
 // runAgentRun implements `pyry agent-run`: parse and validate the full flag
-// surface, mark the workspace trusted, emit the per-spawn deny-default
-// settings file, print its resolved path on stdout, mint a session UUIDv4,
-// spawn `claude` in a PTY under --session-id, watch the on-disk JSONL via
-// internal/agentrun/jsonl/tail, and re-emit each watcher Event onto stdout
-// as line-delimited stream-json. On run termination a final `type:"result"`
-// trailer is composed and emitted.
+// surface, then spawn claude via streamrunner with the stream-json input/
+// output formats. Claude's stdout (the canonical stream-json event stream,
+// including its own `system init` and `result` events) is forwarded
+// byte-for-byte to stdout; stderr is forwarded to os.Stderr.
 //
-// Stdout contract: the `settings-file: ` marker line, followed by the
-// re-emitted stream-json event lines (one per watcher Event), followed by
-// exactly one `type:"result"` trailer. The dispatcher's parser consumes
-// this stream as if it were `claude -p --output-format stream-json` output.
+// Stdout contract: claude's stdout, verbatim. The dispatcher's parser
+// consumes this stream as if it were `claude -p --output-format stream-json`
+// output.
 func runAgentRun(stdout io.Writer, args []string) error {
 	// --self-check is a sibling verb mode (#336): boot-time verification
 	// that permissions.defaultMode "deny" in the per-spawn settings file
@@ -208,20 +198,6 @@ func runAgentRun(stdout io.Writer, args []string) error {
 	parsed, err := parseAgentRunArgs(args)
 	if err != nil {
 		return err
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("agent-run: resolving home directory: %w", err)
-	}
-	if err := agentrun.MarkWorkdirTrusted(home, parsed.workdir); err != nil {
-		return fmt.Errorf("agent-run: pre-populating workspace trust: %w", err)
-	}
-	settingsPath, err := agentrun.WriteSettings(parsed.workdir, parsed.allowedTools)
-	if err != nil {
-		return fmt.Errorf("agent-run: %w", err)
-	}
-	if _, err := fmt.Fprintf(stdout, "settings-file: %s\n", settingsPath); err != nil {
-		return fmt.Errorf("agent-run: write settings-file marker: %w", err)
 	}
 
 	promptBytes, err := os.ReadFile(parsed.promptFile)
@@ -236,98 +212,66 @@ func runAgentRun(stdout io.Writer, args []string) error {
 		claudeBin = "claude"
 	}
 
-	sessionID, err := newSessionUUID()
-	if err != nil {
-		return fmt.Errorf("agent-run: mint session id: %w", err)
-	}
-
-	emitter, err := streamjson.New(streamjson.Config{
-		Writer:    stdout,
-		SessionID: sessionID,
-	})
-	if err != nil {
-		return fmt.Errorf("agent-run: stream emitter: %w", err)
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	watcher, err := tail.New(tail.Config{
-		Workdir:     parsed.workdir,
-		SessionID:   sessionID,
-		HomeDir:     home,
-		OnEvent:     func(ev jsonl.Event) { _ = emitter.Emit(ev) },
-		OnEndOfTurn: cancel,
+	err = streamrunner.Run(ctx, streamrunner.Config{
+		ClaudeBin:   claudeBin,
+		WorkDir:     parsed.workdir,
+		Args:        buildClaudeArgs(parsed),
+		PromptBytes: promptBytes,
+		Stdout:      stdout,
+		Stderr:      os.Stderr,
 	})
-	if err != nil {
-		return fmt.Errorf("agent-run: tail watcher: %w", err)
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return watcher.Run(gctx) })
-	g.Go(func() error {
-		return agentrun.Drive(gctx, agentrun.DriveConfig{
-			ClaudeBin:        claudeBin,
-			WorkDir:          parsed.workdir,
-			Args:             buildClaudeArgs(parsed, settingsPath, sessionID),
-			PromptBytes:      promptBytes,
-			TrustDialogDelay: parseDurationEnv("PYRY_AGENT_RUN_TRUST_DELAY"),
-			PromptDelay:      parseDurationEnv("PYRY_AGENT_RUN_PROMPT_DELAY"),
-		})
-	})
-	runErr := g.Wait()
-
-	classifyForEmitter(emitter, runErr)
-	if cerr := emitter.Close(); cerr != nil {
-		slog.Default().Warn("agent-run: stream trailer write failed", "err", cerr)
-	}
-
-	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			return fmt.Errorf("agent-run: drive: %w", runErr)
-		}
-		if errors.Is(runErr, context.Canceled) {
-			return nil
-		}
-		return fmt.Errorf("agent-run: drive: %w", runErr)
-	}
-	return nil
-}
-
-// classifyForEmitter translates the errgroup result into a streamjson
-// ExitReason override. nil and context.Canceled are not overrides — the
-// emitter's Close defaults already handle the EOT-observed vs not-observed
-// split. Any other error (ExitError, watcher I/O failure, etc.) classifies
-// as ExitReasonError.
-func classifyForEmitter(em *streamjson.Emitter, err error) {
 	if err == nil {
-		return
+		return nil
 	}
 	if errors.Is(err, context.Canceled) {
-		return
+		return nil
 	}
-	em.SetExitReason(streamjson.ExitReasonError)
+	return fmt.Errorf("agent-run: %w", err)
 }
 
-// newSessionUUID returns a fresh UUIDv4-shaped string for use as claude's
-// --session-id. Mirrors internal/conversations/id.go:NewID's pattern; not
-// extracted because this is the sole agent-run call site.
-func newSessionUUID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("read random: %w", err)
+// buildClaudeArgs constructs the argv passed to `claude` (without argv[0])
+// for the stream-json subprocess pipeline.
+//
+// Notes on individual flags:
+//
+//   - `--input-format stream-json` causes claude to read one user-turn
+//     envelope from stdin.
+//   - `--output-format stream-json --verbose` is the required pair to get
+//     assistant message events on stdout under stream-json mode (without
+//     `--verbose`, only the final `result` is emitted).
+//   - `--dangerously-skip-permissions` removes the workspace-trust dialog
+//     and the per-spawn settings file (replaced by `--allowed-tools` as the
+//     authoritative tool gate). Acceptable in this verb because the
+//     dispatcher is the sole caller and operates inside an isolated worktree;
+//     the spawn's blast radius is bounded by `--allowed-tools`, not by the
+//     trust dialog.
+//   - `--max-turns` is honoured in stream-json mode (interactive mode
+//     ignored it) and bounds runaway-agent turn budget.
+//   - `--allowed-tools` is comma-joined; `splitAllowedTools` already
+//     normalised operator input into a clean slice at parse time.
+func buildClaudeArgs(parsed agentRunArgs) []string {
+	return []string{
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions",
+		"--append-system-prompt-file", parsed.systemPromptFile,
+		"--model", parsed.model,
+		"--effort", parsed.effort,
+		"--max-turns", strconv.Itoa(parsed.maxTurns),
+		"--allowed-tools", strings.Join(parsed.allowedTools, ","),
 	}
-	b[6] = b[6]&0x0f | 0x40 // version 4
-	b[8] = b[8]&0x3f | 0x80 // variant RFC 4122
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // parseDurationEnv reads name as a time.Duration. Empty or unparseable
-// values return zero, which DriveConfig interprets as "use the
+// values return zero, which selfcheck.Config interprets as "use the
 // spike-validated production default". Production never sets these; the
-// knobs exist so unit tests can compress sleeps to milliseconds.
+// knobs exist so unit tests can compress sleeps to milliseconds. Used only
+// by `pyry agent-run --self-check` (cmd/pyry/agent_run_selfcheck.go); the
+// stream-json runtime path no longer has timing knobs.
 func parseDurationEnv(name string) time.Duration {
 	raw := os.Getenv(name)
 	if raw == "" {
@@ -338,32 +282,4 @@ func parseDurationEnv(name string) time.Duration {
 		return 0
 	}
 	return d
-}
-
-// buildClaudeArgs constructs the argv passed to `claude` (without argv[0]).
-//
-// Two security invariants are pinned by tests:
-//
-//   - `--permission-mode default` MUST appear. The per-spawn settings file
-//     emitted by #339 has `defaultMode: "deny"`; the upstream spike used
-//     `acceptEdits`, which silently overrides the file's default and
-//     defeats the whitelist. The literal flag pair is load-bearing.
-//   - `--allowedTools` MUST NOT appear. In interactive mode under the
-//     settings layer, `--allowedTools` is additive and silently broadens
-//     the allow-list. The settings file is the sole authority.
-//
-// `--max-turns` and `--output-format` are accepted at the pyry CLI surface
-// (the dispatcher requires them for budget bookkeeping and intent
-// declaration respectively) but are NOT propagated to interactive claude:
-// claude's interactive mode does not honour `--max-turns`, and
-// `--output-format stream-json` is a `-p`-mode-only flag.
-func buildClaudeArgs(parsed agentRunArgs, settingsPath, sessionID string) []string {
-	return []string{
-		"--settings", settingsPath,
-		"--permission-mode", "default",
-		"--model", parsed.model,
-		"--append-system-prompt-file", parsed.systemPromptFile,
-		"--effort", parsed.effort,
-		"--session-id", sessionID,
-	}
 }
