@@ -93,10 +93,11 @@ type Harness struct {
 	// tests can verify it is gone after cleanup runs.
 	PID int
 
-	// Stdout / Stderr accumulate the child's output. Safe to read after the
-	// process has exited (cleanup waits for the wait goroutine).
-	Stdout *bytes.Buffer
-	Stderr *bytes.Buffer
+	// Stdout / Stderr accumulate the child's output. The underlying
+	// buffer is mutex-guarded so a test goroutine can poll for log
+	// signals while os/exec's pipe-copy goroutine is still writing.
+	Stdout *safeBuffer
+	Stderr *safeBuffer
 
 	cmd         *exec.Cmd
 	doneCh      chan struct{}
@@ -430,7 +431,7 @@ type spawnOpts struct {
 // `--` claude-arg sentinel. Go's flag package processes args left-to-right
 // with last-wins semantics, so a duplicate flag in extraFlags overrides
 // the standard default (e.g. `-pyry-idle-timeout=1s` to enable eviction).
-func spawn(t *testing.T, home string, extraFlags ...string) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
+func spawn(t *testing.T, home string, extraFlags ...string) (string, *exec.Cmd, *safeBuffer, *safeBuffer, chan struct{}) {
 	t.Helper()
 	return spawnWith(t, home, spawnOpts{extraFlags: extraFlags})
 }
@@ -439,7 +440,7 @@ func spawn(t *testing.T, home string, extraFlags ...string) (string, *exec.Cmd, 
 // historical /bin/sleep 99999 behaviour. Callers needing fake-claude or
 // other supervised-child wiring populate spawnOpts and let the defaults
 // fill in the rest.
-func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
+func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *safeBuffer, *safeBuffer, chan struct{}) {
 	t.Helper()
 	if o.claudeBin == "" {
 		o.claudeBin = "/bin/sleep"
@@ -451,8 +452,8 @@ func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *byte
 	bin := ensurePyryBuilt(t)
 	socket := filepath.Join(home, "pyry.sock")
 
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
+	stdout := &safeBuffer{}
+	stderr := &safeBuffer{}
 
 	args := []string{
 		"-pyry-socket=" + socket,
