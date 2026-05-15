@@ -35,6 +35,8 @@ Single tag, no alternation. The `e2e_install` precedent established the `e2e_<pu
 
 The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRun` → `ReadJSONL`. Subsequent tickets (#364–#368, the actual prompt-poisoning / trust-boundary tests) build on this three-step shape.
 
+- `prompt_fidelity_test.go` (#364) — first consumer of the trio. `TestRealClaude_PromptFidelity` runs `pyry agent-run` against the real `claude` CLI with a distinctive ASCII-only prompt literal (`INTEGRATION_TEST_PROMPT_PROMPTFIDELITY_2N7Q4R8W`), then asserts the literal survives byte-for-byte into the first `user`-kinded entry of the resulting JSONL session via `bytes.Contains(event.Raw, []byte(literal))`. Pins the streamrunner envelope's text round-trip end-to-end — would catch any future preprocessing, escaping drift, or wiring change that bypasses streamrunner. Run-level asserts (`ExitCode == 0`, `SessionID != ""`) come BEFORE the JSONL assert so a setup/auth/network failure surfaces as itself rather than as "no user entry". Uses `--max-turns=1`, `--effort=low`, `--model=claude-haiku-4-5` to minimise per-run cost (~$0.01). See [`codebase/364.md`](../codebase/364.md) for the design rationale.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -85,3 +87,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#362](https://github.com/pyrycode/pyrycode/issues/362) — the now-removed nightly workflow; codebase note at [`codebase/362.md`](../codebase/362.md). See also [#379](https://github.com/pyrycode/pyrycode/issues/379) for the removal.
 - Ticket [#372](https://github.com/pyrycode/pyrycode/issues/372) — `WithWorktree` + `ReadJSONL` fixture helpers; codebase note at [`codebase/372.md`](../codebase/372.md).
 - Ticket [#373](https://github.com/pyrycode/pyrycode/issues/373) — `RunPyryAgentRun` subprocess fixture helper; codebase note at [`codebase/373.md`](../codebase/373.md).
+- Ticket [#364](https://github.com/pyrycode/pyrycode/issues/364) — prompt-fidelity regression guard, first consumer of the fixture trio; codebase note at [`codebase/364.md`](../codebase/364.md).
