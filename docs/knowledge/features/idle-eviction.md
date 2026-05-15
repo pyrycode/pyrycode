@@ -53,7 +53,7 @@ type SessionConfig struct {
 
 CLI flags (`cmd/pyry/main.go`):
 
-- `-pyry-idle-timeout` (default `15m`). `0` disables idle eviction entirely. Operator escape hatch and smoke-test knob (`-pyry-idle-timeout 30s`).
+- `-pyry-idle-timeout` (default `0` / disabled; opt in with e.g. `30s`). Eviction is opt-in because the original `15m` default silently killed the supervised claude in daemon-mode (`install-service`) installs where the operator wants claude warm for plugin inbound — see #395. Operator escape hatch and smoke-test knob (`-pyry-idle-timeout 30s`).
 - `-pyry-active-cap` (default `0` = uncapped). Negative values map to "unset" via `Pool.New`'s contract (`<=0` → uncapped); no validation in `runSupervisor`. Today's primary consumer is the e2e suite (#116); production operators leave it at zero until Phase 2.0's auto-mint workload makes it load-bearing.
 
 ## `Session` surface
