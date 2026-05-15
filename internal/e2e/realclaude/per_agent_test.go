@@ -24,7 +24,7 @@ import (
 )
 
 // dispatcherBaseTools mirrors the `baseTools` literal at
-// agents/dispatcher/src/dispatch.ts:1190 (in the sibling agent-dispatcher
+// agents/dispatcher/src/dispatch.ts:1183 (in the sibling agent-dispatcher
 // repo). If a future renumber moves that line, update both the cite and
 // the contents below. A drift between this list and the dispatcher's
 // goes silent until a role test starts producing surprising tool denials.
@@ -50,14 +50,11 @@ var dispatcherBaseTools = []string{
 	"mcp__codegraph__codegraph_context",
 	"mcp__codegraph__codegraph_files",
 	"mcp__codegraph__codegraph_status",
-	"mcp__plugin_figma_figma__get_design_context",
-	"mcp__plugin_figma_figma__get_screenshot",
-	"mcp__plugin_figma_figma__get_metadata",
 }
 
 // dispatcherAllowedToolsForRole returns the dispatcher's per-role allowed-
 // tools list: baseTools for po/developer/documentation, baseTools+Agent for
-// architect/code-review. Mirrors agents/dispatcher/src/dispatch.ts:1191-1193.
+// architect/code-review. Mirrors agents/dispatcher/src/dispatch.ts:1184-1186.
 // An unknown role is a programmer error at the only five call sites in this
 // file, so we panic rather than thread an `ok` return through every caller.
 func dispatcherAllowedToolsForRole(role string) []string {
