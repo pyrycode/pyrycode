@@ -116,11 +116,18 @@ type Supervisor struct {
 	convMu         sync.Mutex
 	currentConvID  string
 
-	// ptmxMu guards ptmx. Leaf-only; never held while acquiring convMu or
-	// mu. setPTY (called from runOnce) and WriteUserTurn (called from
-	// arbitrary handler goroutines) serialize through this lock.
+	// ptmxMu guards ptmx and ptmxReadyCh. Leaf-only; never held while
+	// acquiring convMu or mu. setPTY (called from runOnce) and
+	// WriteUserTurn (called from arbitrary handler goroutines) serialize
+	// through this lock.
 	ptmxMu sync.Mutex
 	ptmx   *os.File
+	// ptmxReadyCh is closed by setPTY when a non-nil PTY is registered;
+	// freshened (re-opened) by setPTY(nil) so subsequent WaitForPTY waiters
+	// block again until the next runOnce iteration binds a new PTY.
+	// WaitForPTY captures the channel reference under ptmxMu then awaits
+	// it unlocked — same pattern as Session.activeCh.
+	ptmxReadyCh chan struct{}
 }
 
 // State returns a snapshot of the current supervisor state. Safe to call from
@@ -187,10 +194,52 @@ func (s *Supervisor) CurrentConversation() string {
 // runOnce iteration. WriteUserTurn writes to this fd; setPTY(nil) before the
 // actual Close ensures an in-flight WriteUserTurn sees nil rather than a
 // just-closed fd. Mirrors Bridge.SetPTY.
+//
+// ptmxReadyCh choreography: setPTY(non-nil) closes the readiness channel
+// (idempotent — close is a no-op when already closed); setPTY(nil)
+// allocates a fresh open channel (idempotent — leaves the channel alone
+// when it is already open). WaitForPTY captures the chan reference under
+// ptmxMu and awaits it unlocked.
 func (s *Supervisor) setPTY(f *os.File) {
 	s.ptmxMu.Lock()
+	defer s.ptmxMu.Unlock()
 	s.ptmx = f
+	if f != nil {
+		select {
+		case <-s.ptmxReadyCh:
+			// already closed
+		default:
+			close(s.ptmxReadyCh)
+		}
+		return
+	}
+	select {
+	case <-s.ptmxReadyCh:
+		s.ptmxReadyCh = make(chan struct{})
+	default:
+		// already open
+	}
+}
+
+// WaitForPTY blocks until the supervisor has a bound PTY (closed by setPTY
+// on the next runOnce iteration), or ctx is cancelled. Returns nil on
+// readiness, ctx.Err() on cancel. Safe from any goroutine; idempotent on
+// an already-bound PTY (returns immediately).
+//
+// Session.Activate calls this at the tail of its waiting phase so callers
+// that follow Activate with WriteUserTurn observe a live PTY rather than
+// the ~hundreds-of-ms gap between transitionTo closing activeCh and
+// runOnce binding the new master.
+func (s *Supervisor) WaitForPTY(ctx context.Context) error {
+	s.ptmxMu.Lock()
+	ch := s.ptmxReadyCh
 	s.ptmxMu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // New constructs a Supervisor from a Config, applying defaults.
@@ -214,9 +263,10 @@ func New(cfg Config) (*Supervisor, error) {
 		cfg.BackoffReset = 60 * time.Second
 	}
 	return &Supervisor{
-		cfg:   cfg,
-		log:   cfg.Logger,
-		state: State{Phase: PhaseStarting},
+		cfg:         cfg,
+		log:         cfg.Logger,
+		state:       State{Phase: PhaseStarting},
+		ptmxReadyCh: make(chan struct{}),
 	}, nil
 }
 

@@ -604,6 +604,136 @@ func TestSupervisor_WriteUserTurn_NoPTYDrops(t *testing.T) {
 	}
 }
 
+// TestSupervisor_WaitForPTY_ReturnsImmediatelyWhenSet covers the
+// already-bound branch: setPTY(non-nil) closes ptmxReadyCh, and a
+// subsequent WaitForPTY observes the closed channel and returns
+// immediately with nil.
+func TestSupervisor_WaitForPTY_ReturnsImmediatelyWhenSet(t *testing.T) {
+	t.Parallel()
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// A dummy *os.File suffices; setPTY does not read from it. /dev/null is
+	// universally available and cleans up when the process exits.
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer f.Close()
+	sup.setPTY(f)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := sup.WaitForPTY(ctx); err != nil {
+		t.Errorf("WaitForPTY (already set) = %v, want nil", err)
+	}
+}
+
+// TestSupervisor_WaitForPTY_BlocksUntilSet covers the not-yet-bound
+// branch: WaitForPTY blocks while ptmxReadyCh is open, then unblocks
+// when a concurrent setPTY closes it.
+func TestSupervisor_WaitForPTY_BlocksUntilSet(t *testing.T) {
+	t.Parallel()
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer f.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		done <- sup.WaitForPTY(ctx)
+	}()
+
+	// Ensure the waiter is parked before we set the PTY; otherwise we'd
+	// race the already-set fast path and not actually cover this branch.
+	time.Sleep(50 * time.Millisecond)
+	sup.setPTY(f)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("WaitForPTY = %v, want nil after setPTY", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForPTY did not unblock after setPTY")
+	}
+}
+
+// TestSupervisor_WaitForPTY_FreshensAfterClear covers the
+// re-iteration shape: setPTY(nil) after a prior set freshens the
+// readiness channel so the next WaitForPTY blocks again until the
+// next non-nil setPTY.
+func TestSupervisor_WaitForPTY_FreshensAfterClear(t *testing.T) {
+	t.Parallel()
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer f.Close()
+
+	// First iteration: bind and observe immediate readiness.
+	sup.setPTY(f)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel1()
+	if err := sup.WaitForPTY(ctx1); err != nil {
+		t.Fatalf("WaitForPTY (iter 1) = %v, want nil", err)
+	}
+
+	// Iteration teardown: setPTY(nil) freshens the chan.
+	sup.setPTY(nil)
+
+	// Now a WaitForPTY with a short deadline must time out — the chan is
+	// open again.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if err := sup.WaitForPTY(ctx2); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WaitForPTY after clear = %v, want context.DeadlineExceeded", err)
+	}
+
+	// Re-bind: the fresh chan closes, WaitForPTY returns nil.
+	sup.setPTY(f)
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel3()
+	if err := sup.WaitForPTY(ctx3); err != nil {
+		t.Errorf("WaitForPTY (iter 2) = %v, want nil", err)
+	}
+}
+
+// TestSupervisor_WaitForPTY_CtxCancel covers the ctx-cancel branch: a
+// cancelled ctx surfaces verbatim without blocking on the chan.
+func TestSupervisor_WaitForPTY_CtxCancel(t *testing.T) {
+	t.Parallel()
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sup.WaitForPTY(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("WaitForPTY(cancelled) = %v, want context.Canceled", err)
+	}
+}
+
 // TestSupervisor_WriteUserTurn_CursorConcurrency stresses the cursor's
 // mutex under contention. Multiple writers alternate ids while a reader
 // loops on CurrentConversation. The assertion is twofold: -race stays

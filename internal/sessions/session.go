@@ -187,14 +187,22 @@ func (s *Session) Resize(rows, cols uint16) error {
 
 // Activate moves the session into stateActive if it is currently evicted,
 // blocking until the lifecycle goroutine has started the supervisor AND the
-// post-transition registry persist has completed (or ctx is cancelled).
-// Safe from any goroutine; idempotent under concurrent calls.
+// post-transition registry persist has completed AND the supervisor has
+// bound its PTY (or ctx is cancelled). Safe from any goroutine; idempotent
+// under concurrent calls.
 //
 // No early-return for "already active" — callers always wait on activeCh.
 // When the session is fully active and persisted, activeCh is already closed
 // and the receive returns immediately. When a transition is in flight (state
 // flipped, persist still running), the receive correctly blocks until the
 // persist completes and transitionTo closes activeCh.
+//
+// PTY-readiness wait: after the state flip, runOnce takes a brief window
+// (~hundreds of ms) to allocate the PTY master and call setPTY. Activate
+// waits past that window via supervisor.WaitForPTY so callers that follow
+// Activate with WriteUserTurn/Resize observe a live PTY rather than the
+// silent-drop-on-nil branch. The relay-routed send_message path depends
+// on this guarantee (#396).
 func (s *Session) Activate(ctx context.Context) error {
 	s.lcMu.Lock()
 	ch := s.activeCh
@@ -211,10 +219,10 @@ func (s *Session) Activate(ctx context.Context) error {
 
 	select {
 	case <-ch:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	return s.sup.WaitForPTY(ctx)
 }
 
 // Evict moves the session into stateEvicted if it is currently active,
@@ -338,6 +346,17 @@ func (s *Session) runActive(ctx context.Context) error {
 				timer.Reset(s.idleTimeout)
 				continue
 			}
+			// SIGKILL-cause record: pairs with the supervisor-level
+			// "claude exited" line that follows. Operators reading logs
+			// after an idle eviction see this WARN first and don't have
+			// to correlate the generic "signal: killed" exit with the
+			// configured idle window. #396 added this signal so a
+			// supervision-incomplete state has an explicit log line.
+			s.log.Warn("session: idle eviction firing",
+				"event", "session.idle_eviction",
+				"session_id", string(s.id),
+				"idle_timeout", s.idleTimeout,
+				"bootstrap", s.bootstrap)
 			cancelSup()
 			drainSup()
 			return nil
