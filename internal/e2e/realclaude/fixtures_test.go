@@ -3,11 +3,15 @@
 package realclaude
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
@@ -107,6 +111,215 @@ func TestResolveAndOpenJSONL_MissingFile(t *testing.T) {
 
 func TestJSONLEntry_AliasCompiles(t *testing.T) {
 	var _ jsonl.Event = JSONLEntry{}
+}
+
+// TestMain branches on GO_TEST_HELPER_PROCESS so the test binary doubles as
+// a fake `pyry`. Otherwise it points PYRY_E2E_BIN at itself so that
+// ensurePyryBuilt short-circuits and tests in this package run against the
+// fake — none of them want real pyry.
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_TEST_HELPER_PROCESS") == "1" {
+		runFakePyry()
+		return
+	}
+	os.Setenv("PYRY_E2E_BIN", os.Args[0])
+	os.Exit(m.Run())
+}
+
+func runFakePyry() {
+	switch os.Getenv("PYRY_E2E_FAKE_MODE") {
+	case "happy":
+		fmt.Println(`{"type":"system","subtype":"init","cwd":"/tmp","tools":["Read"],"model":"claude-haiku-4-5","session_id":"` + fakeInitSessionID + `"}`)
+		fmt.Println(`{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}`)
+		fmt.Println(`{"type":"result","session_id":"` + fakeInitSessionID + `"}`)
+		os.Exit(0)
+	case "fail":
+		fmt.Fprintln(os.Stderr, "fake pyry: simulated failure before any stream-json")
+		os.Exit(2)
+	case "sleep":
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	case "argv":
+		for _, a := range os.Args {
+			fmt.Fprintln(os.Stderr, a)
+		}
+		os.Exit(0)
+	}
+	fmt.Fprintf(os.Stderr, "fake pyry: unknown PYRY_E2E_FAKE_MODE %q\n", os.Getenv("PYRY_E2E_FAKE_MODE"))
+	os.Exit(99)
+}
+
+const fakeInitSessionID = "11111111-1111-4111-8111-111111111111"
+
+func fullRunOpts(workdir string) RunOpts {
+	return RunOpts{
+		Workdir:      workdir,
+		Prompt:       "hello",
+		SystemPrompt: "you are a tester",
+		AllowedTools: []string{"Read"},
+		MaxTurns:     1,
+		Effort:       "low",
+		Model:        "claude-haiku-4-5",
+		ExtraEnv:     []string{"GO_TEST_HELPER_PROCESS=1"},
+	}
+}
+
+func TestRunPyryAgentRun_HappyPath(t *testing.T) {
+	workdir := WithWorktree(t)
+	opts := fullRunOpts(workdir)
+	opts.ExtraEnv = append(opts.ExtraEnv, "PYRY_E2E_FAKE_MODE=happy")
+
+	result := RunPyryAgentRun(t, opts)
+
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0 (stderr: %s)", result.ExitCode, result.Stderr)
+	}
+	if result.SessionID != fakeInitSessionID {
+		t.Fatalf("SessionID = %q, want %q", result.SessionID, fakeInitSessionID)
+	}
+	if !bytes.Contains(result.Stdout, []byte(`"subtype":"init"`)) {
+		t.Fatalf("stdout missing init envelope:\n%s", result.Stdout)
+	}
+	if !bytes.Contains(result.Stdout, []byte(`"type":"result"`)) {
+		t.Fatalf("stdout missing result trailer:\n%s", result.Stdout)
+	}
+}
+
+func TestValidateRunOpts_Positive(t *testing.T) {
+	if err := validateRunOpts(fullRunOpts("/tmp/x")); err != nil {
+		t.Fatalf("validateRunOpts(full) = %v, want nil", err)
+	}
+}
+
+func TestValidateRunOpts_Negative(t *testing.T) {
+	cases := []struct {
+		name      string
+		mut       func(*RunOpts)
+		wantField string
+	}{
+		{"workdir", func(o *RunOpts) { o.Workdir = "" }, "Workdir"},
+		{"prompt", func(o *RunOpts) { o.Prompt = "" }, "Prompt"},
+		{"system prompt", func(o *RunOpts) { o.SystemPrompt = "" }, "SystemPrompt"},
+		{"allowed tools", func(o *RunOpts) { o.AllowedTools = nil }, "AllowedTools"},
+		{"zero max turns", func(o *RunOpts) { o.MaxTurns = 0 }, "MaxTurns"},
+		{"negative max turns", func(o *RunOpts) { o.MaxTurns = -1 }, "MaxTurns"},
+		{"effort", func(o *RunOpts) { o.Effort = "" }, "Effort"},
+		{"model", func(o *RunOpts) { o.Model = "" }, "Model"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := fullRunOpts("/tmp/x")
+			tc.mut(&opts)
+			err := validateRunOpts(opts)
+			if err == nil {
+				t.Fatalf("validateRunOpts: want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Fatalf("err %q does not name field %q", err.Error(), tc.wantField)
+			}
+		})
+	}
+}
+
+func TestRunPyryAgentRun_InitEventAbsent(t *testing.T) {
+	workdir := WithWorktree(t)
+	opts := fullRunOpts(workdir)
+	opts.ExtraEnv = append(opts.ExtraEnv, "PYRY_E2E_FAKE_MODE=fail")
+
+	result := RunPyryAgentRun(t, opts)
+
+	if result.ExitCode != 2 {
+		t.Fatalf("ExitCode = %d, want 2 (stderr: %s)", result.ExitCode, result.Stderr)
+	}
+	if result.SessionID != "" {
+		t.Fatalf("SessionID = %q, want empty", result.SessionID)
+	}
+}
+
+// TestRunPyryAgentRun_Timeout re-execs itself so the inner branch's t.Fatalf
+// is captured as a subprocess failure rather than killing the outer test.
+func TestRunPyryAgentRun_Timeout(t *testing.T) {
+	if os.Getenv("PYRY_REALCLAUDE_TIMEOUT_INNER") == "1" {
+		workdir := WithWorktree(t)
+		opts := fullRunOpts(workdir)
+		opts.ExtraEnv = append(opts.ExtraEnv, "PYRY_E2E_FAKE_MODE=sleep")
+		opts.Timeout = 100 * time.Millisecond
+		RunPyryAgentRun(t, opts)
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunPyryAgentRun_Timeout$", "-test.v")
+	cmd.Env = append(os.Environ(), "PYRY_REALCLAUDE_TIMEOUT_INNER=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("inner test succeeded, want timeout failure:\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("timed out")) {
+		t.Fatalf("output missing 'timed out':\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("stdout:")) || !bytes.Contains(out, []byte("stderr:")) {
+		t.Fatalf("output missing stdout/stderr capture:\n%s", out)
+	}
+}
+
+func TestRunPyryAgentRun_ArgvContract(t *testing.T) {
+	workdir := WithWorktree(t)
+	opts := fullRunOpts(workdir)
+	opts.ExtraEnv = append(opts.ExtraEnv, "PYRY_E2E_FAKE_MODE=argv")
+	opts.AllowedTools = []string{"Read", "Bash"}
+	opts.MaxTurns = 3
+
+	result := RunPyryAgentRun(t, opts)
+
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	want := []string{
+		"agent-run",
+		"--prompt-file=" + filepath.Join(workdir, "prompt.txt"),
+		"--system-prompt-file=" + filepath.Join(workdir, "system.txt"),
+		"--allowed-tools=Read,Bash",
+		"--max-turns=3",
+		"--effort=low",
+		"--model=claude-haiku-4-5",
+		"--workdir=" + workdir,
+		"--output-format=stream-json",
+	}
+	for _, w := range want {
+		if !bytes.Contains(result.Stderr, []byte(w)) {
+			t.Fatalf("argv missing %q:\n%s", w, result.Stderr)
+		}
+	}
+}
+
+func TestParseInitSessionID(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty", "", ""},
+		{"init line", `{"type":"system","subtype":"init","session_id":"abc"}` + "\n", "abc"},
+		{"empty session id", `{"type":"system","subtype":"init","session_id":""}` + "\n", ""},
+		{
+			"non-init system line first",
+			`{"type":"system","subtype":"warn","session_id":"skip"}` + "\n" +
+				`{"type":"system","subtype":"init","session_id":"yes"}` + "\n",
+			"yes",
+		},
+		{"result trailer only", `{"type":"result","session_id":"x"}` + "\n", ""},
+		{
+			"malformed before init",
+			"not json\n" + `{"type":"system","subtype":"init","session_id":"ok"}` + "\n",
+			"ok",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseInitSessionID([]byte(tc.input)); got != tc.want {
+				t.Fatalf("parseInitSessionID = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func writeFixtureLines(t *testing.T, workdir, sessionID string, lines ...string) {
