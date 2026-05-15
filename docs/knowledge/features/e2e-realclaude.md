@@ -42,19 +42,26 @@ No `-race`. These are I/O-bound trust-boundary checks, not goroutine-stress test
 
 `make check` is unchanged. CI's per-PR `make check` does not run this suite — it stays opt-in for that path.
 
-## CI cadence: nightly workflow
+## CI cadence: code-review phase, no nightly workflow
 
-`.github/workflows/e2e-realclaude-nightly.yml` (#362) runs `make e2e-realclaude` on a schedule so an upstream `claude` binary regression surfaces within 24h instead of at the next production dispatch.
+The real-`claude` suite is NOT wired into GitHub Actions. It runs **locally
+during the code-review phase** of every dispatched ticket via the pipeline
+— see the code-review agent's `CLAUDE.md` for the invocation contract.
 
-- **Triggers:** `schedule: cron: "0 4 * * *"` (04:00 UTC daily) + `workflow_dispatch: {}` for manual validation. The 04:00 slot is offset from `self-check-daily.yml`'s 06:13 UTC so the two nightly real-claude jobs don't contend on any shared rate-limit window.
-- **Job:** single `e2e-realclaude` job on `ubuntu-latest`. Steps: `actions/checkout@v6` → `actions/setup-go@v6` with `go-version: "1.26.x"` (exact parity with `self-check-daily.yml`) → `npm install -g @anthropic-ai/claude-code` → `make e2e-realclaude` with `ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}` in the step's `env:` block. **No `go build` step** — unlike `self-check-daily.yml` (which builds `pyry` then exec's it), this workflow runs Go tests directly via the make target; `go test` handles compilation.
-- **`timeout-minutes: 15`.** Conservative cap. The #361 smoke test is fast (~seconds), but #363–#368 will add longer scenarios. Hard upper bound is GitHub Actions' default 6h; 15 minutes prevents a hung `claude` from burning that ceiling.
-- **No `continue-on-error: true`.** A red nightly IS the entire signal.
-- **Monitoring contract: badge-only.** Same as `self-check-daily.yml` (#336). No auto-issue, no Discord/Slack webhook. Rationale follows the project's evidence-based fix selection principle — there's no observed "operator missed a red badge" failure mode yet; adding a notification channel speculatively is premature. If badge-only proves insufficient in practice, follow up in a separate ticket.
-- **Secret missing failure mode:** if `ANTHROPIC_API_KEY` is unset, the test that depends on it fails inside the suite — surfaces as a red badge with a clear test-output reason. No workflow-level pre-check.
-- **Cost:** every run consumes API credits. Do not enable a more aggressive cadence without revisiting the cost/coverage tradeoff.
+The earlier nightly workflow (`.github/workflows/e2e-realclaude-nightly.yml`,
+#362) was removed in #379 the same day it landed. CI-side rationale for the
+removal:
 
-The make target is the only contract between the workflow and the suite — future tests added under `internal/e2e/realclaude/` are picked up automatically without touching CI.
+- GitHub Actions would need an `ANTHROPIC_API_KEY` repo secret; Max-plan
+  tokens used locally are free.
+- Per-run cost ($0.10–$0.50, scaling with test count) buys nothing local
+  runs don't already cover once code-review runs the suite on every PR.
+- Failure surface synchronised to dispatch cadence beats unpredictable
+  04:00 UTC failures.
+- One fewer CI file to keep in lockstep with `self-check-daily.yml`.
+
+The make target is unchanged — `make e2e-realclaude` is still the entry
+point, just no longer invoked by CI.
 
 ## Verifying tag exclusion
 
@@ -64,6 +71,6 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 
 - [features/e2e-harness.md](e2e-harness.md) — the fake-claude sibling suite.
 - [features/install-e2e.md](install-e2e.md) — the `e2e_install`-tagged install round-trip suite (same naming pattern).
-- [features/agentrun-selfcheck-package.md](agentrun-selfcheck-package.md) — `self-check-daily.yml`, the sibling badge-only nightly workflow whose monitoring contract this one mirrors.
+- [features/agentrun-selfcheck-package.md](agentrun-selfcheck-package.md) — `self-check-daily.yml`, the sibling badge-only nightly self-check workflow.
 - Ticket [#361](https://github.com/pyrycode/pyrycode/issues/361) — scaffolding ticket; codebase note at [`codebase/361.md`](../codebase/361.md).
-- Ticket [#362](https://github.com/pyrycode/pyrycode/issues/362) — nightly workflow; codebase note at [`codebase/362.md`](../codebase/362.md).
+- Ticket [#362](https://github.com/pyrycode/pyrycode/issues/362) — the now-removed nightly workflow; codebase note at [`codebase/362.md`](../codebase/362.md). See also [#379](https://github.com/pyrycode/pyrycode/issues/379) for the removal.
