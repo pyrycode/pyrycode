@@ -1,10 +1,12 @@
 package main
 
 import (
+	"flag"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseClientFlags(t *testing.T) {
@@ -610,6 +612,26 @@ func TestRunLogs_RejectsExtraArgs(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unexpected arguments") {
 		t.Errorf("err = %v, want substring 'unexpected arguments'", err)
+	}
+}
+
+// TestPyryIdleTimeoutDefault pins -pyry-idle-timeout's default to 0
+// (idle eviction opt-in). Flipping the default back to a non-zero value
+// silently breaks daemon-mode supervisors — see #395.
+//
+// The pool's "0 disables" behaviour is covered by
+// internal/sessions.TestPool_ParityWhenIdleDisabled; this test only
+// guards the literal at the CLI seam.
+func TestPyryIdleTimeoutDefault(t *testing.T) {
+	t.Parallel()
+
+	fs := flag.NewFlagSet("pyry", flag.ContinueOnError)
+	idleTimeout := fs.Duration("pyry-idle-timeout", 0, "")
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("fs.Parse: %v", err)
+	}
+	if *idleTimeout != time.Duration(0) {
+		t.Errorf("default -pyry-idle-timeout = %v, want 0 (idle eviction opt-in)", *idleTimeout)
 	}
 }
 

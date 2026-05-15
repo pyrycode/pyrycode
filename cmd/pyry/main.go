@@ -402,7 +402,7 @@ func runSupervisor(args []string) error {
 	verbose := fs.Bool("pyry-verbose", false, "verbose pyry logging")
 	name := fs.String("pyry-name", defaultName(), "instance name (socket: ~/.pyry/<name>.sock)")
 	socketFlag := fs.String("pyry-socket", "", "explicit socket path (overrides -pyry-name)")
-	idleTimeout := fs.Duration("pyry-idle-timeout", 15*time.Minute, "evict idle claudes after this duration (0 disables)")
+	idleTimeout := fs.Duration("pyry-idle-timeout", 0, "evict idle claudes after this duration (0 disables; pass e.g. 15m to enable)")
 	activeCap := fs.Int("pyry-active-cap", 0, "max concurrently active claudes (0 = uncapped)")
 	convSweepInterval := fs.Duration("pyry-conv-sweep-interval", 0, "override conversations sweep tick interval (testing; 0 = production default)")
 	relayFlag := fs.String("pyry-relay", "", "relay URL override (default: $PYRY_RELAY_URL or ~/.pyry/config.json)")
@@ -1326,8 +1326,8 @@ Pyry flags (must come before claude args, or after a -- separator):
   -pyry-name string     instance name; socket is ~/.pyry/<name>.sock
                         (default "pyry"; PYRY_NAME env var overrides default)
   -pyry-socket string   explicit socket path (overrides -pyry-name)
-  -pyry-idle-timeout    evict idle claudes after this duration (default 15m;
-                        0 disables; respawn latency 2-15s on next attach)
+  -pyry-idle-timeout    evict idle claudes after this duration
+                        (default 0 / disabled; pass e.g. 15m to enable)
   -pyry-conv-sweep-interval duration  override conversations sweep tick interval
                         (testing; 0 = production default of 1h)
   -pyry-relay string    relay URL (default: $PYRY_RELAY_URL or ~/.pyry/config.json)

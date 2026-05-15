@@ -222,7 +222,7 @@ Session.Run (per-session lifecycle goroutine)
 
 Each `*Session` owns a per-session lifecycle goroutine that drives an `active ↔ evicted` two-state machine. Activity = "at least one client attached" (`attached > 0`). On the idle timeout with no attaches, the supervisor's inner ctx is cancelled and claude exits cleanly — the JSONL on disk is preserved untouched. `Session.Activate(ctx)` (called by `handleAttach` before `Attach`) wakes the session and respawns the supervisor pointing at the same JSONL.
 
-Registry gains `lifecycle_state` (`omitempty`, defaults to `"active"`). Bootstrap warm-starts in whatever state the registry says. Lock order: `Pool.mu → Session.lcMu`. CLI: `-pyry-idle-timeout` (default `15m`, `0` disables). See [features/idle-eviction.md](../features/idle-eviction.md) and [ADR 005](../decisions/005-idle-eviction-state-machine.md).
+Registry gains `lifecycle_state` (`omitempty`, defaults to `"active"`). Bootstrap warm-starts in whatever state the registry says. Lock order: `Pool.mu → Session.lcMu`. CLI: `-pyry-idle-timeout` (default `0` / disabled; opt in with e.g. `15m`). See [features/idle-eviction.md](../features/idle-eviction.md) and [ADR 005](../decisions/005-idle-eviction-state-machine.md).
 
 ### E2E Harness (Phase test-infra, ticket #68)
 

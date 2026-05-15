@@ -91,3 +91,13 @@ The work is genuinely one state machine with one persist seam and one external t
 - Feature doc: [`features/idle-eviction.md`](../features/idle-eviction.md)
 - Locked phase design: [`docs/multi-session.md`](../../multi-session.md), [`docs/plan.md`](../../plan.md)
 - Sibling: [ADR 003](003-session-addressable-runtime.md) (sessions package shape this builds on)
+
+## Update — 2026-05-15
+
+The production CLI default for `-pyry-idle-timeout` changed from `15m` to `0` (idle eviction is now opt-in). The original "sensible production default (15m)" line in *Consequences › Positive* assumed short-lived interactive sessions where amortised memory cost matters. It didn't account for the daemon-mode path that landed later via `pyry install-service` (#202, #190), where the supervised claude is meant to stay warm to handle Discord/Telegram plugin inbound. Under that path the 15-minute default fired deterministically 15 minutes after every supervisor restart and — compounded by a companion respawn-on-attach bug — produced a silent bot outage until manual intervention. Failure mode was confirmed on pyrybox on 2026-05-15 (see ticket [#395](https://github.com/pyrycode/pyrycode/issues/395)).
+
+Flipping the default is preferred over a daemon-aware default injected by `install-service` (more code paths for marginal benefit — "warm claude waste" is memory not money on daemons). Pool plumbing already treats `0` as disabled; the never-armed `time.Timer` pattern (see `docs/lessons.md:88`) means there's no behavioural change downstream of `cmd/pyry`. Operators who want eviction now pass `-pyry-idle-timeout=15m` explicitly. The state-machine design in *Decision* above is unchanged.
+
+The "respawn latency 2-15s on next attach" rider in *Consequences › Negative* is tracked separately in the companion respawn-on-attach bug ticket.
+
+The original *Consequences* line is left intact above to preserve the historical reasoning at the time of the ADR.
