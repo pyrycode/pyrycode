@@ -66,12 +66,17 @@ func (s *Session) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err
 func (s *Session) Run(ctx context.Context) error
 ```
 
-- **`Activate`** — moves an evicted session to `active`, blocking until the supervisor has started AND the post-transition registry persist has completed (or `ctx` cancels). When already active, returns immediately (the wake channel is already closed). Idempotent under concurrent calls; safe from any goroutine. See [§ Persist seam](#persist-seam) for the disk-consistency guarantee.
+- **`Activate`** — moves an evicted session to `active`, blocking until the supervisor has started AND the post-transition registry persist has completed AND the supervisor has bound its PTY (or `ctx` cancels). When already active, returns immediately (both the wake channel and the supervisor's `ptmxReadyCh` are already closed). Idempotent under concurrent calls; safe from any goroutine. After Activate returns nil, callers can safely invoke `WriteUserTurn`/`Resize` and reach the live claude — the PTY-readiness wait closes the ~hundreds-of-ms gap between `transitionTo` closing `activeCh` and `runOnce` binding the new PTY master ([ADR 023](../decisions/023-activate-waits-pty-readiness.md), #396). See [§ Persist seam](#persist-seam) for the disk-consistency guarantee.
 - **`Evict`** — moves an active session to `evicted`, blocking until the supervisor has stopped AND the post-transition persist has completed (or `ctx` cancels). When already evicted, returns immediately. Idempotent under concurrent calls; safe from any goroutine. **Force-eviction:** unlike the idle timer, `Evict` does *not* defer for `attached > 0`. Used by the cap policy at `Pool.Activate`'s spawn path; an attached caller will see EOF on its bridge.
 - **`Attach`** — unchanged signature. Now bumps an `attached` counter under `lcMu`; the wrapper goroutine decrements on bridge `done`. While `attached > 0`, idle eviction is deferred (cap eviction is not).
 - **`Run`** — rewritten as a loop over `runActive` / `runEvicted`, driving the state machine and persisting after every transition.
 
-**Activate-before-Attach contract.** `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it). Callers must Activate first. The control plane is the only attach caller in pyry today and always Activates first (`handleAttach` in `internal/control/server.go`).
+**Activate-before-Attach contract.** `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it). Callers must Activate first. Two attach paths exist today and both Activate first with a 30s budget:
+
+1. **Control plane** — `handleAttach` in `internal/control/server.go` (CLI `pyry attach`, since #40).
+2. **Relay-routed `send_message`** — `handlers.SendMessage` in `internal/relay/handlers/send_message.go` (Discord/Telegram phone/plugin inbound, since #396). Without Activate, an inbound `send_message` against an idle-evicted bootstrap silently dropped through `Supervisor.WriteUserTurn`'s `ptmx == nil` discard branch — the failure mode that produced a 7.5h pyrybox outage on 2026-05-15.
+
+A busted respawn surfaces as `attach: activate: <err>` on the control wire and as `protocol.CodeServerBinaryOffline` (`Retryable=true`) + `send_message.activate_failed` WARN log on the relay wire.
 
 ## `Pool` surface
 
@@ -258,7 +263,11 @@ func (s *Session) transitionTo(newState lifecycleState) error {
 
 `RotateID` mutates `session.id` *without* taking `lcMu`. Today's only callers (startup reconciliation, fsnotify rotation watcher) run before any lifecycle goroutine begins observing the id, so no concurrent reader exists. `lastActiveAt` IS protected by `lcMu` and is taken briefly. Documented in the function comment.
 
-## Control-plane integration
+## Attach-event integration
+
+Two callers reach Activate before driving the supervisor — the control plane and the relay-routed `send_message` handler. Both use the same 30s budget so operator mental models for "how long before the binary gives up" stay uniform.
+
+### Control plane
 
 `internal/control` adds `Activate(ctx)` to its `Session` interface. `handleAttach` calls it before `Attach`:
 
@@ -276,6 +285,31 @@ done, err := sess.Attach(conn, conn)
 The 30s window caps the documented 2-15s respawn latency with safety margin. A busted respawn surfaces as a clean error rather than a hung attach.
 
 `handleStatus` does **not** activate. Status on an evicted session reports the supervisor's `PhaseStopped`; that's faithful and avoids spurious wakeups from a poll. Wire-string drift on healthy daemons is unchanged: `pyry status` still reports `PhaseRunning` on a never-evicted session.
+
+### Relay-routed `send_message` (#396)
+
+`internal/relay/handlers/send_message.go` extends `TurnWriter` with `Activate(ctx) error` and runs it before `WriteUserTurn`:
+
+```go
+activateCtx, cancelActivate := context.WithTimeout(ctx, sendMessageActivateTimeout)
+if err := w.Activate(activateCtx); err != nil {
+    cancelActivate()
+    if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+        return err
+    }
+    logger.Warn("relay: send_message activate failed",
+        "event", "send_message.activate_failed", ...)
+    return replyError(ctx, c, env, protocol.CodeServerBinaryOffline, msgServerBinaryOffline, true)
+}
+cancelActivate()
+err := w.WriteUserTurn(p.ConversationID, []byte(p.Text))
+```
+
+`sendMessageActivateTimeout` is the same 30s the CLI attach path uses, deliberately. `*sessions.Session` satisfies the extended interface adapter-free at `cmd/pyry/relay.go`. Activate timeout maps to `protocol.CodeServerBinaryOffline` with `Retryable=true`; `ctx.Canceled` (conn closing) propagates to the dispatcher's per-conn unwind.
+
+### Eviction cause record
+
+`runActive` emits a WARN-level `session.idle_eviction` log line at the SIGKILL moment (#396), preceding the supervisor-level `claude exited` line. Operators no longer need to correlate the generic `signal: killed` against the configured idle window. Fields: `session_id`, `idle_timeout`, `bootstrap`. The cap-policy eviction path does not yet emit a sibling line — when that path next gets touched, mirror this pattern.
 
 ## Failure posture
 
@@ -336,8 +370,8 @@ pyry stop
 
 ## References
 
-- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116), [#169](https://github.com/pyrycode/pyrycode/issues/169), [#202](https://github.com/pyrycode/pyrycode/issues/202)
-- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md), [`docs/specs/architecture/169-evict-activate-persist-ordering.md`](../../specs/architecture/169-evict-activate-persist-ordering.md), [`docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md`](../../specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md)
-- ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md), [`013-evict-activate-persist-ordering.md`](../decisions/013-evict-activate-persist-ordering.md), [`016-bootstrap-ignores-persisted-lifecycle-state.md`](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md)
+- Tickets: [#40](https://github.com/pyrycode/pyrycode/issues/40), [#41](https://github.com/pyrycode/pyrycode/issues/41), [#116](https://github.com/pyrycode/pyrycode/issues/116), [#169](https://github.com/pyrycode/pyrycode/issues/169), [#202](https://github.com/pyrycode/pyrycode/issues/202), [#395](https://github.com/pyrycode/pyrycode/issues/395), [#396](https://github.com/pyrycode/pyrycode/issues/396)
+- Specs: [`docs/specs/architecture/40-idle-eviction-lazy-respawn.md`](../../specs/architecture/40-idle-eviction-lazy-respawn.md), [`docs/specs/architecture/41-concurrent-active-cap-lru.md`](../../specs/architecture/41-concurrent-active-cap-lru.md), [`docs/specs/architecture/169-evict-activate-persist-ordering.md`](../../specs/architecture/169-evict-activate-persist-ordering.md), [`docs/specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md`](../../specs/architecture/202-supervise-bootstrap-evicted-warm-start-hang.md), [`docs/specs/architecture/396-send-message-respawn.md`](../../specs/architecture/396-send-message-respawn.md)
+- ADRs: [`005-idle-eviction-state-machine.md`](../decisions/005-idle-eviction-state-machine.md), [`006-concurrent-active-cap-lru.md`](../decisions/006-concurrent-active-cap-lru.md), [`013-evict-activate-persist-ordering.md`](../decisions/013-evict-activate-persist-ordering.md), [`016-bootstrap-ignores-persisted-lifecycle-state.md`](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md), [`023-activate-waits-pty-readiness.md`](../decisions/023-activate-waits-pty-readiness.md)
 - Sibling docs: [`sessions-package.md`](sessions-package.md), [`sessions-registry.md`](sessions-registry.md), [`control-plane.md`](control-plane.md)
 - Locked phase design: [`docs/multi-session.md`](../../multi-session.md)
