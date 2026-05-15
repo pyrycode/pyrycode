@@ -22,13 +22,17 @@ All files in the directory carry exactly:
 
 Single tag, no alternation. The `e2e_install` precedent established the `e2e_<purpose>` naming.
 
-## What's there today (#361 scaffold)
+## What's there today
 
-- `smoke_test.go` — one test, `TestClaudeBinaryAvailable`, that:
+- `smoke_test.go` (#361) — one test, `TestClaudeBinaryAvailable`, that:
   - Asserts `exec.LookPath("claude")` succeeds. **Fatal, not skip** — the suite is opted-into by typing `make e2e-realclaude`, so a missing binary is misconfiguration, not absence.
   - Runs `exec.CommandContext(ctx, "claude", "--version")` under a 10 s timeout and asserts a zero exit. `CombinedOutput()` is reported on failure for debuggability. The version string is NOT parsed — "real claude is on PATH and executes" is the entire assertion.
+- `fixtures.go` (#372) — shared file-system primitives for every downstream test:
+  - `WithWorktree(t) string` — `t.TempDir()` + `t.Setenv("HOME", dir)`, returns the path. Pins HOME for both the in-test process and any subprocess so `os.UserHomeDir()` resolves to the same root on both sides. Does NOT create `.claude/…`; the runtime owns that.
+  - `ReadJSONL(t, workdir, sessionID) []JSONLEntry` — opens `<HOME>/.claude/projects/<agentrun.EncodeProjectDir(workdir)>/<sessionID>.jsonl` and runs it through `jsonl.NewReader(...).Next()`. Empty file → empty slice; open/parse failures call `t.Fatalf` with the resolved path embedded. A private `resolveAndOpenJSONL` split exists so the missing-file path is testable as a returned error.
+  - `JSONLEntry = jsonl.Event` — type **alias**, not a wrapper struct. Keeps downstream tests from importing `internal/agentrun/jsonl` directly while preserving full field access. See [`codebase/372.md`](../codebase/372.md) for the design rationale.
 
-Subsequent tickets (#362, #363) add the actual prompt-poisoning / trust-boundary tests on this scaffold.
+Subsequent tickets (#373 for the subprocess invocation helper, then #364–#368 for the actual prompt-poisoning / trust-boundary tests) compose on top of these.
 
 ## Make target
 
@@ -74,3 +78,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - [features/agentrun-selfcheck-package.md](agentrun-selfcheck-package.md) — `self-check-daily.yml`, the sibling badge-only nightly self-check workflow.
 - Ticket [#361](https://github.com/pyrycode/pyrycode/issues/361) — scaffolding ticket; codebase note at [`codebase/361.md`](../codebase/361.md).
 - Ticket [#362](https://github.com/pyrycode/pyrycode/issues/362) — the now-removed nightly workflow; codebase note at [`codebase/362.md`](../codebase/362.md). See also [#379](https://github.com/pyrycode/pyrycode/issues/379) for the removal.
+- Ticket [#372](https://github.com/pyrycode/pyrycode/issues/372) — `WithWorktree` + `ReadJSONL` fixture helpers; codebase note at [`codebase/372.md`](../codebase/372.md).
