@@ -3,10 +3,10 @@
 // to its stdin, forwards stdout/stderr to caller-supplied writers, and
 // waits for the child to exit.
 //
-// This is the headless sibling of internal/agentrun.Drive — that primitive
-// drives an interactive claude via a PTY; this one drives the
-// `--input-format stream-json --output-format stream-json` shape used by
-// `pyry agent-run` from a single shot of stdin.
+// `pyry agent-run` uses streamrunner to drive claude in
+// `--input-format stream-json --output-format stream-json` mode from a
+// single shot of stdin; the package owns the spawn, the stdin write, and
+// the wait — nothing else.
 //
 // The package logs only error messages and never logs prompt bytes or any
 // substring of the stream-json event stream — writers are opaque io.Writer
