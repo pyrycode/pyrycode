@@ -2,7 +2,7 @@
 
 Headless sibling of [`agentrun.Drive`](agentrun-package.md): spawns `claude` as a plain subprocess (no PTY), writes one stream-json user-turn envelope to its stdin, forwards stdout/stderr to caller-supplied writers, and maps the child's exit to the verb-level contract. Caller assembles the full claude argv (including `--input-format stream-json --output-format stream-json --dangerously-skip-permissions`); this primitive owns only the spawn, the stdin envelope, and the ctx-cancel teardown.
 
-Introduced #390 as a leaf primitive. Caller wiring lands in #391; until then the package has no production consumer.
+Introduced #390 as a leaf primitive. Caller wiring landed in #391: [`pyry agent-run`](pyry-agent-run-command.md) is the sole production consumer, having cut over from the PTY-drive path to eliminate the 2026-05-14 `/doctor` prompt-poisoning regression.
 
 ## Public API
 
@@ -104,7 +104,7 @@ Four test cases against the four observable behaviours: clean exit (stdout subst
 
 ## Consumers
 
-- `pyry agent-run` (deferred to #391) — caller assembles the full claude argv including `--input-format stream-json --output-format stream-json --verbose --dangerously-skip-permissions --allowed-tools … --model … --effort … --max-turns … --append-system-prompt-file …`, passes the prompt bytes through `Config.PromptBytes`, and threads the per-verb stdout/stderr writers. The current `Drive`-based path stays as the interactive bridge mode.
+- [`pyry agent-run`](pyry-agent-run-command.md) (#391) — assembles the full claude argv (`--input-format stream-json --output-format stream-json --verbose --dangerously-skip-permissions --allowed-tools … --model … --effort … --max-turns … --append-system-prompt-file …`), passes the prompt bytes through `Config.PromptBytes`, threads the verb's stdout (forwarded byte-for-byte to the dispatcher) and `os.Stderr`, and maps the runner's return (`nil` / `context.Canceled` / `*exec.ExitError`) to the verb's exit-code contract. The PTY-drive sibling `agentrun.Drive` is no longer invoked from this verb's runtime path, but stays compiled because `cmd/pyry/agent_run_selfcheck.go` (#336) still depends on the surrounding `agentrun` package for `WriteSettings` / `MarkWorkdirTrusted`.
 
 ## Out of scope
 
@@ -115,6 +115,6 @@ Four test cases against the four observable behaviours: clean exit (stdout subst
 ## Related
 
 - [agentrun-package.md](agentrun-package.md) — the PTY-driven sibling (`Drive`) this primitive parallels; shares the "ctx-cancel is success" return contract and the "log-and-continue on stdin write failure" pattern.
-- [streamjson-package.md](streamjson-package.md) — the event-stream emitter that #391's caller will compose with this primitive's stdout writer.
-- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes both halves; will switch from `Drive` to `streamrunner.Run` once #391 lands.
+- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes this primitive (cut over from `Drive` in #391).
+- [streamjson-package.md](streamjson-package.md) — the pre-#391 event-stream emitter; no longer composed with this primitive (claude itself emits the canonical stream-json events on its own stdout under stream-json mode). Package stays in tree pending the cleanup ticket.
 - Spec [`docs/specs/architecture/390-streamrunner-primitive.md`](../../specs/architecture/390-streamrunner-primitive.md) — the build-time architect spec.
