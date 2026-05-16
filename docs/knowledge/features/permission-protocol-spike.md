@@ -106,6 +106,20 @@ Total cost across the six modes was approximately `$0.08` (~`$0.014` per cache-c
 - `internal/e2e/realclaude/testdata/permission_protocol_v2.1.143_<mode>.json` — six captured fixtures (one per mode).
 - `internal/e2e/realclaude/testdata/permission_protocol_v2.1.143_default.json` — the canonical default-mode fixture referenced by the spike test on rerun.
 
+## Regression contract on the null findings (#418)
+
+The spike test PASSES on any non-structural outcome — it pins the on-disk artefact, not its shape. To prevent a future `claude` release from silently flipping the findings (e.g. starting to emit permission events on stdio, or enforcing `--allowed-tools` under this argv), `internal/e2e/realclaude/permission_protocol_regression_test.go` walks every fixture matching `testdata/permission_protocol_v*_*.json` and asserts the four findings as a regression contract. Pure JSON parse + assert; no API call, no subprocess; excluded from `make check` by the `e2e_realclaude` build tag.
+
+Per fixture, the test asserts:
+
+- No `stdout_events[i].type` is `control_request` / `permission_request` / `tool_permission_request` (finding #1).
+- `result.permission_denials` is empty (finding #1/#2).
+- `init.tools` contains `"Bash"` (finding #4 — the full registry, not the allowlist).
+- `init.permissionMode` echoes the `<mode>` token parsed out of the filename, with the `auto → default` synonym from finding #3 applied at the parser.
+- Structural sanity: `exit_code == 0`, `context_deadline_tripped == false`, `len(stdout_events) >= 7`.
+
+The filename glob is the source of truth for matrix coverage — a future spike rerun that adds a new mode (e.g. `--permission-mode foo`) drops a new fixture and the regression test picks it up automatically with no code change. Each failure message names the offending fixture and which finding flipped (e.g. `permission_protocol_v2.1.143_auto.json: init.permissionMode = "auto", want "default" (spike finding #3 flipped)`), so the spike-runner is pointed directly at the section above to revisit. See [`codebase/418.md`](../codebase/418.md) for implementation detail.
+
 ## Follow-up
 
 Per AC: no follow-up issue is filed. The "filed only if a real event fires" branch is not triggered because no permission event fired in any mode.
