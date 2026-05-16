@@ -209,7 +209,7 @@ Mechanism: re-key is a full Noise_IK handshake re-run, **initiated by the phone*
 1. Either side decides re-key is due (1-hour timer elapsed, or operator triggered it).
 2. If the binary initiates, it sends a `rekey_request` envelope (AEAD-sealed under the current CipherState, as a `noise_msg`). The phone receives it and proceeds to step 3.
    If the phone initiates (its own timer fired), it proceeds directly to step 3.
-3. Phone sends a fresh `noise_init` frame (plaintext at the outer-frame layer; the IK initiator's static key authenticates it). The early-data payload is empty or contains a `rekey_marker` envelope (TBD — see implementation tickets).
+3. Phone sends a fresh `noise_init` frame (plaintext at the outer-frame layer; the IK initiator's static key authenticates it). **The early-data payload of a re-key `noise_init` is empty** (zero-length plaintext, AEAD-sealed under the handshake-derived key per Noise_IK rules). This mirrors WireGuard / Tailscale re-key flows: the handshake itself is the signal; no application-layer marker is needed inside it. Responder distinguishes re-key from initial handshake by `conn_id` state (already `open` or `awaitingRekeyInit`) — see #434's per-conn-id state machine and #435's `awaitingRekeyInit` substate.
 4. Binary responds with `noise_resp`.
 5. Both sides derive new `(k_send, k_recv)` CipherStates from the new handshake.
 6. **Atomic switchover:** the first frame either side sends after the new handshake uses the new keys. The old CipherStates are zeroised. Any in-flight frame received under old keys after switchover is rejected (AEAD MAC failure) and the connection closes; this is acceptable because the WS is full-duplex and the switchover signal is the new handshake completing, not a wire marker.
