@@ -21,7 +21,7 @@ import (
 
 // pairVerbList is the displayed verb list in `pyry pair` usage errors.
 // Update in lockstep with the switch in runPair when new sub-verbs land.
-const pairVerbList = "list, revoke"
+const pairVerbList = "list, revoke, preflight"
 
 // resolveDevicesPath returns ~/.pyry/<sanitized-name>/devices.json. Falls
 // back to a CWD-relative path if $HOME can't be resolved (matches
@@ -118,6 +118,8 @@ func runPair(args []string) error {
 			return runPairList(args[1:])
 		case "revoke":
 			return runPairRevoke(args[1:])
+		case "preflight":
+			return runPairPreflight(args[1:])
 		}
 		if !strings.HasPrefix(args[0], "-") {
 			fmt.Fprintf(os.Stderr, "pyry pair: unknown verb %q\n", args[0])
@@ -344,5 +346,67 @@ func runPairRevoke(args []string) error {
 		return fmt.Errorf("pair revoke: %w", err)
 	}
 	fmt.Printf("Revoked %s.\n", parsed.deviceName)
+	return nil
+}
+
+// pairPreflightArgs is the parsed shape of `pyry pair preflight`'s flag set.
+type pairPreflightArgs struct {
+	instanceName string // -pyry-name
+}
+
+// parsePairPreflightArgs parses the flag set for `pyry pair preflight`.
+// Only -pyry-name is accepted. Unknown flags or unexpected positionals
+// produce errors propagated to the caller; runPairPreflight maps these
+// to exit 2.
+func parsePairPreflightArgs(args []string) (pairPreflightArgs, error) {
+	fs := flag.NewFlagSet("pyry pair preflight", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	instance := fs.String("pyry-name", defaultName(), "instance name (state dir: ~/.pyry/<name>/)")
+	if err := fs.Parse(args); err != nil {
+		return pairPreflightArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return pairPreflightArgs{}, fmt.Errorf("unexpected positional %q", fs.Arg(0))
+	}
+	return pairPreflightArgs{instanceName: *instance}, nil
+}
+
+// preflightVerdict returns (exitCode, stderrLine) for the v2 release gate.
+// exitCode == 0 means the gate passed (count == 0); stderrLine is "".
+// exitCode == 2 means the gate failed (count > 0); stderrLine is the exact
+// message to emit before os.Exit(2). Pure: deterministic on count.
+func preflightVerdict(count int) (exitCode int, stderrLine string) {
+	if count == 0 {
+		return 0, ""
+	}
+	return 2, fmt.Sprintf("pyry pair preflight: %d paired device(s); v2 release gate requires zero.", count)
+}
+
+// runPairPreflight implements `pyry pair preflight`: load the device
+// registry for the resolved instance and exit non-zero if any paired
+// device exists. Strictly opt-in release gate for the v2 cutover; does
+// not alter the default `pyry pair list` output.
+//
+// Returns nil on the gate-pass path (registry empty, exit 0). Returns a
+// wrapped `fmt.Errorf("pair preflight: %w", err)` for I/O failures
+// (Load) — main.run prefixes with `pyry: ` and os.Exit(1). Calls
+// os.Exit(2) directly for the gate-fail and usage-failure paths to
+// bypass main's `pyry: ` prefix.
+func runPairPreflight(args []string) error {
+	parsed, err := parsePairPreflightArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pyry pair preflight:", err)
+		fmt.Fprintln(os.Stderr, "usage: pyry pair preflight [-pyry-name=<instance>]")
+		os.Exit(2)
+	}
+	devicesPath := resolveDevicesPath(parsed.instanceName)
+	registry, err := devices.Load(devicesPath)
+	if err != nil {
+		return fmt.Errorf("pair preflight: %w", err)
+	}
+	if exitCode, line := preflightVerdict(len(registry.List())); exitCode != 0 {
+		fmt.Fprintln(os.Stderr, line)
+		os.Exit(exitCode)
+	}
 	return nil
 }
