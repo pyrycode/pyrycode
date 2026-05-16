@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -69,6 +70,18 @@ const (
 // the lock); there is no mutex because flynn/noise's CipherStates are
 // not safe for concurrent use and the manager guarantees a single
 // writer per conn_id.
+//
+// Re-key (#449): a noise_init arriving while state == V2StateOpen runs
+// the IK responder a second time against the binary's same static key.
+// New (send, recv) CipherStates are derived and the swap on the
+// V2Session struct is a single tuple assignment on the dispatch
+// goroutine — the only goroutine that ever reads or writes s.send /
+// s.recv. The old *CipherState pointers are dropped from the struct;
+// Go's GC reclaims the underlying memory. An explicit Wipe() on
+// internal/noise.CipherState is not exposed (would require touching
+// #433's surface); the single-owner-goroutine ownership of s.send /
+// s.recv ensures no code path accesses the old state after the swap,
+// which is the practical zeroisation property.
 type V2Session struct {
 	connID string
 	state  V2SessionState
@@ -80,8 +93,23 @@ type V2Session struct {
 	// token-accept branch. Surfaced into the per-frame *dispatch.Conn as
 	// auth so handlers can call c.Auth(). Set exactly once in
 	// handleNoiseInit's token-OK path before state advances to
-	// V2StateOpen. Nil before the token check completes.
+	// V2StateOpen. Nil before the token check completes. A successful
+	// re-key does NOT replace this snapshot — the value pins the
+	// originally-authenticated device for the entire session lifetime.
 	device *devices.Device
+
+	// peerStatic is the initiator's 32-byte X25519 static public key,
+	// captured by handleInitialHandshake right after Responder.ReadInit
+	// succeeds. Consulted by handleRekeyInit to enforce peer-pubkey
+	// continuity: a re-key whose initiator presents a different static
+	// key (relay-MITM injection, phone-side identity change) is rejected
+	// at 4426.
+	//
+	// SECURITY: never persisted across binary restarts; lives only for
+	// the V2Session's in-memory lifetime. A successful re-key does NOT
+	// overwrite it — the value pins the original peer's identity for the
+	// entire session lifetime.
+	peerStatic []byte
 }
 
 // State returns the externally-observable state. Called from the same
@@ -300,22 +328,35 @@ type InnerFrameV2Decoded struct {
 	Data []byte
 }
 
-// handleNoiseInit processes an inbound noise_init frame. The handshake
-// path is documented step-by-step in
-// docs/specs/architecture/445-internal-relay-v2-inner-frame-handshake-token-gating.md.
+// handleNoiseInit routes a noise_init to either the initial handshake
+// (awaitingInit → handshakeComplete → open) or the re-key responder
+// (open → open with new CipherStates). A noise_init arriving in
+// handshakeComplete is an out-of-state protocol violation per the spec
+// transition table.
 func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
-	if s.state != V2StateAwaitingInit {
-		// noise_init while handshakeComplete or open: rekey lives in #435,
-		// not here. Treat as state-machine violation per the spec table.
+	switch s.state {
+	case V2StateAwaitingInit:
+		m.handleInitialHandshake(ctx, s, inner)
+	case V2StateOpen:
+		m.handleRekeyInit(ctx, s, inner)
+	default:
+		// V2StateHandshakeComplete (V2StateClosed is filtered in handleFrame).
 		m.cfg.Logger.Warn("relay: v2 state reject",
 			"event", "v2.state.reject",
 			"conn_id", s.connID,
 			"close_code", int(StatusProtocolMismatch),
-			"reason", "noise_init_after_handshake")
+			"reason", "noise_init_in_handshake_complete")
 		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
-		return
 	}
+}
 
+// handleInitialHandshake runs the IK responder for the first noise_init
+// on a given conn (state V2StateAwaitingInit). On success the session
+// advances through handshakeComplete to open with paired CipherStates,
+// the captured peer-static key, and the matched device snapshot. The
+// step-by-step protocol is documented in
+// docs/specs/architecture/445-internal-relay-v2-inner-frame-handshake-token-gating.md.
+func (m *V2SessionManager) handleInitialHandshake(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
 	// Lazy-construct the responder on first noise_init for this conn.
 	resp, err := noise.NewResponder(m.cfg.StaticPriv)
 	if err != nil {
@@ -343,6 +384,11 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
 		return
 	}
+
+	// Capture the initiator's static pubkey for the re-key continuity
+	// check (#449). PeerStatic() is callable only after ReadInit; this is
+	// the canonical capture point.
+	s.peerStatic = s.resp.PeerStatic()
 
 	var helloEnv protocol.Envelope
 	if err := json.Unmarshal(earlyData, &helloEnv); err != nil {
@@ -479,6 +525,133 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	s.state = V2StateOpen
 }
 
+// handleRekeyInit runs the responder side of a phone-initiated re-key
+// handshake on a session already in V2StateOpen. Same shape as the
+// initial handshake (NewResponder → ReadInit → WriteResp → emit
+// noise_resp) with three differences:
+//
+//  1. Early-data is empty in both directions per spec § Re-key. Hello
+//     decode and token re-validation are skipped — the device snapshot
+//     captured at initial handshake is preserved.
+//  2. Peer-static continuity is enforced. The new peer's static must
+//     match s.peerStatic; mismatch closes at 4426 (same code the initial
+//     handshake uses for IK-pattern failure). Without this check a
+//     relay-MITM that injects a noise_init on an authenticated conn
+//     could re-key over the session and inherit the device snapshot.
+//  3. On success the (send, recv) CipherStates are swapped atomically.
+//     The swap is a single tuple assignment on the dispatch goroutine;
+//     no other goroutine reads or writes these fields, so no lock is
+//     needed. State remains V2StateOpen; s.device and s.peerStatic are
+//     unchanged.
+//
+// Failure paths reuse closeWith (which deletes the session entry) and
+// the initial handshake's 4426 close code. No new close codes (AC #4).
+func (m *V2SessionManager) handleRekeyInit(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
+	resp, err := noise.NewResponder(m.cfg.StaticPriv)
+	if err != nil {
+		// Realistically unreachable: StaticPriv length validated at
+		// NewV2SessionManager.
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_responder_init_failed")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	if _, err := resp.ReadInit(inner.Data); err != nil {
+		// MAC failure, malformed IK message 1, wrong static pub on the
+		// initiator's encrypted-s. No AEAD channel from this Responder;
+		// close-only at 4426. Spec § Re-key: early-data is empty, so the
+		// returned payload is unused.
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_read_init_failed")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	// Peer-static continuity. bytes.Equal is variable-time but both
+	// operands are public keys (public by definition); timing leakage
+	// carries no secret, so subtle.ConstantTimeCompare is not required.
+	// Logged "reason" intentionally omits any peer-static bytes and the
+	// device name on this branch — the re-key initiator's identity is
+	// unknown / hostile here.
+	if !bytes.Equal(resp.PeerStatic(), s.peerStatic) {
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_peer_static_mismatch")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	respMsg, newSend, newRecv, err := resp.WriteResp(nil)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_write_resp_failed")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	respFrame, err := marshalInnerFrameV2(protocol.TypeNoiseResp, respMsg)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_marshal_noise_resp")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	// Atomic CipherState swap. Single tuple assignment on the dispatch
+	// goroutine; old pointers are dropped from the struct (GC reclaims).
+	s.send, s.recv = newSend, newRecv
+
+	m.cfg.Logger.Info("relay: v2 rekey accept",
+		"event", "v2.rekey.accept",
+		"conn_id", s.connID,
+		"device_name", s.device.Name)
+	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+}
+
+// handleRekeyRequest processes a decrypted rekey_request envelope. The
+// binary is always the IK responder; the phone re-keys by sending
+// noise_init directly. Receipt of a rekey_request from the phone takes
+// no transport action in this slice — it is purely informational /
+// forward-compat. The recognised values for payload.reason are
+// "scheduled", "manual", "compromise" (spec § Re-key). Unrecognised
+// values are tolerated and logged at WARN.
+func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, env protocol.Envelope) {
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	// Decode failure leaves Reason == "" which falls into the
+	// unknown-reason WARN branch — treated as forward-compat.
+	_ = json.Unmarshal(env.Payload, &payload)
+
+	switch payload.Reason {
+	case "scheduled", "manual", "compromise":
+		m.cfg.Logger.Info("relay: v2 rekey_request",
+			"event", "v2.rekey_request",
+			"conn_id", s.connID,
+			"reason", payload.Reason)
+	default:
+		m.cfg.Logger.Warn("relay: v2 rekey_request unknown reason",
+			"event", "v2.rekey_request.unknown_reason",
+			"conn_id", s.connID,
+			"reason", payload.Reason)
+	}
+}
+
 // handleNoiseMsg processes an inbound noise_msg frame. The
 // handshakeComplete branch is the gating invariant: a noise_msg
 // arriving while we hold CipherStates but have not yet validated the
@@ -575,7 +748,25 @@ func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inn
 // after Route returns writes into a leaked but capacity-bounded channel
 // that the GC reclaims once the goroutine exits; closing here would
 // panic such a sender.
+//
+// #449 adds a control-envelope discriminator ahead of the application
+// dispatch path: a successfully-decoded envelope whose Type matches a
+// known v2 control type (currently only TypeRekeyRequest) is handled
+// inline and does NOT reach dispatch.Route. JSON-decode failures
+// deliberately fall through to Route, which emits the existing sealed
+// protocol.malformed reply — preserving #446's malformed-envelope path.
 func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
+	// Control-envelope discriminator (#449). probe is a separate local
+	// from Route's internal envelope decode: Route remains the single
+	// source of truth for v1-compatible application envelopes; this
+	// probe is a cheap classifier that short-circuits known v2 control
+	// envelope types before Route runs.
+	var probe protocol.Envelope
+	if err := json.Unmarshal(plaintext, &probe); err == nil && probe.Type == protocol.TypeRekeyRequest {
+		m.handleRekeyRequest(ctx, s, probe)
+		return
+	}
+
 	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
 	conn := dispatch.NewConn(s.connID, outbound, s.device)
 	dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)
