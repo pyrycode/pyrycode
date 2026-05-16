@@ -36,6 +36,23 @@ func WithWorktree(t *testing.T) string {
 	return dir
 }
 
+// WithWorktreeAuthenticated behaves like WithWorktree and additionally
+// re-pins ANTHROPIC_API_KEY from the outer test environment so the
+// subprocess inherits a real-API credential. Use ONLY for tests that need
+// a real Anthropic response (not argv-shape probes). Skips the test with
+// a named-variable message when ANTHROPIC_API_KEY is unset in the outer
+// environment.
+func WithWorktreeAuthenticated(t *testing.T) string {
+	t.Helper()
+	key := os.Getenv("ANTHROPIC_API_KEY")
+	if key == "" {
+		t.Skipf("realclaude.WithWorktreeAuthenticated: ANTHROPIC_API_KEY is unset in the outer environment; this helper is opt-in and requires that variable. Export it (or rely on a CI secret) to run tests that use this fixture.")
+	}
+	dir := WithWorktree(t)
+	t.Setenv("ANTHROPIC_API_KEY", key)
+	return dir
+}
+
 // ReadJSONL parses <HOME>/.claude/projects/<EncodeProjectDir(workdir)>/<sessionID>.jsonl
 // and returns every event. Empty file → empty slice; open or parse
 // failures call t.Fatalf with the resolved path embedded.
