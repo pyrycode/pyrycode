@@ -52,6 +52,55 @@ func TestWithWorktree_ReturnsExistingHomeIsolatedDir(t *testing.T) {
 	}
 }
 
+// TestWithWorktreeAuthenticated_RealAssistant exercises the fixture end-to-end:
+// with ANTHROPIC_API_KEY present in the outer env, a minimal `pyry agent-run`
+// invocation produces a JSONL fixture with at least one real assistant event.
+// When the credential is absent the helper itself calls t.Skip, so the suite
+// stays green on contributor machines without API keys.
+func TestWithWorktreeAuthenticated_RealAssistant(t *testing.T) {
+	workdir := WithWorktreeAuthenticated(t)
+
+	result := RunPyryAgentRun(t, RunOpts{
+		Workdir:      workdir,
+		Prompt:       "Reply with the single word 'pong' and nothing else.",
+		SystemPrompt: "You are a minimal e2e authentication probe. Keep replies under 10 words.",
+		AllowedTools: []string{"Read"},
+		MaxTurns:     1,
+		Effort:       "low",
+		Model:        "claude-haiku-4-5",
+	})
+
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0\nstderr:\n%s", result.ExitCode, truncate(result.Stderr))
+	}
+	if result.SessionID == "" {
+		t.Fatalf("SessionID is empty: no system/init envelope found in stdout\nstdout:\n%s", truncate(result.Stdout))
+	}
+
+	// Belt-and-suspenders against the #383 failure mode: the structural
+	// assertions below would already fail on a synthetic-auth envelope
+	// (ExitCode != 0, no EndOfTurn text), but the substring check produces
+	// a clearer diagnostic when auth is the culprit. Stdout is capped at
+	// 1 KiB via truncate to bound any future leakage surface; today
+	// claude's stream-json output does not echo the API key.
+	if bytes.Contains(result.Stdout, []byte(`"model":"<synthetic>"`)) {
+		t.Fatalf("stdout contains synthetic-model marker (auth failed?)\nstdout:\n%s", truncate(result.Stdout))
+	}
+	if bytes.Contains(result.Stdout, []byte(`"error":"authentication_failed"`)) {
+		t.Fatalf("stdout contains authentication_failed marker\nstdout:\n%s", truncate(result.Stdout))
+	}
+
+	events := ReadJSONL(t, workdir, result.SessionID)
+	jsonlPath := jsonlPathFor(workdir, result.SessionID)
+	for _, ev := range events {
+		if ev.Kind == "assistant" && ev.EndOfTurn && ev.TextChars > 0 {
+			return
+		}
+	}
+	t.Fatalf("no assistant event with EndOfTurn=true and TextChars>0 found in JSONL\npath: %s\nstderr:\n%s",
+		jsonlPath, truncate(result.Stderr))
+}
+
 func TestReadJSONL_HappyPath(t *testing.T) {
 	workdir := WithWorktree(t)
 	writeFixtureLines(t, workdir, testSessionID,
@@ -113,16 +162,46 @@ func TestJSONLEntry_AliasCompiles(t *testing.T) {
 	var _ jsonl.Event = JSONLEntry{}
 }
 
+// TestExtraEnvHasHelperProcessFlag exercises the recursion-guard predicate.
+// Belt-and-suspenders against the 2026-05-16 fork-bomb pattern recurring.
+func TestExtraEnvHasHelperProcessFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		env  []string
+		want bool
+	}{
+		{"empty", nil, false},
+		{"unrelated only", []string{"FOO=bar", "BAZ=qux"}, false},
+		{"flag present", []string{"GO_TEST_HELPER_PROCESS=1"}, true},
+		{"flag with neighbors", []string{"A=1", "GO_TEST_HELPER_PROCESS=1", "B=2"}, true},
+		{"flag set to 0", []string{"GO_TEST_HELPER_PROCESS=0"}, false},
+		{"flag empty value", []string{"GO_TEST_HELPER_PROCESS="}, false},
+		{"prefix-only", []string{"GO_TEST_HELPER_PROCESS_EXTRA=1"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extraEnvHasHelperProcessFlag(tc.env); got != tc.want {
+				t.Fatalf("extraEnvHasHelperProcessFlag(%v) = %t, want %t", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestMain branches on GO_TEST_HELPER_PROCESS so the test binary doubles as
-// a fake `pyry`. Otherwise it points PYRY_E2E_BIN at itself so that
-// ensurePyryBuilt short-circuits and tests in this package run against the
-// fake — none of them want real pyry.
+// a fake `pyry` for tests that opt in via RunOpts.UseTestBinaryAsFakePyry.
+//
+// Previously this also set PYRY_E2E_BIN=os.Args[0] so ensurePyryBuilt
+// short-circuited to the test binary. That pattern caused the 2026-05-16
+// fork-bomb: tests that wanted *real* pyry (tool_loop, per_agent — added
+// after this TestMain was written) inherited the self-referential env var,
+// invoked the test binary as "pyry", whose TestMain fell through to
+// m.Run() and recursed unboundedly. Each test that wants the fake-pyry
+// pattern now opts in explicitly via the RunOpts field.
 func TestMain(m *testing.M) {
 	if os.Getenv("GO_TEST_HELPER_PROCESS") == "1" {
 		runFakePyry()
 		return
 	}
-	os.Setenv("PYRY_E2E_BIN", os.Args[0])
 	os.Exit(m.Run())
 }
 
@@ -153,14 +232,15 @@ const fakeInitSessionID = "11111111-1111-4111-8111-111111111111"
 
 func fullRunOpts(workdir string) RunOpts {
 	return RunOpts{
-		Workdir:      workdir,
-		Prompt:       "hello",
-		SystemPrompt: "you are a tester",
-		AllowedTools: []string{"Read"},
-		MaxTurns:     1,
-		Effort:       "low",
-		Model:        "claude-haiku-4-5",
-		ExtraEnv:     []string{"GO_TEST_HELPER_PROCESS=1"},
+		Workdir:                 workdir,
+		Prompt:                  "hello",
+		SystemPrompt:            "you are a tester",
+		AllowedTools:            []string{"Read"},
+		MaxTurns:                1,
+		Effort:                  "low",
+		Model:                   "claude-haiku-4-5",
+		ExtraEnv:                []string{"GO_TEST_HELPER_PROCESS=1"},
+		UseTestBinaryAsFakePyry: true,
 	}
 }
 
