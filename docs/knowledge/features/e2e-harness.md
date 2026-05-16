@@ -69,8 +69,8 @@ type Harness struct {
     HomeDir           string         // child's $HOME (registry, claude dir live underneath)
     ClaudeSessionsDir string         // populated by StartRotation; empty otherwise
     PID               int            // captured at spawn for leak verification
-    Stdout            *bytes.Buffer  // safe to read after process exit
-    Stderr            *bytes.Buffer
+    Stdout            *safeBuffer    // mutex-guarded — safe to poll while daemon runs
+    Stderr            *safeBuffer    // (#398: was *bytes.Buffer; raced os/exec pipe-copy)
 }
 
 func Start(t *testing.T) *Harness  // fail-fast: t.Fatalf on any error
@@ -1321,8 +1321,9 @@ short-circuits to a pre-built binary on disk for CI prebuild.
 ### `spawnOpts` — shared spawn core
 
 `spawn(t, home, extraFlags...)` and `StartRotation` both forward to a new
-`spawnWith(t, home, spawnOpts) (socket, *exec.Cmd, *bytes.Buffer,
-*bytes.Buffer, doneCh)` core. `spawnOpts` zero-value yields the historical
+`spawnWith(t, home, spawnOpts) (socket, *exec.Cmd, *safeBuffer,
+*safeBuffer, doneCh)` core (stdout/stderr buffers became `*safeBuffer` in
+#398 so tests can poll while `os/exec`'s pipe-copy goroutine still writes). `spawnOpts` zero-value yields the historical
 `/bin/sleep 99999` behaviour, so `spawn` is now a one-liner over
 `spawnWith`. Existing call sites (`StartIn`, `StartExpectingFailureIn`)
 unchanged.

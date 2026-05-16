@@ -27,7 +27,20 @@ func (*Server) Close() error            // idempotent, always nil
 func (*Server) RejectNextBinaryWith4409()                       // arm one-shot WS 4409
 func (*Server) LastBinaryHello(serverID string) (protocol.Envelope, bool)
 func (*Server) ForceCloseBinary(serverID string) bool           // close with 1011 (StatusInternalError)
+func (*Server) WaitBinary(ctx context.Context, serverID string) bool  // (#371) block until s.binaries[serverID] is registered
 ```
+
+`WaitBinary` exists because `websocket.Accept` writes the 101 response —
+unblocking the test's `websocket.Dial` — *before* `handleBinary` finishes
+inserting into `s.binaries` under `s.mu`. Tests that probe server-side
+bookkeeping immediately after a raw dial (`ForceCloseBinary`,
+`LastBinaryHello`, future probes) must synchronize on a positive signal
+or race the handler under `-race`. Polls every 2 ms on a `time.Ticker`
+under the caller's ctx; returns `true` on registration, `false` on ctx
+expiry. `LastBinaryHello`-polling remains the right pattern for e2e
+tests that already send a hello (the daemon does that on dial-out);
+`WaitBinary` is the equivalent for unit tests that raw-dial without a
+hello. See [`codebase/371.md`](../codebase/371.md).
 
 Callers append `/v1/server` (binary upgrade) or `/v1/client` (phone
 upgrade) to `URL()`. No `Config` struct yet — every test wants "boot it,

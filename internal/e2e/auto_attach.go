@@ -89,6 +89,17 @@ func (b *safeBuffer) String() string {
 	return b.buf.String()
 }
 
+// Bytes returns a snapshot of the bytes written so far. The returned
+// slice is a copy and is safe to retain past the next Write call.
+func (b *safeBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	src := b.buf.Bytes()
+	out := make([]byte, len(src))
+	copy(out, src)
+	return out
+}
+
 // echoClaudeScript is a /bin/sh wrapper around the e2e test binary
 // running TestHelperProcess in echo mode. The script ignores its own
 // argv, so Pool.Create's `--session-id <uuid>` suffix (appended on

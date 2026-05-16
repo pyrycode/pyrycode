@@ -24,20 +24,31 @@ const (
 	sendMsgConnIDForTest = "c-send-msg"
 )
 
-// stubTurnWriter records the WriteUserTurn arguments and returns the
-// preconfigured err. The captured payload is detached from the caller's
-// slice so the recorded bytes are immune to later in-place mutation.
+// stubTurnWriter records Activate / WriteUserTurn arguments and returns
+// the preconfigured errors. The captured payload is detached from the
+// caller's slice so the recorded bytes are immune to later in-place
+// mutation. callOrder lets tests assert Activate-before-WriteUserTurn.
 type stubTurnWriter struct {
-	err        error
-	calls      int
-	gotID      string
-	gotPayload []byte
+	err            error
+	activateErr    error
+	calls          int
+	activateCalls  int
+	gotID          string
+	gotPayload     []byte
+	callOrder      []string
+}
+
+func (s *stubTurnWriter) Activate(ctx context.Context) error {
+	s.activateCalls++
+	s.callOrder = append(s.callOrder, "activate")
+	return s.activateErr
 }
 
 func (s *stubTurnWriter) WriteUserTurn(id string, payload []byte) error {
 	s.calls++
 	s.gotID = id
 	s.gotPayload = append([]byte(nil), payload...)
+	s.callOrder = append(s.callOrder, "write")
 	return s.err
 }
 
@@ -131,11 +142,89 @@ func TestSendMessage_Success_EmitsAck(t *testing.T) {
 	if stub.calls != 1 {
 		t.Errorf("WriteUserTurn calls = %d, want 1", stub.calls)
 	}
+	if stub.activateCalls != 1 {
+		t.Errorf("Activate calls = %d, want 1", stub.activateCalls)
+	}
+	if got := stub.callOrder; len(got) != 2 || got[0] != "activate" || got[1] != "write" {
+		t.Errorf("callOrder = %v, want [activate write]", got)
+	}
 	if stub.gotID != sendMsgConvID {
 		t.Errorf("WriteUserTurn id = %q, want %q", stub.gotID, sendMsgConvID)
 	}
 	if string(stub.gotPayload) != sendMsgText {
 		t.Errorf("WriteUserTurn payload = %q, want %q", string(stub.gotPayload), sendMsgText)
+	}
+}
+
+// TestSendMessage_ActivateTimeout_EmitsBinaryOffline covers the #396
+// failure mode: Activate returns context.DeadlineExceeded (e.g. claude
+// failed to respawn within the 30s window). The handler must not call
+// WriteUserTurn, must emit a server.binary_offline error envelope, and
+// must return nil so the dispatcher keeps the conn alive for retry.
+func TestSendMessage_ActivateTimeout_EmitsBinaryOffline(t *testing.T) {
+	t.Parallel()
+	stub := &stubTurnWriter{activateErr: context.DeadlineExceeded}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	h := SendMessage(stub, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeServerBinaryOffline {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeServerBinaryOffline)
+	}
+	if !payload.Retryable {
+		t.Errorf("Retryable = false, want true (binary-offline is transient)")
+	}
+	if stub.activateCalls != 1 {
+		t.Errorf("Activate calls = %d, want 1", stub.activateCalls)
+	}
+	if stub.calls != 0 {
+		t.Errorf("WriteUserTurn calls = %d, want 0 (Activate failure must short-circuit)", stub.calls)
+	}
+}
+
+// TestSendMessage_HandlerCtxCanceled_PropagatesError covers the
+// conn-closing branch: when the dispatcher's ctx is cancelled, Activate
+// returns context.Canceled and the handler propagates the error so the
+// dispatcher's per-conn unwind runs. No wire reply is produced.
+func TestSendMessage_HandlerCtxCanceled_PropagatesError(t *testing.T) {
+	t.Parallel()
+	stub := &stubTurnWriter{activateErr: context.Canceled}
+	c, _, out := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // ensure ctx.Err() is non-nil at handler entry
+
+	h := SendMessage(stub, sendMsgLogger(t))
+	err := h(ctx, c, req)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("handler err = %v, want context.Canceled", err)
+	}
+	if stub.calls != 0 {
+		t.Errorf("WriteUserTurn calls = %d, want 0", stub.calls)
+	}
+
+	select {
+	case env := <-out:
+		t.Fatalf("unexpected outbound envelope on ctx-cancel branch: %+v", env)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

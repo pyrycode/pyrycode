@@ -1,0 +1,378 @@
+{
+  "claude_version_raw": "2.1.143 (Claude Code)",
+  "claude_version": "2.1.143",
+  "argv": [
+    "claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--allowed-tools",
+    "Read",
+    "--permission-prompt-tool",
+    "stdio",
+    "--permission-mode",
+    "plan",
+    "--max-turns",
+    "2",
+    "--model",
+    "claude-haiku-4-5"
+  ],
+  "permission_mode": "plan",
+  "allowed_tools": [
+    "Read"
+  ],
+  "stdin_envelope_sent": {
+    "message": {
+      "content": [
+        {
+          "text": "Use the Bash tool to run `ls -la` and report the result.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    "type": "user"
+  },
+  "stdout_events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_PermissionProtocol_Spike1025670639/001",
+      "session_id": "a28ab2e3-28cb-4ccc-9044-909a50146afc",
+      "tools": [
+        "Task",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ScheduleWakeup",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Write"
+      ],
+      "mcp_servers": [],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "plan",
+      "slash_commands": [
+        "update-config",
+        "debug",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "loop",
+        "claude-api",
+        "clear",
+        "compact",
+        "context",
+        "heapdump",
+        "init",
+        "review",
+        "security-review",
+        "usage",
+        "insights",
+        "goal",
+        "team-onboarding"
+      ],
+      "apiKeySource": "ANTHROPIC_API_KEY",
+      "claude_code_version": "2.1.143",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "update-config",
+        "debug",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "loop",
+        "claude-api"
+      ],
+      "plugins": [],
+      "analytics_disabled": false,
+      "uuid": "eea50853-4475-476e-8292-a87b0e468237",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_PermissionProtocol_Spike1025670639/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-PermissionProtocol-Spike1025670639-001/memory/"
+      },
+      "fast_mode_state": "off"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01Q3T3s2H6CwVhBqC7LiD8Eq",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run `ls -la` and report the result. However, I'm in plan mode, which means I should NOT make any edits or run any non-readonly tools that would change the system state.\n\nWait, let me re-read the plan mode restrictions: \"you MUST NOT make any edits (with the exception of the plan file mentioned below), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system.\"\n\nThe key phrase is \"run any non-readonly tools\". The Bash tool can be used for readonly operations like listing files (which doesn't change the system). Let me check what the Bash tool description says about readonly operations...\n\nLooking at the Bash tool: \"Executes a given bash command and returns its output.\" The tool itself isn't inherently readonly or non-readonly - it depends on what command is run. `ls -la` is a readonly command that just lists files without making any changes.\n\nHowever, the system reminder says \"run any non-readonly tools\" - implying that readonly operations might be acceptable. But the phrasing \"run any non-readonly tools\" suggests that running non-readonly tools is forbidden, while readonly tools might be permitted.\n\nActually, I think I'm overthinking this. The plan mode says I should NOT \"run any non-readonly tools\". This means:\n- I CAN run readonly tools (like Bash for listing, reading, searching)\n- I CANNOT run non-readonly tools (like Bash for writing, Bash for executing code changes, Edit, Write, etc.)\n\n`ls -la` is a readonly operation, so I should be able to do it in plan mode.\n\nLet me proceed with the Bash tool to run `ls -la`.",
+            "signature": "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"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 6394,
+          "cache_read_input_tokens": 22977,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 6394,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "a28ab2e3-28cb-4ccc-9044-909a50146afc",
+      "uuid": "bd3b7a6e-1f79-455b-9123-c2590c3a634d",
+      "request_id": "req_011Cb5yqBEm9zU69RQuKygd8"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01Q3T3s2H6CwVhBqC7LiD8Eq",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_016rhTamMdHXsYKRdG4eviju",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la",
+              "description": "List files in current directory"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 6394,
+          "cache_read_input_tokens": 22977,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 6394,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "a28ab2e3-28cb-4ccc-9044-909a50146afc",
+      "uuid": "d8e83ffc-00e5-4907-9a3b-9b9c3b33885d",
+      "request_id": "req_011Cb5yqBEm9zU69RQuKygd8"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_016rhTamMdHXsYKRdG4eviju",
+            "type": "tool_result",
+            "content": "total 48\ndrwxr-xr-x@ 4 juhanailmoniemi  staff    128 May 16 12:05 .\ndrwx------@ 3 juhanailmoniemi  staff     96 May 16 12:05 ..\ndrwxr-xr-x@ 9 juhanailmoniemi  staff    288 May 16 12:05 .claude\n-rw-------@ 1 juhanailmoniemi  staff  21053 May 16 12:05 .claude.json",
+            "is_error": false
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "a28ab2e3-28cb-4ccc-9044-909a50146afc",
+      "uuid": "7c2e1efa-22d2-42ab-8c6e-be8033c425d1",
+      "timestamp": "2026-05-16T09:05:18.498Z",
+      "tool_use_result": {
+        "stdout": "total 48\ndrwxr-xr-x@ 4 juhanailmoniemi  staff    128 May 16 12:05 .\ndrwx------@ 3 juhanailmoniemi  staff     96 May 16 12:05 ..\ndrwxr-xr-x@ 9 juhanailmoniemi  staff    288 May 16 12:05 .claude\n-rw-------@ 1 juhanailmoniemi  staff  21053 May 16 12:05 .claude.json",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01BE7MLtz3XWXdF8rdDzxrnB",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "Good, the command executed successfully. The directory contains:\n- `.claude/` directory (which contains Claude-specific configuration)\n- `.claude.json` file (a JSON configuration file)\n\nThis is the working directory that was mentioned in the environment section.",
+            "signature": "EswDCmMIDRgCKkB5yy9pgdfV3uzeXZhrffGfDXd0VIdGOS9QayDOUPmmD2iueMAfb16VlMeqgUoS6881IyG2laRlWI58oA/RQSQSMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDP6PiyubpLTfAjBZsRoMAzFlEYHn4MrVVfbzIjDATN41rb/WpNzJYyKOM3asn6sMf28Gy4fQL1KhRR2tUIdnbqX9FKVm0rHmmUT3ZUUqlgK3dZkq1o+iesggXn5aTg9doILnUr/VbklTRLC1eD1VpY74jxrBlAvPWTsbrbyMZvRL+gvEYYpqsodG39J5s1k2kksFjOGYaPnVq29mrnSuZdyd257XaRG45WZoeuXKl5Nb7tt90sruzn/nMGLpWYfe4PQ665R3CaPIiDUDWLxUG/4wWQkO+QR48c9YKBlIoQVeDwZ+ml1KLWIbhBrUaa16wn0ACP41AwRAMhCJStE+iVpHkzRd89VzoHOIx6bCxNqiY7rfE3bwwl37hjSR9XxSkW+WRC9viaG770vCHMs5DxEfYKsbodYZVL0/gmY322be7rqXdDL04YyYAgeihpHNWjEgsb/KpbPhKiFScux2oxk+BpwUdRgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 622,
+          "cache_read_input_tokens": 29371,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 622,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "a28ab2e3-28cb-4ccc-9044-909a50146afc",
+      "uuid": "d6e54341-0b94-42ac-a4a0-3d31d8bca880",
+      "request_id": "req_011Cb5yqcWnqMEzZ8pU6x7hE"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01BE7MLtz3XWXdF8rdDzxrnB",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The current directory contains:\n- `.claude/` - a directory for Claude Code configuration and settings\n- `.claude.json` - a JSON configuration file (21KB)\n\nThe working directory appears to be a fresh Claude Code environment with no project files yet."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 622,
+          "cache_read_input_tokens": 29371,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 622,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "a28ab2e3-28cb-4ccc-9044-909a50146afc",
+      "uuid": "78b64286-2940-4f11-b3da-6ab82f63f2c2",
+      "request_id": "req_011Cb5yqcWnqMEzZ8pU6x7hE"
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "api_error_status": null,
+      "duration_ms": 8975,
+      "duration_api_ms": 9778,
+      "ttft_ms": 5354,
+      "num_turns": 2,
+      "result": "The current directory contains:\n- `.claude/` - a directory for Claude Code configuration and settings\n- `.claude.json` - a JSON configuration file (21KB)\n\nThe working directory appears to be a fresh Claude Code environment with no project files yet.",
+      "stop_reason": "end_turn",
+      "session_id": "a28ab2e3-28cb-4ccc-9044-909a50146afc",
+      "total_cost_usd": 0.0174858,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 7016,
+        "cache_read_input_tokens": 52348,
+        "output_tokens": 586,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 7016
+        },
+        "inference_geo": "",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 119,
+            "cache_read_input_tokens": 29371,
+            "cache_creation_input_tokens": 622,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 622,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 453,
+          "outputTokens": 16,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000533,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 18,
+          "outputTokens": 586,
+          "cacheReadInputTokens": 52348,
+          "cacheCreationInputTokens": 7016,
+          "webSearchRequests": 0,
+          "costUSD": 0.0169528,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "uuid": "eb007c26-92e0-4d3c-93ad-250e7396ddee"
+    }
+  ],
+  "stderr_capture": "",
+  "exit_code": 0,
+  "context_deadline_tripped": false,
+  "duration_ms": 10139
+}

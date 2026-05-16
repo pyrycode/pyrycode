@@ -10,18 +10,16 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
-// Canned JSONL fixtures used across the self-check tests. Kept on a
-// single line each so the fake-claude writer can dump them verbatim into
-// the session JSONL file the watcher tails.
+// Canned stream-json fixtures used across the self-check tests. Each is a
+// single JSONL line (no trailing newline); the fake-claude helper writes
+// these to stdout with newline separators.
 const (
 	// passLine: assistant entry with stop_reason "end_turn" and a single
-	// text content block. Satisfies the deterministic end-of-turn rule
-	// (stop_reason "end_turn" AND sum text length > 0). No tool_use
-	// blocks means the bash detector sees nothing.
+	// text content block. Satisfies jsonl.Reader's deterministic end-of-
+	// turn rule (stop_reason "end_turn" AND sum of text > 0). No tool_use
+	// blocks means the Bash detector sees nothing.
 	passLine = `{"type":"assistant","message":{"id":"msg_pass","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
 
 	// bashLine: assistant entry whose content carries a tool_use block
@@ -32,59 +30,34 @@ const (
 )
 
 // TestSelfCheckHelperProcess is the fake-claude entry point. The test
-// binary re-execs itself with GO_SELF_CHECK_HELPER=1 (set in the parent
-// test's Config.Env, propagated through SpawnPTY into the wrapper script
-// and on into the re-exec'd test binary). Reads:
+// binary is re-exec'd via a shell wrapper that drops the production claude
+// argv (which the Go test binary's flag parser would reject) and routes
+// here keyed by GO_SELFCHECK_HELPER=1 in the env.
 //
-//   - GO_SELF_CHECK_HELPER_SESSION_ID: the --session-id value extracted
-//     from the production argv by the wrapper script.
-//   - GO_SELF_CHECK_HELPER_JSONL: verbatim bytes to write into
-//     $HOME/.claude/projects/<encoded-cwd>/<sid>.jsonl. Empty skips the
-//     write (used by the timeout fixture).
-//   - GO_SELF_CHECK_HELPER_LIFETIME: time.Duration the fake stays alive
-//     after writing. Defaults to 1s.
+// Env knobs:
+//
+//   - GO_SELFCHECK_HELPER_STDOUT: verbatim bytes to write to stdout
+//     (typically one or more JSONL lines). Empty skips the write.
+//   - GO_SELFCHECK_HELPER_LIFETIME: time.Duration the fake stays alive
+//     after writing. Defaults to 200ms. Used by the timeout fixture to
+//     hold the child past cfg.OverallTimeout without producing output.
 func TestSelfCheckHelperProcess(t *testing.T) {
-	if os.Getenv("GO_SELF_CHECK_HELPER") != "1" {
+	if os.Getenv("GO_SELFCHECK_HELPER") != "1" {
 		return
 	}
-
-	sid := os.Getenv("GO_SELF_CHECK_HELPER_SESSION_ID")
-	if sid == "" {
-		fmt.Fprintln(os.Stderr, "fake: missing GO_SELF_CHECK_HELPER_SESSION_ID")
-		os.Exit(99)
-	}
-
-	if content := os.Getenv("GO_SELF_CHECK_HELPER_JSONL"); content != "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fake: getwd: %v\n", err)
-			os.Exit(98)
-		}
-		encoded, err := agentrun.EncodeProjectDir(cwd)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fake: encode: %v\n", err)
-			os.Exit(98)
-		}
-		home := os.Getenv("HOME")
-		if home == "" {
-			fmt.Fprintln(os.Stderr, "fake: empty HOME")
-			os.Exit(98)
-		}
-		dir := filepath.Join(home, ".claude", "projects", encoded)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			fmt.Fprintf(os.Stderr, "fake: mkdir: %v\n", err)
-			os.Exit(97)
-		}
-		path := filepath.Join(dir, sid+".jsonl")
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "fake: write: %v\n", err)
-			os.Exit(96)
-		}
-	}
-
+	// Drain stdin so streamrunner's stdin envelope write doesn't block.
 	go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
-	lifetime := 1 * time.Second
-	if raw := os.Getenv("GO_SELF_CHECK_HELPER_LIFETIME"); raw != "" {
+
+	if out := os.Getenv("GO_SELFCHECK_HELPER_STDOUT"); out != "" {
+		if _, err := os.Stdout.WriteString(out); err != nil {
+			fmt.Fprintf(os.Stderr, "fake: write stdout: %v\n", err)
+			os.Exit(98)
+		}
+		_ = os.Stdout.Sync()
+	}
+
+	lifetime := 200 * time.Millisecond
+	if raw := os.Getenv("GO_SELFCHECK_HELPER_LIFETIME"); raw != "" {
 		if d, err := time.ParseDuration(raw); err == nil {
 			lifetime = d
 		}
@@ -94,24 +67,14 @@ func TestSelfCheckHelperProcess(t *testing.T) {
 }
 
 // selfCheckHelperWrapper writes a /bin/sh wrapper that drops the
-// production claude argv (the Go test binary's flag parser would reject
-// it), extracts --session-id, re-exports it as
-// GO_SELF_CHECK_HELPER_SESSION_ID, and exec's the test binary in
-// fake-claude mode. Mirrors the pattern in cmd/pyry/agent_run_test.go's
-// configureFakeClaude.
+// production claude argv (the Go test binary's flag parser rejects unknown
+// flags like --input-format) and exec's the test binary in fake-claude
+// mode. Env knobs are inherited through the exec.
 func selfCheckHelperWrapper(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fake-claude.sh")
 	body := fmt.Sprintf(`#!/bin/sh
-SID=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --session-id) SID="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-export GO_SELF_CHECK_HELPER_SESSION_ID="$SID"
 exec %q -test.run=^TestSelfCheckHelperProcess$
 `, os.Args[0])
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
@@ -120,35 +83,24 @@ exec %q -test.run=^TestSelfCheckHelperProcess$
 	return path
 }
 
-// selfCheckSetup builds a homeDir + workdir pair with the canonical
-// deny-default settings file already in place. Returns a partially-filled
-// Config the caller customises (Env, OverallTimeout). t.Setenv pins HOME
-// so the spawned child sees the same home as the parent.
-func selfCheckSetup(t *testing.T) (homeDir, workdir string, cfg Config) {
+// selfCheckSetup returns a Config wired to the helper wrapper with a
+// short OverallTimeout. The caller sets cfg.Env to thread the helper's
+// behaviour knobs.
+func selfCheckSetup(t *testing.T) Config {
 	t.Helper()
-	homeDir = t.TempDir()
-	t.Setenv("HOME", homeDir)
-	workdir = t.TempDir()
-	if _, err := agentrun.WriteSettings(workdir, []string{"Read"}); err != nil {
-		t.Fatalf("WriteSettings: %v", err)
+	return Config{
+		ClaudeBin:      selfCheckHelperWrapper(t),
+		WorkDir:        t.TempDir(),
+		OverallTimeout: 5 * time.Second,
 	}
-	cfg = Config{
-		ClaudeBin:        selfCheckHelperWrapper(t),
-		HomeDir:          homeDir,
-		Workdir:          workdir,
-		TrustDialogDelay: 20 * time.Millisecond,
-		PromptDelay:      20 * time.Millisecond,
-		OverallTimeout:   5 * time.Second,
-	}
-	return homeDir, workdir, cfg
 }
 
 func TestSelfCheck_Pass(t *testing.T) {
-	_, _, cfg := selfCheckSetup(t)
+	cfg := selfCheckSetup(t)
 	cfg.Env = []string{
-		"GO_SELF_CHECK_HELPER=1",
-		"GO_SELF_CHECK_HELPER_JSONL=" + passLine + "\n",
-		"GO_SELF_CHECK_HELPER_LIFETIME=500ms",
+		"GO_SELFCHECK_HELPER=1",
+		"GO_SELFCHECK_HELPER_STDOUT=" + passLine + "\n",
+		"GO_SELFCHECK_HELPER_LIFETIME=200ms",
 	}
 
 	result, err := SelfCheckDenyDefault(context.Background(), cfg)
@@ -170,15 +122,15 @@ func TestSelfCheck_Pass(t *testing.T) {
 }
 
 func TestSelfCheck_BashInvoked(t *testing.T) {
-	_, _, cfg := selfCheckSetup(t)
+	cfg := selfCheckSetup(t)
 	cfg.Env = []string{
-		"GO_SELF_CHECK_HELPER=1",
+		"GO_SELFCHECK_HELPER=1",
 		// Two-line fixture: Bash tool_use first, end_turn second. The
 		// detector must trip on the first line; the second is present so
 		// a regression where the detector misses Bash and falls through
 		// to end-of-turn would surface as PASS, not a hang.
-		"GO_SELF_CHECK_HELPER_JSONL=" + bashLine + "\n" + passLine + "\n",
-		"GO_SELF_CHECK_HELPER_LIFETIME=500ms",
+		"GO_SELFCHECK_HELPER_STDOUT=" + bashLine + "\n" + passLine + "\n",
+		"GO_SELFCHECK_HELPER_LIFETIME=200ms",
 	}
 
 	result, err := SelfCheckDenyDefault(context.Background(), cfg)
@@ -196,47 +148,15 @@ func TestSelfCheck_BashInvoked(t *testing.T) {
 	}
 }
 
-// TestSelfCheck_BashInvokedUnderMisformattedSettings is the AC's
-// "runtime enforcement, not file presence" verification. The settings
-// file written to the workdir uses defaultMode "DENY" (uppercase) — a
-// shape that, were the detector to inspect the file content, might be
-// flagged as "deny is present". The detector is structural over JSONL:
-// it sees the Bash tool_use the fake emits and still reports
-// ErrBashInvoked.
-func TestSelfCheck_BashInvokedUnderMisformattedSettings(t *testing.T) {
-	_, workdir, cfg := selfCheckSetup(t)
-	settingsPath := filepath.Join(workdir, agentrun.SettingsFilename)
-	bogus := `{"permissions":{"allow":["Read"],"defaultMode":"DENY"}}` + "\n"
-	if err := os.WriteFile(settingsPath, []byte(bogus), 0o600); err != nil {
-		t.Fatalf("write bogus settings: %v", err)
-	}
-
-	cfg.Env = []string{
-		"GO_SELF_CHECK_HELPER=1",
-		"GO_SELF_CHECK_HELPER_JSONL=" + bashLine + "\n",
-		"GO_SELF_CHECK_HELPER_LIFETIME=500ms",
-	}
-
-	result, err := SelfCheckDenyDefault(context.Background(), cfg)
-	if !errors.Is(err, ErrBashInvoked) {
-		t.Fatalf("err = %v, want ErrBashInvoked\nresult=%+v", err, result)
-	}
-	if !result.BashInvoked {
-		t.Errorf("BashInvoked = false, want true")
-	}
-	if result.Evidence == nil {
-		t.Errorf("Evidence is nil, want the bash line")
-	}
-}
-
 func TestSelfCheck_Timeout(t *testing.T) {
-	_, _, cfg := selfCheckSetup(t)
+	cfg := selfCheckSetup(t)
 	cfg.OverallTimeout = 300 * time.Millisecond
 	cfg.Env = []string{
-		"GO_SELF_CHECK_HELPER=1",
-		// No JSONL output. Fake stays alive past the OverallTimeout so
-		// the watcher never sees an end_turn nor a Bash invocation.
-		"GO_SELF_CHECK_HELPER_LIFETIME=2s",
+		"GO_SELFCHECK_HELPER=1",
+		// No stdout output. Fake stays alive past OverallTimeout so the
+		// watcher never sees an end_turn nor a Bash invocation before
+		// the deadline fires.
+		"GO_SELFCHECK_HELPER_LIFETIME=2s",
 	}
 
 	result, err := SelfCheckDenyDefault(context.Background(), cfg)
@@ -256,11 +176,11 @@ func TestSelfCheck_Timeout(t *testing.T) {
 // is logged + skipped, does not poison subsequent events, and does not
 // turn a PASS into an inconclusive.
 func TestSelfCheck_MalformedAssistantLineSkipped(t *testing.T) {
-	_, _, cfg := selfCheckSetup(t)
+	cfg := selfCheckSetup(t)
 	cfg.Env = []string{
-		"GO_SELF_CHECK_HELPER=1",
-		"GO_SELF_CHECK_HELPER_JSONL=" + "{not valid json\n" + passLine + "\n",
-		"GO_SELF_CHECK_HELPER_LIFETIME=500ms",
+		"GO_SELFCHECK_HELPER=1",
+		"GO_SELFCHECK_HELPER_STDOUT=" + "{not valid json\n" + passLine + "\n",
+		"GO_SELFCHECK_HELPER_LIFETIME=200ms",
 	}
 
 	result, err := SelfCheckDenyDefault(context.Background(), cfg)
@@ -287,22 +207,16 @@ func TestSelfCheck_ConfigValidation(t *testing.T) {
 			wantInErr: "empty ClaudeBin",
 		},
 		{
-			name:      "empty HomeDir",
-			mutate:    func(c *Config) { c.HomeDir = "" },
-			wantInErr: "empty HomeDir",
-		},
-		{
-			name:      "empty Workdir",
-			mutate:    func(c *Config) { c.Workdir = "" },
-			wantInErr: "empty Workdir",
+			name:      "empty WorkDir",
+			mutate:    func(c *Config) { c.WorkDir = "" },
+			wantInErr: "empty WorkDir",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Config{
 				ClaudeBin: "/bin/true",
-				HomeDir:   t.TempDir(),
-				Workdir:   t.TempDir(),
+				WorkDir:   t.TempDir(),
 			}
 			tc.mutate(&cfg)
 			_, err := SelfCheckDenyDefault(context.Background(), cfg)

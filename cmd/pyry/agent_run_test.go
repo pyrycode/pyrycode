@@ -3,38 +3,44 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
-// fakeClaudeAssistantLine is the single JSONL line the fake-claude binary
-// writes to the watched session file. Shape: assistant entry with a single
-// text content block and a usage object — satisfies jsonl.Reader's parser
-// and the deterministic end-of-turn rule (stop_reason == "end_turn" AND
-// sum text length > 0). Kept on one line so the file is one complete entry
-// the watcher drains atomically.
-const fakeClaudeAssistantLine = `{"type":"assistant","message":{"id":"msg_fake","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
+// Note: production claude under --output-format stream-json still writes a
+// JSONL session file at ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl.
+// This fake does NOT produce that file — the verb no longer reads it (the
+// JSONL-tail watcher was deleted in #391). Verification of claude's own
+// JSONL emission is left to manual smoke against a real `claude` binary;
+// see #375 for the self-check refactor that owns that surface.
 
-// TestAgentRunFakeClaude is the fake-claude entry point used by the
+// TestAgentRunStreamJSONFake is the fake-claude entry point used by the
 // runAgentRun wiring tests. When PYRY_AGENT_RUN_FAKE=1 is set in the
-// environment, the test binary re-exec'd as claude:
+// environment, the test binary re-exec'd as claude behaves per
+// GO_AGENT_RUN_FAKE_MODE:
 //
-//  1. Optionally captures argv[1:] to GO_AGENT_RUN_FAKE_ARGS_FILE.
-//  2. Writes a canned end-of-turn assistant JSONL line to
-//     $HOME/.claude/projects/<encoded-cwd>/<sid>.jsonl, where <sid> is read
-//     from --session-id in argv. This satisfies pyry's tail.Watcher so the
-//     emitter's OnEndOfTurn fires and the run terminates cleanly.
-//  3. Drains stdin into io.Discard.
-//  4. Sleeps GO_AGENT_RUN_FAKE_LIFETIME (default 200ms) and exits 0.
-func TestAgentRunFakeClaude(t *testing.T) {
+//   - "clean" (default): drain stdin to EOF, write a canned three-line
+//     stream-json sequence to stdout (system init / assistant / result
+//     success), exit 0.
+//   - "exit1": drain stdin to EOF, exit 1.
+//   - "sleep": drain stdin to EOF, install a SIGTERM handler that prints
+//     "got SIGTERM" to stderr and exits 0; otherwise sleep 30s. Used by
+//     the ctx-cancel path coverage in streamrunner; the verb-level test
+//     here defers to streamrunner's own coverage.
+//
+// Optional captures:
+//   - GO_AGENT_RUN_FAKE_ARGS_FILE: write argv[1:] (one per line) if set.
+//   - GO_AGENT_RUN_FAKE_STDIN_FILE: write drained stdin bytes verbatim if set.
+func TestAgentRunStreamJSONFake(t *testing.T) {
 	if os.Getenv("PYRY_AGENT_RUN_FAKE") != "1" {
 		return
 	}
@@ -45,89 +51,80 @@ func TestAgentRunFakeClaude(t *testing.T) {
 		}
 	}
 
-	if err := writeFakeClaudeJSONL(); err != nil {
-		fmt.Fprintf(os.Stderr, "fake: write jsonl: %v\n", err)
-		os.Exit(98)
+	mode := os.Getenv("GO_AGENT_RUN_FAKE_MODE")
+	if mode == "" {
+		mode = "clean"
 	}
 
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
-	lifetime := 200 * time.Millisecond
-	if raw := os.Getenv("GO_AGENT_RUN_FAKE_LIFETIME"); raw != "" {
-		if d, err := time.ParseDuration(raw); err == nil {
-			lifetime = d
+	switch mode {
+	case "clean":
+		drainStdin(t)
+		lines := []string{
+			`{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000"}`,
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}`,
+			`{"type":"result","subtype":"success"}`,
 		}
+		for _, l := range lines {
+			fmt.Fprintln(os.Stdout, l)
+		}
+		os.Exit(0)
+	case "exit1":
+		drainStdin(t)
+		os.Exit(1)
+	case "sleep":
+		// SIGTERM handler is installed but the verb-level test no longer
+		// exercises this mode; kept here to mirror streamrunner's helper
+		// shape and avoid silently breaking future test additions.
+		drainStdin(t)
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	default:
+		fmt.Fprintf(os.Stderr, "fake: unknown GO_AGENT_RUN_FAKE_MODE=%q\n", mode)
+		os.Exit(99)
 	}
-	time.Sleep(lifetime)
-	os.Exit(0)
 }
 
-// writeFakeClaudeJSONL writes the canned end-of-turn assistant line to the
-// session JSONL path the tail.Watcher expects: $HOME/.claude/projects/
-// <agentrun.EncodeProjectDir(cwd)>/<sid>.jsonl. Resolves <sid> from
-// --session-id in argv and <cwd> from os.Getwd (which equals the parent
-// runAgentRun's --workdir, since Drive sets cmd.Dir to that).
-func writeFakeClaudeJSONL() error {
-	sid := os.Getenv("GO_AGENT_RUN_FAKE_SESSION_ID")
-	if sid == "" {
-		return fmt.Errorf("no GO_AGENT_RUN_FAKE_SESSION_ID in env")
+func drainStdin(t *testing.T) {
+	t.Helper()
+	if path := os.Getenv("GO_AGENT_RUN_FAKE_STDIN_FILE"); path != "" {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fake: open stdin capture: %v\n", err)
+			os.Exit(99)
+		}
+		if _, err := io.Copy(f, os.Stdin); err != nil {
+			fmt.Fprintf(os.Stderr, "fake: copy stdin: %v\n", err)
+			_ = f.Close()
+			os.Exit(99)
+		}
+		_ = f.Sync()
+		_ = f.Close()
+		return
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getwd: %w", err)
-	}
-	encoded, err := agentrun.EncodeProjectDir(cwd)
-	if err != nil {
-		return fmt.Errorf("encode cwd: %w", err)
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		return fmt.Errorf("empty HOME")
-	}
-	dir := filepath.Join(home, ".claude", "projects", encoded)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-	path := filepath.Join(dir, sid+".jsonl")
-	return os.WriteFile(path, []byte(fakeClaudeAssistantLine+"\n"), 0o600)
+	_, _ = io.Copy(io.Discard, os.Stdin)
 }
 
 // configureFakeClaude wires the test-only env knobs so a runAgentRun call
-// spawns a shell wrapper that exec's the test binary in fake-claude mode,
-// with ~ms-scale drive delays. Without this, runAgentRun would try to
-// spawn the real `claude` from PATH and the drive would block for ~6
-// seconds.
+// spawns a shell wrapper that exec's the test binary in fake-claude mode.
+// Without this, runAgentRun would try to spawn the real `claude` from PATH.
 //
-// A shell wrapper is required because buildClaudeArgs (the production
-// argv builder) emits real claude flags like `--settings <path>` which the
-// Go test binary's flag parser would reject. The wrapper drops the
-// production argv on the floor and re-execs the test binary with a fixed
-// `-test.run` pinned to TestAgentRunFakeClaude.
+// A shell wrapper is required because buildClaudeArgs emits real claude
+// flags (e.g. `--input-format stream-json`) which the Go test binary's flag
+// parser would reject. The wrapper drops the production argv on the floor
+// and re-execs the test binary with a fixed `-test.run` pinned to
+// TestAgentRunStreamJSONFake.
 func configureFakeClaude(t *testing.T) {
 	t.Helper()
 	scriptDir := t.TempDir()
 	script := filepath.Join(scriptDir, "fake-claude.sh")
-	// The wrapper drops the production argv (the test binary's flag parser
-	// rejects unknown claude flags) but first extracts --session-id and
-	// re-exports it so the fake can write the canned JSONL to the path
-	// pyry's tail.Watcher is waiting for.
 	body := fmt.Sprintf(`#!/bin/sh
-SID=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --session-id) SID="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-export GO_AGENT_RUN_FAKE_SESSION_ID="$SID"
-exec %q -test.run=^TestAgentRunFakeClaude$
+exec %q -test.run=^TestAgentRunStreamJSONFake$
 `, os.Args[0])
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake-claude script: %v", err)
 	}
 	t.Setenv("PYRY_CLAUDE_BIN", script)
 	t.Setenv("PYRY_AGENT_RUN_FAKE", "1")
-	t.Setenv("PYRY_AGENT_RUN_TRUST_DELAY", "5ms")
-	t.Setenv("PYRY_AGENT_RUN_PROMPT_DELAY", "5ms")
 }
 
 // validArgsFixture builds a fully-valid argv for parseAgentRunArgs. Tests
@@ -396,110 +393,17 @@ func TestParseAgentRunArgs_AllowedToolsForms(t *testing.T) {
 	}
 }
 
-// TestRunAgentRun_EmitsSettingsFile drives runAgentRun end-to-end with a
-// valid argv, captures stdout, and asserts the marker line appears as the
-// first stdout line and the on-disk settings file is written. The marker
-// line is the dispatcher's parse contract (sibling #332). Subsequent
-// stdout lines — the stream-json passthrough and trailer — are validated
-// in TestRunAgentRun_DrivesFakeClaude.
-func TestRunAgentRun_EmitsSettingsFile(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	configureFakeClaude(t)
-
-	var stdout bytes.Buffer
-	if err := runAgentRun(&stdout, fx.argv); err != nil {
-		t.Fatalf("runAgentRun: %v", err)
-	}
-
-	wantPath := filepath.Join(fx.workdir, agentrun.SettingsFilename)
-	wantLine := "settings-file: " + wantPath
-	firstLine := strings.SplitN(stdout.String(), "\n", 2)[0]
-	if firstLine != wantLine {
-		t.Errorf("stdout first line:\n got  = %q\n want = %q", firstLine, wantLine)
-	}
-
-	got, err := os.ReadFile(wantPath)
-	if err != nil {
-		t.Fatalf("read settings file: %v", err)
-	}
-	wantJSON := `{"permissions":{"allow":["Read","Bash"],"defaultMode":"deny"}}` + "\n"
-	if string(got) != wantJSON {
-		t.Errorf("settings file content:\n got  = %q\n want = %q", got, wantJSON)
-	}
-}
-
-// TestRunAgentRun_MarksWorkdirTrusted asserts that runAgentRun writes
-// projects[realpath(workdir)].hasTrustDialogAccepted = true into
-// $HOME/.claude.json so the supervised claude (#332) does not block on the
-// workspace-trust TUI dialog at startup.
-func TestRunAgentRun_MarksWorkdirTrusted(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	configureFakeClaude(t)
-
-	if err := runAgentRun(io.Discard, fx.argv); err != nil {
-		t.Fatalf("runAgentRun: %v", err)
-	}
-
-	homeDir := os.Getenv("HOME")
-	dataPath := filepath.Join(homeDir, ".claude.json")
-	info, err := os.Stat(dataPath)
-	if err != nil {
-		t.Fatalf("stat %s: %v", dataPath, err)
-	}
-	if !info.Mode().IsRegular() {
-		t.Fatalf("%s: not a regular file", dataPath)
-	}
-
-	data, err := os.ReadFile(dataPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", dataPath, err)
-	}
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		t.Fatalf("decode %s: %v", dataPath, err)
-	}
-
-	wantKey, err := filepath.EvalSymlinks(fx.workdir)
-	if err != nil {
-		t.Fatalf("eval symlinks %s: %v", fx.workdir, err)
-	}
-
-	projects, ok := root["projects"].(map[string]any)
-	if !ok {
-		t.Fatalf("projects: not an object, got %T", root["projects"])
-	}
-	entry, ok := projects[wantKey].(map[string]any)
-	if !ok {
-		t.Fatalf("projects[%q]: not an object, got %T", wantKey, projects[wantKey])
-	}
-	got, ok := entry["hasTrustDialogAccepted"].(bool)
-	if !ok {
-		t.Fatalf("projects[%q].hasTrustDialogAccepted: not a bool, got %T", wantKey, entry["hasTrustDialogAccepted"])
-	}
-	if !got {
-		t.Errorf("projects[%q].hasTrustDialogAccepted = false, want true", wantKey)
-	}
-}
-
-// TestBuildClaudeArgs_Shape pins the production claude argv. Two
-// assertions are load-bearing for the deny-default security model:
-//
-//   - `--permission-mode default` MUST appear so the settings file's
-//     `defaultMode: deny` takes effect (anything else, notably acceptEdits
-//     used in the upstream spike, silently overrides the file).
-//   - `--allowedTools` MUST NOT appear. In interactive mode under the
-//     settings layer it is additive and broadens the allow-list.
-//
-// The remaining flags are fixture-driven so a future flag addition forces
-// an explicit test update.
+// TestBuildClaudeArgs_Shape pins the production claude argv under the
+// stream-json subprocess pipeline (#391). The security invariants the old
+// PTY/settings argv pinned (`--permission-mode default` MUST appear,
+// `--allowedTools` MUST NOT appear) are inverted here: `--allowed-tools`
+// IS the authoritative tool gate now, and `--dangerously-skip-permissions`
+// replaces the settings file's deny-default + workspace-trust mark.
 func TestBuildClaudeArgs_Shape(t *testing.T) {
-	const fixedSID = "deadbeef-dead-4ead-aead-deaddeadbeef"
 	tests := []struct {
-		name         string
-		parsed       agentRunArgs
-		settingsPath string
-		sessionID    string
-		want         []string
+		name   string
+		parsed agentRunArgs
+		want   []string
 	}{
 		{
 			name: "canonical happy path",
@@ -507,112 +411,111 @@ func TestBuildClaudeArgs_Shape(t *testing.T) {
 				model:            "sonnet-4-6",
 				systemPromptFile: "/tmp/sys.md",
 				effort:           "medium",
+				maxTurns:         3,
 				allowedTools:     []string{"Read", "Bash"},
 			},
-			settingsPath: "/tmp/.pyry-agent-run-settings.json",
-			sessionID:    fixedSID,
 			want: []string{
-				"--settings", "/tmp/.pyry-agent-run-settings.json",
-				"--permission-mode", "default",
-				"--model", "sonnet-4-6",
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--verbose",
+				"--dangerously-skip-permissions",
 				"--append-system-prompt-file", "/tmp/sys.md",
+				"--model", "sonnet-4-6",
 				"--effort", "medium",
-				"--session-id", fixedSID,
+				"--max-turns", "3",
+				"--allowed-tools", "Read,Bash",
 			},
 		},
 		{
-			name: "max effort",
+			name: "max effort, single tool, larger turn budget",
 			parsed: agentRunArgs{
 				model:            "opus-4-7",
 				systemPromptFile: "/tmp/x.md",
 				effort:           "max",
+				maxTurns:         12,
 				allowedTools:     []string{"Read"},
 			},
-			settingsPath: "/p.json",
-			sessionID:    fixedSID,
 			want: []string{
-				"--settings", "/p.json",
-				"--permission-mode", "default",
-				"--model", "opus-4-7",
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--verbose",
+				"--dangerously-skip-permissions",
 				"--append-system-prompt-file", "/tmp/x.md",
+				"--model", "opus-4-7",
 				"--effort", "max",
-				"--session-id", fixedSID,
+				"--max-turns", "12",
+				"--allowed-tools", "Read",
 			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildClaudeArgs(tc.parsed, tc.settingsPath, tc.sessionID)
+			got := buildClaudeArgs(tc.parsed)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("buildClaudeArgs:\n got  = %v\n want = %v", got, tc.want)
 			}
-			// Security invariants — explicit, named assertions so a
-			// drift in argv shape that happens to keep slices.Equal
-			// passing still trips here.
-			if idx := slices.Index(got, "--permission-mode"); idx < 0 || idx+1 >= len(got) || got[idx+1] != "default" {
-				t.Errorf("missing `--permission-mode default` in %v", got)
+
+			// Named structural assertions so a re-ordering that happens to
+			// preserve slices.Equal against a stale `want` still trips a
+			// clear-named guard.
+			if !slices.Contains(got, "--dangerously-skip-permissions") {
+				t.Errorf("missing --dangerously-skip-permissions in %v", got)
 			}
-			if slices.Contains(got, "--allowedTools") || slices.Contains(got, "--allowed-tools") {
-				t.Errorf("`--allowedTools` / `--allowed-tools` must NOT appear in %v", got)
+			if !nextValueEquals(got, "--input-format", "stream-json") {
+				t.Errorf("missing `--input-format stream-json` in %v", got)
 			}
-			if slices.Contains(got, "--max-turns") {
-				t.Errorf("`--max-turns` must NOT appear in spawned argv (interactive claude ignores it): %v", got)
+			if !nextValueEquals(got, "--output-format", "stream-json") {
+				t.Errorf("missing `--output-format stream-json` in %v", got)
 			}
-			if slices.Contains(got, "--output-format") {
-				t.Errorf("`--output-format` must NOT appear in spawned argv (stream-json is `-p`-mode only): %v", got)
+			if !slices.Contains(got, "--verbose") {
+				t.Errorf("missing --verbose in %v", got)
 			}
-			if idx := slices.Index(got, "--session-id"); idx < 0 || idx+1 >= len(got) || got[idx+1] != tc.sessionID {
-				t.Errorf("missing `--session-id %s` in %v", tc.sessionID, got)
+			wantTools := strings.Join(tc.parsed.allowedTools, ",")
+			if !nextValueEquals(got, "--allowed-tools", wantTools) {
+				t.Errorf("missing `--allowed-tools %s` in %v", wantTools, got)
+			}
+			wantMaxTurns := strconv.Itoa(tc.parsed.maxTurns)
+			if !nextValueEquals(got, "--max-turns", wantMaxTurns) {
+				t.Errorf("missing `--max-turns %s` in %v", wantMaxTurns, got)
+			}
+
+			// Negative pins: the load-bearing PTY/settings-mode flags must
+			// never reappear under the stream-json pipeline.
+			for _, banned := range []string{"--settings", "--permission-mode", "--session-id"} {
+				if slices.Contains(got, banned) {
+					t.Errorf("banned flag %q present in %v", banned, got)
+				}
 			}
 		})
 	}
 }
 
-// TestBuildClaudeArgs_SessionIDShape pins that the session id minted by
-// runAgentRun is a canonical UUIDv4 string by exercising newSessionUUID
-// directly. Concrete shape: 36 chars, dashes at the standard positions,
-// version-4 nibble at position 14, RFC 4122 variant at position 19.
-func TestNewSessionUUID_Shape(t *testing.T) {
-	t.Parallel()
-	seen := map[string]bool{}
-	for i := 0; i < 32; i++ {
-		got, err := newSessionUUID()
-		if err != nil {
-			t.Fatalf("newSessionUUID: %v", err)
-		}
-		if len(got) != 36 {
-			t.Errorf("len = %d, want 36 (%q)", len(got), got)
-		}
-		if got[8] != '-' || got[13] != '-' || got[18] != '-' || got[23] != '-' {
-			t.Errorf("dash positions wrong: %q", got)
-		}
-		if got[14] != '4' {
-			t.Errorf("version nibble = %q, want '4'", got[14])
-		}
-		switch got[19] {
-		case '8', '9', 'a', 'b':
-		default:
-			t.Errorf("variant nibble = %q, want one of 89ab", got[19])
-		}
-		if seen[got] {
-			t.Errorf("collision: %q", got)
-		}
-		seen[got] = true
+func nextValueEquals(argv []string, flag, want string) bool {
+	idx := slices.Index(argv, flag)
+	if idx < 0 || idx+1 >= len(argv) {
+		return false
 	}
+	return argv[idx+1] == want
 }
 
-// TestRunAgentRun_DrivesFakeClaude verifies the end-to-end wiring:
-// runAgentRun reads the prompt file, builds the argv, spawns the (faked)
-// claude, drives the PTY, watches the on-disk JSONL the fake writes,
-// re-emits each event onto stdout, and composes a `type:"result"` trailer
-// on end-of-turn. Asserts:
+// TestRunAgentRun_StreamJSON_Clean verifies the end-to-end wiring: runAgentRun
+// reads the prompt file, builds the argv, spawns the (faked) claude via
+// streamrunner, and forwards claude's stdout verbatim. Asserts:
 //
-//  (a) the `settings-file:` marker line appears first;
-//  (b) the assistant JSONL line the fake wrote appears byte-equivalent;
-//  (c) the final line is a `type:"result"` trailer with subtype "success".
-func TestRunAgentRun_DrivesFakeClaude(t *testing.T) {
+//   (a) the stream-json events (system init / assistant / result success)
+//       appear on stdout in order;
+//   (b) stdout does NOT start with a "settings-file: " marker line (the
+//       marker was removed in #391; claude's `system init` event takes over);
+//   (c) the verb does not write the per-spawn settings file or the
+//       workspace-trust mark in ~/.claude.json;
+//   (d) the prompt file's "hello" content is delivered as a stream-json
+//       user-turn envelope on claude's stdin.
+func TestRunAgentRun_StreamJSON_Clean(t *testing.T) {
 	fx := newValidArgsFixture(t)
 	configureFakeClaude(t)
+
+	stdinCapture := filepath.Join(t.TempDir(), "stdin.json")
+	t.Setenv("GO_AGENT_RUN_FAKE_STDIN_FILE", stdinCapture)
 
 	var stdout bytes.Buffer
 	done := make(chan error, 1)
@@ -627,48 +530,131 @@ func TestRunAgentRun_DrivesFakeClaude(t *testing.T) {
 		t.Fatalf("runAgentRun did not return within 10s\nstdout so far=%q", stdout.String())
 	}
 
-	// Settings file must exist on disk — confirms we got past the
-	// agentrun.WriteSettings step before spawning.
-	settingsPath := filepath.Join(fx.workdir, agentrun.SettingsFilename)
-	if _, err := os.Stat(settingsPath); err != nil {
-		t.Fatalf("settings file missing: %v", err)
-	}
-
 	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
 	if len(lines) < 3 {
-		t.Fatalf("stdout has %d lines, want >=3 (marker + assistant + trailer): %q", len(lines), stdout.String())
+		t.Fatalf("stdout has %d lines, want >=3 (system + assistant + result): %q", len(lines), stdout.String())
 	}
-	if !strings.HasPrefix(lines[0], "settings-file: ") {
-		t.Errorf("stdout[0] = %q, want settings-file marker", lines[0])
+	if strings.HasPrefix(lines[0], "settings-file: ") {
+		t.Errorf("stdout[0] is a settings-file marker (removed in #391): %q", lines[0])
 	}
-	// (b) the assistant line is somewhere between the marker and trailer.
-	if !slices.Contains(lines, fakeClaudeAssistantLine) {
-		t.Errorf("stdout missing assistant line %q\nfull stdout=%q", fakeClaudeAssistantLine, stdout.String())
+
+	// Walk the lines, decoding each and asserting the type/subtype shape
+	// in the order the fake emitted them.
+	var (
+		sawSystemInit bool
+		sawAssistant  bool
+		sawResultIdx  = -1
+	)
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		var ev struct {
+			Type    string `json:"type"`
+			Subtype string `json:"subtype"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("stdout line %d not valid JSON: %v\nline=%q", i, err, line)
+		}
+		switch {
+		case ev.Type == "system" && ev.Subtype == "init":
+			sawSystemInit = true
+		case ev.Type == "assistant":
+			if !sawSystemInit {
+				t.Errorf("assistant event appeared before system init (line %d)", i)
+			}
+			sawAssistant = true
+		case ev.Type == "result" && ev.Subtype == "success":
+			if !sawAssistant {
+				t.Errorf("result event appeared before assistant (line %d)", i)
+			}
+			sawResultIdx = i
+		}
 	}
-	// (c) the last line is a result trailer with subtype "success".
-	var tr struct {
-		Type           string `json:"type"`
-		Subtype        string `json:"subtype"`
-		TerminalReason string `json:"terminal_reason"`
-		NumTurns       int    `json:"num_turns"`
-		Usage          struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
+	if !sawSystemInit {
+		t.Errorf("missing system init event in stdout: %q", stdout.String())
 	}
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &tr); err != nil {
-		t.Fatalf("decode trailer %q: %v", lines[len(lines)-1], err)
+	if !sawAssistant {
+		t.Errorf("missing assistant event in stdout: %q", stdout.String())
 	}
-	if tr.Type != "result" || tr.Subtype != "success" || tr.TerminalReason != "completed" {
-		t.Errorf("trailer: %+v, want type=result subtype=success terminal_reason=completed", tr)
+	if sawResultIdx < 0 {
+		t.Errorf("missing result success event in stdout: %q", stdout.String())
 	}
-	if tr.NumTurns != 1 {
-		t.Errorf("trailer.num_turns = %d, want 1", tr.NumTurns)
+
+	// (c) negative filesystem assertions: the settings file and the
+	// workspace-trust mark in ~/.claude.json must NOT be written by the verb.
+	settingsPath := filepath.Join(fx.workdir, ".pyry-agent-run-settings.json")
+	if _, err := os.Stat(settingsPath); err == nil {
+		t.Errorf("verb wrote per-spawn settings file at %s; should be gone in #391", settingsPath)
+	} else if !os.IsNotExist(err) {
+		t.Errorf("stat settings file: %v", err)
 	}
-	if tr.Usage.InputTokens != 5 || tr.Usage.OutputTokens != 2 {
-		t.Errorf("trailer.usage = %+v, want input=5 output=2 (matches fake canned line)", tr.Usage)
+	trustPath := filepath.Join(os.Getenv("HOME"), ".claude.json")
+	if _, err := os.Stat(trustPath); err == nil {
+		t.Errorf("verb wrote workspace-trust mark at %s; should be gone in #391", trustPath)
+	} else if !os.IsNotExist(err) {
+		t.Errorf("stat trust file: %v", err)
+	}
+
+	// (d) stdin envelope round-trip: the prompt file's "hello" content was
+	// JSON-wrapped and delivered. This confirms the verb is using
+	// streamrunner.Run rather than a path that bypasses the envelope.
+	captured, err := os.ReadFile(stdinCapture)
+	if err != nil {
+		t.Fatalf("read stdin capture: %v", err)
+	}
+	var env struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(bytes.TrimRight(captured, "\n"), &env); err != nil {
+		t.Fatalf("unmarshal stdin envelope: %v\nraw=%q", err, captured)
+	}
+	if env.Type != "user" || env.Message.Role != "user" {
+		t.Errorf("envelope shape: type=%q role=%q, want user/user", env.Type, env.Message.Role)
+	}
+	if len(env.Message.Content) != 1 || env.Message.Content[0].Type != "text" || env.Message.Content[0].Text != "hello" {
+		t.Errorf("envelope content: %+v, want one text block with %q", env.Message.Content, "hello")
 	}
 }
+
+// TestRunAgentRun_StreamJSON_NonZeroExit pins that a non-zero claude exit
+// surfaces as an error wrapping *exec.ExitError with the verb's
+// "agent-run: " prefix.
+func TestRunAgentRun_StreamJSON_NonZeroExit(t *testing.T) {
+	fx := newValidArgsFixture(t)
+	configureFakeClaude(t)
+	t.Setenv("GO_AGENT_RUN_FAKE_MODE", "exit1")
+
+	err := runAgentRun(io.Discard, fx.argv)
+	if err == nil {
+		t.Fatal("runAgentRun: got nil, want non-nil from exit-1 child")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("runAgentRun: err = %v (%T), want chain containing *exec.ExitError", err, err)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("ExitCode = %d, want 1", exitErr.ExitCode())
+	}
+	if !strings.HasPrefix(err.Error(), "agent-run: ") {
+		t.Errorf("err message %q lacks `agent-run: ` prefix", err.Error())
+	}
+}
+
+// Per spec: a verb-level ctx-cancel test was considered and rejected.
+// The streamrunner package owns the SIGTERM/SIGKILL grace behaviour
+// (see internal/agentrun/streamrunner.TestRun_CtxCancelMidRun); the
+// verb's only ctx-cancel logic is one line (`return nil` if
+// errors.Is(err, context.Canceled)`). Adding a verb-level cover would
+// require either signal-context dependency injection or sending SIGTERM
+// to the test process — both heavier than the bug they would prevent.
 
 func TestSplitAllowedTools(t *testing.T) {
 	tests := []struct {

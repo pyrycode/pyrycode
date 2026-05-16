@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -316,6 +317,180 @@ func TestSession_ActivateCtxCancellation(t *testing.T) {
 	if err := sess.Activate(cancelled); !errors.Is(err, context.Canceled) {
 		t.Errorf("Activate(cancelled) err = %v, want context.Canceled", err)
 	}
+}
+
+// TestSession_Activate_GuaranteesPTYBound is the load-bearing test for #396:
+// once Activate returns nil from an evicted session, the supervisor's PTY
+// must already be bound. Without the strengthened contract, a
+// send_message handler running immediately after Activate could observe
+// the silent-drop-on-nil branch in supervisor.WriteUserTurn.
+//
+// We assert indirectly via supervisor.WaitForPTY with an
+// already-cancelled ctx — if the PTY were not bound, the ctx-cancel
+// branch would fire and return context.Canceled. A nil result confirms
+// the chan is already closed.
+func TestSession_Activate_GuaranteesPTYBound(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolIdle(t, 80*time.Millisecond)
+	sess := pool.Default()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = sess.Run(ctx) }()
+
+	if !pollUntil(t, 2*time.Second, func() bool {
+		return sess.LifecycleState() == stateEvicted
+	}) {
+		t.Fatal("session did not evict")
+	}
+
+	activateCtx, activateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer activateCancel()
+	if err := sess.Activate(activateCtx); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	// Immediately after Activate, the supervisor's PTY readiness chan
+	// must already be closed: a brief-deadline WaitForPTY returns nil.
+	// A non-cancelled ctx avoids the select-randomization that an
+	// already-cancelled ctx would introduce (select picks randomly when
+	// both branches are ready).
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer checkCancel()
+	if err := sess.sup.WaitForPTY(checkCtx); err != nil {
+		t.Errorf("WaitForPTY immediately after Activate = %v, want nil (PTY must be bound)", err)
+	}
+}
+
+// TestSession_IdleEviction_EmitsLogRecord covers AC#3: an eviction
+// event produces at least one log record at the moment SIGKILL fires
+// that identifies the cause as idle-timeout eviction.
+func TestSession_IdleEviction_EmitsLogRecord(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+
+	rec := &recordingHandler{}
+	logger := slog.New(rec)
+	cfg := Config{
+		Bootstrap: SessionConfig{
+			ClaudeBin:      "/bin/sleep",
+			ClaudeArgs:     []string{"3600"},
+			IdleTimeout:    80 * time.Millisecond,
+			BackoffInitial: 10 * time.Millisecond,
+			BackoffMax:     10 * time.Millisecond,
+			BackoffReset:   1 * time.Second,
+		},
+		Logger: logger,
+	}
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+	sess := pool.Default()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = sess.Run(ctx) }()
+
+	if !pollUntil(t, 2*time.Second, func() bool {
+		return sess.LifecycleState() == stateEvicted
+	}) {
+		t.Fatal("session did not evict")
+	}
+
+	found := rec.findEvent("session.idle_eviction")
+	if found == nil {
+		t.Fatalf("expected log record with event=session.idle_eviction; got events=%v", rec.events())
+	}
+	if got := found.attrString("session_id"); got != string(sess.ID()) {
+		t.Errorf("session_id attr = %q, want %q", got, string(sess.ID()))
+	}
+	if !found.attrBool("bootstrap") {
+		t.Errorf("bootstrap attr = false, want true")
+	}
+	if found.Level < slog.LevelWarn {
+		t.Errorf("level = %v, want >= WARN", found.Level)
+	}
+}
+
+// recordingHandler captures slog records for assertions.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *recordingHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(_ string) slog.Handler      { return h }
+
+type recordView struct{ slog.Record }
+
+func (r recordView) attrString(key string) string {
+	var out string
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			out = a.Value.String()
+			return false
+		}
+		return true
+	})
+	return out
+}
+
+func (r recordView) attrBool(key string) bool {
+	var out bool
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			out = a.Value.Bool()
+			return false
+		}
+		return true
+	})
+	return out
+}
+
+func (h *recordingHandler) findEvent(event string) *recordView {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, rec := range h.records {
+		var got string
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "event" {
+				got = a.Value.String()
+				return false
+			}
+			return true
+		})
+		if got == event {
+			v := recordView{Record: rec}
+			return &v
+		}
+	}
+	return nil
+}
+
+func (h *recordingHandler) events() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, 0, len(h.records))
+	for _, rec := range h.records {
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "event" {
+				out = append(out, a.Value.String())
+				return false
+			}
+			return true
+		})
+	}
+	return out
 }
 
 // TestSession_ShutdownFromActive: outer ctx cancel returns ctx.Err from Run

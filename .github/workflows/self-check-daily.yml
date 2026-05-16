@@ -1,11 +1,13 @@
 name: agent-run self-check (daily)
 
-# Belt-and-suspenders safety net for the deny-default whitelist (#336):
-# every day, build pyry, install claude, and verify that
-# `permissions.defaultMode: "deny"` still enforces refusal of Bash in
-# interactive mode. A red badge on this workflow signals the
-# per-spawn security boundary has regressed — investigate before
-# trusting any new dispatcher run.
+# Belt-and-suspenders safety net for the per-agent tool-allowlist
+# contract (#375; supersedes #336): every day, build pyry, install
+# claude, and verify that claude launched with `--allowed-tools "Read"
+# --dangerously-skip-permissions` still refuses Bash, as observed in
+# claude's stream-json stdout (no `tool_use` event with name=="Bash").
+# A red badge on this workflow signals the per-agent security boundary
+# the dispatcher relies on has regressed — investigate before trusting
+# any new dispatcher run.
 #
 # The job exits 0 on PASS, non-zero on FAIL or inconclusive. Operator
 # monitors the badge; a stronger pager hookup is a follow-up if false-
