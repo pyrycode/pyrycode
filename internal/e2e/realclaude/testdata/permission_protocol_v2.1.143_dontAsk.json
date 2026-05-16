@@ -1,0 +1,378 @@
+{
+  "claude_version_raw": "2.1.143 (Claude Code)",
+  "claude_version": "2.1.143",
+  "argv": [
+    "claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--allowed-tools",
+    "Read",
+    "--permission-prompt-tool",
+    "stdio",
+    "--permission-mode",
+    "dontAsk",
+    "--max-turns",
+    "2",
+    "--model",
+    "claude-haiku-4-5"
+  ],
+  "permission_mode": "dontAsk",
+  "allowed_tools": [
+    "Read"
+  ],
+  "stdin_envelope_sent": {
+    "message": {
+      "content": [
+        {
+          "text": "Use the Bash tool to run `ls -la` and report the result.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    "type": "user"
+  },
+  "stdout_events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_PermissionProtocol_Spike3741738234/001",
+      "session_id": "818a5b18-361c-4af1-899e-bb33c090730d",
+      "tools": [
+        "Task",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ScheduleWakeup",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Write"
+      ],
+      "mcp_servers": [],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "dontAsk",
+      "slash_commands": [
+        "update-config",
+        "debug",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "loop",
+        "claude-api",
+        "clear",
+        "compact",
+        "context",
+        "heapdump",
+        "init",
+        "review",
+        "security-review",
+        "usage",
+        "insights",
+        "goal",
+        "team-onboarding"
+      ],
+      "apiKeySource": "ANTHROPIC_API_KEY",
+      "claude_code_version": "2.1.143",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "update-config",
+        "debug",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "loop",
+        "claude-api"
+      ],
+      "plugins": [],
+      "analytics_disabled": false,
+      "uuid": "1ea852c2-043b-4d3e-9695-a8045af0b4aa",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_PermissionProtocol_Spike3741738234/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-PermissionProtocol-Spike3741738234-001/memory/"
+      },
+      "fast_mode_state": "off"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01PP9AyijpHDckWkY3KwNtYq",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user wants me to run `ls -la` in the current working directory and report the results. This is a straightforward request to list files in the current directory with detailed information.\n\nLet me use the Bash tool to do this.",
+            "signature": "EqoDCmMIDRgCKkDjFnLFitwmGQkFe4JPqpzmRZ8u1bKpNmdZGe7Ofnevq3w0TzkRF/lo4DWKE6ELnYjXWd/HUKhqO7w1145SKw3EMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDLHqxbxG143GqsmRXhoM2x21jfZoVFPGXJEPIjBRIStvLnNWCax8TiRDS1NFb7NUGqpg/qWRhOf1ZF5knYdf/lAv+eZpfpelm8mrP58q9AGwCk9B1+nenpLugR6wXKGcPfA/oBsA9Y2S3OFLOyK33FSL4ZEKbyMmXjXVhjlmtCMqMNwqiBRnb4m1Yy0QrV7t11LP+tUD7yanmeXuFoatnfkiU2YEwUbYysFQ0/dzJEwEirEyk0iY3rh21DFP4HihqEDuZ+9ytfcL054enEcwtLqHCnJlLLkYYn8/9tsMG2NyIo8mV735TEf6V+3syltdhs15Kmh3HgeDXlBBhPKP4qPoWzvkkubTiXEf2lb+YipkyiZHYH/X70Wr+PsADnP7c/YWB6L53xuqn89E/tIPD1Rdpj9EmgmdvoilFzlkElbMXqXlGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 5264,
+          "cache_read_input_tokens": 22977,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 5264,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 6,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "818a5b18-361c-4af1-899e-bb33c090730d",
+      "uuid": "e852582f-1eed-4b6a-a0cf-289f7193d5b5",
+      "request_id": "req_011Cb5yrMuF2P4HBMv6Dekqc"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01PP9AyijpHDckWkY3KwNtYq",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_014fAU1LyW4nTLpiZKNSsnQ4",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la",
+              "description": "List files in current directory with details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 5264,
+          "cache_read_input_tokens": 22977,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 5264,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 6,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "818a5b18-361c-4af1-899e-bb33c090730d",
+      "uuid": "601547d9-562b-4d50-b1da-106598309c65",
+      "request_id": "req_011Cb5yrMuF2P4HBMv6Dekqc"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_014fAU1LyW4nTLpiZKNSsnQ4",
+            "type": "tool_result",
+            "content": "total 48\ndrwxr-xr-x@ 4 juhanailmoniemi  staff    128 May 16 12:05 .\ndrwx------@ 3 juhanailmoniemi  staff     96 May 16 12:05 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  staff    256 May 16 12:05 .claude\n-rw-------@ 1 juhanailmoniemi  staff  21056 May 16 12:05 .claude.json",
+            "is_error": false
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "818a5b18-361c-4af1-899e-bb33c090730d",
+      "uuid": "12e26250-1bf7-431f-af25-76ddc8339806",
+      "timestamp": "2026-05-16T09:05:30.731Z",
+      "tool_use_result": {
+        "stdout": "total 48\ndrwxr-xr-x@ 4 juhanailmoniemi  staff    128 May 16 12:05 .\ndrwx------@ 3 juhanailmoniemi  staff     96 May 16 12:05 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  staff    256 May 16 12:05 .claude\n-rw-------@ 1 juhanailmoniemi  staff  21056 May 16 12:05 .claude.json",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01ByiBCFFJrgMhkxHRe8M5DW",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The ls -la command was successful. The directory contains:\n- `.` (current directory)\n- `..` (parent directory)\n- `.claude/` - a directory with 8 items\n- `.claude.json` - a file with 21056 bytes\n\nLet me report these results to the user.",
+            "signature": "ErEDCmMIDRgCKkDKEKK7ulNrYcTL9s1lmkfo11vBlGjDPtbcqmN0bA6xz43XfiPfwd0g577L7eeX9Cy/XvvAN68BjC4LETYAhNLNMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDPdSWMhI1Tdzfk3V+BoM8lOXQnvntsja1jxcIjBtMN/XJT0L/5e08swN8UbB39y9ltH1Hf799QGgEo6eSz3e59zWenp7AFW9x+Xtmewq+wEYckj7mGB5W9uVgkJfn/lcsC74CqjQNijxipaEoHFZynd4WX64h1Azl456BOF3uXHSI/EI68WdCWmoi1HpbNESKSBkVBG6yttMGyjrkvAo0BvMSKdukWT7JfYEUKExUQB5aSxk/eaxubD6iI8gdC9Eh6yrwuCeRBhxT/cfnbTD4SpLSxq6nyyeyLKAp4lFa65xjflJA0AbmRw+9tpIa1+ImyLcAjG3gMWF2jRKjzVNVd4+nlelDNWWvk9Qt3tbccUqSQvs6qb2OqrLhqEzjmVz5hriVmx3knQ13FEG0W2Ib+LwqrICUmk0gGmaosHG02M5sCwJ9ihdF+DXNRgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 290,
+          "cache_read_input_tokens": 28241,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 290,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "818a5b18-361c-4af1-899e-bb33c090730d",
+      "uuid": "1b68d9da-829f-491d-b6dc-8d8236da08c3",
+      "request_id": "req_011Cb5yrVYsBaNtJwGNKhvVC"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_01ByiBCFFJrgMhkxHRe8M5DW",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The current directory contains:\n- `.claude/` — a directory with 8 items (subdirectories for Claude Code configuration)\n- `.claude.json` — a configuration file (21 KB)\n\nThis appears to be a Claude Code project directory with configuration files but no application code yet."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 290,
+          "cache_read_input_tokens": 28241,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 290,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "818a5b18-361c-4af1-899e-bb33c090730d",
+      "uuid": "a2140dcf-89fa-4b0d-b44d-fc92ca584f90",
+      "request_id": "req_011Cb5yrVYsBaNtJwGNKhvVC"
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "api_error_status": null,
+      "duration_ms": 4261,
+      "duration_api_ms": 5242,
+      "ttft_ms": 1635,
+      "num_turns": 2,
+      "result": "The current directory contains:\n- `.claude/` — a directory with 8 items (subdirectories for Claude Code configuration)\n- `.claude.json` — a configuration file (21 KB)\n\nThis appears to be a Claude Code project directory with configuration files but no application code yet.",
+      "stop_reason": "end_turn",
+      "session_id": "818a5b18-361c-4af1-899e-bb33c090730d",
+      "total_cost_usd": 0.014005300000000002,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 5554,
+        "cache_read_input_tokens": 51218,
+        "output_tokens": 278,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 5554
+        },
+        "inference_geo": "",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 143,
+            "cache_read_input_tokens": 28241,
+            "cache_creation_input_tokens": 290,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 290,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 453,
+          "outputTokens": 16,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000533,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 18,
+          "outputTokens": 278,
+          "cacheReadInputTokens": 51218,
+          "cacheCreationInputTokens": 5554,
+          "webSearchRequests": 0,
+          "costUSD": 0.0134723,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "uuid": "ea627781-c1ad-46be-9d0f-00f13389dbf3"
+    }
+  ],
+  "stderr_capture": "",
+  "exit_code": 0,
+  "context_deadline_tripped": false,
+  "duration_ms": 5407
+}
