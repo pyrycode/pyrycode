@@ -16,12 +16,19 @@ type HelloServerPayload struct {
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
 // always "client". LastSeenTS is optional; when present it triggers a
 // backfill (docs/protocol-mobile.md § Backfill semantics).
+//
+// Token is the in-band carrier of the device-pairing token under v2
+// (docs/protocol-mobile.md § Authentication, line 420). Empty under v1
+// (carried as RoutingEnvelope.Token instead); the omitempty keeps v1
+// round-trip byte-identical for existing fixtures. SECURITY: Token is
+// plaintext credential material — MUST NOT be logged at any level.
 type HelloClientPayload struct {
 	Role             string     `json:"role"`
 	DeviceName       string     `json:"device_name"`
 	ClientVersion    string     `json:"client_version"`
 	ProtocolVersions []string   `json:"protocol_versions"`
 	LastSeenTS       *time.Time `json:"last_seen_ts,omitempty"`
+	Token            string     `json:"token,omitempty"`
 }
 
 // HelloAckPayload is the body of a "hello_ack" envelope sent in response

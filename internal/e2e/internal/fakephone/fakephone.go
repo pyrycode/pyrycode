@@ -79,6 +79,17 @@ func Dial(ctx context.Context, baseURL, serverID, token, deviceName string) (*Cl
 
 // Send marshals env and writes it as a single WS text frame.
 func (c *Client) Send(env protocol.Envelope) error {
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("fakephone marshal: %w", err)
+	}
+	return c.SendBytes(data)
+}
+
+// SendBytes writes data as a single WS text frame without any marshalling.
+// Used by v2 e2e tests where the wire shape inside RoutingEnvelope.Frame is
+// an InnerFrameV2 rather than a protocol.Envelope.
+func (c *Client) SendBytes(data []byte) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -86,10 +97,6 @@ func (c *Client) Send(env protocol.Envelope) error {
 	}
 	c.mu.Unlock()
 
-	data, err := json.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("fakephone marshal: %w", err)
-	}
 	if err := c.conn.Write(context.Background(), websocket.MessageText, data); err != nil {
 		c.mu.Lock()
 		closed := c.closed
@@ -108,10 +115,26 @@ func (c *Client) Send(env protocol.Envelope) error {
 // Read context is canceled, so a timed-out Client cannot be reused.
 // After Close, returns ErrClosed.
 func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
+	data, err := c.ReceiveBytes(timeout)
+	if err != nil {
+		return protocol.Envelope{}, err
+	}
+	var env protocol.Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return protocol.Envelope{}, fmt.Errorf("fakephone unmarshal: %w", err)
+	}
+	return env, nil
+}
+
+// ReceiveBytes reads one WS text frame and returns the raw payload. Same
+// timeout / close semantics as Receive. Used by v2 e2e tests where the
+// wire shape inside RoutingEnvelope.Frame is an InnerFrameV2 rather than
+// a protocol.Envelope.
+func (c *Client) ReceiveBytes(timeout time.Duration) ([]byte, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return protocol.Envelope{}, ErrClosed
+		return nil, ErrClosed
 	}
 	c.mu.Unlock()
 
@@ -134,19 +157,14 @@ func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
 		closed := c.closed
 		c.mu.Unlock()
 		if closed {
-			return protocol.Envelope{}, ErrClosed
+			return nil, ErrClosed
 		}
 		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
-			return protocol.Envelope{}, ErrReceiveTimeout
+			return nil, ErrReceiveTimeout
 		}
-		return protocol.Envelope{}, fmt.Errorf("fakephone read: %w", err)
+		return nil, fmt.Errorf("fakephone read: %w", err)
 	}
-
-	var env protocol.Envelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return protocol.Envelope{}, fmt.Errorf("fakephone unmarshal: %w", err)
-	}
-	return env, nil
+	return data, nil
 }
 
 // LastCloseStatus returns the WS close status code observed by the most

@@ -141,6 +141,11 @@ func New(logger *slog.Logger) *Server {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/server", s.handleBinary)
+	// /v2/server is path-only. The routing-envelope wire is unchanged
+	// from v1; the v2 distinction lives inside RoutingEnvelope.Frame
+	// (docs/protocol-mobile.md § Wire shapes, ticket #445). The handler
+	// is shared.
+	mux.HandleFunc("/v2/server", s.handleBinary)
 	mux.HandleFunc("/v1/client", s.handlePhone)
 	s.http = httptest.NewServer(mux)
 	return s
@@ -422,7 +427,16 @@ func (s *Server) binaryRecvPump(ctx context.Context, bc *binaryConn) error {
 				"server_id", bc.serverID, "conn_id", env.ConnID)
 			continue
 		}
-		msg := phoneSend{frame: env.Frame, closeCode: env.CloseCode}
+		// json.RawMessage marshals nil as the literal token "null"
+		// (4 bytes). Treat that as "no frame to forward" — matches the
+		// production relay's close-only envelope contract
+		// (relay/connection.go:CloseConn; protocol/envelope.go field
+		// docs).
+		frame := env.Frame
+		if string(frame) == "null" {
+			frame = nil
+		}
+		msg := phoneSend{frame: frame, closeCode: env.CloseCode}
 		select {
 		case ph.sendCh <- msg:
 		case <-ctx.Done():
