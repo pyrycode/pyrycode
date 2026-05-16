@@ -26,6 +26,20 @@ var ErrInvalidDaemonName = errors.New("keys: invalid daemon name")
 // with the public point recomputed from private_key. Match with errors.Is.
 var ErrCorruptKeyFile = errors.New("keys: corrupt static key file")
 
+// ErrInsecureKeyDirMode is returned (wrapped) when the parent directory of
+// static_key.json has any group/other readable, writable, or executable bit
+// set, or when the path exists but is not a directory. The operator's fix
+// is to chmod the directory to 0700 (or remove the imposter) and restart;
+// the daemon refuses to start to make the weakened mode visible. Match
+// with errors.Is.
+var ErrInsecureKeyDirMode = errors.New("keys: insecure key directory mode")
+
+// ErrInsecureKeyFileMode is returned (wrapped) when static_key.json exists
+// with a mode other than exactly 0600. No auto-chmod, no silent fallback —
+// the operator chmods the file back to 0600 by hand and restarts. Match
+// with errors.Is.
+var ErrInsecureKeyFileMode = errors.New("keys: insecure key file mode")
+
 // StaticKey is the binary's persistent X25519 keypair for Mobile Protocol v2.
 // The raw 32-byte private scalar and public point are accessed via the
 // PrivateKey and PublicKey methods, which return copies by value so callers

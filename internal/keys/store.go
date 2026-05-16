@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -58,10 +60,11 @@ type onDiskKey struct {
 // LoadOrCreate is not safe for concurrent use against the same path;
 // bootstrap runs once on daemon startup before any goroutines fan out.
 //
-// Filesystem hardening (parent-dir mode 0700 enforcement, file mode 0600
-// enforcement on read, O_NOFOLLOW on read) is intentionally NOT in this
-// function — it ships in #439 as a follow-up inside this same package and
-// is a hard prerequisite for any downstream consumer.
+// Before any read or write, the parent directory is required to exist
+// with a mode that has no group/other bits set (ErrInsecureKeyDirMode
+// otherwise); on the read path the file is required to be exactly mode
+// 0600 (ErrInsecureKeyFileMode otherwise) and is opened with O_NOFOLLOW
+// so a between-stat-and-open symlink swap cannot redirect the load.
 func LoadOrCreate(baseDir, daemonName string) (*StaticKey, error) {
 	if !validDaemonName(daemonName) {
 		return nil, fmt.Errorf("keys: invalid daemon name %q: %w", daemonName, ErrInvalidDaemonName)
@@ -69,15 +72,74 @@ func LoadOrCreate(baseDir, daemonName string) (*StaticKey, error) {
 	dir := filepath.Join(baseDir, daemonName)
 	path := filepath.Join(dir, filename)
 
-	raw, err := os.ReadFile(path)
+	if err := ensureSecureKeyDir(dir); err != nil {
+		return nil, err
+	}
+
+	fi, err := os.Lstat(path)
 	switch {
 	case err == nil:
+		if mode := fi.Mode().Perm(); mode != 0o600 {
+			return nil, fmt.Errorf("keys: %s: mode %#o: %w", path, mode, ErrInsecureKeyFileMode)
+		}
+		raw, err := openSecureKeyFile(path)
+		if err != nil {
+			return nil, err
+		}
 		return parsePersisted(path, raw)
 	case errors.Is(err, fs.ErrNotExist):
 		return mintAndPersist(dir, path)
 	default:
+		return nil, fmt.Errorf("keys: stat %s: %w", path, err)
+	}
+}
+
+// ensureSecureKeyDir guarantees that dir exists, is a directory, and has
+// no group/other permission bits set. If dir is missing it is created at
+// mode 0700 and re-stat'd to confirm the umask did not narrow (or some
+// exotic filesystem widen) the requested mode. On any group/other bit set,
+// or when the path exists but is not a directory, the function returns a
+// wrapped ErrInsecureKeyDirMode naming the path and the observed mode in
+// octal. No auto-chmod.
+func ensureSecureKeyDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
+			return fmt.Errorf("keys: mkdir %s: %w", dir, mkErr)
+		}
+		fi, err = os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("keys: re-stat %s: %w", dir, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("keys: stat %s: %w", dir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("keys: %s is not a directory: %w", dir, ErrInsecureKeyDirMode)
+	}
+	if mode := fi.Mode().Perm(); mode&0o077 != 0 {
+		return fmt.Errorf("keys: %s: mode %#o: %w", dir, mode, ErrInsecureKeyDirMode)
+	}
+	return nil
+}
+
+// openSecureKeyFile reads path with O_NOFOLLOW so a symlink swap between
+// the caller's mode check and this open cannot redirect to attacker-
+// controlled bytes. On ELOOP (or any open/read error) the wrapped error
+// names only the caller-supplied path — the resolved link target is
+// deliberately not included so a hostile symlink cannot use the error
+// message as an exfiltration channel.
+func openSecureKeyFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("keys: open %s: %w", path, err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(f)
+	if err != nil {
 		return nil, fmt.Errorf("keys: read %s: %w", path, err)
 	}
+	return raw, nil
 }
 
 func parsePersisted(path string, raw []byte) (*StaticKey, error) {

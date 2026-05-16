@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -315,6 +316,277 @@ func TestLoadOrCreate_NonENOENTReadErrorIsNotCorruption(t *testing.T) {
 	}
 	if sk != nil {
 		t.Errorf("StaticKey = %v, want nil on error", sk)
+	}
+}
+
+func TestLoadOrCreate_InsecureDirModeRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    os.FileMode
+		wantErr error // nil ⇒ accept
+	}{
+		{"0700 accept", 0o700, nil},
+		{"0750 reject", 0o750, ErrInsecureKeyDirMode},
+		{"0755 reject", 0o755, ErrInsecureKeyDirMode},
+		{"0701 reject", 0o701, ErrInsecureKeyDirMode},
+	}
+	for _, tt := range cases {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			const daemon = "test"
+			dir := filepath.Join(base, daemon)
+
+			seedKey, err := LoadOrCreate(base, daemon)
+			if err != nil {
+				t.Fatalf("seed LoadOrCreate: %v", err)
+			}
+			path := filepath.Join(dir, filename)
+			preBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read seed: %v", err)
+			}
+
+			if err := os.Chmod(dir, tt.mode); err != nil {
+				t.Fatalf("chmod dir: %v", err)
+			}
+			// Restore before t.TempDir cleanup so the temp tree removes cleanly.
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+			sk, err := LoadOrCreate(base, daemon)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Errorf("LoadOrCreate: got err %v, want nil", err)
+				}
+				if sk == nil {
+					t.Errorf("StaticKey nil on accept path")
+				} else if sk.PrivateKey() != seedKey.PrivateKey() || sk.PublicKey() != seedKey.PublicKey() {
+					t.Errorf("accept-path key disagrees with seeded key")
+				}
+			} else {
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("err = %v, want errors.Is %v", err, tt.wantErr)
+				}
+				if sk != nil {
+					t.Errorf("StaticKey = %v, want nil on reject", sk)
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, dir) {
+					t.Errorf("err message %q missing dir path %q", msg, dir)
+				}
+				wantMode := fmt.Sprintf("%#o", tt.mode)
+				if !strings.Contains(msg, wantMode) {
+					t.Errorf("err message %q missing observed mode %q", msg, wantMode)
+				}
+				privB64 := base64.StdEncoding.EncodeToString(seedKey.priv[:])
+				if strings.Contains(msg, privB64) {
+					t.Errorf("err message leaks private_key base64")
+				}
+			}
+
+			postBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("re-read: %v", err)
+			}
+			if !bytes.Equal(preBytes, postBytes) {
+				t.Errorf("file mutated on reject path")
+			}
+		})
+	}
+}
+
+func TestLoadOrCreate_InsecureFileModeRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"0644", 0o644},
+		{"0640", 0o640},
+		{"0660", 0o660},
+		{"0666", 0o666},
+	}
+	for _, tt := range cases {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			const daemon = "test"
+			seedKey, err := LoadOrCreate(base, daemon)
+			if err != nil {
+				t.Fatalf("seed LoadOrCreate: %v", err)
+			}
+			path := filepath.Join(base, daemon, filename)
+			preBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read seed: %v", err)
+			}
+
+			if err := os.Chmod(path, tt.mode); err != nil {
+				t.Fatalf("chmod file: %v", err)
+			}
+
+			sk, err := LoadOrCreate(base, daemon)
+			if !errors.Is(err, ErrInsecureKeyFileMode) {
+				t.Errorf("err = %v, want errors.Is ErrInsecureKeyFileMode", err)
+			}
+			if sk != nil {
+				t.Errorf("StaticKey = %v, want nil on reject", sk)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, path) {
+				t.Errorf("err message %q missing file path %q", msg, path)
+			}
+			wantMode := fmt.Sprintf("%#o", tt.mode)
+			if !strings.Contains(msg, wantMode) {
+				t.Errorf("err message %q missing observed mode %q", msg, wantMode)
+			}
+
+			postBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("re-read: %v", err)
+			}
+			if !bytes.Equal(preBytes, postBytes) {
+				t.Errorf("file mutated on reject path")
+			}
+
+			// chmod back and verify the load succeeds — proves the reject path
+			// did not mutate file content.
+			if err := os.Chmod(path, 0o600); err != nil {
+				t.Fatalf("restore chmod: %v", err)
+			}
+			restored, err := LoadOrCreate(base, daemon)
+			if err != nil {
+				t.Fatalf("restore load: %v", err)
+			}
+			if restored.PrivateKey() != seedKey.PrivateKey() || restored.PublicKey() != seedKey.PublicKey() {
+				t.Errorf("restored load returned different key")
+			}
+		})
+	}
+}
+
+// TestLoadOrCreate_FreshCreateUnderHostileUmaskStill0700 pins the post-MkdirAll
+// re-stat: even when the process umask is 0o000 (so mkdir(2) cannot narrow the
+// requested mode), the daemon must end up with a 0700 directory or the
+// hardening check would have rejected it. syscall.Umask is process-global, so
+// this test cannot run in parallel.
+func TestLoadOrCreate_FreshCreateUnderHostileUmaskStill0700(t *testing.T) {
+	old := syscall.Umask(0)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	base := t.TempDir()
+	const daemon = "test"
+	sk, err := LoadOrCreate(base, daemon)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	if sk == nil {
+		t.Fatal("StaticKey = nil on success")
+	}
+	dir := filepath.Join(base, daemon)
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := fi.Mode().Perm(); mode != 0o700 {
+		t.Errorf("dir mode = %#o, want 0700", mode)
+	}
+	path := filepath.Join(dir, filename)
+	pfi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if mode := pfi.Mode().Perm(); mode != 0o600 {
+		t.Errorf("file mode = %#o, want 0600", mode)
+	}
+}
+
+func TestLoadOrCreate_SymlinkRefusedOnRead(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	const daemon = "test"
+	dir := filepath.Join(base, daemon)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	sentinelPriv := bytes.Repeat([]byte{0x77}, 32)
+	sentinelPub := derivePublic(t, sentinelPriv)
+	privB64 := base64.StdEncoding.EncodeToString(sentinelPriv)
+	pubB64 := base64.StdEncoding.EncodeToString(sentinelPub)
+
+	decoyDir := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(decoyDir, 0o700); err != nil {
+		t.Fatalf("mkdir decoy: %v", err)
+	}
+	decoyPath := filepath.Join(decoyDir, "decoy.json")
+	decoyContents := fmt.Sprintf(
+		`{"version":1,"algorithm":"Noise_25519","private_key":%q,"public_key":%q,"created_at":%q}`,
+		privB64, pubB64, time.Now().UTC().Format(time.RFC3339),
+	)
+	if err := os.WriteFile(decoyPath, []byte(decoyContents), 0o600); err != nil {
+		t.Fatalf("seed decoy: %v", err)
+	}
+
+	keyPath := filepath.Join(dir, filename)
+	if err := os.Symlink(decoyPath, keyPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	sk, err := LoadOrCreate(base, daemon)
+	if err == nil {
+		t.Fatal("LoadOrCreate succeeded on symlinked key path")
+	}
+	if sk != nil {
+		t.Errorf("StaticKey = %v, want nil on symlink", sk)
+	}
+	// Lstat sees the symlink's own permission bits (0755 on macOS, 0777 on
+	// Linux) — both fail the strict 0600 check before the open ever runs.
+	if !errors.Is(err, ErrInsecureKeyFileMode) {
+		t.Errorf("err = %v, want errors.Is ErrInsecureKeyFileMode", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, decoyPath) {
+		t.Errorf("err message leaks decoy path: %q", msg)
+	}
+	if strings.Contains(msg, pubB64) {
+		t.Errorf("err message leaks decoy public_key bytes: %q", msg)
+	}
+	if strings.Contains(msg, privB64) {
+		t.Errorf("err message leaks decoy private_key bytes: %q", msg)
+	}
+}
+
+func TestLoadOrCreate_InsecureFileModeErrorDoesNotLeakPrivateKey(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	const daemon = "test"
+	dir := filepath.Join(base, daemon)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	knownPriv := bytes.Repeat([]byte{0x33}, 32)
+	privB64 := base64.StdEncoding.EncodeToString(knownPriv)
+	pubB64 := base64.StdEncoding.EncodeToString(derivePublic(t, knownPriv))
+	contents := fmt.Sprintf(
+		`{"version":1,"algorithm":"Noise_25519","private_key":%q,"public_key":%q,"created_at":%q}`,
+		privB64, pubB64, time.Now().UTC().Format(time.RFC3339),
+	)
+	path := filepath.Join(dir, filename)
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("seed fixture: %v", err)
+	}
+
+	sk, err := LoadOrCreate(base, daemon)
+	if !errors.Is(err, ErrInsecureKeyFileMode) {
+		t.Fatalf("err = %v, want errors.Is ErrInsecureKeyFileMode", err)
+	}
+	if sk != nil {
+		t.Fatalf("StaticKey = %v, want nil on reject", sk)
+	}
+	if strings.Contains(err.Error(), privB64) {
+		t.Errorf("error message contains private_key base64: %q", err.Error())
 	}
 }
 

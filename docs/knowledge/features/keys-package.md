@@ -14,11 +14,13 @@ func (k *StaticKey) PublicKey()  [32]byte
 
 func LoadOrCreate(baseDir, daemonName string) (*StaticKey, error)
 
-var ErrInvalidDaemonName = errors.New("keys: invalid daemon name")
-var ErrCorruptKeyFile    = errors.New("keys: corrupt static key file")
+var ErrInvalidDaemonName   = errors.New("keys: invalid daemon name")
+var ErrCorruptKeyFile      = errors.New("keys: corrupt static key file")
+var ErrInsecureKeyDirMode  = errors.New("keys: insecure key directory mode")
+var ErrInsecureKeyFileMode = errors.New("keys: insecure key file mode")
 ```
 
-Five exports. Construct `StaticKey` only via `LoadOrCreate` — there is no public constructor; the type is opaque on purpose so the private bytes have a single ingress path.
+Seven exports. Construct `StaticKey` only via `LoadOrCreate` — there is no public constructor; the type is opaque on purpose so the private bytes have a single ingress path.
 
 ## SECURITY contract
 
@@ -44,9 +46,11 @@ The full I/O lifecycle for the daemon's static key. Runs once at daemon startup,
 
 **`daemonName` is validated against the allowlist before any filesystem access** — on reject the function returns `ErrInvalidDaemonName` (wrapped) and the filesystem is untouched. The package does NOT validate `baseDir`; an attacker-controlled `baseDir` is outside the threat model (`baseDir = "/"` with `daemonName = "etc"` would happily write `/etc/static_key.json` if running as root — the allowlist defends against `daemonName` injection only).
 
-**First run (path missing):** parent dir created with `MkdirAll(dir, 0o700)`, keypair minted via `ecdh.X25519().GenerateKey(rand.Reader)`, encoded to the JSON schema below, written atomically to a sibling temp file in the parent dir (chmod'd to `0600` before write to defeat umask), fsync'd, closed, renamed into place. Rename is the commit point; partial state lives only in the `.static-key-*.tmp` sibling and the deferred `os.Remove` cleans it up on any earlier failure.
+**Before any I/O** (`ensureSecureKeyDir`): the parent directory is stat'd. If it doesn't exist, `MkdirAll(dir, 0o700)` runs followed by a re-stat (defensive against default ACLs and exotic filesystems widening the requested mode). If the path exists but is not a directory, or any group/other bit is set (`mode & 0o077 != 0`), the function returns `ErrInsecureKeyDirMode` wrapped with the path and the observed mode in octal. No auto-`chmod`.
 
-**Subsequent runs (path present):** `os.ReadFile`, `json.Unmarshal`, seven-step schema validation (see below). The file is **never** rewritten on the load path, even on validation failure.
+**First run (path missing):** keypair minted via `ecdh.X25519().GenerateKey(rand.Reader)`, encoded to the JSON schema below, written atomically to a sibling temp file in the parent dir (chmod'd to `0600` before write to defeat umask), fsync'd, closed, renamed into place. Rename is the commit point; partial state lives only in the `.static-key-*.tmp` sibling and the deferred `os.Remove` cleans it up on any earlier failure.
+
+**Subsequent runs (path present):** `os.Lstat` the file (NOT `Stat` — a symlink under the key path must not be transparently followed during the mode check); reject anything but a regular file with exactly mode `0600` (`ErrInsecureKeyFileMode`); then `os.OpenFile(path, O_RDONLY|syscall.O_NOFOLLOW, 0)`, `io.ReadAll`, `json.Unmarshal`, seven-step schema validation (see below). The file is **never** rewritten on the load path, even on validation failure.
 
 ### Daemon-name allowlist
 
@@ -110,21 +114,28 @@ Encoding choices:
 
 Each step returns `fmt.Errorf("keys: %s: <reason>: %w", path, ErrCorruptKeyFile)`. Error messages include the path (operator-actionable) and **never** include base64 fields, decoded bytes, or file contents. `TestLoadOrCreate_CorruptJSONErrorDoesNotLeakPrivateKey` pins this.
 
-### Three-way `os.ReadFile` switch
+### Three-way `os.Lstat` switch
 
 ```go
-raw, err := os.ReadFile(path)
+fi, err := os.Lstat(path)
 switch {
 case err == nil:
+    if mode := fi.Mode().Perm(); mode != 0o600 {
+        return nil, fmt.Errorf("keys: %s: mode %#o: %w", path, mode, ErrInsecureKeyFileMode)
+    }
+    raw, err := openSecureKeyFile(path) // O_NOFOLLOW
+    if err != nil {
+        return nil, err
+    }
     return parsePersisted(path, raw)
 case errors.Is(err, fs.ErrNotExist):
     return mintAndPersist(dir, path)
 default:
-    return nil, fmt.Errorf("keys: read %s: %w", path, err)
+    return nil, fmt.Errorf("keys: stat %s: %w", path, err)
 }
 ```
 
-I/O errors are distinguishable from corruption — callers can branch on `errors.Is(err, ErrCorruptKeyFile)` without false positives from a permissions issue. `TestLoadOrCreate_NonENOENTReadErrorIsNotCorruption` traps this by making `static_key.json` itself a directory so `ReadFile` returns EISDIR.
+I/O errors are distinguishable from corruption and from mode-rejection — callers can branch on `errors.Is(err, ErrCorruptKeyFile)`, `…ErrInsecureKeyFileMode`, `…ErrInsecureKeyDirMode`, `…ErrInvalidDaemonName` without false positives between them. `TestLoadOrCreate_NonENOENTReadErrorIsNotCorruption` traps this by making `static_key.json` itself a directory; the trap now surfaces as `ErrInsecureKeyFileMode` (Lstat reports the directory's `0700` mode ≠ `0600`) before the read happens — neither `ErrCorruptKeyFile` nor `ErrInvalidDaemonName`, which is what the test asserts.
 
 ### Corruption is operator-escalated, never auto-regenerated
 
@@ -140,9 +151,19 @@ The chmod-before-write defends against macOS umask collapsing the requested mode
 
 Not safe for concurrent use against the same path. Bootstrap runs once at daemon startup before any goroutines fan out. Two pyry daemons sharing a HOME is a wider misconfiguration that affects `sessions.json`, `devices.json`, `server-id`, etc. — not a concern this package addresses. Same contract as `internal/identity.LoadOrCreate`.
 
-## Filesystem hardening lives in this same package but ships separately
+## Filesystem hardening (parent-dir mode, file mode, `O_NOFOLLOW`)
 
-The pre-read parent-directory mode rejection (`0700`), post-`MkdirAll` re-stat verification, existing-file mode rejection (`0600`), and `O_NOFOLLOW` on the read path are intentionally NOT in `LoadOrCreate` as of #438. They ship as **#439** — a hard prerequisite for any downstream consumer (the spec, the issue body, and `protocol-mobile.md` all name #439 as the blocker for #432 and #433). The partition is load-bearing for the security review: SHOULD-FIX-not-MUST-FIX classification holds because the production exposure window is zero — no consumer reads `static_key.json` until #439 lands.
+Landed in [#439](../codebase/439.md) on top of the #438 primitive. `LoadOrCreate` refuses to start the daemon when:
+
+- the parent directory has any group/other readable/writable/executable bit set (`mode & 0o077 != 0`) — returns `ErrInsecureKeyDirMode`. The same sentinel covers the "path exists but is not a directory" case (operator fix is the same: remove the imposter, re-run).
+- `static_key.json` has any mode other than exactly `0600` — returns `ErrInsecureKeyFileMode`. The strict equality (rather than the dir's "no g/o bits") is intentional: the package writes the file at exactly `0600`, so anything else (including narrower) indicates tampering.
+- a between-`Lstat`-and-open symlink swap would otherwise redirect the read — `os.OpenFile(path, O_RDONLY|syscall.O_NOFOLLOW, 0)` returns `ELOOP`.
+
+Two layers, two fabrics: `Lstat` catches the symlink-at-rest case (a symlink's own mode is `0755`/`0777`, fails the `== 0600` check); `O_NOFOLLOW` catches the dynamic swap during the TOCTOU window. The directory check on entry catches the parent-mode case before any read or write touches the filesystem. Wrapped error messages name the path and the observed mode in `%#o` and nothing else — never the file contents, never a resolved symlink target.
+
+**No auto-`chmod` ever.** The loud-failure contract is the security feature; auto-repair would hide packaging bugs and hand a hostile process under the same UID the moment of vulnerability they need. The operator chmods by hand and restarts.
+
+`syscall.O_NOFOLLOW` is the canonical spelling on both Linux and macOS — no `golang.org/x/sys/unix` import.
 
 ## Why `crypto/ecdh` over `flynn/noise`
 
@@ -168,14 +189,19 @@ Same-package (white-box) so the unexported `validDaemonName`, `newStaticKey`, `o
 - `TestLoadOrCreate_InvalidDaemonName` — 12 reject rows; each asserts `errors.Is(err, ErrInvalidDaemonName)`, `sk == nil`, AND `baseDir` has zero entries after the call.
 - `TestLoadOrCreate_CorruptJSONReturnsSentinel` — 11 corruption rows (not JSON, missing brace, wrong version, wrong algorithm, private not base64, private wrong length, public not base64, public wrong length, public mismatched private, created_at not RFC3339). Each row asserts `errors.Is(err, ErrCorruptKeyFile)`, `sk == nil`, AND on-disk bytes byte-identical to the seeded fixture.
 - `TestLoadOrCreate_CorruptJSONErrorDoesNotLeakPrivateKey` — seed a fixture with a known base64 private key, trigger `algorithm` mismatch, assert `err.Error()` does not contain the known base64 substring.
-- `TestLoadOrCreate_NonENOENTReadErrorIsNotCorruption` — make `static_key.json` itself a directory; assert non-nil error that is NOT `Is(ErrCorruptKeyFile)` and NOT `Is(ErrInvalidDaemonName)`.
+- `TestLoadOrCreate_NonENOENTReadErrorIsNotCorruption` — make `static_key.json` itself a directory; assert non-nil error that is NOT `Is(ErrCorruptKeyFile)` and NOT `Is(ErrInvalidDaemonName)`. (After #439 this now surfaces as `ErrInsecureKeyFileMode` — Lstat sees the directory's mode ≠ `0600` — but the test's assertions still hold because `ErrInsecureKeyFileMode` is neither corruption nor invalid-name.)
+- `TestLoadOrCreate_InsecureDirModeRejected` (#439) — table-driven `0700` accept / `0750`, `0755`, `0701` reject; asserts `errors.Is(ErrInsecureKeyDirMode)`, message contains dir path + observed mode in `%#o`, file bytes unchanged, no private-key leak.
+- `TestLoadOrCreate_InsecureFileModeRejected` (#439) — table-driven `0644`, `0640`, `0660`, `0666` all reject; chmod-back-to-`0600` proves the reject path didn't mutate content.
+- `TestLoadOrCreate_FreshCreateUnderHostileUmaskStill0700` (#439) — `syscall.Umask(0)` (process-global; non-parallel) then `LoadOrCreate` on a fresh tempdir; asserts post-create dir mode is exactly `0700` and file mode `0600`.
+- `TestLoadOrCreate_SymlinkRefusedOnRead` (#439) — symlink a decoy with a sentinel keypair to `<dir>/static_key.json`; asserts `errors.Is(ErrInsecureKeyFileMode)` (Lstat sees symlink mode `0755`/`0777`, fails the `== 0600` check before the open) and that the error message contains neither the decoy path nor its key bytes.
+- `TestLoadOrCreate_InsecureFileModeErrorDoesNotLeakPrivateKey` (#439) — extension of the existing no-leak shape for the new sentinel.
 
 ## Out of scope (deferred or in follow-up tickets)
 
-- **Filesystem hardening** — parent-dir mode rejection, post-`MkdirAll` re-stat, existing-file mode rejection, `O_NOFOLLOW` on read. Filed as #439; same package.
 - **QR payload extension** — `server_static_pubkey` (base64 32-byte public key) added to `internal/pair.Payload`. #432.
 - **Noise wrapper** consuming `StaticKey.PrivateKey()` for the IK handshake state machine. #433.
-- **Caller wiring in `pyry pair`** that calls `keys.LoadOrCreate` and feeds the public half into `internal/pair.Payload`. Integration ticket on top of #432 + #439 + #438.
+- **Caller wiring in `pyry pair`** that calls `keys.LoadOrCreate` and feeds the public half into `internal/pair.Payload`. Integration ticket on top of #432 + #438 + #439.
+- **`io.LimitReader` (e.g. 64KB) on the keyfile read** — defers a hostile-process-under-same-UID OOM. Threat model excludes that adversary today; revisit if it expands. (See `docs/specs/architecture/439-keys-filesystem-hardening.md` § Security threat #7.)
 - **Key rotation verb** (`pyry rotate-static-key`) — v3.
 - **Hardware-backed key storage** on the binary side (TPM, macOS Secure Enclave) — v3.
 - **In-memory zeroisation** of the private bytes — Go gives no reliable zeroisation primitives; defence-in-depth belongs with hardware-backed storage.
