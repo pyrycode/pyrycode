@@ -31,6 +31,8 @@ func TestRelayV2_Handshake(t *testing.T) {
 	t.Run("happy_path", testV2HappyPath)
 	t.Run("bad_token_4401", testV2BadToken)
 	t.Run("ik_reject_4426", testV2IKReject)
+	t.Run("encrypted_echo_round_trip", testV2EncryptedEchoRoundTrip)
+	t.Run("tampered_noise_msg_4421", testV2TamperedNoiseMsg_4421)
 }
 
 // v2Harness bundles the per-test wiring: fakerelay, binary↔relay
@@ -327,6 +329,190 @@ func testV2BadToken(t *testing.T) {
 	}
 	if int(code) != 4401 {
 		t.Errorf("WS close code = %d, want 4401", int(code))
+	}
+}
+
+// sendNoiseMsg wraps ciphertext as an InnerFrameV2(noise_msg) and sends
+// it over the phone WS. Counterpart of sendNoiseInit for open-state
+// dispatch tests.
+func sendNoiseMsg(t *testing.T, phone *fakephone.Client, ciphertext []byte) {
+	t.Helper()
+	wireFrame, err := json.Marshal(protocol.InnerFrameV2{
+		Version: protocol.V2Version,
+		Type:    protocol.TypeNoiseMsg,
+		Data:    base64.StdEncoding.EncodeToString(ciphertext),
+	})
+	if err != nil {
+		t.Fatalf("marshal noise_msg wire frame: %v", err)
+	}
+	if err := phone.SendBytes(wireFrame); err != nil {
+		t.Fatalf("phone send noise_msg: %v", err)
+	}
+}
+
+// driveHandshakeToOpen runs a paired-device handshake from the phone
+// side against h, returning the initiator's CipherStates ready for
+// open-state application dispatch (initSend encrypts phone→binary,
+// initRecv decrypts binary→phone).
+func driveHandshakeToOpen(t *testing.T, h *v2Harness, phone *fakephone.Client, token string) (*noise.CipherState, *noise.CipherState) {
+	t.Helper()
+	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("phone keygen: %v", err)
+	}
+	initiator, err := noise.NewInitiator(initPriv.Bytes(), h.pubKey)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	initMsg, err := initiator.WriteInit(buildHelloEarly(t, token))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	sendNoiseInit(t, phone, initMsg)
+
+	inner := readInnerFrame(t, phone, 3*time.Second)
+	if inner.Type != protocol.TypeNoiseResp {
+		t.Fatalf("handshake: got inner type %q, want %q", inner.Type, protocol.TypeNoiseResp)
+	}
+	respRaw, err := base64.StdEncoding.DecodeString(inner.Data)
+	if err != nil {
+		t.Fatalf("decode noise_resp data: %v", err)
+	}
+	_, initSend, initRecv, err := initiator.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("initiator.ReadResp: %v", err)
+	}
+	return initSend, initRecv
+}
+
+// testV2EncryptedEchoRoundTrip drives a paired-device handshake to
+// V2StateOpen, registers an echo handler keyed by TypeListConversations,
+// AEAD-seals an envelope, sends it as noise_msg, and asserts the phone
+// receives an AEAD-sealed reply whose decoded inner envelope matches
+// the registered handler's response with InReplyTo pointing at the
+// request id. Covers AC #1 end-to-end through the existing handler chain.
+func testV2EncryptedEchoRoundTrip(t *testing.T) {
+	const plainToken = "v2-e2e-dispatch-token-001"
+	reg := &devices.Registry{}
+	reg.Add(devices.Device{
+		TokenHash: devices.HashToken(plainToken),
+		Name:      "v2-e2e-phone",
+		PairedAt:  time.Now().UTC(),
+	})
+
+	const replyText = "e2e-echo-payload"
+	echoPayload, err := json.Marshal(map[string]string{"text": replyText})
+	if err != nil {
+		t.Fatalf("marshal echo payload: %v", err)
+	}
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			return c.Reply(ctx, env, protocol.TypeConversations, echoPayload)
+		},
+	}
+
+	h := startV2Harness(t, reg, handlers)
+	phone := h.dialPhone(t)
+	initSend, initRecv := driveHandshakeToOpen(t, h, phone, plainToken)
+
+	const reqID uint64 = 11
+	reqEnv, err := json.Marshal(protocol.Envelope{
+		ID:      reqID,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal request envelope: %v", err)
+	}
+	ciphertext, err := initSend.Encrypt(reqEnv)
+	if err != nil {
+		t.Fatalf("seal request envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, ciphertext)
+
+	inner := readInnerFrame(t, phone, 3*time.Second)
+	if inner.Type != protocol.TypeNoiseMsg {
+		t.Fatalf("reply inner type = %q, want %q", inner.Type, protocol.TypeNoiseMsg)
+	}
+	replyCipher, err := base64.StdEncoding.DecodeString(inner.Data)
+	if err != nil {
+		t.Fatalf("decode reply data: %v", err)
+	}
+	replyPlain, err := initRecv.Decrypt(replyCipher)
+	if err != nil {
+		t.Fatalf("phone decrypt reply: %v", err)
+	}
+	var replyEnv protocol.Envelope
+	if err := json.Unmarshal(replyPlain, &replyEnv); err != nil {
+		t.Fatalf("decode reply envelope: %v", err)
+	}
+	if replyEnv.Type != protocol.TypeConversations {
+		t.Errorf("reply Type = %q, want %q", replyEnv.Type, protocol.TypeConversations)
+	}
+	if replyEnv.InReplyTo == nil || *replyEnv.InReplyTo != reqID {
+		t.Errorf("InReplyTo = %v, want pointer to %d", replyEnv.InReplyTo, reqID)
+	}
+	var gotPayload map[string]string
+	if err := json.Unmarshal(replyEnv.Payload, &gotPayload); err != nil {
+		t.Fatalf("decode reply payload: %v", err)
+	}
+	if gotPayload["text"] != replyText {
+		t.Errorf("reply payload text = %q, want %q", gotPayload["text"], replyText)
+	}
+}
+
+// testV2TamperedNoiseMsg_4421 drives a paired-device handshake to
+// V2StateOpen, sends a well-formed noise_msg whose ciphertext has one
+// byte flipped, and asserts the phone observes a WS close with code
+// 4421 (AC #2). The fresh-conn_id reconnect case from the spec is
+// deliberately deferred to the unit test
+// TestV2Session_OpenState_FreshNoiseInitAfterAEADClose — fakerelay
+// assigns a new conn_id per dial, so "same conn_id" reconnect is not
+// expressible at the e2e layer without invasive harness changes.
+func testV2TamperedNoiseMsg_4421(t *testing.T) {
+	const plainToken = "v2-e2e-dispatch-token-002"
+	reg := &devices.Registry{}
+	reg.Add(devices.Device{
+		TokenHash: devices.HashToken(plainToken),
+		Name:      "v2-e2e-phone",
+		PairedAt:  time.Now().UTC(),
+	})
+
+	// No handlers registered: if the handler chain were reached on a
+	// tampered frame, the unsupported-type reply path would still run
+	// — but the test asserts a WS close instead, so neither path fires.
+	h := startV2Harness(t, reg, nil)
+	phone := h.dialPhone(t)
+	initSend, _ := driveHandshakeToOpen(t, h, phone, plainToken)
+
+	envBytes, err := json.Marshal(protocol.Envelope{
+		ID:      1,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	ciphertext, err := initSend.Encrypt(envBytes)
+	if err != nil {
+		t.Fatalf("seal envelope: %v", err)
+	}
+	ciphertext[0] ^= 0xff
+	sendNoiseMsg(t, phone, ciphertext)
+
+	if _, err := phone.ReceiveBytes(3 * time.Second); err == nil {
+		t.Fatal("phone receive: nil err, want WS close")
+	} else if errors.Is(err, fakephone.ErrReceiveTimeout) {
+		t.Fatalf("phone receive timed out without seeing close: %v", err)
+	}
+	code, ok := phone.LastCloseStatus()
+	if !ok {
+		t.Fatal("phone LastCloseStatus: not set")
+	}
+	if int(code) != 4421 {
+		t.Errorf("WS close code = %d, want 4421", int(code))
 	}
 }
 
