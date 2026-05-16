@@ -182,12 +182,26 @@ func parseContentBlocks(raw json.RawMessage) ([]contentBlock, error) {
 // can distinguish "field absent" (nil) from "field present, empty"
 // (non-nil, len 0). Today pyry's emitter never emits this field; the
 // pointer is a forward-compat guard per the AC.
+//
+// IsError, TerminalReason, and Usage were added by #385 for the
+// budget-guardrail tests (cache-hit + max-turns). They are omitempty-tagged
+// so pre-#385 consumers that don't read them decode unchanged.
 type resultTrailer struct {
 	Type              string             `json:"type"`
 	Subtype           string             `json:"subtype"`
 	StopReason        string             `json:"stop_reason"`
 	NumTurns          int                `json:"num_turns"`
 	PermissionDenials *[]json.RawMessage `json:"permission_denials,omitempty"`
+	IsError           bool               `json:"is_error,omitempty"`
+	TerminalReason    string             `json:"terminal_reason,omitempty"`
+	Usage             resultTrailerUsage `json:"usage,omitempty"`
+}
+
+type resultTrailerUsage struct {
+	InputTokens              int `json:"input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 }
 
 // parseResultTrailer scans stdout line by line for the first
