@@ -368,6 +368,47 @@ func TestDecrypt_RejectsReplayedFrame(t *testing.T) {
 	}
 }
 
+// TestResponder_PeerStaticAfterReadInit pins the new accessor used by
+// the v2 re-key responder for peer-pubkey continuity (#449). The method
+// returns a fresh allocation each call, so a caller that mutates the
+// returned slice cannot corrupt the underlying HandshakeState.
+func TestResponder_PeerStaticAfterReadInit(t *testing.T) {
+	t.Parallel()
+	initPriv, initPub := genKeypair(t)
+	respPriv, respPub := genKeypair(t)
+
+	initiator, err := NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	responder, err := NewResponder(respPriv)
+	if err != nil {
+		t.Fatalf("NewResponder: %v", err)
+	}
+	initMsg, err := initiator.WriteInit([]byte("hello"))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	if _, err := responder.ReadInit(initMsg); err != nil {
+		t.Fatalf("ReadInit: %v", err)
+	}
+
+	got := responder.PeerStatic()
+	if !bytes.Equal(got, initPub) {
+		t.Errorf("PeerStatic() = %x, want %x", got, initPub)
+	}
+
+	// Defensive-copy check: mutating the returned slice MUST NOT affect
+	// the next call.
+	if len(got) > 0 {
+		got[0] ^= 0xff
+	}
+	again := responder.PeerStatic()
+	if !bytes.Equal(again, initPub) {
+		t.Errorf("PeerStatic() after caller mutation = %x, want %x", again, initPub)
+	}
+}
+
 // TestErrorMessages_DoNotLeakPlaintextOrKey: a single defensive assertion
 // against future refactors that might pull plaintext into the error
 // message. Cheap, pins the contract documented in the package comment.

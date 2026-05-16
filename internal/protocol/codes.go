@@ -59,4 +59,16 @@ const (
 
 	// Push.
 	TypeRegisterPushToken = "register_push_token"
+
+	// TypeRekeyRequest is the v2 control envelope (docs/protocol-mobile.md
+	// § Re-key) that either side may emit to nudge the peer toward
+	// initiating a re-key handshake. Receipt is informational; the actual
+	// re-key is a noise_init handshake re-run on the IK initiator's
+	// schedule.
+	//
+	// NOT a v1 application type — deliberately omitted from v1TypeSet
+	// (envelope.go). The v2 manager intercepts it before dispatch.Route,
+	// so a leak into v1TypeSet would route it to the handler chain in
+	// violation of #449 AC #3.
+	TypeRekeyRequest = "rekey_request"
 )
