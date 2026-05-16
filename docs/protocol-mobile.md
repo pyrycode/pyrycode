@@ -6,7 +6,7 @@ This document is the single source of truth. The pyry binary, the relay, and the
 
 ## Status
 
-`v2` — **draft.** No wire is live yet. v2 supersedes the v1 draft via hard cutover; v1 envelope shapes are not supported on the wire at any point.
+`v2` — **draft.** No wire is live yet. v2 supersedes the v1 draft via hard cutover; v1 envelope shapes are not supported on the wire at any point. The pre-flight gate (`pyry pair list` empty, see [Pre-flight](#pre-flight-pyry-pair-list-empty-check) and #436) MUST pass before flipping the v2 release flag on any deployment, since v1 pair records have no `server_static_pubkey` and cannot complete a v2 handshake.
 
 The v1 draft is preserved in git history (`git show HEAD~1:docs/protocol-mobile.md` at the point this rewrite landed) for archaeological reference only — it is not an implementation target.
 
@@ -193,6 +193,8 @@ The handshake completes in **one round-trip** (one message from each side). The 
 ### Transport
 
 Once both sides hold CipherStates, every application frame is wrapped as a `noise_msg`. The plaintext payload (before AEAD-sealing) is exactly a v1-shaped application envelope (JSON, UTF-8). The sealed-and-base64-encoded ciphertext is the `data` field of the `noise_msg` outer frame.
+
+**Associated data: empty.** AEAD sealing is performed with empty associated-data (`EncryptWithAd(nil, ...)` / `DecryptWithAd(nil, ...)`). The outer routing envelope (`conn_id`, `frame`) is intentionally NOT bound to the AEAD because (a) per-handshake key derivation isolates one session's ciphertext from another (replay across sessions fails MAC), and (b) per-session nonce-counter discipline isolates frames within a session (replay within session fails MAC). Binding `conn_id` into the AD would force a re-key on every relay-side routing change with no security benefit; the relay's threat model already excludes ciphertext tampering as a meaningful capability (MAC failure → connection close, no plaintext leak). Implementations MUST NOT pass a non-empty AD without a corresponding spec amendment.
 
 Nonce management: Noise's CipherState carries a monotonic 64-bit counter. Both sides start at counter 0 after the handshake; each `EncryptWithAd` / `DecryptWithAd` increments. The wire does **not** carry the nonce — both sides derive it deterministically from their own counter. WebSocket gives ordered, lossless delivery within a session, so counter drift is not possible without a programming error or malicious frame injection (which AEAD detection would catch as a MAC failure → connection close).
 
@@ -589,13 +591,13 @@ None as of 2026-05-16. The four architect-level questions ((a) Go Noise library,
 
 ### Go (binary side) — recommendation: `github.com/flynn/noise`
 
-- **Status:** Maintained. Latest release v1.1.0 (Feb 2024). Used in production by Tailscale's control protocol with the exact cipher suite v2 requires.
+- **Status:** Maintained. Latest release v1.1.0 (Feb 2024). It is the canonical third-party Noise Protocol implementation in Go. (Note: Tailscale's control protocol uses the same cipher suite v2 requires but ships its own implementation at `tailscale.com/control/noise` rather than depending on flynn/noise; the parity v2 inherits is cipher-suite-level, not library-level.)
 - **Noise_IK support:** First-class. `noise.HandshakeIK` constant exposed; the canonical cipher suite is constructed via `noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)`.
 - **Early-data payloads:** `HandshakeState.WriteMessage(out, payload)` accepts an early-data payload on every handshake message. Returns the resulting wire bytes plus, on the final message, the paired `CipherState`s for transport.
 - **Test vectors:** The library ships Noise specification test vectors (`vectors.txt`) and asserts against them in CI — confidence-inspiring.
 - **Dependency footprint:** Pure Go, no cgo, no transitive dependencies beyond `golang.org/x/crypto`.
 
-This is the no-controversy choice. The architect-spike requirement (validate that the library handles IK + early data correctly under the chosen cipher suite) is satisfied by the published API surface and by the existence of two production users (Tailscale's `tailscale.com/control/noise`, WireGuard via `wireguard-go`) that exercise the same code paths.
+This is the no-controversy choice. The architect-spike requirement (validate that the library handles IK + early data correctly under the chosen cipher suite) is satisfied by the published API surface (`HandshakeIK` constant + `WriteMessage`/`ReadMessage` early-data payload semantics) and by the library's own CI assertion against Noise specification test vectors. Production deployments of the same cipher suite (Tailscale's own Noise implementation; WireGuard via `wireguard-go`) demonstrate the cipher choice itself is well-trodden, even though those deployments do not depend on flynn/noise directly.
 
 **No alternatives considered viable.** `perlin-network/noise` is a P2P networking framework, not a Noise Protocol implementation (despite the name). No other mature Go Noise library exists.
 
@@ -700,7 +702,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 - **[Tokens, secrets, credentials]** No new findings — device-token handling is structurally improved (relay no longer sees plaintext tokens); static private key is generated by `crypto/rand` (via the Noise library), stored at `0600`, never logged. Static-key rotation is explicitly deferred to v3.
 - **[File operations]** SHOULD FIX → FIXED — §Static keys — binary side now mandates (a) parent dir mode `0700`, (b) `<daemon-name>` allowlist canonicalisation to defeat path traversal, (c) `O_NOFOLLOW` on the read path. Atomic-write recipe inherited from project-level convention.
 - **[Subprocess / external command]** N/A — v2 introduces no new subprocess paths.
-- **[Cryptographic primitives]** SHOULD FIX → FIXED — fingerprint truncation standardised on **BLAKE2s(pubkey)[:8]** (64-bit) throughout, defeating 2³² preimage search. Cipher suite (`Noise_IK_25519_ChaChaPoly_BLAKE2s`) is a standards-grade choice with two existing Go production deployments (Tailscale control protocol, WireGuard transport via different library); empty associated-data documented in §Wire shapes.
+- **[Cryptographic primitives]** SHOULD FIX → FIXED — fingerprint truncation standardised on **BLAKE2s(pubkey)[:8]** (64-bit) throughout, defeating 2³² preimage search. Cipher suite (`Noise_IK_25519_ChaChaPoly_BLAKE2s`) is a standards-grade choice; the same suite is used in production by Tailscale's control protocol and (in a closely-related form) by WireGuard transport, though both ship their own Noise implementations rather than depending on flynn/noise. Empty associated-data is now explicitly documented and justified in §Transport, with the rule that implementations MUST NOT pass a non-empty AD without a spec amendment.
 - **[Network & I/O]** SHOULD FIX → FIXED — base64 alphabet pinned to `base64.StdEncoding`; per-frame size cap of 65535 decoded bytes named explicitly (matches the Noise framework's transport-message limit); §Application envelope size cap supersedes v1's 1 MiB cap with **65519 bytes** to fit inside the Noise transport message.
 - **[Error messages, logs, telemetry]** No findings — handshake failures close at WS layer (`4426`) without emitting an `error` envelope (no oracle); private static key MUST NOT be logged (named explicitly in #431 AC); device-token transit moves out of relay process memory entirely.
 - **[Concurrency]** No new findings — per-conn-id state machine (specified in #434) owns CipherStates on a single dispatch goroutine; flynn/noise CipherStates are not goroutine-safe and this constraint is documented in the child ticket. Re-key swap is atomic at the dispatch-goroutine level (#435).
