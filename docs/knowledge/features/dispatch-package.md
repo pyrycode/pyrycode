@@ -53,6 +53,21 @@ func (d *Dispatcher) Run(ctx context.Context) error
 func (d *Dispatcher) Outbound() <-chan protocol.RoutingEnvelope
 func (d *Dispatcher) ActiveConns() []*Conn  // #311; broadcast-eligibility snapshot
 
+// Standalone handler-table dispatch for callers that own their own
+// per-conn goroutine — e.g. the v2 session manager which decrypts a
+// noise_msg before dispatching the inner envelope (#446). Synchronous;
+// the caller must drain `conn`'s outbound channel afterwards.
+func Route(ctx context.Context, logger *slog.Logger, conn *Conn,
+            handlers map[string]Handler, frame json.RawMessage)
+
+// Production-allowed *Conn factory for callers that route envelopes
+// outside Dispatcher.Run (#446). Distinct from NewTestConn only in
+// policy: NewTestConn carries the "test fixtures only" restriction;
+// NewConn is the production-allowed equivalent. Implementations are
+// identical.
+func NewConn(id string, outbound chan<- protocol.RoutingEnvelope,
+              auth *devices.Device) *Conn
+
 // Test-fixtures only — do not call from production code (#319).
 func NewTestConn(id string, outbound chan<- protocol.RoutingEnvelope,
                   auth *devices.Device) *Conn
@@ -83,21 +98,30 @@ Run(ctx)                       (demux goroutine)
   exit before closing `Outbound`, so the caller can `for env := range
   d.Outbound()` and know the drain is complete.
 
-## Per-frame routing (`handleOne`)
+## Per-frame routing (`Route`)
 
 | Inbound shape                             | Wire code              | `in_reply_to` |
 |------------------------------------------ |----------------------- |---------------|
-| `RoutingEnvelope.Frame` not JSON-decodable| `protocol.malformed`   | absent        |
+| `frame` not JSON-decodable                | `protocol.malformed`   | absent        |
 | `PayloadEncrypted=true`                   | `protocol.unsupported` | `&req.ID`     |
 | `Type` empty / not in v1 set              | `protocol.unknown_type`| `&req.ID`     |
 | v1 `Type` with no handler registered      | `protocol.unsupported` | `&req.ID`     |
 | v1 `Type` with handler                    | handler invoked        | —             |
 
-Sentinel-to-`Code*` mapping happens inside the dispatcher (consumer's
+Sentinel-to-`Code*` mapping happens inside `Route` (consumer's
 job per `docs/PROJECT-MEMORY.md` § "Refusal-to-wire-code mapping is the
 consumer's job"). `protocol.IsV1Compatible`'s
 encrypted-wins-over-unknown check order is inherited verbatim — see the
 [lessons in `codebase/307.md`](../codebase/307.md#islv1compatible-check-order-pins-the-stricter-rejection).
+
+`Dispatcher.handleOne` is a one-line wrapper over `Route`: the
+per-conn goroutine is the only call site inside `Dispatcher.Run`, but
+`Route` is exported so the v2 session manager can reuse the same
+table-dispatch + error-envelope logic from its own per-frame goroutine
+after AEAD-decrypting a `noise_msg` (#446). A non-nil error returned
+from the handler is logged at WARN; no automatic reply is synthesised
+(matches `Dispatcher.Run`'s posture). `handlers` may be nil — every
+envelope then falls through to the "no handler registered" reply path.
 
 Error envelopes carry only the `Code*` string + a static `Message`.
 Decode-error text, stack info, and any byte derived from untrusted
@@ -362,7 +386,7 @@ verb-slice integration is enough.
 - `internal/protocol` (#255 + #271) — `Envelope`, `RoutingEnvelope`,
   `IsV1Compatible`, `Code*` constants, `ErrorPayload`, `TypeError`.
 
-### Test-only `Conn` constructor (#319)
+### Test-only `Conn` constructor (#319) and the production sibling (#446)
 
 `NewTestConn(id, outbound, auth) *Conn` is an exported, non-`_test.go`
 constructor reserved for verb-handler test fixtures in sibling packages
@@ -375,10 +399,18 @@ call `c.NextID()` once before invoking the handler.
 
 The constructor does NOT mutate auth on a dispatcher-owned `*Conn`; it
 only builds a fresh `*Conn` whose outbound channel the caller supplies.
-The dispatcher remains the sole production `*Conn` factory (via
-`routeConn`). Doc-comment opens with **"Test fixtures only — do not
-call from production code."** Code-review checks no `cmd/` package
-calls it.
+Doc-comment opens with **"Test fixtures only — do not call from
+production code."**
+
+`NewConn` (added #446) is the production-allowed equivalent — same body,
+different policy. The v2 session manager's `dispatchAppFrame` allocates
+a per-frame `*Conn` via `NewConn` for each AEAD-decrypted `noise_msg`,
+calls `Route`, then drains the per-frame outbound channel and re-seals
+each reply under the session's `s.send` CipherState. Two constructors
+exist so a reviewer scanning for `NewTestConn` in `cmd/` or `internal/relay`
+still has a single-word grep that flags misuse; production callers that
+need their own per-conn goroutine use `NewConn` and the test-only
+restriction stays cleanly on `NewTestConn`.
 
 ## Out of scope (deferred)
 
