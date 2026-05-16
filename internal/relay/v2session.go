@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -40,6 +41,14 @@ const (
 // payloads never reach Responder.ReadInit.
 const maxNoisePayloadBytes = 65535
 
+// handlerOutboundBuf is the buffer size for the per-frame dispatch.Conn
+// outbound channel allocated by dispatchAppFrame. The three production
+// handlers (send_message, list_conversations, register_push_token) emit
+// exactly one reply per invocation; Route emits at most one error reply.
+// 8 is a generous safety margin and is documented as the
+// synchronous-handler assumption in V2SessionConfig.Handlers.
+const handlerOutboundBuf = 8
+
 // V2SessionState is the externally-observable lifecycle state of a
 // per-conn V2Session. The handshakeComplete substate is distinct from
 // open even though both can be set inside the same noise_init handler:
@@ -66,6 +75,13 @@ type V2Session struct {
 	resp   *noise.Responder
 	send   *noise.CipherState
 	recv   *noise.CipherState
+
+	// device is the matched device snapshot from the handshake's
+	// token-accept branch. Surfaced into the per-frame *dispatch.Conn as
+	// auth so handlers can call c.Auth(). Set exactly once in
+	// handleNoiseInit's token-OK path before state advances to
+	// V2StateOpen. Nil before the token check completes.
+	device *devices.Device
 }
 
 // State returns the externally-observable state. Called from the same
@@ -108,6 +124,24 @@ type V2SessionConfig struct {
 	// payload bytes, AEAD ciphertext, and base64 forms thereof MUST NOT
 	// appear in any logged field.
 	Logger *slog.Logger
+
+	// Handlers is the application-layer envelope-type → handler table
+	// used for v2 open-state dispatch. Optional: nil or empty map means
+	// no app handlers are registered, and every open-state envelope falls
+	// through to a sealed protocol.unsupported reply via dispatch.Route.
+	// Mirror v1's internal/dispatch.Dispatcher.Register registration
+	// shape — production wires Handlers via the daemon, same handlers as
+	// v1.
+	//
+	// SECURITY: handlers run on the manager's single dispatch goroutine
+	// (same goroutine that mutates s.send / s.recv). Handlers MUST be
+	// synchronous and MUST NOT spawn long-lived background goroutines
+	// that retain a reference to the *dispatch.Conn passed in — the
+	// conn's outbound channel is per-frame and is drained before
+	// dispatchAppFrame returns; sends from a forked goroutine after that
+	// drain are silently lost (the channel is leaked but bounded by its
+	// capacity, and reclaimed by GC).
+	Handlers map[string]dispatch.Handler
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -433,20 +467,24 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		return
 	}
 
-	// Success: emit noise_resp, advance to open.
+	// Success: emit noise_resp, advance to open. Capture the matched
+	// device snapshot so dispatchAppFrame can surface it via *dispatch.Conn
+	// for handlers that consult c.Auth().
 	m.cfg.Logger.Info("relay: v2 handshake accept",
 		"event", "v2.handshake.accept",
 		"conn_id", s.connID,
 		"device_name", device.Name)
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+	s.device = &device
 	s.state = V2StateOpen
 }
 
-// handleNoiseMsg processes an inbound noise_msg frame. In this slice
-// the open-state branch is a no-op drop — application dispatch lands in
-// the follow-up (#446). The handshakeComplete branch is the gating
-// invariant: a noise_msg arriving while we hold CipherStates but have
-// not yet validated the token is rejected as auth.invalid_token.
+// handleNoiseMsg processes an inbound noise_msg frame. The
+// handshakeComplete branch is the gating invariant: a noise_msg
+// arriving while we hold CipherStates but have not yet validated the
+// token is rejected as auth.invalid_token. The open branch AEAD-decrypts
+// the payload and dispatches the inner v1-shaped envelope through the
+// existing handler chain; AEAD failures close the conn at 4421.
 func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
 	switch s.state {
 	case V2StateAwaitingInit:
@@ -501,11 +539,71 @@ func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inn
 		m.closeWith(ctx, s, StatusUnauthorized, errFrame)
 		return
 	case V2StateOpen:
-		// Application dispatch lands in #446. Drop silently for now —
-		// this slice's tests assert the handler chain is unreached, not
-		// that open-state noise_msg has any side effect.
-		_ = inner
+		plaintext, err := s.recv.Decrypt(inner.Data)
+		if err != nil {
+			// Tampered, replayed, or truncated frame. flynn/noise leaves
+			// the receive counter unchanged on Decrypt failure, but the
+			// channel is no longer trustworthy: close at 4421 and drop the
+			// session entry so a subsequent noise_init for the same
+			// conn_id starts a fresh awaitingInit (AC #2, #3). Do NOT log
+			// the underlying error text — the AEAD ciphertext and counter
+			// indices are not operator-actionable and stay out of the log
+			// channel per the spec's security review.
+			m.cfg.Logger.Warn("relay: v2 aead fail",
+				"event", "v2.aead.fail",
+				"conn_id", s.connID,
+				"close_code", int(StatusProtocolMismatch))
+			m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+			return
+		}
+		m.dispatchAppFrame(ctx, s, plaintext)
 		return
+	}
+}
+
+// dispatchAppFrame runs dispatch.Route on a per-frame *dispatch.Conn,
+// drains any reply envelopes the handler emitted, AEAD-seals each one
+// under s.send, wraps as noise_msg, and forwards via m.send.
+// Synchronous; returns only after Route has returned and all replies
+// have been drained.
+//
+// Assumes handlers are synchronous and do not spawn long-lived
+// goroutines that retain a reference to conn; the per-frame outbound
+// buffer (handlerOutboundBuf) is large enough to absorb a handler's
+// synchronous replies without blocking c.Send. The channel is
+// deliberately NOT closed — a misbehaving handler that forks a sender
+// after Route returns writes into a leaked but capacity-bounded channel
+// that the GC reclaims once the goroutine exits; closing here would
+// panic such a sender.
+func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
+	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
+	conn := dispatch.NewConn(s.connID, outbound, s.device)
+	dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)
+	for {
+		select {
+		case reply := <-outbound:
+			ciphertext, err := s.send.Encrypt(reply.Frame)
+			if err != nil {
+				// Realistically unreachable under correct flynn/noise.
+				// Drop the reply rather than emit the unencrypted frame.
+				m.cfg.Logger.Warn("relay: v2 seal app reply failed; reply dropped",
+					"conn_id", s.connID)
+				continue
+			}
+			frame, err := marshalInnerFrameV2(protocol.TypeNoiseMsg, ciphertext)
+			if err != nil {
+				m.cfg.Logger.Warn("relay: v2 marshal app reply failed; reply dropped",
+					"conn_id", s.connID)
+				continue
+			}
+			// The reply's CloseCode is ignored: handlers do not signal
+			// closes through c.Send/c.Reply; the close-code field on the
+			// routing envelope is reserved for the manager's own
+			// close-intent emissions (closeWith).
+			m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
+		default:
+			return
+		}
 	}
 }
 

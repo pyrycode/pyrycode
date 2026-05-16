@@ -547,6 +547,76 @@ func equalIDs(a, b []uint64) bool {
 	return true
 }
 
+// TestRoute_StandaloneInvocation exercises the externally-exposed Route
+// + NewConn surfaces used by callers that own their own per-conn
+// goroutine (the v2 session manager). Registers a handler that replies
+// via c.Reply, calls Route directly, and asserts the outbound channel
+// receives the reply with InReplyTo set to the request id.
+func TestRoute_StandaloneInvocation(t *testing.T) {
+	t.Parallel()
+
+	outbound := make(chan protocol.RoutingEnvelope, 4)
+	conn := NewConn("conn-route", outbound, nil)
+
+	const reqID uint64 = 42
+	replied := make(chan struct{})
+	handlers := map[string]Handler{
+		protocol.TypeSendMessage: func(ctx context.Context, c *Conn, env protocol.Envelope) error {
+			defer close(replied)
+			return c.Reply(ctx, env, protocol.TypeMessage, mustEncode(t, map[string]string{"hi": "there"}))
+		},
+	}
+
+	frame := mustEncode(t, protocol.Envelope{ID: reqID, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
+	Route(context.Background(), testLogger(), conn, handlers, frame)
+	select {
+	case <-replied:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not run")
+	}
+
+	select {
+	case out := <-outbound:
+		var inner protocol.Envelope
+		if err := json.Unmarshal(out.Frame, &inner); err != nil {
+			t.Fatalf("decode reply: %v", err)
+		}
+		if inner.Type != protocol.TypeMessage {
+			t.Errorf("inner.Type = %q, want %q", inner.Type, protocol.TypeMessage)
+		}
+		if inner.InReplyTo == nil || *inner.InReplyTo != reqID {
+			t.Errorf("InReplyTo = %v, want pointer to %d", inner.InReplyTo, reqID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no reply enqueued on outbound")
+	}
+}
+
+// TestRoute_NoHandler_UnsupportedReply verifies the no-handler branch
+// emits a sealed protocol.unsupported error envelope and does not panic
+// on a nil handlers map.
+func TestRoute_NoHandler_UnsupportedReply(t *testing.T) {
+	t.Parallel()
+
+	outbound := make(chan protocol.RoutingEnvelope, 1)
+	conn := NewConn("c", outbound, nil)
+	frame := mustEncode(t, protocol.Envelope{ID: 5, Type: protocol.TypeSendMessage, TS: time.Now().UTC()})
+	Route(context.Background(), testLogger(), conn, nil, frame)
+
+	select {
+	case out := <-outbound:
+		inner, payload := decodeError(t, out)
+		if payload.Code != protocol.CodeProtocolUnsupported {
+			t.Errorf("code = %q, want %q", payload.Code, protocol.CodeProtocolUnsupported)
+		}
+		if inner.InReplyTo == nil || *inner.InReplyTo != 5 {
+			t.Errorf("InReplyTo = %v, want pointer to 5", inner.InReplyTo)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no error reply enqueued")
+	}
+}
+
 func waitOrFail(t *testing.T, wg *sync.WaitGroup, d time.Duration, msg string) {
 	t.Helper()
 	done := make(chan struct{})

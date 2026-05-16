@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/identity"
@@ -43,7 +44,13 @@ type v2Harness struct {
 	pubKey    []byte
 }
 
-func startV2Harness(t *testing.T, reg *devices.Registry) *v2Harness {
+// startV2Harness wires up a fakerelay + binary↔relay Connection +
+// V2SessionManager for a single test. handlers may be nil — when nil the
+// session manager has no app handlers registered and open-state app
+// envelopes fall through to protocol.unsupported error replies. Used by
+// #446's open-state dispatch tests, which register echo handlers to
+// exercise the encrypted reply path.
+func startV2Harness(t *testing.T, reg *devices.Registry, handlers map[string]dispatch.Handler) *v2Harness {
 	t.Helper()
 
 	fr := fakerelay.New(relayTestLogger())
@@ -94,6 +101,7 @@ func startV2Harness(t *testing.T, reg *devices.Registry) *v2Harness {
 		Devices:    reg,
 		ServerID:   string(serverID),
 		Logger:     relayTestLogger(),
+		Handlers:   handlers,
 	})
 	if err != nil {
 		t.Fatalf("NewV2SessionManager: %v", err)
@@ -199,7 +207,7 @@ func testV2HappyPath(t *testing.T) {
 		PairedAt:  time.Now().UTC(),
 	})
 
-	h := startV2Harness(t, reg)
+	h := startV2Harness(t, reg, nil)
 	phone := h.dialPhone(t)
 
 	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -249,7 +257,7 @@ func testV2HappyPath(t *testing.T) {
 // observe a WS close with code 4401.
 func testV2BadToken(t *testing.T) {
 	reg := &devices.Registry{} // empty registry: every token rejects
-	h := startV2Harness(t, reg)
+	h := startV2Harness(t, reg, nil)
 	phone := h.dialPhone(t)
 
 	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -327,7 +335,7 @@ func testV2BadToken(t *testing.T) {
 // frame.
 func testV2IKReject(t *testing.T) {
 	reg := &devices.Registry{}
-	h := startV2Harness(t, reg)
+	h := startV2Harness(t, reg, nil)
 	phone := h.dialPhone(t)
 
 	garbage := make([]byte, 96)
