@@ -57,6 +57,9 @@ func TestPair_E2E(t *testing.T) {
 		if payload.Relay == "" {
 			t.Error("payload.Relay is empty")
 		}
+		if payload.ServerStaticPubkey == "" {
+			t.Error("payload.ServerStaticPubkey is empty")
+		}
 	})
 
 	t.Run("auto-name when --name omitted", func(t *testing.T) {
@@ -85,6 +88,9 @@ func TestPair_E2E(t *testing.T) {
 		}
 		if !devices.VerifyToken(payload.Token, entry.TokenHash) {
 			t.Errorf("payload.Token does not hash to entry.TokenHash")
+		}
+		if payload.ServerStaticPubkey == "" {
+			t.Error("payload.ServerStaticPubkey is empty")
 		}
 	})
 }

@@ -45,22 +45,29 @@ pyry pair preflight [-pyry-name=<instance>]
 Chosen so no failure path leaves a plaintext token in any context outside this process's RAM:
 
 ```
-1. Parse flags                                           → exit 2 on parse error
-2. config.Load(~/.pyry/config.json)                      → exit 1 on I/O / parse error
-3. resolveRelay(flag, cfg) → relay URL                   → exit 2 if empty
-4. devices.Load(~/.pyry/<name>/devices.json) → registry  → exit 1 on I/O error
-5. identity.LoadOrCreate(~/.pyry/<name>/server-id)       → exit 1 on I/O error
-6. crypto/rand.Read(32 bytes) → hex.EncodeToString       → exit 1 on rng error
-7. devices.HashToken(plain) → 64-char hex SHA-256
-8. deviceName := --name OR "device-" + hash[:8]
-9. registry.Add(Device{TokenHash, Name, PairedAt: now.UTC()})
-10. registry.Save(devicesPath)                           → exit 1 on I/O error
-11. pair.Render(Payload{Server, Relay, Token: plain}, os.Stdout) → exit 1 on write error
+ 1. Parse flags                                                          → exit 2 on parse error
+ 2. config.Load(~/.pyry/config.json)                                     → exit 1 on I/O / parse error
+ 3. resolveRelay(flag, cfg) → relay URL                                  → exit 2 if empty
+ 4. devices.Load(~/.pyry/<name>/devices.json) → registry                 → exit 1 on I/O error
+ 5. identity.LoadOrCreate(~/.pyry/<name>/server-id) → server-id          → exit 1 on I/O error
+ 6. keys.LoadOrCreate(~/.pyry, sanitizeName(name)) → static keypair      → exit 1 on I/O / corruption / mode error
+ 7. crypto/rand.Read(32 bytes) → hex.EncodeToString                      → exit 1 on rng error
+ 8. devices.HashToken(plain) → 64-char hex SHA-256
+ 9. deviceName := --name OR "device-" + hash[:8]
+10. registry.Add(Device{TokenHash, Name, PairedAt: now.UTC()})
+11. registry.Save(devicesPath)                                           → exit 1 on I/O error
+12. pair.Render(Payload{Server, Relay, Token, ServerStaticPubkey}, os.Stdout)  → exit 1 on write error
 ```
 
-Steps 2–5 run before any token is generated: a misconfigured relay or unreadable server-id file fails fast, before the random draw. Step 6 happens only on the path where 1–5 succeeded. Once Step 6 runs, the plaintext token exists only in this process's RAM until Step 11 writes it to stdout.
+Steps 2–6 run before any token is generated: a misconfigured relay, unreadable server-id, or insecure static-key file fails fast, before the random draw. Step 7 happens only on the path where 1–6 succeeded. Once Step 7 runs, the plaintext token exists only in this process's RAM until Step 12 writes it to stdout.
 
-**Step 10 gates the rest.** If `registry.Save` fails, `Render` is skipped and the plaintext token never escapes the process. The user retries; a new (independent) token is minted on the next run; the orphaned in-memory device is dropped with the process. The reverse ordering (render first, save second) would be wrong: a post-render save failure would print a working pairing payload that the daemon would later reject because the token isn't in the registry. See [ADR 021](../decisions/021-pair-cli-order-of-operations.md).
+**Step 6** (`keys.LoadOrCreate`, added #432) loads the binary's persistent Noise_IK static keypair from `~/.pyry/<sanitized-name>/static_key.json`, minting it on first run. Failures (`ErrInvalidDaemonName` if `sanitizeName` produces a name `keys.validDaemonName` rejects; `ErrInsecureKeyDirMode` / `ErrInsecureKeyFileMode` if the keystore has weak permissions; `ErrCorruptKeyFile` on parse failure; raw I/O errors) surface as `pyry: pair: keys: <wrapped>` and exit 1 — operator-actionable. Step 12 then copies `staticKey.PublicKey()` (the `[32]byte` by-value accessor) into the `pair.Payload`'s `ServerStaticPubkey` field as `base64.StdEncoding.EncodeToString(pub[:])`. `StaticKey.PrivateKey()` is never read by this verb — grep-enforceable.
+
+**Step 11 gates the rest.** If `registry.Save` fails, `Render` is skipped and the plaintext token never escapes the process. The user retries; a new (independent) token is minted on the next run; the orphaned in-memory device is dropped with the process. The reverse ordering (render first, save second) would be wrong: a post-render save failure would print a working pairing payload that the daemon would later reject because the token isn't in the registry. See [ADR 021](../decisions/021-pair-cli-order-of-operations.md). The static keypair, by contrast, is intentionally persisted *before* the random draw — every paired phone binds to the same keypair, so it must outlive any single `pyry pair` invocation.
+
+### Daemon-name validator mismatch
+
+`cmd/pyry/main.go:sanitizeName` is a transformer that permits `.` and uppercase and replaces other bad chars with `_`; `internal/keys.validDaemonName` rejects both `.` and uppercase outright. `PYRY_NAME=Foo` produces `~/.pyry/Foo/devices.json` from `resolveDevicesPath` (which calls `sanitizeName`) but fails at `keys.LoadOrCreate("~/.pyry", "Foo")` with `ErrInvalidDaemonName`. The mismatch is intentional — `internal/keys` cannot relax its allowlist without weakening the path-traversal defence — and surfaces as a clean `pyry: pair: keys: invalid daemon name "Foo"` error. **No auto-rewrite, no `strings.ToLower`-and-retry, no synchronization.** Operator-facing fix: rename the instance to match `[a-z0-9_-]{1,64}` with no leading `-`. See [codebase/438.md](../codebase/438.md) for the rationale.
 
 ## On-disk paths
 
@@ -69,10 +76,13 @@ Steps 2–5 run before any token is generated: a misconfigured relay or unreadab
 | Config | `~/.pyry/config.json` | per-user (no instance interpolation) |
 | Server-id | `~/.pyry/<sanitized-name>/server-id` | per-instance |
 | Devices | `~/.pyry/<sanitized-name>/devices.json` | per-instance |
+| Static key | `~/.pyry/<sanitized-name>/static_key.json` | per-instance (mode 0600, parent 0700) |
 
 `resolveDevicesPath` and `resolveServerIDPath` MUST call `sanitizeName(name)` before joining — defends against `PYRY_NAME=../../etc` or `-pyry-name=../etc` carrying path-traversal segments. Same discipline as `resolveRegistryPath` and `resolveSocketPath` in `cmd/pyry/main.go`. `resolveConfigPath` does NOT sanitize — there is no instance-name segment to neutralize. Pinned by `TestResolveDevicesPath` / `TestResolveServerIDPath` (each asserts that `../etc` cannot escape `~/.pyry/`).
 
-The three resolvers live in `cmd/pyry/pair.go` for now. If a future ticket needs them elsewhere, lift to `main.go` alongside `resolveRegistryPath`.
+`resolveStaticKeyBaseDir` (added #432) returns just the *parent* directory (`~/.pyry`); the `<sanitized-name>/static_key.json` suffix is owned by `internal/keys`, which performs its own stricter daemon-name validation via `validDaemonName` (cannot bypass via caller-precomputed path — the API takes `(baseDir, daemonName)`, not `path`). Allowlist defence + 0700/0600 mode enforcement + `O_NOFOLLOW` on read all live in `internal/keys`; see [features/keys-package.md](keys-package.md) and [codebase/439.md](../codebase/439.md).
+
+The four resolvers (`resolveDevicesPath`, `resolveServerIDPath`, `resolveConfigPath`, `resolveStaticKeyBaseDir`) live in `cmd/pyry/pair.go` for now. If a future ticket needs them elsewhere, lift to `main.go` alongside `resolveRegistryPath`.
 
 ## Relay URL resolution
 
@@ -133,13 +143,14 @@ Same package, table-driven, stdlib `testing` only. Covers the pure pieces; files
 - `TestResolveRelay` — three-leg precedence: flag wins, config wins when flag empty, default wins when both empty.
 - `TestResolveDevicesPath` / `TestResolveServerIDPath` — HOME-isolated via `t.Setenv("HOME", t.TempDir())`; assert the joined path AND that path-traversal input (`../etc`) is neutralized via `filepath.Rel` containment check.
 - `TestResolveConfigPath` — confirms the per-user (no instance-name) layout.
+- `TestRunPairDefault_PopulatesStaticPubkey` (#432) — drives `runPairDefault(nil)` against an isolated `HOME=t.TempDir()`, captures stdout via an inline `captureStdout(t, fn)` pipe helper, decodes the rendered payload via `pair.Decode`, asserts `ServerStaticPubkey != ""` and base64-decodes to exactly 32 bytes. Runs `runPairDefault` a *second* time against the same HOME and asserts the same `ServerStaticPubkey` — verifies `keys.LoadOrCreate` returns the persisted key, not a fresh one. Skipped on Windows.
 
 ### End-to-end (`internal/e2e/pair_test.go`, `//go:build e2e`)
 
 `TestPair_E2E` fulfills AC #6. Two sub-tests:
 
-1. **with explicit name** — `RunBareIn(t, home, "pair", "--name=test-phone")`, decode payload via `pair.Decode`, load `<home>/.pyry/pyry/devices.json` via `devices.Load`, assert exactly one entry with `Name == "test-phone"` and `devices.VerifyToken(payload.Token, entry.TokenHash)` true.
-2. **auto-name when `--name` omitted** — same shape, asserts `entry.Name == "device-" + entry.TokenHash[:8]`.
+1. **with explicit name** — `RunBareIn(t, home, "pair", "--name=test-phone")`, decode payload via `pair.Decode`, load `<home>/.pyry/pyry/devices.json` via `devices.Load`, assert exactly one entry with `Name == "test-phone"` and `devices.VerifyToken(payload.Token, entry.TokenHash)` true. Asserts `payload.ServerStaticPubkey != ""` (#432).
+2. **auto-name when `--name` omitted** — same shape, asserts `entry.Name == "device-" + entry.TokenHash[:8]`. Asserts `payload.ServerStaticPubkey != ""` (#432).
 
 The empty-relay (AC exit-2 path) is covered by `TestResolveRelay` rather than e2e because it's not reachable through real config — the default constant is non-empty, so an e2e test would require swapping it (build-time, out of scope).
 
@@ -360,7 +371,8 @@ The exit-2 non-empty-registry path (`os.Exit(2)` from inside `runPairPreflight`)
 - [`features/identity-package.md`](identity-package.md) — `LoadOrCreate` contract for the per-instance server-id (step 5).
 - [`features/devices-package.md`](devices-package.md) — `Device` shape, `HashToken` (step 7), `VerifyToken` (used in the e2e linkage check).
 - [`features/devices-registry.md`](devices-registry.md) — `Registry.Load` / `Add` / `Save` semantics consumed in steps 4, 9, 10.
-- [`features/pair-package.md`](pair-package.md) — `Payload`, `Encode`, `Render` (step 11); token-secrecy contract that this wiring inherits.
+- [`features/pair-package.md`](pair-package.md) — `Payload`, `Encode`, `Render`, `Fingerprint` (step 12); token-secrecy contract that this wiring inherits.
+- [`features/keys-package.md`](keys-package.md) — `LoadOrCreate(baseDir, daemonName)` (step 6); first production consumer of the Mobile Protocol v2 static keypair.
 - [`features/e2e-harness.md`](e2e-harness.md) — `RunBareIn` helper added for AC #6.
 - [ADR 020](../decisions/020-devices-registry-snapshot-then-write.md) — `Save`'s snapshot-then-write discipline that keeps the auth path unblocked while pair writes.
 - [ADR 021](../decisions/021-pair-cli-order-of-operations.md) — load-fail-fast → mint → save → render order, chosen so no plaintext token escapes the process if `Save` fails.
