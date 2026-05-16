@@ -18,8 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,9 +55,20 @@ func TestRealClaude_BashTool_NonZeroExit(t *testing.T) {
 	events := ReadJSONL(t, workdir, result.SessionID)
 	jsonlPath := jsonlPathFor(workdir, result.SessionID)
 
+	// Three independent observations, tracked separately so a failure
+	// message names the actual missing event rather than a downstream
+	// consequence of an earlier missing event:
+	//   1. assistant tool_use(name=Bash) → bashToolUseID
+	//   2. matching user tool_result(tool_use_id=bashToolUseID)
+	//      → sawToolResult, toolResultIsErr, toolResultContent
+	//   3. any subsequent assistant text block → sawFinalText
+	// is_error is a documented stream-json field (verified against
+	// internal/agentrun/jsonl/testdata/{clean,no_end_turn,double_end_turn}.jsonl,
+	// which contain 19 `"is_error":...` occurrences from real claude runs).
 	var bashToolUseID string
-	var toolResultErr bool
-	var toolResultText string
+	var sawToolResult bool
+	var toolResultIsErr bool
+	var toolResultContent json.RawMessage
 	var sawFinalText bool
 
 	for _, e := range events {
@@ -76,7 +85,7 @@ func TestRealClaude_BashTool_NonZeroExit(t *testing.T) {
 						break
 					}
 				}
-			} else if toolResultErr {
+			} else if sawToolResult {
 				for _, b := range blocks {
 					if b.Type == "text" && b.Text != "" {
 						sawFinalText = true
@@ -94,8 +103,9 @@ func TestRealClaude_BashTool_NonZeroExit(t *testing.T) {
 			}
 			for _, b := range blocks {
 				if b.Type == "tool_result" && b.ToolUseID == bashToolUseID {
-					toolResultErr = b.IsError
-					toolResultText = b.Text
+					sawToolResult = true
+					toolResultIsErr = b.IsError
+					toolResultContent = b.Content
 					break
 				}
 			}
@@ -105,12 +115,15 @@ func TestRealClaude_BashTool_NonZeroExit(t *testing.T) {
 	if bashToolUseID == "" {
 		t.Fatalf("no Bash tool_use observed in assistant entries; path: %s", jsonlPath)
 	}
-	if !toolResultErr {
-		t.Fatalf("Bash tool_result for id %s did not set is_error=true (content=%q); path: %s",
-			bashToolUseID, toolResultText, jsonlPath)
+	if !sawToolResult {
+		t.Fatalf("Bash tool_use id %s present but no matching tool_result; path: %s", bashToolUseID, jsonlPath)
 	}
-	if toolResultText == "" {
-		t.Fatalf("Bash tool_result for id %s has empty content; path: %s", bashToolUseID, jsonlPath)
+	if !toolResultIsErr {
+		t.Fatalf("Bash tool_result for id %s did not set is_error=true (content=%s); path: %s",
+			bashToolUseID, string(toolResultContent), jsonlPath)
+	}
+	if len(toolResultContent) == 0 {
+		t.Fatalf("Bash tool_result for id %s has empty content field; path: %s", bashToolUseID, jsonlPath)
 	}
 	if !sawFinalText {
 		t.Fatalf("no subsequent assistant text block after errored tool_result; path: %s", jsonlPath)
@@ -145,9 +158,9 @@ func TestRealClaude_PrematureStdinClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	exitCode, _, stderr, runErr := runClaudeDirect(t, ctx, bin, workdir, envelope)
+	exitCode, stderr, runErr := runClaudeDirect(t, ctx, bin, workdir, envelope)
 
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("claude did not exit within 60s after stdin close — hang regression\nrunErr=%v\nstderr:\n%s",
 			runErr, truncate(stderr))
 	}
@@ -169,9 +182,9 @@ func TestRealClaude_MalformedStreamJSON(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	exitCode, _, stderr, runErr := runClaudeDirect(t, ctx, bin, workdir, garbage)
+	exitCode, stderr, runErr := runClaudeDirect(t, ctx, bin, workdir, garbage)
 
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("claude did not exit within 60s on malformed stdin — hang regression\nrunErr=%v\nstderr:\n%s",
 			runErr, truncate(stderr))
 	}
@@ -298,11 +311,14 @@ func directClaudeArgs() []string {
 
 // runClaudeDirect spawns claude under ctx with directClaudeArgs(), writes
 // stdinBytes, closes stdin, and returns the exit code plus captured
-// stdout/stderr. Does NOT call t.Fatalf on non-zero exit or on
-// ctx-cancel-driven kill — callers assert those themselves. The fourth
-// return value is the raw error from cmd.Wait (useful for diagnostics
-// when ctx fires).
-func runClaudeDirect(t *testing.T, ctx context.Context, bin, workdir string, stdinBytes []byte) (int, []byte, []byte, error) {
+// stderr. Does NOT call t.Fatalf on non-zero exit or on ctx-cancel-driven
+// kill — callers assert those themselves. The third return value is the
+// raw error from cmd.Wait (useful for diagnostics when ctx fires).
+//
+// Stdout is captured (so it is drained and the child's pipe never
+// backpressures) but not returned: neither caller asserts on response
+// content. If a future raw-exec test needs the body, surface it then.
+func runClaudeDirect(t *testing.T, ctx context.Context, bin, workdir string, stdinBytes []byte) (int, []byte, error) {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, bin, directClaudeArgs()...)
 	cmd.Dir = workdir
@@ -317,11 +333,12 @@ func runClaudeDirect(t *testing.T, ctx context.Context, bin, workdir string, std
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("runClaudeDirect: start: %v", err)
 	}
-	if _, err := stdin.Write(stdinBytes); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+	if _, err := stdin.Write(stdinBytes); err != nil {
 		// Mirror streamrunner's "log-and-continue" posture: the child's
-		// exit status is the authoritative outcome. A broken pipe here
-		// just means claude already closed stdin (Test 3's expected case
-		// when claude rejects the first malformed byte fast).
+		// exit status is the authoritative outcome. A write error here
+		// (typically EPIPE wrapped in *os.PathError when claude has
+		// already closed its end, e.g. Test 3's fast-reject path) is
+		// diagnostic, not a test fault on its own.
 		t.Logf("runClaudeDirect: stdin write: %v", err)
 	}
 	if err := stdin.Close(); err != nil {
@@ -329,7 +346,7 @@ func runClaudeDirect(t *testing.T, ctx context.Context, bin, workdir string, std
 	}
 
 	waitErr := cmd.Wait()
-	return cmd.ProcessState.ExitCode(), stdout.Bytes(), stderr.Bytes(), waitErr
+	return cmd.ProcessState.ExitCode(), stderr.Bytes(), waitErr
 }
 
 // buildUserTurnEnvelope produces the single newline-terminated JSON line
