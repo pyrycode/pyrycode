@@ -94,10 +94,8 @@ func (c *Conn) setAuth(d *devices.Device) { c.auth = d }
 
 // NewTestConn constructs a *Conn for verb-handler test fixtures. Test
 // fixtures only — do not call from production code. The dispatcher is
-// the sole production Conn factory (see routeConn). The constructor
-// exists so handler tests in sibling packages can drive a real Conn
-// against a caller-supplied outbound channel and a synthesised auth
-// snapshot, without depending on a full Dispatcher.
+// the sole production Conn factory (see routeConn); other production
+// callers that own their own per-conn goroutine should use NewConn.
 //
 // The returned Conn has nextID at zero, so the first NextID() call
 // returns 1 (matching the gate-disabled production path). Tests that
@@ -106,6 +104,20 @@ func (c *Conn) setAuth(d *devices.Device) { c.auth = d }
 // originated reply lands at id=2 — should call c.NextID() once before
 // invoking the handler.
 func NewTestConn(id string, outbound chan<- protocol.RoutingEnvelope, auth *devices.Device) *Conn {
+	return &Conn{id: id, outbound: outbound, auth: auth}
+}
+
+// NewConn constructs a *Conn for production callers that own their own
+// per-conn goroutine and route envelopes outside Dispatcher.Run (e.g.
+// the v2 session manager, which decrypts a noise_msg before dispatching
+// the inner envelope through the handler table via Route). The caller
+// owns outbound and is responsible for draining it.
+//
+// Distinct from NewTestConn only in policy: NewTestConn carries the
+// "test fixtures only" restriction; NewConn is the production-allowed
+// equivalent. The Conn returned has nextID at zero, matching the
+// gate-disabled production path.
+func NewConn(id string, outbound chan<- protocol.RoutingEnvelope, auth *devices.Device) *Conn {
 	return &Conn{id: id, outbound: outbound, auth: auth}
 }
 
@@ -492,7 +504,7 @@ func (d *Dispatcher) runGate(ctx context.Context, st *connState, routing protoco
 	if outcome.Err != nil {
 		d.cfg.Logger.Warn("dispatch: first-frame gate err; replying protocol.malformed",
 			"conn_id", st.conn.ConnID(), "err", outcome.Err)
-		d.sendError(ctx, st.conn, nil, protocol.CodeProtocolMalformed, "malformed envelope")
+		sendError(ctx, d.cfg.Logger, st.conn, nil, protocol.CodeProtocolMalformed, "malformed envelope")
 		return false
 	}
 	resp := outcome.Response
@@ -521,39 +533,59 @@ func (d *Dispatcher) runGate(ctx context.Context, st *connState, routing protoco
 }
 
 func (d *Dispatcher) handleOne(ctx context.Context, c *Conn, routing protocol.RoutingEnvelope) {
+	Route(ctx, d.cfg.Logger, c, d.handlers, routing.Frame)
+}
+
+// Route dispatches a single inbound envelope frame through handlers,
+// using the same malformed / IsV1Compatible / unknown-type error-envelope
+// paths as Dispatcher's per-conn loop. Suitable for callers that own
+// their own per-conn goroutine and only need single-frame handler-table
+// dispatch (e.g. the v2 session manager's post-AEAD-decrypt dispatch).
+//
+// Error replies (malformed envelope JSON, unsupported v1 features,
+// unknown envelope type, no registered handler) are emitted via
+// conn.Send → conn.outbound. A non-nil error returned from the handler
+// itself is logged at WARN; no automatic reply is synthesised (matches
+// Dispatcher.Run's posture). handlers may be nil — every envelope then
+// falls through to the "no handler registered" reply path.
+//
+// Route does NOT change conn.outbound's blocking behaviour: the caller
+// is responsible for sizing the channel so handler+Route replies fit
+// without head-of-line-blocking the dispatch loop.
+func Route(ctx context.Context, logger *slog.Logger, conn *Conn, handlers map[string]Handler, frame json.RawMessage) {
 	var env protocol.Envelope
-	if err := json.Unmarshal(routing.Frame, &env); err != nil {
-		d.cfg.Logger.Warn("dispatch: malformed inner frame; replying protocol.malformed",
-			"conn_id", c.ConnID(), "err", err)
-		d.sendError(ctx, c, nil, protocol.CodeProtocolMalformed, "malformed envelope")
+	if err := json.Unmarshal(frame, &env); err != nil {
+		logger.Warn("dispatch: malformed inner frame; replying protocol.malformed",
+			"conn_id", conn.ConnID(), "err", err)
+		sendError(ctx, logger, conn, nil, protocol.CodeProtocolMalformed, "malformed envelope")
 		return
 	}
 
 	if err := protocol.IsV1Compatible(env); err != nil {
 		switch {
 		case errors.Is(err, protocol.ErrUnsupported):
-			d.sendError(ctx, c, &env.ID, protocol.CodeProtocolUnsupported, "unsupported envelope feature")
+			sendError(ctx, logger, conn, &env.ID, protocol.CodeProtocolUnsupported, "unsupported envelope feature")
 		case errors.Is(err, protocol.ErrUnknownType):
-			d.sendError(ctx, c, &env.ID, protocol.CodeProtocolUnknownType, "unknown envelope type")
+			sendError(ctx, logger, conn, &env.ID, protocol.CodeProtocolUnknownType, "unknown envelope type")
 		default:
-			d.sendError(ctx, c, &env.ID, protocol.CodeProtocolUnsupported, "unsupported envelope")
+			sendError(ctx, logger, conn, &env.ID, protocol.CodeProtocolUnsupported, "unsupported envelope")
 		}
 		return
 	}
 
-	h, ok := d.handlers[env.Type]
+	h, ok := handlers[env.Type]
 	if !ok {
-		d.sendError(ctx, c, &env.ID, protocol.CodeProtocolUnsupported, "no handler registered for envelope type")
+		sendError(ctx, logger, conn, &env.ID, protocol.CodeProtocolUnsupported, "no handler registered for envelope type")
 		return
 	}
 
-	if err := h(ctx, c, env); err != nil {
-		d.cfg.Logger.Warn("dispatch: handler returned error",
-			"conn_id", c.ConnID(), "type", env.Type, "err", err)
+	if err := h(ctx, conn, env); err != nil {
+		logger.Warn("dispatch: handler returned error",
+			"conn_id", conn.ConnID(), "type", env.Type, "err", err)
 	}
 }
 
-func (d *Dispatcher) sendError(ctx context.Context, c *Conn, inReplyTo *uint64, code, message string) {
+func sendError(ctx context.Context, logger *slog.Logger, c *Conn, inReplyTo *uint64, code, message string) {
 	payload := protocol.ErrorPayload{
 		Code:      code,
 		Message:   message,
@@ -561,7 +593,7 @@ func (d *Dispatcher) sendError(ctx context.Context, c *Conn, inReplyTo *uint64, 
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
-		d.cfg.Logger.Warn("dispatch: marshal error payload",
+		logger.Warn("dispatch: marshal error payload",
 			"conn_id", c.ConnID(), "code", code, "err", err)
 		return
 	}
@@ -573,7 +605,7 @@ func (d *Dispatcher) sendError(ctx context.Context, c *Conn, inReplyTo *uint64, 
 		InReplyTo: inReplyTo,
 	}
 	if err := c.Send(ctx, env); err != nil {
-		d.cfg.Logger.Debug("dispatch: send error envelope dropped",
+		logger.Debug("dispatch: send error envelope dropped",
 			"conn_id", c.ConnID(), "code", code, "err", err)
 	}
 }

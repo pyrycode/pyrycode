@@ -1,10 +1,10 @@
-# `internal/relay` V2 session manager — Noise_IK handshake + token gating
+# `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, and refuses every out-of-state inner frame at the WS-close layer. No application dispatch — `noise_msg` frames that reach the `open` state are dropped silently in this slice; the follow-up (#446) lands the handler-chain wiring.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
-**Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, and an outbound `RoutingEnvelope` forwarder.
+**Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
-**Production wiring:** **not yet wired** into `cmd/pyry/relay.go`. The daemon still runs the v1 `internal/dispatch.Dispatcher` against `/v1/server`. The v2 manager is reachable only through test wiring today; cutover is a follow-up slice that also depends on the open-state handler surface (#446) and the pre-flight release-flag gate ([#436](../codebase/436.md)).
+**Production wiring:** **not yet wired** into `cmd/pyry/relay.go`. The daemon still runs the v1 `internal/dispatch.Dispatcher` against `/v1/server`. The v2 manager is reachable only through test wiring today; the cutover follow-up re-wires `cmd/pyry/relay.go` to construct `V2SessionManager` instead of `Dispatcher` and registers the handler functions against `V2SessionConfig.Handlers` rather than `Dispatcher.Register`. Depends on the pre-flight release-flag gate ([#436](../codebase/436.md)).
 
 ## Surface
 
@@ -38,6 +38,7 @@ type V2SessionConfig struct {
     Devices    *devices.Registry                       // required; token-validation predicate
     ServerID   string                                  // required; surfaced into hello_ack
     Logger     *slog.Logger                            // required (panic if nil)
+    Handlers   map[string]dispatch.Handler             // optional; open-state envelope-type → handler
 }
 
 type V2SessionManager struct { /* unexported */ }
@@ -46,7 +47,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error)
 func (m *V2SessionManager) Run(ctx context.Context) error
 ```
 
-`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
+`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
 
 ## Wire types (`internal/protocol/v2envelope.go`)
 
@@ -86,7 +87,7 @@ The `Token string \`json:"token,omitempty"\`` field appended to `protocol.HelloC
                        token  | (Validate hit)
                           OK  v
                     +-----------+
-                    | V2StateOpen |          (handler dispatch lands in #446; no-op drop today)
+                    | V2StateOpen |          (noise_msg → dispatch.Route → AEAD-sealed reply)
                     +-----------+
 
   Any rejection at any state → emit a single RoutingEnvelope carrying the
@@ -102,8 +103,8 @@ The `handshakeComplete` substate is observably distinct from `open` even though 
 |---|---|---|---|---|
 | `noise_init` | run handshake (below) | close(4421), → closed | close(4421), → closed | drop |
 | `noise_resp` (phone is never the writer) | close(4421), → closed | close(4421), → closed | close(4421), → closed | drop |
-| `noise_msg`, decrypt succeeds | close(4421), → closed (no CipherStates yet) | sealed `auth.invalid_token` + close(4401), → closed | drop (open-state dispatch deferred) | drop |
-| `noise_msg`, decrypt fails / no CipherStates | close(4421), → closed | close(4421), → closed | drop | drop |
+| `noise_msg`, decrypt succeeds | close(4421), → closed (no CipherStates yet) | sealed `auth.invalid_token` + close(4401), → closed | **dispatch via handler chain; AEAD-sealed reply emitted; state stays `open`** | drop |
+| `noise_msg`, decrypt fails / no CipherStates | close(4421), → closed | close(4421), → closed | **close(4421), → closed (AEAD-failure teardown; session entry dropped)** | drop |
 | Unknown `type` / bad `v` / malformed JSON / oversized `data` | close(4421), → closed | close(4421), → closed | close(4421), → closed | drop |
 
 ### `noise_init` happy-and-failure path
@@ -132,13 +133,31 @@ Today the natural inbound-frame flow never reaches this cell: state transitions 
 
 The implementation tries AEAD-decrypt-then-decode-as-`Envelope`. Decrypt failure → close(4421). Decrypt success → seal `auth.invalid_token` under the live `send` CipherState, emit + close(4401), regardless of envelope type. The handler chain in `internal/relay/handlers/` is **not** reached.
 
+### `noise_msg` in `V2StateOpen` — application dispatch and AEAD-failure teardown
+
+The two `open`-row cells filled by [#446](../codebase/446.md).
+
+**Happy path** (`dispatchAppFrame`):
+
+1. `s.recv.Decrypt(inner.Data)` → plaintext envelope JSON. The handler chain is unreached on `Decrypt` failure (see below).
+2. Allocate a per-frame `outbound chan protocol.RoutingEnvelope` (buffer 8 — `handlerOutboundBuf`) and a per-frame `*dispatch.Conn` via [`dispatch.NewConn`](dispatch-package.md), carrying the matched device snapshot captured in step 10 of the handshake.
+3. `dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)` — same error-envelope paths as v1 `Dispatcher.handleOne` (malformed JSON → sealed `protocol.malformed`; unsupported / unknown type / no handler → sealed `protocol.unsupported`-or-`unknown_type`; handler error → log WARN, no synthesised reply).
+4. Drain `outbound` non-blockingly. For each captured reply: `s.send.Encrypt(reply.Frame)` → `marshalInnerFrameV2(TypeNoiseMsg, ciphertext)` → emit via `m.send` with `CloseCode: 0`. The reply's `CloseCode` is ignored — close intent is reserved for the manager's own close-with paths.
+5. Return. State remains `V2StateOpen`.
+
+**AEAD-failure teardown** (tampered / replayed / truncated `noise_msg`): `s.recv.Decrypt` returns non-nil → log `v2.aead.fail` with `conn_id` + `close_code=4421` (NO error text — the underlying flynn/noise error may carry counter indices that aren't operator-actionable) → `closeWith(ctx, s, StatusProtocolMismatch, nil)`. `closeWith` emits a single close-only routing envelope and **deletes the session entry from `m.sessions`** — the next `noise_init` for the same `conn_id` lazy-creates a fresh `awaitingInit` with no carry-over CipherStates. The handler chain is structurally unreachable: the AEAD-decrypt branch returns before `dispatchAppFrame` is called.
+
+**Why the outbound channel is not closed.** Closing on the sending side panics any goroutine the handler accidentally forked that retains the `*dispatch.Conn`. The drain is non-blocking (`select { case env := <-outbound: ...; default: return }`); a misbehaving handler that forks a sender after `dispatchAppFrame` returns writes into a leaked but capacity-bounded channel that the GC reclaims once the goroutine exits. This is the documented synchronous-handler assumption — handlers MUST be synchronous and MUST NOT retain `*dispatch.Conn` beyond the call.
+
+The `device` field on `V2Session` is set exactly once in the handshake token-accept branch (right before state advances to `V2StateOpen`) and is surfaced through `*dispatch.Conn.Auth()`. Same lifetime as v1's `Conn.auth` slot — revocation of the device after handshake does NOT tear down the active conn; this matches the v1 posture and is intentional. Revocation propagation for active conns is tracked as a separate concern.
+
 ## Concurrency
 
 **One goroutine.** `Run` is the only goroutine the manager owns. It reads `cfg.Frames`, looks up (or lazily creates) `m.sessions[env.ConnID]`, and processes the frame synchronously. `m.sessions` is mutated exclusively by `Run`; no mutex.
 
-`V2Session` carries no lock. The package contract is "one goroutine per `conn_id` mutates the session"; in this slice that goroutine is `Run` itself. flynn/noise's `CipherState` carries a mutable 64-bit nonce counter; concurrent access would be UB — the serialisation point IS the lock.
+`V2Session` carries no lock. The package contract is "one goroutine per `conn_id` mutates the session"; today that goroutine is `Run` itself. flynn/noise's `CipherState` carries a mutable 64-bit nonce counter; concurrent access would be UB — the serialisation point IS the lock.
 
-Intentionally simpler than [`internal/dispatch.Dispatcher`](dispatch-package.md), which spins one goroutine per `conn_id` to absorb handler-side latency. v2 in this slice runs no handlers — every frame is a synchronous Noise call (~100 µs) or sub-µs JSON decode. Single-goroutine fan-in is correct and obviously safe; per-conn fan-out is a #446 concern once the open-state handler surface lands.
+Intentionally simpler than [`internal/dispatch.Dispatcher`](dispatch-package.md), which spins one goroutine per `conn_id` to absorb handler-side latency. v2 runs handlers synchronously on the manager's single dispatch goroutine — a slow handler stalls dispatch for ALL `conn_id`s, not just the current one. The worst-case stall today is `send_message`'s 30 s `Activate` timeout. This is deliberate for the size:S surface; per-conn fan-out (one goroutine per `conn_id` with a per-session mutex guarding `s.send` / `s.recv`) is the documented production-cutover follow-up and the priority concern before flipping `cmd/pyry/relay.go` to v2.
 
 `V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Once a broadcast layer or handler-side goroutines appear, the accessor will need `atomic.Int32` or a small mutex — not pre-emptively refactored.
 
@@ -146,9 +165,11 @@ Intentionally simpler than [`internal/dispatch.Dispatcher`](dispatch-package.md)
 
 Mirrors v1's `internal/relay/auth.go` posture. The implementation MUST adhere; CR checks each rule against the diff.
 
-- **MUST NOT log at any level**: `HelloClientPayload.Token`, `cfg.StaticPriv`, raw `RoutingEnvelope.Frame` bytes, AEAD ciphertext bytes (the `Data` field of any `noise_msg`), plaintext envelope payload bytes (post-AEAD-decrypt), base64-encoded forms of any of the above. The same MUST applies to `slog` fields, error wrapping (`fmt.Errorf("foo: %w", err)` where `err` accidentally carries the secret), and `panic` strings.
+- **MUST NOT log at any level**: `HelloClientPayload.Token`, `cfg.StaticPriv`, raw `RoutingEnvelope.Frame` bytes, AEAD ciphertext bytes (the `Data` field of any `noise_msg`), plaintext envelope payload bytes (post-AEAD-decrypt), handler reply envelope bytes (pre-encrypt), encrypted reply bytes (post-`s.send.Encrypt`), base64-encoded forms of any of the above. The same MUST applies to `slog` fields, error wrapping (`fmt.Errorf("foo: %w", err)` where `err` accidentally carries the secret), and `panic` strings.
 - **MUST log (operator-actionable) on ACCEPT**: event class `v2.handshake.accept`, `conn_id`, `device_name`. Plain low-cardinality string fields only.
 - **MUST log (operator-actionable) on REJECT**: event class (`v2.handshake.reject.invalid_token` / `v2.handshake.reject.ik_failure` / `v2.state.reject`), `conn_id`, `close_code`. **NO `device_name`** even when the early-data carried one — anti-enumeration of paired-device names from binary logs.
+- **MUST log on open-state AEAD failure**: event class `v2.aead.fail`, `conn_id`, `close_code=4421`. **NO error text** from `s.recv.Decrypt` (the underlying flynn/noise error may carry counter indices that aren't operator-actionable). **NO envelope shape information** — a frame that didn't decrypt cannot be inspected.
+- **No per-envelope log on the open-state happy path.** High-frequency message traffic would spam the log channel; existing v1 handler logs (`send_message.ack`, etc.) inherit their per-handler log policy and surface the per-envelope diagnostic instead.
 
 `V2SessionConfig.StaticPriv` is the binary's 32-byte X25519 static private key. The doc-comment on the field declares it MUST NOT be logged, wrapped into an error message, or emitted on any wire surface — [`internal/keys`](keys-package.md) and [`internal/noise`](noise-package.md) document the same contract for the same bytes.
 
@@ -166,7 +187,16 @@ Each test constructs a `V2SessionManager` with an in-memory `outbound` recorder 
 - `TestV2Session_NoiseInitAfterOpen_4421` — drive happy-path to `open`, then feed a second `noise_init` → outbound has the original `noise_resp` + a separate `CloseCode=4421` envelope. State = closed.
 - `TestV2Session_Gating_NoiseMsgInHandshakeComplete_4401` — directly assign `s.state = V2StateHandshakeComplete`, `s.send/recv = <CipherStates from a real adjacent handshake>`, feed a `noise_msg` whose plaintext is a non-hello envelope. Asserts: exactly one outbound envelope with `CloseCode == 4401`, frame is AEAD-sealed `error{auth.invalid_token}`. **Structurally proves the "handler chain unreachable from handshakeComplete" invariant** — the regression guard for any future refactor that might add a v2→handler edge.
 - `TestV2Session_OutOfStateRejections` — table-driven over the remaining cells: malformed JSON / unknown `Type` / bad `v` / unexpected `noise_resp` → 4421 in each state.
-- `TestNewV2SessionManager_ConfigValidation` — panics on nil `Frames` / nil `Logger`; wrapped errors on nil `Outbound` / nil `Devices` / empty `ServerID` / wrong-length `StaticPriv`.
+- `TestNewV2SessionManager_ConfigValidation` — panics on nil `Frames` / nil `Logger`; wrapped errors on nil `Outbound` / nil `Devices` / empty `ServerID` / wrong-length `StaticPriv`. `Handlers` is optional — no new validation case.
+
+Open-state dispatch additions (#446):
+
+- `TestV2Session_OpenState_EncryptedRoundTrip` — paired-device happy path through `dispatchAppFrame`. Stub handler keyed by `TypeListConversations` replies via `c.Reply`; phone-side decrypt of the captured `noise_msg` matches the handler's payload, `InReplyTo` echoes the request id, session state stays `V2StateOpen`.
+- `TestV2Session_OpenState_TamperedNoiseMsg_4421` — flip one byte of a real ciphertext → exactly one outbound envelope with `CloseCode == 4421` and nil `Frame`, the registered handler's `atomic.Bool` flag stays false (handler chain structurally unreachable), and `mgr.sessions[v2TestConnID]` is absent (AC #3 — `closeWith` deletion).
+- `TestV2Session_OpenState_FreshNoiseInitAfterAEADClose` — companion to the prior test. After 4421+cleanup, a second `noise_init` on the same `conn_id` completes a fresh handshake; a ciphertext sealed under the OLD `initSend` fails against the new session's `s.recv` (deterministic proof that the post-cleanup session is fresh `awaitingInit`-then-`open` with no carry-over CipherStates).
+- `TestV2Session_OpenState_UnknownEnvelopeType_SealedUnsupportedReply` — open-state envelope with `Handlers = nil` → AEAD-sealed `Envelope{Type: TypeError, Payload.Code: CodeProtocolUnsupported}`. State stays `open`.
+- `TestV2Session_OpenState_MalformedInnerEnvelope_SealedMalformedReply` — open-state envelope whose AEAD plaintext is raw garbage → AEAD-sealed `Envelope{Type: TypeError, Payload.Code: CodeProtocolMalformed}`. State stays `open`.
+- `TestV2Session_OpenState_HandlerAuthDevice` — handler captures `c.Auth().Name` from inside the dispatch closure; asserts the matched-device snapshot captured during handshake (`s.device`) reaches the handler via `*dispatch.Conn.Auth()`.
 
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)
 
@@ -175,36 +205,40 @@ Spins up `fakerelay` (now with both `/v1/server` and `/v2/server`), wires `relay
 - `testV2HappyPath` — paired device → phone observes a `noise_resp` frame, decrypts hello_ack, then no further traffic.
 - `testV2BadToken` — unpaired device → phone reads the AEAD-sealed `auth.invalid_token` `noise_msg`, then `Read` errors with `LastCloseStatus() == 4401`.
 - `testV2IKReject` — phone sends an invalid noise_init (random bytes, no real IK message 1) → phone's next read errors with close code 4426. No prior frame from binary.
+- `testV2EncryptedEchoRoundTrip` (#446) — paired-device handshake to open with a stub handler registered against `TypeListConversations`; phone-side AEAD-seal request, read one inner frame back, decrypt with `initRecv`, assert the inner envelope's `Type`/`InReplyTo`/`Payload` match the handler's reply.
+- `testV2TamperedNoiseMsg_4421` (#446) — phone sends a `noise_msg` with one byte flipped after handshake; phone observes `LastCloseStatus() == 4421`. The "fresh `noise_init` on the same `conn_id`" assertion lives in the unit test layer because `fakerelay` assigns a new `conn_id` per dial.
 
-The gating-invariant test is unit-test-shape only — the e2e suite covers the natural inbound flows.
+The gating-invariant test and the post-AEAD-failure fresh-handshake test are unit-shape only — the e2e suite covers the natural inbound flows.
 
 ## Fakerelay / fakephone harness additions
 
 - **`fakerelay.New` registers `/v2/server`** alongside `/v1/server`, sharing the existing `handleBinary` handler — the relay-side wire (binary↔relay routing envelope) is unchanged in v2. Phone-side `/v2/client` is NOT registered; tests connect the phone on `/v1/client`. The fakerelay's `binaryRecvPump` now treats `json.RawMessage` that marshals to the literal token `"null"` as "no frame to forward", matching the production relay's close-only envelope contract — without this, the close-only 4421/4426 paths would attempt to forward a `null` frame to the phone.
 - **`fakephone.Client.SendBytes(data []byte)` / `ReceiveBytes(timeout)`** are byte-oriented siblings to `Send(env)` / `Receive(timeout)`. The wire shape inside `RoutingEnvelope.Frame` under v2 is an `InnerFrameV2` (not a `protocol.Envelope`), so the test driver builds the v2 frame as raw bytes and bypasses the `Envelope` marshal/unmarshal. `Send` / `Receive` delegate to the byte-oriented variants for the v1 case so v1 behaviour is unchanged.
 
-## Out of scope (this slice)
+## Out of scope (deferred)
 
-- `noise_msg` application dispatch in the `open` state — follow-up slice (#446) wires the `internal/relay/handlers/` chain to v2.
-- Encrypted echo round-trip e2e and tampered-`noise_msg` AEAD-failure → 4421 teardown — follow-up slice (#446; no dispatch path exists here to fail).
+- **Production wiring of `V2SessionManager` into `cmd/pyry/relay.go`** — daemon path still runs the v1 dispatcher. Cutover re-wires the daemon to construct `V2SessionManager` instead of `Dispatcher` and registers production handlers against `V2SessionConfig.Handlers`. Gated by the pre-flight release-flag check ([#436](../codebase/436.md)).
+- **Per-conn fan-out for handler dispatch.** Open-state handler dispatch runs synchronously on the manager's single goroutine; a long-running handler stalls all conns. The follow-up spawns one goroutine per `conn_id` with a per-session mutex guarding `s.send` / `s.recv` (mirroring `dispatch.Dispatcher.runConn`). Priority concern before production cutover.
 - Re-key timer + `rekey_request` handling — #435.
-- Pre-flight release-flag gate — `pyry pair preflight` already lands (#436); the actual v2 cutover gate is in a later slice.
-- Production wiring of `V2SessionManager` into `cmd/pyry/relay.go` — daemon path still runs the v1 dispatcher. Cutover decision lives with #446 (handlers) or a sibling.
+- `V2Session` cleanup on phone-initiated WS close — relay→binary "phone disconnected" forward signal does not exist on the v2 wire today. AEAD-failure teardown (this slice) IS the only binary-initiated cleanup path; phone-initiated reconnects still cannot trigger local cleanup. State entries linger until the binary↔relay leg recycles.
 - Per-phone-conn 10s handshake timeout — requires a relay→binary "phone connected" signal that does not exist in the v2 wire today. Tracked for a future protocol amendment + binary slice.
-- `V2Session` cleanup on phone-initiated WS close — same root cause; relay→binary "phone disconnected" forward signal does not exist. State entries linger until the binary↔relay leg recycles.
+- Revocation propagation to active conns — the device snapshot captured on `s.device` does not refresh after handshake; same posture as v1's `dispatch.Conn.auth`. Revocation tears down at the next WS recycle, not mid-conn.
 
 ## Dependencies
 
 - [`internal/noise`](noise-package.md) (#433) — `Responder`, `ReadInit`, `WriteResp`, `CipherState`, `KeyLen`. The wrapper's empty-AD-at-the-type-system invariant flows through to every AEAD operation here.
 - [`internal/devices`](devices-package.md) — `Registry.Validate(plain)` predicate (two-state, bumps `LastSeenAt` under `reg.mu`).
-- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, the new `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, and the new `Token` field on `HelloClientPayload`.
+- [`internal/dispatch`](dispatch-package.md) — `Handler`, `Conn`, `NewConn`, `Route` (#446). The same handler-table dispatch primitives used by v1's `Dispatcher`, factored out so the v2 manager does not duplicate the malformed/unsupported/unknown-type error-envelope logic.
+- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, and the `Token` field on `HelloClientPayload`.
 - [`github.com/coder/websocket`](relay-package.md#dependencies) — only for the `StatusCode` type aliasing the two new exported close codes.
 
 ## Related
 
-- [`docs/specs/architecture/445-v2-inner-frame-handshake.md`](../../specs/architecture/445-v2-inner-frame-handshake.md) — architect spec (transition table + AC reconciliation + security review).
+- [`docs/specs/architecture/445-v2-inner-frame-handshake.md`](../../specs/architecture/445-v2-inner-frame-handshake.md) — handshake spec (transition table + AC reconciliation + security review).
+- [`docs/specs/architecture/446-v2-noise-msg-application-dispatch.md`](../../specs/architecture/446-v2-noise-msg-application-dispatch.md) — open-state dispatch + AEAD-failure teardown spec.
 - [`docs/protocol-mobile.md`](../../protocol-mobile.md) §§ Authentication, Wire shapes, Failure modes, Error codes — wire-format source of truth.
 - [ADR 024](../decisions/024-noise-ik-mobile-e2e.md) — Mobile Protocol v2 (Noise_IK) parent decision.
 - [`codebase/433.md`](../codebase/433.md) — `internal/noise` wrapper; the responder API this manager consumes.
-- [`codebase/445.md`](../codebase/445.md) — per-ticket implementation notes.
+- [`codebase/445.md`](../codebase/445.md) / [`codebase/446.md`](../codebase/446.md) — per-ticket implementation notes for the handshake and open-state slices.
+- [`features/dispatch-package.md`](dispatch-package.md) — `Route` and `NewConn` (the production-allowed counterpart to `NewTestConn`).
 - [`features/relay-package.md`](relay-package.md) — the v1 surfaces of `internal/relay`.
