@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/identity"
+	"github.com/pyrycode/pyrycode/internal/keys"
 	"github.com/pyrycode/pyrycode/internal/pair"
 )
 
@@ -53,6 +55,19 @@ func resolveConfigPath() string {
 		return "config.json"
 	}
 	return filepath.Join(home, ".pyry", "config.json")
+}
+
+// resolveStaticKeyBaseDir returns the parent directory under which
+// internal/keys places <daemonName>/static_key.json. Returns ~/.pyry
+// when HOME resolves; falls back to "" so keys.LoadOrCreate writes the
+// keypair into "./<daemonName>/". Mirrors resolveDevicesPath /
+// resolveServerIDPath's fallback shape.
+func resolveStaticKeyBaseDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".pyry")
 }
 
 // pairArgs is the parsed shape of `pyry pair`'s flag set.
@@ -170,6 +185,11 @@ func runPairDefault(args []string) error {
 		return fmt.Errorf("pair: %w", err)
 	}
 
+	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(parsed.instanceName))
+	if err != nil {
+		return fmt.Errorf("pair: %w", err)
+	}
+
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return fmt.Errorf("pair: read random: %w", err)
@@ -191,10 +211,12 @@ func runPairDefault(args []string) error {
 		return fmt.Errorf("pair: %w", err)
 	}
 
+	pub := staticKey.PublicKey()
 	payload := pair.Payload{
-		Server: serverID,
-		Relay:  relay,
-		Token:  plain,
+		Server:             serverID,
+		Relay:              relay,
+		Token:              plain,
+		ServerStaticPubkey: base64.StdEncoding.EncodeToString(pub[:]),
 	}
 	if err := pair.Render(payload, os.Stdout); err != nil {
 		return fmt.Errorf("pair: render: %w", err)

@@ -10,7 +10,14 @@ import (
 	"github.com/pyrycode/pyrycode/internal/identity"
 )
 
-const instructionLine = "Scan the QR with the Pyrycode mobile app, or paste the string above into the app's pairing screen."
+const (
+	instructionLine = "Scan the QR with the Pyrycode mobile app, or paste the string above into the app's pairing screen."
+	// fingerprintZeros is the fingerprint emitted for a payload whose
+	// ServerStaticPubkey decodes to 32 zero bytes — matches the
+	// hardcoded vector in TestFingerprint_FixedVector.
+	fingerprintZeros = "32:0b:5e:a9:9e:65:3b:c2"
+	fingerprintHint  = "verify this matches the fingerprint shown on your phone"
+)
 
 // qrBlockGlyphs are the UTF-8 half-block code points qrterminal/v3
 // emits when drawing a QR symbol via GenerateHalfBlock.
@@ -27,9 +34,10 @@ func containsAnyQRBlock(s string) bool {
 
 func samplePayload() Payload {
 	return Payload{
-		Server: identity.ServerID(testServerID),
-		Relay:  testRelay,
-		Token:  testToken,
+		Server:             identity.ServerID(testServerID),
+		Relay:              testRelay,
+		Token:              testToken,
+		ServerStaticPubkey: testStaticPubkeyB64,
 	}
 }
 
@@ -49,6 +57,12 @@ func TestRender_Format_Happy(t *testing.T) {
 	}
 	if !strings.Contains(out, Encode(p)) {
 		t.Error("Encode(p) substring not found in rendered output")
+	}
+	if !strings.Contains(out, "Static-key fp: "+fingerprintZeros) {
+		t.Errorf("fingerprint line missing or wrong value (want %q in output):\n%s", "Static-key fp: "+fingerprintZeros, out)
+	}
+	if !strings.Contains(out, fingerprintHint) {
+		t.Errorf("fingerprint hint %q missing from output:\n%s", fingerprintHint, out)
 	}
 	if !strings.Contains(out, instructionLine) {
 		t.Error("instruction line not found in rendered output")
@@ -76,6 +90,17 @@ func TestRender_FieldOrder(t *testing.T) {
 	if !strings.Contains(suffix, instructionLine) {
 		t.Error("instruction line did not follow the encoded payload")
 	}
+	// Fingerprint line must sit between the encoded payload and the
+	// instruction line — the QR-then-payload-then-fingerprint-then-
+	// instruction order is the contract from § UX implications.
+	fpIdx := strings.Index(out, "Static-key fp: ")
+	instrIdx := strings.Index(out, instructionLine)
+	if fpIdx < 0 || instrIdx < 0 {
+		t.Fatalf("fingerprint or instruction line missing: fpIdx=%d instrIdx=%d", fpIdx, instrIdx)
+	}
+	if !(idx < fpIdx && fpIdx < instrIdx) {
+		t.Errorf("expected order encoded(%d) < fingerprint(%d) < instruction(%d)", idx, fpIdx, instrIdx)
+	}
 	// At least one blank line must separate the last QR row from the
 	// encoded payload line: trim the encoded line back to the previous
 	// newline, then look for "\n\n" (or "\n" + whitespace-only line)
@@ -87,6 +112,25 @@ func TestRender_FieldOrder(t *testing.T) {
 	beforeEncodedLine := prefix[:lineStart]
 	if !strings.HasSuffix(beforeEncodedLine, "\n") {
 		t.Error("expected blank line between QR symbol and encoded payload")
+	}
+}
+
+// TestRender_InvalidPubkey_DoesNotPanic confirms the non-Decode-built
+// fallback in fingerprintLine: a hand-built Payload with malformed
+// ServerStaticPubkey must yield "Static-key fp: <invalid>" without
+// panicking, since Render's contract says it accepts unvalidated
+// Payload structs (Encode's doc-comment names this).
+func TestRender_InvalidPubkey_DoesNotPanic(t *testing.T) {
+	t.Parallel()
+	p := samplePayload()
+	p.ServerStaticPubkey = "!!!"
+	var buf bytes.Buffer
+	err := Render(p, &buf)
+	if err != nil {
+		t.Fatalf("Render returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Static-key fp: <invalid>") {
+		t.Errorf("expected Static-key fp: <invalid> in output:\n%s", buf.String())
 	}
 }
 

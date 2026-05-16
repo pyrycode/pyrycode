@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/pair"
 )
 
 // TestParsePairArgs covers the flag-set surface of `pyry pair`: the
@@ -578,4 +581,86 @@ func TestRunPairPreflight_CorruptRegistry(t *testing.T) {
 	if !strings.Contains(err.Error(), "pair preflight:") {
 		t.Errorf("error %q missing prefix %q", err.Error(), "pair preflight:")
 	}
+}
+
+// captureStdout replaces os.Stdout with a pipe for the duration of fn
+// and returns whatever fn wrote. Lives inline rather than in a shared
+// helper since runPairDefault is currently the only test in this file
+// that needs it.
+func captureStdout(t *testing.T, fn func() error) ([]byte, error) {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- b
+	}()
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = orig
+	return <-done, runErr
+}
+
+// TestRunPairDefault_PopulatesStaticPubkey runs `pyry pair` end-to-end
+// against an isolated HOME, decodes the rendered payload, and asserts
+// the new ServerStaticPubkey field is present, base64-decodes to 32
+// bytes, and is stable across two calls (verifying keys.LoadOrCreate
+// returns the persisted key on the second call, not a fresh one).
+// Skipped on Windows — pyry doesn't target Windows.
+func TestRunPairDefault_PopulatesStaticPubkey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pyry is linux+macOS only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	stdout1, err := captureStdout(t, func() error { return runPairDefault(nil) })
+	if err != nil {
+		t.Fatalf("first runPairDefault: %v\nstdout:\n%s", err, stdout1)
+	}
+	p1 := decodeRenderedPayload(t, stdout1)
+	if p1.ServerStaticPubkey == "" {
+		t.Fatal("first payload ServerStaticPubkey is empty")
+	}
+	raw, err := base64.StdEncoding.DecodeString(p1.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("base64 decode ServerStaticPubkey: %v", err)
+	}
+	if len(raw) != 32 {
+		t.Errorf("decoded pubkey length=%d, want 32", len(raw))
+	}
+
+	stdout2, err := captureStdout(t, func() error { return runPairDefault(nil) })
+	if err != nil {
+		t.Fatalf("second runPairDefault: %v\nstdout:\n%s", err, stdout2)
+	}
+	p2 := decodeRenderedPayload(t, stdout2)
+	if p2.ServerStaticPubkey != p1.ServerStaticPubkey {
+		t.Errorf("ServerStaticPubkey changed across invocations: first=%q second=%q",
+			p1.ServerStaticPubkey, p2.ServerStaticPubkey)
+	}
+}
+
+// decodeRenderedPayload scans Render output for the encoded line and
+// decodes it via pair.Decode. Mirrors the e2e helper in
+// internal/e2e/pair_test.go.
+func decodeRenderedPayload(t *testing.T, stdout []byte) pair.Payload {
+	t.Helper()
+	for _, line := range strings.Split(string(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if p, err := pair.Decode(line); err == nil {
+			return p
+		}
+	}
+	t.Fatalf("no decodable pair payload found in stdout:\n%s", stdout)
+	return pair.Payload{}
 }

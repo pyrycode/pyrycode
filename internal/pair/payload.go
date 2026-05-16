@@ -1,6 +1,7 @@
-// Package pair encodes the {server, relay, token} tuple a paired mobile
-// device needs to connect through the relay back to this binary, and
-// decodes strings produced by the same encoder. Pure functions; no I/O.
+// Package pair encodes the {server, relay, token, server_static_pubkey}
+// tuple a paired mobile device needs to connect through the relay back
+// to this binary, and decodes strings produced by the same encoder.
+// Pure functions; no I/O.
 //
 // The encoded form is a single ASCII string suitable for embedding in a
 // QR symbol or for a one-time paste-fallback display. The wire shape is
@@ -13,6 +14,12 @@
 // output, or Decode errors in any context that may persist user-visible
 // output: the device-token is one-time-only and its visibility ends
 // when the QR symbol is dismissed.
+//
+// The ServerStaticPubkey field is the raw 32-byte X25519 public point
+// of the binary's persistent Noise static keypair, base64-encoded with
+// base64.StdEncoding (standard alphabet, with padding). This alphabet
+// matches the on-disk encoding in internal/keys, so the same bytes
+// have the same string form on disk and in the QR payload.
 package pair
 
 import (
@@ -26,20 +33,23 @@ import (
 	"github.com/pyrycode/pyrycode/internal/identity"
 )
 
-// Payload is the {server, relay, token} tuple emitted by `pyry pair` and
-// consumed by the paired mobile device.
+// Payload is the {server, relay, token, server_static_pubkey} tuple
+// emitted by `pyry pair` and consumed by the paired mobile device.
 //
 // Field order is fixed by the protocol-mobile.md appendix; do not reorder.
-// All three fields are required; encoders SHOULD reject zero values
+// All four fields are required; encoders SHOULD reject zero values
 // upstream, decoders MUST (see Decode).
 //
 // Relay is not parsed/validated by this package; semantic validation
 // belongs to whichever caller dials the URL. Token is not length- or
 // alphabet-checked here; minting contract belongs to the token issuer.
+// ServerStaticPubkey is the base64.StdEncoding-encoded raw 32-byte
+// X25519 public key; Decode rejects any other length.
 type Payload struct {
-	Server identity.ServerID `json:"server"`
-	Relay  string            `json:"relay"`
-	Token  string            `json:"token"`
+	Server             identity.ServerID `json:"server"`
+	Relay              string            `json:"relay"`
+	Token              string            `json:"token"`
+	ServerStaticPubkey string            `json:"server_static_pubkey"`
 }
 
 // ErrInvalidPayload is the sentinel returned (via wrap) for any input
@@ -74,8 +84,10 @@ func Encode(p Payload) string {
 //   - input that is not valid base64url (URL-safe alphabet, no padding)
 //   - decoded bytes that are not a JSON object
 //   - JSON containing trailing bytes after the top-level object
-//   - server/relay/token field missing or the empty string
+//   - server/relay/token/server_static_pubkey field missing or empty
 //   - server field not parseable by identity.ParseServerID
+//   - server_static_pubkey not valid base64.StdEncoding
+//   - server_static_pubkey decoding to a length other than 32 bytes
 //
 // On any error the returned Payload is the zero value.
 func Decode(s string) (Payload, error) {
@@ -101,8 +113,18 @@ func Decode(s string) (Payload, error) {
 	if p.Token == "" {
 		return Payload{}, fmt.Errorf("%w: missing field: token", ErrInvalidPayload)
 	}
+	if p.ServerStaticPubkey == "" {
+		return Payload{}, fmt.Errorf("%w: missing field: server_static_pubkey", ErrInvalidPayload)
+	}
 	if _, err := identity.ParseServerID(string(p.Server)); err != nil {
 		return Payload{}, fmt.Errorf("%w: invalid server id", ErrInvalidPayload)
+	}
+	pub, err := base64.StdEncoding.DecodeString(p.ServerStaticPubkey)
+	if err != nil {
+		return Payload{}, fmt.Errorf("%w: invalid server_static_pubkey encoding", ErrInvalidPayload)
+	}
+	if len(pub) != 32 {
+		return Payload{}, fmt.Errorf("%w: server_static_pubkey wrong length", ErrInvalidPayload)
 	}
 	return p, nil
 }
