@@ -560,9 +560,28 @@ Unchanged from v1.
 
 ### Pre-flight: `pyry pair list` empty check
 
-Before flipping the v2 release flag on any binary deployment, run `pyry pair list` and confirm it is empty (no paired devices). Pairing data from v1 is not v2-compatible (no `server_static_pubkey` was ever exchanged, no mobile-side Keystore alias was provisioned), and v2 has no migration tooling. A non-empty `pyry pair list` at release time means existing paired devices will fail on first v2 connect with `4426` and the user has no recovery path other than `pyry pair revoke && pyry pair` for every device.
+Before flipping the v2 release flag on any binary deployment, run `pyry pair preflight` and confirm it exits 0. Pairing data from v1 is not v2-compatible (no `server_static_pubkey` was ever exchanged, no mobile-side Keystore alias was provisioned), and v2 has no migration tooling. A non-empty device registry at release time means existing paired devices will fail on first v2 connect with `4426` and the user has no recovery path other than `pyry pair revoke && pyry pair` for every device.
 
-This check is automated as a CI gate on the release workflow — see the implementation child ticket for the pre-flight verb.
+The `pyry pair preflight` verb is a dedicated, opt-in release gate (it does not alter the default `pyry pair list` output, so out-of-tree scripts that parse the table are unaffected). Its contract:
+
+- **Exit 0** — registry empty. Gate passes; release tooling may proceed.
+- **Exit 1** — registry I/O error or malformed `devices.json`. Wrapped error printed via `pyry: pair preflight: …`. Release tooling should treat this as "the check itself failed" (investigate the binary's state, retry).
+- **Exit 2** — one or more paired devices exist. Single stderr line `pyry pair preflight: <N> paired device(s); v2 release gate requires zero.`. Release tooling should treat this as "the gate caught what it was supposed to catch" — do not flip the flag; the operator must `pyry pair revoke` per device first.
+
+Stdout is silent on every branch. Same 0/1/2 convention as `grep(1)`.
+
+Intended invocation in a release workflow:
+
+```sh
+if ! pyry pair preflight; then
+    echo "v2 release gate failed; aborting" >&2
+    exit 1
+fi
+```
+
+A `case $?` block can distinguish the exit-1 (check failed) and exit-2 (gate fired) cases when finer-grained reporting is needed.
+
+The pyrycode release tooling does not yet have a feature-flag mechanism distinct from version bumping (#436), so this documented invocation is the load-bearing artefact until one lands; the CLI exit-code behaviour is already in `pyry` itself.
 
 ## Reserved for future versions
 

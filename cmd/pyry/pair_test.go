@@ -451,3 +451,131 @@ func TestRunPairRevoke_SaveFailure(t *testing.T) {
 		t.Errorf("error %q missing prefix %q", err.Error(), "pair revoke:")
 	}
 }
+
+// TestParsePairPreflightArgs covers the flag-set surface of `pyry pair
+// preflight`: the empty path (defaults), -pyry-name (custom instance),
+// and the two error shapes runPairPreflight maps to exit 2.
+func TestParsePairPreflightArgs(t *testing.T) {
+	t.Setenv("PYRY_NAME", "")
+
+	tests := []struct {
+		name         string
+		args         []string
+		wantInstance string
+		wantErr      string
+	}{
+		{name: "empty", args: nil, wantInstance: defaultName()},
+		{name: "instance", args: []string{"-pyry-name=foo"}, wantInstance: "foo"},
+		{name: "positional rejected", args: []string{"extra"}, wantErr: "unexpected positional"},
+		{name: "unknown flag rejected", args: []string{"--bogus"}, wantErr: "flag provided but not defined"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePairPreflightArgs(tc.args)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %q missing fragment %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.instanceName != tc.wantInstance {
+				t.Errorf("instanceName=%q want %q", got.instanceName, tc.wantInstance)
+			}
+		})
+	}
+}
+
+// TestPreflightVerdict pins the exit-code matrix and the byte-for-byte
+// stderr line for the v2 release gate. The exact stderr-line strings
+// are part of the AC #1 contract.
+func TestPreflightVerdict(t *testing.T) {
+	tests := []struct {
+		name     string
+		count    int
+		wantCode int
+		wantLine string
+	}{
+		{name: "empty", count: 0, wantCode: 0, wantLine: ""},
+		{name: "one", count: 1, wantCode: 2, wantLine: "pyry pair preflight: 1 paired device(s); v2 release gate requires zero."},
+		{name: "two", count: 2, wantCode: 2, wantLine: "pyry pair preflight: 2 paired device(s); v2 release gate requires zero."},
+		{name: "ten", count: 10, wantCode: 2, wantLine: "pyry pair preflight: 10 paired device(s); v2 release gate requires zero."},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCode, gotLine := preflightVerdict(tc.count)
+			if gotCode != tc.wantCode {
+				t.Errorf("exitCode=%d want %d", gotCode, tc.wantCode)
+			}
+			if gotLine != tc.wantLine {
+				t.Errorf("stderrLine=%q want %q", gotLine, tc.wantLine)
+			}
+		})
+	}
+}
+
+// TestRunPairPreflight_EmptyRegistry verifies the gate-pass path when
+// no devices.json exists on disk (cold-start contract: devices.Load
+// returns empty registry, nil error).
+func TestRunPairPreflight_EmptyRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	if err := runPairPreflight(nil); err != nil {
+		t.Fatalf("runPairPreflight: %v", err)
+	}
+}
+
+// TestRunPairPreflight_ZeroByteRegistry verifies the gate-pass path
+// when devices.json exists but is zero bytes (devices.Load returns
+// empty registry, nil error per internal/devices/registry.go:45-47).
+func TestRunPairPreflight_ZeroByteRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	path := resolveDevicesPath(defaultName())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
+
+	if err := runPairPreflight(nil); err != nil {
+		t.Fatalf("runPairPreflight: %v", err)
+	}
+}
+
+// TestRunPairPreflight_CorruptRegistry verifies the exit-1 I/O-error
+// path: malformed JSON returns a wrapped error with the `pair
+// preflight:` prefix.
+func TestRunPairPreflight_CorruptRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	path := resolveDevicesPath(defaultName())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("[}"), 0o600); err != nil {
+		t.Fatalf("write malformed file: %v", err)
+	}
+
+	err := runPairPreflight(nil)
+	if err == nil {
+		t.Fatalf("expected error from runPairPreflight, got nil")
+	}
+	if !strings.Contains(err.Error(), "pair preflight:") {
+		t.Errorf("error %q missing prefix %q", err.Error(), "pair preflight:")
+	}
+}

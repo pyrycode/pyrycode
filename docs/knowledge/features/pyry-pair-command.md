@@ -15,10 +15,11 @@ Lives in [`cmd/pyry/pair.go`](../../../cmd/pyry/pair.go). Dispatched from `cmd/p
 | (bare) | Mint a token, persist a `Device`, render QR + paste payload to stdout |
 | `list` | Print the registry as a tabular listing (read-only) |
 | `revoke <name>` | Remove the registry entry whose `Name` matches |
+| `preflight` | v2 release gate — exit 0 if registry empty, exit 2 if any paired device exists (silent stdout, byte-pinned stderr line on the non-empty path) |
 
-Mirrors `runSessions`'s sub-router shape ([ADR 010](../decisions/010-sessions-cli-sub-router.md)) with one deviation: `runPair` does NOT call `parseClientFlags` — the pair family does not dial the daemon, so there is no `-pyry-socket` to peel. Per-verb flag-set parsers (`parsePairArgs`, `parsePairListArgs`, `parsePairRevokeArgs`) own `-pyry-name` directly.
+Mirrors `runSessions`'s sub-router shape ([ADR 010](../decisions/010-sessions-cli-sub-router.md)) with one deviation: `runPair` does NOT call `parseClientFlags` — the pair family does not dial the daemon, so there is no `-pyry-socket` to peel. Per-verb flag-set parsers (`parsePairArgs`, `parsePairListArgs`, `parsePairRevokeArgs`, `parsePairPreflightArgs`) own `-pyry-name` directly.
 
-`pairVerbList` is a single string constant updated in lockstep when verbs land (today: `"list, revoke"`). The dispatcher is deliberately ~10 lines, NOT factored into a generic helper — `runSessions` and `runPair` each carry their own switch by design (CLAUDE.md "Simplicity first"; each new sibling verb is one switch case, not a refactor).
+`pairVerbList` is a single string constant updated in lockstep when verbs land (today: `"list, revoke, preflight"`). The dispatcher is deliberately ~10 lines, NOT factored into a generic helper — `runSessions` and `runPair` each carry their own switch by design (CLAUDE.md "Simplicity first"; each new sibling verb is one switch case, not a refactor).
 
 **Flags-vs-verb disambiguation.** `pyry pair --name=foo` has `--name=foo` as `args[0]`. The dispatcher must not treat that as an unknown verb. Real verbs are bare identifiers (no leading `-`); the `strings.HasPrefix(args[0], "-")` check routes flag-leading args to `runPairDefault` so the bare-pair flow keeps accepting `--name`/`--relay`. Unknown bare-verb tokens hit the usage-error path → exit 2.
 
@@ -28,6 +29,7 @@ Mirrors `runSessions`'s sub-router shape ([ADR 010](../decisions/010-sessions-cl
 pyry pair [-pyry-name=<instance>] [--name <device-label>] [--relay <url>]
 pyry pair list [-pyry-name=<instance>]
 pyry pair revoke [-pyry-name=<instance>] <name>
+pyry pair preflight [-pyry-name=<instance>]
 ```
 
 | Flag | Purpose | Default |
@@ -270,6 +272,77 @@ E2E (`internal/e2e/pair_test.go`, `//go:build e2e`) — `TestPairRevoke_E2E` wit
 - **not found** — pair `phone-a`, snapshot the file bytes, `pyry pair revoke ghost`; assert exit 1 + stderr exactly `pyry pair revoke: no device named ghost\n` + stdout empty + on-disk bytes unchanged (`bytes.Equal`).
 - **missing registry** — fresh HOME, no prior pair, `pyry pair revoke ghost`; assert exit 1 + same stderr + `os.Stat(<path>) == fs.ErrNotExist` after the call (the AC's "no file created" requirement).
 
+## `pyry pair preflight` (#436)
+
+v2 release gate: exit non-zero if any paired device exists on the target binary, so the release workflow can refuse to flip the v2 cutover flag against a deployment that still has v1 pair records. v1 records have no `server_static_pubkey` (#432), and v2 has no migration tooling per [ADR 024](../decisions/024-noise-ik-mobile-e2e.md); any paired device at v2 cutover would fail Noise_IK handshake with WS code `4426` and the user has no recovery path other than `pyry pair revoke && pyry pair` per device.
+
+```
+1. Parse flags                                                → exit 2 on parse error
+2. resolveDevicesPath(name) → path                            (sanitized)
+3. devices.Load(path) → registry                              → exit 1 (wrapped) on I/O / parse error
+4. preflightVerdict(len(registry.List())) → (code, line)
+5. if code != 0: fmt.Fprintln(os.Stderr, line); os.Exit(code) (exit 2)
+   else:         return nil                                    (exit 0)
+```
+
+### Output contract
+
+| Outcome | Stdout | Stderr | Exit |
+|---|---|---|---|
+| Registry empty (gate passes) | (silent) | (silent) | `0` |
+| Registry I/O error / malformed JSON | (silent) | `pyry: pair preflight: <wrapped err>\n` | `1` |
+| Registry non-empty (gate fails) | (silent) | `pyry pair preflight: <N> paired device(s); v2 release gate requires zero.\n` | `2` |
+| Flag parse error / unknown flag / unexpected positional | (silent) | `pyry pair preflight: <err>\nusage: pyry pair preflight [-pyry-name=<instance>]\n` | `2` |
+
+Stdout is silent on every branch — allows release tooling to redirect stdout to `/dev/null` without losing the gate-failure message. The 0/1/2 triple matches `grep(1)`: 0 = condition met (gate passes), 1 = check itself failed, 2 = gate fired. The 1-vs-2 split is load-bearing for CI: "the check itself failed" needs human investigation; "the gate fired" needs the operator-instructed remediation.
+
+### `preflightVerdict` — pure verdict helper
+
+```go
+func preflightVerdict(count int) (exitCode int, stderrLine string)
+```
+
+Returns `(0, "")` on `count == 0`, `(2, "pyry pair preflight: <N> paired device(s); v2 release gate requires zero.")` on `count > 0`. Extracted from `runPairPreflight` so the byte-exact stderr-line contract is unit-testable without driving `os.Exit` through a subprocess. The "device(s)" form is deliberate — singular/plural pluralisation in CI output is not worth the branch.
+
+### Why a dedicated verb, not `pair list --quiet --fail-if-any`
+
+Three reasons (architect spec):
+
+1. **Output divergence.** `pair list` writes a table to stdout; preflight is silent on stdout on every branch. Smuggling completely different output behaviour through a flag combo on the same verb is more surprising than a clearly-named sibling.
+2. **CI legibility.** Release tooling literally contains the string `pyry pair preflight`. A reader who has never seen this codebase understands what it does.
+3. **No ambiguous flag interactions.** A `--fail-if-any` flag would invite future flags (`--max-count`, `--exclude-name`, …); a dedicated verb pins the surface at its current behaviour and pushes any future variants onto their own verb.
+
+The 2-line `devices.Load` + `registry.List()` preamble shared with `runPairList` is **not extracted** — per the project's "duplicated until a Nth instance forces extraction" policy, this is the first sibling reader and the downstream output contracts (table vs. count-and-gate) diverge entirely.
+
+### Stability vs. `pair list`
+
+`pair list`'s default tabular stdout output is unchanged. Out-of-tree scripts parsing the table are unaffected (issue body Technical Note). The gate is strictly additive — a new opt-in sub-verb, not a flag mutating `pair list`.
+
+### Intended CI invocation
+
+Documented in [`docs/protocol-mobile.md`](../../protocol-mobile.md) § *Pre-flight*:
+
+```sh
+if ! pyry pair preflight; then
+    echo "v2 release gate failed; aborting" >&2
+    exit 1
+fi
+```
+
+A `case $?` block can distinguish the exit-1 (check failed) and exit-2 (gate fired) cases when finer-grained reporting is needed. The pyrycode release tooling does not yet have a feature-flag mechanism distinct from version bumping; this documented invocation is the load-bearing artefact until one lands. The CLI exit-code behaviour is already in `pyry`.
+
+### Tests
+
+Unit (`cmd/pyry/pair_test.go`):
+
+- `TestParsePairPreflightArgs` — table: empty (defaults), `-pyry-name=foo`, positional rejected, unknown flag rejected.
+- `TestPreflightVerdict` — table: `count=0 → (0, "")`; `count=1` / `count=2` / `count=10` → `(2, "pyry pair preflight: <N> paired device(s); v2 release gate requires zero.")`. Byte-for-byte stderr-line contract pinned here.
+- `TestRunPairPreflight_EmptyRegistry` — `t.Setenv("HOME", t.TempDir())`, no `devices.json` on disk, assert `runPairPreflight(nil)` returns nil. Pins the cold-start (missing file) gate-pass path.
+- `TestRunPairPreflight_ZeroByteRegistry` — same, but write a zero-byte `devices.json` first; assert `runPairPreflight(nil)` returns nil. Pins the cold-start (empty file) gate-pass path via `devices.Load`'s contract.
+- `TestRunPairPreflight_CorruptRegistry` — write `[}` (malformed JSON) to `devices.json`; assert returned error is non-nil and prefixed with `"pair preflight:"`. Pins the exit-1 wrapped-error path.
+
+The exit-2 non-empty-registry path (`os.Exit(2)` from inside `runPairPreflight`) is not driven through the runner in unit tests because `os.Exit` terminates the test binary. The byte-exact contract for that path is fully covered by `TestPreflightVerdict`; the remaining two-line dispatch (`fmt.Fprintln(os.Stderr, line); os.Exit(exitCode)`) is trivial wiring. Same shape as how `runPairRevoke`'s `os.Exit(1)` not-found path is unit-tested (it isn't — covered e2e).
+
 ## Open question (deferred)
 
 **Daemon staleness on warm `devices.json`.** When a Phase 3 daemon-side WS-handshake auth path lands, it will read `devices.json` once at startup and hold the in-memory `Registry`. A `pyry pair` invocation while the daemon is running will append on disk but leave the daemon's copy stale until its next `Load`. Mitigation (reload-on-write via fsnotify on `devices.json`, or a daemon-side `pair` control verb that mints in-process) is owned by the consumer ticket. Current wiring is the right shape: the storage primitive (`devices.Registry`) doesn't know about the daemon; the verb writes through it directly.
@@ -296,3 +369,5 @@ E2E (`internal/e2e/pair_test.go`, `//go:build e2e`) — `TestPairRevoke_E2E` wit
 - `docs/specs/architecture/213-pair-command.md` — architect's spec for the bare-pair wiring slice.
 - `docs/specs/architecture/214-pair-list.md` — architect's spec for `pyry pair list`.
 - `docs/specs/architecture/215-pair-revoke.md` — architect's spec for `pyry pair revoke`.
+- `docs/specs/architecture/436-pair-preflight-empty-check.md` — architect's spec for `pyry pair preflight`.
+- [ADR 024](../decisions/024-noise-ik-mobile-e2e.md) — Mobile Protocol v2 / Noise_IK parent decision; § *Pre-flight* names #436 as the implementation slice.
