@@ -498,6 +498,29 @@ func nextValueEquals(argv []string, flag, want string) bool {
 	return argv[idx+1] == want
 }
 
+// TestAgentRunUsageDescription locks the `pyry agent-run --help` body so a
+// future stale-disclaimer regression fails CI (#359). The constant is the
+// sole source of the description prose printed between the `Usage:` header
+// and `fs.PrintDefaults()` by the `fs.Usage` callback, so asserting on it
+// directly covers the same surface `--help` renders without needing to
+// invoke the flag parser or redirect stderr.
+func TestAgentRunUsageDescription(t *testing.T) {
+	if strings.Contains(agentRunUsageDescription, "scaffold only") {
+		t.Errorf("agentRunUsageDescription still contains stale %q disclaimer:\n%s",
+			"scaffold only", agentRunUsageDescription)
+	}
+	// Load-bearing substrings: the prose cannot describe the current
+	// runtime behaviour without `stream-json` (the protocol name), and
+	// `--max-turns` / `--allowed-tools` are the two behavioural anchors
+	// AC #2 calls out for the new help text.
+	for _, want := range []string{"stream-json", "--max-turns", "--allowed-tools"} {
+		if !strings.Contains(agentRunUsageDescription, want) {
+			t.Errorf("agentRunUsageDescription missing required substring %q:\n%s",
+				want, agentRunUsageDescription)
+		}
+	}
+}
+
 // TestRunAgentRun_StreamJSON_Clean verifies the end-to-end wiring: runAgentRun
 // reads the prompt file, builds the argv, spawns the (faked) claude via
 // streamrunner, and forwards claude's stdout verbatim. Asserts:

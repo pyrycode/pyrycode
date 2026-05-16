@@ -31,6 +31,22 @@ type agentRunArgs struct {
 	outputFormat     string
 }
 
+// agentRunUsageDescription is the body printed by `pyry agent-run --help`
+// between the `Usage:` header and `fs.PrintDefaults()`. Extracted as a
+// constant so a sibling test in agent_run_test.go can lock the prose
+// against stale-disclaimer regressions (see #359). Keep this in sync with
+// runAgentRun's doc comment and buildClaudeArgs's doc comment, which are
+// the canonical descriptions of the runtime behaviour.
+const agentRunUsageDescription = `Drive a single supervised claude turn headlessly.
+
+Spawns claude as a stream-json subprocess (no PTY, no JSONL watcher),
+delivers the user prompt as a stream-json envelope on claude's stdin,
+and forwards claude's stream-json stdout (its canonical system init,
+assistant deltas, and result events) byte-for-byte to pyry's stdout for
+the dispatcher to consume. --max-turns is passed through to claude,
+which enforces it. --dangerously-skip-permissions paired with
+--allowed-tools is the authoritative tool gate.`
+
 // validEfforts enumerates the accepted values for --effort. The spike
 // (#329) froze this set; if the upstream claude CLI uses different names,
 // file a follow-up rather than silently renaming here.
@@ -77,7 +93,7 @@ func parseAgentRunArgs(args []string) (agentRunArgs, error) {
 
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: pyry agent-run [flags]")
-		fmt.Fprintln(fs.Output(), "Drive a single supervised claude turn headlessly (scaffold only — no spawn yet).")
+		fmt.Fprintln(fs.Output(), agentRunUsageDescription)
 		fs.PrintDefaults()
 	}
 
