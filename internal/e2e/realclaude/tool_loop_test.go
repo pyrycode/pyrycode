@@ -147,12 +147,19 @@ func TestRealClaude_ToolLoopIntegrity(t *testing.T) {
 // contentBlock names only the fields under assertion across assistant
 // and user content blocks. JSON tags carry omitempty so the same struct
 // decodes both tool_use, tool_result, and text blocks.
+//
+// Note: `tool_result` blocks carry their body in `content` (not `text`),
+// which is either a string or an array of nested content blocks per
+// claude's stream-json contract. RawMessage holds either shape so
+// callers can check non-emptiness without binding to one form.
 type contentBlock struct {
-	Type      string `json:"type"`
-	Name      string `json:"name,omitempty"`
-	ID        string `json:"id,omitempty"`
-	Text      string `json:"text,omitempty"`
-	ToolUseID string `json:"tool_use_id,omitempty"`
+	Type      string          `json:"type"`
+	Name      string          `json:"name,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 }
 
 // parseContentBlocks decodes the verbatim JSONL line into the
