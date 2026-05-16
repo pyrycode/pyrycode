@@ -73,6 +73,20 @@ type RunOpts struct {
 	Model        string
 	ExtraEnv     []string
 	Timeout      time.Duration
+	// UseTestBinaryAsFakePyry, when true, makes RunPyryAgentRun exec the
+	// current test binary (os.Args[0]) as if it were pyry. The test binary's
+	// TestMain is expected to recognise GO_TEST_HELPER_PROCESS=1 in the
+	// child env and route into runFakePyry() instead of running the test
+	// suite. Callers MUST include "GO_TEST_HELPER_PROCESS=1" in ExtraEnv
+	// when setting this flag — RunPyryAgentRun enforces this to prevent
+	// the 2026-05-16 fork-bomb recurrence (unbounded test-binary spawn
+	// when a self-referential PYRY_E2E_BIN was inherited by tests that
+	// did not opt into fake-pyry mode).
+	//
+	// When false (default), RunPyryAgentRun goes through ensurePyryBuilt,
+	// which builds real pyry from source (or honors PYRY_E2E_BIN if set
+	// and non-self-referential).
+	UseTestBinaryAsFakePyry bool
 }
 
 // RunResult is the synchronous return value of RunPyryAgentRun. A non-zero
@@ -94,7 +108,22 @@ func RunPyryAgentRun(t *testing.T, opts RunOpts) RunResult {
 	if err := validateRunOpts(opts); err != nil {
 		t.Fatalf("realclaude.RunPyryAgentRun: %v", err)
 	}
-	bin := ensurePyryBuilt(t)
+	var bin string
+	if opts.UseTestBinaryAsFakePyry {
+		// Recursion guard — see comment on UseTestBinaryAsFakePyry. When
+		// the child is the test binary itself, the child's TestMain must
+		// route into runFakePyry() via GO_TEST_HELPER_PROCESS=1. Without
+		// it, TestMain falls through to m.Run() and re-spawns itself,
+		// producing the 2026-05-16 unbounded fork-bomb.
+		if !extraEnvHasHelperProcessFlag(opts.ExtraEnv) {
+			t.Fatalf("realclaude.RunPyryAgentRun: UseTestBinaryAsFakePyry=true requires " +
+				"\"GO_TEST_HELPER_PROCESS=1\" in ExtraEnv; without it the child test binary " +
+				"falls through to m.Run() and recurses unboundedly (fork-bomb, 2026-05-16)")
+		}
+		bin = os.Args[0]
+	} else {
+		bin = ensurePyryBuilt(t)
+	}
 	promptPath := filepath.Join(opts.Workdir, "prompt.txt")
 	if err := os.WriteFile(promptPath, []byte(opts.Prompt), 0o600); err != nil {
 		t.Fatalf("realclaude.RunPyryAgentRun: write %s: %v", promptPath, err)
@@ -141,6 +170,19 @@ func RunPyryAgentRun(t *testing.T, opts RunOpts) RunResult {
 	}
 }
 
+// extraEnvHasHelperProcessFlag returns true iff ExtraEnv contains a
+// literal "GO_TEST_HELPER_PROCESS=1" entry. This is the discriminator
+// that lets the child test binary route into runFakePyry() instead of
+// re-running the test suite (and recursing).
+func extraEnvHasHelperProcessFlag(env []string) bool {
+	for _, kv := range env {
+		if kv == "GO_TEST_HELPER_PROCESS=1" {
+			return true
+		}
+	}
+	return false
+}
+
 // validateRunOpts returns the first required-field violation. Exposed as a
 // returned error so tests can assert on it without intercepting t.Fatalf.
 // The --effort enum is NOT re-validated here; pyry rejects bad values and
@@ -178,6 +220,21 @@ func ensurePyryBuilt(t *testing.T) string {
 	t.Helper()
 	pyryBinOnce.Do(func() {
 		if env := os.Getenv("PYRY_E2E_BIN"); env != "" {
+			// Defense-in-depth: refuse a self-referential PYRY_E2E_BIN.
+			// The 2026-05-16 fork-bomb was caused by TestMain auto-setting
+			// PYRY_E2E_BIN=os.Args[0] (the test binary) and tests that
+			// wanted real pyry inheriting the self-ref — they invoked the
+			// test binary as "pyry", whose TestMain fell through to
+			// m.Run() and recursed unboundedly. Use RunOpts.UseTestBinaryAsFakePyry
+			// instead for explicit self-exec intent.
+			envAbs, err1 := filepath.Abs(env)
+			selfAbs, err2 := filepath.Abs(os.Args[0])
+			if err1 == nil && err2 == nil && envAbs == selfAbs {
+				pyryBinErr = fmt.Errorf("PYRY_E2E_BIN=%s points at the test binary itself; "+
+					"refusing to use as pyry — set RunOpts.UseTestBinaryAsFakePyry=true "+
+					"(plus GO_TEST_HELPER_PROCESS=1 in ExtraEnv) for explicit self-exec intent", env)
+				return
+			}
 			pyryBinPath = env
 			return
 		}

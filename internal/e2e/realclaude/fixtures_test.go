@@ -113,16 +113,46 @@ func TestJSONLEntry_AliasCompiles(t *testing.T) {
 	var _ jsonl.Event = JSONLEntry{}
 }
 
+// TestExtraEnvHasHelperProcessFlag exercises the recursion-guard predicate.
+// Belt-and-suspenders against the 2026-05-16 fork-bomb pattern recurring.
+func TestExtraEnvHasHelperProcessFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		env  []string
+		want bool
+	}{
+		{"empty", nil, false},
+		{"unrelated only", []string{"FOO=bar", "BAZ=qux"}, false},
+		{"flag present", []string{"GO_TEST_HELPER_PROCESS=1"}, true},
+		{"flag with neighbors", []string{"A=1", "GO_TEST_HELPER_PROCESS=1", "B=2"}, true},
+		{"flag set to 0", []string{"GO_TEST_HELPER_PROCESS=0"}, false},
+		{"flag empty value", []string{"GO_TEST_HELPER_PROCESS="}, false},
+		{"prefix-only", []string{"GO_TEST_HELPER_PROCESS_EXTRA=1"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extraEnvHasHelperProcessFlag(tc.env); got != tc.want {
+				t.Fatalf("extraEnvHasHelperProcessFlag(%v) = %t, want %t", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestMain branches on GO_TEST_HELPER_PROCESS so the test binary doubles as
-// a fake `pyry`. Otherwise it points PYRY_E2E_BIN at itself so that
-// ensurePyryBuilt short-circuits and tests in this package run against the
-// fake — none of them want real pyry.
+// a fake `pyry` for tests that opt in via RunOpts.UseTestBinaryAsFakePyry.
+//
+// Previously this also set PYRY_E2E_BIN=os.Args[0] so ensurePyryBuilt
+// short-circuited to the test binary. That pattern caused the 2026-05-16
+// fork-bomb: tests that wanted *real* pyry (tool_loop, per_agent — added
+// after this TestMain was written) inherited the self-referential env var,
+// invoked the test binary as "pyry", whose TestMain fell through to
+// m.Run() and recursed unboundedly. Each test that wants the fake-pyry
+// pattern now opts in explicitly via the RunOpts field.
 func TestMain(m *testing.M) {
 	if os.Getenv("GO_TEST_HELPER_PROCESS") == "1" {
 		runFakePyry()
 		return
 	}
-	os.Setenv("PYRY_E2E_BIN", os.Args[0])
 	os.Exit(m.Run())
 }
 
@@ -153,14 +183,15 @@ const fakeInitSessionID = "11111111-1111-4111-8111-111111111111"
 
 func fullRunOpts(workdir string) RunOpts {
 	return RunOpts{
-		Workdir:      workdir,
-		Prompt:       "hello",
-		SystemPrompt: "you are a tester",
-		AllowedTools: []string{"Read"},
-		MaxTurns:     1,
-		Effort:       "low",
-		Model:        "claude-haiku-4-5",
-		ExtraEnv:     []string{"GO_TEST_HELPER_PROCESS=1"},
+		Workdir:                 workdir,
+		Prompt:                  "hello",
+		SystemPrompt:            "you are a tester",
+		AllowedTools:            []string{"Read"},
+		MaxTurns:                1,
+		Effort:                  "low",
+		Model:                   "claude-haiku-4-5",
+		ExtraEnv:                []string{"GO_TEST_HELPER_PROCESS=1"},
+		UseTestBinaryAsFakePyry: true,
 	}
 }
 
