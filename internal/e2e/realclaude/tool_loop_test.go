@@ -153,6 +153,7 @@ type contentBlock struct {
 	ID        string `json:"id,omitempty"`
 	Text      string `json:"text,omitempty"`
 	ToolUseID string `json:"tool_use_id,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
 }
 
 // parseContentBlocks decodes the verbatim JSONL line into the
