@@ -27,7 +27,7 @@ const (
     V2StateClosed
 )
 
-type V2Session struct { /* unexported fields: connID, state, resp, send, recv */ }
+type V2Session struct { /* unexported fields: connID, state, resp, send, recv, device, peerStatic */ }
 
 func (s *V2Session) State() V2SessionState
 
@@ -112,6 +112,7 @@ The `handshakeComplete` substate is observably distinct from `open` even though 
 1. JSON-decode inner frame, validate `Version == 2` and `Type == "noise_init"`, base64-decode `Data` (size-cap 65535).
 2. Lazy-construct `noise.Responder` from `cfg.StaticPriv` (one per session).
 3. `Responder.ReadInit(data)` → early-data bytes. **On err: close(4426)** (MAC fail / wrong static pubkey / malformed IK message 1; no CipherStates exist, no AEAD-sealed error possible).
+3a. **Capture `s.peerStatic = s.resp.PeerStatic()`** (#452) — the initiator's static pub, pinned for the session's lifetime at the earliest authenticated point. By the time `ReadInit` returns nil, flynn has MAC-verified and DH-decrypted the static; the value is authentic regardless of whether subsequent steps accept the hello. Set exactly once per `V2Session`; a future re-key (added in #453) MUST NOT overwrite it. The field is inert in the current code (no production reader); #453's `handleRekeyInit` will compare a fresh-handshake initiator's `PeerStatic()` against it via `bytes.Equal` and reject mismatches at WS close code 4426.
 4. Decode early-data as a `protocol.Envelope`; require `Type == "hello"`. On decode failure or wrong type: **close(4421)** (handshake-layer protocol violation; CipherStates still don't exist).
 5. Decode `Envelope.Payload` as `protocol.HelloClientPayload`. On decode failure: close(4421).
 6. Marshal `HelloAckPayload{ProtocolVersion: "v2", ServerID: cfg.ServerID, ConnID: env.ConnID}` into an `Envelope{ID: 1, Type: hello_ack, InReplyTo: &hello.ID}`.
@@ -151,6 +152,8 @@ The two `open`-row cells filled by [#446](../codebase/446.md).
 
 The `device` field on `V2Session` is set exactly once in the handshake token-accept branch (right before state advances to `V2StateOpen`) and is surfaced through `*dispatch.Conn.Auth()`. Same lifetime as v1's `Conn.auth` slot — revocation of the device after handshake does NOT tear down the active conn; this matches the v1 posture and is intentional. Revocation propagation for active conns is tracked as a separate concern.
 
+The `peerStatic` field on `V2Session` (#452) is similarly set exactly once — at step 3a above, before any branch that calls `closeWith`. A token failure (or any later handshake-layer failure) tears the session down via `closeWith` and `delete(m.sessions, s.connID)`, which drops the captured field along with the session entry — a failed handshake leaves no peerStatic to compare against on a future re-key. The field is identity-bearing (the public-static of the paired peer); the doc-comment pins the **MUST NOT log** discipline so a future log-line refactor cannot relax it on the "but it's public" instinct — emitting it makes the binary log a parallel device registry for anyone with log-read access.
+
 ## Concurrency
 
 **One goroutine.** `Run` is the only goroutine the manager owns. It reads `cfg.Frames`, looks up (or lazily creates) `m.sessions[env.ConnID]`, and processes the frame synchronously. `m.sessions` is mutated exclusively by `Run`; no mutex.
@@ -165,7 +168,7 @@ Intentionally simpler than [`internal/dispatch.Dispatcher`](dispatch-package.md)
 
 Mirrors v1's `internal/relay/auth.go` posture. The implementation MUST adhere; CR checks each rule against the diff.
 
-- **MUST NOT log at any level**: `HelloClientPayload.Token`, `cfg.StaticPriv`, raw `RoutingEnvelope.Frame` bytes, AEAD ciphertext bytes (the `Data` field of any `noise_msg`), plaintext envelope payload bytes (post-AEAD-decrypt), handler reply envelope bytes (pre-encrypt), encrypted reply bytes (post-`s.send.Encrypt`), base64-encoded forms of any of the above. The same MUST applies to `slog` fields, error wrapping (`fmt.Errorf("foo: %w", err)` where `err` accidentally carries the secret), and `panic` strings.
+- **MUST NOT log at any level**: `HelloClientPayload.Token`, `cfg.StaticPriv`, raw `RoutingEnvelope.Frame` bytes, AEAD ciphertext bytes (the `Data` field of any `noise_msg`), plaintext envelope payload bytes (post-AEAD-decrypt), handler reply envelope bytes (pre-encrypt), encrypted reply bytes (post-`s.send.Encrypt`), base64-encoded forms of any of the above, **`V2Session.peerStatic` bytes (#452)**. The same MUST applies to `slog` fields, error wrapping (`fmt.Errorf("foo: %w", err)` where `err` accidentally carries the secret), and `panic` strings. `peerStatic` is identity-bearing rather than secret, but the no-key-bytes-in-logs discipline extends to per-session identity pins — emitting it makes the binary log a parallel device registry.
 - **MUST log (operator-actionable) on ACCEPT**: event class `v2.handshake.accept`, `conn_id`, `device_name`. Plain low-cardinality string fields only.
 - **MUST log (operator-actionable) on REJECT**: event class (`v2.handshake.reject.invalid_token` / `v2.handshake.reject.ik_failure` / `v2.state.reject`), `conn_id`, `close_code`. **NO `device_name`** even when the early-data carried one — anti-enumeration of paired-device names from binary logs.
 - **MUST log on open-state AEAD failure**: event class `v2.aead.fail`, `conn_id`, `close_code=4421`. **NO error text** from `s.recv.Decrypt` (the underlying flynn/noise error may carry counter indices that aren't operator-actionable). **NO envelope shape information** — a frame that didn't decrypt cannot be inspected.
@@ -198,6 +201,10 @@ Open-state dispatch additions (#446):
 - `TestV2Session_OpenState_MalformedInnerEnvelope_SealedMalformedReply` — open-state envelope whose AEAD plaintext is raw garbage → AEAD-sealed `Envelope{Type: TypeError, Payload.Code: CodeProtocolMalformed}`. State stays `open`.
 - `TestV2Session_OpenState_HandlerAuthDevice` — handler captures `c.Auth().Name` from inside the dispatch closure; asserts the matched-device snapshot captured during handshake (`s.device`) reaches the handler via `*dispatch.Conn.Auth()`.
 
+Peer-static capture (#452):
+
+- `TestV2Session_InitialHandshake_CapturesPeerStatic` — drives a paired-device handshake to `V2StateOpen` via `driveToOpen`, then white-box-asserts `mgr.sessions[v2TestConnID].peerStatic == initPub` and `len(...) == noise.KeyLen`. The length check is the regression guard against an empty-slice silently passing a future `bytes.Equal(nil, nil)` comparison if the capture site is skipped. Pins the capture invariant for the inert-in-this-slice field that #453 will read.
+
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)
 
 Spins up `fakerelay` (now with both `/v1/server` and `/v2/server`), wires `relay.Connect` + `V2SessionManager` inline (no daemon — `cmd/pyry/relay.go` still wires the v1 dispatcher), dials a `fakephone` against `/v1/client` (unchanged routing wire under v2), and drives a Noise_IK handshake from the phone side.
@@ -219,7 +226,9 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 
 - **Production wiring of `V2SessionManager` into `cmd/pyry/relay.go`** — daemon path still runs the v1 dispatcher. Cutover re-wires the daemon to construct `V2SessionManager` instead of `Dispatcher` and registers production handlers against `V2SessionConfig.Handlers`. Gated by the pre-flight release-flag check ([#436](../codebase/436.md)).
 - **Per-conn fan-out for handler dispatch.** Open-state handler dispatch runs synchronously on the manager's single goroutine; a long-running handler stalls all conns. The follow-up spawns one goroutine per `conn_id` with a per-session mutex guarding `s.send` / `s.recv` (mirroring `dispatch.Dispatcher.runConn`). Priority concern before production cutover.
-- Re-key timer + `rekey_request` handling — #435.
+- **Re-key responder peer-continuity check** — #453. Reads `V2Session.peerStatic` (pinned this slice by #452) and compares against a fresh-handshake initiator's `Responder.PeerStatic()`; mismatch closes at WS code 4426. Atomic `CipherState` swap and AEAD-mismatch teardown verification land in the same slice.
+- **`rekey_request` control-envelope discriminator** — #454. Independent of #453's continuity check.
+- Re-key timer + `rekey_request` handling — #435 (super-ticket; #453 + #454 are the concrete slices).
 - `V2Session` cleanup on phone-initiated WS close — relay→binary "phone disconnected" forward signal does not exist on the v2 wire today. AEAD-failure teardown (this slice) IS the only binary-initiated cleanup path; phone-initiated reconnects still cannot trigger local cleanup. State entries linger until the binary↔relay leg recycles.
 - Per-phone-conn 10s handshake timeout — requires a relay→binary "phone connected" signal that does not exist in the v2 wire today. Tracked for a future protocol amendment + binary slice.
 - Revocation propagation to active conns — the device snapshot captured on `s.device` does not refresh after handshake; same posture as v1's `dispatch.Conn.auth`. Revocation tears down at the next WS recycle, not mid-conn.
@@ -240,5 +249,6 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [ADR 024](../decisions/024-noise-ik-mobile-e2e.md) — Mobile Protocol v2 (Noise_IK) parent decision.
 - [`codebase/433.md`](../codebase/433.md) — `internal/noise` wrapper; the responder API this manager consumes.
 - [`codebase/445.md`](../codebase/445.md) / [`codebase/446.md`](../codebase/446.md) — per-ticket implementation notes for the handshake and open-state slices.
+- [`codebase/452.md`](../codebase/452.md) — `V2Session.peerStatic` capture at the initial IK handshake; pure-data exposure for the re-key responder's peer-continuity check.
 - [`features/dispatch-package.md`](dispatch-package.md) — `Route` and `NewConn` (the production-allowed counterpart to `NewTestConn`).
 - [`features/relay-package.md`](relay-package.md) — the v1 surfaces of `internal/relay`.
