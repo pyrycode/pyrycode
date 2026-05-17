@@ -244,6 +244,39 @@ func SessionsHasID(ctx context.Context, socketPath, id string) (bool, error) {
 	return resp.SessionsHasID.Has, nil
 }
 
+// Rekey asks the daemon to trigger an immediate Noise re-key on the
+// named v2 conn. Returns nil on a successful enqueue (the underlying
+// handshake runs asynchronously on the conn's state machine — the
+// helper does not wait for it).
+//
+// ErrConnNotFound is reconstructed from Response.ErrorCode so callers
+// can errors.Is against it. Other server errors (no rekeyer configured,
+// missing connID, manager-internal failures) return as
+// errors.New(resp.Error) verbatim.
+//
+// No production caller exists in slice A (#459) — wired now so slice B
+// (#460) is a one-file change in cmd/pyry/. Same one-shot dial → encode
+// → decode → close lifecycle as the other client helpers.
+func Rekey(ctx context.Context, socketPath, connID string) error {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:  VerbRekey,
+		Rekey: &RekeyPayload{ConnID: connID},
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		if resp.ErrorCode == ErrCodeConnNotFound {
+			return ErrConnNotFound
+		}
+		return errors.New(resp.Error)
+	}
+	if !resp.OK {
+		return errors.New("control: rekey response missing ok flag")
+	}
+	return nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {

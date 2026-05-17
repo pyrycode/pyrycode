@@ -77,6 +77,20 @@ const (
 	// to sessions.list. Empty / malformed input returns Response.Error;
 	// a well-formed but absent UUID returns {Has: false}.
 	VerbSessionsHasID Verb = "sessions.has-id"
+
+	// VerbRekey asks the daemon to trigger an immediate Noise re-key on
+	// the named v2 conn. Request.Rekey carries the conn id;
+	// Response.OK acknowledges that the trigger has been accepted by
+	// the v2 session manager (the underlying handshake runs
+	// asynchronously on the conn's own state machine — this verb does
+	// not wait for it).
+	//
+	// Slice A (#459) lays this wire and the dispatcher. The operator
+	// subcommand (`pyry rekey <conn_id>`) and the V2SessionManager
+	// implementation that satisfies Rekeyer are slice B (#460); until
+	// then every production-path VerbRekey request returns
+	// "rekey: no rekeyer configured".
+	VerbRekey Verb = "rekey"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -112,6 +126,13 @@ const (
 	// ErrCodeCannotRemoveBootstrap is set by the server when Pool.Remove
 	// returns sessions.ErrCannotRemoveBootstrap.
 	ErrCodeCannotRemoveBootstrap ErrorCode = "cannot_remove_bootstrap"
+
+	// ErrCodeConnNotFound is set by the server when Rekeyer.Rekey
+	// returns ErrConnNotFound (or any error wrapping it). The client
+	// maps this back to the same sentinel so callers can errors.Is
+	// against it. Analogue of ErrCodeSessionNotFound for the v2 conn
+	// namespace used by VerbRekey.
+	ErrCodeConnNotFound ErrorCode = "conn_not_found"
 )
 
 // Request is the wire format for a single client request.
@@ -120,6 +141,7 @@ type Request struct {
 	Attach   *AttachPayload   `json:"attach,omitempty"`   // populated for VerbAttach
 	Resize   *ResizePayload   `json:"resize,omitempty"`   // populated for VerbResize
 	Sessions *SessionsPayload `json:"sessions,omitempty"` // populated for VerbSessionsNew (Phase 1.1+)
+	Rekey    *RekeyPayload    `json:"rekey,omitempty"`    // populated for VerbRekey
 }
 
 // AttachPayload carries the client's terminal geometry at attach time and
@@ -174,6 +196,17 @@ type SessionsPayload struct {
 	ID          string      `json:"id,omitempty"`          // sessions.rm, sessions.rename
 	JSONLPolicy JSONLPolicy `json:"jsonlPolicy,omitempty"` // sessions.rm
 	NewLabel    string      `json:"newLabel,omitempty"`    // sessions.rename
+}
+
+// RekeyPayload carries the v2 conn id to re-key. ConnID has no omitempty:
+// an empty connID is invalid input and the server-side guard
+// (handleRekey) rejects it before calling Rekeyer. The camelCase JSON tag
+// matches the control-socket convention (SessionsPayload.ID,
+// AttachPayload.SessionID, ResizePayload.SessionID) — not to be confused
+// with RoutingEnvelope.ConnID's snake-case `conn_id`, which is the
+// mobile-WS wire and unrelated.
+type RekeyPayload struct {
+	ConnID string `json:"connID"`
 }
 
 // ResizePayload carries a live window-size update for an attached session.
