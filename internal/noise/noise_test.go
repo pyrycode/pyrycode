@@ -368,6 +368,68 @@ func TestDecrypt_RejectsReplayedFrame(t *testing.T) {
 	}
 }
 
+// TestResponder_PeerStatic_AfterReadInit_MatchesInitiatorStatic drives a
+// fresh IK message 1 from a known initiator static key into a fresh
+// Responder, then asserts PeerStatic returns the initiator's public key
+// and that the returned slice is a defensive copy (mutating it does not
+// affect subsequent calls or flynn's internal state).
+func TestResponder_PeerStatic_AfterReadInit_MatchesInitiatorStatic(t *testing.T) {
+	t.Parallel()
+	initPriv, initPub := genKeypair(t)
+	respPriv, respPub := genKeypair(t)
+
+	initiator, err := NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	responder, err := NewResponder(respPriv)
+	if err != nil {
+		t.Fatalf("NewResponder: %v", err)
+	}
+	initMsg, err := initiator.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	if _, err := responder.ReadInit(initMsg); err != nil {
+		t.Fatalf("ReadInit: %v", err)
+	}
+
+	got := responder.PeerStatic()
+	if len(got) != KeyLen {
+		t.Fatalf("PeerStatic len = %d, want %d", len(got), KeyLen)
+	}
+	if !bytes.Equal(got, initPub) {
+		t.Errorf("PeerStatic = %x, want %x", got, initPub)
+	}
+
+	// Defensive-copy contract: mutating one return must not affect another.
+	a := responder.PeerStatic()
+	b := responder.PeerStatic()
+	a[0] ^= 0xff
+	if !bytes.Equal(b, initPub) {
+		t.Errorf("second call returned mutated value: got %x, want %x", b, initPub)
+	}
+	c := responder.PeerStatic()
+	if !bytes.Equal(c, initPub) {
+		t.Errorf("third call returned mutated value: got %x, want %x", c, initPub)
+	}
+}
+
+// TestResponder_PeerStatic_BeforeReadInit_ReturnsZeroLength pins the
+// pre-handshake contract: no panic, returns a zero-length slice.
+func TestResponder_PeerStatic_BeforeReadInit_ReturnsZeroLength(t *testing.T) {
+	t.Parallel()
+	respPriv, _ := genKeypair(t)
+	responder, err := NewResponder(respPriv)
+	if err != nil {
+		t.Fatalf("NewResponder: %v", err)
+	}
+	got := responder.PeerStatic()
+	if len(got) != 0 {
+		t.Errorf("PeerStatic before ReadInit = %x (len=%d), want zero-length", got, len(got))
+	}
+}
+
 // TestErrorMessages_DoNotLeakPlaintextOrKey: a single defensive assertion
 // against future refactors that might pull plaintext into the error
 // message. Cheap, pins the contract documented in the package comment.

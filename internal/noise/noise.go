@@ -103,6 +103,26 @@ func (r *Responder) ReadInit(initMsg []byte) ([]byte, error) {
 	return payload, nil
 }
 
+// PeerStatic returns a copy of the initiator's 32-byte X25519 static
+// public key as learned from IK message 1.
+//
+// Callable only after ReadInit has returned nil. flynn/noise's contract
+// is "an error to call before a handshake message containing a static
+// key has been read"; the wrapper does NOT panic on misuse. Before
+// ReadInit has succeeded, the underlying flynn field is the zero value
+// for []byte (nil), so this method returns a zero-length slice (its
+// length is 0; bytes.Equal against any non-empty key returns false).
+// Callers that need stricter enforcement should track handshake state
+// in their own session struct.
+//
+// The returned slice is a fresh allocation; mutating it does not affect
+// the underlying HandshakeState, and a subsequent call returns an
+// independent copy. Mirrors the defensive-copy posture of NewResponder's
+// StaticKeypair.Private assignment.
+func (r *Responder) PeerStatic() []byte {
+	return append([]byte(nil), r.hs.PeerStatic()...)
+}
+
 // WriteResp produces IK message 2, carrying earlyData as the early-data
 // payload, and returns the paired CipherStates for the post-handshake
 // transport. send is the CipherState this side (responder) uses to encrypt
