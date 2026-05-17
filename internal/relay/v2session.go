@@ -42,6 +42,49 @@ const (
 // payloads never reach Responder.ReadInit.
 const maxNoisePayloadBytes = 65535
 
+// rekeyInterval is the scheduled re-key cadence on each open v2 session
+// (docs/protocol-mobile.md § Re-key — the 1-hour rule). Exposed as a
+// package var (lowercase) so tests can substitute a sub-second value
+// via the same t.Cleanup save-and-restore idiom handshakeTimeout uses;
+// not part of the public API.
+var rekeyInterval = 1 * time.Hour
+
+// rekeyReplyTimeout is the bounded window between emitting a
+// rekey_request and observing the phone's fresh noise_init. On expiry
+// the conn is closed at StatusHandshakeFailure (4426) and a
+// noise.rekey_failed log line is emitted. Exposed as a package var
+// (lowercase) so tests can substitute a sub-second value; not part of
+// the public API.
+var rekeyReplyTimeout = 30 * time.Second
+
+// wakeKind enumerates the per-session timer events the manager's Run
+// goroutine handles on its wake channel. The values are internal and
+// MUST NOT be exposed across the package boundary.
+type wakeKind int
+
+const (
+	wakeRekeyEmit wakeKind = iota
+	wakeRekeyReplyTimeout
+)
+
+// wakeSignal is the value the per-session timer-callback goroutines
+// (spawned by time.AfterFunc) push onto V2SessionManager.wake. The Run
+// goroutine pops these signals and performs the actual work
+// (emitRekeyRequest or closeWith) under the single-owner-goroutine
+// invariant for s.send / s.recv.
+type wakeSignal struct {
+	s    *V2Session
+	kind wakeKind
+}
+
+// wakeBufferSize sizes the manager's wake channel. The 1-hour rekey
+// cadence makes concurrent fires across sessions vanishingly rare; 16
+// is a generous safety margin that absorbs the realistic worst case
+// (every session times out simultaneously while Run is busy in a slow
+// handler invocation) without forcing the timer-callback goroutine to
+// block. cap=1 would also be correct.
+const wakeBufferSize = 16
+
 // handlerOutboundBuf is the buffer size for the per-frame dispatch.Conn
 // outbound channel allocated by dispatchAppFrame. The three production
 // handlers (send_message, list_conversations, register_push_token) emit
@@ -102,6 +145,36 @@ type V2Session struct {
 	// package's no-key-in-logs discipline extends to per-session
 	// identity pins. Not persisted to disk; lifetime is the V2Session.
 	peerStatic []byte
+
+	// rekeyTimer fires rekeyInterval after the session entered
+	// V2StateOpen (initial handshake) or after the last successful
+	// responder-side CipherState swap (rekeyComplete). On fire the
+	// timer's AfterFunc callback delivers a wakeRekeyEmit signal onto
+	// m.wake; the manager's Run goroutine then calls emitRekeyRequest
+	// under the single-owner-goroutine invariant for s.send. Stopped
+	// (and replaced with nil) by closeWith on any close path. Re-armed
+	// by rekeyComplete. Nil before initial open; nil after closeWith.
+	rekeyTimer *time.Timer
+
+	// rekeyReplyTimer fires rekeyReplyTimeout after emitRekeyRequest
+	// sent a rekey_request. On fire the AfterFunc callback delivers a
+	// wakeRekeyReplyTimeout signal onto m.wake; the manager's Run
+	// goroutine then closes the conn via closeWith(StatusHandshakeFailure
+	// /* 4426 */, nil) and emits the noise.rekey_failed log line.
+	// rekeyComplete stops this timer (and clears awaitingRekeyReply)
+	// when the phone's fresh noise_init lands in handleRekeyInit
+	// before the timeout elapses. Nil unless awaitingRekeyReply is
+	// true.
+	rekeyReplyTimer *time.Timer
+
+	// awaitingRekeyReply is true between an emitRekeyRequest emit and
+	// either rekeyComplete (success) or the wakeRekeyReplyTimeout
+	// branch (failure). The bool is the canonical "are we awaiting a
+	// fresh noise_init" predicate; rekeyReplyTimer non-nil-ness is the
+	// concrete machinery but is not consulted as state — Stop() on a
+	// fired timer can race with the wake delivery, and the bool is the
+	// stable signal that rekeyComplete already won.
+	awaitingRekeyReply bool
 }
 
 // State returns the externally-observable state. Called from the same
@@ -109,6 +182,39 @@ type V2Session struct {
 // broadcast layer added in a later slice) would need atomic.Int32 or a
 // small mutex — tracked in spec § Open questions.
 func (s *V2Session) State() V2SessionState { return s.state }
+
+// rekeyComplete is the seam that bridges responder-side swap completion
+// back to initiator-side cadence. Called from the success tail of
+// (*V2SessionManager).handleRekeyInit after the atomic s.send / s.recv
+// swap and the v2.rekey.accept log emission.
+//
+// Behaviour:
+//   - Clears awaitingRekeyReply (no-op if not set — a spontaneous
+//     phone-initiated re-key that the binary did not request still
+//     re-bases the 1-hour cadence; any successful swap is a fresh-key
+//     moment).
+//   - Stops and nils rekeyReplyTimer (no-op if nil).
+//   - Stops and replaces rekeyTimer with a fresh one armed
+//     rekeyInterval from now.
+//
+// Runs on the manager's single dispatch goroutine (the same goroutine
+// that owns s.send / s.recv after the swap). Inherits the no-mutex /
+// no-atomic invariant from the rest of the package.
+//
+// The (m, ctx) argument shape carries the dependencies needed to
+// re-arm the 1-hour timer — m for the wake channel, ctx (Run-derived
+// runCtx) for the AfterFunc callback's escape arm.
+func (s *V2Session) rekeyComplete(m *V2SessionManager, ctx context.Context) {
+	s.awaitingRekeyReply = false
+	if s.rekeyReplyTimer != nil {
+		s.rekeyReplyTimer.Stop()
+		s.rekeyReplyTimer = nil
+	}
+	if s.rekeyTimer != nil {
+		s.rekeyTimer.Stop()
+	}
+	s.rekeyTimer = m.armRekeyTimer(ctx, s)
+}
 
 // V2SessionConfig parameterises V2SessionManager. All fields are
 // required; NewV2SessionManager validates and panics or errors on
@@ -182,6 +288,19 @@ type V2SessionConfig struct {
 type V2SessionManager struct {
 	cfg      V2SessionConfig
 	sessions map[string]*V2Session
+
+	// wake is the wake-up signal channel for per-session timers. Both
+	// the 1-hour rekey-emit timer and the 30s rekey-reply-timeout
+	// timer use time.AfterFunc callbacks (which run on fresh runtime
+	// goroutines, NOT on the dispatch goroutine that owns
+	// s.send / s.recv); the callbacks send a wakeSignal onto this
+	// channel so the manager's Run goroutine can do the actual work
+	// (emitRekeyRequest or closeWith) under the single-owner-
+	// goroutine invariant. Buffered (wakeBufferSize) so timer
+	// callbacks don't block on a busy Run goroutine; callbacks also
+	// honour the Run-derived ctx so they unblock cleanly on Run exit
+	// and leak no goroutines.
+	wake chan wakeSignal
 }
 
 // NewV2SessionManager validates cfg and returns a ready manager. Panics
@@ -211,24 +330,90 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 	return &V2SessionManager{
 		cfg:      cfg,
 		sessions: make(map[string]*V2Session),
+		wake:     make(chan wakeSignal, wakeBufferSize),
 	}, nil
 }
 
 // Run drives the state machine until Frames closes or ctx is cancelled.
 // Returns ctx.Err() on cancellation, nil on Frames close. Every per-conn
 // session is released on return; no goroutines outlive Run.
+//
+// runCtx is a derived-cancel context so per-session timer-callback
+// goroutines (spawned by armRekeyTimer / armRekeyReplyTimer via
+// time.AfterFunc) unblock cleanly when Run exits. The callbacks select
+// on (m.wake, runCtx.Done) so a fired-but-undelivered wake completes
+// via the ctx branch on shutdown and leaves no goroutine behind.
 func (m *V2SessionManager) Run(ctx context.Context) error {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			return ctx.Err()
 		case env, ok := <-m.cfg.Frames:
 			if !ok {
 				return nil
 			}
-			m.handleFrame(ctx, env)
+			m.handleFrame(runCtx, env)
+		case w := <-m.wake:
+			m.handleWake(runCtx, w)
 		}
 	}
+}
+
+// handleWake routes a per-session timer wake to its handler under the
+// single-owner-goroutine invariant. A wake arriving on a session that
+// has transitioned out of V2StateOpen (e.g. closeWith ran between the
+// timer fire and the wake delivery) is dropped silently. The state-
+// check is read-only on s.state from the dispatch goroutine — no race
+// because the same goroutine that would have mutated s.state is the
+// goroutine doing this read.
+func (m *V2SessionManager) handleWake(ctx context.Context, w wakeSignal) {
+	if w.s.state != V2StateOpen {
+		return
+	}
+	switch w.kind {
+	case wakeRekeyEmit:
+		m.emitRekeyRequest(ctx, w.s)
+	case wakeRekeyReplyTimeout:
+		if !w.s.awaitingRekeyReply {
+			// rekeyComplete already cleared the awaiting state — the
+			// phone's fresh noise_init landed before the timeout fired
+			// and the swap succeeded. Ignore stale wake.
+			return
+		}
+		m.cfg.Logger.Warn("relay: v2 rekey reply timeout",
+			"event", "noise.rekey_failed",
+			"conn_id", w.s.connID,
+			"close_code", int(StatusHandshakeFailure))
+		m.closeWith(ctx, w.s, StatusHandshakeFailure, nil)
+	}
+}
+
+// armRekeyTimer arms the 1-hour scheduled re-key timer. The callback
+// runs on a fresh runtime goroutine (time.AfterFunc semantics); it
+// pushes a wakeRekeyEmit signal onto m.wake under blocking-send +
+// ctx.Done semantics. ctx is the manager's Run-derived runCtx;
+// cancelled on Run exit, which unblocks any pending callback goroutine.
+func (m *V2SessionManager) armRekeyTimer(ctx context.Context, s *V2Session) *time.Timer {
+	return time.AfterFunc(rekeyInterval, func() {
+		select {
+		case m.wake <- wakeSignal{s: s, kind: wakeRekeyEmit}:
+		case <-ctx.Done():
+		}
+	})
+}
+
+// armRekeyReplyTimer arms the 30s reply-window timer. Same shape as
+// armRekeyTimer but with the wakeRekeyReplyTimeout kind and the
+// shorter cadence.
+func (m *V2SessionManager) armRekeyReplyTimer(ctx context.Context, s *V2Session) *time.Timer {
+	return time.AfterFunc(rekeyReplyTimeout, func() {
+		select {
+		case m.wake <- wakeSignal{s: s, kind: wakeRekeyReplyTimeout}:
+		case <-ctx.Done():
+		}
+	})
 }
 
 // handleFrame dispatches one inbound routing envelope to its
@@ -516,6 +701,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
 	s.device = &device
 	s.state = V2StateOpen
+	s.rekeyTimer = m.armRekeyTimer(ctx, s)
 }
 
 // handleRekeyInit runs the responder side of a phone-initiated re-key
@@ -630,6 +816,7 @@ func (m *V2SessionManager) handleRekeyInit(ctx context.Context, s *V2Session, in
 		"conn_id", s.connID,
 		"device_name", s.device.Name)
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+	s.rekeyComplete(m, ctx)
 }
 
 // handleNoiseMsg processes an inbound noise_msg frame. The
@@ -815,6 +1002,86 @@ func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, e
 	}
 }
 
+// emitRekeyRequest builds an AEAD-sealed rekey_request envelope under
+// s.send, wraps it as a noise_msg inner frame, forwards via m.send,
+// then sets s.awaitingRekeyReply=true and arms s.rekeyReplyTimer.
+// Called from handleWake's wakeRekeyEmit arm, on the manager's single
+// dispatch goroutine.
+//
+// payload.reason is always "scheduled" in this slice. The "manual" and
+// "compromise" reasons (docs/protocol-mobile.md § Re-key) are emitted
+// by the future pyry rekey <conn_id> operator verb (#451), not by the
+// timer-driven path.
+//
+// Envelope ID is fixed at 1: there is no rekey_ack response that would
+// correlate by InReplyTo (the spec is explicit — the next successful
+// AEAD round-trip under the new keys is the implicit ack).
+//
+// AEAD-seal failure is realistically unreachable under correct
+// flynn/noise (same posture as sealError). On seal or marshal failure
+// the frame is dropped and a WARN line emitted; the conn is NOT
+// closed — the session remains in V2StateOpen and the next 1-hour
+// cadence will attempt another emit. Closing the conn over an internal
+// seal failure would tear down a working session for a non-protocol
+// error.
+func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session) {
+	// Defensive: a wakeRekeyEmit arriving while already awaiting a
+	// reply would re-emit. Skip — the in-flight emit's reply window is
+	// still ticking. (Should not happen under normal operation;
+	// rekeyTimer is one-shot and only re-armed by rekeyComplete, which
+	// clears the bool first.)
+	if s.awaitingRekeyReply {
+		m.cfg.Logger.Warn("relay: v2 rekey emit skipped",
+			"event", "v2.rekey.emit.skipped_already_awaiting",
+			"conn_id", s.connID)
+		return
+	}
+
+	reqPayload, err := json.Marshal(struct {
+		Reason string `json:"reason"`
+	}{Reason: "scheduled"})
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 rekey emit marshal failed",
+			"event", "v2.rekey.emit.marshal_failed",
+			"conn_id", s.connID)
+		return
+	}
+	envelope := protocol.Envelope{
+		ID:      1,
+		Type:    protocol.TypeRekeyRequest,
+		TS:      time.Now().UTC(),
+		Payload: reqPayload,
+	}
+	envJSON, err := json.Marshal(envelope)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 rekey emit marshal failed",
+			"event", "v2.rekey.emit.marshal_failed",
+			"conn_id", s.connID)
+		return
+	}
+	ciphertext, err := s.send.Encrypt(envJSON)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 rekey emit seal failed",
+			"event", "v2.rekey.emit.seal_failed",
+			"conn_id", s.connID)
+		return
+	}
+	frame, err := marshalInnerFrameV2(protocol.TypeNoiseMsg, ciphertext)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 rekey emit marshal failed",
+			"event", "v2.rekey.emit.marshal_failed",
+			"conn_id", s.connID)
+		return
+	}
+	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
+	s.awaitingRekeyReply = true
+	s.rekeyReplyTimer = m.armRekeyReplyTimer(ctx, s)
+	m.cfg.Logger.Info("relay: v2 rekey emit",
+		"event", "v2.rekey.emit",
+		"conn_id", s.connID,
+		"reason", "scheduled")
+}
+
 // sealError builds a TypeError envelope, AEAD-seals it under s.send,
 // and returns the wrapped noise_msg inner-frame JSON ready for the
 // Frame slot of a RoutingEnvelope. Returns a non-nil error only if the
@@ -872,6 +1139,20 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 		return
 	}
 	s.state = V2StateClosed
+	// Stop per-session timers to free runtime timer-heap entries and
+	// ensure no pending callback goroutine blocks indefinitely on
+	// m.wake. The callback's ctx.Done arm is the load-bearing teardown
+	// (Run-derived runCtx cancels on Run exit); these Stop() calls are
+	// the defensive belt and are safe to call on a fired timer
+	// (returns false, no-op).
+	if s.rekeyTimer != nil {
+		s.rekeyTimer.Stop()
+		s.rekeyTimer = nil
+	}
+	if s.rekeyReplyTimer != nil {
+		s.rekeyReplyTimer.Stop()
+		s.rekeyReplyTimer = nil
+	}
 	delete(m.sessions, s.connID)
 	env := protocol.RoutingEnvelope{
 		ConnID:    s.connID,
