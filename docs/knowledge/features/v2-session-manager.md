@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -45,6 +45,16 @@ type V2SessionManager struct { /* unexported */ }
 
 func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error)
 func (m *V2SessionManager) Run(ctx context.Context) error
+
+// Satisfies control.Rekeyer. Operator-driven manual re-key trigger (#462).
+func (m *V2SessionManager) Rekey(ctx context.Context, connID string) error
+
+// Sentinels returned by Rekey. ErrConnNotFound wraps control.ErrConnNotFound
+// via %w so the slice A dispatcher's errors.Is mapping fires unchanged.
+var (
+    ErrConnNotFound   error // wraps control.ErrConnNotFound
+    ErrSessionNotOpen error // session not in V2StateOpen, or already awaiting a rekey reply
+)
 ```
 
 `NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
@@ -199,6 +209,51 @@ On successful emit, the manager sets `s.awaitingRekeyReply = true` and arms `s.r
 
 **No new ADR.** [ADR 024](../decisions/024-noise-ik-mobile-e2e.md) § Re-key policy specifies the 1-hour cadence and the explicit `rekey_request` envelope; this slice implements the initiator half. No new close code is introduced — the reply-timeout teardown reuses `StatusHandshakeFailure` (4426), the same code the initial handshake and the re-key responder (#453) use for the IK-failure class.
 
+### Operator-driven manual re-key (#462) — `Rekey` method satisfying `control.Rekeyer`
+
+`*V2SessionManager` satisfies [`control.Rekeyer`](control-plane.md#rekey-v2-conn-re-key-trigger-seam-13d-1-459) (pinned by `var _ control.Rekeyer = (*V2SessionManager)(nil)`). The public method `Rekey(ctx context.Context, connID string) error` funnels each request onto Run's single dispatch goroutine via a new unbuffered `manualRekey chan manualRekeyReq` field; a fourth `Run` select arm dequeues the request and dispatches to a private `handleManualRekey` method that runs on the owner goroutine. The shape preserves the single-owner-goroutine invariant for `s.send` / `s.state` / `s.rekeyTimer` / `s.awaitingRekeyReply` — `Rekey` itself does only channel I/O on the caller's goroutine; every session-state read or write happens in `handleManualRekey` on `Run`'s goroutine. **No new lock, no new atomic, no new long-lived goroutine.**
+
+```go
+type manualRekeyReq struct {
+    connID string
+    reply  chan error // cap=1 per request; manager's send is non-blocking
+}
+
+// In V2SessionManager:
+//   manualRekey chan manualRekeyReq  // unbuffered: backpressure is correct
+
+// In Run's select:
+case req := <-m.manualRekey:
+    req.reply <- m.handleManualRekey(runCtx, req.connID)
+```
+
+The channel is unbuffered: backpressure is the right semantics — if `Run` is busy processing a frame, `Rekey` waits. A buffer would mislead the caller into thinking the request was accepted when in reality `Run` hadn't yet observed it. The caller's `ctx` is the escape arm in both `Rekey` select blocks (enqueue and reply). The per-request reply channel is `cap=1` so the manager's `req.reply <- err` send is non-blocking even if the caller's ctx fires between enqueue and reply. The `manualRekey` channel is NOT closed on `Run` exit (matches the existing posture for `m.cfg.Frames`); in-flight callers unblock via `ctx.Done`.
+
+**Method-name divergence.** Ticket #462's AC text said `TriggerRekey(connID string) error`; the slice A `control.Rekeyer` interface declared `Rekey(ctx context.Context, connID string) error`. The interface signature wins because it lets `*V2SessionManager` satisfy `control.Rekeyer` directly with no adapter. The compile-time `var _ control.Rekeyer = (*V2SessionManager)(nil)` assertion pins the contract so a future refactor cannot drift the name back to the AC's informal label.
+
+**`handleManualRekey` is the lookup + emit dispatch site.** Three reject branches, then the emit:
+
+| Precondition | Returned sentinel |
+| --- | --- |
+| `m.sessions[connID]` miss | `ErrConnNotFound` (wraps `control.ErrConnNotFound`) |
+| `s.state != V2StateOpen` | `ErrSessionNotOpen` |
+| `s.awaitingRekeyReply` (a prior emit is in flight) | `ErrSessionNotOpen` |
+| All checks pass | stop+nil `s.rekeyTimer`; call `emitRekeyRequest(ctx, s, "manual")`; return nil |
+
+The `!= V2StateOpen` and `awaitingRekeyReply` branches return the SAME sentinel because from the operator's perspective both mean "the conn is not in a state where a manual rekey can be initiated." Distinguishing them externally would leak internal state-machine vocabulary into the operator surface with no actionable consequence. The collapse also imposes a natural per-conn rate limit: at most one manual rekey per `rekeyReplyTimeout` (30 s in production) — a second `Rekey` arriving within that window hits the awaiting-reply branch.
+
+**`ErrConnNotFound` wraps `control.ErrConnNotFound` via `%w`.** Slice A's dispatcher uses `errors.Is(err, control.ErrConnNotFound)` (not `==`) to map to `ErrCodeConnNotFound = "conn_not_found"` on the wire. `%w` keeps that mapping firing without any further plumbing on either side. `ErrSessionNotOpen` has no wire-code analogue today — slice A defined no `ErrCodeSessionNotOpen`; the control dispatcher surfaces it through `Response.Error` verbatim with no `ErrorCode`. Sentinels live in `internal/relay` so the wire-mapping layer can import them without leaking relay-internal state-machine vocabulary into `internal/control`. The `relay → control` import is non-cyclic.
+
+**Timer rebase.** `handleManualRekey` calls `s.rekeyTimer.Stop()` and sets `s.rekeyTimer = nil` BEFORE the emit. `Stop()`'s bool return is intentionally ignored — see "Stale-wake benign race" below. The natural [#453](../codebase/453.md) responder cycle on the phone's reply re-arms a fresh `rekeyTimer` via `rekeyComplete` from the swap moment, not the previous emit moment, so the next scheduled emit lands at T_swap + `rekeyInterval`, never at the original boundary. On reply-timeout the conn closes at WS 4426 and the session is removed entirely.
+
+**`emitRekeyRequest` refactor.** The function signature gained a `reason string` parameter; the body deltas are mechanically minimal (the struct literal's `Reason:` field, the `Info` log's `reason` value). Call sites: `handleWake`'s `wakeRekeyEmit` arm passes `"scheduled"`; `handleManualRekey` passes `"manual"`. **One emit function, two callers — no parallel emit machinery.** The AEAD-seal posture, the awaiting-defensive skip, the marshal-failure WARN, the `awaitingRekeyReply = true` set, and the `armRekeyReplyTimer` call all run on both paths byte-identically. Mobile Protocol v2's `payload.reason = "manual"` is wire-pinned by `docs/protocol-mobile.md` § Re-key as *"operator-triggered via `pyry rekey <conn_id>`"*; the literal is the only semantic difference between the scheduled and manual emits.
+
+**Stale-wake benign race.** Sequence: scheduled `rekeyTimer` fires at T=0, the `AfterFunc` callback pushes `wakeSignal{s, wakeRekeyEmit}` onto `m.wake` (cap 16). `Run` picks up the `manualRekey` arm first (Go's `select` is fair-random). `handleManualRekey` runs `Stop()` (returns false — fired), nils the timer, runs the manual emit (which sets `awaitingRekeyReply = true`). On a subsequent `Run` iteration the stale wake is processed: `handleWake` → `wakeRekeyEmit` arm → `emitRekeyRequest(ctx, s, "scheduled")` → the defensive `awaitingRekeyReply` check catches it and logs `v2.rekey.emit.skipped_already_awaiting`. **No double emit; one spurious WARN.** The defensive skip stays in `emitRekeyRequest` precisely so this race remains benign on the scheduled path; the manual path's explicit pre-check makes the defensive skip structurally unreachable from `handleManualRekey` (the explicit check fires first).
+
+**AEAD-seal-failure posture: pause-not-close.** A sub-emit failure on the manual path leaves the conn with `rekeyTimer = nil` and `awaitingRekeyReply = false` — automatic scheduled re-keying is paused indefinitely until a phone-initiated re-key rebases the timer via `rekeyComplete`. Acceptable per the architect's security review: seal failures are realistically unreachable under correct flynn/noise (same posture as `sealError`); the remediation is operator-visible (`v2.rekey.emit.seal_failed` log line) and the operator can re-run `pyry rekey <conn_id>` once slice B2 lands. Re-arming the timer in the seal-failure branch would mask the underlying error AND introduce a code path the scheduled emit doesn't have — extra surface area for an unobserved failure mode.
+
+**Production wire-up is out of scope.** `NewV2SessionManager` has no production caller as of 2026-05-17 (`grep` finds only test callers). The `Rekey` method is reachable from `internal/relay` tests only until the production wire-up lands in a separate ticket. The sibling slice B2 ships the `pyry rekey <conn_id>` operator verb in `cmd/pyry`; once both this slice and the production wire-up land, the verb is end-to-end functional.
+
 **AEAD-failure teardown** (tampered / replayed / truncated `noise_msg`): `s.recv.Decrypt` returns non-nil → log `v2.aead.fail` with `conn_id` + `close_code=4421` (NO error text — the underlying flynn/noise error may carry counter indices that aren't operator-actionable) → `closeWith(ctx, s, StatusProtocolMismatch, nil)`. `closeWith` emits a single close-only routing envelope and **deletes the session entry from `m.sessions`** — the next `noise_init` for the same `conn_id` lazy-creates a fresh `awaitingInit` with no carry-over CipherStates. The handler chain is structurally unreachable: the AEAD-decrypt branch returns before `dispatchAppFrame` is called.
 
 **Why the outbound channel is not closed.** Closing on the sending side panics any goroutine the handler accidentally forked that retains the `*dispatch.Conn`. The drain is non-blocking (`select { case env := <-outbound: ...; default: return }`); a misbehaving handler that forks a sender after `dispatchAppFrame` returns writes into a leaked but capacity-bounded channel that the GC reclaims once the goroutine exits. This is the documented synchronous-handler assumption — handlers MUST be synchronous and MUST NOT retain `*dispatch.Conn` beyond the call.
@@ -278,6 +333,15 @@ Re-key initiator — 1-hour timer + emit + 30 s reply timeout (#450):
 - `TestV2Session_RekeyInitiator_ReplyTimeout_4426` — substitutes `rekeyReplyTimeout = 40*time.Millisecond`; uses `bufferLogger()`; drives to open; does NOT feed a noise_init reply; waits for the close envelope via the new `waitForOutboundCount(t, rec, n, deadline)` helper. Asserts: third outbound envelope has `CloseCode == uint16(StatusHandshakeFailure)` and nil Frame; `mgr.sessions[v2TestConnID]` absent after stop; log buffer contains `event=noise.rekey_failed`, `close_code=4426`, `conn_id=…`; the `noise.rekey_failed` line specifically does NOT contain `err=` (per-line substring check — anti-leakage of flynn-noise error text).
 - `TestV2Session_RekeyInitiator_TimerCleanup_NoGoroutineLeak` — two sub-tests: `close_via_manager_exit` (drive to open, stop immediately before the rekeyTimer fires) and `close_via_reply_timeout` (drive to open, wait for the close envelope after the reply-timeout, then stop). Both assert `runtime.NumGoroutine()` returns to within +1 of the pre-test baseline after `runtime.Gosched(); runtime.GC(); time.Sleep(20ms)`. Pins the goroutine-lifetime invariant for `time.AfterFunc` callbacks under the wake-channel design.
 
+Operator-driven manual re-key (#462):
+
+- `TestV2Session_RekeyManual_HappyPath_EmitsManualReason` — drives `driveToOpen`, calls `mgr.Rekey(ctx, v2TestConnID)`, waits for the second envelope (initial `noise_resp` + manual emit), AEAD-decrypts the second envelope under `sess.initRecv`, asserts `Type == protocol.TypeRekeyRequest` and `payload.reason == "manual"`, and asserts the log buffer contains `event=v2.rekey.emit` + `reason=manual` + `conn_id=<v2TestConnID>`. Substitutes long `rekeyInterval`/`rekeyReplyTimeout` (10 s each) so the scheduled boundary cannot fire during the test window.
+- `TestV2Session_RekeyManual_UnknownConn_ReturnsErrConnNotFound` — manager with `Run` started but `m.sessions` empty; `mgr.Rekey(ctx, "this-conn-does-not-exist")` returns an error that satisfies BOTH `errors.Is(err, relay.ErrConnNotFound)` AND `errors.Is(err, control.ErrConnNotFound)` (the wire-mapping invariant — the `%w` wrap survives both levels). `rec.snapshot()` is empty (no outbound side-effect).
+- `TestV2Session_RekeyManual_AlreadyAwaitingReply_ReturnsErrSessionNotOpen` — long `rekeyReplyTimeout` so the first emit's awaiting-reply window doesn't auto-close; first `Rekey` succeeds → wait for the manual emit to land in `rec` → second `Rekey` returns `errors.Is(err, relay.ErrSessionNotOpen)`. Asserts only ONE manual emit envelope is recorded (no double emit), session state remains `V2StateOpen`, and `s.awaitingRekeyReply` remains true.
+- `TestV2Session_RekeyManual_RebasesScheduledTimer` — substitutes `rekeyInterval = 100ms` / `rekeyReplyTimeout = 1s`. Drives to open, immediately calls `Rekey`, waits for the manual emit at T ≈ small_delta and asserts `payload.reason == "manual"`. Drives a fresh responder cycle (same `initPriv` → peer-static continuity passes), captures `initRecv2`. **Original-boundary check**: at T ≈ rekeyInterval + jitter (130 ms after open — past the original scheduled boundary, well before T_rekeyComplete + rekeyInterval), asserts `rec.snapshot()` length is still 3 (manual + responder reply + nothing else). **New-boundary check**: at T_rekeyComplete + rekeyInterval + jitter, asserts a fourth envelope arrives whose payload decodes (under post-swap `initRecv2`) to `TypeRekeyRequest` with `reason == "scheduled"`. The original-boundary check is the load-bearing negative assertion — it directly pins "no stale scheduled emit lands between manual emit and the re-based scheduled boundary."
+
+All four #462 tests are explicitly NOT `t.Parallel()` — they mutate package-level `rekeyInterval` / `rekeyReplyTimeout` vars (same posture as the other rekey tests).
+
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)
 
 Spins up `fakerelay` (now with both `/v1/server` and `/v2/server`), wires `relay.Connect` + `V2SessionManager` inline (no daemon — `cmd/pyry/relay.go` still wires the v1 dispatcher), dials a `fakephone` against `/v1/client` (unchanged routing wire under v2), and drives a Noise_IK handshake from the phone side.
@@ -299,7 +363,8 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 
 - **Production wiring of `V2SessionManager` into `cmd/pyry/relay.go`** — daemon path still runs the v1 dispatcher. Cutover re-wires the daemon to construct `V2SessionManager` instead of `Dispatcher` and registers production handlers against `V2SessionConfig.Handlers`. Gated by the pre-flight release-flag check ([#436](../codebase/436.md)).
 - **Per-conn fan-out for handler dispatch.** Open-state handler dispatch runs synchronously on the manager's single goroutine; a long-running handler stalls all conns. The follow-up spawns one goroutine per `conn_id` with a per-session mutex guarding `s.send` / `s.recv` (mirroring `dispatch.Dispatcher.runConn`). Priority concern before production cutover.
-- Operator-facing `pyry rekey <conn_id>` verb — #451 (sibling of #450). CLI surface for manual re-key; will emit a `rekey_request` envelope with `payload.reason == "manual"` or `"compromise"` instead of `"scheduled"` and reuse this slice's `emitRekeyRequest` plumbing.
+- Operator-facing `pyry rekey <conn_id>` verb — sibling slice B2 of #460 (re-split of #451). CLI surface for manual re-key; uses slice A's [`control.Rekey`](control-plane.md#client-helper) client helper to call `*V2SessionManager.Rekey` (shipped in #462), which reuses this slice's `emitRekeyRequest` plumbing with `payload.reason == "manual"`. The `"compromise"` value remains reserved for a future caller.
+- Production wire-up of `*V2SessionManager` into `cmd/pyry` — separate ticket. `NewV2SessionManager` has no production caller as of 2026-05-17; until the daemon constructs the manager, drives `Run`, and calls `ctrlServer.SetRekeyer(mgr)`, the #462 `Rekey` method is reachable from `internal/relay` tests only.
 - Explicit `Wipe()` of old CipherState key bytes on re-key swap — would require touching #433's surface; deferred. The single-owner-goroutine invariant provides the practical zeroisation property (no code path observes the old state after the swap); documented in the `V2Session` package comment.
 - `s.resp` reset to nil after handshake completes — the field is dead state after `WriteResp` returns and is unused by the re-key path (which constructs a fresh local `Responder`). Cleanup belongs in a `V2Session`-shape refactor, not in any re-key slice.
 - `V2Session` cleanup on phone-initiated WS close — relay→binary "phone disconnected" forward signal does not exist on the v2 wire today. AEAD-failure teardown (this slice) IS the only binary-initiated cleanup path; phone-initiated reconnects still cannot trigger local cleanup. State entries linger until the binary↔relay leg recycles.
@@ -326,5 +391,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`codebase/454.md`](../codebase/454.md) — v2 `rekey_request` control-envelope discriminator at the `dispatchAppFrame` seam; logs-only `handleRekeyRequest`.
 - [`codebase/453.md`](../codebase/453.md) — v2 re-key responder swap on open conn; `handleRekeyInit`, peer-static continuity check, atomic CipherState swap.
 - [`codebase/450.md`](../codebase/450.md) — v2 re-key initiator on binary side; 1-hour `rekeyTimer`, AEAD-sealed `rekey_request` emit under `s.send`, 30 s `rekeyReplyTimer`, `rekeyComplete` seam, wake-channel routing of `time.AfterFunc` callbacks.
+- [`codebase/459.md`](../codebase/459.md) — `internal/control` rekey verb wire + `Rekeyer` interface + `control.Rekey` client helper + `control.ErrConnNotFound` sentinel; the wire contract that `(*V2SessionManager).Rekey` (#462) implements.
+- [`codebase/462.md`](../codebase/462.md) — manager-side manual-rekey trigger; `Rekey` method + `manualRekey` channel + `handleManualRekey` + `emitRekeyRequest(reason)` refactor + `ErrConnNotFound`/`ErrSessionNotOpen` sentinels.
 - [`features/dispatch-package.md`](dispatch-package.md) — `Route` and `NewConn` (the production-allowed counterpart to `NewTestConn`).
 - [`features/relay-package.md`](relay-package.md) — the v1 surfaces of `internal/relay`.

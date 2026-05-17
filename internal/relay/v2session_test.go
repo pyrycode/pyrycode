@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/noise"
@@ -2088,4 +2090,334 @@ func TestV2Session_RekeyInitiator_TimerCleanup_NoGoroutineLeak(t *testing.T) {
 			t.Errorf("goroutine leak: before=%d, after=%d (delta=%d)", before, after, after-before)
 		}
 	})
+}
+
+// TestV2Session_RekeyManual_HappyPath_EmitsManualReason drives a v2
+// handshake to open, calls (*V2SessionManager).Rekey, and asserts the
+// resulting emit is a TypeRekeyRequest envelope sealed under s.send
+// with payload.reason == "manual" and a matching log line.
+func TestV2Session_RekeyManual_HappyPath_EmitsManualReason(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval / rekeyReplyTimeout
+	// vars. Long values so the scheduled timer cannot fire during the
+	// test window (only the manual emit should produce a second envelope).
+	prevInterval := rekeyInterval
+	rekeyInterval = 10 * time.Second
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 10 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sess.mgr.Rekey(ctx, v2TestConnID); err != nil {
+		t.Fatalf("Rekey: %v", err)
+	}
+
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("envs after manual rekey: got %d, want exactly 2 (noise_resp + manual emit)", len(envs))
+	}
+	emit := envs[1]
+	if emit.CloseCode != 0 {
+		t.Errorf("manual emit CloseCode = %d, want 0", emit.CloseCode)
+	}
+	inner := decryptAppFrame(t, emit, sess.initRecv)
+	if inner.Type != protocol.TypeRekeyRequest {
+		t.Errorf("manual emit inner type = %q, want %q", inner.Type, protocol.TypeRekeyRequest)
+	}
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner.Payload, &payload); err != nil {
+		t.Fatalf("decode manual emit payload: %v", err)
+	}
+	if payload.Reason != "manual" {
+		t.Errorf("manual emit reason = %q, want %q", payload.Reason, "manual")
+	}
+
+	waitForLogContains(t, logBuf, "event=v2.rekey.emit")
+	out := logBuf.String()
+	for _, want := range []string{
+		"event=v2.rekey.emit",
+		"reason=manual",
+		"conn_id=" + v2TestConnID,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestV2Session_RekeyManual_UnknownConn_ReturnsErrConnNotFound calls
+// Rekey for a conn_id the manager has never seen and asserts the
+// returned error matches both relay.ErrConnNotFound and
+// control.ErrConnNotFound (the wire-mapping invariant the dispatcher's
+// errors.Is depends on) and that no outbound side-effect occurred.
+func TestV2Session_RekeyManual_UnknownConn_ReturnsErrConnNotFound(t *testing.T) {
+	t.Parallel()
+
+	respPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := mgr.Rekey(ctx, "this-conn-does-not-exist")
+	if err == nil {
+		t.Fatalf("Rekey on unknown conn: err = nil, want non-nil")
+	}
+	if !errors.Is(err, ErrConnNotFound) {
+		t.Errorf("errors.Is(err, relay.ErrConnNotFound) = false; err = %v", err)
+	}
+	if !errors.Is(err, control.ErrConnNotFound) {
+		t.Errorf("errors.Is(err, control.ErrConnNotFound) = false; err = %v (wire-mapping invariant broken)", err)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Errorf("rec.snapshot() len = %d, want 0 (no outbound side-effect on unknown conn)", len(got))
+	}
+}
+
+// TestV2Session_RekeyManual_AlreadyAwaitingReply_ReturnsErrSessionNotOpen
+// drives to open, fires a successful manual Rekey, then fires a SECOND
+// Rekey on the same conn while the first reply window is still open.
+// The second call must return ErrSessionNotOpen without producing a
+// second outbound emit.
+func TestV2Session_RekeyManual_AlreadyAwaitingReply_ReturnsErrSessionNotOpen(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval / rekeyReplyTimeout.
+	prevInterval := rekeyInterval
+	rekeyInterval = 10 * time.Second
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 5 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := sess.mgr.Rekey(ctx, v2TestConnID); err != nil {
+		t.Fatalf("first Rekey: %v", err)
+	}
+	// Wait for the manual emit so awaitingRekeyReply is observably true
+	// on the dispatch goroutine before the second call lands.
+	envs := waitForEnvelopes(t, sess.rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("envs after first Rekey: got %d, want 2 (noise_resp + manual emit)", len(envs))
+	}
+
+	err := sess.mgr.Rekey(ctx, v2TestConnID)
+	if err == nil {
+		t.Fatalf("second Rekey: err = nil, want ErrSessionNotOpen")
+	}
+	if !errors.Is(err, ErrSessionNotOpen) {
+		t.Errorf("errors.Is(err, relay.ErrSessionNotOpen) = false; err = %v", err)
+	}
+	if got := sess.rec.snapshot(); len(got) != 2 {
+		t.Errorf("rec.snapshot() len = %d, want 2 (no second manual emit)", len(got))
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after second Rekey", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after second Rekey = %v, want V2StateOpen", got)
+	}
+	if !s.awaitingRekeyReply {
+		t.Errorf("awaitingRekeyReply = false after second Rekey, want true")
+	}
+}
+
+// TestV2Session_RekeyManual_RebasesScheduledTimer pins the AC's "manual
+// emit at T re-bases the scheduled timer so the next scheduled emit
+// lands at T+rekeyInterval relative to the manual emit, not at the
+// original tick boundary." Sequence: drive to open at T≈0, sleep a
+// fraction of rekeyInterval so the original and re-based boundaries
+// separate cleanly, fire manual Rekey, drive a successful responder
+// cycle so rekeyComplete arms a fresh scheduled timer, assert no extra
+// emit lands at the original boundary, then assert the re-based
+// boundary produces a fresh scheduled emit.
+func TestV2Session_RekeyManual_RebasesScheduledTimer(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval / rekeyReplyTimeout.
+	//
+	// rekeyInterval is 300ms; the manual rekey is delayed by ~200ms after
+	// open so the original boundary (openedAt+300ms) is clearly before the
+	// re-based boundary (rekeyCompleteAt+300ms ≈ openedAt+500ms). A
+	// tighter cadence would make the two boundaries indistinguishable
+	// under scheduler jitter.
+	prevInterval := rekeyInterval
+	rekeyInterval = 300 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 2 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 3)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	openedAt := time.Now()
+
+	// Delay the manual rekey so the original scheduled boundary (T+300ms)
+	// is clearly distinguishable from the re-based boundary (T_manual+300ms).
+	sleepUntil(openedAt.Add(200 * time.Millisecond))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := sess.mgr.Rekey(ctx, v2TestConnID); err != nil {
+		t.Fatalf("Rekey: %v", err)
+	}
+
+	// Wait for the manual emit (envelope #2).
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) < 2 {
+		t.Fatalf("envs after manual rekey: got %d, want >= 2", len(envs))
+	}
+	emit := envs[1]
+	inner := decryptAppFrame(t, emit, sess.initRecv)
+	if inner.Type != protocol.TypeRekeyRequest {
+		t.Fatalf("manual emit inner type = %q, want %q", inner.Type, protocol.TypeRekeyRequest)
+	}
+	var manualPayload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner.Payload, &manualPayload); err != nil {
+		t.Fatalf("decode manual emit payload: %v", err)
+	}
+	if manualPayload.Reason != "manual" {
+		t.Fatalf("manual emit reason = %q, want %q", manualPayload.Reason, "manual")
+	}
+
+	// Drive a successful responder cycle. Fresh initiator, same initPriv
+	// so peer-static continuity holds; empty early-data per spec.
+	initiator2, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator2: %v", err)
+	}
+	initMsg2, err := initiator2.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit2: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg2)
+
+	// Wait for the responder reply (envelope #3) and read it so the
+	// post-swap initiator CipherStates exist for the fourth-envelope
+	// decode below.
+	envs = waitForEnvelopes(t, rec, 3)
+	if len(envs) < 3 {
+		t.Fatalf("envs after responder cycle: got %d, want >= 3", len(envs))
+	}
+	rekeyResp := envs[2]
+	respRaw := decodeRespFrame(t, rekeyResp)
+	_, _, initRecv2, err := initiator2.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("initiator2.ReadResp: %v", err)
+	}
+	rekeyCompleteAt := time.Now()
+
+	// Original-boundary check: sleep past openedAt + rekeyInterval, then
+	// confirm no fourth envelope landed. The original timer was stopped
+	// in handleManualRekey before its 300ms fire, and the rebased timer
+	// is armed at rekeyCompleteAt which is ~200ms+ε after open — its
+	// 300ms fire lands at ~500ms+ε, comfortably after this check at
+	// 350ms.
+	sleepUntil(openedAt.Add(rekeyInterval + 50*time.Millisecond))
+	if got := rec.snapshot(); len(got) != 3 {
+		t.Fatalf("envelope count at original scheduled boundary: got %d, want 3 (stale scheduled emit leaked)", len(got))
+	}
+
+	// New-boundary check: rekeyComplete armed a fresh scheduled timer.
+	// Wait until rekeyCompleteAt + rekeyInterval + jitter and assert the
+	// fourth envelope is a TypeRekeyRequest with reason="scheduled".
+	deadline := rekeyCompleteAt.Add(rekeyInterval + 500*time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(rec.snapshot()) >= 4 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	envs = rec.snapshot()
+	if len(envs) < 4 {
+		t.Fatalf("envs at re-based scheduled boundary: got %d, want >= 4 (re-based timer did not fire)", len(envs))
+	}
+	scheduledEmit := envs[3]
+	scheduledInner := decryptAppFrame(t, scheduledEmit, initRecv2)
+	if scheduledInner.Type != protocol.TypeRekeyRequest {
+		t.Errorf("scheduled emit inner type = %q, want %q", scheduledInner.Type, protocol.TypeRekeyRequest)
+	}
+	var scheduledPayload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(scheduledInner.Payload, &scheduledPayload); err != nil {
+		t.Fatalf("decode scheduled emit payload: %v", err)
+	}
+	if scheduledPayload.Reason != "scheduled" {
+		t.Errorf("scheduled emit reason = %q, want %q", scheduledPayload.Reason, "scheduled")
+	}
+}
+
+// sleepUntil blocks until t (or returns immediately if t is in the
+// past). Helper for the manual-rekey timer-rebase test's wall-clock
+// boundary checks.
+func sleepUntil(t time.Time) {
+	d := time.Until(t)
+	if d > 0 {
+		time.Sleep(d)
+	}
 }

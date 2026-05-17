@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/noise"
@@ -57,6 +59,22 @@ var rekeyInterval = 1 * time.Hour
 // the public API.
 var rekeyReplyTimeout = 30 * time.Second
 
+// ErrConnNotFound is returned by (*V2SessionManager).Rekey when connID
+// is not currently registered in the manager's sessions map. Wraps
+// control.ErrConnNotFound so the control dispatcher's
+// errors.Is(err, control.ErrConnNotFound) check in handleRekey
+// continues to map to ErrCodeConnNotFound on the wire without further
+// plumbing.
+var ErrConnNotFound = fmt.Errorf("relay: conn not found: %w", control.ErrConnNotFound)
+
+// ErrSessionNotOpen is returned by (*V2SessionManager).Rekey when the
+// named session exists but is not eligible for a manual rekey — either
+// not in V2StateOpen (still handshaking, or already torn down), or
+// already awaiting a rekey reply from a prior emit. The control
+// dispatcher surfaces this verbatim through Response.Error with no
+// ErrorCode (slice A defines no wire code for this state yet).
+var ErrSessionNotOpen = errors.New("relay: session not open")
+
 // wakeKind enumerates the per-session timer events the manager's Run
 // goroutine handles on its wake channel. The values are internal and
 // MUST NOT be exposed across the package boundary.
@@ -75,6 +93,15 @@ const (
 type wakeSignal struct {
 	s    *V2Session
 	kind wakeKind
+}
+
+// manualRekeyReq is enqueued by (*V2SessionManager).Rekey and dequeued
+// by Run on the manual-rekey channel arm. The reply channel is
+// per-request (cap=1) so the manager's reply send is non-blocking even
+// if the caller's ctx fires between enqueue and reply.
+type manualRekeyReq struct {
+	connID string
+	reply  chan error
 }
 
 // wakeBufferSize sizes the manager's wake channel. The 1-hour rekey
@@ -301,6 +328,15 @@ type V2SessionManager struct {
 	// honour the Run-derived ctx so they unblock cleanly on Run exit
 	// and leak no goroutines.
 	wake chan wakeSignal
+
+	// manualRekey funnels (*V2SessionManager).Rekey calls onto Run's
+	// dispatch goroutine so the lookup + emit sequence runs under the
+	// single-owner-goroutine invariant for s.send / s.state /
+	// s.rekeyTimer. Unbuffered: backpressure is correct — if Run is
+	// busy, Rekey waits; the caller's ctx is the escape arm in Rekey.
+	// Not closed by the manager on Run exit; in-flight callers unblock
+	// via ctx.Done.
+	manualRekey chan manualRekeyReq
 }
 
 // NewV2SessionManager validates cfg and returns a ready manager. Panics
@@ -328,9 +364,10 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 			noise.KeyLen, len(cfg.StaticPriv))
 	}
 	return &V2SessionManager{
-		cfg:      cfg,
-		sessions: make(map[string]*V2Session),
-		wake:     make(chan wakeSignal, wakeBufferSize),
+		cfg:         cfg,
+		sessions:    make(map[string]*V2Session),
+		wake:        make(chan wakeSignal, wakeBufferSize),
+		manualRekey: make(chan manualRekeyReq),
 	}, nil
 }
 
@@ -357,6 +394,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleFrame(runCtx, env)
 		case w := <-m.wake:
 			m.handleWake(runCtx, w)
+		case req := <-m.manualRekey:
+			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		}
 	}
 }
@@ -374,7 +413,7 @@ func (m *V2SessionManager) handleWake(ctx context.Context, w wakeSignal) {
 	}
 	switch w.kind {
 	case wakeRekeyEmit:
-		m.emitRekeyRequest(ctx, w.s)
+		m.emitRekeyRequest(ctx, w.s, "scheduled")
 	case wakeRekeyReplyTimeout:
 		if !w.s.awaitingRekeyReply {
 			// rekeyComplete already cleared the awaiting state — the
@@ -1005,13 +1044,11 @@ func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, e
 // emitRekeyRequest builds an AEAD-sealed rekey_request envelope under
 // s.send, wraps it as a noise_msg inner frame, forwards via m.send,
 // then sets s.awaitingRekeyReply=true and arms s.rekeyReplyTimer.
-// Called from handleWake's wakeRekeyEmit arm, on the manager's single
-// dispatch goroutine.
-//
-// payload.reason is always "scheduled" in this slice. The "manual" and
-// "compromise" reasons (docs/protocol-mobile.md § Re-key) are emitted
-// by the future pyry rekey <conn_id> operator verb (#451), not by the
-// timer-driven path.
+// Called on the manager's single dispatch goroutine from two sites:
+// handleWake's wakeRekeyEmit arm passes reason="scheduled" (timer-
+// driven), and handleManualRekey passes reason="manual" (operator-
+// triggered via the control socket — docs/protocol-mobile.md § Re-key).
+// The "compromise" reason is reserved for a future caller.
 //
 // Envelope ID is fixed at 1: there is no rekey_ack response that would
 // correlate by InReplyTo (the spec is explicit — the next successful
@@ -1020,11 +1057,10 @@ func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, e
 // AEAD-seal failure is realistically unreachable under correct
 // flynn/noise (same posture as sealError). On seal or marshal failure
 // the frame is dropped and a WARN line emitted; the conn is NOT
-// closed — the session remains in V2StateOpen and the next 1-hour
-// cadence will attempt another emit. Closing the conn over an internal
-// seal failure would tear down a working session for a non-protocol
-// error.
-func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session) {
+// closed — the session remains in V2StateOpen. On the scheduled path
+// the next 1-hour cadence will attempt another emit; on the manual
+// path the operator can re-run pyry rekey to retry.
+func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session, reason string) {
 	// Defensive: a wakeRekeyEmit arriving while already awaiting a
 	// reply would re-emit. Skip — the in-flight emit's reply window is
 	// still ticking. (Should not happen under normal operation;
@@ -1039,7 +1075,7 @@ func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session) {
 
 	reqPayload, err := json.Marshal(struct {
 		Reason string `json:"reason"`
-	}{Reason: "scheduled"})
+	}{Reason: reason})
 	if err != nil {
 		m.cfg.Logger.Warn("relay: v2 rekey emit marshal failed",
 			"event", "v2.rekey.emit.marshal_failed",
@@ -1079,7 +1115,7 @@ func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session) {
 	m.cfg.Logger.Info("relay: v2 rekey emit",
 		"event", "v2.rekey.emit",
 		"conn_id", s.connID,
-		"reason", "scheduled")
+		"reason", reason)
 }
 
 // sealError builds a TypeError envelope, AEAD-seals it under s.send,
@@ -1179,5 +1215,75 @@ func (m *V2SessionManager) send(env protocol.RoutingEnvelope) {
 			"close_code", env.CloseCode,
 			"err", err)
 	}
+}
+
+// Rekey satisfies control.Rekeyer. It funnels the request onto Run's
+// dispatch goroutine via m.manualRekey so the lookup + emit sequence
+// runs under the single-owner-goroutine invariant on s.send / s.state /
+// s.rekeyTimer — no new lock or atomic is introduced.
+//
+// Returns ErrConnNotFound (wraps control.ErrConnNotFound, so the
+// dispatcher's errors.Is check maps to ErrCodeConnNotFound on the
+// wire), ErrSessionNotOpen for sessions not in V2StateOpen or already
+// awaiting a rekey reply, ctx.Err() on caller cancellation, or any
+// transport-layer error surfaced by the emit path (no such error is
+// returned today — seal failures are logged and dropped per
+// emitRekeyRequest's documented posture).
+//
+// Production wire-up of *V2SessionManager into the cmd/pyry daemon
+// lands in a separate ticket; until then this method is reachable
+// only from internal/relay tests.
+var _ control.Rekeyer = (*V2SessionManager)(nil)
+
+func (m *V2SessionManager) Rekey(ctx context.Context, connID string) error {
+	req := manualRekeyReq{connID: connID, reply: make(chan error, 1)}
+	select {
+	case m.manualRekey <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-req.reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// handleManualRekey runs on Run's dispatch goroutine. It validates the
+// session is eligible for a manual rekey, stops the scheduled 1-hour
+// timer so a manual emit at T+45min does not also trigger a scheduled
+// emit at T+60min (rekeyComplete re-arms a fresh timer on the responder
+// reply), and reuses the existing emitRekeyRequest machinery with
+// reason="manual".
+//
+// Sessions awaiting a prior rekey reply collapse into ErrSessionNotOpen
+// — the same sentinel as "not in V2StateOpen" — because from the
+// operator's perspective both states mean "the conn is not ready for
+// a fresh manual rekey." This also imposes a natural per-conn rate
+// limit of one manual rekey per rekeyReplyTimeout (30s in production).
+func (m *V2SessionManager) handleManualRekey(ctx context.Context, connID string) error {
+	s, ok := m.sessions[connID]
+	if !ok {
+		return ErrConnNotFound
+	}
+	if s.state != V2StateOpen {
+		return ErrSessionNotOpen
+	}
+	if s.awaitingRekeyReply {
+		return ErrSessionNotOpen
+	}
+	// Stop the scheduled 1-hour timer before emitting; rekeyComplete
+	// arms a fresh one on the responder reply. Stop()'s bool return is
+	// intentionally ignored: a stale wakeRekeyEmit signal already
+	// queued onto m.wake is caught by emitRekeyRequest's defensive
+	// awaitingRekeyReply skip (the manual emit below sets the bool
+	// before Run picks up the stale wake).
+	if s.rekeyTimer != nil {
+		s.rekeyTimer.Stop()
+		s.rekeyTimer = nil
+	}
+	m.emitRekeyRequest(ctx, s, "manual")
+	return nil
 }
 

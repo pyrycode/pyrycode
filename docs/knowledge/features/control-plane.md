@@ -1048,9 +1048,9 @@ Unlike attach (which calls `ResolveID` to accept loose-input prefixes), `session
 
 See `docs/specs/architecture/157-control-sessions-has-id.md` for the full ticket-time design; this section is the canonical evergreen reference.
 
-## Rekey: V2 conn re-key trigger seam (1.3d-1, #459)
+## Rekey: V2 conn re-key trigger seam (1.3d-1, #459 + #462)
 
-`VerbRekey` lets a local operator client trigger an immediate Noise re-key on a named v2 conn through the control socket. The verb is single-word (`"rekey"`) — not part of a `rekey.*` family — because the trigger has no sibling operations. The operator-facing surface (`pyry rekey <conn_id>`) is slice B (#460); slice A ships the wire contract and the seam without a production caller. Until slice B lands a `*relay.V2SessionManager` via `SetRekeyer`, every `VerbRekey` request returns `Response{Error: "rekey: no rekeyer configured"}`.
+`VerbRekey` lets a local operator client trigger an immediate Noise re-key on a named v2 conn through the control socket. The verb is single-word (`"rekey"`) — not part of a `rekey.*` family — because the trigger has no sibling operations. Slice A (#459) ships the wire contract and the seam; slice B1 (#462) ships the manager-side implementer (`*relay.V2SessionManager` satisfies `control.Rekeyer` via its `Rekey(ctx, connID)` method — see [v2-session-manager.md](v2-session-manager.md#operator-driven-manual-re-key-462--rekey-method-satisfying-controlrekeyer)). Sibling slice B2 ships the operator-facing CLI (`pyry rekey <conn_id>`). Until a `*V2SessionManager` is installed via `SetRekeyer` in production (a separate ticket — `NewV2SessionManager` has no production caller as of 2026-05-17), every `VerbRekey` request returns `Response{Error: "rekey: no rekeyer configured"}`.
 
 The plumbing channel is the existing control socket — the operator subcommand runs in a separate process and cannot reach the daemon's in-process `V2SessionManager` directly. The trade-off is one socket round-trip on a verb the operator invokes interactively, which is immaterial in practice.
 
@@ -1103,9 +1103,11 @@ type RekeyPayload struct {
 Response.ErrorCode == "conn_not_found"  → ErrConnNotFound
 ```
 
-The sentinel `ErrConnNotFound = errors.New("rekey: conn not found")` is **owned in `internal/control`** because the `Rekeyer` contract is defined here; slice B's `*relay.V2SessionManager.TriggerRekey` wraps its internal not-found state with `%w` against this sentinel. The dispatcher uses `errors.Is` (not `==`), so wrapped sentinels also map correctly. The client's `Rekey` helper reconstructs the bare `ErrConnNotFound` from `Response.ErrorCode` so callers can `errors.Is` against it.
+The sentinel `ErrConnNotFound = errors.New("rekey: conn not found")` is **owned in `internal/control`** because the `Rekeyer` contract is defined here. Slice B1 (#462) chose the wrap-at-the-producer shape: `relay.ErrConnNotFound = fmt.Errorf("relay: conn not found: %w", control.ErrConnNotFound)`. The dispatcher uses `errors.Is` (not `==`), so the producer's `%w` wrap maps to `ErrCodeConnNotFound` on the wire without any further plumbing. The client's `Rekey` helper reconstructs the bare `ErrConnNotFound` from `Response.ErrorCode` so callers can `errors.Is` against it.
 
-The pattern mirrors how `internal/control` consumes `sessions.ErrSessionNotFound` — the import direction is flipped because slice B's package owns the producer. Slice B has a small choice (return the bare `control.ErrConnNotFound`, or define `relay.ErrConnNotFound` and wrap-translate at the wiring layer); both shapes are byte-stable on the wire.
+Slice B1 also defines a second producer-side sentinel `relay.ErrSessionNotOpen` (returned when a conn exists but is not in `V2StateOpen`, or is already awaiting a prior rekey reply); slice A defined no `ErrCodeSessionNotOpen` wire code, so the dispatcher surfaces it through `Response.Error` verbatim with no `ErrorCode`. A wire code can be added if/when the operator UX wants the distinction client-actionable.
+
+The pattern mirrors how `internal/control` consumes `sessions.ErrSessionNotFound` — the import direction is flipped because slice B's package owns the producer. The `relay → control` import is non-cyclic (verified at #462 spec time).
 
 ### Dispatcher behaviour
 
