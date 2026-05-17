@@ -178,6 +178,8 @@ func run() error {
 			return runSessions(os.Args[2:])
 		case "pair":
 			return runPair(os.Args[2:])
+		case "rekey":
+			return runRekey(os.Args[2:])
 		case "install-service":
 			return runInstallService(os.Args[2:])
 		case "update":
@@ -1305,6 +1307,9 @@ Usage:
                                                   print QR + paste-fallback payload
   pyry pair list [flags]                         list paired devices
   pyry pair revoke <name> [flags]                revoke a paired device by Name
+  pyry rekey <conn_id> [flags]                   trigger an immediate Noise re-key
+                                                  on the named v2 conn (operator
+                                                  rotation; control-socket only)
   pyry install-service [flags] [-- claude-args]  write a systemd or launchd
                                                   unit file for pyry
   pyry update [--check] [--version <v>]          download and install the latest
