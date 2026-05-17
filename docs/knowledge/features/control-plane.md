@@ -1149,7 +1149,24 @@ func Rekey(ctx context.Context, socketPath, connID string) error {
 }
 ```
 
-Same one-shot dial → encode → decode → close lifecycle as the other client helpers. No production caller in slice A — wired now so slice B is a one-file change in `cmd/pyry/`.
+Same one-shot dial → encode → decode → close lifecycle as the other client helpers. Production caller as of slice B2 (#463): `cmd/pyry/rekey.go`'s `runRekey` is the topmost operator-facing consumer. The helper itself is unchanged from slice A.
+
+### Operator-facing CLI consumer (#463)
+
+`pyry rekey <conn_id>` is the operator surface that dials `control.Rekey`. Three-way error routing at the verb layer:
+
+| `control.Rekey` returns | Verb action | Final stderr |
+| --- | --- | --- |
+| `nil` | return `nil` (exit 0) | (none) |
+| `errors.Is(err, ErrConnNotFound)` | print + `os.Exit(1)` | `pyry rekey: conn_id "<value>" not found` |
+| Known untyped server reject (`"rekey: no rekeyer configured"`, `"rekey: missing connID"`) | print + `os.Exit(1)` | `pyry rekey: rekey: no rekeyer configured` (verbatim surfaced) |
+| Anything else (transport: dial / encode / decode) | `return fmt.Errorf("rekey: %w", err)` | `pyry: rekey: <transport err>` (outer `pyry: ` from main) |
+
+The known-server-reject branch matches by message-prefix because slice A reserves the typed-sentinel slot for `ErrConnNotFound` only. If a future slice adds wire codes for the no-rekeyer / missing-connID guards (or slice B1's `relay.ErrSessionNotOpen`), the helper collapses to `errors.Is` calls. The split keeps the operator-readable prefix correct: server rejects get a clean `pyry rekey: ...` line (no double `pyry: rekey:` from main's outer printer), while transport errors flow through the wrapped-return path so main's `pyry: ` prefix produces `pyry: rekey: <err>` without disturbing the verb-specific format.
+
+Until the daemon-wire-up ticket lands, every production `pyry rekey` call surfaces `pyry rekey: rekey: no rekeyer configured` because `cmd/pyry/main.go` does not yet construct a `*V2SessionManager` (`NewV2SessionManager` has no production caller as of 2026-05-17). The verb is shipped ahead of cutover, matching the `pair preflight` precedent.
+
+See [`codebase/463.md`](../codebase/463.md) for the per-ticket implementation summary.
 
 ### Threat model
 
