@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -68,7 +69,12 @@ const (
 // is serialised by the manager's single dispatch goroutine (the loop is
 // the lock); there is no mutex because flynn/noise's CipherStates are
 // not safe for concurrent use and the manager guarantees a single
-// writer per conn_id.
+// writer per conn_id. The re-key responder (handleRekeyInit) atomically
+// swaps s.send / s.recv in a single tuple assignment on this same
+// goroutine; old *CipherState pointers are dropped from the struct and
+// reclaimed by GC. No explicit Wipe() of the key bytes is exposed — the
+// single-owner-goroutine invariant means no code path reads the old
+// state after the swap, which is the practical zeroisation property.
 type V2Session struct {
 	connID string
 	state  V2SessionState
@@ -168,7 +174,11 @@ type V2SessionConfig struct {
 // than internal/dispatch.Dispatcher (which spins one goroutine per
 // conn_id); v2 in this slice runs no application handlers, every frame
 // processes synchronously (~100µs Noise call or sub-µs JSON decode), so
-// single-goroutine fan-in is correct and obviously safe.
+// single-goroutine fan-in is correct and obviously safe. The re-key
+// responder's CipherState swap (s.send, s.recv = newSend, newRecv)
+// inherits this property: a single tuple assignment on this goroutine
+// cannot be observed half-applied by any other code path, so the spec's
+// atomic-switchover requirement is structural.
 type V2SessionManager struct {
 	cfg      V2SessionConfig
 	sessions map[string]*V2Session
@@ -314,18 +324,28 @@ type InnerFrameV2Decoded struct {
 	Data []byte
 }
 
-// handleNoiseInit processes an inbound noise_init frame. The handshake
-// path is documented step-by-step in
+// handleNoiseInit processes an inbound noise_init frame. The initial
+// handshake path is documented step-by-step in
 // docs/specs/architecture/445-internal-relay-v2-inner-frame-handshake-token-gating.md.
+// A noise_init arriving in V2StateOpen is a phone-initiated re-key
+// (docs/protocol-mobile.md § Re-key); it is routed to handleRekeyInit,
+// which runs IK responder again and atomically swaps s.send / s.recv.
+// noise_init in V2StateHandshakeComplete remains a state-machine
+// violation (CipherStates are held but uncommitted; a fresh handshake
+// at that point is indistinguishable from a wire-protocol violation).
 func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
-	if s.state != V2StateAwaitingInit {
-		// noise_init while handshakeComplete or open: rekey lives in #435,
-		// not here. Treat as state-machine violation per the spec table.
+	switch s.state {
+	case V2StateOpen:
+		m.handleRekeyInit(ctx, s, inner)
+		return
+	case V2StateAwaitingInit:
+		// fall through to the initial-handshake body below
+	default: // V2StateHandshakeComplete; V2StateClosed is filtered earlier in handleFrame.
 		m.cfg.Logger.Warn("relay: v2 state reject",
 			"event", "v2.state.reject",
 			"conn_id", s.connID,
 			"close_code", int(StatusProtocolMismatch),
-			"reason", "noise_init_after_handshake")
+			"reason", "noise_init_in_handshake_complete")
 		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 		return
 	}
@@ -496,6 +516,120 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
 	s.device = &device
 	s.state = V2StateOpen
+}
+
+// handleRekeyInit runs the responder side of a phone-initiated re-key
+// handshake. Same shape as the initial handshake (NewResponder →
+// ReadInit → WriteResp → emit noise_resp) with three differences:
+//
+//  1. Early-data is empty on both directions (docs/protocol-mobile.md
+//     § Re-key). Hello validation and token re-check are skipped — they
+//     ran at initial handshake. The per-rekey identity gate is the
+//     peer-static continuity check below, not the token.
+//  2. Peer-static continuity is enforced: the new initiator's static
+//     pub (from resp.PeerStatic() after ReadInit) MUST equal
+//     s.peerStatic captured at initial handshake. Mismatch closes at
+//     4426, the same code the initial handshake uses for IK-related
+//     failure.
+//  3. CipherState swap on success: a SINGLE tuple assignment
+//     `s.send, s.recv = newSend, newRecv` on the manager's single
+//     dispatch goroutine. No half-mixed state where one direction uses
+//     new keys and the other uses old. State stays V2StateOpen;
+//     s.device and s.peerStatic are preserved. The old *CipherState
+//     pointers are dropped from the struct; Go's GC reclaims the
+//     underlying memory. An explicit Wipe() of the key bytes is NOT
+//     exposed (would require touching internal/noise's surface —
+//     deferred); the single-owner-goroutine invariant means no code
+//     path observes the old state after the swap.
+//
+// Failure paths reuse the initial handshake's close code (4426) and
+// closeWith primitive — no new close code is introduced. closeWith
+// removes the session entry, so the next inbound frame on the same
+// conn_id lazy-creates a fresh V2StateAwaitingInit session.
+func (m *V2SessionManager) handleRekeyInit(ctx context.Context, s *V2Session, inner InnerFrameV2Decoded) {
+	resp, err := noise.NewResponder(m.cfg.StaticPriv)
+	if err != nil {
+		// Realistically unreachable: StaticPriv length is validated at
+		// NewV2SessionManager. Close at 4426 anyway — without a Responder
+		// we cannot proceed.
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_responder_init_failed")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	// Re-key noise_init carries empty early-data per spec; discard the
+	// returned slice unconditionally.
+	if _, err := resp.ReadInit(inner.Data); err != nil {
+		// MAC failure, malformed IK message 1, or wrong responder static.
+		// No re-key CipherStates exist; close-only at 4426.
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_read_init_failed")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	// Peer-static continuity check: pins the post-rekey AEAD channel to
+	// the same peer identity as the initial handshake (Threat #3
+	// residual-risk claim). bytes.Equal is intentional and variable-time
+	// acceptable — both operands are public keys (live peer's static
+	// from resp.PeerStatic() and the stored s.peerStatic), so timing
+	// leakage carries no secret. device_name is intentionally omitted
+	// from the reject log line: the re-key initiator's identity is
+	// unknown / hostile, and logging the captured-at-initial-handshake
+	// device-name on a rejected re-key would be an anti-enumeration
+	// signal.
+	if !bytes.Equal(resp.PeerStatic(), s.peerStatic) {
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_peer_static_mismatch")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	// Re-key noise_resp carries empty early-data per spec.
+	respMsg, newSend, newRecv, err := resp.WriteResp(nil)
+	if err != nil {
+		// Realistically unreachable under correct flynn/noise.
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_write_resp_failed")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	respFrame, err := marshalInnerFrameV2(protocol.TypeNoiseResp, respMsg)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.ik_failure",
+			"conn_id", s.connID,
+			"close_code", int(StatusHandshakeFailure),
+			"reason", "rekey_marshal_noise_resp")
+		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
+		return
+	}
+
+	// Atomic swap on the single dispatch goroutine. The old
+	// *CipherState pointers are dropped from the struct here; the GC
+	// reclaims the underlying memory once no further reference exists.
+	// State stays V2StateOpen; s.device and s.peerStatic are preserved.
+	s.send, s.recv = newSend, newRecv
+
+	m.cfg.Logger.Info("relay: v2 rekey accept",
+		"event", "v2.rekey.accept",
+		"conn_id", s.connID,
+		"device_name", s.device.Name)
+	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
 }
 
 // handleNoiseMsg processes an inbound noise_msg frame. The
