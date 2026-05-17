@@ -98,6 +98,13 @@ func IsV1Compatible(env Envelope) error {
 	return nil
 }
 
+// v1TypeSet is the closed enumeration of envelope types accepted by
+// wire-protocol v1. Mobile Protocol v2 control types (e.g.
+// TypeRekeyRequest) MUST NOT be added here: the v2 session manager
+// (internal/relay/v2session.go) intercepts them at its dispatch boundary
+// before internal/dispatch.Route consults this set. Adding a v2-control
+// constant would silently route it to the handler chain — see
+// internal/protocol/compat_test.go for the partition enforcement.
 var v1TypeSet = map[string]bool{
 	TypeHello:               true,
 	TypeHelloAck:            true,
