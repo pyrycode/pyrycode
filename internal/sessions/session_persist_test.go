@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // helperPoolPersistentIdle builds a Pool with persistence enabled, a long-
@@ -21,16 +23,21 @@ func helperPoolPersistentIdle(t *testing.T, registryPath string, idle time.Durat
 	if _, err := exec.LookPath("/bin/sleep"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
 	}
+	// Bridge mode: callers run the pool via runPoolInBackground, which spawns
+	// the bootstrap supervisor. Foreground mode in a Run-reaching fixture is
+	// the deadlock surface #41 surfaced.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
+			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    idle,
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
 		},
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:       logger,
 		RegistryPath: registryPath,
 	}
 	pool, err := New(cfg)

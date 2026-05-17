@@ -802,15 +802,22 @@ func TestPool_Run_StartsWatcher(t *testing.T) {
 		return &dirProbe{dir: dir}
 	}
 
+	// Bridge mode keeps the supervisor's I/O pumps off os.Stdin: this test
+	// calls pool.Run, which spawns the bootstrap supervisor. Foreground mode
+	// in a Run-reaching fixture is the deadlock surface #41 surfaced. Also
+	// the suspected source of TestPool_Run_StartsWatcher's intermittent
+	// flake first flagged in #39's PR review.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pool, err := New(Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
+			Bridge:         supervisor.NewBridge(logger),
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
 		},
-		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:            logger,
 		RegistryPath:      regPath,
 		ClaudeSessionsDir: dir,
 	})
@@ -1025,16 +1032,21 @@ func TestPool_ParityWhenIdleDisabled(t *testing.T) {
 	if _, err := exec.LookPath("/bin/sleep"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
 	}
+	// Bridge mode: this test calls sess.Run, which spawns the bootstrap
+	// supervisor. Foreground mode in a Run-reaching fixture is the
+	// deadlock surface #41 surfaced.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
+			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    0, // disabled
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: logger,
 	}
 	pool, err := New(cfg)
 	if err != nil {
@@ -1065,6 +1077,7 @@ func TestPool_New_MalformedRegistryIsFatal(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatalf("seed malformed: %v", err)
 	}
+	// No Bridge — New is expected to return an error here; Run is never reached.
 	pool, err := New(Config{
 		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
