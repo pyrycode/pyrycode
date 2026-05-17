@@ -9,7 +9,7 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go                     12 Code* string constants + 16 Type* string constants
+├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
@@ -332,9 +332,11 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 | `CodeRelayNoServer` | `relay.no_server` |
 | `CodeRelayServerIDConflict` | `relay.server_id_conflict` |
 
-### Envelope types (16)
+### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). The set is closed in v1; new types require a v2 envelope per the protocol's versioning policy (additive changes stay v1, breaking changes go v2).
+Wire values for `Envelope.Type` (spec § Message types). Two architectural buckets: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and a separate Mobile Protocol v2 control-envelope group whose members are **deliberately NOT** in `v1TypeSet` — they are intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called. Adding a v2-control constant to `v1TypeSet` would silently route the envelope to the v1 handler chain, which is exactly the opposite of what's wanted.
+
+**v1 application types** (16; spec § v1 Message types):
 
 | Group | Constants |
 |-------|-----------|
@@ -344,15 +346,24 @@ Wire values for `Envelope.Type` (spec § Message types). The set is closed in v1
 | Backfill | `TypeBackfillSince`, `TypeMessageChunk`, `TypeBackfillDone` |
 | Push | `TypeRegisterPushToken` |
 
+**v2 control-envelope types** (#454; spec `docs/protocol-mobile.md` § Re-key):
+
+| Group | Constants |
+|-------|-----------|
+| Re-key | `TypeRekeyRequest` |
+
+`TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out. The two advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
+
 ## Drift detectors
 
-The 16-entry type list appears three times: in the `Type*` constants block (`codes.go`), in the `v1TypeSet` map literal (`envelope.go`), and in two test slices (`compat_test.go`). The triple-copy is **deliberate** — three explicit drift detectors fail loudly in CI when a new constant lands without the corresponding map entry:
+The v1 type list appears three times: in the `Type*` constants block (`codes.go`), in the `v1TypeSet` map literal (`envelope.go`), and in two test slices (`compat_test.go`). The triple-copy is **deliberate** — explicit drift detectors fail loudly in CI when a new constant lands without the corresponding map entry:
 
-- `TestIsV1Compatible` — runs every `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a `Type*` const, forgot the map").
-- `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts `len(v1TypeSet) == 16` and every constant is keyed in the map.
+- `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
+- `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
+- `TestTypeConstants_V1V2Partition` (#454) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist (`map[string]bool{TypeRekeyRequest: true}`); never both, never neither. Forces a future contributor adding a v2-control type to amend the allowlist explicitly. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
-Reflection over `go/types` was considered and rejected — heavier than three explicit assertions for a closed 16-entry set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
+Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
 
 ## Concurrency
 
