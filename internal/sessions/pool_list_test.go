@@ -177,6 +177,7 @@ func TestPool_List_RaceClean(t *testing.T) {
 
 	dir := t.TempDir()
 	regPath := filepath.Join(dir, "sessions.json")
+	// No Bridge — exercises Pool.mu lock ordering via List/RotateID only; Run is not called.
 	pool, err := New(Config{
 		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),

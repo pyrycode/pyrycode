@@ -149,6 +149,7 @@ func TestPool_New_HonoursConfigSweepInterval(t *testing.T) {
 	if _, err := exec.LookPath("/bin/sleep"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
 	}
+	// No Bridge — test only inspects post-New fields; Run is not called.
 	cfg := Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin: "/bin/sleep",
@@ -173,6 +174,7 @@ func TestPool_New_DefaultSweepIntervalWhenConfigZero(t *testing.T) {
 	if _, err := exec.LookPath("/bin/sleep"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
 	}
+	// No Bridge — test only inspects post-New fields; Run is not called.
 	cfg := Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin: "/bin/sleep",

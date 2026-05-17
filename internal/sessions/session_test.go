@@ -121,16 +121,21 @@ func helperPoolIdle(t *testing.T, idle time.Duration) *Pool {
 	if _, err := exec.LookPath("/bin/sleep"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
 	}
+	// Bridge mode: callers run sess.Run, which spawns the bootstrap
+	// supervisor. Foreground mode in a Run-reaching fixture is the deadlock
+	// surface #41 surfaced.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
+			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    idle,
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: logger,
 	}
 	pool, err := New(cfg)
 	if err != nil {
@@ -373,10 +378,14 @@ func TestSession_IdleEviction_EmitsLogRecord(t *testing.T) {
 
 	rec := &recordingHandler{}
 	logger := slog.New(rec)
+	// Bridge mode: this test calls sess.Run, which spawns the bootstrap
+	// supervisor. Foreground mode in a Run-reaching fixture is the deadlock
+	// surface #41 surfaced.
 	cfg := Config{
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
+			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    80 * time.Millisecond,
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
