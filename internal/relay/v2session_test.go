@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1284,5 +1285,248 @@ func TestV2Session_InitialHandshake_CapturesPeerStatic(t *testing.T) {
 	}
 	if !bytes.Equal(s.peerStatic, initPub) {
 		t.Errorf("peerStatic mismatch: got %x, want %x", s.peerStatic, initPub)
+	}
+}
+
+// --- v2 control-envelope tests (#454) ---
+
+// syncLogBuffer is a goroutine-safe sink for slog text output. The
+// manager's dispatch goroutine writes; the test goroutine reads. Mirrors
+// internal/conversations/sweep_loop_test.go's syncBuffer.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncLogBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncLogBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// bufferLogger returns a slog.TextHandler-backed logger that writes into
+// a goroutine-safe buffer at Debug level. The buffer is suitable for
+// substring assertions on event/level/field key=value text.
+func bufferLogger() (*slog.Logger, *syncLogBuffer) {
+	buf := &syncLogBuffer{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
+}
+
+// waitForLogContains polls buf until it contains substr or the deadline
+// expires. Synchronisation knob for tests that send a frame the manager
+// processes without emitting an outbound envelope (e.g. rekey_request,
+// which is informational).
+func waitForLogContains(t *testing.T, buf *syncLogBuffer, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), substr) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForLogContains: %q not found in log; got:\n%s", substr, buf.String())
+}
+
+// TestV2Session_OpenState_RekeyRequest_ScheduledIntercepted drives a
+// paired-device handshake to open and feeds an AEAD-sealed rekey_request
+// envelope. The v2 control-envelope discriminator MUST route the frame
+// away from the application handler chain (handlerCalled stays false),
+// emit no outbound envelope, and leave the session in V2StateOpen.
+func TestV2Session_OpenState_RekeyRequest_ScheduledIntercepted(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	var handlerCalled atomic.Bool
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			handlerCalled.Store(true)
+			return nil
+		},
+	}
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+		Handlers:   handlers,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      42,
+		Type:    protocol.TypeRekeyRequest,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"reason":"scheduled"}`),
+	})
+
+	// The discriminator emits no outbound envelope, so synchronise on the
+	// log line the recognised-reason branch writes.
+	waitForLogContains(t, logBuf, "event=v2.rekey.request.received")
+
+	// Exactly one outbound envelope (the handshake's noise_resp); no
+	// reply, no close.
+	envs := rec.snapshot()
+	if len(envs) != 1 {
+		t.Fatalf("envs after rekey_request: got %d, want exactly 1 (noise_resp only)", len(envs))
+	}
+	if envs[0].CloseCode != 0 {
+		t.Errorf("noise_resp CloseCode = %d, want 0", envs[0].CloseCode)
+	}
+	if handlerCalled.Load() {
+		t.Error("application handler invoked on rekey_request; control envelope MUST be intercepted before dispatch.Route")
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after rekey_request", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after rekey_request = %v, want V2StateOpen", got)
+	}
+}
+
+// TestV2Session_OpenState_RekeyRequest_UnknownReasonTolerated drives to
+// open then sends rekey_request with an unrecognised reason. The
+// manager must log at WARN with the raw reason string, emit no
+// outbound frame, and leave the session in V2StateOpen.
+func TestV2Session_OpenState_RekeyRequest_UnknownReasonTolerated(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      42,
+		Type:    protocol.TypeRekeyRequest,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"reason":"lunar-eclipse"}`),
+	})
+
+	waitForLogContains(t, logBuf, "event=v2.rekey.request.received")
+
+	out := logBuf.String()
+	for _, want := range []string{"level=WARN", "event=v2.rekey.request.received", "reason=lunar-eclipse"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+
+	envs := rec.snapshot()
+	if len(envs) != 1 {
+		t.Fatalf("envs after unknown-reason rekey_request: got %d, want exactly 1 (noise_resp only)", len(envs))
+	}
+	if envs[0].CloseCode != 0 {
+		t.Errorf("noise_resp CloseCode = %d, want 0", envs[0].CloseCode)
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after unknown-reason rekey_request", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after unknown-reason rekey_request = %v, want V2StateOpen", got)
+	}
+}
+
+// TestV2Session_OpenState_RekeyRequest_RecognisedReasons parameterises
+// across the three recognised payload.reason values from
+// docs/protocol-mobile.md § Re-key. Each must log at INFO with the
+// matching reason field, emit no outbound frame, and leave the session
+// in V2StateOpen.
+func TestV2Session_OpenState_RekeyRequest_RecognisedReasons(t *testing.T) {
+	t.Parallel()
+
+	reasons := []string{"scheduled", "manual", "compromise"}
+	for _, reason := range reasons {
+		reason := reason
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+
+			respPriv, respPub := genV2Keypair(t)
+			initPriv, _ := genV2Keypair(t)
+			reg := v2PairedRegistry(t, v2TestToken)
+
+			logger, logBuf := bufferLogger()
+			frames := make(chan protocol.RoutingEnvelope, 2)
+			rec := &v2Recorder{}
+			sess := driveToOpen(t, V2SessionConfig{
+				Frames:     frames,
+				Outbound:   rec.outbound,
+				StaticPriv: respPriv,
+				Devices:    reg,
+				ServerID:   v2TestServerID,
+				Logger:     logger,
+			}, frames, rec, respPub, initPriv)
+			t.Cleanup(sess.stop)
+
+			payload, err := json.Marshal(map[string]string{"reason": reason})
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+				ID:      42,
+				Type:    protocol.TypeRekeyRequest,
+				TS:      time.Now().UTC(),
+				Payload: payload,
+			})
+
+			waitForLogContains(t, logBuf, "event=v2.rekey.request.received")
+
+			out := logBuf.String()
+			for _, want := range []string{"level=INFO", "event=v2.rekey.request.received", "reason=" + reason} {
+				if !strings.Contains(out, want) {
+					t.Errorf("log missing %q; got:\n%s", want, out)
+				}
+			}
+
+			envs := rec.snapshot()
+			if len(envs) != 1 {
+				t.Fatalf("envs after %s rekey_request: got %d, want exactly 1 (noise_resp only)", reason, len(envs))
+			}
+			if envs[0].CloseCode != 0 {
+				t.Errorf("noise_resp CloseCode = %d, want 0", envs[0].CloseCode)
+			}
+
+			sess.stop()
+			s := sess.mgr.sessions[v2TestConnID]
+			if s == nil {
+				t.Fatalf("session for %q missing after %s rekey_request", v2TestConnID, reason)
+			}
+			if got := s.State(); got != V2StateOpen {
+				t.Errorf("state after %s rekey_request = %v, want V2StateOpen", reason, got)
+			}
+		})
 	}
 }

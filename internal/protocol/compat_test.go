@@ -70,6 +70,54 @@ func TestV1TypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 	}
 }
 
+// v2OnlyTypes is the test-local allowlist of Mobile Protocol v2 control
+// envelope types that are deliberately excluded from v1TypeSet. Adding a
+// constant to this map without also intercepting it at
+// internal/relay/v2session.go's dispatch boundary would let it fall
+// through to dispatch.Route as an unknown type — the partition is the
+// architectural seam between v1 application traffic and v2 control
+// traffic.
+var v2OnlyTypes = map[string]bool{
+	TypeRekeyRequest: true,
+}
+
+// TestTypeConstants_V1V2Partition pins the architectural asymmetry that
+// every exported Type* constant must be classified either as a v1
+// application type (member of v1TypeSet) or a v2 control type (member of
+// v2OnlyTypes), and never as both. A future contributor adding a v2
+// control type is forced to amend the v2OnlyTypes literal here; a
+// contributor accidentally adding a v2 control type to v1TypeSet is
+// caught by the "in both" branch.
+func TestTypeConstants_V1V2Partition(t *testing.T) {
+	all := []string{
+		// v1 application types.
+		TypeHello, TypeHelloAck, TypeError, TypeAck,
+		TypeSendMessage, TypeMessage,
+		TypeListConversations, TypeConversations,
+		TypeCreateConversation, TypeConversationCreated,
+		TypePromoteConversation, TypeConversationUpdated,
+		TypeBackfillSince, TypeMessageChunk, TypeBackfillDone,
+		TypeRegisterPushToken,
+		// v2 control types.
+		TypeRekeyRequest,
+	}
+	for _, ty := range all {
+		inV1 := v1TypeSet[ty]
+		inV2 := v2OnlyTypes[ty]
+		switch {
+		case inV1 && inV2:
+			t.Errorf("%q in BOTH v1TypeSet and v2OnlyTypes; the partition must be disjoint", ty)
+		case !inV1 && !inV2:
+			t.Errorf("%q missing from both v1TypeSet and v2OnlyTypes; classify it as v1 application or v2 control", ty)
+		}
+	}
+	// And the union must equal the constant-count to catch the inverse:
+	// a v1TypeSet entry that has no exported Type* constant.
+	if got, want := len(v1TypeSet)+len(v2OnlyTypes), len(all); got != want {
+		t.Errorf("v1TypeSet + v2OnlyTypes size: got %d, want %d", got, want)
+	}
+}
+
 func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 	cases := map[string]string{
 		"CodeProtocolUnknownType":         CodeProtocolUnknownType,

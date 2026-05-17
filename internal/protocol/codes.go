@@ -60,3 +60,26 @@ const (
 	// Push.
 	TypeRegisterPushToken = "register_push_token"
 )
+
+// Mobile Protocol v2 control-envelope types. These are NOT v1 application
+// types; they MUST NOT appear in v1TypeSet (internal/protocol/envelope.go).
+// The v2 session manager intercepts them at the dispatch boundary
+// (internal/relay/v2session.go's dispatchAppFrame) before
+// internal/dispatch.Route is called, so handler-table lookup never sees
+// them.
+const (
+	// TypeRekeyRequest is the Mobile Protocol v2 control envelope either
+	// side may emit to nudge the peer toward initiating a re-key
+	// handshake (docs/protocol-mobile.md § Re-key). It is informational
+	// from the binary's perspective: the binary is the IK responder per
+	// ADR 024, so an inbound rekey_request takes no transport action.
+	//
+	// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a
+	// leak into that set would route the envelope to dispatch.Route's
+	// handler chain, violating the v2 control / v1 application boundary
+	// enforced by internal/relay's v2 session manager. The drift detector
+	// in internal/protocol/compat_test.go partitions Type* constants
+	// between v1TypeSet and v2OnlyTypes; this constant lives in the
+	// latter.
+	TypeRekeyRequest = "rekey_request"
+)

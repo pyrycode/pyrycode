@@ -595,6 +595,20 @@ func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inn
 // that the GC reclaims once the goroutine exits; closing here would
 // panic such a sender.
 func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
+	// v2 control-envelope discriminator: a successful JSON decode whose
+	// type matches a v2 control type is routed away from the v1
+	// application dispatch chain. The probe is intentionally a re-decode;
+	// dispatch.Route below decodes the same plaintext a second time. Cost
+	// is one small JSON parse per application frame, well below the
+	// per-frame AEAD cost. A JSON decode failure here deliberately falls
+	// through so dispatch.Route's malformed-envelope branch emits the
+	// sealed protocol.malformed reply established by #446 unchanged.
+	var probeEnv protocol.Envelope
+	if err := json.Unmarshal(plaintext, &probeEnv); err == nil && probeEnv.Type == protocol.TypeRekeyRequest {
+		m.handleRekeyRequest(ctx, s, probeEnv)
+		return
+	}
+
 	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
 	conn := dispatch.NewConn(s.connID, outbound, s.device)
 	dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)
@@ -623,6 +637,47 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		default:
 			return
 		}
+	}
+}
+
+// handleRekeyRequest classifies an inbound v2 rekey_request control
+// envelope and emits a single structured log line. The binary is always
+// the IK responder (ADR 024); a rekey_request from the phone takes NO
+// transport action — no close, no outbound frame, no state change. The
+// phone re-keys by sending noise_init directly, not by signalling via
+// rekey_request.
+//
+// payload.reason is matched against the closed set {scheduled, manual,
+// compromise} from docs/protocol-mobile.md § Re-key:
+//   - recognised values log at INFO,
+//   - empty, unknown, or non-string values log at WARN (forward-compat:
+//     mobile may add a reason value before the binary catches up).
+//
+// ctx is accepted for parity with dispatchAppFrame / handleNoiseMsg but
+// is unused: the method does no work that needs cancellation. Runs on
+// the manager's single dispatch goroutine (same as the rest of this
+// file); no new concurrency invariant.
+func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, env protocol.Envelope) {
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	// Decode failures are tolerated and treated as empty reason; emitting
+	// a sealed protocol.malformed reply for a broken control payload
+	// would be a surprising behaviour change since the envelope itself
+	// took no transport action either way.
+	_ = json.Unmarshal(env.Payload, &payload)
+
+	switch payload.Reason {
+	case "scheduled", "manual", "compromise":
+		m.cfg.Logger.Info("relay: v2 rekey request received",
+			"event", "v2.rekey.request.received",
+			"conn_id", s.connID,
+			"reason", payload.Reason)
+	default:
+		m.cfg.Logger.Warn("relay: v2 rekey request received",
+			"event", "v2.rekey.request.received",
+			"conn_id", s.connID,
+			"reason", payload.Reason)
 	}
 }
 
