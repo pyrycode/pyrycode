@@ -17,6 +17,7 @@ type CipherState struct{ /* unexported */ }
 
 func NewResponder(staticPriv []byte) (*Responder, error)
 func (r *Responder) ReadInit(initMsg []byte) (earlyData []byte, err error)
+func (r *Responder) PeerStatic() []byte
 func (r *Responder) WriteResp(earlyData []byte) (respMsg []byte, send, recv *CipherState, err error)
 
 func NewInitiator(staticPriv, peerStaticPub []byte) (*Initiator, error)
@@ -27,7 +28,7 @@ func (c *CipherState) Encrypt(plaintext []byte) (ciphertext []byte, err error)
 func (c *CipherState) Decrypt(ciphertext []byte) (plaintext []byte, err error)
 ```
 
-Eleven exports total. No `HandshakeState`, no `Config`, no `HandshakePattern`, no `CipherSuite`, no `DHKey` re-export — flynn types do not leak through the API.
+Twelve exports total. No `HandshakeState`, no `Config`, no `HandshakePattern`, no `CipherSuite`, no `DHKey` re-export — flynn types do not leak through the API.
 
 ## Cipher suite
 
@@ -89,6 +90,22 @@ The swap is pinned structurally by `TestRoundTrip_BothDirections`: if `WriteResp
 This is the v2 spec's mandate from `docs/protocol-mobile.md:197`: *"Implementations MUST NOT pass a non-empty AD without a corresponding spec amendment."* Per-handshake key derivation isolates one session's ciphertext from another, and per-session nonce-counter discipline isolates frames within a session — the outer routing envelope (`conn_id`, `frame`) is plaintext and intentionally not AEAD-bound.
 
 A caller cannot pass non-empty AD without editing `noise.go`, which would itself be a spec amendment. The wrapper IS the enforcement point.
+
+## Peer-static exposure (responder only)
+
+`(*Responder).PeerStatic() []byte` returns a defensive copy of the initiator's 32-byte X25519 static public key learned from IK message 1. Callable only after `ReadInit` returns nil; the wrapper does NOT panic on misuse — pre-`ReadInit` calls return a zero-length slice, matching flynn's `HandshakeState.PeerStatic()` zero-value behaviour. Body is one statement:
+
+```go
+return append([]byte(nil), r.hs.PeerStatic()...)
+```
+
+The defensive copy mirrors `NewResponder`'s `StaticKeypair.Private` posture — same idiom, symmetric for bytes flowing OUT as for bytes flowing IN. A caller that stashes the slice and later mutates it cannot corrupt flynn's internal state nor poison a downstream `bytes.Equal` comparison. Cost: 32 bytes per call.
+
+**No `Initiator.PeerStatic` accessor exists.** The initiator already knows its peer's static — it is the constructor argument. Adding the symmetry would be dead code and invite confusion about which side's value is "trusted".
+
+**Production consumer** (from [#452](../codebase/452.md)): [`internal/relay/V2Session.peerStatic`](v2-session-manager.md) captures the value at the initial Noise_IK handshake to pin the peer's identity for the session's lifetime; a future re-key responder (#453) will compare a fresh-handshake initiator's `PeerStatic()` against the pinned field and reject mismatches at WS close code 4426. The wrapper's contract: bytes returned post-`ReadInit` are authenticated (flynn has MAC-verified and DH-decrypted the initiator's static); bytes returned pre-`ReadInit` carry no semantics (zero-length).
+
+The pre-`ReadInit` zero-length return is pinned by `TestResponder_PeerStatic_BeforeReadInit_ReturnsZeroLength` independently of flynn's internals — a future flynn upgrade that initialised `s.rs` to a non-nil placeholder would surface as a unit-test failure rather than a silent behavioural change. Callers that need stricter enforcement (e.g. "panic if I call this out of order") should track handshake state in their own session struct.
 
 ## Key arguments — `[]byte` of length `KeyLen` (32)
 
@@ -180,6 +197,11 @@ Transport-counter behaviour:
 - `TestDecrypt_RejectsOutOfOrderFrame` — encrypt p1 then p2, deliver p2 first; assert MAC failure (the wire carries no nonce; `rRecv` expects nonce 0 but p2's tag was computed against nonce 1).
 - `TestDecrypt_RejectsReplayedFrame` — encrypt p1, decrypt p1 (succeeds), decrypt p1 again (fails — counter advanced).
 
+Peer-static accessor (#452):
+
+- `TestResponder_PeerStatic_AfterReadInit_MatchesInitiatorStatic` — drives a real handshake (`NewInitiator` + `WriteInit` → `NewResponder` + `ReadInit`); asserts `PeerStatic()` returns the initiator's pub. Two consecutive calls, mutate the first, assert the second is unchanged — pins the defensive-copy contract. Third call after mutation confirms flynn's internal state is not aliased through the returned slice.
+- `TestResponder_PeerStatic_BeforeReadInit_ReturnsZeroLength` — `NewResponder` only; assert `len(PeerStatic()) == 0` and no panic. Pins the wrapper's pre-handshake contract independently of flynn's internals.
+
 Error-message hygiene:
 
 - `TestErrorMessages_DoNotLeakPlaintextOrKey` — described above.
@@ -208,6 +230,7 @@ Tests deliberately not included:
 - [`features/keys-package.md`](keys-package.md) — produces the `[32]byte` static private key the responder consumes via `StaticKey.PrivateKey()`.
 - [`features/pair-package.md`](pair-package.md) — QR payload publishes the responder's static public key + 64-bit fingerprint; the phone-side initiator feeds the same bytes into `NewInitiator(_, peerStaticPub)`.
 - [`codebase/433.md`](../codebase/433.md) — per-ticket implementation summary.
+- [`codebase/452.md`](../codebase/452.md) — `(*Responder).PeerStatic()` accessor; defensive-copy posture symmetric to `NewResponder`.
 - [`codebase/438.md`](../codebase/438.md) — `internal/keys` static keypair primitive.
 - [`codebase/439.md`](../codebase/439.md) — `internal/keys` filesystem hardening (hard prerequisite for any production consumer of `LoadOrCreate`).
 - [`codebase/432.md`](../codebase/432.md) — `internal/pair` QR payload extension carrying `server_static_pubkey` + fingerprint.

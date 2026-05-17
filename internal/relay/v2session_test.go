@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -1246,5 +1247,42 @@ func TestV2Session_OpenState_HandlerAuthDevice(t *testing.T) {
 	got, _ := seenName.Load().(string)
 	if got != v2TestDevName {
 		t.Errorf("c.Auth().Name = %q, want %q", got, v2TestDevName)
+	}
+}
+
+// TestV2Session_InitialHandshake_CapturesPeerStatic pins the capture
+// site in handleNoiseInit: after the initial IK handshake reaches
+// V2StateOpen, V2Session.peerStatic must equal the initiator's static
+// public key. Consumed by the re-key responder's continuity check
+// (#453); inert in this slice.
+func TestV2Session_InitialHandshake_CapturesPeerStatic(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, initPub := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after handshake", v2TestConnID)
+	}
+	if len(s.peerStatic) != noise.KeyLen {
+		t.Fatalf("peerStatic len = %d, want %d", len(s.peerStatic), noise.KeyLen)
+	}
+	if !bytes.Equal(s.peerStatic, initPub) {
+		t.Errorf("peerStatic mismatch: got %x, want %x", s.peerStatic, initPub)
 	}
 }

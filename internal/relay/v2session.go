@@ -82,6 +82,20 @@ type V2Session struct {
 	// handleNoiseInit's token-OK path before state advances to
 	// V2StateOpen. Nil before the token check completes.
 	device *devices.Device
+
+	// peerStatic is the initiator's 32-byte X25519 static public key
+	// captured at the initial handshake (immediately after
+	// Responder.ReadInit returns nil). The field is set exactly once
+	// per V2Session and pins the original peer's identity for the
+	// session's entire lifetime — a successful re-key (added in #453)
+	// MUST NOT overwrite this value; the re-key responder reads
+	// s.peerStatic and rejects mismatches at WS close code 4426.
+	//
+	// SECURITY: this is a public key (not a secret), but it is
+	// identity-bearing. It MUST NOT appear in any logged field; the
+	// package's no-key-in-logs discipline extends to per-session
+	// identity pins. Not persisted to disk; lifetime is the V2Session.
+	peerStatic []byte
 }
 
 // State returns the externally-observable state. Called from the same
@@ -343,6 +357,11 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
 		return
 	}
+	// Pin the initiator's static pub at the earliest authenticated
+	// point — ReadInit success means flynn has MAC-verified and
+	// decrypted the static. Consumed by the re-key responder's
+	// peer-continuity check (#453); inert in this slice.
+	s.peerStatic = s.resp.PeerStatic()
 
 	var helloEnv protocol.Envelope
 	if err := json.Unmarshal(earlyData, &helloEnv); err != nil {
