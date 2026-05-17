@@ -1048,6 +1048,113 @@ Unlike attach (which calls `ResolveID` to accept loose-input prefixes), `session
 
 See `docs/specs/architecture/157-control-sessions-has-id.md` for the full ticket-time design; this section is the canonical evergreen reference.
 
+## Rekey: V2 conn re-key trigger seam (1.3d-1, #459)
+
+`VerbRekey` lets a local operator client trigger an immediate Noise re-key on a named v2 conn through the control socket. The verb is single-word (`"rekey"`) — not part of a `rekey.*` family — because the trigger has no sibling operations. The operator-facing surface (`pyry rekey <conn_id>`) is slice B (#460); slice A ships the wire contract and the seam without a production caller. Until slice B lands a `*relay.V2SessionManager` via `SetRekeyer`, every `VerbRekey` request returns `Response{Error: "rekey: no rekeyer configured"}`.
+
+The plumbing channel is the existing control socket — the operator subcommand runs in a separate process and cannot reach the daemon's in-process `V2SessionManager` directly. The trade-off is one socket round-trip on a verb the operator invokes interactively, which is immaterial in practice.
+
+### Why a setter instead of a constructor argument
+
+`Server.NewServer` keeps its signature frozen across the slice; the Rekeyer is installed post-construction:
+
+```go
+type Rekeyer interface {
+    Rekey(ctx context.Context, connID string) error
+}
+
+func (s *Server) SetRekeyer(r Rekeyer) {
+    s.mu.Lock()
+    s.rekeyer = r
+    s.mu.Unlock()
+}
+```
+
+Threading the Rekeyer through `NewServer` would cascade across 1 production call site (`cmd/pyry/` daemon wiring) plus 10+ `_test.go` call sites that already pass long argument lists to `NewServer`. The setter sidesteps the cascade and keeps the wire contract independent of the constructor. Canonically called once between `Listen` and `Serve` as part of daemon startup; the existing `s.mu` (already guarding `listener` / `closed` / `closedCh`) covers the field's read in `handleRekey`. The lock is released before the (potentially blocking) Rekeyer call — leaf-lock, no nested critical sections.
+
+### Why `Rekeyer` is free-standing, not embedded into `Sessioner`
+
+Unlike `Remover` / `Renamer` / `Lister` / `GetOrCreator` which all share the `*sessions.Pool` producer (hence the `Sessioner` aggregate), `Rekeyer`'s implementer is `*relay.V2SessionManager` — a different type. Embedding `Rekeyer` into `Sessioner` would either force `Pool` to grow a stub `Rekey` method or force a covariant adapter; both are noise. Free-standing matches the package convention: "interface-at-the-consumer; aggregate sub-interfaces only when one concrete type satisfies the aggregate."
+
+### Wire shape
+
+`Request.Rekey` is a new omitempty pointer; every other verb's wire bytes stay byte-identical (the same back-compat property the existing payloads' additions preserve):
+
+```go
+type Request struct {
+    // ... existing fields ...
+    Rekey *RekeyPayload `json:"rekey,omitempty"`
+}
+
+type RekeyPayload struct {
+    ConnID string `json:"connID"`
+}
+```
+
+`RekeyPayload.ConnID` has **no** `omitempty` — empty `ConnID` is invalid input and the server-side guard (`handleRekey`) rejects it before calling Rekeyer. The camelCase JSON tag matches the control-socket convention (`SessionsPayload.ID`, `AttachPayload.SessionID`, `ResizePayload.SessionID`) — deliberately distinct from `RoutingEnvelope.ConnID`'s snake-case `"conn_id"`, which is the mobile-WS wire and unrelated to the operator-facing control socket.
+
+`rekey` uses the `OK` / `Error` envelope — no typed result. The success ack is `Response{OK: true}`; the underlying handshake runs asynchronously on the conn's state machine and the verb does not wait for it.
+
+### Typed errors via Response.ErrorCode
+
+`Rekeyer.Rekey` returns `ErrConnNotFound` when the named conn is not currently open on the v2 session manager. The dispatcher maps this to the wire token `ErrCodeConnNotFound = "conn_not_found"`:
+
+```
+Response.ErrorCode == "conn_not_found"  → ErrConnNotFound
+```
+
+The sentinel `ErrConnNotFound = errors.New("rekey: conn not found")` is **owned in `internal/control`** because the `Rekeyer` contract is defined here; slice B's `*relay.V2SessionManager.TriggerRekey` wraps its internal not-found state with `%w` against this sentinel. The dispatcher uses `errors.Is` (not `==`), so wrapped sentinels also map correctly. The client's `Rekey` helper reconstructs the bare `ErrConnNotFound` from `Response.ErrorCode` so callers can `errors.Is` against it.
+
+The pattern mirrors how `internal/control` consumes `sessions.ErrSessionNotFound` — the import direction is flipped because slice B's package owns the producer. Slice B has a small choice (return the bare `control.ErrConnNotFound`, or define `relay.ErrConnNotFound` and wrap-translate at the wiring layer); both shapes are byte-stable on the wire.
+
+### Dispatcher behaviour
+
+`handleRekey` follows `handleSessionsRename`'s no-`context.WithTimeout` shape. The rekey-trigger contract is "deliver the request to the v2 manager loop", not "complete the rekey handshake" — a handler-level timeout would lie about cancellability. `context.Background()` is passed into `Rekeyer.Rekey` so slice B's implementer can propagate its own enqueue-cancellation logic; this slice imposes no deadline.
+
+Guards fire in this order before the Rekeyer call:
+
+| Precondition | Server reply |
+| --- | --- |
+| `s.rekeyer == nil` | `Response{Error: "rekey: no rekeyer configured"}` (no `ErrorCode`) |
+| `payload == nil \|\| payload.ConnID == ""` | `Response{Error: "rekey: missing connID"}` (no `ErrorCode`) |
+| `r.Rekey(...)` returns `ErrConnNotFound` (via `errors.Is`) | `Response{Error: err.Error(), ErrorCode: ErrCodeConnNotFound}` |
+| `r.Rekey(...)` returns any other error | `Response{Error: err.Error()}` (no `ErrorCode`) |
+| `r.Rekey(...)` returns `nil` | `Response{OK: true}` |
+
+The guard order is load-bearing: a daemon with no Rekeyer installed surfaces its config drift over an input-validation error, since the input never reached anything that could have used it. The nil-rekeyer and missing-connID guards both surface as plain strings (no `ErrorCode`) because neither is a client-actionable distinction — they indicate either config drift on the daemon side or a malformed client.
+
+### Client helper
+
+`control.Rekey(ctx, socketPath, connID) error` mirrors `SessionsRm`'s single-arg shape:
+
+```go
+func Rekey(ctx context.Context, socketPath, connID string) error {
+    resp, err := request(ctx, socketPath, Request{
+        Verb:  VerbRekey,
+        Rekey: &RekeyPayload{ConnID: connID},
+    })
+    if err != nil { return err }
+    if resp.Error != "" {
+        if resp.ErrorCode == ErrCodeConnNotFound {
+            return ErrConnNotFound
+        }
+        return errors.New(resp.Error)
+    }
+    if !resp.OK {
+        return errors.New("control: rekey response missing ok flag")
+    }
+    return nil
+}
+```
+
+Same one-shot dial → encode → decode → close lifecycle as the other client helpers. No production caller in slice A — wired now so slice B is a one-file change in `cmd/pyry/`.
+
+### Threat model
+
+Operator-authenticated by filesystem perms (`0600` on the socket) — the same authentication boundary as `pyry stop` and `pyry sessions rm`. An attacker who can issue `VerbRekey` can also issue `VerbStop`; the rekey verb does not lower the bar. `RekeyPayload.ConnID` is a string forwarded verbatim to slice B's `Rekeyer` — slice B is responsible for validating the conn-id against its `sessions` map. Error strings never echo flynn-noise error text or AEAD bytes; the wrapped `ErrConnNotFound` message contains only the operator-supplied conn-id, same trust class as the input.
+
+See `docs/specs/architecture/459-control-rekey-wire.md` for the full ticket-time design; this section is the canonical evergreen reference.
+
 ## Foreground binary auto-attach (1.3c-2)
 
 When `pyry` is invoked as a foreground binary (no `attach` / `status` / `stop` / `logs` / `sessions` / `install-service` / `version` / `help` subcommand) AND the claude-side args contain `--session-id <uuid>`, pyry now checks whether a daemon already hosts that UUID and — if so — dispatches to `control.AttachStdio` instead of spawning a fresh supervised claude. The motivating consumer is Claudian's "claude binary path" UI setting: pointing it at `~/.local/bin/pyry` Just Works against a running daemon, without a wrapper script and without socket-name management.
