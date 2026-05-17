@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1760,4 +1761,331 @@ func TestV2Session_OpenState_RekeyRequest_RecognisedReasons(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- re-key initiator tests (#450) ---
+
+// waitForOutboundCount polls rec.snapshot() until at least n envelopes
+// are recorded or the supplied deadline expires. Same shape as
+// waitForEnvelopes but with a caller-supplied deadline (used by the
+// reply-timeout test that has to wait a bounded window for the close
+// envelope without the 2s default tripping a stale-rekey false positive).
+func waitForOutboundCount(t *testing.T, rec *v2Recorder, n int, deadline time.Duration) []protocol.RoutingEnvelope {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		envs := rec.snapshot()
+		if len(envs) >= n {
+			return envs
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitForOutboundCount: only got %d, want >= %d", len(rec.snapshot()), n)
+	return nil
+}
+
+// TestV2Session_RekeyInitiator_Emit_ReArmViaResponder pins AC #5
+// bullets 1 + 2: after rekeyInterval elapses the manager emits a
+// rekey_request envelope sealed under s.send with payload.reason ==
+// "scheduled"; after a full re-key cycle completes via handleRekeyInit
+// the timer re-arms and a SECOND rekey_request is emitted under the
+// post-swap s.send. Joint test because the natural production caller
+// of rekeyComplete is handleRekeyInit, not a test goroutine bypass.
+func TestV2Session_RekeyInitiator_Emit_ReArmViaResponder(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval /
+	// rekeyReplyTimeout vars which the dispatch goroutines of other
+	// parallel tests read at session-open / emit time.
+	prevInterval := rekeyInterval
+	rekeyInterval = 20 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 3)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// First emit: wait for the rekeyInterval to elapse and a second
+	// outbound envelope to appear (initial noise_resp + first emit).
+	envs := waitForEnvelopes(t, rec, 2)
+	if len(envs) < 2 {
+		t.Fatalf("envs after first interval: got %d, want >= 2", len(envs))
+	}
+	emit1 := envs[1]
+	if emit1.CloseCode != 0 {
+		t.Errorf("first emit CloseCode = %d, want 0", emit1.CloseCode)
+	}
+	inner1 := decryptAppFrame(t, emit1, sess.initRecv)
+	if inner1.Type != protocol.TypeRekeyRequest {
+		t.Errorf("first emit inner type = %q, want %q", inner1.Type, protocol.TypeRekeyRequest)
+	}
+	var payload1 struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner1.Payload, &payload1); err != nil {
+		t.Fatalf("decode first emit payload: %v", err)
+	}
+	if payload1.Reason != "scheduled" {
+		t.Errorf("first emit reason = %q, want %q", payload1.Reason, "scheduled")
+	}
+
+	// Drive a successful re-key via handleRekeyInit (fresh initiator,
+	// same initPriv so peer-static continuity holds, empty early-data
+	// per spec § Re-key). This re-bases the 1-hour cadence via
+	// rekeyComplete.
+	initiator2, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator2: %v", err)
+	}
+	initMsg2, err := initiator2.WriteInit(nil)
+	if err != nil {
+		t.Fatalf("WriteInit2: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg2)
+
+	envs = waitForEnvelopes(t, rec, 3)
+	if len(envs) < 3 {
+		t.Fatalf("envs after rekey: got %d, want >= 3", len(envs))
+	}
+	rekeyResp := envs[2]
+	if rekeyResp.CloseCode != 0 {
+		t.Errorf("rekey noise_resp CloseCode = %d, want 0", rekeyResp.CloseCode)
+	}
+	respRaw := decodeRespFrame(t, rekeyResp)
+	_, _, initRecv2, err := initiator2.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("initiator2.ReadResp: %v", err)
+	}
+
+	// Second emit: rekeyComplete re-armed the timer; after another
+	// rekeyInterval the manager emits a fresh rekey_request — under
+	// the POST-SWAP s.send, decoded under initRecv2.
+	envs = waitForEnvelopes(t, rec, 4)
+	if len(envs) < 4 {
+		t.Fatalf("envs after second interval: got %d, want >= 4", len(envs))
+	}
+	emit2 := envs[3]
+	if emit2.CloseCode != 0 {
+		t.Errorf("second emit CloseCode = %d, want 0", emit2.CloseCode)
+	}
+	inner2 := decryptAppFrame(t, emit2, initRecv2)
+	if inner2.Type != protocol.TypeRekeyRequest {
+		t.Errorf("second emit inner type = %q, want %q", inner2.Type, protocol.TypeRekeyRequest)
+	}
+	var payload2 struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner2.Payload, &payload2); err != nil {
+		t.Fatalf("decode second emit payload: %v", err)
+	}
+	if payload2.Reason != "scheduled" {
+		t.Errorf("second emit reason = %q, want %q", payload2.Reason, "scheduled")
+	}
+
+	// State after stop: session still open, awaitingRekeyReply still
+	// true (second emit was sent, no second responder cycle).
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after second emit", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after second emit = %v, want V2StateOpen", got)
+	}
+	if !s.awaitingRekeyReply {
+		t.Errorf("awaitingRekeyReply = false after second emit, want true (no responder cycle ran)")
+	}
+}
+
+// TestV2Session_RekeyInitiator_ReplyTimeout_4426 pins AC #5 bullet 3:
+// after the timer-driven emit, if no fresh noise_init arrives within
+// rekeyReplyTimeout the manager closes the conn at
+// StatusHandshakeFailure (4426) with a noise.rekey_failed log line.
+func TestV2Session_RekeyInitiator_ReplyTimeout_4426(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval /
+	// rekeyReplyTimeout vars which the dispatch goroutines of other
+	// parallel tests read at session-open / emit time.
+	prevInterval := rekeyInterval
+	rekeyInterval = 20 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Wait for the close envelope: initial noise_resp + emit + close.
+	envs := waitForOutboundCount(t, rec, 3, 500*time.Millisecond)
+	if len(envs) < 3 {
+		t.Fatalf("envs after reply timeout: got %d, want >= 3", len(envs))
+	}
+	emit := envs[1]
+	if emit.CloseCode != 0 {
+		t.Errorf("emit CloseCode = %d, want 0", emit.CloseCode)
+	}
+	closing := envs[2]
+	if closing.CloseCode != uint16(StatusHandshakeFailure) {
+		t.Errorf("close_code = %d, want %d", closing.CloseCode, StatusHandshakeFailure)
+	}
+	if closing.Frame != nil {
+		t.Errorf("Frame = %s, want nil (close-only at 4426)", string(closing.Frame))
+	}
+
+	// Stop so the log buffer fully flushes before substring checks.
+	sess.stop()
+
+	if _, ok := sess.mgr.sessions[v2TestConnID]; ok {
+		t.Errorf("sessions[%q] still present after reply-timeout close; closeWith should have deleted it", v2TestConnID)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{
+		"event=noise.rekey_failed",
+		"close_code=4426",
+		"conn_id=" + v2TestConnID,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+	// noise.rekey_failed line MUST NOT carry an err= field — no
+	// flynn-noise error text leaks via the timeout branch (architect
+	// security review).
+	failLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "event=noise.rekey_failed") {
+			failLine = line
+			break
+		}
+	}
+	if failLine == "" {
+		t.Fatalf("noise.rekey_failed log line not found; got:\n%s", out)
+	}
+	if strings.Contains(failLine, "err=") {
+		t.Errorf("noise.rekey_failed line carries err= field; no flynn-noise error text should leak.\nline: %s", failLine)
+	}
+}
+
+// TestV2Session_RekeyInitiator_TimerCleanup_NoGoroutineLeak pins
+// AC #5 bullet 4: armed timer-callback goroutines do not outlive Run.
+// Two phases — close via manager-exit (timers armed but never fired)
+// and close via reply-timeout fire (rekeyReplyTimer fired the close).
+// In both cases, runtime.NumGoroutine returns to its pre-test baseline
+// within a small jitter window after Run exits.
+func TestV2Session_RekeyInitiator_TimerCleanup_NoGoroutineLeak(t *testing.T) {
+	// Not t.Parallel(): runtime.NumGoroutine is global, parallel tests
+	// would race the baseline reads.
+
+	t.Run("close_via_manager_exit", func(t *testing.T) {
+		prevInterval := rekeyInterval
+		rekeyInterval = 50 * time.Millisecond
+		t.Cleanup(func() { rekeyInterval = prevInterval })
+		prevReply := rekeyReplyTimeout
+		rekeyReplyTimeout = 100 * time.Millisecond
+		t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+		before := runtime.NumGoroutine()
+
+		respPriv, respPub := genV2Keypair(t)
+		initPriv, _ := genV2Keypair(t)
+		reg := v2PairedRegistry(t, v2TestToken)
+
+		frames := make(chan protocol.RoutingEnvelope, 2)
+		rec := &v2Recorder{}
+		sess := driveToOpen(t, V2SessionConfig{
+			Frames:     frames,
+			Outbound:   rec.outbound,
+			StaticPriv: respPriv,
+			Devices:    reg,
+			ServerID:   v2TestServerID,
+			Logger:     silentLogger(),
+		}, frames, rec, respPub, initPriv)
+
+		// Stop immediately — rekeyTimer is armed but has not yet
+		// fired. Run-derived runCtx cancel must unblock any pending
+		// callback goroutine. (Sleeping briefly here is unnecessary:
+		// armRekeyTimer's callback hasn't been spawned yet because
+		// time.AfterFunc spawns the goroutine only when the timer
+		// fires.)
+		sess.stop()
+
+		// Give time.AfterFunc-spawned goroutines (if any fired during
+		// the brief handshake window) a tick to unblock and exit.
+		runtime.Gosched()
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+
+		after := runtime.NumGoroutine()
+		if after > before+1 {
+			t.Errorf("goroutine leak: before=%d, after=%d (delta=%d)", before, after, after-before)
+		}
+	})
+
+	t.Run("close_via_reply_timeout", func(t *testing.T) {
+		prevInterval := rekeyInterval
+		rekeyInterval = 20 * time.Millisecond
+		t.Cleanup(func() { rekeyInterval = prevInterval })
+		prevReply := rekeyReplyTimeout
+		rekeyReplyTimeout = 40 * time.Millisecond
+		t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+		before := runtime.NumGoroutine()
+
+		respPriv, respPub := genV2Keypair(t)
+		initPriv, _ := genV2Keypair(t)
+		reg := v2PairedRegistry(t, v2TestToken)
+
+		frames := make(chan protocol.RoutingEnvelope, 2)
+		rec := &v2Recorder{}
+		sess := driveToOpen(t, V2SessionConfig{
+			Frames:     frames,
+			Outbound:   rec.outbound,
+			StaticPriv: respPriv,
+			Devices:    reg,
+			ServerID:   v2TestServerID,
+			Logger:     silentLogger(),
+		}, frames, rec, respPub, initPriv)
+
+		// Wait for the close envelope (initial noise_resp + emit +
+		// close) so both timers have fired.
+		_ = waitForOutboundCount(t, rec, 3, 500*time.Millisecond)
+		sess.stop()
+
+		runtime.Gosched()
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+
+		after := runtime.NumGoroutine()
+		if after > before+1 {
+			t.Errorf("goroutine leak: before=%d, after=%d (delta=%d)", before, after, after-before)
+		}
+	})
 }
