@@ -24,6 +24,16 @@ import (
 // grepping the error message.
 var ErrInstanceRunning = errors.New("another pyry instance is already running")
 
+// ErrConnNotFound is returned by Rekeyer.Rekey when the named v2 conn is
+// not currently open on the session manager. The dispatcher maps this to
+// ErrCodeConnNotFound on the wire (via errors.Is, so wrapped sentinels
+// also map); the client helper reconstructs this sentinel from the wire
+// token so callers can errors.Is against it. Owned in this package
+// because the Rekeyer contract is defined here — slice B's
+// *relay.V2SessionManager wraps its internal not-found condition with
+// %w against this sentinel.
+var ErrConnNotFound = errors.New("rekey: conn not found")
+
 // dialProbeTimeout is how long Listen waits for a live-instance probe to
 // connect before treating the socket as stale. Short enough not to delay
 // the common case (no prior pyry — connection refused fires instantly),
@@ -123,6 +133,36 @@ type GetOrCreator interface {
 	GetOrCreate(ctx context.Context, id sessions.SessionID, label string) (sessions.SessionID, error)
 }
 
+// Rekeyer is the per-conn rekey-trigger view the control server depends
+// on for VerbRekey. Slice B's *relay.V2SessionManager satisfies it via
+// TriggerRekey; slice A (#459) ships no production implementer — until
+// SetRekeyer is called handleRekey replies "rekey: no rekeyer
+// configured".
+//
+// Rekey triggers an immediate Noise re-key on the named conn (the
+// operator-driven "manual" rekey path in docs/protocol-mobile.md
+// § Re-key). Returns ErrConnNotFound (possibly wrapped) when no conn
+// with the given id is currently open on the v2 session manager — the
+// dispatcher maps this to ErrCodeConnNotFound on the wire via errors.Is.
+// Any other non-nil error is surfaced verbatim through Response.Error
+// with no ErrorCode.
+//
+// Plumbing channel: the operator-facing verb routes through the control
+// socket rather than a direct in-process call because the
+// `pyry rekey <conn_id>` subcommand runs in a separate process; an
+// in-process channel is not a workable alternative when the trigger
+// originates outside the daemon process. The trade-off is one socket
+// round-trip on a verb the operator invokes interactively — immaterial
+// in practice.
+//
+// Not embedded into Sessioner: slice B's implementer is a different
+// type from *sessions.Pool, so aggregating would force a stub method on
+// Pool or a covariant adapter. Free-standing matches the
+// Remover/Renamer/Lister "interface-at-the-consumer" pattern.
+type Rekeyer interface {
+	Rekey(ctx context.Context, connID string) error
+}
+
 // Sessioner aggregates the lifecycle methods the control server dispatches
 // to. Phase 1.1a-B1 added Create; Phase 1.1d-B1 added Remove via the
 // embedded Remover; Phase 1.1c-B1 added Rename via the embedded Renamer;
@@ -167,6 +207,14 @@ type Server struct {
 	listener net.Listener
 	closed   bool
 	closedCh chan struct{} // closed by Close, lets Serve's ctx-watcher exit
+	// rekeyer is the optional Rekeyer used to service VerbRekey
+	// requests. Installed via SetRekeyer between NewServer and Serve
+	// (so NewServer's signature stays frozen across the 34-call-site
+	// fan-out — see #451 split rationale). Read under s.mu by
+	// handleRekey; the lock is released before the (potentially
+	// blocking) call into the Rekeyer. Zero-value (nil) is the
+	// production state until slice B (#460) lands a V2SessionManager.
+	rekeyer Rekeyer
 
 	// streamingWG tracks streaming-handler goroutines (currently: the
 	// per-attach detach watcher). Serve waits on it before returning so a
@@ -223,6 +271,22 @@ func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, sh
 // SocketPath returns the configured socket path.
 func (s *Server) SocketPath() string {
 	return s.socketPath
+}
+
+// SetRekeyer installs the Rekeyer used to service VerbRekey requests.
+// Safe to call from any goroutine; canonically called once between
+// NewServer and Serve as part of daemon startup. Passing nil clears the
+// previously-installed Rekeyer (used by tests; production startup
+// installs once and never clears).
+//
+// Threading the rekeyer through NewServer would cascade across every
+// NewServer call site (~1 production + 10+ tests) — see #451 split
+// rationale. SetRekeyer keeps the wire contract independent of the
+// constructor.
+func (s *Server) SetRekeyer(r Rekeyer) {
+	s.mu.Lock()
+	s.rekeyer = r
+	s.mu.Unlock()
 }
 
 // Listen creates the socket file. It is split from Serve so callers can
@@ -419,6 +483,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleSessionsList(enc)
 	case VerbSessionsHasID:
 		s.handleSessionsHasID(enc, req.Sessions)
+	case VerbRekey:
+		s.handleRekey(enc, req.Rekey)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -633,6 +699,46 @@ func (s *Server) handleSessionsHasID(enc *json.Encoder, payload *SessionsPayload
 	}
 	has := err == nil
 	_ = enc.Encode(Response{SessionsHasID: &SessionsHasIDResult{Has: has}})
+}
+
+// handleRekey serves a VerbRekey request: read the installed Rekeyer
+// under s.mu, validate the payload, call Rekeyer.Rekey, map the typed
+// ErrConnNotFound sentinel to the wire ErrorCode, and ack.
+//
+// Mirrors handleSessionsRename's no-ctx-timeout shape: slice B's
+// Rekeyer enqueues the trigger and returns once the v2 manager has
+// accepted it. The actual Noise handshake runs asynchronously on the
+// conn's state machine — a handler-level WithTimeout would lie about
+// cancellability. context.Background() is passed into Rekeyer.Rekey so
+// slice B can propagate cancellation through its own enqueue logic if
+// it wants; this slice does not impose a deadline.
+//
+// Guards (nil rekeyer, nil/empty payload) fire BEFORE the Rekeyer call
+// so a misconfigured daemon or malformed client cannot trigger work or
+// reach a nil dereference. The s.mu critical section loads the Rekeyer
+// pointer once and releases the lock before the (potentially blocking)
+// call into the installed Rekeyer.
+func (s *Server) handleRekey(enc *json.Encoder, payload *RekeyPayload) {
+	s.mu.Lock()
+	r := s.rekeyer
+	s.mu.Unlock()
+	if r == nil {
+		_ = enc.Encode(Response{Error: "rekey: no rekeyer configured"})
+		return
+	}
+	if payload == nil || payload.ConnID == "" {
+		_ = enc.Encode(Response{Error: "rekey: missing connID"})
+		return
+	}
+	if err := r.Rekey(context.Background(), payload.ConnID); err != nil {
+		resp := Response{Error: err.Error()}
+		if errors.Is(err, ErrConnNotFound) {
+			resp.ErrorCode = ErrCodeConnNotFound
+		}
+		_ = enc.Encode(resp)
+		return
+	}
+	_ = enc.Encode(Response{OK: true})
 }
 
 // toSessionsPolicy maps the wire-level JSONLPolicy enum (string) to the
