@@ -8,12 +8,14 @@ require (
 	github.com/flynn/noise v1.1.0
 	github.com/fsnotify/fsnotify v1.10.0
 	github.com/mdp/qrterminal/v3 v3.2.1
+	github.com/pyrycode/tui-driver v0.0.0-20260519122208-b09fe70e60a7
 	golang.org/x/crypto v0.51.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.43.0
 )
 
 require (
+	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
