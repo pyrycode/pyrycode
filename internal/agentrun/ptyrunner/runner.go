@@ -1,32 +1,34 @@
 // Package ptyrunner spawns claude as an interactive TUI under a PTY (via
 // github.com/pyrycode/tui-driver), waits for the TUI to reach idle, submits
-// one user prompt through a bracketed-paste sequence, and tears the session
-// down cleanly.
+// one user prompt through a bracketed-paste sequence, tails the per-session
+// JSONL output, re-emits each event as stream-json on cfg.Stdout, and tears
+// the session down cleanly after the deterministic end-of-turn fires.
 //
 // `pyry agent-run` will use ptyrunner (post-#470 cutover) to drive claude on
 // the interactive surface Anthropic's 2026-06-15 billing policy explicitly
 // names as subscription-eligible, replacing the stream-json subprocess path
 // in internal/agentrun/streamrunner. The package owns the spawn, the
-// idle-wait, the modal/banner safety check, the prompt write, and the
-// shutdown — nothing else.
+// idle-wait, the modal/banner safety check, the prompt write, the JSONL
+// tail + stream-json emit, and the shutdown — nothing else.
 //
-// This slice is scaffolding only. Subsequent slices wire JSONL tailing
-// (#472), stream-json re-emit + result trailer (#472), pyry-side max-turns
-// budget (#472), and the cmd/pyry/agent_run.go cutover (#470). The Config
-// declares MaxTurns and Stdout for forward-compatibility with #472 but Run
-// does not consume them in this slice.
+// This slice wires the JSONL tail and stream-json emit on top of the
+// scaffolding from #471. The pyry-side max-turns budget and the watchdog
+// goroutine land in a follow-up slice on top of this one; the
+// cmd/pyry/agent_run.go cutover is #470.
 //
 // The package logs only error messages and never logs PromptBytes content
 // or any substring of the rolling TUI buffer — writers are opaque and the
-// buffer is inspected only via tui-driver's pure-function detectors.
+// buffer is inspected only via tui-driver's pure-function detectors. The
+// wired jsonl/tail watcher and streamjson emitter inherit the same
+// discipline — neither logs Event content; ptyrunner does not add any log
+// call that would either.
 //
 // Dependency direction: the package must not import
 // github.com/pyrycode/pyrycode/internal/supervisor (the PTY helper for the
-// long-lived claude wrapper) nor any of the sibling agentrun subpackages
-// (jsonl, streamjson, budget) — those are wired by #472, not here. Verify
-// with:
+// long-lived claude wrapper). The sibling agentrun subpackages (jsonl,
+// jsonl/tail, streamjson) are wired here. Verify with:
 //
-//	go list -deps ./internal/agentrun/ptyrunner/... | grep -E 'pyrycode/internal/(supervisor|agentrun/(jsonl|streamjson|budget))'
+//	go list -deps ./internal/agentrun/ptyrunner/... | grep pyrycode/internal/supervisor
 //
 // Expected output: empty.
 package ptyrunner
@@ -41,6 +43,10 @@ import (
 	"os/exec"
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
+	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl/tail"
+	"github.com/pyrycode/pyrycode/internal/agentrun/streamjson"
 )
 
 // Sentinel-shape errors surfaced when a modal or failure banner is detected
@@ -89,10 +95,11 @@ type Config struct {
 	// Required.
 	Effort string
 
-	// MaxTurns is declared for forward-compatibility with #472 (pyry-side
-	// budget counter); NOT consumed in this slice. The interactive-TUI
-	// claude path intentionally omits --max-turns from argv (#472
-	// enforces the cap in pyry itself).
+	// MaxTurns is declared for forward-compatibility with the follow-up
+	// slice on top of #478 (pyry-side budget counter); NOT consumed in this
+	// slice. The interactive-TUI claude path intentionally omits
+	// --max-turns from argv (the follow-up slice enforces the cap in pyry
+	// itself).
 	MaxTurns int
 
 	// PromptBytes is the user-turn prompt text submitted via
@@ -104,15 +111,24 @@ type Config struct {
 	// it.
 	PromptBytes []byte
 
-	// Stdout is declared for forward-compatibility with #472 (stream-json
-	// re-emit); NOT written to in this slice. Run does not touch this
-	// field.
+	// Stdout is where the streamjson.Emitter writes per-event stream-json
+	// lines and the trailing `type:"result"` trailer. Required.
+	// Production callers pass os.Stdout; tests pass a bytes.Buffer or a
+	// failing writer.
 	Stdout io.Writer
 
 	// Stderr receives the child's stderr. Required. (The interactive-TUI
 	// claude writes stderr separately from the PTY-mirrored stdout —
 	// tui-driver does not multiplex them.)
 	Stderr io.Writer
+
+	// HomeDir is an optional test seam. When non-empty, it overrides the
+	// home directory used by the JSONL watcher
+	// (~/.claude/projects/<encoded-workdir>/). Production callers leave it
+	// empty; the watcher consults os.UserHomeDir() in that case. Tests
+	// use a t.TempDir() value so each test gets an isolated
+	// ~/.claude/projects tree.
+	HomeDir string
 
 	// Env is appended to os.Environ() in the child process. Optional;
 	// production callers leave it nil. Tests use it to thread
@@ -129,14 +145,18 @@ type Config struct {
 // Run spawns claude under tui-driver with the argv shape buildArgs
 // produces, waits for the TUI to reach idle, runs the trust / mcp-failure
 // / network-failure detectors against the post-idle snapshot, submits
-// cfg.PromptBytes via Session.WritePrompt, and returns.
+// cfg.PromptBytes via Session.WritePrompt, tails the per-session JSONL via
+// jsonl/tail, re-emits each event as stream-json on cfg.Stdout via
+// streamjson.Emitter, and returns once end-of-turn fires or the context is
+// cancelled.
 //
 // Return value contract:
 //
-//   - nil on a clean spawn → idle → WritePrompt cycle.
+//   - nil on a clean spawn → idle → WritePrompt → tail-to-end-of-turn cycle.
 //   - nil on operator-shutdown collapse: any ctx-cancel / deadline-exceeded
-//     error from Spawn or WaitUntil collapses to nil (same contract
-//     streamrunner uses).
+//     error from Spawn / WaitUntil / Watcher.Run, and any in-flight emit
+//     failure observed during teardown, collapses to nil when ctx.Err() is
+//     set (same contract streamrunner uses).
 //   - errors.New("ptyrunner: <field> required") on missing required fields.
 //   - fmt.Errorf("ptyrunner: spawn: %w", err) on Spawn failure.
 //   - fmt.Errorf("ptyrunner: wait idle: %w", err) on a non-ctx WaitUntil
@@ -145,9 +165,22 @@ type Config struct {
 //     the corresponding post-idle detection.
 //   - fmt.Errorf("ptyrunner: write prompt: %w", err) on WritePrompt
 //     failure.
+//   - fmt.Errorf("ptyrunner: emitter: %w", err) on streamjson.New failure
+//     (defensive — Writer is validated upstream and SessionID is required).
+//   - fmt.Errorf("ptyrunner: tail: %w", err) on tail.New / Watcher.Run
+//     failure (non-ctx I/O failure draining the JSONL file).
+//   - fmt.Errorf("ptyrunner: emit: %w", err) on the first sticky Emit
+//     failure captured during the watcher's drain (e.g. broken pipe on
+//     cfg.Stdout). Prioritised over a non-ctx Watcher.Run error because
+//     the emit failure is operator-actionable while the watcher likely
+//     returned cleanly at EOT regardless.
 //
-// Session.Close is invoked via defer; a non-nil Close error is logged at
-// Warn level and not surfaced (close-time errors are advisory).
+// Cleanup ordering: emitter.Close (which writes the `result` trailer) runs
+// BEFORE sess.Close (which SIGTERM→grace→SIGKILLs the claude child) via
+// defer LIFO. That way the dispatcher receives a complete stream even if
+// the child takes the full grace window to exit. emitter.Close's return
+// value is discarded; sess.Close's non-nil error is logged at Warn and not
+// surfaced.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.ClaudeBin == "" {
 		return errors.New("ptyrunner: ClaudeBin required")
@@ -172,6 +205,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if len(cfg.PromptBytes) == 0 {
 		return errors.New("ptyrunner: PromptBytes required")
+	}
+	if cfg.Stdout == nil {
+		return errors.New("ptyrunner: Stdout required")
 	}
 	if cfg.Stderr == nil {
 		return errors.New("ptyrunner: Stderr required")
@@ -228,6 +264,55 @@ func Run(ctx context.Context, cfg Config) error {
 
 	if err := sess.WritePrompt(string(cfg.PromptBytes)); err != nil {
 		return fmt.Errorf("ptyrunner: write prompt: %w", err)
+	}
+
+	emitter, err := streamjson.New(streamjson.Config{
+		Writer:    cfg.Stdout,
+		SessionID: cfg.SessionID,
+		Logger:    logger,
+	})
+	if err != nil {
+		return fmt.Errorf("ptyrunner: emitter: %w", err)
+	}
+	// Registered AFTER sess.Close's defer so LIFO ordering runs
+	// emitter.Close FIRST (flushes the `result` trailer), then sess.Close
+	// (SIGTERMs the claude child). emitter.Close's return is advisory:
+	// if Emit was failing the dispatcher already sees a broken stream,
+	// and if Emit was succeeding the trailer's ~300-byte write almost
+	// certainly succeeds.
+	defer func() { _ = emitter.Close() }()
+
+	var emitErr error
+	watcher, err := tail.New(tail.Config{
+		Workdir:   cfg.WorkDir,
+		SessionID: cfg.SessionID,
+		HomeDir:   cfg.HomeDir,
+		OnEvent: func(ev jsonl.Event) {
+			if err := emitter.Emit(ev); err != nil && emitErr == nil {
+				emitErr = err
+			}
+		},
+		// OnEndOfTurn intentionally no-op: the emitter's internal
+		// EndOfTurnSeen state is set inside Emit when ev.EndOfTurn
+		// is true, so Close's default classification produces
+		// ExitReasonCompletion automatically. The callback exists
+		// only because tail.Config.OnEndOfTurn is required.
+		OnEndOfTurn: func() {},
+		Logger:      logger,
+	})
+	if err != nil {
+		return fmt.Errorf("ptyrunner: tail: %w", err)
+	}
+
+	runErr := watcher.Run(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
+	if emitErr != nil {
+		return fmt.Errorf("ptyrunner: emit: %w", emitErr)
+	}
+	if runErr != nil {
+		return fmt.Errorf("ptyrunner: tail: %w", runErr)
 	}
 	return nil
 }

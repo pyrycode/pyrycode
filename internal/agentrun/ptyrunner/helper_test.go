@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -39,6 +40,11 @@ func TestMain(m *testing.M) {
 //                        AND IsIdle both fire.
 //   - "slow_spawn":      sleep 5s before writing anything (parent's
 //                        ctx-cancel fires inside WaitUntil first).
+//   - "jsonl":           write ❯ + space (IsIdle), then once the parent's
+//                        WritePrompt arrives on stdin, write
+//                        GO_PTYRUNNER_JSONL_BODY to GO_PTYRUNNER_JSONL_PATH
+//                        (atomic-append, 0600). The body's lines drive the
+//                        parent's tail.Watcher + streamjson.Emitter.
 //
 // All modes install a SIGTERM handler so Session.Close()'s
 // SIGTERM→grace→SIGKILL sequence resolves on the SIGTERM step rather
@@ -65,6 +71,8 @@ func runHelper() {
 	case "slow_spawn":
 		time.Sleep(5 * time.Second)
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
+	case "jsonl":
+		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_PTYRUNNER_HELPER_MODE: %q\n", mode)
 		os.Exit(99)
@@ -73,10 +81,68 @@ func runHelper() {
 
 	// Drain stdin so PTY writes from the parent (WritePrompt's
 	// bracketed-paste sequence) don't backpressure into the parent's
-	// PTY master write. Discarded — this slice does not verify
-	// WritePrompt's exact wire shape (the tui-driver package already
-	// pins it via internal tests).
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
+	// PTY master write. For jsonl mode, signal stdinSeen on the first
+	// byte so the main goroutine knows WritePrompt has landed and the
+	// JSONL body can be flushed to disk.
+	stdinSeen := make(chan struct{}, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		first := true
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 && first {
+				first = false
+				select {
+				case stdinSeen <- struct{}{}:
+				default:
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	if mode == "jsonl" {
+		path := os.Getenv("GO_PTYRUNNER_JSONL_PATH")
+		body := os.Getenv("GO_PTYRUNNER_JSONL_BODY")
+		if path == "" {
+			fmt.Fprintln(os.Stderr, "jsonl mode requires GO_PTYRUNNER_JSONL_PATH")
+			os.Exit(98)
+		}
+		go func() {
+			select {
+			case <-stdinSeen:
+			case <-time.After(20 * time.Second):
+				fmt.Fprintln(os.Stderr, "jsonl mode: stdin first-byte timeout")
+				return
+			}
+			if body == "" {
+				return
+			}
+			// MkdirAll guards against the race where the parent's
+			// tail.New has not yet created the encoded project dir
+			// when WritePrompt's bytes land on the child's stdin.
+			// The watcher is armed at the project-dir level (via
+			// fsnotify.Add in tail.New), so a CREATE event on the
+			// JSONL file fires whether the helper or the parent
+			// makes the dir first.
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				fmt.Fprintf(os.Stderr, "jsonl mode: mkdir %s: %v\n", filepath.Dir(path), err)
+				return
+			}
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "jsonl mode: open %s: %v\n", path, err)
+				return
+			}
+			if _, err := io.WriteString(f, body); err != nil {
+				fmt.Fprintf(os.Stderr, "jsonl mode: write %s: %v\n", path, err)
+			}
+			_ = f.Sync()
+			_ = f.Close()
+		}()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
