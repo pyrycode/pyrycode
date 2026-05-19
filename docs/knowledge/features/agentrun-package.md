@@ -1,6 +1,6 @@
 # `internal/agentrun` — workdir helpers and shared types for `pyry agent-run`
 
-> **Post-#392 surface.** The parent `internal/agentrun` package now hosts only **workdir helpers** (`ResolveWorkdir` + `EncodeProjectDir`). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive. The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive and the trust pre-write as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md)). See § "Subpackages" below.
+> **Post-#392 surface.** The parent `internal/agentrun` package now hosts only **workdir helpers** (`ResolveWorkdir` + `EncodeProjectDir`). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive. The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below.
 
 Stdlib-only helpers for `pyry agent-run`. The parent package's residual responsibility is **workdir encoding** — the macOS `/var → /private/var` realpath rule lives in one place so every consumer (`trust`, the JSONL watcher, `rotation/watcher.go`) shares the same definition of "claude's path key."
 
@@ -24,11 +24,12 @@ Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-
 | Subpackage | Doc | Purpose |
 | --- | --- | --- |
 | `internal/agentrun/trust` | [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) | Pre-mark workdirs trusted in `~/.claude.json` so PTY-driven claude skips the workspace-trust modal (#475; slimmed resurrection of #341 / #392). |
+| `internal/agentrun/settings` | [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md) | Write the per-spawn deny-default permissions JSON (`{"permissions":{"allow":[...],"defaultMode":"deny"}}`) to `os.TempDir()` so PTY-driven claude enforces the same tool whitelist `-p --allowedTools` had natively (#476; slimmed resurrection of #339 / #392). |
 | `internal/agentrun/ptyrunner` | [ptyrunner-package.md](ptyrunner-package.md) | Interactive-TUI spawn primitive driven by `tui-driver` — the production spawn after #470 lands the cutover (#471). |
 | `internal/agentrun/streamrunner` | [streamrunner-package.md](streamrunner-package.md) | Stream-json subprocess spawn primitive — the current production spawn until #470 cuts over to `ptyrunner`. |
 | `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector consumed by the JSONL watcher (#348). |
 
-All four subpackages import `internal/agentrun` for `ResolveWorkdir` / `EncodeProjectDir`; the realpath rule lives in the parent so the spawn / trust / watcher consumers share a single definition.
+The `trust`, `ptyrunner`, `streamrunner`, and `jsonl` subpackages import `internal/agentrun` for `ResolveWorkdir` / `EncodeProjectDir`; the realpath rule lives in the parent so the spawn / trust / watcher consumers share a single definition. `settings` does not — it has no workdir input (writes to `os.TempDir()`), so it depends on stdlib only.
 
 ## Key shape
 
@@ -45,6 +46,7 @@ The substitution rule covers **both** `/` and `.`. Direct observation of `~/.cla
 ## Consumers
 
 - `internal/agentrun/trust` — calls `ResolveWorkdir(workdir)` to produce the `projects[...]` key inside `~/.claude.json`. See [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md).
+- `internal/agentrun/settings` — does **not** import this parent package; writes its tempfile to `os.TempDir()` and is stdlib-only. See [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md).
 - `internal/agentrun/ptyrunner` — passes a `ResolveWorkdir`-resolved path as `Config.WorkDir` (delegated from the trust pre-write's return value).
 - JSONL watcher (#333, fsnotify wrapper #349) — calls `EncodeProjectDir` (#347) to compute the `~/.claude/projects/<encoded-cwd>/` directory name and `ResolveWorkdir` for any `projects[...]` key comparison; consumes [`internal/agentrun/jsonl`](jsonl-reader.md) (#348) for the per-turn line reader + deterministic end-of-turn detector.
 - `internal/sessions/rotation/watcher.go` — uses `ResolveWorkdir` for path comparison against the platform probe.
@@ -56,10 +58,10 @@ Three surfaces lived in this package historically and were removed in #392 when 
 | Removed symbol | #392 outcome | Resurrected as |
 | --- | --- | --- |
 | `MarkWorkdirTrusted(homeDir, workdir string) error` | deleted | [`internal/agentrun/trust`](agentrun-trust-subpackage.md) subpackage (#475, slimmed signature `(workdir) (realpath, error)`, no flock) |
-| `WriteSettings` + `SettingsFilename` | deleted | not yet resurrected; cutover ticket #469 (sibling of #475) will reintroduce the deny-default settings JSON writer for PTY drive |
+| `WriteSettings(workdir, allowed) (string, error)` + `SettingsFilename` | deleted | [`internal/agentrun/settings`](agentrun-settings-subpackage.md) subpackage (#476, slimmed signature `(allowedTools) (string, error)`, writes to `os.TempDir()` with random suffix, no atomic-rename, caller-owned cleanup) |
 | `Drive` + `DriveConfig` | deleted | [`internal/agentrun/ptyrunner`](ptyrunner-package.md) subpackage (#471), driven via `tui-driver` instead of a hand-rolled `supervisor.SpawnPTY` scripted sequence |
 
-The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrections. The new shape sits in sibling subpackages rather than the parent package because the spawn / trust / settings concerns are now package-scoped (each with its own dependency direction and test surface). See [codebase/392.md](../codebase/392.md) for the deletion context and [codebase/475.md](../codebase/475.md) for the trust resurrection.
+The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrections. The new shape sits in sibling subpackages rather than the parent package because the spawn / trust / settings concerns are now package-scoped (each with its own dependency direction and test surface). See [codebase/392.md](../codebase/392.md) for the deletion context, [codebase/475.md](../codebase/475.md) for the trust resurrection, and [codebase/476.md](../codebase/476.md) for the settings resurrection.
 
 ## Out of scope
 
@@ -69,6 +71,7 @@ The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrec
 ## Related
 
 - [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) — `internal/agentrun/trust`, the workspace-trust pre-write (#475).
+- [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md) — `internal/agentrun/settings`, the per-spawn deny-default permissions JSON writer (#476).
 - [ptyrunner-package.md](ptyrunner-package.md) — `internal/agentrun/ptyrunner`, the interactive-TUI spawn primitive (#471).
 - [streamrunner-package.md](streamrunner-package.md) — `internal/agentrun/streamrunner`, the stream-json spawn primitive (#390).
 - [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348), the pure JSONL line reader + deterministic end-of-turn detector the JSONL watcher (#349) wraps.
