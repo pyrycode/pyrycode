@@ -11,17 +11,20 @@
 // idle-wait, the modal/banner safety check, the prompt write, the JSONL
 // tail + stream-json emit, and the shutdown — nothing else.
 //
-// This slice wires the JSONL tail and stream-json emit on top of the
-// scaffolding from #471. The pyry-side max-turns budget and the watchdog
-// goroutine land in a follow-up slice on top of this one; the
-// cmd/pyry/agent_run.go cutover is #470.
+// This slice composes the pyry-side max-turns budget Counter (from
+// internal/agentrun/budget) and the tui-driver watchdog Tracker
+// (PTY-heartbeat + spinner-freeze) on top of the JSONL tail + stream-json
+// emit from #478; the cmd/pyry/agent_run.go cutover is #470.
 //
 // The package logs only error messages and never logs PromptBytes content
 // or any substring of the rolling TUI buffer — writers are opaque and the
 // buffer is inspected only via tui-driver's pure-function detectors. The
 // wired jsonl/tail watcher and streamjson emitter inherit the same
 // discipline — neither logs Event content; ptyrunner does not add any log
-// call that would either.
+// call that would either. The wired budget Counter and the watchdog
+// goroutine inherit the same discipline — the Counter logs only count +
+// max_turns numerics and the watchdog goroutine logs only the
+// tuidriver-generated watchdog error string; neither logs Event content.
 //
 // Dependency direction: the package must not import
 // github.com/pyrycode/pyrycode/internal/supervisor (the PTY helper for the
@@ -41,9 +44,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 
+	"github.com/pyrycode/pyrycode/internal/agentrun/budget"
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl/tail"
 	"github.com/pyrycode/pyrycode/internal/agentrun/streamjson"
@@ -95,11 +102,12 @@ type Config struct {
 	// Required.
 	Effort string
 
-	// MaxTurns is declared for forward-compatibility with the follow-up
-	// slice on top of #478 (pyry-side budget counter); NOT consumed in this
-	// slice. The interactive-TUI claude path intentionally omits
-	// --max-turns from argv (the follow-up slice enforces the cap in pyry
-	// itself).
+	// MaxTurns is the assistant-entry cap enforced by the pyry-side budget
+	// Counter (internal/agentrun/budget). Required; must be > 0. The
+	// interactive-TUI claude path intentionally omits --max-turns from argv
+	// because interactive claude does not honor it; this field is the
+	// load-bearing enforcement point. On budget hit the run is terminated
+	// with ExitReasonMaxTurns set on the streamjson emitter.
 	MaxTurns int
 
 	// PromptBytes is the user-turn prompt text submitted via
@@ -135,6 +143,18 @@ type Config struct {
 	// TestHelperProcess wiring. EnsureClaudeEnv (called after this
 	// package wires cmd.Env) sets TERM=xterm-256color.
 	Env []string
+
+	// WatchdogTick is the cadence at which the watchdog goroutine polls
+	// the rolling buffer + spinner state. Optional; zero defaults to 1
+	// second (matches the tui-driver spike binaries). Tests typically set
+	// 50ms to keep wall-clock low.
+	WatchdogTick time.Duration
+
+	// WatchdogTrackerOpts is forwarded verbatim to tuidriver.NewTracker.
+	// Optional; zero values pick the tuidriver-package defaults
+	// (PTYQuietLimit = 30s, SpinnerFreezeLimit = 30s). Tests use short
+	// values (~200ms) to fire the watchdog within the test deadline.
+	WatchdogTrackerOpts tuidriver.TrackerOpts
 
 	// Logger is used for the small number of Warn-level diagnostics this
 	// package emits (spawn / close / modal-detected). Optional; nil
@@ -175,12 +195,17 @@ type Config struct {
 //     the emit failure is operator-actionable while the watcher likely
 //     returned cleanly at EOT regardless.
 //
-// Cleanup ordering: emitter.Close (which writes the `result` trailer) runs
-// BEFORE sess.Close (which SIGTERM→grace→SIGKILLs the claude child) via
-// defer LIFO. That way the dispatcher receives a complete stream even if
-// the child takes the full grace window to exit. emitter.Close's return
-// value is discarded; sess.Close's non-nil error is logged at Warn and not
-// surfaced.
+// Cleanup ordering — defer LIFO produces:
+//
+//	cancel() → wg.Wait() → counter.Stop() → emitter.Close() → sess.Close()
+//
+// Each step is load-bearing: cancel() signals the watchdog goroutine to
+// exit its select loop; wg.Wait() drains it so no further
+// SetExitReason(ExitReasonError) races with emitter.Close; counter.Stop()
+// cancels the budget's SIGKILL grace timer; emitter.Close writes the
+// `result` trailer to cfg.Stdout BEFORE sess.Close()'s SIGTERM races with
+// claude's last PTY writes. Re-ordering these defers silently breaks the
+// invariant — keep them in this LIFO sequence.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.ClaudeBin == "" {
 		return errors.New("ptyrunner: ClaudeBin required")
@@ -211,6 +236,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if cfg.Stderr == nil {
 		return errors.New("ptyrunner: Stderr required")
+	}
+	if cfg.MaxTurns <= 0 {
+		return errors.New("ptyrunner: MaxTurns required")
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -266,6 +294,20 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("ptyrunner: write prompt: %w", err)
 	}
 
+	// Single shared cancellation point: the budget Terminate hook AND the
+	// watchdog goroutine both call cancel() on their respective trigger;
+	// the tail watcher's Run(runCtx) returns ctx.Err() once either fires.
+	// Cancelling the parent ctx (operator shutdown) also signals runCtx
+	// because runCtx is a child of ctx.
+	//
+	// This first defer cancel() catches the early-return paths below
+	// (emitter.New / budget.New / tail.New failure). A second defer cancel()
+	// is registered after the watchdog goroutine spawn so the cleanup-order
+	// LIFO fires cancel() FIRST (cancel is idempotent and safe for concurrent
+	// + repeated calls per context docs).
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	emitter, err := streamjson.New(streamjson.Config{
 		Writer:    cfg.Stdout,
 		SessionID: cfg.SessionID,
@@ -274,13 +316,32 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("ptyrunner: emitter: %w", err)
 	}
-	// Registered AFTER sess.Close's defer so LIFO ordering runs
-	// emitter.Close FIRST (flushes the `result` trailer), then sess.Close
-	// (SIGTERMs the claude child). emitter.Close's return is advisory:
-	// if Emit was failing the dispatcher already sees a broken stream,
-	// and if Emit was succeeding the trailer's ~300-byte write almost
-	// certainly succeeds.
+	// Defer-LIFO discipline: do NOT reorder the chain below. Fire order
+	// (top runs first): cancel() → wg.Wait() → counter.Stop() →
+	// emitter.Close() → sess.Close(). See package doc on Run for the
+	// invariants each step protects.
 	defer func() { _ = emitter.Close() }()
+
+	tracker := tuidriver.NewTracker(cfg.WatchdogTrackerOpts)
+	tracker.RecordTransition("prompt-written")
+
+	counter, err := budget.New(budget.Config{
+		MaxTurns: cfg.MaxTurns,
+		Terminate: func() error {
+			emitter.SetExitReason(streamjson.ExitReasonMaxTurns)
+			tracker.RecordTransition("budget-hit")
+			cancel()
+			return cmd.Process.Signal(syscall.SIGTERM)
+		},
+		Kill: func() error {
+			return cmd.Process.Signal(syscall.SIGKILL)
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		return fmt.Errorf("ptyrunner: budget: %w", err)
+	}
+	defer counter.Stop()
 
 	var emitErr error
 	watcher, err := tail.New(tail.Config{
@@ -291,21 +352,28 @@ func Run(ctx context.Context, cfg Config) error {
 			if err := emitter.Emit(ev); err != nil && emitErr == nil {
 				emitErr = err
 			}
+			counter.OnEvent(ev)
 		},
-		// OnEndOfTurn intentionally no-op: the emitter's internal
-		// EndOfTurnSeen state is set inside Emit when ev.EndOfTurn
-		// is true, so Close's default classification produces
-		// ExitReasonCompletion automatically. The callback exists
-		// only because tail.Config.OnEndOfTurn is required.
-		OnEndOfTurn: func() {},
-		Logger:      logger,
+		OnEndOfTurn: func() {
+			counter.OnEndOfTurn()
+		},
+		Logger: logger,
 	})
 	if err != nil {
 		return fmt.Errorf("ptyrunner: tail: %w", err)
 	}
 
-	runErr := watcher.Run(ctx)
-	if ctx.Err() != nil {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runWatchdog(runCtx, sess.Buffer, tracker, emitter, cancel, cfg.WatchdogTick, logger)
+	}()
+	defer wg.Wait()
+	defer cancel()
+
+	runErr := watcher.Run(runCtx)
+	if runCtx.Err() != nil {
 		return nil
 	}
 	if emitErr != nil {
