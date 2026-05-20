@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
@@ -48,6 +50,7 @@ func helperRunCfg(t *testing.T, mode string, stdout, stderr *bytes.Buffer, jsonl
 		SystemPrompt: "/dev/null",
 		Model:        "test-model",
 		Effort:       "low",
+		MaxTurns:     5,
 		PromptBytes:  []byte("hi"),
 		Stdout:       stdout,
 		Stderr:       stderr,
@@ -364,6 +367,114 @@ func TestBuildArgs(t *testing.T) {
 	}
 }
 
+func TestRun_BudgetHitBeforeEndOfTurn(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, noEotBody)
+	cfg.MaxTurns = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 8*time.Second {
+		t.Errorf("Run took %v, want < 8s", elapsed)
+	}
+
+	got := stdout.Bytes()
+	if !bytes.HasPrefix(got, []byte(noEotBody)) {
+		t.Fatalf("stdout missing verbatim JSONL prefix:\n got  = %q\n want = %q", got, noEotBody)
+	}
+
+	tr := parseTrailer(t, got)
+	if tr.Type != "result" {
+		t.Errorf("trailer Type = %q, want result", tr.Type)
+	}
+	if tr.Subtype != "error_max_turns" {
+		t.Errorf("trailer Subtype = %q, want error_max_turns", tr.Subtype)
+	}
+	if tr.TerminalReason != "max_turns" {
+		t.Errorf("trailer TerminalReason = %q, want max_turns", tr.TerminalReason)
+	}
+	if !tr.IsError {
+		t.Errorf("trailer IsError = false, want true")
+	}
+	if tr.NumTurns != 1 {
+		t.Errorf("trailer NumTurns = %d, want 1", tr.NumTurns)
+	}
+	if tr.SessionID != cfg.SessionID {
+		t.Errorf("trailer SessionID = %q, want %q", tr.SessionID, cfg.SessionID)
+	}
+}
+
+func TestRun_WatchdogFires(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, "")
+	cfg.MaxTurns = 10
+	cfg.WatchdogTick = 50 * time.Millisecond
+	cfg.WatchdogTrackerOpts = tuidriver.TrackerOpts{
+		PTYQuietLimit:      200 * time.Millisecond,
+		SpinnerFreezeLimit: 200 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v, want nil (watchdog-fire collapse)", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		t.Errorf("Run took %v, want < 5s", elapsed)
+	}
+
+	tr := parseTrailer(t, stdout.Bytes())
+	if tr.Subtype != "error_during_execution" {
+		t.Errorf("trailer Subtype = %q, want error_during_execution", tr.Subtype)
+	}
+	if tr.TerminalReason != "" {
+		t.Errorf("trailer TerminalReason = %q, want empty", tr.TerminalReason)
+	}
+	if !tr.IsError {
+		t.Errorf("trailer IsError = false, want true")
+	}
+}
+
+func TestParseSpinnerSeconds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		in      string
+		wantSec int
+		wantOk  bool
+	}{
+		{"class A single-word verb seconds only", "✻ Baked for 5s", 5, true},
+		{"class A minutes + seconds", "✻ Baked for 1m 30s", 90, true},
+		{"class A two-word verb seconds only", "✻ Coming up for 7s", 7, true},
+		{"class B ellipsis no for-tail", "✻ Channeling…", 0, false},
+		{"class C parenthesised tokens counter", "✻ Actualizing… (2s · ↓1 tokens)", 0, false},
+		{"no glyph", "some text without glyph", 0, false},
+		{"glyph only", "✻", 0, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotSec, gotOk := parseSpinnerSeconds([]byte(tc.in))
+			if gotSec != tc.wantSec || gotOk != tc.wantOk {
+				t.Errorf("parseSpinnerSeconds(%q) = (%d, %v), want (%d, %v)",
+					tc.in, gotSec, gotOk, tc.wantSec, tc.wantOk)
+			}
+		})
+	}
+}
+
 func TestRun_MissingRequiredFields(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -381,6 +492,7 @@ func TestRun_MissingRequiredFields(t *testing.T) {
 		{"no PromptBytes", func(c *Config) { c.PromptBytes = nil }, "PromptBytes required"},
 		{"no Stdout", func(c *Config) { c.Stdout = nil }, "Stdout required"},
 		{"no Stderr", func(c *Config) { c.Stderr = nil }, "Stderr required"},
+		{"no MaxTurns", func(c *Config) { c.MaxTurns = 0 }, "MaxTurns required"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -394,6 +506,7 @@ func TestRun_MissingRequiredFields(t *testing.T) {
 				SystemPrompt: "/dev/null",
 				Model:        "m",
 				Effort:       "e",
+				MaxTurns:     1,
 				PromptBytes:  []byte("x"),
 				Stdout:       &bytes.Buffer{},
 				Stderr:       &bytes.Buffer{},
