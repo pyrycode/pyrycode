@@ -2,91 +2,39 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun/selfcheck"
 )
 
-// Canned stream-json fixtures used by the CLI-level self-check tests.
-// Same shape as internal/agentrun/selfcheck/selfcheck_test.go; duplicated
-// (small) to keep the test surface self-contained.
-const (
-	selfCheckPassLine = `{"type":"assistant","message":{"id":"msg_pass","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
+// selfCheckBashLine is the canned Bash tool_use assistant entry used as
+// FAIL Evidence in the CLI-level tests. Same shape as the package-level
+// fixture; duplicated to keep the test surface self-contained.
+const selfCheckBashLine = `{"type":"assistant","message":{"id":"msg_bash","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"echo hello"}}],"usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
 
-	selfCheckBashLine = `{"type":"assistant","message":{"id":"msg_bash","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"echo hello"}}],"usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
-)
-
-// TestSelfCheckCLIFakeClaude is the fake-claude entry point for the CLI-
-// level self-check tests. The runAgentRunSelfCheck verb resolves
-// PYRY_CLAUDE_BIN; setting that to a shell wrapper written by
-// configureSelfCheckFakeClaude routes spawned children here.
-//
-// The wrapper handles `--version` separately (short-circuited in shell
-// before re-exec) so captureClaudeVersion produces a clean line.
-//
-// Env knobs:
-//
-//   - GO_SELF_CHECK_CLI_FAKE_STDOUT: verbatim bytes to write to stdout.
-//   - GO_SELF_CHECK_CLI_FAKE_LIFETIME: time.Duration the fake stays alive
-//     after writing. Defaults to 200ms.
-func TestSelfCheckCLIFakeClaude(t *testing.T) {
-	if os.Getenv("GO_SELF_CHECK_CLI_FAKE") != "1" {
-		return
-	}
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
-
-	if out := os.Getenv("GO_SELF_CHECK_CLI_FAKE_STDOUT"); out != "" {
-		if _, err := os.Stdout.WriteString(out); err != nil {
-			fmt.Fprintf(os.Stderr, "fake: write stdout: %v\n", err)
-			os.Exit(98)
-		}
-		_ = os.Stdout.Sync()
-	}
-
-	lifetime := 200 * time.Millisecond
-	if raw := os.Getenv("GO_SELF_CHECK_CLI_FAKE_LIFETIME"); raw != "" {
-		if d, err := time.ParseDuration(raw); err == nil {
-			lifetime = d
-		}
-	}
-	time.Sleep(lifetime)
-	os.Exit(0)
-}
-
-// configureSelfCheckFakeClaude writes a /bin/sh wrapper that drops the
-// production claude argv (the Go test binary rejects unknown flags),
-// short-circuits --version to a literal echo (so captureClaudeVersion
-// produces a clean line), and otherwise exec's the test binary in
-// TestSelfCheckCLIFakeClaude mode. Pins PYRY_CLAUDE_BIN +
-// GO_SELF_CHECK_CLI_FAKE_STDOUT via t.Setenv so the wrapper inherits both.
-func configureSelfCheckFakeClaude(t *testing.T, stdoutFixture string) {
+// installSelfCheckSeams captures the production seam values and restores
+// them via t.Cleanup. Tests must NOT call t.Parallel — the seams are
+// package-level.
+func installSelfCheckSeams(t *testing.T) {
 	t.Helper()
-	scriptDir := t.TempDir()
-	script := filepath.Join(scriptDir, "fake-claude.sh")
-	body := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "fake-claude 0.0.0"
-  exit 0
-fi
-exec %q -test.run=^TestSelfCheckCLIFakeClaude$
-`, os.Args[0])
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake-claude script: %v", err)
-	}
-	t.Setenv("PYRY_CLAUDE_BIN", script)
-	t.Setenv("GO_SELF_CHECK_CLI_FAKE", "1")
-	t.Setenv("GO_SELF_CHECK_CLI_FAKE_STDOUT", stdoutFixture)
+	origFn := selfCheckFn
+	origVer := selfCheckGetVersion
+	t.Cleanup(func() {
+		selfCheckFn = origFn
+		selfCheckGetVersion = origVer
+	})
+	selfCheckGetVersion = func(string) string { return "fake-claude 0.0.0" }
 }
 
 func TestRunAgentRunSelfCheck_PASS(t *testing.T) {
-	configureSelfCheckFakeClaude(t, selfCheckPassLine+"\n")
+	installSelfCheckSeams(t)
+	selfCheckFn = func(ctx context.Context, cfg selfcheck.Config) (selfcheck.Result, error) {
+		return selfcheck.Result{EndOfTurnObserved: true, AssistantCount: 1}, nil
+	}
 
 	var stdout bytes.Buffer
 	if err := runAgentRun(&stdout, []string{"--self-check"}); err != nil {
@@ -105,7 +53,15 @@ func TestRunAgentRunSelfCheck_PASS(t *testing.T) {
 }
 
 func TestRunAgentRunSelfCheck_FAIL(t *testing.T) {
-	configureSelfCheckFakeClaude(t, selfCheckBashLine+"\n")
+	installSelfCheckSeams(t)
+	selfCheckFn = func(ctx context.Context, cfg selfcheck.Config) (selfcheck.Result, error) {
+		return selfcheck.Result{
+				BashInvoked: true,
+				Evidence:    []byte(selfCheckBashLine),
+			},
+			fmt.Errorf("%w: tool_use name=%q observed in assistant entry",
+				selfcheck.ErrBashInvoked, "Bash")
+	}
 
 	var stdout bytes.Buffer
 	err := runAgentRun(&stdout, []string{"--self-check"})
@@ -119,20 +75,22 @@ func TestRunAgentRunSelfCheck_FAIL(t *testing.T) {
 	if !strings.Contains(got, `"name":"Bash"`) {
 		t.Errorf("stdout missing verbatim Evidence line with \"name\":\"Bash\":\n%s", got)
 	}
-	if !strings.Contains(got, "#329") || !strings.Contains(got, "#336") || !strings.Contains(got, "#375") {
-		t.Errorf("stdout missing #329 / #336 / #375 references:\n%s", got)
-	}
-	// Negative pins: operator-string AC requires no PTY / settings-file /
-	// permissions.defaultMode terminology survives in the FAIL message.
-	forbidden := []string{
-		"permissions.defaultMode",
-		".pyry-agent-run-settings.json",
-		"per-spawn settings file",
+	// Required substrings: post-#473 the FAIL prose accurately names the
+	// settings-file + permission-mode + PTY enforcement contract. These
+	// MUST be present (the predecessor's forbidden-list pin is now
+	// inverted).
+	required := []string{
+		`permissions.defaultMode: "deny"`,
+		`["Read"]`,
 		"PTY",
+		"#329",
+		"#336",
+		"#470",
+		"#473",
 	}
-	for _, sub := range forbidden {
-		if strings.Contains(got, sub) {
-			t.Errorf("FAIL message contains forbidden substring %q:\n%s", sub, got)
+	for _, sub := range required {
+		if !strings.Contains(got, sub) {
+			t.Errorf("FAIL message missing required substring %q:\n%s", sub, got)
 		}
 	}
 }
@@ -142,7 +100,10 @@ func TestRunAgentRunSelfCheck_FAIL(t *testing.T) {
 // route to the self-check codepath rather than failing on
 // `--prompt-file: required`.
 func TestRunAgentRun_SelfCheckShortCircuit(t *testing.T) {
-	configureSelfCheckFakeClaude(t, selfCheckPassLine+"\n")
+	installSelfCheckSeams(t)
+	selfCheckFn = func(ctx context.Context, cfg selfcheck.Config) (selfcheck.Result, error) {
+		return selfcheck.Result{EndOfTurnObserved: true, AssistantCount: 1}, nil
+	}
 
 	var stdout bytes.Buffer
 	if err := runAgentRun(&stdout, []string{"--self-check"}); err != nil {
