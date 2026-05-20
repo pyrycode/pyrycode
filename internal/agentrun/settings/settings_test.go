@@ -77,7 +77,7 @@ func TestWriteSettings_SingleToolGoldenBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	want := []byte(`{"permissions":{"allow":["Bash"],"defaultMode":"deny"}}` + "\n")
+	want := []byte(`{"permissions":{"allow":["Bash"],"defaultMode":"dontAsk"}}` + "\n")
 	if string(got) != string(want) {
 		t.Fatalf("bytes mismatch\n got: %q\nwant: %q", got, want)
 	}
@@ -97,7 +97,7 @@ func TestWriteSettings_PreservesOrderAndDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	want := []byte(`{"permissions":{"allow":["Bash","Read","Bash","Edit"],"defaultMode":"deny"}}` + "\n")
+	want := []byte(`{"permissions":{"allow":["Bash","Read","Bash","Edit"],"defaultMode":"dontAsk"}}` + "\n")
 	if string(got) != string(want) {
 		t.Fatalf("bytes mismatch\n got: %q\nwant: %q", got, want)
 	}
@@ -135,8 +135,8 @@ func TestWriteSettings_RoundTripParseable(t *testing.T) {
 			t.Errorf("allow[%d] = %q, want %q", i, parsed.Permissions.Allow[i], tool)
 		}
 	}
-	if parsed.Permissions.DefaultMode != "deny" {
-		t.Errorf("defaultMode = %q, want %q", parsed.Permissions.DefaultMode, "deny")
+	if parsed.Permissions.DefaultMode != "dontAsk" {
+		t.Errorf("defaultMode = %q, want %q", parsed.Permissions.DefaultMode, "dontAsk")
 	}
 }
 

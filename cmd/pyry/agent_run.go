@@ -224,7 +224,7 @@ func requireDir(path string) error {
 // The dispatcher's parser is satisfied by either.
 func runAgentRun(stdout io.Writer, args []string) error {
 	// --self-check is a sibling verb mode (#336): boot-time verification
-	// that permissions.defaultMode "deny" in the per-spawn settings file
+	// that permissions.defaultMode "dontAsk" in the per-spawn settings file
 	// still enforces the whitelist. Recognised positionally so it
 	// short-circuits before parseAgentRunArgs runs — the eight required
 	// production flags do not apply to the diagnostic verb.
