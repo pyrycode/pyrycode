@@ -1,8 +1,8 @@
 # `internal/agentrun/settings` — per-spawn deny-default permissions JSON
 
-Writes a `{"permissions":{"allow":[...],"defaultMode":"deny"}}` JSON file to `os.TempDir()` and returns the path. The caller (#470's `runAgentRun`) hands the path to [`ptyrunner.Config.SettingsPath`](ptyrunner-package.md) so PTY-driven interactive `claude` enforces a deny-default tool whitelist — the same semantics `claude -p --allowedTools` had natively in stream-json mode.
+Writes a `{"permissions":{"allow":[...],"defaultMode":"dontAsk"}}` JSON file to `os.TempDir()` and returns the path. The caller (#470's `runAgentRun`) hands the path to [`ptyrunner.Config.SettingsPath`](ptyrunner-package.md) so PTY-driven interactive `claude` enforces a deny-default tool whitelist — the same semantics `claude -p --allowedTools` had natively in stream-json mode.
 
-Introduced [#476](https://github.com/pyrycode/pyrycode/issues/476) as a **slimmed resurrection** of the helper [#339](https://github.com/pyrycode/pyrycode/issues/339) shipped and [#392](https://github.com/pyrycode/pyrycode/issues/392) deleted. The 2026-05-19 pivot back to PTY drive ([`codebase/471.md`](../codebase/471.md)) made the settings file load-bearing again because Phase A (2026-05-14) found `claude --allowedTools <list>` is **additive** in interactive mode — tools omitted from the flag still run when the model asks for them. Only the `--settings <path>` JSON with `defaultMode: "deny"` replicates the `-p` enforcement contract.
+Introduced [#476](https://github.com/pyrycode/pyrycode/issues/476) as a **slimmed resurrection** of the helper [#339](https://github.com/pyrycode/pyrycode/issues/339) shipped and [#392](https://github.com/pyrycode/pyrycode/issues/392) deleted. The 2026-05-19 pivot back to PTY drive ([`codebase/471.md`](../codebase/471.md)) made the settings file load-bearing again because Phase A (2026-05-14) found `claude --allowedTools <list>` is **additive** in interactive mode — tools omitted from the flag still run when the model asks for them. Only the `--settings <path>` JSON with `defaultMode: "dontAsk"` replicates the `-p` enforcement contract. The original Phase A spike picked `"deny"` by guessing the literal; claude 2.1.145 rejected that value at startup and silently fell back to `"default"` mode — fixed in [#487](https://github.com/pyrycode/pyrycode/issues/487) by switching to the Anthropic-documented value (see [`agent-sdk/permissions` docs](https://code.claude.com/docs/en/agent-sdk/permissions): *"Don't ask mode (`dontAsk`) converts any permission prompt into a denial"*).
 
 ## Public API
 
@@ -21,10 +21,10 @@ No exported types, no constructor, one function. `allowedTools` is round-tripped
 Compact, no whitespace, single trailing `\n` from `json.Encoder.Encode`. For `[]string{"Read", "Bash"}` the on-disk bytes are exactly:
 
 ```
-{"permissions":{"allow":["Read","Bash"],"defaultMode":"deny"}}
+{"permissions":{"allow":["Read","Bash"],"defaultMode":"dontAsk"}}
 ```
 
-(plus a trailing `\n`, 64 bytes total).
+(plus a trailing `\n`, 67 bytes total).
 
 Two unexported types make the field order load-bearing — Go's struct serialisation produces the canonical sequence without `SetIndent`:
 
@@ -136,9 +136,9 @@ No `context.Context` parameter — the operation is fast-bounded (local filesyst
 Test cases:
 
 - `TestWriteSettings_EmptyInputReturnsErrorAndDoesNotWrite` — sub-tests `nil` and `[]string{}`. Snapshots `filepath.Glob(os.TempDir() + "/pyry-agent-run-settings-*.json")` before the call into a set, then asserts no path that wasn't in the before-set appears after — the only safe way to detect a tempfile leak when parallel sibling tests create and clean up their own files in the same directory. Pins the error message substring and `path == ""`.
-- `TestWriteSettings_SingleToolGoldenBytes` — input `[]string{"Bash"}`; reads the file and asserts exact bytes `{"permissions":{"allow":["Bash"],"defaultMode":"deny"}}\n`.
+- `TestWriteSettings_SingleToolGoldenBytes` — input `[]string{"Bash"}`; reads the file and asserts exact bytes `{"permissions":{"allow":["Bash"],"defaultMode":"dontAsk"}}\n`.
 - `TestWriteSettings_PreservesOrderAndDuplicates` — input `[]string{"Bash", "Read", "Bash", "Edit"}` (deliberately not sorted, with a duplicate); asserts exact bytes contain `"allow":["Bash","Read","Bash","Edit"]`. Pins both the no-sort and no-dedup contracts.
-- `TestWriteSettings_RoundTripParseable` — input `[]string{"Read", "Bash"}`; reads the file and `json.Unmarshal`s into a local mirror struct; asserts `allow` slice equals the input and `defaultMode == "deny"`.
+- `TestWriteSettings_RoundTripParseable` — input `[]string{"Read", "Bash"}`; reads the file and `json.Unmarshal`s into a local mirror struct; asserts `allow` slice equals the input and `defaultMode == "dontAsk"`.
 - `TestWriteSettings_PathLocationPrefixSuffix` — input `[]string{"Read"}`; asserts `filepath.Dir(path) == os.TempDir()` (after `filepath.Clean` on both sides for trailing-slash normalisation), `strings.HasPrefix(filepath.Base(path), "pyry-agent-run-settings-")`, and `strings.HasSuffix(path, ".json")`.
 - `TestWriteSettings_PathIsAbsolute` — same input; asserts `filepath.IsAbs(path)`. Defensive — `os.CreateTemp` returns absolute paths on Unix by stdlib contract, but ptyrunner's `Config.SettingsPath` only validates non-emptiness, so this test pins the absoluteness the consumer doesn't.
 
@@ -172,6 +172,7 @@ No other consumers. The helper is single-purpose and has no in-process API surfa
 - [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) — sibling slim-resurrection landed in #475; same template, complementary concern (workspace-trust pre-write).
 - [ptyrunner-package.md](ptyrunner-package.md) — the spawn primitive that consumes the path via `Config.SettingsPath`.
 - [`codebase/476.md`](../codebase/476.md) — build notes (file inventory, patterns, lessons).
+- [`codebase/487.md`](../codebase/487.md) — `"deny"` → `"dontAsk"` literal fix; the original Phase A spike's guessed value was rejected by claude 2.1.145 and silently fell back to `"default"` mode, reopening `/doctor` poisoning on the ptyrunner path.
 - [`docs/specs/architecture/476-agentrun-settings-helper.md`](../../specs/architecture/476-agentrun-settings-helper.md) — architect spec.
 - [`codebase/339.md`](../codebase/339.md) — the original (pre-deletion) helper; this slimmed version's contract is a strict subset of the file-writing behaviour and a deliberate descope of the workdir / overwrite / marker-line semantics.
 - [`codebase/392.md`](../codebase/392.md) — the deletion this ticket reverses.
