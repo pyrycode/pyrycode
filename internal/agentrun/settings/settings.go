@@ -2,8 +2,9 @@
 // interactive claude spawned via PTY drive. The file replicates the tool
 // whitelist that `claude -p --allowedTools` enforced before the 2026-05-19
 // pivot back to PTY drive (--allowedTools is additive in interactive mode;
-// only --settings with defaultMode:"deny" replicates -p semantics — see
-// Phase A spike, 2026-05-14).
+// only --settings with defaultMode:"dontAsk" replicates -p semantics — the
+// documented value per Anthropic's agent-sdk/permissions docs, restored
+// here after #487).
 //
 // MUST NOT log the allowedTools slice, the JSON payload, or the returned
 // path. Tool names are operational config rather than secret material, but
@@ -20,7 +21,7 @@ import (
 
 // settingsFile and permissions are field-order-load-bearing: Go's struct
 // serialisation produces the canonical
-// {"permissions":{"allow":[...],"defaultMode":"deny"}} byte sequence.
+// {"permissions":{"allow":[...],"defaultMode":"dontAsk"}} byte sequence.
 type settingsFile struct {
 	Permissions permissions `json:"permissions"`
 }
@@ -37,7 +38,7 @@ type permissions struct {
 //
 // JSON shape (compact, no whitespace, trailing \n from json.Encoder.Encode):
 //
-//	{"permissions":{"allow":[<allowedTools>],"defaultMode":"deny"}}
+//	{"permissions":{"allow":[<allowedTools>],"defaultMode":"dontAsk"}}
 //
 // allowedTools is round-tripped verbatim — element order and any duplicates
 // are preserved. The helper performs no deduplication, no sorting, and no
@@ -69,7 +70,7 @@ func WriteSettings(allowedTools []string) (string, error) {
 	if err := enc.Encode(&settingsFile{
 		Permissions: permissions{
 			Allow:       allowedTools,
-			DefaultMode: "deny",
+			DefaultMode: "dontAsk",
 		},
 	}); err != nil {
 		_ = f.Close()

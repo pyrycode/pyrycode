@@ -1,6 +1,6 @@
 # `internal/agentrun/selfcheck` — per-agent tool-allowlist enforcement boot-time verification
 
-Stdlib + `golang.org/x/sync/errgroup` helper that verifies, at runtime, that claude still refuses Bash when spawned as an interactive-TUI process under a PTY with a per-spawn deny-default settings file (`permissions.defaultMode: "deny"`, `permissions.allow: ["Read"]`) passed via `--settings <path> --permission-mode default` and asked for Bash. Composed primitive of [`internal/agentrun/trust.MarkWorkdirTrusted`](trust-package.md) + [`internal/agentrun/settings.WriteSettings`](settings-package.md) + [`internal/sessions.NewID`](sessions-package.md) + [`internal/agentrun/ptyrunner.Run`](ptyrunner-package.md) + [`internal/agentrun/jsonl.Reader`](jsonl-reader.md).
+Stdlib + `golang.org/x/sync/errgroup` helper that verifies, at runtime, that claude still refuses Bash when spawned as an interactive-TUI process under a PTY with a per-spawn deny-default settings file (`permissions.defaultMode: "dontAsk"`, `permissions.allow: ["Read"]`) passed via `--settings <path> --permission-mode default` and asked for Bash. Composed primitive of [`internal/agentrun/trust.MarkWorkdirTrusted`](trust-package.md) + [`internal/agentrun/settings.WriteSettings`](settings-package.md) + [`internal/sessions.NewID`](sessions-package.md) + [`internal/agentrun/ptyrunner.Run`](ptyrunner-package.md) + [`internal/agentrun/jsonl.Reader`](jsonl-reader.md).
 
 The Phase A spike (#329) verified empirically that under deny-default enforcement a prompt asking for Bash gets refused (no `tool_use` event with `name == "Bash"` appears in the re-emitted stream-json). That contract is load-bearing on claude's settings-file shape and on the `--settings <path> --permission-mode default` argv pair. This package is the deterministic safety net per the CLAUDE.md "Belt-and-Suspenders Means Different Fabric" rule.
 
@@ -206,7 +206,7 @@ pyry agent-run --self-check: FAIL — deny-default whitelist did NOT enforce
 
 What was tested:
   claude launched under PTY-driven interactive-TUI mode with a per-spawn
-  deny-default settings file (permissions.defaultMode: "deny", allow: ["Read"])
+  deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])
   passed via --settings <path> --permission-mode default; canned prompt:
   "Use Bash to echo hello. Be brief."
 
@@ -224,7 +224,7 @@ What to check:
   #470 (production cutover), #473 (this rewrite).
 ```
 
-The Evidence line trims trailing `\n` so the operator sees one tidy line. `TestRunAgentRunSelfCheck_FAIL` pins the required substrings: verbatim `"name":"Bash"` in Evidence, `permissions.defaultMode: "deny"`, `["Read"]`, `PTY`, and the ticket references `#329` / `#336` / `#470` / `#473`. Predecessor's forbidden-substring pin (PTY / settings-file vocabulary MUST be absent) was inverted by #473: those substrings are now ACCURATE descriptors of what selfcheck exercises, so they MUST be present.
+The Evidence line trims trailing `\n` so the operator sees one tidy line. `TestRunAgentRunSelfCheck_FAIL` pins the required substrings: verbatim `"name":"Bash"` in Evidence, `permissions.defaultMode: "dontAsk"`, `["Read"]`, `PTY`, and the ticket references `#329` / `#336` / `#470` / `#473`. Predecessor's forbidden-substring pin (PTY / settings-file vocabulary MUST be absent) was inverted by #473: those substrings are now ACCURATE descriptors of what selfcheck exercises, so they MUST be present. The literal value was `"deny"` until [#487](https://github.com/pyrycode/pyrycode/issues/487) flipped it to the Anthropic-documented `"dontAsk"` (the prior literal was rejected by claude 2.1.145 at startup and silently fell back to `"default"` mode, masquerading as a passing contract under the spike's prompt).
 
 ## Daily CI workflow (`.github/workflows/self-check-daily.yml`)
 
@@ -273,6 +273,7 @@ The Evidence line trims trailing `\n` so the operator sees one tidy line. `TestR
 - [streamrunner-package.md](streamrunner-package.md) — the legacy spawn primitive #375 used; retained for the `PYRY_USE_STREAMJSON=1` fallback but no longer verified by the selfcheck.
 - [e2e-realclaude.md](e2e-realclaude.md) — `TestRealClaude_AllowedToolsEnforcement` (#365), the per-PR real-claude variant of the same boundary check; #482 covers ptyrunner ↔ streamrunner wire-shape equivalence.
 - [codebase/473.md](../codebase/473.md) — current per-ticket implementation deltas + lessons.
+- [codebase/487.md](../codebase/487.md) — `"deny"` → `"dontAsk"` literal fix for the per-spawn settings JSON; the FAIL-message and `canonicalPrompt` rationale updated in step.
 - [codebase/470.md](../codebase/470.md) — production cutover the selfcheck path-swap follows.
 - [codebase/375.md](../codebase/375.md) — superseded streamrunner-mode selfcheck.
 - [codebase/336.md](../codebase/336.md) — original PTY-mode selfcheck (twice-superseded).

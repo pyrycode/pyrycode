@@ -80,7 +80,7 @@ func TestRunAgentRunSelfCheck_FAIL(t *testing.T) {
 	// MUST be present (the predecessor's forbidden-list pin is now
 	// inverted).
 	required := []string{
-		`permissions.defaultMode: "deny"`,
+		`permissions.defaultMode: "dontAsk"`,
 		`["Read"]`,
 		"PTY",
 		"#329",
