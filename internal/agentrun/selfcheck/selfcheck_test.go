@@ -3,18 +3,18 @@ package selfcheck
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun/ptyrunner"
 )
 
 // Canned stream-json fixtures used across the self-check tests. Each is a
-// single JSONL line (no trailing newline); the fake-claude helper writes
-// these to stdout with newline separators.
+// single JSONL line (no trailing newline); the ptyRun mock writes these to
+// cfg.Stdout with newline separators.
 const (
 	// passLine: assistant entry with stop_reason "end_turn" and a single
 	// text content block. Satisfies jsonl.Reader's deterministic end-of-
@@ -29,81 +29,61 @@ const (
 	bashLine = `{"type":"assistant","message":{"id":"msg_bash","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"echo hello"}}],"usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
 )
 
-// TestSelfCheckHelperProcess is the fake-claude entry point. The test
-// binary is re-exec'd via a shell wrapper that drops the production claude
-// argv (which the Go test binary's flag parser would reject) and routes
-// here keyed by GO_SELFCHECK_HELPER=1 in the env.
-//
-// Env knobs:
-//
-//   - GO_SELFCHECK_HELPER_STDOUT: verbatim bytes to write to stdout
-//     (typically one or more JSONL lines). Empty skips the write.
-//   - GO_SELFCHECK_HELPER_LIFETIME: time.Duration the fake stays alive
-//     after writing. Defaults to 200ms. Used by the timeout fixture to
-//     hold the child past cfg.OverallTimeout without producing output.
-func TestSelfCheckHelperProcess(t *testing.T) {
-	if os.Getenv("GO_SELFCHECK_HELPER") != "1" {
-		return
-	}
-	// Drain stdin so streamrunner's stdin envelope write doesn't block.
-	go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
-
-	if out := os.Getenv("GO_SELFCHECK_HELPER_STDOUT"); out != "" {
-		if _, err := os.Stdout.WriteString(out); err != nil {
-			fmt.Fprintf(os.Stderr, "fake: write stdout: %v\n", err)
-			os.Exit(98)
-		}
-		_ = os.Stdout.Sync()
-	}
-
-	lifetime := 200 * time.Millisecond
-	if raw := os.Getenv("GO_SELFCHECK_HELPER_LIFETIME"); raw != "" {
-		if d, err := time.ParseDuration(raw); err == nil {
-			lifetime = d
-		}
-	}
-	time.Sleep(lifetime)
-	os.Exit(0)
-}
-
-// selfCheckHelperWrapper writes a /bin/sh wrapper that drops the
-// production claude argv (the Go test binary's flag parser rejects unknown
-// flags like --input-format) and exec's the test binary in fake-claude
-// mode. Env knobs are inherited through the exec.
-func selfCheckHelperWrapper(t *testing.T) string {
+// installSeams captures the production seam values, installs no-op
+// replacements that the per-test body then overrides selectively, and
+// restores the originals via t.Cleanup. Tests must NOT call t.Parallel —
+// the seams are package-level.
+func installSeams(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "fake-claude.sh")
-	body := fmt.Sprintf(`#!/bin/sh
-exec %q -test.run=^TestSelfCheckHelperProcess$
-`, os.Args[0])
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		t.Fatalf("write wrapper: %v", err)
+	origTrust := trustMark
+	origSettings := settingsWrite
+	origSession := newSessionID
+	origPty := ptyRun
+	t.Cleanup(func() {
+		trustMark = origTrust
+		settingsWrite = origSettings
+		newSessionID = origSession
+		ptyRun = origPty
+	})
+	// Default benign overrides; per-test bodies replace the ones they care
+	// about. Ensures no test accidentally hits ~/.claude.json,
+	// os.TempDir(), or the real ptyrunner.
+	trustMark = func(workdir string) (string, error) { return workdir, nil }
+	settingsWrite = func(allowed []string) (string, error) { return "/tmp/test-settings.json", nil }
+	newSessionID = func() (string, error) { return "00000000-0000-4000-8000-000000000000", nil }
+	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+		t.Errorf("ptyRun unexpectedly invoked; test should override it")
+		return nil
 	}
-	return path
 }
 
-// selfCheckSetup returns a Config wired to the helper wrapper with a
-// short OverallTimeout. The caller sets cfg.Env to thread the helper's
-// behaviour knobs.
-func selfCheckSetup(t *testing.T) Config {
+// baseConfig returns a Config wired with a short OverallTimeout and the
+// minimal required fields. Per-test bodies layer in overrides.
+func baseConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		ClaudeBin:      selfCheckHelperWrapper(t),
+		ClaudeBin:      "/usr/bin/claude-fake",
 		WorkDir:        t.TempDir(),
 		OverallTimeout: 5 * time.Second,
 	}
 }
 
 func TestSelfCheck_Pass(t *testing.T) {
-	cfg := selfCheckSetup(t)
-	cfg.Env = []string{
-		"GO_SELFCHECK_HELPER=1",
-		"GO_SELFCHECK_HELPER_STDOUT=" + passLine + "\n",
-		"GO_SELFCHECK_HELPER_LIFETIME=200ms",
+	installSeams(t)
+	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+		if _, err := io.WriteString(cfg.Stdout, passLine+"\n"); err != nil {
+			return err
+		}
+		// Hold briefly so the watcher's reader actually consumes the
+		// line before pw closes.
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
 	}
 
-	result, err := SelfCheckDenyDefault(context.Background(), cfg)
+	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
 	if err != nil {
 		t.Fatalf("SelfCheckDenyDefault: unexpected error: %v\nresult=%+v", err, result)
 	}
@@ -122,18 +102,23 @@ func TestSelfCheck_Pass(t *testing.T) {
 }
 
 func TestSelfCheck_BashInvoked(t *testing.T) {
-	cfg := selfCheckSetup(t)
-	cfg.Env = []string{
-		"GO_SELFCHECK_HELPER=1",
+	installSeams(t)
+	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
 		// Two-line fixture: Bash tool_use first, end_turn second. The
 		// detector must trip on the first line; the second is present so
 		// a regression where the detector misses Bash and falls through
 		// to end-of-turn would surface as PASS, not a hang.
-		"GO_SELFCHECK_HELPER_STDOUT=" + bashLine + "\n" + passLine + "\n",
-		"GO_SELFCHECK_HELPER_LIFETIME=200ms",
+		if _, err := io.WriteString(cfg.Stdout, bashLine+"\n"+passLine+"\n"); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
 	}
 
-	result, err := SelfCheckDenyDefault(context.Background(), cfg)
+	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
 	if !errors.Is(err, ErrBashInvoked) {
 		t.Fatalf("err = %v, want ErrBashInvoked\nresult=%+v", err, result)
 	}
@@ -149,16 +134,16 @@ func TestSelfCheck_BashInvoked(t *testing.T) {
 }
 
 func TestSelfCheck_Timeout(t *testing.T) {
-	cfg := selfCheckSetup(t)
-	cfg.OverallTimeout = 300 * time.Millisecond
-	cfg.Env = []string{
-		"GO_SELFCHECK_HELPER=1",
-		// No stdout output. Fake stays alive past OverallTimeout so the
-		// watcher never sees an end_turn nor a Bash invocation before
-		// the deadline fires.
-		"GO_SELFCHECK_HELPER_LIFETIME=2s",
+	installSeams(t)
+	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+		// Block past the cfg.OverallTimeout. Real ptyrunner.Run collapses
+		// ctx-cancel to nil — mirror that contract.
+		<-ctx.Done()
+		return nil
 	}
 
+	cfg := baseConfig(t)
+	cfg.OverallTimeout = 300 * time.Millisecond
 	result, err := SelfCheckDenyDefault(context.Background(), cfg)
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout\nresult=%+v", err, result)
@@ -176,14 +161,19 @@ func TestSelfCheck_Timeout(t *testing.T) {
 // is logged + skipped, does not poison subsequent events, and does not
 // turn a PASS into an inconclusive.
 func TestSelfCheck_MalformedAssistantLineSkipped(t *testing.T) {
-	cfg := selfCheckSetup(t)
-	cfg.Env = []string{
-		"GO_SELFCHECK_HELPER=1",
-		"GO_SELFCHECK_HELPER_STDOUT=" + "{not valid json\n" + passLine + "\n",
-		"GO_SELFCHECK_HELPER_LIFETIME=200ms",
+	installSeams(t)
+	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+		if _, err := io.WriteString(cfg.Stdout, "{not valid json\n"+passLine+"\n"); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
 	}
 
-	result, err := SelfCheckDenyDefault(context.Background(), cfg)
+	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
 	if err != nil {
 		t.Fatalf("SelfCheckDenyDefault: unexpected error: %v\nresult=%+v", err, result)
 	}
@@ -214,6 +204,7 @@ func TestSelfCheck_ConfigValidation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			installSeams(t)
 			cfg := Config{
 				ClaudeBin: "/bin/true",
 				WorkDir:   t.TempDir(),
@@ -227,6 +218,105 @@ func TestSelfCheck_ConfigValidation(t *testing.T) {
 				t.Errorf("err = %q, want substring %q", err.Error(), tc.wantInErr)
 			}
 		})
+	}
+}
+
+func TestSelfCheck_TrustMarkFailure(t *testing.T) {
+	installSeams(t)
+	trustMark = func(workdir string) (string, error) {
+		return "", errors.New("trust write failed")
+	}
+
+	_, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
+	if err == nil {
+		t.Fatal("SelfCheckDenyDefault: nil error, want trust-mark failure")
+	}
+	if !strings.Contains(err.Error(), "mark workdir trusted") {
+		t.Errorf("err = %q, want substring %q", err.Error(), "mark workdir trusted")
+	}
+	if !strings.Contains(err.Error(), "trust write failed") {
+		t.Errorf("err = %q, want underlying error %q", err.Error(), "trust write failed")
+	}
+}
+
+func TestSelfCheck_SettingsWriteFailure(t *testing.T) {
+	installSeams(t)
+	settingsWrite = func(allowed []string) (string, error) {
+		return "", errors.New("settings write failed")
+	}
+
+	_, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
+	if err == nil {
+		t.Fatal("SelfCheckDenyDefault: nil error, want settings-write failure")
+	}
+	if !strings.Contains(err.Error(), "write settings") {
+		t.Errorf("err = %q, want substring %q", err.Error(), "write settings")
+	}
+	if !strings.Contains(err.Error(), "settings write failed") {
+		t.Errorf("err = %q, want underlying error %q", err.Error(), "settings write failed")
+	}
+}
+
+func TestSelfCheck_SessionIDFailure(t *testing.T) {
+	installSeams(t)
+	newSessionID = func() (string, error) {
+		return "", errors.New("session id failed")
+	}
+
+	_, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
+	if err == nil {
+		t.Fatal("SelfCheckDenyDefault: nil error, want session-id failure")
+	}
+	if !strings.Contains(err.Error(), "mint session id") {
+		t.Errorf("err = %q, want substring %q", err.Error(), "mint session id")
+	}
+	if !strings.Contains(err.Error(), "session id failed") {
+		t.Errorf("err = %q, want underlying error %q", err.Error(), "session id failed")
+	}
+}
+
+// TestSelfCheck_SettingsCleanedOnLaterFailure pins the defer-ordering
+// invariant: `defer os.Remove(settingsPath)` is registered AFTER
+// settingsWrite succeeds and BEFORE newSessionID is called, so any
+// failure past the settings write still cleans up the tempfile.
+func TestSelfCheck_SettingsCleanedOnLaterFailure(t *testing.T) {
+	installSeams(t)
+
+	var observedPath string
+	settingsWrite = func(allowed []string) (string, error) {
+		f, err := os.CreateTemp(t.TempDir(), "test-settings-*.json")
+		if err != nil {
+			return "", err
+		}
+		_ = f.Close()
+		observedPath = f.Name()
+		return observedPath, nil
+	}
+	newSessionID = func() (string, error) {
+		return "", errors.New("forced session-id failure")
+	}
+
+	_, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
+	if err == nil {
+		t.Fatal("SelfCheckDenyDefault: nil error, want session-id failure")
+	}
+	if observedPath == "" {
+		t.Fatal("settingsWrite mock never recorded a path; cannot assert cleanup")
+	}
+	if _, statErr := os.Stat(observedPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("settings tempfile %q not cleaned up; stat err = %v", observedPath, statErr)
+	}
+}
+
+func TestSelfCheck_PtyRunnerError(t *testing.T) {
+	installSeams(t)
+	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+		return ptyrunner.ErrTrustModalDetected
+	}
+
+	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
+	if !errors.Is(err, ptyrunner.ErrTrustModalDetected) {
+		t.Fatalf("err = %v, want errors.Is(err, ptyrunner.ErrTrustModalDetected)\nresult=%+v", err, result)
 	}
 }
 
