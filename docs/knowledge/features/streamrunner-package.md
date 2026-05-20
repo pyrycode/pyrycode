@@ -2,7 +2,7 @@
 
 Headless sibling of [`agentrun.Drive`](agentrun-package.md): spawns `claude` as a plain subprocess (no PTY), writes one stream-json user-turn envelope to its stdin, forwards stdout/stderr to caller-supplied writers, and maps the child's exit to the verb-level contract. Caller assembles the full claude argv (including `--input-format stream-json --output-format stream-json --dangerously-skip-permissions`); this primitive owns only the spawn, the stdin envelope, and the ctx-cancel teardown.
 
-Introduced #390 as a leaf primitive. Caller wiring landed in #391: [`pyry agent-run`](pyry-agent-run-command.md) is the sole production consumer, having cut over from the PTY-drive path to eliminate the 2026-05-14 `/doctor` prompt-poisoning regression.
+Introduced #390 as a leaf primitive. Caller wiring landed in #391: [`pyry agent-run`](pyry-agent-run-command.md) cut over from the PTY-drive path to eliminate the 2026-05-14 `/doctor` prompt-poisoning regression. **#470 cut the verb's default back to [`ptyrunner`](ptyrunner-package.md) to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline; streamrunner stays as the operator-facing rollback knob, selected via `PYRY_USE_STREAMJSON=1`, and is preserved indefinitely for billing-classification comparison (operator decision 2026-05-19).**
 
 ## Public API
 
