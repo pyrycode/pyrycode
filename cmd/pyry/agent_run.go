@@ -14,7 +14,21 @@ import (
 	"syscall"
 	"unicode"
 
+	"github.com/pyrycode/pyrycode/internal/agentrun/ptyrunner"
+	"github.com/pyrycode/pyrycode/internal/agentrun/settings"
 	"github.com/pyrycode/pyrycode/internal/agentrun/streamrunner"
+	"github.com/pyrycode/pyrycode/internal/agentrun/trust"
+	"github.com/pyrycode/pyrycode/internal/sessions"
+)
+
+// Test-only seams overridden by _test.go files to inject failures at each
+// call site of the ptyrunner default path without spawning real claude.
+// Production never assigns to these.
+var (
+	trustMark     = trust.MarkWorkdirTrusted
+	settingsWrite = settings.WriteSettings
+	ptyRun        = ptyrunner.Run
+	newSessionID  = sessions.NewID
 )
 
 // agentRunArgs is the parsed shape of `pyry agent-run`'s flag set. Field
@@ -34,18 +48,25 @@ type agentRunArgs struct {
 // agentRunUsageDescription is the body printed by `pyry agent-run --help`
 // between the `Usage:` header and `fs.PrintDefaults()`. Extracted as a
 // constant so a sibling test in agent_run_test.go can lock the prose
-// against stale-disclaimer regressions (see #359). Keep this in sync with
-// runAgentRun's doc comment and buildClaudeArgs's doc comment, which are
-// the canonical descriptions of the runtime behaviour.
+// against stale-disclaimer regressions (see #359).
 const agentRunUsageDescription = `Drive a single supervised claude turn headlessly.
 
-Spawns claude as a stream-json subprocess (no PTY, no JSONL watcher),
-delivers the user prompt as a stream-json envelope on claude's stdin,
-and forwards claude's stream-json stdout (its canonical system init,
-assistant deltas, and result events) byte-for-byte to pyry's stdout for
-the dispatcher to consume. --max-turns is passed through to claude,
-which enforces it. --dangerously-skip-permissions paired with
---allowed-tools is the authoritative tool gate.`
+By default, spawns claude as an interactive-TUI process under a PTY
+(the surface Anthropic's 2026-06-15 billing policy names as
+subscription-eligible), pre-marks the workdir as trusted in
+~/.claude.json, writes a per-spawn deny-default permissions JSON,
+delivers the user prompt via a bracketed-paste sequence, tails
+claude's session JSONL, and re-emits each event as stream-json on
+stdout for the dispatcher to consume. --max-turns is enforced by
+pyry (interactive claude does not honour it). --allowed-tools is the
+load-bearing tool gate, written into the per-spawn settings file as
+a deny-default allow-list.
+
+Set PYRY_USE_STREAMJSON=1 to fall back to the legacy stream-json
+subprocess path (claude -p with --output-format stream-json) for
+billing-classification experimentation. The fallback is operator-facing
+only; the dispatcher receives the same stream-json wire shape under
+both modes.`
 
 // validEfforts enumerates the accepted values for --effort. The spike
 // (#329) froze this set; if the upstream claude CLI uses different names,
@@ -193,14 +214,14 @@ func requireDir(path string) error {
 }
 
 // runAgentRun implements `pyry agent-run`: parse and validate the full flag
-// surface, then spawn claude via streamrunner with the stream-json input/
-// output formats. Claude's stdout (the canonical stream-json event stream,
-// including its own `system init` and `result` events) is forwarded
-// byte-for-byte to stdout; stderr is forwarded to os.Stderr.
+// surface, then drive claude either via the interactive-TUI PTY path
+// (default) or the stream-json subprocess path (when PYRY_USE_STREAMJSON=1).
+// Both modes emit stream-json on stdout for the dispatcher.
 //
-// Stdout contract: claude's stdout, verbatim. The dispatcher's parser
-// consumes this stream as if it were `claude -p --output-format stream-json`
-// output.
+// Stdout contract: line-delimited stream-json events. Under the streamrunner
+// path it's claude's own stdout forwarded byte-for-byte; under the ptyrunner
+// path it's the streamjson.Emitter's re-emit of claude's per-session JSONL.
+// The dispatcher's parser is satisfied by either.
 func runAgentRun(stdout io.Writer, args []string) error {
 	// --self-check is a sibling verb mode (#336): boot-time verification
 	// that permissions.defaultMode "deny" in the per-spawn settings file
@@ -230,14 +251,16 @@ func runAgentRun(stdout io.Writer, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	err = streamrunner.Run(ctx, streamrunner.Config{
-		ClaudeBin:   claudeBin,
-		WorkDir:     parsed.workdir,
-		Args:        buildClaudeArgs(parsed),
-		PromptBytes: promptBytes,
-		Stdout:      stdout,
-		Stderr:      os.Stderr,
-	})
+	// PYRY_USE_STREAMJSON=1 selects the legacy stream-json subprocess
+	// rollback. Only the exact string "1" is truthy; any other value (or
+	// unset) falls through to the ptyrunner default — pinned by
+	// TestRunAgentRun_EnvNon1ValueDispatchesToPtyRunner so a future
+	// contributor cannot quietly widen the truthy set.
+	if os.Getenv("PYRY_USE_STREAMJSON") == "1" {
+		err = runAgentRunStreamRunner(ctx, stdout, parsed, claudeBin, promptBytes)
+	} else {
+		err = runAgentRunPty(ctx, stdout, parsed, claudeBin, promptBytes)
+	}
 	if err == nil {
 		return nil
 	}
@@ -247,8 +270,61 @@ func runAgentRun(stdout io.Writer, args []string) error {
 	return fmt.Errorf("agent-run: %w", err)
 }
 
-// buildClaudeArgs constructs the argv passed to `claude` (without argv[0])
-// for the stream-json subprocess pipeline.
+// runAgentRunStreamRunner is the legacy stream-json subprocess path,
+// selected by PYRY_USE_STREAMJSON=1. Byte-equivalent to the pre-cutover
+// runAgentRun body; preserved indefinitely for billing-classification
+// comparison (operator decision 2026-05-19).
+func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agentRunArgs, claudeBin string, promptBytes []byte) error {
+	return streamrunner.Run(ctx, streamrunner.Config{
+		ClaudeBin:   claudeBin,
+		WorkDir:     parsed.workdir,
+		Args:        buildStreamRunnerClaudeArgs(parsed),
+		PromptBytes: promptBytes,
+		Stdout:      stdout,
+		Stderr:      os.Stderr,
+	})
+}
+
+// runAgentRunPty is the default path: pre-mark workdir trust, write the
+// per-spawn deny-default settings JSON, mint a fresh session UUID, and
+// delegate to ptyrunner.Run. The settings tempfile is removed on every
+// exit path via defer.
+func runAgentRunPty(ctx context.Context, stdout io.Writer, parsed agentRunArgs, claudeBin string, promptBytes []byte) error {
+	realpath, err := trustMark(parsed.workdir)
+	if err != nil {
+		return fmt.Errorf("mark workdir trusted in ~/.claude.json: %w", err)
+	}
+
+	settingsPath, err := settingsWrite(parsed.allowedTools)
+	if err != nil {
+		return fmt.Errorf("write per-spawn settings: %w", err)
+	}
+	defer func() { _ = os.Remove(settingsPath) }()
+
+	sid, err := newSessionID()
+	if err != nil {
+		return fmt.Errorf("mint session id: %w", err)
+	}
+
+	return ptyRun(ctx, ptyrunner.Config{
+		ClaudeBin:    claudeBin,
+		WorkDir:      realpath,
+		SessionID:    string(sid),
+		SettingsPath: settingsPath,
+		SystemPrompt: parsed.systemPromptFile,
+		Model:        parsed.model,
+		Effort:       parsed.effort,
+		MaxTurns:     parsed.maxTurns,
+		PromptBytes:  promptBytes,
+		Stdout:       stdout,
+		Stderr:       os.Stderr,
+	})
+}
+
+// buildStreamRunnerClaudeArgs constructs the argv passed to `claude`
+// (without argv[0]) for the stream-json subprocess pipeline selected by
+// PYRY_USE_STREAMJSON=1. The ptyrunner default path owns its own argv
+// inside internal/agentrun/ptyrunner; do not unify these shapes.
 //
 // Notes on individual flags:
 //
@@ -267,7 +343,7 @@ func runAgentRun(stdout io.Writer, args []string) error {
 //     ignored it) and bounds runaway-agent turn budget.
 //   - `--allowed-tools` is comma-joined; `splitAllowedTools` already
 //     normalised operator input into a clean slice at parse time.
-func buildClaudeArgs(parsed agentRunArgs) []string {
+func buildStreamRunnerClaudeArgs(parsed agentRunArgs) []string {
 	return []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",

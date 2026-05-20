@@ -2,7 +2,7 @@
 
 PTY-driven sibling of [`internal/agentrun/streamrunner`](streamrunner-package.md): spawns `claude` as an interactive TUI under [`github.com/pyrycode/tui-driver`](https://github.com/pyrycode/tui-driver), waits for the TUI to reach idle, checks for trust-folder / MCP-failure / network-failure modals at the post-idle snapshot, submits one user prompt via `Session.WritePrompt` (bracketed-paste), and tears the session down through `Session.Close` (SIGTERM → grace → SIGKILL → PTY close).
 
-Introduced #471 as a scaffolding-only slice. No production caller imports it yet — [`pyry agent-run`](pyry-agent-run-command.md) will cut over from `streamrunner` to `ptyrunner` in #470 once #469 (trust pre-write + deny-default settings JSON) and #472 (JSONL tail + stream-json re-emit + pyry-side budget + watchdog) land. The pivot is driven by Anthropic's 2026-06-15 billing policy: the article enumerates "Interactive Claude Code in the terminal or IDE" as subscription-eligible but does not name the stream-json subprocess surface that `streamrunner` drives — pyrycode pivots proactively to the named surface before the deadline.
+Introduced #471 as a scaffolding-only slice; extended by #478 (JSONL tail + stream-json emit + end-of-turn classification) and #479 (pyry-side `MaxTurns` budget Counter + PTY-heartbeat/spinner-freeze watchdog with shared ctx-cancel teardown). **#470 wired it in as the [`pyry agent-run`](pyry-agent-run-command.md) default**, cutting the verb over from `streamrunner` to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline. The pivot is driven by Anthropic's policy article enumerating "Interactive Claude Code in the terminal or IDE" as subscription-eligible while not naming the stream-json subprocess surface; `streamrunner` is retained as a `PYRY_USE_STREAMJSON=1` rollback knob for empirical post-deadline billing-classification comparison.
 
 ## Public API
 
@@ -160,17 +160,17 @@ CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kerne
 
 ## Out of scope
 
-- JSONL tail + stream-json re-emit + `result` trailer composition → #472 (consumes `Stdout`).
-- Pyry-side max-turns budget enforcement → #472 (consumes `MaxTurns`).
-- Trust pre-write + deny-default settings JSON file generation → #469 (produces `SettingsPath` and the remediation `ErrTrustModalDetected` points to).
-- `cmd/pyry/agent_run.go` cutover from `streamrunner` to `ptyrunner` → #470.
-- Streamrunner deletion → not in this migration phase; the two primitives stay side-by-side until the cutover lands.
+- JSONL tail + stream-json re-emit + `result` trailer composition → landed in #478.
+- Pyry-side max-turns budget enforcement + watchdog → landed in #479.
+- Trust pre-write + deny-default settings JSON file generation → landed as separate subpackages [`trust`](agentrun-trust-subpackage.md) (#475) and [`settings`](agentrun-settings-subpackage.md) (#476); together they produce `SettingsPath` and the remediation `ErrTrustModalDetected` points to.
+- `cmd/pyry/agent_run.go` cutover from `streamrunner` to `ptyrunner` → landed in #470.
+- Streamrunner deletion → not planned. Operator decision 2026-05-19: streamrunner stays as a sibling indefinitely for billing-classification comparison, selected via `PYRY_USE_STREAMJSON=1`.
 - Operator-tunable timing knobs — the SIGTERM grace and `WaitUntil` poll interval are tui-driver defaults; no `Config` exposure.
 
 ## Related
 
-- [streamrunner-package.md](streamrunner-package.md) — the no-PTY sibling whose stateless-`Run` + `Config` + sentinel-error package shape this primitive mirrors. The two coexist until #470 cuts the consumer over.
-- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes the spawn primitives. Currently wired to `streamrunner` (#391); #470 cuts it over to `ptyrunner`.
+- [streamrunner-package.md](streamrunner-package.md) — the no-PTY sibling whose stateless-`Run` + `Config` + sentinel-error package shape this primitive mirrors. The two coexist post-#470 under the `PYRY_USE_STREAMJSON` rollback knob.
+- [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes the spawn primitives. Post-#470 wired to `ptyrunner` by default; falls back to `streamrunner` when `PYRY_USE_STREAMJSON=1`.
 - [agentrun-package.md](agentrun-package.md) — the surrounding `internal/agentrun` package; `WriteSettings` / `MarkWorkdirTrusted` (used by #469 to produce `SettingsPath` and pre-write trust) live there.
 - [`codebase/471.md`](../codebase/471.md) — build notes (file inventory, helper-process mode table, `TestMain` rationale, `GOPRIVATE` setup).
 - Spec [`docs/specs/architecture/471-ptyrunner-skeleton.md`](../../specs/architecture/471-ptyrunner-skeleton.md) — architect spec.
