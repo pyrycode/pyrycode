@@ -15,9 +15,14 @@ type Config struct {
     SystemPrompt string       // required; system-prompt file, --append-system-prompt-file
     Model        string       // required; --model
     Effort       string       // required; --effort
-    MaxTurns     int          // declared for #472; NOT consumed in this slice
+    AllowedTools []string     // required (#498), non-nil; empty slice OK; wire-shape mirror
+                              // of the names in the deny-default settings file at SettingsPath;
+                              // stamped into the leading system/init envelope's `tools` field
+                              // via streamjson.Config.Tools; NOT placed on argv (the interactive
+                              // TUI carries the allowlist inside SettingsPath)
+    MaxTurns     int          // required (#479); pyry-side budget counter cap
     PromptBytes  []byte       // required; user-turn prompt, submitted via Session.WritePrompt
-    Stdout       io.Writer    // declared for #472 (stream-json re-emit); NOT written in this slice
+    Stdout       io.Writer    // required (#478); stream-json re-emit target (passed through to streamjson)
     Stderr       io.Writer    // required; child stderr
     Env          []string     // optional; appended to os.Environ() in the child
     Logger       *slog.Logger // optional; defaults to slog.Default()
@@ -55,7 +60,7 @@ Intentionally **absent** from the argv:
 - `--input-format` / `--output-format` / `--verbose` — stream-json mode markers; the interactive TUI rejects them.
 - `--dangerously-skip-permissions` — replaced by the deny-default settings JSON from #469.
 - `--max-turns` — the interactive TUI ignores it; #472 enforces the cap pyry-side via a budget counter.
-- `--allowed-tools` — carried as JSON inside the settings file produced by #469.
+- `--allowed-tools` — carried as JSON inside the settings file produced by #469. `Config.AllowedTools` (#498) is the human-readable mirror used for the leading `system/init` envelope's `tools` field, populated from the same `parsed.allowedTools` slice at the `runAgentRunPty` wiring site so the envelope and the runtime enforcement cannot drift.
 
 `TestBuildArgs` pins the six pairs and includes a forbidden-flag loop so the absences are regression-protected.
 
@@ -126,9 +131,9 @@ Never logs `cfg.PromptBytes` content, any substring of `sess.Buffer.Snapshot()`,
   ```
   Expected output: empty.
 
-## Forward-compatibility fields
+## Required-field validation
 
-`MaxTurns` and `Stdout` are declared in `Config` but unused in this slice. Field comments name the consuming sibling (#472) explicitly and say "NOT consumed in this slice" so a casual reader is not misled. The precedent is to let #472 extend `Run` in-place to read these fields without breaking the public struct shape.
+Each `Config` field marked required produces a wrapped one-line error of the shape `errors.New("ptyrunner: <field> required")` when missing. The validation block runs first inside `Run` before any spawn. `AllowedTools` (#498) is `nil`-rejected and `[]string{}`-accepted — an empty allowlist is a valid runtime configuration (the deny-default settings file still pins `defaultMode:"dontAsk"`). `TestRun_MissingRequiredFields` covers each required field with its expected error substring.
 
 ## Testing
 
@@ -161,6 +166,7 @@ CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kerne
 ## Out of scope
 
 - JSONL tail + stream-json re-emit + `result` trailer composition → landed in #478.
+- Leading `system/init` envelope synthesis (wire-shape parity with streamrunner) → landed in #498 inside `streamjson.New`; ptyrunner threads `WorkDir` / `AllowedTools` / `Model` / `SessionID` into the streamjson Config so the envelope's six required fields are populated from ptyrunner's existing inputs.
 - Pyry-side max-turns budget enforcement + watchdog → landed in #479.
 - Trust pre-write + deny-default settings JSON file generation → landed as separate subpackages [`trust`](agentrun-trust-subpackage.md) (#475) and [`settings`](agentrun-settings-subpackage.md) (#476); together they produce `SettingsPath` and the remediation `ErrTrustModalDetected` points to.
 - `cmd/pyry/agent_run.go` cutover from `streamrunner` to `ptyrunner` → landed in #470.
