@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 func TestResolveWorkdir_DarwinRealpath(t *testing.T) {
@@ -90,9 +92,40 @@ func TestEncodeProjectDir_LiteralSubstitution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeProjectDir(%q): %v", resolved, err)
 	}
-	want := strings.NewReplacer("/", "-", ".", "-").Replace(resolved)
+	want := tuidriver.EncodeCwd(resolved)
 	if got != want {
 		t.Fatalf("EncodeProjectDir(%q) = %q, want %q", resolved, got, want)
+	}
+}
+
+func TestEncodeProjectDir_NonAlnumBytes(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cases := []struct {
+		name    string
+		segment string
+		suffix  string
+	}{
+		{name: "underscores", segment: "Test_With_Underscores", suffix: "-Test-With-Underscores"},
+		{name: "space", segment: "with space", suffix: "-with-space"},
+		{name: "pre-existing dash idempotent", segment: "already-dashed", suffix: "-already-dashed"},
+		{name: "mixed specials", segment: "a_b-c.d e", suffix: "-a-b-c-d-e"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wd := filepath.Join(base, tc.segment)
+			if err := os.MkdirAll(wd, 0o755); err != nil {
+				t.Fatalf("MkdirAll(%q): %v", wd, err)
+			}
+			got, err := EncodeProjectDir(wd)
+			if err != nil {
+				t.Fatalf("EncodeProjectDir(%q): %v", wd, err)
+			}
+			if !strings.HasSuffix(got, tc.suffix) {
+				t.Fatalf("EncodeProjectDir(%q) = %q, want suffix %q", wd, got, tc.suffix)
+			}
+		})
 	}
 }
 

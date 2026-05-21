@@ -9,10 +9,9 @@ package agentrun
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
-)
 
-var projectDirReplacer = strings.NewReplacer("/", "-", ".", "-")
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+)
 
 // ResolveWorkdir returns the resolved absolute path of workdir, mirroring how
 // claude resolves a workdir before reading ~/.claude.json's projects map.
@@ -32,12 +31,14 @@ func ResolveWorkdir(workdir string) (string, error) {
 
 // EncodeProjectDir returns the dashed directory-name segment claude uses
 // under ~/.claude/projects/ for the given workdir. Chains ResolveWorkdir
-// then maps '/' and '.' to '-' in the resolved absolute path. The result
-// does NOT include the ~/.claude/projects/ prefix or any .jsonl suffix.
+// then maps every byte outside [a-zA-Z0-9] to '-' (matching how claude
+// derives the on-disk projects-dir name; see tuidriver.EncodeCwd). The
+// result does NOT include the ~/.claude/projects/ prefix or any .jsonl
+// suffix.
 func EncodeProjectDir(workdir string) (string, error) {
 	resolved, err := ResolveWorkdir(workdir)
 	if err != nil {
 		return "", err
 	}
-	return projectDirReplacer.Replace(resolved), nil
+	return tuidriver.EncodeCwd(resolved), nil
 }
