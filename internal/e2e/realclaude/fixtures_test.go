@@ -101,6 +101,80 @@ func TestWithWorktreeAuthenticated_RealAssistant(t *testing.T) {
 		jsonlPath, truncate(result.Stderr))
 }
 
+// TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet
+// re-execs the test binary with both ANTHROPIC_API_KEY and
+// CLAUDE_CODE_OAUTH_TOKEN cleared. t.Skipf ends the calling goroutine via
+// runtime.Goexit() with no in-process return value, so asserting on the
+// skip-message text requires the outer/inner subprocess pattern. Mirrors
+// TestRunPyryAgentRun_Timeout.
+func TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet(t *testing.T) {
+	if os.Getenv("PYRY_REALCLAUDE_AUTH_SKIP_INNER") == "1" {
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+		WithWorktreeAuthenticated(t)
+		t.Fatalf("WithWorktreeAuthenticated returned without skipping; want t.Skip when both creds unset")
+		return
+	}
+	cmd := exec.Command(os.Args[0],
+		"-test.run=^TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet$",
+		"-test.v")
+	cmd.Env = append(os.Environ(), "PYRY_REALCLAUDE_AUTH_SKIP_INNER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("inner test exited non-zero (t.Skip should be success): %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("--- SKIP: TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet")) {
+		t.Fatalf("inner test did not skip; output:\n%s", out)
+	}
+	wants := []string{
+		"ANTHROPIC_API_KEY",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		"security find-generic-password -s 'Claude Code-credentials' -w",
+		"jq -r '.claudeAiOauth.accessToken'",
+	}
+	for _, w := range wants {
+		if !bytes.Contains(out, []byte(w)) {
+			t.Fatalf("skip message missing required substring %q\noutput:\n%s", w, out)
+		}
+	}
+}
+
+// TestWithWorktreeAuthenticated_OAuthTokenOnly_RepinsAndPreservesAbsentApiKey
+// drives the OAuth-only branch in-process. No subprocess, no network. The
+// token value is a synthetic literal — claude is never invoked here. We
+// verify (a) the helper proceeds past the skip gate when only the OAuth
+// token is set, (b) the token survives the WithWorktree HOME re-pin via
+// t.Setenv, and (c) the helper does NOT t.Setenv the absent
+// ANTHROPIC_API_KEY (preserve original outer-env shape).
+func TestWithWorktreeAuthenticated_OAuthTokenOnly_RepinsAndPreservesAbsentApiKey(t *testing.T) {
+	const token = "test-oauth-token-not-real"
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+	// Unset the API key entirely so we can distinguish absent from set-empty.
+	if err := os.Unsetenv("ANTHROPIC_API_KEY"); err != nil {
+		t.Fatalf("Unsetenv ANTHROPIC_API_KEY: %v", err)
+	}
+
+	dir := WithWorktreeAuthenticated(t)
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat %s: %v", dir, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", dir)
+	}
+	if got := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); got != token {
+		t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN = %q, want %q", got, token)
+	}
+	if _, present := os.LookupEnv("ANTHROPIC_API_KEY"); present {
+		t.Fatalf("ANTHROPIC_API_KEY present in env; helper must not Setenv an absent var")
+	}
+	if got := os.Getenv("HOME"); got != dir {
+		t.Fatalf("HOME = %q, want %q", got, dir)
+	}
+}
+
 func TestReadJSONL_HappyPath(t *testing.T) {
 	workdir := WithWorktree(t)
 	writeFixtureLines(t, workdir, testSessionID,

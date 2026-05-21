@@ -37,19 +37,42 @@ func WithWorktree(t *testing.T) string {
 }
 
 // WithWorktreeAuthenticated behaves like WithWorktree and additionally
-// re-pins ANTHROPIC_API_KEY from the outer test environment so the
-// subprocess inherits a real-API credential. Use ONLY for tests that need
-// a real Anthropic response (not argv-shape probes). Skips the test with
-// a named-variable message when ANTHROPIC_API_KEY is unset in the outer
-// environment.
+// re-pins ANTHROPIC_API_KEY and/or CLAUDE_CODE_OAUTH_TOKEN from the outer
+// test environment so the subprocess inherits a real-API credential. Use
+// ONLY for tests that need a real Anthropic response (not argv-shape
+// probes). Skips the test with a named-variable message when neither
+// variable is set in the outer environment.
+//
+// On a Max-only Mac the operator has no ANTHROPIC_API_KEY; the credential
+// is an OAuth access token in macOS Keychain (service
+// "Claude Code-credentials") that claude accepts via CLAUDE_CODE_OAUTH_TOKEN.
+// The skip message names both variables and points operators at the
+// Keychain extraction recipe.
+//
+// Whichever variable(s) are non-empty in the outer environment are
+// re-pinned via t.Setenv so subprocess inheritance survives any future
+// fixture-level env sanitisation in RunPyryAgentRun. An absent variable
+// is NOT t.Setenv'd to "" — preserving the original outer-env shape lets
+// downstream tooling distinguish unset from set-empty.
 func WithWorktreeAuthenticated(t *testing.T) string {
 	t.Helper()
-	key := os.Getenv("ANTHROPIC_API_KEY")
-	if key == "" {
-		t.Skipf("realclaude.WithWorktreeAuthenticated: ANTHROPIC_API_KEY is unset in the outer environment; this helper is opt-in and requires that variable. Export it (or rely on a CI secret) to run tests that use this fixture.")
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	oauthToken := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
+	if apiKey == "" && oauthToken == "" {
+		t.Skipf("realclaude.WithWorktreeAuthenticated: neither ANTHROPIC_API_KEY " +
+			"nor CLAUDE_CODE_OAUTH_TOKEN is set in the outer environment; this " +
+			"helper requires one. For a Max-only Mac, extract the OAuth token via " +
+			"`security find-generic-password -s 'Claude Code-credentials' -w | " +
+			"jq -r '.claudeAiOauth.accessToken'` and export as " +
+			"CLAUDE_CODE_OAUTH_TOKEN.")
 	}
 	dir := WithWorktree(t)
-	t.Setenv("ANTHROPIC_API_KEY", key)
+	if apiKey != "" {
+		t.Setenv("ANTHROPIC_API_KEY", apiKey)
+	}
+	if oauthToken != "" {
+		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", oauthToken)
+	}
 	return dir
 }
 
