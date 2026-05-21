@@ -752,8 +752,8 @@ func TestRunAgentRun_DispatchesToPtyRunnerByDefault(t *testing.T) {
 	}
 	if captured.ClaudeBin == "" || captured.WorkDir == "" || captured.SessionID == "" ||
 		captured.SettingsPath == "" || captured.SystemPrompt == "" || captured.Model == "" ||
-		captured.Effort == "" || captured.MaxTurns == 0 || len(captured.PromptBytes) == 0 ||
-		captured.Stdout == nil || captured.Stderr == nil {
+		captured.Effort == "" || captured.AllowedTools == nil || captured.MaxTurns == 0 ||
+		len(captured.PromptBytes) == 0 || captured.Stdout == nil || captured.Stderr == nil {
 		t.Fatalf("ptyRun captured Config has unpopulated required fields: %+v", captured)
 	}
 }

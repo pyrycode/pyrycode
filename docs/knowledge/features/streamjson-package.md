@@ -1,6 +1,6 @@
 # `internal/agentrun/streamjson` — stdout emitter mirroring `claude -p` shape
 
-Leaf package that turns the parsed `jsonl.Event` stream into the line-delimited stream-json shape the dispatcher already speaks. The dispatcher historically spawned `claude -p --output-format stream-json` and read its stdout; after the agent-run migration it spawns `pyry agent-run --output-format stream-json` and expects byte-equivalent output. `streamjson.Emitter` is the bridge: re-emits each `Event.Raw` verbatim, aggregates the per-event `Usage` blocks, and composes a single `type:"result"` trailer line when the run terminates.
+Leaf package that turns the parsed `jsonl.Event` stream into the line-delimited stream-json shape the dispatcher already speaks. The dispatcher historically spawned `claude -p --output-format stream-json` and read its stdout; after the agent-run migration it spawns `pyry agent-run --output-format stream-json` and expects byte-equivalent output. `streamjson.Emitter` is the bridge: composes the leading `type:"system" subtype:"init"` envelope on construction (#498), re-emits each `Event.Raw` verbatim, aggregates the per-event `Usage` blocks, and composes a single `type:"result"` trailer line when the run terminates.
 
 ## Public API
 
@@ -16,10 +16,17 @@ const (
 type Config struct {
     Writer    io.Writer        // required; production passes os.Stdout
     SessionID string           // required; UUIDv4 the caller minted and passed to claude
+    Cwd       string           // required (#498); stamped into init.cwd
+    Tools     []string         // required (#498), non-nil; empty slice OK; stamped into init.tools
+    Model     string           // required (#498); stamped into init.model
     Now       func() time.Time // optional; defaults to time.Now (test seam)
     Logger    *slog.Logger     // optional; defaults to slog.Default()
 }
 
+// New constructs an Emitter and writes the leading
+// {"type":"system","subtype":"init",...} envelope to cfg.Writer before
+// returning. Returns (nil, err) if Writer is nil, SessionID is empty, Cwd
+// is empty, Tools is nil, Model is empty, or the init write fails (#498).
 func New(cfg Config) (*Emitter, error)
 
 // Emit re-emits ev.Raw + '\n', aggregating ev.Usage and counting assistant
@@ -41,9 +48,30 @@ func (e *Emitter) SetExitReason(r ExitReason)
 func (e *Emitter) Close() error
 ```
 
+## Wire shape (the init envelope)
+
+`New` composes the leading `system/init` line synchronously before returning, sourcing all fields from `Config`. This restores the [[Drop-In Contract]] for ptyrunner's stream-json output — `parseInitSessionID` (`internal/e2e/realclaude/fixtures.go`) and any dispatcher parser keyed on the leading envelope now work against ptyrunner without runner-specific branching. The wire shape is fixture-pinned (`testdata/captured_run.jsonl:1`):
+
+| Field | Type | Value |
+|-------|------|-------|
+| `type` | string | literal `"system"` |
+| `subtype` | string | literal `"init"` |
+| `cwd` | string | `Config.Cwd` (in ptyrunner: `cfg.WorkDir`) |
+| `tools` | []string | `Config.Tools` (in ptyrunner: `cfg.AllowedTools`) — non-nil; empty slice marshals as `[]`, never `null` |
+| `model` | string | `Config.Model` (in ptyrunner: `cfg.Model`) |
+| `session_id` | string | `Config.SessionID` |
+
+Key order in the marshalled struct is fixed (pinned by `TestNew_InitLineKeyOrderMatchesFixture` byte-comparing against the captured fixture). The unexported `initLine` struct (`emitter.go:296-309`) declares the six fields in this order; reordering breaks byte-equivalence even though the resulting JSON stays semantically valid. Same convention `trailer` uses.
+
+The synthesis lives in `streamjson`, not `ptyrunner`, because the package already owns the wire shape for the trailer; siblings of one wire contract belong in one place. The init write happens synchronously inside `New` before any other goroutine can observe the Emitter, so the leading-line invariant is structural (no mu, no race).
+
+Fields deliberately NOT in the envelope: `claude_code_version` (would require a cache-it-once `claude --version` shell-out), `permissionMode` (mirrors `--permission-mode default`), `apiKeySource` (`"none"` when token-via-env), `mcp_servers`. These are optional-if-cheap per the #498 spec; none are gating. The fixture is the source of truth for the required set, not streamrunner's live output.
+
+On init-write failure, `New` returns `(nil, fmt.Errorf("streamjson: emit init: %w", err))` — the Emitter is unusable when its first write fails, so the caller never sees a half-constructed emitter (`TestNew_InitWriteFailureReturnsError`).
+
 ## Wire shape (the trailer)
 
-The trailer is the only line `streamjson` composes itself. Every other line is `Event.Raw + '\n'` byte-for-byte from the watcher's parser. Field-set was derived from captured `claude -p --output-format stream-json` `type:"result"` fixtures — pyry emits the subset the v1 dispatcher parser (`agent-dispatcher/src/dispatch.ts`) reads, plus the fields the v2 fixture-compare test asserts on. Anything outside this set is omitted; the dispatcher tolerates missing fields via `r.<field> || <default>`.
+The trailer is the second line `streamjson` composes itself. Between init and trailer, every line is `Event.Raw + '\n'` byte-for-byte from the watcher's parser. Field-set was derived from captured `claude -p --output-format stream-json` `type:"result"` fixtures — pyry emits the subset the v1 dispatcher parser (`agent-dispatcher/src/dispatch.ts`) reads, plus the fields the v2 fixture-compare test asserts on. Anything outside this set is omitted; the dispatcher tolerates missing fields via `r.<field> || <default>`.
 
 | Field | Type | Value |
 |-------|------|-------|
@@ -102,7 +130,8 @@ The mutex is held only for the duration of a single `Emit` write + state update 
 | `Writer.Write` fails (broken pipe) inside `Emit` | Sticky `writeErr`; subsequent `Emit` calls no-op; `Close` still attempts the trailer (best-effort) and returns its own error |
 | `Close` called twice | Second and later calls return the first's error verbatim, do not re-write |
 | `Emit` called after `Close` | No-op returning nil |
-| `New(Config{Writer: nil})` / empty `SessionID` | Returns error; no Emitter constructed |
+| `New(Config{Writer: nil})` / empty `SessionID` / empty `Cwd` / nil `Tools` / empty `Model` | Returns `(nil, err)`; no Emitter constructed |
+| `Writer.Write` fails during the init synthesis inside `New` | Returns `(nil, fmt.Errorf("streamjson: emit init: %w", err))`; no Emitter constructed (pinned by `TestNew_InitWriteFailureReturnsError`) |
 
 The emitter MUST NOT log Event content. The package doc-comment is load-bearing — logs only counts, durations, and error messages; never `Event.Raw` bytes nor per-event `Usage` values. Mirrors the `internal/agentrun/jsonl` invariant.
 
@@ -134,7 +163,12 @@ The `runAgentRun` flow after #354:
 - All three trailer compositions (completion / max_turns / error) + the no-EOT-no-override default-error fallback.
 - `SetExitReason` and `Close` idempotence; `Emit` after `Close` no-ops; sticky write error.
 - `cfg.Now` seam for `duration_ms`; `SessionID` round-trip; `total_cost_usd` and `result` constants.
-- `TestCapturedFixture_ByteEquivalence` — replays `testdata/captured_run.jsonl` (the synthesised fixture matching captured `claude -p` shape) through `Emit`+`Close`; asserts non-result lines byte-equivalent, plus structural equality on `type`/`subtype`/`is_error`/`num_turns`/`stop_reason`/`terminal_reason` and on all four `usage` integer fields. Known-expected diff list documented inline (timestamps, session ids, claude-only fields like `modelUsage`/`permission_denials`/`uuid`/`api_error_status`/`duration_api_ms`, extra usage fields).
+- `TestNew_ValidatesConfig` — table-driven over the five required-field cases (nil Writer, empty SessionID, empty Cwd, nil Tools, empty Model) (#498).
+- `TestNew_WritesInitLineFirst` — first newline-terminated line decodes to `initLine{Type:"system",Subtype:"init",...}` with field values matching `Config` inputs (#498).
+- `TestNew_InitLineKeyOrderMatchesFixture` — byte-compares the synthesised init against `testdata/captured_run.jsonl:1`. Pins the `initLine` struct's tag declaration order; a future reorder fails locally instead of only under `make e2e-realclaude` (#498).
+- `TestNew_EmptyToolsMarshalsAsEmptyArray` — `Tools: []string{}` produces `"tools":[]` (never `"tools":null`); guards against a future nil-slice regression (#498).
+- `TestNew_InitWriteFailureReturnsError` — `failingWriter` rejects the first write; `New` returns `(nil, err)` with `errors.Is(err, w.err)` and `"streamjson: emit init"` substring (#498).
+- `TestCapturedFixture_ByteEquivalence` — replays `testdata/captured_run.jsonl` (the synthesised fixture matching captured `claude -p` shape) through `Emit`+`Close`; asserts non-result lines byte-equivalent (including the init at `out[0]`, which the producer-side synthesis emits from `Config`), plus structural equality on `type`/`subtype`/`is_error`/`num_turns`/`stop_reason`/`terminal_reason` and on all four `usage` integer fields. After #498 the fixture's first line is fed via `Config.{Cwd,Tools,Model,SessionID}` (not through `Emit`) — feeding it through the reader would duplicate it; the test feeds `nonResult[1:]` to the reader. Known-expected diff list documented inline (timestamps, session ids, claude-only fields like `modelUsage`/`permission_denials`/`uuid`/`api_error_status`/`duration_api_ms`, extra usage fields).
 
 `cmd/pyry/agent_run_test.go` extends:
 
