@@ -28,7 +28,7 @@ const unicodePrompt = "INTEGRATION_TEST_PROMPT_UNICODEFIDELITY_K3M9P2X7 ä ö å
 // this test asserts byte-identical preservation of a framed non-ASCII
 // payload into the first "user" entry of claude's JSONL session file.
 func TestRealClaude_PromptFidelity_Unicode(t *testing.T) {
-	workdir := WithWorktree(t)
+	workdir := WithWorktreeAuthenticated(t)
 
 	result := RunPyryAgentRun(t, RunOpts{
 		Workdir:      workdir,

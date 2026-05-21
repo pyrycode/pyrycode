@@ -26,7 +26,7 @@ const distinctivePrompt = "INTEGRATION_TEST_PROMPT_PROMPTFIDELITY_2N7Q4R8W"
 // envelope's text round-trip, or wires a path that bypasses streamrunner,
 // the substring match fails and this test catches it before merge.
 func TestRealClaude_PromptFidelity(t *testing.T) {
-	workdir := WithWorktree(t)
+	workdir := WithWorktreeAuthenticated(t)
 
 	result := RunPyryAgentRun(t, RunOpts{
 		Workdir:      workdir,

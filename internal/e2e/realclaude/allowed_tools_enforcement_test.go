@@ -35,7 +35,7 @@ import (
 // tool_use. A regression here means the claude-binary boundary stopped
 // honoring `--allowed-tools`.
 func TestRealClaude_AllowedToolsEnforcement(t *testing.T) {
-	workdir := WithWorktree(t)
+	workdir := WithWorktreeAuthenticated(t)
 
 	result := RunPyryAgentRun(t, RunOpts{
 		Workdir:      workdir,
