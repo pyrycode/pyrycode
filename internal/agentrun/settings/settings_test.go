@@ -9,7 +9,16 @@ import (
 )
 
 func TestWriteSettings_EmptyInputReturnsErrorAndDoesNotWrite(t *testing.T) {
-	t.Parallel()
+	// Cannot use t.Parallel() here — t.Setenv (below) forbids it. The
+	// previous before/after-glob approach intended to coexist with parallel
+	// siblings, but it raced anyway: parallel tests calling WriteSettings
+	// with VALID input create *persistent* tempfiles by design (the caller
+	// uses the path post-return), and those files landed in our `after`
+	// glob unattributable to this call. CI surfaced the race; local runs
+	// were timing-lucky. Fix: isolate TMPDIR per-test so the glob only sees
+	// this test's own tempfiles. Trade-off: this test runs serially
+	// relative to others in the package — acceptable, the test is O(ms).
+	t.Setenv("TMPDIR", t.TempDir())
 
 	cases := []struct {
 		name  string
@@ -22,13 +31,13 @@ func TestWriteSettings_EmptyInputReturnsErrorAndDoesNotWrite(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			// No t.Parallel — see parent test's comment. Sub-tests must
+			// also run serially because they share the parent's TMPDIR
+			// and would race the same way against each other.
 
-			// Snapshot the tempdir set before/after. We can't compare
-			// counts — parallel sibling tests create-then-cleanup their
-			// own tempfiles. Instead, assert no new path appeared that
-			// wasn't already there (a leak from this call would be a new
-			// entry in `after \ before`).
+			// Snapshot the tempdir set before/after. With TMPDIR isolated
+			// to t.TempDir() above, only this test's own WriteSettings
+			// calls can put files in this glob — no cross-test contamination.
 			pattern := filepath.Join(os.TempDir(), "pyry-agent-run-settings-*.json")
 			before, err := filepath.Glob(pattern)
 			if err != nil {
