@@ -82,7 +82,7 @@ func dispatcherAllowedToolsForRole(role string) []string {
 // distinct top-level function.
 func runRoleSmokeTest(t *testing.T, role, systemPrompt, userPrompt string) {
 	t.Helper()
-	workdir := WithWorktree(t)
+	workdir := WithWorktreeAuthenticated(t)
 
 	result := RunPyryAgentRun(t, RunOpts{
 		Workdir:      workdir,

@@ -25,7 +25,7 @@ import (
 // correlation, subsequent assistant text) and on pyry's stdout result
 // trailer (subtype/stop_reason/num_turns).
 func TestRealClaude_ToolLoopIntegrity(t *testing.T) {
-	workdir := WithWorktree(t)
+	workdir := WithWorktreeAuthenticated(t)
 
 	for _, seed := range []struct {
 		name    string
