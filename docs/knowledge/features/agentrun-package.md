@@ -13,7 +13,8 @@ func ResolveWorkdir(workdir string) (string, error)
 
 // EncodeProjectDir returns the dashed directory-name segment claude uses
 // under ~/.claude/projects/ for the given workdir. Chains ResolveWorkdir
-// then maps '/' AND '.' to '-' in the resolved absolute path.
+// then maps every byte outside [a-zA-Z0-9] to '-' (matching how claude
+// derives the on-disk projects-dir name; delegates to tuidriver.EncodeCwd).
 func EncodeProjectDir(workdir string) (string, error)
 ```
 
@@ -37,11 +38,13 @@ The `trust`, `ptyrunner`, `streamrunner`, and `jsonl` subpackages import `intern
 
 ## Two output shapes, two helpers
 
-`ResolveWorkdir` produces the resolved abs path (`/private/var/folders/...`) used as the `projects[...]` key inside `~/.claude.json`. `EncodeProjectDir` (#347) chains it and applies `strings.NewReplacer("/", "-", ".", "-")` to produce the dashed directory-name segment claude uses under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`. The two encodings are distinct: same input, different transforms for different consumers. Both helpers share the resolve half so the macOS realpath rule lives in one place; only the post-resolve transform differs.
+`ResolveWorkdir` produces the resolved abs path (`/private/var/folders/...`) used as the `projects[...]` key inside `~/.claude.json`. `EncodeProjectDir` (#347, encoder generalised in #501) chains it and delegates to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver) to produce the dashed directory-name segment claude uses under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`. The two encodings are distinct: same input, different transforms for different consumers. Both helpers share the resolve half so the macOS realpath rule lives in one place; only the post-resolve transform differs.
 
-The substitution rule covers **both** `/` and `.`. Direct observation of `~/.claude/projects/` shows entries where a workdir segment like `/.pyrycode-worktrees/` encodes to `--pyrycode-worktrees-` — a doubled dash from `/` + `.`. The #347 ticket body specified only `/` → `-`; the architect spec amended the rule from observation and `docs/lessons.md:53`. Shipping the AC-literal rule would silently produce keys that never match claude's directory names for any workdir containing a `.` segment (`.git`, `.venv`, hidden-dir parents).
+The substitution rule is **every byte outside `[a-zA-Z0-9]` → `-`** (per-byte, no run collapse — idempotent on already-encoded strings because `-` itself is non-alnum and maps to `-`). The rule is verified empirically against claude's on-disk behaviour and canonicalised in `tuidriver.EncodeCwd` as of 2026-05-19. The #347 ticket body specified only `/` → `-`; the architect spec amended to `/` AND `.` from direct observation (workdir segments like `/.pyrycode-worktrees/` encoding to `--pyrycode-worktrees-`); #501 generalised the rule to the full character class after the narrow encoder caused a 55 s wedge in real-claude e2e tests for any workdir containing `_` or ` ` (Go test temp dirs whose names include underscores). Shipping anything narrower than the full per-byte rule produces keys that never match claude's directory names for non-trivial inputs.
 
 `EncodeProjectDir` returns `ResolveWorkdir`'s error **unchanged** on failure — `errors.Is(err, fs.ErrNotExist)` continues to work through the chain. Result does NOT include the `~/.claude/projects/` prefix or any `.jsonl` suffix; it is the directory-name segment only.
+
+**Single source of truth.** The encoder lives in `tui-driver/pkg/tuidriver.EncodeCwd` (the package closest to claude's protocol). `EncodeProjectDir` delegates; the parent `internal/agentrun` package no longer maintains its own replacer. Two remaining narrow-replacer call sites in `internal/sessions/reconcile.go` and `internal/e2e/rotation_test.go` still carry the old `/`-and-`.` rule as of #501 — code review flagged them as a follow-up (out of scope for #501); the "single source of truth" property is `internal/agentrun/`-scoped today, not yet project-wide.
 
 ## Consumers
 
