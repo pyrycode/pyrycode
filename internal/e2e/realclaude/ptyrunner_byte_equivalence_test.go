@@ -52,6 +52,50 @@ var ptyRunnerArgvFlagAlternates = map[string]string{
 	"--append-system-prompt-file": "--append-system-prompt[-file]",
 }
 
+// additiveDriftAllowlist groups the per-runner tolerated emissions used by
+// additiveDriftViolations. The Events set covers top-level "type" values; the
+// ResultTrailerFields set covers top-level JSON keys on the `result` line.
+// Each populated entry MUST carry a trailing line comment citing #503 (or
+// the eventual audit doc) so a future contributor reading a failure has the
+// single edit point. See [[503]] for the catalogue + per-field rationale.
+type additiveDriftAllowlist struct {
+	Events              map[string]struct{}
+	ResultTrailerFields map[string]struct{}
+}
+
+// expectedStreamRunnerOnly enumerates event types and top-level
+// result-trailer fields that streamrunner emits but ptyrunner does not, and
+// which are accepted as documented one-sided emissions rather than drift.
+// Names match the AC literally so a failure message naming the table is
+// grep-able. Sibling ticket #505 tunes membership per the #503 audit's
+// per-field "must close" vs "document as omitted" decisions; this ticket
+// only ships the mechanism.
+var expectedStreamRunnerOnly = additiveDriftAllowlist{
+	Events: map[string]struct{}{
+		"rate_limit_event": {}, // #503: API-level transient event, ptyrunner reads JSONL not the API
+	},
+	ResultTrailerFields: map[string]struct{}{
+		"api_error_status":   {}, // #503
+		"duration_api_ms":    {}, // #503
+		"fast_mode_state":    {}, // #503
+		"modelUsage":         {}, // #503
+		"permission_denials": {}, // #503
+		"ttft_ms":            {}, // #503
+		"uuid":               {}, // #503: claude's own session UUID, distinct from session_id
+	},
+}
+
+// expectedPtyRunnerOnly is the inverse table — event types and top-level
+// result-trailer fields ptyrunner emits but streamrunner does not. Starts
+// empty (AC mandate); sibling ticket #505 will populate per the #503 audit
+// if any ptyrunner-only emissions are decided to be tolerated rather than
+// closed. Empty-but-initialised, not nil, to keep the intentional-emptiness
+// signal explicit.
+var expectedPtyRunnerOnly = additiveDriftAllowlist{
+	Events:              map[string]struct{}{},
+	ResultTrailerFields: map[string]struct{}{},
+}
+
 // TestPtyRunnerArgvFlagsExistInClaudeHelp asserts every flag ptyrunner.buildArgs
 // emits is still recognized by `claude --help`. Cheap (no API key, <1s
 // wall-clock); contributors without ANTHROPIC_API_KEY can still verify this
@@ -123,6 +167,139 @@ func truncatePrefix(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "...(truncated)"
+}
+
+// extractEventTypeSet returns the set of distinct top-level "type" values
+// observed across all non-empty lines in stream. The empty type string is
+// included if anything emitted an envelope with no "type" field — that
+// itself is a drift signal worth surfacing through the same channel.
+func extractEventTypeSet(stream []byte) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	for i, line := range bytes.Split(stream, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var env struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &env); err != nil {
+			return nil, fmt.Errorf("extractEventTypeSet: line %d: %w (raw: %s)", i, err, truncatePrefix(line, 256))
+		}
+		out[env.Type] = struct{}{}
+	}
+	return out, nil
+}
+
+// extractResultTrailerFields returns the set of top-level JSON keys on the
+// FIRST type:"result" line in stream. Errors if no result line is found —
+// mirrors decodeResultTrailer's contract but returns the error so the
+// self-check sub-tests can assert on the result without a fake *testing.T.
+func extractResultTrailerFields(stream []byte) (map[string]struct{}, error) {
+	for i, line := range bytes.Split(stream, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var env struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &env); err != nil {
+			return nil, fmt.Errorf("extractResultTrailerFields: line %d: %w (raw: %s)", i, err, truncatePrefix(line, 256))
+		}
+		if env.Type != "result" {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(line, &fields); err != nil {
+			return nil, fmt.Errorf("extractResultTrailerFields: line %d: decode keys: %w (raw: %s)", i, err, truncatePrefix(line, 256))
+		}
+		out := make(map[string]struct{}, len(fields))
+		for k := range fields {
+			out[k] = struct{}{}
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("extractResultTrailerFields: no result line found")
+}
+
+// additiveDriftViolations returns one violation message per drift between
+// the two raw streams (empty slice = no drift). Each message names the
+// unknown identifier AND the allowlist table that needs updating, so a
+// contributor reading a failure has a single edit point.
+//
+// Returns []string rather than calling t.Errorf so the self-check
+// sub-tests can feed hand-crafted byte fixtures and assert on the slice
+// directly without a fake *testing.T. The real test
+// (TestPtyRunnerVsStreamRunner_StructuralEquivalence) iterates the slice
+// with t.Error so all signals surface in one run.
+//
+// Helper-extraction failures (malformed JSON, missing result line) are
+// surfaced as violation messages too — a malformed stream is itself drift
+// worth surfacing through the same channel.
+func additiveDriftViolations(streamRaw, ptyRaw []byte) []string {
+	var out []string
+
+	streamEvents, err := extractEventTypeSet(streamRaw)
+	if err != nil {
+		out = append(out, fmt.Sprintf("extractEventTypeSet(streamrunner): %v", err))
+	}
+	ptyEvents, err := extractEventTypeSet(ptyRaw)
+	if err != nil {
+		out = append(out, fmt.Sprintf("extractEventTypeSet(ptyrunner): %v", err))
+	}
+	streamFields, err := extractResultTrailerFields(streamRaw)
+	if err != nil {
+		out = append(out, fmt.Sprintf("extractResultTrailerFields(streamrunner): %v", err))
+	}
+	ptyFields, err := extractResultTrailerFields(ptyRaw)
+	if err != nil {
+		out = append(out, fmt.Sprintf("extractResultTrailerFields(ptyrunner): %v", err))
+	}
+
+	for ev := range streamEvents {
+		if _, ok := ptyEvents[ev]; ok {
+			continue
+		}
+		if _, ok := expectedStreamRunnerOnly.Events[ev]; ok {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"streamrunner emitted event type %q which is not in the cross-runner intersection and not in expectedStreamRunnerOnly.Events; either add it to that table with a citation comment (#503 or audit doc), or treat the divergence as a real bug",
+			ev))
+	}
+	for ev := range ptyEvents {
+		if _, ok := streamEvents[ev]; ok {
+			continue
+		}
+		if _, ok := expectedPtyRunnerOnly.Events[ev]; ok {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"ptyrunner emitted event type %q which is not in the cross-runner intersection and not in expectedPtyRunnerOnly.Events; either add it to that table with a citation comment, or file a follow-up ticket to align ptyrunner's emitter",
+			ev))
+	}
+	for f := range streamFields {
+		if _, ok := ptyFields[f]; ok {
+			continue
+		}
+		if _, ok := expectedStreamRunnerOnly.ResultTrailerFields[f]; ok {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"streamrunner result-trailer field %q is not in the cross-runner intersection and not in expectedStreamRunnerOnly.ResultTrailerFields; either add it to that table with a citation comment (#503 or audit doc), or treat the divergence as a real bug",
+			f))
+	}
+	for f := range ptyFields {
+		if _, ok := streamFields[f]; ok {
+			continue
+		}
+		if _, ok := expectedPtyRunnerOnly.ResultTrailerFields[f]; ok {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"ptyrunner result-trailer field %q is not in the cross-runner intersection and not in expectedPtyRunnerOnly.ResultTrailerFields; either add it to that table with a citation comment, or file a follow-up ticket to align ptyrunner's emitter",
+			f))
+	}
+	return out
 }
 
 // streamRunnerArgs mirrors cmd/pyry/agent_run.go:buildStreamRunnerClaudeArgs
@@ -267,6 +444,14 @@ func TestPtyRunnerVsStreamRunner_StructuralEquivalence(t *testing.T) {
 	compareShapes(t, streamShapes, ptyShapes,
 		streamOut.Bytes(), ptyOut.Bytes(),
 		streamErr.Bytes(), ptyErr.Bytes())
+
+	// Additive-drift check: shape comparison catches ptyrunner SHRINKING
+	// relative to streamrunner but not either side GROWING new event types
+	// or result-trailer fields. t.Error (not t.Fatal) so the field-level
+	// invariants below still run and all signals surface in one test output.
+	for _, v := range additiveDriftViolations(streamOut.Bytes(), ptyOut.Bytes()) {
+		t.Error(v)
+	}
 
 	// Field-level invariants 7-10. Errorf (not Fatalf) so all four run.
 	checkInit(t, "streamrunner", streamOut.Bytes(), workdirStream, model, allowedTools)
@@ -444,4 +629,110 @@ func decodeResultTrailer(t *testing.T, side string, stream []byte) byteEquivResu
 	}
 	t.Fatalf("%s: no result trailer found in stdout", side)
 	return byteEquivResultTrailer{}
+}
+
+// TestAdditiveDriftAssertion_SelfCheck regression-tests the additive-drift
+// assertion logic against hand-crafted byte fixtures. Runs under the
+// e2e_realclaude build tag (the whole file is gated) but does NOT require
+// the real claude CLI or any network — the fixtures are inline string
+// constants. Together the sub-tests cover the cross-product of
+// (event-type, result-field) × (streamrunner-side, ptyrunner-side) ×
+// (drift, no-drift).
+func TestAdditiveDriftAssertion_SelfCheck(t *testing.T) {
+	const intersectionBaseline = `{"type":"system","subtype":"init","cwd":"/tmp","tools":[],"model":"claude-haiku-4-5","session_id":"abc"}
+{"type":"user","content":"hi"}
+{"type":"assistant","content":"hi"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":100,"num_turns":1,"session_id":"abc","total_cost_usd":0.0,"usage":{}}
+`
+
+	inject := func(t *testing.T, stream, target, replacement string) []byte {
+		t.Helper()
+		out := strings.Replace(stream, target, replacement, 1)
+		if out == stream {
+			t.Fatalf("inject: target %q not found in fixture", target)
+		}
+		return []byte(out)
+	}
+
+	t.Run("intersection_match_no_drift", func(t *testing.T) {
+		vs := additiveDriftViolations([]byte(intersectionBaseline), []byte(intersectionBaseline))
+		if len(vs) != 0 {
+			t.Errorf("expected no violations, got %d:\n%s", len(vs), strings.Join(vs, "\n"))
+		}
+	})
+
+	t.Run("streamrunner_extra_event_type", func(t *testing.T) {
+		const extra = `{"type":"synthetic_extra_event","subtype":"x"}` + "\n"
+		streamRaw := []byte(extra + intersectionBaseline)
+		ptyRaw := []byte(intersectionBaseline)
+		vs := additiveDriftViolations(streamRaw, ptyRaw)
+		if len(vs) != 1 {
+			t.Fatalf("expected 1 violation, got %d:\n%s", len(vs), strings.Join(vs, "\n"))
+		}
+		if !strings.Contains(vs[0], "synthetic_extra_event") {
+			t.Errorf("violation does not name synthetic identifier: %q", vs[0])
+		}
+		if !strings.Contains(vs[0], "expectedStreamRunnerOnly.Events") {
+			t.Errorf("violation does not name expectedStreamRunnerOnly.Events: %q", vs[0])
+		}
+	})
+
+	t.Run("ptyrunner_extra_event_type", func(t *testing.T) {
+		const extra = `{"type":"synthetic_pty_event","subtype":"x"}` + "\n"
+		streamRaw := []byte(intersectionBaseline)
+		ptyRaw := []byte(extra + intersectionBaseline)
+		vs := additiveDriftViolations(streamRaw, ptyRaw)
+		if len(vs) != 1 {
+			t.Fatalf("expected 1 violation, got %d:\n%s", len(vs), strings.Join(vs, "\n"))
+		}
+		if !strings.Contains(vs[0], "synthetic_pty_event") {
+			t.Errorf("violation does not name synthetic identifier: %q", vs[0])
+		}
+		if !strings.Contains(vs[0], "expectedPtyRunnerOnly.Events") {
+			t.Errorf("violation does not name expectedPtyRunnerOnly.Events: %q", vs[0])
+		}
+	})
+
+	t.Run("streamrunner_extra_result_field", func(t *testing.T) {
+		streamRaw := inject(t, intersectionBaseline, `"usage":{}`, `"usage":{},"synthetic_stream_field":"x"`)
+		ptyRaw := []byte(intersectionBaseline)
+		vs := additiveDriftViolations(streamRaw, ptyRaw)
+		if len(vs) != 1 {
+			t.Fatalf("expected 1 violation, got %d:\n%s", len(vs), strings.Join(vs, "\n"))
+		}
+		if !strings.Contains(vs[0], "synthetic_stream_field") {
+			t.Errorf("violation does not name synthetic identifier: %q", vs[0])
+		}
+		if !strings.Contains(vs[0], "expectedStreamRunnerOnly.ResultTrailerFields") {
+			t.Errorf("violation does not name expectedStreamRunnerOnly.ResultTrailerFields: %q", vs[0])
+		}
+	})
+
+	t.Run("ptyrunner_extra_result_field", func(t *testing.T) {
+		streamRaw := []byte(intersectionBaseline)
+		ptyRaw := inject(t, intersectionBaseline, `"usage":{}`, `"usage":{},"synthetic_pty_field":"x"`)
+		vs := additiveDriftViolations(streamRaw, ptyRaw)
+		if len(vs) != 1 {
+			t.Fatalf("expected 1 violation, got %d:\n%s", len(vs), strings.Join(vs, "\n"))
+		}
+		if !strings.Contains(vs[0], "synthetic_pty_field") {
+			t.Errorf("violation does not name synthetic identifier: %q", vs[0])
+		}
+		if !strings.Contains(vs[0], "expectedPtyRunnerOnly.ResultTrailerFields") {
+			t.Errorf("violation does not name expectedPtyRunnerOnly.ResultTrailerFields: %q", vs[0])
+		}
+	})
+
+	t.Run("allowlisted_streamrunner_field_does_not_fire", func(t *testing.T) {
+		// streamrunner carries an allowlisted entry (api_error_status);
+		// ptyrunner does not. Allowlist absorbs the asymmetry → zero
+		// violations. Sanity check the allowlist actually allowlists.
+		streamRaw := inject(t, intersectionBaseline, `"usage":{}`, `"usage":{},"api_error_status":"ok"`)
+		ptyRaw := []byte(intersectionBaseline)
+		vs := additiveDriftViolations(streamRaw, ptyRaw)
+		if len(vs) != 0 {
+			t.Errorf("expected no violations (api_error_status is allowlisted), got %d:\n%s",
+				len(vs), strings.Join(vs, "\n"))
+		}
+	})
 }
