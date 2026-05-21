@@ -47,8 +47,24 @@ type Config struct {
 	Writer io.Writer
 
 	// SessionID is the UUIDv4 the caller minted and passed to claude via
-	// --session-id. Stamped into the trailer's `session_id` field. Required.
+	// --session-id. Stamped into the leading init envelope's `session_id`
+	// field and the trailer's `session_id` field. Required.
 	SessionID string
+
+	// Cwd is claude's working directory. Stamped into the leading init
+	// envelope's `cwd` field. Required (non-empty).
+	Cwd string
+
+	// Tools is the human-readable tool allowlist stamped into the leading
+	// init envelope's `tools` field. Required (non-nil); an empty slice is
+	// accepted and marshals as `[]`. Runtime enforcement is performed by
+	// the deny-default settings file ptyrunner writes; this list is the
+	// wire-shape mirror of those names.
+	Tools []string
+
+	// Model is the model identifier stamped into the leading init
+	// envelope's `model` field. Required (non-empty).
+	Model string
 
 	// Now is a clock seam; defaults to time.Now. New captures Now() at
 	// construction; Close calls Now() again to compute duration_ms.
@@ -86,14 +102,26 @@ type usageTotals struct {
 	cacheReadIn      int
 }
 
-// New constructs an Emitter. Returns an error if Writer is nil or SessionID
-// is empty.
+// New constructs an Emitter and writes the leading
+// `{"type":"system","subtype":"init",...}` envelope to cfg.Writer before
+// returning. Returns an error if Writer is nil, SessionID is empty, Cwd is
+// empty, Tools is nil, or Model is empty. On init-write failure the returned
+// *Emitter is nil and the error wraps the underlying writer error.
 func New(cfg Config) (*Emitter, error) {
 	if cfg.Writer == nil {
 		return nil, errors.New("streamjson: nil Writer")
 	}
 	if cfg.SessionID == "" {
 		return nil, errors.New("streamjson: empty SessionID")
+	}
+	if cfg.Cwd == "" {
+		return nil, errors.New("streamjson: empty Cwd")
+	}
+	if cfg.Tools == nil {
+		return nil, errors.New("streamjson: nil Tools")
+	}
+	if cfg.Model == "" {
+		return nil, errors.New("streamjson: empty Model")
 	}
 	now := cfg.Now
 	if now == nil {
@@ -103,6 +131,24 @@ func New(cfg Config) (*Emitter, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+
+	init := initLine{
+		Type:      "system",
+		Subtype:   "init",
+		Cwd:       cfg.Cwd,
+		Tools:     cfg.Tools,
+		Model:     cfg.Model,
+		SessionID: cfg.SessionID,
+	}
+	buf, err := json.Marshal(&init)
+	if err != nil {
+		return nil, fmt.Errorf("streamjson: marshal init: %w", err)
+	}
+	buf = append(buf, '\n')
+	if _, err := cfg.Writer.Write(buf); err != nil {
+		return nil, fmt.Errorf("streamjson: emit init: %w", err)
+	}
+
 	return &Emitter{
 		w:         cfg.Writer,
 		sessionID: cfg.SessionID,
@@ -246,6 +292,20 @@ func wireFields(r ExitReason) (subtype, terminal string, isErr bool) {
 	default:
 		return "error_during_execution", "", true
 	}
+}
+
+// initLine is the on-the-wire shape of the leading `type:"system"
+// subtype:"init"` envelope. Field order here pins JSON key order so the
+// captured-fixture byte-equivalence test diffs cleanly. Reordering breaks
+// the wire contract even though the resulting JSON is still semantically
+// valid.
+type initLine struct {
+	Type      string   `json:"type"`
+	Subtype   string   `json:"subtype"`
+	Cwd       string   `json:"cwd"`
+	Tools     []string `json:"tools"`
+	Model     string   `json:"model"`
+	SessionID string   `json:"session_id"`
 }
 
 // trailer is the on-the-wire shape of the `type:"result"` line. Field order

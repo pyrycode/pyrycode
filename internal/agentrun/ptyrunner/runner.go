@@ -102,6 +102,14 @@ type Config struct {
 	// Required.
 	Effort string
 
+	// AllowedTools is the human-readable tool allowlist stamped into the
+	// leading `system/init` envelope's `tools` field (via streamjson.New).
+	// Required (non-nil; empty slice OK). The runtime enforcement is the
+	// deny-default settings file at SettingsPath; this list is the
+	// wire-shape mirror of those names, kept caller-synchronised at the
+	// runAgentRunPty wiring site.
+	AllowedTools []string
+
 	// MaxTurns is the assistant-entry cap enforced by the pyry-side budget
 	// Counter (internal/agentrun/budget). Required; must be > 0. The
 	// interactive-TUI claude path intentionally omits --max-turns from argv
@@ -228,6 +236,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Effort == "" {
 		return errors.New("ptyrunner: Effort required")
 	}
+	if cfg.AllowedTools == nil {
+		return errors.New("ptyrunner: AllowedTools required")
+	}
 	if len(cfg.PromptBytes) == 0 {
 		return errors.New("ptyrunner: PromptBytes required")
 	}
@@ -311,6 +322,9 @@ func Run(ctx context.Context, cfg Config) error {
 	emitter, err := streamjson.New(streamjson.Config{
 		Writer:    cfg.Stdout,
 		SessionID: cfg.SessionID,
+		Cwd:       cfg.WorkDir,
+		Tools:     cfg.AllowedTools,
+		Model:     cfg.Model,
 		Logger:    logger,
 	})
 	if err != nil {

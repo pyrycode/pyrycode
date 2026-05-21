@@ -86,41 +86,15 @@ func TestPtyRunnerArgvFlagsExistInClaudeHelp(t *testing.T) {
 // field sets on the `result` trailer — streamrunner forwards claude's native
 // fields verbatim (api_error_status, duration_api_ms, result, modelUsage,
 // permission_denials, fast_mode_state, uuid, usage.server_tool_use);
-// ptyrunner's emitter (internal/agentrun/streamjson/emitter.go:251-273)
-// declares a strict subset by design. Byte-equivalence would fail. The
+// ptyrunner's emitter (internal/agentrun/streamjson/emitter.go) declares a
+// strict subset by design. Byte-equivalence on the trailer would fail. The
 // structural comparison asks the right question — *does the dispatcher see
 // the same signal?*
 //
-// Normalization rules — fields we deliberately DO NOT compare and why:
-//
-//   - session_id            : random per run (NewID for pty, claude-minted for stream)
-//   - ts / timestamp        : wall-clock-dependent
-//   - duration_ms /
-//     duration_api_ms       : run-time-dependent
-//   - total_cost_usd /
-//     usage.*               : token counts depend on LLM response
-//   - result (text body)    : LLM output is non-deterministic
-//   - api_error_status,
-//     modelUsage,
-//     permission_denials,
-//     fast_mode_state, uuid : in streamrunner's pass-through; omitted by
-//     usage.server_tool_use   ptyrunner's emitter trailer by design
-//   - message.id / .text /
-//     message.usage         : claude-internal id; non-deterministic text;
-//                             token counts
-//   - tool_use_id /
-//     content[*].id         : claude-internal correlation ids
-//   - parentUuid, cwd,
-//     sessionId (JSONL-
-//     native per-line meta) : present in ptyrunner's JSONL pass-through;
-//                             streamrunner emits a minimal user envelope
-//                             from its userTurn struct. The shape-only
-//                             comparison naturally ignores them.
-//
 // extractShapes reads ONLY `type` + `subtype`. Field-level invariants
-// (init.model / user prompt text / result.is_error / result.num_turns) are
-// asserted via targeted decodes below; this struct never materialises a
-// normalised form.
+// (init.cwd / .tools / .model / .session_id, user prompt text,
+// result.is_error / result.num_turns) are asserted via targeted decodes
+// below; this struct never materialises a normalised form.
 type envelopeShape struct {
 	Type    string
 	Subtype string
@@ -269,6 +243,7 @@ func TestPtyRunnerVsStreamRunner_StructuralEquivalence(t *testing.T) {
 			SystemPrompt: systemPath,
 			Model:        model,
 			Effort:       effort,
+			AllowedTools: allowedTools,
 			MaxTurns:     maxTurns,
 			PromptBytes:  promptBytes,
 			Stdout:       &ptyOut,
@@ -294,8 +269,8 @@ func TestPtyRunnerVsStreamRunner_StructuralEquivalence(t *testing.T) {
 		streamErr.Bytes(), ptyErr.Bytes())
 
 	// Field-level invariants 7-10. Errorf (not Fatalf) so all four run.
-	checkInitModel(t, "streamrunner", streamOut.Bytes(), model)
-	checkInitModel(t, "ptyrunner", ptyOut.Bytes(), model)
+	checkInit(t, "streamrunner", streamOut.Bytes(), workdirStream, model, allowedTools)
+	checkInit(t, "ptyrunner", ptyOut.Bytes(), realpath, model, allowedTools)
 	checkUserContains(t, "streamrunner", streamOut.Bytes(), promptText)
 	checkUserContains(t, "ptyrunner", ptyOut.Bytes(), promptText)
 	streamResult := decodeResultTrailer(t, "streamrunner", streamOut.Bytes())
@@ -371,24 +346,39 @@ func formatShapes(s []envelopeShape) string {
 	return b.String()
 }
 
-// checkInitModel decodes the first system/init line and asserts model matches.
-func checkInitModel(t *testing.T, side string, stream []byte, wantModel string) {
+// checkInit decodes the first system/init line and asserts the load-bearing
+// required-field set (type, subtype, cwd, tools, model, session_id) matches
+// the values stamped into it by the runner. Asserts session_id is non-empty
+// — the parseInitSessionID contract.
+func checkInit(t *testing.T, side string, stream []byte, wantCwd, wantModel string, wantTools []string) {
 	t.Helper()
 	for _, line := range bytes.Split(stream, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		var env struct {
-			Type    string `json:"type"`
-			Subtype string `json:"subtype"`
-			Model   string `json:"model"`
+			Type      string   `json:"type"`
+			Subtype   string   `json:"subtype"`
+			Cwd       string   `json:"cwd"`
+			Tools     []string `json:"tools"`
+			Model     string   `json:"model"`
+			SessionID string   `json:"session_id"`
 		}
 		if err := json.Unmarshal(line, &env); err != nil {
 			continue
 		}
 		if env.Type == "system" && env.Subtype == "init" {
+			if env.Cwd != wantCwd {
+				t.Errorf("%s init.cwd = %q, want %q", side, env.Cwd, wantCwd)
+			}
 			if env.Model != wantModel {
 				t.Errorf("%s init.model = %q, want %q", side, env.Model, wantModel)
+			}
+			if env.SessionID == "" {
+				t.Errorf("%s init.session_id is empty", side)
+			}
+			if !reflect.DeepEqual(env.Tools, wantTools) {
+				t.Errorf("%s init.tools = %v, want %v", side, env.Tools, wantTools)
 			}
 			return
 		}

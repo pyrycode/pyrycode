@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,7 @@ func helperRunCfg(t *testing.T, mode string, stdout, stderr *bytes.Buffer, jsonl
 		SystemPrompt: "/dev/null",
 		Model:        "test-model",
 		Effort:       "low",
+		AllowedTools: []string{"Read"},
 		MaxTurns:     5,
 		PromptBytes:  []byte("hi"),
 		Stdout:       stdout,
@@ -92,10 +94,22 @@ func parseTrailer(t *testing.T, buf []byte) trailer {
 	return tr
 }
 
-// failingWriter is an io.Writer that always returns an error.
-type failingWriter struct{}
+// failingWriter discards the first failAfter writes and then returns
+// "simulated pipe broken" on every subsequent write. failAfter=0 means
+// "fail every write".
+type failingWriter struct {
+	mu        sync.Mutex
+	failAfter int
+	writes    int
+}
 
-func (failingWriter) Write(_ []byte) (int, error) {
+func (f *failingWriter) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes++
+	if f.writes <= f.failAfter {
+		return len(p), nil
+	}
 	return 0, errors.New("simulated pipe broken")
 }
 
@@ -117,8 +131,42 @@ func TestRun_HappyPath_EmitsAndEndOfTurn(t *testing.T) {
 	}
 
 	got := stdout.Bytes()
-	if !bytes.HasPrefix(got, []byte(happyPathBody)) {
-		t.Fatalf("stdout missing verbatim JSONL prefix:\n got  = %q\n want = %q", got, happyPathBody)
+	lines := bytes.Split(bytes.TrimRight(got, "\n"), []byte("\n"))
+	if len(lines) < 3 {
+		t.Fatalf("stdout has %d lines, want >=3 (init + assistant + trailer):\n%s", len(lines), got)
+	}
+
+	// Line 0: synthesised init envelope.
+	var init struct {
+		Type      string   `json:"type"`
+		Subtype   string   `json:"subtype"`
+		Cwd       string   `json:"cwd"`
+		Tools     []string `json:"tools"`
+		Model     string   `json:"model"`
+		SessionID string   `json:"session_id"`
+	}
+	if err := json.Unmarshal(lines[0], &init); err != nil {
+		t.Fatalf("decode init line %q: %v", lines[0], err)
+	}
+	if init.Type != "system" || init.Subtype != "init" {
+		t.Errorf("init (Type,Subtype) = (%q,%q), want (system,init)", init.Type, init.Subtype)
+	}
+	if init.Cwd != cfg.WorkDir {
+		t.Errorf("init Cwd = %q, want %q", init.Cwd, cfg.WorkDir)
+	}
+	if init.Model != cfg.Model {
+		t.Errorf("init Model = %q, want %q", init.Model, cfg.Model)
+	}
+	if init.SessionID != cfg.SessionID {
+		t.Errorf("init SessionID = %q, want %q", init.SessionID, cfg.SessionID)
+	}
+	if !reflect.DeepEqual(init.Tools, cfg.AllowedTools) {
+		t.Errorf("init Tools = %v, want %v", init.Tools, cfg.AllowedTools)
+	}
+
+	// Line 1: verbatim JSONL assistant entry from the helper.
+	if string(lines[1])+"\n" != happyPathBody {
+		t.Errorf("emitted assistant line not byte-equivalent:\n got  = %q\n want = %q", lines[1], strings.TrimRight(happyPathBody, "\n"))
 	}
 
 	tr := parseTrailer(t, got)
@@ -305,7 +353,9 @@ func TestRun_EmitErrorPropagation(t *testing.T) {
 	t.Parallel()
 	var stderr bytes.Buffer
 	base := helperRunCfg(t, "jsonl", &bytes.Buffer{}, &stderr, happyPathBody)
-	base.Stdout = failingWriter{}
+	// failAfter=1 so streamjson.New's init write succeeds; the watcher's
+	// first Emit call hits the failure and ptyrunner surfaces it.
+	base.Stdout = &failingWriter{failAfter: 1}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -386,8 +436,15 @@ func TestRun_BudgetHitBeforeEndOfTurn(t *testing.T) {
 	}
 
 	got := stdout.Bytes()
-	if !bytes.HasPrefix(got, []byte(noEotBody)) {
-		t.Fatalf("stdout missing verbatim JSONL prefix:\n got  = %q\n want = %q", got, noEotBody)
+	// Skip the leading synthesised init line; the noEotBody assistant
+	// entry is the SECOND line on stdout (init + assistant + trailer).
+	initEnd := bytes.IndexByte(got, '\n')
+	if initEnd < 0 {
+		t.Fatalf("stdout missing init line: %q", got)
+	}
+	afterInit := got[initEnd+1:]
+	if !bytes.HasPrefix(afterInit, []byte(noEotBody)) {
+		t.Fatalf("stdout missing verbatim JSONL after init:\n got  = %q\n want prefix = %q", afterInit, noEotBody)
 	}
 
 	tr := parseTrailer(t, got)
@@ -489,6 +546,7 @@ func TestRun_MissingRequiredFields(t *testing.T) {
 		{"no SystemPrompt", func(c *Config) { c.SystemPrompt = "" }, "SystemPrompt required"},
 		{"no Model", func(c *Config) { c.Model = "" }, "Model required"},
 		{"no Effort", func(c *Config) { c.Effort = "" }, "Effort required"},
+		{"no AllowedTools", func(c *Config) { c.AllowedTools = nil }, "AllowedTools required"},
 		{"no PromptBytes", func(c *Config) { c.PromptBytes = nil }, "PromptBytes required"},
 		{"no Stdout", func(c *Config) { c.Stdout = nil }, "Stdout required"},
 		{"no Stderr", func(c *Config) { c.Stderr = nil }, "Stderr required"},
@@ -506,6 +564,7 @@ func TestRun_MissingRequiredFields(t *testing.T) {
 				SystemPrompt: "/dev/null",
 				Model:        "m",
 				Effort:       "e",
+				AllowedTools: []string{"Read"},
 				MaxTurns:     1,
 				PromptBytes:  []byte("x"),
 				Stdout:       &bytes.Buffer{},

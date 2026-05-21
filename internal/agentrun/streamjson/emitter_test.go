@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,9 @@ import (
 )
 
 // newTestEmitter returns an Emitter writing to a fresh bytes.Buffer with a
-// deterministic clock that advances 1s between New and Close.
+// deterministic clock that advances 1s between New and Close. The buffer
+// already contains the leading init envelope on return; tests asserting on
+// emitted-event bytes must skip past it (see initLen below).
 func newTestEmitter(t *testing.T) (*Emitter, *bytes.Buffer) {
 	t.Helper()
 	buf := &bytes.Buffer{}
@@ -27,6 +30,9 @@ func newTestEmitter(t *testing.T) (*Emitter, *bytes.Buffer) {
 	em, err := New(Config{
 		Writer:    buf,
 		SessionID: "11111111-1111-4111-8111-111111111111",
+		Cwd:       "/tmp/test",
+		Tools:     []string{"Read"},
+		Model:     "test-model",
 		Now:       now,
 	})
 	if err != nil {
@@ -37,11 +43,37 @@ func newTestEmitter(t *testing.T) (*Emitter, *bytes.Buffer) {
 
 func TestNew_ValidatesConfig(t *testing.T) {
 	t.Parallel()
-	if _, err := New(Config{SessionID: "x"}); err == nil {
-		t.Error("New(nil writer): want error")
+	valid := func() Config {
+		return Config{
+			Writer:    &bytes.Buffer{},
+			SessionID: "11111111-1111-4111-8111-111111111111",
+			Cwd:       "/tmp/test",
+			Tools:     []string{"Read"},
+			Model:     "m",
+		}
 	}
-	if _, err := New(Config{Writer: &bytes.Buffer{}}); err == nil {
-		t.Error("New(empty SessionID): want error")
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"nil Writer", func(c *Config) { c.Writer = nil }, "nil Writer"},
+		{"empty SessionID", func(c *Config) { c.SessionID = "" }, "empty SessionID"},
+		{"empty Cwd", func(c *Config) { c.Cwd = "" }, "empty Cwd"},
+		{"nil Tools", func(c *Config) { c.Tools = nil }, "nil Tools"},
+		{"empty Model", func(c *Config) { c.Model = "" }, "empty Model"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := valid()
+			tc.mutate(&cfg)
+			_, err := New(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("New err = %v, want substring %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -79,13 +111,14 @@ func TestEmit_RawPassthrough_PreservesBytesVerbatim(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			em, buf := newTestEmitter(t)
+			initLen := buf.Len()
 			if err := em.Emit(tc.ev); err != nil {
 				t.Fatalf("Emit: %v", err)
 			}
 			want := append([]byte(nil), tc.ev.Raw...)
 			want = append(want, '\n')
-			if !bytes.Equal(buf.Bytes(), want) {
-				t.Errorf("raw passthrough:\n got  = %q\n want = %q", buf.Bytes(), want)
+			if !bytes.Equal(buf.Bytes()[initLen:], want) {
+				t.Errorf("raw passthrough:\n got  = %q\n want = %q", buf.Bytes()[initLen:], want)
 			}
 		})
 	}
@@ -318,21 +351,33 @@ func TestEmit_AfterClose_NoOp(t *testing.T) {
 	}
 }
 
-// failingWriter returns err on the first Write, then nothing.
+// failingWriter discards the first failAfter writes and then returns err on
+// every subsequent write. failAfter=0 means "fail every write".
 type failingWriter struct {
-	err    error
-	writes int
+	err       error
+	failAfter int
+	writes    int
 }
 
 func (f *failingWriter) Write(p []byte) (int, error) {
 	f.writes++
+	if f.writes <= f.failAfter {
+		return len(p), nil
+	}
 	return 0, f.err
 }
 
 func TestEmit_WriteErrorIsSticky(t *testing.T) {
 	t.Parallel()
-	w := &failingWriter{err: errors.New("boom")}
-	em, err := New(Config{Writer: w, SessionID: "11111111-1111-4111-8111-111111111111"})
+	// failAfter=1 so the leading init write succeeds; the first Emit write fails.
+	w := &failingWriter{err: errors.New("boom"), failAfter: 1}
+	em, err := New(Config{
+		Writer:    w,
+		SessionID: "11111111-1111-4111-8111-111111111111",
+		Cwd:       "/tmp/test",
+		Tools:     []string{"Read"},
+		Model:     "test-model",
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -343,8 +388,34 @@ func TestEmit_WriteErrorIsSticky(t *testing.T) {
 	if err := em.Emit(jsonl.Event{Kind: "assistant", Raw: json.RawMessage(`{}`)}); err != nil {
 		t.Errorf("second Emit: %v (want nil no-op)", err)
 	}
-	if w.writes != 1 {
-		t.Errorf("failing writer was called %d times, want 1 (sticky short-circuit)", w.writes)
+	// 1 init + 1 Emit write that failed = 2 total Write calls; the second
+	// Emit's sticky-short-circuit must NOT touch the writer.
+	if w.writes != 2 {
+		t.Errorf("failing writer was called %d times, want 2 (init + first emit only)", w.writes)
+	}
+}
+
+func TestNew_InitWriteFailureReturnsError(t *testing.T) {
+	t.Parallel()
+	w := &failingWriter{err: errors.New("boom")}
+	em, err := New(Config{
+		Writer:    w,
+		SessionID: "11111111-1111-4111-8111-111111111111",
+		Cwd:       "/tmp/test",
+		Tools:     []string{"Read"},
+		Model:     "test-model",
+	})
+	if err == nil {
+		t.Fatal("New: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "streamjson: emit init") {
+		t.Errorf("err = %v, want substring %q", err, "streamjson: emit init")
+	}
+	if !errors.Is(err, w.err) {
+		t.Errorf("err = %v, want wrapped %v", err, w.err)
+	}
+	if em != nil {
+		t.Errorf("New returned non-nil emitter on init write failure: %+v", em)
 	}
 }
 
@@ -360,7 +431,14 @@ func TestTrailer_DurationMSUsesNowSeam(t *testing.T) {
 		}
 		return time.Unix(0, 0).Add(1500 * time.Millisecond)
 	}
-	em, err := New(Config{Writer: buf, SessionID: "11111111-1111-4111-8111-111111111111", Now: now})
+	em, err := New(Config{
+		Writer:    buf,
+		SessionID: "11111111-1111-4111-8111-111111111111",
+		Cwd:       "/tmp/test",
+		Tools:     []string{"Read"},
+		Model:     "test-model",
+		Now:       now,
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -377,7 +455,13 @@ func TestTrailer_SessionIDRoundTrips(t *testing.T) {
 	t.Parallel()
 	const id = "deadbeef-dead-4ead-aead-deaddeadbeef"
 	buf := &bytes.Buffer{}
-	em, err := New(Config{Writer: buf, SessionID: id})
+	em, err := New(Config{
+		Writer:    buf,
+		SessionID: id,
+		Cwd:       "/tmp/test",
+		Tools:     []string{"Read"},
+		Model:     "test-model",
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -457,15 +541,20 @@ func TestCapturedFixture_ByteEquivalence(t *testing.T) {
 	nonResult := allLines[:len(allLines)-1]
 	fixtureResultLine := allLines[len(allLines)-1]
 
-	// Drive the fixture's non-result lines through jsonl.Reader so we feed
-	// the emitter the same Event shapes the watcher does in production.
-	src := bytes.NewReader([]byte(strings.Join(nonResult, "\n") + "\n"))
+	// Drive the fixture's non-result, non-init lines through jsonl.Reader so
+	// we feed the emitter the same Event shapes the watcher does in
+	// production. The fixture's leading init line is produced by New itself,
+	// not re-emitted via Emit — feeding it through would duplicate it.
+	src := bytes.NewReader([]byte(strings.Join(nonResult[1:], "\n") + "\n"))
 	rdr := jsonl.NewReader(src, jsonl.Config{})
 
 	buf := &bytes.Buffer{}
 	em, err := New(Config{
 		Writer:    buf,
-		SessionID: "11111111-1111-4111-8111-111111111111",
+		SessionID: "28b6666c-aaaa-4aaa-baaa-aaaaaaaaaaaa",
+		Cwd:       "/tmp/example",
+		Tools:     []string{"Read", "Bash"},
+		Model:     "claude-haiku-4-5",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -489,9 +578,11 @@ func TestCapturedFixture_ByteEquivalence(t *testing.T) {
 
 	out := bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte("\n"))
 	if len(out) != len(nonResult)+1 {
-		t.Fatalf("pyry stdout has %d lines, want %d (non-result + trailer)", len(out), len(nonResult)+1)
+		t.Fatalf("pyry stdout has %d lines, want %d (init + non-init non-result + trailer)", len(out), len(nonResult)+1)
 	}
-	// (a) non-result lines byte-equivalent.
+	// (a) non-result lines byte-equivalent — including the producer-side
+	// init at index 0, which New synthesises from the same field values
+	// captured in the fixture's first line.
 	for i, want := range nonResult {
 		if string(out[i]) != want {
 			t.Errorf("line %d not byte-equivalent:\n got  = %q\n want = %q", i, out[i], want)
@@ -525,4 +616,114 @@ func TestCapturedFixture_ByteEquivalence(t *testing.T) {
 // surfaces numbers as float64, so direct == on ints would fail.
 func equalAny(a, b any) bool {
 	return a == b
+}
+
+// TestNew_WritesInitLineFirst asserts the first newline-terminated line
+// written by New decodes to the init shape with field values matching the
+// Config inputs verbatim.
+func TestNew_WritesInitLineFirst(t *testing.T) {
+	t.Parallel()
+	const (
+		sid   = "deadbeef-dead-4ead-aead-deaddeadbeef"
+		cwd   = "/tmp/test-cwd"
+		model = "claude-haiku-4-5"
+	)
+	tools := []string{"Read", "Bash", "Glob"}
+
+	buf := &bytes.Buffer{}
+	em, err := New(Config{
+		Writer:    buf,
+		SessionID: sid,
+		Cwd:       cwd,
+		Tools:     tools,
+		Model:     model,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_ = em
+
+	idx := bytes.IndexByte(buf.Bytes(), '\n')
+	if idx < 0 {
+		t.Fatalf("New did not write a newline-terminated init line: %q", buf.Bytes())
+	}
+	var got initLine
+	if err := json.Unmarshal(buf.Bytes()[:idx], &got); err != nil {
+		t.Fatalf("decode init line %q: %v", buf.Bytes()[:idx], err)
+	}
+	want := initLine{
+		Type:      "system",
+		Subtype:   "init",
+		Cwd:       cwd,
+		Tools:     tools,
+		Model:     model,
+		SessionID: sid,
+	}
+	if got.Type != want.Type || got.Subtype != want.Subtype ||
+		got.Cwd != want.Cwd || got.Model != want.Model || got.SessionID != want.SessionID {
+		t.Errorf("init line:\n got  = %+v\n want = %+v", got, want)
+	}
+	if !reflect.DeepEqual(got.Tools, want.Tools) {
+		t.Errorf("init tools: got %v, want %v", got.Tools, want.Tools)
+	}
+}
+
+// TestNew_InitLineKeyOrderMatchesFixture locks the struct's tag declaration
+// order to the captured fixture's first line. JSON-parsing into a map would
+// lose order; we walk the byte prefix instead. A future contributor
+// reordering initLine's fields will break this test with a diagnostic
+// pointing at the fixture as the source of truth.
+func TestNew_InitLineKeyOrderMatchesFixture(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("testdata", "captured_run.jsonl"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	fixtureLine0 := bytes.SplitN(raw, []byte("\n"), 2)[0]
+
+	buf := &bytes.Buffer{}
+	if _, err := New(Config{
+		Writer:    buf,
+		SessionID: "28b6666c-aaaa-4aaa-baaa-aaaaaaaaaaaa",
+		Cwd:       "/tmp/example",
+		Tools:     []string{"Read", "Bash"},
+		Model:     "claude-haiku-4-5",
+	}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	idx := bytes.IndexByte(buf.Bytes(), '\n')
+	if idx < 0 {
+		t.Fatalf("no init line written")
+	}
+	gotInit := buf.Bytes()[:idx]
+	if !bytes.Equal(gotInit, fixtureLine0) {
+		t.Errorf("init line does not match fixture (captured_run.jsonl:1):\n got  = %s\n want = %s", gotInit, fixtureLine0)
+	}
+}
+
+// TestNew_EmptyToolsMarshalsAsEmptyArray pins that a non-nil empty Tools
+// slice marshals as `[]`, not `null`. Consumers anchoring on the field's
+// presence-as-array would break on `null`.
+func TestNew_EmptyToolsMarshalsAsEmptyArray(t *testing.T) {
+	t.Parallel()
+	buf := &bytes.Buffer{}
+	if _, err := New(Config{
+		Writer:    buf,
+		SessionID: "11111111-1111-4111-8111-111111111111",
+		Cwd:       "/tmp/test",
+		Tools:     []string{},
+		Model:     "m",
+	}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	idx := bytes.IndexByte(buf.Bytes(), '\n')
+	if idx < 0 {
+		t.Fatalf("no init line written")
+	}
+	if !bytes.Contains(buf.Bytes()[:idx], []byte(`"tools":[]`)) {
+		t.Errorf("init line missing `\"tools\":[]`:\n %s", buf.Bytes()[:idx])
+	}
+	if bytes.Contains(buf.Bytes()[:idx], []byte(`"tools":null`)) {
+		t.Errorf("init line marshalled empty Tools as null:\n %s", buf.Bytes()[:idx])
+	}
 }
