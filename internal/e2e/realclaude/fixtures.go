@@ -54,6 +54,18 @@ func WithWorktree(t *testing.T) string {
 // fixture-level env sanitisation in RunPyryAgentRun. An absent variable
 // is NOT t.Setenv'd to "" — preserving the original outer-env shape lets
 // downstream tooling distinguish unset from set-empty.
+//
+// On the OAuth path the helper additionally seeds <tempHome>/.claude.json
+// from the operator's real ~/.claude.json (verbatim copy at mode 0o600) so
+// interactive (PTY) claude skips the onboarding theme picker. Without that
+// seed, ptyrunner reads the picker's prompt glyph as "ready", delivers the
+// bracketed-paste prompt into the picker's input field, claude never
+// proceeds past the picker, and the 31 s ptyrunner deadline fires (#496).
+// The OAuth env-var alone authenticates `claude -p` (headless) but does
+// NOT skip the onboarding TUI on a fresh $HOME. If the operator's
+// ~/.claude.json is unreadable, the helper t.Skips naming both
+// prerequisites (token AND .claude.json) — silently seeding nothing would
+// re-introduce the 31 s timeout AC #4 exists to eliminate.
 func WithWorktreeAuthenticated(t *testing.T) string {
 	t.Helper()
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
@@ -66,12 +78,39 @@ func WithWorktreeAuthenticated(t *testing.T) string {
 			"jq -r '.claudeAiOauth.accessToken'` and export as " +
 			"CLAUDE_CODE_OAUTH_TOKEN.")
 	}
+	// Capture the operator's real HOME and read ~/.claude.json BEFORE
+	// WithWorktree pins HOME to a tempdir. The OAuth path needs the
+	// captured bytes seeded into the tempdir so interactive (PTY) claude
+	// skips the onboarding theme picker; a fresh $HOME without this file
+	// causes the 31 s ptyrunner timeout #496 fixes.
+	var claudeJSON []byte
+	if oauthToken != "" {
+		operatorHome := os.Getenv("HOME")
+		src := filepath.Join(operatorHome, ".claude.json")
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Skipf("realclaude.WithWorktreeAuthenticated: CLAUDE_CODE_OAUTH_TOKEN "+
+				"is set but %s could not be read (%v). Interactive `claude` "+
+				"(PTY mode) shows the onboarding theme picker on a fresh $HOME "+
+				"regardless of auth env vars, so ptyrunner tests would time out "+
+				"at 31 s without this file. Run `claude` once directly under your "+
+				"user account to complete the onboarding flow (which writes "+
+				"~/.claude.json with `hasCompletedOnboarding=true`), then "+
+				"re-export CLAUDE_CODE_OAUTH_TOKEN and re-run `make e2e-realclaude`.",
+				src, err)
+		}
+		claudeJSON = data
+	}
 	dir := WithWorktree(t)
 	if apiKey != "" {
 		t.Setenv("ANTHROPIC_API_KEY", apiKey)
 	}
 	if oauthToken != "" {
 		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", oauthToken)
+		dst := filepath.Join(dir, ".claude.json")
+		if err := os.WriteFile(dst, claudeJSON, 0o600); err != nil {
+			t.Fatalf("realclaude.WithWorktreeAuthenticated: write %s: %v", dst, err)
+		}
 	}
 	return dir
 }
