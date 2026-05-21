@@ -144,10 +144,22 @@ func TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet(t *tes
 // token value is a synthetic literal — claude is never invoked here. We
 // verify (a) the helper proceeds past the skip gate when only the OAuth
 // token is set, (b) the token survives the WithWorktree HOME re-pin via
-// t.Setenv, and (c) the helper does NOT t.Setenv the absent
-// ANTHROPIC_API_KEY (preserve original outer-env shape).
+// t.Setenv, (c) the helper does NOT t.Setenv the absent
+// ANTHROPIC_API_KEY (preserve original outer-env shape), and (d) the
+// captured ~/.claude.json bytes are seeded verbatim into <tempHome>/.claude.json
+// at mode 0o600 (#496 contract — interactive PTY claude needs this file to
+// skip the onboarding theme picker).
 func TestWithWorktreeAuthenticated_OAuthTokenOnly_RepinsAndPreservesAbsentApiKey(t *testing.T) {
 	const token = "test-oauth-token-not-real"
+	// Pre-seed a fake operator HOME with a recognisable .claude.json before
+	// the fixture is invoked. The _marker field makes the verbatim-copy
+	// assertion below diagnostic.
+	opHome := t.TempDir()
+	want := []byte(`{"hasCompletedOnboarding":true,"installMethod":"npm-global","_marker":"#496-test"}` + "\n")
+	if err := os.WriteFile(filepath.Join(opHome, ".claude.json"), want, 0o600); err != nil {
+		t.Fatalf("WriteFile fake operator .claude.json: %v", err)
+	}
+	t.Setenv("HOME", opHome)
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
 	// Unset the API key entirely so we can distinguish absent from set-empty.
@@ -172,6 +184,68 @@ func TestWithWorktreeAuthenticated_OAuthTokenOnly_RepinsAndPreservesAbsentApiKey
 	}
 	if got := os.Getenv("HOME"); got != dir {
 		t.Fatalf("HOME = %q, want %q", got, dir)
+	}
+	seeded := filepath.Join(dir, ".claude.json")
+	got, err := os.ReadFile(seeded)
+	if err != nil {
+		t.Fatalf("ReadFile seeded .claude.json: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("seeded .claude.json bytes differ\n got: %q\nwant: %q", got, want)
+	}
+	seededInfo, err := os.Stat(seeded)
+	if err != nil {
+		t.Fatalf("Stat seeded .claude.json: %v", err)
+	}
+	if mode := seededInfo.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("seeded .claude.json mode = %#o, want %#o", mode, 0o600)
+	}
+}
+
+// TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON re-execs
+// the test binary with CLAUDE_CODE_OAUTH_TOKEN set but the operator HOME
+// pinned to an empty tempdir (no .claude.json). t.Skipf ends the inner
+// goroutine via runtime.Goexit() with no in-process return value, so
+// asserting on the skip-message text requires the outer/inner subprocess
+// pattern. Uses sentinel PYRY_REALCLAUDE_NOJSON_INNER=1 (distinct from
+// PYRY_REALCLAUDE_AUTH_SKIP_INNER=1 because that sentinel clears BOTH env
+// vars; this test needs the OAuth token SET) and falls through TestMain
+// because GO_TEST_HELPER_PROCESS is unset.
+func TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON(t *testing.T) {
+	if os.Getenv("PYRY_REALCLAUDE_NOJSON_INNER") == "1" {
+		opHome := t.TempDir()
+		t.Setenv("HOME", opHome)
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		if err := os.Unsetenv("ANTHROPIC_API_KEY"); err != nil {
+			t.Fatalf("Unsetenv ANTHROPIC_API_KEY: %v", err)
+		}
+		t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-oauth-token-not-real")
+		WithWorktreeAuthenticated(t)
+		t.Fatalf("WithWorktreeAuthenticated returned without skipping; want t.Skip when .claude.json missing")
+		return
+	}
+	cmd := exec.Command(os.Args[0],
+		"-test.run=^TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON$",
+		"-test.v")
+	cmd.Env = append(os.Environ(), "PYRY_REALCLAUDE_NOJSON_INNER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("inner test exited non-zero (t.Skip should be success): %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("--- SKIP: TestWithWorktreeAuthenticated_SkipsWhenOAuthSetButNoClaudeJSON")) {
+		t.Fatalf("inner test did not skip; output:\n%s", out)
+	}
+	wants := []string{
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		".claude.json",
+		"onboarding",
+		"hasCompletedOnboarding=true",
+		"claude",
+	}
+	for _, w := range wants {
+		if !bytes.Contains(out, []byte(w)) {
+			t.Fatalf("skip message missing required substring %q\noutput:\n%s", w, out)
+		}
 	}
 }
 
