@@ -16,7 +16,6 @@ import (
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 )
 
@@ -90,14 +89,10 @@ func startWatcher(t *testing.T, cfg Config) (*Watcher, context.CancelFunc, func(
 }
 
 // expectedEncodedDir returns the encoded project-dir form for path, as the
-// watcher would compute it. Fatals on error.
+// watcher would compute it.
 func expectedEncodedDir(t *testing.T, home, workdir, sessionID string) string {
 	t.Helper()
-	resolved, err := agentrun.ResolveWorkdir(workdir)
-	if err != nil {
-		t.Fatalf("ResolveWorkdir: %v", err)
-	}
-	return filepath.Dir(tuidriver.SessionJSONLPath(home, resolved, sessionID))
+	return filepath.Dir(tuidriver.SessionJSONLPath(home, workdir, sessionID))
 }
 
 // waitForEndOfTurn polls the recorder until OnEndOfTurn has fired or the

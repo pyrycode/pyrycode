@@ -13,7 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 )
 
@@ -293,8 +294,7 @@ func TestResolveAndOpenJSONL_MissingFile(t *testing.T) {
 		t.Fatalf("resolveAndOpenJSONL: want error for missing file, got nil")
 	}
 	home, _ := os.UserHomeDir()
-	enc, _ := agentrun.EncodeProjectDir(workdir)
-	wantPath := filepath.Join(home, ".claude", "projects", enc, testSessionID+".jsonl")
+	wantPath := tuidriver.SessionJSONLPath(home, workdir, testSessionID)
 	if path != wantPath {
 		t.Fatalf("returned path = %q, want %q", path, wantPath)
 	}
@@ -556,15 +556,11 @@ func writeFixtureLines(t *testing.T, workdir, sessionID string, lines ...string)
 	if err != nil {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
-	enc, err := agentrun.EncodeProjectDir(workdir)
-	if err != nil {
-		t.Fatalf("EncodeProjectDir: %v", err)
-	}
-	dir := filepath.Join(home, ".claude", "projects", enc)
+	path := tuidriver.SessionJSONLPath(home, workdir, sessionID)
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll %s: %v", dir, err)
 	}
-	path := filepath.Join(dir, sessionID+".jsonl")
 	var body string
 	for _, line := range lines {
 		body += line + "\n"
