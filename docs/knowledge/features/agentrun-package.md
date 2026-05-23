@@ -23,9 +23,10 @@ Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-
 | `internal/agentrun/settings` | [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md) | Write the per-spawn deny-default permissions JSON (`{"permissions":{"allow":[...],"defaultMode":"deny"}}`) to `os.TempDir()` so PTY-driven claude enforces the same tool whitelist `-p --allowedTools` had natively (#476; slimmed resurrection of #339 / #392). |
 | `internal/agentrun/ptyrunner` | [ptyrunner-package.md](ptyrunner-package.md) | Interactive-TUI spawn primitive driven by `tui-driver` — the production spawn after #470 lands the cutover (#471). |
 | `internal/agentrun/streamrunner` | [streamrunner-package.md](streamrunner-package.md) | Stream-json subprocess spawn primitive — the current production spawn until #470 cuts over to `ptyrunner`. |
-| `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector consumed by the JSONL watcher (#348). |
+| `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector (#348). Post-[#512](../codebase/512.md) consumed only by `selfcheck` (parses the `streamjson.Emitter` pipe) and `e2e/realclaude/fixtures.go` (parses captured fixtures); both will migrate in a follow-up that finally deletes the package. |
+| `internal/agentrun/budget` | [budget-package.md](budget-package.md) | `Counter` enforces the per-agent `--max-turns` budget; consumed by `ptyrunner.Run` (#334 / #479 / #512). |
 
-Only the `trust` subpackage imports `internal/agentrun` after [#508](../codebase/508.md) (for `ResolveWorkdir` — the `projects[...]` key shape). The `ptyrunner`, `streamrunner`, and `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. `settings` has never imported this parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
+Only the `trust` subpackage imports `internal/agentrun` after [#508](../codebase/508.md) (for `ResolveWorkdir` — the `projects[...]` key shape). The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. The `jsonl/tail` subpackage was deleted in [#512](../codebase/512.md) (`ptyrunner.Run` drains `tuidriver.TailJSONL` inline). `settings` has never imported this parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
 
 ## Key shape
 
@@ -44,7 +45,7 @@ The substitution rule (canonicalised in `tuidriver.EncodeCwd` as of 2026-05-19) 
 - `internal/agentrun/trust` — calls `ResolveWorkdir(workdir)` to produce the `projects[...]` key inside `~/.claude.json`. Sole remaining production caller after [#508](../codebase/508.md); [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks migrating this call off `ResolveWorkdir` so the parent package can be deleted. See [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md).
 - `internal/agentrun/settings` — does **not** import this parent package; writes its tempfile to `os.TempDir()` and is stdlib-only. See [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md).
 - `internal/agentrun/ptyrunner` — does not import this parent post-[#508](../codebase/508.md). Receives its `Config.WorkDir` from the caller; the trust pre-write supplies the resolved value via `trust.MarkWorkdirTrusted`'s return.
-- JSONL watcher (`internal/agentrun/jsonl/tail`, #333 / #349) — does not import this parent post-[#508](../codebase/508.md). Calls [`tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) directly; the canonicalisation rule and the dashed-name encoding both live inside tui-driver. See [jsonl-tail-watcher.md](jsonl-tail-watcher.md).
+- JSONL watcher (`internal/agentrun/jsonl/tail`) — **deleted by [#512](../codebase/512.md)**. `ptyrunner.Run` drains [`tuidriver.TailJSONL`](https://github.com/pyrycode/tui-driver) inline; the canonicalisation rule and the dashed-name encoding live inside tui-driver.
 - `internal/sessions/rotation/watcher.go` — uses `ResolveWorkdir` for path comparison against the platform probe.
 
 ## History — deleted surfaces
@@ -70,7 +71,7 @@ The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrec
 - [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md) — `internal/agentrun/settings`, the per-spawn deny-default permissions JSON writer (#476).
 - [ptyrunner-package.md](ptyrunner-package.md) — `internal/agentrun/ptyrunner`, the interactive-TUI spawn primitive (#471).
 - [streamrunner-package.md](streamrunner-package.md) — `internal/agentrun/streamrunner`, the stream-json spawn primitive (#390).
-- [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348), the pure JSONL line reader + deterministic end-of-turn detector the JSONL watcher (#349) wraps.
+- [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348), the pure JSONL line reader + deterministic end-of-turn detector. Post-[#512](../codebase/512.md) consumed only by `selfcheck` and `e2e/realclaude/fixtures.go`; the tail-watcher consumer is gone.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes the subpackages.
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks` pattern for path comparison against claude-resolved paths.
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe each subpackage mirrors.

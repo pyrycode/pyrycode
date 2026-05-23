@@ -2,7 +2,7 @@
 
 Leaf package that turns the parsed `tuidriver.JSONLEntry` stream into the line-delimited stream-json shape the dispatcher already speaks. The dispatcher historically spawned `claude -p --output-format stream-json` and read its stdout; after the agent-run migration it spawns `pyry agent-run --output-format stream-json` and expects byte-equivalent output. `streamjson.Emitter` is the bridge: composes the leading `type:"system" subtype:"init"` envelope on construction (#498), re-emits each `entry.RawLine` verbatim, aggregates the per-entry `usage` block via the private `readUsage` walk, and composes a single `type:"result"` trailer line when the run terminates.
 
-After #511 `Emit` consumes `github.com/pyrycode/tui-driver/pkg/tuidriver.JSONLEntry` directly; the watcher's `OnEvent func(jsonl.Event)` Config field is still alive (until #512 pivots it onto `tuidriver.TailJSONL`), so `ptyrunner/runner.go` carries a throwaway `eventToEntry` adapter at the closure call site.
+After #511 `Emit` consumes `github.com/pyrycode/tui-driver/pkg/tuidriver.JSONLEntry` directly. #512 then deleted the bespoke `internal/agentrun/jsonl/tail/` watcher and the throwaway `eventToEntry` adapter — `ptyrunner.Run` now drains `tuidriver.TailJSONL` inline and feeds each entry straight into `emitter.Emit`.
 
 ## Public API
 
@@ -149,7 +149,7 @@ The `runAgentRun` flow after #354:
 2. **Mint a UUIDv4** via `newSessionUUID` (mirrors `internal/conversations/id.go:NewID`; this is a leaf call site, not extracted).
 3. Construct `streamjson.Emitter{Writer: stdout, SessionID: <uuid>}`.
 4. `ctx, cancel := signal.NotifyContext(SIGTERM, SIGINT)`. End-of-turn → `cancel`: this propagates EOT through Drive's ctx → claude SIGTERM → child exit → Drive returns nil → errgroup unblocks.
-5. Construct `tail.Watcher` with `OnEvent: func(ev) { _ = emitter.Emit(eventToEntry(ev)) }` (after #511; `eventToEntry` is a throwaway adapter in `runner.go` that wraps `jsonl.Event` into `tuidriver.JSONLEntry` until #512 pivots the watcher to `tuidriver.TailJSONL`), `OnEndOfTurn: cancel`.
+5. Drain `tuidriver.TailJSONL(ctx, jsonlPath, 0)` inline (after #512): `for entry := range entries { _ = emitter.Emit(entry); counter.OnEvent(entry); if tuidriver.IsEndTurn(entry) { counter.OnEndOfTurn(); break } }`. The pre-#512 `tail.Watcher` + `OnEvent` / `OnEndOfTurn` callback fan-out (and the throwaway `eventToEntry` adapter introduced by #511) are gone.
 6. `errgroup.WithContext(ctx)` — `g.Go(watcher.Run)`, `g.Go(agentrun.Drive)`. Both share `gctx`; first error cancels both.
 7. `runErr := g.Wait()` → `classifyForEmitter(em, runErr)` → `emitter.Close()` → return wrapped `runErr` (or nil on operator ctx-cancel).
 
@@ -192,8 +192,9 @@ The `runAgentRun` flow after #354:
 
 ## Related
 
-- [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348, #353). Producer-side `Event` contract. Will be deleted by #512; `streamjson` no longer consumes it after #511.
-- [jsonl-tail-watcher.md](jsonl-tail-watcher.md) — `internal/agentrun/jsonl/tail` (#349, #501, #509). The watcher whose `OnEvent` callback drives `Emit`; the `OnEvent func(jsonl.Event)` signature is preserved through #511 and migrates to `tuidriver.JSONLEntry` under #512 alongside the watcher's pivot to `tuidriver.TailJSONL`.
+- [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348, #353). Producer-side `Event` contract. `streamjson` no longer consumes it after #511; the package still exists for `selfcheck` + `realclaude/fixtures` (will be deleted in a follow-up after they migrate too).
+- [`tuidriver.TailJSONL`](https://github.com/pyrycode/tui-driver/blob/main/pkg/tuidriver/jsonl.go) — the tui-driver channel-based tailer that #512 inlined in `ptyrunner.Run`. Each entry surfaced on the channel feeds `emitter.Emit(entry)` directly.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that constructs and drives the Emitter.
 - [budget-package.md](budget-package.md) — `internal/agentrun/budget` (#334). Future caller of `SetExitReason(ExitReasonMaxTurns)`. Still on `jsonl.Event` through #511; #512 migrates it.
 - [#511](../codebase/511.md) — `streamjson.Emitter` migration from `jsonl.Event` to `tuidriver.JSONLEntry` and the throwaway `eventToEntry` adapter in `ptyrunner/runner.go`.
+- [#512](../codebase/512.md) — `ptyrunner.Run` inline drain of `tuidriver.TailJSONL`; deletion of `internal/agentrun/jsonl/tail/` and the `eventToEntry` adapter; `Emit` now consumes the tuidriver channel directly without an adapter layer.

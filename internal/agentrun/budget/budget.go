@@ -5,9 +5,11 @@
 // In `claude -p` mode, claude exits after --max-turns natively. Interactive
 // claude — what `pyry agent-run` spawns — does not, so pyry must enforce the
 // cap itself. The Counter is a leaf unit consumable by the downstream
-// agent-run driver: wire (*Counter).OnEvent and (*Counter).OnEndOfTurn to the
-// matching fields on tail.Config, and the Counter's Terminate / Kill hooks to
-// cmd.Process.Signal(SIGTERM) / SIGKILL respectively.
+// agent-run driver: wire (*Counter).OnEvent into the loop draining the
+// tuidriver.TailJSONL channel, call (*Counter).OnEndOfTurn when
+// tuidriver.IsEndTurn fires for that entry, and wire the Counter's
+// Terminate / Kill hooks to cmd.Process.Signal(SIGTERM) / SIGKILL
+// respectively.
 package budget
 
 
@@ -17,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 // defaultGracePeriod mirrors supervisor.spawnWaitDelay. Copied (not imported)
@@ -65,8 +67,9 @@ type Config struct {
 // after GracePeriod.
 //
 // Safe for concurrent use. In production OnEvent / OnEndOfTurn fire from the
-// tail.Watcher.Run goroutine, the grace timer fires from time.AfterFunc's
-// goroutine, and Stop / Reason fire from the driver goroutine.
+// agent-run caller's goroutine that drains the tuidriver.TailJSONL channel,
+// the grace timer fires from time.AfterFunc's goroutine, and Stop / Reason
+// fire from the driver goroutine.
 type Counter struct {
 	cfg Config
 
@@ -98,20 +101,21 @@ func New(cfg Config) (*Counter, error) {
 	return &Counter{cfg: cfg}, nil
 }
 
-// OnEvent wires to tail.Config.OnEvent. Counts assistant entries and triggers
-// Terminate when the budget is reached on a non-end_turn event.
-func (c *Counter) OnEvent(ev jsonl.Event) {
-	if ev.Kind != "assistant" {
+// OnEvent counts assistant entries and triggers Terminate when the budget is
+// reached. Caller invokes OnEvent once per entry surfaced by
+// tuidriver.TailJSONL. End-of-turn classification is the caller's job — it
+// calls OnEndOfTurn separately when tuidriver.IsEndTurn(entry) is true. The
+// budget check fires synchronously here for every assistant entry, including
+// one that is itself end-of-turn: at the boundary (MaxTurns reached exactly
+// at the end-of-turn entry), max_turns wins because OnEvent grabs the
+// reason first and the subsequent OnEndOfTurn cannot overwrite a non-empty
+// reason.
+func (c *Counter) OnEvent(entry tuidriver.JSONLEntry) {
+	if entry.Type != "assistant" {
 		return
 	}
 	c.mu.Lock()
 	c.count++
-	if ev.EndOfTurn {
-		// Natural completion at or before the budget — OnEndOfTurn will
-		// classify the run.
-		c.mu.Unlock()
-		return
-	}
 	if c.fired {
 		c.mu.Unlock()
 		return
@@ -137,8 +141,10 @@ func (c *Counter) OnEvent(ev jsonl.Event) {
 	}
 }
 
-// OnEndOfTurn wires to tail.Config.OnEndOfTurn. Records completion as the
-// terminal reason unless the budget has already fired.
+// OnEndOfTurn records completion as the terminal reason unless the budget
+// has already fired. Caller invokes once per entry for which
+// tuidriver.IsEndTurn returns true, after OnEvent has been called for the
+// same entry.
 func (c *Counter) OnEndOfTurn() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

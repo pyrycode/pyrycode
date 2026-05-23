@@ -19,17 +19,17 @@
 // The package logs only error messages and never logs PromptBytes content
 // or any substring of the rolling TUI buffer — writers are opaque and the
 // buffer is inspected only via tui-driver's pure-function detectors. The
-// wired jsonl/tail watcher and streamjson emitter inherit the same
-// discipline — neither logs Event content; ptyrunner does not add any log
-// call that would either. The wired budget Counter and the watchdog
+// tuidriver.TailJSONL channel drain and the streamjson emitter inherit the
+// same discipline — neither logs entry content; ptyrunner does not add any
+// log call that would either. The wired budget Counter and the watchdog
 // goroutine inherit the same discipline — the Counter logs only count +
 // max_turns numerics and the watchdog goroutine logs only the
-// tuidriver-generated watchdog error string; neither logs Event content.
+// tuidriver-generated watchdog error string; neither logs entry content.
 //
 // Dependency direction: the package must not import
 // github.com/pyrycode/pyrycode/internal/supervisor (the PTY helper for the
-// long-lived claude wrapper). The sibling agentrun subpackages (jsonl,
-// jsonl/tail, streamjson) are wired here. Verify with:
+// long-lived claude wrapper). The sibling agentrun subpackages (budget,
+// streamjson) are wired here. Verify with:
 //
 //	go list -deps ./internal/agentrun/ptyrunner/... | grep pyrycode/internal/supervisor
 //
@@ -51,8 +51,6 @@ import (
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun/budget"
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl/tail"
 	"github.com/pyrycode/pyrycode/internal/agentrun/streamjson"
 )
 
@@ -139,11 +137,11 @@ type Config struct {
 	Stderr io.Writer
 
 	// HomeDir is an optional test seam. When non-empty, it overrides the
-	// home directory used by the JSONL watcher
-	// (~/.claude/projects/<encoded-workdir>/). Production callers leave it
-	// empty; the watcher consults os.UserHomeDir() in that case. Tests
-	// use a t.TempDir() value so each test gets an isolated
-	// ~/.claude/projects tree.
+	// home directory used to resolve the per-session JSONL path
+	// (~/.claude/projects/<encoded-workdir>/<session-id>.jsonl).
+	// Production callers leave it empty; os.UserHomeDir() is consulted in
+	// that case. Tests use a t.TempDir() value so each test gets an
+	// isolated ~/.claude/projects tree.
 	HomeDir string
 
 	// Env is appended to os.Environ() in the child process. Optional;
@@ -173,18 +171,18 @@ type Config struct {
 // Run spawns claude under tui-driver with the argv shape buildArgs
 // produces, waits for the TUI to reach idle, runs the trust / mcp-failure
 // / network-failure detectors against the post-idle snapshot, submits
-// cfg.PromptBytes via Session.WritePrompt, tails the per-session JSONL via
-// jsonl/tail, re-emits each event as stream-json on cfg.Stdout via
-// streamjson.Emitter, and returns once end-of-turn fires or the context is
-// cancelled.
+// cfg.PromptBytes via Session.WritePrompt, drains the per-session JSONL
+// via tuidriver.TailJSONL inline, re-emits each entry as stream-json on
+// cfg.Stdout via streamjson.Emitter, and returns once end-of-turn fires or
+// the context is cancelled.
 //
 // Return value contract:
 //
 //   - nil on a clean spawn → idle → WritePrompt → tail-to-end-of-turn cycle.
 //   - nil on operator-shutdown collapse: any ctx-cancel / deadline-exceeded
-//     error from Spawn / WaitUntil / Watcher.Run, and any in-flight emit
-//     failure observed during teardown, collapses to nil when ctx.Err() is
-//     set (same contract streamrunner uses).
+//     error from Spawn / WaitUntil / WaitForSessionJSONL / TailJSONL, and
+//     any in-flight emit failure observed during teardown, collapses to
+//     nil when ctx.Err() is set (same contract streamrunner uses).
 //   - errors.New("ptyrunner: <field> required") on missing required fields.
 //   - fmt.Errorf("ptyrunner: spawn: %w", err) on Spawn failure.
 //   - fmt.Errorf("ptyrunner: wait idle: %w", err) on a non-ctx WaitUntil
@@ -195,25 +193,30 @@ type Config struct {
 //     failure.
 //   - fmt.Errorf("ptyrunner: emitter: %w", err) on streamjson.New failure
 //     (defensive — Writer is validated upstream and SessionID is required).
-//   - fmt.Errorf("ptyrunner: tail: %w", err) on tail.New / Watcher.Run
-//     failure (non-ctx I/O failure draining the JSONL file).
+//   - fmt.Errorf("ptyrunner: home dir: %w", err) when cfg.HomeDir is empty
+//     and os.UserHomeDir() fails.
+//   - fmt.Errorf("ptyrunner: wait jsonl: %w", err) on a non-ctx
+//     WaitForSessionJSONL failure (e.g. permission denied on stat).
+//   - fmt.Errorf("ptyrunner: tail: %w", err) on TailJSONL open / seek
+//     failure (synchronous, non-ctx).
 //   - fmt.Errorf("ptyrunner: emit: %w", err) on the first sticky Emit
-//     failure captured during the watcher's drain (e.g. broken pipe on
-//     cfg.Stdout). Prioritised over a non-ctx Watcher.Run error because
-//     the emit failure is operator-actionable while the watcher likely
-//     returned cleanly at EOT regardless.
+//     failure captured during the inline drain (e.g. broken pipe on
+//     cfg.Stdout). Prioritised over a clean drain because the emit
+//     failure is operator-actionable.
 //
 // Cleanup ordering — defer LIFO produces:
 //
 //	cancel() → wg.Wait() → counter.Stop() → emitter.Close() → sess.Close()
 //
-// Each step is load-bearing: cancel() signals the watchdog goroutine to
-// exit its select loop; wg.Wait() drains it so no further
-// SetExitReason(ExitReasonError) races with emitter.Close; counter.Stop()
-// cancels the budget's SIGKILL grace timer; emitter.Close writes the
-// `result` trailer to cfg.Stdout BEFORE sess.Close()'s SIGTERM races with
-// claude's last PTY writes. Re-ordering these defers silently breaks the
-// invariant — keep them in this LIFO sequence.
+// Each step is load-bearing: cancel() signals the watchdog goroutine
+// (and the tuidriver.TailJSONL goroutine) to exit; wg.Wait() drains the
+// watchdog so no further SetExitReason(ExitReasonError) races with
+// emitter.Close; counter.Stop() cancels the budget's SIGKILL grace
+// timer; emitter.Close writes the `result` trailer to cfg.Stdout BEFORE
+// sess.Close()'s SIGTERM races with claude's last PTY writes. The
+// tuidriver.TailJSONL channel is drained inline by Run's own goroutine,
+// so wg tracks only the watchdog. Re-ordering these defers silently
+// breaks the invariant — keep them in this LIFO sequence.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.ClaudeBin == "" {
 		return errors.New("ptyrunner: ClaudeBin required")
@@ -307,15 +310,17 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Single shared cancellation point: the budget Terminate hook AND the
 	// watchdog goroutine both call cancel() on their respective trigger;
-	// the tail watcher's Run(runCtx) returns ctx.Err() once either fires.
-	// Cancelling the parent ctx (operator shutdown) also signals runCtx
-	// because runCtx is a child of ctx.
+	// the tuidriver.TailJSONL goroutine closes its channel once runCtx
+	// cancels, ending the inline drain below. Cancelling the parent ctx
+	// (operator shutdown) also signals runCtx because runCtx is a child
+	// of ctx.
 	//
 	// This first defer cancel() catches the early-return paths below
-	// (emitter.New / budget.New / tail.New failure). A second defer cancel()
-	// is registered after the watchdog goroutine spawn so the cleanup-order
-	// LIFO fires cancel() FIRST (cancel is idempotent and safe for concurrent
-	// + repeated calls per context docs).
+	// (emitter.New / budget.New / home-dir / wait-jsonl / tail-open
+	// failure). A second defer cancel() is registered after the watchdog
+	// goroutine spawn so the cleanup-order LIFO fires cancel() FIRST
+	// (cancel is idempotent and safe for concurrent + repeated calls per
+	// context docs).
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -357,25 +362,15 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer counter.Stop()
 
-	var emitErr error
-	watcher, err := tail.New(tail.Config{
-		Workdir:   cfg.WorkDir,
-		SessionID: cfg.SessionID,
-		HomeDir:   cfg.HomeDir,
-		OnEvent: func(ev jsonl.Event) {
-			if err := emitter.Emit(eventToEntry(ev)); err != nil && emitErr == nil {
-				emitErr = err
-			}
-			counter.OnEvent(ev)
-		},
-		OnEndOfTurn: func() {
-			counter.OnEndOfTurn()
-		},
-		Logger: logger,
-	})
-	if err != nil {
-		return fmt.Errorf("ptyrunner: tail: %w", err)
+	home := cfg.HomeDir
+	if home == "" {
+		h, herr := os.UserHomeDir()
+		if herr != nil {
+			return fmt.Errorf("ptyrunner: home dir: %w", herr)
+		}
+		home = h
 	}
+	jsonlPath := tuidriver.SessionJSONLPath(home, cfg.WorkDir, cfg.SessionID)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -386,15 +381,36 @@ func Run(ctx context.Context, cfg Config) error {
 	defer wg.Wait()
 	defer cancel()
 
-	runErr := watcher.Run(runCtx)
+	if werr := tuidriver.WaitForSessionJSONL(runCtx, jsonlPath); werr != nil {
+		if isCtxErr(runCtx, werr) {
+			return nil
+		}
+		return fmt.Errorf("ptyrunner: wait jsonl: %w", werr)
+	}
+	entries, err := tuidriver.TailJSONL(runCtx, jsonlPath, 0)
+	if err != nil {
+		if isCtxErr(runCtx, err) {
+			return nil
+		}
+		return fmt.Errorf("ptyrunner: tail: %w", err)
+	}
+
+	var emitErr error
+	for entry := range entries {
+		if eerr := emitter.Emit(entry); eerr != nil && emitErr == nil {
+			emitErr = eerr
+		}
+		counter.OnEvent(entry)
+		if tuidriver.IsEndTurn(entry) {
+			counter.OnEndOfTurn()
+			break
+		}
+	}
 	if runCtx.Err() != nil {
 		return nil
 	}
 	if emitErr != nil {
 		return fmt.Errorf("ptyrunner: emit: %w", emitErr)
-	}
-	if runErr != nil {
-		return fmt.Errorf("ptyrunner: tail: %w", runErr)
 	}
 	return nil
 }
@@ -415,48 +431,6 @@ func buildArgs(cfg Config) []string {
 		"--model", cfg.Model,
 		"--effort", cfg.Effort,
 	}
-}
-
-// eventToEntry converts a jsonl.Event into the tuidriver.JSONLEntry shape
-// the streamjson.Emitter consumes. Throwaway adapter — #512 deletes it when
-// the watcher pivots to tuidriver.TailJSONL and feeds entries directly.
-//
-// Populates: Type (from Kind), RawLine (from Raw, byte-identical), and a
-// minimal Message{StopReason, Raw{"usage": ...}} for assistant entries with
-// usage. The Raw["usage"] sub-map carries the four counter fields as float64
-// so streamjson.readUsage's type-assertion path matches tuidriver's own
-// parseMessage output. On an end-of-turn event the adapter populates a
-// synthetic Content[]{ContentBlock{Type: "text", Raw: {"text": "x"}}} so
-// tuidriver.IsEndTurn fires (it requires non-empty assistant text). The
-// synthetic content is never re-emitted — Emit's byte passthrough reads
-// RawLine, not Content.
-func eventToEntry(ev jsonl.Event) tuidriver.JSONLEntry {
-	entry := tuidriver.JSONLEntry{
-		Type:    ev.Kind,
-		RawLine: []byte(ev.Raw),
-	}
-	if ev.Kind != "assistant" {
-		return entry
-	}
-	msg := &tuidriver.EntryMessage{StopReason: ev.StopReason}
-	if ev.Usage != nil {
-		msg.Raw = map[string]any{
-			"usage": map[string]any{
-				"input_tokens":                float64(ev.Usage.InputTokens),
-				"output_tokens":               float64(ev.Usage.OutputTokens),
-				"cache_creation_input_tokens": float64(ev.Usage.CacheCreationInputTokens),
-				"cache_read_input_tokens":     float64(ev.Usage.CacheReadInputTokens),
-			},
-		}
-	}
-	if ev.EndOfTurn {
-		msg.Content = []tuidriver.ContentBlock{{
-			Type: "text",
-			Raw:  map[string]any{"text": "x"},
-		}}
-	}
-	entry.Message = msg
-	return entry
 }
 
 // isCtxErr reports whether err originates from ctx-cancel or
