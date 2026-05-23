@@ -1,6 +1,6 @@
 # `internal/agentrun/jsonl/tail` — fsnotify tail watcher for claude session JSONL
 
-The filesystem-orchestration layer between `agentrun.EncodeProjectDir` ([agentrun-package.md](agentrun-package.md), #347) and the pure JSONL line reader ([jsonl-reader.md](jsonl-reader.md), #348). Waits for `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` to appear via fsnotify, opens it (with bounded retry to absorb the "CREATE fires before claude has the file ready" race), and drives a `jsonl.Reader` until the deterministic end-of-turn signal fires or the caller cancels.
+The filesystem-orchestration layer between `tuidriver.SessionJSONLPath` ([tui-driver](https://github.com/pyrycode/tui-driver), #509) and the pure JSONL line reader ([jsonl-reader.md](jsonl-reader.md), #348). Waits for `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` to appear via `tuidriver.WaitForSessionJSONL` (50ms poll), opens it, and drives a `jsonl.Reader` over fsnotify WRITE events until the deterministic end-of-turn signal fires or the caller cancels. Follow-up [#512](https://github.com/pyrycode/pyrycode/issues/512) will replace the per-line read loop with `tuidriver.TailJSONL` and delete this package.
 
 ## Why a sibling subpackage
 
@@ -33,25 +33,27 @@ Two exported types, three exported funcs/methods. Caller MUST call `Run` after `
 ```
 New(cfg):
   validate Workdir / SessionID / OnEvent / OnEndOfTurn non-zero
-  home = cfg.HomeDir or os.UserHomeDir()
-  dir  = home + "/.claude/projects/" + agentrun.EncodeProjectDir(Workdir)
-  os.MkdirAll(dir, 0o700)                          // first-run-in-this-workdir case
+  home         = cfg.HomeDir or os.UserHomeDir()
+  resolved     = agentrun.ResolveWorkdir(cfg.Workdir)            // macOS realpath invariant
+  expectedPath = tuidriver.SessionJSONLPath(home, resolved, SessionID)
+  dir          = filepath.Dir(expectedPath)
+  os.MkdirAll(dir, 0o700)                                        // first-run-in-this-workdir case
   fsw = fsnotify.NewWatcher(); fsw.Add(dir)
-  expectedPath = dir + "/" + SessionID + ".jsonl"
 
 Run(ctx):
   defer fsw.Close() + close opened file
-  (1) os.Stat(expectedPath)
-        on ok  → openAndDrain (covers pre-existing file)
-  (2) for { select ctx.Done / fsw.Events / fsw.Errors }
-        CREATE for expectedPath + file not yet opened → openAndDrain
-        WRITE/CREATE for expectedPath + file opened    → drain
-        any other event                                → ignore
-        fsw.Errors                                     → log Warn, continue
-        ctx.Done                                       → return ctx.Err()
+  (1) tuidriver.WaitForSessionJSONL(ctx, expectedPath)            // 50ms poll, returns on appearance / ctx
+  (2) openAndDrain() — open, seek to StartOffset, construct jsonl.Reader, drain initial bytes
+  (3) for { select ctx.Done / fsw.Events / fsw.Errors }
+        WRITE/CREATE for expectedPath → drain
+        any other event               → ignore
+        fsw.Errors                    → log Warn, continue
+        ctx.Done                      → return ctx.Err()
 ```
 
-`openAndDrain` opens the file with bounded retry, seeks to `StartOffset > 0`, constructs the `jsonl.Reader` against the live `*os.File`, and drains. `drain` calls `reader.Next()` in a loop, invoking `OnEvent` on each event; on `EndOfTurn=true` it invokes `OnEndOfTurn` and returns `(done=true, nil)`. On `io.EOF` it returns `(done=false, nil)` — the file hasn't grown yet, wait for the next fsnotify event. Any non-EOF reader error bails the Run.
+`openAndDrain` opens the file (no bounded retry — `WaitForSessionJSONL` already guaranteed appearance), seeks to `StartOffset > 0`, constructs the `jsonl.Reader` against the live `*os.File`, and drains. `drain` calls `reader.Next()` in a loop, invoking `OnEvent` on each event; on `EndOfTurn=true` it invokes `OnEndOfTurn` and returns `(done=true, nil)`. On `io.EOF` it returns `(done=false, nil)` — the file hasn't grown yet, wait for the next fsnotify event. Any non-EOF reader error bails the Run.
+
+`agentrun.ResolveWorkdir` upstream of `tuidriver.SessionJSONLPath` is load-bearing: `SessionJSONLPath` is a pure join and `tuidriver.EncodeCwd` silently encodes the input as-passed on resolution failure (no error). Keeping the explicit `ResolveWorkdir` call preserves (a) the macOS realpath invariant (`/var/folders/...` → `/private/var/folders/...` before encoding, matching what claude writes to) and (b) the pre-existing fail-closed error contract on missing workdirs.
 
 ## Project-directory existence — resolved
 
@@ -59,13 +61,11 @@ The encoded project dir `~/.claude/projects/<encoded-cwd>/` may not exist at spa
 
 If a future revision ever observes claude refusing to write into a pre-created dir, escalate to a two-level watch via follow-up. Defer until empirically observed.
 
-## CREATE-before-ready race
+## Appearance race — handled by `tuidriver.WaitForSessionJSONL`
 
-fsnotify on Linux + macOS will fire `CREATE` for the file as soon as `open(O_CREAT)` returns in claude — which can be a few ms before claude writes the first byte. `openWithRetry` walks `probeRetryDelays = []time.Duration{0, 50ms, 200ms}` (250ms total worst-case), mirroring `rotation.probeWithRetry`. On exhaustion (file genuinely went away — spurious CREATE) the watcher logs at Warn and continues the event loop; a later WRITE may surface the file. Permission-denied and other non-ENOENT errors bail immediately.
+`Run`'s first action is `tuidriver.WaitForSessionJSONL(ctx, expectedPath)`: an initial `os.Stat` short-circuits if the file already exists, otherwise a 50ms `DefaultPollInterval` ticker loops until appearance, ctx cancellation, deadline, or a non-NotExist stat error short-circuits. The fsnotify subscription is armed in `New` before `Run` is called, so any WRITE events that arrive during the wait are buffered in `fsw.Events` (4096-deep default channel) and consumed by the event loop after the initial drain. No double-open is possible: only the up-front wait calls `openAndDrain`, and the event loop only calls `drain` on an already-open reader.
 
-## Initial-stat covers the pre-existing-file race
-
-`fsnotify.Add(dir)` is called in `New`; `Run`'s first action is `os.Stat(expectedPath)`. Order matters: any CREATE that races with the stat is queued in `fsw.Events` and replayed by the event loop, so the watcher never double-opens. If the stat succeeds, the file is opened immediately (no fsnotify event needed); if the stat returns `fs.ErrNotExist`, the event loop takes over.
+The pre-#509 design used `os.Stat` + `fsnotify.CREATE` event + `openWithRetry` walking `probeRetryDelays = {0, 50ms, 200ms}` to absorb the "CREATE fires before claude has the file ready" race; #509 collapsed all three into the single `tuidriver.WaitForSessionJSONL` call. The polling cadence is smoother (50ms throughout) than the previous stepped 0/50/200ms schedule, faster on average, and never slower than 50ms.
 
 ## Concurrency model
 
@@ -80,10 +80,11 @@ One goroutine: `Run`. No background goroutines, no inner `errgroup`. `OnEvent` a
 | Class | Surface |
 |---|---|
 | `OnEndOfTurn` fired | `Run` returns `nil` |
-| Context cancelled | `Run` returns `ctx.Err()` |
+| Context cancelled / deadline exceeded during wait | `Run` returns `tuidriver.WaitForSessionJSONL`'s wrap — `fmt.Errorf("session jsonl %s did not appear: %w", path, context.Cause(ctx))`; `errors.Is(err, context.Canceled)` / `errors.Is(err, context.DeadlineExceeded)` match through the `%w` wrap |
+| Context cancelled during the event loop | `Run` returns `ctx.Err()` |
+| `tuidriver.WaitForSessionJSONL` non-NotExist stat error (e.g. ENOTDIR) | `Run` returns the wrapped error (no polling) |
 | `jsonl.Reader` returns `ErrLineTooLarge` or non-EOF read error | `Run` returns the wrapped error |
-| `os.Open` retry exhausted with `fs.ErrNotExist` | Logged Warn, event loop continues |
-| `os.Open` non-ENOENT (e.g. permission denied) | `Run` returns the wrapped error |
+| `os.Open` after wait returns nil (TOCTOU on file vanishing) | `Run` returns `tail: open %s: %w` |
 | `fsw.Errors` channel emits | Logged Warn, event loop continues |
 | `fsw.Events` channel closes | `Run` returns `nil` (watcher externally closed) |
 
@@ -93,16 +94,18 @@ Same `MUST NOT log file contents at any layer` stance as the parser and the agen
 
 ## Tests
 
-`internal/agentrun/jsonl/tail/watcher_test.go` — six test functions, all `t.Parallel()`. The `startWatcher(t, cfg)` helper runs `Run` in a goroutine and registers a `t.Cleanup` that cancels and asserts Run exits within 2s. An `eventRecorder` (mutex-wrapped) collects `OnEvent` invocations and end-turn fires; `waitForEndOfTurn` polls the recorder against a deadline rather than `time.Sleep`-then-check.
+`internal/agentrun/jsonl/tail/watcher_test.go` — eight test functions, all `t.Parallel()`. The `startWatcher(t, cfg)` helper runs `Run` in a goroutine and registers a `t.Cleanup` that cancels and asserts Run exits within 2s. An `eventRecorder` (mutex-wrapped) collects `OnEvent` invocations and end-turn fires; `waitForEndOfTurn` polls the recorder against a deadline rather than `time.Sleep`-then-check. The `expectedEncodedDir(t, home, workdir, sessionID)` helper mirrors the production-code path computation exactly (`filepath.Dir(tuidriver.SessionJSONLPath(home, ResolveWorkdir(workdir), sessionID))`) so test and watcher agree on the directory by construction.
 
 | Test | Pins |
 |---|---|
 | `TestNew_ValidationErrors` | Empty `Workdir` / `SessionID` and nil `OnEvent` / `OnEndOfTurn` each return an error with the expected substring |
 | `TestNew_RealpathEncoding` (darwin-only) | A `t.TempDir()` under `/var/folders/...` watches `~/.claude/projects/-private-var-folders-...`, NOT `-var-folders-...` |
-| `TestWatcher_LateCreate` | Watcher started before JSONL exists; CREATE fires → file opened with retry → WRITE events drive parsing → end-of-turn fires once |
-| `TestWatcher_ExistingFile` | JSONL pre-exists at Run; initial-stat picks it up without any fsnotify event; `Run` returns nil after end-of-turn |
+| `TestWatcher_LateCreate` | Watcher started before JSONL exists; `WaitForSessionJSONL` ticks until the file appears → WRITE events drive parsing → end-of-turn fires once |
+| `TestWatcher_ExistingFile` | JSONL pre-exists at Run; `WaitForSessionJSONL`'s initial stat short-circuits, file opens immediately; `Run` returns nil after end-of-turn |
 | `TestWatcher_FixtureIntegration` | Replays `internal/agentrun/jsonl/testdata/clean.jsonl` line-by-line into a tempdir-hosted fake home; asserts 25 events + 1 end-of-turn fire, last event `EndOfTurn=true` |
-| `TestWatcher_ContextCancellation` | Cancellation while waiting for the JSONL to appear → `Run` returns `context.Canceled` within 500ms; goroutine teardown clean |
+| `TestWatcher_ContextCancellation` | Cancellation while waiting for the JSONL to appear → `Run` returns `context.Canceled` (through `WaitForSessionJSONL`'s `%w` wrap) within 500ms; goroutine teardown clean |
+| `TestWatcher_WaitTimeout` (#509) | `context.WithTimeout(150ms)` while JSONL never appears → `Run` returns `context.DeadlineExceeded` (through the `%w` wrap) within 500ms of the deadline |
+| `TestWatcher_SpecialCharWorkdir` (#509) | Workdir literal `"a_b c.d"` → `filepath.Base(w.dir)` ends with `-a-b-c-d`; encoded dir exists on disk. Spot-check that the encoding seam reaches `tuidriver.EncodeCwd`'s per-byte rule (not the pre-[#501](../codebase/501.md) narrow replacer) |
 
 `writeLineByLine` uses `O_CREATE|O_WRONLY|O_APPEND` between writes with `Sync` after each line; the fixture-integration test does the same via `bufio.Scanner` over the real fixture.
 
@@ -120,7 +123,10 @@ Same `MUST NOT log file contents at any layer` stance as the parser and the agen
 
 ## Related
 
-- [jsonl-reader.md](jsonl-reader.md) — the parser this watcher drives.
-- [agentrun-package.md](agentrun-package.md) — `EncodeProjectDir` (#347) supplies the directory name.
-- [rotation-watcher.md](rotation-watcher.md) — the pattern reference (fsnotify lifecycle + bounded retry-probe shape).
+- [jsonl-reader.md](jsonl-reader.md) — the parser this watcher drives. To be replaced by `tuidriver.TailJSONL` in [#512](https://github.com/pyrycode/pyrycode/issues/512).
+- [agentrun-package.md](agentrun-package.md) — owns `ResolveWorkdir` (still called from `New` upstream of `tuidriver.SessionJSONLPath`) and the now-historical `EncodeProjectDir` (#347, since #501 delegated to `tuidriver.EncodeCwd`).
+- [tui-driver](https://github.com/pyrycode/tui-driver) `pkg/tuidriver/jsonl.go` — library home of `SessionJSONLPath` + `WaitForSessionJSONL` + `DefaultPollInterval = 50ms` (tui-driver #58, commit `a2edf4f`, 2026-05-22).
+- [codebase/509.md](../codebase/509.md) — migration ticket: path resolution + file-appear wait delegated to tui-driver.
+- [codebase/501.md](../codebase/501.md) — encoder delegation prerequisite (per-byte rule now lives in `tuidriver.EncodeCwd`).
+- [rotation-watcher.md](rotation-watcher.md) — sibling fsnotify watcher; still uses its own `probeRetryDelays` (different code, different package).
 - [ADR 004](../decisions/004-fsnotify-for-rotation-detection.md) — the fsnotify-over-polling rationale that applies equally here.

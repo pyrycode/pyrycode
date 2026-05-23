@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 )
@@ -89,13 +91,13 @@ func startWatcher(t *testing.T, cfg Config) (*Watcher, context.CancelFunc, func(
 
 // expectedEncodedDir returns the encoded project-dir form for path, as the
 // watcher would compute it. Fatals on error.
-func expectedEncodedDir(t *testing.T, home, workdir string) string {
+func expectedEncodedDir(t *testing.T, home, workdir, sessionID string) string {
 	t.Helper()
-	encoded, err := agentrun.EncodeProjectDir(workdir)
+	resolved, err := agentrun.ResolveWorkdir(workdir)
 	if err != nil {
-		t.Fatalf("EncodeProjectDir: %v", err)
+		t.Fatalf("ResolveWorkdir: %v", err)
 	}
-	return filepath.Join(home, ".claude", "projects", encoded)
+	return filepath.Dir(tuidriver.SessionJSONLPath(home, resolved, sessionID))
 }
 
 // waitForEndOfTurn polls the recorder until OnEndOfTurn has fired or the
@@ -194,7 +196,7 @@ func TestNew_RealpathEncoding(t *testing.T) {
 		Logger:      discardLogger(),
 	})
 
-	wantDir := expectedEncodedDir(t, home, workdir)
+	wantDir := expectedEncodedDir(t, home, workdir, testSessionID)
 	if base := filepath.Base(wantDir); !strings.HasPrefix(base, "-private-var-folders-") {
 		t.Fatalf("encoded dir base = %q, want prefix -private-var-folders-", base)
 	}
@@ -221,7 +223,7 @@ func TestWatcher_LateCreate(t *testing.T) {
 		Logger:      discardLogger(),
 	})
 
-	dir := expectedEncodedDir(t, home, workdir)
+	dir := expectedEncodedDir(t, home, workdir, testSessionID)
 	path := filepath.Join(dir, testSessionID+".jsonl")
 
 	// Give the watcher a moment to install its fsnotify subscription before
@@ -257,11 +259,7 @@ func TestWatcher_ExistingFile(t *testing.T) {
 	home := t.TempDir()
 	rec := &eventRecorder{}
 
-	encoded, err := agentrun.EncodeProjectDir(workdir)
-	if err != nil {
-		t.Fatalf("EncodeProjectDir: %v", err)
-	}
-	dir := filepath.Join(home, ".claude", "projects", encoded)
+	dir := expectedEncodedDir(t, home, workdir, testSessionID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -316,7 +314,7 @@ func TestWatcher_FixtureIntegration(t *testing.T) {
 		Logger:      discardLogger(),
 	})
 
-	dir := expectedEncodedDir(t, home, workdir)
+	dir := expectedEncodedDir(t, home, workdir, testSessionID)
 	path := filepath.Join(dir, testSessionID+".jsonl")
 
 	src, err := os.Open("../testdata/clean.jsonl")
@@ -387,5 +385,80 @@ func TestWatcher_ContextCancellation(t *testing.T) {
 	cancel()
 	if err := wait(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// TestWatcher_WaitTimeout verifies that when the JSONL never appears, Run
+// returns a wrapped context.DeadlineExceeded from tuidriver.WaitForSessionJSONL.
+func TestWatcher_WaitTimeout(t *testing.T) {
+	t.Parallel()
+	workdir := t.TempDir()
+	home := t.TempDir()
+	rec := &eventRecorder{}
+
+	w, err := New(Config{
+		Workdir:     workdir,
+		SessionID:   testSessionID,
+		HomeDir:     home,
+		OnEvent:     rec.onEvent,
+		OnEndOfTurn: rec.onEndOfTurn,
+		Logger:      discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- w.Run(ctx) }()
+
+	select {
+	case runErr := <-doneCh:
+		if !errors.Is(runErr, context.DeadlineExceeded) {
+			t.Fatalf("Run returned %v, want context.DeadlineExceeded", runErr)
+		}
+	case <-time.After(650 * time.Millisecond):
+		t.Fatalf("Run did not return within 500ms of the deadline")
+	}
+}
+
+// TestWatcher_SpecialCharWorkdir spot-checks that the path the watcher
+// computes goes through tuidriver's encoder for special characters
+// (underscore, space, dot — all of which the old EncodeProjectDir mapped
+// wrong before #501). Confirms the seam is wired up; tuidriver's own
+// cwd_test.go owns the exhaustive byte-rule coverage.
+func TestWatcher_SpecialCharWorkdir(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	workdir := filepath.Join(parent, "a_b c.d")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir: %v", err)
+	}
+	home := t.TempDir()
+
+	w, err := New(Config{
+		Workdir:     workdir,
+		SessionID:   testSessionID,
+		HomeDir:     home,
+		OnEvent:     func(jsonl.Event) {},
+		OnEndOfTurn: func() {},
+		Logger:      discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = w.fsw.Close() })
+
+	if !strings.HasSuffix(filepath.Base(w.dir), "-a-b-c-d") {
+		t.Fatalf("encoded dir base = %q, want suffix -a-b-c-d", filepath.Base(w.dir))
+	}
+	info, err := os.Stat(w.dir)
+	if err != nil {
+		t.Fatalf("stat encoded dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("encoded path %s is not a directory", w.dir)
 	}
 }
