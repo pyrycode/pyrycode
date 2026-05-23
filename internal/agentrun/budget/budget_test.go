@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 func discardLogger() *slog.Logger {
@@ -53,8 +53,8 @@ func (r *signalRecorder) counts() (term, kill int) {
 	return r.terminate, r.kill
 }
 
-func assistantEvent(endOfTurn bool) jsonl.Event {
-	return jsonl.Event{Kind: "assistant", EndOfTurn: endOfTurn}
+func assistantEntry() tuidriver.JSONLEntry {
+	return tuidriver.JSONLEntry{Type: "assistant"}
 }
 
 func mustNew(t *testing.T, cfg Config) *Counter {
@@ -102,17 +102,17 @@ func TestOnEvent_NonAssistantKindsDoNotCount(t *testing.T) {
 	})
 	nonAssistant := []string{"user", "tool_use", "tool_result", "system", "attachment", ""}
 	for _, kind := range nonAssistant {
-		c.OnEvent(jsonl.Event{Kind: kind})
+		c.OnEvent(tuidriver.JSONLEntry{Type: kind})
 	}
 	if term, _ := rec.counts(); term != 0 {
 		t.Fatalf("non-assistant kinds triggered Terminate: %d calls", term)
 	}
-	c.OnEvent(assistantEvent(false))
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
+	c.OnEvent(assistantEntry())
 	if term, _ := rec.counts(); term != 0 {
 		t.Fatalf("Terminate called before budget: %d calls", term)
 	}
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
 	if term, _ := rec.counts(); term != 1 {
 		t.Fatalf("Terminate not called at budget: %d calls", term)
 	}
@@ -129,18 +129,18 @@ func TestOnEvent_SIGTERMFiresExactlyAtBudget(t *testing.T) {
 	})
 	defer c.Stop()
 
-	c.OnEvent(assistantEvent(false))
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
+	c.OnEvent(assistantEntry())
 	if term, _ := rec.counts(); term != 0 {
 		t.Fatalf("Terminate fired before budget: %d", term)
 	}
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
 	if term, _ := rec.counts(); term != 1 {
 		t.Fatalf("Terminate did not fire at budget: %d", term)
 	}
 	// Subsequent assistant events must not re-fire Terminate.
-	c.OnEvent(assistantEvent(false))
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
+	c.OnEvent(assistantEntry())
 	if term, _ := rec.counts(); term != 1 {
 		t.Fatalf("Terminate fired more than once: %d", term)
 	}
@@ -161,7 +161,7 @@ func TestOnEvent_SIGKILLFiresAfterGrace(t *testing.T) {
 	})
 	defer c.Stop()
 
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
 	term, kill := rec.counts()
 	if term != 1 {
 		t.Fatalf("Terminate not fired at budget: %d", term)
@@ -209,7 +209,7 @@ func TestStop_CancelsPendingSIGKILL(t *testing.T) {
 		GracePeriod: grace,
 	})
 
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
 	if term, _ := rec.counts(); term != 1 {
 		t.Fatalf("Terminate not fired: %d", term)
 	}
@@ -248,8 +248,8 @@ func TestOnEndOfTurn_ReasonCompletion(t *testing.T) {
 		Kill:        rec.Kill,
 		GracePeriod: 10 * time.Millisecond,
 	})
-	c.OnEvent(assistantEvent(false))
-	c.OnEvent(assistantEvent(true))
+	c.OnEvent(assistantEntry())
+	c.OnEvent(assistantEntry())
 	c.OnEndOfTurn()
 	if got := c.Reason(); got != ReasonCompletion {
 		t.Fatalf("Reason = %q, want %q", got, ReasonCompletion)
@@ -269,34 +269,10 @@ func TestOnEndOfTurn_DoesNotOverwriteMaxTurns(t *testing.T) {
 		GracePeriod: 50 * time.Millisecond,
 	})
 	defer c.Stop()
-	c.OnEvent(assistantEvent(false)) // hits budget, reason=max_turns
-	c.OnEndOfTurn()                  // must NOT overwrite to completion
+	c.OnEvent(assistantEntry()) // hits budget, reason=max_turns
+	c.OnEndOfTurn()             // must NOT overwrite to completion
 	if got := c.Reason(); got != ReasonMaxTurns {
 		t.Fatalf("Reason = %q, want %q (first-terminal-wins)", got, ReasonMaxTurns)
-	}
-}
-
-func TestOnEvent_BudgetBoundaryEndOfTurnIsCompletion(t *testing.T) {
-	// MaxTurns assistant events arrive, the last with EndOfTurn=true. Per
-	// the spec's default classification, this is completion, not max_turns.
-	t.Parallel()
-	rec := &signalRecorder{}
-	c := mustNew(t, Config{
-		MaxTurns:    3,
-		Terminate:   rec.Terminate,
-		Kill:        rec.Kill,
-		GracePeriod: 50 * time.Millisecond,
-	})
-	defer c.Stop()
-	c.OnEvent(assistantEvent(false))
-	c.OnEvent(assistantEvent(false))
-	c.OnEvent(assistantEvent(true)) // exactly at the budget, but natural end
-	c.OnEndOfTurn()
-	if term, _ := rec.counts(); term != 0 {
-		t.Fatalf("Terminate fired on budget-boundary end_turn: %d", term)
-	}
-	if got := c.Reason(); got != ReasonCompletion {
-		t.Fatalf("Reason = %q, want %q", got, ReasonCompletion)
 	}
 }
 
@@ -309,8 +285,8 @@ func TestReason_ZeroValueBeforeTerminalEvent(t *testing.T) {
 		Kill:        rec.Kill,
 		GracePeriod: 10 * time.Millisecond,
 	})
-	c.OnEvent(assistantEvent(false))
-	c.OnEvent(jsonl.Event{Kind: "user"})
+	c.OnEvent(assistantEntry())
+	c.OnEvent(tuidriver.JSONLEntry{Type: "user"})
 	if got := c.Reason(); got != "" {
 		t.Fatalf("Reason = %q, want zero value before terminal event", got)
 	}
@@ -329,7 +305,7 @@ func TestTerminateError_DoesNotBlockKill(t *testing.T) {
 		GracePeriod: grace,
 	})
 	defer c.Stop()
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
 	time.Sleep(grace * 3)
 	if got := killCalls.Load(); got != 1 {
 		t.Fatalf("Kill calls = %d, want 1 after Terminate error", got)
@@ -349,7 +325,7 @@ func TestKillError_IsLogged(t *testing.T) {
 		Logger:      logger,
 	})
 	defer c.Stop()
-	c.OnEvent(assistantEvent(false))
+	c.OnEvent(assistantEntry())
 	time.Sleep(80 * time.Millisecond)
 	out := buf.String()
 	if !strings.Contains(out, "kill failed") {

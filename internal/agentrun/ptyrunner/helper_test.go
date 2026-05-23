@@ -120,13 +120,13 @@ func runHelper() {
 			if body == "" {
 				return
 			}
-			// MkdirAll guards against the race where the parent's
-			// tail.New has not yet created the encoded project dir
-			// when WritePrompt's bytes land on the child's stdin.
-			// The watcher is armed at the project-dir level (via
-			// fsnotify.Add in tail.New), so a CREATE event on the
-			// JSONL file fires whether the helper or the parent
-			// makes the dir first.
+			// MkdirAll guards against a missing encoded project dir
+			// in test mode — the helper owns parent-dir creation
+			// because no other actor creates it before the JSONL
+			// write. The parent's tuidriver.WaitForSessionJSONL
+			// polls the JSONL path via os.Stat and resolves as
+			// soon as the file appears, regardless of whether the
+			// parent dir pre-existed.
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				fmt.Fprintf(os.Stderr, "jsonl mode: mkdir %s: %v\n", filepath.Dir(path), err)
 				return
