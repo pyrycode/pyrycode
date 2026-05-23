@@ -1,11 +1,11 @@
-// Package streamjson re-emits the parsed claude session-JSONL Event stream
+// Package streamjson re-emits the parsed claude session-JSONL entry stream
 // onto a writer (typically pyry's stdout) and composes a single
 // `type:"result"` trailer line when the run terminates. Output shape mirrors
 // `claude -p --output-format stream-json` so the dispatcher's stream-json
 // parser keeps working unchanged after the agent-run migration.
 //
-// MUST NOT log Event content. The package logs only counts, durations, and
-// error messages — never Event.Raw bytes nor per-event Usage values.
+// MUST NOT log entry content. The package logs only counts, durations, and
+// error messages — never JSONLEntry.RawLine bytes nor per-entry usage values.
 package streamjson
 
 import (
@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 // ExitReason classifies how the run terminated. The internal value is
@@ -74,9 +74,9 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// Emitter re-emits jsonl.Events to its Writer and composes a single
-// `type:"result"` trailer line on Close. Safe for concurrent use across
-// Emit, SetExitReason, and Close.
+// Emitter re-emits tuidriver.JSONLEntry values to its Writer and composes a
+// single `type:"result"` trailer line on Close. Safe for concurrent use
+// across Emit, SetExitReason, and Close.
 type Emitter struct {
 	w         io.Writer
 	sessionID string
@@ -158,17 +158,23 @@ func New(cfg Config) (*Emitter, error) {
 	}, nil
 }
 
-// Emit re-emits ev.Raw verbatim followed by '\n', aggregates ev.Usage, and
-// counts assistant entries. Safe for concurrent use.
+// Emit re-emits entry.RawLine verbatim followed by '\n', aggregates the
+// per-entry usage counters, and counts assistant entries. Safe for concurrent
+// use.
+//
+// Byte passthrough uses entry.RawLine (the verbatim source-line bytes
+// captured by the tail goroutine). Re-marshalling from entry.Raw would
+// normalise key order and whitespace, breaking the byte-equivalence contract
+// the dispatcher relies on.
 //
 // Once an underlying write fails, the error is sticky: subsequent Emit calls
 // no-op (returning nil) so the watcher can keep parsing until end-of-turn or
 // ctx cancel without thrashing on a broken pipe. Close still attempts to
 // write the trailer (best-effort).
 //
-// Emit after Close is a no-op returning nil — late events from a slow
+// Emit after Close is a no-op returning nil — late entries from a slow
 // watcher goroutine must not panic.
-func (e *Emitter) Emit(ev jsonl.Event) error {
+func (e *Emitter) Emit(entry tuidriver.JSONLEntry) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -178,27 +184,67 @@ func (e *Emitter) Emit(ev jsonl.Event) error {
 
 	// State updates first; even if the write fails, the totals stay
 	// consistent so Close emits a coherent trailer.
-	if ev.Kind == "assistant" {
+	if entry.Type == "assistant" {
 		e.numTurns++
-		e.lastStopReason = ev.StopReason
+		if entry.Message != nil {
+			e.lastStopReason = entry.Message.StopReason
+		}
 	}
-	if ev.EndOfTurn {
+	if tuidriver.IsEndTurn(entry) {
 		e.endOfTurnSeen = true
 	}
-	if ev.Usage != nil {
-		e.aggUsage.input += ev.Usage.InputTokens
-		e.aggUsage.output += ev.Usage.OutputTokens
-		e.aggUsage.cacheCreationIn += ev.Usage.CacheCreationInputTokens
-		e.aggUsage.cacheReadIn += ev.Usage.CacheReadInputTokens
+	if u, ok := readUsage(entry); ok {
+		e.aggUsage.input += u.InputTokens
+		e.aggUsage.output += u.OutputTokens
+		e.aggUsage.cacheCreationIn += u.CacheCreationInputTokens
+		e.aggUsage.cacheReadIn += u.CacheReadInputTokens
 	}
 
-	line := append([]byte(nil), ev.Raw...)
+	line := append([]byte(nil), entry.RawLine...)
 	line = append(line, '\n')
 	if _, err := e.w.Write(line); err != nil {
 		e.writeErr = err
 		return fmt.Errorf("streamjson: emit: %w", err)
 	}
 	return nil
+}
+
+// usageBlock mirrors message.usage's four counter fields. Used only as
+// readUsage's return type; internal aggregation state, not part of the API
+// surface.
+type usageBlock struct {
+	InputTokens              int
+	OutputTokens             int
+	CacheCreationInputTokens int
+	CacheReadInputTokens     int
+}
+
+// readUsage extracts the four token-counter fields from entry.Message.Raw's
+// "usage" object. Returns (zero, false) when the entry has no Message, no
+// Message.Raw, no "usage" key, or a non-map value at "usage" — same
+// observable behaviour as the old `ev.Usage == nil` gate.
+//
+// encoding/json decodes JSON numbers as float64 into map[string]any; this
+// helper truncates to int, matching the wire shape's integer-valued
+// counters.
+func readUsage(entry tuidriver.JSONLEntry) (usageBlock, bool) {
+	if entry.Message == nil || entry.Message.Raw == nil {
+		return usageBlock{}, false
+	}
+	m, ok := entry.Message.Raw["usage"].(map[string]any)
+	if !ok {
+		return usageBlock{}, false
+	}
+	read := func(k string) int {
+		v, _ := m[k].(float64)
+		return int(v)
+	}
+	return usageBlock{
+		InputTokens:              read("input_tokens"),
+		OutputTokens:             read("output_tokens"),
+		CacheCreationInputTokens: read("cache_creation_input_tokens"),
+		CacheReadInputTokens:     read("cache_read_input_tokens"),
+	}, true
 }
 
 // SetExitReason overrides the default exit-reason classification used by
