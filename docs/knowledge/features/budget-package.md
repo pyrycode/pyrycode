@@ -1,6 +1,6 @@
 # `internal/agentrun/budget` — pyry-side `--max-turns` enforcement
 
-`Counter` enforces the per-agent turn budget for `pyry agent-run` by counting assistant JSONL entries and signalling claude when the cap is hit. The leaf unit; integration into `agentrun.Drive` (wiring the Counter to a live `tail.Watcher` and to `cmd.Process.Signal`) is downstream and not yet landed.
+`Counter` enforces the per-agent turn budget for `pyry agent-run` by counting assistant JSONL entries and signalling claude when the cap is hit. The leaf unit; [`internal/agentrun/ptyrunner`](ptyrunner-package.md) wires `OnEvent` into the loop that drains `tuidriver.TailJSONL`, calls `OnEndOfTurn` when `tuidriver.IsEndTurn(entry)` fires for that entry, and routes `Terminate` / `Kill` to `cmd.Process.Signal(SIGTERM)` / `SIGKILL` (#479 / #512).
 
 ## Why it exists
 
@@ -27,22 +27,23 @@ type Config struct {
 
 func New(cfg Config) (*Counter, error)
 
-func (c *Counter) OnEvent(ev jsonl.Event)  // wire to tail.Config.OnEvent
-func (c *Counter) OnEndOfTurn()            // wire to tail.Config.OnEndOfTurn
+func (c *Counter) OnEvent(entry tuidriver.JSONLEntry) // caller invokes per entry from the tuidriver.TailJSONL drain
+func (c *Counter) OnEndOfTurn()                       // caller invokes when tuidriver.IsEndTurn(entry) is true, after OnEvent
 func (c *Counter) Reason() Reason
 func (c *Counter) Stop()                   // cancel pending SIGKILL timer
 ```
 
 ## Counting rule
 
-`OnEvent` filters on `ev.Kind == "assistant"` — non-assistant kinds (`user`, `tool_use`, `tool_result`, `system`, `attachment`, `""`) return immediately without incrementing. The whitelist matches `jsonl.Reader`'s classification. Each assistant entry counts as one turn, **including** empty-content transitional `end_turn` blocks (validated by parent #329's "Unknown 3 PASS" spike across 1151 real session JSONLs). This filter is defensive — after #353, the `tail.Watcher.OnEvent` callback fires for every well-formed line, not just assistant entries, so the Counter cannot trust upstream filtering.
+`OnEvent` filters on `entry.Type == "assistant"` — non-assistant kinds (`user`, `tool_use`, `tool_result`, `system`, `attachment`, `""`) return immediately without incrementing. The whitelist matches the same shape `tuidriver.TailJSONL` surfaces (every well-formed line, classified by `entry.Type`). Each assistant entry counts as one turn, **including** empty-content transitional `end_turn` blocks (validated by parent #329's "Unknown 3 PASS" spike across 1151 real session JSONLs). This filter is defensive — the caller cannot be trusted to pre-filter.
 
 `OnEvent` increments the count first, then branches:
 
-- `ev.EndOfTurn == true` — return without firing; `OnEndOfTurn` will classify the run as completion.
 - Already fired — return (idempotent).
 - `count < MaxTurns` — return.
 - `count >= MaxTurns` — set `fired = true`, set `reason = ReasonMaxTurns`, arm the grace timer via `time.AfterFunc(GracePeriod, killAfterGrace)`, then unlock and invoke `cfg.Terminate()`.
+
+End-of-turn classification is the **caller's** job (#512). The caller invokes `OnEndOfTurn` only when `tuidriver.IsEndTurn(entry)` returns true, after `OnEvent(entry)` has been called for the same entry. The pre-#512 early-return branch on `ev.EndOfTurn` is gone; see § "Reason semantics" below for the boundary-case consequence.
 
 ## SIGTERM → SIGKILL escalation
 
@@ -54,8 +55,8 @@ Default `GracePeriod` is 5s, copied from `supervisor.spawnWaitDelay` (not import
 
 ## Reason semantics — first observed terminal event wins
 
-- `OnEndOfTurn` sets `reason = ReasonCompletion` only if `reason == ""`. If `ReasonMaxTurns` is already set (budget fired on a prior `OnEvent`), the completion signal does NOT overwrite it.
-- Budget-boundary natural completion (the `MaxTurns`-th event arriving with `EndOfTurn=true`) is classified as `ReasonCompletion`, not `ReasonMaxTurns`. The natural `end_turn` signal is a stronger statement of completion than the turn count is; if the future stream-json emitter ticket needs "ran to budget exhaustion" semantics, the switch is one line in `OnEvent`.
+- `OnEndOfTurn` sets `reason = ReasonCompletion` only if `reason == ""`. If `ReasonMaxTurns` is already set (budget fired on a prior `OnEvent` or the same-entry `OnEvent`), the completion signal does NOT overwrite it.
+- **Budget-boundary case is `ReasonMaxTurns`, not `ReasonCompletion` (#512 semantic flip).** When the `MaxTurns`-th assistant entry is itself end-of-turn, the budget wins: the caller invokes `OnEvent(entry)` first (synchronously under `c.mu`, sets `c.reason = ReasonMaxTurns`, fires `Terminate`), and the caller's subsequent `OnEndOfTurn()` is a no-op because the first-terminal-wins guard refuses to overwrite a non-empty reason. The pre-#512 behaviour (boundary classified as `completion`) is gone along with the deleted EOT early-return branch — see [codebase/512.md](../codebase/512.md) for the rationale.
 - Zero value (`""`) means neither terminal event fired — typically a context-cancellation teardown.
 
 ## Concurrency model
@@ -64,11 +65,11 @@ A single `sync.Mutex` guards `count`, `reason`, `fired`, and `killTimer`. All pu
 
 In production:
 
-- `OnEvent` / `OnEndOfTurn` fire from the `tail.Watcher.Run` goroutine.
+- `OnEvent` / `OnEndOfTurn` fire from the agent-run caller's goroutine that drains the `tuidriver.TailJSONL` channel (the same `ptyrunner.Run` goroutine; see [ptyrunner-package.md](ptyrunner-package.md)).
 - The grace timer fires from `time.AfterFunc`'s anonymous goroutine.
 - `Stop` / `Reason` fire from the driver goroutine.
 
-At the budget boundary, `OnEvent` then `OnEndOfTurn` are sequential within the same watcher goroutine (not concurrent), so the "increment then check EndOfTurn" branch in `OnEvent` deterministically suppresses termination when the budget-th event itself carries `EndOfTurn=true`.
+At the budget boundary, `OnEvent` then `OnEndOfTurn` are sequential within the same drain goroutine (not concurrent); `OnEvent` grabs `c.reason = ReasonMaxTurns` first under `c.mu`, and the subsequent `OnEndOfTurn` cannot overwrite a non-empty reason.
 
 ## Error handling
 
@@ -99,24 +100,24 @@ The Counter does not import `os/exec`.
 - `TestOnEvent_SIGKILLFiresAfterGrace` — `GracePeriod=80ms`; Kill not called at grace/2, called exactly once after grace, and the elapsed time between Terminate and Kill is `>= grace`.
 - `TestStop_CancelsPendingSIGKILL` — hit budget, call `Stop`, sleep 3×grace; Kill not called. Second `Stop` is a no-op.
 - `TestStop_WithoutBudgetHit` — Stop with no pending timer; no signals fire.
-- `TestOnEndOfTurn_ReasonCompletion` — fewer than MaxTurns events, last with EndOfTurn=true; `Reason() == ReasonCompletion`, no signals.
-- `TestOnEndOfTurn_DoesNotOverwriteMaxTurns` — budget hit, then OnEndOfTurn called; `Reason()` stays `ReasonMaxTurns` (first-terminal-wins).
-- `TestOnEvent_BudgetBoundaryEndOfTurnIsCompletion` — budget-th event is `EndOfTurn=true`; Terminate not called, `Reason() == ReasonCompletion`.
+- `TestOnEndOfTurn_ReasonCompletion` — fewer than MaxTurns events, caller invokes `OnEndOfTurn`; `Reason() == ReasonCompletion`, no signals.
+- `TestOnEndOfTurn_DoesNotOverwriteMaxTurns` — budget hit, then OnEndOfTurn called; `Reason()` stays `ReasonMaxTurns` (first-terminal-wins). (`TestOnEvent_BudgetBoundaryEndOfTurnIsCompletion` was **deleted** by #512 along with the EOT early-return branch it pinned; `TestOnEvent_SIGTERMFiresExactlyAtBudget` already covers the new boundary behaviour.)
 - `TestReason_ZeroValueBeforeTerminalEvent` — pre-terminal `Reason()` is `""`.
 - `TestTerminateError_DoesNotBlockKill` — Terminate returns ESRCH; Kill still fires after grace.
 - `TestKillError_IsLogged` — Kill returns an error; "kill failed" appears in the slog Warn output via a `syncWriter`-wrapped `strings.Builder` (slog handlers may write concurrently from `time.AfterFunc` and the test goroutine).
 
 Grace-timer tests use `time.Sleep` with millisecond-scale `GracePeriod` values; the suite stays sub-second. No `Clock` interface — per the project's evidence-based-fix-selection principle, defer until flakiness is observed.
 
-## Out of scope (this ticket)
+## Out of scope (this package)
 
-- **Drive integration.** The Counter is consumable by the downstream integration ticket: construct via `New`, wire `OnEvent` / `OnEndOfTurn` to `tail.Config`, wire `Terminate` to `cmd.Process.Signal(syscall.SIGTERM)` and `Kill` to `cmd.Process.Signal(syscall.SIGKILL)`, call `Stop()` after `cmd.Wait` returns, read `Reason()` for the terminal outcome. Integration also needs a session-ID discovery mechanism — claude's session UUID isn't known at spawn time — which is non-trivial and deliberately kept out of this PR.
-- **On-the-wire `exit_reason` trailer.** Surfacing `Reason()` over stream-json belongs to whichever ticket implements the emitter (split from #335).
-- **End-to-end signal verification.** Real claude + real signals will be covered by the integration ticket's tests.
+- **On-the-wire `exit_reason` trailer.** `streamjson.Emitter.SetExitReason(ExitReasonMaxTurns)` is the seam; ptyrunner's Terminate callback drives it.
+- **End-to-end signal verification.** Covered by ptyrunner's integration tests (the budget-hit path is exercised by `TestRun_BudgetHitBeforeEndOfTurn`).
 
 ## Related
 
-- Sibling [jsonl-reader.md](jsonl-reader.md) — `jsonl.Event{Kind, EndOfTurn, …}`, the input shape the Counter consumes.
-- Sibling [jsonl-tail-watcher.md](jsonl-tail-watcher.md) — `tail.Config{OnEvent, OnEndOfTurn, …}`, the callback contract the Counter wires into.
-- Sibling [agentrun-package.md](agentrun-package.md) / [pyry-agent-run-command.md](pyry-agent-run-command.md) — `--max-turns` flag is parsed today but not propagated to interactive claude (the integration ticket will wire it through the Counter instead).
+- Sibling [ptyrunner-package.md](ptyrunner-package.md) — the consumer that drains `tuidriver.TailJSONL` and calls `OnEvent` / `OnEndOfTurn` per entry; routes `Terminate` / `Kill` to `cmd.Process.Signal`. Post-#512 the Counter has a single in-tree caller.
+- Sibling [streamjson-package.md](streamjson-package.md) — `SetExitReason(ExitReasonMaxTurns)` carries the budget classification into the `result` trailer.
+- [tui-driver `pkg/tuidriver/jsonl.go`](https://github.com/pyrycode/tui-driver/blob/main/pkg/tuidriver/jsonl.go) — `JSONLEntry` (post-#512 the `OnEvent` parameter shape) and `IsEndTurn(entry)` (the caller's discriminator for invoking `OnEndOfTurn`).
+- [codebase/512.md](../codebase/512.md) — migration ticket: signature flip, deleted EOT branch, deleted boundary-completion test, boundary semantic shift to `max_turns`.
+- Sibling [pyry-agent-run-command.md](pyry-agent-run-command.md) / [agentrun-package.md](agentrun-package.md) — `--max-turns` flag is parsed and propagated into the ptyrunner Config which constructs the Counter.
 - Parent #329 — Phase A spike that established the assistant-entry counting rule empirically.
