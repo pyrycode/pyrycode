@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 // newTestEmitter returns an Emitter writing to a fresh bytes.Buffer with a
@@ -39,6 +39,45 @@ func newTestEmitter(t *testing.T) (*Emitter, *bytes.Buffer) {
 		t.Fatalf("New: %v", err)
 	}
 	return em, buf
+}
+
+// entry constructs a non-assistant tuidriver.JSONLEntry with RawLine set to
+// rawLine and Type set to t. Mirrors the structural shape produced by
+// ptyrunner.eventToEntry for non-assistant kinds.
+func entry(t string, rawLine string) tuidriver.JSONLEntry {
+	return tuidriver.JSONLEntry{
+		Type:    t,
+		RawLine: []byte(rawLine),
+	}
+}
+
+// assistantEntry constructs an assistant tuidriver.JSONLEntry carrying
+// stopReason, optional usage (nil to omit), and the synthetic non-empty text
+// content tuidriver.IsEndTurn requires when endOfTurn is true. Mirrors the
+// structural shape produced by ptyrunner.eventToEntry for assistant kinds.
+func assistantEntry(rawLine, stopReason string, usage *usageBlock, endOfTurn bool) tuidriver.JSONLEntry {
+	msg := &tuidriver.EntryMessage{StopReason: stopReason}
+	if usage != nil {
+		msg.Raw = map[string]any{
+			"usage": map[string]any{
+				"input_tokens":                float64(usage.InputTokens),
+				"output_tokens":               float64(usage.OutputTokens),
+				"cache_creation_input_tokens": float64(usage.CacheCreationInputTokens),
+				"cache_read_input_tokens":     float64(usage.CacheReadInputTokens),
+			},
+		}
+	}
+	if endOfTurn {
+		msg.Content = []tuidriver.ContentBlock{{
+			Type: "text",
+			Raw:  map[string]any{"text": "x"},
+		}}
+	}
+	return tuidriver.JSONLEntry{
+		Type:    "assistant",
+		Message: msg,
+		RawLine: []byte(rawLine),
+	}
 }
 
 func TestNew_ValidatesConfig(t *testing.T) {
@@ -80,42 +119,35 @@ func TestNew_ValidatesConfig(t *testing.T) {
 func TestEmit_RawPassthrough_PreservesBytesVerbatim(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		ev   jsonl.Event
+		name  string
+		entry tuidriver.JSONLEntry
 	}{
 		{
 			name: "assistant with usage",
-			ev: jsonl.Event{
-				Kind:       "assistant",
-				StopReason: "end_turn",
-				EndOfTurn:  true,
-				Raw:        json.RawMessage(`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":2}}}`),
-				Usage:      &jsonl.UsageBlock{InputTokens: 1, OutputTokens: 2},
-			},
+			entry: assistantEntry(
+				`{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":2}}}`,
+				"end_turn",
+				&usageBlock{InputTokens: 1, OutputTokens: 2},
+				true,
+			),
 		},
 		{
-			name: "tool_use no usage",
-			ev: jsonl.Event{
-				Kind: "tool_use",
-				Raw:  json.RawMessage(`{"type":"tool_use","id":"toolu_abc","name":"Read"}`),
-			},
+			name:  "tool_use no usage",
+			entry: entry("tool_use", `{"type":"tool_use","id":"toolu_abc","name":"Read"}`),
 		},
 		{
-			name: "unrecognised kind preserves non-canonical whitespace",
-			ev: jsonl.Event{
-				Kind: "",
-				Raw:  json.RawMessage(`{"type": "exotic",  "msg":"hi"}`),
-			},
+			name:  "unrecognised kind preserves non-canonical whitespace",
+			entry: entry("", `{"type": "exotic",  "msg":"hi"}`),
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			em, buf := newTestEmitter(t)
 			initLen := buf.Len()
-			if err := em.Emit(tc.ev); err != nil {
+			if err := em.Emit(tc.entry); err != nil {
 				t.Fatalf("Emit: %v", err)
 			}
-			want := append([]byte(nil), tc.ev.Raw...)
+			want := append([]byte(nil), tc.entry.RawLine...)
 			want = append(want, '\n')
 			if !bytes.Equal(buf.Bytes()[initLen:], want) {
 				t.Errorf("raw passthrough:\n got  = %q\n want = %q", buf.Bytes()[initLen:], want)
@@ -127,32 +159,17 @@ func TestEmit_RawPassthrough_PreservesBytesVerbatim(t *testing.T) {
 func TestEmit_AggregatesUsage(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
-	events := []jsonl.Event{
-		{
-			Kind: "assistant", StopReason: "tool_use",
-			Raw:   json.RawMessage(`{"type":"assistant","i":1}`),
-			Usage: &jsonl.UsageBlock{InputTokens: 10, OutputTokens: 1, CacheCreationInputTokens: 100, CacheReadInputTokens: 5},
-		},
-		{
-			Kind: "user",
-			Raw:  json.RawMessage(`{"type":"user"}`),
-		},
-		{
-			Kind: "assistant", StopReason: "tool_use",
-			Raw: json.RawMessage(`{"type":"assistant","i":2}`),
-			// Usage == nil — must not crash; spec #353 allows it.
-		},
-		{
-			Kind: "tool_use",
-			Raw:  json.RawMessage(`{"type":"tool_use"}`),
-		},
-		{
-			Kind: "assistant", StopReason: "end_turn", EndOfTurn: true,
-			Raw:   json.RawMessage(`{"type":"assistant","i":3}`),
-			Usage: &jsonl.UsageBlock{InputTokens: 20, OutputTokens: 3, CacheCreationInputTokens: 200, CacheReadInputTokens: 0},
-		},
+	entries := []tuidriver.JSONLEntry{
+		assistantEntry(`{"type":"assistant","i":1}`, "tool_use",
+			&usageBlock{InputTokens: 10, OutputTokens: 1, CacheCreationInputTokens: 100, CacheReadInputTokens: 5}, false),
+		entry("user", `{"type":"user"}`),
+		// Assistant with no usage — must not crash; spec #353 allows it.
+		assistantEntry(`{"type":"assistant","i":2}`, "tool_use", nil, false),
+		entry("tool_use", `{"type":"tool_use"}`),
+		assistantEntry(`{"type":"assistant","i":3}`, "end_turn",
+			&usageBlock{InputTokens: 20, OutputTokens: 3, CacheCreationInputTokens: 200, CacheReadInputTokens: 0}, true),
 	}
-	for _, ev := range events {
+	for _, ev := range entries {
 		if err := em.Emit(ev); err != nil {
 			t.Fatalf("Emit: %v", err)
 		}
@@ -180,10 +197,16 @@ func TestEmit_NumTurnsCountsAssistantEvents(t *testing.T) {
 	em, buf := newTestEmitter(t)
 	kinds := []string{"assistant", "user", "assistant", "tool_use", "assistant", "system", "tool_use", "assistant", "user", "user", "assistant"}
 	for i, k := range kinds {
-		ev := jsonl.Event{Kind: k, Raw: json.RawMessage(`{}`)}
-		if k == "assistant" && i == len(kinds)-1 {
-			ev.StopReason = "end_turn"
-			ev.EndOfTurn = true
+		var ev tuidriver.JSONLEntry
+		if k == "assistant" {
+			endOfTurn := i == len(kinds)-1
+			stop := ""
+			if endOfTurn {
+				stop = "end_turn"
+			}
+			ev = assistantEntry(`{}`, stop, nil, endOfTurn)
+		} else {
+			ev = entry(k, `{}`)
 		}
 		if err := em.Emit(ev); err != nil {
 			t.Fatalf("Emit[%d]: %v", i, err)
@@ -202,10 +225,7 @@ func TestEmit_LastStopReasonWins(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
 	for _, sr := range []string{"tool_use", "tool_use", "end_turn"} {
-		ev := jsonl.Event{Kind: "assistant", StopReason: sr, Raw: json.RawMessage(`{}`)}
-		if sr == "end_turn" {
-			ev.EndOfTurn = true
-		}
+		ev := assistantEntry(`{}`, sr, nil, sr == "end_turn")
 		if err := em.Emit(ev); err != nil {
 			t.Fatalf("Emit: %v", err)
 		}
@@ -223,7 +243,7 @@ func TestEmit_NoAssistantEvent_StopReasonEmpty(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
 	for _, k := range []string{"user", "tool_use", "tool_result"} {
-		if err := em.Emit(jsonl.Event{Kind: k, Raw: json.RawMessage(`{}`)}); err != nil {
+		if err := em.Emit(entry(k, `{}`)); err != nil {
 			t.Fatalf("Emit: %v", err)
 		}
 	}
@@ -239,10 +259,7 @@ func TestEmit_NoAssistantEvent_StopReasonEmpty(t *testing.T) {
 func TestTrailer_CompletionDefault(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
-	ev := jsonl.Event{
-		Kind: "assistant", StopReason: "end_turn", EndOfTurn: true,
-		Raw: json.RawMessage(`{"type":"assistant"}`),
-	}
+	ev := assistantEntry(`{"type":"assistant"}`, "end_turn", nil, true)
 	if err := em.Emit(ev); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
@@ -258,7 +275,7 @@ func TestTrailer_CompletionDefault(t *testing.T) {
 func TestTrailer_MaxTurns(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
-	if err := em.Emit(jsonl.Event{Kind: "assistant", StopReason: "tool_use", Raw: json.RawMessage(`{"type":"assistant"}`)}); err != nil {
+	if err := em.Emit(assistantEntry(`{"type":"assistant"}`, "tool_use", nil, false)); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	em.SetExitReason(ExitReasonMaxTurns)
@@ -274,7 +291,7 @@ func TestTrailer_MaxTurns(t *testing.T) {
 func TestTrailer_Error(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
-	if err := em.Emit(jsonl.Event{Kind: "assistant", StopReason: "tool_use", Raw: json.RawMessage(`{"type":"assistant"}`)}); err != nil {
+	if err := em.Emit(assistantEntry(`{"type":"assistant"}`, "tool_use", nil, false)); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	em.SetExitReason(ExitReasonError)
@@ -291,7 +308,7 @@ func TestTrailer_DefaultErrorFallback_NoEOT(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
 	// Emit only non-EOT events; do NOT call SetExitReason.
-	if err := em.Emit(jsonl.Event{Kind: "assistant", StopReason: "tool_use", Raw: json.RawMessage(`{}`)}); err != nil {
+	if err := em.Emit(assistantEntry(`{}`, "tool_use", nil, false)); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	if err := em.Close(); err != nil {
@@ -321,7 +338,7 @@ func TestSetExitReason_Idempotent(t *testing.T) {
 func TestClose_Idempotent(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
-	if err := em.Emit(jsonl.Event{Kind: "assistant", StopReason: "end_turn", EndOfTurn: true, Raw: json.RawMessage(`{}`)}); err != nil {
+	if err := em.Emit(assistantEntry(`{}`, "end_turn", nil, true)); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	if err := em.Close(); err != nil {
@@ -343,7 +360,7 @@ func TestEmit_AfterClose_NoOp(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	closedLen := buf.Len()
-	if err := em.Emit(jsonl.Event{Kind: "assistant", Raw: json.RawMessage(`{"late":"event"}`)}); err != nil {
+	if err := em.Emit(assistantEntry(`{"late":"event"}`, "", nil, false)); err != nil {
 		t.Errorf("Emit after Close: %v (want nil no-op)", err)
 	}
 	if buf.Len() != closedLen {
@@ -381,11 +398,11 @@ func TestEmit_WriteErrorIsSticky(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if err := em.Emit(jsonl.Event{Kind: "assistant", Raw: json.RawMessage(`{}`)}); err == nil {
+	if err := em.Emit(assistantEntry(`{}`, "", nil, false)); err == nil {
 		t.Fatal("first Emit: want error, got nil")
 	}
 	// Second Emit must be a silent no-op — sticky writeErr short-circuits.
-	if err := em.Emit(jsonl.Event{Kind: "assistant", Raw: json.RawMessage(`{}`)}); err != nil {
+	if err := em.Emit(assistantEntry(`{}`, "", nil, false)); err != nil {
 		t.Errorf("second Emit: %v (want nil no-op)", err)
 	}
 	// 1 init + 1 Emit write that failed = 2 total Write calls; the second
@@ -492,6 +509,114 @@ func TestTrailer_ConstantFields(t *testing.T) {
 	}
 }
 
+// TestReadUsage_NilMessage covers the absent path where an assistant entry
+// arrives without a Message (malformed envelope). readUsage must report
+// absent (not panic), and the rest of the assistant state machine must still
+// update.
+func TestReadUsage_NilMessage(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	ev := tuidriver.JSONLEntry{
+		Type:    "assistant",
+		Message: nil,
+		RawLine: []byte(`{"type":"assistant"}`),
+	}
+	if err := em.Emit(ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.NumTurns != 1 {
+		t.Errorf("num_turns = %d, want 1", tr.NumTurns)
+	}
+	assertZeroUsage(t, tr)
+}
+
+// TestReadUsage_NoRawMap covers the absent path where Message exists but
+// Message.Raw is nil.
+func TestReadUsage_NoRawMap(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	ev := tuidriver.JSONLEntry{
+		Type:    "assistant",
+		Message: &tuidriver.EntryMessage{StopReason: "tool_use", Raw: nil},
+		RawLine: []byte(`{"type":"assistant"}`),
+	}
+	if err := em.Emit(ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.NumTurns != 1 {
+		t.Errorf("num_turns = %d, want 1", tr.NumTurns)
+	}
+	assertZeroUsage(t, tr)
+}
+
+// TestReadUsage_NoUsageKey covers the absent path where Message.Raw has no
+// "usage" key.
+func TestReadUsage_NoUsageKey(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	ev := tuidriver.JSONLEntry{
+		Type: "assistant",
+		Message: &tuidriver.EntryMessage{
+			StopReason: "tool_use",
+			Raw:        map[string]any{"stop_reason": "tool_use"},
+		},
+		RawLine: []byte(`{"type":"assistant"}`),
+	}
+	if err := em.Emit(ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.NumTurns != 1 {
+		t.Errorf("num_turns = %d, want 1", tr.NumTurns)
+	}
+	assertZeroUsage(t, tr)
+}
+
+// TestReadUsage_NonMapUsage covers the absent path where "usage" exists but
+// is not a JSON object (defensive against malformed claude output).
+func TestReadUsage_NonMapUsage(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	ev := tuidriver.JSONLEntry{
+		Type: "assistant",
+		Message: &tuidriver.EntryMessage{
+			StopReason: "tool_use",
+			Raw:        map[string]any{"usage": "not a map"},
+		},
+		RawLine: []byte(`{"type":"assistant"}`),
+	}
+	if err := em.Emit(ev); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.NumTurns != 1 {
+		t.Errorf("num_turns = %d, want 1", tr.NumTurns)
+	}
+	assertZeroUsage(t, tr)
+}
+
+func assertZeroUsage(t *testing.T, tr trailer) {
+	t.Helper()
+	if tr.Usage.InputTokens != 0 || tr.Usage.OutputTokens != 0 ||
+		tr.Usage.CacheCreationInputTokens != 0 || tr.Usage.CacheReadInputTokens != 0 {
+		t.Errorf("usage totals not all zero: %+v", tr.Usage)
+	}
+}
+
 // lastTrailer decodes the final non-empty line of buf as a trailer struct.
 func lastTrailer(t *testing.T, buf []byte) trailer {
 	t.Helper()
@@ -504,6 +629,40 @@ func lastTrailer(t *testing.T, buf []byte) trailer {
 		t.Fatalf("last line is not a result trailer: %s", lines[len(lines)-1])
 	}
 	return tr
+}
+
+// lineToEntry parses one already-trimmed JSONL line into a tuidriver.JSONLEntry,
+// duplicating tuidriver's package-internal parseEntry/parseMessage logic. This
+// keeps the captured-fixture replay test independent of jsonl.Reader (which
+// #512 deletes). A future tuidriver.ParseEntry export removes this duplication.
+func lineToEntry(line []byte) tuidriver.JSONLEntry {
+	var raw map[string]any
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return tuidriver.JSONLEntry{}
+	}
+	entry := tuidriver.JSONLEntry{Raw: raw, RawLine: bytes.Clone(line)}
+	entry.Type, _ = raw["type"].(string)
+	m, ok := raw["message"].(map[string]any)
+	if !ok {
+		return entry
+	}
+	msg := tuidriver.EntryMessage{Raw: m}
+	msg.ID, _ = m["id"].(string)
+	msg.StopReason, _ = m["stop_reason"].(string)
+	if blocks, ok := m["content"].([]any); ok {
+		msg.Content = make([]tuidriver.ContentBlock, 0, len(blocks))
+		for _, b := range blocks {
+			bm, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			cb := tuidriver.ContentBlock{Raw: bm}
+			cb.Type, _ = bm["type"].(string)
+			msg.Content = append(msg.Content, cb)
+		}
+	}
+	entry.Message = &msg
+	return entry
 }
 
 // TestCapturedFixture_ByteEquivalence replays the non-result lines from
@@ -533,20 +692,13 @@ func TestCapturedFixture_ByteEquivalence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	// Split on '\n' but preserve trailing '\r' if any (jsonl.Reader does).
+	// Split on '\n' but preserve trailing '\r' if any (tuidriver does).
 	allLines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
 	if len(allLines) < 2 {
 		t.Fatalf("fixture has %d lines, want >=2 (events + trailer)", len(allLines))
 	}
 	nonResult := allLines[:len(allLines)-1]
 	fixtureResultLine := allLines[len(allLines)-1]
-
-	// Drive the fixture's non-result, non-init lines through jsonl.Reader so
-	// we feed the emitter the same Event shapes the watcher does in
-	// production. The fixture's leading init line is produced by New itself,
-	// not re-emitted via Emit — feeding it through would duplicate it.
-	src := bytes.NewReader([]byte(strings.Join(nonResult[1:], "\n") + "\n"))
-	rdr := jsonl.NewReader(src, jsonl.Config{})
 
 	buf := &bytes.Buffer{}
 	em, err := New(Config{
@@ -560,15 +712,14 @@ func TestCapturedFixture_ByteEquivalence(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	for {
-		ev, err := rdr.Next()
-		if err != nil {
-			if errors.Is(err, jsonl.ErrLineTooLarge) {
-				t.Fatalf("fixture line too large")
-			}
-			break // io.EOF or unexpected; either way the loop is done
+	// The fixture's leading init line is produced by New itself; skip it
+	// here to avoid duplication. Every other non-result line drives Emit.
+	for _, line := range nonResult[1:] {
+		if line == "" {
+			continue
 		}
-		if err := em.Emit(ev); err != nil {
+		entry := lineToEntry([]byte(line))
+		if err := em.Emit(entry); err != nil {
 			t.Fatalf("Emit: %v", err)
 		}
 	}

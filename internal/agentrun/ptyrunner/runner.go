@@ -363,7 +363,7 @@ func Run(ctx context.Context, cfg Config) error {
 		SessionID: cfg.SessionID,
 		HomeDir:   cfg.HomeDir,
 		OnEvent: func(ev jsonl.Event) {
-			if err := emitter.Emit(ev); err != nil && emitErr == nil {
+			if err := emitter.Emit(eventToEntry(ev)); err != nil && emitErr == nil {
 				emitErr = err
 			}
 			counter.OnEvent(ev)
@@ -415,6 +415,48 @@ func buildArgs(cfg Config) []string {
 		"--model", cfg.Model,
 		"--effort", cfg.Effort,
 	}
+}
+
+// eventToEntry converts a jsonl.Event into the tuidriver.JSONLEntry shape
+// the streamjson.Emitter consumes. Throwaway adapter — #512 deletes it when
+// the watcher pivots to tuidriver.TailJSONL and feeds entries directly.
+//
+// Populates: Type (from Kind), RawLine (from Raw, byte-identical), and a
+// minimal Message{StopReason, Raw{"usage": ...}} for assistant entries with
+// usage. The Raw["usage"] sub-map carries the four counter fields as float64
+// so streamjson.readUsage's type-assertion path matches tuidriver's own
+// parseMessage output. On an end-of-turn event the adapter populates a
+// synthetic Content[]{ContentBlock{Type: "text", Raw: {"text": "x"}}} so
+// tuidriver.IsEndTurn fires (it requires non-empty assistant text). The
+// synthetic content is never re-emitted — Emit's byte passthrough reads
+// RawLine, not Content.
+func eventToEntry(ev jsonl.Event) tuidriver.JSONLEntry {
+	entry := tuidriver.JSONLEntry{
+		Type:    ev.Kind,
+		RawLine: []byte(ev.Raw),
+	}
+	if ev.Kind != "assistant" {
+		return entry
+	}
+	msg := &tuidriver.EntryMessage{StopReason: ev.StopReason}
+	if ev.Usage != nil {
+		msg.Raw = map[string]any{
+			"usage": map[string]any{
+				"input_tokens":                float64(ev.Usage.InputTokens),
+				"output_tokens":               float64(ev.Usage.OutputTokens),
+				"cache_creation_input_tokens": float64(ev.Usage.CacheCreationInputTokens),
+				"cache_read_input_tokens":     float64(ev.Usage.CacheReadInputTokens),
+			},
+		}
+	}
+	if ev.EndOfTurn {
+		msg.Content = []tuidriver.ContentBlock{{
+			Type: "text",
+			Raw:  map[string]any{"text": "x"},
+		}}
+	}
+	entry.Message = msg
+	return entry
 }
 
 // isCtxErr reports whether err originates from ctx-cancel or
