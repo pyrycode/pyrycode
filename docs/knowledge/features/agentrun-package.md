@@ -1,21 +1,16 @@
 # `internal/agentrun` — workdir helpers and shared types for `pyry agent-run`
 
-> **Post-#392 surface.** The parent `internal/agentrun` package now hosts only **workdir helpers** (`ResolveWorkdir` + `EncodeProjectDir`). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive. The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below.
+> **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts a single exported function: `ResolveWorkdir`. The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it.
 
-Stdlib-only helpers for `pyry agent-run`. The parent package's residual responsibility is **workdir encoding** — the macOS `/var → /private/var` realpath rule lives in one place so every consumer (`trust`, the JSONL watcher, `rotation/watcher.go`) shares the same definition of "claude's path key."
+Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibility is **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
 
 ## Public API
 
 ```go
 // ResolveWorkdir returns the resolved absolute path of workdir, mirroring how
 // claude resolves a workdir before reading ~/.claude.json's projects map.
+// Sole remaining caller after #508: internal/agentrun/trust.
 func ResolveWorkdir(workdir string) (string, error)
-
-// EncodeProjectDir returns the dashed directory-name segment claude uses
-// under ~/.claude/projects/ for the given workdir. Chains ResolveWorkdir
-// then maps every byte outside [a-zA-Z0-9] to '-' (matching how claude
-// derives the on-disk projects-dir name; delegates to tuidriver.EncodeCwd).
-func EncodeProjectDir(workdir string) (string, error)
 ```
 
 Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
@@ -30,28 +25,26 @@ Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-
 | `internal/agentrun/streamrunner` | [streamrunner-package.md](streamrunner-package.md) | Stream-json subprocess spawn primitive — the current production spawn until #470 cuts over to `ptyrunner`. |
 | `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector consumed by the JSONL watcher (#348). |
 
-The `trust`, `ptyrunner`, `streamrunner`, and `jsonl` subpackages import `internal/agentrun` for `ResolveWorkdir` / `EncodeProjectDir`; the realpath rule lives in the parent so the spawn / trust / watcher consumers share a single definition. `settings` does not — it has no workdir input (writes to `os.TempDir()`), so it depends on stdlib only.
+Only the `trust` subpackage imports `internal/agentrun` after [#508](../codebase/508.md) (for `ResolveWorkdir` — the `projects[...]` key shape). The `ptyrunner`, `streamrunner`, and `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. `settings` has never imported this parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
 
 ## Key shape
 
 `projects` map keys are the **resolved** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. `ResolveWorkdir` does `filepath.Abs` then `filepath.EvalSymlinks`. The same pattern is used in `internal/sessions/rotation/watcher.go` for path comparison against the platform probe.
 
-## Two output shapes, two helpers
+## Encoder lives in tui-driver
 
-`ResolveWorkdir` produces the resolved abs path (`/private/var/folders/...`) used as the `projects[...]` key inside `~/.claude.json`. `EncodeProjectDir` (#347, encoder generalised in #501) chains it and delegates to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver) to produce the dashed directory-name segment claude uses under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl`. The two encodings are distinct: same input, different transforms for different consumers. Both helpers share the resolve half so the macOS realpath rule lives in one place; only the post-resolve transform differs.
+`ResolveWorkdir` produces the resolved abs path (`/private/var/folders/...`) used as the `projects[...]` key inside `~/.claude.json`. The dashed directory-name segment claude uses under `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` is produced by [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The two encodings are distinct (same logical input, different transforms for different consumers) but they no longer share a wrapper here — pre-[#508](../codebase/508.md) `EncodeProjectDir` chained `ResolveWorkdir` then `EncodeCwd`, which resolved symlinks twice (linux) or did `EvalSymlinks`-then-`F_GETPATH` (darwin). #508 deleted the wrapper; callers that need the dashed name now use `tuidriver.EncodeCwd(workdir)` directly (or `tuidriver.SessionJSONLPath(home, workdir, sessionID)` for the full path), and `tuidriver.EncodeCwd`'s internal `canonicalisePath` handles the realpath rule once (darwin: `F_GETPATH` via fd; linux: `filepath.EvalSymlinks`).
 
-The substitution rule is **every byte outside `[a-zA-Z0-9]` → `-`** (per-byte, no run collapse — idempotent on already-encoded strings because `-` itself is non-alnum and maps to `-`). The rule is verified empirically against claude's on-disk behaviour and canonicalised in `tuidriver.EncodeCwd` as of 2026-05-19. The #347 ticket body specified only `/` → `-`; the architect spec amended to `/` AND `.` from direct observation (workdir segments like `/.pyrycode-worktrees/` encoding to `--pyrycode-worktrees-`); #501 generalised the rule to the full character class after the narrow encoder caused a 55 s wedge in real-claude e2e tests for any workdir containing `_` or ` ` (Go test temp dirs whose names include underscores). Shipping anything narrower than the full per-byte rule produces keys that never match claude's directory names for non-trivial inputs.
+The substitution rule (canonicalised in `tuidriver.EncodeCwd` as of 2026-05-19) is **every byte outside `[a-zA-Z0-9]` → `-`** (per-byte, no run collapse — idempotent on already-encoded strings because `-` itself is non-alnum and maps to `-`). The rule is verified empirically against claude's on-disk behaviour. The #347 ticket body specified only `/` → `-`; the architect spec amended to `/` AND `.` from direct observation (workdir segments like `/.pyrycode-worktrees/` encoding to `--pyrycode-worktrees-`); [#501](../codebase/501.md) generalised the rule to the full character class after the narrow encoder caused a 55 s wedge in real-claude e2e tests for any workdir containing `_` or ` ` (Go test temp dirs whose names include underscores). Shipping anything narrower than the full per-byte rule produces keys that never match claude's directory names for non-trivial inputs.
 
-`EncodeProjectDir` returns `ResolveWorkdir`'s error **unchanged** on failure — `errors.Is(err, fs.ErrNotExist)` continues to work through the chain. Result does NOT include the `~/.claude/projects/` prefix or any `.jsonl` suffix; it is the directory-name segment only.
-
-**Single source of truth.** The encoder lives in `tui-driver/pkg/tuidriver.EncodeCwd` (the package closest to claude's protocol). `EncodeProjectDir` delegates; the parent `internal/agentrun` package no longer maintains its own replacer. Two remaining narrow-replacer call sites in `internal/sessions/reconcile.go` and `internal/e2e/rotation_test.go` still carry the old `/`-and-`.` rule as of #501 — code review flagged them as a follow-up (out of scope for #501); the "single source of truth" property is `internal/agentrun/`-scoped today, not yet project-wide.
+**Single source of truth.** The encoder lives in `tui-driver/pkg/tuidriver.EncodeCwd` (the package closest to claude's protocol). The pre-#508 `EncodeProjectDir` wrapper that delegated to it is gone — there is no `internal/agentrun`-side replacer left. Two narrow-replacer call sites in `internal/sessions/reconcile.go` and `internal/e2e/rotation_test.go` still carry the old `/`-and-`.` rule (flagged as a follow-up since [#501](../codebase/501.md)); the "single source of truth" property is `internal/agentrun/`-scoped today, not yet project-wide.
 
 ## Consumers
 
-- `internal/agentrun/trust` — calls `ResolveWorkdir(workdir)` to produce the `projects[...]` key inside `~/.claude.json`. See [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md).
+- `internal/agentrun/trust` — calls `ResolveWorkdir(workdir)` to produce the `projects[...]` key inside `~/.claude.json`. Sole remaining production caller after [#508](../codebase/508.md); [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks migrating this call off `ResolveWorkdir` so the parent package can be deleted. See [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md).
 - `internal/agentrun/settings` — does **not** import this parent package; writes its tempfile to `os.TempDir()` and is stdlib-only. See [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md).
-- `internal/agentrun/ptyrunner` — passes a `ResolveWorkdir`-resolved path as `Config.WorkDir` (delegated from the trust pre-write's return value).
-- JSONL watcher (#333, fsnotify wrapper #349) — calls `EncodeProjectDir` (#347) to compute the `~/.claude/projects/<encoded-cwd>/` directory name and `ResolveWorkdir` for any `projects[...]` key comparison; consumes [`internal/agentrun/jsonl`](jsonl-reader.md) (#348) for the per-turn line reader + deterministic end-of-turn detector.
+- `internal/agentrun/ptyrunner` — does not import this parent post-[#508](../codebase/508.md). Receives its `Config.WorkDir` from the caller; the trust pre-write supplies the resolved value via `trust.MarkWorkdirTrusted`'s return.
+- JSONL watcher (`internal/agentrun/jsonl/tail`, #333 / #349) — does not import this parent post-[#508](../codebase/508.md). Calls [`tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) directly; the canonicalisation rule and the dashed-name encoding both live inside tui-driver. See [jsonl-tail-watcher.md](jsonl-tail-watcher.md).
 - `internal/sessions/rotation/watcher.go` — uses `ResolveWorkdir` for path comparison against the platform probe.
 
 ## History — deleted surfaces
