@@ -99,11 +99,17 @@ func TestBridge_OutputObserver_NilSkipped(t *testing.T) {
 
 	b := NewBridge(nil)
 	var out bytes.Buffer
-	done, err := b.Attach(strings.NewReader(""), &out)
+
+	// Pipe so the input pump stays parked in pr.Read; this keeps b.output
+	// bound to &out for the assertion window. An immediate-EOF reader would
+	// race the Attach goroutine's cleanup, which clears b.output on EOF.
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	done, err := b.Attach(pr, &out)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	defer func() { <-done }()
 
 	// No observer registered → Write proceeds normally.
 	n, err := b.Write([]byte("hi"))
@@ -122,6 +128,10 @@ func TestBridge_OutputObserver_NilSkipped(t *testing.T) {
 	if _, err := b.Write([]byte("!")); err != nil {
 		t.Fatalf("Write after nil-set: %v", err)
 	}
+
+	// Trigger detach deterministically and wait for the input pump to exit.
+	pw.Close()
+	<-done
 }
 
 func TestBridge_DiscardsWhenUnattached(t *testing.T) {
@@ -146,7 +156,12 @@ func TestBridge_OutputForwardsWhenAttached(t *testing.T) {
 	b := NewBridge(nil)
 	var out bytes.Buffer
 
-	done, err := b.Attach(strings.NewReader(""), &out)
+	// Pipe so the input pump stays parked through the Write/assertion; an
+	// immediate-EOF reader would race the Attach cleanup that clears b.output.
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	done, err := b.Attach(pr, &out)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -158,8 +173,9 @@ func TestBridge_OutputForwardsWhenAttached(t *testing.T) {
 		t.Errorf("out = %q, want hello", got)
 	}
 
-	// `in` was an empty reader — io.Copy on it returns immediately, so the
-	// done channel should fire promptly.
+	// Close the pipe writer to deliver EOF on the input side; done should
+	// then close once the input pump exits and runs detach cleanup.
+	pw.Close()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
