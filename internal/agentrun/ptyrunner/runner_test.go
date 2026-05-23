@@ -246,6 +246,57 @@ func TestRun_NetworkFailureDetected(t *testing.T) {
 	}
 }
 
+func TestRun_MidRun_ModalAndBannerDetection(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		mode      string
+		want      error
+		substring string
+	}{
+		{
+			name:      "trust modal mid-run",
+			mode:      "mid_trust",
+			want:      ErrTrustModalDetected,
+			substring: "#469's MarkWorkdirTrusted",
+		},
+		{
+			name:      "mcp failure banner mid-run",
+			mode:      "mid_mcp_failure",
+			want:      ErrMcpFailureBanner,
+			substring: "MCP failure banner",
+		},
+		{
+			name:      "network failure mid-run",
+			mode:      "mid_network_failure",
+			want:      ErrNetworkFailure,
+			substring: "FailedToOpenSocket",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr bytes.Buffer
+			cfg := helperRunCfg(t, tc.mode, &stdout, &stderr, "")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			err := Run(ctx, cfg)
+			if err == nil {
+				t.Fatalf("Run: got nil, want %v", tc.want)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Run: err = %v, want errors.Is(err, %v)", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.substring) {
+				t.Errorf("err message missing %q substring: %q", tc.substring, err.Error())
+			}
+		})
+	}
+}
+
 func TestRun_CtxCancelDuringSpawn(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer

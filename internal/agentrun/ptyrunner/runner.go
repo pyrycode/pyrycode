@@ -172,23 +172,26 @@ type Config struct {
 // produces, waits for the TUI to reach idle, runs the trust / mcp-failure
 // / network-failure detectors against the post-idle snapshot, submits
 // cfg.PromptBytes via Session.WritePrompt, drains the per-session JSONL
-// via tuidriver.TailJSONL inline, re-emits each entry as stream-json on
-// cfg.Stdout via streamjson.Emitter, and returns once end-of-turn fires or
-// the context is cancelled.
+// AND polls PTY-state transitions via tuidriver.Session.Events, re-emits
+// each entry as stream-json on cfg.Stdout via streamjson.Emitter, and
+// returns once end-of-turn fires or the context is cancelled.
 //
 // Return value contract:
 //
-//   - nil on a clean spawn → idle → WritePrompt → tail-to-end-of-turn cycle.
+//   - nil on a clean spawn → idle → WritePrompt → events-to-end-of-turn cycle.
 //   - nil on operator-shutdown collapse: any ctx-cancel / deadline-exceeded
-//     error from Spawn / WaitUntil / WaitForSessionJSONL / TailJSONL, and
-//     any in-flight emit failure observed during teardown, collapses to
+//     error from Spawn / WaitUntil / WaitForSessionJSONL / Session.Events,
+//     and any in-flight emit failure observed during teardown, collapses to
 //     nil when ctx.Err() is set (same contract streamrunner uses).
 //   - errors.New("ptyrunner: <field> required") on missing required fields.
 //   - fmt.Errorf("ptyrunner: spawn: %w", err) on Spawn failure.
 //   - fmt.Errorf("ptyrunner: wait idle: %w", err) on a non-ctx WaitUntil
 //     error (defensive — WaitUntil only returns ctx.Cause today).
 //   - ErrTrustModalDetected / ErrMcpFailureBanner / ErrNetworkFailure on
-//     the corresponding post-idle detection.
+//     the corresponding post-idle one-shot detection OR on a mid-run
+//     EventKindPty{ModalShown(trust-folder),McpFailureShown,NetworkFailureShown}
+//     transition surfaced on the Session.Events stream. The detection
+//     cadence is tui-driver's DefaultPollInterval (50 ms).
 //   - fmt.Errorf("ptyrunner: write prompt: %w", err) on WritePrompt
 //     failure.
 //   - fmt.Errorf("ptyrunner: emitter: %w", err) on streamjson.New failure
@@ -197,8 +200,8 @@ type Config struct {
 //     and os.UserHomeDir() fails.
 //   - fmt.Errorf("ptyrunner: wait jsonl: %w", err) on a non-ctx
 //     WaitForSessionJSONL failure (e.g. permission denied on stat).
-//   - fmt.Errorf("ptyrunner: tail: %w", err) on TailJSONL open / seek
-//     failure (synchronous, non-ctx).
+//   - fmt.Errorf("ptyrunner: events: %w", err) on Session.Events
+//     synchronous open / seek failure (non-ctx).
 //   - fmt.Errorf("ptyrunner: emit: %w", err) on the first sticky Emit
 //     failure captured during the inline drain (e.g. broken pipe on
 //     cfg.Stdout). Prioritised over a clean drain because the emit
@@ -209,14 +212,14 @@ type Config struct {
 //	cancel() → wg.Wait() → counter.Stop() → emitter.Close() → sess.Close()
 //
 // Each step is load-bearing: cancel() signals the watchdog goroutine
-// (and the tuidriver.TailJSONL goroutine) to exit; wg.Wait() drains the
-// watchdog so no further SetExitReason(ExitReasonError) races with
-// emitter.Close; counter.Stop() cancels the budget's SIGKILL grace
+// (and the tuidriver.Session.Events merge goroutine) to exit; wg.Wait()
+// drains the watchdog so no further SetExitReason(ExitReasonError) races
+// with emitter.Close; counter.Stop() cancels the budget's SIGKILL grace
 // timer; emitter.Close writes the `result` trailer to cfg.Stdout BEFORE
 // sess.Close()'s SIGTERM races with claude's last PTY writes. The
-// tuidriver.TailJSONL channel is drained inline by Run's own goroutine,
-// so wg tracks only the watchdog. Re-ordering these defers silently
-// breaks the invariant — keep them in this LIFO sequence.
+// tuidriver.Session.Events channel is drained inline by Run's own
+// goroutine, so wg tracks only the watchdog. Re-ordering these defers
+// silently breaks the invariant — keep them in this LIFO sequence.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.ClaudeBin == "" {
 		return errors.New("ptyrunner: ClaudeBin required")
@@ -387,23 +390,37 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		return fmt.Errorf("ptyrunner: wait jsonl: %w", werr)
 	}
-	entries, err := tuidriver.TailJSONL(runCtx, jsonlPath, 0)
+	ch, err := sess.Events(runCtx, jsonlPath, 0)
 	if err != nil {
 		if isCtxErr(runCtx, err) {
 			return nil
 		}
-		return fmt.Errorf("ptyrunner: tail: %w", err)
+		return fmt.Errorf("ptyrunner: events: %w", err)
 	}
 
 	var emitErr error
-	for entry := range entries {
-		if eerr := emitter.Emit(entry); eerr != nil && emitErr == nil {
-			emitErr = eerr
-		}
-		counter.OnEvent(entry)
-		if tuidriver.IsEndTurn(entry) {
+loop:
+	for ev := range ch {
+		switch ev.Kind {
+		case tuidriver.EventKindPtyModalShown:
+			if ev.Modal == tuidriver.ModalClassTrustFolder {
+				logger.Warn("ptyrunner: trust modal detected")
+				return ErrTrustModalDetected
+			}
+		case tuidriver.EventKindPtyMcpFailureShown:
+			logger.Warn("ptyrunner: mcp failure banner detected")
+			return ErrMcpFailureBanner
+		case tuidriver.EventKindPtyNetworkFailureShown:
+			logger.Warn("ptyrunner: network failure detected")
+			return ErrNetworkFailure
+		case tuidriver.EventKindJsonlEntry:
+			if eerr := emitter.Emit(ev.Entry); eerr != nil && emitErr == nil {
+				emitErr = eerr
+			}
+			counter.OnEvent(ev.Entry)
+		case tuidriver.EventKindJsonlEndOfTurn:
 			counter.OnEndOfTurn()
-			break
+			break loop
 		}
 	}
 	if runCtx.Err() != nil {
