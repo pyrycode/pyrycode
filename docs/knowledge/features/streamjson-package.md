@@ -1,6 +1,8 @@
 # `internal/agentrun/streamjson` — stdout emitter mirroring `claude -p` shape
 
-Leaf package that turns the parsed `jsonl.Event` stream into the line-delimited stream-json shape the dispatcher already speaks. The dispatcher historically spawned `claude -p --output-format stream-json` and read its stdout; after the agent-run migration it spawns `pyry agent-run --output-format stream-json` and expects byte-equivalent output. `streamjson.Emitter` is the bridge: composes the leading `type:"system" subtype:"init"` envelope on construction (#498), re-emits each `Event.Raw` verbatim, aggregates the per-event `Usage` blocks, and composes a single `type:"result"` trailer line when the run terminates.
+Leaf package that turns the parsed `tuidriver.JSONLEntry` stream into the line-delimited stream-json shape the dispatcher already speaks. The dispatcher historically spawned `claude -p --output-format stream-json` and read its stdout; after the agent-run migration it spawns `pyry agent-run --output-format stream-json` and expects byte-equivalent output. `streamjson.Emitter` is the bridge: composes the leading `type:"system" subtype:"init"` envelope on construction (#498), re-emits each `entry.RawLine` verbatim, aggregates the per-entry `usage` block via the private `readUsage` walk, and composes a single `type:"result"` trailer line when the run terminates.
+
+After #511 `Emit` consumes `github.com/pyrycode/tui-driver/pkg/tuidriver.JSONLEntry` directly; the watcher's `OnEvent func(jsonl.Event)` Config field is still alive (until #512 pivots it onto `tuidriver.TailJSONL`), so `ptyrunner/runner.go` carries a throwaway `eventToEntry` adapter at the closure call site.
 
 ## Public API
 
@@ -29,11 +31,13 @@ type Config struct {
 // is empty, Tools is nil, Model is empty, or the init write fails (#498).
 func New(cfg Config) (*Emitter, error)
 
-// Emit re-emits ev.Raw + '\n', aggregating ev.Usage and counting assistant
-// entries. Safe for concurrent use. Sticky write error: once a write fails,
-// subsequent calls no-op (returning nil) so the watcher can drain to EOT or
-// ctx cancel without thrashing a broken pipe. Emit after Close is a no-op.
-func (e *Emitter) Emit(ev jsonl.Event) error
+// Emit re-emits entry.RawLine + '\n', aggregating per-entry usage (private
+// readUsage walks Message.Raw["usage"]) and counting assistant entries
+// (entry.Type == "assistant"). End-of-turn is read via tuidriver.IsEndTurn.
+// Safe for concurrent use. Sticky write error: once a write fails, subsequent
+// calls no-op (returning nil) so the watcher can drain to EOT or ctx cancel
+// without thrashing a broken pipe. Emit after Close is a no-op.
+func (e *Emitter) Emit(entry tuidriver.JSONLEntry) error
 
 // SetExitReason overrides the default exit-reason classification used by
 // Close. Pluggable seam for the future #334 budget integration (its
@@ -103,14 +107,16 @@ Both `subtype` and `terminal_reason` are emitted: the v1 dispatcher reads `r.sub
 
 ### Usage aggregation
 
-For every `Event` with `Usage != nil` (i.e. assistant lines that carry a `message.usage` block), the four `int` fields are summed across the run. The trailer's `usage` object always emits all four keys with their integer totals — never `omitempty`. A missing key would be a different wire shape than zero.
+For every `JSONLEntry` whose `Message.Raw["usage"]` is a `map[string]any` (i.e. assistant lines that carry a `message.usage` block), the private `readUsage` helper extracts the four counter fields (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`) and `Emit` sums them into the run-wide totals. The trailer's `usage` object always emits all four keys with their integer totals — never `omitempty`. A missing key would be a different wire shape than zero.
 
-Extra usage fields claude carries (`server_tool_use`, `service_tier`, `cache_creation`, `iterations`, `speed`, `inference_geo`) are NOT emitted; `jsonl.UsageBlock` (the producer side, #353) only mirrors the four ints. Expand that struct in a sibling ticket if a consumer needs the richer subset.
+`readUsage` returns `(usageBlock, false)` (and the aggregator skips the entry) when the entry has no `Message`, no `Message.Raw`, no `"usage"` key, or a non-map value at `"usage"` — same observable behaviour as the pre-#511 `ev.Usage == nil` gate. `encoding/json` decodes JSON numbers into `map[string]any` as `float64`, not `int` — the helper type-asserts to `float64` then truncates; asserting straight to `int` would silently zero every entry (the pyrycode-side bug class #511's "Patterns established" calls out explicitly).
+
+Extra usage fields claude carries (`server_tool_use`, `service_tier`, `cache_creation`, `iterations`, `speed`, `inference_geo`) are NOT emitted. A future `tuidriver.Usage(entry)` upstream helper would let consumers share one implementation; for now `readUsage` lives in `streamjson`.
 
 ## Raw passthrough
 
-- One `Event` → one `ev.Raw + '\n'` write. No re-encoding under any circumstance — that would break byte-equivalence with `claude -p`. `Event.Raw` already has the trailing `'\n'` stripped by the reader (`internal/agentrun/jsonl/reader.go`); the emitter re-appends it.
-- All `Kind` values flow through, including `Kind == ""` (unrecognised types). The forward-compatibility story is identical to the reader's: new claude line types land in the `""` bucket and survive in `Raw` until the reader's whitelist widens.
+- One `JSONLEntry` → one `entry.RawLine + '\n'` write. **Re-marshalling from `entry.Raw` (the `map[string]any`) is explicitly disallowed** — it would normalise key order and whitespace, breaking byte-equivalence with `claude -p`. `RawLine`'s tuidriver contract: "byte-identical to what parseEntry consumed, with the trailing `\r\n` or `\n` stripped"; the emitter re-appends `'\n'`.
+- All `entry.Type` values flow through, including `Type == ""` (unrecognised envelopes). The forward-compatibility story is identical to the underlying reader's: new claude line types land in the `""` bucket and survive in `RawLine` until tuidriver's whitelist widens.
 - No newline insertion inside the emitted JSON object — `TestEmit_RawPassthrough_PreservesBytesVerbatim` pins this by feeding a non-canonical whitespace pattern (`{"type": "user",  "msg":"hi"}` with double space) and asserting it round-trips byte-for-byte.
 
 ## Concurrency model
@@ -121,7 +127,7 @@ One mutex, three call sites:
 - `SetExitReason` fires from the budget Counter's timer goroutine in #334's future integration.
 - `Close` fires from the driver goroutine after both have stopped.
 
-The mutex is held only for the duration of a single `Emit` write + state update or a single `Close` write + flag flip. No nested locks. `Emit` after `Close` no-ops (returns nil) so a spurious late event from a slow watcher unwind cannot panic.
+The mutex is held only for the duration of a single `Emit` write + state update or a single `Close` write + flag flip. No nested locks. `Emit` after `Close` no-ops (returns nil) so a spurious late entry from a slow watcher unwind cannot panic. `readUsage` is a pure function with no shared state.
 
 ## Error model
 
@@ -133,7 +139,7 @@ The mutex is held only for the duration of a single `Emit` write + state update 
 | `New(Config{Writer: nil})` / empty `SessionID` / empty `Cwd` / nil `Tools` / empty `Model` | Returns `(nil, err)`; no Emitter constructed |
 | `Writer.Write` fails during the init synthesis inside `New` | Returns `(nil, fmt.Errorf("streamjson: emit init: %w", err))`; no Emitter constructed (pinned by `TestNew_InitWriteFailureReturnsError`) |
 
-The emitter MUST NOT log Event content. The package doc-comment is load-bearing — logs only counts, durations, and error messages; never `Event.Raw` bytes nor per-event `Usage` values. Mirrors the `internal/agentrun/jsonl` invariant.
+The emitter MUST NOT log entry content. The package doc-comment is load-bearing — logs only counts, durations, and error messages; never `entry.RawLine` bytes nor per-entry usage values. Mirrors the upstream tuidriver invariant.
 
 ## Wire-up (`cmd/pyry/agent_run.go`)
 
@@ -143,7 +149,7 @@ The `runAgentRun` flow after #354:
 2. **Mint a UUIDv4** via `newSessionUUID` (mirrors `internal/conversations/id.go:NewID`; this is a leaf call site, not extracted).
 3. Construct `streamjson.Emitter{Writer: stdout, SessionID: <uuid>}`.
 4. `ctx, cancel := signal.NotifyContext(SIGTERM, SIGINT)`. End-of-turn → `cancel`: this propagates EOT through Drive's ctx → claude SIGTERM → child exit → Drive returns nil → errgroup unblocks.
-5. Construct `tail.Watcher` with `OnEvent: func(ev) { _ = emitter.Emit(ev) }`, `OnEndOfTurn: cancel`.
+5. Construct `tail.Watcher` with `OnEvent: func(ev) { _ = emitter.Emit(eventToEntry(ev)) }` (after #511; `eventToEntry` is a throwaway adapter in `runner.go` that wraps `jsonl.Event` into `tuidriver.JSONLEntry` until #512 pivots the watcher to `tuidriver.TailJSONL`), `OnEndOfTurn: cancel`.
 6. `errgroup.WithContext(ctx)` — `g.Go(watcher.Run)`, `g.Go(agentrun.Drive)`. Both share `gctx`; first error cancels both.
 7. `runErr := g.Wait()` → `classifyForEmitter(em, runErr)` → `emitter.Close()` → return wrapped `runErr` (or nil on operator ctx-cancel).
 
@@ -168,7 +174,8 @@ The `runAgentRun` flow after #354:
 - `TestNew_InitLineKeyOrderMatchesFixture` — byte-compares the synthesised init against `testdata/captured_run.jsonl:1`. Pins the `initLine` struct's tag declaration order; a future reorder fails locally instead of only under `make e2e-realclaude` (#498).
 - `TestNew_EmptyToolsMarshalsAsEmptyArray` — `Tools: []string{}` produces `"tools":[]` (never `"tools":null`); guards against a future nil-slice regression (#498).
 - `TestNew_InitWriteFailureReturnsError` — `failingWriter` rejects the first write; `New` returns `(nil, err)` with `errors.Is(err, w.err)` and `"streamjson: emit init"` substring (#498).
-- `TestCapturedFixture_ByteEquivalence` — replays `testdata/captured_run.jsonl` (the synthesised fixture matching captured `claude -p` shape) through `Emit`+`Close`; asserts non-result lines byte-equivalent (including the init at `out[0]`, which the producer-side synthesis emits from `Config`), plus structural equality on `type`/`subtype`/`is_error`/`num_turns`/`stop_reason`/`terminal_reason` and on all four `usage` integer fields. After #498 the fixture's first line is fed via `Config.{Cwd,Tools,Model,SessionID}` (not through `Emit`) — feeding it through the reader would duplicate it; the test feeds `nonResult[1:]` to the reader. Known-expected diff list documented inline (timestamps, session ids, claude-only fields like `modelUsage`/`permission_denials`/`uuid`/`api_error_status`/`duration_api_ms`, extra usage fields).
+- `TestCapturedFixture_ByteEquivalence` — replays `testdata/captured_run.jsonl` (the synthesised fixture matching captured `claude -p` shape) through `Emit`+`Close`; asserts non-result lines byte-equivalent (including the init at `out[0]`, which the producer-side synthesis emits from `Config`), plus structural equality on `type`/`subtype`/`is_error`/`num_turns`/`stop_reason`/`terminal_reason` and on all four `usage` integer fields. After #498 the fixture's first line is fed via `Config.{Cwd,Tools,Model,SessionID}` (not through `Emit`) — feeding it through `Emit` would duplicate it; the test loop iterates `nonResult[1:]`. After #511 the loop drops `jsonl.NewReader` and uses a local `lineToEntry` helper that mirrors tuidriver's package-internal `parseEntry`/`parseMessage` (~25 LOC of duplication accepted with a one-line comment pointing at the future `tuidriver.ParseEntry` export). Known-expected diff list documented inline (timestamps, session ids, claude-only fields like `modelUsage`/`permission_denials`/`uuid`/`api_error_status`/`duration_api_ms`, extra usage fields).
+- `TestReadUsage_NilMessage` / `_NoRawMap` / `_NoUsageKey` / `_NonMapUsage` (#511) — pin the four absent paths of the private `readUsage` helper: each emits one assistant entry with the matrix and asserts `tr.NumTurns == 1` (state machine still updates) plus all four usage totals zero. `_NonMapUsage` is the most defensive — it asserts the `.(map[string]any)` assertion doesn't panic on a string value.
 
 `cmd/pyry/agent_run_test.go` extends:
 
@@ -178,14 +185,15 @@ The `runAgentRun` flow after #354:
 
 ## Open questions / out of scope
 
-- **Final assistant text in `result`.** Always `""`. v1 dispatcher reads `r.result || ""` so an empty value is fine. If a downstream consumer requires the final text (logs, retry classification), the emitter can grow a `lastAssistantText` field by re-parsing the last `Kind == "assistant"` `Event.Raw` on Close. Deferred until observed.
+- **Final assistant text in `result`.** Always `""`. v1 dispatcher reads `r.result || ""` so an empty value is fine. If a downstream consumer requires the final text (logs, retry classification), the emitter can grow a `lastAssistantText` field by re-parsing the last `entry.Type == "assistant"` `RawLine` on Close. Deferred until observed.
 - **`duration_api_ms`.** Claude emits both wall and API-portion durations. Pyry has no clean way to measure the API portion separately. Omit; the dispatcher can derive if it starts caring.
-- **Richer `usage` fields.** Pyry's `jsonl.UsageBlock` mirrors only the four ints. Expand at the producer (#353's struct) before the emitter, since the source data is what's missing.
-- **#334 budget integration wire-up.** This ticket added the `SetExitReason(ExitReasonMaxTurns)` setter; the actual call site lives in the budget Counter's Terminate hook in a sibling integration ticket.
+- **`tuidriver.Usage(entry)` upstream accessor.** `readUsage` lives in `streamjson` as of #511 because it's the only consumer of `Message.Raw["usage"]` so far. If a second consumer surfaces (likely `budget.Counter` after #512), promote the helper into tui-driver so both share one implementation.
+- **#334 budget integration wire-up.** The `SetExitReason(ExitReasonMaxTurns)` setter is the seam; the actual call site lives in the budget Counter's Terminate hook in a sibling integration ticket.
 
 ## Related
 
-- [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348, #353). Producer side of the `Event` contract: `Event.Raw` / `Event.Kind` / `Event.Usage`.
-- [jsonl-tail-watcher.md](jsonl-tail-watcher.md) — `internal/agentrun/jsonl/tail` (#349). The watcher whose `OnEvent` callback fires `Emit` and whose `OnEndOfTurn` fires the parent-ctx `cancel`.
+- [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348, #353). Producer-side `Event` contract. Will be deleted by #512; `streamjson` no longer consumes it after #511.
+- [jsonl-tail-watcher.md](jsonl-tail-watcher.md) — `internal/agentrun/jsonl/tail` (#349, #501, #509). The watcher whose `OnEvent` callback drives `Emit`; the `OnEvent func(jsonl.Event)` signature is preserved through #511 and migrates to `tuidriver.JSONLEntry` under #512 alongside the watcher's pivot to `tuidriver.TailJSONL`.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that constructs and drives the Emitter.
-- [budget-package.md](budget-package.md) — `internal/agentrun/budget` (#334). Future caller of `SetExitReason(ExitReasonMaxTurns)`.
+- [budget-package.md](budget-package.md) — `internal/agentrun/budget` (#334). Future caller of `SetExitReason(ExitReasonMaxTurns)`. Still on `jsonl.Event` through #511; #512 migrates it.
+- [#511](../codebase/511.md) — `streamjson.Emitter` migration from `jsonl.Event` to `tuidriver.JSONLEntry` and the throwaway `eventToEntry` adapter in `ptyrunner/runner.go`.
