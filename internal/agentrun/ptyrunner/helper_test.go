@@ -45,6 +45,18 @@ func TestMain(m *testing.M) {
 //                        GO_PTYRUNNER_JSONL_BODY to GO_PTYRUNNER_JSONL_PATH
 //                        (atomic-append, 0600). The body's lines drive the
 //                        parent's tail.Watcher + streamjson.Emitter.
+//   - "mid_trust":       write ❯ + space (IsIdle, no modal anchor at start),
+//                        then once stdin's first byte arrives (WritePrompt
+//                        landed), write the trust-folder modal anchor +
+//                        ❯ to stdout. The merge loop's 50 ms poll detects
+//                        the rising edge and emits EventKindPtyModalShown
+//                        with Modal=ModalClassTrustFolder.
+//   - "mid_mcp_failure": same shape as mid_trust but the post-stdinSeen
+//                        write is the "1 MCP server failed" banner. The
+//                        merge loop emits EventKindPtyMcpFailureShown.
+//   - "mid_network_failure": same shape, post-stdinSeen write is the
+//                        FailedToOpenSocket anchor. The merge loop emits
+//                        EventKindPtyNetworkFailureShown.
 //
 // All modes install a SIGTERM handler so Session.Close()'s
 // SIGTERM→grace→SIGKILL sequence resolves on the SIGTERM step rather
@@ -72,6 +84,8 @@ func runHelper() {
 		time.Sleep(5 * time.Second)
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	case "jsonl":
+		fmt.Fprint(os.Stdout, idleGlyph+" ")
+	case "mid_trust", "mid_mcp_failure", "mid_network_failure":
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_PTYRUNNER_HELPER_MODE: %q\n", mode)
@@ -141,6 +155,47 @@ func runHelper() {
 			}
 			_ = f.Sync()
 			_ = f.Close()
+		}()
+	}
+
+	if mode == "mid_trust" || mode == "mid_mcp_failure" || mode == "mid_network_failure" {
+		path := os.Getenv("GO_PTYRUNNER_JSONL_PATH")
+		if path == "" {
+			fmt.Fprintln(os.Stderr, mode+": requires GO_PTYRUNNER_JSONL_PATH")
+			os.Exit(98)
+		}
+		var anchor string
+		switch mode {
+		case "mid_trust":
+			anchor = "Quicksafetycheck" + idleGlyph + " "
+		case "mid_mcp_failure":
+			anchor = "1 MCP server failed " + idleGlyph + " "
+		case "mid_network_failure":
+			anchor = "FailedToOpenSocket " + idleGlyph + " "
+		}
+		go func() {
+			select {
+			case <-stdinSeen:
+			case <-time.After(20 * time.Second):
+				fmt.Fprintln(os.Stderr, mode+": stdin first-byte timeout")
+				return
+			}
+			// Create the per-session JSONL file (empty) so the
+			// parent's WaitForSessionJSONL resolves and Session.Events
+			// opens the unified stream. The mid-run anchor write
+			// below then drives the Events merge loop's PTY axis.
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				fmt.Fprintf(os.Stderr, mode+": mkdir %s: %v\n", filepath.Dir(path), err)
+				return
+			}
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, mode+": open %s: %v\n", path, err)
+				return
+			}
+			_ = f.Close()
+			fmt.Fprint(os.Stdout, anchor)
+			_ = os.Stdout.Sync()
 		}()
 	}
 
