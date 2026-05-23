@@ -19,7 +19,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 )
 
@@ -105,14 +104,10 @@ func New(cfg Config) (*Watcher, error) {
 		home = h
 	}
 
-	// Claude resolves symlinks (macOS /var → /private/var) before encoding.
-	// tuidriver.SessionJSONLPath is a pure join; the resolution step has to
-	// happen here so the encoded directory matches what claude writes to.
-	resolved, err := agentrun.ResolveWorkdir(cfg.Workdir)
-	if err != nil {
-		return nil, fmt.Errorf("tail: resolve workdir: %w", err)
-	}
-	expectedPath := tuidriver.SessionJSONLPath(home, resolved, cfg.SessionID)
+	// tuidriver.SessionJSONLPath canonicalises cfg.Workdir internally
+	// (darwin: F_GETPATH; linux: EvalSymlinks) before encoding, matching
+	// how claude itself derives the on-disk projects-dir name.
+	expectedPath := tuidriver.SessionJSONLPath(home, cfg.Workdir, cfg.SessionID)
 	dir := filepath.Dir(expectedPath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("tail: mkdir %s: %w", dir, err)

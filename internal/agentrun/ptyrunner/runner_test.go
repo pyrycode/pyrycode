@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -14,8 +13,6 @@ import (
 	"time"
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
-
-	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
 const testSessionID = "6fc6d062-1972-4457-9bfd-6b47c7e77e11"
@@ -32,11 +29,7 @@ func helperRunCfg(t *testing.T, mode string, stdout, stderr *bytes.Buffer, jsonl
 	t.Helper()
 	home := t.TempDir()
 	workdir := t.TempDir()
-	encoded, err := agentrun.EncodeProjectDir(workdir)
-	if err != nil {
-		t.Fatalf("EncodeProjectDir: %v", err)
-	}
-	jsonlPath := filepath.Join(home, ".claude", "projects", encoded, testSessionID+".jsonl")
+	jsonlPath := tuidriver.SessionJSONLPath(home, workdir, testSessionID)
 	env := []string{
 		"GO_PTYRUNNER_HELPER=1",
 		"GO_PTYRUNNER_HELPER_MODE=" + mode,

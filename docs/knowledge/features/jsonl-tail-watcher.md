@@ -34,8 +34,9 @@ Two exported types, three exported funcs/methods. Caller MUST call `Run` after `
 New(cfg):
   validate Workdir / SessionID / OnEvent / OnEndOfTurn non-zero
   home         = cfg.HomeDir or os.UserHomeDir()
-  resolved     = agentrun.ResolveWorkdir(cfg.Workdir)            // macOS realpath invariant
-  expectedPath = tuidriver.SessionJSONLPath(home, resolved, SessionID)
+  expectedPath = tuidriver.SessionJSONLPath(home, cfg.Workdir, SessionID)
+                                                                 //   ↳ EncodeCwd
+                                                                 //     ↳ canonicalisePath (darwin F_GETPATH / linux EvalSymlinks)
   dir          = filepath.Dir(expectedPath)
   os.MkdirAll(dir, 0o700)                                        // first-run-in-this-workdir case
   fsw = fsnotify.NewWatcher(); fsw.Add(dir)
@@ -53,7 +54,7 @@ Run(ctx):
 
 `openAndDrain` opens the file (no bounded retry — `WaitForSessionJSONL` already guaranteed appearance), seeks to `StartOffset > 0`, constructs the `jsonl.Reader` against the live `*os.File`, and drains. `drain` calls `reader.Next()` in a loop, invoking `OnEvent` on each event; on `EndOfTurn=true` it invokes `OnEndOfTurn` and returns `(done=true, nil)`. On `io.EOF` it returns `(done=false, nil)` — the file hasn't grown yet, wait for the next fsnotify event. Any non-EOF reader error bails the Run.
 
-`agentrun.ResolveWorkdir` upstream of `tuidriver.SessionJSONLPath` is load-bearing: `SessionJSONLPath` is a pure join and `tuidriver.EncodeCwd` silently encodes the input as-passed on resolution failure (no error). Keeping the explicit `ResolveWorkdir` call preserves (a) the macOS realpath invariant (`/var/folders/...` → `/private/var/folders/...` before encoding, matching what claude writes to) and (b) the pre-existing fail-closed error contract on missing workdirs.
+Canonicalisation is delegated to `tuidriver.EncodeCwd` (called inside `tuidriver.SessionJSONLPath`): darwin uses `F_GETPATH` via the open fd, linux uses `filepath.EvalSymlinks`. The pre-[#508](../codebase/508.md) shape called `agentrun.ResolveWorkdir(cfg.Workdir)` upstream as a fail-closed guard against missing-workdir typos; [#508](../codebase/508.md) deleted that explicit call after auditing that the upstream `ptyrunner` caller already pre-checks the workdir existence (`cmd.Start` fails on a non-existent `Dir: cfg.WorkDir` before `tail.New` is reached), so the eager check was defending against a structurally impossible state. The single canonicalisation happens once inside `EncodeCwd`; on resolution failure (which cannot reach this code path in production), `EncodeCwd` encodes the input as-passed and `MkdirAll` would create a wrong-named directory — surfaced downstream as `WaitForSessionJSONL` blocking until ctx-cancel rather than an early `fs.ErrNotExist`. See [codebase/508.md](../codebase/508.md) § Lessons learned for the audit that justified removing the dual layer.
 
 ## Project-directory existence — resolved
 
@@ -94,7 +95,7 @@ Same `MUST NOT log file contents at any layer` stance as the parser and the agen
 
 ## Tests
 
-`internal/agentrun/jsonl/tail/watcher_test.go` — eight test functions, all `t.Parallel()`. The `startWatcher(t, cfg)` helper runs `Run` in a goroutine and registers a `t.Cleanup` that cancels and asserts Run exits within 2s. An `eventRecorder` (mutex-wrapped) collects `OnEvent` invocations and end-turn fires; `waitForEndOfTurn` polls the recorder against a deadline rather than `time.Sleep`-then-check. The `expectedEncodedDir(t, home, workdir, sessionID)` helper mirrors the production-code path computation exactly (`filepath.Dir(tuidriver.SessionJSONLPath(home, ResolveWorkdir(workdir), sessionID))`) so test and watcher agree on the directory by construction.
+`internal/agentrun/jsonl/tail/watcher_test.go` — eight test functions, all `t.Parallel()`. The `startWatcher(t, cfg)` helper runs `Run` in a goroutine and registers a `t.Cleanup` that cancels and asserts Run exits within 2s. An `eventRecorder` (mutex-wrapped) collects `OnEvent` invocations and end-turn fires; `waitForEndOfTurn` polls the recorder against a deadline rather than `time.Sleep`-then-check. The `expectedEncodedDir(t, home, workdir, sessionID)` helper mirrors the production-code path computation exactly (`filepath.Dir(tuidriver.SessionJSONLPath(home, workdir, sessionID))` since [#508](../codebase/508.md)) so test and watcher agree on the directory by construction.
 
 | Test | Pins |
 |---|---|
@@ -124,7 +125,7 @@ Same `MUST NOT log file contents at any layer` stance as the parser and the agen
 ## Related
 
 - [jsonl-reader.md](jsonl-reader.md) — the parser this watcher drives. To be replaced by `tuidriver.TailJSONL` in [#512](https://github.com/pyrycode/pyrycode/issues/512).
-- [agentrun-package.md](agentrun-package.md) — owns `ResolveWorkdir` (still called from `New` upstream of `tuidriver.SessionJSONLPath`) and the now-historical `EncodeProjectDir` (#347, since #501 delegated to `tuidriver.EncodeCwd`).
+- [agentrun-package.md](agentrun-package.md) — owns `ResolveWorkdir` (no longer called from this watcher post-[#508](../codebase/508.md); sole remaining caller is `agentrun/trust`). The historical `EncodeProjectDir` wrapper (#347 → delegated in [#501](../codebase/501.md) → deleted in [#508](../codebase/508.md)) is gone; the encoder lives directly in `tuidriver.EncodeCwd`.
 - [tui-driver](https://github.com/pyrycode/tui-driver) `pkg/tuidriver/jsonl.go` — library home of `SessionJSONLPath` + `WaitForSessionJSONL` + `DefaultPollInterval = 50ms` (tui-driver #58, commit `a2edf4f`, 2026-05-22).
 - [codebase/509.md](../codebase/509.md) — migration ticket: path resolution + file-appear wait delegated to tui-driver.
 - [codebase/501.md](../codebase/501.md) — encoder delegation prerequisite (per-byte rule now lives in `tuidriver.EncodeCwd`).

@@ -5,11 +5,10 @@ package realclaude
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 // distinctivePrompt is an ASCII-only token unlikely to appear in any system
@@ -73,17 +72,13 @@ func TestRealClaude_PromptFidelity(t *testing.T) {
 }
 
 // jsonlPathFor recomputes the JSONL path for failure-message diagnostics.
-// Returns a "<unresolved: ...>" sentinel on error rather than failing the
-// test — the assertion has already failed; we just want the best path string
-// we can produce.
+// Returns a "<unresolved home: ...>" sentinel when $HOME is unresolvable
+// rather than failing the test — the assertion has already failed; we just
+// want the best path string we can produce.
 func jsonlPathFor(workdir, sessionID string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "<unresolved home: " + err.Error() + ">"
 	}
-	enc, err := agentrun.EncodeProjectDir(workdir)
-	if err != nil {
-		return "<unresolved encoding: " + err.Error() + ">"
-	}
-	return filepath.Join(home, ".claude", "projects", enc, sessionID+".jsonl")
+	return tuidriver.SessionJSONLPath(home, workdir, sessionID)
 }

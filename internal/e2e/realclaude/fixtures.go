@@ -19,7 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 )
 
@@ -115,7 +116,7 @@ func WithWorktreeAuthenticated(t *testing.T) string {
 	return dir
 }
 
-// ReadJSONL parses <HOME>/.claude/projects/<EncodeProjectDir(workdir)>/<sessionID>.jsonl
+// ReadJSONL parses tuidriver.SessionJSONLPath(<HOME>, workdir, sessionID)
 // and returns every event. Empty file → empty slice; open or parse
 // failures call t.Fatalf with the resolved path embedded.
 func ReadJSONL(t *testing.T, workdir, sessionID string) []JSONLEntry {
@@ -363,11 +364,7 @@ func resolveAndOpenJSONL(workdir, sessionID string) (*os.File, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve HOME: %w", err)
 	}
-	enc, err := agentrun.EncodeProjectDir(workdir)
-	if err != nil {
-		return nil, "", fmt.Errorf("encode workdir %q: %w", workdir, err)
-	}
-	path := filepath.Join(home, ".claude", "projects", enc, sessionID+".jsonl")
+	path := tuidriver.SessionJSONLPath(home, workdir, sessionID)
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, path, fmt.Errorf("open %s: %w", path, err)
