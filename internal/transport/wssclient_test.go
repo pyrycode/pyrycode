@@ -811,7 +811,11 @@ func TestFatalCloseCodes_HaltsReconnect_RacingSendError(t *testing.T) {
 		reconnectMax:     50 * time.Millisecond,
 		stabilityReset:   1 * time.Second,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 15s allowances for -race + parallel self-contention on macOS; see #523.
+	// The original 5s budget raced the goroutine's connectErr send against
+	// ctx.Done() under -race -count=N parallelism (test-side, not a
+	// production-side grace-expiry).
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -850,16 +854,26 @@ func TestFatalCloseCodes_HaltsReconnect_RacingSendError(t *testing.T) {
 
 	relay.TriggerClose()
 
+	// On ctx.Done, give the Connect goroutine a small grace to publish its
+	// buffered return value — under heavy -race contention the goroutine's
+	// send to connectErr can land just after ctx.Done becomes ready, and
+	// Go's select then picks ctx.Done in the outer arm even though Connect
+	// returned ErrFatalClose successfully (see #523).
+	var err error
 	select {
-	case err := <-connectErr:
-		if !errors.Is(err, ErrFatalClose) {
-			t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
-		}
-		if status := websocket.CloseStatus(err); status != websocket.StatusCode(4409) {
-			t.Errorf("CloseStatus(err) = %d, want 4409", status)
-		}
+	case err = <-connectErr:
 	case <-ctx.Done():
-		t.Fatal("Connect did not return before ctx deadline")
+		select {
+		case err = <-connectErr:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("Connect did not return before ctx deadline")
+		}
+	}
+	if !errors.Is(err, ErrFatalClose) {
+		t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
+	}
+	if status := websocket.CloseStatus(err); status != websocket.StatusCode(4409) {
+		t.Errorf("CloseStatus(err) = %d, want 4409", status)
 	}
 
 	if got := relay.connCount.Load(); got != 1 {
