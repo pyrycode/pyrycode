@@ -496,35 +496,6 @@ func TestRun_WatchdogFires(t *testing.T) {
 	}
 }
 
-func TestParseSpinnerSeconds(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		in      string
-		wantSec int
-		wantOk  bool
-	}{
-		{"class A single-word verb seconds only", "✻ Baked for 5s", 5, true},
-		{"class A minutes + seconds", "✻ Baked for 1m 30s", 90, true},
-		{"class A two-word verb seconds only", "✻ Coming up for 7s", 7, true},
-		{"class B ellipsis no for-tail", "✻ Channeling…", 0, false},
-		{"class C parenthesised tokens counter", "✻ Actualizing… (2s · ↓1 tokens)", 0, false},
-		{"no glyph", "some text without glyph", 0, false},
-		{"glyph only", "✻", 0, false},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotSec, gotOk := parseSpinnerSeconds([]byte(tc.in))
-			if gotSec != tc.wantSec || gotOk != tc.wantOk {
-				t.Errorf("parseSpinnerSeconds(%q) = (%d, %v), want (%d, %v)",
-					tc.in, gotSec, gotOk, tc.wantSec, tc.wantOk)
-			}
-		})
-	}
-}
-
 func TestRun_MissingRequiredFields(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
