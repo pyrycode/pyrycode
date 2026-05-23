@@ -72,16 +72,16 @@ type additiveDriftAllowlist struct {
 // only ships the mechanism.
 var expectedStreamRunnerOnly = additiveDriftAllowlist{
 	Events: map[string]struct{}{
-		"rate_limit_event": {}, // #503: API-level transient event, ptyrunner reads JSONL not the API
+		"rate_limit_event": {}, // #503 audit 2026-05-23: API-stream event, structurally unreachable from claude's local JSONL (which ptyrunner tails). Dispatcher default-case preview log only — no semantic consumption.
 	},
 	ResultTrailerFields: map[string]struct{}{
-		"api_error_status":   {}, // #503
-		"duration_api_ms":    {}, // #503
-		"fast_mode_state":    {}, // #503
-		"modelUsage":         {}, // #503
-		"permission_denials": {}, // #503
-		"ttft_ms":            {}, // #503
-		"uuid":               {}, // #503: claude's own session UUID, distinct from session_id
+		"api_error_status":   {}, // #503 audit 2026-05-23: API-only (claude's HTTP layer); dispatcher never reads it.
+		"duration_api_ms":    {}, // #503 audit 2026-05-23: API-only; dispatcher never reads it.
+		"fast_mode_state":    {}, // #503 audit 2026-05-23: API-only; dispatcher never reads it.
+		"modelUsage":         {}, // #503 audit 2026-05-23: API-only (per-model breakdown); dispatcher never reads it.
+		"permission_denials": {}, // #503 audit 2026-05-23: API-only (claude's gate result); dispatcher never reads it.
+		"ttft_ms":            {}, // #503 audit 2026-05-23: API-only (time to first token); dispatcher never reads it.
+		"uuid":               {}, // #503 audit 2026-05-23: API-side session UUID, distinct from session_id (which dispatcher does read); duplicate signal.
 	},
 }
 
@@ -92,7 +92,12 @@ var expectedStreamRunnerOnly = additiveDriftAllowlist{
 // closed. Empty-but-initialised, not nil, to keep the intentional-emptiness
 // signal explicit.
 var expectedPtyRunnerOnly = additiveDriftAllowlist{
-	Events:              map[string]struct{}{},
+	Events: map[string]struct{}{
+		"permission-mode":       {}, // #503 audit 2026-05-23: claude local-JSONL housekeeping envelope. Dispatcher default-case preview log only.
+		"file-history-snapshot": {}, // #503 audit 2026-05-23: ditto.
+		"skill_listing":         {}, // #503 audit 2026-05-23: ditto.
+		"ai-title":              {}, // #503 audit 2026-05-23: ditto.
+	},
 	ResultTrailerFields: map[string]struct{}{},
 }
 
@@ -126,14 +131,14 @@ func TestPtyRunnerArgvFlagsExistInClaudeHelp(t *testing.T) {
 }
 
 // envelopeShape captures the per-line dispatcher-visible structural shape
-// extracted from a stream-json byte stream. The two pipelines emit DIFFERENT
-// field sets on the `result` trailer — streamrunner forwards claude's native
-// fields verbatim (api_error_status, duration_api_ms, result, modelUsage,
-// permission_denials, fast_mode_state, uuid, usage.server_tool_use);
-// ptyrunner's emitter (internal/agentrun/streamjson/emitter.go) declares a
-// strict subset by design. Byte-equivalence on the trailer would fail. The
-// structural comparison asks the right question — *does the dispatcher see
-// the same signal?*
+// extracted from a stream-json byte stream. The two pipelines emit
+// DIFFERENT field sets on the `result` trailer; this comparison asks the
+// right question — does the dispatcher see the same SIGNAL?
+//
+// Per-field rationale for every tolerated divergence (both directions):
+// docs/audits/2026-05-23-ptyrunner-streamrunner-byte-equivalence.md (#503).
+// TL;DR — none of the divergent fields/events are consumed semantically
+// by agent-dispatcher; they are all log-preview-only.
 //
 // extractShapes reads ONLY `type` + `subtype`. Field-level invariants
 // (init.cwd / .tools / .model / .session_id, user prompt text,
