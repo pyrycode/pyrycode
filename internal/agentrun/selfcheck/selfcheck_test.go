@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,40 @@ func TestSelfCheck_Pass(t *testing.T) {
 	}
 	if result.Evidence != nil {
 		t.Errorf("Evidence = %q, want nil", result.Evidence)
+	}
+}
+
+// TestSelfCheck_PassesCanonicalAllowToPtyRunner pins the call-site contract
+// that SelfCheckDenyDefault populates ptyrunner.Config.AllowedTools with the
+// canonicalAllow constant. Regression net for the silent-drift pattern that
+// produced bug #526: a required field was added to ptyrunner.Config (the
+// runner.go:245 nil-check), but the selfcheck's Config literal was not
+// updated, and no existing test in this package exercises the real Config
+// contract — the ptyRun mock accepts anything.
+func TestSelfCheck_PassesCanonicalAllowToPtyRunner(t *testing.T) {
+	installSeams(t)
+	var observedAllow []string
+	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+		observedAllow = cfg.AllowedTools
+		if _, err := io.WriteString(cfg.Stdout, passLine+"\n"); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
+	}
+
+	if _, err := SelfCheckDenyDefault(context.Background(), baseConfig(t)); err != nil {
+		t.Fatalf("SelfCheckDenyDefault: unexpected error: %v", err)
+	}
+
+	if observedAllow == nil {
+		t.Fatal("ptyrunner.Config.AllowedTools is nil; runner.go:245 nil-check would reject this Config")
+	}
+	if !reflect.DeepEqual(observedAllow, canonicalAllow) {
+		t.Errorf("ptyrunner.Config.AllowedTools = %v, want %v (canonicalAllow)", observedAllow, canonicalAllow)
 	}
 }
 

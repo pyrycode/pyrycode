@@ -198,6 +198,7 @@ func SelfCheckDenyDefault(ctx context.Context, cfg Config) (Result, error) {
 			WorkDir:      realpath,
 			SessionID:    sid,
 			SettingsPath: settingsPath,
+			AllowedTools: canonicalAllow,
 			// ptyrunner.Config.SystemPrompt is a required path; /dev/null
 			// is a portable 0-byte readable character device on Linux +
 			// macOS (the only targets per project CLAUDE.md). claude's
