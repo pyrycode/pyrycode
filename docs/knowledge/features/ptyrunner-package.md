@@ -100,19 +100,19 @@ The modal/banner detection runs **after** idle — the trust modal renders the `
 | Idle wait | non-ctx error (defensive) | `fmt.Errorf("ptyrunner: wait idle: %w", err)` |
 | Modal check | trust / mcp / network | `ErrTrustModalDetected` / `ErrMcpFailureBanner` / `ErrNetworkFailure` |
 | WritePrompt | error | `fmt.Errorf("ptyrunner: write prompt: %w", err)` |
-| Close (deferred) | error | Warn-log; not surfaced |
+| Close (deferred) | error | Warn-log on genuine failure; Debug-log on benign teardown shape ([`agentrun.ExitErrIsBenign`](agentrun-package.md), #527); not surfaced |
 | Clean cycle | — | `nil` |
 
 The operator-shutdown collapse is delegated to a small `isCtxErr(ctx, err)` helper that checks both `errors.Is(err, context.Canceled|DeadlineExceeded)` and a bare `ctx.Err() != nil`. The double-check is defensive — `tuidriver.WaitUntil` returns `context.Cause(ctx)` which may be a wrapped cause; checking `ctx.Err()` directly handles that case.
 
-Close errors are advisory: the body's return value already names the operator-visible outcome, and a non-nil `Close` after a clean cycle is best-effort cleanup. Same pattern `streamrunner` uses for stdin close failures.
+Close errors are advisory: the body's return value already names the operator-visible outcome, and a non-nil `Close` after a clean cycle is best-effort cleanup. The deferred `sess.Close()` filter (#527) is required because `tuidriver.Session.Close()` bubbles claude's exit code through — when budget sends SIGTERM at `max_turns`, claude's signal handler exits 143, and `Close` returns `*exec.ExitError{ExitCode=143}`; without the predicate, every routine `max_turns` exhaustion would emit one WARN. Same pattern `streamrunner` uses for stdin close failures.
 
 ## Logging discipline
 
-Only `Warn`-level diagnostics emitted:
+`Warn`-level diagnostics (genuine failures only — teardown-shape errors get downgraded by the predicate at the close site):
 
 - `"ptyrunner: spawn failed"` with `err`
-- `"ptyrunner: close failed"` with `err`
+- `"ptyrunner: close failed"` with `err` — only when [`agentrun.ExitErrIsBenign(err)`](agentrun-package.md) is false. Benign shape logs as `"ptyrunner: close: child already exited"` at Debug.
 - `"ptyrunner: trust modal detected"` / `"ptyrunner: mcp failure banner detected"` / `"ptyrunner: network failure detected"`
 
 Never logs `cfg.PromptBytes` content, any substring of `sess.Buffer.Snapshot()`, or any rendered TUI content. Writers (`Stderr` now, `Stdout` in #472) are opaque. The rule is pinned in the package doc-comment.

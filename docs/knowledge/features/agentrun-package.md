@@ -2,7 +2,7 @@
 
 > **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts a single exported function: `ResolveWorkdir`. The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it.
 
-Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibility is **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
+Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map — and a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
 
 ## Public API
 
@@ -11,9 +11,19 @@ Stdlib-only helper for `pyry agent-run`. The parent package's residual responsib
 // claude resolves a workdir before reading ~/.claude.json's projects map.
 // Sole remaining caller after #508: internal/agentrun/trust.
 func ResolveWorkdir(workdir string) (string, error)
+
+// ExitErrIsBenign reports whether err is the OS-level "process already gone"
+// or "self-signalled exit" shape that surfaces during expected teardown of
+// an agent-run child. Returns false for nil and for any other error.
+// Benign classes: syscall.ESRCH, syscall.EPIPE, os.ErrClosed,
+// *exec.ExitError with ExitCode() in {143, 137}, and *exec.ExitError where
+// the child was signal-killed by SIGTERM or SIGKILL. Wrapped errors are
+// unwrapped via errors.Is / errors.As. Consumed by ptyrunner / budget /
+// streamrunner to gate the four teardown-path error-log sites (#527).
+func ExitErrIsBenign(err error) bool
 ```
 
-Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
+`ResolveWorkdir` has the same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
 
 ## Subpackages
 
@@ -26,7 +36,13 @@ Same shape as `internal/install.ResolveWorkDir` — the name overlap is package-
 | `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector (#348). Post-[#512](../codebase/512.md) consumed only by `selfcheck` (parses the `streamjson.Emitter` pipe) and `e2e/realclaude/fixtures.go` (parses captured fixtures); both will migrate in a follow-up that finally deletes the package. |
 | `internal/agentrun/budget` | [budget-package.md](budget-package.md) | `Counter` enforces the per-agent `--max-turns` budget; consumed by `ptyrunner.Run` (#334 / #479 / #512). |
 
-Only the `trust` subpackage imports `internal/agentrun` after [#508](../codebase/508.md) (for `ResolveWorkdir` — the `projects[...]` key shape). The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. The `jsonl/tail` subpackage was deleted in [#512](../codebase/512.md) (`ptyrunner.Run` drains `tuidriver.TailJSONL` inline). `settings` has never imported this parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
+Imports of `internal/agentrun` after [#508](../codebase/508.md) and [#527](../codebase/527.md):
+
+- `trust` imports for `ResolveWorkdir` — the `projects[...]` key shape.
+- `ptyrunner`, `budget`, `streamrunner` each import for `ExitErrIsBenign` — the shared teardown-error predicate at their respective `Session.Close` / `Terminate` / `Kill` / `stdin.Close` error-log sites (#527).
+- `settings` does not import the parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
+
+The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. The `jsonl/tail` subpackage was deleted in [#512](../codebase/512.md) (`ptyrunner.Run` drains `tuidriver.TailJSONL` inline).
 
 ## Key shape
 

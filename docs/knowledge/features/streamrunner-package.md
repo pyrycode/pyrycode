@@ -40,7 +40,9 @@ A single newline-terminated JSON line matching the 2026-05-14 probe:
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"<prompt>"}]}}
 ```
 
-`PromptBytes` is JSON-encoded via `encoding/json` — **not** shell-escaped — so embedded double-quotes, backslashes, newlines, and control characters round-trip cleanly. After the marshalled bytes, `Run` writes `'\n'` and closes stdin. The write is synchronous in the calling goroutine (single ~150-byte payload); failures of `Write` or `Close` are logged at Warn and not returned. Reason: the child may have already exited and its exit code is the authoritative outcome. Same logged-and-continued pattern as `drive.go`'s PTY writes.
+`PromptBytes` is JSON-encoded via `encoding/json` — **not** shell-escaped — so embedded double-quotes, backslashes, newlines, and control characters round-trip cleanly. After the marshalled bytes, `Run` writes `'\n'` and closes stdin. The write is synchronous in the calling goroutine (single ~150-byte payload); failures are logged and not returned. Reason: the child may have already exited and its exit code is the authoritative outcome. Same logged-and-continued pattern as `drive.go`'s PTY writes.
+
+The `stdin.Close()` error log is filtered through [`agentrun.ExitErrIsBenign`](agentrun-package.md) (#527): a benign teardown shape (`EPIPE` / `os.ErrClosed` when the child exited early) logs at Debug as `"streamrunner: stdin close: child already exited"`; a genuine failure logs at Warn as `"streamrunner: stdin close failed"`. The sibling `stdin.Write` failure is **not** filtered — it stays a Warn unconditionally (`"streamrunner: stdin write failed"`) because a mid-write failure is genuinely unexpected, not a teardown response.
 
 ## ctx-cancel teardown
 
@@ -65,7 +67,8 @@ return waitErr                       // nil on exit 0; *exec.ExitError otherwise
 
 The package logs **only**:
 
-- Warn on stdin write or close failure (error message only).
+- Warn on stdin write failure (`"streamrunner: stdin write failed"`, error message only).
+- Warn on stdin close failure (`"streamrunner: stdin close failed"`, error message only) — **only** when [`agentrun.ExitErrIsBenign(err)`](agentrun-package.md) is false. Benign close shape (`EPIPE` / `os.ErrClosed` after child early-exit) logs at Debug as `"streamrunner: stdin close: child already exited"` (#527).
 
 It does **not** log:
 
