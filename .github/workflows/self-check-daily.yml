@@ -16,11 +16,19 @@ name: agent-run self-check (daily)
 # Operator action: investigate the linked run before trusting any new
 # dispatcher activity. If the secret is unset, the notify-failure job
 # logs a warning and exits 0 — the original red badge still fires.
+#
+# Triggers: daily cron (`schedule:`), manual (`workflow_dispatch:`), and
+# release-tag pushes via the reusable-workflow `workflow_call:` entry
+# point invoked from `.github/workflows/release.yml`. A failing run on
+# any trigger surfaces via the Discord alert (`notify-failure` job, #533)
+# AND, when invoked from `release.yml`, blocks the goreleaser job from
+# publishing (#534).
 
 on:
   schedule:
     - cron: "13 6 * * *"   # 06:13 UTC daily — off-peak; offset from main CI.
   workflow_dispatch: {}     # manual trigger for testing the workflow itself
+  workflow_call: {}         # invoked from release.yml on v* tag pushes (#534)
 
 jobs:
   self-check:

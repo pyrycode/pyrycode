@@ -1,5 +1,13 @@
 name: release
 
+# Triggered on `v*` tag pushes. Before goreleaser publishes binaries,
+# the per-agent self-check (#375) is invoked via the reusable workflow
+# at .github/workflows/self-check-daily.yml (#534). goreleaser declares
+# `needs: self-check`, so a regression in the per-agent tool-allowlist
+# contract fails closed: the tag remains in the repo, no GitHub Release
+# is created, no binaries publish, no homebrew formula push fires.
+# Recovery: delete the tag, fix the regression on main, retag.
+
 on:
   push:
     tags:
@@ -9,7 +17,17 @@ permissions:
   contents: write
 
 jobs:
+  self-check:
+    # Per-agent self-check gate (#534). Invokes the same workflow body
+    # that runs daily on cron, so the steps stay in sync across both
+    # call sites. `secrets: inherit` passes ANTHROPIC_API_KEY (required
+    # by the self-check) and DISCORD_WEBHOOK_URL (used by the
+    # notify-failure job in the called workflow on failure).
+    uses: ./.github/workflows/self-check-daily.yml
+    secrets: inherit
+
   goreleaser:
+    needs: self-check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
