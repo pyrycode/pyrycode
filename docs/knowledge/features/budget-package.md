@@ -73,8 +73,8 @@ At the budget boundary, `OnEvent` then `OnEndOfTurn` are sequential within the s
 
 ## Error handling
 
-- `cfg.Terminate()` returning an error (e.g. ESRCH because claude already died): log at Warn and continue. The grace timer is still armed — Kill will follow in `GracePeriod`. Pinned by `TestTerminateError_DoesNotBlockKill`.
-- `cfg.Kill()` returning an error: log at Warn (pinned by `TestKillError_IsLogged`). No panic, no surface to the caller — `OnEvent` has no caller to return to (it's a callback).
+- `cfg.Terminate()` returning an error: log and continue. The grace timer is still armed — Kill will follow in `GracePeriod`. Pinned by `TestTerminateError_DoesNotBlockKill`. Log level is filtered through [`agentrun.ExitErrIsBenign`](agentrun-package.md) (#527): a benign teardown error (claude already exited → `ESRCH`, or any of the other benign classes) logs at Debug as `"budget: terminate: child already exited"`; a genuine failure logs at Warn as `"budget: terminate failed"`. Both branches preserve the `count` / `max_turns` structured fields.
+- `cfg.Kill()` returning an error: same predicate filter (#527) — `"budget: kill: child already exited"` at Debug for benign, `"budget: kill failed"` at Warn for non-benign (pinned by `TestKillError_IsLogged`, which passes a non-sentinel `errors.New("simulated kill failure")` and so still exercises the Warn branch). The `reason` field is preserved on both branches. No panic, no surface to the caller — `OnEvent` has no caller to return to (it's a callback).
 - Malformed `Config` at `New` time: returns an error immediately. Downstream integration wraps with the `agentrun:` namespace prefix.
 
 ## Why a callback interface, not direct `*exec.Cmd` ownership

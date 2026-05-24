@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"reflect"
 	"strings"
@@ -14,6 +15,25 @@ import (
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
+
+// loggerSyncWriter serialises Write calls for the slog test handler; slog
+// handlers may write concurrently from defers / timer goroutines.
+type loggerSyncWriter struct {
+	mu sync.Mutex
+	w  strings.Builder
+}
+
+func (s *loggerSyncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+func (s *loggerSyncWriter) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.String()
+}
 
 const testSessionID = "6fc6d062-1972-4457-9bfd-6b47c7e77e11"
 
@@ -509,6 +529,37 @@ func TestRun_BudgetHitBeforeEndOfTurn(t *testing.T) {
 	}
 	if tr.SessionID != cfg.SessionID {
 		t.Errorf("trailer SessionID = %q, want %q", tr.SessionID, cfg.SessionID)
+	}
+}
+
+func TestRun_MaxTurnsExhaustion_NoBenignWarns(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	// noEotBody is an assistant entry without end_turn — once MaxTurns is
+	// reached, the budget Counter SIGTERMs the helper, which exits 143.
+	cfg := helperRunCfg(t, "jsonl_exit143", &stdout, &stderr, noEotBody)
+	cfg.MaxTurns = 1
+
+	logBuf := &loggerSyncWriter{}
+	cfg.Logger = slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := logBuf.String()
+	for _, forbidden := range []string{
+		"ptyrunner: close failed",
+		"budget: terminate failed",
+		"budget: kill failed",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("captured WARN includes %q (benign teardown error misclassified):\n%s",
+				forbidden, out)
+		}
 	}
 }
 

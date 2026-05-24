@@ -23,6 +23,9 @@ import (
 //                    sleep 30s. Used by the ctx-cancel test.
 //   - "echo_stdin":  read stdin to EOF, write the bytes verbatim to
 //                    GO_STREAMRUNNER_HELPER_STDIN_FILE (mode 0o600), exit 0.
+//   - "exit0_no_read": exit 0 immediately without reading stdin. Forces the
+//                    parent's stdin.Write to hit EPIPE (broken pipe) and the
+//                    subsequent stdin.Close to surface a benign error.
 func TestStreamRunnerHelperProcess(t *testing.T) {
 	if os.Getenv("GO_STREAMRUNNER_HELPER") != "1" {
 		return
@@ -57,6 +60,10 @@ func TestStreamRunnerHelperProcess(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			os.Exit(0)
 		}
+	case "exit0_no_read":
+		// Exit immediately; do not drain stdin. The parent's pipe write
+		// hits EPIPE once the kernel observes the read end closed.
+		os.Exit(0)
 	case "echo_stdin":
 		path := os.Getenv("GO_STREAMRUNNER_HELPER_STDIN_FILE")
 		if path == "" {
