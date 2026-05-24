@@ -50,6 +50,7 @@ import (
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/agentrun/budget"
 	"github.com/pyrycode/pyrycode/internal/agentrun/streamjson"
 )
@@ -280,7 +281,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer func() {
 		if cerr := sess.Close(); cerr != nil {
-			logger.Warn("ptyrunner: close failed", "err", cerr)
+			if agentrun.ExitErrIsBenign(cerr) {
+				logger.Debug("ptyrunner: close: child already exited", "err", cerr)
+			} else {
+				logger.Warn("ptyrunner: close failed", "err", cerr)
+			}
 		}
 	}()
 

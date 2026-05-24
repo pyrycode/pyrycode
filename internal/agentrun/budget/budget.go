@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
 // defaultGracePeriod mirrors supervisor.spawnWaitDelay. Copied (not imported)
@@ -134,10 +136,17 @@ func (c *Counter) OnEvent(entry tuidriver.JSONLEntry) {
 		slog.Int("count", count),
 		slog.Int("max_turns", max))
 	if err := c.cfg.Terminate(); err != nil {
-		c.cfg.Logger.Warn("budget: terminate failed",
-			slog.Int("count", count),
-			slog.Int("max_turns", max),
-			"err", err)
+		if agentrun.ExitErrIsBenign(err) {
+			c.cfg.Logger.Debug("budget: terminate: child already exited",
+				slog.Int("count", count),
+				slog.Int("max_turns", max),
+				"err", err)
+		} else {
+			c.cfg.Logger.Warn("budget: terminate failed",
+				slog.Int("count", count),
+				slog.Int("max_turns", max),
+				"err", err)
+		}
 	}
 }
 
@@ -188,6 +197,11 @@ func (c *Counter) killAfterGrace() {
 	c.cfg.Logger.Warn("budget: grace period elapsed, sending SIGKILL",
 		slog.String("reason", string(reason)))
 	if err := c.cfg.Kill(); err != nil {
-		c.cfg.Logger.Warn("budget: kill failed", "err", err)
+		if agentrun.ExitErrIsBenign(err) {
+			c.cfg.Logger.Debug("budget: kill: child already exited",
+				slog.String("reason", string(reason)), "err", err)
+		} else {
+			c.cfg.Logger.Warn("budget: kill failed", "err", err)
+		}
 	}
 }

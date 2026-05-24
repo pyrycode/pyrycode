@@ -32,6 +32,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
 // killGrace is the SIGTERM → SIGKILL grace window applied via
@@ -164,7 +166,11 @@ func Run(ctx context.Context, cfg Config) error {
 		logger.Warn("streamrunner: stdin write failed", "err", err)
 	}
 	if err := stdin.Close(); err != nil {
-		logger.Warn("streamrunner: stdin close failed", "err", err)
+		if agentrun.ExitErrIsBenign(err) {
+			logger.Debug("streamrunner: stdin close: child already exited", "err", err)
+		} else {
+			logger.Warn("streamrunner: stdin close failed", "err", err)
+		}
 	}
 
 	waitErr := cmd.Wait()

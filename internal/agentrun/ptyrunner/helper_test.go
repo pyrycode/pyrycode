@@ -45,6 +45,11 @@ func TestMain(m *testing.M) {
 //                        GO_PTYRUNNER_JSONL_BODY to GO_PTYRUNNER_JSONL_PATH
 //                        (atomic-append, 0600). The body's lines drive the
 //                        parent's tail.Watcher + streamjson.Emitter.
+//   - "jsonl_exit143":   same wiring as "jsonl", but the SIGTERM handler
+//                        exits with code 143 (128 + SIGTERM(15)) so the
+//                        parent's Session.Close surfaces an *exec.ExitError
+//                        with that exit code — the steady-state shape on
+//                        every `max_turns` exhaustion in production.
 //   - "mid_trust":       write ❯ + space (IsIdle, no modal anchor at start),
 //                        then once stdin's first byte arrives (WritePrompt
 //                        landed), write the trust-folder modal anchor +
@@ -83,7 +88,7 @@ func runHelper() {
 	case "slow_spawn":
 		time.Sleep(5 * time.Second)
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
-	case "jsonl":
+	case "jsonl", "jsonl_exit143":
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	case "mid_trust", "mid_mcp_failure", "mid_network_failure":
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
@@ -117,7 +122,7 @@ func runHelper() {
 		}
 	}()
 
-	if mode == "jsonl" {
+	if mode == "jsonl" || mode == "jsonl_exit143" {
 		path := os.Getenv("GO_PTYRUNNER_JSONL_PATH")
 		body := os.Getenv("GO_PTYRUNNER_JSONL_BODY")
 		if path == "" {
@@ -201,9 +206,13 @@ func runHelper() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
+	exitOnSigterm := 0
+	if mode == "jsonl_exit143" {
+		exitOnSigterm = 143
+	}
 	select {
 	case <-sigCh:
-		os.Exit(0)
+		os.Exit(exitOnSigterm)
 	case <-time.After(30 * time.Second):
 		os.Exit(0)
 	}
