@@ -9,9 +9,13 @@ name: agent-run self-check (daily)
 # the dispatcher relies on has regressed — investigate before trusting
 # any new dispatcher run.
 #
-# The job exits 0 on PASS, non-zero on FAIL or inconclusive. Operator
-# monitors the badge; a stronger pager hookup is a follow-up if false-
-# positive rate is acceptable.
+# The job exits 0 on PASS, non-zero on FAIL or inconclusive.
+#
+# Alerting contract (#533): on failure, this workflow posts to the
+# operator's Discord channel via the `DISCORD_WEBHOOK_URL` repo secret.
+# Operator action: investigate the linked run before trusting any new
+# dispatcher activity. If the secret is unset, the notify-failure job
+# logs a warning and exits 0 — the original red badge still fires.
 
 on:
   schedule:
@@ -35,3 +39,31 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: ./pyry agent-run --self-check
+
+  notify-failure:
+    needs: self-check
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post Discord alert
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ -z "${DISCORD_WEBHOOK_URL}" ]; then
+            echo "::warning::DISCORD_WEBHOOK_URL secret not set — alert suppressed"
+            exit 0
+          fi
+          PAYLOAD="$(jq -n \
+            --arg workflow "${WORKFLOW_NAME}" \
+            --arg url "${RUN_URL}" \
+            --arg sha "${SHA:0:12}" \
+            --arg date "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+            '{content: "🚨 **\($workflow)** failed\nRun: <\($url)>\nCommit: `\($sha)`\nDate: \($date)\nInvestigate before trusting any new dispatcher activity."}')"
+          curl --fail-with-body -sS \
+            -H 'Content-Type: application/json' \
+            -X POST \
+            -d "${PAYLOAD}" \
+            "${DISCORD_WEBHOOK_URL}"
