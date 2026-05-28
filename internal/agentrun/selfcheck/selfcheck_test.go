@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,14 +21,14 @@ const (
 	// passLine: assistant entry with stop_reason "end_turn" and a single
 	// text content block. Satisfies jsonl.Reader's deterministic end-of-
 	// turn rule (stop_reason "end_turn" AND sum of text > 0). No tool_use
-	// blocks means the Bash detector sees nothing.
+	// blocks means the probe-tool detector sees nothing.
 	passLine = `{"type":"assistant","message":{"id":"msg_pass","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
 
-	// bashLine: assistant entry whose content carries a tool_use block
-	// with name "Bash". The detector matches on this; stop_reason
+	// writeLine: assistant entry whose content carries a tool_use block
+	// with name "Write". The detector matches on this; stop_reason
 	// "tool_use" here mirrors what claude emits when it actually picks a
 	// tool.
-	bashLine = `{"type":"assistant","message":{"id":"msg_bash","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"echo hello"}}],"usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
+	writeLine = `{"type":"assistant","message":{"id":"msg_write","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"probe.txt","content":"hello"}}],"usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
 )
 
 // installSeams captures the production seam values, installs no-op
@@ -88,8 +89,8 @@ func TestSelfCheck_Pass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelfCheckDenyDefault: unexpected error: %v\nresult=%+v", err, result)
 	}
-	if result.BashInvoked {
-		t.Errorf("BashInvoked = true, want false")
+	if result.ProbeToolInvoked {
+		t.Errorf("ProbeToolInvoked = true, want false")
 	}
 	if !result.EndOfTurnObserved {
 		t.Errorf("EndOfTurnObserved = false, want true")
@@ -136,14 +137,15 @@ func TestSelfCheck_PassesCanonicalAllowToPtyRunner(t *testing.T) {
 	}
 }
 
-func TestSelfCheck_BashInvoked(t *testing.T) {
+func TestSelfCheck_ProbeToolInvoked(t *testing.T) {
 	installSeams(t)
 	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
-		// Two-line fixture: Bash tool_use first, end_turn second. The
-		// detector must trip on the first line; the second is present so
-		// a regression where the detector misses Bash and falls through
-		// to end-of-turn would surface as PASS, not a hang.
-		if _, err := io.WriteString(cfg.Stdout, bashLine+"\n"+passLine+"\n"); err != nil {
+		// Two-line fixture: probe-tool tool_use first, end_turn second.
+		// The detector must trip on the first line; the second is
+		// present so a regression where the detector misses the probe
+		// tool and falls through to end-of-turn would surface as PASS,
+		// not a hang.
+		if _, err := io.WriteString(cfg.Stdout, writeLine+"\n"+passLine+"\n"); err != nil {
 			return err
 		}
 		select {
@@ -154,17 +156,31 @@ func TestSelfCheck_BashInvoked(t *testing.T) {
 	}
 
 	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
-	if !errors.Is(err, ErrBashInvoked) {
-		t.Fatalf("err = %v, want ErrBashInvoked\nresult=%+v", err, result)
+	if !errors.Is(err, ErrProbeToolInvoked) {
+		t.Fatalf("err = %v, want ErrProbeToolInvoked\nresult=%+v", err, result)
 	}
-	if !result.BashInvoked {
-		t.Errorf("BashInvoked = false, want true")
+	if !result.ProbeToolInvoked {
+		t.Errorf("ProbeToolInvoked = false, want true")
 	}
 	if result.Evidence == nil {
-		t.Fatalf("Evidence is nil, want the bash line")
+		t.Fatalf("Evidence is nil, want the write line")
 	}
-	if !strings.Contains(string(result.Evidence), `"name":"Bash"`) {
-		t.Errorf("Evidence does not contain `\"name\":\"Bash\"`: %q", result.Evidence)
+	if !strings.Contains(string(result.Evidence), `"name":"Write"`) {
+		t.Errorf("Evidence does not contain `\"name\":\"Write\"`: %q", result.Evidence)
+	}
+}
+
+// TestProbeToolIsNotInAllowList pins the coupling invariant between the
+// probe-tool and the allow list: canonicalProbeTool MUST NOT appear in
+// canonicalAllow. A future code change that appends the probe-tool name
+// to canonicalAllow would make PASS structurally unreachable (the
+// allow-list mechanism would permit the probe tool) without any
+// compile-time signal. This converts the doc-comment convention to a
+// deterministic-fail check.
+func TestProbeToolIsNotInAllowList(t *testing.T) {
+	if slices.Contains(canonicalAllow, canonicalProbeTool) {
+		t.Fatalf("canonicalProbeTool %q must NOT be in canonicalAllow %v — invariant violation",
+			canonicalProbeTool, canonicalAllow)
 	}
 }
 
@@ -186,8 +202,8 @@ func TestSelfCheck_Timeout(t *testing.T) {
 	if result.EndOfTurnObserved {
 		t.Errorf("EndOfTurnObserved = true, want false")
 	}
-	if result.BashInvoked {
-		t.Errorf("BashInvoked = true, want false")
+	if result.ProbeToolInvoked {
+		t.Errorf("ProbeToolInvoked = true, want false")
 	}
 }
 
@@ -215,8 +231,8 @@ func TestSelfCheck_MalformedAssistantLineSkipped(t *testing.T) {
 	if !result.EndOfTurnObserved {
 		t.Errorf("EndOfTurnObserved = false, want true (the valid line should have surfaced)")
 	}
-	if result.BashInvoked {
-		t.Errorf("BashInvoked = true, want false")
+	if result.ProbeToolInvoked {
+		t.Errorf("ProbeToolInvoked = true, want false")
 	}
 }
 
@@ -355,7 +371,7 @@ func TestSelfCheck_PtyRunnerError(t *testing.T) {
 	}
 }
 
-func TestBashInvokedInRaw(t *testing.T) {
+func TestProbeToolInvokedInRaw(t *testing.T) {
 	tests := []struct {
 		name    string
 		raw     string
@@ -363,12 +379,12 @@ func TestBashInvokedInRaw(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "Bash tool_use",
-			raw:  bashLine,
+			name: "Write tool_use",
+			raw:  writeLine,
 			want: true,
 		},
 		{
-			name: "Read tool_use is not Bash",
+			name: "Read tool_use is not Write",
 			raw:  `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}`,
 			want: false,
 		},
@@ -378,8 +394,8 @@ func TestBashInvokedInRaw(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "lowercase bash does not match",
-			raw:  `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"bash","input":{}}]}}`,
+			name: "lowercase write does not match",
+			raw:  `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"write","input":{}}]}}`,
 			want: false,
 		},
 		{
@@ -395,18 +411,18 @@ func TestBashInvokedInRaw(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := bashInvokedInRaw([]byte(tc.raw))
+			got, err := probeToolInvokedInRaw([]byte(tc.raw))
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("bashInvokedInRaw: nil error, want decode error")
+					t.Fatalf("probeToolInvokedInRaw: nil error, want decode error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("bashInvokedInRaw: unexpected error: %v", err)
+				t.Fatalf("probeToolInvokedInRaw: unexpected error: %v", err)
 			}
 			if got != tc.want {
-				t.Errorf("bashInvokedInRaw = %v, want %v", got, tc.want)
+				t.Errorf("probeToolInvokedInRaw = %v, want %v", got, tc.want)
 			}
 		})
 	}

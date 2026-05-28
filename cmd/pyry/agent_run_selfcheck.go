@@ -30,7 +30,7 @@ var (
 // subprocess shape.
 //
 // Returns nil on PASS. Returns the wrapped sentinel
-// (selfcheck.ErrBashInvoked / selfcheck.ErrTimeout) on FAIL or
+// (selfcheck.ErrProbeToolInvoked / selfcheck.ErrTimeout) on FAIL or
 // inconclusive so main's top-level error printer surfaces a non-zero
 // exit. Infrastructure errors (mkdtemp, ptyrunner spawn) propagate
 // verbatim.
@@ -57,17 +57,17 @@ func runAgentRunSelfCheck(stdout io.Writer) error {
 	case err == nil:
 		fmt.Fprintln(stdout, "pyry agent-run --self-check: PASS")
 		fmt.Fprintf(stdout, "claude version: %s\n", version)
-		fmt.Fprintf(stdout, "deny-default whitelist held: %d assistant event(s) observed; Bash refused.\n", result.AssistantCount)
+		fmt.Fprintf(stdout, "deny-default whitelist held: %d assistant event(s) observed; Write refused.\n", result.AssistantCount)
 		return nil
 
-	case errors.Is(err, selfcheck.ErrBashInvoked):
+	case errors.Is(err, selfcheck.ErrProbeToolInvoked):
 		writeSelfCheckFailMessage(stdout, result.Evidence)
 		return err
 
 	case errors.Is(err, selfcheck.ErrTimeout):
 		fmt.Fprintln(stdout, "pyry agent-run --self-check: INCONCLUSIVE — overall timeout fired")
 		fmt.Fprintf(stdout, "claude version: %s\n", version)
-		fmt.Fprintln(stdout, "Neither an end-of-turn nor a Bash invocation was observed before the")
+		fmt.Fprintln(stdout, "Neither an end-of-turn nor a Write invocation was observed before the")
 		fmt.Fprintln(stdout, "self-check's overall timeout. Treat as infrastructure failure (not a")
 		fmt.Fprintln(stdout, "security failure); retry once before paging.")
 		return err
@@ -91,10 +91,10 @@ func writeSelfCheckFailMessage(stdout io.Writer, evidence []byte) {
 	fmt.Fprintln(stdout, "  claude launched under PTY-driven interactive-TUI mode with a per-spawn")
 	fmt.Fprintln(stdout, `  deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])`)
 	fmt.Fprintln(stdout, "  passed via --settings <path> --permission-mode dontAsk; canned prompt:")
-	fmt.Fprintln(stdout, `  "Use Bash to echo hello. Be brief."`)
+	fmt.Fprintln(stdout, `  "Use Write to create a file named probe.txt with content 'hello'. Be brief."`)
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What was observed:")
-	fmt.Fprintln(stdout, `  Assistant tool_use with name "Bash" appeared in the re-emitted stream-json.`)
+	fmt.Fprintln(stdout, `  Assistant tool_use with name "Write" appeared in the re-emitted stream-json.`)
 	fmt.Fprintln(stdout, "  Evidence (verbatim assistant event):")
 	fmt.Fprintf(stdout, "    %s\n", strings.TrimRight(string(evidence), "\n"))
 	fmt.Fprintln(stdout)
@@ -104,7 +104,9 @@ func writeSelfCheckFailMessage(stdout io.Writer, evidence []byte) {
 	fmt.Fprintln(stdout, "  argv pyry writes in internal/agentrun/ptyrunner/runner.go's buildArgs and")
 	fmt.Fprintln(stdout, "  the JSON shape produced by internal/agentrun/settings/settings.go.")
 	fmt.Fprintln(stdout, "  References: #329 (Phase A spike), #336 (streamrunner predecessor, superseded),")
-	fmt.Fprintln(stdout, "  #470 (production cutover), #473 (this rewrite).")
+	fmt.Fprintln(stdout, "  #470 (production cutover), #473 (ptyrunner selfcheck rewrite),")
+	fmt.Fprintln(stdout, "  #538 (--permission-mode dontAsk argv fix),")
+	fmt.Fprintln(stdout, "  #539 (probe tool moved off Bash carveout).")
 }
 
 // captureClaudeVersion runs `claude --version` with a 5-second budget and
