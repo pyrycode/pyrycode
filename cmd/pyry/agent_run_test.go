@@ -407,7 +407,7 @@ func TestParseAgentRunArgs_AllowedToolsForms(t *testing.T) {
 // TestBuildStreamRunnerClaudeArgs_Shape pins the legacy claude argv under
 // the stream-json subprocess pipeline (#391, renamed in #470 to reflect
 // streamrunner-specific scope). The security invariants the old
-// PTY/settings argv pinned (`--permission-mode default` MUST appear,
+// PTY/settings argv pinned (`--permission-mode dontAsk` MUST appear,
 // `--allowedTools` MUST NOT appear) are inverted here: `--allowed-tools`
 // IS the authoritative tool gate now, and `--dangerously-skip-permissions`
 // replaces the settings file's deny-default + workspace-trust mark.

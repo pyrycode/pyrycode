@@ -90,7 +90,7 @@ func writeSelfCheckFailMessage(stdout io.Writer, evidence []byte) {
 	fmt.Fprintln(stdout, "What was tested:")
 	fmt.Fprintln(stdout, "  claude launched under PTY-driven interactive-TUI mode with a per-spawn")
 	fmt.Fprintln(stdout, `  deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])`)
-	fmt.Fprintln(stdout, "  passed via --settings <path> --permission-mode default; canned prompt:")
+	fmt.Fprintln(stdout, "  passed via --settings <path> --permission-mode dontAsk; canned prompt:")
 	fmt.Fprintln(stdout, `  "Use Bash to echo hello. Be brief."`)
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What was observed:")

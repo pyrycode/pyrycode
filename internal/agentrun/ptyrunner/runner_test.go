@@ -455,7 +455,7 @@ func TestBuildArgs(t *testing.T) {
 	want := []string{
 		"--session-id", "sid-xyz",
 		"--settings", "/tmp/s.json",
-		"--permission-mode", "default",
+		"--permission-mode", "dontAsk",
 		"--append-system-prompt-file", "/tmp/sp.txt",
 		"--model", "the-model",
 		"--effort", "high",
