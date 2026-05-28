@@ -30,7 +30,7 @@ var (
 // subprocess shape.
 //
 // Returns nil on PASS. Returns the wrapped sentinel
-// (selfcheck.ErrProbeToolInvoked / selfcheck.ErrTimeout) on FAIL or
+// (selfcheck.ErrSentinelWritten / selfcheck.ErrTimeout) on FAIL or
 // inconclusive so main's top-level error printer surfaces a non-zero
 // exit. Infrastructure errors (mkdtemp, ptyrunner spawn) propagate
 // verbatim.
@@ -57,18 +57,18 @@ func runAgentRunSelfCheck(stdout io.Writer) error {
 	case err == nil:
 		fmt.Fprintln(stdout, "pyry agent-run --self-check: PASS")
 		fmt.Fprintf(stdout, "claude version: %s\n", version)
-		fmt.Fprintf(stdout, "deny-default whitelist held: %d assistant event(s) observed; Write refused.\n", result.AssistantCount)
+		fmt.Fprintf(stdout, "deny-default whitelist held: %d assistant event(s) observed; probe sentinel never appeared on disk.\n", result.AssistantCount)
 		return nil
 
-	case errors.Is(err, selfcheck.ErrProbeToolInvoked):
-		writeSelfCheckFailMessage(stdout, result.Evidence)
+	case errors.Is(err, selfcheck.ErrSentinelWritten):
+		writeSelfCheckFailMessage(stdout, result.SentinelPath)
 		return err
 
 	case errors.Is(err, selfcheck.ErrTimeout):
 		fmt.Fprintln(stdout, "pyry agent-run --self-check: INCONCLUSIVE — overall timeout fired")
 		fmt.Fprintf(stdout, "claude version: %s\n", version)
-		fmt.Fprintln(stdout, "Neither an end-of-turn nor a Write invocation was observed before the")
-		fmt.Fprintln(stdout, "self-check's overall timeout. Treat as infrastructure failure (not a")
+		fmt.Fprintln(stdout, "Neither an end-of-turn signal nor a probe-sentinel write was observed before")
+		fmt.Fprintln(stdout, "the self-check's overall timeout. Treat as infrastructure failure (not a")
 		fmt.Fprintln(stdout, "security failure); retry once before paging.")
 		return err
 
@@ -83,30 +83,39 @@ func runAgentRunSelfCheck(stdout io.Writer) error {
 //
 // Post-#473 the message describes the ptyrunner verification path
 // (interactive-TUI claude under PTY with a per-spawn deny-default
-// settings file), not the streamrunner shape.
-func writeSelfCheckFailMessage(stdout io.Writer, evidence []byte) {
+// settings file). Post-#542 the evidence is the execution-layer
+// sentinel path on disk, not a re-emitted assistant event.
+//
+// sentinelPath is a path pyry constructed inside the throwaway workdir —
+// never file contents or captured claude output (package SECURITY note).
+func writeSelfCheckFailMessage(stdout io.Writer, sentinelPath string) {
 	fmt.Fprintln(stdout, "pyry agent-run --self-check: FAIL — deny-default whitelist did NOT enforce")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What was tested:")
 	fmt.Fprintln(stdout, "  claude launched under PTY-driven interactive-TUI mode with a per-spawn")
 	fmt.Fprintln(stdout, `  deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])`)
-	fmt.Fprintln(stdout, "  passed via --settings <path> --permission-mode dontAsk; canned prompt:")
-	fmt.Fprintln(stdout, `  "Use Write to create a file named probe.txt with content 'hello'. Be brief."`)
+	fmt.Fprintln(stdout, "  passed via --settings <path> --permission-mode dontAsk; the canned prompt")
+	fmt.Fprintln(stdout, "  instructs claude to Use Write to create a probe sentinel file inside the")
+	fmt.Fprintln(stdout, "  self-check's throwaway workdir.")
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What was observed:")
-	fmt.Fprintln(stdout, `  Assistant tool_use with name "Write" appeared in the re-emitted stream-json.`)
-	fmt.Fprintln(stdout, "  Evidence (verbatim assistant event):")
-	fmt.Fprintf(stdout, "    %s\n", strings.TrimRight(string(evidence), "\n"))
+	fmt.Fprintln(stdout, "  The probe sentinel file appeared on disk — claude's runtime executed Write")
+	fmt.Fprintln(stdout, "  despite the deny-default settings.")
+	fmt.Fprintln(stdout, "  Evidence (sentinel path on disk):")
+	fmt.Fprintf(stdout, "    %s\n", sentinelPath)
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "What to check:")
 	fmt.Fprintln(stdout, "  The settings-file enforcement contract may have changed in claude.")
 	fmt.Fprintln(stdout, "  Compare the current claude --settings / --permission-mode behaviour to the")
 	fmt.Fprintln(stdout, "  argv pyry writes in internal/agentrun/ptyrunner/runner.go's buildArgs and")
 	fmt.Fprintln(stdout, "  the JSON shape produced by internal/agentrun/settings/settings.go.")
+	fmt.Fprintln(stdout, "  The self-check now verifies RUNTIME-layer enforcement (the sentinel file on")
+	fmt.Fprintln(stdout, "  disk), not LLM-layer output: https://code.claude.com/docs/en/permissions")
 	fmt.Fprintln(stdout, "  References: #329 (Phase A spike), #336 (streamrunner predecessor, superseded),")
 	fmt.Fprintln(stdout, "  #470 (production cutover), #473 (ptyrunner selfcheck rewrite),")
 	fmt.Fprintln(stdout, "  #538 (--permission-mode dontAsk argv fix),")
-	fmt.Fprintln(stdout, "  #539 (probe tool moved off Bash carveout).")
+	fmt.Fprintln(stdout, "  #539 (probe tool moved off Bash carveout),")
+	fmt.Fprintln(stdout, "  #542 (detector moved to execution-layer sentinel).")
 }
 
 // captureClaudeVersion runs `claude --version` with a 5-second budget and

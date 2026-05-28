@@ -11,11 +11,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/agentrun/selfcheck"
 )
 
-// selfCheckWriteLine is the canned Write tool_use assistant entry used
-// as FAIL Evidence in the CLI-level tests. Same shape as the package-
-// level fixture; duplicated to keep the test surface self-contained.
-const selfCheckWriteLine = `{"type":"assistant","message":{"id":"msg_write","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"probe.txt","content":"hello"}}],"usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
-
 // installSelfCheckSeams captures the production seam values and restores
 // them via t.Cleanup. Tests must NOT call t.Parallel — the seams are
 // package-level.
@@ -54,42 +49,45 @@ func TestRunAgentRunSelfCheck_PASS(t *testing.T) {
 
 func TestRunAgentRunSelfCheck_FAIL(t *testing.T) {
 	installSelfCheckSeams(t)
+	const sentinelPath = "/tmp/pyry-self-check-XXXX/probe-sentinel.txt"
 	selfCheckFn = func(ctx context.Context, cfg selfcheck.Config) (selfcheck.Result, error) {
 		return selfcheck.Result{
-				ProbeToolInvoked: true,
-				Evidence:         []byte(selfCheckWriteLine),
+				SentinelWritten: true,
+				SentinelPath:    sentinelPath,
 			},
-			fmt.Errorf("%w: tool_use name=%q observed in assistant entry",
-				selfcheck.ErrProbeToolInvoked, "Write")
+			fmt.Errorf("%w: probe sentinel appeared at %s",
+				selfcheck.ErrSentinelWritten, sentinelPath)
 	}
 
 	var stdout bytes.Buffer
 	err := runAgentRun(&stdout, []string{"--self-check"})
-	if !errors.Is(err, selfcheck.ErrProbeToolInvoked) {
-		t.Fatalf("err = %v, want ErrProbeToolInvoked\nstdout=%q", err, stdout.String())
+	if !errors.Is(err, selfcheck.ErrSentinelWritten) {
+		t.Fatalf("err = %v, want ErrSentinelWritten\nstdout=%q", err, stdout.String())
 	}
 	got := stdout.String()
 	if !strings.HasPrefix(got, "pyry agent-run --self-check: FAIL") {
 		t.Errorf("stdout does not start with FAIL marker:\n%s", got)
 	}
-	if !strings.Contains(got, `"name":"Write"`) {
-		t.Errorf("stdout missing verbatim Evidence line with \"name\":\"Write\":\n%s", got)
+	if !strings.Contains(got, sentinelPath) {
+		t.Errorf("stdout missing the sentinel path evidence %q:\n%s", sentinelPath, got)
 	}
-	// Required substrings: post-#539 the FAIL prose names the new probe
-	// tool (Write) and extends the historical-reference chain to include
-	// #538 (argv production fix) and #539 (this rewrite). These MUST be
-	// present.
+	// Required substrings: post-#542 the FAIL prose reports execution-layer
+	// evidence (the sentinel file on disk) and extends the historical-
+	// reference chain through #542. The LLM-layer artifacts ("Use Write to
+	// create a file named probe.txt", "name":"Write") are gone. These MUST
+	// be present.
 	required := []string{
 		`permissions.defaultMode: "dontAsk"`,
 		`["Read"]`,
 		"PTY",
-		"Use Write to create a file named probe.txt",
+		"appeared on disk",
 		"#329",
 		"#336",
 		"#470",
 		"#473",
 		"#538",
 		"#539",
+		"#542",
 	}
 	for _, sub := range required {
 		if !strings.Contains(got, sub) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -20,14 +21,15 @@ import (
 const (
 	// passLine: assistant entry with stop_reason "end_turn" and a single
 	// text content block. Satisfies jsonl.Reader's deterministic end-of-
-	// turn rule (stop_reason "end_turn" AND sum of text > 0). No tool_use
-	// blocks means the probe-tool detector sees nothing.
+	// turn rule (stop_reason "end_turn" AND sum of text > 0).
 	passLine = `{"type":"assistant","message":{"id":"msg_pass","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
 
 	// writeLine: assistant entry whose content carries a tool_use block
-	// with name "Write". The detector matches on this; stop_reason
-	// "tool_use" here mirrors what claude emits when it actually picks a
-	// tool.
+	// with name "Write" — normal LLM output that claude's runtime denies
+	// between emission and execution. Post-#542 the detector is
+	// execution-layer (os.Stat of the sentinel), so an emitted-but-denied
+	// tool_use in the stream must NOT trip FAIL; this fixture pins that in
+	// TestSelfCheck_ToolUseInStreamDoesNotFail.
 	writeLine = `{"type":"assistant","message":{"id":"msg_write","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"probe.txt","content":"hello"}}],"usage":{"input_tokens":5,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
 )
 
@@ -89,8 +91,8 @@ func TestSelfCheck_Pass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelfCheckDenyDefault: unexpected error: %v\nresult=%+v", err, result)
 	}
-	if result.ProbeToolInvoked {
-		t.Errorf("ProbeToolInvoked = true, want false")
+	if result.SentinelWritten {
+		t.Errorf("SentinelWritten = true, want false")
 	}
 	if !result.EndOfTurnObserved {
 		t.Errorf("EndOfTurnObserved = false, want true")
@@ -98,8 +100,8 @@ func TestSelfCheck_Pass(t *testing.T) {
 	if result.AssistantCount != 1 {
 		t.Errorf("AssistantCount = %d, want 1", result.AssistantCount)
 	}
-	if result.Evidence != nil {
-		t.Errorf("Evidence = %q, want nil", result.Evidence)
+	if result.SentinelPath != "" {
+		t.Errorf("SentinelPath = %q, want \"\"", result.SentinelPath)
 	}
 }
 
@@ -113,8 +115,10 @@ func TestSelfCheck_Pass(t *testing.T) {
 func TestSelfCheck_PassesCanonicalAllowToPtyRunner(t *testing.T) {
 	installSeams(t)
 	var observedAllow []string
+	var observedMaxTurns int
 	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
 		observedAllow = cfg.AllowedTools
+		observedMaxTurns = cfg.MaxTurns
 		if _, err := io.WriteString(cfg.Stdout, passLine+"\n"); err != nil {
 			return err
 		}
@@ -135,16 +139,61 @@ func TestSelfCheck_PassesCanonicalAllowToPtyRunner(t *testing.T) {
 	if !reflect.DeepEqual(observedAllow, canonicalAllow) {
 		t.Errorf("ptyrunner.Config.AllowedTools = %v, want %v (canonicalAllow)", observedAllow, canonicalAllow)
 	}
+	// Pins AC2: MaxTurns must be >= 2 so claude's runtime reaches the
+	// execute-or-deny step. MaxTurns: 1 was the original bug (SIGTERM
+	// before the boundary). Cheapest guard against a regression.
+	if observedMaxTurns < 2 {
+		t.Errorf("ptyrunner.Config.MaxTurns = %d, want >= 2 (must reach the execute-or-deny step)", observedMaxTurns)
+	}
 }
 
-func TestSelfCheck_ProbeToolInvoked(t *testing.T) {
+// TestSelfCheck_SentinelWritten pins the FAIL mechanism after the layer
+// swap: the verdict is the sentinel file on disk, not a tool_use block in
+// the stream. The mock simulates a leaked boundary by writing the sentinel
+// inside the spawn's workdir; even though end_turn is also observed, the
+// stat-first verdict returns ErrSentinelWritten.
+func TestSelfCheck_SentinelWritten(t *testing.T) {
+	installSeams(t)
+	cfg := baseConfig(t)
+	wantSentinel := filepath.Join(cfg.WorkDir, probeSentinelName)
+	ptyRun = func(ctx context.Context, pcfg ptyrunner.Config) error {
+		// Boundary leaked: claude's runtime executed Write and the sentinel
+		// landed on disk at the path the prompt named (pcfg.WorkDir is the
+		// trust-marked realpath, identity-mocked to cfg.WorkDir).
+		if err := os.WriteFile(filepath.Join(pcfg.WorkDir, probeSentinelName), []byte("hello"), 0o600); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(pcfg.Stdout, passLine+"\n"); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
+	}
+
+	result, err := SelfCheckDenyDefault(context.Background(), cfg)
+	if !errors.Is(err, ErrSentinelWritten) {
+		t.Fatalf("err = %v, want ErrSentinelWritten\nresult=%+v", err, result)
+	}
+	if !result.SentinelWritten {
+		t.Errorf("SentinelWritten = false, want true")
+	}
+	if result.SentinelPath != wantSentinel {
+		t.Errorf("SentinelPath = %q, want %q", result.SentinelPath, wantSentinel)
+	}
+}
+
+// TestSelfCheck_ToolUseInStreamDoesNotFail is the regression net for the
+// whole ticket: an emitted-but-denied tool_use is normal LLM output (the
+// model emits the Write block, claude's runtime denies execution, no file
+// lands). Pre-#542 this false-FAILed; the execution-layer detector must
+// PASS it.
+func TestSelfCheck_ToolUseInStreamDoesNotFail(t *testing.T) {
 	installSeams(t)
 	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
-		// Two-line fixture: probe-tool tool_use first, end_turn second.
-		// The detector must trip on the first line; the second is
-		// present so a regression where the detector misses the probe
-		// tool and falls through to end-of-turn would surface as PASS,
-		// not a hang.
+		// Emit a Write tool_use then end_turn — but create NO file.
 		if _, err := io.WriteString(cfg.Stdout, writeLine+"\n"+passLine+"\n"); err != nil {
 			return err
 		}
@@ -156,17 +205,14 @@ func TestSelfCheck_ProbeToolInvoked(t *testing.T) {
 	}
 
 	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
-	if !errors.Is(err, ErrProbeToolInvoked) {
-		t.Fatalf("err = %v, want ErrProbeToolInvoked\nresult=%+v", err, result)
+	if err != nil {
+		t.Fatalf("SelfCheckDenyDefault: unexpected error: %v\nresult=%+v", err, result)
 	}
-	if !result.ProbeToolInvoked {
-		t.Errorf("ProbeToolInvoked = false, want true")
+	if result.SentinelWritten {
+		t.Errorf("SentinelWritten = true, want false")
 	}
-	if result.Evidence == nil {
-		t.Fatalf("Evidence is nil, want the write line")
-	}
-	if !strings.Contains(string(result.Evidence), `"name":"Write"`) {
-		t.Errorf("Evidence does not contain `\"name\":\"Write\"`: %q", result.Evidence)
+	if !result.EndOfTurnObserved {
+		t.Errorf("EndOfTurnObserved = false, want true")
 	}
 }
 
@@ -202,8 +248,8 @@ func TestSelfCheck_Timeout(t *testing.T) {
 	if result.EndOfTurnObserved {
 		t.Errorf("EndOfTurnObserved = true, want false")
 	}
-	if result.ProbeToolInvoked {
-		t.Errorf("ProbeToolInvoked = true, want false")
+	if result.SentinelWritten {
+		t.Errorf("SentinelWritten = true, want false")
 	}
 }
 
@@ -231,8 +277,8 @@ func TestSelfCheck_MalformedAssistantLineSkipped(t *testing.T) {
 	if !result.EndOfTurnObserved {
 		t.Errorf("EndOfTurnObserved = false, want true (the valid line should have surfaced)")
 	}
-	if result.ProbeToolInvoked {
-		t.Errorf("ProbeToolInvoked = true, want false")
+	if result.SentinelWritten {
+		t.Errorf("SentinelWritten = true, want false")
 	}
 }
 
@@ -368,62 +414,5 @@ func TestSelfCheck_PtyRunnerError(t *testing.T) {
 	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
 	if !errors.Is(err, ptyrunner.ErrTrustModalDetected) {
 		t.Fatalf("err = %v, want errors.Is(err, ptyrunner.ErrTrustModalDetected)\nresult=%+v", err, result)
-	}
-}
-
-func TestProbeToolInvokedInRaw(t *testing.T) {
-	tests := []struct {
-		name    string
-		raw     string
-		want    bool
-		wantErr bool
-	}{
-		{
-			name: "Write tool_use",
-			raw:  writeLine,
-			want: true,
-		},
-		{
-			name: "Read tool_use is not Write",
-			raw:  `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}`,
-			want: false,
-		},
-		{
-			name: "text only",
-			raw:  passLine,
-			want: false,
-		},
-		{
-			name: "lowercase write does not match",
-			raw:  `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"write","input":{}}]}}`,
-			want: false,
-		},
-		{
-			name: "tool_use without name field",
-			raw:  `{"type":"assistant","message":{"content":[{"type":"tool_use"}]}}`,
-			want: false,
-		},
-		{
-			name:    "invalid json surfaces decode error",
-			raw:     `{not json`,
-			wantErr: true,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := probeToolInvokedInRaw([]byte(tc.raw))
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("probeToolInvokedInRaw: nil error, want decode error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("probeToolInvokedInRaw: unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("probeToolInvokedInRaw = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }
