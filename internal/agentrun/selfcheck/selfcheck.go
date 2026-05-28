@@ -5,7 +5,7 @@
 // permissions.allow ["Read"]) and asked for Bash.
 //
 // The contract is load-bearing on claude's settings-file shape and the
-// `--settings <path> --permission-mode default` argv pair. A silent
+// `--settings <path> --permission-mode dontAsk` argv pair. A silent
 // rename or behaviour change to either would dissolve the per-agent
 // security boundary the dispatcher relies on. The Phase A spike (#329)
 // verified empirically the streamrunner shape; the post-#470 production

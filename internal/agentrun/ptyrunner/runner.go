@@ -448,7 +448,7 @@ func buildArgs(cfg Config) []string {
 	return []string{
 		"--session-id", cfg.SessionID,
 		"--settings", cfg.SettingsPath,
-		"--permission-mode", "default",
+		"--permission-mode", "dontAsk",
 		"--append-system-prompt-file", cfg.SystemPrompt,
 		"--model", cfg.Model,
 		"--effort", cfg.Effort,
