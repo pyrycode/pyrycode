@@ -49,7 +49,7 @@ No constructor, no long-lived object — same stateless shape `streamrunner` shi
 ```
 --session-id <SessionID>
 --settings <SettingsPath>
---permission-mode default
+--permission-mode dontAsk
 --append-system-prompt-file <SystemPrompt>
 --model <Model>
 --effort <Effort>

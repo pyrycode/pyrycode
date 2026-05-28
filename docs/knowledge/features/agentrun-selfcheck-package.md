@@ -1,8 +1,8 @@
 # `internal/agentrun/selfcheck` — per-agent tool-allowlist enforcement boot-time verification
 
-Stdlib + `golang.org/x/sync/errgroup` helper that verifies, at runtime, that claude still refuses Bash when spawned as an interactive-TUI process under a PTY with a per-spawn deny-default settings file (`permissions.defaultMode: "dontAsk"`, `permissions.allow: ["Read"]`) passed via `--settings <path> --permission-mode default` and asked for Bash. Composed primitive of [`internal/agentrun/trust.MarkWorkdirTrusted`](trust-package.md) + [`internal/agentrun/settings.WriteSettings`](settings-package.md) + [`internal/sessions.NewID`](sessions-package.md) + [`internal/agentrun/ptyrunner.Run`](ptyrunner-package.md) + [`internal/agentrun/jsonl.Reader`](jsonl-reader.md).
+Stdlib + `golang.org/x/sync/errgroup` helper that verifies, at runtime, that claude still refuses Bash when spawned as an interactive-TUI process under a PTY with a per-spawn deny-default settings file (`permissions.defaultMode: "dontAsk"`, `permissions.allow: ["Read"]`) passed via `--settings <path> --permission-mode dontAsk` and asked for Bash. Composed primitive of [`internal/agentrun/trust.MarkWorkdirTrusted`](trust-package.md) + [`internal/agentrun/settings.WriteSettings`](settings-package.md) + [`internal/sessions.NewID`](sessions-package.md) + [`internal/agentrun/ptyrunner.Run`](ptyrunner-package.md) + [`internal/agentrun/jsonl.Reader`](jsonl-reader.md).
 
-The Phase A spike (#329) verified empirically that under deny-default enforcement a prompt asking for Bash gets refused (no `tool_use` event with `name == "Bash"` appears in the re-emitted stream-json). That contract is load-bearing on claude's settings-file shape and on the `--settings <path> --permission-mode default` argv pair. This package is the deterministic safety net per the CLAUDE.md "Belt-and-Suspenders Means Different Fabric" rule.
+The Phase A spike (#329) verified empirically that under deny-default enforcement a prompt asking for Bash gets refused (no `tool_use` event with `name == "Bash"` appears in the re-emitted stream-json). That contract is load-bearing on claude's settings-file shape and on the `--settings <path> --permission-mode dontAsk` argv pair (the argv value was `default` until [#538](https://github.com/pyrycode/pyrycode/issues/538) flipped it — argv `default` shadowed the settings-file `defaultMode: "dontAsk"` per claude's documented argv-overrides-settings precedence, silently dropping the deny-default to prompt-mode on every spawn since the [#470](https://github.com/pyrycode/pyrycode/issues/470) ptyrunner cutover; see [`codebase/538.md`](../codebase/538.md)). This package is the deterministic safety net per the CLAUDE.md "Belt-and-Suspenders Means Different Fabric" rule.
 
 History — the conceptual safety net is unchanged across three rewrites; the verification mechanism has tracked the production code path:
 
@@ -80,7 +80,7 @@ The argv ptyrunner builds (`internal/agentrun/ptyrunner/runner.go:buildArgs`) is
 ```
 --session-id <sid>
 --settings <settingsPath>
---permission-mode default
+--permission-mode dontAsk
 --append-system-prompt-file /dev/null
 --model sonnet
 --effort low
@@ -207,7 +207,7 @@ pyry agent-run --self-check: FAIL — deny-default whitelist did NOT enforce
 What was tested:
   claude launched under PTY-driven interactive-TUI mode with a per-spawn
   deny-default settings file (permissions.defaultMode: "dontAsk", allow: ["Read"])
-  passed via --settings <path> --permission-mode default; canned prompt:
+  passed via --settings <path> --permission-mode dontAsk; canned prompt:
   "Use Bash to echo hello. Be brief."
 
 What was observed:
