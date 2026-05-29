@@ -84,22 +84,23 @@ type Emitter struct {
 	log       *slog.Logger
 	start     time.Time
 
-	mu             sync.Mutex
-	numTurns       int
-	endOfTurnSeen  bool
-	lastStopReason string
-	aggUsage       usageTotals
-	exitReason     ExitReason
-	writeErr       error
-	closed         bool
-	closeErr       error
+	mu                sync.Mutex
+	numTurns          int
+	endOfTurnSeen     bool
+	lastStopReason    string
+	lastAssistantText string
+	aggUsage          usageTotals
+	exitReason        ExitReason
+	writeErr          error
+	closed            bool
+	closeErr          error
 }
 
 type usageTotals struct {
-	input            int
-	output           int
-	cacheCreationIn  int
-	cacheReadIn      int
+	input           int
+	output          int
+	cacheCreationIn int
+	cacheReadIn     int
 }
 
 // New constructs an Emitter and writes the leading
@@ -188,6 +189,20 @@ func (e *Emitter) Emit(entry tuidriver.JSONLEntry) error {
 		e.numTurns++
 		if entry.Message != nil {
 			e.lastStopReason = entry.Message.StopReason
+		}
+		// Capture the final assistant turn's text for the trailer's `result`
+		// field. claude -p (and thus the streamrunner passthrough) populates
+		// `result` with the last assistant message's text; the ptyrunner path
+		// synthesises its own trailer in Close, so without this it shipped an
+		// empty `result` — a parity gap that blanked the dispatcher's
+		// completion-comment embed and the salvage-PR context tail (surfaced
+		// 2026-05-29). Reuses the same AssistantText primitive that drives
+		// end-of-turn detection above, so it's non-empty exactly when a turn
+		// carried text. Last non-empty wins: intermediate "let me check…"
+		// turns are overwritten by the end-of-turn summary, and textless
+		// tool_use turns return "" and don't clobber the captured text.
+		if txt := tuidriver.AssistantText(entry); txt != "" {
+			e.lastAssistantText = txt
 		}
 	}
 	if tuidriver.IsEndTurn(entry) {
@@ -296,15 +311,15 @@ func (e *Emitter) Close() error {
 	subtype, terminal, isErr := wireFields(exit)
 
 	tr := trailer{
-		Type:          "result",
-		Subtype:       subtype,
-		IsError:       isErr,
-		DurationMS:    e.now().Sub(e.start).Milliseconds(),
-		NumTurns:      e.numTurns,
-		Result:        "",
-		StopReason:    e.lastStopReason,
-		SessionID:     e.sessionID,
-		TotalCostUSD:  0,
+		Type:         "result",
+		Subtype:      subtype,
+		IsError:      isErr,
+		DurationMS:   e.now().Sub(e.start).Milliseconds(),
+		NumTurns:     e.numTurns,
+		Result:       e.lastAssistantText,
+		StopReason:   e.lastStopReason,
+		SessionID:    e.sessionID,
+		TotalCostUSD: 0,
 		Usage: trailerUsage{
 			InputTokens:              e.aggUsage.input,
 			OutputTokens:             e.aggUsage.output,

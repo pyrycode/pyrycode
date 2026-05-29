@@ -80,6 +80,20 @@ func assistantEntry(rawLine, stopReason string, usage *usageBlock, endOfTurn boo
 	}
 }
 
+// textAssistant builds an assistant entry carrying a single text content
+// block with the given text, mirroring the shape tuidriver parses from
+// claude's session JSONL. Used by the result-capture tests.
+func textAssistant(text, stopReason string) tuidriver.JSONLEntry {
+	return tuidriver.JSONLEntry{
+		Type: "assistant",
+		Message: &tuidriver.EntryMessage{
+			StopReason: stopReason,
+			Content:    []tuidriver.ContentBlock{{Type: "text", Raw: map[string]any{"text": text}}},
+		},
+		RawLine: []byte(`{"type":"assistant"}`),
+	}
+}
+
 func TestNew_ValidatesConfig(t *testing.T) {
 	t.Parallel()
 	valid := func() Config {
@@ -509,6 +523,59 @@ func TestTrailer_ConstantFields(t *testing.T) {
 	}
 }
 
+// TestTrailer_ResultCapturesFinalAssistantText pins the parity fix: the
+// trailer's `result` field carries the LAST assistant turn's text, matching
+// what claude -p / streamrunner emit. Intermediate "let me check…" turns are
+// overwritten by the end-of-turn summary; the textless tool_use turn between
+// them must not clobber the captured text. (Regression: ptyrunner shipped an
+// empty `result`, blanking the dispatcher's completion-comment embed —
+// surfaced 2026-05-29.)
+func TestTrailer_ResultCapturesFinalAssistantText(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	for _, ev := range []tuidriver.JSONLEntry{
+		textAssistant("Let me inspect the ticket.", "tool_use"),
+		entry("tool_use", `{"type":"tool_use"}`),
+		textAssistant("## Done — refined and unblocked.", "end_turn"),
+	} {
+		if err := em.Emit(ev); err != nil {
+			t.Fatalf("Emit: %v", err)
+		}
+	}
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.Result != "## Done — refined and unblocked." {
+		t.Errorf("result = %q, want the final assistant summary", tr.Result)
+	}
+}
+
+// TestTrailer_ResultEmptyWhenNoAssistantText guards the "last non-empty wins"
+// rule's floor: assistant turns with no text content (tool_use-only) plus
+// non-assistant lines leave result empty rather than panicking or emitting
+// stray bytes. Keeps the no-text path identical to the pre-fix behaviour.
+func TestTrailer_ResultEmptyWhenNoAssistantText(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	for _, ev := range []tuidriver.JSONLEntry{
+		assistantEntry(`{}`, "tool_use", nil, false),
+		entry("tool_use", `{"type":"tool_use"}`),
+		entry("user", `{"type":"user"}`),
+	} {
+		if err := em.Emit(ev); err != nil {
+			t.Fatalf("Emit: %v", err)
+		}
+	}
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.Result != "" {
+		t.Errorf("result = %q, want empty (no assistant text emitted)", tr.Result)
+	}
+}
+
 // TestReadUsage_NilMessage covers the absent path where an assistant entry
 // arrives without a Message (malformed envelope). readUsage must report
 // absent (not panic), and the rest of the assistant state machine must still
@@ -668,11 +735,11 @@ func lineToEntry(line []byte) tuidriver.JSONLEntry {
 // TestCapturedFixture_ByteEquivalence replays the non-result lines from
 // testdata/captured_run.jsonl through the emitter, calls Close, and asserts:
 //
-//   (a) each replayed non-result line is byte-equivalent to its fixture
-//       counterpart;
-//   (b) the trailer pyry composes matches the fixture's result line on the
-//       field set defined by this spec (type, subtype, is_error, num_turns,
-//       stop_reason, terminal_reason, and the four usage int counters).
+//	(a) each replayed non-result line is byte-equivalent to its fixture
+//	    counterpart;
+//	(b) the trailer pyry composes matches the fixture's result line on the
+//	    field set defined by this spec (type, subtype, is_error, num_turns,
+//	    stop_reason, terminal_reason, and the four usage int counters).
 //
 // SYNTHESISED FIXTURE: testdata/captured_run.jsonl was hand-crafted to match
 // the shapes documented in the spec. The captured `claude -p` run was not
