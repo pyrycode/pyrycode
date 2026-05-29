@@ -574,6 +574,10 @@ func TestRun_WatchdogFires(t *testing.T) {
 		PTYQuietLimit:      200 * time.Millisecond,
 		SpinnerFreezeLimit: 200 * time.Millisecond,
 	}
+	// Short prompt-commit window so the (intentionally) never-committing
+	// fixture exhausts its re-delivery budget fast and reaches the watchdog
+	// path well inside the deadline.
+	cfg.PromptCommitTimeout = 100 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

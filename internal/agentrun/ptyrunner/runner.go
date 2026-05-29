@@ -163,6 +163,13 @@ type Config struct {
 	// values (~200ms) to fire the watchdog within the test deadline.
 	WatchdogTrackerOpts tuidriver.TrackerOpts
 
+	// PromptCommitTimeout bounds how long Run waits for a freshly-delivered
+	// prompt to commit (spinner up or session JSONL written) before treating
+	// the paste as corrupted/uncommitted and re-delivering. Optional; zero
+	// defaults to defaultPromptCommitTimeout. Tests set a short value to keep
+	// the retry budget well inside the deadline. See the retry loop in Run.
+	PromptCommitTimeout time.Duration
+
 	// Logger is used for the small number of Warn-level diagnostics this
 	// package emits (spawn / close / modal-detected). Optional; nil
 	// falls back to slog.Default().
@@ -316,8 +323,52 @@ func Run(ctx context.Context, cfg Config) error {
 		return ErrNetworkFailure
 	}
 
-	if err := sess.WritePrompt(string(cfg.PromptBytes)); err != nil {
-		return fmt.Errorf("ptyrunner: write prompt: %w", err)
+	home := cfg.HomeDir
+	if home == "" {
+		h, herr := os.UserHomeDir()
+		if herr != nil {
+			return fmt.Errorf("ptyrunner: home dir: %w", herr)
+		}
+		home = h
+	}
+	jsonlPath := tuidriver.SessionJSONLPath(home, cfg.WorkDir, cfg.SessionID)
+
+	// Deliver the prompt and CONFIRM the turn committed. Under MCP-init churn
+	// the bracketed-paste byte stream can be interleaved with claude's TUI
+	// redraws — corrupting the pasted text AND absorbing the trailing \r
+	// commit. Claude is then left idle with garbled, uncommitted input: no
+	// turn, no session JSONL, a ~54s watchdog wedge ("Mode B", root-caused
+	// 2026-05-29 by instrumenting this path against live claude 2.1.156).
+	// Reactively recover: if claude has NOT started a turn (no spinner AND no
+	// session JSONL) within commitTimeout, clear the (garbled) input line and
+	// re-deliver, up to maxPromptAttempts. A healthy run shows the spinner /
+	// writes JSONL within ~1s — far inside the window — so it never retries.
+	commitTimeout := cfg.PromptCommitTimeout
+	if commitTimeout <= 0 {
+		commitTimeout = defaultPromptCommitTimeout
+	}
+	committed := false
+	for attempt := 1; attempt <= maxPromptAttempts; attempt++ {
+		if attempt > 1 {
+			if cerr := sess.ClearInputLine(); cerr != nil {
+				return fmt.Errorf("ptyrunner: clear input line: %w", cerr)
+			}
+		}
+		if werr := sess.WritePrompt(string(cfg.PromptBytes)); werr != nil {
+			return fmt.Errorf("ptyrunner: write prompt: %w", werr)
+		}
+		if promptDidCommit(ctx, sess, jsonlPath, commitTimeout) {
+			committed = true
+			break
+		}
+		logger.Warn("ptyrunner: prompt did not commit; re-delivering", "attempt", attempt, "of", maxPromptAttempts)
+	}
+	if !committed {
+		// Backstop: fall through to the JSONL wait + watchdog (prior
+		// behaviour). The retries recover the common corrupted-paste case;
+		// a residual wedge still surfaces as num_turns=0 and the dispatcher
+		// retries the ticket.
+		logger.Warn("ptyrunner: prompt uncommitted after retries; proceeding (may wedge)")
 	}
 
 	// Single shared cancellation point: the budget Terminate hook AND the
@@ -373,16 +424,6 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("ptyrunner: budget: %w", err)
 	}
 	defer counter.Stop()
-
-	home := cfg.HomeDir
-	if home == "" {
-		h, herr := os.UserHomeDir()
-		if herr != nil {
-			return fmt.Errorf("ptyrunner: home dir: %w", herr)
-		}
-		home = h
-	}
-	jsonlPath := tuidriver.SessionJSONLPath(home, cfg.WorkDir, cfg.SessionID)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -474,4 +515,42 @@ func isCtxErr(ctx context.Context, err error) bool {
 		return true
 	}
 	return false
+}
+
+// Prompt-commit retry bounds (see the loop in Run). A corrupted/uncommitted
+// bracketed paste under MCP-init churn ("Mode B") is recovered by clearing
+// the input line and re-delivering. A healthy run commits within ~1s, so the
+// timeout never bites it; the attempt cap bounds the worst case.
+const (
+	maxPromptAttempts          = 3
+	defaultPromptCommitTimeout = 3 * time.Second
+	promptCommitPoll           = 150 * time.Millisecond
+)
+
+// promptDidCommit reports whether claude started a turn after a prompt write:
+// the thinking spinner is visible OR the per-session JSONL has appeared
+// (claude writes it only once input lands). Polls at promptCommitPoll until a
+// signal is seen, the timeout elapses, or ctx is cancelled. It only observes
+// — never writes — so a false negative costs one extra re-delivery, never a
+// corrupted live turn.
+func promptDidCommit(ctx context.Context, sess *tuidriver.Session, jsonlPath string, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	tk := time.NewTicker(promptCommitPoll)
+	defer tk.Stop()
+	for {
+		if tuidriver.IsThinking(sess.Buffer.Snapshot()) {
+			return true
+		}
+		if _, err := os.Stat(jsonlPath); err == nil {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-tk.C:
+		}
+	}
 }
