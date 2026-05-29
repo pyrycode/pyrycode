@@ -304,8 +304,12 @@ func Run(ctx context.Context, cfg Config) error {
 		return ErrTrustModalDetected
 	}
 	if tuidriver.HasMcpFailureBanner(snap) {
-		logger.Warn("ptyrunner: mcp failure banner detected")
-		return ErrMcpFailureBanner
+		// Non-fatal: an ambient MCP server failing to connect must not abort
+		// the run. The deny-default allowed-tools gate governs what the agent
+		// may invoke; streamrunner never aborted on MCP failure (parity).
+		// Treating it as fatal regressed every spawn whose env had any
+		// offline MCP server into error_during_execution/"no output".
+		logger.Warn("ptyrunner: mcp failure banner detected at idle — continuing (non-fatal)")
 	}
 	if tuidriver.HasNetworkFailure(snap) {
 		logger.Warn("ptyrunner: network failure detected")
@@ -413,8 +417,10 @@ loop:
 				return ErrTrustModalDetected
 			}
 		case tuidriver.EventKindPtyMcpFailureShown:
-			logger.Warn("ptyrunner: mcp failure banner detected")
-			return ErrMcpFailureBanner
+			// Non-fatal (see the idle-time check above): keep consuming
+			// events so the turn can complete despite an ambient MCP server
+			// being offline.
+			logger.Warn("ptyrunner: mcp failure banner detected — continuing (non-fatal)")
 		case tuidriver.EventKindPtyNetworkFailureShown:
 			logger.Warn("ptyrunner: network failure detected")
 			return ErrNetworkFailure
