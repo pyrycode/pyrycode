@@ -11,6 +11,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/identity"
+	"github.com/pyrycode/pyrycode/internal/keys"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
@@ -88,7 +89,7 @@ func startRelay(
 	ctx context.Context,
 	logger *slog.Logger,
 	instanceName, relayURL, version string,
-	allowInsecure bool,
+	allowInsecure, v2Enabled bool,
 	shutdown context.CancelFunc,
 	convReg *conversations.Registry,
 	sess handlers.TurnWriter,
@@ -129,47 +130,87 @@ func startRelay(
 		return nil, fmt.Errorf("relay connect: %w", err)
 	}
 
-	d := dispatch.New(dispatch.Config{
-		Frames:     conn.Frames(),
-		Logger:     logger,
-		FirstFrame: authGate(registry, string(serverID), logger),
-	})
-	d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
-	d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
-	d.Register(protocol.TypeSendMessage, handlers.SendMessage(sess, logger))
+	// legCleanup tears down the protocol-specific consumers of conn.Frames()
+	// (the v1 dispatcher path or the v2 Noise manager); the shared waitDone
+	// classifier below is appended to it. Exactly one leg consumes the frame
+	// stream — there is no mixed-mode path (ADR 024: v2 is a hard cutover).
+	var legCleanup func()
 
-	// The assistant-turn bridge taps Bridge.Write so PTY chunks fan out
-	// to every active phone conn as a `message` envelope (#311). Skip in
-	// foreground mode (bridge == nil) — there is no PTY-output observer
-	// surface in that path; inbound `send_message` still works.
-	var bridgeCleanup func()
-	if bridge != nil {
-		bridgeCleanup = startAssistantTurnBridge(ctx, sup, bridge, d, logger)
+	if v2Enabled {
+		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		legCleanup = func() {
+			// Close the connection first so Connection.run closes Frames,
+			// which unblocks the manager's Run; drain then waits for it.
+			_ = conn.Close()
+			drain()
+		}
+	} else {
+		d := dispatch.New(dispatch.Config{
+			Frames:     conn.Frames(),
+			Logger:     logger,
+			FirstFrame: authGate(registry, string(serverID), logger),
+		})
+		d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
+		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
+		d.Register(protocol.TypeSendMessage, handlers.SendMessage(sess, logger))
+
+		// The assistant-turn bridge taps Bridge.Write so PTY chunks fan out
+		// to every active phone conn as a `message` envelope (#311). Skip in
+		// foreground mode (bridge == nil) — there is no PTY-output observer
+		// surface in that path; inbound `send_message` still works.
+		var bridgeCleanup func()
+		if bridge != nil {
+			bridgeCleanup = startAssistantTurnBridge(ctx, sup, bridge, d, logger)
+		}
+
+		dispatcherDone := make(chan struct{})
+		go func() {
+			defer close(dispatcherDone)
+			if err := d.Run(ctx); err != nil {
+				logger.Debug("relay: dispatcher run returned", "err", err)
+			}
+		}()
+
+		forwarderDone := make(chan struct{})
+		go func() {
+			defer close(forwarderDone)
+			for env := range d.Outbound() {
+				if err := conn.Send(env); err != nil {
+					// Transport-internal reconnect handles transient drops;
+					// a Send error here means the conn is currently dropped
+					// or closed. We log and continue draining so the
+					// dispatcher's Outbound close still unblocks Run.
+					logger.Debug("relay: outbound forward dropped",
+						"conn_id", env.ConnID, "err", err)
+				}
+			}
+		}()
+
+		legCleanup = func() {
+			// Stop the assistant-turn observer first so no new PTY chunks
+			// queue while the dispatcher is winding down. The cleanup waits
+			// for the emitter goroutine on ctx-cancel.
+			if bridgeCleanup != nil {
+				bridgeCleanup()
+			}
+			_ = conn.Close()
+			// Order: Connection.run defers close(frames) → dispatcher.Run
+			// returns (Frames closed) → dispatcher closes Outbound → forwarder
+			// exits. Wait returns once Connection.run completes.
+			<-dispatcherDone
+			<-forwarderDone
+		}
 	}
 
-	dispatcherDone := make(chan struct{})
-	go func() {
-		defer close(dispatcherDone)
-		if err := d.Run(ctx); err != nil {
-			logger.Debug("relay: dispatcher run returned", "err", err)
-		}
-	}()
-
-	forwarderDone := make(chan struct{})
-	go func() {
-		defer close(forwarderDone)
-		for env := range d.Outbound() {
-			if err := conn.Send(env); err != nil {
-				// Transport-internal reconnect handles transient drops;
-				// a Send error here means the conn is currently dropped
-				// or closed. We log and continue draining so the
-				// dispatcher's Outbound close still unblocks Run.
-				logger.Debug("relay: outbound forward dropped",
-					"conn_id", env.ConnID, "err", err)
-			}
-		}
-	}()
-
+	// The conn.Wait() classifier is identical for both legs — a 4409
+	// server-id conflict unwinds the daemon (no reconnect loop); ctx-cancel
+	// is the clean-shutdown path; any other terminal error is logged at warn.
+	// Shared after the branch so the v2 leg inherits the contract unchanged.
 	waitDone := make(chan struct{})
 	go func() {
 		defer close(waitDone)
@@ -189,19 +230,68 @@ func startRelay(
 	}()
 
 	cleanup = func() {
-		// Stop the assistant-turn observer first so no new PTY chunks
-		// queue while the dispatcher is winding down. The cleanup waits
-		// for the emitter goroutine on ctx-cancel.
-		if bridgeCleanup != nil {
-			bridgeCleanup()
-		}
-		_ = conn.Close()
-		// Order: Connection.run defers close(frames) → dispatcher.Run
-		// returns (Frames closed) → dispatcher closes Outbound → forwarder
-		// exits. Wait returns once Connection.run completes.
-		<-dispatcherDone
-		<-forwarderDone
+		legCleanup()
 		<-waitDone
 	}
 	return cleanup, nil
+}
+
+// startRelayV2 wires the Mobile Protocol v2 (Noise_IK E2E) dispatch leg: it
+// loads the binary's persistent static keypair, builds a V2SessionManager
+// against conn.Frames() registering the same three relay handlers as the v1
+// path, and runs the manager in one goroutine. The returned drain func blocks
+// until that goroutine has exited; the caller Close()s conn before calling
+// drain so the manager's Run unblocks on the closed Frames channel.
+//
+// The static key is loaded with the same (baseDir, sanitizeName(name)) pair
+// `pyry pair` uses, so the loaded private key derives the public key the phone
+// pinned at pairing. On error the leg fails fast at startup, mirroring the
+// identity.LoadOrCreate / devices.Load posture in startRelay's prologue.
+//
+// SECURITY: StaticPriv is the binary's 32-byte X25519 static secret. It is
+// passed to the manager as an opaque slice and is never logged, wrapped into
+// an error, or emitted on any wire surface here — the same contract
+// internal/keys and internal/noise enforce for these bytes.
+func startRelayV2(
+	ctx context.Context,
+	logger *slog.Logger,
+	instanceName string,
+	conn *relay.Connection,
+	registry *devices.Registry,
+	serverID identity.ServerID,
+	convReg *conversations.Registry,
+	sess handlers.TurnWriter,
+) (drain func(), err error) {
+	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
+	if err != nil {
+		return nil, fmt.Errorf("load static key: %w", err)
+	}
+	priv := staticKey.PrivateKey()
+
+	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
+		Frames:     conn.Frames(),
+		Outbound:   conn.Send,
+		StaticPriv: priv[:],
+		Devices:    registry,
+		ServerID:   string(serverID),
+		Logger:     logger,
+		Handlers: map[string]dispatch.Handler{
+			protocol.TypeListConversations: handlers.ListConversations(convReg),
+			protocol.TypeRegisterPushToken: handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
+			protocol.TypeSendMessage:       handlers.SendMessage(sess, logger),
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build v2 session manager: %w", err)
+	}
+
+	mgrDone := make(chan struct{})
+	go func() {
+		defer close(mgrDone)
+		if err := mgr.Run(ctx); err != nil {
+			logger.Debug("relay: v2 manager run returned", "err", err)
+		}
+	}()
+
+	return func() { <-mgrDone }, nil
 }
