@@ -226,23 +226,27 @@ func TestRun_TrustModalDetected(t *testing.T) {
 	}
 }
 
-func TestRun_McpFailureDetected(t *testing.T) {
+// TestRun_McpFailureNonFatal asserts an MCP-failure banner does NOT abort
+// the run. A failing ambient MCP server (often one the agent does not even
+// need) must not collapse a dispatched turn: streamrunner never aborted on
+// this, and treating it as fatal regressed every spawn whose env had any
+// offline MCP server into `error_during_execution`/"no output" (root-caused
+// 2026-05-29 — the banner detector was designed to SURFACE failures to a
+// host UI, not to abort the dispatcher path). The "mcp_failure" fixture
+// renders only the banner and no end-of-turn, so Run proceeds past it and
+// ends via ctx/watchdog. Contract: ErrMcpFailureBanner is never returned.
+// The banner-then-complete happy path is covered against live claude by the
+// agent-run repro harness.
+func TestRun_McpFailureNonFatal(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	cfg := helperRunCfg(t, "mcp_failure", &stdout, &stderr, "")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	err := Run(ctx, cfg)
-	if err == nil {
-		t.Fatal("Run: got nil, want MCP-failure error")
-	}
-	if !errors.Is(err, ErrMcpFailureBanner) {
-		t.Fatalf("Run: err = %v, want errors.Is(err, ErrMcpFailureBanner)", err)
-	}
-	if !strings.Contains(err.Error(), "MCP failure banner") {
-		t.Errorf("err message missing MCP-failure detector name: %q", err.Error())
+	if err := Run(ctx, cfg); errors.Is(err, ErrMcpFailureBanner) {
+		t.Fatalf("Run: MCP banner must be non-fatal, got ErrMcpFailureBanner: %v", err)
 	}
 }
 
@@ -280,12 +284,9 @@ func TestRun_MidRun_ModalAndBannerDetection(t *testing.T) {
 			want:      ErrTrustModalDetected,
 			substring: "#469's MarkWorkdirTrusted",
 		},
-		{
-			name:      "mcp failure banner mid-run",
-			mode:      "mid_mcp_failure",
-			want:      ErrMcpFailureBanner,
-			substring: "MCP failure banner",
-		},
+		// mcp failure banner mid-run is intentionally absent: an MCP banner
+		// is non-fatal (see TestRun_McpFailureNonFatal). Trust-modal and
+		// network-failure remain fatal mid-run.
 		{
 			name:      "network failure mid-run",
 			mode:      "mid_network_failure",
@@ -573,6 +574,10 @@ func TestRun_WatchdogFires(t *testing.T) {
 		PTYQuietLimit:      200 * time.Millisecond,
 		SpinnerFreezeLimit: 200 * time.Millisecond,
 	}
+	// Short prompt-commit window so the (intentionally) never-committing
+	// fixture exhausts its re-delivery budget fast and reaches the watchdog
+	// path well inside the deadline.
+	cfg.PromptCommitTimeout = 100 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

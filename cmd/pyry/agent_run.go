@@ -63,10 +63,10 @@ load-bearing tool gate, written into the per-spawn settings file as
 a deny-default allow-list.
 
 Set PYRY_USE_STREAMJSON=1 to fall back to the legacy stream-json
-subprocess path (claude -p with --output-format stream-json) for
-billing-classification experimentation. The fallback is operator-facing
-only; the dispatcher receives the same stream-json wire shape under
-both modes.`
+subprocess path (claude with --input-format/--output-format stream-json,
+NOT claude -p/--print) for billing-classification experimentation. The
+fallback is operator-facing only; the dispatcher receives the same
+stream-json wire shape under both modes.`
 
 // validEfforts enumerates the accepted values for --effort. The spike
 // (#329) froze this set; if the upstream claude CLI uses different names,
