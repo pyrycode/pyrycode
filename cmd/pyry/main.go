@@ -480,8 +480,13 @@ func runSupervisor(args []string) error {
 
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
 	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
+	// PYRY_MOBILE_V2=1 flips the daemon's relay leg from the v1 dispatch path
+	// to the Mobile Protocol v2 (Noise_IK E2E) manager. Operator-set switch,
+	// mirroring PYRY_ALLOW_INSECURE_RELAY (env-only, no config/flag); run
+	// `pyry pair preflight` first to confirm no v1 pairings will break.
+	v2Enabled := os.Getenv("PYRY_MOBILE_V2") == "1"
 	bootstrap := pool.Default()
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, cancel, convReg, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge())
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge())
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
