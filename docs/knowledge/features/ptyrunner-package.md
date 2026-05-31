@@ -2,7 +2,7 @@
 
 PTY-driven sibling of [`internal/agentrun/streamrunner`](streamrunner-package.md): spawns `claude` as an interactive TUI under [`github.com/pyrycode/tui-driver`](https://github.com/pyrycode/tui-driver), waits for the TUI to reach idle, checks for trust-folder / MCP-failure / network-failure modals at the post-idle snapshot, submits one user prompt via `Session.WritePrompt` (bracketed-paste), and tears the session down through `Session.Close` (SIGTERM → grace → SIGKILL → PTY close).
 
-Introduced #471 as a scaffolding-only slice; extended by #478 (JSONL tail + stream-json emit + end-of-turn classification), #479 (pyry-side `MaxTurns` budget Counter + PTY-heartbeat/spinner-freeze watchdog with shared ctx-cancel teardown), #547 (a prompt-commit recovery loop that re-delivers a corrupted/uncommitted bracketed paste), and #553 (a `Pasted text` chip gate on that re-delivery so a committed-but-slow turn is never destructively re-pasted — **#227** protection; see [Prompt-commit recovery & the chip gate](#prompt-commit-recovery--the-chip-gate)). **#470 wired it in as the [`pyry agent-run`](pyry-agent-run-command.md) default**, cutting the verb over from `streamrunner` to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline. The pivot is driven by Anthropic's policy article enumerating "Interactive Claude Code in the terminal or IDE" as subscription-eligible while not naming the stream-json subprocess surface; `streamrunner` is retained as a `PYRY_USE_STREAMJSON=1` rollback knob for empirical post-deadline billing-classification comparison.
+Introduced #471 as a scaffolding-only slice; extended by #478 (JSONL tail + stream-json emit + end-of-turn classification), #479 (pyry-side `MaxTurns` budget Counter + PTY-heartbeat/spinner-freeze watchdog with shared ctx-cancel teardown), #547 (a prompt-commit recovery loop that re-delivers a corrupted/uncommitted bracketed paste), #553 (a `Pasted text` chip gate on that re-delivery so a committed-but-slow turn is never destructively re-pasted — **#227** protection; see [Prompt-commit recovery & the chip gate](#prompt-commit-recovery--the-chip-gate)), and #552 (an opt-in TUI session flight recorder behind `PYRY_RECORD_DIR` that mirrors every PTY byte to an asciinema-v2 `.cast` file — OFF by default, byte-identical to today when unset; see [Session flight recorder](#session-flight-recorder-pyry_record_dir)). **#470 wired it in as the [`pyry agent-run`](pyry-agent-run-command.md) default**, cutting the verb over from `streamrunner` to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline. The pivot is driven by Anthropic's policy article enumerating "Interactive Claude Code in the terminal or IDE" as subscription-eligible while not naming the stream-json subprocess surface; `streamrunner` is retained as a `PYRY_USE_STREAMJSON=1` rollback knob for empirical post-deadline billing-classification comparison.
 
 ## Public API
 
@@ -72,7 +72,9 @@ Intentionally **absent** from the argv:
    cmd.Dir = cfg.WorkDir; cmd.Stderr = cfg.Stderr
    if cfg.Env != nil { cmd.Env = append(os.Environ(), cfg.Env...) }
 3. tuidriver.EnsureClaudeEnv(cmd)               // sets TERM=xterm-256color
-4. sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{})
+   (3a. if PYRY_RECORD_DIR is set: create the .cast file + recorder and arm mirror — see
+        "Session flight recorder" below; otherwise mirror stays nil)
+4. sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{Mirror: mirror})  // mirror nil when off
    defer sess.Close()
 5. tuidriver.WaitUntil(ctx, func() bool { return tuidriver.IsIdle(sess.Buffer.Snapshot()) })
 6. snap := sess.Buffer.Snapshot()
@@ -109,11 +111,28 @@ The two decisions log distinct **verbatim** WARN lines (test observables — do 
 
 Only the wedge line carries the `(pasted-text chip present); re-delivering` marker; the committed-but-slow line ends `…not re-delivering`. Both contain "re-delivering", so the tests key on the marker. The `committed = true` on the no-chip path also suppresses the misleading `ptyrunner: prompt uncommitted after retries; proceeding (may wedge)` backstop warn. See [`codebase/553.md`](../codebase/553.md).
 
+## Session flight recorder (`PYRY_RECORD_DIR`)
+
+Opt-in flight recorder (#552). The **control channel** — the rendered PTY screen — is otherwise never persisted: it lives only in tui-driver's ~4 KB rolling buffer and is gone the moment claude exits, yet nearly every ptyrunner failure (hang, wrong state detection, modal mis-handling, paste corruption) lives there. (The content channel — claude's per-session JSONL — is already persisted by claude.) When the operator sets `PYRY_RECORD_DIR`, `Run` mirrors **every PTY byte** of the session to an asciinema-v2 `.cast` file so a bad session can be replayed (`asciinema play`) or parsed/diffed offline.
+
+This is the pyrycode-side consumer wiring of `tuidriver.NewCastRecorder(w io.Writer, cols, rows int) *CastRecorder` (published by tui-driver#125) into the pre-existing `SpawnOpts.Mirror io.Writer` seam — tui-driver's PTY reader goroutine copies every chunk into `Mirror`, and production passed `Mirror: nil` before #552. **The recorder owns no lifecycle; the consumer owns and closes the underlying `*os.File`.**
+
+- **OFF by default, byte-identical to today.** The env var unifies switch + location: set → ON and write there; unset/empty → OFF. There is **no baked-in default directory** (a fallback would risk ambient recording of sensitive content). When unset, `mirror` stays a pure nil `io.Writer` and `SpawnOpts{Mirror: nil}` is byte-for-byte the old `SpawnOpts{}` — no typed-nil trap. Suggested operator location: `~/.local/share/pyry-recordings/` (sibling of `~/.local/share/pyry-artifacts/`, outside Obsidian Sync / Time Machine reach).
+- **Wiring site + named return.** The recorder block sits after `tuidriver.EnsureClaudeEnv(cmd)` and **before** `tuidriver.Spawn` (Mirror is read at spawn time). `Run`'s signature is `func Run(ctx, cfg) (err error)` (named return) so the finalize defer reads the run's **final** result at fire time, not nil at registration.
+- **cols/rows = `tuidriver.DefaultPtyCols` / `DefaultPtyRows` (120 × 40).** `StartPTY` sets every PTY tui-driver spawns to exactly those and ptyrunner spawns with empty opts, so the cast's recorded dimensions match the bytes' origin — exported constants, no magic numbers.
+- **Filenames.** Temp at create: `<UTC-stamp>-<sessionID>.cast` (stamp = `time.Now().UTC().Format("20060102T150405Z")`, sortable), opened `O_CREATE|O_EXCL|O_WRONLY, 0o600`. Session-identifiable *from creation*, so a crash / SIGKILL before the rename still leaves a session-tagged, replayable file. On clean close the outcome is inserted **inside the stem** — `<stem>-ok.cast` (nil run error) / `<stem>-err.cast` (non-nil) — so the file stays `*.cast` (required by both prune and replay). The rename *only adds* the suffix; it never changes the extension.
+- **Close + rename is the strict LIFO tail.** `defer func() { finalizeRecording(f, tmpPath, err, logger) }()` is registered before `defer sess.Close()`, so it runs **last** in the cleanup chain (`cancel() → wg.Wait() → counter.Stop() → emitter.Close() → sess.Close() → finalizeRecording()`). This is load-bearing: `sess.Close()` closes the PTY then blocks on `<-readerDone`, joining the sole `Mirror` writer (the reader goroutine), so the close + rename can never race a mirror write. Race-clean under `go test -race`. The wrapping closure (not a bare `defer`) is mandatory so it reads the named `err` at fire time.
+- **7-day prune, scoped to the dir.** On startup (only when the var is set) `pruneOldRecordings` globs `filepath.Join(dir, "*.cast")` — `*` never crosses a separator, so no recursion, no escape, only top-level `*.cast` hits — and `os.Remove`s those with `mtime` older than `recordingMaxAge = 7 * 24h`. Never touches a subdirectory, a non-`.cast` file, or a path outside the dir. The fresh run's own file (mtime `now`) survives.
+- **Fail-fast on setup, best-effort on housekeeping.** `MkdirAll(0o700)` / `createRecordingFile` / `WriteHeader` fail-fast with a wrapped `ptyrunner: <op>: %w` error before `Spawn` (the operator opted in; silently continuing would betray that, and nothing is lost — no session has started). Prune and rename are best-effort: errors are Warn-logged (**path + err only, never recording content**) and never abort the run.
+
+**SECURITY (`security-sensitive`):** an enabled recording captures the prompt + claude output + **ALL** tool output (file contents, possibly secrets/tokens). Mitigated by: OFF-by-default, mode `0600` (owner-only), `*.cast` gitignored, a flag-site warning, and guidance to a non-synced/non-backed-up location. The artifact is unencrypted by design (it must stay `asciinema play`-able); the threat model is a local opt-in debug aid on the single-user operator's own machine. `cfg.SessionID` becomes a filename component but is already trusted as a path component (`SessionJSONLPath`) and as `--session-id` argv (a `crypto/rand` UUIDv4), so no trust boundary widens. See the spec's `## Security review` (verdict PASS) and [`codebase/552.md`](../codebase/552.md).
+
 ## Return contract
 
 | Stage | Outcome | Return |
 | --- | --- | --- |
 | Required-field validation | Missing field | `errors.New("ptyrunner: <field> required")` |
+| Recording setup (only when `PYRY_RECORD_DIR` set) | dir / file / header failure | `fmt.Errorf("ptyrunner: recording dir\|create recording\|recording header: %w", err)` — fail-fast before Spawn (see [Session flight recorder](#session-flight-recorder-pyry_record_dir)) |
 | Spawn | ctx-canceled / deadline-exceeded | `nil` (operator-shutdown collapse) |
 | Spawn | other error | `fmt.Errorf("ptyrunner: spawn: %w", err)` |
 | Idle wait | ctx-canceled / deadline-exceeded | `nil` (operator-shutdown collapse) |
@@ -139,12 +158,12 @@ Never logs `cfg.PromptBytes` content, any substring of `sess.Buffer.Snapshot()`,
 
 ## Concurrency
 
-`tui-driver` owns the two background goroutines (PTY reader, `cmd.Wait` observer). `Run` is straight-line foreground code — no goroutines, channels, or timers in this package. `tuidriver.WaitUntil` polls at 50ms via an internal `time.Ticker`. `sess.Close()` (deferred) is idempotent and handles SIGTERM → 3s grace → SIGKILL → PTY close → reader-goroutine join.
+`tui-driver` owns the two background goroutines (PTY reader, `cmd.Wait` observer). `Run` is straight-line foreground code — no goroutines, channels, or timers in this package. `tuidriver.WaitUntil` polls at 50ms via an internal `time.Ticker`. `sess.Close()` (deferred) is idempotent and handles SIGTERM → 3s grace → SIGKILL → PTY close → reader-goroutine join. The #552 flight recorder adds **no** new goroutine either — it is driven entirely by tui-driver's existing PTY reader goroutine (the sole `Mirror` writer); `finalizeRecording`'s file close + rename is ordered strictly after that goroutine exits because its defer is the LIFO tail, running after `sess.Close()`'s `<-readerDone` join (happens-before).
 
 ## Dependency direction
 
-- Stdlib: `context`, `errors`, `fmt`, `io`, `log/slog`, `os`, `os/exec`.
-- External: `github.com/pyrycode/tui-driver/pkg/tuidriver` (pinned `v0.0.0-20260519122208-b09fe70e60a7`; first `main` after PR #43 landed `WritePrompt`).
+- Stdlib: `bytes` (#553), `context`, `errors`, `fmt`, `io`, `log/slog`, `os`, `os/exec`, `path/filepath` (#552), `strings` (#552).
+- External: `github.com/pyrycode/tui-driver/pkg/tuidriver` (pinned `v0.0.0-20260531143940-6bec180ad34c`, bumped in #552 to publish `NewCastRecorder` + `DefaultPtyCols`/`DefaultPtyRows`; was `v0.0.0-20260519122208-b09fe70e60a7`, the first `main` after PR #43 landed `WritePrompt`).
 - **Must not** import `internal/supervisor`, `internal/agentrun/jsonl`, `internal/agentrun/streamjson`, or `internal/agentrun/budget`. Verify with:
   ```
   go list -deps ./internal/agentrun/ptyrunner/... | grep -E 'pyrycode/internal/(supervisor|agentrun/(jsonl|streamjson|budget))'
@@ -206,5 +225,6 @@ CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kerne
 - [agentrun-package.md](agentrun-package.md) — the surrounding `internal/agentrun` package; `WriteSettings` / `MarkWorkdirTrusted` (used by #469 to produce `SettingsPath` and pre-write trust) live there.
 - [`codebase/471.md`](../codebase/471.md) — build notes (file inventory, helper-process mode table, `TestMain` rationale, `GOPRIVATE` setup).
 - [`codebase/553.md`](../codebase/553.md) — chip-gate build notes (decision table, evidence base, the stderr-sentinel-vs-logger testing lesson). Spec [`docs/specs/architecture/553-chip-gated-repaste.md`](../../specs/architecture/553-chip-gated-repaste.md). PR #547 introduced the recovery loop; issue #227 is the destructive re-paste regression the gate prevents.
+- [`codebase/552.md`](../codebase/552.md) — flight-recorder build notes (env-read-in-`Run` rationale, the named-return + wrapping-closure-defer gotcha, fail-fast/best-effort split, the unresolved package-doc carve-out follow-up). Spec [`docs/specs/architecture/552-ptyrunner-session-flight-recorder.md`](../../specs/architecture/552-ptyrunner-session-flight-recorder.md). Consumes tui-driver#125's `NewCastRecorder` via the `SpawnOpts.Mirror` seam.
 - Spec [`docs/specs/architecture/471-ptyrunner-skeleton.md`](../../specs/architecture/471-ptyrunner-skeleton.md) — architect spec.
 - [tui-driver PR #43](https://github.com/pyrycode/tui-driver/pull/43) — `Session.WritePrompt` introduction; the bracketed-paste fix this primitive depends on for prompt commit.
