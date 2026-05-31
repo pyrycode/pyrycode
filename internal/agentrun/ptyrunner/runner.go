@@ -37,6 +37,7 @@
 package ptyrunner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -361,7 +362,18 @@ func Run(ctx context.Context, cfg Config) error {
 			committed = true
 			break
 		}
-		logger.Warn("ptyrunner: prompt did not commit; re-delivering", "attempt", attempt, "of", maxPromptAttempts)
+		if !hasPastedChip(sess.Buffer.Snapshot()) {
+			// No "Pasted text" chip → the paste committed; the commit signals
+			// (spinner / session JSONL) are just lagging a slow MCP cold-start.
+			// Re-delivering here would re-paste an already-in-flight turn — the
+			// destructive #227 path. Treat as committed-but-slow and stop
+			// retrying; the JSONL wait below still picks up the lagging turn.
+			// Evidence: no-chip ⟺ committed (N=60 probe, 0 counterexamples).
+			logger.Warn("ptyrunner: commit signals slow but input box empty (no pasted-text chip) — assuming committed-but-slow, not re-delivering")
+			committed = true
+			break
+		}
+		logger.Warn("ptyrunner: prompt uncommitted (pasted-text chip present); re-delivering")
 	}
 	if !committed {
 		// Backstop: fall through to the JSONL wait + watchdog (prior
@@ -553,4 +565,14 @@ func promptDidCommit(ctx context.Context, sess *tuidriver.Session, jsonlPath str
 		case <-tk.C:
 		}
 	}
+}
+
+// hasPastedChip reports whether the input box still shows the "Pasted text"
+// chip — positive evidence the bracketed paste is uncommitted. Used to gate
+// the re-deliver branch: chip present ⟺ genuine wedge (re-deliver); chip
+// absent ⟺ committed-but-slow (do NOT re-deliver, the #227 path). Matches
+// after StripANSI so an ANSI-escaped chip still hits. Mirrors the
+// tuidriver.IsThinking one-liner shape; total over a possibly-empty snapshot.
+func hasPastedChip(snap []byte) bool {
+	return bytes.Contains(tuidriver.StripANSI(snap), []byte("Pasted text"))
 }

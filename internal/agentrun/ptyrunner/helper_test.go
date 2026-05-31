@@ -90,6 +90,18 @@ func runHelper() {
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	case "jsonl", "jsonl_exit143":
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
+	case "commit_wedge_chip":
+		// "Pasted text" chip + ❯ at idle — the chip carries no ✻ so IsIdle
+		// still fires, and hasPastedChip(snapshot) is true. With the JSONL
+		// held back by commitModeJSONLDelay, the parent's first commit window
+		// elapses with no JSONL and the chip-gated branch re-delivers.
+		fmt.Fprint(os.Stdout, "[Pasted text +3 lines] "+idleGlyph+" ")
+	case "commit_slow_nochip":
+		// ❯ only (no chip) — same render as jsonl; the only difference is the
+		// delayed JSONL write. The input box is empty, so the chip-gated
+		// branch treats the slow turn as committed-but-slow and does NOT
+		// re-deliver (#227 protection).
+		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	case "mid_trust", "mid_mcp_failure", "mid_network_failure":
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	default:
@@ -122,12 +134,20 @@ func runHelper() {
 		}
 	}()
 
-	if mode == "jsonl" || mode == "jsonl_exit143" {
+	if mode == "jsonl" || mode == "jsonl_exit143" || mode == "commit_wedge_chip" || mode == "commit_slow_nochip" {
 		path := os.Getenv("GO_PTYRUNNER_JSONL_PATH")
 		body := os.Getenv("GO_PTYRUNNER_JSONL_BODY")
 		if path == "" {
 			fmt.Fprintln(os.Stderr, "jsonl mode requires GO_PTYRUNNER_JSONL_PATH")
 			os.Exit(98)
+		}
+		// The commit-mode fixtures hold the body back so the parent's first
+		// prompt-commit window elapses with no JSONL → the chip-gated branch
+		// fires; the delayed body then lets WaitForSessionJSONL complete the
+		// run cleanly. jsonl / jsonl_exit143 write with no delay.
+		var delay time.Duration
+		if mode == "commit_wedge_chip" || mode == "commit_slow_nochip" {
+			delay = commitModeJSONLDelay
 		}
 		go func() {
 			select {
@@ -136,30 +156,13 @@ func runHelper() {
 				fmt.Fprintln(os.Stderr, "jsonl mode: stdin first-byte timeout")
 				return
 			}
+			if delay > 0 {
+				time.Sleep(delay)
+			}
 			if body == "" {
 				return
 			}
-			// MkdirAll guards against a missing encoded project dir
-			// in test mode — the helper owns parent-dir creation
-			// because no other actor creates it before the JSONL
-			// write. The parent's tuidriver.WaitForSessionJSONL
-			// polls the JSONL path via os.Stat and resolves as
-			// soon as the file appears, regardless of whether the
-			// parent dir pre-existed.
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-				fmt.Fprintf(os.Stderr, "jsonl mode: mkdir %s: %v\n", filepath.Dir(path), err)
-				return
-			}
-			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "jsonl mode: open %s: %v\n", path, err)
-				return
-			}
-			if _, err := io.WriteString(f, body); err != nil {
-				fmt.Fprintf(os.Stderr, "jsonl mode: write %s: %v\n", path, err)
-			}
-			_ = f.Sync()
-			_ = f.Close()
+			writeSessionJSONLBody(path, body)
 		}()
 	}
 
@@ -216,4 +219,39 @@ func runHelper() {
 	case <-time.After(30 * time.Second):
 		os.Exit(0)
 	}
+}
+
+// commitModeJSONLDelay is how long the commit-mode fixtures
+// (commit_wedge_chip / commit_slow_nochip) hold the session JSONL body back
+// after the prompt lands. It must exceed the test's PromptCommitTimeout
+// (200ms) so the parent's first commit window elapses with no JSONL and the
+// chip-gated branch is exercised; 500ms leaves a 300ms margin. Correctness
+// does not depend on the wedge committing inside the retry budget — control
+// always falls through to WaitForSessionJSONL, which picks up the delayed
+// body — so the margin is what keeps the suite -race -count stable.
+const commitModeJSONLDelay = 500 * time.Millisecond
+
+// writeSessionJSONLBody appends body to the per-session JSONL at path,
+// creating the encoded project dir first. Shared by every fake-claude mode
+// that surfaces a session turn (jsonl, jsonl_exit143, and the commit-mode
+// fixtures). MkdirAll guards against a missing encoded project dir in test
+// mode — the helper owns parent-dir creation because no other actor creates
+// it before the JSONL write. The parent's tuidriver.WaitForSessionJSONL polls
+// the path via os.Stat and resolves as soon as the file appears, regardless
+// of whether the parent dir pre-existed.
+func writeSessionJSONLBody(path, body string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "jsonl mode: mkdir %s: %v\n", filepath.Dir(path), err)
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "jsonl mode: open %s: %v\n", path, err)
+		return
+	}
+	if _, err := io.WriteString(f, body); err != nil {
+		fmt.Fprintf(os.Stderr, "jsonl mode: write %s: %v\n", path, err)
+	}
+	_ = f.Sync()
+	_ = f.Close()
 }
