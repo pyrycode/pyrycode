@@ -46,7 +46,7 @@ make build           # produces ./pyry
 
 Requirements:
 
-- Go 1.23 or later
+- Go 1.26.2 or later
 - A `claude` binary on `PATH` (or supplied via `-pyry-claude`)
 - Linux or macOS (Windows is out of scope)
 

@@ -4,9 +4,11 @@ A process supervisor and runtime for [Claude Code](https://claude.com/claude-cod
 
 ## Status
 
-**Phase 0 complete and dogfooded.** Foreground mode is a drop-in `claude` wrapper with auto-restart. Service mode runs `pyry` under launchd or systemd and exposes a Unix-socket control plane. As of `v0.5.2` pyry is daily-driver-grade on Linux: pyrybox now runs claude under systemd via the public install path described below, replacing the prior `tmux` + bash restart-loop setup.
+**Daily-driver-grade and actively shipping.** Foreground mode is a drop-in `claude` wrapper with auto-restart. Service mode runs `pyry` under launchd or systemd and exposes a Unix-socket control plane. As of `v0.13.0` pyrybox runs claude under systemd via the public install path described below, replacing the prior `tmux` + bash restart-loop setup.
 
-Production hardening — multi-session routing, Channels integration, in-process knowledge capture, remote access, voice — is on the roadmap (see [`docs/plan.md`](docs/plan.md)).
+Shipped since Phase 0: **multi-session routing** (a single pyry hosts N UUID-addressed claude sessions, `pyry sessions new/list/rm/rename` + `pyry attach <id>`), **`pyry agent-run`** (an SDK-consumer runner — `ptyrunner` by default, `streamrunner` via `PYRY_USE_STREAMJSON=1`), and **remote access**: the Pyrycode-Relay is **live at `pyrycode-relay.pyryco.de`** (binary↔relay WSS, Noise_IK E2E crypto, QR pairing). The companion mobile client has its UI through Phase 2 with the real-backend integration (Phase 4) underway.
+
+Still on the roadmap: Channels integration (pyrycode-owned Discord/Telegram) and voice (see [`docs/plan.md`](docs/plan.md)).
 
 ## What it does
 
@@ -28,7 +30,7 @@ Linux and macOS, including Apple Silicon (arm64) — prebuilt `darwin_arm64` bin
 curl -fsSL https://raw.githubusercontent.com/pyrycode/pyrycode/main/install.sh | bash
 ```
 
-Drops `pyry` in `~/.local/bin/`. Set `PYRY_VERSION=v0.5.2` to pin a release; set `PYRY_INSTALL_DIR=/usr/local/bin` (run with `sudo bash`) for a system-wide install.
+Drops `pyry` in `~/.local/bin/`. Set `PYRY_VERSION=v0.13.0` to pin a release; set `PYRY_INSTALL_DIR=/usr/local/bin` (run with `sudo bash`) for a system-wide install.
 
 **Homebrew** (macOS, Linuxbrew):
 
@@ -52,7 +54,7 @@ make linux           # cross-compile dist/pyry-linux-amd64
 make dist            # adds darwin × {amd64, arm64}
 ```
 
-Requires a working `claude` binary on `PATH` to actually do anything useful. Building from source needs Go 1.26 or later.
+Requires a working `claude` binary on `PATH` to actually do anything useful. Building from source needs Go 1.26.2 or later.
 
 ## Quickstart
 
