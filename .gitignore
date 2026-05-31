@@ -4,6 +4,12 @@
 *.test
 *.out
 
+# Flight-recorder session recordings (PYRY_RECORD_DIR, #552). Belt-and-
+# suspenders: the production default lives outside the repo, but if an operator
+# points PYRY_RECORD_DIR inside the tree while debugging, recordings (which can
+# contain full session content) never get committed.
+*.cast
+
 # Go
 /vendor/
 
