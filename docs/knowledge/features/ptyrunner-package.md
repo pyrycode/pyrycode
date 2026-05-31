@@ -2,7 +2,7 @@
 
 PTY-driven sibling of [`internal/agentrun/streamrunner`](streamrunner-package.md): spawns `claude` as an interactive TUI under [`github.com/pyrycode/tui-driver`](https://github.com/pyrycode/tui-driver), waits for the TUI to reach idle, checks for trust-folder / MCP-failure / network-failure modals at the post-idle snapshot, submits one user prompt via `Session.WritePrompt` (bracketed-paste), and tears the session down through `Session.Close` (SIGTERM → grace → SIGKILL → PTY close).
 
-Introduced #471 as a scaffolding-only slice; extended by #478 (JSONL tail + stream-json emit + end-of-turn classification) and #479 (pyry-side `MaxTurns` budget Counter + PTY-heartbeat/spinner-freeze watchdog with shared ctx-cancel teardown). **#470 wired it in as the [`pyry agent-run`](pyry-agent-run-command.md) default**, cutting the verb over from `streamrunner` to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline. The pivot is driven by Anthropic's policy article enumerating "Interactive Claude Code in the terminal or IDE" as subscription-eligible while not naming the stream-json subprocess surface; `streamrunner` is retained as a `PYRY_USE_STREAMJSON=1` rollback knob for empirical post-deadline billing-classification comparison.
+Introduced #471 as a scaffolding-only slice; extended by #478 (JSONL tail + stream-json emit + end-of-turn classification), #479 (pyry-side `MaxTurns` budget Counter + PTY-heartbeat/spinner-freeze watchdog with shared ctx-cancel teardown), #547 (a prompt-commit recovery loop that re-delivers a corrupted/uncommitted bracketed paste), and #553 (a `Pasted text` chip gate on that re-delivery so a committed-but-slow turn is never destructively re-pasted — **#227** protection; see [Prompt-commit recovery & the chip gate](#prompt-commit-recovery--the-chip-gate)). **#470 wired it in as the [`pyry agent-run`](pyry-agent-run-command.md) default**, cutting the verb over from `streamrunner` to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline. The pivot is driven by Anthropic's policy article enumerating "Interactive Claude Code in the terminal or IDE" as subscription-eligible while not naming the stream-json subprocess surface; `streamrunner` is retained as a `PYRY_USE_STREAMJSON=1` rollback knob for empirical post-deadline billing-classification comparison.
 
 ## Public API
 
@@ -79,8 +79,10 @@ Intentionally **absent** from the argv:
    HasTrustModal(snap)      → ErrTrustModalDetected
    HasMcpFailureBanner(snap) → ErrMcpFailureBanner
    HasNetworkFailure(snap)   → ErrNetworkFailure
-7. sess.WritePrompt(string(cfg.PromptBytes))
-8. return nil
+7. Deliver-and-confirm loop: sess.WritePrompt(string(cfg.PromptBytes)), then confirm
+   the turn committed and recover a corrupted/uncommitted paste — re-delivering only
+   when the "Pasted text" chip proves it is still uncommitted (see below).
+8. Drain the session JSONL, enforce the max-turns budget + watchdog (#478 / #479), return nil.
 ```
 
 The modal/banner detection runs **after** idle — the trust modal renders the `❯` glyph in its input field, so `IsIdle` returns true even inside it; the post-idle check is precisely what disambiguates. Detector order (trust → mcp → network) prioritises the most actionable case but is not load-bearing for correctness (detectors are mutually exclusive in practice).
@@ -88,6 +90,24 @@ The modal/banner detection runs **after** idle — the trust modal renders the `
 ## `WritePrompt` vs `Write` is load-bearing
 
 `session.WritePrompt(text)` (introduced in [tui-driver PR #43](https://github.com/pyrycode/tui-driver/pull/43)) wraps `text` with bracketed-paste markers (`\x1b[200~text\x1b[201~`) and writes a separate trailing `\r` outside the closer. Naive `session.Write(promptBytes + "\r")` does NOT commit a multi-line or >1 KB prompt: claude's TUI auto-paste-detects bytes arriving faster than human typing, groups them as `[Pasted text +N lines]` chips, swallows the trailing `\r` into the paste body, and waits indefinitely for an explicit Enter. The package always calls `WritePrompt`; the `string(cfg.PromptBytes)` conversion is the only `[]byte→string` boundary in the call graph. A future contributor refactoring to `Write` will silently break long prompts — pinned in the package doc-comment.
+
+## Prompt-commit recovery & the chip gate
+
+Under MCP-init churn the bracketed-paste byte stream can interleave with claude's TUI redraws, corrupting the pasted text and absorbing the trailing `\r` commit — claude is left idle with garbled, uncommitted input ("Mode B", root-caused #547). After `WritePrompt`, `Run` confirms the turn committed and reactively recovers, inside a bounded retry loop (`maxPromptAttempts = 3`):
+
+- **`promptDidCommit(ctx, sess, jsonlPath, timeout)`** polls (`promptCommitPoll`, 150ms) for either signal that claude started a turn — `tuidriver.IsThinking(snapshot)` OR the per-session JSONL appearing (`os.Stat`). A healthy run trips this within ~1s, far inside `PromptCommitTimeout` (default `defaultPromptCommitTimeout` = 3s; override via `Config.PromptCommitTimeout`), so it never retries.
+- On timeout, the **chip gate** (#553) decides whether to re-deliver, acting only on positive evidence the paste is still uncommitted: `hasPastedChip(snap) = bytes.Contains(tuidriver.StripANSI(snap), []byte("Pasted text"))` (a pure detector mirroring `tuidriver.IsThinking`'s shape). **Chip present** ⟺ genuine wedge → `ClearInputLine` + re-deliver. **Chip absent** ⟺ committed-but-slow (commit signals lagging a slow MCP cold-start) → set `committed = true` and stop retrying.
+
+Re-delivering unconditionally on timeout — the pre-#553 behaviour PR #547 shipped — re-pastes an in-flight turn whose signals merely lag, the destructive **#227** path. The gate restores the discriminator: a closed N=60 probe (claude 2.1.158) established chip-present ⟺ uncommitted with zero counterexamples. **Both** break paths fall through to the downstream JSONL wait, so a committed-but-slow turn still completes once its lagging JSONL lands — the gate decides whether to *re-paste*, never whether to *wait*.
+
+The two decisions log distinct **verbatim** WARN lines (test observables — do not paraphrase):
+
+| Case | WARN line |
+| --- | --- |
+| genuine wedge (re-deliver) | `ptyrunner: prompt uncommitted (pasted-text chip present); re-delivering` |
+| committed-but-slow (no re-deliver, #227 fix) | `ptyrunner: commit signals slow but input box empty (no pasted-text chip) — assuming committed-but-slow, not re-delivering` |
+
+Only the wedge line carries the `(pasted-text chip present); re-delivering` marker; the committed-but-slow line ends `…not re-delivering`. Both contain "re-delivering", so the tests key on the marker. The `committed = true` on the no-chip path also suppresses the misleading `ptyrunner: prompt uncommitted after retries; proceeding (may wedge)` backstop warn. See [`codebase/553.md`](../codebase/553.md).
 
 ## Return contract
 
@@ -148,6 +168,8 @@ Helper modes keyed by `GO_PTYRUNNER_HELPER_MODE`:
 | `mcp_failure` | `1 MCP server failed ` + `❯` + space | `HasMcpFailureBanner` + `IsIdle` |
 | `network_failure` | `FailedToOpenSocket ` + `❯` + space | `HasNetworkFailure` + `IsIdle` |
 | `slow_spawn` | sleeps 5s before writing anything | parent's `WaitUntil` ctx-cancels first |
+| `commit_wedge_chip` | `[Pasted text +3 lines] ❯` + space; JSONL body held back `commitModeJSONLDelay` (500ms) | `IsIdle` (chip carries no `✻`) + `hasPastedChip` → chip-gate re-delivers |
+| `commit_slow_nochip` | `❯` + space; JSONL body held back `commitModeJSONLDelay` | `IsIdle`, no chip → chip-gate treats as committed-but-slow (#227 path) |
 
 All modes drain stdin to `io.Discard` so the parent's `WritePrompt` bracketed-paste sequence doesn't backpressure into the PTY master write. All modes install a SIGTERM handler with a 30s fallback timeout so `Session.Close`'s SIGTERM step (not the 3s SIGKILL fallback) drives the helper's exit — keeps the seven scenario tests at ~3.6s total.
 
@@ -158,6 +180,10 @@ Test cases:
 - `TestRun_CtxCancelDuringSpawn` (mode `slow_spawn`, cancels at 100ms, expects `nil`, elapsed < 8s)
 - `TestBuildArgs` (six argv pairs + forbidden-flag loop)
 - `TestRun_MissingRequiredFields` (nine subtests, one per required field)
+- `TestHasPastedChip` (pure detector, 6 cases incl. an ANSI-escaped chip that only matches after `StripANSI`, plus a `"Paste text"` near-miss → false)
+- `TestRun_CommitWedge_ChipPresent_ReDelivers` / `TestRun_CommitSlow_NoChip_DoesNotReDeliver` (logger-asserting via the captured `cfg.Logger` + `loggerSyncWriter`; the latter pins the #227 protection by asserting the wedge marker is **absent**. RED→GREEN was demonstrated by toggling the gate to `if false && …`)
+
+The chip-gate integration tests observe the loop decision through the captured `cfg.Logger` (slog `TextHandler` @ `LevelWarn`), **not** a fake-claude stderr sentinel: under the PTY the helper's `os.Stderr` is not wired into the parent's `cfg.Stderr`, so a stderr sentinel observes nothing. The fixtures' `commitModeJSONLDelay` (500ms) only needs to exceed the test's `PromptCommitTimeout` (200ms) so the first commit window elapses with no JSONL and the gate is exercised; control always falls through to `WaitForSessionJSONL`, which keeps the suite `-race -count=5` stable.
 
 Tests do **not** need real claude — the detectors are pure functions over `[]byte` snapshots; synthetic PTY bytes that contain the UTF-8 anchors satisfy them. Same approach `streamrunner`'s tests take.
 
@@ -179,5 +205,6 @@ CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kerne
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes the spawn primitives. Post-#470 wired to `ptyrunner` by default; falls back to `streamrunner` when `PYRY_USE_STREAMJSON=1`.
 - [agentrun-package.md](agentrun-package.md) — the surrounding `internal/agentrun` package; `WriteSettings` / `MarkWorkdirTrusted` (used by #469 to produce `SettingsPath` and pre-write trust) live there.
 - [`codebase/471.md`](../codebase/471.md) — build notes (file inventory, helper-process mode table, `TestMain` rationale, `GOPRIVATE` setup).
+- [`codebase/553.md`](../codebase/553.md) — chip-gate build notes (decision table, evidence base, the stderr-sentinel-vs-logger testing lesson). Spec [`docs/specs/architecture/553-chip-gated-repaste.md`](../../specs/architecture/553-chip-gated-repaste.md). PR #547 introduced the recovery loop; issue #227 is the destructive re-paste regression the gate prevents.
 - Spec [`docs/specs/architecture/471-ptyrunner-skeleton.md`](../../specs/architecture/471-ptyrunner-skeleton.md) — architect spec.
 - [tui-driver PR #43](https://github.com/pyrycode/tui-driver/pull/43) — `Session.WritePrompt` introduction; the bracketed-paste fix this primitive depends on for prompt commit.
