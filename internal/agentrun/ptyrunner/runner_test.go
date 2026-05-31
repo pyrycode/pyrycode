@@ -7,7 +7,9 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -734,5 +736,236 @@ func TestRun_MissingRequiredFields(t *testing.T) {
 				t.Fatalf("Run err = %v, want substring %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// --- PYRY_RECORD_DIR flight-recorder (#552) ---
+//
+// These tests drive os.Getenv("PYRY_RECORD_DIR") via t.Setenv, so they MUST
+// NOT call t.Parallel() (nor any parent). Go runs the serial tests to
+// completion before the parallel batch, so an env-setting serial test never
+// overlaps a parallel one.
+
+// castFiles returns the basenames of all *.cast files directly in dir.
+func castFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*.cast"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+	names := make([]string, len(matches))
+	for i, m := range matches {
+		names[i] = filepath.Base(m)
+	}
+	return names
+}
+
+// assertNoCastFiles fails if any *.cast file exists anywhere under root.
+func assertNoCastFiles(t *testing.T, root string) {
+	t.Helper()
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // unreadable subtree — nothing to assert
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".cast") {
+			t.Errorf("unexpected .cast file under %s: %s", root, path)
+		}
+		return nil
+	})
+}
+
+// castOkNameRe matches <sortable-UTC-stamp>-<sessionid>-ok.cast.
+var castOkNameRe = regexp.MustCompile(`^\d{8}T\d{6}Z-` + regexp.QuoteMeta(testSessionID) + `-ok\.cast$`)
+
+// TestRun_RecordOff_NoFileCreated covers AC #1: PYRY_RECORD_DIR empty → no
+// recording file appears and the run is unaffected (byte-identical to today).
+func TestRun_RecordOff_NoFileCreated(t *testing.T) {
+	t.Setenv("PYRY_RECORD_DIR", "")
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, happyPathBody)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Run unaffected: the success trailer is present.
+	tr := parseTrailer(t, stdout.Bytes())
+	if tr.Type != "result" || tr.Subtype != "success" {
+		t.Errorf("trailer = (%q,%q), want (result,success)", tr.Type, tr.Subtype)
+	}
+	// No stray recording under the run's home or workdir.
+	assertNoCastFiles(t, cfg.HomeDir)
+	assertNoCastFiles(t, cfg.WorkDir)
+}
+
+// TestRun_RecordOn_CreatesOkTaggedValidV2 covers AC #2 + AC #3 (ok): one
+// 0600 .cast named <stamp>-<sid>-ok.cast is created, non-empty, and parses
+// as valid asciinema v2 (version 2, 120x40, ≥1 "o" event).
+func TestRun_RecordOn_CreatesOkTaggedValidV2(t *testing.T) {
+	recDir := t.TempDir()
+	t.Setenv("PYRY_RECORD_DIR", recDir)
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, happyPathBody)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	names := castFiles(t, recDir)
+	if len(names) != 1 {
+		t.Fatalf("recordings = %v, want exactly one .cast", names)
+	}
+	name := names[0]
+	if !castOkNameRe.MatchString(name) {
+		t.Errorf("recording name %q does not match %v", name, castOkNameRe)
+	}
+
+	path := filepath.Join(recDir, name)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("recording mode = %o, want 600", perm)
+	}
+	if info.Size() == 0 {
+		t.Fatalf("recording is empty")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
+	if len(lines) < 2 {
+		t.Fatalf("cast has %d lines, want >=2 (header + >=1 event)", len(lines))
+	}
+	// Header line.
+	var hdr struct {
+		Version int `json:"version"`
+		Width   int `json:"width"`
+		Height  int `json:"height"`
+	}
+	if err := json.Unmarshal(lines[0], &hdr); err != nil {
+		t.Fatalf("decode cast header %q: %v", lines[0], err)
+	}
+	if hdr.Version != 2 {
+		t.Errorf("cast version = %d, want 2", hdr.Version)
+	}
+	if hdr.Width != int(tuidriver.DefaultPtyCols) || hdr.Height != int(tuidriver.DefaultPtyRows) {
+		t.Errorf("cast (width,height) = (%d,%d), want (%d,%d)",
+			hdr.Width, hdr.Height, tuidriver.DefaultPtyCols, tuidriver.DefaultPtyRows)
+	}
+	// At least one event line is a 3-element [float64, "o", string].
+	var event []any
+	if err := json.Unmarshal(lines[1], &event); err != nil {
+		t.Fatalf("decode cast event %q: %v", lines[1], err)
+	}
+	if len(event) != 3 {
+		t.Fatalf("cast event has %d elements, want 3: %v", len(event), event)
+	}
+	if _, ok := event[0].(float64); !ok {
+		t.Errorf("cast event[0] = %T, want float64", event[0])
+	}
+	if event[1] != "o" {
+		t.Errorf("cast event[1] = %v, want \"o\"", event[1])
+	}
+	if _, ok := event[2].(string); !ok {
+		t.Errorf("cast event[2] = %T, want string", event[2])
+	}
+}
+
+// TestRun_RecordOn_ErrTagged covers AC #3 (err): a non-nil run result seals
+// the recording with an -err suffix (still a *.cast).
+func TestRun_RecordOn_ErrTagged(t *testing.T) {
+	cases := []struct {
+		name string
+		mode string
+		want error
+	}{
+		{"network failure", "network_failure", ErrNetworkFailure},
+		{"trust modal", "trust", ErrTrustModalDetected},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			recDir := t.TempDir()
+			t.Setenv("PYRY_RECORD_DIR", recDir)
+			var stdout, stderr bytes.Buffer
+			cfg := helperRunCfg(t, tc.mode, &stdout, &stderr, "")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			err := Run(ctx, cfg)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Run: err = %v, want errors.Is(err, %v)", err, tc.want)
+			}
+			names := castFiles(t, recDir)
+			if len(names) != 1 {
+				t.Fatalf("recordings = %v, want exactly one .cast", names)
+			}
+			if !strings.HasSuffix(names[0], "-err.cast") {
+				t.Errorf("recording name %q, want -err.cast suffix", names[0])
+			}
+		})
+	}
+}
+
+// TestRun_RecordPrune_Scoped covers AC #4: on startup, *.cast files older
+// than 7 days are pruned; fresher .cast files and non-.cast files are kept,
+// and pruning never escapes PYRY_RECORD_DIR.
+func TestRun_RecordPrune_Scoped(t *testing.T) {
+	recDir := t.TempDir()
+	t.Setenv("PYRY_RECORD_DIR", recDir)
+
+	old := filepath.Join(recDir, "old.cast")
+	keep := filepath.Join(recDir, "keep.cast")
+	decoy := filepath.Join(recDir, "decoy.log")
+	for _, p := range []string{old, keep, decoy} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+	eightDaysAgo := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(old, eightDaysAgo, eightDaysAgo); err != nil {
+		t.Fatalf("chtimes old: %v", err)
+	}
+	// A stale non-.cast file must NOT be pruned (glob is *.cast only).
+	if err := os.Chtimes(decoy, eightDaysAgo, eightDaysAgo); err != nil {
+		t.Fatalf("chtimes decoy: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, happyPathBody)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("old.cast should be pruned, stat err = %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("keep.cast (fresh) should remain: %v", err)
+	}
+	if _, err := os.Stat(decoy); err != nil {
+		t.Errorf("decoy.log (non-.cast) must be untouched: %v", err)
+	}
+	// The run's own recording survives prune and is -ok tagged.
+	foundOk := false
+	for _, n := range castFiles(t, recDir) {
+		if castOkNameRe.MatchString(n) {
+			foundOk = true
+		}
+	}
+	if !foundOk {
+		t.Errorf("run's own -ok.cast missing; recordings = %v", castFiles(t, recDir))
 	}
 }

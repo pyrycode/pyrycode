@@ -45,6 +45,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -218,7 +220,7 @@ type Config struct {
 //
 // Cleanup ordering — defer LIFO produces:
 //
-//	cancel() → wg.Wait() → counter.Stop() → emitter.Close() → sess.Close()
+//	cancel() → wg.Wait() → counter.Stop() → emitter.Close() → sess.Close() → finalizeRecording()
 //
 // Each step is load-bearing: cancel() signals the watchdog goroutine
 // (and the tuidriver.Session.Events merge goroutine) to exit; wg.Wait()
@@ -227,9 +229,17 @@ type Config struct {
 // timer; emitter.Close writes the `result` trailer to cfg.Stdout BEFORE
 // sess.Close()'s SIGTERM races with claude's last PTY writes. The
 // tuidriver.Session.Events channel is drained inline by Run's own
-// goroutine, so wg tracks only the watchdog. Re-ordering these defers
-// silently breaks the invariant — keep them in this LIFO sequence.
-func Run(ctx context.Context, cfg Config) error {
+// goroutine, so wg tracks only the watchdog. finalizeRecording() (only
+// registered when PYRY_RECORD_DIR is set) is the strict tail: it closes +
+// renames the .cast recording only after sess.Close() has joined
+// tui-driver's PTY reader goroutine — the sole Mirror writer — via
+// <-readerDone, so no mirror write can race the close+rename. Re-ordering
+// these defers silently breaks the invariant — keep them in this LIFO
+// sequence.
+//
+// Run returns a named err so the recording-finalize defer reads the run's
+// final result (-ok / -err) at fire time; no existing defer assigns to err.
+func Run(ctx context.Context, cfg Config) (err error) {
 	if cfg.ClaudeBin == "" {
 		return errors.New("ptyrunner: ClaudeBin required")
 	}
@@ -279,7 +289,43 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	tuidriver.EnsureClaudeEnv(cmd)
 
-	sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{})
+	// Opt-in TUI session flight recorder, gated on PYRY_RECORD_DIR. OFF by
+	// default: when the env var is unset/empty, mirror stays nil and
+	// SpawnOpts{Mirror: nil} is byte-identical to the pre-#552 SpawnOpts{}.
+	//
+	// SECURITY: when enabled, EVERY PTY byte of the session is mirrored to a
+	// .cast file — the prompt, claude's output, AND all tool output, which can
+	// include file contents and secrets. The file is 0600 (owner-only) and
+	// *.cast is gitignored, but the artifact is unencrypted by design (it must
+	// stay `asciinema play`-able). Point PYRY_RECORD_DIR at a non-synced,
+	// non-backed-up location such as ~/.local/share/pyry-recordings/ (sibling
+	// of ~/.local/share/pyry-artifacts/) — never inside the repo, ~/.claude, or
+	// any Obsidian Sync / Time Machine path. The recording is a separate opt-in
+	// artifact, NOT a log (see the package doc's logging-discipline carve-out).
+	var mirror io.Writer
+	if dir := os.Getenv("PYRY_RECORD_DIR"); dir != "" {
+		if merr := os.MkdirAll(dir, 0o700); merr != nil {
+			return fmt.Errorf("ptyrunner: recording dir: %w", merr)
+		}
+		pruneOldRecordings(dir, logger)
+		f, tmpPath, ferr := createRecordingFile(dir, cfg.SessionID)
+		if ferr != nil {
+			return fmt.Errorf("ptyrunner: create recording: %w", ferr)
+		}
+		// Register the finalize defer NOW — before `defer sess.Close()` below,
+		// so LIFO runs it LAST (after sess.Close joins the PTY reader). The
+		// wrapping closure reads the named err at fire time so the outcome tag
+		// matches the run's final result; a bare defer would capture nil here.
+		// On a pre-Spawn early return it simply closes a header-only file.
+		defer func() { finalizeRecording(f, tmpPath, err, logger) }()
+		rec := tuidriver.NewCastRecorder(f, int(tuidriver.DefaultPtyCols), int(tuidriver.DefaultPtyRows))
+		if herr := rec.WriteHeader(); herr != nil {
+			return fmt.Errorf("ptyrunner: recording header: %w", herr)
+		}
+		mirror = rec
+	}
+
+	sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{Mirror: mirror})
 	if err != nil {
 		if isCtxErr(ctx, err) {
 			return nil
@@ -575,4 +621,76 @@ func promptDidCommit(ctx context.Context, sess *tuidriver.Session, jsonlPath str
 // tuidriver.IsThinking one-liner shape; total over a possibly-empty snapshot.
 func hasPastedChip(snap []byte) bool {
 	return bytes.Contains(tuidriver.StripANSI(snap), []byte("Pasted text"))
+}
+
+// recordingMaxAge bounds how long a .cast flight recording is kept. On
+// startup (only when PYRY_RECORD_DIR is set) recordings older than this are
+// pruned so disk use stays bounded across runs.
+const recordingMaxAge = 7 * 24 * time.Hour
+
+// createRecordingFile opens a session-tagged temp .cast file in dir, mode
+// 0600. The name is <sortable-UTC-stamp>-<sessionID>.cast so a crash / SIGKILL
+// before the close-time rename still leaves a session-identifiable file.
+// O_EXCL is cheap hygiene against a pre-created path (the per-second UTC stamp
+// plus the UUID session id make a real collision otherwise impossible, and it
+// defeats a create-time symlink/pre-create swap).
+func createRecordingFile(dir, sessionID string) (f *os.File, tmpPath string, err error) {
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	tmpPath = filepath.Join(dir, stamp+"-"+sessionID+".cast")
+	f, err = os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, tmpPath, nil
+}
+
+// finalizeRecording closes the recording file and renames it to annotate the
+// run outcome inside the stem — <stem>-ok.cast on a nil runErr, <stem>-err.cast
+// otherwise. The suffix goes before the extension so the file stays a *.cast
+// (required by both prune and `asciinema play`). Best-effort: a failed close
+// is ignored (data is already flushed by the reader goroutine) and a failed
+// rename leaves the session-tagged temp in place — still a valid, replayable
+// cast — Warn-logged with the path only, never any recording content.
+//
+// Runs as the strict tail of Run's defer-LIFO chain, after sess.Close() has
+// joined the PTY reader goroutine (the sole Mirror writer), so the close and
+// rename cannot race a mirror write.
+func finalizeRecording(f *os.File, tmpPath string, runErr error, logger *slog.Logger) {
+	_ = f.Close()
+	outcome := "ok"
+	if runErr != nil {
+		outcome = "err"
+	}
+	finalPath := strings.TrimSuffix(tmpPath, ".cast") + "-" + outcome + ".cast"
+	if rerr := os.Rename(tmpPath, finalPath); rerr != nil {
+		logger.Warn("ptyrunner: recording rename failed", "from", tmpPath, "to", finalPath, "err", rerr)
+	}
+}
+
+// pruneOldRecordings deletes *.cast files in dir whose mtime is older than
+// recordingMaxAge. Scoped strictly to dir's top level: filepath.Glob's "*"
+// never matches a path separator, so it cannot recurse or escape dir, and only
+// *.cast glob hits are candidates — never a subdirectory, never a non-.cast
+// file. Best-effort housekeeping: glob/stat/remove errors are Warn-logged
+// (path + err only) and never abort the run; a stale-cleanup hiccup must not
+// block recording a fresh session. Called before the fresh file is created.
+func pruneOldRecordings(dir string, logger *slog.Logger) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.cast"))
+	if err != nil {
+		logger.Warn("ptyrunner: recording prune glob failed", "dir", dir, "err", err)
+		return
+	}
+	cutoff := time.Now().Add(-recordingMaxAge)
+	for _, path := range matches {
+		info, serr := os.Stat(path)
+		if serr != nil {
+			logger.Warn("ptyrunner: recording prune stat failed", "path", path, "err", serr)
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if rerr := os.Remove(path); rerr != nil {
+				logger.Warn("ptyrunner: recording prune remove failed", "path", path, "err", rerr)
+			}
+		}
+	}
 }
