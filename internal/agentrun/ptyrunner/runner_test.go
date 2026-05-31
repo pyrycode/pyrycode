@@ -603,6 +603,93 @@ func TestRun_WatchdogFires(t *testing.T) {
 	}
 }
 
+// TestHasPastedChip covers the pure detector over hand-built snapshots. The
+// ANSI-escaped case splits the anchor with a CSI reset so the match only
+// succeeds after StripANSI — proving that step is load-bearing.
+func TestHasPastedChip(t *testing.T) {
+	t.Parallel()
+	const idleGlyph = "\xe2\x9d\xaf" // ❯
+	cases := []struct {
+		name string
+		snap []byte
+		want bool
+	}{
+		{"chip present plain", []byte("[Pasted text +3 lines] " + idleGlyph + " "), true},
+		{"no chip", []byte(idleGlyph + " "), false},
+		// "Pasted" and " text" are split by a CSI reset — only StripANSI rejoins
+		// them into the "Pasted text" anchor.
+		{"ansi-escaped chip", []byte("[Pasted\x1b[0m text +3 lines] " + idleGlyph), true},
+		{"empty", []byte{}, false},
+		{"nil", nil, false},
+		{"near miss", []byte("Paste text " + idleGlyph), false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasPastedChip(tc.snap); got != tc.want {
+				t.Errorf("hasPastedChip(%q) = %v, want %v", tc.snap, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRun_CommitWedge_ChipPresent_ReDelivers asserts the genuine-wedge path:
+// commit signals are slow (JSONL held back past PromptCommitTimeout) AND the
+// "Pasted text" chip is present, so the runner re-delivers and logs the wedge
+// marker. The delayed JSONL then completes the run cleanly (Run returns nil).
+func TestRun_CommitWedge_ChipPresent_ReDelivers(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "commit_wedge_chip", &stdout, &stderr, happyPathBody)
+	cfg.PromptCommitTimeout = 200 * time.Millisecond
+
+	logBuf := &loggerSyncWriter{}
+	cfg.Logger = slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "(pasted-text chip present); re-delivering") {
+		t.Errorf("captured WARN missing wedge re-deliver marker:\n%s", out)
+	}
+}
+
+// TestRun_CommitSlow_NoChip_DoesNotReDeliver asserts the #227 protection:
+// commit signals are slow (JSONL held back past PromptCommitTimeout) but the
+// input box is empty (no chip), so the runner treats the turn as
+// committed-but-slow and does NOT re-deliver. The committed-but-slow marker
+// must appear; the destructive wedge marker must NOT.
+func TestRun_CommitSlow_NoChip_DoesNotReDeliver(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "commit_slow_nochip", &stdout, &stderr, happyPathBody)
+	cfg.PromptCommitTimeout = 200 * time.Millisecond
+
+	logBuf := &loggerSyncWriter{}
+	cfg.Logger = slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "input box empty (no pasted-text chip)") {
+		t.Errorf("captured WARN missing committed-but-slow marker:\n%s", out)
+	}
+	if strings.Contains(out, "(pasted-text chip present); re-delivering") {
+		t.Errorf("captured WARN includes destructive re-deliver marker (#227 regression):\n%s", out)
+	}
+}
+
 func TestRun_MissingRequiredFields(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
