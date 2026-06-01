@@ -237,8 +237,10 @@ type Config struct {
 // these defers silently breaks the invariant — keep them in this LIFO
 // sequence.
 //
-// Run returns a named err so the recording-finalize defer reads the run's
-// final result (-ok / -err) at fire time; no existing defer assigns to err.
+// Run returns a named err so the recording-finalize defer can read it at fire
+// time; the defer also reads the emitter's resolved ExitReason (the real wedge
+// signal — Run returns nil on a watchdog-fire collapse) to tag -ok / -err by
+// the run's true outcome. No existing defer assigns to err.
 func Run(ctx context.Context, cfg Config) (err error) {
 	if cfg.ClaudeBin == "" {
 		return errors.New("ptyrunner: ClaudeBin required")
@@ -302,6 +304,11 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	// of ~/.local/share/pyry-artifacts/) — never inside the repo, ~/.claude, or
 	// any Obsidian Sync / Time Machine path. The recording is a separate opt-in
 	// artifact, NOT a log (see the package doc's logging-discipline carve-out).
+	// emitter is created later (after the idle/modal gates), but the recording
+	// finalize defer below must read its resolved ExitReason at fire time to
+	// tag the .cast by the run's REAL outcome — so declare it here, before that
+	// defer is registered. nil until assigned; the defer nil-checks it.
+	var emitter *streamjson.Emitter
 	var mirror io.Writer
 	if dir := os.Getenv("PYRY_RECORD_DIR"); dir != "" {
 		if merr := os.MkdirAll(dir, 0o700); merr != nil {
@@ -313,11 +320,21 @@ func Run(ctx context.Context, cfg Config) (err error) {
 			return fmt.Errorf("ptyrunner: create recording: %w", ferr)
 		}
 		// Register the finalize defer NOW — before `defer sess.Close()` below,
-		// so LIFO runs it LAST (after sess.Close joins the PTY reader). The
-		// wrapping closure reads the named err at fire time so the outcome tag
-		// matches the run's final result; a bare defer would capture nil here.
-		// On a pre-Spawn early return it simply closes a header-only file.
-		defer func() { finalizeRecording(f, tmpPath, err, logger) }()
+		// so LIFO runs it LAST (after sess.Close joins the PTY reader, and after
+		// emitter.Close has resolved the exit reason). The closure reads the
+		// named err AND the emitter's resolved ExitReason at fire time: Run
+		// returns nil on a watchdog-fired wedge, so err alone would mis-tag it
+		// -ok — emitter.ExitReason()==ExitReasonError is the real wedge signal,
+		// while a benign max-turns stop (ExitReasonMaxTurns) stays -ok. emitter
+		// is nil on a pre-stream early return: then a hard failure (trust /
+		// network modal) tags -err via err, otherwise a header-only file -> -ok.
+		defer func() {
+			isErr := err != nil
+			if emitter != nil && emitter.ExitReason() == streamjson.ExitReasonError {
+				isErr = true
+			}
+			finalizeRecording(f, tmpPath, isErr, logger)
+		}()
 		rec := tuidriver.NewCastRecorder(f, int(tuidriver.DefaultPtyCols), int(tuidriver.DefaultPtyRows))
 		if herr := rec.WriteHeader(); herr != nil {
 			return fmt.Errorf("ptyrunner: recording header: %w", herr)
@@ -445,7 +462,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	emitter, err := streamjson.New(streamjson.Config{
+	emitter, err = streamjson.New(streamjson.Config{
 		Writer:    cfg.Stdout,
 		SessionID: cfg.SessionID,
 		Cwd:       cfg.WorkDir,
@@ -645,20 +662,24 @@ func createRecordingFile(dir, sessionID string) (f *os.File, tmpPath string, err
 }
 
 // finalizeRecording closes the recording file and renames it to annotate the
-// run outcome inside the stem — <stem>-ok.cast on a nil runErr, <stem>-err.cast
-// otherwise. The suffix goes before the extension so the file stays a *.cast
-// (required by both prune and `asciinema play`). Best-effort: a failed close
-// is ignored (data is already flushed by the reader goroutine) and a failed
-// rename leaves the session-tagged temp in place — still a valid, replayable
-// cast — Warn-logged with the path only, never any recording content.
+// run outcome inside the stem — <stem>-ok.cast when isErr is false,
+// <stem>-err.cast when true. isErr reflects the run's REAL outcome (a hard Run
+// error OR the emitter's resolved ExitReasonError wedge), NOT just Run's Go
+// return — Run returns nil on a watchdog-fired wedge, so keying off the return
+// alone mis-tagged every wedge -ok (fixed 2026-06-01). The suffix goes before
+// the extension so the file stays a *.cast (required by both prune and
+// `asciinema play`). Best-effort: a failed close is ignored (data is already
+// flushed by the reader goroutine) and a failed rename leaves the
+// session-tagged temp in place — still a valid, replayable cast — Warn-logged
+// with the path only, never any recording content.
 //
 // Runs as the strict tail of Run's defer-LIFO chain, after sess.Close() has
 // joined the PTY reader goroutine (the sole Mirror writer), so the close and
 // rename cannot race a mirror write.
-func finalizeRecording(f *os.File, tmpPath string, runErr error, logger *slog.Logger) {
+func finalizeRecording(f *os.File, tmpPath string, isErr bool, logger *slog.Logger) {
 	_ = f.Close()
 	outcome := "ok"
-	if runErr != nil {
+	if isErr {
 		outcome = "err"
 	}
 	finalPath := strings.TrimSuffix(tmpPath, ".cast") + "-" + outcome + ".cast"
