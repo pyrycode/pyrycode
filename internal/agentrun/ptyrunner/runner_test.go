@@ -917,6 +917,75 @@ func TestRun_RecordOn_ErrTagged(t *testing.T) {
 	}
 }
 
+// TestRun_RecordOn_Wedge_ErrTagged covers the gap the 2026-06-01 smoke found:
+// a watchdog-fired WEDGE makes Run return nil (it synthesises an
+// error_during_execution result on the stream and exits 0), yet the recording
+// MUST still be tagged -err — keyed off the emitter's resolved ExitReason, not
+// Run's (nil) Go return. Before the fix this renamed -ok (the bug). Mirrors
+// TestRun_WatchdogFires' fixture + recording on.
+func TestRun_RecordOn_Wedge_ErrTagged(t *testing.T) {
+	recDir := t.TempDir()
+	t.Setenv("PYRY_RECORD_DIR", recDir)
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, "")
+	cfg.MaxTurns = 10
+	cfg.WatchdogTick = 50 * time.Millisecond
+	cfg.WatchdogTrackerOpts = tuidriver.TrackerOpts{
+		PTYQuietLimit:      200 * time.Millisecond,
+		SpinnerFreezeLimit: 200 * time.Millisecond,
+	}
+	cfg.PromptCommitTimeout = 100 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Run returns nil on a watchdog-fire collapse — that is the whole point.
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v, want nil (watchdog-fire collapse)", err)
+	}
+	// Confirm this really exercised the wedge path, not some other outcome.
+	if tr := parseTrailer(t, stdout.Bytes()); tr.Subtype != "error_during_execution" {
+		t.Fatalf("trailer Subtype = %q, want error_during_execution (test must hit the wedge)", tr.Subtype)
+	}
+	names := castFiles(t, recDir)
+	if len(names) != 1 {
+		t.Fatalf("recordings = %v, want exactly one .cast", names)
+	}
+	if !strings.HasSuffix(names[0], "-err.cast") {
+		t.Errorf("recording name %q, want -err.cast suffix (a wedge must tag -err)", names[0])
+	}
+}
+
+// TestRun_RecordOn_MaxTurns_OkTagged locks the decision that a benign
+// max-turns stop (claude produced output; the budget cut it) tags -ok, even
+// though its wire subtype is error_max_turns / is_error:true. Only a genuine
+// wedge (ExitReasonError) tags -err — so the suffix stays a useful
+// failed-vs-healthy filter and isn't tripped by every budget-capped run.
+func TestRun_RecordOn_MaxTurns_OkTagged(t *testing.T) {
+	recDir := t.TempDir()
+	t.Setenv("PYRY_RECORD_DIR", recDir)
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, noEotBody)
+	cfg.MaxTurns = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tr := parseTrailer(t, stdout.Bytes()); tr.Subtype != "error_max_turns" {
+		t.Fatalf("trailer Subtype = %q, want error_max_turns (test must hit the budget path)", tr.Subtype)
+	}
+	names := castFiles(t, recDir)
+	if len(names) != 1 {
+		t.Fatalf("recordings = %v, want exactly one .cast", names)
+	}
+	if !strings.HasSuffix(names[0], "-ok.cast") {
+		t.Errorf("recording name %q, want -ok.cast suffix (benign max-turns is not a failure)", names[0])
+	}
+}
+
 // TestRun_RecordPrune_Scoped covers AC #4: on startup, *.cast files older
 // than 7 days are pruned; fresher .cast files and non-.cast files are kept,
 // and pruning never escapes PYRY_RECORD_DIR.

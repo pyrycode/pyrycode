@@ -280,6 +280,19 @@ func (e *Emitter) SetExitReason(r ExitReason) {
 	}
 }
 
+// ExitReason reports the run's terminal classification. Before Close it
+// returns whatever SetExitReason recorded (possibly ""); Close resolves and
+// persists the final reason (defaulting to ExitReasonError when no end-of-turn
+// was seen), so after Close this returns that resolved value. The ptyrunner
+// flight-recorder reads it to tag a recording by the run's REAL outcome — Run
+// returns a nil error even on a watchdog-fired wedge, so the Go return alone
+// cannot distinguish a wedge from a clean finish.
+func (e *Emitter) ExitReason() ExitReason {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.exitReason
+}
+
 // Close writes the final `type:"result"` trailer line. MUST be called
 // exactly once after Emit calls have stopped; calling Close while Emit is
 // still firing is a race.
@@ -307,6 +320,9 @@ func (e *Emitter) Close() error {
 			exit = ExitReasonError
 		}
 	}
+	// Persist the resolved reason so ExitReason() reports the final
+	// classification post-Close, not the possibly-empty pre-resolution value.
+	e.exitReason = exit
 
 	subtype, terminal, isErr := wireFields(exit)
 
