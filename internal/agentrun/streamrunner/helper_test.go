@@ -5,10 +5,25 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// blockUntilSigterm waits for SIGTERM (exits 0) or a 30s safety timeout. Used
+// by the stall helper modes so a watchdog-driven kill terminates the fake
+// claude promptly instead of falling through to the SIGKILL grace window.
+func blockUntilSigterm() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	select {
+	case <-sigCh:
+		os.Exit(0)
+	case <-time.After(30 * time.Second):
+		os.Exit(0)
+	}
+}
 
 // TestStreamRunnerHelperProcess is the fake-claude entry point for Run's
 // tests. The test binary re-execs itself with GO_STREAMRUNNER_HELPER=1 and
@@ -26,6 +41,23 @@ import (
 //   - "exit0_no_read": exit 0 immediately without reading stdin. Forces the
 //                    parent's stdin.Write to hit EPIPE (broken pipe) and the
 //                    subsequent stdin.Close to surface a benign error.
+//   - "stall_silent": read stdin to EOF, emit NOTHING, then block until
+//                    SIGTERM (exit 0) or a 30s safety timeout. Models a run
+//                    that wedges before claude's first turn — awaitingAssistant
+//                    is true from the start, so the watchdog must fire. The
+//                    SIGTERM handler keeps the watchdog-driven kill fast.
+//   - "stall_after_user": read stdin to EOF, emit system → assistant(tool_use)
+//                    → user(tool_result), then block until SIGTERM (exit 0) or
+//                    30s. Models a stall right after a tool result came back —
+//                    awaitingAssistant is true again, so the watchdog must fire.
+//   - "slow_tool":  read stdin to EOF, emit system → assistant(tool_use), sleep
+//                    GO_STREAMRUNNER_HELPER_SLEEP_MS (default 600ms), then emit
+//                    user(tool_result) → assistant(text) → result and exit 0.
+//                    Models a legitimately long in-flight tool run —
+//                    awaitingAssistant is FALSE during the silence, so the
+//                    watchdog must NOT fire. Deliberately installs no SIGTERM
+//                    handler: a wrong watchdog kill shows up as a missing
+//                    success `result` line.
 func TestStreamRunnerHelperProcess(t *testing.T) {
 	if os.Getenv("GO_STREAMRUNNER_HELPER") != "1" {
 		return
@@ -63,6 +95,38 @@ func TestStreamRunnerHelperProcess(t *testing.T) {
 	case "exit0_no_read":
 		// Exit immediately; do not drain stdin. The parent's pipe write
 		// hits EPIPE once the kernel observes the read end closed.
+		os.Exit(0)
+	case "stall_silent":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		blockUntilSigterm()
+	case "stall_after_user":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		for _, l := range []string{
+			`{"type":"system","subtype":"init"}`,
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}`,
+			`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}`,
+		} {
+			fmt.Fprintln(os.Stdout, l)
+		}
+		blockUntilSigterm()
+	case "slow_tool":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stdout, `{"type":"system","subtype":"init"}`)
+		fmt.Fprintln(os.Stdout, `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}`)
+		sleepMS := 600
+		if v := os.Getenv("GO_STREAMRUNNER_HELPER_SLEEP_MS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				sleepMS = n
+			}
+		}
+		time.Sleep(time.Duration(sleepMS) * time.Millisecond)
+		for _, l := range []string{
+			`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"done"}]}}`,
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"finished"}]}}`,
+			`{"type":"result","subtype":"success"}`,
+		} {
+			fmt.Fprintln(os.Stdout, l)
+		}
 		os.Exit(0)
 	case "echo_stdin":
 		path := os.Getenv("GO_STREAMRUNNER_HELPER_STDIN_FILE")
