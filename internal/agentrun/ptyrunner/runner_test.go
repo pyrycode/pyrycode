@@ -267,8 +267,8 @@ func TestRun_NetworkFailureDetected(t *testing.T) {
 	if !errors.Is(err, ErrNetworkFailure) {
 		t.Fatalf("Run: err = %v, want errors.Is(err, ErrNetworkFailure)", err)
 	}
-	if !strings.Contains(err.Error(), "FailedToOpenSocket") {
-		t.Errorf("err message missing FailedToOpenSocket anchor: %q", err.Error())
+	if !strings.Contains(err.Error(), "claude API unreachable") {
+		t.Errorf("err message missing network-failure description: %q", err.Error())
 	}
 }
 
@@ -293,7 +293,7 @@ func TestRun_MidRun_ModalAndBannerDetection(t *testing.T) {
 			name:      "network failure mid-run",
 			mode:      "mid_network_failure",
 			want:      ErrNetworkFailure,
-			substring: "FailedToOpenSocket",
+			substring: "claude API unreachable",
 		},
 	}
 	for _, tc := range cases {
@@ -605,40 +605,18 @@ func TestRun_WatchdogFires(t *testing.T) {
 	}
 }
 
-// TestHasPastedChip covers the pure detector over hand-built snapshots. The
-// ANSI-escaped case splits the anchor with a CSI reset so the match only
-// succeeds after StripANSI — proving that step is load-bearing.
-func TestHasPastedChip(t *testing.T) {
-	t.Parallel()
-	const idleGlyph = "\xe2\x9d\xaf" // ❯
-	cases := []struct {
-		name string
-		snap []byte
-		want bool
-	}{
-		{"chip present plain", []byte("[Pasted text +3 lines] " + idleGlyph + " "), true},
-		{"no chip", []byte(idleGlyph + " "), false},
-		// "Pasted" and " text" are split by a CSI reset — only StripANSI rejoins
-		// them into the "Pasted text" anchor.
-		{"ansi-escaped chip", []byte("[Pasted\x1b[0m text +3 lines] " + idleGlyph), true},
-		{"empty", []byte{}, false},
-		{"nil", nil, false},
-		{"near miss", []byte("Paste text " + idleGlyph), false},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := hasPastedChip(tc.snap); got != tc.want {
-				t.Errorf("hasPastedChip(%q) = %v, want %v", tc.snap, got, tc.want)
-			}
-		})
-	}
-}
+// The pure chip detector and its table test moved into tui-driver along with
+// the prompt-deliver + commit-confirm + recovery logic they back
+// (pkg/tuidriver: TestHasPastedChip, TestDeliverPrompt_*). The re-deliver /
+// committed-but-slow BEHAVIOUR is still pinned here end-to-end by
+// TestRun_CommitWedge_ChipPresent_ReDelivers and
+// TestRun_CommitSlow_NoChip_DoesNotReDeliver, which drive real Run against the
+// fake-claude and assert the decision markers DeliverPrompt logs through
+// cfg.Logger.
 
 // TestRun_CommitWedge_ChipPresent_ReDelivers asserts the genuine-wedge path:
 // commit signals are slow (JSONL held back past PromptCommitTimeout) AND the
-// "Pasted text" chip is present, so the runner re-delivers and logs the wedge
+// pasted-text chip is present, so the runner re-delivers and logs the wedge
 // marker. The delayed JSONL then completes the run cleanly (Run returns nil).
 func TestRun_CommitWedge_ChipPresent_ReDelivers(t *testing.T) {
 	t.Parallel()

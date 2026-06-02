@@ -1,6 +1,7 @@
 # Build artifacts
 /pyry
 /dist/
+/substrate-guard
 *.test
 *.out
 
