@@ -8,9 +8,11 @@
 // single shot of stdin; the package owns the spawn, the stdin write, and
 // the wait — nothing else.
 //
-// The package logs only error messages and never logs prompt bytes or any
-// substring of the stream-json event stream — writers are opaque io.Writer
-// values and the package does not parse what passes through them.
+// The package logs only diagnostic messages and never logs prompt bytes or
+// any substring of the stream-json event stream. It tee-parses stdout for
+// STRUCTURAL fields only — the top-level `type` of each event line, to drive
+// the idle-stall watchdog (see watchdog.go) — and never inspects, retains, or
+// logs event content.
 //
 // Dependency direction: the package must not import
 // github.com/pyrycode/pyrycode/internal/supervisor (the PTY helper) nor any
@@ -76,9 +78,15 @@ type Config struct {
 	Env []string
 
 	// Logger is used for the small number of Warn-level diagnostics this
-	// package emits (stdin write/close failures). Optional; nil falls
-	// back to slog.Default().
+	// package emits (stdin write/close failures, idle-stall watchdog fire).
+	// Optional; nil falls back to slog.Default().
 	Logger *slog.Logger
+
+	// IdleTimeout overrides the idle-stall watchdog threshold (the silence
+	// budget while claude owes an assistant turn). Optional; zero or negative
+	// falls back to the idleStall default. Production leaves it unset; tests
+	// shrink it so a stall fires in milliseconds.
+	IdleTimeout time.Duration
 }
 
 // userTurn is the stream-json envelope written to claude's stdin. The shape
@@ -104,17 +112,25 @@ type userTurnContentText struct {
 // envelope to its stdin and closes stdin, forwards stdout/stderr to the
 // configured writers, and waits for the child to exit.
 //
+// An idle-stall watchdog (see watchdog.go) runs alongside: it tee-parses
+// stdout for structural `type` fields and, if the stream sits silent past
+// cfg.IdleTimeout *while claude owes an assistant turn*, kills claude and
+// makes Run synthesise a distinct, retryable `idle_stall` result line on
+// stdout (claude never emits its own `result` on a watchdog kill).
+//
 // Return value contract:
 //
 //   - nil on a clean (exit 0) child termination.
-//   - nil on ctx-cancel-driven teardown — operator shutdown is success.
-//   - *exec.ExitError on non-zero child exit not triggered by ctx cancel.
+//   - nil on operator-shutdown teardown (parent ctx cancel) — success.
+//   - nil on an idle-stall watchdog kill — the synthetic result line on
+//     stdout is the signal; pyry exits clean and the dispatcher retries.
+//   - *exec.ExitError on non-zero child exit not triggered by a cancel.
 //   - a wrapped error from pre-Start setup (stdin pipe, spawn).
 //
-// On ctx cancel, the child receives SIGTERM and is given killGrace to
-// exit before stdlib follows up with SIGKILL. This is wired via
-// exec.Cmd.Cancel + exec.Cmd.WaitDelay — no goroutine or timer is owned by
-// this package.
+// On either cancel (operator shutdown of the parent ctx, or the watchdog
+// cancelling its child ctx) the child receives SIGTERM and is given killGrace
+// to exit before stdlib follows up with SIGKILL — wired via exec.Cmd.Cancel +
+// exec.Cmd.WaitDelay.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.ClaudeBin == "" {
 		return errors.New("streamrunner: ClaudeBin required")
@@ -133,14 +149,31 @@ func Run(ctx context.Context, cfg Config) error {
 		logger = slog.Default()
 	}
 
+	idle := cfg.IdleTimeout
+	if idle <= 0 {
+		idle = idleStall
+	}
+	runStart := time.Now()
+
 	envelope, err := marshalEnvelope(cfg.PromptBytes)
 	if err != nil {
 		return fmt.Errorf("streamrunner: marshal envelope: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, cfg.ClaudeBin, cfg.Args...)
+	// childCtx is distinct from the parent ctx so the watchdog can kill the
+	// run (cancelChild) without it looking like operator shutdown — operator
+	// SIGTERM/SIGINT cancels the parent ctx, which still propagates here and
+	// stays a clean no-result teardown.
+	childCtx, cancelChild := context.WithCancel(ctx)
+	defer cancelChild()
+
+	// Tee-parse stdout for structural `type` fields to drive the watchdog;
+	// bytes pass through unchanged.
+	parser := newStreamParser(cfg.Stdout, nil)
+
+	cmd := exec.CommandContext(childCtx, cfg.ClaudeBin, cfg.Args...)
 	cmd.Dir = cfg.WorkDir
-	cmd.Stdout = cfg.Stdout
+	cmd.Stdout = parser
 	cmd.Stderr = cfg.Stderr
 	if cfg.Env != nil {
 		cmd.Env = append(os.Environ(), cfg.Env...)
@@ -159,6 +192,8 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("streamrunner: start: %w", err)
 	}
 
+	wd := startWatchdog(childCtx, parser, idle, cancelChild, logger)
+
 	// Single ~150-byte synchronous write; no goroutine needed. Failures
 	// are logged-and-continued — the child's exit status is the
 	// authoritative outcome. Identical pattern to drive.go's PTY writes.
@@ -174,7 +209,23 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	waitErr := cmd.Wait()
+	cancelChild() // stop the watchdog promptly on a normal exit
+	wd.wait()     // join the goroutine; happens-before reading its state
+
+	// Operator shutdown wins: a parent-ctx cancel is a clean no-result
+	// teardown even if the watchdog also tripped in the same instant.
 	if ctx.Err() != nil {
+		return nil
+	}
+	// cmd.Wait() has returned, so the stdlib's stdout-forwarding goroutine is
+	// done — Run is now the single writer to cfg.Stdout, so synthesising the
+	// trailer here cannot race the passthrough.
+	if wd.hasFired() {
+		if !parser.hasSeenResult() {
+			if err := writeIdleStallResult(cfg.Stdout, idle, runStart); err != nil {
+				logger.Warn("streamrunner: write idle_stall result failed", "err", err)
+			}
+		}
 		return nil
 	}
 	return waitErr
