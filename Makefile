@@ -1,9 +1,10 @@
 # Pyrycode developer Makefile.
 #
 # Targets that matter day to day:
-#   make check    — run the same checks CI runs (vet + race tests + staticcheck).
-#                   Run before every push to avoid the "every PR fails CI on the
-#                   same lint warning" cycle that filled inboxes in late Apr 2026.
+#   make check    — run the same checks CI runs (vet + race tests + staticcheck
+#                   + substrate-guard). Run before every push to avoid the
+#                   "every PR fails CI on the same lint warning" cycle that
+#                   filled inboxes in late Apr 2026.
 #   make build    — build the pyry binary at ./pyry (gitignored)
 #   make test     — race-enabled tests only
 #   make linux    — cross-compile for pyrybox (linux/amd64)
@@ -15,7 +16,7 @@ BIN         ?= ./pyry
 DIST        ?= ./dist
 
 .PHONY: check
-check: vet test staticcheck
+check: vet test staticcheck substrate-guard
 
 .PHONY: vet
 vet:
@@ -36,6 +37,14 @@ staticcheck:
 		$(GO) install honnef.co/go/tools/cmd/staticcheck@latest; \
 	fi
 	$(STATICCHECK) ./...
+
+# substrate-guard fails if any claude-TUI substrate literal (screen string,
+# escape sequence, glyph) appears in pyrycode .go source outside the allowlist.
+# The text-fabric backstop to the tui-driver compiler seal — see
+# cmd/substrate-guard. Fast (a file walk); no network or install needed.
+.PHONY: substrate-guard
+substrate-guard:
+	$(GO) run ./cmd/substrate-guard
 
 .PHONY: build
 build:

@@ -37,7 +37,6 @@
 package ptyrunner
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -71,9 +70,11 @@ var (
 	// status banner is present at idle.
 	ErrMcpFailureBanner = errors.New("ptyrunner: MCP failure banner detected; check claude's MCP server config")
 
-	// ErrNetworkFailure fires when the FailedToOpenSocket anchor is
-	// present at idle (claude API unreachable).
-	ErrNetworkFailure = errors.New("ptyrunner: network failure detected (FailedToOpenSocket); claude API unreachable")
+	// ErrNetworkFailure fires when tui-driver's network-failure detector
+	// (tuidriver.HasNetworkFailure) reports the claude API unreachable at idle.
+	// The screen-literal anchor it keys on is owned by tui-driver, not named
+	// here — pyrycode carries no claude-TUI substrate string.
+	ErrNetworkFailure = errors.New("ptyrunner: network failure detected; claude API unreachable")
 )
 
 // Config configures Run. Required fields are validated at entry; optional
@@ -121,8 +122,8 @@ type Config struct {
 	MaxTurns int
 
 	// PromptBytes is the user-turn prompt text submitted via
-	// tuidriver.Session.WritePrompt — NOT raw Write. Required (must be
-	// non-empty; an empty paste has no semantics in the TUI).
+	// tuidriver.Session.DeliverPrompt. Required (must be non-empty; an empty
+	// paste has no semantics in the TUI).
 	//
 	// PromptBytes content MUST NOT appear in any log line or in any
 	// wrapped error message — the package's logging discipline forbids
@@ -166,11 +167,12 @@ type Config struct {
 	// values (~200ms) to fire the watchdog within the test deadline.
 	WatchdogTrackerOpts tuidriver.TrackerOpts
 
-	// PromptCommitTimeout bounds how long Run waits for a freshly-delivered
-	// prompt to commit (spinner up or session JSONL written) before treating
-	// the paste as corrupted/uncommitted and re-delivering. Optional; zero
-	// defaults to defaultPromptCommitTimeout. Tests set a short value to keep
-	// the retry budget well inside the deadline. See the retry loop in Run.
+	// PromptCommitTimeout bounds how long each delivery attempt waits for a
+	// freshly-delivered prompt to commit (spinner up or session JSONL written)
+	// before treating the paste as corrupted/uncommitted and re-delivering.
+	// Forwarded verbatim to tuidriver.DeliverPrompt as DeliverOpts.CommitTimeout;
+	// zero picks tui-driver's DefaultPromptCommitTimeout. Tests set a short value
+	// to keep the retry budget well inside the deadline.
 	PromptCommitTimeout time.Duration
 
 	// Logger is used for the small number of Warn-level diagnostics this
@@ -180,16 +182,16 @@ type Config struct {
 }
 
 // Run spawns claude under tui-driver with the argv shape buildArgs
-// produces, waits for the TUI to reach idle, runs the trust / mcp-failure
-// / network-failure detectors against the post-idle snapshot, submits
-// cfg.PromptBytes via Session.WritePrompt, drains the per-session JSONL
-// AND polls PTY-state transitions via tuidriver.Session.Events, re-emits
+// produces, waits for the TUI to reach idle and classifies the post-idle
+// trust / mcp-failure / network-failure conditions via Session.WaitReady,
+// submits cfg.PromptBytes via Session.DeliverPrompt, drains the per-session
+// JSONL AND polls PTY-state transitions via tuidriver.Session.Events, re-emits
 // each entry as stream-json on cfg.Stdout via streamjson.Emitter, and
 // returns once end-of-turn fires or the context is cancelled.
 //
 // Return value contract:
 //
-//   - nil on a clean spawn → idle → WritePrompt → events-to-end-of-turn cycle.
+//   - nil on a clean spawn → idle → deliver → events-to-end-of-turn cycle.
 //   - nil on operator-shutdown collapse: any ctx-cancel / deadline-exceeded
 //     error from Spawn / WaitUntil / WaitForSessionJSONL / Session.Events,
 //     and any in-flight emit failure observed during teardown, collapses to
@@ -203,8 +205,8 @@ type Config struct {
 //     EventKindPty{ModalShown(trust-folder),McpFailureShown,NetworkFailureShown}
 //     transition surfaced on the Session.Events stream. The detection
 //     cadence is tui-driver's DefaultPollInterval (50 ms).
-//   - fmt.Errorf("ptyrunner: write prompt: %w", err) on WritePrompt
-//     failure.
+//   - fmt.Errorf("ptyrunner: deliver prompt: %w", err) on a DeliverPrompt
+//     PTY-write failure.
 //   - fmt.Errorf("ptyrunner: emitter: %w", err) on streamjson.New failure
 //     (defensive — Writer is validated upstream and SessionID is required).
 //   - fmt.Errorf("ptyrunner: home dir: %w", err) when cfg.HomeDir is empty
@@ -230,10 +232,10 @@ type Config struct {
 // sess.Close()'s SIGTERM races with claude's last PTY writes. The
 // tuidriver.Session.Events channel is drained inline by Run's own
 // goroutine, so wg tracks only the watchdog. finalizeRecording() (only
-// registered when PYRY_RECORD_DIR is set) is the strict tail: it closes +
-// renames the .cast recording only after sess.Close() has joined
-// tui-driver's PTY reader goroutine — the sole Mirror writer — via
-// <-readerDone, so no mirror write can race the close+rename. Re-ordering
+// registered when PYRY_RECORD_DIR is set) is the strict tail: it renames the
+// .cast recording only after sess.Close() has joined tui-driver's PTY reader
+// goroutine AND closed the RecordTo file (tui-driver owns that file end to
+// end), so the rename cannot race a PTY write or an open handle. Re-ordering
 // these defers silently breaks the invariant — keep them in this LIFO
 // sequence.
 //
@@ -292,57 +294,54 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	tuidriver.EnsureClaudeEnv(cmd)
 
 	// Opt-in TUI session flight recorder, gated on PYRY_RECORD_DIR. OFF by
-	// default: when the env var is unset/empty, mirror stays nil and
-	// SpawnOpts{Mirror: nil} is byte-identical to the pre-#552 SpawnOpts{}.
+	// default: an empty env var leaves recordTo "" and SpawnOpts{RecordTo: ""}
+	// is byte-identical to the pre-#552 SpawnOpts{}.
 	//
-	// SECURITY: when enabled, EVERY PTY byte of the session is mirrored to a
-	// .cast file — the prompt, claude's output, AND all tool output, which can
-	// include file contents and secrets. The file is 0600 (owner-only) and
-	// *.cast is gitignored, but the artifact is unencrypted by design (it must
-	// stay `asciinema play`-able). Point PYRY_RECORD_DIR at a non-synced,
-	// non-backed-up location such as ~/.local/share/pyry-recordings/ (sibling
-	// of ~/.local/share/pyry-artifacts/) — never inside the repo, ~/.claude, or
-	// any Obsidian Sync / Time Machine path. The recording is a separate opt-in
-	// artifact, NOT a log (see the package doc's logging-discipline carve-out).
-	// emitter is created later (after the idle/modal gates), but the recording
-	// finalize defer below must read its resolved ExitReason at fire time to
-	// tag the .cast by the run's REAL outcome — so declare it here, before that
-	// defer is registered. nil until assigned; the defer nil-checks it.
+	// SECURITY: when enabled, tui-driver records EVERY PTY byte of the session
+	// to a .cast file — the prompt, claude's output, AND all tool output, which
+	// can include file contents and secrets. tui-driver opens it 0600 O_EXCL and
+	// owns it; *.cast is gitignored, but the artifact is unencrypted by design
+	// (it must stay `asciinema play`-able). Point PYRY_RECORD_DIR at a
+	// non-synced, non-backed-up location such as ~/.local/share/pyry-recordings/
+	// (sibling of ~/.local/share/pyry-artifacts/) — never inside the repo,
+	// ~/.claude, or any Obsidian Sync / Time Machine path. The recording is a
+	// separate opt-in artifact, NOT a log (see the package doc's
+	// logging-discipline carve-out).
+	//
+	// ptyrunner owns only the path lifecycle: prune on startup, and the
+	// post-Close -ok/-err rename. emitter is created later (after the idle/modal
+	// gates), but the recording-finalize defer below must read its resolved
+	// ExitReason at fire time to tag the .cast by the run's REAL outcome — so
+	// declare it here, before that defer is registered. nil until assigned; the
+	// defer nil-checks it.
 	var emitter *streamjson.Emitter
-	var mirror io.Writer
+	var recordTo string
 	if dir := os.Getenv("PYRY_RECORD_DIR"); dir != "" {
 		if merr := os.MkdirAll(dir, 0o700); merr != nil {
 			return fmt.Errorf("ptyrunner: recording dir: %w", merr)
 		}
 		pruneOldRecordings(dir, logger)
-		f, tmpPath, ferr := createRecordingFile(dir, cfg.SessionID)
-		if ferr != nil {
-			return fmt.Errorf("ptyrunner: create recording: %w", ferr)
-		}
+		recordTo = recordingPath(dir, cfg.SessionID)
 		// Register the finalize defer NOW — before `defer sess.Close()` below,
-		// so LIFO runs it LAST (after sess.Close joins the PTY reader, and after
-		// emitter.Close has resolved the exit reason). The closure reads the
-		// named err AND the emitter's resolved ExitReason at fire time: Run
-		// returns nil on a watchdog-fired wedge, so err alone would mis-tag it
-		// -ok — emitter.ExitReason()==ExitReasonError is the real wedge signal,
-		// while a benign max-turns stop (ExitReasonMaxTurns) stays -ok. emitter
-		// is nil on a pre-stream early return: then a hard failure (trust /
-		// network modal) tags -err via err, otherwise a header-only file -> -ok.
+		// so LIFO runs it LAST: after sess.Close joins tui-driver's PTY reader
+		// AND closes the recording file, and after emitter.Close has resolved
+		// the exit reason. The closure reads the named err AND the emitter's
+		// resolved ExitReason at fire time: Run returns nil on a watchdog-fired
+		// wedge, so err alone would mis-tag it -ok — emitter.ExitReason()==
+		// ExitReasonError is the real wedge signal, while a benign max-turns
+		// stop (ExitReasonMaxTurns) stays -ok. emitter is nil on a pre-stream
+		// early return: then a hard failure (trust / network modal) tags -err
+		// via err, otherwise a header-only file -> -ok.
 		defer func() {
 			isErr := err != nil
 			if emitter != nil && emitter.ExitReason() == streamjson.ExitReasonError {
 				isErr = true
 			}
-			finalizeRecording(f, tmpPath, isErr, logger)
+			finalizeRecording(recordTo, isErr, logger)
 		}()
-		rec := tuidriver.NewCastRecorder(f, int(tuidriver.DefaultPtyCols), int(tuidriver.DefaultPtyRows))
-		if herr := rec.WriteHeader(); herr != nil {
-			return fmt.Errorf("ptyrunner: recording header: %w", herr)
-		}
-		mirror = rec
 	}
 
-	sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{Mirror: mirror})
+	sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{RecordTo: recordTo})
 	if err != nil {
 		if isCtxErr(ctx, err) {
 			return nil
@@ -360,29 +359,28 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 	}()
 
-	if werr := tuidriver.WaitUntil(ctx, func() bool {
-		return tuidriver.IsIdle(sess.Buffer.Snapshot())
-	}); werr != nil {
+	// Wait for the TUI to reach idle, then apply policy to the readiness
+	// classification. tui-driver detects (trust / mcp / network); ptyrunner
+	// owns the policy: abort on trust, continue past an mcp banner, abort on
+	// network. The mcp banner is non-fatal — an ambient MCP server failing must
+	// not abort the run; streamrunner never aborted on it (parity), and treating
+	// it as fatal regressed every spawn whose env had any offline MCP server
+	// into error_during_execution/"no output".
+	ready, werr := sess.WaitReady(ctx)
+	if werr != nil {
 		if isCtxErr(ctx, werr) {
 			return nil
 		}
 		return fmt.Errorf("ptyrunner: wait idle: %w", werr)
 	}
-
-	snap := sess.Buffer.Snapshot()
-	if tuidriver.HasTrustModal(snap) {
+	if ready.TrustModal {
 		logger.Warn("ptyrunner: trust modal detected")
 		return ErrTrustModalDetected
 	}
-	if tuidriver.HasMcpFailureBanner(snap) {
-		// Non-fatal: an ambient MCP server failing to connect must not abort
-		// the run. The deny-default allowed-tools gate governs what the agent
-		// may invoke; streamrunner never aborted on MCP failure (parity).
-		// Treating it as fatal regressed every spawn whose env had any
-		// offline MCP server into error_during_execution/"no output".
+	if ready.McpFailure {
 		logger.Warn("ptyrunner: mcp failure banner detected at idle — continuing (non-fatal)")
 	}
-	if tuidriver.HasNetworkFailure(snap) {
+	if ready.NetworkFailure {
 		logger.Warn("ptyrunner: network failure detected")
 		return ErrNetworkFailure
 	}
@@ -397,53 +395,20 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	jsonlPath := tuidriver.SessionJSONLPath(home, cfg.WorkDir, cfg.SessionID)
 
-	// Deliver the prompt and CONFIRM the turn committed. Under MCP-init churn
-	// the bracketed-paste byte stream can be interleaved with claude's TUI
-	// redraws — corrupting the pasted text AND absorbing the trailing \r
-	// commit. Claude is then left idle with garbled, uncommitted input: no
-	// turn, no session JSONL, a ~54s watchdog wedge ("Mode B", root-caused
-	// 2026-05-29 by instrumenting this path against live claude 2.1.156).
-	// Reactively recover: if claude has NOT started a turn (no spinner AND no
-	// session JSONL) within commitTimeout, clear the (garbled) input line and
-	// re-deliver, up to maxPromptAttempts. A healthy run shows the spinner /
-	// writes JSONL within ~1s — far inside the window — so it never retries.
-	commitTimeout := cfg.PromptCommitTimeout
-	if commitTimeout <= 0 {
-		commitTimeout = defaultPromptCommitTimeout
-	}
-	committed := false
-	for attempt := 1; attempt <= maxPromptAttempts; attempt++ {
-		if attempt > 1 {
-			if cerr := sess.ClearInputLine(); cerr != nil {
-				return fmt.Errorf("ptyrunner: clear input line: %w", cerr)
-			}
-		}
-		if werr := sess.WritePrompt(string(cfg.PromptBytes)); werr != nil {
-			return fmt.Errorf("ptyrunner: write prompt: %w", werr)
-		}
-		if promptDidCommit(ctx, sess, jsonlPath, commitTimeout) {
-			committed = true
-			break
-		}
-		if !hasPastedChip(sess.Buffer.Snapshot()) {
-			// No "Pasted text" chip → the paste committed; the commit signals
-			// (spinner / session JSONL) are just lagging a slow MCP cold-start.
-			// Re-delivering here would re-paste an already-in-flight turn — the
-			// destructive #227 path. Treat as committed-but-slow and stop
-			// retrying; the JSONL wait below still picks up the lagging turn.
-			// Evidence: no-chip ⟺ committed (N=60 probe, 0 counterexamples).
-			logger.Warn("ptyrunner: commit signals slow but input box empty (no pasted-text chip) — assuming committed-but-slow, not re-delivering")
-			committed = true
-			break
-		}
-		logger.Warn("ptyrunner: prompt uncommitted (pasted-text chip present); re-delivering")
-	}
-	if !committed {
-		// Backstop: fall through to the JSONL wait + watchdog (prior
-		// behaviour). The retries recover the common corrupted-paste case;
-		// a residual wedge still surfaces as num_turns=0 and the dispatcher
-		// retries the ticket.
-		logger.Warn("ptyrunner: prompt uncommitted after retries; proceeding (may wedge)")
+	// Deliver the prompt and confirm the turn committed, recovering from the
+	// corrupted-paste wedge ("Mode B"). The deliver + commit-confirm + #227
+	// no-re-deliver logic lives in tui-driver's DeliverPrompt; its decision
+	// markers flow through cfg.Logger so the package's log discipline holds. A
+	// residual wedge after retries surfaces downstream as num_turns=0 and the
+	// dispatcher retries the ticket — DeliverPrompt's DeliverResult.Committed is
+	// advisory, so Run falls through to the JSONL wait + watchdog regardless.
+	if _, derr := sess.DeliverPrompt(ctx, tuidriver.DeliverOpts{
+		Prompt:        string(cfg.PromptBytes),
+		JSONLPath:     jsonlPath,
+		CommitTimeout: cfg.PromptCommitTimeout,
+		Logger:        logger,
+	}); derr != nil {
+		return fmt.Errorf("ptyrunner: deliver prompt: %w", derr)
 	}
 
 	// Single shared cancellation point: the budget Terminate hook AND the
@@ -504,7 +469,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runWatchdog(runCtx, sess.Buffer, tracker, emitter, cancel, cfg.WatchdogTick, logger)
+		runWatchdog(runCtx, sess, tracker, emitter, cancel, cfg.WatchdogTick, logger)
 	}()
 	defer wg.Wait()
 	defer cancel()
@@ -592,92 +557,39 @@ func isCtxErr(ctx context.Context, err error) bool {
 	return false
 }
 
-// Prompt-commit retry bounds (see the loop in Run). A corrupted/uncommitted
-// bracketed paste under MCP-init churn ("Mode B") is recovered by clearing
-// the input line and re-delivering. A healthy run commits within ~1s, so the
-// timeout never bites it; the attempt cap bounds the worst case.
-const (
-	maxPromptAttempts          = 3
-	defaultPromptCommitTimeout = 3 * time.Second
-	promptCommitPoll           = 150 * time.Millisecond
-)
-
-// promptDidCommit reports whether claude started a turn after a prompt write:
-// the thinking spinner is visible OR the per-session JSONL has appeared
-// (claude writes it only once input lands). Polls at promptCommitPoll until a
-// signal is seen, the timeout elapses, or ctx is cancelled. It only observes
-// — never writes — so a false negative costs one extra re-delivery, never a
-// corrupted live turn.
-func promptDidCommit(ctx context.Context, sess *tuidriver.Session, jsonlPath string, timeout time.Duration) bool {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	tk := time.NewTicker(promptCommitPoll)
-	defer tk.Stop()
-	for {
-		if tuidriver.IsThinking(sess.Buffer.Snapshot()) {
-			return true
-		}
-		if _, err := os.Stat(jsonlPath); err == nil {
-			return true
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-deadline.C:
-			return false
-		case <-tk.C:
-		}
-	}
-}
-
-// hasPastedChip reports whether the input box still shows the "Pasted text"
-// chip — positive evidence the bracketed paste is uncommitted. Used to gate
-// the re-deliver branch: chip present ⟺ genuine wedge (re-deliver); chip
-// absent ⟺ committed-but-slow (do NOT re-deliver, the #227 path). Matches
-// after StripANSI so an ANSI-escaped chip still hits. Mirrors the
-// tuidriver.IsThinking one-liner shape; total over a possibly-empty snapshot.
-func hasPastedChip(snap []byte) bool {
-	return bytes.Contains(tuidriver.StripANSI(snap), []byte("Pasted text"))
-}
-
 // recordingMaxAge bounds how long a .cast flight recording is kept. On
 // startup (only when PYRY_RECORD_DIR is set) recordings older than this are
 // pruned so disk use stays bounded across runs.
 const recordingMaxAge = 7 * 24 * time.Hour
 
-// createRecordingFile opens a session-tagged temp .cast file in dir, mode
-// 0600. The name is <sortable-UTC-stamp>-<sessionID>.cast so a crash / SIGKILL
-// before the close-time rename still leaves a session-identifiable file.
-// O_EXCL is cheap hygiene against a pre-created path (the per-second UTC stamp
-// plus the UUID session id make a real collision otherwise impossible, and it
-// defeats a create-time symlink/pre-create swap).
-func createRecordingFile(dir, sessionID string) (f *os.File, tmpPath string, err error) {
+// recordingPath returns the session-tagged temp .cast path in dir. tui-driver
+// (via SpawnOpts.RecordTo) opens it 0600 O_EXCL, writes the asciinema header,
+// and closes it on Session.Close; ptyrunner owns only the path lifecycle —
+// prune, and the post-Close -ok/-err rename. The name is
+// <sortable-UTC-stamp>-<sessionID>.cast so a crash / SIGKILL before the rename
+// still leaves a session-identifiable file. The per-second UTC stamp plus the
+// UUID session id make a collision otherwise impossible, and tui-driver's
+// O_EXCL open defeats a create-time symlink/pre-create swap.
+func recordingPath(dir, sessionID string) string {
 	stamp := time.Now().UTC().Format("20060102T150405Z")
-	tmpPath = filepath.Join(dir, stamp+"-"+sessionID+".cast")
-	f, err = os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, "", err
-	}
-	return f, tmpPath, nil
+	return filepath.Join(dir, stamp+"-"+sessionID+".cast")
 }
 
-// finalizeRecording closes the recording file and renames it to annotate the
-// run outcome inside the stem — <stem>-ok.cast when isErr is false,
-// <stem>-err.cast when true. isErr reflects the run's REAL outcome (a hard Run
-// error OR the emitter's resolved ExitReasonError wedge), NOT just Run's Go
-// return — Run returns nil on a watchdog-fired wedge, so keying off the return
-// alone mis-tagged every wedge -ok (fixed 2026-06-01). The suffix goes before
-// the extension so the file stays a *.cast (required by both prune and
-// `asciinema play`). Best-effort: a failed close is ignored (data is already
-// flushed by the reader goroutine) and a failed rename leaves the
-// session-tagged temp in place — still a valid, replayable cast — Warn-logged
-// with the path only, never any recording content.
+// finalizeRecording renames the recording to annotate the run outcome inside
+// the stem — <stem>-ok.cast when isErr is false, <stem>-err.cast when true.
+// isErr reflects the run's REAL outcome (a hard Run error OR the emitter's
+// resolved ExitReasonError wedge), NOT just Run's Go return — Run returns nil
+// on a watchdog-fired wedge, so keying off the return alone mis-tagged every
+// wedge -ok (fixed 2026-06-01). The suffix goes before the extension so the
+// file stays a *.cast (required by both prune and `asciinema play`).
+// Best-effort: a failed rename leaves the session-tagged temp in place — still
+// a valid, replayable cast — Warn-logged with the path only, never any
+// recording content.
 //
 // Runs as the strict tail of Run's defer-LIFO chain, after sess.Close() has
-// joined the PTY reader goroutine (the sole Mirror writer), so the close and
-// rename cannot race a mirror write.
-func finalizeRecording(f *os.File, tmpPath string, isErr bool, logger *slog.Logger) {
-	_ = f.Close()
+// joined tui-driver's PTY reader goroutine AND closed the recording file, so
+// the rename cannot race a write or an open handle.
+func finalizeRecording(tmpPath string, isErr bool, logger *slog.Logger) {
 	outcome := "ok"
 	if isErr {
 		outcome = "err"
