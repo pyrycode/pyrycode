@@ -40,7 +40,12 @@ func TestRealClaude_BashTool_NonZeroExit(t *testing.T) {
 		Prompt:       "Use the Bash tool to run \"ls /nonexistent-path-for-pyrycode-382\". Report what you see.",
 		SystemPrompt: "You are an e2e regression-guard test. When asked to run a Bash command, run it once with the Bash tool and report the result.",
 		AllowedTools: []string{"Bash"},
-		MaxTurns:     3,
+		// Loose backstop, not a target. On claude 2.1.158 a single-tool task
+		// spends several assistant messages, a thinking message plus narration
+		// around the one command, and the budget counts every assistant
+		// message. A tight cap trips before the command runs. The task
+		// completes well under this and stops at end_turn. See Lessons 2026-06-03.
+		MaxTurns:     10,
 		Effort:       "low",
 		Model:        "claude-haiku-4-5",
 	})

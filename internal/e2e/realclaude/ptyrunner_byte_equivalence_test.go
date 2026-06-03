@@ -362,9 +362,14 @@ func TestPtyRunnerVsStreamRunner_StructuralEquivalence(t *testing.T) {
 	promptBytes := []byte(promptText)
 	allowedTools := []string{"Read"}
 	const (
-		model    = "claude-haiku-4-5"
-		effort   = "low"
-		maxTurns = 1
+		model  = "claude-haiku-4-5"
+		effort = "low"
+		// Loose backstop, not a target. On claude 2.1.158 even the one-word
+		// "OK" reply spends a thinking message plus the text message, and the
+		// interrupt-runner budget counts every assistant message, so a cap of
+		// 1 tripped it before completion while the other runner finished. Both
+		// runners complete the reply far under this. See Lessons 2026-06-03.
+		maxTurns = 6
 	)
 
 	// Step A — streamrunner side. Sequential with Step B; each run owns its
