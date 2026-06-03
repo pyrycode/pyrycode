@@ -64,7 +64,12 @@ func TestRealClaude_LargeToolOutput_ExceedsDefaultScannerBuffer(t *testing.T) {
 		Prompt:       largeToolOutputUserPrompt,
 		SystemPrompt: largeToolOutputSystemPrompt,
 		AllowedTools: []string{"Bash"},
-		MaxTurns:     2,
+		// Loose backstop, not a target. On claude 2.1.158 a single-tool task
+		// spends several assistant messages, a thinking message plus narration
+		// around the one command, and the budget counts every assistant
+		// message. A tight cap trips before the command runs. The task
+		// completes well under this and stops at end_turn. See Lessons 2026-06-03.
+		MaxTurns:     10,
 		Effort:       "low",
 		Model:        "claude-haiku-4-5",
 	})

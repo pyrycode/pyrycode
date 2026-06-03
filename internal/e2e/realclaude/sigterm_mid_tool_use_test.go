@@ -47,9 +47,9 @@ const sigtermSystemPrompt = "You are an e2e regression-guard test. " +
 	"comment, and do NOT do anything else."
 
 // sigtermPrompt forces a single Bash call running `sleep 30`. The 30-second
-// sleep is far longer than the combined 3s pre-SIGTERM window + 5s
-// post-SIGTERM grace, so the Bash subprocess is guaranteed to be alive
-// (and the relevant in-flight tool_use) when the signal lands.
+// sleep is far longer than the time to detect the subprocess plus the 5s
+// post-SIGTERM grace, so the Bash subprocess is still alive and its in-flight
+// tool_use still open when the signal lands.
 const sigtermPrompt = "Use the Bash tool to run `sleep 30`. Do nothing else."
 
 // TestRealClaude_SigtermMidToolUse is the regression sensor described in
@@ -82,12 +82,19 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	})
 
-	// Pre-SIGTERM window: long enough for claude to emit the system/init
-	// envelope, write the assistant tool_use envelope to the on-disk
-	// JSONL, and fork the Bash subprocess. If the "no Bash tool_use
-	// observed" failure fires reproducibly, raise this to 5s — do NOT go
-	// below 2s; the tool_use envelope write is the timing-critical event.
-	time.Sleep(3 * time.Second)
+	// Interrupt the moment claude's shell command is actually running,
+	// not after a fixed wall-clock guess. Wait for the `sleep 30`
+	// subprocess to appear in pyry's process group, then send the signal.
+	// This holds no matter how fast or slow a given claude version starts.
+	// A fixed timer does not. The 30s sleep keeps the subprocess in flight
+	// long after detection, so SIGTERM still lands mid-tool_use. This uses
+	// the same pgid + pgrep lookup as the orphan check below, so it
+	// observes exactly the subprocess whose cleanup invariant #1 guards.
+	if !waitForBashSubprocess(t, pgid, 25*time.Second) {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		t.Fatalf("claude never started the `sleep 30` subprocess within 25s, "+
+			"cannot exercise SIGTERM mid-tool_use\nstderr:\n%s", truncate(stderr.Bytes()))
+	}
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("send SIGTERM to pyry (pid=%d): %v", cmd.Process.Pid, err)
@@ -134,9 +141,8 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 
 	sessionID := parseInitSessionID(stdout.Bytes())
 	if sessionID == "" {
-		t.Fatalf("no system/init envelope found in pyry stdout — pyry may have "+
-			"exited before claude emitted system/init; the 3s pre-SIGTERM "+
-			"window may be too tight on this runner\nstdout:\n%s",
+		t.Fatalf("no system/init envelope found in pyry stdout, pyry may have "+
+			"exited before claude emitted system/init\nstdout:\n%s",
 			truncate(stdout.Bytes()))
 	}
 
@@ -162,8 +168,10 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 
 	events := ReadJSONL(t, workdir, sessionID)
 
-	// Bash tool_use present. Failure here means SIGTERM landed before
-	// claude invoked Bash — raise the pre-SIGTERM sleep.
+	// Bash tool_use present. Because we waited for the `sleep 30`
+	// subprocess before signalling, a miss here means the tool_use line
+	// was not flushed to the session file before SIGTERM truncated it,
+	// not that the signal raced ahead of the tool call.
 	var bashToolUseID string
 	bashIdx := -1
 	for i, e := range events {
@@ -186,9 +194,9 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 		}
 	}
 	if bashToolUseID == "" {
-		t.Fatalf("no Bash tool_use observed in %s — SIGTERM may have landed "+
-			"before claude invoked Bash; raise the pre-SIGTERM sleep from 3s "+
-			"to 5s (do NOT lower --max-turns or shorten the prompt)", jsonlPath)
+		t.Fatalf("the `sleep 30` subprocess was observed running but no Bash "+
+			"tool_use envelope is in %s, the tool_use line was not flushed to "+
+			"the session file before SIGTERM truncated it", jsonlPath)
 	}
 
 	// Matching tool_result absent (branch B). Failure here means the
@@ -228,7 +236,14 @@ func spawnPyryAgentRun(t *testing.T, bin, workdir, promptPath, systemPath string
 		"--prompt-file="+promptPath,
 		"--system-prompt-file="+systemPath,
 		"--allowed-tools=Bash",
-		"--max-turns=2",
+		// A generous ceiling, not a sync point. The test interrupts as
+		// soon as the `sleep 30` subprocess appears, so this only has to
+		// be high enough that claude reaches the single Bash call. A tight
+		// cap of 2 was fine on older claude but newer versions spend a
+		// turn or two before the tool call, so 2 hit the cap before Bash
+		// ran. Keep it loose enough to bound a runaway, not so tight it
+		// races claude's pacing.
+		"--max-turns=6",
 		"--effort=low",
 		"--model=claude-haiku-4-5",
 		"--workdir="+workdir,
@@ -242,6 +257,25 @@ func spawnPyryAgentRun(t *testing.T, bin, workdir, promptPath, systemPath string
 		t.Fatalf("spawnPyryAgentRun: start %s: %v", bin, err)
 	}
 	return cmd
+}
+
+// waitForBashSubprocess blocks until claude's in-flight shell command (the
+// `sleep 30` subprocess) actually appears inside pyry's process group, or
+// until timeout. It replaces a fixed pre-SIGTERM sleep: the caller signals
+// the moment the command is genuinely running, so the test holds regardless
+// of how fast or slow a given claude version starts a tool call. pgrep exit
+// code 1 (no match yet) is the normal not-yet case; the loop just retries.
+func waitForBashSubprocess(t *testing.T, pgid int, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("pgrep", "-g", strconv.Itoa(pgid), "sleep").Output()
+		if err == nil && len(bytes.TrimSpace(out)) > 0 {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
 }
 
 // processesInProcessGroup runs `pgrep -g <pgid>`, drops the pgid itself
