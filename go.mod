@@ -8,7 +8,7 @@ require (
 	github.com/flynn/noise v1.1.0
 	github.com/fsnotify/fsnotify v1.10.0
 	github.com/mdp/qrterminal/v3 v3.2.1
-	github.com/pyrycode/tui-driver v1.0.0
+	github.com/pyrycode/tui-driver v1.0.1
 	golang.org/x/crypto v0.51.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.43.0
