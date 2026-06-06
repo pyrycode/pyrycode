@@ -9,10 +9,11 @@ package realclaude
 // asserts that:
 //
 //   - pyry's result trailer reports num_turns >= 10,
-//   - the on-disk JSONL contains ≥10 assistant entries with EndOfTurn=true
-//     (one per turn boundary),
-//   - the last assistant entry is itself a well-formed end-of-turn with
-//     non-empty text (final summary),
+//   - the on-disk JSONL contains ≥10 assistant entries that parse cleanly
+//     (the append path under test); end-of-turn markers are NOT counted —
+//     in a tool-use sequence claude emits ~1 end_turn (the final summary),
+//     not one per turn, so the old ">=10 EndOfTurn" bullet mismodeled the
+//     protocol and could not pass on any claude version,
 //   - the captured stderr does NOT contain bufio.Scanner's "token too long"
 //     error text — a forward-defensive tripwire for the day someone wires a
 //     stdlib Scanner into pyry's stdout/stderr path without bumping its
@@ -103,29 +104,27 @@ func TestRealClaude_LongSessionJSONLIntegrity(t *testing.T) {
 	events := ReadJSONL(t, workdir, result.SessionID)
 	jsonlPath := jsonlPathFor(workdir, result.SessionID)
 
-	endOfTurnCount := 0
 	assistantCount := 0
-	var last *JSONLEntry
 	for i := range events {
 		if events[i].Kind == "assistant" {
 			assistantCount++
-			last = &events[i]
-			if events[i].EndOfTurn {
-				endOfTurnCount++
-			}
 		}
 	}
-	if endOfTurnCount < 10 {
-		t.Fatalf("assistant EndOfTurn=true count = %d, want >= 10 (total assistant events: %d)\npath: %s",
-			endOfTurnCount, assistantCount, jsonlPath)
-	}
-	if last == nil {
-		t.Fatalf("no assistant event found in JSONL\npath: %s\nstderr:\n%s", jsonlPath, truncate(result.Stderr))
-	}
-	if !last.EndOfTurn || last.TextChars <= 0 {
-		t.Fatalf("last assistant event: EndOfTurn=%t TextChars=%d, want EndOfTurn=true and TextChars>0\n"+
-			"path: %s\nassistant events seen: %d",
-			last.EndOfTurn, last.TextChars, jsonlPath, assistantCount)
+	// This test guards the >=10-turn append path: >=10 assistant entries
+	// written to and read back from the on-disk session JSONL with no parse
+	// error (ReadJSONL fatals on any malformed line, so a clean return here
+	// already proves append integrity). We deliberately do NOT count EndOfTurn
+	// (stop_reason=="end_turn") markers. In claude's tool-use protocol a
+	// tool-calling assistant message stops with "tool_use"; only a final
+	// yield-to-user message stops with "end_turn". A ten-command sequence
+	// therefore yields ~1 end_turn (the summary), or 0 when the turn budget is
+	// spent on tool calls before a summary is reached — never one per command.
+	// The previous ">=10 EndOfTurn" assertion mismodeled the protocol and could
+	// not pass on any claude version; the trailer's NumTurns>=10 check above is
+	// the correct turn-count signal.
+	if assistantCount < 10 {
+		t.Fatalf("assistant entry count = %d, want >= 10 (the >=10-turn JSONL append path is the "+
+			"regression surface this test guards)\npath: %s", assistantCount, jsonlPath)
 	}
 
 	// Forward-defensive tripwire: the literal stdlib error text bufio.Scanner
