@@ -57,6 +57,12 @@ func assistantEntry() tuidriver.JSONLEntry {
 	return tuidriver.JSONLEntry{Type: "assistant"}
 }
 
+// assistantEntryID builds an assistant entry carrying message.id == id, so a
+// run of same-id entries models one logical reply split across JSONL lines.
+func assistantEntryID(id string) tuidriver.JSONLEntry {
+	return tuidriver.JSONLEntry{Type: "assistant", Message: &tuidriver.EntryMessage{ID: id}}
+}
+
 func mustNew(t *testing.T, cfg Config) *Counter {
 	t.Helper()
 	if cfg.Logger == nil {
@@ -146,6 +152,102 @@ func TestOnEvent_SIGTERMFiresExactlyAtBudget(t *testing.T) {
 	}
 	if got := c.Reason(); got != ReasonMaxTurns {
 		t.Fatalf("Reason = %q, want %q", got, ReasonMaxTurns)
+	}
+}
+
+func TestOnEvent_CountsLogicalTurns(t *testing.T) {
+	t.Parallel()
+	user := tuidriver.JSONLEntry{Type: "user"}
+	cases := []struct {
+		name     string
+		maxTurns int
+		entries  []tuidriver.JSONLEntry
+		// fireAt is the 0-based index in entries after which Terminate first
+		// becomes 1. Every earlier prefix must leave Terminate at 0.
+		fireAt int
+	}{
+		{
+			// AC#1: a split reply (same message.id across entries, with a
+			// non-assistant entry interleaved) counts as one turn; the budget
+			// fires only when the second distinct id reaches MaxTurns.
+			name:     "split reply counts as one turn",
+			maxTurns: 2,
+			entries: []tuidriver.JSONLEntry{
+				assistantEntryID("msg_A"), // [thinking]  turn 1
+				assistantEntryID("msg_A"), // [tool_use]  still turn 1
+				user,                      // tool_result, must not split turn 1
+				assistantEntryID("msg_B"), // [text]      turn 2 -> budget
+			},
+			fireAt: 3,
+		},
+		{
+			// AC#2: K logical turns span more than K assistant entries (2 per
+			// turn). The budget fires when the K-th distinct id first appears,
+			// not after MaxTurns raw assistant entries (old per-entry counting
+			// would have fired at index 2, mid-turn-2).
+			name:     "K turns span more than K entries",
+			maxTurns: 3,
+			entries: []tuidriver.JSONLEntry{
+				assistantEntryID("msg_1"), // turn 1
+				assistantEntryID("msg_1"),
+				assistantEntryID("msg_2"), // turn 2
+				assistantEntryID("msg_2"),
+				assistantEntryID("msg_3"), // turn 3 -> budget
+				assistantEntryID("msg_3"),
+			},
+			fireAt: 4,
+		},
+		{
+			// AC#5: one distinct id per entry still counts as one turn each.
+			name:     "one distinct id per entry",
+			maxTurns: 3,
+			entries: []tuidriver.JSONLEntry{
+				assistantEntryID("msg_A"),
+				assistantEntryID("msg_B"),
+				assistantEntryID("msg_C"), // turn 3 -> budget
+			},
+			fireAt: 2,
+		},
+		{
+			// AC#5: empty-id entries are each their own turn (the empty-id
+			// floor), preserving the pre-fix per-entry behaviour.
+			name:     "empty id is its own turn",
+			maxTurns: 3,
+			entries: []tuidriver.JSONLEntry{
+				assistantEntry(),
+				assistantEntry(),
+				assistantEntry(), // turn 3 -> budget
+			},
+			fireAt: 2,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &signalRecorder{}
+			c := mustNew(t, Config{
+				MaxTurns:    tc.maxTurns,
+				Terminate:   rec.Terminate,
+				Kill:        rec.Kill,
+				GracePeriod: 50 * time.Millisecond,
+			})
+			defer c.Stop()
+
+			for i, e := range tc.entries {
+				c.OnEvent(e)
+				term, _ := rec.counts()
+				want := 0
+				if i >= tc.fireAt {
+					want = 1
+				}
+				if term != want {
+					t.Fatalf("after entry %d: Terminate count = %d, want %d", i, term, want)
+				}
+			}
+			if got := c.Reason(); got != ReasonMaxTurns {
+				t.Fatalf("Reason = %q, want %q", got, ReasonMaxTurns)
+			}
+		})
 	}
 }
 

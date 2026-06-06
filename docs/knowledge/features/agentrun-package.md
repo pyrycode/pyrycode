@@ -1,8 +1,8 @@
 # `internal/agentrun` — workdir helpers and shared types for `pyry agent-run`
 
-> **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts a single exported function: `ResolveWorkdir`. The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it.
+> **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts three small exported helpers: `ResolveWorkdir`, `ExitErrIsBenign` (#527), and `IsNewLogicalTurn` (#574). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it.
 
-Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map — and a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
+Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map — a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface, and a **shared logical-turn-boundary predicate** (`IsNewLogicalTurn`, #574) that both `budget`'s `--max-turns` enforcement and `streamjson`'s `num_turns` reporting call so the two counts cannot drift on what a claude turn is. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
 
 ## Public API
 
@@ -21,6 +21,17 @@ func ResolveWorkdir(workdir string) (string, error)
 // unwrapped via errors.Is / errors.As. Consumed by ptyrunner / budget /
 // streamrunner to gate the four teardown-path error-log sites (#527).
 func ExitErrIsBenign(err error) bool
+
+// IsNewLogicalTurn reports whether an assistant entry with message id currentID
+// begins a new logical turn, given lastID (the previous assistant entry's id;
+// "" before any). currentID == "" → true (empty id is ungroupable → its own
+// turn, the empty-id floor); a changed id → true; the same id → false. claude
+// serialises one logical reply as multiple consecutive assistant JSONL entries
+// sharing a message.id, so counting distinct consecutive ids matches claude's
+// native num_turns. Pure over two strings (no tuidriver dependency). Single
+// source of truth shared by budget's --max-turns enforcement and streamjson's
+// num_turns reporting so the two counts cannot drift (#573 inline → #574 extracted).
+func IsNewLogicalTurn(currentID, lastID string) bool
 ```
 
 `ResolveWorkdir` has the same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
@@ -36,10 +47,11 @@ func ExitErrIsBenign(err error) bool
 | `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector (#348). Post-[#512](../codebase/512.md) consumed only by `selfcheck` (parses the `streamjson.Emitter` pipe) and `e2e/realclaude/fixtures.go` (parses captured fixtures); both will migrate in a follow-up that finally deletes the package. |
 | `internal/agentrun/budget` | [budget-package.md](budget-package.md) | `Counter` enforces the per-agent `--max-turns` budget; consumed by `ptyrunner.Run` (#334 / #479 / #512). |
 
-Imports of `internal/agentrun` after [#508](../codebase/508.md) and [#527](../codebase/527.md):
+Imports of `internal/agentrun` after [#508](../codebase/508.md), [#527](../codebase/527.md), and [#574](../codebase/574.md):
 
 - `trust` imports for `ResolveWorkdir` — the `projects[...]` key shape.
 - `ptyrunner`, `budget`, `streamrunner` each import for `ExitErrIsBenign` — the shared teardown-error predicate at their respective `Session.Close` / `Terminate` / `Kill` / `stdin.Close` error-log sites (#527).
+- `budget` and `streamjson` each import for `IsNewLogicalTurn` — the shared turn-boundary predicate (#574); `budget`'s `Counter.OnEvent` gates `count++` on it and `streamjson`'s `Emitter.Emit` gates `numTurns++` on it, so the enforced and reported turn counts share one definition.
 - `settings` does not import the parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
 
 The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. The `jsonl/tail` subpackage was deleted in [#512](../codebase/512.md) (`ptyrunner.Run` drains `tuidriver.TailJSONL` inline).
@@ -89,5 +101,6 @@ The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrec
 - [streamrunner-package.md](streamrunner-package.md) — `internal/agentrun/streamrunner`, the stream-json spawn primitive (#390).
 - [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl` (#348), the pure JSONL line reader + deterministic end-of-turn detector. Post-[#512](../codebase/512.md) consumed only by `selfcheck` and `e2e/realclaude/fixtures.go`; the tail-watcher consumer is gone.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes the subpackages.
+- [budget-package.md](budget-package.md) / [streamjson-package.md](streamjson-package.md) — the two callers of the shared `IsNewLogicalTurn` predicate (#574); enforcement and reporting of claude's logical-turn count, kept from drifting by the single shared function. See [codebase/574.md](../codebase/574.md).
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks` pattern for path comparison against claude-resolved paths.
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe each subpackage mirrors.
