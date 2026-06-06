@@ -509,18 +509,18 @@ func TestPtyRunnerVsStreamRunner_StructuralEquivalence(t *testing.T) {
 		t.Errorf("result.is_error mismatch: streamrunner=%v ptyrunner=%v",
 			streamResult.IsError, ptyResult.IsError)
 	}
-	// num_turns legitimately differs between runners: streamrunner forwards
-	// claude's native logical-turn count, while ptyrunner's stream-json emitter
-	// counts assistant events, and claude 2.1.158 splits one reply into a
-	// thinking event + a text event (1 vs 2 for a trivial reply). Assert only
-	// that BOTH completed real work — num_turns >= 1, i.e. neither wedged to
-	// the 0-turn idle-stall result. Restoring strict equality is tracked by
-	// #567 (align ptyrunner's count with claude's native turn count).
-	if streamResult.NumTurns < 1 {
-		t.Errorf("streamrunner result.num_turns = %d, want >= 1 (0 = wedge/empty result)", streamResult.NumTurns)
-	}
+	// Both runners must report claude's native logical-turn count: streamrunner
+	// forwards it from claude's own result envelope, and ptyrunner's emitter
+	// groups consecutive assistant JSONL entries by message.id so a reply claude
+	// splits across a thinking line + a text line counts as one turn (#573). The
+	// floor guard keeps a 0 == 0 "both wedged to the idle-stall result" outcome
+	// failing loudly.
 	if ptyResult.NumTurns < 1 {
 		t.Errorf("ptyrunner result.num_turns = %d, want >= 1 (0 = wedge/empty result)", ptyResult.NumTurns)
+	}
+	if streamResult.NumTurns != ptyResult.NumTurns {
+		t.Errorf("result.num_turns mismatch: streamrunner=%d ptyrunner=%d (both must report claude's native logical-turn count)",
+			streamResult.NumTurns, ptyResult.NumTurns)
 	}
 }
 

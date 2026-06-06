@@ -94,6 +94,28 @@ func textAssistant(text, stopReason string) tuidriver.JSONLEntry {
 	}
 }
 
+// assistantEntryID constructs an assistant entry carrying message.id and one
+// content block per blockType, mirroring the multi-line assistant-turn shape
+// claude 2.1.158 writes to the session JSONL (e.g. a thinking line then a text
+// line sharing one message.id). A "text" block gets non-empty text so
+// tuidriver.AssistantText/IsEndTurn treat it as a real reply; other block
+// types (thinking, tool_use) carry an empty Raw map.
+func assistantEntryID(id, rawLine, stopReason string, blockTypes []string) tuidriver.JSONLEntry {
+	msg := &tuidriver.EntryMessage{ID: id, StopReason: stopReason}
+	for _, bt := range blockTypes {
+		raw := map[string]any{}
+		if bt == "text" {
+			raw["text"] = "x"
+		}
+		msg.Content = append(msg.Content, tuidriver.ContentBlock{Type: bt, Raw: raw})
+	}
+	return tuidriver.JSONLEntry{
+		Type:    "assistant",
+		Message: msg,
+		RawLine: []byte(rawLine),
+	}
+}
+
 func TestNew_ValidatesConfig(t *testing.T) {
 	t.Parallel()
 	valid := func() Config {
@@ -206,32 +228,87 @@ func TestEmit_AggregatesUsage(t *testing.T) {
 	}
 }
 
-func TestEmit_NumTurnsCountsAssistantEvents(t *testing.T) {
+// TestEmit_NumTurnsCountsLogicalTurns pins logical-turn semantics: num_turns
+// counts distinct assistant message.ids (claude's native logical-turn count),
+// not raw assistant JSONL entries. claude 2.1.158 serialises one logical reply
+// as multiple consecutive assistant entries sharing a message.id (a thinking
+// line, a tool_use line, a text line), and the trailer must count those as one
+// turn — matching what streamrunner forwards from claude's own result envelope
+// (#573).
+func TestEmit_NumTurnsCountsLogicalTurns(t *testing.T) {
 	t.Parallel()
-	em, buf := newTestEmitter(t)
-	kinds := []string{"assistant", "user", "assistant", "tool_use", "assistant", "system", "tool_use", "assistant", "user", "user", "assistant"}
-	for i, k := range kinds {
-		var ev tuidriver.JSONLEntry
-		if k == "assistant" {
-			endOfTurn := i == len(kinds)-1
-			stop := ""
-			if endOfTurn {
-				stop = "end_turn"
+	tests := []struct {
+		name    string
+		entries []tuidriver.JSONLEntry
+		want    int
+	}{
+		{
+			// The ticket body's trivial-reply case: 2.1.158 splits one logical
+			// reply into a thinking line then a text line, both sharing
+			// message.id → one turn.
+			name: "split thinking+text reply is one turn",
+			entries: []tuidriver.JSONLEntry{
+				assistantEntryID("msg_C", `{}`, "", []string{"thinking"}),
+				assistantEntryID("msg_C", `{}`, "end_turn", []string{"text"}),
+			},
+			want: 1,
+		},
+		{
+			// 2.1.158 tool-use shape: msg_A spans a thinking line + a tool_use
+			// line (one turn); msg_B is the follow-up text reply (a second
+			// turn). Distinct message.id count = 2 = claude's native num_turns.
+			name: "thinking+tool_use then text reply",
+			entries: []tuidriver.JSONLEntry{
+				assistantEntryID("msg_A", `{}`, "tool_use", []string{"thinking"}),
+				assistantEntryID("msg_A", `{}`, "tool_use", []string{"tool_use"}),
+				entry("user", `{}`),
+				assistantEntryID("msg_B", `{}`, "end_turn", []string{"text"}),
+			},
+			want: 2,
+		},
+		{
+			// Multi-turn tool-use loop (AC#2): three distinct assistant messages
+			// separated by tool_result lines → three logical turns.
+			name: "multi-turn tool loop",
+			entries: []tuidriver.JSONLEntry{
+				assistantEntryID("msg_A", `{}`, "tool_use", []string{"thinking", "tool_use"}),
+				entry("tool_result", `{}`),
+				assistantEntryID("msg_B", `{}`, "tool_use", []string{"tool_use"}),
+				entry("tool_result", `{}`),
+				assistantEntryID("msg_C", `{}`, "end_turn", []string{"text"}),
+			},
+			want: 3,
+		},
+		{
+			// empty-id floor: synthetic/malformed entries with no message.id are
+			// ungroupable, so each counts as its own turn — preserving the
+			// pre-fix per-entry behaviour the TestReadUsage_* family relies on.
+			name: "id-less entries each count",
+			entries: []tuidriver.JSONLEntry{
+				assistantEntry(`{}`, "tool_use", nil, false),
+				assistantEntry(`{}`, "end_turn", nil, true),
+			},
+			want: 2,
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			em, buf := newTestEmitter(t)
+			for i, ev := range tc.entries {
+				if err := em.Emit(ev); err != nil {
+					t.Fatalf("Emit[%d]: %v", i, err)
+				}
 			}
-			ev = assistantEntry(`{}`, stop, nil, endOfTurn)
-		} else {
-			ev = entry(k, `{}`)
-		}
-		if err := em.Emit(ev); err != nil {
-			t.Fatalf("Emit[%d]: %v", i, err)
-		}
-	}
-	if err := em.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	tr := lastTrailer(t, buf.Bytes())
-	if tr.NumTurns != 5 {
-		t.Errorf("num_turns = %d, want 5", tr.NumTurns)
+			if err := em.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			tr := lastTrailer(t, buf.Bytes())
+			if tr.NumTurns != tc.want {
+				t.Errorf("num_turns = %d, want %d", tr.NumTurns, tc.want)
+			}
+		})
 	}
 }
 
