@@ -74,6 +74,8 @@ Intentionally **absent** from the argv:
 3. tuidriver.EnsureClaudeEnv(cmd)               // sets TERM=xterm-256color
    (3a. if PYRY_RECORD_DIR is set: create the .cast file + recorder and arm mirror — see
         "Session flight recorder" below; otherwise mirror stays nil)
+   (3b. install cmd.Cancel (descendant-group reap → graceful SIGTERM) + cmd.WaitDelay — see
+        "Operator-SIGTERM teardown" below; MUST be set before Spawn arms the os/exec ctx watcher)
 4. sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{Mirror: mirror})  // mirror nil when off
    defer sess.Close()
 5. tuidriver.WaitUntil(ctx, func() bool { return tuidriver.IsIdle(sess.Buffer.Snapshot()) })
@@ -156,9 +158,33 @@ Close errors are advisory: the body's return value already names the operator-vi
 
 Never logs `cfg.PromptBytes` content, any substring of `sess.Buffer.Snapshot()`, or any rendered TUI content. Writers (`Stderr` now, `Stdout` in #472) are opaque. The rule is pinned in the package doc-comment.
 
+## Operator-SIGTERM teardown: descendant-group reap (`reap.go`, #565)
+
+claude (2.1.158) runs **every** Bash command in its own detached process group two levels below pyry — `pyry → claude → zsh -c eval '<cmd>' → <cmd>`, where the `zsh`+`cmd` live in a NEW group claude creates. `sess.Close()` reaps claude (pyry's direct child) but not that group, so on operator SIGTERM the Bash subprocess survives, reparented to init. For a command that never returns (`tail -f /dev/null`) the orphan is **unbounded**.
+
+A graceful SIGTERM to claude does **not** fix this on its own: measured 3/3 (claude 2.1.158), claude given a graceful SIGTERM + grace exits cleanly but leaves the Bash group it deliberately isolated orphaned. Relying on claude to reap a grandchild it intentionally detached is a stochastic dependency that does not hold, so the no-orphan guarantee comes from deterministic pyry code (*belt-and-suspenders means different fabric*).
+
+`Run` overrides `exec.Cmd.Cancel` — installed after `EnsureClaudeEnv` and **before** `Spawn`, so os/exec's ctx watcher captures it at `Start`:
+
+```go
+cmd.Cancel = func() error {
+    reapDescendantGroups(cmd.Process.Pid, logger) // SIGKILL claude's detached Bash group(s)
+    return cmd.Process.Signal(syscall.SIGTERM)     // then graceful SIGTERM (lets claude flush JSONL)
+}
+cmd.WaitDelay = killGrace // local const = 5s; mirrors streamrunner.killGrace / supervisor.spawnWaitDelay
+```
+
+- **`cmd.Cancel` fires only on operator ctx-cancel** — the `signal.NotifyContext(SIGTERM, SIGINT)` ctx threaded from [`cmd/pyry/agent_run.go`](pyry-agent-run-command.md). Normal completion, budget-hit, and watchdog-fire don't cancel the parent ctx, so those paths are **byte-for-byte unchanged**. Without the override, os/exec's default ctx-cancel is an immediate `Kill()` (SIGKILL) of claude — which both skips the reap and denies claude grace to flush its JSONL.
+- **Race-free chokepoint.** At `cmd.Cancel` time claude and its whole descendant tree are guaranteed alive and not-yet-signalled, so the `ps` snapshot sees the live tree. This is not a hopeful defer-time scan.
+- **`reapDescendantGroups(rootPid, logger)`** (`reap.go`) takes one `ps -axo pid=,ppid=,pgid=` snapshot (one portable enumeration across Linux + macOS — no `//go:build` split, no cgo, no new dep), BFS-walks `rootPid`'s transitive descendants, and `syscall.Kill(-pgid, SIGKILL)`s each distinct descendant group (negative pid = whole group). SIGKILL (not SIGTERM-then-grace) because these are abandoned tool commands whose output is already discarded (no `tool_result` will be sent). Three **load-bearing guards** skip a candidate group: `pgid <= 1` (init/invalid), `pgid == syscall.Getpgrp()` (pyry's own group — never suicide), and `pgid == rootPid` (claude is a `setsid`/`pty.Start` group leader so `pgid == pid`; `sess.Close()` owns claude's teardown). Getting the self-group or root-group guard wrong SIGKILLs pyry or init.
+- **Best-effort + content-blind.** `ps` is bounded by a 2s timeout (`reapPSTimeout`); enumeration/kill failures log at Warn (pgids/counts only — never command strings, preserving the package's logging discipline) and do not propagate; claude still gets its SIGTERM. `ESRCH` (group already exited in the window) is benign.
+- **Bounded exit.** Two SIGKILL backstops follow the SIGTERM: tui-driver `Session.Close`'s 3s grace and `cmd.WaitDelay` (5s). The 3s fires first and is the binding bound, so pyry exits well within the e2e's 5s window (~700 ms happy path). `WaitDelay`'s exact value is **non-binding** — it only has to stay ≥ the `Close` grace so os/exec does not preempt the graceful path.
+
+**Known same-shape gap (not a regression).** The budget-hit and watchdog-fire teardown paths tear claude down without cancelling the parent ctx, so `cmd.Cancel` does not fire and they retain the same structural descendant leak. Out of scope per #565 (operator SIGTERM only, and unobserved); if ever observed, the same `reapDescendantGroups(cmd.Process.Pid, logger)` call drops into the budget `Terminate` hook. See [`codebase/565.md`](../codebase/565.md).
+
 ## Concurrency
 
-`tui-driver` owns the two background goroutines (PTY reader, `cmd.Wait` observer). `Run` is straight-line foreground code — no goroutines, channels, or timers in this package. `tuidriver.WaitUntil` polls at 50ms via an internal `time.Ticker`. `sess.Close()` (deferred) is idempotent and handles SIGTERM → 3s grace → SIGKILL → PTY close → reader-goroutine join. The #552 flight recorder adds **no** new goroutine either — it is driven entirely by tui-driver's existing PTY reader goroutine (the sole `Mirror` writer); `finalizeRecording`'s file close + rename is ordered strictly after that goroutine exits because its defer is the LIFO tail, running after `sess.Close()`'s `<-readerDone` join (happens-before).
+`tui-driver` owns the two background goroutines (PTY reader, `cmd.Wait` observer). `Run` is straight-line foreground code — no goroutines, channels, or timers in this package. `tuidriver.WaitUntil` polls at 50ms via an internal `time.Ticker`. `sess.Close()` (deferred) is idempotent and handles SIGTERM → 3s grace → SIGKILL → PTY close → reader-goroutine join. The #565 descendant-group reap runs synchronously inside `cmd.Cancel` on os/exec's ctx-watcher goroutine (operator-SIGTERM path only); it reads only `cmd.Process.Pid` (immutable after `Start`) + `logger` (concurrency-safe), shells out to `ps`, and issues `syscall.Kill`s — no shared mutable state, no locks (see [Operator-SIGTERM teardown](#operator-sigterm-teardown-descendant-group-reap-reapgo-565)). The #552 flight recorder adds **no** new goroutine either — it is driven entirely by tui-driver's existing PTY reader goroutine (the sole `Mirror` writer); `finalizeRecording`'s file close + rename is ordered strictly after that goroutine exits because its defer is the LIFO tail, running after `sess.Close()`'s `<-readerDone` join (happens-before).
 
 ## Dependency direction
 
@@ -216,7 +242,7 @@ CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kerne
 - Trust pre-write + deny-default settings JSON file generation → landed as separate subpackages [`trust`](agentrun-trust-subpackage.md) (#475) and [`settings`](agentrun-settings-subpackage.md) (#476); together they produce `SettingsPath` and the remediation `ErrTrustModalDetected` points to.
 - `cmd/pyry/agent_run.go` cutover from `streamrunner` to `ptyrunner` → landed in #470.
 - Streamrunner deletion → not planned. Operator decision 2026-05-19: streamrunner stays as a sibling indefinitely for billing-classification comparison, selected via `PYRY_USE_STREAMJSON=1`.
-- Operator-tunable timing knobs — the SIGTERM grace and `WaitUntil` poll interval are tui-driver defaults; no `Config` exposure.
+- Operator-tunable timing knobs — the in-session SIGTERM grace (tui-driver `Session.Close`, 3s) and the `WaitUntil` poll interval are tui-driver defaults; the os/exec teardown grace is a package constant (`killGrace = 5s`, see [Operator-SIGTERM teardown](#operator-sigterm-teardown-descendant-group-reap-reapgo-565)). None are `Config`-exposed.
 
 ## Related
 
@@ -226,5 +252,6 @@ CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kerne
 - [`codebase/471.md`](../codebase/471.md) — build notes (file inventory, helper-process mode table, `TestMain` rationale, `GOPRIVATE` setup).
 - [`codebase/553.md`](../codebase/553.md) — chip-gate build notes (decision table, evidence base, the stderr-sentinel-vs-logger testing lesson). Spec [`docs/specs/architecture/553-chip-gated-repaste.md`](../../specs/architecture/553-chip-gated-repaste.md). PR #547 introduced the recovery loop; issue #227 is the destructive re-paste regression the gate prevents.
 - [`codebase/552.md`](../codebase/552.md) — flight-recorder build notes (env-read-in-`Run` rationale, the named-return + wrapping-closure-defer gotcha, fail-fast/best-effort split, the unresolved package-doc carve-out follow-up). Spec [`docs/specs/architecture/552-ptyrunner-session-flight-recorder.md`](../../specs/architecture/552-ptyrunner-session-flight-recorder.md). Consumes tui-driver#125's `NewCastRecorder` via the `SpawnOpts.Mirror` seam.
+- [`codebase/565.md`](../codebase/565.md) — operator-SIGTERM descendant-group reap build notes (the measured (a)-insufficient finding, the three load-bearing guards, the budget/watchdog same-shape gap). Spec [`docs/specs/architecture/565-ptyrunner-descendant-pgroup-reap.md`](../../specs/architecture/565-ptyrunner-descendant-pgroup-reap.md). Strengthens the [`#422`](../codebase/422.md) SIGTERM e2e.
 - Spec [`docs/specs/architecture/471-ptyrunner-skeleton.md`](../../specs/architecture/471-ptyrunner-skeleton.md) — architect spec.
 - [tui-driver PR #43](https://github.com/pyrycode/tui-driver/pull/43) — `Session.WritePrompt` introduction; the bracketed-paste fix this primitive depends on for prompt commit.

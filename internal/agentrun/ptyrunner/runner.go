@@ -293,6 +293,26 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	tuidriver.EnsureClaudeEnv(cmd)
 
+	// Operator-SIGTERM teardown. cmd.Cancel fires only when the ctx passed to
+	// CommandContext is cancelled — operator SIGTERM/SIGINT — and never on
+	// normal completion, budget-hit, or watchdog-fire (none of those cancel
+	// the parent ctx), so those paths are byte-for-byte unchanged. At fire
+	// time claude and its whole descendant tree are alive and not-yet-signalled,
+	// so the reap walk is race-free. The reap SIGKILLs claude's detached Bash
+	// subprocess group(s) — claude isolates every Bash command two levels below
+	// pyry and does not reap that group even on a graceful SIGTERM (#565). The
+	// trailing SIGTERM (vs os/exec's default immediate SIGKILL) then lets claude
+	// flush its session JSONL cleanly before exit. Installed before Spawn so the
+	// hook is in place when the os/exec watcher is armed at Start.
+	cmd.Cancel = func() error {
+		reapDescendantGroups(cmd.Process.Pid, logger)
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	// WaitDelay's exact value is non-binding — tui-driver Session.Close's
+	// shutdown grace fires first and is the binding bounded-exit backstop;
+	// killGrace only has to stay ≥ that grace. See reap.go.
+	cmd.WaitDelay = killGrace
+
 	// Opt-in TUI session flight recorder, gated on PYRY_RECORD_DIR. OFF by
 	// default: an empty env var leaves recordTo "" and SpawnOpts{RecordTo: ""}
 	// is byte-identical to the pre-#552 SpawnOpts{}.
