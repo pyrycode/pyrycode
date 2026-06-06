@@ -47,8 +47,7 @@ const maxNoisePayloadBytes = 65535
 // rekeyInterval is the scheduled re-key cadence on each open v2 session
 // (docs/protocol-mobile.md § Re-key — the 1-hour rule). Exposed as a
 // package var (lowercase) so tests can substitute a sub-second value
-// via the same t.Cleanup save-and-restore idiom handshakeTimeout uses;
-// not part of the public API.
+// via a t.Cleanup save-and-restore idiom; not part of the public API.
 var rekeyInterval = 1 * time.Hour
 
 // rekeyReplyTimeout is the bounded window between emitting a

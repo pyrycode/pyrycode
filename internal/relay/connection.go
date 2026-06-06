@@ -1,15 +1,18 @@
 // Package relay drives the binary's outbound long-lived connection to the
-// relay: opens the WSS via internal/transport, runs the one-shot
-// hello/hello_ack handshake on every fresh conn, and exposes inbound
-// frames as protocol.RoutingEnvelope values via Frames(). It does NOT
-// dispatch on envelope types, validate device tokens, or interpret
-// application-level error payloads — those concerns layer above this
-// package in a future ticket (supervisor wiring + per-message handlers).
+// relay: opens the WSS via internal/transport and exposes inbound frames
+// as protocol.RoutingEnvelope values via Frames(). The binary↔relay leg
+// is content-blind — the relay registers the binary's server-id from the
+// x-pyrycode-server request header and claims the slot on WS upgrade, so
+// the conn is treated as established the moment the upgrade completes;
+// there is no relay-originated hello/hello_ack handshake on this leg. It
+// does NOT dispatch on envelope types, validate device tokens, or
+// interpret application-level error payloads — those concerns layer above
+// this package in a future ticket (supervisor wiring + per-message
+// handlers).
 //
-// The single source of truth for the headers, handshake timing, and close
-// codes is docs/protocol-mobile.md (§ Authentication, § Connection
-// lifecycle, § Worked example). When that document changes, this package
-// changes.
+// The single source of truth for the headers and close codes is
+// docs/protocol-mobile.md (§ Authentication, § Connection lifecycle,
+// § Worked example). When that document changes, this package changes.
 package relay
 
 import (
@@ -35,12 +38,6 @@ import (
 // Typed locally so callers don't have to import the websocket package
 // for the value.
 const statusServerIDConflict websocket.StatusCode = 4409
-
-// handshakeTimeout is the deadline for receiving hello_ack after sending
-// hello. Wire-spec 5s per docs/protocol-mobile.md § Connection lifecycle.
-// Exposed as a package var (lowercase) so tests can substitute a shorter
-// value; not part of the public API.
-var handshakeTimeout = 5 * time.Second
 
 // Sentinel errors. Callers distinguish fatal vs. retryable via errors.Is.
 var (
@@ -160,19 +157,18 @@ func connectWithClient(ctx context.Context, cfg Config, client *transport.Client
 	return c
 }
 
-// Frames returns the channel of post-handshake inbound frames. The
-// channel closes when the lifecycle terminates. Frames are delivered in
-// the order the underlying conn produces them; reconnects are
-// transparent (a fresh hello/hello_ack handshake runs first, then frames
-// resume on the new conn).
+// Frames returns the channel of inbound frames. The channel closes when
+// the lifecycle terminates. Frames are delivered in the order the
+// underlying conn produces them; reconnects are transparent — frames
+// resume on the new conn directly.
 func (c *Connection) Frames() <-chan protocol.RoutingEnvelope { return c.frames }
 
 // Send marshals env to JSON and forwards it to the relay over the
 // current transport conn. Returns transport.ErrDisconnected if the
 // underlying conn is currently dropped (caller decides whether to retry
-// or drop the frame); transport reconnect and a fresh hello/hello_ack
-// handshake happen asynchronously, so a frame sent while disconnected
-// is lost — that's consistent with v1 protocol expectations
+// or drop the frame); transport reconnect happens asynchronously, so a
+// frame sent while disconnected is lost — that's consistent with the
+// protocol's connection-lifecycle expectations
 // (docs/protocol-mobile.md § Connection lifecycle).
 func (c *Connection) Send(env protocol.RoutingEnvelope) error {
 	raw, err := json.Marshal(env)
@@ -249,79 +245,27 @@ func (c *Connection) run(ctx context.Context) {
 			c.result = c.classifyTransportErr(err)
 			return
 		case <-c.client.Connected():
-			if err := c.handshake(ctx); err != nil {
-				c.cfg.Logger.Warn("relay: handshake failed; recycling conn",
-					"err", err)
-				c.client.DropConn()
-				continue
-			}
+			// The binary↔relay leg is content-blind: the relay registers
+			// the server-id from the x-pyrycode-server header and claims
+			// the slot on WS upgrade, sending no hello_ack. The conn is
+			// established the moment Connected fires — go straight to
+			// forwarding, no handshake.
+			c.cfg.Logger.Info("relay: conn established",
+				"server_id", string(c.cfg.ServerID))
 			c.forwardFrames(ctx)
 		}
 	}
-}
-
-func (c *Connection) handshake(ctx context.Context) error {
-	payload := protocol.HelloServerPayload{
-		Role:             "server",
-		ServerID:         string(c.cfg.ServerID),
-		BinaryVersion:    c.cfg.BinaryVersion,
-		ProtocolVersions: []string{"v1"},
-	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal hello payload: %w", err)
-	}
-	helloEnv := protocol.Envelope{
-		ID:      1,
-		Type:    protocol.TypeHello,
-		TS:      time.Now().UTC(),
-		Payload: payloadJSON,
-	}
-	helloRaw, err := json.Marshal(helloEnv)
-	if err != nil {
-		return fmt.Errorf("marshal hello envelope: %w", err)
-	}
-	if err := c.client.Send(helloRaw); err != nil {
-		return fmt.Errorf("send hello: %w", err)
-	}
-
-	deadlineCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-	defer cancel()
-	frame, err := c.client.Receive(deadlineCtx)
-	if err != nil {
-		if errors.Is(deadlineCtx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("hello_ack timeout after %s", handshakeTimeout)
-		}
-		return fmt.Errorf("recv hello_ack: %w", err)
-	}
-
-	// Relay-to-binary frames are ALWAYS wrapped in RoutingEnvelope —
-	// including hello_ack (docs/protocol-mobile.md § Worked example,
-	// conn_id "-").
-	var routing protocol.RoutingEnvelope
-	if err := json.Unmarshal(frame, &routing); err != nil {
-		return fmt.Errorf("decode routing envelope: %w", err)
-	}
-	var env protocol.Envelope
-	if err := json.Unmarshal(routing.Frame, &env); err != nil {
-		return fmt.Errorf("decode inner envelope: %w", err)
-	}
-	if env.Type != protocol.TypeHelloAck {
-		return fmt.Errorf("expected hello_ack, got type %q", env.Type)
-	}
-	c.cfg.Logger.Info("relay: handshake complete",
-		"server_id", string(c.cfg.ServerID))
-	return nil
 }
 
 func (c *Connection) forwardFrames(ctx context.Context) {
 	for {
 		raw, err := c.client.Receive(ctx)
 		if err != nil {
-			// Expected: transport.ErrDisconnected (conn dropped; run will
-			// re-handshake on next Connected), transport.ErrClosed (Close
-			// called), or ctx.Err (shutdown). Logged for diagnosability —
-			// an unrecognised err is a breadcrumb for transport API drift.
+			// Expected: transport.ErrDisconnected (conn dropped; run
+			// re-enters forwardFrames on the next Connected),
+			// transport.ErrClosed (Close called), or ctx.Err (shutdown).
+			// Logged for diagnosability — an unrecognised err is a
+			// breadcrumb for transport API drift.
 			c.cfg.Logger.Debug("relay: forwardFrames exiting", "err", err)
 			return
 		}
