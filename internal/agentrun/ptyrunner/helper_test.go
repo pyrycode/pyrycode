@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -67,6 +69,14 @@ func TestMain(m *testing.M) {
 // SIGTERM→grace→SIGKILL sequence resolves on the SIGTERM step rather
 // than waiting out the 3-second grace.
 func runHelper() {
+	// reap-tree fixture modes (TestReapDescendantGroups) build a process tree
+	// instead of standing in for claude. Keyed by GO_PTYRUNNER_REAP_MODE so the
+	// claude-stand-in switch below stays untouched.
+	if role := os.Getenv("GO_PTYRUNNER_REAP_MODE"); role != "" {
+		runReapHelper(role)
+		// runReapHelper terminates via os.Exit.
+		return
+	}
 
 	// UTF-8 encodings of claude's TUI glyphs the parent's detectors look
 	// for (after StripANSI).
@@ -230,6 +240,72 @@ func runHelper() {
 // always falls through to WaitForSessionJSONL, which picks up the delayed
 // body — so the margin is what keeps the suite -race -count stable.
 const commitModeJSONLDelay = 500 * time.Millisecond
+
+// runReapHelper is the process-tree fixture for TestReapDescendantGroups,
+// dispatched by GO_PTYRUNNER_REAP_MODE. It never stands in for claude; it just
+// shapes a tree the reaper walks:
+//
+//   - "leaf":         block (no children). Used as a fresh-group descendant,
+//                     a same-group sibling, or a no-descendant root.
+//   - "parent_fresh": spawn one "leaf" grandchild in a FRESH process group
+//                     (Setpgid), report its pid via GO_PTYRUNNER_REAP_REPORT,
+//                     then block. Mirrors claude → zsh+tail (the reaped group).
+//   - "parent_same":  spawn one "leaf" grandchild in the SAME group (no
+//                     Setpgid), report its pid, then block. Exercises the
+//                     "rootPid's own group is excluded" guard.
+//
+// The reaper kills with SIGKILL (uncatchable), so no mode needs a signal
+// handler; the 30s block is a backstop so a leaked helper self-terminates.
+func runReapHelper(role string) {
+	switch role {
+	case "leaf":
+		blockUntilKilled()
+	case "parent_fresh":
+		spawnGrandchildAndBlock(true)
+	case "parent_same":
+		spawnGrandchildAndBlock(false)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown GO_PTYRUNNER_REAP_MODE: %q\n", role)
+		os.Exit(97)
+	}
+}
+
+// blockUntilKilled blocks for a generous backstop window, then exits. The
+// reaper (and the test's cleanup) kill via SIGKILL, which needs no handler;
+// the timer only bounds a helper the test forgot to kill.
+func blockUntilKilled() {
+	time.Sleep(30 * time.Second)
+	os.Exit(0)
+}
+
+// spawnGrandchildAndBlock re-execs this binary as a "leaf" grandchild — in a
+// fresh process group when freshGroup is set — writes the grandchild's pid to
+// GO_PTYRUNNER_REAP_REPORT so the parent test can target its assertions, then
+// blocks. It reaps the grandchild in the background so a SIGKILL'd group truly
+// empties: a zombie still answers kill(-pgid, 0), which would otherwise defeat
+// the test's group-gone probe.
+func spawnGrandchildAndBlock(freshGroup bool) {
+	reportPath := os.Getenv("GO_PTYRUNNER_REAP_REPORT")
+	if reportPath == "" {
+		fmt.Fprintln(os.Stderr, "parent reap helper requires GO_PTYRUNNER_REAP_REPORT")
+		os.Exit(96)
+	}
+	gc := exec.Command(os.Args[0])
+	gc.Env = append(os.Environ(), "GO_PTYRUNNER_HELPER=1", "GO_PTYRUNNER_REAP_MODE=leaf")
+	if freshGroup {
+		gc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	if err := gc.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "parent reap helper: start grandchild: %v\n", err)
+		os.Exit(95)
+	}
+	go func() { _ = gc.Wait() }()
+	if err := os.WriteFile(reportPath, []byte(strconv.Itoa(gc.Process.Pid)), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "parent reap helper: write report: %v\n", err)
+		os.Exit(94)
+	}
+	blockUntilKilled()
+}
 
 // writeSessionJSONLBody appends body to the per-session JSONL at path,
 // creating the encoded project dir first. Shared by every fake-claude mode

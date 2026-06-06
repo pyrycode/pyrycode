@@ -6,11 +6,12 @@ package realclaude
 // when pyry receives SIGTERM while real claude has a Bash subprocess
 // in flight, these production invariants must hold:
 //
-//  1. Direct-child cleanup. pyry reaps the claude process it spawned — no
-//     leftover claude after pyry exits. (claude's OWN Bash subprocesses run
-//     in a separate descendant process group that pyry does not reap on
-//     SIGTERM; that gap is tracked by #565 and is out of scope here. The
-//     test reaps the leaked subprocess itself so it leaves nothing behind.)
+//  1. Full-subtree cleanup. pyry reaps the claude process it spawned AND
+//     claude's in-flight Bash subprocess group — no leftover claude and no
+//     orphaned `tail` after pyry exits. claude runs every Bash command in a
+//     detached descendant process group two levels below pyry; on SIGTERM
+//     pyry walks claude's descendant groups and SIGKILLs them (#565), so the
+//     whole subtree is gone, not just the direct child.
 //  2. JSONL consistency. The on-disk session JSONL ends at a complete
 //     envelope boundary — no half-written trailing line that a future
 //     --continue would choke on.
@@ -39,8 +40,9 @@ package realclaude
 // Subprocess detection (claude 2.1.158). claude runs every Bash command in
 // its own process group two levels below pyry, so `pgrep -g <pyry-pgid>`
 // cannot see it. waitForBashSubprocess walks the process tree by parent
-// instead, and returns the subprocess's process group so the test can reap
-// the #565 leak in cleanup.
+// instead, and returns the subprocess's process group — the group invariant 1
+// now asserts pyry reaped (#565), no longer merely the group the test reaps in
+// cleanup.
 //
 // Terminal-shape branch: the architect picked branch B (clean stream
 // truncation at a complete envelope boundary). The on-disk JSONL is the
@@ -161,9 +163,11 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 		t.Fatalf("claude never started the `tail -f /dev/null` subprocess within 25s, "+
 			"cannot exercise SIGTERM mid-tool_use\nstderr:\n%s", truncate(stderr.Bytes()))
 	}
-	// Reap claude's leaked Bash subprocess (#565) at test end. pyry does not
-	// kill claude's descendant group on SIGTERM, so without this the
-	// `tail -f /dev/null` would linger past the run as an orphan.
+	// Defense-in-depth: pyry reaps this Bash subprocess group on SIGTERM
+	// (#565), and invariant 1 below asserts it is gone after pyry exits. This
+	// cleanup is a belt-and-suspenders safety net for the case where the
+	// production reap regresses — the positive assertion runs first, so a
+	// regression is caught, not masked. ESRCH (already reaped) is harmless.
 	t.Cleanup(func() {
 		_ = syscall.Kill(-bashPGID, syscall.SIGKILL)
 	})
@@ -216,14 +220,20 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 			"(teardown kill-grace contract)\nstderr:\n%s", truncate(stderr.Bytes()))
 	}
 
-	// Invariant 1: pyry reaps the claude process it spawned. claude's own
-	// Bash subprocess runs in a separate descendant process group that pyry
-	// does not reap on SIGTERM (#565); that gap is out of scope here and is
-	// salvaged by the bashPGID cleanup registered above.
+	// Invariant 1: pyry reaps the full claude subtree — the direct child AND
+	// claude's detached Bash subprocess group (#565). On SIGTERM pyry walks
+	// claude's descendant process groups and SIGKILLs them, then SIGTERMs
+	// claude, so neither the claude process nor the `tail -f /dev/null` group
+	// is alive once pyry has exited.
 	if !waitForProcessGone(claudePid, 2*time.Second) {
 		t.Fatalf("claude (pid=%d, pyry's direct child) still alive after pyry exit — "+
 			"pyry did not reap the process it spawned\nstderr:\n%s",
 			claudePid, truncate(stderr.Bytes()))
+	}
+	if !waitForGroupGone(bashPGID, 2*time.Second) {
+		t.Fatalf("claude's Bash subprocess group (pgid=%d) still alive after pyry exit — "+
+			"pyry did not reap claude's detached descendant process group (#565)\nstderr:\n%s",
+			bashPGID, truncate(stderr.Bytes()))
 	}
 
 	jsonlPath := jsonlPathFor(workdir, sessionID)
@@ -421,6 +431,25 @@ func waitForProcessGone(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
 		if syscall.Kill(pid, 0) != nil {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// waitForGroupGone returns true once no process in group pgid is alive,
+// polling up to timeout. syscall.Kill(-pgid, 0) probes the whole group without
+// delivering a signal: a non-nil error (ESRCH) means every member is gone.
+// The group's members (claude's `zsh` + `tail`) are reparented to init when
+// pyry tears claude down, and init reaps them once pyry's reap SIGKILLs the
+// group — the sibling of waitForProcessGone for a whole process group (#565).
+func waitForGroupGone(pgid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if syscall.Kill(-pgid, 0) != nil {
 			return true
 		}
 		if !time.Now().Before(deadline) {
