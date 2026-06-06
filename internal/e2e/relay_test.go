@@ -49,49 +49,6 @@ func relayTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-// TestRelay_Hello asserts that a pyry daemon spawned against a ws://
-// fakerelay completes the binary↔relay handshake: the binary upgrades
-// on /v1/server and sends a "hello" envelope with role=server and the
-// persisted ServerID. The relay's hello_ack reply path is exercised
-// in the unit tests; e2e only proves the wire arrives.
-func TestRelay_Hello(t *testing.T) {
-	fr := fakerelay.New(relayTestLogger())
-	t.Cleanup(func() { _ = fr.Close() })
-
-	home := shortHome(t)
-	h := StartInWithEnv(t,
-		home,
-		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
-		"-pyry-relay="+fr.URL()+"/v1/server",
-	)
-
-	serverID := readPersistedServerID(t, home)
-
-	deadline := time.Now().Add(5 * time.Second)
-	var hello any
-	for time.Now().Before(deadline) {
-		if env, ok := fr.LastBinaryHello(serverID); ok {
-			hello = env
-			if env.Type == "hello" {
-				payloadStr := string(env.Payload)
-				if !strings.Contains(payloadStr, `"role":"server"`) {
-					t.Errorf("hello payload missing role=server: %s", payloadStr)
-				}
-				if !strings.Contains(payloadStr, `"server_id":"`+serverID+`"`) {
-					t.Errorf("hello payload missing server_id=%s: %s", serverID, payloadStr)
-				}
-				h.Stop(t)
-				return
-			}
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	h.Stop(t)
-	t.Fatalf("relay never observed expected binary hello for server-id=%s (got %+v)",
-		serverID, hello)
-}
-
 // TestRelay_4409 asserts that a WS close code 4409 from the relay
 // causes the daemon to log the conflict and exit cleanly (exit code 0
 // via ctx cancel; no reconnect loop). Does not go through the harness's

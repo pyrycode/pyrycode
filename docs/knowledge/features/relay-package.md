@@ -4,7 +4,7 @@
 
 The binary side of the binary↔relay wire protocol. Three surfaces:
 
-1. **Outbound dial with server-id handshake** (`connection.go`, #248) — wraps `internal/transport.Client` (#247, the generic WSS primitive) with the v1 handshake state machine: builds the upgrade headers, sends `hello`, awaits `hello_ack` within 5 seconds, classifies WS close-code `4409` as terminal (server-id conflict), and exposes inbound frames as `protocol.RoutingEnvelope` values via `Frames()`. Knows nothing about per-envelope dispatch or supervisor lifecycle.
+1. **Outbound dial, established on WS upgrade** (`connection.go`, #248; binary↔relay handshake retired #582) — wraps `internal/transport.Client` (#247, the generic WSS primitive): builds the upgrade headers, treats the conn as established the moment the WS upgrade fires (the relay is content-blind — it registers the binary's server-id from the `x-pyrycode-server` header and sends no `hello_ack`), classifies WS close-code `4409` as terminal (server-id conflict), and exposes inbound frames as `protocol.RoutingEnvelope` values via `Frames()`. No relay-originated `hello`/`hello_ack` ceremony on this leg. Knows nothing about per-envelope dispatch or supervisor lifecycle.
 2. **Per-phone-conn first-frame token validation** (`auth.go`, #249) — a single pure function `AuthenticateFirstFrame` that returns a structured `AuthOutcome` (response envelope + close-or-keep signal) on top of `devices.Registry.Validate`. Carrier-agnostic with respect to how the token reached the binary. The relay-conn ticket that wires this into actual phone traffic is a future sibling.
 3. **Per-envelope-type handlers** (`handlers/`, #250, signature rewrite #319) — sibling sub-package (`internal/relay/handlers`) of `dispatch.Handler` closures, one per inbound phone-traffic envelope type. Inhabitants today: `ListConversations` (#303) for `list_conversations`, `RegisterPushToken` (#250 logic, #319 signature) for `register_push_token`, and `SendMessage` (#322 + Activate ordering #396) for `send_message`. Each is a factory: `func(deps...) dispatch.Handler` returning a closure with `func(ctx, *dispatch.Conn, protocol.Envelope) error`. The handler reads the authenticated device via `c.Auth()` (#318), allocates response ids via `c.NextID()` (called inside `c.Reply`), and never stamps `id`/`in_reply_to`/`ts` itself. The sub-package imports `internal/conversations` + `internal/devices` + `internal/dispatch` + `internal/protocol` only — no import of `internal/relay` or `internal/sessions` — keeping it cycle-free; the `send_message` handler depends on its own `handlers.TurnWriter` interface (`Activate` + `WriteUserTurn`) that `*sessions.Session` satisfies structurally. `SendMessage` runs `Activate` with a 30s budget before `WriteUserTurn` so an idle-evicted bootstrap session lazily respawns claude on the next inbound message instead of dropping it through the supervisor's `ptmx == nil` discard branch (#396, [features/idle-eviction.md](idle-eviction.md#relay-routed-send_message-396)); a busted respawn surfaces as `protocol.CodeServerBinaryOffline` with `Retryable=true`.
 
@@ -87,41 +87,33 @@ Built inside `Connect` from `Config`; the caller does NOT supply them:
 
 Source: `docs/protocol-mobile.md` § Authentication. The relay accepts on first-claim-wins; if the server-id is already claimed it closes with status `4409` and the package surfaces `ErrServerIDConflict` from `Wait()`.
 
-## Handshake (one-shot per WS conn)
+## Connection establishment (on WS upgrade)
+
+The binary↔relay leg is **content-blind** — there is no application-layer `hello`/`hello_ack` ceremony on it (retired #582). The relay registers the binary's server-id from the `x-pyrycode-server` request header and claims the slot on WS upgrade; under v2 a `hello_ack` would be AEAD-sealed application data the relay holds no key for. So the conn is established the moment the upgrade fires, and `run()` goes straight to forwarding.
 
 ```
 Connect()              → goroutine spawns
    │
    └── on every fresh transport conn (signalled by transport.Client.Connected()):
          │
-         ├── send Envelope{ID: 1, Type: "hello", TS: now, Payload: HelloServerPayload{
-         │        Role:             "server",
-         │        ServerID:         cfg.ServerID,
-         │        BinaryVersion:    cfg.BinaryVersion,
-         │        ProtocolVersions: ["v1"],
-         │   }}
-         │
-         ├── Receive(deadline = 5s)
-         │     │
-         │     ├── timeout / wrong type / malformed JSON → log WARN, DropConn(), reconnect
-         │     ├── ErrDisconnected (conn dropped mid-handshake) → reconnect
-         │     └── RoutingEnvelope wrapping Envelope{Type: "hello_ack"} → READY
+         ├── log Info "relay: conn established" (server_id)
          │
          └── forwardFrames(): Receive → unmarshal RoutingEnvelope → c.frames
                                 │
-                                └── any err → return; outer select catches next Connected → re-handshake
+                                └── any err → return; outer select catches next Connected → re-enter forwardFrames
 ```
 
-The 5-second `hello_ack` deadline is a wire-spec constant. `hello_ack` frames are ALWAYS wrapped in `RoutingEnvelope` (`conn_id: "-"`) per `docs/protocol-mobile.md` § Worked example — the decoder unwraps before checking `Envelope.Type`.
+WS close-code `4409` (server-id conflict) is classified terminal independently of any frame exchange — it rides the transport's `FatalCloseCodes: [4409]` and surfaces as `ErrServerIDConflict` from `Wait()` (see Reconnect semantics).
+
+> The *phone↔binary* `hello`/`hello_ack` is a different leg and survives — it is carried E2E-encrypted as Noise_IK early-data, relay-blind, and validated by the binary's `AuthenticateFirstFrame` (see § Auth below). Only the binary↔relay leg ceremony was retired.
 
 ## Reconnect semantics
 
 | Cause | Behaviour |
 |---|---|
-| Transport drop (`1011`, `1006`, network error) | Inherits `internal/transport`'s backoff (1s/2s/4s/8s/16s/30s cap ±20% jitter, reset after ≥60s uptime). On each fresh conn, re-runs the handshake. Frames flow on the SAME `Frames()` channel before and after reconnect — consumers see a contiguous in-order stream. |
+| Transport drop (`1011`, `1006`, network error) | Inherits `internal/transport`'s backoff (1s/2s/4s/8s/16s/30s cap ±20% jitter, reset after ≥60s uptime). On each fresh conn, re-enters forwarding directly (no handshake). Frames flow on the SAME `Frames()` channel before and after reconnect — consumers see a contiguous in-order stream. |
 | WS close `4409` (server-id conflict) | `Wait()` returns `ErrServerIDConflict`. NO reconnect. Operator escalation: another pyry holds the same server-id, or a stale connection on the relay side has not yet been reaped (relay's 30-second grace window). |
-| `hello_ack` timeout / wrong type / malformed JSON | Logged WARN; `client.DropConn()` force-closes the live conn; transport reconnects via backoff; handshake retries. Persistent failure → backoff saturates at 30s — acceptable degraded behaviour. |
-| Malformed JSON on a post-handshake frame | Logged WARN; frame dropped at the trust boundary; loop continues. Single bad frame does NOT tear the conn. |
+| Malformed JSON on an inbound frame | Logged WARN; frame dropped at the trust boundary; loop continues. Single bad frame does NOT tear the conn. |
 | `ctx` cancelled / `Close()` called | Clean shutdown. `Frames()` closes; `Wait()` returns `ctx.Err()` or `nil`. |
 
 ## Error model
@@ -145,8 +137,7 @@ Sentinels are distinguished via `errors.Is`. `ErrServerIDConflict`'s string cont
 
 | Event | Level | Fields |
 |---|---|---|
-| `relay: handshake complete` | Info | `server_id` |
-| `relay: handshake failed; recycling conn` | Warn | `err` |
+| `relay: conn established` | Info | `server_id` |
 | `relay: malformed routing envelope; dropping` | Warn | `err` |
 | `relay: forwardFrames exiting` | Debug | `err` |
 
@@ -155,31 +146,28 @@ Forbidden everywhere: `token`, `payload`, raw `frame` bytes, full `Headers` map 
 ## Edge cases and gotchas
 
 - **`Frames()` channel is unbuffered.** A slow consumer applies back-pressure all the way to the relay's send buffer. The dispatcher (future ticket) must keep `Frames()` drained continuously.
-- **Frames are delivered post-handshake only.** The `hello_ack` is consumed inside `handshake()` and never reaches `Frames()`.
-- **Reconnects are invisible to `Frames()` consumers.** The same channel persists across reconnects; a fresh `hello`/`hello_ack` handshake runs first, then frames resume on the new conn.
-- **`Connect` is sync-validate, async-run.** It returns immediately after `Config` validation. The connection is NOT yet Ready; observe `Frames()` to consume post-handshake frames, or call `Wait()` to block on terminal classification.
+- **Reconnects are invisible to `Frames()` consumers.** The same channel persists across reconnects; frames resume on the new conn directly (no handshake).
+- **`Connect` is sync-validate, async-run.** It returns immediately after `Config` validation. The connection is NOT yet established; observe `Frames()` to consume inbound frames, or call `Wait()` to block on terminal classification.
 - **Caller is responsible for `Close()`** during shutdown to release resources; `ctx` cancellation also drains the lifecycle.
-- **Race between `Connected` signal and conn drop:** if the conn drops between the relay observing `Connected` and calling `Send(hello)`, `Send` returns `ErrNotConnected`, `handshake` returns an error, `DropConn` is a no-op, `run` loops and catches the next `Connected` or `transportErrCh`. No stuck state.
+- **Race between `Connected` signal and conn drop:** if the conn drops right after the relay observes `Connected`, `forwardFrames`'s first `Receive` returns `ErrDisconnected`, `run` loops and catches the next `Connected` or `transportErrCh`. No stuck state.
 
 ## Test surface
 
 `internal/relay/connection_test.go` (~700 LOC, stdlib + `coder/websocket`):
 
-- `newTestRelay(t)` — `httptest.NewServer` + `websocket.Accept` upgrader with hooks for: pre-emptive close with status, skip-ack, drop-after-hello, drop-after-ack, send-N-frames-after-ack, header introspection.
+- `newTestRelay(t)` — `httptest.NewServer` + `websocket.Accept` upgrader for a **content-blind forwarder**: it registers each conn on upgrade (`ConnCount()` / `connectedCh` / header capture) and pumps `outboundFrames` to the binary; it never reads a hello or sends a `hello_ack`. Behaviors: `behaviorForward` (default — register + forward), `behaviorCloseImmediately4409` (close 4409 on accept), `behaviorDropOnConnect` (`CloseNow` right after upgrade → transport reconnects).
 - `testLogger(t)` — discarding `slog.Logger`.
 - `connectWithClient(ctx, cfg, client) *Connection` — unexported test seam that wraps a `*transport.Client` (typically wired to the `httptest` URL via a custom `dialFn`) and bypasses production's URL/scheme validation. Production callers use `Connect`. The newer `Config.AllowInsecureScheme` field (#301) is a *production-shaped* path through `Connect` for callers that just need `ws://` (e2e); two seams, two purposes — keep both.
-- `handshakeTimeout` is a package-level `var` so tests substitute a 200ms value via `t.Cleanup`. Same idiom as `internal/transport`'s test-substituted cadence fields.
+- `waitConnCount(t, relay, n, timeout)` — readiness helper polling `relay.ConnCount() >= n`; replaced the `HelloEnv(0)` poll loops when the binary-sent hello was retired (#582).
 
 Pinned behaviour:
 
-- `TestConnect_HappyPath` — `hello` → `hello_ack` → Ready, full envelope shape on the wire matches the spec.
+- `TestConnect_ReachesForwardingNoAck` (#582) — against a relay that never sends a `hello_ack`, a frame pushed via `relay.outboundFrames` arrives on `c.Frames()` AND `ConnCount == 1` (no recycle); pins "reaches frame-forwarding, no ack, no recycle".
 - `TestHeaders_Set` — relay introspects `x-pyrycode-server`, `x-pyrycode-version`, `user-agent: pyry/<version>`.
-- `TestHandshake_AckTimeout` (NON-PARALLEL — mutates package-level `handshakeTimeout`) — 200ms substitute, handshake fails, `DropConn` fires, reconnect, success on attempt 2.
-- `TestHandshake_UnexpectedFrame` — relay sends a non-ack frame first; same recycle.
 - `TestServerIDConflict_FatalNoReconnect` — 4409 → `Wait()` returns `ErrServerIDConflict`; relay's `connCount` stays at 1.
-- `TestTransportDropDuringHandshake` — relay reads `hello` then `CloseNow`; reconnect; success.
-- `TestTransportDropPostHandshake_ReHandshakes` — proves post-reconnect frames flow on the SAME `Frames()` channel (pins the `ErrDisconnected` wedge fix in the transport additions; without it, `forwardFrames` would wedge in the previous-conn `Receive` and never let `run` observe the next `Connected`).
-- `TestFrames_DeliversPostHandshakeInOrder` — three frames delivered in arrival order.
+- `TestTransportDropOnConnect_Reconnects` (#582) — relay `CloseNow`s right after upgrade; transport reconnects (`ConnCount >= 2`).
+- `TestTransportDropPostConnect_Reconnects` (#582) — proves post-reconnect frames flow on the SAME `Frames()` channel (pins the `ErrDisconnected` wedge fix in the transport additions; without it, `forwardFrames` would wedge in the previous-conn `Receive` and never let `run` observe the next `Connected`).
+- `TestFrames_AfterConnect_InOrder` — three frames delivered in arrival order.
 - `TestClose_ShutsDownCleanly` — `Close()` drains `Frames()` and `Wait()` returns; goroutines exit.
 - `TestContextCancel_ShutsDownCleanly` — `cancel(ctx)` drains the lifecycle.
 - `TestConfig_Validation_TableDriven` — each missing required field; `ws://` / `http://` / unparseable schemes → `ErrInvalidConfig` (with `AllowInsecureScheme=false`).
@@ -362,14 +350,14 @@ Build tag `e2e`. `TestRelay_RegisterPushToken_AckAndPersists` pairs a device via
 ## Consumers and roadmap
 
 - **Supervisor wiring** (#301): `cmd/pyry/main.go` + `cmd/pyry/relay.go` resolve the relay URL with precedence `-pyry-relay` > `PYRY_RELAY_URL` > `cfg.RelayURL` > `DefaultConfig`, load the server-id via `identity.LoadOrCreate(resolveServerIDPath(name))` (same on-disk file as `pyry pair`), call `relay.Connect`, and spawn one supervisor-owned goroutine that drains `Frames()` and reads `Wait()`. On `ErrServerIDConflict` the goroutine calls the shared `signal.NotifyContext` cancel, unwinding `pool.Run`; on any other terminal error it logs warn and exits without restart (transport-internal reconnect already absorbed all non-fatal closes); empty `relayURL` is the disabled-relay branch (info log, no goroutine). See [`codebase/301.md`](../codebase/301.md) for the full wiring + e2e harness extensions.
-- **Outbound sending** (#307, landed): `(*Connection).Send(env protocol.RoutingEnvelope) error` marshals the routing envelope and forwards via `transport.Client.Send`. Caller wraps the inner `protocol.Envelope` in `RoutingEnvelope` (the dispatcher's `Conn.Send` does this from the inside). Returns `transport.ErrDisconnected` / `ErrNotConnected` / `ErrClosed` verbatim when the underlying conn is dropped — frames sent during a disconnected window are lost, which is consistent with v1 protocol semantics (reconnect re-runs `hello/hello_ack`, so per-conn state on the relay is implicitly the wrong frame of reference for retry). First consumer is `internal/dispatch` via the dispatcher's `Outbound()` forwarder in `cmd/pyry/relay.go`.
+- **Outbound sending** (#307, landed): `(*Connection).Send(env protocol.RoutingEnvelope) error` marshals the routing envelope and forwards via `transport.Client.Send`. Caller wraps the inner `protocol.Envelope` in `RoutingEnvelope` (the dispatcher's `Conn.Send` does this from the inside). Returns `transport.ErrDisconnected` / `ErrNotConnected` / `ErrClosed` verbatim when the underlying conn is dropped — frames sent during a disconnected window are lost, which is consistent with the protocol's connection-lifecycle semantics (reconnect re-establishes the conn on WS upgrade, so per-conn state on the relay is implicitly the wrong frame of reference for retry). First consumer is `internal/dispatch` via the dispatcher's `Outbound()` forwarder in `cmd/pyry/relay.go`.
 - **Relay-conn wiring** (#308 + #318, landed): the dispatcher's `FirstFrameGate` extracts the token from `RoutingEnvelope.Token` (relay-populated from the phone's `x-pyrycode-token` header on the first frame per `conn_id`), calls `AuthenticateFirstFrame`, and on reject publishes one routing envelope carrying both `Response.Frame` AND `CloseCode=4401` — the WS close is atomic with the error envelope. The dispatcher owns the `2..N` per-conn envelope-ID counter (#308) and stores the auth'd `*devices.Device` snapshot into `*dispatch.Conn`'s per-conn slot via the unexported `setAuth` seam (#318); downstream handlers read it via `c.Auth()` rather than re-validating.
 - **Per-message dispatch** (`internal/dispatch`, #307+#308+#318): consumes `Frames()`, runs the optional `FirstFrame` gate, decodes the inner `protocol.Envelope` and branches on `Type`, routing to the registered handler in `internal/relay/handlers/`. `list_conversations` (#303), `register_push_token` (#319), and `send_message` (#322) are wired in `cmd/pyry/relay.go`'s `startRelay`; the rest of the #256 catalog (the assistant-turn-delivery half of `send_message` plus `backfill_since` / `create_conversation` / `promote_conversation` / `delete_conversation`) is deferred.
 
 ## Dependencies
 
 - `internal/transport` (#247) — generic WSS client. The additions #248 landed (`Config.FatalCloseCodes`, `Connected()`, `ErrDisconnected`, `ErrFatalClose`, `DropConn()`) are documented under [`features/transport-package.md`](transport-package.md).
-- `internal/protocol` (#255 + #271) — `Envelope`, `RoutingEnvelope`, `TypeHello` / `TypeHelloAck` / `TypeError` constants, `CodeAuthInvalidToken`, `HelloServerPayload`, `HelloAckPayload`, `ErrorPayload`.
+- `internal/protocol` (#255 + #271) — `Envelope`, `RoutingEnvelope`, `TypeHello` / `TypeHelloAck` / `TypeError` constants, `CodeAuthInvalidToken`, `HelloAckPayload`, `ErrorPayload`. (`HelloServerPayload` is no longer referenced by this package since #582 retired the binary↔relay handshake — it now has no consumer anywhere in the repo.)
 - `internal/devices` (#208 + #210) — `Registry.Validate(plain)` predicate (two-state, bumps `LastSeenAt` under `reg.mu`) consumed by `AuthenticateFirstFrame`. The plain→hash boundary lives in `devices.HashToken`; this package never hashes.
 - `internal/identity` (#206 / #207) — `ServerID` newtype. `LoadOrCreate` is the caller's responsibility, not this package's.
 - `github.com/coder/websocket` — only for the `StatusCode` type (typed-locally as `statusServerIDConflict` for 4409 and exported as `StatusUnauthorized` for 4401); consumers in `cmd/pyry` don't pull this transitively for headers alone.

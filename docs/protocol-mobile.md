@@ -17,7 +17,7 @@ v2 layers end-to-end encryption over the v1 wire while preserving the relay topo
 | Area | v1 | v2 |
 |---|---|---|
 | **E2E encryption** | None. Inner frames readable by the relay's process memory. | **Noise_IK over X25519/ChaChaPoly1305/BLAKE2s.** Inner frame is AEAD-sealed; relay sees ciphertext + opaque routing fields only. |
-| **Endpoints** | `/v1/server`, `/v1/client` | `/v2/server`, `/v2/client` |
+| **Endpoints** | `/v1/server`, `/v1/client` | `/v1/server`, `/v1/client` (unchanged — the relay is content-blind; the route path carries no protocol meaning, so it is not renamed to `/v2/...`) |
 | **Inner-frame discriminator** | `type` is the application message type. | `type` is one of `noise_init` / `noise_resp` / `noise_msg`. Application message types are inside the AEAD-sealed payload of `noise_msg`. |
 | **`payload_encrypted` flag** | Reserved; v1 rejects `true` with `protocol.unsupported`. | **Removed.** Encryption is structural in v2 — every transport frame is `noise_msg`. |
 | **Pairing QR payload** | `{server, relay, token}` | `{server, relay, token, server_static_pubkey}` |
@@ -322,6 +322,10 @@ Unchanged from v1. The binary opens `wss://<relay>/v2/server` with these request
 | `user-agent` | yes | `pyry/<version>` for ops debugging. |
 
 First-claim-wins. Conflict → `4409` close. 30-second grace period on disconnect.
+
+**The leg is established the moment the WS upgrade completes.** There is no relay-originated `hello`/`hello_ack` handshake on the binary↔relay leg — under v2 a `hello_ack` would be AEAD-sealed application data the relay holds no key for, and server-id registration is purely header-based via `x-pyrycode-server` (the slot is claimed on upgrade). The binary goes straight to forwarding frames once the upgrade fires; it does not send a `hello` and does not wait for an ack. (The phone↔binary `hello`/`hello_ack` is a different leg — it survives as Noise_IK early-data, E2E-encrypted and relay-blind; see § Handshake.)
+
+The route path label carries no protocol meaning. The relay registers the binary from the `x-pyrycode-server` header regardless of path, so `/v1/server` and `/v2/server` denote the same content-blind endpoint; the `/v1` labels are retained (and the `/v2/server` references elsewhere in this document denote the same endpoint) until a future cosmetic rename.
 
 The binary does not authenticate to the relay via Noise — the relay isn't a Noise peer. The relay-issued admin token (deferred from v1) is still a separate future hardening and is not part of v2.
 
@@ -732,5 +736,6 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-06-07`: Retired the binary↔relay `hello`/`hello_ack` ceremony (#582). That leg is established on WS upgrade with header-based server-id registration; the relay sends no `hello_ack`. Endpoints stay `/v1/server`, `/v1/client` (route path carries no protocol meaning; `/v2` rename not performed).
 - `2026-05-16`: v2 draft (this document). Adds end-to-end encryption via Noise_IK. Hard cutover from v1; v1 doc preserved in git history only.
 - `2026-05-08`: v1 initial draft (superseded; see git history).
