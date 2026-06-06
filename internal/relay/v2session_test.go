@@ -2421,3 +2421,443 @@ func sleepUntil(t time.Time) {
 		time.Sleep(d)
 	}
 }
+
+// --- unsolicited push surface tests (#571) ---
+
+// buildMessageEnvelope constructs a fully-formed binary→phone `message`
+// envelope (TypeMessage + protocol.MessagePayload) — the shape the #572
+// assistant-turn bridge will hand to Push. text identifies the frame so
+// the decrypting side can assert the payload round-tripped intact.
+func buildMessageEnvelope(t *testing.T, id uint64, text string) protocol.Envelope {
+	t.Helper()
+	payload, err := json.Marshal(protocol.MessagePayload{
+		ConversationID: "conv-push-1",
+		MessageID:      "msg-" + text,
+		Role:           "assistant",
+		Text:           text,
+	})
+	if err != nil {
+		t.Fatalf("marshal message payload: %v", err)
+	}
+	return protocol.Envelope{
+		ID:      id,
+		Type:    protocol.TypeMessage,
+		TS:      time.Now().UTC(),
+		Payload: payload,
+	}
+}
+
+// TestV2Session_Push_InterleavedWithReply_DecryptsUnderRace pins AC#1 and
+// AC#4: an unsolicited Push fired from a separate goroutine while a
+// request/reply dispatch is in flight on the same session. Both outbound
+// frames must decrypt cleanly under the phone's recv CipherState in
+// capture (= seal) order — any nonce reuse from concurrent s.send access
+// would surface as an AEAD failure inside decryptAppFrame. The pushed
+// frame decodes through the SAME path as the solicited reply
+// (decryptAppFrame) to a valid TypeMessage envelope, proving no new wire
+// shape is introduced. Order between reply and push is nondeterministic
+// (Run's select); assert presence, not order.
+func TestV2Session_Push_InterleavedWithReply_DecryptsUnderRace(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	const replyText = "push-interleave-reply"
+	echoPayload, err := json.Marshal(map[string]string{"text": replyText})
+	if err != nil {
+		t.Fatalf("marshal echo payload: %v", err)
+	}
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			return c.Reply(ctx, env, protocol.TypeConversations, echoPayload)
+		},
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		Handlers:   handlers,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	const reqID uint64 = 41
+	const pushText = "unsolicited-assistant-text"
+	req := sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      reqID,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+	// Build the push envelope on the test goroutine: t.Fatalf inside a
+	// child goroutine is unsafe, and buildMessageEnvelope may call it.
+	pushEnv := buildMessageEnvelope(t, 100, pushText)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Fire the push concurrently with feeding the inbound request so the
+	// push funnel and dispatchAppFrame contend for the single Run goroutine.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := sess.mgr.Push(ctx, v2TestConnID, pushEnv); err != nil {
+			t.Errorf("Push: %v", err)
+		}
+	}()
+	frames <- req
+	wg.Wait()
+
+	// noise_resp (envs[0]) + reply + push.
+	envs := waitForEnvelopes(t, sess.rec, 3)
+	if len(envs) != 3 {
+		t.Fatalf("envs: got %d, want exactly 3 (noise_resp + reply + push)", len(envs))
+	}
+
+	// Decrypt every app frame in capture order under the phone's recv
+	// state. A clean in-order decrypt across both frames is the
+	// nonce-integrity proof; decryptAppFrame t.Fatals on any AEAD failure.
+	var sawReply, sawPush bool
+	for _, e := range envs[1:] {
+		inner := decryptAppFrame(t, e, sess.initRecv)
+		switch inner.Type {
+		case protocol.TypeConversations:
+			if inner.InReplyTo == nil || *inner.InReplyTo != reqID {
+				t.Errorf("reply InReplyTo = %v, want pointer to %d", inner.InReplyTo, reqID)
+			}
+			sawReply = true
+		case protocol.TypeMessage:
+			var mp protocol.MessagePayload
+			if err := json.Unmarshal(inner.Payload, &mp); err != nil {
+				t.Fatalf("decode pushed message payload: %v", err)
+			}
+			if mp.Text != pushText {
+				t.Errorf("pushed message text = %q, want %q", mp.Text, pushText)
+			}
+			sawPush = true
+		default:
+			t.Errorf("unexpected outbound inner type %q", inner.Type)
+		}
+	}
+	if !sawReply {
+		t.Error("no conversations reply captured")
+	}
+	if !sawPush {
+		t.Error("no message push captured")
+	}
+}
+
+// TestV2Session_Push_ConcurrentWithReplies_NoNonceCorruption pins AC#2:
+// N concurrent pushes plus M in-flight request/reply dispatches on the
+// same open session. All N+M outbound frames must decrypt in capture
+// order under the phone's recv state with no AEAD failure — the stress
+// proof that the funnel serialises every s.send.Encrypt onto Run and the
+// nonce counter never reuses. Run under -race.
+func TestV2Session_Push_ConcurrentWithReplies_NoNonceCorruption(t *testing.T) {
+	t.Parallel()
+
+	const (
+		nPush = 8
+		mReq  = 8
+	)
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	echoPayload, err := json.Marshal(map[string]string{"text": "reply"})
+	if err != nil {
+		t.Fatalf("marshal echo payload: %v", err)
+	}
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			return c.Reply(ctx, env, protocol.TypeConversations, echoPayload)
+		},
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, mReq)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		Handlers:   handlers,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Pre-seal the M inbound requests sequentially so initSend's nonce
+	// advances on a single goroutine; they must be fed (and thus decrypted
+	// by the binary's recv) in this same order.
+	reqs := make([]protocol.RoutingEnvelope, mReq)
+	for i := range reqs {
+		reqs[i] = sealAppFrame(t, sess.initSend, protocol.Envelope{
+			ID:      uint64(1000 + i),
+			Type:    protocol.TypeListConversations,
+			TS:      time.Now().UTC(),
+			Payload: json.RawMessage(`{}`),
+		})
+	}
+	// Pre-build push envelopes on the test goroutine (avoid t.Fatalf from
+	// a child goroutine).
+	pushEnvs := make([]protocol.Envelope, nPush)
+	for i := range pushEnvs {
+		pushEnvs[i] = buildMessageEnvelope(t, uint64(2000+i), "push")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := 0; i < nPush; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := sess.mgr.Push(ctx, v2TestConnID, pushEnvs[i]); err != nil {
+				t.Errorf("Push[%d]: %v", i, err)
+			}
+		}(i)
+	}
+	// M inbound requests fed in seal order from this goroutine, interleaving
+	// with the concurrent pushes at Run's select.
+	for _, r := range reqs {
+		frames <- r
+	}
+	wg.Wait()
+
+	envs := waitForEnvelopes(t, sess.rec, 1+mReq+nPush)
+
+	var pushes, replies int
+	for _, e := range envs[1:] {
+		inner := decryptAppFrame(t, e, sess.initRecv)
+		switch inner.Type {
+		case protocol.TypeConversations:
+			replies++
+		case protocol.TypeMessage:
+			pushes++
+		default:
+			t.Errorf("unexpected outbound inner type %q", inner.Type)
+		}
+	}
+	if pushes != nPush {
+		t.Errorf("decoded %d pushes, want %d", pushes, nPush)
+	}
+	if replies != mReq {
+		t.Errorf("decoded %d replies, want %d", replies, mReq)
+	}
+}
+
+// TestV2Session_Push_UnknownConn_ErrConnNotFound_OtherSessionUnaffected
+// pins AC#3: pushing to a conn_id the manager has never seen returns
+// ErrConnNotFound (wrapping control.ErrConnNotFound for the wire-mapping
+// invariant) and does NOT mutate an unrelated open session — that
+// session's subsequent solicited round-trip still decrypts cleanly.
+func TestV2Session_Push_UnknownConn_ErrConnNotFound_OtherSessionUnaffected(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	echoPayload, err := json.Marshal(map[string]string{"text": "ok"})
+	if err != nil {
+		t.Fatalf("marshal echo payload: %v", err)
+	}
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			return c.Reply(ctx, env, protocol.TypeConversations, echoPayload)
+		},
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		Handlers:   handlers,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err = sess.mgr.Push(ctx, "no-such-conn", buildMessageEnvelope(t, 1, "x"))
+	if !errors.Is(err, ErrConnNotFound) {
+		t.Errorf("errors.Is(err, relay.ErrConnNotFound) = false; err = %v", err)
+	}
+	if !errors.Is(err, control.ErrConnNotFound) {
+		t.Errorf("errors.Is(err, control.ErrConnNotFound) = false; err = %v (wire-mapping invariant broken)", err)
+	}
+
+	// The unrelated open session is untouched: a solicited round-trip still
+	// decrypts cleanly (its send CipherState was never mutated).
+	const reqID uint64 = 7
+	frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      reqID,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+	envs := waitForEnvelopes(t, sess.rec, 2) // noise_resp + reply
+	inner := decryptAppFrame(t, envs[1], sess.initRecv)
+	if inner.Type != protocol.TypeConversations {
+		t.Errorf("reply Type = %q, want %q", inner.Type, protocol.TypeConversations)
+	}
+	if inner.InReplyTo == nil || *inner.InReplyTo != reqID {
+		t.Errorf("reply InReplyTo = %v, want pointer to %d", inner.InReplyTo, reqID)
+	}
+}
+
+// TestV2Session_Push_NotOpen_ReturnsErrSessionNotOpen pins AC#3: a session
+// that exists but has not reached V2StateOpen (still awaiting init, or
+// handshake-complete-but-token-unvalidated) refuses the push with
+// ErrSessionNotOpen — the security gate that keeps server output away from
+// an un-authenticated peer. White-box session injection mirrors the gating
+// test; the Push channel-send is the happens-before edge that makes the
+// map write visible to Run (no frames fed, no timers armed on a pre-open
+// session, so Run touches the map only when it services the push).
+func TestV2Session_Push_NotOpen_ReturnsErrSessionNotOpen(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		state V2SessionState
+	}{
+		{"awaiting_init", V2StateAwaitingInit},
+		{"handshake_complete", V2StateHandshakeComplete},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			respPriv, _ := genV2Keypair(t)
+			reg := v2PairedRegistry(t, v2TestToken)
+			frames := make(chan protocol.RoutingEnvelope)
+			rec := &v2Recorder{}
+			mgr, stop := startManager(t, V2SessionConfig{
+				Frames:     frames,
+				Outbound:   rec.outbound,
+				StaticPriv: respPriv,
+				Devices:    reg,
+				ServerID:   v2TestServerID,
+				Logger:     silentLogger(),
+			})
+			t.Cleanup(stop)
+
+			// handlePush returns at the state check before touching s.send,
+			// so nil CipherStates are safe here.
+			const connID = "c-notopen"
+			mgr.sessions[connID] = &V2Session{connID: connID, state: tc.state}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			err := mgr.Push(ctx, connID, buildMessageEnvelope(t, 1, "x"))
+			if !errors.Is(err, ErrSessionNotOpen) {
+				t.Errorf("Push to %v session: err = %v, want ErrSessionNotOpen", tc.state, err)
+			}
+			if got := rec.snapshot(); len(got) != 0 {
+				t.Errorf("rec.snapshot() len = %d, want 0 (no outbound on not-open push)", len(got))
+			}
+		})
+	}
+}
+
+// TestV2Session_Push_ClosedSession_ReturnsErrConnNotFound pins AC#3: a
+// session that was opened then torn down (an AEAD-failure 4421 close
+// deletes it from the map) collapses into the same ErrConnNotFound branch
+// as a never-seen conn. closeWith deletes the entry before emitting the
+// close envelope, so observing the close guarantees the delete has
+// happened on the Run goroutine.
+func TestV2Session_Push_ClosedSession_ReturnsErrConnNotFound(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Drive an AEAD-failure close: flip a byte in a sealed frame's
+	// ciphertext.
+	envBytes, err := json.Marshal(protocol.Envelope{
+		ID: 1, Type: protocol.TypeListConversations, TS: time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	ciphertext, err := sess.initSend.Encrypt(envBytes)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	ciphertext[0] ^= 0xff
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseMsg, ciphertext)
+
+	closeEnvs := waitForEnvelopes(t, sess.rec, 2) // noise_resp + 4421 close
+	if closeEnvs[1].CloseCode != uint16(StatusProtocolMismatch) {
+		t.Fatalf("close_code = %d, want %d", closeEnvs[1].CloseCode, StatusProtocolMismatch)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err = sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "x"))
+	if !errors.Is(err, ErrConnNotFound) {
+		t.Errorf("Push to closed session: err = %v, want ErrConnNotFound", err)
+	}
+}
+
+// TestV2Session_Push_CtxCancelled_ReturnsCtxErr pins the ctx-cancellation
+// arm: a Push whose ctx is already cancelled returns ctx.Err() without
+// blocking. With no Run goroutine draining m.push, the send case can never
+// proceed, so the ctx.Done arm is the only ready case — deterministic, no
+// flakiness from select picking the send.
+func TestV2Session_Push_CtxCancelled_ReturnsCtxErr(t *testing.T) {
+	t.Parallel()
+
+	respPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	mgr, err := NewV2SessionManager(V2SessionConfig{
+		Frames:     make(chan protocol.RoutingEnvelope),
+		Outbound:   (&v2Recorder{}).outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewV2SessionManager: %v", err)
+	}
+	// Intentionally do NOT start Run: m.push has no receiver.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "x")); !errors.Is(err, context.Canceled) {
+		t.Errorf("Push with cancelled ctx: err = %v, want context.Canceled", err)
+	}
+}

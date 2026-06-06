@@ -104,6 +104,16 @@ type manualRekeyReq struct {
 	reply  chan error
 }
 
+// pushReq is enqueued by (*V2SessionManager).Push and dequeued by Run on
+// the push channel arm. reply is per-request (cap=1) so Run's reply send
+// is non-blocking even if the caller's ctx fires between enqueue and
+// reply. Mirrors manualRekeyReq.
+type pushReq struct {
+	connID string
+	env    protocol.Envelope
+	reply  chan error
+}
+
 // wakeBufferSize sizes the manager's wake channel. The 1-hour rekey
 // cadence makes concurrent fires across sessions vanishingly rare; 16
 // is a generous safety margin that absorbs the realistic worst case
@@ -337,6 +347,14 @@ type V2SessionManager struct {
 	// Not closed by the manager on Run exit; in-flight callers unblock
 	// via ctx.Done.
 	manualRekey chan manualRekeyReq
+
+	// push funnels (*V2SessionManager).Push calls onto Run's dispatch
+	// goroutine so the lookup + seal-under-s.send + forward sequence runs
+	// under the single-owner-goroutine invariant. Unbuffered: backpressure
+	// is correct — if Run is busy, Push waits; the caller's ctx is the
+	// escape arm. Not closed by the manager on Run exit; in-flight callers
+	// unblock via ctx.Done.
+	push chan pushReq
 }
 
 // NewV2SessionManager validates cfg and returns a ready manager. Panics
@@ -368,6 +386,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		sessions:    make(map[string]*V2Session),
 		wake:        make(chan wakeSignal, wakeBufferSize),
 		manualRekey: make(chan manualRekeyReq),
+		push:        make(chan pushReq),
 	}, nil
 }
 
@@ -396,6 +415,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleWake(runCtx, w)
 		case req := <-m.manualRekey:
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
+		case req := <-m.push:
+			req.reply <- m.handlePush(runCtx, req.connID, req.env)
 		}
 	}
 }
@@ -1284,6 +1305,89 @@ func (m *V2SessionManager) handleManualRekey(ctx context.Context, connID string)
 		s.rekeyTimer = nil
 	}
 	m.emitRekeyRequest(ctx, s, "manual")
+	return nil
+}
+
+// Push seals env under the addressed session's send CipherState, wraps it
+// as a noise_msg transport frame, and forwards it to the phone. Safe to
+// call from any goroutine other than the dispatch goroutine: the request
+// is funneled onto Run via m.push so s.send is never touched concurrently
+// with an in-flight dispatchAppFrame reply or a re-key swap. It is the
+// missing primitive behind server-initiated delivery to a phone (the
+// "broadcast layer" deferred at the V2Session / State() comments).
+//
+// connID names a specific connected phone. The caller owns env entirely
+// (Type, ID, TS, Payload); Push performs no envelope validation — it is a
+// transport primitive.
+//
+// Returns ErrConnNotFound (wraps control.ErrConnNotFound) when no session
+// with connID exists or it has been torn down; ErrSessionNotOpen when the
+// session exists but is not in V2StateOpen (still handshaking, or
+// handshake-complete-but-token-unvalidated — refusing the push keeps
+// server output away from an un-authenticated peer); ctx.Err() on caller
+// cancellation; or a wrapped marshal/seal error (realistically
+// unreachable under correct flynn/noise). Returns nil once the sealed
+// frame is forwarded to Outbound — a transport-level drop (relay
+// disconnected) is logged at debug inside m.send and NOT surfaced,
+// matching v1 reconnect semantics and the rest of the package.
+//
+// Production wire-up of *V2SessionManager into the cmd/pyry daemon for
+// server-initiated pushes lands in a separate ticket (#572); until then
+// this method is reachable only from internal/relay tests.
+func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol.Envelope) error {
+	req := pushReq{connID: connID, env: env, reply: make(chan error, 1)}
+	select {
+	case m.push <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-req.reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// handlePush runs on Run's dispatch goroutine. It looks up the session,
+// requires V2StateOpen, then seals env under s.send and forwards a
+// noise_msg — reusing emitRekeyRequest's marshal→Encrypt→wrap→send
+// sequence (minus the rekey bookkeeping).
+//
+// Reads s.send at execution time on the dispatch goroutine, so it always
+// uses the current CipherState and composes with re-key swaps: a push
+// either seals fully under the old key or fully under the new key, never
+// a torn read.
+//
+// The seal/marshal error paths return wrapped errors (the caller decides
+// log level); they MUST NOT echo env, plaintext, ciphertext, or key
+// bytes, matching the package's no-AEAD-bytes-in-logs discipline.
+func (m *V2SessionManager) handlePush(_ context.Context, connID string, env protocol.Envelope) error {
+	s, ok := m.sessions[connID]
+	if !ok {
+		// A torn-down session was already deleted from the map by
+		// closeWith, so "closed" collapses into this same branch.
+		return ErrConnNotFound
+	}
+	if s.state != V2StateOpen {
+		return ErrSessionNotOpen
+	}
+	envJSON, err := json.Marshal(env)
+	if err != nil {
+		// Defensive: a well-typed envelope (e.g. a message envelope, a
+		// closed struct of strings) does not fail to marshal in practice.
+		return fmt.Errorf("marshal push envelope: %w", err)
+	}
+	ciphertext, err := s.send.Encrypt(envJSON)
+	if err != nil {
+		// Realistically unreachable under correct flynn/noise.
+		return fmt.Errorf("seal push envelope: %w", err)
+	}
+	frame, err := marshalInnerFrameV2(protocol.TypeNoiseMsg, ciphertext)
+	if err != nil {
+		return fmt.Errorf("marshal push frame: %w", err)
+	}
+	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
 	return nil
 }
 
