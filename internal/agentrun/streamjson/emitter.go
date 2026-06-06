@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 )
 
 // ExitReason classifies how the run terminated. The internal value is
@@ -191,17 +193,15 @@ func (e *Emitter) Emit(entry tuidriver.JSONLEntry) error {
 		// logical reply as multiple consecutive assistant entries sharing a
 		// message.id (2.1.158 emits a thinking line then a text line for a
 		// single reply); a new turn begins only when the message.id changes, so
-		// the count matches claude's native num_turns. Empty id is ungroupable
-		// (synthetic/malformed entries) → counted as its own turn, preserving
-		// the pre-fix per-entry behaviour for id-less entries. Transition-
-		// counting equals distinct-id-counting because claude completes one
-		// assistant message before starting the next — no A,B,A interleaving
-		// has been observed.
+		// the count matches claude's native num_turns. The boundary predicate
+		// is shared with budget's --max-turns enforcement via
+		// agentrun.IsNewLogicalTurn so the reported and enforced counts cannot
+		// drift (#574).
 		id := ""
 		if entry.Message != nil {
 			id = entry.Message.ID
 		}
-		if id == "" || id != e.lastAssistantMsgID {
+		if agentrun.IsNewLogicalTurn(id, e.lastAssistantMsgID) {
 			e.numTurns++
 		}
 		e.lastAssistantMsgID = id

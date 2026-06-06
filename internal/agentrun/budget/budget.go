@@ -12,7 +12,6 @@
 // respectively.
 package budget
 
-
 import (
 	"errors"
 	"log/slog"
@@ -75,11 +74,12 @@ type Config struct {
 type Counter struct {
 	cfg Config
 
-	mu        sync.Mutex
-	count     int
-	reason    Reason
-	fired     bool
-	killTimer *time.Timer
+	mu                 sync.Mutex
+	count              int
+	lastAssistantMsgID string // message.id of the previous assistant entry; "" = none seen yet
+	reason             Reason
+	fired              bool
+	killTimer          *time.Timer
 }
 
 // New constructs a Counter. Validates required fields, defaults GracePeriod
@@ -116,8 +116,23 @@ func (c *Counter) OnEvent(entry tuidriver.JSONLEntry) {
 	if entry.Type != "assistant" {
 		return
 	}
+	// Count logical turns, not raw assistant entries: claude serialises one
+	// reply as multiple consecutive assistant entries sharing a message.id, so
+	// the budget must charge each logical reply once to match claude's native
+	// num_turns. Same predicate as streamjson's num_turns reporting (#573) via
+	// the shared agentrun.IsNewLogicalTurn, so the reported and enforced turn
+	// counts cannot drift. Interleaved non-assistant entries hit the early
+	// return above and never touch lastAssistantMsgID, so they cannot split a
+	// turn whose lines straddle them.
+	id := ""
+	if entry.Message != nil {
+		id = entry.Message.ID
+	}
 	c.mu.Lock()
-	c.count++
+	if agentrun.IsNewLogicalTurn(id, c.lastAssistantMsgID) {
+		c.count++
+	}
+	c.lastAssistantMsgID = id
 	if c.fired {
 		c.mu.Unlock()
 		return
