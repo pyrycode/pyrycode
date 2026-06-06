@@ -2740,7 +2740,6 @@ func TestV2Session_Push_NotOpen_ReturnsErrSessionNotOpen(t *testing.T) {
 		{"awaiting_init", V2StateAwaitingInit},
 		{"handshake_complete", V2StateHandshakeComplete},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
