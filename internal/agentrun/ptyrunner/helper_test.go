@@ -25,6 +25,12 @@ func TestMain(m *testing.M) {
 		// runHelper terminates via os.Exit.
 		return
 	}
+	// #576: drop any ambient PYRY_RECORD_DIR so tests that don't explicitly
+	// opt into recording never inherit it. The recording gate (runner.go) reads
+	// os.Getenv in THIS process; clearing it once here makes every non-opt-in
+	// TestRun_* deterministic regardless of the caller's shell. Recording tests
+	// re-set it per-test via t.Setenv (which restores to unset on cleanup).
+	_ = os.Unsetenv("PYRY_RECORD_DIR")
 	os.Exit(m.Run())
 }
 
