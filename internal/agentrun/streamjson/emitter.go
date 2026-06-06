@@ -84,16 +84,17 @@ type Emitter struct {
 	log       *slog.Logger
 	start     time.Time
 
-	mu                sync.Mutex
-	numTurns          int
-	endOfTurnSeen     bool
-	lastStopReason    string
-	lastAssistantText string
-	aggUsage          usageTotals
-	exitReason        ExitReason
-	writeErr          error
-	closed            bool
-	closeErr          error
+	mu                 sync.Mutex
+	numTurns           int
+	lastAssistantMsgID string // message.id of the previous assistant entry; "" = none seen yet
+	endOfTurnSeen      bool
+	lastStopReason     string
+	lastAssistantText  string
+	aggUsage           usageTotals
+	exitReason         ExitReason
+	writeErr           error
+	closed             bool
+	closeErr           error
 }
 
 type usageTotals struct {
@@ -160,8 +161,8 @@ func New(cfg Config) (*Emitter, error) {
 }
 
 // Emit re-emits entry.RawLine verbatim followed by '\n', aggregates the
-// per-entry usage counters, and counts assistant entries. Safe for concurrent
-// use.
+// per-entry usage counters, and counts logical assistant turns (consecutive
+// assistant entries grouped by message.id). Safe for concurrent use.
 //
 // Byte passthrough uses entry.RawLine (the verbatim source-line bytes
 // captured by the tail goroutine). Re-marshalling from entry.Raw would
@@ -186,7 +187,24 @@ func (e *Emitter) Emit(entry tuidriver.JSONLEntry) error {
 	// State updates first; even if the write fails, the totals stay
 	// consistent so Close emits a coherent trailer.
 	if entry.Type == "assistant" {
-		e.numTurns++
+		// Count logical turns, not raw assistant entries. claude serialises one
+		// logical reply as multiple consecutive assistant entries sharing a
+		// message.id (2.1.158 emits a thinking line then a text line for a
+		// single reply); a new turn begins only when the message.id changes, so
+		// the count matches claude's native num_turns. Empty id is ungroupable
+		// (synthetic/malformed entries) → counted as its own turn, preserving
+		// the pre-fix per-entry behaviour for id-less entries. Transition-
+		// counting equals distinct-id-counting because claude completes one
+		// assistant message before starting the next — no A,B,A interleaving
+		// has been observed.
+		id := ""
+		if entry.Message != nil {
+			id = entry.Message.ID
+		}
+		if id == "" || id != e.lastAssistantMsgID {
+			e.numTurns++
+		}
+		e.lastAssistantMsgID = id
 		if entry.Message != nil {
 			e.lastStopReason = entry.Message.StopReason
 		}

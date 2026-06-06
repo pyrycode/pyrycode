@@ -32,8 +32,9 @@ type Config struct {
 func New(cfg Config) (*Emitter, error)
 
 // Emit re-emits entry.RawLine + '\n', aggregating per-entry usage (private
-// readUsage walks Message.Raw["usage"]) and counting assistant entries
-// (entry.Type == "assistant"). End-of-turn is read via tuidriver.IsEndTurn.
+// readUsage walks Message.Raw["usage"]) and counting logical assistant turns
+// (consecutive assistant entries grouped by message.id — see "num_turns
+// counting" below). End-of-turn is read via tuidriver.IsEndTurn.
 // Safe for concurrent use. Sticky write error: once a write fails, subsequent
 // calls no-op (returning nil) so the watcher can drain to EOT or ctx cancel
 // without thrashing a broken pipe. Emit after Close is a no-op.
@@ -83,7 +84,7 @@ The trailer is the second line `streamjson` composes itself. Between init and tr
 | `subtype` | string | per termination table below |
 | `is_error` | bool | per termination table below |
 | `duration_ms` | int64 | `time.Since(start).Milliseconds()` |
-| `num_turns` | int | count of `Kind == "assistant"` events seen by `Emit` |
+| `num_turns` | int | claude's logical-turn count — distinct assistant `message.id`s seen by `Emit`, not raw assistant entries (see "num_turns counting" below) |
 | `result` | string | always `""` — pyry does not synthesise final assistant text; dispatcher logs assistant events independently |
 | `stop_reason` | string | `StopReason` of the last assistant event (`""` if none) |
 | `session_id` | string | the UUIDv4 minted by the caller and passed to claude via `--session-id` |
@@ -112,6 +113,14 @@ For every `JSONLEntry` whose `Message.Raw["usage"]` is a `map[string]any` (i.e. 
 `readUsage` returns `(usageBlock, false)` (and the aggregator skips the entry) when the entry has no `Message`, no `Message.Raw`, no `"usage"` key, or a non-map value at `"usage"` — same observable behaviour as the pre-#511 `ev.Usage == nil` gate. `encoding/json` decodes JSON numbers into `map[string]any` as `float64`, not `int` — the helper type-asserts to `float64` then truncates; asserting straight to `int` would silently zero every entry (the pyrycode-side bug class #511's "Patterns established" calls out explicitly).
 
 Extra usage fields claude carries (`server_tool_use`, `service_tier`, `cache_creation`, `iterations`, `speed`, `inference_geo`) are NOT emitted. A future `tuidriver.Usage(entry)` upstream helper would let consumers share one implementation; for now `readUsage` lives in `streamjson`.
+
+### num_turns counting
+
+`num_turns` reports claude's **logical-turn count** — one per distinct assistant `message.id` — matching the native count streamrunner forwards from claude's own `type:"result"` envelope (#573). It is **not** the raw assistant-entry count: claude 2.1.158 serialises one logical reply as multiple consecutive assistant JSONL entries sharing a `message.id` (a `thinking` line, a `tool_use` line, a `text` line), and counting each over-counts (~doubles `num_turns` for a trivial reply). The dispatcher logs and acts on `num_turns`, so the two runners must agree.
+
+`Emit` counts by **transition**: it tracks the previous assistant entry's id in `e.lastAssistantMsgID` and increments `numTurns` only when the current entry's `message.id` differs. Intervening non-assistant entries (`user`/`tool_result`) fall outside the `entry.Type == "assistant"` block, so they never touch `lastAssistantMsgID` and never split a turn whose lines straddle them. Transition-counting equals distinct-id counting because claude completes one assistant message before starting the next — no `A,B,A` interleaving has been observed, so no seen-set is kept (a one-line code comment documents the assumption).
+
+**empty-id floor:** an entry with no `message.id` (`Message == nil` or `ID == ""`) is ungroupable and counted as its own turn, preserving the pre-#573 per-entry behaviour for id-less entries. Real claude always emits a non-empty id; empty ids appear only in synthetic/malformed entries — this is why `TestReadUsage_*` (single id-less entry → `num_turns == 1`) stays green. The fix is the consumer-side `msg_id` grouping tuidriver deliberately leaves to consumers (`IsEndTurn`/`AssistantText` are per-entry). See [`codebase/573.md`](../codebase/573.md). The budget Counter (`internal/agentrun/budget`) double-counts identically on the enforcement path and is aligned to the same rule in a sibling ticket.
 
 ## Raw passthrough
 
@@ -165,7 +174,7 @@ The `runAgentRun` flow after #354:
 
 - Raw-byte passthrough (assistant w/ usage, tool_use w/o usage, unrecognised `Kind == ""`, non-canonical whitespace).
 - Token aggregation (sums across multiple assistants; nil-Usage on an assistant is permitted by #353 and must not crash).
-- `num_turns` counts only assistant events; `stop_reason` reflects the last assistant; `""` when no assistant was seen.
+- `num_turns` counts logical turns (`TestEmit_NumTurnsCountsLogicalTurns`, #573): distinct assistant `message.id`s — a split `thinking`+`text` reply is one turn, a multi-turn tool loop is one per distinct id, id-less entries each count (the empty-id floor). `stop_reason` reflects the last assistant; `""` when no assistant was seen.
 - All three trailer compositions (completion / max_turns / error) + the no-EOT-no-override default-error fallback.
 - `SetExitReason` and `Close` idempotence; `Emit` after `Close` no-ops; sticky write error.
 - `cfg.Now` seam for `duration_ms`; `SessionID` round-trip; `total_cost_usd` and `result` constants.
@@ -198,3 +207,4 @@ The `runAgentRun` flow after #354:
 - [budget-package.md](budget-package.md) — `internal/agentrun/budget` (#334). Future caller of `SetExitReason(ExitReasonMaxTurns)`. Still on `jsonl.Event` through #511; #512 migrates it.
 - [#511](../codebase/511.md) — `streamjson.Emitter` migration from `jsonl.Event` to `tuidriver.JSONLEntry` and the throwaway `eventToEntry` adapter in `ptyrunner/runner.go`.
 - [#512](../codebase/512.md) — `ptyrunner.Run` inline drain of `tuidriver.TailJSONL`; deletion of `internal/agentrun/jsonl/tail/` and the `eventToEntry` adapter; `Emit` now consumes the tuidriver channel directly without an adapter layer.
+- [#573](../codebase/573.md) — `num_turns` switched from raw assistant-entry counting to logical-turn (`message.id`) counting so ptyrunner matches streamrunner's native count; the `lastAssistantMsgID` field and the empty-id floor.
