@@ -12,7 +12,10 @@ ships the sibling fake-phone client. #301 extends the harness with
 binary-direct `hello`/`hello_ack` dispatch and a WS-4409 close mode so
 the real `pyry` daemon can complete its binary↔relay handshake against
 the harness; the e2e test in `internal/e2e/relay_test.go` is the first
-production consumer.
+production consumer. #581 migrates the suite's *readiness gates* off
+`LastBinaryHello`-polling onto `WaitBinary` — the consumer-migration slice
+of #569's Strangler Fig (#581 migrates readers → #582 retires the handshake
+→ #583 removes the `LastBinaryHello` accessor).
 
 ## Surface
 
@@ -37,10 +40,14 @@ bookkeeping immediately after a raw dial (`ForceCloseBinary`,
 `LastBinaryHello`, future probes) must synchronize on a positive signal
 or race the handler under `-race`. Polls every 2 ms on a `time.Ticker`
 under the caller's ctx; returns `true` on registration, `false` on ctx
-expiry. `LastBinaryHello`-polling remains the right pattern for e2e
-tests that already send a hello (the daemon does that on dial-out);
-`WaitBinary` is the equivalent for unit tests that raw-dial without a
-hello. See [`codebase/371.md`](../codebase/371.md).
+expiry. `WaitBinary` first served raw-dial unit tests (#371) while e2e
+tests polled `LastBinaryHello`; **as of #581 every e2e readiness gate uses
+`WaitBinary` too** — the suite no longer polls `LastBinaryHello` to detect
+that the binary is up, decoupling readiness from the relay-leg hello ahead
+of #582 retiring that handshake. `LastBinaryHello` is now read only as a
+payload-assertion accessor (`TestRelay_Hello`) and is removed in #583 once
+nothing reads it. See [`codebase/371.md`](../codebase/371.md) and
+[`codebase/581.md`](../codebase/581.md).
 
 Callers append `/v1/server` (binary upgrade) or `/v1/client` (phone
 upgrade) to `URL()`. No `Config` struct yet — every test wants "boot it,

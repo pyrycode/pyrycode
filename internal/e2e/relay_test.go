@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -142,15 +143,10 @@ func TestRelay_1011(t *testing.T) {
 
 	serverID := readPersistedServerID(t, home)
 
-	deadline := time.Now().Add(4 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := fr.LastBinaryHello(serverID); ok {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, ok := fr.LastBinaryHello(serverID); !ok {
-		t.Fatalf("first hello not observed within 4s")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if !fr.WaitBinary(ctx, serverID) {
+		t.Fatal("binary connection not registered within 4s")
 	}
 
 	if !fr.ForceCloseBinary(serverID) {

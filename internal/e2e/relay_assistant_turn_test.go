@@ -74,15 +74,10 @@ func TestRelay_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
 
 	serverID := readPersistedServerID(t, home)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := fr.LastBinaryHello(serverID); ok {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, ok := fr.LastBinaryHello(serverID); !ok {
-		t.Fatal("binary hello not observed within 5s")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !fr.WaitBinary(ctx, serverID) {
+		t.Fatal("binary connection not registered within 5s")
 	}
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -158,7 +153,7 @@ func TestRelay_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
 	//    number, but require one whose Text contains the marker.
 	var matched protocol.Envelope
 	var matchedPayload protocol.MessagePayload
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
