@@ -79,18 +79,13 @@ func startV2Harness(t *testing.T, reg *devices.Registry, handlers map[string]dis
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	// Block until the binary↔relay handshake has landed before any phone
-	// dials — otherwise phone→binary routing would race against
+	// Block until the binary's relay connection has registered before any
+	// phone dials — otherwise phone→binary routing would race against
 	// binary-side WS upgrade completion.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := fr.LastBinaryHello(string(serverID)); ok {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, ok := fr.LastBinaryHello(string(serverID)); !ok {
-		t.Fatal("binary↔relay hello not observed within 5s")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !fr.WaitBinary(ctx, string(serverID)) {
+		t.Fatal("binary connection not registered within 5s")
 	}
 
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())

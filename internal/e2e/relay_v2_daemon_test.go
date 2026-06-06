@@ -72,18 +72,15 @@ func driveHandshakeToOpenDaemon(t *testing.T, phone *fakephone.Client, pubKey []
 	return initSend, initRecv
 }
 
-// waitBinaryHello polls fakerelay until the binary↔relay hello for serverID
-// lands (5s deadline) so phone→binary routing doesn't race the WS upgrade.
+// waitBinaryHello blocks until the binary's relay connection registers for
+// serverID (5s deadline) so phone→binary routing doesn't race the WS upgrade.
 func waitBinaryHello(t *testing.T, fr *fakerelay.Server, serverID string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := fr.LastBinaryHello(serverID); ok {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !fr.WaitBinary(ctx, serverID) {
+		t.Fatal("binary connection not registered within 5s")
 	}
-	t.Fatal("binary↔relay hello not observed within 5s")
 }
 
 // testV2DaemonListConversationsRoundTrip drives a spawned daemon with the v2
