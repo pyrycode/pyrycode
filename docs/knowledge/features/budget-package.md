@@ -1,6 +1,6 @@
 # `internal/agentrun/budget` — pyry-side `--max-turns` enforcement
 
-`Counter` enforces the per-agent turn budget for `pyry agent-run` by counting assistant JSONL entries and signalling claude when the cap is hit. The leaf unit; [`internal/agentrun/ptyrunner`](ptyrunner-package.md) wires `OnEvent` into the loop that drains `tuidriver.TailJSONL`, calls `OnEndOfTurn` when `tuidriver.IsEndTurn(entry)` fires for that entry, and routes `Terminate` / `Kill` to `cmd.Process.Signal(SIGTERM)` / `SIGKILL` (#479 / #512).
+`Counter` enforces the per-agent turn budget for `pyry agent-run` by counting claude's **logical turns** (one per distinct consecutive assistant `message.id`, not per raw assistant JSONL entry) and signalling claude when the cap is hit. The leaf unit; [`internal/agentrun/ptyrunner`](ptyrunner-package.md) wires `OnEvent` into the loop that drains `tuidriver.TailJSONL`, calls `OnEndOfTurn` when `tuidriver.IsEndTurn(entry)` fires for that entry, and routes `Terminate` / `Kill` to `cmd.Process.Signal(SIGTERM)` / `SIGKILL` (#479 / #512).
 
 ## Why it exists
 
@@ -35,9 +35,13 @@ func (c *Counter) Stop()                   // cancel pending SIGKILL timer
 
 ## Counting rule
 
-`OnEvent` filters on `entry.Type == "assistant"` — non-assistant kinds (`user`, `tool_use`, `tool_result`, `system`, `attachment`, `""`) return immediately without incrementing. The whitelist matches the same shape `tuidriver.TailJSONL` surfaces (every well-formed line, classified by `entry.Type`). Each assistant entry counts as one turn, **including** empty-content transitional `end_turn` blocks (validated by parent #329's "Unknown 3 PASS" spike across 1151 real session JSONLs). This filter is defensive — the caller cannot be trusted to pre-filter.
+`OnEvent` filters on `entry.Type == "assistant"` — non-assistant kinds (`user`, `tool_use`, `tool_result`, `system`, `attachment`, `""`) return immediately without incrementing. The whitelist matches the same shape `tuidriver.TailJSONL` surfaces (every well-formed line, classified by `entry.Type`). This filter is defensive — the caller cannot be trusted to pre-filter.
 
-`OnEvent` increments the count first, then branches:
+**Logical-turn counting (#574).** The Counter charges **one turn per distinct consecutive assistant `message.id`**, not one per assistant entry. claude 2.1.158 serialises one logical reply as multiple consecutive assistant entries sharing a `message.id` (a `thinking` line, a `tool_use` line, a `text` line); counting each over-counts, so a `--max-turns=N` cap was reached ~twice as fast on ptyrunner as on the **streamrunner** baseline. The Counter holds the previous assistant entry's id in `lastAssistantMsgID` (alongside `count`, under `mu`) and increments only when `agentrun.IsNewLogicalTurn(id, lastAssistantMsgID)` is true — the **same shared predicate** `streamjson.Emitter` uses for `num_turns`, so the reported and enforced turn counts cannot drift on what a turn is (see [streamjson-package.md](streamjson-package.md) § num_turns counting and [codebase/574.md](../codebase/574.md)). Interleaved non-assistant entries hit the `entry.Type != "assistant"` early-return, so they never touch `lastAssistantMsgID` and cannot split a turn whose lines straddle them.
+
+**empty-id floor.** An entry with no `message.id` (`Message == nil` or `ID == ""`) is ungroupable and counts as its own turn — `IsNewLogicalTurn` returns true for an empty `currentID`. Real claude always emits a non-empty id; empty ids appear only in synthetic/malformed entries, so this preserves the pre-#574 per-entry behaviour for id-less entries (including empty-content transitional `end_turn` blocks, validated by parent #329's "Unknown 3 PASS" spike across 1151 real session JSONLs).
+
+`OnEvent` extracts `id` from `entry.Message` (nil-guarded) before the lock, then under `mu` increments the count only when the entry begins a new logical turn, stores `lastAssistantMsgID = id`, and branches:
 
 - Already fired — return (idempotent).
 - `count < MaxTurns` — return.
@@ -61,7 +65,7 @@ Default `GracePeriod` is 5s, copied from `supervisor.spawnWaitDelay` (not import
 
 ## Concurrency model
 
-A single `sync.Mutex` guards `count`, `reason`, `fired`, and `killTimer`. All public methods acquire the lock at entry. The only goroutine the Counter spawns is the implicit one inside `time.AfterFunc`; its callback (`killAfterGrace`) acquires the same mutex but releases it before calling `cfg.Kill()` — external callbacks run unlocked to avoid deadlocking a caller that holds the lock indirectly.
+A single `sync.Mutex` guards `count`, `lastAssistantMsgID`, `reason`, `fired`, and `killTimer`. All public methods acquire the lock at entry. The only goroutine the Counter spawns is the implicit one inside `time.AfterFunc`; its callback (`killAfterGrace`) acquires the same mutex but releases it before calling `cfg.Kill()` — external callbacks run unlocked to avoid deadlocking a caller that holds the lock indirectly.
 
 In production:
 
@@ -96,7 +100,8 @@ The Counter does not import `os/exec`.
 
 - `TestNew_Validation` — zero / negative `MaxTurns`, nil `Terminate`, nil `Kill` each return an error.
 - `TestOnEvent_NonAssistantKindsDoNotCount` — feeds every non-assistant kind; asserts Terminate fires only after `MaxTurns` assistant events arrive, regardless of interleaved non-assistant events.
-- `TestOnEvent_SIGTERMFiresExactlyAtBudget` — Terminate not called at budget-1, called exactly once at budget, not called again at budget+1 / budget+2; `Reason()` is `ReasonMaxTurns`.
+- `TestOnEvent_SIGTERMFiresExactlyAtBudget` — Terminate not called at budget-1, called exactly once at budget, not called again at budget+1 / budget+2; `Reason()` is `ReasonMaxTurns`. (Uses `assistantEntry()` — empty id — so each entry is its own turn under the empty-id floor, leaving this test green unchanged by #574.)
+- `TestOnEvent_CountsLogicalTurns` (#574) — table-driven; the new `assistantEntryID(id)` helper builds an assistant entry carrying `message.id == id`. Cases: a split reply (same id across entries, with an interleaved `user` entry) counts as **one** turn (AC#1); K logical turns spanning >K entries fire only at the K-th distinct id, not at `MaxTurns` raw entries (AC#2); one distinct id per entry counts one each; empty-id entries are each their own turn (the floor). Asserts `Terminate` stays at 0 for every prefix before the fire index and `Reason() == ReasonMaxTurns`.
 - `TestOnEvent_SIGKILLFiresAfterGrace` — `GracePeriod=80ms`; Kill not called at grace/2, called exactly once after grace, and the elapsed time between Terminate and Kill is `>= grace`.
 - `TestStop_CancelsPendingSIGKILL` — hit budget, call `Stop`, sleep 3×grace; Kill not called. Second `Stop` is a no-op.
 - `TestStop_WithoutBudgetHit` — Stop with no pending timer; no signals fire.
@@ -116,7 +121,9 @@ Grace-timer tests use `time.Sleep` with millisecond-scale `GracePeriod` values; 
 ## Related
 
 - Sibling [ptyrunner-package.md](ptyrunner-package.md) — the consumer that drains `tuidriver.TailJSONL` and calls `OnEvent` / `OnEndOfTurn` per entry; routes `Terminate` / `Kill` to `cmd.Process.Signal`. Post-#512 the Counter has a single in-tree caller.
-- Sibling [streamjson-package.md](streamjson-package.md) — `SetExitReason(ExitReasonMaxTurns)` carries the budget classification into the `result` trailer.
+- Sibling [streamjson-package.md](streamjson-package.md) — `SetExitReason(ExitReasonMaxTurns)` carries the budget classification into the `result` trailer; its `num_turns` counting shares the `agentrun.IsNewLogicalTurn` predicate with this Counter (#574).
+- Parent [agentrun-package.md](agentrun-package.md) — home of the shared `IsNewLogicalTurn` turn-boundary predicate this Counter calls.
+- [codebase/574.md](../codebase/574.md) — switched the Counter from per-entry to logical-turn (`message.id`) counting and extracted the shared predicate; the enforcement sibling of [codebase/573.md](../codebase/573.md) (the reporting-path fix).
 - [tui-driver `pkg/tuidriver/jsonl.go`](https://github.com/pyrycode/tui-driver/blob/main/pkg/tuidriver/jsonl.go) — `JSONLEntry` (post-#512 the `OnEvent` parameter shape) and `IsEndTurn(entry)` (the caller's discriminator for invoking `OnEndOfTurn`).
 - [codebase/512.md](../codebase/512.md) — migration ticket: signature flip, deleted EOT branch, deleted boundary-completion test, boundary semantic shift to `max_turns`.
 - Sibling [pyry-agent-run-command.md](pyry-agent-run-command.md) / [agentrun-package.md](agentrun-package.md) — `--max-turns` flag is parsed and propagated into the ptyrunner Config which constructs the Counter.
