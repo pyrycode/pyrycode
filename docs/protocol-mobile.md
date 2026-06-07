@@ -421,6 +421,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`tool_use`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
+| **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -510,6 +512,28 @@ These five envelope types form the structured live-session stream. They are sent
 | `stop_reason` | string | Why the turn ended; one of `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`. These mirror the ACP turn-end reasons. |
 
 ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` is added here per the implementing ticket (#607), following the "spec follows the code" convention (ADR 025 § Consequences).
+
+### Screen snapshot (v2)
+
+The screen snapshot is the always-available, parser-independent **floor** of ADR 025's safe-degradation strategy (ADR 025 § Safe degradation). At any time the phone may ask for a one-shot text picture of the current claude screen; because the snapshot depends on no screen parser it survives any parser break and backs the stall fallback. The request/response pair is `request_snapshot` → `screen_snapshot`. All fields are always present (no omitempty).
+
+#### `request_snapshot`
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler; the interception, render, and push live in the consumer ticket.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose current screen to snapshot. |
+
+#### `screen_snapshot`
+
+Direction **binary → phone**. The one-shot text picture answering a `request_snapshot`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation this snapshot belongs to. |
+| `text` | string | The current screen rendered to **plain text only — never raw terminal control codes** (preserves ADR 025's no-raw-bytes invariant). Multi-line. |
+| `ts` | RFC3339 | When the snapshot was rendered. |
 
 ## Backfill semantics
 
