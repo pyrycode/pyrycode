@@ -61,11 +61,18 @@ type Bridge struct {
 	cancelMu   sync.Mutex
 	iterCancel chan struct{} // closed by EndIteration to make Read return EOF
 
-	// Output path (PTY → bridge → attach client).
+	// Output path (PTY → bridge → both heads). This is the Phase-1 two-heads
+	// model (ADR 025, #595): `output` is the local attach head — at-most-one,
+	// guarded by `attached` (ErrBridgeBusy on a second Attach); `outputObserver`
+	// is the phone observer head — a non-owning tap set by assistant_turn_v2.go.
+	// Write fans the same bytes to both. The two seams are independent: neither
+	// reads nor mutates the other's field, so neither head can corrupt the
+	// other. Attach is NOT re-seated onto a separate mirror seam — this shape IS
+	// the intended two-heads surface.
 	mu             sync.Mutex
-	output         io.Writer    // attached client output, or nil = discard
+	output         io.Writer // local attach head, or nil = discard
 	attached       bool
-	outputObserver func([]byte) // optional tap; see SetOutputObserver
+	outputObserver func([]byte) // phone observer head; see SetOutputObserver
 
 	// ptyMu guards rs. Held briefly across the Resize delegate call so a
 	// concurrent SetResizer can't swap the delegate mid-call. Leaf-only —

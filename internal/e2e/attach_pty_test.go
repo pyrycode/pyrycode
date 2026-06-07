@@ -137,6 +137,14 @@ func TestHelperProcess(t *testing.T) {
 // → supervisor PTY → claude → and back, by writing a known payload into
 // the attach PTY's master and asserting the same bytes are observed
 // coming back through the master side within a generous deadline.
+//
+// This is the AC1 regression lock for #595: it runs against the
+// tui-driver-hosted supervisor (#593) and pins the local two-direction
+// mirror round-trip — local keystrokes reach claude as raw input AND
+// claude's mirror output (Session.MirrorOutput → Bridge.Write) renders
+// back to the same master. With the echo helper the two directions are
+// one observable event, so a single round-trip proves both. The
+// across-restart variant is TestE2E_Attach_SurvivesClaudeRestart.
 func TestE2E_Attach_RoundTripsBytes(t *testing.T) {
 	a := StartAttach(t, "")
 

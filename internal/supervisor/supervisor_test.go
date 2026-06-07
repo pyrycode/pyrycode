@@ -600,6 +600,126 @@ func TestSupervisor_WriteUserTurn_RealDeliverNotReadyFailsLoud(t *testing.T) {
 	}
 }
 
+// TestSupervisor_InputCoexistence_BothHeadsReachChildContiguously pins the
+// Phase-1 input-coexistence contract (#595): the local attach head (keystrokes
+// via Bridge.Read → sessionWriter → Session.AttachInput) and the phone head
+// (WriteUserTurn → injected deliverFn → Session.AttachInput) both drive the one
+// session's input, and each single PTY write lands contiguously — neither head's
+// turn is split by the other's.
+//
+// Phase-1 expectation, made explicit (the "made explicit" half of AC3): the two
+// heads share one input stream with NO arbitration and NO echo ownership. This
+// test deliberately asserts neither an ordering between the two markers nor any
+// echo ownership — only that each marker arrives intact. Multi-write delivery
+// sequences may interleave at sub-turn granularity in Phase 1; two-heads
+// arbitration (first-answer-wins / modal ownership) is Phase 3 (#597), out of
+// scope here.
+//
+// The injected deliverFn writes straight to Session.AttachInput, bypassing the
+// live-claude WaitReady idle-gate (#594's contract, tested separately) so the
+// test exercises coexistence, not delivery semantics. Runs under -race: the race
+// detector is the evidence that the two input paths' supervisor-level
+// bookkeeping (convMu, sessMu, the Bridge channel) has no data race.
+func TestSupervisor_InputCoexistence_BothHeadsReachChildContiguously(t *testing.T) {
+	t.Parallel()
+
+	const (
+		localMarker = "LOCAL-KEYSTROKE-595\n"
+		phoneMarker = "PHONE-TURN-595\n"
+		convID      = "c-595"
+	)
+
+	stdinFile := t.TempDir() + "/stdin.bin"
+	cfg := helperConfig("stdin_to_file", "GO_TEST_HELPER_STDIN_FILE="+stdinFile)
+	cfg.Bridge = NewBridge(cfg.Logger)
+
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Injected phone-delivery seam: deliver straight to the captured session's
+	// raw input — the one shared PTY-write terminus — without WaitReady.
+	sup.deliverFn = func(_ context.Context, sess *tuidriver.Session, payload []byte) error {
+		return sess.AttachInput(payload)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(runCtx) }()
+
+	// PhaseRunning is set (in onSpawn) before setSession registers the session,
+	// so wait for the session itself (WaitForPTY) before driving either head.
+	waitForPhase(t, sup, PhaseRunning, 5*time.Second)
+	if err := sup.WaitForPTY(runCtx); err != nil {
+		t.Fatalf("WaitForPTY: %v", err)
+	}
+
+	// Local head: park the attach input on a pipe; writing the marker pushes it
+	// through Bridge.Read → sessionWriter → AttachInput. localOut drains the
+	// kernel-echoed output so the PTY master never backpressures; it is never
+	// asserted (echo ownership is Phase 3).
+	localPR, localPW := io.Pipe()
+	var localOut syncBuffer
+	attachDone, err := cfg.Bridge.Attach(localPR, &localOut)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// Drive both heads concurrently — coexistence under -race.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, werr := localPW.Write([]byte(localMarker)); werr != nil {
+			t.Errorf("local write: %v", werr)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if werr := sup.WriteUserTurn(runCtx, convID, []byte(phoneMarker)); werr != nil {
+			t.Errorf("WriteUserTurn: %v", werr)
+		}
+	}()
+	wg.Wait()
+
+	// Poll the child's stdin log until BOTH markers are present, each as a
+	// contiguous substring (interleaving at sub-marker granularity would break
+	// the exact match — that is the turn-integrity assertion).
+	deadline := time.Now().Add(5 * time.Second)
+	var content string
+	for time.Now().Before(deadline) {
+		raw, _ := os.ReadFile(stdinFile)
+		content = string(raw)
+		if strings.Contains(content, localMarker) && strings.Contains(content, phoneMarker) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(content, localMarker) {
+		t.Errorf("child stdin missing intact local marker; got %q", content)
+	}
+	if !strings.Contains(content, phoneMarker) {
+		t.Errorf("child stdin missing intact phone marker; got %q", content)
+	}
+
+	// Bookkeeping: the phone turn stamped the cursor; the local path never
+	// touches convMu, so the cursor reflects the phone turn alone.
+	if got := sup.CurrentConversation(); got != convID {
+		t.Errorf("CurrentConversation = %q, want %q", got, convID)
+	}
+
+	// Teardown: drain the attach pump, then stop the supervisor.
+	cancel()
+	_ = localPW.Close()
+	<-attachDone
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
+
 // TestSupervisor_WriteUserTurn_CommittedReturnsNil covers the happy path
 // through the deliverFn seam: a confirmed commit returns nil. The seam returns
 // the already-classified outcome, so no claude-screen literal is needed in this
