@@ -77,8 +77,8 @@ func TestBridge_OutputObserver_InvokedOnWrite(t *testing.T) {
 	b := NewBridge(nil)
 
 	var (
-		mu      sync.Mutex
-		seen    [][]byte
+		mu   sync.Mutex
+		seen [][]byte
 	)
 	b.SetOutputObserver(func(p []byte) {
 		mu.Lock()
@@ -311,6 +311,150 @@ func TestBridge_ResizeAfterClearResizer(t *testing.T) {
 	if err := b.Resize(40, 100); err != nil {
 		t.Errorf("Resize after SetResizer(nil): %v, want nil", err)
 	}
+}
+
+// TestBridge_OutputCoexistence_BothHeadsReceiveSameBytes pins the Phase-1
+// two-heads invariant (#595): with BOTH the local attach head (b.output, via
+// Attach) and the phone observer head (b.outputObserver, via SetOutputObserver)
+// bound at once, Bridge.Write delivers the same bytes to both, in order. The
+// existing OutputObserver_InvokedOnWrite / OutputForwardsWhenAttached tests each
+// drive only one seam; none sets both — that is the gap #595 closes. Local
+// attach is unaffected by an active phone observer, and the phone observer keeps
+// receiving while a local attach is bound (both directions of AC2).
+func TestBridge_OutputCoexistence_BothHeadsReceiveSameBytes(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+
+	// Phone head: the observer copies p (the production contract) into a local
+	// recording. Writes below run on this goroutine, so the recording and the
+	// attached buffer need no extra synchronisation.
+	var obs [][]byte
+	b.SetOutputObserver(func(p []byte) {
+		c := make([]byte, len(p))
+		copy(c, p)
+		obs = append(obs, c)
+	})
+
+	// Local head: park the input pump on a pipe so b.output stays bound across
+	// the Writes (an immediate-EOF reader would race the Attach cleanup that
+	// clears b.output).
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	var attached bytes.Buffer
+	done, err := b.Attach(pr, &attached)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if _, err := b.Write([]byte("alpha")); err != nil {
+		t.Fatalf("Write alpha: %v", err)
+	}
+	if _, err := b.Write([]byte("beta")); err != nil {
+		t.Fatalf("Write beta: %v", err)
+	}
+
+	if got := attached.String(); got != "alphabeta" {
+		t.Errorf("attached head = %q, want %q", got, "alphabeta")
+	}
+	if len(obs) != 2 || string(obs[0]) != "alpha" || string(obs[1]) != "beta" {
+		t.Errorf("observer head = %q, want [alpha beta]", obs)
+	}
+
+	pw.Close()
+	<-done
+}
+
+// TestBridge_OutputCoexistence_FaultingLocalSinkDoesNotStarveObserver pins the
+// fault-isolation half of the #595 invariant: a mid-detach local writer that
+// errors on every Write must not starve the phone observer. Write swallows the
+// local error (returns n == len(p)) and the observer still receives the chunk
+// intact. Complements TestBridge_WriteSwallowsAttachedWriteErrors, which has no
+// observer — here the observer is the surface that must survive.
+func TestBridge_OutputCoexistence_FaultingLocalSinkDoesNotStarveObserver(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+
+	var obs [][]byte
+	b.SetOutputObserver(func(p []byte) {
+		c := make([]byte, len(p))
+		copy(c, p)
+		obs = append(obs, c)
+	})
+
+	// Park the input pump so b.output stays bound to the erroring writer.
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	if _, err := b.Attach(pr, &errWriter{err: errors.New("conn closed")}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	n, err := b.Write([]byte("payload"))
+	if err != nil {
+		t.Fatalf("Write must not surface the local sink error: %v", err)
+	}
+	if n != len("payload") {
+		t.Errorf("n = %d, want %d", n, len("payload"))
+	}
+	if len(obs) != 1 || string(obs[0]) != "payload" {
+		t.Errorf("observer head = %q, want [payload] despite a faulting local sink", obs)
+	}
+}
+
+// TestBridge_OutputCoexistence_ObserverCopyContract demonstrates the copy
+// contract the two-heads fan-out relies on: the supervisor reuses one io.Copy
+// buffer across reads, so a chunk passed to Write is overwritten before the next
+// Write. A correctly-copying observer's recording is therefore stable across the
+// reuse, and the attached writer receives each chunk's bytes as they stood at
+// its own Write.
+func TestBridge_OutputCoexistence_ObserverCopyContract(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+
+	var obs [][]byte
+	b.SetOutputObserver(func(p []byte) {
+		c := make([]byte, len(p))
+		copy(c, p)
+		obs = append(obs, c)
+	})
+
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	var attached bytes.Buffer
+	done, err := b.Attach(pr, &attached)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// One caller buffer, reused across Writes — exactly the supervisor's
+	// MirrorOutput → Bridge.Write shape, where the buffer is overwritten by the
+	// next read.
+	buf := []byte("AAAAA")
+	if _, err := b.Write(buf); err != nil {
+		t.Fatalf("Write 1: %v", err)
+	}
+	copy(buf, []byte("BBBBB")) // overwrite in place, as the next Read would
+	if _, err := b.Write(buf); err != nil {
+		t.Fatalf("Write 2: %v", err)
+	}
+
+	if len(obs) != 2 {
+		t.Fatalf("observer invocations = %d, want 2", len(obs))
+	}
+	if string(obs[0]) != "AAAAA" {
+		t.Errorf("first observed chunk = %q, want %q (stable across buffer reuse)", obs[0], "AAAAA")
+	}
+	if string(obs[1]) != "BBBBB" {
+		t.Errorf("second observed chunk = %q, want %q", obs[1], "BBBBB")
+	}
+	if got := attached.String(); got != "AAAAABBBBB" {
+		t.Errorf("attached head = %q, want %q", got, "AAAAABBBBB")
+	}
+
+	pw.Close()
+	<-done
 }
 
 func TestBridge_BlocksReadUntilAttached(t *testing.T) {
