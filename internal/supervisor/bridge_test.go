@@ -8,9 +8,24 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/creack/pty"
 )
+
+// fakeResizer is a test double for the resizer delegate (*tuidriver.Session
+// in production). It records the most recent Resize call and returns a
+// settable error, letting the Bridge resize tests assert the delegation
+// contract without opening a real PTY — the "geometry reaches the kernel"
+// path is covered by tui-driver's own Session.Resize tests.
+type fakeResizer struct {
+	rows, cols uint16
+	calls      int
+	err        error
+}
+
+func (f *fakeResizer) Resize(rows, cols uint16) error {
+	f.calls++
+	f.rows, f.cols = rows, cols
+	return f.err
+}
 
 // errWriter implements io.Writer and returns the configured error on every
 // call. Used to exercise the "attached output goes bad mid-write" path.
@@ -237,67 +252,64 @@ func TestBridge_RejectsConcurrentAttach(t *testing.T) {
 	}
 }
 
-// TestBridge_ResizeAppliesToPTY opens a real PTY pair and verifies that
-// after SetPTY + Resize, pty.Getsize reads back the dimensions we set.
-// Skipped on hosts where pty.Open is unavailable (sandboxed CI etc.) —
-// matches the e2e harness's pattern in internal/e2e/attach_pty.go.
-func TestBridge_ResizeAppliesToPTY(t *testing.T) {
+// TestBridge_ResizeForwardsToResizer asserts that after SetResizer + Resize,
+// the registered delegate receives the dimensions verbatim (rows-then-cols).
+func TestBridge_ResizeForwardsToResizer(t *testing.T) {
 	t.Parallel()
 
-	master, slave, err := pty.Open()
-	if err != nil {
-		t.Skipf("pty.Open unavailable: %v", err)
-	}
-	defer master.Close()
-	defer slave.Close()
-
 	b := NewBridge(nil)
-	b.SetPTY(master)
+	fr := &fakeResizer{}
+	b.SetResizer(fr)
 
 	if err := b.Resize(40, 100); err != nil {
 		t.Fatalf("Resize: %v", err)
 	}
-
-	rows, cols, err := pty.Getsize(master)
-	if err != nil {
-		t.Fatalf("pty.Getsize: %v", err)
+	if fr.calls != 1 {
+		t.Fatalf("resizer calls = %d, want 1", fr.calls)
 	}
-	if rows != 40 || cols != 100 {
-		t.Errorf("size = (%d rows, %d cols), want (40, 100)", rows, cols)
+	if fr.rows != 40 || fr.cols != 100 {
+		t.Errorf("forwarded (rows=%d, cols=%d), want (40, 100)", fr.rows, fr.cols)
 	}
 }
 
-// TestBridge_ResizeNoPTYRegistered asserts the seam is silent (returns nil)
-// when no PTY has been registered for the current iteration. This is the
-// race window between EndIteration and the next BeginIteration where an
-// in-flight client resize targets nothing.
-func TestBridge_ResizeNoPTYRegistered(t *testing.T) {
+// TestBridge_ResizePropagatesResizerError asserts a delegate error surfaces
+// verbatim — the control plane logs it but does not fail the attach.
+func TestBridge_ResizePropagatesResizerError(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+	wantErr := errors.New("resize boom")
+	b.SetResizer(&fakeResizer{err: wantErr})
+
+	if err := b.Resize(24, 80); !errors.Is(err, wantErr) {
+		t.Errorf("Resize err = %v, want errors.Is == %v", err, wantErr)
+	}
+}
+
+// TestBridge_ResizeNoResizerRegistered asserts the seam is silent (returns
+// nil) when no delegate has been registered for the current iteration. This
+// is the race window between EndIteration and the next BeginIteration where
+// an in-flight client resize targets nothing.
+func TestBridge_ResizeNoResizerRegistered(t *testing.T) {
 	t.Parallel()
 
 	b := NewBridge(nil)
 	if err := b.Resize(40, 100); err != nil {
-		t.Errorf("Resize on bridge with no PTY: %v, want nil", err)
+		t.Errorf("Resize on bridge with no resizer: %v, want nil", err)
 	}
 }
 
-// TestBridge_ResizeAfterClearPTY asserts SetPTY(nil) returns Resize to its
-// silent-no-op state — this is what runOnce relies on at iteration teardown.
-func TestBridge_ResizeAfterClearPTY(t *testing.T) {
+// TestBridge_ResizeAfterClearResizer asserts SetResizer(nil) returns Resize
+// to its silent-no-op state — what runOnce relies on at iteration teardown.
+func TestBridge_ResizeAfterClearResizer(t *testing.T) {
 	t.Parallel()
 
-	master, slave, err := pty.Open()
-	if err != nil {
-		t.Skipf("pty.Open unavailable: %v", err)
-	}
-	defer master.Close()
-	defer slave.Close()
-
 	b := NewBridge(nil)
-	b.SetPTY(master)
-	b.SetPTY(nil)
+	b.SetResizer(&fakeResizer{})
+	b.SetResizer(nil)
 
 	if err := b.Resize(40, 100); err != nil {
-		t.Errorf("Resize after SetPTY(nil): %v, want nil", err)
+		t.Errorf("Resize after SetResizer(nil): %v, want nil", err)
 	}
 }
 

@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 	"golang.org/x/term"
 )
 
@@ -112,22 +112,22 @@ type Supervisor struct {
 	state State
 
 	// convMu guards currentConvID. Leaf-only; never held while acquiring
-	// ptmxMu or mu.
-	convMu         sync.Mutex
-	currentConvID  string
+	// sessMu or mu.
+	convMu        sync.Mutex
+	currentConvID string
 
-	// ptmxMu guards ptmx and ptmxReadyCh. Leaf-only; never held while
-	// acquiring convMu or mu. setPTY (called from runOnce) and
+	// sessMu guards sess and sessReadyCh. Leaf-only; never held while
+	// acquiring convMu or mu. setSession (called from runOnce) and
 	// WriteUserTurn (called from arbitrary handler goroutines) serialize
 	// through this lock.
-	ptmxMu sync.Mutex
-	ptmx   *os.File
-	// ptmxReadyCh is closed by setPTY when a non-nil PTY is registered;
-	// freshened (re-opened) by setPTY(nil) so subsequent WaitForPTY waiters
-	// block again until the next runOnce iteration binds a new PTY.
-	// WaitForPTY captures the channel reference under ptmxMu then awaits
-	// it unlocked — same pattern as Session.activeCh.
-	ptmxReadyCh chan struct{}
+	sessMu sync.Mutex
+	sess   *tuidriver.Session
+	// sessReadyCh is closed by setSession when a non-nil Session is
+	// registered; freshened (re-opened) by setSession(nil) so subsequent
+	// WaitForPTY waiters block again until the next runOnce iteration hosts a
+	// new Session. WaitForPTY captures the channel reference under sessMu then
+	// awaits it unlocked — same pattern as Session.activeCh.
+	sessReadyCh chan struct{}
 }
 
 // State returns a snapshot of the current supervisor state. Safe to call from
@@ -169,12 +169,12 @@ func (s *Supervisor) WriteUserTurn(id string, payload []byte) error {
 	s.currentConvID = id
 	s.convMu.Unlock()
 
-	s.ptmxMu.Lock()
-	defer s.ptmxMu.Unlock()
-	if s.ptmx == nil {
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	if s.sess == nil {
 		return nil
 	}
-	if _, err := s.ptmx.Write(payload); err != nil {
+	if err := s.sess.AttachInput(payload); err != nil {
 		return fmt.Errorf("supervisor: write user turn: %w", err)
 	}
 	return nil
@@ -190,50 +190,50 @@ func (s *Supervisor) CurrentConversation() string {
 	return s.currentConvID
 }
 
-// setPTY registers (or clears, when f is nil) the PTY master for the current
-// runOnce iteration. WriteUserTurn writes to this fd; setPTY(nil) before the
-// actual Close ensures an in-flight WriteUserTurn sees nil rather than a
-// just-closed fd. Mirrors Bridge.SetPTY.
+// setSession registers (or clears, when sess is nil) the hosted Session for
+// the current runOnce iteration. WriteUserTurn writes to it via AttachInput;
+// setSession(nil) before the actual Close ensures an in-flight WriteUserTurn
+// sees nil rather than a closing session. Mirrors Bridge.SetResizer.
 //
-// ptmxReadyCh choreography: setPTY(non-nil) closes the readiness channel
-// (idempotent — close is a no-op when already closed); setPTY(nil)
+// sessReadyCh choreography: setSession(non-nil) closes the readiness channel
+// (idempotent — close is a no-op when already closed); setSession(nil)
 // allocates a fresh open channel (idempotent — leaves the channel alone
 // when it is already open). WaitForPTY captures the chan reference under
-// ptmxMu and awaits it unlocked.
-func (s *Supervisor) setPTY(f *os.File) {
-	s.ptmxMu.Lock()
-	defer s.ptmxMu.Unlock()
-	s.ptmx = f
-	if f != nil {
+// sessMu and awaits it unlocked.
+func (s *Supervisor) setSession(sess *tuidriver.Session) {
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	s.sess = sess
+	if sess != nil {
 		select {
-		case <-s.ptmxReadyCh:
+		case <-s.sessReadyCh:
 			// already closed
 		default:
-			close(s.ptmxReadyCh)
+			close(s.sessReadyCh)
 		}
 		return
 	}
 	select {
-	case <-s.ptmxReadyCh:
-		s.ptmxReadyCh = make(chan struct{})
+	case <-s.sessReadyCh:
+		s.sessReadyCh = make(chan struct{})
 	default:
 		// already open
 	}
 }
 
-// WaitForPTY blocks until the supervisor has a bound PTY (closed by setPTY
-// on the next runOnce iteration), or ctx is cancelled. Returns nil on
-// readiness, ctx.Err() on cancel. Safe from any goroutine; idempotent on
-// an already-bound PTY (returns immediately).
+// WaitForPTY blocks until the supervisor has a live Session (registered by
+// setSession on the next runOnce iteration), or ctx is cancelled. Returns nil
+// on readiness, ctx.Err() on cancel. Safe from any goroutine; idempotent on
+// an already-live Session (returns immediately).
 //
 // Session.Activate calls this at the tail of its waiting phase so callers
-// that follow Activate with WriteUserTurn observe a live PTY rather than
-// the ~hundreds-of-ms gap between transitionTo closing activeCh and
-// runOnce binding the new master.
+// that follow Activate with WriteUserTurn observe a live Session rather than
+// the ~hundreds-of-ms gap between transitionTo closing activeCh and runOnce
+// hosting the new Session.
 func (s *Supervisor) WaitForPTY(ctx context.Context) error {
-	s.ptmxMu.Lock()
-	ch := s.ptmxReadyCh
-	s.ptmxMu.Unlock()
+	s.sessMu.Lock()
+	ch := s.sessReadyCh
+	s.sessMu.Unlock()
 	select {
 	case <-ch:
 		return nil
@@ -266,7 +266,7 @@ func New(cfg Config) (*Supervisor, error) {
 		cfg:         cfg,
 		log:         cfg.Logger,
 		state:       State{Phase: PhaseStarting},
-		ptmxReadyCh: make(chan struct{}),
+		sessReadyCh: make(chan struct{}),
 	}, nil
 }
 
@@ -348,9 +348,24 @@ func buildClaudeArgs(claudeArgs []string, firstRun, continueLast bool) []string 
 	return args
 }
 
-// runOnce spawns claude in a PTY, bridges it to the controlling terminal,
-// and returns when the child exits or ctx is cancelled. onSpawn, if non-nil,
-// is called once with the child PID after the PTY has been allocated.
+// sessionWriter adapts a *tuidriver.Session to io.Writer so the input pump
+// can stay io.Copy(sessionWriter{sess}, src) — mirroring the old
+// io.Copy(ptmx, src). Write forwards bytes to the session's raw-input seam
+// (AttachInput → pty.Write) and reports the full slice written on success so
+// io.Copy keeps draining.
+type sessionWriter struct{ sess *tuidriver.Session }
+
+func (w sessionWriter) Write(p []byte) (int, error) {
+	if err := w.sess.AttachInput(p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// runOnce hosts claude through a tui-driver Session, bridges its I/O to the
+// controlling terminal (or the configured Bridge in service mode), and returns
+// when the child exits or ctx is cancelled. onSpawn, if non-nil, is called once
+// with the child PID after the Session has been spawned.
 func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pid int)) error {
 	cmd := exec.CommandContext(ctx, s.cfg.ClaudeBin, args...)
 	if s.cfg.WorkDir != "" {
@@ -358,52 +373,61 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 	}
 	cmd.Env = append(os.Environ(), s.cfg.helperEnv...)
 
-	ptmx, err := pty.Start(cmd)
+	// Host claude through a tui-driver Session. MirrorOutput is the only
+	// output path now — the Session seals the PTY *os.File privately, so both
+	// modes forward sess.MirrorOutput() to their output sink instead of
+	// io.Copy'ing a raw master. We deliberately do NOT call
+	// tuidriver.EnsureClaudeEnv: it force-overrides TERM=xterm-256color, which
+	// would change claude's TUI rendering versus today's inherited TERM. That
+	// override exists for downstream screen parsing (#596), which this swap
+	// does not do — behaviour-preservation decision.
+	sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{MirrorOutput: true})
 	if err != nil {
-		return fmt.Errorf("pty start: %w", err)
+		return fmt.Errorf("spawn: %w", err)
 	}
-	defer func() { _ = ptmx.Close() }()
 
 	if onSpawn != nil && cmd.Process != nil {
 		onSpawn(cmd.Process.Pid)
 	}
 
 	if s.cfg.Bridge != nil {
-		// Service mode: route PTY I/O through the bridge so an attaching
-		// client can take over interactively. No raw-mode setup and no
-		// server-side SIGWINCH watcher — those belong to whichever client
-		// attaches and apply to its own terminal. Handshake-time geometry
-		// is applied via Bridge.Resize from the control plane (#136); the
-		// live-resize wire message is #137.
+		// Service mode: route I/O through the bridge so an attaching client
+		// can take over interactively. No raw-mode setup and no server-side
+		// SIGWINCH watcher — those belong to whichever client attaches and
+		// apply to its own terminal. Handshake/live-resize geometry reaches
+		// claude via Bridge.Resize → Session.Resize.
 		//
-		// BeginIteration/EndIteration scope the bridge's input cancel so
-		// the input goroutine returns cleanly when the child exits, instead
-		// of leaking and racing with the next iteration's goroutine for
-		// queued attach-client bytes. SetPTY(ptmx) registers the PTY master
-		// so Resize calls land on the right fd; SetPTY(nil) runs BEFORE
-		// EndIteration so an in-flight Resize sees nil rather than a
-		// just-closed fd.
+		// BeginIteration/EndIteration scope the bridge's input cancel so the
+		// input goroutine returns cleanly when the child exits, instead of
+		// leaking and racing the next iteration's goroutine for queued
+		// attach-client bytes. SetResizer(sess) registers the resize delegate;
+		// SetResizer(nil) runs BEFORE EndIteration so an in-flight Resize sees
+		// nil rather than a closing session.
 		s.cfg.Bridge.BeginIteration()
-		s.cfg.Bridge.SetPTY(ptmx)
-		s.setPTY(ptmx)
+		s.cfg.Bridge.SetResizer(sess)
+		s.setSession(sess)
 		done := make(chan error, 2)
 		go func() {
-			_, err := io.Copy(ptmx, s.cfg.Bridge)
+			_, err := io.Copy(sessionWriter{sess}, s.cfg.Bridge)
 			done <- err
 		}()
 		go func() {
-			_, err := io.Copy(s.cfg.Bridge, ptmx)
-			done <- err
+			for chunk := range sess.MirrorOutput() {
+				_, _ = s.cfg.Bridge.Write(chunk)
+			}
+			done <- nil
 		}()
 
-		waitErr := cmd.Wait()
-		s.setPTY(nil)
-		_ = ptmx.Close()
-		s.cfg.Bridge.SetPTY(nil)
+		waitErr := sess.Wait()
+		// Clear registrations before closing the session so a racing
+		// WriteUserTurn/Resize sees nil and drops/no-ops rather than touching
+		// a closing session. EndIteration makes the bridge input pump return
+		// EOF; sess.Close closes the PTY, which closes MirrorOutput and ends
+		// the output pump (already drained/closed by the time Wait returns).
+		s.setSession(nil)
+		s.cfg.Bridge.SetResizer(nil)
 		s.cfg.Bridge.EndIteration()
-		// Wait for both goroutines: the output pump exits when ptmx.Close
-		// fails the read; the input pump exits when EndIteration makes
-		// bridge.Read return EOF.
+		_ = sess.Close()
 		for i := 0; i < 2; i++ {
 			select {
 			case <-done:
@@ -415,9 +439,9 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 
 	// Foreground mode: bridge directly to the supervisor's own terminal.
 	//
-	// Register the PTY master for WriteUserTurn. setPTY(nil) below runs
-	// before ptmx.Close so a racing WriteUserTurn sees nil and drops.
-	s.setPTY(ptmx)
+	// Register the Session for WriteUserTurn. setSession(nil) below runs
+	// before sess.Close so a racing WriteUserTurn sees nil and drops.
+	s.setSession(sess)
 
 	// Put the controlling terminal into raw mode if it is a TTY so that
 	// keystrokes pass through unmodified to the child.
@@ -435,8 +459,8 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 		}
 	}()
 
-	// Keep the PTY window size in sync with the real terminal.
-	stopResize := s.watchWindowSize(ptmx)
+	// Keep the PTY window size in sync with the real terminal via Session.Resize.
+	stopResize := s.watchWindowSize(sess)
 	defer stopResize()
 
 	// Open /dev/tty as a separate fd for the input bridge. When the child
@@ -453,20 +477,24 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 
 	done := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(ptmx, input)
+		_, err := io.Copy(sessionWriter{sess}, input)
 		done <- err
 	}()
 	go func() {
-		_, err := io.Copy(os.Stdout, ptmx)
-		done <- err
+		for chunk := range sess.MirrorOutput() {
+			_, _ = os.Stdout.Write(chunk)
+		}
+		done <- nil
 	}()
 
-	waitErr := cmd.Wait()
-	// Unblock both copy goroutines: ptmx.Close() drains the output
-	// goroutine; input.Close() drains the input goroutine.
-	s.setPTY(nil)
-	_ = ptmx.Close()
+	waitErr := sess.Wait()
+	// Clear the session before closing so a racing WriteUserTurn drops;
+	// input.Close() drains the input pump; sess.Close closes the PTY, which
+	// closes MirrorOutput and ends the output pump (already drained/closed by
+	// the time Wait returns).
+	s.setSession(nil)
 	_ = input.Close()
+	_ = sess.Close()
 
 	// Drain both. Under normal operation each returns within microseconds
 	// of its source closing; the timeout is a safety net.
