@@ -19,6 +19,15 @@ import (
 // evicted session. #396.
 const sendMessageActivateTimeout = 30 * time.Second
 
+// sendMessageDeliverTimeout caps the per-handler wait for WriteUserTurn's
+// ready-gate + commit-confirm delivery. WaitReady blocks while claude is
+// mid-turn, so an unbounded ctx would hang the per-conn goroutine on a long
+// claude turn; the bound turns "claude busy/wedged past budget" into a
+// retryable server.binary_offline reply. Matches sendMessageActivateTimeout so
+// the two phases of one inbound message share a budget shape. A tuning knob,
+// not a contract.
+const sendMessageDeliverTimeout = 30 * time.Second
+
 // msgSendMessageMalformed is the user-facing message emitted in the
 // protocol.malformed error payload when SendMessagePayload cannot be
 // JSON-decoded. The decode-error text is NOT echoed back (it could
@@ -47,7 +56,7 @@ const msgServerBinaryOffline = "server binary offline"
 // Activate is a near-no-op (two non-blocking channel receives).
 type TurnWriter interface {
 	Activate(ctx context.Context) error
-	WriteUserTurn(conversationID string, payload []byte) error
+	WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
 }
 
 // SendMessage returns a dispatch.Handler that processes a send_message
@@ -97,7 +106,13 @@ func SendMessage(w TurnWriter, logger *slog.Logger) dispatch.Handler {
 		}
 		cancelActivate()
 
-		err := w.WriteUserTurn(p.ConversationID, []byte(p.Text))
+		// Bound the delivery: WriteUserTurn's ready-gate blocks while claude is
+		// busy, so an unbounded ctx would hang the per-conn goroutine. A
+		// deliver-timeout yields context.DeadlineExceeded (not Canceled), so it
+		// correctly lands in the default → binary_offline arm below.
+		deliverCtx, cancelDeliver := context.WithTimeout(ctx, sendMessageDeliverTimeout)
+		err := w.WriteUserTurn(deliverCtx, p.ConversationID, []byte(p.Text))
+		cancelDeliver()
 		switch {
 		case err == nil:
 			logger.Info("relay: send_message ack",
@@ -112,8 +127,25 @@ func SendMessage(w TurnWriter, logger *slog.Logger) dispatch.Handler {
 				"conn_id", c.ConnID(),
 				"conversation_id", p.ConversationID)
 			return replyError(ctx, c, env, protocol.CodeConversationNotFound, msgConversationNotFound, false)
-		default:
+		case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+			// The parent conn ctx is closing — propagate for the per-conn
+			// unwind rather than emitting a doomed wire reply. Mirrors the
+			// Activate-block check above. A deliver-timeout is
+			// DeadlineExceeded, not Canceled, so it falls through to default.
 			return err
+		default:
+			// Every other WriteUserTurn failure mode is transient — no live
+			// session, claude not idle within budget, a wedged delivery, or a
+			// PTY closing — so report a retryable binary_offline instead of a
+			// false ack (Route does not reply on a bare handler error). The
+			// supervisor's sentinels (ErrNoLiveSession, ErrTurnNotCommitted)
+			// land here without handlers/ importing internal/supervisor.
+			logger.Warn("relay: send_message delivery failed",
+				"event", "send_message.delivery_failed",
+				"conn_id", c.ConnID(),
+				"conversation_id", p.ConversationID,
+				"err", err)
+			return replyError(ctx, c, env, protocol.CodeServerBinaryOffline, msgServerBinaryOffline, true)
 		}
 	}
 }

@@ -29,6 +29,19 @@ import (
 // should drain promptly; the timeout is a safety net.
 const goroutineDrainTimeout = 100 * time.Millisecond
 
+// ErrNoLiveSession is returned by WriteUserTurn when no claude session is
+// registered at delivery time — the supervisor is between runOnce iterations,
+// has not yet spawned, or is mid-restart. Formerly this was a silent drop
+// (return nil); it is now a loud failure so the relay send_message handler
+// reports it to the phone instead of acking a turn that never reached claude.
+var ErrNoLiveSession = errors.New("supervisor: no live session")
+
+// ErrTurnNotCommitted is returned by WriteUserTurn when DeliverPrompt
+// delivered the turn but could not confirm a commit (DeliverResult.Committed
+// == false) after its bounded recovery — the turn may still be wedged. Like
+// ErrNoLiveSession it maps to a loud failure rather than a false ack.
+var ErrTurnNotCommitted = errors.New("supervisor: turn not committed")
+
 // Phase describes the supervisor's current lifecycle state.
 type Phase string
 
@@ -128,6 +141,17 @@ type Supervisor struct {
 	// new Session. WaitForPTY captures the channel reference under sessMu then
 	// awaits it unlocked — same pattern as Session.activeCh.
 	sessReadyCh chan struct{}
+
+	// deliverFn delivers a captured user turn through a live Session: ready-gate
+	// (WaitReady) → commit-confirm + corrupted-paste recovery (DeliverPrompt) →
+	// Committed check. Set once in New to (*Supervisor).deliverViaSession and
+	// overridden only in tests (the same unexported-injection seam as
+	// helperEnv). Immutable post-New, so WriteUserTurn reads it lock-free. The
+	// seam keeps every WriteUserTurn branch unit-testable without a live claude:
+	// it returns an already-classified error/success, so no claude-screen
+	// literal (idle prompt, spinner, pasted-text chip) leaks into pyrycode — all
+	// that knowledge stays inside tui-driver.
+	deliverFn func(ctx context.Context, sess *tuidriver.Session, payload []byte) error
 }
 
 // State returns a snapshot of the current supervisor state. Safe to call from
@@ -145,20 +169,34 @@ func (s *Supervisor) updateState(fn func(*State)) {
 }
 
 // WriteUserTurn delivers a user-turn payload to the supervised claude child,
-// tagged with the caller's conversation_id. The cursor (CurrentConversation)
-// is updated to id on every accepted call — including when no child is
-// currently active (the bytes are dropped silently in that case, matching
-// Bridge.Write's discard-on-unattached behaviour). The cursor is NOT mutated
-// when validation refuses the id.
+// tagged with the caller's conversation_id, and returns nil only when claude
+// confirms the turn committed. It is the delivery path for untrusted,
+// phone-originated turns (relay send_message → here → live claude); a turn that
+// cannot be confirmed delivered is a loud failure, never a silent ack.
 //
 // Validation, when configured via Config.ValidateConversation, runs first.
-// A non-nil validator result is returned verbatim — production wiring
-// returns conversations.ErrConversationNotFound for unknown ids, which the
-// handler maps to a wire-level refusal code.
+// A non-nil validator result is returned verbatim — production wiring returns
+// conversations.ErrConversationNotFound for unknown ids, which the handler maps
+// to a wire-level refusal code. The cursor (CurrentConversation) is stamped to
+// id before delivery on every validated call — including when delivery then
+// fails — but is NOT mutated when validation refuses the id.
 //
-// PTY write failures are wrapped with a stable "supervisor: write user
-// turn:" prefix; the underlying error is preserved for errors.Is checks.
-func (s *Supervisor) WriteUserTurn(id string, payload []byte) error {
+// Delivery captures the live Session under sessMu, releases the lock, then
+// delivers on the captured pointer (WaitReady + DeliverPrompt can run for
+// seconds; holding sessMu that long would block runOnce's teardown). A
+// concurrent setSession(nil)+Close racing the captured pointer is safe: it
+// lands in tui-driver's teardown-safe PTY-error path (no panic), so a session
+// torn down mid-delivery surfaces here as a loud failure, never a crash or a
+// false ack. This relaxes — without breaking — runOnce's setSession(nil)-
+// before-Close ordering: a racing WriteUserTurn may now deliver against a
+// closing session, but only into that error path.
+//
+// Failure modes — no live session (ErrNoLiveSession), claude not idle within
+// the caller's ctx, an uncommitted/wedged turn (ErrTurnNotCommitted), or a PTY
+// write error — all return non-nil, wrapped with the stable "supervisor: write
+// user turn:" prefix. The underlying error is preserved for errors.Is checks
+// (including context.DeadlineExceeded / context.Canceled through WaitReady).
+func (s *Supervisor) WriteUserTurn(ctx context.Context, id string, payload []byte) error {
 	if s.cfg.ValidateConversation != nil {
 		if err := s.cfg.ValidateConversation(id); err != nil {
 			return err
@@ -170,12 +208,48 @@ func (s *Supervisor) WriteUserTurn(id string, payload []byte) error {
 	s.convMu.Unlock()
 
 	s.sessMu.Lock()
-	defer s.sessMu.Unlock()
-	if s.sess == nil {
-		return nil
+	sess := s.sess
+	s.sessMu.Unlock()
+
+	if sess == nil {
+		return fmt.Errorf("supervisor: write user turn: %w", ErrNoLiveSession)
 	}
-	if err := s.sess.AttachInput(payload); err != nil {
+	if err := s.deliverFn(ctx, sess, payload); err != nil {
 		return fmt.Errorf("supervisor: write user turn: %w", err)
+	}
+	return nil
+}
+
+// deliverViaSession is the production deliverFn. It gates on claude reaching
+// idle (WaitReady), then delivers the turn and confirms the commit with
+// corrupted-paste recovery (DeliverPrompt), reporting ErrTurnNotCommitted when
+// no commit could be confirmed. The WaitReady idle gate is load-bearing: it is
+// what makes DeliverPrompt's "no pasted-text chip ⇒ committed-but-slow"
+// heuristic trustworthy — without a prior idle gate that heuristic would fire
+// for an attached-but-not-ready claude (still booting MCP) and report a false
+// commit. A blocking trust/network condition that prevents idle simply surfaces
+// as a WaitReady ctx timeout → loud failure, so no trust/mcp/network policy
+// branch is needed on this long-lived supervised path.
+//
+// JSONLPath is deliberately left empty: the relay-driven bootstrap session
+// spawns with --continue (not --session-id), so the supervisor holds no stable
+// claude session UUID to build SessionJSONLPath from, and claude rotates the
+// on-disk UUID on /clear anyway. With the idle gate in front, DeliverPrompt's
+// spinner commit signal is sufficient. All claude-screen knowledge stays inside
+// tui-driver; this method sees only classified errors and the Committed bool.
+func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Session, payload []byte) error {
+	if _, err := sess.WaitReady(ctx); err != nil {
+		return fmt.Errorf("wait ready: %w", err)
+	}
+	res, err := sess.DeliverPrompt(ctx, tuidriver.DeliverOpts{
+		Prompt: string(payload),
+		Logger: s.log,
+	})
+	if err != nil {
+		return err
+	}
+	if !res.Committed {
+		return ErrTurnNotCommitted
 	}
 	return nil
 }
@@ -191,9 +265,14 @@ func (s *Supervisor) CurrentConversation() string {
 }
 
 // setSession registers (or clears, when sess is nil) the hosted Session for
-// the current runOnce iteration. WriteUserTurn writes to it via AttachInput;
-// setSession(nil) before the actual Close ensures an in-flight WriteUserTurn
-// sees nil rather than a closing session. Mirrors Bridge.SetResizer.
+// the current runOnce iteration. setSession(nil) before the actual Close means
+// a WriteUserTurn that captures the pointer afterwards sees nil and fails loud.
+// Note the relaxation since #594: WriteUserTurn captures the Session under
+// sessMu then releases the lock before delivering, so a WriteUserTurn that
+// captured the pointer just before this clear may still deliver against a
+// closing session — but only into tui-driver's teardown-safe PTY-error path
+// (no panic), which surfaces as a loud failure, never a crash or a false ack.
+// Mirrors Bridge.SetResizer.
 //
 // sessReadyCh choreography: setSession(non-nil) closes the readiness channel
 // (idempotent — close is a no-op when already closed); setSession(nil)
@@ -262,12 +341,14 @@ func New(cfg Config) (*Supervisor, error) {
 	if cfg.BackoffReset == 0 {
 		cfg.BackoffReset = 60 * time.Second
 	}
-	return &Supervisor{
+	s := &Supervisor{
 		cfg:         cfg,
 		log:         cfg.Logger,
 		state:       State{Phase: PhaseStarting},
 		sessReadyCh: make(chan struct{}),
-	}, nil
+	}
+	s.deliverFn = s.deliverViaSession
+	return s, nil
 }
 
 // Run supervises the claude child until ctx is cancelled. Each iteration spawns

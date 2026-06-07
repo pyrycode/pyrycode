@@ -44,7 +44,7 @@ func (s *stubTurnWriter) Activate(ctx context.Context) error {
 	return s.activateErr
 }
 
-func (s *stubTurnWriter) WriteUserTurn(id string, payload []byte) error {
+func (s *stubTurnWriter) WriteUserTurn(ctx context.Context, id string, payload []byte) error {
 	s.calls++
 	s.gotID = id
 	s.gotPayload = append([]byte(nil), payload...)
@@ -262,11 +262,17 @@ func TestSendMessage_ConversationNotFound_EmitsErrorEnvelope(t *testing.T) {
 	}
 }
 
-func TestSendMessage_WrappedError_PassesThroughNoWireReply(t *testing.T) {
+// TestSendMessage_DeliveryFailure_EmitsBinaryOffline covers AC #2's loud-
+// failure contract: a default-class WriteUserTurn error (e.g. the supervisor's
+// wrapped no-live-session / not-committed failure) must now produce a
+// retryable server.binary_offline envelope so the phone learns the turn was
+// not delivered — instead of the old silent error-propagation that produced no
+// wire reply (and, upstream, a false ack on the silent-drop path). This
+// inverts the prior TestSendMessage_WrappedError_PassesThroughNoWireReply.
+func TestSendMessage_DeliveryFailure_EmitsBinaryOffline(t *testing.T) {
 	t.Parallel()
-	wrapped := errors.New("supervisor: write user turn: bang")
-	stub := &stubTurnWriter{err: wrapped}
-	c, _, out := newSendMsgConn(t)
+	stub := &stubTurnWriter{err: errors.New("supervisor: write user turn: no live session")}
+	c, recv, _ := newSendMsgConn(t)
 	req := sendMsgRequest(t, protocol.SendMessagePayload{
 		ConversationID: sendMsgConvID,
 		MessageID:      sendMsgMessageID,
@@ -274,18 +280,54 @@ func TestSendMessage_WrappedError_PassesThroughNoWireReply(t *testing.T) {
 	})
 
 	h := SendMessage(stub, sendMsgLogger(t))
-	err := h(context.Background(), c, req)
-	if err == nil {
-		t.Fatal("handler returned nil; want wrapped error")
-	}
-	if !errors.Is(err, wrapped) {
-		t.Errorf("handler err = %v, want errors.Is(err, %v) == true", err, wrapped)
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
 	}
 
-	// No outbound envelope must be produced on the wrapped-error branch.
+	env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeServerBinaryOffline {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeServerBinaryOffline)
+	}
+	if !payload.Retryable {
+		t.Errorf("Retryable = false, want true (delivery failure is transient)")
+	}
+	if stub.calls != 1 {
+		t.Errorf("WriteUserTurn calls = %d, want 1", stub.calls)
+	}
+}
+
+// TestSendMessage_DeliveryCtxCanceled_PropagatesError covers the conn-closing
+// branch on the delivery phase: when the parent ctx is cancelled and
+// WriteUserTurn returns context.Canceled, the handler propagates the error for
+// the dispatcher's per-conn unwind and emits no doomed wire reply. (A deliver
+// timeout returns DeadlineExceeded, not Canceled, so it lands in the
+// binary_offline arm instead — covered above.)
+func TestSendMessage_DeliveryCtxCanceled_PropagatesError(t *testing.T) {
+	t.Parallel()
+	stub := &stubTurnWriter{err: context.Canceled}
+	c, _, out := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // parent ctx.Err() non-nil → propagate, don't reply
+
+	h := SendMessage(stub, sendMsgLogger(t))
+	err := h(ctx, c, req)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("handler err = %v, want context.Canceled", err)
+	}
+
 	select {
 	case env := <-out:
-		t.Fatalf("unexpected outbound envelope on wrapped-err branch: %+v", env)
+		t.Fatalf("unexpected outbound envelope on delivery ctx-cancel branch: %+v", env)
 	case <-time.After(50 * time.Millisecond):
 	}
 }

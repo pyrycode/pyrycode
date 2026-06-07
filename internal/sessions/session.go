@@ -107,9 +107,12 @@ func (s *Session) ID() SessionID { return s.id }
 func (s *Session) State() supervisor.State { return s.sup.State() }
 
 // WriteUserTurn delegates to the underlying supervisor. Consumed by the
-// send_message handler via the handlers.TurnWriter interface.
-func (s *Session) WriteUserTurn(conversationID string, payload []byte) error {
-	return s.sup.WriteUserTurn(conversationID, payload)
+// send_message handler via the handlers.TurnWriter interface. ctx bounds the
+// supervisor's ready-gate + commit-confirm delivery; the handler passes a
+// timeout-bounded ctx so a busy/wedged claude surfaces as a loud failure
+// rather than hanging the per-conn goroutine.
+func (s *Session) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
+	return s.sup.WriteUserTurn(ctx, conversationID, payload)
 }
 
 // Supervisor exposes the underlying supervisor handle. Consumed by the

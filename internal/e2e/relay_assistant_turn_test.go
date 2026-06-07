@@ -33,6 +33,12 @@ import (
 // message out with the same id), per-conn ID stamping (monotonic above
 // the ack), role labelling ("assistant"), MessageID well-formedness.
 func TestRelay_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
+	// Blocked on #603: since #594, WriteUserTurn delivers via DeliverPrompt
+	// behind a WaitReady idle-gate and acks only on a confirmed commit. This
+	// test's send_message setup step never acks against fakeclaude (no claude
+	// TUI), so the downstream assistant-echo assertion is unreachable.
+	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
+
 	const (
 		knownConvID        = "55555555-5555-4555-8555-555555555555"
 		knownUserText      = "e2e-311-user:hi\n"
