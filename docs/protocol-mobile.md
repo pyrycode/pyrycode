@@ -416,6 +416,11 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `ack` | either | no | |
 | `error` | either | no | |
 | **`rekey_request`** | either | no | **New in v2.** See [Re-key](#re-key). |
+| **`turn_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`assistant_delta`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`tool_use`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -438,6 +443,73 @@ Sent in the `noise_init` early-data payload. The `payload.token` field carries t
 ```
 
 Binary validates the token after decrypting the handshake message. If invalid, the binary sends an AEAD-sealed `error` envelope (code `auth.invalid_token`) inside a `noise_msg` and asks the relay to close with `4401`. The `noise_resp` may or may not have already been sent at this point — implementations should send it first (so the AEAD channel exists), then immediately send the auth error.
+
+### Capability negotiation (v2)
+
+Both `hello` and `hello_ack` carry an optional `capabilities: []string` field (omitempty — absent, not `null`, when empty, so a v1 phone's `hello` stays byte-identical). The phone advertises the features it understands in its `hello`; the daemon echoes the features *it* supports in `hello_ack`.
+
+| Field | Type | On | Meaning |
+|---|---|---|---|
+| `capabilities` | `[]string` (omitempty) | `hello` (phone → binary) | Features the phone understands, e.g. `["interactive"]`. |
+| `capabilities` | `[]string` (omitempty) | `hello_ack` (binary → phone) | Features the daemon supports and has agreed to. |
+
+Defined capability strings:
+
+| Value | Meaning |
+|---|---|
+| `interactive` | The phone can render the structured interactive event stream below. |
+
+The daemon MUST echo only what it itself supports — the agreed set is the **intersection** of the phone's advertised set with the daemon's own, never a blind mirror of the phone's claims. A phone that does not advertise `interactive` (or whose `interactive` is not echoed back) continues to receive the coarse v1 `message` fan-out only. The intersection logic and the capability-gated fan-out are enforced by the daemon's event-stream bridge (forward-ref #608); the wire fields here are advertisement only.
+
+### Interactive events (v2, capability-gated)
+
+These five envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+
+#### `turn_state`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation this turn belongs to. |
+| `state` | string | Coarse turn lifecycle: `thinking`, `responding`, or `idle`. |
+
+#### `assistant_delta`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation this turn belongs to. |
+| `turn_id` | string | Identifies the turn the delta belongs to. |
+| `seq` | int | Per-turn, non-negative delta-ordering counter; resets each turn. |
+| `text` | string | Incremental assistant text, coalesced (not per token). |
+
+#### `tool_use`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation this turn belongs to. |
+| `turn_id` | string | Identifies the turn the tool call belongs to. |
+| `tool_use_id` | string | Correlates this call with its later `tool_result`. |
+| `name` | string | Tool name. |
+| `input_summary` | string | Human-readable précis of the tool input (not the raw input). |
+
+#### `tool_result`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation this turn belongs to. |
+| `turn_id` | string | Identifies the turn the result belongs to. |
+| `tool_use_id` | string | Matches the `tool_use` this result completes. |
+| `is_error` | bool | Whether the tool invocation failed. |
+| `result_summary` | string | Human-readable précis of the result (not the raw output). |
+
+#### `turn_end`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation this turn belongs to. |
+| `turn_id` | string | Identifies the turn that ended. |
+| `stop_reason` | string | Why the turn ended; one of `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`. These mirror the ACP turn-end reasons. |
+
+ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` is added here per the implementing ticket (#607), following the "spec follows the code" convention (ADR 025 § Consequences).
 
 ## Backfill semantics
 

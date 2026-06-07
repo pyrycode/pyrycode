@@ -36,6 +36,13 @@ func TestIsV1Compatible(t *testing.T) {
 		{"encrypted-with-known-type", TypeHello, true, ErrUnsupported},
 		{"encrypted-with-unknown-type", "frobnicate", true, ErrUnsupported},
 		{"encrypted-with-empty-type", "", true, ErrUnsupported},
+		// v2-only interactive events are not v1-compatible: an old phone
+		// never receives them, so IsV1Compatible must reject each.
+		{"turn_state-rejected", TypeTurnState, false, ErrUnknownType},
+		{"assistant_delta-rejected", TypeAssistantDelta, false, ErrUnknownType},
+		{"tool_use-rejected", TypeToolUse, false, ErrUnknownType},
+		{"tool_result-rejected", TypeToolResult, false, ErrUnknownType},
+		{"turn_end-rejected", TypeTurnEnd, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,15 +77,23 @@ func TestV1TypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 	}
 }
 
-// v2OnlyTypes is the test-local allowlist of Mobile Protocol v2 control
-// envelope types that are deliberately excluded from v1TypeSet. Adding a
-// constant to this map without also intercepting it at
-// internal/relay/v2session.go's dispatch boundary would let it fall
-// through to dispatch.Route as an unknown type — the partition is the
-// architectural seam between v1 application traffic and v2 control
-// traffic.
+// v2OnlyTypes is the test-local allowlist of Mobile Protocol v2 envelope
+// types that are deliberately excluded from v1TypeSet. Two flavours live
+// here: v2 control types (e.g. TypeRekeyRequest), intercepted at
+// internal/relay/v2session.go's dispatch boundary before dispatch.Route;
+// and v2 additive interactive application events (turn_state and friends),
+// pushed outbound to capability-advertising phones and never dispatched
+// inbound. Both are "v2-only" for the partition's purpose — adding either
+// to v1TypeSet would let an old phone (or dispatch.Route) see a type it
+// must not, so the partition is the architectural seam between v1 traffic
+// and v2 traffic.
 var v2OnlyTypes = map[string]bool{
-	TypeRekeyRequest: true,
+	TypeRekeyRequest:   true,
+	TypeTurnState:      true,
+	TypeAssistantDelta: true,
+	TypeToolUse:        true,
+	TypeToolResult:     true,
+	TypeTurnEnd:        true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -100,6 +115,9 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRegisterPushToken,
 		// v2 control types.
 		TypeRekeyRequest,
+		// v2 interactive application events.
+		TypeTurnState, TypeAssistantDelta, TypeToolUse,
+		TypeToolResult, TypeTurnEnd,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]

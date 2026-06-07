@@ -83,3 +83,23 @@ const (
 	// latter.
 	TypeRekeyRequest = "rekey_request"
 )
+
+// Mobile Protocol v2 interactive application-event types. These are
+// additive, capability-gated events the binary pushes to a phone that has
+// advertised the "interactive" capability (docs/protocol-mobile.md
+// § Interactive events). Unlike TypeRekeyRequest (a v2 control envelope
+// intercepted before dispatch.Route), these are outbound binary → phone
+// application events that are never dispatched inbound — but for the
+// v1/v2 partition's purpose they are equally "v2-only".
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: an old
+// phone receives the coarse v1 "message" fan-out, not these. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; these five live in the latter.
+const (
+	TypeTurnState      = "turn_state"
+	TypeAssistantDelta = "assistant_delta"
+	TypeToolUse        = "tool_use"
+	TypeToolResult     = "tool_result"
+	TypeTurnEnd        = "turn_end"
+)
