@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/noise"
@@ -252,5 +254,179 @@ func testV2DaemonDisabledDoesNotEngageV2(t *testing.T) {
 	}
 	if got.Type != protocol.TypeHelloAck {
 		t.Fatalf("reply Type = %q, want %q (v1 hello_ack)", got.Type, protocol.TypeHelloAck)
+	}
+}
+
+// decryptInnerEnvelope base64-decodes a binary→phone noise_msg inner frame,
+// decrypts it under the phone's receive CipherState (whose nonce is
+// sequential — every such frame must be decrypted in capture order), and
+// unmarshals the inner application Envelope. Used for both the solicited ack
+// and the unsolicited assistant-turn messages in the round-trip below.
+func decryptInnerEnvelope(t *testing.T, inner protocol.InnerFrameV2, cs *noise.CipherState) protocol.Envelope {
+	t.Helper()
+	if inner.Type != protocol.TypeNoiseMsg {
+		t.Fatalf("inner frame type = %q, want %q", inner.Type, protocol.TypeNoiseMsg)
+	}
+	cipher, err := base64.StdEncoding.DecodeString(inner.Data)
+	if err != nil {
+		t.Fatalf("decode inner data: %v", err)
+	}
+	plain, err := cs.Decrypt(cipher)
+	if err != nil {
+		t.Fatalf("phone decrypt: %v", err)
+	}
+	var env protocol.Envelope
+	if err := json.Unmarshal(plain, &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	return env
+}
+
+// TestRelayV2_AssistantTurn_BroadcastsMessageEnvelope is the v2 analog of
+// TestRelay_AssistantTurn_BroadcastsMessageEnvelope (#311): it proves the
+// return half of a conversation over the encrypted (Noise) path. A paired
+// phone completes the handshake, sends a sealed send_message (which stamps
+// the supervisor's CurrentConversation cursor and is acked), then triggers
+// fakeclaude to emit a scripted assistant chunk on stdout. The v2
+// assistant-turn bridge (#589) taps Bridge.Write, mints a `message`
+// envelope, and Pushes it sealed to every open v2 session; the phone
+// decrypts it under its session receive key. (AC#1, AC#4.)
+func TestRelayV2_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
+	const (
+		knownConvID        = "88888888-8888-4888-8888-888888888888"
+		knownUserText      = "e2e-589-user:hi\n"
+		knownAssistantText = "e2e-589-assistant:hello v2"
+	)
+
+	home := shortHome(t)
+
+	// Pair: yields the bearer token and the responder static pubkey the phone
+	// pins; the daemon loads the same static key on startup.
+	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
+	if r.ExitCode != 0 {
+		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	}
+	payload := decodePairPayload(t, r.Stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
+
+	// Seed the conversation row the cursor will reference.
+	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
+	convJSON := []byte(`{"conversations":[{"id":"` + knownConvID +
+		`","cwd":"` + home +
+		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
+	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
+		t.Fatalf("seed conversations.json: %v", err)
+	}
+
+	tmp := t.TempDir()
+	sessionsDir := filepath.Join(tmp, "claude-sessions")
+	initialUUID := "99999999-9999-4999-8999-999999999999"
+	rotateTrigger := filepath.Join(tmp, "rotate.trigger.never-created")
+	stdinLog := filepath.Join(tmp, "fakeclaude-stdin.log")
+	asstTrigger := filepath.Join(tmp, "assistant.trigger")
+
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+
+	// fakeclaude on the v2 leg: PYRY_MOBILE_V2=1 selects the Noise manager;
+	// the assistant trigger scripts a finished assistant turn on demand.
+	h := StartRotationWithRelay(t, home, sessionsDir, initialUUID, rotateTrigger,
+		stdinLog, fr.URL()+"/v2/server",
+		"PYRY_MOBILE_V2=1",
+		"PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER="+asstTrigger,
+	)
+	t.Cleanup(func() { h.Stop(t) })
+
+	serverID := readPersistedServerID(t, home)
+	waitBinaryHello(t, fr, serverID)
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, payload.Token, "phone-a")
+	if err != nil {
+		t.Fatalf("phone dial: %v", err)
+	}
+	t.Cleanup(func() { _ = phone.Close() })
+
+	initSend, initRecv := driveHandshakeToOpenDaemon(t, phone, pubKey, payload.Token)
+
+	// Sealed send_message → ack. This stamps CurrentConversation() so the
+	// bridge has a cursor when fakeclaude emits.
+	const reqID uint64 = 21
+	reqEnv, err := json.Marshal(protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeSendMessage,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{
+			ConversationID: knownConvID,
+			MessageID:      "u-1",
+			Text:           knownUserText,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal send_message envelope: %v", err)
+	}
+	ciphertext, err := initSend.Encrypt(reqEnv)
+	if err != nil {
+		t.Fatalf("seal send_message envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, ciphertext)
+
+	ackEnv := decryptInnerEnvelope(t, readInnerFrame(t, phone, 3*time.Second), initRecv)
+	if ackEnv.Type != protocol.TypeAck {
+		t.Fatalf("reply Type = %q, want %q (payload=%s)",
+			ackEnv.Type, protocol.TypeAck, string(ackEnv.Payload))
+	}
+	if ackEnv.InReplyTo == nil || *ackEnv.InReplyTo != reqID {
+		t.Errorf("ack InReplyTo = %v, want pointer to %d", ackEnv.InReplyTo, reqID)
+	}
+
+	// Trigger fakeclaude to emit the scripted assistant chunk on stdout.
+	if err := os.WriteFile(asstTrigger, []byte(knownAssistantText), 0o600); err != nil {
+		t.Fatalf("write assistant trigger: %v", err)
+	}
+
+	// Loop-until-marker, decrypting every binary→phone frame in order (the
+	// receive CipherState nonce is sequential — the phone cannot skip a
+	// frame). Tolerate non-message envelopes and prelude `message` chunks
+	// (TUI banner) until the marker chunk arrives.
+	var matched protocol.Envelope
+	var matchedPayload protocol.MessagePayload
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("did not observe a message envelope containing the assistant marker before deadline")
+		}
+		env := decryptInnerEnvelope(t, readInnerFrame(t, phone, remaining), initRecv)
+		if env.Type != protocol.TypeMessage {
+			continue
+		}
+		var p protocol.MessagePayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatalf("decode message payload: %v", err)
+		}
+		if !strings.Contains(p.Text, knownAssistantText) {
+			continue // prelude chunk; keep draining
+		}
+		matched = env
+		matchedPayload = p
+		break
+	}
+
+	if matched.InReplyTo != nil {
+		t.Errorf("matched.InReplyTo: got %v, want nil (server-initiated)", matched.InReplyTo)
+	}
+	if matchedPayload.ConversationID != knownConvID {
+		t.Errorf("ConversationID: got %q, want %q", matchedPayload.ConversationID, knownConvID)
+	}
+	if matchedPayload.Role != "assistant" {
+		t.Errorf("Role: got %q, want %q", matchedPayload.Role, "assistant")
+	}
+	if !conversations.ValidID(matchedPayload.MessageID) {
+		t.Errorf("MessageID %q is not a valid UUIDv4", matchedPayload.MessageID)
 	}
 }

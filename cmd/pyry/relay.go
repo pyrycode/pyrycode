@@ -138,7 +138,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess, sup, bridge)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -248,6 +248,11 @@ func startRelay(
 // pinned at pairing. On error the leg fails fast at startup, mirroring the
 // identity.LoadOrCreate / devices.Load posture in startRelay's prologue.
 //
+// The assistant-turn bridge (v2) taps Bridge.Write so finished assistant turns
+// fan out to every open v2 session as a sealed `message` envelope (#589). Like
+// the v1 bridge it is skipped in foreground mode (bridge == nil): there is no
+// PTY-output observer surface there, and inbound send_message still works.
+//
 // SECURITY: StaticPriv is the binary's 32-byte X25519 static secret. It is
 // passed to the manager as an opaque slice and is never logged, wrapped into
 // an error, or emitted on any wire surface here — the same contract
@@ -261,6 +266,8 @@ func startRelayV2(
 	serverID identity.ServerID,
 	convReg *conversations.Registry,
 	sess handlers.TurnWriter,
+	sup *supervisor.Supervisor,
+	bridge *supervisor.Bridge,
 ) (drain func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
 	if err != nil {
@@ -293,5 +300,22 @@ func startRelayV2(
 		}
 	}()
 
-	return func() { <-mgrDone }, nil
+	// Tap the PTY output so finished assistant turns fan out to every open
+	// v2 session (#589). mgr is the v2Broadcaster (ActiveConnIDs + Push).
+	// Skip in foreground mode (bridge == nil) — no PTY-output observer there.
+	var bridgeCleanup func()
+	if bridge != nil {
+		bridgeCleanup = startAssistantTurnBridgeV2(ctx, sup, bridge, mgr, logger)
+	}
+
+	return func() {
+		// Stop the observer first so no new PTY chunks queue while the
+		// manager winds down; the cleanup waits for the emitter goroutine on
+		// ctx-cancel (already cancelled by the time drain runs). Then wait
+		// for the manager's Run to exit on the closed Frames channel.
+		if bridgeCleanup != nil {
+			bridgeCleanup()
+		}
+		<-mgrDone
+	}, nil
 }
