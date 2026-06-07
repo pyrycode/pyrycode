@@ -138,6 +138,8 @@ The authoritative shapes land in `docs/protocol-mobile.md` per implementing tick
 5. **Destructive needs explicit confirm (phone UX).** Write/execute/delete classes require a second confirm tap; single-tap grant is reserved for benign classes.
 6. **Audit.** Each remote answer is logged locally (device id, class, decision, time); never on the wire beyond the answer itself. Keys/tokens never logged.
 
+**Viewing is never gated; only acting is.** The per-device gate applies solely to *answering* a modal or permission. Read-only viewing is open to any paired phone: the structured event stream and the on-demand `screen_snapshot` expose nothing beyond what the phone already receives as events, so peeking at the literal screen requires no permission grant. Only acting on the session — granting a permission, answering a modal, sending a message — is subject to the gate. This keeps the snapshot a frictionless escape hatch on any phone while the destructive-action surface stays behind the per-device flag.
+
 This is permission *answering*, default-safe. Tiered permission *scoping* (a phone with less authority than the desk) stays the deferred v3 concern.
 
 ## Safe degradation when a screen parser breaks
