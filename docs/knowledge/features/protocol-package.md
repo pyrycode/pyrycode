@@ -9,29 +9,32 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454)
+├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
 ├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
-├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271)
+├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607)
+├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607) — v2 interactive binary→phone event bodies
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsV1Compatible + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
 ├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
 ├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
-├── handshake_test.go            per-type round-trip for handshake/control payloads (#271)
+├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
+├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads via Envelope.Payload
 └── testdata/                    envelope_full.json, envelope_minimal.json, routing_envelope.json,
                                  register_push_token.json, send_message.json, message.json,
                                  backfill_since.json, message_chunk.json, backfill_done.json,
                                  list_conversations.json, conversations.json,
                                  create_conversation.json, conversation_created.json,
                                  promote_conversation.json, conversation_updated.json,
-                                 hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json
+                                 hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
+                                 turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json
 ```
 
-Seven production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the per-type payload DTOs, one file per spec-section group — the full #256 catalog is now wired.
+Eight production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the v1 per-type payload DTOs, one file per spec-section group — the full #256 catalog is wired — and `interactive.go` (#607) carries the first v2 additive application-event DTOs.
 
 ## Types
 
@@ -228,12 +231,15 @@ type HelloClientPayload struct {
     ClientVersion    string     `json:"client_version"`
     ProtocolVersions []string   `json:"protocol_versions"`
     LastSeenTS       *time.Time `json:"last_seen_ts,omitempty"`
+    Token            string     `json:"token,omitempty"`        // #308; in-band device-pairing token under v2 (plaintext — MUST NOT be logged)
+    Capabilities     []string   `json:"capabilities,omitempty"` // #607; phone's advertised feature set, e.g. [CapabilityInteractive]
 }
 
 type HelloAckPayload struct {
-    ProtocolVersion string `json:"protocol_version"`
-    ServerID        string `json:"server_id"`
-    ConnID          string `json:"conn_id"`
+    ProtocolVersion string   `json:"protocol_version"`
+    ServerID        string   `json:"server_id"`
+    ConnID          string   `json:"conn_id"`
+    Capabilities    []string `json:"capabilities,omitempty"` // #607; daemon's supported feature set (intersection with the phone's claim — enforced in #608)
 }
 
 type ErrorPayload struct {
@@ -253,10 +259,92 @@ Conventions:
 - **`AckPayload` is `struct{}`.** `json.Marshal(AckPayload{})` emits `{}` byte-for-byte, matching the spec's `"payload": {}`.
 - **Field declaration order matches the spec example order.** The JSON encoder emits fields in struct-declaration order; that's what the round-trip byte-equivalence check verifies. Reordering breaks tests.
 - **No constructors, no methods, no validation.** Runtime enforcement of `Role` discriminators (a phone sending `role: "server"`, etc.) is the dispatcher's concern (#248–#250). The `Role` constant is documented in struct comments only.
+- **`Capabilities []string` is additive + `omitempty` (#607).** Both phone-facing hello payloads gained it: the phone advertises its understood features in `hello`, the daemon echoes its supported set in `hello_ack`. `omitempty` is the byte-identical lever — a nil/empty slice drops the key (absent, not `null`), so the unedited `hello_client.json` / `hello_ack.json` fixtures round-trip byte-identically (same precedent as `RoutingEnvelope.Token`). The single defined value is `CapabilityInteractive = "interactive"` (the wire-vocabulary constant lives in `handshake.go` next to the field). This is **advertisement only** — the daemon intersecting the phone's claimed set with its own (echoing only what *it* supports, never blindly mirroring) and the capability-gated fan-out are the consumer's trust decision (#608), not this layer's. `TestHelloClientPayload_CapabilitiesRoundTrip` / `TestHelloAckPayload_CapabilitiesRoundTrip` pin both the round-trip and the omit shape; the pre-existing fixture round-trips stay unchanged as the byte-stability regression guard.
 
 Five fixture files under `testdata/` (one per type, each a complete `Envelope` with the payload inlined) drive five per-type `*_RoundTrip` tests in `handshake_test.go`. The tests reuse `readFixture` and `canonical` helpers from `envelope_test.go`. The byte-equivalence check (`canonical(out) == canonical(raw)`) is the load-bearing assertion; per-type field asserts exist to localise failure messages. The `hello_client.json` fixture's `last_seen_ts: "2026-05-08T08:14:02Z"` (no fractional seconds) pins the `time.RFC3339Nano` no-fractional round-trip behaviour.
 
 Sibling payload slices not yet landed: messaging (`send_message` / `message`), conversations (`list_conversations` / `conversations` / `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated`), backfill (`backfill_since` / `message_chunk` / `backfill_done`), push (`register_push_token`).
+
+## Interactive event payloads (#607)
+
+The first **v2 additive application events** — the wire representation of
+`internal/turnevent`'s neutral turn-event model (#606). All five are **binary →
+phone only**, sent **only** to a phone whose `interactive` capability was echoed in
+`hello_ack`; an old phone never sees them and keeps the coarse v1 `message`
+fan-out. Spec source: `docs/protocol-mobile.md` § Interactive events. They map 1:1
+to the `Type*` constants `TypeTurnState` / `TypeAssistantDelta` / `TypeToolUse` /
+`TypeToolResult` / `TypeTurnEnd`.
+
+```go
+type TurnStatePayload struct {
+    ConversationID string `json:"conversation_id"`
+    State          string `json:"state"` // "thinking" | "responding" | "idle"
+}
+
+type AssistantDeltaPayload struct {
+    ConversationID string `json:"conversation_id"`
+    TurnID         string `json:"turn_id"`
+    Seq            int    `json:"seq"`  // per-turn, non-negative, resets each turn
+    Text           string `json:"text"` // coalesced chunk, not per-token
+}
+
+type ToolUsePayload struct {
+    ConversationID string `json:"conversation_id"`
+    TurnID         string `json:"turn_id"`
+    ToolUseID      string `json:"tool_use_id"`
+    Name           string `json:"name"`
+    InputSummary   string `json:"input_summary"` // human-readable précis, not raw input
+}
+
+type ToolResultPayload struct {
+    ConversationID string `json:"conversation_id"`
+    TurnID         string `json:"turn_id"`
+    ToolUseID      string `json:"tool_use_id"` // matches the tool_use this completes
+    IsError        bool   `json:"is_error"`
+    ResultSummary  string `json:"result_summary"` // human-readable précis, not raw output
+}
+
+type TurnEndPayload struct {
+    ConversationID string `json:"conversation_id"`
+    TurnID         string `json:"turn_id"`
+    StopReason     string `json:"stop_reason"` // turnevent.TurnEndReason values, verbatim
+}
+```
+
+- **No `omitempty` on any field — the deliberate inverse of the handshake/optional
+  discipline.** Every field is always present on the wire so the fixtures pin the
+  full shape and boundary zero-values can't silently vanish: `assistant_delta` with
+  `seq: 0` and `tool_result` with `is_error: false` are pinned exactly. Pick the tag
+  by whether a field's absence is meaningful — here it never is.
+- **`State` and `StopReason` stay plain `string`, not named enums.** Same
+  `MessagePayload.Role` precedent: the closed-set guarantee belongs at the consumer,
+  not in the wire type. `State` is documented (`thinking` / `responding` / `idle`)
+  in the struct doc comment; #608 picks the exact internal-event → state mapping.
+- **`StopReason` carries the `turnevent.TurnEndReason` strings verbatim** (`end_turn`
+  / `max_tokens` / `max_turn_requests` / `refusal` / `cancelled`) **without
+  importing `internal/turnevent`** — `protocol` stays a stdlib-only leaf, and #608
+  produces the field via `string(turnevent.TurnEnd.Reason)`. The wire-value/taxonomy
+  alignment is documented, not enforced by a shared type. ADR 025's base `turn_end`
+  shape is `{conversation_id, turn_id}`; `stop_reason` is the #607 extension per the
+  ticket title, following the "spec follows the code" convention (ADR 025
+  § Consequences).
+- **`Seq` is `int`, not `uint64`.** A per-turn counter that resets each turn (the
+  package count-field idiom: `BackfillDonePayload.Delivered`,
+  `BackfillSincePayload.MaxMessages`); `uint64` is reserved for the
+  session-monotonic `Envelope.ID`.
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to
+  every v1 slice. The intersection-of-capabilities trust decision, the
+  internal-event → envelope mapping, and the capability-gated push all live in the
+  consumer (#608).
+
+Five golden round-trip tests in `interactive_test.go` decode each fixture through
+`Envelope` → `Envelope.Payload` → per-type struct, assert each field (incl. the
+boundary `Seq == 0` / `IsError == false` and `StopReason == "end_turn"`), then
+re-marshal byte-equivalently. The shared `roundTripEnvelope` helper re-marshals the
+**decoded payload struct** (not the original `RawMessage`) back into the envelope —
+that is what pins struct → wire shape, since a missing or reordered json tag only
+surfaces when the bytes are actually re-encoded (the original-`RawMessage`-passthrough
+variant cannot catch it).
 
 ## Predicate: `IsV1Compatible`
 
@@ -334,7 +422,7 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 
 ### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). Two architectural buckets: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and a separate Mobile Protocol v2 control-envelope group whose members are **deliberately NOT** in `v1TypeSet` — they are intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called. Adding a v2-control constant to `v1TypeSet` would silently route the envelope to the v1 handler chain, which is exactly the opposite of what's wanted.
+Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **control envelopes** (`TypeRekeyRequest`, #454), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **additive interactive application events** (the five #607 types), pushed outbound binary → phone and never dispatched inbound. Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
 
 **v1 application types** (16; spec § v1 Message types):
 
@@ -352,7 +440,15 @@ Wire values for `Envelope.Type` (spec § Message types). Two architectural bucke
 |-------|-----------|
 | Re-key | `TypeRekeyRequest` |
 
-`TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out. The two advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
+**v2 interactive application-event types** (#607; spec `docs/protocol-mobile.md` § Interactive events):
+
+| Group | Constants |
+|-------|-----------|
+| Interactive | `TypeTurnState`, `TypeAssistantDelta`, `TypeToolUse`, `TypeToolResult`, `TypeTurnEnd` |
+
+These five live in their **own** const block (not merged into the `TypeRekeyRequest` block) so the doc comment can distinguish control envelopes from application events — but both are "v2-only" for the partition's purpose. `CapabilityInteractive = "interactive"` (the wire-vocabulary constant a phone advertises to opt into this stream) lives in `handshake.go` next to the `Capabilities` field, not here.
+
+`TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out; the interactive block carries the same MUST-NOT instruction. The advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
 
 ## Drift detectors
 
@@ -360,7 +456,7 @@ The v1 type list appears three times: in the `Type*` constants block (`codes.go`
 
 - `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
 - `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist (`map[string]bool{TypeRekeyRequest: true}`); never both, never neither. Forces a future contributor adding a v2-control type to amend the allowlist explicitly. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds six entries (`TypeRekeyRequest` + the five interactive types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 6 == 22`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
@@ -376,6 +472,8 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - `go:generate`-driven membership check — overkill for a 16-entry closed set.
 - A `[]string` slice + linear scan for membership — duplicates the constant names twice (slice + constants); the map literal duplicates them once at the same indentation as the constants block, making drift visible at code review.
 - Per-type payload structs beyond the now-complete #256 catalog — `RegisterPushTokenPayload` (#275), the five messaging + backfill payloads (#272), the conversations-read pair plus row type (#273), the four conversations-write payloads (#274), and the handshake/control payloads (#271). All slices are wired; no more #256 sub-tickets pending.
+- **The interactive bridge, push, and capability trust decision (#607's consumer surface)** — mapping `turnevent` events → the five interactive payloads, the actual push/fan-out, and the daemon intersecting the phone's advertised capabilities with its own supported set all live in #608, never in this leaf package. `interactive.go` is wire vocabulary only.
+- **Other v2 event/control types** — `screen_snapshot`, `modal_*`, `queue_state`, `stall_detected`, and the phone → binary control verbs (`modal_answer`, `interrupt`, …) are deliberately out of scope here; they belong to other #596 children and Phase 3 (#597). Adding them with #607 would breach the S boundary and front-run undesigned trust surfaces.
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.
@@ -407,4 +505,7 @@ No production consumers in this slice. Future:
 - Spec: `docs/protocol-mobile.md` — single source of truth for field names, optionality, wire semantics
 - Convention: `docs/PROJECT-MEMORY.md` § "Refusal-to-wire-code mapping is the consumer's job"
 - Sentinel-pattern precedent: `internal/conversations` (`ErrConversationNotFound` etc.)
-- Future consumers: `internal/dispatch` (#248), `internal/relay-client`, remaining payload slices (sibling tickets to #271)
+- [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Decision 2 (v2-additive + capability negotiation) and § Wire-protocol extension; the decision the #607 interactive payloads + `capabilities` field implement
+- [turnevent-package.md](turnevent-package.md) — the neutral internal turn-event model (#606) the interactive payloads are the wire representation of; `stop_reason` carries its `TurnEndReason` strings verbatim
+- [codebase/607.md](../codebase/607.md) — the #607 implementation note (interactive payloads + capabilities negotiation)
+- Future consumers: `internal/dispatch` (#248), `internal/relay-client`, the interactive event-stream bridge + capability enforcement (#608)

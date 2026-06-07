@@ -140,6 +140,71 @@ func TestHelloAckPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestHelloClientPayload_CapabilitiesRoundTrip pins that an advertised
+// capability set survives marshal→unmarshal, and that an empty/nil set is
+// omitted from the wire (the omitempty byte-stability lever — the
+// "capabilities" key must be absent, not null, so the existing
+// hello_client.json fixture round-trips byte-identically).
+func TestHelloClientPayload_CapabilitiesRoundTrip(t *testing.T) {
+	empty := HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "v"}
+	out, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"capabilities"`)) {
+		t.Errorf("empty Capabilities should be omitted; got %s", out)
+	}
+
+	adv := HelloClientPayload{
+		Role:          "client",
+		DeviceName:    "phone",
+		ClientVersion: "v",
+		Capabilities:  []string{CapabilityInteractive},
+	}
+	out, err = json.Marshal(adv)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back HelloClientPayload
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(back.Capabilities) != 1 || back.Capabilities[0] != CapabilityInteractive {
+		t.Errorf("Capabilities round-trip: got %v, want [%q]", back.Capabilities, CapabilityInteractive)
+	}
+}
+
+// TestHelloAckPayload_CapabilitiesRoundTrip pins the same for the daemon's
+// supported-set echo on hello_ack.
+func TestHelloAckPayload_CapabilitiesRoundTrip(t *testing.T) {
+	empty := HelloAckPayload{ProtocolVersion: "v2", ServerID: "8f7e", ConnID: "c-1"}
+	out, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"capabilities"`)) {
+		t.Errorf("empty Capabilities should be omitted; got %s", out)
+	}
+
+	ack := HelloAckPayload{
+		ProtocolVersion: "v2",
+		ServerID:        "8f7e",
+		ConnID:          "c-1",
+		Capabilities:    []string{CapabilityInteractive},
+	}
+	out, err = json.Marshal(ack)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back HelloAckPayload
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(back.Capabilities) != 1 || back.Capabilities[0] != CapabilityInteractive {
+		t.Errorf("Capabilities round-trip: got %v, want [%q]", back.Capabilities, CapabilityInteractive)
+	}
+}
+
 func TestErrorPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "error.json")
 
