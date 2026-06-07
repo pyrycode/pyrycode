@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method that funnels a concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session (#571), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method that funnels a concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session (#571), exposes an `ActiveConnIDs(ctx)` method that returns a concurrency-safe snapshot of the `conn_id`s of every currently-open session — the enumeration half of the fan-out primitive (#588), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -55,6 +55,18 @@ func (m *V2SessionManager) Rekey(ctx context.Context, connID string) error
 // other than the dispatch goroutine — funneled onto Run so s.send is never
 // touched concurrently with an in-flight reply or a re-key swap.
 func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol.Envelope) error
+
+// Concurrency-safe snapshot of the conn IDs of every session currently in
+// V2StateOpen (#588) — the enumeration half of server-initiated fan-out. The
+// consumer calls this, then Push on each returned id to broadcast one envelope
+// to every connected phone. Safe to call from any goroutine other than the
+// dispatch goroutine — funneled onto Run so m.sessions is never read
+// concurrently with a map write. Result is an unordered set; sessions still
+// handshaking / token-unvalidated are excluded (the same V2StateOpen gate Push
+// enforces). Returns nil on ctx cancellation or after Run has exited — no
+// error, since a snapshot has no failure the caller can act on. v2 analog of
+// v1's dispatch.Dispatcher.ActiveConns().
+func (m *V2SessionManager) ActiveConnIDs(ctx context.Context) []string
 
 // Sentinels returned by Rekey and Push. ErrConnNotFound wraps
 // control.ErrConnNotFound via %w so the slice A dispatcher's errors.Is
@@ -288,6 +300,33 @@ The `device` field on `V2Session` is set exactly once in the handshake token-acc
 
 The `peerStatic` field on `V2Session` (#452) is similarly set exactly once — at step 3a above, before any branch that calls `closeWith`. A token failure (or any later handshake-layer failure) tears the session down via `closeWith` and `delete(m.sessions, s.connID)`, which drops the captured field along with the session entry — a failed handshake leaves no peerStatic to compare against on a future re-key. The field is identity-bearing (the public-static of the paired peer); the doc-comment pins the **MUST NOT log** discipline so a future log-line refactor cannot relax it on the "but it's public" instinct — emitting it makes the binary log a parallel device registry for anyone with log-read access.
 
+### Concurrency-safe open-session enumeration (#588) — `ActiveConnIDs` method + `snapshot` funnel
+
+`ActiveConnIDs(ctx context.Context) []string` is the **enumeration** half of server-initiated fan-out: [`Push`](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) can address one open session by `conn_id`, but cannot discover *which* sessions are open. `ActiveConnIDs` returns a snapshot of the `conn_id`s of every session currently in `V2StateOpen`, so a producer goroutine can fan an unsolicited frame out to all connected phones by calling `ActiveConnIDs` then `Push` per returned id. It is the v2 analog of v1's `dispatch.Dispatcher.ActiveConns()`, and the missing piece [#571](../codebase/571.md) deferred to #572. See [`codebase/588.md`](../codebase/588.md).
+
+It is the structural twin of `Push`/`Rekey`, the **fourth** instance of the single-writer funnel: a new unbuffered `snapshot chan snapshotReq` field + a sixth `Run` select arm route each request onto the single dispatch goroutine, where the private `handleActiveConnIDs` reads `m.sessions` under the single-owner-goroutine invariant — serialised by `Run`'s `select` against every map write (lazy-create, `delete` in `closeWith`, handshake/re-key state transitions). `ActiveConnIDs` itself does only channel I/O on the **caller's** goroutine (a `select` send onto `m.snapshot`, then a `select` receive on the per-request `reply chan []string`, both with `ctx.Done` escape arms returning `nil`); the seal/marshal steps a `Push` would run are simply absent — a snapshot touches no CipherState. No new lock, no new goroutine, no new wire shape, no new exported type beyond the method.
+
+```go
+type snapshotReq struct {
+    reply chan []string // cap=1 per request; Run's reply send is non-blocking
+}
+
+// In Run's select, beside the m.push arm:
+case req := <-m.snapshot:
+    req.reply <- m.handleActiveConnIDs()
+
+// handleActiveConnIDs, on the Run goroutine — the only site reading m.sessions:
+out := make([]string, 0, len(m.sessions))
+for connID, s := range m.sessions {
+    if s.state == V2StateOpen { out = append(out, connID) }
+}
+return out
+```
+
+**The `s.state == V2StateOpen` filter is the load-bearing security gate** (`security-sensitive`). Only an open session has had its token validated (in `handleNoiseInit`'s accept branch); a `V2StateHandshakeComplete` session holds CipherStates but never passed the token check, and is excluded — identical to the gate [`handlePush`](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) enforces, so a server push never reaches an un-authenticated peer. **Belt-and-suspenders, different fabric:** even if this filter regressed, the consumer calls `Push` per returned id and `Push` independently gates on `V2StateOpen` (`ErrSessionNotOpen` for a non-open session) — two deterministic, independent code-level checks in two methods (enumeration filter + `handlePush` gate), neither a stochastic agent rule. A `V2StateClosed` session cannot appear: `closeWith` already `delete`d it from the map.
+
+**Returns `[]string`, not `([]string, error)`.** A snapshot has no failure mode the caller can act on; the only non-completion (ctx cancelled, or `Run` already exited with `Frames` closed and no receiver on `m.snapshot`) returns `nil` — equivalent to "no open sessions" for the broadcast consumer, which fans out to nobody this round and re-enumerates on the next assistant turn. `nil` and an empty non-nil slice are both `len 0` and interchangeable. The result is an **unordered set** (Go's randomized map-iteration order); the handler does not sort (no AC requires it; the broadcast consumer fans out order-independently — paying O(n log n) on the single dispatch goroutine would buy nothing). `handleActiveConnIDs` emits no log line and reads no secret-bearing field — the return holds only non-secret conn-id routing keys, handed only to the in-process consumer, never to a wire.
+
 ## Concurrency
 
 **One owner goroutine + transient `time.AfterFunc` callbacks routed through a wake channel.** `Run` is the only goroutine the manager owns long-term. It reads `cfg.Frames`, looks up (or lazily creates) `m.sessions[env.ConnID]`, processes the frame synchronously, and ALSO pops `wakeSignal` values from a per-manager buffered channel `m.wake` and dispatches them via `handleWake`. `m.sessions` is mutated exclusively by `Run`; no mutex.
@@ -298,7 +337,7 @@ The #450 timer plumbing introduces transient `time.AfterFunc`-spawned goroutines
 
 Intentionally simpler than [`internal/dispatch.Dispatcher`](dispatch-package.md), which spins one goroutine per `conn_id` to absorb handler-side latency. v2 runs handlers synchronously on the manager's single dispatch goroutine — a slow handler stalls dispatch for ALL `conn_id`s, not just the current one. The worst-case stall today is `send_message`'s 30 s `Activate` timeout. This is deliberate for the size:S surface; per-conn fan-out (one goroutine per `conn_id` with a per-session mutex guarding `s.send` / `s.recv`) is the documented production-cutover follow-up and the priority concern before flipping `cmd/pyry/relay.go` to v2.
 
-`V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. The #571 push surface deliberately keeps it that way: `handlePush` reads `s.state` **on the `Run` goroutine** (the request is funneled through `m.push` first), not via a cross-goroutine `State()` call — so the server-initiated push primitive introduces no new reader of `s.state` off the owner goroutine and `State()` still needs no `atomic.Int32`/mutex. Should a future broadcast/enumeration layer (#572) read `s.state` directly from a producer goroutine, that accessor will need the atomic/mutex then — not pre-emptively refactored.
+`V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Both the #571 push surface and the #588 enumeration surface deliberately keep it that way: `handlePush` reads `s.state` **on the `Run` goroutine** (funneled through `m.push`), and `handleActiveConnIDs` reads `s.state` **on the `Run` goroutine** (funneled through `m.snapshot`) — neither via a cross-goroutine `State()` call. So the broadcast/enumeration layer that this comment once anticipated (#572's fan-out, now built on #571's `Push` + #588's `ActiveConnIDs`) introduces **no** new reader of `s.state` off the owner goroutine, and `State()` still needs no `atomic.Int32`/mutex. Should a future slice read `s.state` directly from a producer goroutine *outside* the funnel, that accessor will need the atomic/mutex then — not pre-emptively refactored.
 
 ## Security and log discipline
 
@@ -397,7 +436,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 ## Out of scope (deferred)
 
 - **Production wiring of `V2SessionManager` into `cmd/pyry/relay.go`** — **landed in [#549](../codebase/549.md)** behind `PYRY_MOBILE_V2=1` (see the "Production wiring" line above). Two aspects remain deferred: the assistant-turn `message` fan-out to v2 phones, and the per-conn fan-out below.
-- **Assistant-turn `message` fan-out to v2 phones.** The addressable server-initiated push *primitive* now exists — [`Push`](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) ([#571](../codebase/571.md)) — but the bridge that taps the assistant/PTY output stream (#311) and fans `message` envelopes to connected phones is **not** wired on the v2 leg (the v2 branch does not call `startAssistantTurnBridge`). Two pieces remain, both owned by #572 (the v2 assistant-turn bridge, `blocked-by` #571): (a) **connected-session enumeration** — a snapshot of currently-open `conn_id`s (the v2 analog of v1's `dispatch.Dispatcher.ActiveConns()`), itself a cross-goroutine read of `m.sessions` needing its own snapshot funnel; and (b) **outbound envelope-ID policy** — `Push` leaves `env.ID` to the caller, and #572 decides whether a per-session monotonic ID is needed or whether `MessagePayload.MessageID` (a UUID) suffices. Until #572, `Push` is reachable from `internal/relay` tests only.
+- **Assistant-turn `message` fan-out to v2 phones.** Both primitives the fan-out needs now exist — the addressable server-initiated push [`Push`](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) ([#571](../codebase/571.md)) and the open-session enumeration snapshot [`ActiveConnIDs`](#concurrency-safe-open-session-enumeration-588--activeconnids-method--snapshot-funnel) ([#588](../codebase/588.md)) — but the bridge that taps the assistant/PTY output stream (#311) and fans `message` envelopes to connected phones is **not** wired on the v2 leg (the v2 branch does not call `startAssistantTurnBridge`). What remains, owned by #572 (the v2 assistant-turn bridge, `blocked-by` #571): (a) **the bridge wiring itself** — call `ActiveConnIDs`, then `Push` per returned id, driven off the assistant-turn signal; and (b) **outbound envelope-ID policy** — `Push` leaves `env.ID` to the caller, and #572 decides whether a per-session monotonic ID is needed or whether `MessagePayload.MessageID` (a UUID) suffices. Until #572, both `Push` and `ActiveConnIDs` are reachable from `internal/relay` tests only.
 - **Per-conn fan-out for handler dispatch.** Open-state handler dispatch runs synchronously on the manager's single goroutine; a long-running handler stalls all conns. The follow-up spawns one goroutine per `conn_id` with a per-session mutex guarding `s.send` / `s.recv` (mirroring `dispatch.Dispatcher.runConn`). Priority concern before production cutover.
 - Operator-facing `pyry rekey <conn_id>` verb — sibling slice B2 of #460 (re-split of #451). CLI surface for manual re-key; uses slice A's [`control.Rekey`](control-plane.md#client-helper) client helper to call `*V2SessionManager.Rekey` (shipped in #462), which reuses this slice's `emitRekeyRequest` plumbing with `payload.reason == "manual"`. The `"compromise"` value remains reserved for a future caller.
 - Control-socket wiring of `(*V2SessionManager).Rekey` — still deferred. As of [#549](../codebase/549.md) the daemon constructs the manager and drives `Run` (so `NewV2SessionManager` now has a production caller), but it does **not** call `ctrlServer.SetRekeyer(mgr)`. Until that wire-up lands, the #462 `Rekey` method (hence `pyry rekey <conn_id>`) is reachable from `internal/relay` tests only.
@@ -431,5 +470,6 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`codebase/462.md`](../codebase/462.md) — manager-side manual-rekey trigger; `Rekey` method + `manualRekey` channel + `handleManualRekey` + `emitRekeyRequest(reason)` refactor + `ErrConnNotFound`/`ErrSessionNotOpen` sentinels.
 - [`codebase/549.md`](../codebase/549.md) — daemon cutover behind `PYRY_MOBILE_V2=1`; `NewV2SessionManager`'s first production caller.
 - [`codebase/571.md`](../codebase/571.md) — concurrency-safe server-initiated push; `Push` method + `pushReq`/`push` channel + `handlePush`, the structural twin of the #462 rekey funnel. The primitive #572's assistant-turn bridge consumes.
+- [`codebase/588.md`](../codebase/588.md) — concurrency-safe open-session enumeration; `ActiveConnIDs` method + `snapshotReq`/`snapshot` channel + `handleActiveConnIDs`, the structural twin of the #571 push funnel (seal/marshal steps dropped). The enumeration half #571 deferred; with `Push` it completes the fan-out primitive #572's bridge consumes.
 - [`features/dispatch-package.md`](dispatch-package.md) — `Route` and `NewConn` (the production-allowed counterpart to `NewTestConn`).
 - [`features/relay-package.md`](relay-package.md) — the v1 surfaces of `internal/relay`.
