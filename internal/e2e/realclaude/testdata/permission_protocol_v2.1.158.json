@@ -39,8 +39,8 @@
     {
       "type": "system",
       "subtype": "init",
-      "cwd": "/private/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike157585152/001",
-      "session_id": "effaad3f-b8e4-42c3-bb00-262f69c4c00e",
+      "cwd": "/private/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike2836717316/001",
+      "session_id": "af7fb4e7-3342-41a2-bffb-ee8b4244a63e",
       "tools": [
         "Task",
         "AskUserQuestion",
@@ -138,9 +138,9 @@
       "plugins": [],
       "analytics_disabled": false,
       "product_feedback_disabled": false,
-      "uuid": "259d209a-7bd7-4d4a-91ca-27b5430b1272",
+      "uuid": "87690e90-849b-4091-9697-585f26bc0493",
       "memory_paths": {
-        "auto": "/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike157585152/001/.claude/projects/-private-tmp-claude-501-TestRealClaude-PermissionProtocol-Spike157585152-001/memory/"
+        "auto": "/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike2836717316/001/.claude/projects/-private-tmp-claude-501-TestRealClaude-PermissionProtocol-Spike2836717316-001/memory/"
       },
       "fast_mode_state": "off"
     },
@@ -150,25 +150,25 @@
         "status": "allowed_warning",
         "resetsAt": 1780898400,
         "rateLimitType": "seven_day",
-        "utilization": 0.75,
+        "utilization": 0.76,
         "isUsingOverage": false,
         "surpassedThreshold": 0.75
       },
-      "uuid": "98d3289a-d7ac-449f-bc3c-db7cd525f19b",
-      "session_id": "effaad3f-b8e4-42c3-bb00-262f69c4c00e"
+      "uuid": "8a14480f-3d51-463f-9b2d-436136d2979b",
+      "session_id": "af7fb4e7-3342-41a2-bffb-ee8b4244a63e"
     },
     {
       "type": "assistant",
       "message": {
         "model": "claude-haiku-4-5-20251001",
-        "id": "msg_01QipsbhvcmmU5dvZhmrtLUR",
+        "id": "msg_019KaLjDPDBxx57n1TNutiH3",
         "type": "message",
         "role": "assistant",
         "content": [
           {
             "type": "thinking",
-            "thinking": "The user is asking me to run `ls -la` in the current directory and report the result. This is a straightforward request to list files with detailed information.\n\nI'll use the Bash tool to execute this command in the primary working directory.",
-            "signature": "EsIDCm0IDhgCKkB6OIj4WwYdShG8liCwqyygFGK4fPR/YCg5qs0DaMjF4JSfVCQd8DyQIOFPwAnDIBwXN4icYEsr3pLilL3xFs60MhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOABCCHRoaW5raW5nEgw/4V1WizQOvaBQYr4aDAM5EhuI3hetaszoYyIwtzky3fXTseu2Ho3/rrXysUtZ1WGxPOwifE3LQKXaDk4hYQIAxIubkpuRcofg0NEtKoICgN5OxFzrxS2Onpa+Hyl995muNh6qziiXWX1853RXOinBKnVZ+r1vfAYBUxlTqNuGld69aPzJSn2/hyhymnL1Cks+384itfCBoIFCCkoQI/oIGCTStd+F4g5jinDbgSZOxjQuVLlH6yR70eCvlTSzxfR5WZyIKkxVXVf+RFxEqNY6X5rBWRNbISdajQBx8WNXHo2+rZe/VpjpVusp7xKGqgQ0zPm8TuG6P6/wE492mCLCpHqimjoRyyYhK95DbPGqBZDcChIltf9zh5VwFNvq6zAJGIDljKarLvTTbxKv8LoPxEj0qhK4dEwQLRt4MhaWDjWAetclN63uLusqd/czO+jZGAE="
+            "thinking": "The user is asking me to run `ls -la` in the current directory and report the result. This is a straightforward task using the Bash tool.\n\nLet me run this command.",
+            "signature": "EvMCCm0IDhgCKkBrK4gBuRm2L1ZTRACPAQwTG1/OAphicME5U/EvR7xaWk1Llgbdy31s3avdKYu8WGAC0CLxicyLs3KN+2QOmldAMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOABCCHRoaW5raW5nEgxAd0tZoe4GdFsowKcaDNLUF2k9ok4CG8Sv3yIwRLiaGPq2b0bpGpiYw5zUiaPXNffggiO3F7parqzoNn/KMt5pZrpAx6YeVwC2jWXWKrMBCF/WEyqM7KenC8Ngu4AKk+lkz3BMcJtormHXQt3JTOfye9kz4lvVQeC9Q0PsUB0ejoir8K+IhVQxlt74S4tmkkePpxpYvh1Yu+i6asEPCimqxpSaB6mdhJaGY+IzhYHfCAJHZNgIUDcz5t6bDGigKMc+XbLJfApH95c1ltQo1sBUrPpJg8DI8LL3rUhAfZq0Diwo5TVlOfBPeWHSwNag8BaVNO0XtcuD3Rbx9+LvpfTAWCAYAQ=="
           }
         ],
         "stop_reason": null,
@@ -176,11 +176,11 @@
         "stop_details": null,
         "usage": {
           "input_tokens": 10,
-          "cache_creation_input_tokens": 5887,
+          "cache_creation_input_tokens": 5891,
           "cache_read_input_tokens": 17927,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 5887
+            "ephemeral_1h_input_tokens": 5891
           },
           "output_tokens": 1,
           "service_tier": "standard",
@@ -190,25 +190,25 @@
         "context_management": null
       },
       "parent_tool_use_id": null,
-      "session_id": "effaad3f-b8e4-42c3-bb00-262f69c4c00e",
-      "uuid": "6136d747-1e44-48cb-823d-fb7a99df3b97",
-      "request_id": "req_011CbpcWEMECRUYn2FspxCxE"
+      "session_id": "af7fb4e7-3342-41a2-bffb-ee8b4244a63e",
+      "uuid": "d397e5fa-9945-4167-a37b-6bcd96fedd01",
+      "request_id": "req_011Cbpgu5CB6dBXnjjjX7bqW"
     },
     {
       "type": "assistant",
       "message": {
         "model": "claude-haiku-4-5-20251001",
-        "id": "msg_01QipsbhvcmmU5dvZhmrtLUR",
+        "id": "msg_019KaLjDPDBxx57n1TNutiH3",
         "type": "message",
         "role": "assistant",
         "content": [
           {
             "type": "tool_use",
-            "id": "toolu_01RD1G7vaLQNaK4TbLSuriiM",
+            "id": "toolu_01TvdobmqfU9mXr17bRDntWq",
             "name": "Bash",
             "input": {
               "command": "ls -la",
-              "description": "List files in current directory with details"
+              "description": "List files and directories in the current directory with details"
             },
             "caller": {
               "type": "direct"
@@ -220,11 +220,11 @@
         "stop_details": null,
         "usage": {
           "input_tokens": 10,
-          "cache_creation_input_tokens": 5887,
+          "cache_creation_input_tokens": 5891,
           "cache_read_input_tokens": 17927,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 5887
+            "ephemeral_1h_input_tokens": 5891
           },
           "output_tokens": 1,
           "service_tier": "standard",
@@ -234,9 +234,9 @@
         "context_management": null
       },
       "parent_tool_use_id": null,
-      "session_id": "effaad3f-b8e4-42c3-bb00-262f69c4c00e",
-      "uuid": "37909479-a3e4-4681-950d-77d5f2449fac",
-      "request_id": "req_011CbpcWEMECRUYn2FspxCxE"
+      "session_id": "af7fb4e7-3342-41a2-bffb-ee8b4244a63e",
+      "uuid": "0005d4c2-3a81-4ce7-a54c-ff46e5392d53",
+      "request_id": "req_011Cbpgu5CB6dBXnjjjX7bqW"
     },
     {
       "type": "user",
@@ -244,19 +244,19 @@
         "role": "user",
         "content": [
           {
-            "tool_use_id": "toolu_01RD1G7vaLQNaK4TbLSuriiM",
+            "tool_use_id": "toolu_01TvdobmqfU9mXr17bRDntWq",
             "type": "tool_result",
-            "content": "total 728\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun  8 00:31 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun  8 00:31 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun  8 00:31 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  369940 Jun  8 00:31 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun  8 00:31 Library",
+            "content": "total 728\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun  8 01:28 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun  8 01:28 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun  8 01:28 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  371198 Jun  8 01:28 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun  8 01:28 Library",
             "is_error": false
           }
         ]
       },
       "parent_tool_use_id": null,
-      "session_id": "effaad3f-b8e4-42c3-bb00-262f69c4c00e",
-      "uuid": "6f9d15e2-6ae9-4189-9265-d50711957543",
-      "timestamp": "2026-06-07T21:31:07.945Z",
+      "session_id": "af7fb4e7-3342-41a2-bffb-ee8b4244a63e",
+      "uuid": "01f4f8a3-d9ae-41fb-877c-37706431ca87",
+      "timestamp": "2026-06-07T22:28:44.799Z",
       "tool_use_result": {
-        "stdout": "total 728\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun  8 00:31 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun  8 00:31 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun  8 00:31 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  369940 Jun  8 00:31 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun  8 00:31 Library",
+        "stdout": "total 728\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun  8 01:28 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun  8 01:28 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun  8 01:28 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  371198 Jun  8 01:28 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun  8 01:28 Library",
         "stderr": "",
         "interrupted": false,
         "isImage": false,
@@ -267,13 +267,13 @@
       "type": "assistant",
       "message": {
         "model": "claude-haiku-4-5-20251001",
-        "id": "msg_01J5PcW7uPKPWjqbCTbjWy7a",
+        "id": "msg_01TEVfvnQZjBYxy9PPwmukwY",
         "type": "message",
         "role": "assistant",
         "content": [
           {
             "type": "text",
-            "text": "The current directory contains:\n- `.claude/` — Claude Code configuration directory\n- `.claude.json` — Claude Code state file (369 KB)\n- `Library/` — a subdirectory"
+            "text": "The current directory contains:\n- `.claude/` — Claude Code configuration directory\n- `.claude.json` — Session data file (371 KB)\n- `Library/` — A subdirectory\n- Standard parent directory references (`.` and `..`)"
           }
         ],
         "stop_reason": null,
@@ -281,11 +281,11 @@
         "stop_details": null,
         "usage": {
           "input_tokens": 6,
-          "cache_creation_input_tokens": 5971,
+          "cache_creation_input_tokens": 5978,
           "cache_read_input_tokens": 17927,
           "cache_creation": {
             "ephemeral_5m_input_tokens": 0,
-            "ephemeral_1h_input_tokens": 5971
+            "ephemeral_1h_input_tokens": 5978
           },
           "output_tokens": 1,
           "service_tier": "standard",
@@ -294,53 +294,53 @@
         "diagnostics": {
           "cache_miss_reason": {
             "type": "messages_changed",
-            "cache_missed_input_tokens": 6123
+            "cache_missed_input_tokens": 6129
           }
         },
         "context_management": null
       },
       "parent_tool_use_id": null,
-      "session_id": "effaad3f-b8e4-42c3-bb00-262f69c4c00e",
-      "uuid": "f6d1a734-a5d5-48e9-ab40-40f0ddf3e668",
-      "request_id": "req_011CbpcWQp2KN532qKY48sXE"
+      "session_id": "af7fb4e7-3342-41a2-bffb-ee8b4244a63e",
+      "uuid": "f994e228-f2fd-4a3d-a2d2-54de8a337ea0",
+      "request_id": "req_011CbpguFWnhyFkE8Ecc4CeV"
     },
     {
       "type": "result",
       "subtype": "success",
       "is_error": false,
       "api_error_status": null,
-      "duration_ms": 4168,
-      "duration_api_ms": 5596,
-      "ttft_ms": 2354,
+      "duration_ms": 4600,
+      "duration_api_ms": 5912,
+      "ttft_ms": 1858,
       "num_turns": 2,
-      "result": "The current directory contains:\n- `.claude/` — Claude Code configuration directory\n- `.claude.json` — Claude Code state file (369 KB)\n- `Library/` — a subdirectory",
+      "result": "The current directory contains:\n- `.claude/` — Claude Code configuration directory\n- `.claude.json` — Session data file (371 KB)\n- `Library/` — A subdirectory\n- Standard parent directory references (`.` and `..`)",
       "stop_reason": "end_turn",
-      "session_id": "effaad3f-b8e4-42c3-bb00-262f69c4c00e",
-      "total_cost_usd": 0.0198669,
+      "session_id": "af7fb4e7-3342-41a2-bffb-ee8b4244a63e",
+      "total_cost_usd": 0.01989565,
       "usage": {
         "input_tokens": 16,
-        "cache_creation_input_tokens": 11858,
+        "cache_creation_input_tokens": 11869,
         "cache_read_input_tokens": 35854,
-        "output_tokens": 184,
+        "output_tokens": 187,
         "server_tool_use": {
           "web_search_requests": 0,
           "web_fetch_requests": 0
         },
         "service_tier": "standard",
         "cache_creation": {
-          "ephemeral_1h_input_tokens": 11858,
+          "ephemeral_1h_input_tokens": 11869,
           "ephemeral_5m_input_tokens": 0
         },
         "inference_geo": "not_available",
         "iterations": [
           {
             "input_tokens": 6,
-            "output_tokens": 47,
+            "output_tokens": 59,
             "cache_read_input_tokens": 17927,
-            "cache_creation_input_tokens": 5971,
+            "cache_creation_input_tokens": 5978,
             "cache_creation": {
               "ephemeral_5m_input_tokens": 0,
-              "ephemeral_1h_input_tokens": 5971
+              "ephemeral_1h_input_tokens": 5978
             },
             "type": "message"
           }
@@ -360,11 +360,11 @@
         },
         "claude-haiku-4-5": {
           "inputTokens": 16,
-          "outputTokens": 184,
+          "outputTokens": 187,
           "cacheReadInputTokens": 35854,
-          "cacheCreationInputTokens": 11858,
+          "cacheCreationInputTokens": 11869,
           "webSearchRequests": 0,
-          "costUSD": 0.019343899999999997,
+          "costUSD": 0.01937265,
           "contextWindow": 200000,
           "maxOutputTokens": 32000
         }
@@ -372,11 +372,11 @@
       "permission_denials": [],
       "terminal_reason": "completed",
       "fast_mode_state": "off",
-      "uuid": "b6aff8f0-59a0-458e-9abd-43b249ddee41"
+      "uuid": "84371bb6-2ae1-41e8-930c-d09cbd7dc417"
     }
   ],
   "stderr_capture": "",
   "exit_code": 0,
   "context_deadline_tripped": false,
-  "duration_ms": 5196
+  "duration_ms": 5595
 }

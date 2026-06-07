@@ -264,6 +264,30 @@ func (s *Supervisor) CurrentConversation() string {
 	return s.currentConvID
 }
 
+// ScreenSnapshot renders the current claude screen to plain text. live is false
+// when no claude child is attached (between restarts, mid-spawn, or idle-
+// evicted); text is "" then. Safe for concurrent use and non-blocking: it
+// captures the live Session under sessMu (a pointer read), releases the lock,
+// then does a bounded in-memory VT100 render — no I/O, no channel ops — so it
+// never wedges the caller. It backs the relay's on-demand request_snapshot
+// (ADR 025 § Safe degradation), the parser-independent live-view escape hatch.
+//
+// SECURITY: the raw bytes from sess.Snapshot() are consumed by tuidriver.Render
+// in the same expression and are never named or stored in pyrycode, so no
+// claude-screen literal enters this package (cmd/substrate-guard stays green).
+// The render runs inside the tui-driver seal; pyrycode forwards only the opaque
+// rendered text. 0,0 selects tui-driver's default grid, matching the daemon
+// PTY's allocation, so the render is 1:1 in headless mode.
+func (s *Supervisor) ScreenSnapshot() (text string, live bool) {
+	s.sessMu.Lock()
+	sess := s.sess
+	s.sessMu.Unlock()
+	if sess == nil {
+		return "", false
+	}
+	return tuidriver.Render(sess.Snapshot(), 0, 0), true
+}
+
 // setSession registers (or clears, when sess is nil) the hosted Session for
 // the current runOnce iteration. setSession(nil) before the actual Close means
 // a WriteUserTurn that captures the pointer afterwards sees nil and fails loud.
