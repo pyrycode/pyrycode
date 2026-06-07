@@ -8,14 +8,17 @@ binary ↔ relay ↔ phone — without depending on the `pyrycode-relay`
 binary or live infrastructure.
 
 Phase: #295 ships the package in isolation (no consumers wired). #296
-ships the sibling fake-phone client. #301 extends the harness with
-binary-direct `hello`/`hello_ack` dispatch and a WS-4409 close mode so
-the real `pyry` daemon can complete its binary↔relay handshake against
-the harness; the e2e test in `internal/e2e/relay_test.go` is the first
-production consumer. #581 migrates the suite's *readiness gates* off
-`LastBinaryHello`-polling onto `WaitBinary` — the consumer-migration slice
-of #569's Strangler Fig (#581 migrates readers → #582 retires the handshake
-→ #583 removes the `LastBinaryHello` accessor).
+ships the sibling fake-phone client. #301 added a binary-direct
+`hello`/`hello_ack` dispatch and a WS-4409 close mode so the real `pyry`
+daemon could complete its binary↔relay handshake against the harness; the
+e2e test in `internal/e2e/relay_test.go` is the first production consumer.
+The Strangler Fig of #569 then retired that handshake end-to-end:
+**#581 migrated the suite's readiness gates off `LastBinaryHello`-polling
+onto `WaitBinary` → #582 retired the binary↔relay handshake in the real
+binary (the leg is now established on WS upgrade, header-registered) →
+#583 removed the now-dead binary-direct hello dispatch and the
+`LastBinaryHello` accessor from this harness.** The WS-4409 close mode
+stays. See [`codebase/583.md`](../codebase/583.md).
 
 ## Surface
 
@@ -28,7 +31,6 @@ func (*Server) Close() error            // idempotent, always nil
 
 // e2e test hooks (#301)
 func (*Server) RejectNextBinaryWith4409()                       // arm one-shot WS 4409
-func (*Server) LastBinaryHello(serverID string) (protocol.Envelope, bool)
 func (*Server) ForceCloseBinary(serverID string) bool           // close with 1011 (StatusInternalError)
 func (*Server) WaitBinary(ctx context.Context, serverID string) bool  // (#371) block until s.binaries[serverID] is registered
 ```
@@ -36,18 +38,19 @@ func (*Server) WaitBinary(ctx context.Context, serverID string) bool  // (#371) 
 `WaitBinary` exists because `websocket.Accept` writes the 101 response —
 unblocking the test's `websocket.Dial` — *before* `handleBinary` finishes
 inserting into `s.binaries` under `s.mu`. Tests that probe server-side
-bookkeeping immediately after a raw dial (`ForceCloseBinary`,
-`LastBinaryHello`, future probes) must synchronize on a positive signal
-or race the handler under `-race`. Polls every 2 ms on a `time.Ticker`
-under the caller's ctx; returns `true` on registration, `false` on ctx
-expiry. `WaitBinary` first served raw-dial unit tests (#371) while e2e
-tests polled `LastBinaryHello`; **as of #581 every e2e readiness gate uses
-`WaitBinary` too** — the suite no longer polls `LastBinaryHello` to detect
-that the binary is up, decoupling readiness from the relay-leg hello ahead
-of #582 retiring that handshake. `LastBinaryHello` is now read only as a
-payload-assertion accessor (`TestRelay_Hello`) and is removed in #583 once
-nothing reads it. See [`codebase/371.md`](../codebase/371.md) and
-[`codebase/581.md`](../codebase/581.md).
+bookkeeping immediately after a raw dial (`ForceCloseBinary` and future
+probes) must synchronize on a positive signal or race the handler under
+`-race`. Polls every 2 ms on a `time.Ticker` under the caller's ctx;
+returns `true` on registration, `false` on ctx expiry. `WaitBinary` first
+served raw-dial unit tests (#371); **as of #581 every e2e readiness gate
+uses it too**, detecting that the binary is up from its WS-upgrade
+registration (`x-pyrycode-server` → `s.binaries`) rather than from a
+relay-leg hello. That decoupling is what let #582 retire the binary↔relay
+handshake and #583 remove this harness's binary-direct hello dispatch +
+`LastBinaryHello` accessor with no readiness fallout. See
+[`codebase/371.md`](../codebase/371.md),
+[`codebase/581.md`](../codebase/581.md), and
+[`codebase/583.md`](../codebase/583.md).
 
 Callers append `/v1/server` (binary upgrade) or `/v1/client` (phone
 upgrade) to `URL()`. No `Config` struct yet — every test wants "boot it,
@@ -102,17 +105,18 @@ connects follow the normal HTTP-409 first-claim-wins path. Exists for
 the `TestRelay_4409` e2e test that needs the production-shaped WS close
 code rather than the HTTP-409 substitution.
 
-### Binary-direct hello dispatch (#301)
+### No binary-direct (no-conn_id) handling — removed #583
 
-When a binary sends an envelope **without** a `conn_id` in the outer
-routing wrapper, `binaryRecvPump` decodes the raw bytes a second time as
-`protocol.Envelope` and dispatches by `Type`. Today only
-`protocol.TypeHello` is handled: capture under `s.mu` keyed by
-`serverID` (read via `LastBinaryHello`), then reply with a
-routing-wrapped `Envelope{Type:TypeHelloAck, InReplyTo:&helloID,
-Payload:HelloAckPayload{ProtocolVersion:"v1", ServerID, ConnID:"-"}}`.
-Other binary-direct types log at debug and drop — the dispatcher slice
-takes over later. The routing-envelope path (frames with `conn_id`) is
+Through #301–#582 the harness carried a binary-direct path: an envelope
+sent **without** a `conn_id` was decoded a second time as
+`protocol.Envelope` and, if `TypeHello`, captured (`LastBinaryHello`) and
+answered with a synthesized routing-wrapped `hello_ack`. #582 retired the
+binary↔relay hello in the real binary (the leg is now established on WS
+upgrade, server-id header-registered), so no binary ever sends such a
+frame. #583 removed the dispatch branch, `handleBinaryDirect`, the
+`lastBinaryHello` map, and the `LastBinaryHello` accessor. A stray
+no-conn_id frame now falls through to the ordinary unknown-`conn_id`
+drop (below). The routing-envelope path (frames with `conn_id`) is
 unchanged.
 
 ## Routing rules (`docs/protocol-mobile.md` § Routing envelope)
@@ -130,10 +134,12 @@ relay → phone:    raw frame bytes  [then WS close(close_code) if non-zero]
 - Phone is expected to send well-formed JSON; the wrapper places `frame`
   as `RawMessage` and requires `json.Valid(data)` (a non-JSON phone
   frame tears the phone down with a Debug log).
-- Malformed binary wrappers or unknown `conn_id`s are
-  **Debug-logged-and-dropped** (not relay-shutdown) — surfaces as a
-  missing receive in the consumer test rather than a relay-side shutdown
-  that masks the cause.
+- Malformed binary wrappers, or frames whose `conn_id` is empty or
+  unknown, are **Debug-logged-and-dropped** (not relay-shutdown) —
+  surfaces as a missing receive in the consumer test rather than a
+  relay-side shutdown that masks the cause. (Since #583 an empty-`conn_id`
+  binary-direct frame is no longer special-cased: `s.phones[""]` is always
+  a miss, so it lands in this drop like any unknown `conn_id`.)
 - **Token injection (#308).** On the **first** phone→binary frame for
   each `conn_id`, the harness embeds the upgrade-time
   `x-pyrycode-token` value into `RoutingEnvelope.Token`; subsequent
@@ -207,8 +213,9 @@ doomed conn.
   status is the harness's substitution. (`4409` is supported as a
   one-shot opt-in via `RejectNextBinaryWith4409` — see above.)
 - **Token-contents validation.** Any non-empty token accepted.
-- **Binary-direct envelope dispatch beyond `hello`.** Other types log at
-  debug and drop; the dispatcher slice consumes them.
+- **Binary-direct (no-conn_id) control frames.** The binary↔relay leg
+  carries none post-#582; the harness no longer synthesizes a `hello_ack`
+  and any stray no-conn_id frame is dropped (see Routing rules).
 - **Persistence, rate limiting, throttling.** Maps live for the
   `Server`'s lifetime; no quotas.
 
@@ -216,8 +223,8 @@ doomed conn.
 
 ```
 internal/e2e/internal/fakerelay/
-  fakerelay.go        ~425 LOC, package fakerelay, no build tag
-  fakerelay_test.go   ~400 LOC, no build tag (stdlib testing)
+  fakerelay.go        ~565 LOC, package fakerelay, no build tag
+  fakerelay_test.go   ~490 LOC, no build tag (stdlib testing)
 ```
 
 No build tag on either file: the package is `internal/e2e/internal/`-fenced
