@@ -113,6 +113,15 @@ type pushReq struct {
 	reply  chan error
 }
 
+// snapshotReq is enqueued by (*V2SessionManager).ActiveConnIDs and dequeued
+// by Run on the snapshot channel arm. reply is per-request (cap=1) so Run's
+// reply send is non-blocking even if the caller's ctx fires between enqueue
+// and reply. Mirrors pushReq minus the per-conn inputs — a snapshot takes no
+// addressed-conn argument.
+type snapshotReq struct {
+	reply chan []string
+}
+
 // wakeBufferSize sizes the manager's wake channel. The 1-hour rekey
 // cadence makes concurrent fires across sessions vanishingly rare; 16
 // is a generous safety margin that absorbs the realistic worst case
@@ -354,6 +363,15 @@ type V2SessionManager struct {
 	// escape arm. Not closed by the manager on Run exit; in-flight callers
 	// unblock via ctx.Done.
 	push chan pushReq
+
+	// snapshot funnels (*V2SessionManager).ActiveConnIDs calls onto Run's
+	// dispatch goroutine so the read of m.sessions runs under the
+	// single-owner-goroutine invariant, serialised against every map write
+	// (lazy-create, delete, state transitions). Unbuffered: backpressure is
+	// correct — if Run is busy, ActiveConnIDs waits; the caller's ctx is the
+	// escape arm. Not closed by the manager on Run exit; in-flight callers
+	// unblock via ctx.Done.
+	snapshot chan snapshotReq
 }
 
 // NewV2SessionManager validates cfg and returns a ready manager. Panics
@@ -386,6 +404,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		wake:        make(chan wakeSignal, wakeBufferSize),
 		manualRekey: make(chan manualRekeyReq),
 		push:        make(chan pushReq),
+		snapshot:    make(chan snapshotReq),
 	}, nil
 }
 
@@ -416,6 +435,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case req := <-m.push:
 			req.reply <- m.handlePush(runCtx, req.connID, req.env)
+		case req := <-m.snapshot:
+			req.reply <- m.handleActiveConnIDs()
 		}
 	}
 }
@@ -1388,5 +1409,72 @@ func (m *V2SessionManager) handlePush(_ context.Context, connID string, env prot
 	}
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
 	return nil
+}
+
+// ActiveConnIDs returns a snapshot of the conn IDs of every session currently
+// in V2StateOpen — the authenticated, token-validated sessions to which Push
+// may deliver. The result is an unordered set (Go's randomized map-iteration
+// order); a caller that needs a stable order must sort it.
+//
+// Safe to call from any goroutine other than the dispatch goroutine: the
+// request is funneled onto Run via m.snapshot so m.sessions is never read
+// concurrently with an in-flight handshake transition, dispatchAppFrame
+// reply, re-key swap, or closeWith teardown. It is the enumeration half of
+// the server-initiated fan-out primitive — the consumer (#572's assistant-
+// turn bridge) calls this, then Push on each returned id to fan one
+// unsolicited message envelope out to every connected phone. It is the v2
+// analog of v1's dispatch.Dispatcher.ActiveConns().
+//
+// Sessions still handshaking (V2StateAwaitingInit) or handshake-complete-but-
+// token-unvalidated (V2StateHandshakeComplete) are excluded — the same
+// V2StateOpen security gate handlePush enforces, so a server push never
+// reaches an un-authenticated peer. A torn-down session (deleted from the map
+// by closeWith) cannot appear.
+//
+// Returns nil on caller ctx cancellation, or when Run has already exited
+// (Frames closed, no receiver on m.snapshot) and the caller's ctx then fires
+// — both equivalent to "no open sessions" for the broadcast consumer, which
+// fans out to nobody this round and re-enumerates on the next turn. nil and an
+// empty non-nil slice are interchangeable (both len 0); a snapshot has no
+// failure the caller can act on, so no error is returned.
+//
+// Production wire-up of *V2SessionManager into the cmd/pyry daemon for
+// server-initiated fan-out lands in a separate ticket (#572); until then this
+// method is reachable only from internal/relay tests.
+func (m *V2SessionManager) ActiveConnIDs(ctx context.Context) []string {
+	req := snapshotReq{reply: make(chan []string, 1)}
+	select {
+	case m.snapshot <- req:
+	case <-ctx.Done():
+		return nil
+	}
+	select {
+	case ids := <-req.reply:
+		return ids
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+// handleActiveConnIDs runs on Run's dispatch goroutine — the only site that
+// reads m.sessions for the snapshot, serialised by Run's select against every
+// map write (lazy-create in handleFrame, delete in closeWith, state
+// transitions in the handshake handlers). No read can observe a half-updated
+// map or a torn s.state.
+//
+// The returned slice is freshly allocated and owned by the caller; it holds
+// only conn-id strings (non-secret routing identifiers), never a *V2Session
+// or any key/plaintext bytes. Order is Go's randomized map-iteration order —
+// an unordered set by design: the AC requires no ordering and the broadcast
+// consumer fans out order-independently, so no O(n log n) sort is paid on the
+// single dispatch goroutine.
+func (m *V2SessionManager) handleActiveConnIDs() []string {
+	out := make([]string, 0, len(m.sessions))
+	for connID, s := range m.sessions {
+		if s.state == V2StateOpen {
+			out = append(out, connID)
+		}
+	}
+	return out
 }
 
