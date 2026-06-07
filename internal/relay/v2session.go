@@ -261,9 +261,20 @@ func (s *V2Session) rekeyComplete(m *V2SessionManager, ctx context.Context) {
 	s.rekeyTimer = m.armRekeyTimer(ctx, s)
 }
 
-// V2SessionConfig parameterises V2SessionManager. All fields are
-// required; NewV2SessionManager validates and panics or errors on
-// missing required values per the documentation below.
+// ScreenSnapshotter renders the daemon's live claude screen to plain text:
+// text is the rendered screen, live is false (and text "") when no claude
+// child is attached. *supervisor.Supervisor satisfies it. Declared here, in
+// the consumer, so internal/relay depends on neither internal/supervisor nor
+// tui-driver (CODING-STYLE: define interfaces where they are consumed).
+type ScreenSnapshotter interface {
+	ScreenSnapshot() (text string, live bool)
+}
+
+// V2SessionConfig parameterises V2SessionManager. The handshake/transport
+// fields are required; NewV2SessionManager validates and panics or errors on
+// missing required values per the documentation below. Handlers, Snapshotter,
+// and KnownConversation are optional — their per-field docs describe the
+// nil behaviour.
 //
 // SECURITY: StaticPriv is the binary's 32-byte X25519 static private
 // key. It MUST NOT be logged, wrapped into an error message, or emitted
@@ -313,6 +324,19 @@ type V2SessionConfig struct {
 	// drain are silently lost (the channel is leaked but bounded by its
 	// capacity, and reclaimed by GC).
 	Handlers map[string]dispatch.Handler
+
+	// Snapshotter renders the live claude screen for an inbound
+	// request_snapshot (ADR 025 § Safe degradation). Optional: when nil,
+	// request_snapshot yields a server.binary_offline error reply — the
+	// snapshot feature is simply unavailable, not a crash.
+	Snapshotter ScreenSnapshotter
+
+	// KnownConversation reports whether conversationID names a conversation
+	// this daemon hosts. request_snapshot rejects an unknown/foreign id with
+	// conversation.not_found before any render (AC #4). Optional: when nil,
+	// every request_snapshot is rejected as not-found. Production wires it to
+	// a conversations.Registry membership check.
+	KnownConversation func(conversationID string) bool
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -1005,9 +1029,15 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 	// through so dispatch.Route's malformed-envelope branch emits the
 	// sealed protocol.malformed reply established by #446 unchanged.
 	var probeEnv protocol.Envelope
-	if err := json.Unmarshal(plaintext, &probeEnv); err == nil && probeEnv.Type == protocol.TypeRekeyRequest {
-		m.handleRekeyRequest(ctx, s, probeEnv)
-		return
+	if err := json.Unmarshal(plaintext, &probeEnv); err == nil {
+		switch probeEnv.Type {
+		case protocol.TypeRekeyRequest:
+			m.handleRekeyRequest(ctx, s, probeEnv)
+			return
+		case protocol.TypeRequestSnapshot:
+			m.handleRequestSnapshot(ctx, s, probeEnv)
+			return
+		}
 	}
 
 	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
@@ -1079,6 +1109,131 @@ func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, e
 			"event", "v2.rekey.request.received",
 			"conn_id", s.connID,
 			"reason", payload.Reason)
+	}
+}
+
+// Static error messages for request_snapshot replies. Deliberately generic:
+// the wire reply NEVER echoes the JSON decode error or the (attacker-
+// controlled) raw conversation_id, only one of these constants.
+const (
+	msgSnapshotConvNotFound = "unknown or foreign conversation_id"
+	msgSnapshotOffline      = "no live claude session"
+)
+
+// handleRequestSnapshot renders the current claude screen and pushes a
+// screen_snapshot addressed to s, or a deterministic error reply. It is the
+// inbound-control handler for TypeRequestSnapshot — intercepted in
+// dispatchAppFrame before dispatch.Route, exactly like handleRekeyRequest —
+// and runs on the manager's single Run dispatch goroutine. Every branch pushes
+// exactly one reply and returns: it never panics, hangs, or silently drops the
+// request (AC #3).
+//
+// Both the success and error replies are delivered via m.handlePush — the
+// single existing seal-and-forward path. The public Push is deliberately NOT
+// used here: it funnels onto m.push and waits for Run, which is the goroutine
+// executing this handler, so calling it would self-deadlock the manager.
+//
+// SECURITY: the rendered screen text is NEVER logged; error replies carry only
+// a static message constant. The conversation_id is validated before any render
+// (AC #4): an unknown/foreign id renders nothing.
+func (m *V2SessionManager) handleRequestSnapshot(ctx context.Context, s *V2Session, env protocol.Envelope) {
+	var payload protocol.RequestSnapshotPayload
+	// A decode failure is tolerated: it leaves ConversationID == "", which the
+	// KnownConversation check below rejects as not-found. The decode error is
+	// never echoed back to the phone.
+	_ = json.Unmarshal(env.Payload, &payload)
+
+	// AC #4: reject an unknown/foreign conversation_id before any render. A nil
+	// KnownConversation (optional seam) rejects everything as not-found.
+	if m.cfg.KnownConversation == nil || !m.cfg.KnownConversation(payload.ConversationID) {
+		m.snapshotReplyError(ctx, s, env.ID, protocol.CodeConversationNotFound, msgSnapshotConvNotFound, false)
+		return
+	}
+
+	// AC #3: a nil Snapshotter (optional seam) means the feature is
+	// unavailable; report it deterministically rather than dropping.
+	if m.cfg.Snapshotter == nil {
+		m.snapshotReplyError(ctx, s, env.ID, protocol.CodeServerBinaryOffline, msgSnapshotOffline, true)
+		return
+	}
+	text, live := m.cfg.Snapshotter.ScreenSnapshot()
+	if !live {
+		// AC #3: no claude child attached (between restarts / idle-evicted).
+		m.snapshotReplyError(ctx, s, env.ID, protocol.CodeServerBinaryOffline, msgSnapshotOffline, true)
+		return
+	}
+
+	snapPayload, err := json.Marshal(protocol.ScreenSnapshotPayload{
+		ConversationID: payload.ConversationID,
+		Text:           text,
+		TS:             time.Now().UTC(),
+	})
+	if err != nil {
+		// ScreenSnapshotPayload is a closed struct of two strings + a time;
+		// marshal cannot fail in practice. Defensive — NEVER echo err (it could
+		// quote the rendered text). Fall back to a deterministic error reply so
+		// the request is still answered, never silently dropped (AC #3).
+		m.cfg.Logger.Warn("relay: v2 screen_snapshot marshal failed",
+			"event", "v2.snapshot.marshal_err",
+			"conn_id", s.connID,
+			"conversation_id", payload.ConversationID)
+		m.snapshotReplyError(ctx, s, env.ID, protocol.CodeServerBinaryOffline, msgSnapshotOffline, true)
+		return
+	}
+	inReplyTo := env.ID
+	reply := protocol.Envelope{
+		ID:        1, // non-load-bearing; the phone correlates on InReplyTo.
+		Type:      protocol.TypeScreenSnapshot,
+		TS:        time.Now().UTC(),
+		Payload:   snapPayload,
+		InReplyTo: &inReplyTo,
+	}
+	m.cfg.Logger.Info("relay: v2 screen snapshot served",
+		"event", "v2.snapshot.served",
+		"conn_id", s.connID,
+		"conversation_id", payload.ConversationID)
+	if err := m.handlePush(ctx, s.connID, reply); err != nil {
+		// Unreachable in practice: s is V2StateOpen on the dispatch goroutine.
+		// Logged at debug and dropped — the package's outbound-drop posture;
+		// NEVER echo the rendered text.
+		m.cfg.Logger.Debug("relay: v2 screen_snapshot push dropped",
+			"event", "v2.snapshot.push_err",
+			"conn_id", s.connID,
+			"err", err)
+	}
+}
+
+// snapshotReplyError pushes a single TypeError reply to s, correlated to
+// inReplyTo, via the same m.handlePush seal-and-forward path the success reply
+// uses (no parallel send path). message MUST be a static constant — never
+// attacker-controlled bytes.
+func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session, inReplyTo uint64, code, message string, retryable bool) {
+	errPayload, err := json.Marshal(protocol.ErrorPayload{
+		Code:      code,
+		Message:   message,
+		Retryable: retryable,
+	})
+	if err != nil {
+		// A closed struct of strings + bool; marshal cannot fail in practice.
+		m.cfg.Logger.Warn("relay: v2 snapshot error reply marshal failed",
+			"event", "v2.snapshot.err_marshal",
+			"conn_id", s.connID,
+			"code", code)
+		return
+	}
+	reply := protocol.Envelope{
+		ID:        1, // non-load-bearing; the phone correlates on InReplyTo.
+		Type:      protocol.TypeError,
+		TS:        time.Now().UTC(),
+		Payload:   errPayload,
+		InReplyTo: &inReplyTo,
+	}
+	if err := m.handlePush(ctx, s.connID, reply); err != nil {
+		m.cfg.Logger.Debug("relay: v2 snapshot error reply push dropped",
+			"event", "v2.snapshot.err_push",
+			"conn_id", s.connID,
+			"code", code,
+			"err", err)
 	}
 }
 
