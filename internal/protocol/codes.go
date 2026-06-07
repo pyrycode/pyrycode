@@ -103,3 +103,22 @@ const (
 	TypeToolResult     = "tool_result"
 	TypeTurnEnd        = "turn_end"
 )
+
+// Mobile Protocol v2 screen-snapshot types. The always-available,
+// parser-independent screen snapshot is the floor of ADR 025's
+// safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the
+// phone asks for a one-shot text picture of the current screen, the binary
+// renders it and pushes it back. The pair groups here so a reader greps
+// "snapshot" and finds both adjacent with their rationale.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go. Like
+// TypeRekeyRequest, TypeRequestSnapshot is an inbound v2 control envelope the
+// v2 session manager intercepts before dispatch.Route; a leak into v1TypeSet
+// would route it to the handler chain. TypeScreenSnapshot is an outbound
+// binary → phone event an old phone must never receive. The drift detector
+// in internal/protocol/compat_test.go partitions Type* constants between
+// v1TypeSet and v2OnlyTypes; these two live in the latter.
+const (
+	TypeRequestSnapshot = "request_snapshot" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+	TypeScreenSnapshot  = "screen_snapshot"  // binary → phone, outbound v2 event (plain text only)
+)
