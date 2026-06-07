@@ -6,25 +6,27 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 	"golang.org/x/term"
 )
 
-// watchWindowSize forwards SIGWINCH from the controlling terminal to the PTY
-// so that the child process sees the correct terminal dimensions. Returns a
-// function to stop watching.
-func (s *Supervisor) watchWindowSize(ptmx *os.File) func() {
+// watchWindowSize forwards SIGWINCH from the controlling terminal to the
+// session's PTY (via Session.Resize) so that the child process sees the
+// correct terminal dimensions. Returns a function to stop watching.
+func (s *Supervisor) watchWindowSize(sess *tuidriver.Session) func() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
 	done := make(chan struct{})
 
-	// Prime it once so the child starts with the correct size.
-	resizeOnce(ptmx)
+	// Prime it once so the child starts at the operator's real terminal size
+	// rather than StartPTY's fixed 40×120 spawn default.
+	resizeOnce(sess)
 
 	go func() {
 		for {
 			select {
 			case <-ch:
-				resizeOnce(ptmx)
+				resizeOnce(sess)
 			case <-done:
 				return
 			}
@@ -37,7 +39,7 @@ func (s *Supervisor) watchWindowSize(ptmx *os.File) func() {
 	}
 }
 
-func resizeOnce(ptmx *os.File) {
+func resizeOnce(sess *tuidriver.Session) {
 	// term.IsTerminal uses ioctl directly without wrapping the fd in an
 	// *os.File. Earlier code used `pty.GetsizeFull(os.NewFile(fd, ""))`,
 	// which leaks the wrapper to GC; the wrapper's finalizer eventually
@@ -53,5 +55,6 @@ func resizeOnce(ptmx *os.File) {
 	if err != nil {
 		return
 	}
-	_ = pty.Setsize(ptmx, size)
+	// Best-effort: a resize racing sess.Close returns an (ignored) error.
+	_ = sess.Resize(size.Rows, size.Cols)
 }

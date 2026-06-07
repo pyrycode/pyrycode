@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 // TestSupervisor_NewAppliesDefaults covers the default-application paths in
@@ -143,10 +146,11 @@ func TestSupervisor_StateAcrossPhases(t *testing.T) {
 // integration tests. The test binary re-execs itself with GO_TEST_HELPER_PROCESS=1,
 // and the behavior is controlled by GO_TEST_HELPER_MODE:
 //
-//   - "exit0":     exit immediately with code 0
-//   - "exit1":     exit immediately with code 1
-//   - "sleep":     sleep for GO_TEST_HELPER_SLEEP duration, then exit 0
-//   - "crash":     exit immediately with code 2 (simulates crash)
+//   - "exit0":       exit immediately with code 0
+//   - "exit1":       exit immediately with code 1
+//   - "sleep":       sleep for GO_TEST_HELPER_SLEEP duration, then exit 0
+//   - "crash":       exit immediately with code 2 (simulates crash)
+//   - "emit_marker": write GO_TEST_HELPER_MARKER to stdout, then block
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_TEST_HELPER_PROCESS") != "1" {
 		return
@@ -196,6 +200,17 @@ func TestHelperProcess(t *testing.T) {
 		_, _ = io.Copy(f, os.Stdin)
 		_ = f.Close()
 		os.Exit(0)
+	case "emit_marker":
+		// Write a known marker to stdout, then stay alive so the supervisor's
+		// MirrorOutput → bridge.Write feed has time to deliver it before the
+		// test cancels. Killed by ctx-cancel (SIGKILL) at teardown.
+		marker := os.Getenv("GO_TEST_HELPER_MARKER")
+		if marker == "" {
+			fmt.Fprintln(os.Stderr, "emit_marker: GO_TEST_HELPER_MARKER unset")
+			os.Exit(99)
+		}
+		fmt.Fprint(os.Stdout, marker)
+		time.Sleep(24 * time.Hour)
 	case "count_exits":
 		// Exit with code 0 the first N times, then block until killed.
 		// Uses a file to track invocation count.
@@ -447,6 +462,92 @@ func waitForPhase(t *testing.T, sup *Supervisor, phase Phase, timeout time.Durat
 	t.Fatalf("never reached phase %q within %v; last state = %+v", phase, timeout, sup.State())
 }
 
+// syncBuffer is a goroutine-safe io.Writer + String accessor. The
+// supervisor's output pump writes into it from a separate goroutine while the
+// test polls for a marker, so the buffer access must be locked.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// TestSupervisor_Bridge_MirrorReachesConsumer verifies that claude's raw PTY
+// output reaches BOTH bridge raw-byte surfaces — the attached-client writer
+// (the `pyry attach` path, b.output) and the output observer (the
+// assistant-turn bridge, b.outputObserver) — via the Session.MirrorOutput
+// feed introduced by the Session-hosting migration. Proves AC #4: no raw-byte
+// consumer is starved by the swap from io.Copy(bridge, ptmx) to the
+// MirrorOutput → bridge.Write output pump.
+func TestSupervisor_Bridge_MirrorReachesConsumer(t *testing.T) {
+	t.Parallel()
+
+	const marker = "MIRROR_MARKER_OK"
+	cfg := helperConfig("emit_marker", "GO_TEST_HELPER_MARKER="+marker)
+	cfg.Bridge = NewBridge(cfg.Logger)
+
+	// Observer surface (assistant-turn bridge path). The observer contract
+	// forbids retaining p past return, so copy the bytes into a syncBuffer.
+	observed := &syncBuffer{}
+	cfg.Bridge.SetOutputObserver(func(p []byte) { _, _ = observed.Write(p) })
+
+	// Attached-client surface (pyry attach path). Park the input side on a
+	// pipe so the attach input pump blocks on Read and b.output stays bound.
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	attached := &syncBuffer{}
+	attachDone, err := cfg.Bridge.Attach(pr, attached)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+	waitForPhase(t, sup, PhaseRunning, 5*time.Second)
+
+	// Poll both surfaces until each carries the marker, or fail.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(attached.String(), marker) &&
+			strings.Contains(observed.String(), marker) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := attached.String(); !strings.Contains(got, marker) {
+		t.Errorf("attached client output = %q, want it to contain %q", got, marker)
+	}
+	if got := observed.String(); !strings.Contains(got, marker) {
+		t.Errorf("output observer = %q, want it to contain %q", got, marker)
+	}
+
+	cancel()
+	pw.Close() // detach: EOF on the input side drains the attach goroutine
+	<-attachDone
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
+
 // TestSupervisor_WriteUserTurn_HappyPath verifies the end-to-end flow: a
 // successful WriteUserTurn updates the cursor AND the payload reaches the
 // child's stdin via the PTY master. Uses service mode with a Bridge so the
@@ -605,7 +706,7 @@ func TestSupervisor_WriteUserTurn_NoPTYDrops(t *testing.T) {
 }
 
 // TestSupervisor_WaitForPTY_ReturnsImmediatelyWhenSet covers the
-// already-bound branch: setPTY(non-nil) closes ptmxReadyCh, and a
+// already-live branch: setSession(non-nil) closes sessReadyCh, and a
 // subsequent WaitForPTY observes the closed channel and returns
 // immediately with nil.
 func TestSupervisor_WaitForPTY_ReturnsImmediatelyWhenSet(t *testing.T) {
@@ -616,14 +717,10 @@ func TestSupervisor_WaitForPTY_ReturnsImmediatelyWhenSet(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// A dummy *os.File suffices; setPTY does not read from it. /dev/null is
-	// universally available and cleans up when the process exits.
-	f, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer f.Close()
-	sup.setPTY(f)
+	// A zero-value *tuidriver.Session is a valid non-nil pointer; setSession
+	// only stores it and drives the readiness channel — it never dereferences
+	// the session, so this is safe for readiness-only assertions.
+	sup.setSession(&tuidriver.Session{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -632,9 +729,9 @@ func TestSupervisor_WaitForPTY_ReturnsImmediatelyWhenSet(t *testing.T) {
 	}
 }
 
-// TestSupervisor_WaitForPTY_BlocksUntilSet covers the not-yet-bound
-// branch: WaitForPTY blocks while ptmxReadyCh is open, then unblocks
-// when a concurrent setPTY closes it.
+// TestSupervisor_WaitForPTY_BlocksUntilSet covers the not-yet-live
+// branch: WaitForPTY blocks while sessReadyCh is open, then unblocks
+// when a concurrent setSession closes it.
 func TestSupervisor_WaitForPTY_BlocksUntilSet(t *testing.T) {
 	t.Parallel()
 	cfg := helperConfig("exit0")
@@ -643,12 +740,6 @@ func TestSupervisor_WaitForPTY_BlocksUntilSet(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	f, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer f.Close()
-
 	done := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -656,25 +747,25 @@ func TestSupervisor_WaitForPTY_BlocksUntilSet(t *testing.T) {
 		done <- sup.WaitForPTY(ctx)
 	}()
 
-	// Ensure the waiter is parked before we set the PTY; otherwise we'd
+	// Ensure the waiter is parked before we set the session; otherwise we'd
 	// race the already-set fast path and not actually cover this branch.
 	time.Sleep(50 * time.Millisecond)
-	sup.setPTY(f)
+	sup.setSession(&tuidriver.Session{})
 
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Errorf("WaitForPTY = %v, want nil after setPTY", err)
+			t.Errorf("WaitForPTY = %v, want nil after setSession", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("WaitForPTY did not unblock after setPTY")
+		t.Fatal("WaitForPTY did not unblock after setSession")
 	}
 }
 
 // TestSupervisor_WaitForPTY_FreshensAfterClear covers the
-// re-iteration shape: setPTY(nil) after a prior set freshens the
+// re-iteration shape: setSession(nil) after a prior set freshens the
 // readiness channel so the next WaitForPTY blocks again until the
-// next non-nil setPTY.
+// next non-nil setSession.
 func TestSupervisor_WaitForPTY_FreshensAfterClear(t *testing.T) {
 	t.Parallel()
 	cfg := helperConfig("exit0")
@@ -683,22 +774,20 @@ func TestSupervisor_WaitForPTY_FreshensAfterClear(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	f, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer f.Close()
+	// A zero-value session is never dereferenced by setSession — safe for
+	// readiness-only assertions (see WaitForPTY_ReturnsImmediatelyWhenSet).
+	sess := &tuidriver.Session{}
 
 	// First iteration: bind and observe immediate readiness.
-	sup.setPTY(f)
+	sup.setSession(sess)
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel1()
 	if err := sup.WaitForPTY(ctx1); err != nil {
 		t.Fatalf("WaitForPTY (iter 1) = %v, want nil", err)
 	}
 
-	// Iteration teardown: setPTY(nil) freshens the chan.
-	sup.setPTY(nil)
+	// Iteration teardown: setSession(nil) freshens the chan.
+	sup.setSession(nil)
 
 	// Now a WaitForPTY with a short deadline must time out — the chan is
 	// open again.
@@ -709,7 +798,7 @@ func TestSupervisor_WaitForPTY_FreshensAfterClear(t *testing.T) {
 	}
 
 	// Re-bind: the fresh chan closes, WaitForPTY returns nil.
-	sup.setPTY(f)
+	sup.setSession(sess)
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel3()
 	if err := sup.WaitForPTY(ctx3); err != nil {

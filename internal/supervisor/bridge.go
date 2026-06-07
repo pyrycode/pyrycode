@@ -2,18 +2,22 @@ package supervisor
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"sync"
-
-	"github.com/creack/pty"
 )
 
 // ErrBridgeBusy is returned by Bridge.Attach when another client is already
 // attached.
 var ErrBridgeBusy = errors.New("supervisor: bridge already has an attached client")
+
+// resizer is the consumer-side view of the live-resize delegate the bridge
+// forwards window-size changes to. Satisfied by *tuidriver.Session
+// (tui-driver v1.2.0, Session.Resize). Defined here, where it is consumed,
+// per the accept-interfaces convention.
+type resizer interface {
+	Resize(rows, cols uint16) error
+}
 
 // inputChunkBufferSize is the high-water mark for buffered input chunks
 // between the attached client and the supervisor's input pump. Sized
@@ -63,11 +67,11 @@ type Bridge struct {
 	attached       bool
 	outputObserver func([]byte) // optional tap; see SetOutputObserver
 
-	// ptyMu guards ptmx. Held briefly across pty.Setsize so a concurrent
-	// SetPTY/ClearPTY can't swap the file mid-call. Leaf-only — never
-	// acquired while holding mu, cancelMu, or leftMu.
+	// ptyMu guards rs. Held briefly across the Resize delegate call so a
+	// concurrent SetResizer can't swap the delegate mid-call. Leaf-only —
+	// never acquired while holding mu, cancelMu, or leftMu.
 	ptyMu sync.Mutex
-	ptmx  *os.File // current PTY master, or nil between iterations
+	rs    resizer // current resize delegate, or nil between iterations
 }
 
 // NewBridge constructs an empty bridge. No output is attached yet; PTY writes
@@ -258,33 +262,36 @@ func (b *Bridge) Attached() bool {
 	return b.attached
 }
 
-// SetPTY registers (or clears, when f is nil) the PTY master for the current
-// runOnce iteration. Subsequent Resize calls target this fd. runOnce calls
-// SetPTY(ptmx) after pty.Start succeeds and SetPTY(nil) before EndIteration
-// so a Resize racing with iteration teardown sees nil rather than a closed fd.
-func (b *Bridge) SetPTY(f *os.File) {
+// SetResizer registers (or clears, when r is nil) the resize delegate for the
+// current runOnce iteration. Subsequent Resize calls forward to it. runOnce
+// calls SetResizer(sess) after Spawn succeeds and SetResizer(nil) before
+// EndIteration so a Resize racing iteration teardown forwards to nil (a silent
+// no-op) rather than a closing session.
+//
+// Pass an untyped nil to clear. A typed nil (e.g. a nil *tuidriver.Session)
+// is a non-nil interface; Resize would then dereference it. runOnce always
+// clears with the untyped nil literal.
+func (b *Bridge) SetResizer(r resizer) {
 	b.ptyMu.Lock()
-	b.ptmx = f
+	b.rs = r
 	b.ptyMu.Unlock()
 }
 
-// Resize applies the given window size to the registered PTY master via
-// pty.Setsize. Returns nil silently when no PTY is registered (between
-// iterations, or in foreground mode where no Bridge exists at all). Errors
-// from pty.Setsize are wrapped and returned for the caller to log; the
-// control plane does not fail the attach on resize errors.
+// Resize forwards the given window size to the registered resize delegate (a
+// tui-driver *Session). Returns nil silently when no delegate is registered
+// (between iterations, or in foreground mode where no Bridge exists at all).
+// The delegate wraps its own error ("tuidriver: resize …"), returned verbatim
+// for the caller to log; the control plane does not fail the attach on resize
+// errors.
 //
-// rows-then-cols matches pty.Winsize field order. The wire protocol uses
-// cols-then-rows in AttachPayload; the boundary swap happens at the
-// handleAttach call site.
+// rows-then-cols matches Session.Resize and pty.Winsize field order. The wire
+// protocol uses cols-then-rows in AttachPayload; the boundary swap happens at
+// the handleAttach call site.
 func (b *Bridge) Resize(rows, cols uint16) error {
 	b.ptyMu.Lock()
 	defer b.ptyMu.Unlock()
-	if b.ptmx == nil {
+	if b.rs == nil {
 		return nil
 	}
-	if err := pty.Setsize(b.ptmx, &pty.Winsize{Rows: rows, Cols: cols}); err != nil {
-		return fmt.Errorf("pty setsize: %w", err)
-	}
-	return nil
+	return b.rs.Resize(rows, cols)
 }
