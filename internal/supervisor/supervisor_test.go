@@ -548,12 +548,14 @@ func TestSupervisor_Bridge_MirrorReachesConsumer(t *testing.T) {
 	}
 }
 
-// TestSupervisor_WriteUserTurn_HappyPath verifies the end-to-end flow: a
-// successful WriteUserTurn updates the cursor AND the payload reaches the
-// child's stdin via the PTY master. Uses service mode with a Bridge so the
-// PTY input pump exists, but no attaching client — the bridge sits idle and
-// WriteUserTurn writes directly to ptmx.
-func TestSupervisor_WriteUserTurn_HappyPath(t *testing.T) {
+// TestSupervisor_WriteUserTurn_RealDeliverNotReadyFailsLoud exercises the
+// production deliverViaSession (no deliverFn override) against a real spawned
+// child that never renders claude's idle screen. WaitReady cannot reach idle,
+// so a short-budget ctx expires and WriteUserTurn returns a loud failure —
+// proving the real ready-gate is wired and that an attached-but-not-ready
+// session no longer silently succeeds (AC #2). Uses service mode with a Bridge
+// so the PTY input pump exists; the fake child just stays alive draining stdin.
+func TestSupervisor_WriteUserTurn_RealDeliverNotReadyFailsLoud(t *testing.T) {
 	t.Parallel()
 
 	stdinFile := t.TempDir() + "/stdin.bin"
@@ -566,31 +568,28 @@ func TestSupervisor_WriteUserTurn_HappyPath(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := make(chan error, 1)
-	go func() { runDone <- sup.Run(ctx) }()
+	go func() { runDone <- sup.Run(runCtx) }()
 	waitForPhase(t, sup, PhaseRunning, 5*time.Second)
 
-	if err := sup.WriteUserTurn("c-1", []byte("hello\n")); err != nil {
-		t.Fatalf("WriteUserTurn: %v", err)
+	// Short budget: the fake child never reaches claude-idle, so WaitReady
+	// blocks until this ctx expires (context.DeadlineExceeded), which
+	// deliverViaSession wraps as "wait ready: ...".
+	deliverCtx, cancelDeliver := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancelDeliver()
+	err = sup.WriteUserTurn(deliverCtx, "c-1", []byte("hello\n"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WriteUserTurn err = %v, want errors.Is(err, context.DeadlineExceeded)", err)
 	}
+	if err == nil || !strings.Contains(err.Error(), "supervisor: write user turn:") {
+		t.Errorf("WriteUserTurn err = %v, want the %q wrap prefix", err, "supervisor: write user turn:")
+	}
+	// Cursor is stamped before delivery, so it reflects the attempt even on
+	// the loud-failure path.
 	if got := sup.CurrentConversation(); got != "c-1" {
 		t.Errorf("CurrentConversation = %q, want %q", got, "c-1")
-	}
-
-	// Poll the helper's output file until the payload surfaces, or fail.
-	deadline := time.Now().Add(3 * time.Second)
-	var data []byte
-	for time.Now().Before(deadline) {
-		data, _ = os.ReadFile(stdinFile)
-		if strings.Contains(string(data), "hello") {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !strings.Contains(string(data), "hello") {
-		t.Errorf("helper stdin file = %q, want it to contain %q", string(data), "hello")
 	}
 
 	cancel()
@@ -601,10 +600,104 @@ func TestSupervisor_WriteUserTurn_HappyPath(t *testing.T) {
 	}
 }
 
-// TestSupervisor_WriteUserTurn_CursorReadBack confirms the cursor reflects
-// the most recent successful WriteUserTurn. No child needed — the no-PTY
-// drop path still updates the cursor and returns nil, which is enough for
-// this assertion.
+// TestSupervisor_WriteUserTurn_CommittedReturnsNil covers the happy path
+// through the deliverFn seam: a confirmed commit returns nil. The seam returns
+// the already-classified outcome, so no claude-screen literal is needed in this
+// package to drive the success branch deterministically.
+func TestSupervisor_WriteUserTurn_CommittedReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sup.setSession(&tuidriver.Session{})
+	sup.deliverFn = func(context.Context, *tuidriver.Session, []byte) error { return nil }
+
+	if err := sup.WriteUserTurn(context.Background(), "c-1", []byte("hi")); err != nil {
+		t.Errorf("WriteUserTurn = %v, want nil on confirmed commit", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-1" {
+		t.Errorf("CurrentConversation = %q, want %q", got, "c-1")
+	}
+}
+
+// TestSupervisor_WriteUserTurn_NotCommittedFailsLoud covers the uncommitted
+// branch: the seam returns ErrTurnNotCommitted (DeliverResult.Committed ==
+// false), which WriteUserTurn wraps and returns — never a silent success.
+func TestSupervisor_WriteUserTurn_NotCommittedFailsLoud(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sup.setSession(&tuidriver.Session{})
+	sup.deliverFn = func(context.Context, *tuidriver.Session, []byte) error { return ErrTurnNotCommitted }
+
+	err = sup.WriteUserTurn(context.Background(), "c-1", []byte("hi"))
+	if !errors.Is(err, ErrTurnNotCommitted) {
+		t.Errorf("WriteUserTurn err = %v, want errors.Is(err, ErrTurnNotCommitted)", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "supervisor: write user turn:") {
+		t.Errorf("WriteUserTurn err = %v, want the wrap prefix", err)
+	}
+}
+
+// TestSupervisor_WriteUserTurn_DeliverErrorFailsLoud covers a plain delivery
+// (PTY write) error from the seam: WriteUserTurn wraps it with the stable
+// prefix and preserves it for errors.Is.
+func TestSupervisor_WriteUserTurn_DeliverErrorFailsLoud(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sup.setSession(&tuidriver.Session{})
+	boom := errors.New("pty closed")
+	sup.deliverFn = func(context.Context, *tuidriver.Session, []byte) error { return boom }
+
+	err = sup.WriteUserTurn(context.Background(), "c-1", []byte("hi"))
+	if !errors.Is(err, boom) {
+		t.Errorf("WriteUserTurn err = %v, want errors.Is(err, boom)", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "supervisor: write user turn:") {
+		t.Errorf("WriteUserTurn err = %v, want the wrap prefix", err)
+	}
+}
+
+// TestSupervisor_WriteUserTurn_NotReadyFailsLoud covers the attached-but-not-
+// ready case via the seam: an attached session whose ready-gate times out
+// (WaitReady → context.DeadlineExceeded) is a loud failure, not a silent ack
+// (AC #2). The ctx-cause is preserved through the wrap chain.
+func TestSupervisor_WriteUserTurn_NotReadyFailsLoud(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sup.setSession(&tuidriver.Session{})
+	sup.deliverFn = func(context.Context, *tuidriver.Session, []byte) error {
+		return fmt.Errorf("wait ready: %w", context.DeadlineExceeded)
+	}
+
+	err = sup.WriteUserTurn(context.Background(), "c-1", []byte("hi"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WriteUserTurn err = %v, want errors.Is(err, context.DeadlineExceeded)", err)
+	}
+}
+
+// TestSupervisor_WriteUserTurn_CursorReadBack confirms the cursor reflects the
+// most recent accepted WriteUserTurn id. No child is registered, so each call
+// now returns ErrNoLiveSession (the former silent-drop path is loud), but the
+// cursor is still stamped before the session check — which is what this test
+// asserts.
 func TestSupervisor_WriteUserTurn_CursorReadBack(t *testing.T) {
 	t.Parallel()
 
@@ -614,14 +707,14 @@ func TestSupervisor_WriteUserTurn_CursorReadBack(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := sup.WriteUserTurn("c-1", []byte("first")); err != nil {
-		t.Fatalf("WriteUserTurn c-1: %v", err)
+	if err := sup.WriteUserTurn(context.Background(), "c-1", []byte("first")); !errors.Is(err, ErrNoLiveSession) {
+		t.Fatalf("WriteUserTurn c-1 err = %v, want errors.Is(err, ErrNoLiveSession)", err)
 	}
 	if got := sup.CurrentConversation(); got != "c-1" {
 		t.Errorf("after first write, CurrentConversation = %q, want %q", got, "c-1")
 	}
-	if err := sup.WriteUserTurn("c-2", []byte("second")); err != nil {
-		t.Fatalf("WriteUserTurn c-2: %v", err)
+	if err := sup.WriteUserTurn(context.Background(), "c-2", []byte("second")); !errors.Is(err, ErrNoLiveSession) {
+		t.Fatalf("WriteUserTurn c-2 err = %v, want errors.Is(err, ErrNoLiveSession)", err)
 	}
 	if got := sup.CurrentConversation(); got != "c-2" {
 		t.Errorf("after second write, CurrentConversation = %q, want %q", got, "c-2")
@@ -646,14 +739,18 @@ func TestSupervisor_WriteUserTurn_UnknownIDDoesNotMutateCursor(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := sup.WriteUserTurn("c-1", []byte("ok")); err != nil {
-		t.Fatalf("WriteUserTurn c-1: %v", err)
+	// Known id: validation passes and the cursor is stamped, but with no
+	// session registered delivery fails loud with ErrNoLiveSession. The cursor
+	// stamp (the load-bearing assertion) happens before the session check.
+	if err := sup.WriteUserTurn(context.Background(), "c-1", []byte("ok")); !errors.Is(err, ErrNoLiveSession) {
+		t.Fatalf("WriteUserTurn c-1 err = %v, want errors.Is(err, ErrNoLiveSession)", err)
 	}
 	if got := sup.CurrentConversation(); got != "c-1" {
 		t.Fatalf("after good write, cursor = %q, want %q", got, "c-1")
 	}
 
-	err = sup.WriteUserTurn("ghost", []byte("nope"))
+	// Ghost id: validation refuses it, so the cursor must NOT move.
+	err = sup.WriteUserTurn(context.Background(), "ghost", []byte("nope"))
 	if !errors.Is(err, errTestConvNotFound) {
 		t.Errorf("WriteUserTurn(ghost) err = %v, want errors.Is == errTestConvNotFound", err)
 	}
@@ -675,20 +772,23 @@ func TestSupervisor_WriteUserTurn_NilValidatorSkips(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := sup.WriteUserTurn("anything", []byte("p")); err != nil {
-		t.Errorf("WriteUserTurn: %v", err)
+	// With a nil validator the cursor is stamped for any id; no session is
+	// registered, so the call fails loud with ErrNoLiveSession.
+	if err := sup.WriteUserTurn(context.Background(), "anything", []byte("p")); !errors.Is(err, ErrNoLiveSession) {
+		t.Errorf("WriteUserTurn err = %v, want errors.Is(err, ErrNoLiveSession)", err)
 	}
 	if got := sup.CurrentConversation(); got != "anything" {
 		t.Errorf("CurrentConversation = %q, want %q", got, "anything")
 	}
 }
 
-// TestSupervisor_WriteUserTurn_NoPTYDrops verifies that calling
-// WriteUserTurn before Run (or between iterations) returns nil and silently
-// drops the payload, while still updating the cursor. Matches Bridge.Write's
-// discard-on-unattached behaviour so handlers don't need to special-case the
-// backoff window.
-func TestSupervisor_WriteUserTurn_NoPTYDrops(t *testing.T) {
+// TestSupervisor_WriteUserTurn_NoSessionFailsLoud is the RED→GREEN anchor for
+// AC #2's no-child case: calling WriteUserTurn before Run (or between
+// iterations, when no session is registered) no longer silently drops the
+// payload and returns nil — it fails loud with ErrNoLiveSession so the
+// send_message handler reports failure to the phone instead of a false ack.
+// The cursor is still stamped (the stamp precedes the session check).
+func TestSupervisor_WriteUserTurn_NoSessionFailsLoud(t *testing.T) {
 	t.Parallel()
 
 	cfg := helperConfig("exit0")
@@ -697,8 +797,12 @@ func TestSupervisor_WriteUserTurn_NoPTYDrops(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := sup.WriteUserTurn("c-1", []byte("dropped")); err != nil {
-		t.Errorf("WriteUserTurn before Run: err = %v, want nil", err)
+	err = sup.WriteUserTurn(context.Background(), "c-1", []byte("not dropped"))
+	if !errors.Is(err, ErrNoLiveSession) {
+		t.Errorf("WriteUserTurn before Run: err = %v, want errors.Is(err, ErrNoLiveSession)", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "supervisor: write user turn:") {
+		t.Errorf("WriteUserTurn err = %v, want the %q wrap prefix", err, "supervisor: write user turn:")
 	}
 	if got := sup.CurrentConversation(); got != "c-1" {
 		t.Errorf("CurrentConversation = %q, want %q", got, "c-1")
@@ -842,7 +946,7 @@ func TestSupervisor_WriteUserTurn_CursorConcurrency(t *testing.T) {
 	writer := func(id string) {
 		defer writers.Done()
 		for i := 0; i < iters; i++ {
-			_ = sup.WriteUserTurn(id, []byte("x"))
+			_ = sup.WriteUserTurn(context.Background(), id, []byte("x"))
 		}
 	}
 	go writer("c-a")

@@ -292,6 +292,12 @@ func decryptInnerEnvelope(t *testing.T, inner protocol.InnerFrameV2, cs *noise.C
 // envelope, and Pushes it sealed to every open v2 session; the phone
 // decrypts it under its session receive key. (AC#1, AC#4.)
 func TestRelayV2_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
+	// Blocked on #603: since #594, WriteUserTurn delivers via DeliverPrompt
+	// behind a WaitReady idle-gate and acks only on a confirmed commit. This
+	// test's send_message setup step never acks against fakeclaude (no claude
+	// TUI), so the downstream v2 assistant-echo assertion is unreachable.
+	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
+
 	const (
 		knownConvID        = "88888888-8888-4888-8888-888888888888"
 		knownUserText      = "e2e-589-user:hi\n"
