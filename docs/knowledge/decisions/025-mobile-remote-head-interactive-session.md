@@ -115,6 +115,7 @@ Transport unchanged: every frame is a `noise_msg` carrying the existing `{id, ty
 - `modal_dismissed` — `{conversation_id, modal_id, reason: "answered"|"timeout"|"local"|"cancelled"}`.
 - `queue_state` — `{conversation_id, queued:[{queued_msg_id, text, ts}]}`.
 - `stall_detected` — `{conversation_id}`.
+- `screen_snapshot` — `{conversation_id, text, ts}`. A one-shot text picture of the current screen, rendered by tui-driver's `Render` / `Snapshot`. The parser-independent degrade escape hatch; text only, never raw control codes.
 
 **Phone → binary (control):**
 - `send_message` — unchanged. Queued by the daemon when claude is busy.
@@ -122,6 +123,7 @@ Transport unchanged: every frame is a `noise_msg` carrying the existing `{id, ty
 - `modal_cancel` — `{conversation_id, modal_id, answer_token}`. ESC / deny.
 - `dequeue_message` — `{conversation_id, queued_msg_id}`.
 - `interrupt` — `{conversation_id}`. Maps to `Session.SendEsc`.
+- `request_snapshot` — `{conversation_id}`. Asks for a `screen_snapshot` of the current screen. The on-demand live-view fallback.
 
 **Backpressure / replay.** The per-session push queue is bounded and event-class-aware: `assistant_delta` is coalescable and drop-oldest under pressure (the phone backfills the full turn on reconnect); control events (`modal_shown`, `turn_end`, `tool_*`) never drop. On mid-turn reconnect the phone sends `hello` with `last_event_id`; the binary replays from a bounded per-conversation event ring, or emits a resync marker and the phone re-fetches via the existing `backfill_since`.
 
@@ -140,8 +142,11 @@ This is permission *answering*, default-safe. Tiered permission *scoping* (a pho
 
 ## Safe degradation when a screen parser breaks
 
+Screen-parser breaks are expected, especially early, because claude self-updates its terminal UI. The strategy is to degrade to a coarser-but-honest view, never to silence, and to keep one parser-independent escape hatch always available.
+
 - **Thinking spinner breaks:** the JSONL deltas still flow, so the phone infers "responding" from delta arrival; degrades to "no explicit spinner," not silence.
-- **Modal anchor breaks (the dangerous case):** the turn hangs waiting for input that was never detected. `QuietFor` + watchdog detect a stall (PTY quiet while not-idle and no JSONL progress) and emit `stall_detected`; the phone is told the session may be waiting and can open the live view. Not a silent hang.
+- **Modal anchor breaks (the dangerous case):** the turn hangs waiting for input that was never detected. `QuietFor` + watchdog detect a stall (PTY quiet while not-idle and no JSONL progress) and emit `stall_detected`; the phone surfaces a "claude may be waiting" banner over its structured session view. Not a silent hang.
+- **The live-view escape hatch — serialized screen snapshot.** Independent of any structured parser, the phone can ask for a one-shot text picture of the current screen: a `request_snapshot` control message → the daemon calls tui-driver's `Render` / `Snapshot` → a `screen_snapshot` typed event carrying the rendered text. The phone renders that text. It is NOT a raw byte stream and NOT raw terminal control codes, so the "phone never receives raw screen bytes" invariant holds and the substrate seal holds: tui-driver renders the snapshot inside the seal, and pyrycode forwards it as an opaque event payload, never as a source literal. This is the concrete meaning of "open the live view" — the "show me what is actually on screen right now" fallback that survives any parser break, because it depends on no parser working. Whether the snapshot is also pushed eagerly on `stall_detected` or only fetched on demand is a Phase 2/3 sub-decision; the default is **on-demand**, rendered only when the user opens the view, with optional refresh-by-re-request while viewing.
 - **Version pinning:** tui-driver's `make e2e` against a new claude version is the canary; the version-drift discipline already enforces live verification. A `parser_uncertain` / stall signal is the in-band degrade marker.
 
 ## Rationale
@@ -186,7 +191,7 @@ Rejected: it would either leak claude screen literals into the phone/pyrycode (b
 - **A new sealed mirror surface on tui-driver** carries opaque raw bytes to the local attach head only, so `pyry attach` keeps working without reopening a parse-able seam. The phone never sees raw bytes.
 - **The protocol grows ~13 additive application types** behind a capability flag; the transport and frame are untouched, so ADR 024's confidentiality property is preserved.
 - **Remote permission answering becomes possible**, default-safe, behind a per-device pair flag. Tiered scoping stays a v3 concern.
-- **Screen-modal detection is a brittle seam.** `stall_detected` is the safety net, not a fix; a claude UI change can still degrade the permission UX to "open the live view."
+- **Screen-modal detection is a brittle seam.** `stall_detected` is the safety net, not a fix; a claude UI change can still degrade the permission UX to the on-demand screen snapshot (`request_snapshot` → `screen_snapshot`), the parser-independent live view.
 - **The spec follows the code.** `docs/protocol-mobile.md` is amended per implementing ticket, never ahead of it.
 
 ## Phasing, gates, and ticket map
