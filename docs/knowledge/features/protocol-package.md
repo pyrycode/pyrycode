@@ -9,13 +9,14 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607)
+├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
 ├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607)
 ├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607) — v2 interactive binary→phone event bodies
+├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsV1Compatible + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
@@ -24,6 +25,7 @@ internal/protocol/
 ├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
 ├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads via Envelope.Payload
+├── snapshot_test.go             golden round-trip for the two #617 snapshot payloads + empty-conversation_id boundary
 └── testdata/                    envelope_full.json, envelope_minimal.json, routing_envelope.json,
                                  register_push_token.json, send_message.json, message.json,
                                  backfill_since.json, message_chunk.json, backfill_done.json,
@@ -31,10 +33,11 @@ internal/protocol/
                                  create_conversation.json, conversation_created.json,
                                  promote_conversation.json, conversation_updated.json,
                                  hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
-                                 turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json
+                                 turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json,
+                                 request_snapshot.json, screen_snapshot.json
 ```
 
-Eight production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the v1 per-type payload DTOs, one file per spec-section group — the full #256 catalog is wired — and `interactive.go` (#607) carries the first v2 additive application-event DTOs.
+Nine production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the v1 per-type payload DTOs, one file per spec-section group — the full #256 catalog is wired — `interactive.go` (#607) carries the first v2 additive application-event DTOs, and `snapshot.go` (#617) carries the v2 screen-snapshot request/response DTOs.
 
 ## Types
 
@@ -346,6 +349,64 @@ that is what pins struct → wire shape, since a missing or reordered json tag o
 surfaces when the bytes are actually re-encoded (the original-`RawMessage`-passthrough
 variant cannot catch it).
 
+## Screen-snapshot payloads (#617)
+
+The request/response pair behind ADR 025's always-available, parser-independent
+**screen snapshot** — the floor of the safe-degradation strategy (ADR 025 § Safe
+degradation). The phone may ask for a one-shot text picture of the current claude
+screen at any time; because the snapshot depends on no screen parser it survives any
+parser break and backs the stall fallback. Spec source: `docs/protocol-mobile.md`
+§ Screen snapshot. The pair maps 1:1 to the `Type*` constants `TypeRequestSnapshot`
+(phone → binary control) and `TypeScreenSnapshot` (binary → phone event).
+
+```go
+type RequestSnapshotPayload struct {
+    ConversationID string `json:"conversation_id"`
+}
+
+type ScreenSnapshotPayload struct {
+    ConversationID string    `json:"conversation_id"`
+    Text           string    `json:"text"` // plain rendered text only; never raw control codes
+    TS             time.Time `json:"ts"`
+}
+```
+
+- **`request_snapshot` is an inbound v2 *control* envelope, not an application event.**
+  Structurally like `TypeRekeyRequest`: the v2 session manager intercepts it at the
+  dispatch boundary **before** `dispatch.Route`. There is **no `dispatch.Route`
+  handler** for it — the doc comment says so explicitly so the next reader does not
+  look for a handler that isn't there. The interception, the render via tui-driver,
+  and the push of `screen_snapshot` back are the consumer ticket's job.
+- **`ScreenSnapshotPayload.Text` is plain rendered text only, NEVER raw terminal
+  control codes.** This is the load-bearing invariant: it preserves ADR 025's
+  no-raw-bytes guarantee and the substrate seal — the snapshot is a literal-screen
+  picture rendered to text, not a stream of escape sequences. The struct doc comment
+  states this.
+- **`TS` is `time.Time` (RFC3339Nano on the wire).** Records when the snapshot was
+  rendered. The monotonic-clock reading strips on JSON marshal, so tests compare with
+  `time.Time.Equal`, never `==` or `reflect.DeepEqual` — same discipline as
+  `Envelope.TS` and every other `time.Time` payload field.
+- **No `omitempty` on any field — the same deliberate inverse as the #607 interactive
+  payloads.** Every field is always present on the wire so the fixtures pin the full
+  shape and boundary values (an empty `conversation_id`, a zero `ts`) cannot silently
+  vanish. `TestSnapshotPayloads_EmptyConversationID` pins the empty-`conversation_id`
+  boundary for both payloads.
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to
+  every prior slice. Accepting the inbound frame, rendering the screen, and returning
+  content to the remote party are the consumer's trust decision — that consumer (the
+  screen-snapshot handler child) carries the `security-sensitive` label; this leaf
+  declaration does not.
+
+Two golden round-trips in `snapshot_test.go` decode each fixture through `Envelope`
+→ `Envelope.Payload` → per-type struct and re-marshal byte-equivalently via the shared
+`roundTripEnvelope`. `screen_snapshot.json` carries a **multi-line** `text`
+(`"line one\nline two\nline three\n"`, asserted with `strings.Contains(…, "\n")`) so
+the canonical compare pins the escaped multi-line shape, and a whole-second payload
+`ts` (`"2026-05-08T10:33:14Z"`) so the re-marshal is byte-identical — `time.Time`'s
+RFC3339Nano output trims trailing fractional zeros, so a `.120Z` value would re-emit
+as `.12Z` and break the compare (the same fixture-`ts` gotcha that governs the
+envelope's own timestamp).
+
 ## Predicate: `IsV1Compatible`
 
 ```go
@@ -422,7 +483,7 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 
 ### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **control envelopes** (`TypeRekeyRequest`, #454), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **additive interactive application events** (the five #607 types), pushed outbound binary → phone and never dispatched inbound. Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
+Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454) and `TypeRequestSnapshot` (#617)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types and `TypeScreenSnapshot` (#617)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
 
 **v1 application types** (16; spec § v1 Message types):
 
@@ -448,6 +509,14 @@ Wire values for `Envelope.Type` (spec § Message types). Two architectural parti
 
 These five live in their **own** const block (not merged into the `TypeRekeyRequest` block) so the doc comment can distinguish control envelopes from application events — but both are "v2-only" for the partition's purpose. `CapabilityInteractive = "interactive"` (the wire-vocabulary constant a phone advertises to opt into this stream) lives in `handshake.go` next to the `Capabilities` field, not here.
 
+**v2 screen-snapshot types** (#617; spec `docs/protocol-mobile.md` § Screen snapshot):
+
+| Group | Constants |
+|-------|-----------|
+| Screen snapshot | `TypeRequestSnapshot`, `TypeScreenSnapshot` |
+
+These two live in their **own** cohesive const block, grouping the request/response pair so a reader greps "snapshot" and finds both adjacent with their shared rationale. The pair straddles both v2-only flavours — `TypeRequestSnapshot` is an inbound control envelope intercepted before `dispatch.Route` (like `TypeRekeyRequest`), `TypeScreenSnapshot` is an outbound binary → phone event — but `TestTypeConstants_V1V2Partition` is grouping-independent, so which block a constant lives in is purely a readability choice. Both stay out of `v1TypeSet`. The interception, render (via tui-driver), and push are the consumer ticket's job (`security-sensitive`), not this package's.
+
 `TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out; the interactive block carries the same MUST-NOT instruction. The advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
 
 ## Drift detectors
@@ -456,7 +525,7 @@ The v1 type list appears three times: in the `Type*` constants block (`codes.go`
 
 - `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
 - `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454, extended #607) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds six entries (`TypeRekeyRequest` + the five interactive types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 6 == 22`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds eight entries (`TypeRekeyRequest` + the five interactive types + the two snapshot types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 8 == 24`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
@@ -473,7 +542,8 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - A `[]string` slice + linear scan for membership — duplicates the constant names twice (slice + constants); the map literal duplicates them once at the same indentation as the constants block, making drift visible at code review.
 - Per-type payload structs beyond the now-complete #256 catalog — `RegisterPushTokenPayload` (#275), the five messaging + backfill payloads (#272), the conversations-read pair plus row type (#273), the four conversations-write payloads (#274), and the handshake/control payloads (#271). All slices are wired; no more #256 sub-tickets pending.
 - **The interactive bridge, push, and capability trust decision (#607's consumer surface)** — mapping `turnevent` events → the five interactive payloads, the actual push/fan-out, and the daemon intersecting the phone's advertised capabilities with its own supported set all live in #608, never in this leaf package. `interactive.go` is wire vocabulary only.
-- **Other v2 event/control types** — `screen_snapshot`, `modal_*`, `queue_state`, `stall_detected`, and the phone → binary control verbs (`modal_answer`, `interrupt`, …) are deliberately out of scope here; they belong to other #596 children and Phase 3 (#597). Adding them with #607 would breach the S boundary and front-run undesigned trust surfaces.
+- **The screen-snapshot intercept, render, and push (#617's consumer surface)** — intercepting `request_snapshot` at the v2 dispatch boundary (before `dispatch.Route`), rendering the current screen to text via tui-driver, and pushing `screen_snapshot` back all live in the consumer (the screen-snapshot handler child, which carries `security-sensitive`), never in this leaf package. `snapshot.go` is wire vocabulary only; the trust boundary — accepting a remote inbound frame and returning rendered screen content — is the consumer's, not this declaration's.
+- **Other v2 event/control types** — `modal_*`, `queue_state`, `stall_detected`, and the remaining phone → binary control verbs (`modal_answer`, `interrupt`, …) are deliberately out of scope here; they belong to other #596 children and Phase 3 (#597). (`request_snapshot` / `screen_snapshot` landed in #617 as wire vocabulary; their consumer is the separate `security-sensitive` ticket above.)
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.
@@ -505,7 +575,8 @@ No production consumers in this slice. Future:
 - Spec: `docs/protocol-mobile.md` — single source of truth for field names, optionality, wire semantics
 - Convention: `docs/PROJECT-MEMORY.md` § "Refusal-to-wire-code mapping is the consumer's job"
 - Sentinel-pattern precedent: `internal/conversations` (`ErrConversationNotFound` etc.)
-- [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Decision 2 (v2-additive + capability negotiation) and § Wire-protocol extension; the decision the #607 interactive payloads + `capabilities` field implement
+- [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Decision 2 (v2-additive + capability negotiation) and § Wire-protocol extension; the decision the #607 interactive payloads + `capabilities` field implement. § Safe degradation pins the parser-independent screen-snapshot floor the #617 `request_snapshot` / `screen_snapshot` pair backs.
 - [turnevent-package.md](turnevent-package.md) — the neutral internal turn-event model (#606) the interactive payloads are the wire representation of; `stop_reason` carries its `TurnEndReason` strings verbatim
 - [codebase/607.md](../codebase/607.md) — the #607 implementation note (interactive payloads + capabilities negotiation)
-- Future consumers: `internal/dispatch` (#248), `internal/relay-client`, the interactive event-stream bridge + capability enforcement (#608)
+- [codebase/617.md](../codebase/617.md) — the #617 implementation note (screen-snapshot wire types + v2 partition)
+- Future consumers: `internal/dispatch` (#248), `internal/relay-client`, the interactive event-stream bridge + capability enforcement (#608), the screen-snapshot handler (intercept `request_snapshot` + render + push `screen_snapshot`; `security-sensitive`)
