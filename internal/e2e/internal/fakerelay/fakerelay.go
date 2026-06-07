@@ -33,10 +33,6 @@
 //   - No 30-second grace period on server-id release: when the binary
 //     disconnects, its server-id is immediately reusable.
 //   - No TLS, no persistence, no rate limiting.
-//   - Binary-direct "hello" envelopes (no conn_id) get a synthesized
-//     hello_ack reply so real pyry binaries can complete their
-//     binary↔relay handshake against the harness. Other binary-direct
-//     envelope types are dropped (the dispatcher slice consumes them).
 package fakerelay
 
 import (
@@ -78,13 +74,6 @@ type Server struct {
 	// code 4409 ("server-id already claimed"). The flag clears after
 	// one use. Set via RejectNextBinaryWith4409.
 	rejectNextBinaryWith4409 bool
-
-	// lastBinaryHello records, per server-id, the most recent
-	// binary-direct "hello" envelope observed by binaryRecvPump. Read
-	// via LastBinaryHello. Used by e2e tests to assert the handshake
-	// payload (role, server_id, binary_version, protocol_versions)
-	// without intercepting the WS framing.
-	lastBinaryHello map[string]protocol.Envelope
 }
 
 type binaryConn struct {
@@ -134,10 +123,9 @@ func New(logger *slog.Logger) *Server {
 		panic("fakerelay: logger is required")
 	}
 	s := &Server{
-		log:             logger,
-		binaries:        make(map[string]*binaryConn),
-		phones:          make(map[string]*phoneConn),
-		lastBinaryHello: make(map[string]protocol.Envelope),
+		log:      logger,
+		binaries: make(map[string]*binaryConn),
+		phones:   make(map[string]*phoneConn),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/server", s.handleBinary)
@@ -406,19 +394,6 @@ func (s *Server) binaryRecvPump(ctx context.Context, bc *binaryConn) error {
 				"server_id", bc.serverID, "err", err)
 			continue
 		}
-		// Binary-direct envelopes (no conn_id) are the binary↔relay
-		// handshake / control plane (hello, ack, error). The routing
-		// channel is reserved for binary↔phone traffic, which always
-		// carries a conn_id. We dispatch hello → hello_ack here so
-		// real pyry binaries can complete their handshake against this
-		// harness; other binary-direct types are out of scope until the
-		// dispatcher slice lands.
-		if env.ConnID == "" {
-			if err := s.handleBinaryDirect(ctx, bc, data); err != nil {
-				return err
-			}
-			continue
-		}
 		s.mu.Lock()
 		ph, ok := s.phones[env.ConnID]
 		s.mu.Unlock()
@@ -444,63 +419,6 @@ func (s *Server) binaryRecvPump(ctx context.Context, bc *binaryConn) error {
 		case <-ph.done:
 			// Phone went away mid-route; drop the frame.
 		}
-	}
-}
-
-// handleBinaryDirect handles a binary-direct envelope (no conn_id in the
-// outer routing wrapper). Today only "hello" is dispatched: capture it
-// for test introspection and reply with a wrapped hello_ack. Other types
-// are logged at debug and dropped — the dispatcher slice will take over.
-func (s *Server) handleBinaryDirect(ctx context.Context, bc *binaryConn, raw []byte) error {
-	var env protocol.Envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		s.log.Debug("fakerelay: binary-direct envelope: decode failed",
-			"server_id", bc.serverID, "err", err)
-		return nil
-	}
-	if env.Type != protocol.TypeHello {
-		s.log.Debug("fakerelay: binary-direct envelope dropped (no dispatcher yet)",
-			"server_id", bc.serverID, "type", env.Type)
-		return nil
-	}
-
-	s.mu.Lock()
-	s.lastBinaryHello[bc.serverID] = env
-	s.mu.Unlock()
-
-	helloID := env.ID
-	ackPayload, err := json.Marshal(protocol.HelloAckPayload{
-		ProtocolVersion: "v1",
-		ServerID:        bc.serverID,
-		ConnID:          "-",
-	})
-	if err != nil {
-		return fmt.Errorf("marshal hello_ack payload: %w", err)
-	}
-	ack := protocol.Envelope{
-		ID:        1,
-		Type:      protocol.TypeHelloAck,
-		Payload:   ackPayload,
-		InReplyTo: &helloID,
-	}
-	inner, err := json.Marshal(ack)
-	if err != nil {
-		return fmt.Errorf("marshal hello_ack envelope: %w", err)
-	}
-	wrapped, err := json.Marshal(protocol.RoutingEnvelope{
-		ConnID: "-",
-		Frame:  inner,
-	})
-	if err != nil {
-		return fmt.Errorf("wrap hello_ack: %w", err)
-	}
-	select {
-	case bc.sendCh <- wrapped:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-bc.done:
-		return nil
 	}
 }
 
@@ -597,17 +515,6 @@ func (s *Server) RejectNextBinaryWith4409() {
 	s.mu.Lock()
 	s.rejectNextBinaryWith4409 = true
 	s.mu.Unlock()
-}
-
-// LastBinaryHello returns the most recent binary-direct "hello" envelope
-// observed from the binary that claimed serverID. The boolean is false
-// when no hello has been observed for that server-id yet — callers poll
-// in e2e tests to wait for the handshake to land.
-func (s *Server) LastBinaryHello(serverID string) (protocol.Envelope, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	env, ok := s.lastBinaryHello[serverID]
-	return env, ok
 }
 
 // WaitBinary blocks until a binary is registered for serverID, the
