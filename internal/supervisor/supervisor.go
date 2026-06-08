@@ -288,6 +288,22 @@ func (s *Supervisor) ScreenSnapshot() (text string, live bool) {
 	return tuidriver.Render(sess.Snapshot(), 0, 0), true
 }
 
+// Session returns the currently-hosted tui-driver Session, or nil when no
+// claude child is attached (between restarts, mid-spawn, or idle-evicted).
+// Safe for concurrent use; captures the pointer under sessMu, mirroring
+// ScreenSnapshot's capture. The event-stream producer (internal/turnbridge)
+// subscribes to the returned session's Events() stream.
+//
+// SECURITY: returning *tuidriver.Session does not breach the substrate seal.
+// The supervisor already holds and uses this pointer; the producer only calls
+// sess.Events() (typed events) — never MirrorOutput()/Snapshot() (raw bytes) —
+// so no claude-screen literal enters pyrycode (cmd/substrate-guard stays green).
+func (s *Supervisor) Session() *tuidriver.Session {
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	return s.sess
+}
+
 // setSession registers (or clears, when sess is nil) the hosted Session for
 // the current runOnce iteration. setSession(nil) before the actual Close means
 // a WriteUserTurn that captures the pointer afterwards sees nil and fails loud.
