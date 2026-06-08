@@ -60,7 +60,13 @@ func startInteractiveTurnStreamV2(
 	prod, err := turnbridge.New(turnbridge.Config{
 		Subscribe: sub,
 		OnEvent:   func(ev turnevent.Event) { emitter.Handle(ctx, ev) },
-		Logger:    logger,
+		// Delta coalescing (#609): the emitter owns the ~250ms timer; the producer
+		// selects its channel and routes the fire back into flushDelta on the same
+		// single Run goroutine as OnEvent — symmetric partner of the OnEvent
+		// closure, both capturing the relay lifecycle ctx.
+		FlushSignal: emitter.flushC(),
+		OnFlush:     func() { emitter.flushDelta(ctx) },
+		Logger:      logger,
 	})
 	if err != nil {
 		// Unreachable: New errors only on a nil Subscribe. Fail soft for an

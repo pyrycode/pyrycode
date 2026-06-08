@@ -89,6 +89,42 @@ func TestDrain_OnCtxCancel(t *testing.T) {
 	}
 }
 
+// A fire on FlushSignal invokes OnFlush on the single Run goroutine — the #609
+// seam that lets a consumer flush coalescing state mutated across OnEvent calls
+// without a lock. The blocking send + the flushed channel give a deterministic
+// happens-before, so the assertion is race-clean.
+func TestDrain_FlushSignalInvokesOnFlush(t *testing.T) {
+	t.Parallel()
+
+	ch := make(chan tuidriver.Event) // never fed — only the flush arm fires
+	flush := make(chan time.Time)
+	flushed := make(chan struct{}, 1)
+	p := &Producer{
+		onEvent:     func(turnevent.Event) {},
+		flushSignal: flush,
+		onFlush:     func() { flushed <- struct{}{} },
+		log:         testLogger(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { p.drain(ctx, ch); close(done) }()
+
+	flush <- time.Time{} // fire the flush arm
+	select {
+	case <-flushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnFlush not invoked after FlushSignal fired")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not return after ctx cancel")
+	}
+}
+
 func TestDrain_NilOnEventIsNoop(t *testing.T) {
 	t.Parallel()
 

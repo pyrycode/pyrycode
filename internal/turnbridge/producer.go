@@ -42,6 +42,15 @@ type Config struct {
 	// OnEvent receives each mapped internal event. nil ⇒ the producer drains
 	// the source and does nothing else (AC 4's "no-op beyond draining").
 	OnEvent func(turnevent.Event)
+	// FlushSignal, if non-nil, is selected in the drain loop; each receive
+	// invokes OnFlush on the single Run goroutine. The owning consumer drives
+	// the timer behind this channel (arm/reset/stop), so a "reset on flush"
+	// policy stays single-goroutine-safe. nil ⇒ no periodic-flush arm (#609).
+	FlushSignal <-chan time.Time
+	// OnFlush, if non-nil and FlushSignal fires, runs on the Run goroutine — the
+	// same goroutine as OnEvent — so a consumer may flush state it mutates across
+	// OnEvent calls without a lock. nil ⇒ ignored.
+	OnFlush func()
 	// Logger; nil ⇒ slog.Default().
 	Logger *slog.Logger
 }
@@ -51,9 +60,11 @@ type Config struct {
 // callback (#616) must not block it indefinitely — its own queue owns
 // backpressure (ADR 025 § Backpressure).
 type Producer struct {
-	subscribe Subscriber
-	onEvent   func(turnevent.Event)
-	log       *slog.Logger
+	subscribe   Subscriber
+	onEvent     func(turnevent.Event)
+	flushSignal <-chan time.Time
+	onFlush     func()
+	log         *slog.Logger
 }
 
 // New constructs a Producer. Returns an error if cfg.Subscribe is nil.
@@ -66,9 +77,11 @@ func New(cfg Config) (*Producer, error) {
 		log = slog.Default()
 	}
 	return &Producer{
-		subscribe: cfg.Subscribe,
-		onEvent:   cfg.OnEvent,
-		log:       log,
+		subscribe:   cfg.Subscribe,
+		onEvent:     cfg.OnEvent,
+		flushSignal: cfg.FlushSignal,
+		onFlush:     cfg.OnFlush,
+		log:         log,
 	}, nil
 }
 
@@ -94,12 +107,19 @@ func (p *Producer) Run(ctx context.Context) error {
 // drain reads events off ch until ch closes (session restart) or ctx is done,
 // satisfying AC 2's clean exit on both. With a nil OnEvent it drains the source
 // and does nothing else (AC 4). Otherwise it maps each event, invokes OnEvent on
-// a mapped result, and drops + debug-logs the unrepresentable ones (AC 3).
+// a mapped result, and drops + debug-logs the unrepresentable ones (AC 3). A
+// non-nil FlushSignal is a third select arm; routing its fire to OnFlush here
+// keeps a consumer's timer-driven flush on this single goroutine (#609). A nil
+// flushSignal channel is never ready, so the disabled path is one branch.
 func (p *Producer) drain(ctx context.Context, ch <-chan tuidriver.Event) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-p.flushSignal:
+			if p.onFlush != nil {
+				p.onFlush()
+			}
 		case ev, ok := <-ch:
 			if !ok {
 				return
