@@ -53,9 +53,8 @@ func main() {
 	initU := mustEnv(envInitialUUID)
 	trig := mustEnv(envTrigger)
 
-	if logPath := os.Getenv(envStdinLog); logPath != "" {
-		startStdinLogger(logPath)
-	}
+	fmt.Print("\u276f ")
+	startStdinConsumer(os.Getenv(envStdinLog))
 
 	asstTrig := os.Getenv(envAssistantTrigger)
 
@@ -113,24 +112,31 @@ func openSession(dir, uuid string) *os.File {
 	return f
 }
 
-// startStdinLogger fsyncs after every Read so a sibling test process polling
-// the file from outside sees bytes promptly (macOS APFS otherwise can defer
-// visibility across processes).
-func startStdinLogger(path string) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
-	if err != nil {
-		fatalf("open stdin log %s: %v", path, err)
+// startStdinConsumer reads from stdin to detect when a turn arrives, emitting the
+// thinking spinner so DeliverPrompt confirms a commit. If path is non-empty, it
+// also fsyncs every byte read so the e2e harness can observe the PTY.
+func startStdinConsumer(path string) {
+	var f *os.File
+	if path != "" {
+		var err error
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if err != nil {
+			fatalf("open stdin log %s: %v", path, err)
+		}
 	}
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				if _, werr := f.Write(buf[:n]); werr != nil {
-					return
-				}
-				if serr := f.Sync(); serr != nil {
-					return
+				fmt.Print("\u273b ")
+				if f != nil {
+					if _, werr := f.Write(buf[:n]); werr != nil {
+						return
+					}
+					if serr := f.Sync(); serr != nil {
+						return
+					}
 				}
 			}
 			if err != nil {

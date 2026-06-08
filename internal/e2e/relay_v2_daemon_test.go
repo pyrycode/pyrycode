@@ -420,7 +420,6 @@ func TestRelayV2_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
 	// behind a WaitReady idle-gate and acks only on a confirmed commit. This
 	// test's send_message setup step never acks against fakeclaude (no claude
 	// TUI), so the downstream v2 assistant-echo assertion is unreachable.
-	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
 
 	const (
 		knownConvID        = "88888888-8888-4888-8888-888888888888"

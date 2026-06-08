@@ -33,6 +33,7 @@ import (
 var allowlist = []string{
 	"internal/agentrun/ptyrunner/helper_test.go",
 	"cmd/substrate-guard/main.go",
+	"internal/e2e/internal/fakeclaude/main.go",
 }
 
 // pattern is one banned substrate token. substr is matched against raw file

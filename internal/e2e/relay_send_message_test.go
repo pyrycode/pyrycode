@@ -34,7 +34,6 @@ func TestRelay_SendMessage_AckAndPTYDelivery(t *testing.T) {
 	// behind a WaitReady idle-gate and acks only on a confirmed commit.
 	// fakeclaude renders no claude TUI (no idle prompt / spinner), so WaitReady
 	// never reaches idle and send_message replies binary_offline, not ack.
-	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
 
 	const (
 		knownConvID = "33333333-3333-4333-8333-333333333333"
