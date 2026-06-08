@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method that funnels a concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session (#571), exposes an `ActiveConnIDs(ctx)` method that returns a concurrency-safe snapshot of the `conn_id`s of every currently-open session — the enumeration half of the fan-out primitive (#588), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method that funnels a concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session (#571), exposes an `ActiveConnIDs(ctx)` method that returns a concurrency-safe snapshot of the `conn_id`s of every currently-open session — the enumeration half of the fan-out primitive (#588), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -31,6 +31,13 @@ type V2Session struct { /* unexported fields: connID, state, resp, send, recv, d
 
 func (s *V2Session) State() V2SessionState
 
+// ScreenSnapshotter renders the daemon's live claude screen to plain text
+// (#618). *supervisor.Supervisor satisfies it; declared in the consumer so
+// internal/relay depends on neither internal/supervisor nor tui-driver.
+type ScreenSnapshotter interface {
+    ScreenSnapshot() (text string, live bool) // live==false (text "") ⇒ no child attached
+}
+
 type V2SessionConfig struct {
     Frames     <-chan protocol.RoutingEnvelope         // required; closes ⇒ Run returns nil
     Outbound   func(protocol.RoutingEnvelope) error    // required; production passes (*Connection).Send
@@ -39,6 +46,8 @@ type V2SessionConfig struct {
     ServerID   string                                  // required; surfaced into hello_ack
     Logger     *slog.Logger                            // required (panic if nil)
     Handlers   map[string]dispatch.Handler             // optional; open-state envelope-type → handler
+    Snapshotter       ScreenSnapshotter                // optional (#618); nil ⇒ request_snapshot → server.binary_offline
+    KnownConversation func(conversationID string) bool // optional (#618); nil ⇒ request_snapshot → conversation.not_found
 }
 
 type V2SessionManager struct { /* unexported */ }
@@ -78,7 +87,7 @@ var (
 )
 ```
 
-`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
+`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618) are also **optional and unvalidated** — leaving them nil keeps the ~42 existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash. `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
 
 ## Wire types (`internal/protocol/v2envelope.go`)
 
@@ -172,7 +181,7 @@ The two `open`-row cells filled by [#446](../codebase/446.md).
 **Happy path** (`dispatchAppFrame`):
 
 1. `s.recv.Decrypt(inner.Data)` → plaintext envelope JSON. The handler chain is unreached on `Decrypt` failure (see below).
-2. **v2 control-envelope discriminator** (#454): `json.Unmarshal(plaintext, &probeEnv)`; on decode success **and** `probeEnv.Type == protocol.TypeRekeyRequest`, call `handleRekeyRequest(ctx, s, probeEnv)` and return. The application handler chain is NOT consulted. Decode failures deliberately fall through to step 3 so `dispatch.Route`'s malformed-envelope branch emits the sealed `protocol.malformed` reply established by #446. The probe is a re-decode (`dispatch.Route` decodes the same plaintext again); the cost is one small JSON parse per application frame, well below the per-frame AEAD cost.
+2. **v2 control-envelope discriminator** (#454, extended #618): `json.Unmarshal(plaintext, &probeEnv)`; on decode success a `switch probeEnv.Type` intercepts control envelopes before the application chain — `TypeRekeyRequest` → `handleRekeyRequest`, `TypeRequestSnapshot` → `handleRequestSnapshot` (#618) — then returns. The application handler chain is NOT consulted for either. Decode failures (and any other type) deliberately fall through to step 3 so `dispatch.Route`'s malformed-envelope branch emits the sealed `protocol.malformed` reply established by #446. The probe is a re-decode (`dispatch.Route` decodes the same plaintext again); the cost is one small JSON parse per application frame, well below the per-frame AEAD cost.
 3. Allocate a per-frame `outbound chan protocol.RoutingEnvelope` (buffer 8 — `handlerOutboundBuf`) and a per-frame `*dispatch.Conn` via [`dispatch.NewConn`](dispatch-package.md), carrying the matched device snapshot captured in step 10 of the handshake.
 4. `dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)` — same error-envelope paths as v1 `Dispatcher.handleOne` (malformed JSON → sealed `protocol.malformed`; unsupported / unknown type / no handler → sealed `protocol.unsupported`-or-`unknown_type`; handler error → log WARN, no synthesised reply).
 5. Drain `outbound` non-blockingly. For each captured reply: `s.send.Encrypt(reply.Frame)` → `marshalInnerFrameV2(TypeNoiseMsg, ciphertext)` → emit via `m.send` with `CloseCode: 0`. The reply's `CloseCode` is ignored — close intent is reserved for the manager's own close-with paths.
@@ -328,6 +337,35 @@ return out
 
 **Returns `[]string`, not `([]string, error)`.** A snapshot has no failure mode the caller can act on; the only non-completion (ctx cancelled, or `Run` already exited with `Frames` closed and no receiver on `m.snapshot`) returns `nil` — equivalent to "no open sessions" for the broadcast consumer, which fans out to nobody this round and re-enumerates on the next assistant turn. `nil` and an empty non-nil slice are both `len 0` and interchangeable. The result is an **unordered set** (Go's randomized map-iteration order); the handler does not sort (no AC requires it; the broadcast consumer fans out order-independently — paying O(n log n) on the single dispatch goroutine would buy nothing). `handleActiveConnIDs` emits no log line and reads no secret-bearing field — the return holds only non-secret conn-id routing keys, handed only to the in-process consumer, never to a wire.
 
+### Inbound screen-snapshot handler (#618) — `handleRequestSnapshot` + the render/push seam
+
+`request_snapshot` is a v2 **control** envelope (phone → binary), intercepted in `dispatchAppFrame`'s discriminator switch **before** `dispatch.Route` (the same boundary `rekey_request` uses), and answered with a `screen_snapshot` (binary → phone) carrying the current claude screen rendered to plain text. It backs ADR 025's always-available, parser-independent live-view escape hatch — the floor of the safe-degradation strategy. **`security-sensitive`**: the handler accepts an inbound frame from a non-trusted party over an internet-exposed relay and returns rendered screen content; ADR 025 § Security model (line 141) deliberately keeps read-only screen viewing **outside** the per-device permission gate, but the dispatch-and-return path is the surface the spec-stage security review audited (verdict PASS). See [`codebase/618.md`](../codebase/618.md).
+
+Three seams, smallest-blast-radius first:
+
+- **Supervisor render seam.** `(*supervisor.Supervisor).ScreenSnapshot() (text string, live bool)` captures the live `*tuidriver.Session` under `sessMu` (mirroring `WriteUserTurn`), then renders `tuidriver.Render(sess.Snapshot(), 0, 0)` **inside the seal** — the raw VT100 bytes are consumed in the same expression and never named in pyrycode, so no claude-screen literal enters the package (`cmd/substrate-guard` stays green). `sess == nil` ⇒ `("", false)`. `0,0` selects tui-driver's 120×40 default, matching the daemon PTY's allocation in headless mode (`resizeOnce` only fires for a TTY stdin), so the render is 1:1. Total — no error path; non-blocking (a pointer read + a bounded in-memory render).
+- **Consumer-declared seam.** The relay reaches the supervisor through the one-method `ScreenSnapshotter` interface (declared in the relay) and the `KnownConversation func(string) bool` closure (production: a `conversations.Registry` membership check). The relay imports neither `internal/supervisor` nor `internal/conversations` — both seams are behaviours passed in via `V2SessionConfig`, same shape as `Config.ValidateConversation`.
+- **The handler.** `handleRequestSnapshot(ctx, s, env)` runs on the single `Run` dispatch goroutine. Every branch pushes exactly one reply and returns (**AC #3** — never panics, hangs, or silently drops):
+
+| Condition | Reply | Code | Retryable |
+|---|---|---|---|
+| Malformed payload / empty `conversation_id` | `error` | `conversation.not_found` | false |
+| Unknown / foreign `conversation_id` (**AC #4**) | `error` | `conversation.not_found` | false |
+| `KnownConversation == nil` (optional seam) | `error` | `conversation.not_found` | false |
+| `Snapshotter == nil` (optional seam) | `error` | `server.binary_offline` | true |
+| No live session (`live == false`, **AC #3**) | `error` | `server.binary_offline` | true |
+| Happy path | `screen_snapshot{conversation_id, text, ts}` | — | — |
+
+The `conversation_id` is validated by `KnownConversation` **before any render** (AC #4): an unknown/foreign id renders nothing. A JSON decode failure is tolerated — it leaves `ConversationID == ""`, which collapses into the not-found branch; the decode error is **never echoed**. Error replies carry only a **static** message constant (`msgSnapshotConvNotFound` / `msgSnapshotOffline`), never the decode-error text or the attacker-controlled raw `conversation_id`.
+
+**Both success and error replies go through `m.handlePush`** — the single existing seal-and-forward path ([#571](../codebase/571.md)), no parallel send path. The public [`Push`](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) is deliberately **NOT** called here: it funnels onto `m.push` and waits for `Run`, which is the goroutine executing the handler, so calling it would **self-deadlock** the manager. The envelope `ID` is a fixed non-load-bearing `1` (mirrors `emitRekeyRequest`); the phone correlates on `InReplyTo`.
+
+**Security / log discipline (specified + tested).** The rendered screen text is sensitive and is **NEVER** logged — mirrors `assistant_turn_v2.go`'s chunk-bytes discipline. The handler logs only `conn_id`, `conversation_id` (a non-sensitive UUID), and event names (`v2.snapshot.served`, and defensive `v2.snapshot.*_err` lines). `TestV2Session_OpenState_RequestSnapshot_NeverLogsScreenText` pins the invariant with a benign non-substrate sentinel; code-review should grep the handler for any log field carrying the rendered `text`.
+
+**Concurrency.** No new goroutine, channel, or shutdown step — the handler runs only on `Run`. `ScreenSnapshot` takes `supervisor.sessMu` (leaf, pointer read) then a bounded in-memory render; `KnownConversation` takes a `conversations.Registry` RLock (leaf, bounded). Both are leaf locks in other packages, never nested with relay state. The TOCTOU window between `KnownConversation` and `ScreenSnapshot` is benign — a session that dies in the gap yields a deterministic `server.binary_offline`, not a crash or a stale render.
+
+**Deferred (recorded in `codebase/618.md` § Out of scope):** per-conversation screen routing — this single-bootstrap-conversation phase validates *registry membership*, so any registered id renders the one live screen; the multi-conversation phase ([#596]+) MUST tighten the render to the named conversation's session. Also deferred: resized-foreground render dimensions, eager push on `stall_detected`, and request-flood rate-limiting.
+
 ## Concurrency
 
 **One owner goroutine + transient `time.AfterFunc` callbacks routed through a wake channel.** `Run` is the only goroutine the manager owns long-term. It reads `cfg.Frames`, looks up (or lazily creates) `m.sessions[env.ConnID]`, processes the frame synchronously, and ALSO pops `wakeSignal` values from a per-manager buffered channel `m.wake` and dispatches them via `handleWake`. `m.sessions` is mutated exclusively by `Run`; no mutex.
@@ -452,7 +490,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`internal/noise`](noise-package.md) (#433) — `Responder`, `ReadInit`, `WriteResp`, `CipherState`, `KeyLen`. The wrapper's empty-AD-at-the-type-system invariant flows through to every AEAD operation here.
 - [`internal/devices`](devices-package.md) — `Registry.Validate(plain)` predicate (two-state, bumps `LastSeenAt` under `reg.mu`).
 - [`internal/dispatch`](dispatch-package.md) — `Handler`, `Conn`, `NewConn`, `Route` (#446). The same handler-table dispatch primitives used by v1's `Dispatcher`, factored out so the v2 manager does not duplicate the malformed/unsupported/unknown-type error-envelope logic.
-- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, and the `Token` field on `HelloClientPayload`.
+- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, the `Token` field on `HelloClientPayload`, and (#618) `RequestSnapshotPayload` / `ScreenSnapshotPayload` + `TypeRequestSnapshot` / `TypeScreenSnapshot` / `CodeConversationNotFound` / `CodeServerBinaryOffline` (the #617 snapshot vocabulary).
 - [`github.com/coder/websocket`](relay-package.md#dependencies) — only for the `StatusCode` type aliasing the two new exported close codes.
 
 ## Related
@@ -473,5 +511,8 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`codebase/571.md`](../codebase/571.md) — concurrency-safe server-initiated push; `Push` method + `pushReq`/`push` channel + `handlePush`, the structural twin of the #462 rekey funnel. The primitive the [#589](../codebase/589.md) assistant-turn bridge consumes.
 - [`codebase/588.md`](../codebase/588.md) — concurrency-safe open-session enumeration; `ActiveConnIDs` method + `snapshotReq`/`snapshot` channel + `handleActiveConnIDs`, the structural twin of the #571 push funnel (seal/marshal steps dropped). The enumeration half #571 deferred; with `Push` it completes the fan-out primitive the [#589](../codebase/589.md) bridge consumes.
 - [`codebase/589.md`](../codebase/589.md) — the v2 assistant-turn bridge: the production consumer of `Push` + `ActiveConnIDs`, fanning finished assistant turns to every open v2 phone.
+- [`codebase/618.md`](../codebase/618.md) — the inbound screen-snapshot handler (`security-sensitive`); `ScreenSnapshotter` interface, the two optional `V2SessionConfig` seams, the `dispatchAppFrame` snapshot arm, `handleRequestSnapshot` + `snapshotReplyError`, and the `(*supervisor.Supervisor).ScreenSnapshot` render seam. Reuses `handlePush`, never the public `Push`.
+- [`codebase/617.md`](../codebase/617.md) — the screen-snapshot wire vocabulary (`request_snapshot` / `screen_snapshot` payloads + `Type` constants) #618 consumes.
+- [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Safe degradation (the parser-independent snapshot floor) and § Security model (line 141: read-only screen viewing outside the per-device permission gate).
 - [`features/dispatch-package.md`](dispatch-package.md) — `Route` and `NewConn` (the production-allowed counterpart to `NewTestConn`).
 - [`features/relay-package.md`](relay-package.md) — the v1 surfaces of `internal/relay`.

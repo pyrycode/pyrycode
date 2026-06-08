@@ -35,6 +35,7 @@ import (
 //     hello_ack; no noise_resp is ever produced (AC#2).
 func TestRelayV2_Daemon(t *testing.T) {
 	t.Run("v2_enabled_list_conversations_round_trip", testV2DaemonListConversationsRoundTrip)
+	t.Run("v2_enabled_request_snapshot_round_trip", testV2DaemonRequestSnapshotRoundTrip)
 	t.Run("v2_disabled_does_not_engage_v2", testV2DaemonDisabledDoesNotEngageV2)
 }
 
@@ -184,6 +185,129 @@ func testV2DaemonListConversationsRoundTrip(t *testing.T) {
 	}
 	if got := convsPayload.Conversations[0].ID; got != knownConvID {
 		t.Errorf("conversations[0].ID = %q, want %q", got, knownConvID)
+	}
+}
+
+// testV2DaemonRequestSnapshotRoundTrip drives a spawned daemon with the v2
+// switch enabled through a request_snapshot → render → screen_snapshot round
+// trip at the real daemon seam (AC #5). The default /bin/sleep child gives a
+// live tui-driver session whose (empty) buffer renders to text, so the render
+// path is exercised without depending on send_message / WaitReady. A second
+// request naming a foreign conversation_id is rejected conversation.not_found,
+// strengthening AC #4 at the daemon seam.
+func testV2DaemonRequestSnapshotRoundTrip(t *testing.T) {
+	const (
+		knownConvID   = "66666666-6666-4666-8666-666666666666"
+		foreignConvID = "12121212-1212-4121-8121-121212121212"
+	)
+	home := shortHome(t)
+
+	// Pair a device: yields the bearer token and the responder static pubkey
+	// the phone pins. The daemon loads the same static key on startup.
+	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
+	if r.ExitCode != 0 {
+		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
+	}
+	payload := decodePairPayload(t, r.Stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
+
+	// Seed the known conversation the snapshot request will name (AC #4 gate).
+	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
+	convJSON := []byte(`{"conversations":[{"id":"` + knownConvID +
+		`","cwd":"` + home +
+		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
+	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
+		t.Fatalf("seed conversations.json: %v", err)
+	}
+
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+
+	h := StartInWithEnv(t, home,
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1"},
+		"-pyry-relay="+fr.URL()+"/v2/server",
+	)
+	t.Cleanup(func() { h.Stop(t) })
+
+	serverID := readPersistedServerID(t, home)
+	waitBinaryHello(t, fr, serverID)
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, payload.Token, "phone-a")
+	if err != nil {
+		t.Fatalf("phone dial: %v", err)
+	}
+	t.Cleanup(func() { _ = phone.Close() })
+
+	initSend, initRecv := driveHandshakeToOpenDaemon(t, phone, pubKey, payload.Token)
+
+	// roundTrip seals a request_snapshot for convID, sends it, and returns the
+	// decrypted reply. Binary→phone frames decrypt in capture order (the
+	// receive nonce is sequential); the sleep child emits no PTY output, so no
+	// assistant-turn push interleaves between the two requests.
+	roundTrip := func(reqID uint64, convID string) protocol.Envelope {
+		t.Helper()
+		reqEnv, err := json.Marshal(protocol.Envelope{
+			ID:      reqID,
+			Type:    protocol.TypeRequestSnapshot,
+			TS:      time.Now().UTC(),
+			Payload: mustJSON(t, protocol.RequestSnapshotPayload{ConversationID: convID}),
+		})
+		if err != nil {
+			t.Fatalf("marshal request envelope: %v", err)
+		}
+		ciphertext, err := initSend.Encrypt(reqEnv)
+		if err != nil {
+			t.Fatalf("seal request envelope: %v", err)
+		}
+		sendNoiseMsg(t, phone, ciphertext)
+		return decryptInnerEnvelope(t, readInnerFrame(t, phone, 3*time.Second), initRecv)
+	}
+
+	// Happy path: a known conversation renders a screen_snapshot.
+	const snapReqID uint64 = 31
+	reply := roundTrip(snapReqID, knownConvID)
+	if reply.Type != protocol.TypeScreenSnapshot {
+		t.Fatalf("reply Type = %q, want %q (payload=%s)",
+			reply.Type, protocol.TypeScreenSnapshot, string(reply.Payload))
+	}
+	if reply.InReplyTo == nil || *reply.InReplyTo != snapReqID {
+		t.Errorf("InReplyTo = %v, want pointer to %d", reply.InReplyTo, snapReqID)
+	}
+	var snap protocol.ScreenSnapshotPayload
+	if err := json.Unmarshal(reply.Payload, &snap); err != nil {
+		t.Fatalf("decode screen_snapshot payload: %v", err)
+	}
+	if snap.ConversationID != knownConvID {
+		t.Errorf("ConversationID = %q, want %q", snap.ConversationID, knownConvID)
+	}
+	// snap.Text is the text rendered inside the tui-driver seal. It is a string
+	// by type; its content is intentionally NOT asserted — coupling to the
+	// child's screen would be non-deterministic and risk the substrate guard.
+	if snap.TS.IsZero() {
+		t.Error("screen_snapshot TS is zero, want a render timestamp")
+	}
+
+	// Foreign conversation_id → conversation.not_found (AC #4 at the daemon seam).
+	const foreignReqID uint64 = 32
+	errReply := roundTrip(foreignReqID, foreignConvID)
+	if errReply.Type != protocol.TypeError {
+		t.Fatalf("foreign reply Type = %q, want %q (payload=%s)",
+			errReply.Type, protocol.TypeError, string(errReply.Payload))
+	}
+	if errReply.InReplyTo == nil || *errReply.InReplyTo != foreignReqID {
+		t.Errorf("foreign InReplyTo = %v, want pointer to %d", errReply.InReplyTo, foreignReqID)
+	}
+	var errPayload protocol.ErrorPayload
+	if err := json.Unmarshal(errReply.Payload, &errPayload); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	if errPayload.Code != protocol.CodeConversationNotFound {
+		t.Errorf("error Code = %q, want %q", errPayload.Code, protocol.CodeConversationNotFound)
 	}
 }
 

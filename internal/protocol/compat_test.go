@@ -43,6 +43,9 @@ func TestIsV1Compatible(t *testing.T) {
 		{"tool_use-rejected", TypeToolUse, false, ErrUnknownType},
 		{"tool_result-rejected", TypeToolResult, false, ErrUnknownType},
 		{"turn_end-rejected", TypeTurnEnd, false, ErrUnknownType},
+		// v2-only screen-snapshot types are likewise not v1-compatible.
+		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
+		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,12 +91,14 @@ func TestV1TypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 // must not, so the partition is the architectural seam between v1 traffic
 // and v2 traffic.
 var v2OnlyTypes = map[string]bool{
-	TypeRekeyRequest:   true,
-	TypeTurnState:      true,
-	TypeAssistantDelta: true,
-	TypeToolUse:        true,
-	TypeToolResult:     true,
-	TypeTurnEnd:        true,
+	TypeRekeyRequest:    true,
+	TypeTurnState:       true,
+	TypeAssistantDelta:  true,
+	TypeToolUse:         true,
+	TypeToolResult:      true,
+	TypeTurnEnd:         true,
+	TypeRequestSnapshot: true,
+	TypeScreenSnapshot:  true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -118,6 +123,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 interactive application events.
 		TypeTurnState, TypeAssistantDelta, TypeToolUse,
 		TypeToolResult, TypeTurnEnd,
+		// v2 screen-snapshot types.
+		TypeRequestSnapshot, TypeScreenSnapshot,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]

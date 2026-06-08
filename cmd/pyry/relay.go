@@ -287,6 +287,16 @@ func startRelayV2(
 			protocol.TypeRegisterPushToken: handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
 			protocol.TypeSendMessage:       handlers.SendMessage(sess, logger),
 		},
+		// Screen-snapshot seam (#618): the supervisor renders the live screen
+		// inside the tui-driver seal; KnownConversation gates request_snapshot
+		// on registry membership (AC #4), mirroring the established
+		// conversations-registry validation pattern but returning a bool so the
+		// relay needs no conversations import or errors.Is coupling.
+		Snapshotter: sup,
+		KnownConversation: func(id string) bool {
+			_, ok := convReg.Get(conversations.ConversationID(id))
+			return ok
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build v2 session manager: %w", err)
