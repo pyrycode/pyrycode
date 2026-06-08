@@ -139,6 +139,19 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			// Stall carries conversation_id only; tc's non-empty TurnID and
+			// non-zero Seq are ignored (a stall is not turn-scoped, not a delta).
+			// StallPayload has no turn_id field, so none can leak.
+			name:    "Stall -> stall, conversation_id only",
+			ev:      turnevent.Stall{},
+			tc:      tc,
+			wantTyp: protocol.TypeStall,
+			wantPayload: protocol.StallPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{

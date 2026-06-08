@@ -430,6 +430,130 @@ func TestInteractiveTurnEmitterV2_DropsWhenCursorEmpty(t *testing.T) {
 	}
 }
 
+// AC#1: a stall_detected mapped to turnevent.Stall fans out as a stall envelope
+// to interactive-capable conns only (the capability gate), carrying the cursor's
+// conversation_id.
+func TestInteractiveTurnEmitterV2_StallFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.Stall{})
+
+	if got := len(bcast.pushes); got != 1 {
+		t.Fatalf("stall pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	}
+	p := bcast.pushes[0]
+	if p.connID != "a" {
+		t.Fatalf("stall pushed to conn %q; want interactive conn %q", p.connID, "a")
+	}
+	if p.env.Type != protocol.TypeStall {
+		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeStall)
+	}
+	var sp protocol.StallPayload
+	if err := json.Unmarshal(p.env.Payload, &sp); err != nil {
+		t.Fatalf("decode stall payload: %v", err)
+	}
+	if sp.ConversationID != testConvID {
+		t.Fatalf("stall conversation_id: got %q, want %q", sp.ConversationID, testConvID)
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatal("non-interactive conn b received the stall")
+	}
+}
+
+// AC#1: a stall mutates no turn lifecycle — it emits no turn_state and leaves
+// inTurn/currentState untouched, so the next content opens a fresh turn as if
+// the stall never happened.
+func TestInteractiveTurnEmitterV2_StallNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	// A bare stall before any turn: only the stall, no turn_state / delta.
+	e.Handle(context.Background(), turnevent.Stall{})
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeStall}) {
+		t.Fatalf("bare stall envelopes: got %v, want [%s]", got, protocol.TypeStall)
+	}
+
+	// The next content opens a fresh turn: first subsequent envelope is
+	// turn_state: responding (the stall left inTurn/currentState untouched).
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	wantTypes := []string{
+		protocol.TypeStall,
+		protocol.TypeTurnState,      // responding — fresh turn opens after the stall
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-stall envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after stall: got %v, want [responding]", got)
+	}
+}
+
+// AC#1: a stall mid-turn rides through without disturbing the open turn — seq
+// keeps advancing, the turn id is unchanged, and no extra turn_state is emitted
+// around the stall.
+func TestInteractiveTurnEmitterV2_StallMidTurnDoesNotDisturbOpenTurn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.TextChunk{Text: "a1"}, // opens turn: responding + delta seq 0
+		turnevent.Stall{},               // stall mid-turn
+		turnevent.TextChunk{Text: "a2"}, // delta seq 1, same turn
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // a1
+		protocol.TypeStall,          // stall, no surrounding turn_state
+		protocol.TypeAssistantDelta, // a2
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn stall envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
+	}
+	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("stall disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
+	}
+	if deltas[0].TurnID != deltas[1].TurnID {
+		t.Fatalf("stall split the turn: %q vs %q", deltas[0].TurnID, deltas[1].TurnID)
+	}
+}
+
+// AC#1: an empty cursor drops the stall with no push (the existing Handle gate
+// covers the stall for free).
+func TestInteractiveTurnEmitterV2_StallDroppedWhenCursorEmpty(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{} // empty cursor
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.Stall{})
+
+	if len(bcast.pushes) != 0 {
+		t.Fatalf("empty cursor pushed %d stall envelopes; want 0", len(bcast.pushes))
+	}
+}
+
 // A TurnEnd observed while no turn is open is dropped (no turn_end, no idle).
 func TestInteractiveTurnEmitterV2_TurnEndOutsideTurnDropped(t *testing.T) {
 	t.Parallel()

@@ -140,8 +140,14 @@ func TestMapEvent(t *testing.T) {
 			want:   turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
 			wantOK: true,
 		},
-		// Drop cases: every PTY-state kind, stall, unknown, and JSONL entries
-		// with no representable content.
+		{
+			name:   "stall detected -> Stall",
+			in:     kindEvent(tuidriver.EventKindStallDetected),
+			want:   turnevent.Stall{},
+			wantOK: true,
+		},
+		// Drop cases: every PTY-state kind, unknown, and JSONL entries with no
+		// representable content.
 		{name: "drop unknown", in: kindEvent(tuidriver.EventKindUnknown)},
 		{name: "drop pty idle", in: kindEvent(tuidriver.EventKindPtyIdle)},
 		{name: "drop pty thinking", in: kindEvent(tuidriver.EventKindPtyThinking)},
@@ -151,7 +157,6 @@ func TestMapEvent(t *testing.T) {
 		{name: "drop pty mcp failure hidden", in: kindEvent(tuidriver.EventKindPtyMcpFailureHidden)},
 		{name: "drop pty network failure shown", in: kindEvent(tuidriver.EventKindPtyNetworkFailureShown)},
 		{name: "drop pty network failure hidden", in: kindEvent(tuidriver.EventKindPtyNetworkFailureHidden)},
-		{name: "drop stall detected", in: kindEvent(tuidriver.EventKindStallDetected)},
 		{
 			name: "drop assistant with no representable block",
 			in:   jsonlEvent(entry(t, "assistant", "m4", "", map[string]any{"type": "image", "source": "x"})),

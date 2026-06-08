@@ -13,9 +13,10 @@ import (
 // debug-logs those. Pure; safe on a zero-value Event.
 //
 // The robust JSONL-sourced kinds (assistant text, tool use/result, end-of-turn)
-// map; every PTY-state kind (idle/thinking/modal/mcp/network), the stall marker,
-// and Unknown drop, because the internal model (#606) has no type for them — not
-// because the screen signals are worthless (ADR 025 § brittleness split).
+// map, as does the stall marker (the screen-derived onset signal #373 surfaces);
+// every PTY-state kind (idle/thinking/modal/mcp/network) and Unknown drop,
+// because the internal model (#606) has no type for them — not because the
+// screen signals are worthless (ADR 025 § brittleness split).
 func mapEvent(ev tuidriver.Event) (turnevent.Event, bool) {
 	switch ev.Kind {
 	case tuidriver.EventKindJsonlEntry:
@@ -26,6 +27,11 @@ func mapEvent(ev tuidriver.Event) (turnevent.Event, bool) {
 		// end_turn. Other stop reasons (max_tokens, refusal, …) are not
 		// distinguishable from this event kind in tui-driver v1.3.0.
 		return turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, true
+	case tuidriver.EventKindStallDetected:
+		// One-shot rising-edge marker, no payload and no clearing edge: map to
+		// the zero-field Stall signal (no field extraction). The bridge injects
+		// conversation identity when shaping the wire payload.
+		return turnevent.Stall{}, true
 	default:
 		return nil, false
 	}

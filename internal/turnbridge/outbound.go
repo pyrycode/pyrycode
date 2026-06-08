@@ -90,6 +90,13 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			TurnID:         tc.TurnID,
 			StopReason:     string(e.Reason),
 		}, true
+	case turnevent.Stall:
+		// A stall carries conversation identity only — it is not turn-scoped and
+		// not a delta, so tc.TurnID and tc.Seq are ignored (as BuildTurnState
+		// ignores them).
+		return protocol.TypeStall, protocol.StallPayload{
+			ConversationID: tc.ConversationID,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false
