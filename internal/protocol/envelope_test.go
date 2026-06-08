@@ -154,6 +154,37 @@ func TestRoutingEnvelope_TokenOmitempty(t *testing.T) {
 	}
 }
 
+// TestEnvelope_EventIDOmitempty pins that a nil EventID is absent from the
+// wire (so every non-interactive / v1 construction site stays byte-identical)
+// and that a non-nil EventID round-trips faithfully. AC-4: absent, not null/0.
+func TestEnvelope_EventIDOmitempty(t *testing.T) {
+	env := Envelope{ID: 1, Type: TypeHello, Payload: json.RawMessage(`{}`)}
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"event_id"`)) {
+		t.Errorf("nil EventID should be omitted; got %s", out)
+	}
+
+	id := uint64(7)
+	env.EventID = &id
+	out, err = json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(out, []byte(`"event_id":7`)) {
+		t.Errorf("non-nil EventID should encode; got %s", out)
+	}
+	var back Envelope
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.EventID == nil || *back.EventID != 7 {
+		t.Errorf("EventID round-trip: got %v, want pointer to 7", back.EventID)
+	}
+}
+
 // TestRoutingEnvelope_CloseCodeOmitempty pins that CloseCode=0 is
 // omitted and that a non-zero CloseCode round-trips.
 func TestRoutingEnvelope_CloseCodeOmitempty(t *testing.T) {

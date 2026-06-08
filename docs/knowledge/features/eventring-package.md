@@ -87,12 +87,18 @@ the single `json.Marshal`, before the `ActiveConns` loop:
   timestamp per logical event, shared by every conn and by the ring (previously
   each conn got its own `time.Now()`; the change is intentional and strictly more
   correct: one logical event = one timestamp).
-- `e.ring.Append(convID, typ, payloadJSON, ts)` records the event **unconditionally
-  — independent of how many conns are interactive, including zero**, because the
-  ring is the replay source for phones that are *absent right now* and reconnect
-  later. The returned id is **unused in #646**; #647 surfaces it on the wire.
-- The existing per-conn loop then runs unchanged: `e.nextID++` per conn, build the
-  envelope, `Push`.
+- `eventID := e.ring.Append(convID, typ, payloadJSON, ts)` records the event
+  **unconditionally — independent of how many conns are interactive, including
+  zero**, because the ring is the replay source for phones that are *absent right
+  now* and reconnect later. The returned id was **discarded in #646**; **#649
+  surfaces it on the wire** — `emit` captures it and stamps it on every per-conn
+  envelope as `Envelope.EventID` so a reconnecting phone can advertise it as
+  `last_event_id` (see [codebase/649.md](../codebase/649.md)). The inbound consumer
+  that accepts and replays from it is #647.
+- The per-conn loop then runs almost as before — `e.nextID++` per conn, build the
+  envelope, `Push` — with one addition (#649): `EventID: &eventID` on the envelope
+  literal (`&eventID` is a loop-invariant local shared by reference across the
+  fan-out, so all conns get the identical durable id with no per-conn allocation).
 
 All six v2 wire types flow through `emit()`, so the ring records the complete set.
 
