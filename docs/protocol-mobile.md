@@ -293,6 +293,12 @@ Shape of `noise_msg`:
 }
 ```
 
+Envelope-level fields beyond the v1 set:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `event_id` | int | no (omitempty) | Durable, per-conversation event id for the replay cursor (#649). Present **only** on interactive structured-stream frames (binary → phone; see [Interactive events](#interactive-events-v2-capability-gated)); absent on every other frame. Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing per conversation, stable across reconnects — the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). |
+
 Encoding: line-delimited JSON over WS text frames. One outer envelope per frame. UTF-8.
 
 **Application-envelope size cap.** Because every transport frame fits inside a single Noise transport message (65535 bytes including 16-byte AEAD tag), the decrypted application envelope is capped at **65519 bytes**. v1's 1 MiB `message.too_long` cap is **superseded** in v2; v2 implementations enforce the 65519-byte cap and emit `message.too_long` for any application envelope that, after JSON serialisation, exceeds it. Large payloads (e.g. attachments, deferred to a later v2 feature release) require an envelope-level chunking scheme that is out of scope for this spec.
@@ -466,7 +472,9 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These six envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These six envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+
+**Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable, per-conversation id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in emit order per conversation. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a resync marker if it fell off the bounded window). This section describes the **producer** side — the daemon stamping `event_id` outbound. The reconnect **consumer** (the `last_event_id` field in `hello`, ring replay, and the resync marker) lands with the inbound-reconnect work and is not yet wired.
 
 #### `turn_state`
 
