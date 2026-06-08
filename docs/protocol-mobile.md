@@ -405,7 +405,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 
 | Type | Direction | Carries handshake early-data? | Notes |
 |---|---|---|---|
-| `hello` | phone → binary | yes (in `noise_init`) | Includes device-token, last_seen_ts. |
+| `hello` | phone → binary | yes (in `noise_init`) | Includes device-token, last_seen_ts; optional `last_event_id` for mid-turn reconnect replay (#647). |
 | `hello_ack` | binary → phone | yes (in `noise_resp`) | Includes `conn_id`. |
 | `send_message` | phone → binary | no | |
 | `message` | binary → phone | no | |
@@ -430,6 +430,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
+| **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -446,10 +447,20 @@ Sent in the `noise_init` early-data payload. The `payload.token` field carries t
     "device_name": "Juhana's Pixel 8",
     "client_version": "pyrycode-mobile 0.1.0",
     "protocol_versions": ["v2"],
-    "last_seen_ts": "2026-05-08T08:14:02Z"
+    "last_seen_ts": "2026-05-08T08:14:02Z",
+    "last_event_id": 42
   }
 }
 ```
+
+`last_event_id` (optional, omitempty — absent, not `null`, when the phone has no
+position; key-absent keeps the v1 hello byte-identical) is the durable
+per-conversation `event_id` (see [Interactive events](#interactive-events-v2-capability-gated))
+the phone last saw on the interactive stream. On mid-turn reconnect the phone
+advertises it so the daemon can replay the missed tail from the event ring or
+emit a `resync` marker (#647). It is **untrusted input** — the daemon
+range/shape-validates it (`*uint64` decode) and bounds replay by the ring; the
+phone can never address a conversation other than the daemon's current one.
 
 Binary validates the token after decrypting the handshake message. If invalid, the binary sends an AEAD-sealed `error` envelope (code `auth.invalid_token`) inside a `noise_msg` and asks the relay to close with `4401`. The `noise_resp` may or may not have already been sent at this point — implementations should send it first (so the AEAD channel exists), then immediately send the auth error.
 
@@ -474,7 +485,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 These six envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
 
-**Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable, per-conversation id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in emit order per conversation. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a resync marker if it fell off the bounded window). This section describes the **producer** side — the daemon stamping `event_id` outbound. The reconnect **consumer** (the `last_event_id` field in `hello`, ring replay, and the resync marker) lands with the inbound-reconnect work and is not yet wired.
+**Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable, per-conversation id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in emit order per conversation. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
 #### `turn_state`
 
@@ -529,6 +540,31 @@ ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` i
 | `conversation_id` | string | Conversation that stalled. |
 
 `stall` is the wire form of an internal-only daemon signal (a one-shot stall-onset marker; no ACP equivalent). Like `turn_state`, it is a coarse conversation-level signal and carries no `turn_id`. It is onset-only — there is no clearing event; the phone self-clears on the next turn activity.
+
+#### Reconnect replay & resync (consumer, #647)
+
+The inbound half of the [replay cursor](#interactive-events-v2-capability-gated). On mid-turn reconnect a phone advertises the latest `event_id` it saw as `hello.last_event_id` (see [`hello`](#hello-v2-specific-note)). The daemon resolves the conversation to replay from its **own** current cursor — never from anything the phone sends — and queries the bounded per-conversation event ring (ADR 025 § Backpressure / replay):
+
+- **In-ring tail.** Events with `id > last_event_id` are replayed on that connection, in ascending order, **before** the live stream resumes. Each replay frame carries the same `event_id` it had originally (so the phone advances its cursor), and is AEAD-sealed under the freshly-handshaked session keys.
+- **Caught-up.** `last_event_id` at or beyond the newest retained event → no replay; the live stream resumes normally.
+- **Aged out → `resync`.** `last_event_id` predates the oldest retained event (the position fell off the bounded window) → the daemon emits a single `resync` marker instead of a partial, gap-ful replay, so the phone is never left with a silent gap. The phone responds with a full reload of the named conversation.
+- **Absent.** A phone that sends no `last_event_id` receives no replay — just the normal live stream.
+
+A phone that advertises no `last_event_id`, and any v1 phone, are unaffected (key absent → byte-identical hello).
+
+`last_event_id` is **untrusted remote input**: it is range/shape-validated (`*uint64` decode rejects non-integers), the replay is bounded by what the ring retains (`MaxEventsPerConversation`), and it is scoped to the daemon-resolved conversation — a phone can never address another conversation's events. The phone SHOULD additionally de-duplicate replayed events by `event_id` (defence in depth; the two layers are independent).
+
+##### `resync`
+
+Direction **binary → phone** (outbound v2 control marker; not in `v1TypeSet` — an old phone never receives it).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation the phone must full-reload. The daemon's own resolved id; never attacker-derived. |
+
+The marker carries no `event_id` (it is not a structured event). On receipt the phone discards its `last_event_id` cursor for that conversation and performs a full reload (today via a fresh subscription; the dedicated `backfill_since` reload handler is a deferred follow-up — it needs a message-history store that does not exist yet).
+
+> **Implementation status (2026-06-08).** The reconnect-replay daemon code (PR #651) is **not yet merged** and carries an unresolved code-review **MUST FIX**: in the *caught-up* path the per-connection dedup watermark is set from the untrusted `last_event_id`, which can silently suppress the live stream after a `/clear`-rotated reconnect or a hostile-large `last_event_id`. The wire contract above is the intended behaviour; the daemon defect is tracked in [`docs/knowledge/codebase/647.md`](knowledge/codebase/647.md#️-known-issue--unresolved-code-review-must-fix-do-not-merge-as-is). Treat the replay/resync daemon behaviour as provisional until that fix lands.
 
 ### Screen snapshot (v2)
 
