@@ -110,13 +110,9 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	if cfg.BinaryVersion == "" {
 		return nil, fmt.Errorf("%w: BinaryVersion is required", ErrInvalidConfig)
 	}
-	parsedURL, err := url.Parse(cfg.RelayURL)
+	dialURL, err := resolveDialURL(cfg.RelayURL, cfg.AllowInsecureScheme)
 	if err != nil {
-		return nil, fmt.Errorf("%w: RelayURL parse: %v", ErrInvalidConfig, err)
-	}
-	if parsedURL.Scheme != "wss" && !(cfg.AllowInsecureScheme && parsedURL.Scheme == "ws") {
-		return nil, fmt.Errorf("%w: RelayURL scheme must be wss (got %q)",
-			ErrInvalidConfig, parsedURL.Scheme)
+		return nil, err
 	}
 
 	headers := http.Header{}
@@ -125,7 +121,7 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	headers.Set("user-agent", "pyry/"+cfg.BinaryVersion)
 
 	tcfg := transport.Config{
-		URL:             cfg.RelayURL,
+		URL:             dialURL,
 		Headers:         headers,
 		WriteTimeout:    10 * time.Second,
 		Logger:          cfg.Logger,
@@ -140,6 +136,27 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	}
 	go c.run(ctx)
 	return c, nil
+}
+
+// resolveDialURL is the single home for relay-URL handling: it validates the
+// scheme and appends the binary's /v1/server endpoint when the URL carries no
+// meaningful path, mirroring the phone's /v1/client convention (both consumers
+// read the same base relay_url; the phone appends /v1/client, the daemon
+// appends /v1/server). An operator-supplied path is preserved unchanged.
+// Returns the dial URL, or a wrapped ErrInvalidConfig.
+func resolveDialURL(raw string, allowInsecure bool) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("%w: RelayURL parse: %v", ErrInvalidConfig, err)
+	}
+	if u.Scheme != "wss" && !(allowInsecure && u.Scheme == "ws") {
+		return "", fmt.Errorf("%w: RelayURL scheme must be wss (got %q)",
+			ErrInvalidConfig, u.Scheme)
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/v1/server"
+	}
+	return u.String(), nil
 }
 
 // connectWithClient is a test seam: builds a Connection that wraps the

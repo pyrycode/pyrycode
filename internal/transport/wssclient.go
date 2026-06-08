@@ -138,6 +138,14 @@ var (
 	// Config.FatalCloseCodes. Returned by Connect; the underlying status
 	// is recoverable via websocket.CloseStatus(err).
 	ErrFatalClose = errors.New("transport: fatal close code")
+
+	// ErrUpgradeRejected wraps a dial error where the relay returned a
+	// non-101 HTTP response to the WebSocket upgrade (e.g. 404 on a wrong
+	// URL path), as distinct from a network-level dial failure (DNS,
+	// connection refused, TLS). Connect surfaces it loudly (WARN) on the
+	// first failed upgrade per outage; the HTTP status is in the wrapped
+	// error string. It is NOT a fatal close — the loop keeps retrying.
+	ErrUpgradeRejected = errors.New("transport: websocket upgrade rejected")
 )
 
 // New returns a Client. The Client is not yet connected; call Connect.
@@ -180,6 +188,10 @@ func New(cfg Config) *Client {
 //   - ctx cancellation breaks out of any sleep, any dial, any pump.
 func (c *Client) Connect(ctx context.Context) error {
 	attempt := 1
+	// warnedUpgrade gates the loud upgrade-rejection WARN to once per
+	// outage: set on the first non-101 dial, re-armed on the next
+	// successful connect so a fresh outage gets its own first-failure WARN.
+	warnedUpgrade := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -209,8 +221,15 @@ func (c *Client) Connect(ctx context.Context) error {
 				}
 			}
 			delay := c.backoff(attempt)
-			c.cfg.Logger.Info("transport: dial failed, backing off",
-				"attempt", attempt, "delay", delay, "err", err)
+			if errors.Is(err, ErrUpgradeRejected) && !warnedUpgrade {
+				warnedUpgrade = true
+				c.cfg.Logger.Warn("transport: relay rejected the WebSocket upgrade; "+
+					"verify the relay URL path is correct",
+					"attempt", attempt, "delay", delay, "err", err)
+			} else {
+				c.cfg.Logger.Info("transport: dial failed, backing off",
+					"attempt", attempt, "delay", delay, "err", err)
+			}
 			if !c.sleepCancellable(ctx, delay) {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -222,6 +241,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 
 		connectedAt := time.Now()
+		warnedUpgrade = false
 		c.cfg.Logger.Info("transport: connected", "attempt", attempt)
 		serveErr := c.serve(ctx, conn)
 		uptime := time.Since(connectedAt)
@@ -363,8 +383,15 @@ func (c *Client) setConn(conn *websocket.Conn) {
 
 func (c *Client) realDial(ctx context.Context) (*websocket.Conn, error) {
 	opts := &websocket.DialOptions{HTTPHeader: c.cfg.Headers}
-	conn, _, err := websocket.Dial(ctx, c.cfg.URL, opts)
+	conn, resp, err := websocket.Dial(ctx, c.cfg.URL, opts)
 	if err != nil {
+		// coder/websocket returns a non-nil resp iff the relay answered the
+		// upgrade with a non-101 HTTP status (wrong path, misroute); a
+		// network-level failure leaves resp nil. Classify so Connect can be
+		// loud about the former and quiet-retry the latter.
+		if resp != nil {
+			return nil, fmt.Errorf("%w (HTTP %d): %w", ErrUpgradeRejected, resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("dial: %w", err)
 	}
 	conn.SetReadLimit(maxFrameBytes)
