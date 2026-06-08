@@ -14,6 +14,12 @@ neutral internal turn-event model ([`internal/turnevent`](turnevent-package.md),
   wire payload (#607). The exact mirror of `mapEvent`. See
   [The outbound adapter](#the-outbound-adapter-mapevent--buildturnstate) below.
 
+**#639** threads the screen-derived `stall_detected` marker through **both**
+mappers (`EventKindStallDetected → turnevent.Stall{}` inbound; `Stall → stall`
+envelope outbound) and the consumer's `Handle` fan-out — un-dropping a signal that
+formerly died at the daemon, so a stalled turn reaches interactive phones (#373).
+See [codebase/639.md](../codebase/639.md).
+
 The **consumer half** — the turn-lifecycle state machine, envelope ID minting /
 sealing, and the capability-gated fan-out to phones — was originally one slice
 (#616) but shipped as a chain: capability negotiation (#626, the per-conn
@@ -28,9 +34,14 @@ producer is wired live:** `startInteractiveTurnStreamV2` builds it under the v2
 foreground + sessions-dir gate, so the supervised session's structured events now flow
 to interactive phones (and keep flowing across a restart-driven `/clear` rotation).
 Before #633 the package shipped deliberately unwired — the standard "introduce the
-mapping core + tests; wire the consumer in the next slice" pattern. See
-[codebase/632.md](../codebase/632.md) (emitter) and
-[codebase/633.md](../codebase/633.md) (the live wiring + resolver).
+mapping core + tests; wire the consumer in the next slice" pattern. **#639** then
+un-drops the screen `stall_detected` marker through all three stages to the same
+fan-out: the emitter gains a `case turnevent.Stall` in `Handle` that emits with
+**no lifecycle mutation** (the stall is a peer of `turn_state`, not a droppable
+delta — droppable set is `assistant_delta` only, #610 non-dependency). See
+[codebase/632.md](../codebase/632.md) (emitter),
+[codebase/633.md](../codebase/633.md) (the live wiring + resolver), and
+[codebase/639.md](../codebase/639.md) (the stall fan-out arm).
 
 > #615 + #616 are the two halves of the originally-combined #608. Docs in #606 /
 > #607 that say "the bridge (#608)" mean: producer = #615 (here), consumer = the
@@ -149,16 +160,19 @@ internal model has no representation for the event; the caller drops + debug-log
 | ″ | else | drop |
 | `EventKindJsonlEntry`, other `e.Type` | — | drop |
 | `EventKindJsonlEndOfTurn` | — | `TurnEnd{Reason: TurnEndReasonEndTurn}` |
-| `EventKindPty*` / `EventKindStallDetected` / `EventKindUnknown` | — | drop |
+| `EventKindStallDetected` (#639) | — | `Stall{}` |
+| `EventKindPty*` / `EventKindUnknown` | — | drop |
 
 - **The brittleness split (ADR 025).** JSONL-sourced kinds (assistant text, tool
-  use/result, end-of-turn) are robust and map. Every **PTY-state** kind
-  (`PtyIdle`, `PtyThinking`, `PtyModal*`, `PtyMcpFailure*`, `PtyNetworkFailure*`),
-  the `StallDetected` marker, and `Unknown` are **dropped** — not because the
+  use/result, end-of-turn) are robust and map; the screen-derived `StallDetected`
+  marker **also maps now** that #638 gave it an internal type (`turnevent.Stall`)
+  and #639 wired it through — it surfaces the stall onset #373 consumes. Every
+  **PTY-state** kind (`PtyIdle`, `PtyThinking`, `PtyModal*`, `PtyMcpFailure*`,
+  `PtyNetworkFailure*`) and `Unknown` are still **dropped** — not because the
   screen signals are worthless, but because the internal model (#606) has **no
-  type** for them (no idle/modal/stall variant; that is deliberate). Idle/modal/
-  stall surfacing are later #596/#597 children. All 11 v1.3.0 `EventKind` variants
-  are handled: two mapped, the nine others dropped.
+  type** for them (no idle/modal variant; that is deliberate). Idle/modal
+  surfacing are later #596/#597 children. All 11 v1.3.0 `EventKind` variants are
+  handled: three mapped, the eight others dropped.
 - **Tool activity rides JSONL, not a dedicated kind.** There is no `tool-use` /
   `tool-result` event *kind*. `tuidriver.ParseToolUse(e.RawLine)` extracts a
   `tool_use` block (assistant envelope) → `ToolStart`; `ParseToolResult` extracts
@@ -244,6 +258,7 @@ idiom. Every field is carried verbatim from `tc` + the event:
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput)}` | true |
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content)}` | true |
 | `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason)}` | true |
+| `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
 | `ThoughtChunk` | `""` | `nil` | **false** (drop) |
 | nil / unknown | `""` | `nil` | false (drop) |
 
@@ -334,9 +349,10 @@ open-error retry leaks no watcher; it unblocks on the supervisor's guaranteed
 leaks. `sess.Wait()` is documented safe to call concurrently with the
 supervisor's own `Wait`/`Close`.
 
-`tr` is required by `Session.Events` (a nil tracker panics) but only drives the
-dropped stall arm here — a default `tuidriver.NewTracker(tuidriver.TrackerOpts{})`
-suffices.
+`tr` is required by `Session.Events` (a nil tracker panics) and drives the
+`stall_detected` rising-edge marker that now maps through to a `stall` envelope
+(#639; before that it drove only the dropped stall arm). A default
+`tuidriver.NewTracker(tuidriver.TrackerOpts{})` suffices.
 
 ## The `Session()` accessor (supervisor)
 
@@ -425,3 +441,4 @@ design decision.
   per-session-ctx Wait discipline).
 - [codebase/615.md](../codebase/615.md) — producer ticket record (patterns + lessons).
 - [codebase/627.md](../codebase/627.md) — outbound-adapter ticket record (patterns + lessons).
+- [codebase/639.md](../codebase/639.md) — the stall bridge wiring: un-drops `StallDetected` through all three stages to the capability-gated fan-out (#638's `turnevent.Stall` + `protocol.StallPayload`).
