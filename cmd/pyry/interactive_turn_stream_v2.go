@@ -50,8 +50,9 @@ func startInteractiveTurnStreamV2(
 	logger *slog.Logger,
 ) func() {
 	emitter := newInteractiveTurnEmitterV2(sup, mgr, logger)
-	// Session.Events requires a Tracker; zero opts -> package defaults (drives
-	// only the dropped stall arm, which the mapper discards anyway).
+	// Session.Events requires a Tracker; zero opts -> package defaults. The
+	// tracker's stall_detected marker now maps through to a stall envelope
+	// (the mapper no longer discards it).
 	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
 	resolve := resolveLatestSessionJSONL(claudeSessionsDir)
 	sub := turnbridge.NewSessionSubscriber(sup, resolve, tr, logger)

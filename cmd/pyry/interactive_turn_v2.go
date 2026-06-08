@@ -121,6 +121,15 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		e.emitMapped(ctx, convID, ev)
 		e.transitionTo(ctx, convID, turnbridge.StateIdle)
 		e.endTurn()
+	case turnevent.Stall:
+		// Onset-only control/state signal — a peer of turn_state. Emit with NO
+		// lifecycle mutation: a stall is orthogonal to thinking/responding/idle
+		// and not turn-scoped (no startTurnIfNeeded / transitionTo / endTurn;
+		// inTurn, turnID, seq, currentState all untouched). The phone self-clears
+		// on the next turn activity. Like turn_state it flows through emit() and
+		// is NOT a droppable delta — the droppable set is assistant_delta only
+		// (#610), so a stall is never silently coalesced/discarded.
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -172,8 +181,8 @@ func (e *interactiveTurnEmitterV2) endTurn() {
 
 // emitMapped maps a content event to its wire envelope via the pure #627
 // adapter and emits it. ok==false is defensive — unreachable for
-// TextChunk/ToolStart/ToolUpdate/TurnEnd (only ThoughtChunk and nil drop, and
-// neither reaches here).
+// TextChunk/ToolStart/ToolUpdate/TurnEnd/Stall (only ThoughtChunk and nil drop,
+// and neither reaches here).
 func (e *interactiveTurnEmitterV2) emitMapped(ctx context.Context, convID string, ev turnevent.Event) {
 	typ, payload, ok := turnbridge.MapEvent(ev, turnbridge.TurnContext{
 		ConversationID: convID,
@@ -248,6 +257,8 @@ func eventKind(ev turnevent.Event) string {
 		return "tool_update"
 	case turnevent.TurnEnd:
 		return "turn_end"
+	case turnevent.Stall:
+		return "stall"
 	default:
 		return "unknown"
 	}
