@@ -21,12 +21,22 @@ import (
 // the per-type body as a deferred-decode json.RawMessage; per-type structs
 // land in a sibling ticket and slot in via a second-pass json.Unmarshal.
 type Envelope struct {
-	ID               uint64          `json:"id"`
-	Type             string          `json:"type"`
-	TS               time.Time       `json:"ts"`
-	Payload          json.RawMessage `json:"payload"`
-	InReplyTo        *uint64         `json:"in_reply_to,omitempty"`
-	PayloadEncrypted bool            `json:"payload_encrypted,omitempty"`
+	ID        uint64          `json:"id"`
+	Type      string          `json:"type"`
+	TS        time.Time       `json:"ts"`
+	Payload   json.RawMessage `json:"payload"`
+	InReplyTo *uint64         `json:"in_reply_to,omitempty"`
+
+	// EventID is the durable, per-conversation event id (eventring) the
+	// interactive structured stream stamps so a phone can advertise it as
+	// last_event_id on reconnect. Distinct from ID (the per-conn envelope
+	// counter that resets each reconnect). A pointer + omitempty so every
+	// non-interactive / v1 construction site stays byte-identical: absent,
+	// not 0. Ring ids are always >= 1, so a non-nil pointer never encodes 0.
+	// Set only by the interactive emitter (#649); consumed by #647.
+	EventID *uint64 `json:"event_id,omitempty"`
+
+	PayloadEncrypted bool `json:"payload_encrypted,omitempty"`
 }
 
 // RoutingEnvelope wraps an Envelope with the relay-prepended conn_id used

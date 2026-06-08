@@ -321,11 +321,12 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	// carries the same id regardless of conn count, and is retained even when no
 	// phone is interactive right now (the ring is the replay source for absent
 	// phones that reconnect later). One timestamp per logical event, shared by
-	// every conn (hoisted out of the loop). The returned id is unused here —
-	// #647 surfaces it on the wire. The ring's own mutex handles the future
-	// cross-goroutine read; the emitter takes no lock.
+	// every conn (hoisted out of the loop). The returned id is stamped on each
+	// conn's envelope below — #649 surfaces it on the wire so a reconnecting
+	// phone can advertise it as last_event_id (consumed by #647). The ring's own
+	// mutex handles the future cross-goroutine read; the emitter takes no lock.
 	ts := time.Now().UTC()
-	e.ring.Append(convID, typ, payloadJSON, ts)
+	eventID := e.ring.Append(convID, typ, payloadJSON, ts)
 
 	// Fresh snapshot per envelope: a conn that joined mid-turn is included next
 	// emit; a dropped conn is absent here, or surfaces as a Push error below.
@@ -334,11 +335,16 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 			continue // the capability gate — non-interactive conns never see the structured stream
 		}
 		e.nextID++
+		// &eventID is shared by reference across every per-conn envelope: it is
+		// a loop-invariant local, captured once and never reassigned, and Push
+		// only ever reads the envelope (marshal/seal). So all conns observe the
+		// identical durable id (AC-2) with no race and no per-conn allocation.
 		env := protocol.Envelope{
 			ID:      e.nextID,
 			Type:    typ,
 			TS:      ts,
 			Payload: payloadJSON,
+			EventID: &eventID,
 		}
 		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
 			if ctx.Err() != nil {

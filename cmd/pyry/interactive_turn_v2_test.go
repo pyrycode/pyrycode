@@ -112,6 +112,20 @@ func ringEventIDs(evs []eventring.Event) []uint64 {
 	return out
 }
 
+// pushEventIDs extracts the durable wire event id (env.EventID) from each
+// recorded push, failing if any is nil — every interactive frame must carry one.
+func pushEventIDs(t *testing.T, pushes []recordedPush) []uint64 {
+	t.Helper()
+	out := make([]uint64, len(pushes))
+	for i, p := range pushes {
+		if p.env.EventID == nil {
+			t.Fatalf("push %d (%s) has nil EventID; want a durable id on the wire", i, p.env.Type)
+		}
+		out[i] = *p.env.EventID
+	}
+	return out
+}
+
 func assistantDeltas(t *testing.T, pushes []recordedPush) []protocol.AssistantDeltaPayload {
 	t.Helper()
 	var out []protocol.AssistantDeltaPayload
@@ -928,5 +942,108 @@ func TestInteractiveTurnEmitterV2_RingEmptyOnEmptyCursor(t *testing.T) {
 	got, gap := e.ring.After(testConvID, 0)
 	if gap || len(got) != 0 {
 		t.Fatalf("empty cursor recorded events: %v (gap=%v)", ringEventTypes(got), gap)
+	}
+}
+
+// --- #649 durable event id on the wire --------------------------------------
+
+// AC-1: every fanned-out envelope carries its durable per-conversation event id
+// on the wire (env.EventID), and that id equals the ring id recorded for the
+// same logical event, in the same order.
+func TestInteractiveTurnEmitterV2_WireCarriesDurableEventID(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.ThoughtChunk{Text: "reasoning"},
+		turnevent.TextChunk{Text: "hello"},
+		turnevent.ToolStart{ToolCallID: "t1", Title: "Read"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	ring, _ := e.ring.After(testConvID, 0)
+	wire := pushEventIDs(t, bcast.pushes)
+	if want := ringEventIDs(ring); !slices.Equal(wire, want) {
+		t.Fatalf("wire event ids:\n got %v\nwant %v (ring ids)", wire, want)
+	}
+}
+
+// AC-2: the durable event id is identical across all interactive conns for a
+// given logical event (it is the one ring id fanned to both), while the per-conn
+// envelope ID counter differs between conns and resets meaning per reconnect.
+func TestInteractiveTurnEmitterV2_WireEventIDIdenticalAcrossConns(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: true},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.ThoughtChunk{Text: "reasoning"},
+		turnevent.TextChunk{Text: "hello"},
+		turnevent.ToolStart{ToolCallID: "t1", Title: "Read"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	a := pushesFor(bcast.pushes, "a")
+	b := pushesFor(bcast.pushes, "b")
+	if len(a) == 0 || len(a) != len(b) {
+		t.Fatalf("per-conn push counts: a=%d b=%d, want equal and non-zero", len(a), len(b))
+	}
+	for i := range a {
+		if a[i].env.EventID == nil || b[i].env.EventID == nil {
+			t.Fatalf("event %d: nil EventID (a=%v b=%v)", i, a[i].env.EventID, b[i].env.EventID)
+		}
+		if *a[i].env.EventID != *b[i].env.EventID {
+			t.Errorf("event %d: durable id differs across conns: a=%d b=%d", i, *a[i].env.EventID, *b[i].env.EventID)
+		}
+		if a[i].env.ID == b[i].env.ID {
+			t.Errorf("event %d: per-conn env.ID should differ across conns, both = %d", i, a[i].env.ID)
+		}
+	}
+}
+
+// AC-3: the durable event ids a phone observes on one conversation's live stream
+// are strictly increasing in emit order (the 1..N ring sequence), so the latest
+// one a phone saw is a valid last_event_id.
+func TestInteractiveTurnEmitterV2_WireEventIDsStrictlyIncreasing(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.ThoughtChunk{Text: "reasoning"},
+		turnevent.TextChunk{Text: "hello"},
+		turnevent.ToolStart{ToolCallID: "t1", Title: "Read"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	ids := pushEventIDs(t, pushesFor(bcast.pushes, "a"))
+	if len(ids) == 0 {
+		t.Fatal("no pushes recorded")
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
+			t.Fatalf("event ids not strictly increasing: %v", ids)
+		}
+	}
+	for i, id := range ids {
+		if id != uint64(i+1) {
+			t.Fatalf("event ids not the 1..N ring sequence: got %v", ids)
+		}
 	}
 }
