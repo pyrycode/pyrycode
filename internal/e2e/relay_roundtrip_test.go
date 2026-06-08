@@ -29,12 +29,6 @@ import (
 // set, in_reply_to chaining, ts round-trip on the wire, and
 // conversation_id stability from send_message through the message echo.
 func TestRelay_Roundtrip_Appendix(t *testing.T) {
-	// Blocked on #603: since #594, WriteUserTurn delivers via DeliverPrompt
-	// behind a WaitReady idle-gate and acks only on a confirmed commit. This
-	// roundtrip's send_message step never acks against fakeclaude (no claude
-	// TUI), so the downstream echo/push assertions are unreachable.
-	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
-
 	const (
 		knownConvID        = "77777777-7777-4777-8777-777777777777"
 		knownUserText      = "e2e-297-user:hi\n"
@@ -70,6 +64,7 @@ func TestRelay_Roundtrip_Appendix(t *testing.T) {
 
 	h := StartRotationWithRelay(t, home, sessionsDir, initialUUID, rotateTrigger,
 		stdinLog, fr.URL()+"/v1/server",
+		"PYRY_FAKE_CLAUDE_TUI=1",
 		"PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER="+asstTrigger,
 	)
 	t.Cleanup(func() { h.Stop(t) })
@@ -169,14 +164,10 @@ func TestRelay_Roundtrip_Appendix(t *testing.T) {
 	if err := phone.Send(sendReq); err != nil {
 		t.Fatalf("phone send send_message: %v", err)
 	}
-	sendAck, err := phone.Receive(3 * time.Second)
-	if err != nil {
-		t.Fatalf("phone receive ack: %v", err)
-	}
-	if sendAck.Type != protocol.TypeAck {
-		t.Fatalf("ack Type: got %q, want %q (payload=%s)",
-			sendAck.Type, protocol.TypeAck, string(sendAck.Payload))
-	}
+	// Drain until the ack: in TUI mode fakeclaude emits the thinking-spinner
+	// glyph on stdin, forwarded as a `message` envelope (cursor stamped before
+	// delivery) that races this synchronous ack.
+	sendAck := recvEnvelope(t, phone, protocol.TypeAck, 3*time.Second)
 	if sendAck.InReplyTo == nil || *sendAck.InReplyTo != sendReq.ID {
 		t.Errorf("ack InReplyTo: got %v, want pointer to %d", sendAck.InReplyTo, sendReq.ID)
 	}

@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // shortHome allocates a short-pathed temp dir for the daemon's $HOME.
@@ -47,6 +49,34 @@ func readPersistedServerID(t *testing.T, home string) string {
 
 func relayTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// recvEnvelope receives envelopes from phone until one of Type want arrives,
+// skipping any other type, bounded by timeout overall. It exists because
+// fakeclaude's TUI-mode thinking-spinner commit signal is forwarded as a
+// `message` envelope that races the synchronous ack on the same conn:
+// WriteUserTurn stamps the supervisor cursor before delivering, so the
+// assistant-turn emitter fans the spinner chunk out as a `message`. Tests that
+// want the ack drain through any such interleaved envelope. Fatals on timeout
+// or any receive error before want arrives. (v2 tests cannot use this — their
+// frames are Noise-encrypted; they drain via decryptInnerEnvelope.)
+func recvEnvelope(t *testing.T, phone *fakephone.Client, want string, timeout time.Duration) protocol.Envelope {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("did not receive %q envelope within %s", want, timeout)
+		}
+		env, err := phone.Receive(remaining)
+		if err != nil {
+			t.Fatalf("phone receive (awaiting %q): %v", want, err)
+		}
+		if env.Type == want {
+			return env
+		}
+		t.Logf("recvEnvelope: skipping %q envelope (id=%d) awaiting %q", env.Type, env.ID, want)
+	}
 }
 
 // TestRelay_4409 asserts that a WS close code 4409 from the relay

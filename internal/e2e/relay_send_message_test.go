@@ -30,12 +30,6 @@ import (
 // ack AND the marker bytes means the supervisor accepted the seeded
 // conversation_id before writing.
 func TestRelay_SendMessage_AckAndPTYDelivery(t *testing.T) {
-	// Blocked on #603: since #594, WriteUserTurn delivers via DeliverPrompt
-	// behind a WaitReady idle-gate and acks only on a confirmed commit.
-	// fakeclaude renders no claude TUI (no idle prompt / spinner), so WaitReady
-	// never reaches idle and send_message replies binary_offline, not ack.
-	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
-
 	const (
 		knownConvID = "33333333-3333-4333-8333-333333333333"
 		knownText   = "e2e-323-marker:hello world\n"
@@ -73,7 +67,7 @@ func TestRelay_SendMessage_AckAndPTYDelivery(t *testing.T) {
 	t.Cleanup(func() { _ = fr.Close() })
 
 	h := StartRotationWithRelay(t, home, sessionsDir, initialUUID, trigger,
-		stdinLog, fr.URL()+"/v1/server")
+		stdinLog, fr.URL()+"/v1/server", "PYRY_FAKE_CLAUDE_TUI=1")
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)
@@ -133,14 +127,10 @@ func TestRelay_SendMessage_AckAndPTYDelivery(t *testing.T) {
 	if err := phone.Send(req); err != nil {
 		t.Fatalf("phone send send_message: %v", err)
 	}
-	ack, err := phone.Receive(3 * time.Second)
-	if err != nil {
-		t.Fatalf("phone receive ack: %v", err)
-	}
-	if ack.Type != protocol.TypeAck {
-		t.Fatalf("ack Type: got %q, want %q (payload=%s)",
-			ack.Type, protocol.TypeAck, string(ack.Payload))
-	}
+	// Drain until the ack: in TUI mode fakeclaude emits the thinking-spinner
+	// glyph on stdin, which the supervisor forwards as a `message` envelope
+	// (the cursor is stamped before delivery) racing this synchronous ack.
+	ack := recvEnvelope(t, phone, protocol.TypeAck, 3*time.Second)
 	if ack.InReplyTo == nil || *ack.InReplyTo != reqID {
 		t.Errorf("ack InReplyTo: got %v, want pointer to %d", ack.InReplyTo, reqID)
 	}

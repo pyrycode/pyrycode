@@ -25,9 +25,23 @@
 //	                               the assistant-turn e2e (#311) to script
 //	                               a scripted assistant chunk on demand.
 //	                               Default off — when unset, no watch.
+//	PYRY_FAKE_CLAUDE_TUI           optional; when set to any non-empty
+//	                               value, fakeclaude emits claude's idle-
+//	                               prompt glyph (U+276F) once at startup and
+//	                               its thinking-spinner glyph (U+273B) once
+//	                               on the first stdin bytes, so tui-driver's
+//	                               IsIdle/IsThinking detection — and the #594
+//	                               WaitReady→DeliverPrompt→commit contract —
+//	                               can confirm a turn against fakeclaude.
+//	                               Default off — when unset, fakeclaude emits
+//	                               no TUI substrate and is byte-identical to
+//	                               its pre-#603 behaviour.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
-// non-e2e callers.
+// non-e2e callers. Because TUI mode makes this file carry claude-TUI
+// substrate glyphs, it is on the cmd/substrate-guard allowlist (#603),
+// mirroring the sanctioned internal/agentrun/ptyrunner/helper_test.go
+// exemption.
 package main
 
 import (
@@ -35,6 +49,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -44,22 +59,68 @@ const (
 	envTrigger           = "PYRY_FAKE_CLAUDE_TRIGGER"
 	envStdinLog          = "PYRY_FAKE_CLAUDE_STDIN_LOG"
 	envAssistantTrigger  = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
+	envTUI               = "PYRY_FAKE_CLAUDE_TUI"
 	assistantMaxBytes    = 64 * 1024
 	pollInterval         = 50 * time.Millisecond
 )
+
+// idleGlyph and spinnerGlyph are claude's TUI substrate runes that
+// tui-driver's IsIdle / IsThinking detect (U+276F at idle, U+273B while
+// thinking). fakeclaude emits them only in TUI mode (envTUI) so the #594
+// WaitReady->DeliverPrompt->commit contract can confirm a turn against it.
+// They live here, not via a tui-driver import, to keep this stand-in
+// zero-dependency; the file is on the cmd/substrate-guard allowlist because it
+// carries these glyphs.
+var (
+	idleGlyph    = []byte("❯") // U+276F idle input prompt
+	spinnerGlyph = []byte("✻") // U+273B thinking spinner
+)
+
+// stdoutMu serializes every write to os.Stdout. In TUI mode the main goroutine
+// (startup idle glyph + emitAssistantIfTriggered) and the stdin goroutine
+// (thinking spinner) both write os.Stdout; without serialization a spinner
+// write could interleave mid-assistant-chunk and corrupt the marker the echo
+// tests match on.
+var stdoutMu sync.Mutex
+
+// writeStdout writes p to os.Stdout under stdoutMu and fsyncs. Best-effort:
+// errors are silenced, mirroring emitAssistantIfTriggered — the e2e asserts
+// downstream (the phone receives the bytes), never on the write itself.
+func writeStdout(p []byte) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	_, _ = os.Stdout.Write(p)
+	_ = os.Stdout.Sync()
+}
 
 func main() {
 	dir := mustEnv(envSessionsDir)
 	initU := mustEnv(envInitialUUID)
 	trig := mustEnv(envTrigger)
 
-	if logPath := os.Getenv(envStdinLog); logPath != "" {
-		startStdinLogger(logPath)
+	tui := os.Getenv(envTUI) != ""
+
+	// The stdin reader is the only stdin consumer (a second reader would race
+	// it for bytes). It runs when a stdin-log path is configured OR TUI mode is
+	// on — TUI mode needs stdin read independently of logging so the spinner
+	// fires even if STDIN_LOG is unset.
+	logPath := os.Getenv(envStdinLog)
+	if logPath != "" || tui {
+		startStdinReader(logPath, tui)
 	}
 
 	asstTrig := os.Getenv(envAssistantTrigger)
 
 	f := openSession(dir, initU)
+
+	// TUI mode: seed the idle-prompt glyph once. tui-driver's rolling snapshot
+	// buffer holds the single write, so IsIdle stays true until the spinner
+	// lands — no continuous redraw needed (each restored flow drives exactly
+	// one idle->thinking transition).
+	if tui {
+		writeStdout(idleGlyph)
+	}
+
 	rotated := false
 	for {
 		if !rotated {
@@ -93,8 +154,7 @@ func emitAssistantIfTriggered(path string) {
 	if len(data) > assistantMaxBytes {
 		data = data[:assistantMaxBytes]
 	}
-	_, _ = os.Stdout.Write(data)
-	_ = os.Stdout.Sync()
+	writeStdout(data)
 	_ = os.Remove(path)
 }
 
@@ -113,24 +173,41 @@ func openSession(dir, uuid string) *os.File {
 	return f
 }
 
-// startStdinLogger fsyncs after every Read so a sibling test process polling
-// the file from outside sees bytes promptly (macOS APFS otherwise can defer
-// visibility across processes).
-func startStdinLogger(path string) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
-	if err != nil {
-		fatalf("open stdin log %s: %v", path, err)
+// startStdinReader starts the single stdin-consuming goroutine. When logPath
+// is non-empty it appends every byte read from os.Stdin to that file, fsyncing
+// after each write so a sibling test process polling the file sees bytes
+// promptly (macOS APFS otherwise defers cross-process visibility). When tui is
+// true it emits the thinking-spinner glyph once on the first stdin bytes —
+// claude's "prompt received, turn started" signal, which tui-driver IsThinking
+// reads as the DeliverPrompt commit confirmation. It never echoes stdin
+// content to os.Stdout: TUI mode writes only the fixed spinner glyph, never the
+// phone-controlled prompt bytes.
+func startStdinReader(logPath string, tui bool) {
+	var logF *os.File
+	if logPath != "" {
+		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if err != nil {
+			fatalf("open stdin log %s: %v", logPath, err)
+		}
+		logF = f
 	}
 	go func() {
 		buf := make([]byte, 4096)
+		spinnerEmitted := false
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				if _, werr := f.Write(buf[:n]); werr != nil {
-					return
+				if logF != nil {
+					if _, werr := logF.Write(buf[:n]); werr != nil {
+						return
+					}
+					if serr := logF.Sync(); serr != nil {
+						return
+					}
 				}
-				if serr := f.Sync(); serr != nil {
-					return
+				if tui && !spinnerEmitted {
+					writeStdout(spinnerGlyph)
+					spinnerEmitted = true
 				}
 			}
 			if err != nil {

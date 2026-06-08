@@ -14,8 +14,10 @@
 // gate). Scans every .go file under the repo root, skipping the allowlist;
 // exits non-zero and prints file:line for every hit.
 //
-// Allowlist: the sanctioned fake-claude helper, which legitimately emits these
-// literals to simulate claude's TUI for the ptyrunner integration tests, and
+// Allowlist: the two sanctioned fake-claude helpers, which legitimately emit
+// these literals to simulate claude's TUI — internal/agentrun/ptyrunner/
+// helper_test.go for the ptyrunner integration tests, and internal/e2e/
+// internal/fakeclaude/main.go for the relay/send_message e2e flows (#603) — and
 // this guard's own source, which must name the patterns it bans.
 package main
 
@@ -32,6 +34,7 @@ import (
 // allowlist holds path suffixes exempt from the scan.
 var allowlist = []string{
 	"internal/agentrun/ptyrunner/helper_test.go",
+	"internal/e2e/internal/fakeclaude/main.go",
 	"cmd/substrate-guard/main.go",
 }
 
