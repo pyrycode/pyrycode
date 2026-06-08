@@ -500,7 +500,9 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		}
 		return fmt.Errorf("ptyrunner: wait jsonl: %w", werr)
 	}
-	ch, err := sess.Events(runCtx, jsonlPath, 0)
+	// tracker is the same watchdog Tracker constructed above (line 467);
+	// v1.3.0's Events requires a non-nil *Tracker (nil panics on first deref).
+	ch, err := sess.Events(runCtx, jsonlPath, 0, tracker)
 	if err != nil {
 		if isCtxErr(runCtx, err) {
 			return nil
