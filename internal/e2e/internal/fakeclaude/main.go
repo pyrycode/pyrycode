@@ -25,6 +25,16 @@
 //	                               the assistant-turn e2e (#311) to script
 //	                               a scripted assistant chunk on demand.
 //	                               Default off — when unset, no watch.
+//	PYRY_FAKE_CLAUDE_JSONL_TRIGGER  optional path watched in parallel with
+//	                               the others. When the file appears, its
+//	                               contents (claude-format JSONL lines) are
+//	                               appended verbatim to the live session
+//	                               JSONL, fsynced, then the trigger is
+//	                               removed. Used by the structured-receive
+//	                               e2e (#642) to feed real turn events into
+//	                               the daemon's structured-turn producer,
+//	                               which tails this file. Default off — when
+//	                               unset, no watch.
 //	PYRY_FAKE_CLAUDE_TUI           optional; when set to any non-empty
 //	                               value, fakeclaude emits claude's idle-
 //	                               prompt glyph (U+276F) once at startup and
@@ -59,6 +69,7 @@ const (
 	envTrigger           = "PYRY_FAKE_CLAUDE_TRIGGER"
 	envStdinLog          = "PYRY_FAKE_CLAUDE_STDIN_LOG"
 	envAssistantTrigger  = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
+	envJSONLTrigger      = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
 	envTUI               = "PYRY_FAKE_CLAUDE_TUI"
 	assistantMaxBytes    = 64 * 1024
 	pollInterval         = 50 * time.Millisecond
@@ -110,6 +121,7 @@ func main() {
 	}
 
 	asstTrig := os.Getenv(envAssistantTrigger)
+	jsonlTrig := os.Getenv(envJSONLTrigger)
 
 	f := openSession(dir, initU)
 
@@ -135,6 +147,9 @@ func main() {
 		if asstTrig != "" {
 			emitAssistantIfTriggered(asstTrig)
 		}
+		if jsonlTrig != "" {
+			emitStructuredJSONLIfTriggered(f, jsonlTrig)
+		}
 		time.Sleep(pollInterval)
 	}
 }
@@ -155,6 +170,33 @@ func emitAssistantIfTriggered(path string) {
 		data = data[:assistantMaxBytes]
 	}
 	writeStdout(data)
+	_ = os.Remove(path)
+}
+
+// emitStructuredJSONLIfTriggered checks for the structured-JSONL trigger
+// file. When present, reads its contents (capped at assistantMaxBytes) and
+// appends them verbatim to f — the live session JSONL the daemon's
+// structured-turn producer (cmd/pyry/interactive_turn_stream_v2.go) tails —
+// then fsyncs and removes the trigger. The trigger file's contents ARE the
+// claude-format JSONL lines to append (same "contents are the payload" shape
+// as emitAssistantIfTriggered). The f.Sync() is load-bearing: the daemon's
+// tail is a separate process and macOS APFS otherwise defers cross-process
+// visibility (mirrors the stdin reader's per-write fsync). Errors are
+// silenced — the e2e asserts downstream (the interactive phone receives the
+// structured envelopes), and a missing trigger is the steady state. Only the
+// main goroutine writes f, so this never races the stdin reader.
+func emitStructuredJSONLIfTriggered(f *os.File, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if len(data) > assistantMaxBytes {
+		data = data[:assistantMaxBytes]
+	}
+	if _, err := f.Write(data); err != nil {
+		return
+	}
+	_ = f.Sync()
 	_ = os.Remove(path)
 }
 
