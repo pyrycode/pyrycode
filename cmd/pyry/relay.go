@@ -95,6 +95,7 @@ func startRelay(
 	sess handlers.TurnWriter,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
+	claudeSessionsDir string,
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -138,7 +139,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess, sup, bridge)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess, sup, bridge, claudeSessionsDir)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -253,6 +254,13 @@ func startRelay(
 // the v1 bridge it is skipped in foreground mode (bridge == nil): there is no
 // PTY-output observer surface there, and inbound send_message still works.
 //
+// The structured interactive turn stream (#633) wires the #615 producer to the
+// #632 capability-gated emitter, fanning turn_state / assistant_delta / tool /
+// turn_end envelopes to interactive phones. It is gated the same way as the
+// coarse bridge (bridge != nil) plus a non-empty claudeSessionsDir (the dir the
+// rotation-following JSONL resolver scans; "" already disables reconcile + the
+// rotation watcher, so disabling the producer too is coherent).
+//
 // SECURITY: StaticPriv is the binary's 32-byte X25519 static secret. It is
 // passed to the manager as an opaque slice and is never logged, wrapped into
 // an error, or emitted on any wire surface here — the same contract
@@ -268,6 +276,7 @@ func startRelayV2(
 	sess handlers.TurnWriter,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
+	claudeSessionsDir string,
 ) (drain func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
 	if err != nil {
@@ -318,13 +327,30 @@ func startRelayV2(
 		bridgeCleanup = startAssistantTurnBridgeV2(ctx, sup, bridge, mgr, logger)
 	}
 
+	// Wire the structured interactive turn stream (#633): the #615 producer over
+	// Supervisor.Session() + the rotation-following JSONL resolver, bridged to the
+	// #632 capability-gated emitter over mgr. Gated like the coarse bridge
+	// (foreground has no phone-mirroring surface) plus a resolvable sessions dir
+	// (an empty dir would make the resolver perpetually error and Warn-spam every
+	// retry; "" already disables reconcile + the rotation watcher).
+	var streamCleanup func()
+	if bridge != nil && claudeSessionsDir != "" {
+		streamCleanup = startInteractiveTurnStreamV2(ctx, sup, mgr, claudeSessionsDir, logger)
+	} else if bridge != nil {
+		logger.Info("relay: interactive turn stream disabled; claude sessions dir unresolved",
+			"event", "interactive_turn_stream.no_sessions_dir")
+	}
+
 	return func() {
-		// Stop the observer first so no new PTY chunks queue while the
-		// manager winds down; the cleanup waits for the emitter goroutine on
-		// ctx-cancel (already cancelled by the time drain runs). Then wait
-		// for the manager's Run to exit on the closed Frames channel.
+		// Stop both producers before waiting on the manager so no fan-out races a
+		// winding-down manager. Each cleanup waits for its goroutine on ctx-cancel
+		// (already cancelled by the time drain runs). Then wait for the manager's
+		// Run to exit on the closed Frames channel.
 		if bridgeCleanup != nil {
 			bridgeCleanup()
+		}
+		if streamCleanup != nil {
+			streamCleanup()
 		}
 		<-mgrDone
 	}, nil
