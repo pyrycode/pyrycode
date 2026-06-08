@@ -75,3 +75,15 @@ type TurnEndPayload struct {
 	TurnID         string `json:"turn_id"`
 	StopReason     string `json:"stop_reason"`
 }
+
+// StallPayload is the body of an Envelope whose Type == TypeStall
+// (docs/protocol-mobile.md § stall). Binary → phone direction; the wire form
+// of the internal-only turnevent.Stall onset marker. It carries conversation
+// identity only — like turn_state, a stall is a coarse conversation-level
+// signal, not turn-scoped, so there is no turn_id; and it is onset-only, so
+// there is no clearing field (the phone self-clears on the next turn
+// activity). The bridge (#608) supplies ConversationID because the internal
+// Stall marker carries none.
+type StallPayload struct {
+	ConversationID string `json:"conversation_id"`
+}
