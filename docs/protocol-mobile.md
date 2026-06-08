@@ -461,7 +461,7 @@ Defined capability strings:
 |---|---|
 | `interactive` | The phone can render the structured interactive event stream below. |
 
-The daemon MUST echo only what it itself supports — the agreed set is the **intersection** of the phone's advertised set with the daemon's own, never a blind mirror of the phone's claims. A phone that does not advertise `interactive` (or whose `interactive` is not echoed back) continues to receive the coarse v1 `message` fan-out only. The intersection logic and the capability-gated fan-out are enforced by the daemon's event-stream bridge (forward-ref #608); the wire fields here are advertisement only.
+The daemon MUST echo only what it itself supports — the agreed set is the **intersection** of the phone's advertised set with the daemon's own, never a blind mirror of the phone's claims. A phone that does not advertise `interactive` (or whose `interactive` is not echoed back) continues to receive the coarse v1 `message` fan-out only. The intersection logic — the daemon-side trust decision computing advertised ∩ supported, echoing it in `hello_ack`, and recording the negotiated `interactive` flag per connection — is implemented in #626 (`internal/relay` v2 session manager; `negotiateCapabilities` + the capability-aware `ActiveConns` enumeration). The capability-gated fan-out that routes the interactive event stream only to granted connections remains a later #596 child; the wire fields here are advertisement only.
 
 ### Interactive events (v2, capability-gated)
 
