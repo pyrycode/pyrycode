@@ -27,6 +27,32 @@ import (
 // JSONLEntry aliases jsonl.Event so callers don't import the parser package.
 type JSONLEntry = jsonl.Event
 
+// realHome captures the operator's HOME at package load, before any test
+// redirects it via t.Setenv (WithWorktree). The pyry build uses it so Go's
+// module cache stays warm and private-module git auth stays reachable; see
+// BuildPyry for why a test-redirected HOME breaks the build.
+var realHome = os.Getenv("HOME")
+
+// buildEnvWithRealHome returns the current environment with HOME forced back
+// to realHome. Existing HOME entries are removed and a single HOME=realHome
+// is appended, so the child process sees exactly one HOME regardless of how
+// getenv resolves duplicates. If realHome is empty (HOME unset at launch)
+// the environment is returned unchanged.
+func buildEnvWithRealHome() []string {
+	if realHome == "" {
+		return os.Environ()
+	}
+	base := os.Environ()
+	out := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "HOME=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "HOME="+realHome)
+}
+
 // WithWorktree returns a per-test temp directory and pins $HOME to it so
 // both the in-test process and any subprocess resolve os.UserHomeDir()
 // to the same root.
@@ -325,6 +351,14 @@ func ensurePyryBuilt(t *testing.T) string {
 		}
 		pyryBinPath = filepath.Join(dir, "pyry")
 		cmd := exec.Command("go", "build", "-o", pyryBinPath, "github.com/pyrycode/pyrycode/cmd/pyry")
+		// Build pyry with the operator's real HOME, not a test-redirected one.
+		// WithWorktree pins HOME to a throwaway dir to isolate claude's runtime
+		// config, but Go derives its module cache (GOPATH/GOMODCACHE) and git
+		// auth from HOME, so a throwaway HOME cold-starts the cache and hides
+		// credentials. A private-module dependency then fails its direct git
+		// fetch with "could not read Username". Only the pyry RUN needs the
+		// isolated HOME; the build needs the warm cache plus real auth.
+		cmd.Env = buildEnvWithRealHome()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			pyryBinErr = fmt.Errorf("go build pyry: %w\n%s", err, out)
