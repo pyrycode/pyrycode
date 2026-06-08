@@ -320,8 +320,10 @@ func startRelayV2(
 	}()
 
 	// Tap the PTY output so finished assistant turns fan out to every open
-	// v2 session (#589). mgr is the v2Broadcaster (ActiveConnIDs + Push).
-	// Skip in foreground mode (bridge == nil) — no PTY-output observer there.
+	// non-interactive v2 session (#589, re-targeted in #634). mgr is the
+	// v2Broadcaster (ActiveConns + Push); interactive conns get the #632
+	// structured stream instead. Skip in foreground mode (bridge == nil) —
+	// no PTY-output observer there.
 	var bridgeCleanup func()
 	if bridge != nil {
 		bridgeCleanup = startAssistantTurnBridgeV2(ctx, sup, bridge, mgr, logger)
