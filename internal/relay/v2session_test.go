@@ -2533,6 +2533,383 @@ func buildMessageEnvelope(t *testing.T, id uint64, text string) protocol.Envelop
 	}
 }
 
+// --- pushQueue drop-policy unit tests (#610) ---
+
+// pqEnv builds a minimal envelope carrying only the Type (which drives the drop
+// class) and a strictly-increasing ID (which lets order assertions track an
+// individual envelope across drops). No payload/seal — pushQueue.enqueue is a
+// pure pre-seal policy over the envelope class.
+func pqEnv(typ string, id uint64) protocol.Envelope {
+	return protocol.Envelope{ID: id, Type: typ}
+}
+
+// assertQueue checks q.items matches want (by Type+ID, in order), that each
+// item's droppable flag is consistent with its Type, and that q.dropped equals
+// wantDropped.
+func assertQueue(t *testing.T, q *pushQueue, want []protocol.Envelope, wantDropped uint64) {
+	t.Helper()
+	if len(q.items) != len(want) {
+		t.Fatalf("queue len = %d, want %d", len(q.items), len(want))
+	}
+	for i := range want {
+		got := q.items[i]
+		if got.env.Type != want[i].Type || got.env.ID != want[i].ID {
+			t.Errorf("item[%d] = (%s,%d), want (%s,%d)",
+				i, got.env.Type, got.env.ID, want[i].Type, want[i].ID)
+		}
+		if wantDrop := want[i].Type == protocol.TypeAssistantDelta; got.droppable != wantDrop {
+			t.Errorf("item[%d] droppable = %v, want %v", i, got.droppable, wantDrop)
+		}
+	}
+	if q.dropped != wantDropped {
+		t.Errorf("dropped = %d, want %d", q.dropped, wantDropped)
+	}
+}
+
+// fillDeltas enqueues deltas with IDs lo..hi-1 onto q (helper for the cap-fill
+// scenarios). Returns the want-slice describing those same items.
+func fillDeltas(q *pushQueue, lo, hi uint64) []protocol.Envelope {
+	want := make([]protocol.Envelope, 0, hi-lo)
+	for id := lo; id < hi; id++ {
+		e := pqEnv(protocol.TypeAssistantDelta, id)
+		q.enqueue(e)
+		want = append(want, e)
+	}
+	return want
+}
+
+// TestPushQueue_Enqueue_UnderCap_AllRetained pins the below-cap path: a mix of
+// deltas and control events under pushQueueCap are all retained in FIFO order
+// with no drops.
+func TestPushQueue_Enqueue_UnderCap_AllRetained(t *testing.T) {
+	t.Parallel()
+
+	q := &pushQueue{}
+	seq := []protocol.Envelope{
+		pqEnv(protocol.TypeAssistantDelta, 1),
+		pqEnv(protocol.TypeTurnState, 2),
+		pqEnv(protocol.TypeAssistantDelta, 3),
+		pqEnv(protocol.TypeToolUse, 4),
+		pqEnv(protocol.TypeToolResult, 5),
+		pqEnv(protocol.TypeAssistantDelta, 6),
+		pqEnv(protocol.TypeTurnEnd, 7),
+	}
+	for _, e := range seq {
+		if dropped := q.enqueue(e); dropped {
+			t.Errorf("enqueue(id=%d) reported a drop under cap", e.ID)
+		}
+	}
+	assertQueue(t, q, seq, 0)
+}
+
+// TestPushQueue_Enqueue_DropOldestDelta pins AC#2: at capacity, enqueuing a new
+// delta evicts the OLDEST queued delta so the most recent text is retained.
+func TestPushQueue_Enqueue_DropOldestDelta(t *testing.T) {
+	t.Parallel()
+
+	q := &pushQueue{}
+	fillDeltas(q, 0, pushQueueCap) // ids 0..cap-1
+
+	if dropped := q.enqueue(pqEnv(protocol.TypeAssistantDelta, 9999)); !dropped {
+		t.Fatal("enqueue at capacity should report a drop")
+	}
+	// Oldest (id 0) evicted; ids 1..cap-1 retained in order, new delta at tail.
+	want := fillDeltas(&pushQueue{}, 1, pushQueueCap)
+	want = append(want, pqEnv(protocol.TypeAssistantDelta, 9999))
+	assertQueue(t, q, want, 1)
+}
+
+// TestPushQueue_Enqueue_ControlEvictsDelta pins AC#3: at capacity, a control
+// event is admitted by evicting the oldest droppable delta — never by dropping
+// the control event.
+func TestPushQueue_Enqueue_ControlEvictsDelta(t *testing.T) {
+	t.Parallel()
+
+	q := &pushQueue{}
+	fillDeltas(q, 0, pushQueueCap)
+
+	if dropped := q.enqueue(pqEnv(protocol.TypeTurnEnd, 9999)); !dropped {
+		t.Fatal("control at capacity should evict a delta (reported as a drop)")
+	}
+	want := fillDeltas(&pushQueue{}, 1, pushQueueCap)
+	want = append(want, pqEnv(protocol.TypeTurnEnd, 9999))
+	assertQueue(t, q, want, 1)
+}
+
+// TestPushQueue_Enqueue_MessageIsNeverDrop pins the ticket's class decision:
+// the coarse v1 "message" envelope (#589 bridge) is never-drop — only
+// assistant_delta is droppable. A message at capacity evicts a delta, like any
+// other control event.
+func TestPushQueue_Enqueue_MessageIsNeverDrop(t *testing.T) {
+	t.Parallel()
+
+	q := &pushQueue{}
+	fillDeltas(q, 0, pushQueueCap)
+
+	if dropped := q.enqueue(pqEnv(protocol.TypeMessage, 9999)); !dropped {
+		t.Fatal("message at capacity should evict a delta, not drop itself")
+	}
+	want := fillDeltas(&pushQueue{}, 1, pushQueueCap)
+	want = append(want, pqEnv(protocol.TypeMessage, 9999))
+	assertQueue(t, q, want, 1)
+}
+
+// TestPushQueue_Enqueue_ControlNeverDroppedWhenDeltasPresent pins AC#3 at
+// volume: pushing N control events into a full all-delta queue evicts exactly N
+// deltas (oldest-first) and keeps every control event, in order.
+func TestPushQueue_Enqueue_ControlNeverDroppedWhenDeltasPresent(t *testing.T) {
+	t.Parallel()
+
+	q := &pushQueue{}
+	fillDeltas(q, 0, pushQueueCap)
+
+	controlTypes := []string{
+		protocol.TypeTurnState,
+		protocol.TypeToolUse,
+		protocol.TypeToolResult,
+		protocol.TypeTurnEnd,
+		protocol.TypeStall,
+	}
+	for k, ct := range controlTypes {
+		if dropped := q.enqueue(pqEnv(ct, uint64(1000+k))); !dropped {
+			t.Errorf("control %q at capacity should evict a delta", ct)
+		}
+	}
+	// The N oldest deltas (ids 0..N-1) evicted; ids N..cap-1 retained, then the
+	// N control events at the tail in push order.
+	n := uint64(len(controlTypes))
+	want := fillDeltas(&pushQueue{}, n, pushQueueCap)
+	for k, ct := range controlTypes {
+		want = append(want, pqEnv(ct, uint64(1000+k)))
+	}
+	assertQueue(t, q, want, n)
+}
+
+// TestPushQueue_Enqueue_OrderPreservedAcrossDrops pins AC#4: across a long
+// scripted interleave that forces many delta evictions, the surviving
+// envelopes stay in enqueue order (strictly-increasing IDs) and no control
+// event is ever lost. Conservation: every enqueue either appends or drops one,
+// and deltas are always available to evict, so the queue stays at exactly cap
+// and dropped == totalEnqueued - cap.
+func TestPushQueue_Enqueue_OrderPreservedAcrossDrops(t *testing.T) {
+	t.Parallel()
+
+	q := &pushQueue{}
+	var nextID uint64
+	controlIDs := map[uint64]bool{}
+	enqueue := func(typ string) {
+		nextID++
+		if typ != protocol.TypeAssistantDelta {
+			controlIDs[nextID] = true
+		}
+		q.enqueue(pqEnv(typ, nextID))
+	}
+
+	// Fill to cap with alternating control/delta so there are always deltas to
+	// evict and controls to protect.
+	for i := 0; i < pushQueueCap; i++ {
+		if i%2 == 0 {
+			enqueue(protocol.TypeTurnState)
+		} else {
+			enqueue(protocol.TypeAssistantDelta)
+		}
+	}
+	// Drive many more enqueues past cap: deltas (evict oldest delta) then
+	// controls (evict oldest delta to be admitted).
+	for i := 0; i < 50; i++ {
+		enqueue(protocol.TypeAssistantDelta)
+	}
+	for i := 0; i < 10; i++ {
+		enqueue(protocol.TypeToolUse)
+	}
+
+	// Order preserved: IDs strictly increasing across the surviving FIFO.
+	var prev uint64
+	for i, qe := range q.items {
+		if qe.env.ID <= prev {
+			t.Errorf("items[%d] id %d not strictly greater than prev %d — order not preserved",
+				i, qe.env.ID, prev)
+		}
+		prev = qe.env.ID
+	}
+	// No control event dropped.
+	present := make(map[uint64]bool, len(q.items))
+	for _, qe := range q.items {
+		present[qe.env.ID] = true
+	}
+	for id := range controlIDs {
+		if !present[id] {
+			t.Errorf("control id %d was dropped — control must never drop", id)
+		}
+	}
+	// Conservation: stayed at cap, dropped accounts for the overflow.
+	if len(q.items) != pushQueueCap {
+		t.Errorf("len = %d, want %d (deltas always available to evict)", len(q.items), pushQueueCap)
+	}
+	if want := nextID - uint64(pushQueueCap); q.dropped != want {
+		t.Errorf("dropped = %d, want %d (totalEnqueued - cap)", q.dropped, want)
+	}
+}
+
+// TestPushQueue_Enqueue_AllControlSoftOverflow pins the documented soft-overflow
+// edge: when the queue is saturated entirely with control events, an incoming
+// control is admitted PAST nominal cap (never dropped, never blocks), while an
+// incoming delta is dropped (it cannot evict a control event), leaving the
+// queue unchanged.
+func TestPushQueue_Enqueue_AllControlSoftOverflow(t *testing.T) {
+	t.Parallel()
+
+	q := &pushQueue{}
+	for i := 0; i < pushQueueCap; i++ {
+		q.enqueue(pqEnv(protocol.TypeTurnState, uint64(i)))
+	}
+
+	// Control past a full all-control queue: admitted, no drop, len == cap+1.
+	if dropped := q.enqueue(pqEnv(protocol.TypeTurnEnd, 9000)); dropped {
+		t.Error("control soft-overflow must not report a drop")
+	}
+	if len(q.items) != pushQueueCap+1 {
+		t.Errorf("len = %d, want %d (soft overflow admits control past cap)", len(q.items), pushQueueCap+1)
+	}
+	if q.dropped != 0 {
+		t.Errorf("dropped = %d, want 0", q.dropped)
+	}
+
+	// Delta into the all-control-saturated queue: dropped; queue unchanged.
+	lenBefore := len(q.items)
+	if dropped := q.enqueue(pqEnv(protocol.TypeAssistantDelta, 9001)); !dropped {
+		t.Error("delta into an all-control full queue must be dropped")
+	}
+	if len(q.items) != lenBefore {
+		t.Errorf("len = %d after dropped delta, want %d (unchanged)", len(q.items), lenBefore)
+	}
+	if q.dropped != 1 {
+		t.Errorf("dropped = %d, want 1", q.dropped)
+	}
+	// The tail is still the soft-overflow control — the dropped delta was never
+	// appended.
+	last := q.items[len(q.items)-1]
+	if last.env.Type != protocol.TypeTurnEnd || last.env.ID != 9000 {
+		t.Errorf("tail = (%s,%d), want (turn_end,9000)", last.env.Type, last.env.ID)
+	}
+}
+
+// TestV2Session_Push_NonBlockingUnderStall pins AC#1 end-to-end: with the
+// outbound (relay) leg stalled so the Run goroutine is wedged mid-forward, the
+// producer's Push calls all return promptly (never blocked on the relay), the
+// drop counter engages once the buffer fills past cap, and after the stall is
+// released the surviving deltas decrypt in order under the phone's recv state —
+// proving drop-before-seal left no nonce gap and FIFO order was preserved.
+func TestV2Session_Push_NonBlockingUnderStall(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	// Stalling outbound: records every frame via an inner v2Recorder, but once
+	// armed, blocks each call on release first. The handshake runs with stall
+	// off so the session reaches open; we arm afterwards to wedge the drain.
+	rec := &v2Recorder{}
+	var stall atomic.Bool
+	release := make(chan struct{})
+	gated := func(env protocol.RoutingEnvelope) error {
+		if stall.Load() {
+			<-release
+		}
+		return rec.outbound(env)
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 4)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+
+	var releaseOnce sync.Once
+	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(sess.stop) // runs last
+	t.Cleanup(releaseFn) // runs first — unblock any wedged forward before stop
+
+	// Arm the stall: the next forward (the first drained push) blocks in gated.
+	stall.Store(true)
+
+	// Pre-build push envelopes on the test goroutine (avoid building inside the
+	// pusher goroutine). Deltas with strictly-increasing IDs 0..nPush-1, enough
+	// to overflow the cap so the drop policy engages.
+	const nPush = pushQueueCap + 64
+	pushes := make([]protocol.Envelope, nPush)
+	for i := range pushes {
+		pushes[i] = pqEnv(protocol.TypeAssistantDelta, uint64(i))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Fire all pushes from a goroutine; assert they all return while the
+	// outbound is stalled (proving Push never blocks on the relay).
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range pushes {
+			if err := sess.mgr.Push(ctx, v2TestConnID, pushes[i]); err != nil {
+				t.Errorf("Push[%d]: %v", i, err)
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		releaseFn() // avoid leaking the wedged Run goroutine
+		t.Fatal("Push calls did not return while outbound stalled — producer wedged")
+	}
+
+	// The buffer filled past cap, so the drop counter engaged. Read under the
+	// leaf lock. No more enqueues happen after this point, so dropped is final.
+	sess.mgr.pushMu.Lock()
+	dropped := sess.mgr.queues[v2TestConnID].dropped
+	sess.mgr.pushMu.Unlock()
+	if dropped == 0 {
+		t.Fatalf("dropped = 0, want > 0 (buffer should overflow past cap=%d with %d pushes)", pushQueueCap, nPush)
+	}
+
+	// Release the stall; the drain pumps the survivors one-per-pass. Exactly
+	// nPush-dropped app frames are forwarded (every push is dropped or sent),
+	// plus the handshake noise_resp.
+	releaseFn()
+	wantApp := nPush - int(dropped)
+	envs := waitForEnvelopes(t, sess.rec, 1+wantApp)
+	if len(envs) != 1+wantApp {
+		t.Fatalf("recorded %d envelopes, want %d (noise_resp + %d survivors)", len(envs), 1+wantApp, wantApp)
+	}
+
+	// Decrypt survivors in capture (= seal = FIFO drain) order under the phone's
+	// recv state. A clean in-order decrypt proves drop-before-seal left no nonce
+	// gap; strictly-increasing IDs prove FIFO order survived the drops.
+	var prevID uint64
+	haveFirst := false
+	for _, e := range envs[1:] {
+		inner := decryptAppFrame(t, e, sess.initRecv)
+		if inner.Type != protocol.TypeAssistantDelta {
+			t.Errorf("survivor type = %q, want assistant_delta", inner.Type)
+		}
+		if haveFirst && inner.ID <= prevID {
+			t.Errorf("survivor id %d not strictly greater than prev %d — order not preserved", inner.ID, prevID)
+		}
+		prevID = inner.ID
+		haveFirst = true
+	}
+	// Drop-oldest retains the most recent text: the last survivor is the last
+	// pushed delta.
+	if prevID != uint64(nPush-1) {
+		t.Errorf("last survivor id = %d, want %d (most-recent delta retained)", prevID, nPush-1)
+	}
+}
+
 // TestV2Session_Push_InterleavedWithReply_DecryptsUnderRace pins AC#1 and
 // AC#4: an unsolicited Push fired from a separate goroutine while a
 // request/reply dispatch is in flight on the same session. Both outbound
@@ -2590,7 +2967,7 @@ func TestV2Session_Push_InterleavedWithReply_DecryptsUnderRace(t *testing.T) {
 	defer cancel()
 
 	// Fire the push concurrently with feeding the inbound request so the
-	// push funnel and dispatchAppFrame contend for the single Run goroutine.
+	// buffer drain and dispatchAppFrame contend for the single Run goroutine.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -2645,8 +3022,8 @@ func TestV2Session_Push_InterleavedWithReply_DecryptsUnderRace(t *testing.T) {
 // N concurrent pushes plus M in-flight request/reply dispatches on the
 // same open session. All N+M outbound frames must decrypt in capture
 // order under the phone's recv state with no AEAD failure — the stress
-// proof that the funnel serialises every s.send.Encrypt onto Run and the
-// nonce counter never reuses. Run under -race.
+// proof that the buffer drain serialises every s.send.Encrypt onto Run and
+// the nonce counter never reuses. Run under -race.
 func TestV2Session_Push_ConcurrentWithReplies_NoNonceCorruption(t *testing.T) {
 	t.Parallel()
 
@@ -2808,15 +3185,15 @@ func TestV2Session_Push_UnknownConn_ErrConnNotFound_OtherSessionUnaffected(t *te
 	}
 }
 
-// TestV2Session_Push_NotOpen_ReturnsErrSessionNotOpen pins AC#3: a session
-// that exists but has not reached V2StateOpen (still awaiting init, or
-// handshake-complete-but-token-unvalidated) refuses the push with
-// ErrSessionNotOpen — the security gate that keeps server output away from
-// an un-authenticated peer. White-box session injection mirrors the gating
-// test; the Push channel-send is the happens-before edge that makes the
-// map write visible to Run (no frames fed, no timers armed on a pre-open
-// session, so Run touches the map only when it services the push).
-func TestV2Session_Push_NotOpen_ReturnsErrSessionNotOpen(t *testing.T) {
+// TestV2Session_Push_NotOpen_ReturnsErrConnNotFound pins the error-contract
+// change (#610): a session that exists in m.sessions but never reached
+// V2StateOpen has no push queue (queues are created only at the open tail), so
+// the public Push collapses "not open" into ErrConnNotFound — a not-open conn
+// is indistinguishable from an unknown one at the enqueue boundary. The
+// V2StateOpen security gate moved to the drain side (forwardEnvelope); see
+// TestV2Session_forwardEnvelope_NotOpen_GateRefuses for that half. White-box
+// session injection (no queue) mirrors the gating test.
+func TestV2Session_Push_NotOpen_ReturnsErrConnNotFound(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -2843,8 +3220,9 @@ func TestV2Session_Push_NotOpen_ReturnsErrSessionNotOpen(t *testing.T) {
 			})
 			t.Cleanup(stop)
 
-			// handlePush returns at the state check before touching s.send,
-			// so nil CipherStates are safe here.
+			// Inject a pre-open session WITHOUT a queue — exactly the state of a
+			// conn mid-handshake. Push never touches s.send, so nil CipherStates
+			// are safe here.
 			const connID = "c-notopen"
 			mgr.sessions[connID] = &V2Session{connID: connID, state: tc.state}
 
@@ -2852,13 +3230,58 @@ func TestV2Session_Push_NotOpen_ReturnsErrSessionNotOpen(t *testing.T) {
 			defer cancel()
 
 			err := mgr.Push(ctx, connID, buildMessageEnvelope(t, 1, "x"))
-			if !errors.Is(err, ErrSessionNotOpen) {
-				t.Errorf("Push to %v session: err = %v, want ErrSessionNotOpen", tc.state, err)
+			if !errors.Is(err, ErrConnNotFound) {
+				t.Errorf("Push to %v session: err = %v, want ErrConnNotFound", tc.state, err)
 			}
 			if got := rec.snapshot(); len(got) != 0 {
 				t.Errorf("rec.snapshot() len = %d, want 0 (no outbound on not-open push)", len(got))
 			}
 		})
+	}
+}
+
+// TestV2Session_forwardEnvelope_NotOpen_GateRefuses pins the drain-side
+// security gate (#610 security review): forwardEnvelope — the path the buffer
+// drain uses to seal-and-forward — refuses a session that is not V2StateOpen,
+// so a buffered push to a conn that closed or de-authed between enqueue and
+// drain is dropped before sealing and never delivered to an un-authenticated
+// peer. White-box, no Run goroutine: forwardEnvelope is called directly on the
+// test goroutine over an injected non-open session, so the read of s.state is
+// uncontended.
+func TestV2Session_forwardEnvelope_NotOpen_GateRefuses(t *testing.T) {
+	t.Parallel()
+
+	respPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	rec := &v2Recorder{}
+	mgr, err := NewV2SessionManager(V2SessionConfig{
+		Frames:     make(chan protocol.RoutingEnvelope),
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewV2SessionManager: %v", err)
+	}
+	// Intentionally do NOT start Run: forwardEnvelope is exercised directly.
+	const connID = "c-gate"
+
+	// Missing session → ErrConnNotFound.
+	if err := mgr.forwardEnvelope(context.Background(), connID, buildMessageEnvelope(t, 1, "x")); !errors.Is(err, ErrConnNotFound) {
+		t.Errorf("forwardEnvelope to unknown conn: err = %v, want ErrConnNotFound", err)
+	}
+
+	// Present-but-not-open session (e.g. closed/de-authed before drain) →
+	// ErrSessionNotOpen, no seal, no outbound. nil CipherStates are safe: the
+	// state check returns before s.send is touched.
+	mgr.sessions[connID] = &V2Session{connID: connID, state: V2StateHandshakeComplete}
+	if err := mgr.forwardEnvelope(context.Background(), connID, buildMessageEnvelope(t, 1, "x")); !errors.Is(err, ErrSessionNotOpen) {
+		t.Errorf("forwardEnvelope to non-open session: err = %v, want ErrSessionNotOpen", err)
+	}
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Errorf("rec.snapshot() len = %d, want 0 (gate refused before any seal/send)", len(got))
 	}
 }
 
@@ -2919,9 +3342,9 @@ func TestV2Session_Push_ClosedSession_ReturnsErrConnNotFound(t *testing.T) {
 
 // TestV2Session_Push_CtxCancelled_ReturnsCtxErr pins the ctx-cancellation
 // arm: a Push whose ctx is already cancelled returns ctx.Err() without
-// blocking. With no Run goroutine draining m.push, the send case can never
-// proceed, so the ctx.Done arm is the only ready case — deterministic, no
-// flakiness from select picking the send.
+// blocking. Push checks ctx before the enqueue, so a cancelled ctx
+// short-circuits without consulting the queues — deterministic, no Run
+// goroutine required.
 func TestV2Session_Push_CtxCancelled_ReturnsCtxErr(t *testing.T) {
 	t.Parallel()
 
@@ -2938,7 +3361,8 @@ func TestV2Session_Push_CtxCancelled_ReturnsCtxErr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewV2SessionManager: %v", err)
 	}
-	// Intentionally do NOT start Run: m.push has no receiver.
+	// Intentionally do NOT start Run: the ctx pre-check short-circuits before
+	// any enqueue, so no drain goroutine is needed.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
