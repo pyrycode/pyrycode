@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1112,4 +1113,144 @@ func TestDropConn_BeforeConnect(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 	// Must not panic when no live conn.
 	c.DropConn()
+}
+
+// TestRealDial_UpgradeRejected proves realDial classifies a non-101 HTTP
+// response (the relay served the URL but never upgraded — e.g. a 404 on a
+// wrong path) as ErrUpgradeRejected, carrying the status, using the
+// coder/websocket "resp != nil ⟺ server responded" signal.
+func TestRealDial_UpgradeRejected(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such path", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	c := New(Config{URL: wsURL, Logger: testLogger(t), WriteTimeout: time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := c.realDial(ctx)
+	if err == nil {
+		t.Fatal("realDial against a 404 handler returned nil error")
+	}
+	if !errors.Is(err, ErrUpgradeRejected) {
+		t.Errorf("err = %v, want wrapping ErrUpgradeRejected", err)
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("err = %q, want containing status 404", err.Error())
+	}
+}
+
+// TestRealDial_NetworkFailureNotUpgradeRejected proves a network-level dial
+// failure (no HTTP response at all) stays a plain "dial:" error and is NOT
+// misclassified as an upgrade rejection — the resp == nil branch.
+func TestRealDial_NetworkFailureNotUpgradeRejected(t *testing.T) {
+	t.Parallel()
+	// Reserve then release a port so the dial is refused with no HTTP
+	// response (resp == nil).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	c := New(Config{URL: "ws://" + addr, Logger: testLogger(t), WriteTimeout: time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = c.realDial(ctx)
+	if err == nil {
+		t.Fatal("realDial against a closed port returned nil error")
+	}
+	if errors.Is(err, ErrUpgradeRejected) {
+		t.Errorf("err = %v, must NOT wrap ErrUpgradeRejected (network failure, no HTTP response)", err)
+	}
+}
+
+// recordingHandler is a slog.Handler that captures every record for
+// post-hoc level/message assertions. Safe for concurrent Handle calls.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestConnect_LoudOnFirstUpgradeReject proves AC#1's "loud on the first
+// failed upgrade, not buried": a sustained run of ErrUpgradeRejected dials
+// produces exactly one WARN (carrying the actionable path hint) on the
+// first attempt, with subsequent attempts demoted to the INFO backoff line.
+func TestConnect_LoudOnFirstUpgradeReject(t *testing.T) {
+	t.Parallel()
+	rec := &recordingHandler{}
+	logger := slog.New(rec)
+
+	var dials atomic.Int64
+	c := newClientForTest(t, Config{URL: "wss://example.invalid", Logger: logger, WriteTimeout: time.Second}, testOpts{
+		seed:             1,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     20 * time.Millisecond,
+		dialFn: func(ctx context.Context) (*websocket.Conn, error) {
+			dials.Add(1)
+			return nil, fmt.Errorf("%w (HTTP 404): boom", ErrUpgradeRejected)
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	// Let several attempts accumulate so we observe the first (WARN) and
+	// at least one subsequent (INFO) rejection.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if dials.Load() >= 3 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-connectErr
+
+	if got := dials.Load(); got < 3 {
+		t.Fatalf("dial attempts = %d, want ≥3 to exercise first + subsequent", got)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var warns, backoffInfos int
+	var warnMsg string
+	for _, r := range rec.records {
+		switch r.Level {
+		case slog.LevelWarn:
+			warns++
+			warnMsg = r.Message
+		case slog.LevelInfo:
+			if strings.Contains(r.Message, "dial failed") {
+				backoffInfos++
+			}
+		}
+	}
+	if warns != 1 {
+		t.Errorf("WARN records = %d, want exactly 1 (loud on first upgrade reject only)", warns)
+	}
+	if !strings.Contains(warnMsg, "verify the relay URL path") {
+		t.Errorf("WARN message = %q, want the actionable path hint", warnMsg)
+	}
+	if backoffInfos < 1 {
+		t.Errorf("INFO backoff records = %d, want ≥1 (subsequent rejects demoted to INFO)", backoffInfos)
+	}
 }

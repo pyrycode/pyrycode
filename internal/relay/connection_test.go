@@ -543,6 +543,57 @@ func TestConfig_Validation_TableDriven(t *testing.T) {
 	}
 }
 
+// TestResolveDialURL pins the relay-URL handling: a base URL (no path)
+// gets /v1/server appended (mirroring the phone's /v1/client convention),
+// an operator-supplied path is passed through unchanged, query strings
+// survive reconstruction, and scheme/parse errors wrap ErrInvalidConfig
+// with the same messages Connect surfaced before the helper existed.
+func TestResolveDialURL(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		raw           string
+		allowInsecure bool
+		want          string // expected dial URL (only checked when wantErr == "")
+		wantErr       string // substring of the error; "" means no error expected
+	}{
+		{"base no path appends", "wss://relay.pyrycode.dev", false, "wss://relay.pyrycode.dev/v1/server", ""},
+		{"root slash appends", "wss://relay.pyrycode.dev/", false, "wss://relay.pyrycode.dev/v1/server", ""},
+		{"explicit v1 passthrough", "wss://relay.pyrycode.dev/v1/server", false, "wss://relay.pyrycode.dev/v1/server", ""},
+		{"explicit v2 passthrough", "wss://relay.pyrycode.dev/v2/server", false, "wss://relay.pyrycode.dev/v2/server", ""},
+		{"custom path passthrough", "wss://relay.pyrycode.dev/custom", false, "wss://relay.pyrycode.dev/custom", ""},
+		{"query preserved on append", "wss://h/?x=1", false, "wss://h/v1/server?x=1", ""},
+		{"query preserved on passthrough", "wss://h/v1/server?x=1", false, "wss://h/v1/server?x=1", ""},
+		{"ws rejected without insecure", "ws://relay.pyrycode.dev/", false, "", "wss"},
+		{"http rejected", "http://relay.pyrycode.dev/", false, "", "wss"},
+		{"ws accepted with insecure appends", "ws://127.0.0.1:54321", true, "ws://127.0.0.1:54321/v1/server", ""},
+		{"unparseable wraps parse error", "://broken", false, "", "RelayURL parse"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveDialURL(tc.raw, tc.allowInsecure)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("resolveDialURL(%q) err = nil, want containing %q", tc.raw, tc.wantErr)
+				}
+				if !errors.Is(err, ErrInvalidConfig) {
+					t.Errorf("resolveDialURL(%q) err = %v, want wrapping ErrInvalidConfig", tc.raw, err)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("resolveDialURL(%q) err = %q, want containing %q", tc.raw, err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveDialURL(%q) unexpected err: %v", tc.raw, err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveDialURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCloseConn_WireShape pins the marshalled bytes CloseConn emits:
 // conn_id + close_code present, token omitted. (Frame appears as
 // `"frame":null` per the json.RawMessage zero-value; the consumer-side
