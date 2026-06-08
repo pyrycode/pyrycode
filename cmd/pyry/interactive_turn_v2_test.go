@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -91,6 +92,22 @@ func turnStateValues(t *testing.T, pushes []recordedPush) []string {
 			t.Fatalf("decode turn_state payload: %v", err)
 		}
 		out = append(out, ts.State)
+	}
+	return out
+}
+
+func ringEventTypes(evs []eventring.Event) []string {
+	out := make([]string, len(evs))
+	for i, e := range evs {
+		out[i] = e.Type
+	}
+	return out
+}
+
+func ringEventIDs(evs []eventring.Event) []uint64 {
+	out := make([]uint64, len(evs))
+	for i, e := range evs {
+		out[i] = e.ID
 	}
 	return out
 }
@@ -791,5 +808,125 @@ func TestInteractiveTurnEmitterV2_OneSeqPerCoalescedDelta(t *testing.T) {
 	}
 	if deltas[0].Text != "xyz" {
 		t.Fatalf("coalesced text: got %q, want %q", deltas[0].Text, "xyz")
+	}
+}
+
+// --- #646 durable event ring -------------------------------------------------
+
+// AC-1: every fanned-out event is recorded in the durable per-conversation ring
+// with strictly increasing ids 1..N, in the same order the wire saw them.
+func TestInteractiveTurnEmitterV2_RingRecordsEmittedEvents(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.ThoughtChunk{Text: "reasoning"},
+		turnevent.TextChunk{Text: "hello"},
+		turnevent.ToolStart{ToolCallID: "t1", Title: "Read"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	got, gap := e.ring.After(testConvID, 0)
+	if gap {
+		t.Fatal("ring reported a gap for a fresh query")
+	}
+	wantTypes := []string{
+		protocol.TypeTurnState,      // thinking
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // hello (flushed before tool_use)
+		protocol.TypeToolUse,        // Read
+		protocol.TypeTurnEnd,        // end_turn
+		protocol.TypeTurnState,      // idle
+	}
+	if rt := ringEventTypes(got); !slices.Equal(rt, wantTypes) {
+		t.Fatalf("ring event types:\n got %v\nwant %v", rt, wantTypes)
+	}
+	for i, id := range ringEventIDs(got) {
+		if id != uint64(i+1) {
+			t.Fatalf("ring ids not 1..N: got %v", ringEventIDs(got))
+		}
+	}
+}
+
+// AC-1: the durable id is assigned ONCE per logical event, before the per-conn
+// fan-out — two interactive conns yield one ring entry per logical event while
+// the broadcaster records one push per conn per envelope.
+func TestInteractiveTurnEmitterV2_RingIDIsPerEventNotPerConn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: true},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.ThoughtChunk{Text: "reasoning"},
+		turnevent.TextChunk{Text: "hello"},
+		turnevent.ToolStart{ToolCallID: "t1", Title: "Read"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	got, _ := e.ring.After(testConvID, 0)
+	const wantEvents = 6 // thinking, responding, delta, tool_use, turn_end, idle
+	if len(got) != wantEvents {
+		t.Fatalf("ring recorded %d events, want %d (one per logical event, not per conn)", len(got), wantEvents)
+	}
+	for i, id := range ringEventIDs(got) {
+		if id != uint64(i+1) {
+			t.Fatalf("ring ids not 1..N: got %v", ringEventIDs(got))
+		}
+	}
+	if len(bcast.pushes) != wantEvents*2 {
+		t.Fatalf("broadcaster recorded %d pushes, want %d (2 conns x %d envelopes)", len(bcast.pushes), wantEvents*2, wantEvents)
+	}
+}
+
+// AC-1: events are appended to the ring even with zero interactive conns — the
+// ring is the replay source for phones that are absent now and reconnect later.
+func TestInteractiveTurnEmitterV2_RingAppendsWithNoInteractiveConns(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{}}} // a snapshot with no conns
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.TextChunk{Text: "hello"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	if len(bcast.pushes) != 0 {
+		t.Fatalf("no interactive conns but %d pushes recorded", len(bcast.pushes))
+	}
+	got, _ := e.ring.After(testConvID, 0)
+	if len(got) == 0 {
+		t.Fatal("ring is empty though events were emitted to an absent audience")
+	}
+}
+
+// AC-1: an empty cursor drops the event before emit, so nothing is recorded in
+// the ring.
+func TestInteractiveTurnEmitterV2_RingEmptyOnEmptyCursor(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{} // empty cursor
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+
+	got, gap := e.ring.After(testConvID, 0)
+	if gap || len(got) != 0 {
+		t.Fatalf("empty cursor recorded events: %v (gap=%v)", ringEventTypes(got), gap)
 	}
 }

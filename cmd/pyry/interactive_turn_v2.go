@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
@@ -81,6 +82,16 @@ type interactiveTurnEmitterV2 struct {
 	// increasing subsequence.
 	nextID uint64
 
+	// ring stores every fanned-out event under a durable, connection-independent
+	// per-conversation id for the #647 reconnect-replay path. It is owned here
+	// (created in the constructor, daemon-resident since the emitter is built
+	// once in startInteractiveTurnStreamV2 — codebase/633.md), distinct from the
+	// per-conn envelope nextID above (NOT overloaded). The ring is self-
+	// synchronised: it is the one field a second goroutine (the future query
+	// path) may touch, so the emitter's other fields stay unguarded and
+	// single-goroutine. Appended on emit, before the per-conn fan-out.
+	ring *eventring.Ring
+
 	// Delta-coalescing state (#609) — read/written only on the single Handle/
 	// flush goroutine, same contract as the lifecycle fields above. The invariant
 	// the timer relies on: flushTimer is armed iff deltaBuf is non-empty.
@@ -101,6 +112,7 @@ func newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster,
 		bcast:      bcast,
 		logger:     logger,
 		flushTimer: t,
+		ring:       eventring.New(eventring.MaxEventsPerConversation),
 	}
 }
 
@@ -304,6 +316,17 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 		return
 	}
 
+	// Assign the durable per-conversation event id and record it for replay
+	// ONCE per logical event, before the per-conn fan-out — so the same event
+	// carries the same id regardless of conn count, and is retained even when no
+	// phone is interactive right now (the ring is the replay source for absent
+	// phones that reconnect later). One timestamp per logical event, shared by
+	// every conn (hoisted out of the loop). The returned id is unused here —
+	// #647 surfaces it on the wire. The ring's own mutex handles the future
+	// cross-goroutine read; the emitter takes no lock.
+	ts := time.Now().UTC()
+	e.ring.Append(convID, typ, payloadJSON, ts)
+
 	// Fresh snapshot per envelope: a conn that joined mid-turn is included next
 	// emit; a dropped conn is absent here, or surfaces as a Push error below.
 	for _, c := range e.bcast.ActiveConns(ctx) {
@@ -314,7 +337,7 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 		env := protocol.Envelope{
 			ID:      e.nextID,
 			Type:    typ,
-			TS:      time.Now().UTC(),
+			TS:      ts,
 			Payload: payloadJSON,
 		}
 		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
