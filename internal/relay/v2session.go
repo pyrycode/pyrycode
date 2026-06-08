@@ -17,6 +17,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
+	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -300,6 +301,18 @@ type V2Session struct {
 	// fired timer can race with the wake delivery, and the bool is the
 	// stable signal that rekeyComplete already won.
 	awaitingRekeyReply bool
+
+	// replayThrough is the highest durable event id already delivered to this
+	// conn by the mid-turn-reconnect replay (#647). Run-owned: written in
+	// replayMissed and read in forwardEnvelope, both on the single Run
+	// goroutine — same single-writer regime as state/interactive, so no lock
+	// or atomic. forwardEnvelope drops a live structured envelope whose EventID
+	// <= replayThrough, so the transient replay/live overlap never
+	// double-delivers an event (the deterministic dedup proven in spec
+	// § Concurrency model). Zero for any conn that never advertised
+	// last_event_id, and live ids are always >= 1, so the guard is inert for
+	// them.
+	replayThrough uint64
 }
 
 // State returns the externally-observable state. Called from the same
@@ -490,6 +503,18 @@ type V2SessionManager struct {
 	// the caller's ctx is the escape arm. Not closed by the manager on Run
 	// exit; in-flight callers unblock via ctx.Done.
 	snapshot chan snapshotReq
+
+	// replayRing + replayCursor are the mid-turn-reconnect replay source
+	// (#647), published once after the interactive emitter (which owns the
+	// ring) is built — see SetReplaySource for why this is a late-bound setter
+	// and not a V2SessionConfig field. Guarded by the pushMu leaf lock: the
+	// publish writes them off the Run goroutine during wiring, and replayMissed
+	// reads them on the Run goroutine at reconnect (much later, after a full
+	// network handshake). nil ring or cursor ⇒ replay disabled (no setter
+	// called, or the structured stream is off) — a phone advertising
+	// last_event_id then simply gets the live stream, no replay, no resync.
+	replayRing   *eventring.Ring
+	replayCursor func() string
 }
 
 // NewV2SessionManager validates cfg and returns a ready manager. Panics
@@ -945,6 +970,20 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	m.queues[s.connID] = &pushQueue{}
 	m.pushMu.Unlock()
 	s.rekeyTimer = m.armRekeyTimer(ctx, s)
+
+	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
+	// off, replay the conversation's missed tail (or emit a resync marker) on
+	// this conn before Run returns to its select to service the live stream
+	// (AC-2's "before the live stream resumes"). The hook is at the very tail
+	// of the success path — noise_resp is sent (the phone's recv CipherState
+	// exists), s.state is V2StateOpen (forwardEnvelope's gate passes), and the
+	// push queue exists — so replay frames seal under the fresh session keys as
+	// the first AEAD-transport frames. last_event_id is untrusted remote input:
+	// replayMissed range/ring-bounds it and scopes it to the daemon-resolved
+	// conversation (never one the phone names).
+	if helloPayload.LastEventID != nil {
+		m.replayMissed(ctx, s, *helloPayload.LastEventID)
+	}
 }
 
 // handleRekeyInit runs the responder side of a phone-initiated re-key
@@ -1378,6 +1417,133 @@ func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session,
 	}
 }
 
+// SetReplaySource publishes the mid-turn-reconnect replay source to the manager
+// (#647). It is called once during relay wiring, AFTER the interactive emitter
+// (which owns the eventring) is constructed: the emitter and manager have a
+// circular dependency (the emitter takes the manager as its broadcaster; the
+// replay path needs the emitter-owned ring), so the ring does not exist when
+// NewV2SessionManager runs — a construction-time V2SessionConfig field is not
+// buildable without the constructor cascade #646 avoided. A late-bound setter
+// is the seam that breaks the cycle. ring is the emitter's per-conversation
+// event ring; currentConv resolves the conversation a reconnecting conn replays
+// for (the supervisor's #312 cursor).
+//
+// Stored under pushMu (the existing leaf lock, taken alone): this write happens
+// off the Run goroutine during wiring, and replayMissed reads them on the Run
+// goroutine at reconnect — much later, after a full network handshake. A nil
+// ring or cursor leaves replay disabled. Idempotent by construction (the wiring
+// calls it once).
+func (m *V2SessionManager) SetReplaySource(ring *eventring.Ring, currentConv func() string) {
+	m.pushMu.Lock()
+	defer m.pushMu.Unlock()
+	m.replayRing = ring
+	m.replayCursor = currentConv
+}
+
+// replayMissed serves the mid-turn-reconnect replay for s after its hello
+// advertised last_event_id=afterID (#647). It runs inline on the manager's
+// single Run goroutine at the tail of handleNoiseInit's success path, so the
+// whole replay completes BEFORE Run returns to its select to service live
+// events — the structural guarantee behind AC-2's "before the live stream
+// resumes". Replies seal via forwardEnvelope (the established
+// handleRequestSnapshot inline-reply pattern), not the buffered push stream.
+//
+// afterID is untrusted remote input (AC-5): it is only ever an index into the
+// self-synchronised ring (ring.After's own mutex makes the read safe off the
+// emitter goroutine), scoped to the daemon-resolved conversation (cursor()),
+// never to a conversation the phone names. Work is bounded by what the ring
+// retains (MaxEventsPerConversation); a hostile-large id classifies as
+// caught-up (zero work). SECURITY: replayed payloads are the same structured
+// envelopes #649 already streams to this authenticated conn; the bytes are
+// never logged.
+func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, afterID uint64) {
+	m.pushMu.Lock()
+	ring, cursor := m.replayRing, m.replayCursor
+	m.pushMu.Unlock()
+	if ring == nil || cursor == nil {
+		return // replay disabled: no SetReplaySource, or the stream is off.
+	}
+	convID := cursor()
+	if convID == "" {
+		return // no active conversation; nothing to catch up on.
+	}
+
+	events, gap := ring.After(convID, afterID)
+	if gap {
+		// The requested position aged out of the bounded ring (AC-4): emit one
+		// honest resync marker telling the phone to full-reload, never a
+		// partial gap-ful replay. Leave replayThrough untouched — the phone
+		// discards its cursor and must accept all live events afterward.
+		m.emitResync(ctx, s, convID)
+		return
+	}
+	// Set the watermark first so a late in-flight live push <= afterID is
+	// dropped even in the caught-up case (no replay frames). During the loop it
+	// trails one event behind the frame being forwarded, so forwardEnvelope's
+	// guard never self-drops a replay envelope.
+	s.replayThrough = afterID
+	for _, ev := range events {
+		id := ev.ID // per-iteration local; never &ev.ID of the range variable.
+		replay := protocol.Envelope{
+			ID:      ev.ID, // per-conn id ascending + self-consistent within the replay.
+			Type:    ev.Type,
+			TS:      ev.TS,
+			Payload: ev.Payload,
+			EventID: &id, // required: the phone advances its cursor from this.
+		}
+		if err := m.forwardEnvelope(ctx, s.connID, replay); err != nil {
+			// Session vanished / seal failure: log at debug and stop — the
+			// package's outbound-drop posture (mirrors handleRequestSnapshot).
+			// NEVER echo payload/ciphertext/key bytes.
+			m.cfg.Logger.Debug("relay: v2 reconnect replay frame dropped",
+				"event", "v2.replay.frame_dropped",
+				"conn_id", s.connID,
+				"err", err)
+			return
+		}
+		s.replayThrough = ev.ID
+	}
+}
+
+// emitResync forwards a single resync marker to s, signalling that its
+// advertised last_event_id aged out of the ring and it must do a full reload of
+// convID (#647, AC-4). The marker is a TypeResync control envelope carrying
+// only convID in an inline anonymous payload — no named protocol payload type,
+// mirroring emitRekeyRequest's payload-less inline-struct control precedent. It
+// carries NO EventID (it is not a structured event), so forwardEnvelope's
+// replay-watermark guard never touches it.
+//
+// SECURITY: convID is the daemon's own resolved conversation id, never
+// attacker-derived; the marker exposes no buffered conversation content.
+func (m *V2SessionManager) emitResync(ctx context.Context, s *V2Session, convID string) {
+	payload, err := json.Marshal(struct {
+		ConversationID string `json:"conversation_id"`
+	}{ConversationID: convID})
+	if err != nil {
+		// A closed struct of one string; marshal cannot fail in practice.
+		m.cfg.Logger.Warn("relay: v2 resync marshal failed",
+			"event", "v2.replay.resync_marshal_failed",
+			"conn_id", s.connID)
+		return
+	}
+	marker := protocol.Envelope{
+		ID:      1, // non-load-bearing; the phone keys resync on Type, not ID.
+		Type:    protocol.TypeResync,
+		TS:      time.Now().UTC(),
+		Payload: payload,
+	}
+	m.cfg.Logger.Info("relay: v2 reconnect resync",
+		"event", "v2.replay.resync",
+		"conn_id", s.connID,
+		"conversation_id", convID)
+	if err := m.forwardEnvelope(ctx, s.connID, marker); err != nil {
+		m.cfg.Logger.Debug("relay: v2 resync marker dropped",
+			"event", "v2.replay.resync_dropped",
+			"conn_id", s.connID,
+			"err", err)
+	}
+}
+
 // emitRekeyRequest builds an AEAD-sealed rekey_request envelope under
 // s.send, wraps it as a noise_msg inner frame, forwards via m.send,
 // then sets s.awaitingRekeyReply=true and arms s.rekeyReplyTimer.
@@ -1778,6 +1944,14 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	}
 	if s.state != V2StateOpen {
 		return ErrSessionNotOpen
+	}
+	// Reconnect-replay dedup (#647): drop a live structured envelope this conn
+	// already received via replay. Envelopes with EventID == nil (snapshot,
+	// error, rekey, resync) are never structured events and are never dropped;
+	// conns that never advertised last_event_id keep replayThrough == 0 and
+	// live ids are always >= 1, so the guard is inert for them.
+	if env.EventID != nil && *env.EventID <= s.replayThrough {
+		return nil
 	}
 	envJSON, err := json.Marshal(env)
 	if err != nil {

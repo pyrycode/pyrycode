@@ -174,6 +174,43 @@ func TestHelloClientPayload_CapabilitiesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestHelloClientPayload_LastEventIDRoundTrip pins the #647 inbound replay
+// cursor: an absent last_event_id is omitted from the wire (key absent, not
+// null — the byte-stability lever so today's hello round-trips identically),
+// and a set value round-trips to a pointer to the same id.
+func TestHelloClientPayload_LastEventIDRoundTrip(t *testing.T) {
+	absent := HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "v"}
+	out, err := json.Marshal(absent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"last_event_id"`)) {
+		t.Errorf("absent LastEventID should be omitted; got %s", out)
+	}
+
+	id := uint64(42)
+	adv := HelloClientPayload{
+		Role:          "client",
+		DeviceName:    "phone",
+		ClientVersion: "v",
+		LastEventID:   &id,
+	}
+	out, err = json.Marshal(adv)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(out, []byte(`"last_event_id":42`)) {
+		t.Errorf("set LastEventID should encode as last_event_id:42; got %s", out)
+	}
+	var back HelloClientPayload
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.LastEventID == nil || *back.LastEventID != id {
+		t.Errorf("LastEventID round-trip: got %v, want pointer to %d", back.LastEventID, id)
+	}
+}
+
 // TestHelloAckPayload_CapabilitiesRoundTrip pins the same for the daemon's
 // supported-set echo on hello_ack.
 func TestHelloAckPayload_CapabilitiesRoundTrip(t *testing.T) {
