@@ -37,6 +37,16 @@ type HelloServerPayload struct {
 // round-trips byte-identically with the v1 hello shape (the key is absent,
 // not null). The daemon intersecting this with its own supported set is
 // #608's job — this field is the advertisement only, no enforcement here.
+//
+// LastEventID is the durable per-conversation event id the phone last saw on
+// the interactive structured stream (the event_id #649 stamps on Envelope).
+// A reconnecting phone advertises it so the daemon can replay the missed tail
+// from the in-memory event ring or signal a resync (#647). A pointer +
+// omitempty so a phone advertising none round-trips byte-identically with
+// today's hello (key absent, not null); ring ids are always >= 1 so a non-nil
+// pointer never encodes 0. SECURITY: untrusted remote input — the consumer
+// (internal/relay) range/shape-validates it and bounds replay by the ring;
+// this wire-type layer does no enforcement.
 type HelloClientPayload struct {
 	Role             string     `json:"role"`
 	DeviceName       string     `json:"device_name"`
@@ -45,6 +55,7 @@ type HelloClientPayload struct {
 	LastSeenTS       *time.Time `json:"last_seen_ts,omitempty"`
 	Token            string     `json:"token,omitempty"`
 	Capabilities     []string   `json:"capabilities,omitempty"`
+	LastEventID      *uint64    `json:"last_event_id,omitempty"`
 }
 
 // HelloAckPayload is the body of a "hello_ack" envelope sent in response

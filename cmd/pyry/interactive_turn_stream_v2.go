@@ -50,6 +50,14 @@ func startInteractiveTurnStreamV2(
 	logger *slog.Logger,
 ) func() {
 	emitter := newInteractiveTurnEmitterV2(sup, mgr, logger)
+	// Publish the emitter's event ring + the conversation cursor to the manager
+	// so a phone reconnecting with hello.last_event_id can be replayed the
+	// missed tail (#647). Late-bound here (not a V2SessionConfig field) to break
+	// the emitter↔manager construction cycle: the ring is created inside the
+	// emitter constructor above, after NewV2SessionManager already ran. This is
+	// the only call site; when the stream is disabled the manager keeps a nil
+	// replay source and a reconnecting phone simply gets the live stream.
+	mgr.SetReplaySource(emitter.ring, sup.CurrentConversation)
 	// Session.Events requires a Tracker; zero opts -> package defaults. The
 	// tracker's stall_detected marker now maps through to a stall envelope
 	// (the mapper no longer discards it).

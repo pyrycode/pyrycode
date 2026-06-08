@@ -123,3 +123,19 @@ const (
 	TypeRequestSnapshot = "request_snapshot" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 	TypeScreenSnapshot  = "screen_snapshot"  // binary → phone, outbound v2 event (plain text only)
 )
+
+// Mobile Protocol v2 mid-turn-reconnect resync marker. When a reconnecting
+// phone advertises a hello.last_event_id that has aged out of the bounded
+// per-conversation event ring, the daemon emits this marker (instead of a
+// partial, gap-ful replay) to tell the phone to do a full reload of the named
+// conversation (#647; ADR 025 § Backpressure / replay). It carries only a
+// conversation_id in an inline anonymous payload — no named payload struct,
+// mirroring TypeRekeyRequest's payload-less control precedent.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: it is an
+// outbound binary → phone v2 event an old phone must never receive. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+const (
+	TypeResync = "resync" // binary → phone, outbound v2 mid-turn-reconnect resync marker
+)
