@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -104,22 +105,81 @@ type manualRekeyReq struct {
 	reply  chan error
 }
 
-// pushReq is enqueued by (*V2SessionManager).Push and dequeued by Run on
-// the push channel arm. reply is per-request (cap=1) so Run's reply send
-// is non-blocking even if the caller's ctx fires between enqueue and
-// reply. Mirrors manualRekeyReq.
-type pushReq struct {
-	connID string
-	env    protocol.Envelope
-	reply  chan error
+// queuedEnv is one unsealed envelope buffered in a per-session pushQueue.
+// droppable is precomputed from env.Type so the drop policy never re-derives
+// the class while scanning under pushMu. Envelopes are held UNSEALED: the
+// Noise send nonce is strictly sequential, so dropping a sealed frame would
+// gap the phone's recv nonce (MAC failure → 4421 close). Sealing happens on
+// the Run goroutine, in order, only for the frames that are actually sent.
+type queuedEnv struct {
+	env       protocol.Envelope
+	droppable bool // env.Type == protocol.TypeAssistantDelta
+}
+
+// pushQueue is a per-session bounded FIFO of unsealed envelopes awaiting the
+// Run-side seal-and-forward. It is owned by V2SessionManager and guarded in
+// full by m.pushMu; it holds no lock of its own. The event-class-aware drop
+// policy lives in enqueue (ADR 025 § Backpressure: assistant_delta drop-oldest,
+// control never drops).
+type pushQueue struct {
+	items   []queuedEnv // FIFO; bounded by the drop policy at pushQueueCap
+	dropped uint64      // observability counter; no app content
+}
+
+// enqueue applies the droppable-delta drop policy and appends env, returning
+// whether a drop occurred (so Push can debug-log after releasing pushMu). The
+// caller MUST hold m.pushMu. The method only ever removes existing entries and
+// appends at the tail, so the relative order of every surviving envelope is
+// preserved (AC#4).
+//
+// Drop policy (AC#2/#3):
+//   - below cap: append.
+//   - at cap with a queued delta: evict the OLDEST queued delta, then append
+//     the incoming event (delta or control). A control event is admitted by
+//     evicting a droppable delta, never by dropping a control event.
+//   - at cap with no queued delta (all control), incoming delta: drop the
+//     incoming delta (loss-tolerant; cannot evict a control event).
+//   - at cap with no queued delta (all control), incoming control: admit past
+//     nominal cap (documented soft overflow — see § Design in the spec). The
+//     trilemma bounded ∧ never-drop-control ∧ never-block-producer is
+//     unsatisfiable here; we yield "strictly bounded". This state needs a
+//     connected-but-very-slow relay sustained across hundreds of control
+//     events with zero interleaved text, and the phone cannot drive control
+//     volume (push is server→phone only), so it is unreachable in practice.
+func (q *pushQueue) enqueue(env protocol.Envelope) bool {
+	qe := queuedEnv{env: env, droppable: env.Type == protocol.TypeAssistantDelta}
+	if len(q.items) < pushQueueCap {
+		q.items = append(q.items, qe)
+		return false
+	}
+	// At capacity. Evict the oldest queued delta (the first droppable from the
+	// front) to make room for the incoming event, delta or control.
+	for i := range q.items {
+		if q.items[i].droppable {
+			q.items = slices.Delete(q.items, i, i+1)
+			q.items = append(q.items, qe)
+			q.dropped++
+			return true
+		}
+	}
+	// No droppable delta queued: every buffered event is control.
+	if qe.droppable {
+		// Drop the incoming delta — cannot evict a control event.
+		q.dropped++
+		return true
+	}
+	// Soft overflow: admit the control event past nominal cap.
+	q.items = append(q.items, qe)
+	return false
 }
 
 // snapshotReq is enqueued by (*V2SessionManager).ActiveConns and dequeued
 // by Run on the snapshot channel arm. reply is per-request (cap=1) so Run's
 // reply send is non-blocking even if the caller's ctx fires between enqueue
-// and reply. Mirrors pushReq minus the per-conn inputs — a snapshot takes no
-// addressed-conn argument. The reply carries the capability-aware enumeration
-// ([]ActiveConn); ActiveConnIDs is a thin projection over the same reply.
+// and reply. Mirrors manualRekeyReq minus the per-conn inputs — a snapshot
+// takes no addressed-conn argument. The reply carries the capability-aware
+// enumeration ([]ActiveConn); ActiveConnIDs is a thin projection over the
+// same reply.
 type snapshotReq struct {
 	reply chan []ActiveConn
 }
@@ -131,6 +191,15 @@ type snapshotReq struct {
 // handler invocation) without forcing the timer-callback goroutine to
 // block. cap=1 would also be correct.
 const wakeBufferSize = 16
+
+// pushQueueCap bounds the per-session push buffer (count of envelopes, not
+// bytes). Starting value pending the ADR-025 load test (decisions/025 line
+// 220): post-#609 coalescing makes deltas arrive per-message/~250 ms, so 256
+// gives ample headroom to ride out one transport WriteTimeout window without
+// dropping while bounding worst-case per-session memory. Control events may
+// briefly push the queue past this in the unreachable-in-practice all-control
+// saturated case (see pushQueue.enqueue).
+const pushQueueCap = 256
 
 // handlerOutboundBuf is the buffer size for the per-frame dispatch.Conn
 // outbound channel allocated by dispatchAppFrame. The three production
@@ -391,13 +460,27 @@ type V2SessionManager struct {
 	// via ctx.Done.
 	manualRekey chan manualRekeyReq
 
-	// push funnels (*V2SessionManager).Push calls onto Run's dispatch
-	// goroutine so the lookup + seal-under-s.send + forward sequence runs
-	// under the single-owner-goroutine invariant. Unbuffered: backpressure
-	// is correct — if Run is busy, Push waits; the caller's ctx is the
-	// escape arm. Not closed by the manager on Run exit; in-flight callers
-	// unblock via ctx.Done.
-	push chan pushReq
+	// pushMu is a leaf lock guarding queues (the map) and every pushQueue's
+	// contents. Held only around map lookup + enqueue/pop (both O(cap), cap
+	// small); NEVER held across an Encrypt, m.send, or any channel op, and
+	// never nested with any other lock. It orders below nothing — it is always
+	// taken alone. This is what lets an off-Run Push reach the addressed
+	// session's queue WITHOUT reading Run-owned m.sessions or touching s.send.
+	pushMu sync.Mutex
+
+	// queues maps connID → the per-session bounded push buffer. The KEY SET is
+	// Run-managed: a queue is created when handleNoiseInit advances a session
+	// to V2StateOpen and deleted by closeWith, both on the Run goroutine. Push
+	// only mutates a queue's CONTENTS (under pushMu); it never adds or removes
+	// keys. So queue-exists ⟺ session is V2StateOpen for any Run-side observer.
+	queues map[string]*pushQueue
+
+	// drainCh signals "some queue has work" to Run's drain arm. Capacity 1 with
+	// non-blocking sends (from Push and from the drain's re-signal) collapses
+	// concurrent wakes into at most one pending; a Push that enqueues while Run
+	// is mid-pass lands its signal into the now-drained channel and triggers the
+	// next pass — a self-perpetuating pump with no lost wakeups.
+	drainCh chan struct{}
 
 	// snapshot funnels (*V2SessionManager).ActiveConns (and ActiveConnIDs,
 	// which projects over it) calls onto Run's dispatch goroutine so the read
@@ -438,7 +521,8 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		sessions:    make(map[string]*V2Session),
 		wake:        make(chan wakeSignal, wakeBufferSize),
 		manualRekey: make(chan manualRekeyReq),
-		push:        make(chan pushReq),
+		queues:      make(map[string]*pushQueue),
+		drainCh:     make(chan struct{}, 1),
 		snapshot:    make(chan snapshotReq),
 	}, nil
 }
@@ -468,8 +552,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleWake(runCtx, w)
 		case req := <-m.manualRekey:
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
-		case req := <-m.push:
-			req.reply <- m.handlePush(runCtx, req.connID, req.env)
+		case <-m.drainCh:
+			m.drainOnce(runCtx)
 		case req := <-m.snapshot:
 			req.reply <- m.handleActiveConns()
 		}
@@ -853,6 +937,13 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// can never flag the session.
 	s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)
 	s.state = V2StateOpen
+	// Create the per-session push buffer now that the session is authenticated
+	// and enumerable. queue-exists ⟺ V2StateOpen; an off-Run Push finds this
+	// queue under pushMu without reading Run-owned m.sessions. Mutating the map
+	// here (on Run) and in closeWith (on Run) keeps the key set Run-owned.
+	m.pushMu.Lock()
+	m.queues[s.connID] = &pushQueue{}
+	m.pushMu.Unlock()
 	s.rekeyTimer = m.armRekeyTimer(ctx, s)
 }
 
@@ -1176,10 +1267,12 @@ const (
 // exactly one reply and returns: it never panics, hangs, or silently drops the
 // request (AC #3).
 //
-// Both the success and error replies are delivered via m.handlePush — the
+// Both the success and error replies are delivered via m.forwardEnvelope — the
 // single existing seal-and-forward path. The public Push is deliberately NOT
-// used here: it funnels onto m.push and waits for Run, which is the goroutine
-// executing this handler, so calling it would self-deadlock the manager.
+// used here: it would enqueue the reply onto the buffered push stream (subject
+// to the drop policy and a deferred drain pass), whereas a snapshot reply is
+// InReplyTo-correlated and must seal immediately and in-line on this same Run
+// goroutine.
 //
 // SECURITY: the rendered screen text is NEVER logged; error replies carry only
 // a static message constant. The conversation_id is validated before any render
@@ -1240,7 +1333,7 @@ func (m *V2SessionManager) handleRequestSnapshot(ctx context.Context, s *V2Sessi
 		"event", "v2.snapshot.served",
 		"conn_id", s.connID,
 		"conversation_id", payload.ConversationID)
-	if err := m.handlePush(ctx, s.connID, reply); err != nil {
+	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		// Unreachable in practice: s is V2StateOpen on the dispatch goroutine.
 		// Logged at debug and dropped — the package's outbound-drop posture;
 		// NEVER echo the rendered text.
@@ -1252,9 +1345,9 @@ func (m *V2SessionManager) handleRequestSnapshot(ctx context.Context, s *V2Sessi
 }
 
 // snapshotReplyError pushes a single TypeError reply to s, correlated to
-// inReplyTo, via the same m.handlePush seal-and-forward path the success reply
-// uses (no parallel send path). message MUST be a static constant — never
-// attacker-controlled bytes.
+// inReplyTo, via the same m.forwardEnvelope seal-and-forward path the success
+// reply uses (no parallel send path). message MUST be a static constant —
+// never attacker-controlled bytes.
 func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session, inReplyTo uint64, code, message string, retryable bool) {
 	errPayload, err := json.Marshal(protocol.ErrorPayload{
 		Code:      code,
@@ -1276,7 +1369,7 @@ func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session,
 		Payload:   errPayload,
 		InReplyTo: &inReplyTo,
 	}
-	if err := m.handlePush(ctx, s.connID, reply); err != nil {
+	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
 		m.cfg.Logger.Debug("relay: v2 snapshot error reply push dropped",
 			"event", "v2.snapshot.err_push",
 			"conn_id", s.connID,
@@ -1434,6 +1527,14 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 		s.rekeyReplyTimer = nil
 	}
 	delete(m.sessions, s.connID)
+	// Symmetric with the create in handleNoiseInit: drop the per-session push
+	// buffer. Any buffered-but-undrained envelopes are discarded — the conn is
+	// terminal (#611 reconnect replay, not this ticket, reconciles a returning
+	// phone). The close envelope itself is sent synchronously below, bypassing
+	// the buffer (it is terminal, not part of the ordered push stream).
+	m.pushMu.Lock()
+	delete(m.queues, s.connID)
+	m.pushMu.Unlock()
 	env := protocol.RoutingEnvelope{
 		ConnID:    s.connID,
 		Frame:     frame,
@@ -1531,61 +1632,144 @@ func (m *V2SessionManager) handleManualRekey(ctx context.Context, connID string)
 	return nil
 }
 
-// Push seals env under the addressed session's send CipherState, wraps it
-// as a noise_msg transport frame, and forwards it to the phone. Safe to
-// call from any goroutine other than the dispatch goroutine: the request
-// is funneled onto Run via m.push so s.send is never touched concurrently
-// with an in-flight dispatchAppFrame reply or a re-key swap. It is the
-// missing primitive behind server-initiated delivery to a phone (the
-// "broadcast layer" deferred at the V2Session / State() comments).
+// Push enqueues env onto the addressed session's bounded push buffer and
+// returns immediately — it NEVER blocks on the relay/send path. The Run
+// goroutine drains the buffer on its own schedule (drainOnce), sealing each
+// envelope under s.send in order; so a slow or stalled relay can never wedge
+// the calling producer/dispatch goroutine (the ADR-025 open-risk guard,
+// decisions/025 line 220). Safe to call from any goroutine: Push touches only
+// m.queues (under pushMu) — never s.send, m.sessions, or Outbound.
 //
 // connID names a specific connected phone. The caller owns env entirely
 // (Type, ID, TS, Payload); Push performs no envelope validation — it is a
 // transport primitive.
 //
-// Returns ErrConnNotFound (wraps control.ErrConnNotFound) when no session
-// with connID exists or it has been torn down; ErrSessionNotOpen when the
-// session exists but is not in V2StateOpen (still handshaking, or
-// handshake-complete-but-token-unvalidated — refusing the push keeps
-// server output away from an un-authenticated peer); ctx.Err() on caller
-// cancellation; or a wrapped marshal/seal error (realistically
-// unreachable under correct flynn/noise). Returns nil once the sealed
-// frame is forwarded to Outbound — a transport-level drop (relay
-// disconnected) is logged at debug inside m.send and NOT surfaced,
-// matching v1 reconnect semantics and the rest of the package.
+// Under pressure (queue at capacity) the event-class-aware drop policy runs
+// pre-seal (pushQueue.enqueue): an assistant_delta evicts the oldest queued
+// delta (drop-oldest); a control event is admitted by evicting a droppable
+// delta and is never itself dropped. A drop is not an error — Push returns nil
+// and debug-logs the running count + the dropped class (env.Type only; never
+// payload bytes).
 //
-// Production wire-up of *V2SessionManager into the cmd/pyry daemon for
-// server-initiated pushes lands in a separate ticket (#572); until then
-// this method is reachable only from internal/relay tests.
+// Returns ErrConnNotFound (wraps control.ErrConnNotFound) when no queue exists
+// for connID — i.e. the session never reached V2StateOpen, was never seen, or
+// has been torn down (closeWith deletes the queue). This collapses the former
+// "session not open" case into ErrConnNotFound: a not-open conn has no queue.
+// The V2StateOpen security gate is preserved on the drain side — forwardEnvelope
+// re-checks s.state before sealing, so a buffered push to a conn that closed or
+// de-authed before drain is dropped there, never delivered to an
+// un-authenticated peer. Returns ctx.Err() only when ctx is already cancelled
+// at entry (preserves the emitter's ctx-teardown branch). Both production
+// callers (#632 emitter, #589 coarse bridge) only debug-log the error, so the
+// collapse is invisible to them.
 func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol.Envelope) error {
-	req := pushReq{connID: connID, env: env, reply: make(chan error, 1)}
-	select {
-	case m.push <- req:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case err := <-req.reply:
+	if err := ctx.Err(); err != nil {
 		return err
-	case <-ctx.Done():
-		return ctx.Err()
+	}
+	m.pushMu.Lock()
+	q, ok := m.queues[connID]
+	if !ok {
+		m.pushMu.Unlock()
+		return ErrConnNotFound
+	}
+	dropped := q.enqueue(env)
+	droppedCount := q.dropped
+	m.pushMu.Unlock()
+
+	// Non-blocking wake: a cap-1 channel + this default coalesces concurrent
+	// signals; the drain re-signals if more work remains, so no wake is lost.
+	select {
+	case m.drainCh <- struct{}{}:
+	default:
+	}
+
+	if dropped {
+		m.cfg.Logger.Debug("relay: v2 push drop under pressure",
+			"event", "v2.push.drop",
+			"conn_id", connID,
+			"dropped", droppedCount,
+			"type", env.Type)
+	}
+	return nil
+}
+
+// drainOnce pops at most ONE buffered envelope across all sessions and forwards
+// it on the Run goroutine. Popping one-per-pass (rather than draining a whole
+// buffer) is the "a slow m.send must not re-block the producer" guard: Run
+// returns to its select between sends, so ActiveConns / inbound frames / wakes
+// are serviced with at most one in-flight Outbound (≤ one WriteTimeout) of
+// delay. If any queue still has items after the pop, it re-signals drainCh.
+func (m *V2SessionManager) drainOnce(ctx context.Context) {
+	m.pushMu.Lock()
+	var (
+		connID string
+		env    protocol.Envelope
+		found  bool
+	)
+	// Go randomises map-range order, giving rough fairness across the
+	// realistically-tiny open-conn count.
+	for id, q := range m.queues {
+		if len(q.items) == 0 {
+			continue
+		}
+		connID = id
+		env = q.items[0].env
+		q.items[0] = queuedEnv{} // release the envelope for GC; slot slides out below
+		q.items = q.items[1:]    // pop head (FIFO)
+		found = true
+		break
+	}
+	// After the pop, note whether any queue still has work to re-signal.
+	more := false
+	if found {
+		for _, q := range m.queues {
+			if len(q.items) > 0 {
+				more = true
+				break
+			}
+		}
+	}
+	m.pushMu.Unlock()
+
+	if !found {
+		return
+	}
+	if err := m.forwardEnvelope(ctx, connID, env); err != nil {
+		// Session vanished / not open / seal failure: drop with no app content
+		// in the log (the package's outbound-drop posture). The V2StateOpen
+		// security gate lives in forwardEnvelope.
+		m.cfg.Logger.Debug("relay: v2 push drain drop",
+			"event", "v2.push.drain_drop",
+			"conn_id", connID,
+			"err", err)
+	}
+	if more {
+		select {
+		case m.drainCh <- struct{}{}:
+		default:
+		}
 	}
 }
 
-// handlePush runs on Run's dispatch goroutine. It looks up the session,
-// requires V2StateOpen, then seals env under s.send and forwards a
-// noise_msg — reusing emitRekeyRequest's marshal→Encrypt→wrap→send
-// sequence (minus the rekey bookkeeping).
+// forwardEnvelope runs on Run's dispatch goroutine. It looks up the session,
+// requires V2StateOpen (the security gate that keeps server output away from an
+// un-authenticated or torn-down peer), then seals env under s.send and forwards
+// a noise_msg — reusing emitRekeyRequest's marshal→Encrypt→wrap→send sequence
+// (minus the rekey bookkeeping). It is the single existing seal-and-forward
+// path, shared by the push-buffer drain (drainOnce) and the snapshot reply
+// handlers (handleRequestSnapshot / snapshotReplyError, which call it directly
+// because their replies are InReplyTo-correlated and not part of the ordered
+// push stream).
 //
 // Reads s.send at execution time on the dispatch goroutine, so it always
-// uses the current CipherState and composes with re-key swaps: a push
+// uses the current CipherState and composes with re-key swaps: a forward
 // either seals fully under the old key or fully under the new key, never
 // a torn read.
 //
 // The seal/marshal error paths return wrapped errors (the caller decides
 // log level); they MUST NOT echo env, plaintext, ciphertext, or key
 // bytes, matching the package's no-AEAD-bytes-in-logs discipline.
-func (m *V2SessionManager) handlePush(_ context.Context, connID string, env protocol.Envelope) error {
+func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env protocol.Envelope) error {
 	s, ok := m.sessions[connID]
 	if !ok {
 		// A torn-down session was already deleted from the map by
@@ -1641,7 +1825,7 @@ type ActiveConn struct {
 //
 // Sessions still handshaking (V2StateAwaitingInit) or handshake-complete-but-
 // token-unvalidated (V2StateHandshakeComplete) are excluded — the same
-// V2StateOpen security gate handlePush enforces, so the negotiated flag of an
+// V2StateOpen security gate forwardEnvelope enforces, so the negotiated flag of an
 // un-authenticated peer is never observable. A torn-down session (deleted from
 // the map by closeWith) cannot appear.
 //
