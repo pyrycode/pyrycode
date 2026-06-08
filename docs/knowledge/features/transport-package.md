@@ -40,10 +40,11 @@ func (*Client) DropConn()                          // force-close live conn; rec
 func (*Client) Close() error                      // idempotent
 
 var (
-    ErrNotConnected = errors.New("transport: not connected")
-    ErrClosed       = errors.New("transport: client closed")
-    ErrDisconnected = errors.New("transport: connection lost")     // #248
-    ErrFatalClose   = errors.New("transport: fatal close code")    // #248; status via websocket.CloseStatus(err)
+    ErrNotConnected    = errors.New("transport: not connected")
+    ErrClosed          = errors.New("transport: client closed")
+    ErrDisconnected    = errors.New("transport: connection lost")            // #248
+    ErrFatalClose      = errors.New("transport: fatal close code")           // #248; status via websocket.CloseStatus(err)
+    ErrUpgradeRejected = errors.New("transport: websocket upgrade rejected") // #631; non-101 HTTP upgrade response (HTTP status in wrapped string)
 )
 ```
 
@@ -134,6 +135,14 @@ The deferred-decision note in #247's spec assigned four additions to #248 (the r
 - **`ErrDisconnected` + per-conn `connDone`** — `connDone` is per-conn, pre-closed at construction (`Receive`/`Send` before `Connect` return `ErrDisconnected` immediately rather than blocking forever), replaced with a fresh open channel inside `serve` before pumps install, closed in `serve`'s deferred teardown. `Receive` and `Send` capture `connDone` once under `connDoneMu` then select — a serve iteration that replaces `c.connDone` between the capture and the select cannot accidentally wake the caller on the new channel. Without this, a `Receive` blocked when the conn drops would stay blocked until the next conn delivers a frame, wedging the relay's `forwardFrames` receive loop above this layer permanently.
 - **`DropConn()`** — force-closes the live conn (if any) via `conn.CloseNow()` (abrupt 1006-equivalent, no close-frame round-trip). The serve loop sees the closed conn, returns to the dial loop, reconnects via backoff. Does NOT halt the dial loop. Idempotent (no-op when no conn is live). `CloseNow` over `Close(status, reason)` so the caller is not blocked for up to 10s on a close handshake when the only purpose is to recycle the conn. It exists for a consumer wanting to recycle a transport-healthy-but-application-stuck conn; the relay package was its original caller (the binary↔relay handshake-failure path), which #582 retired — `DropConn` now has no caller in `internal/relay` but remains for future consumers.
 
+### #631 additions — loud on a rejected upgrade
+
+A non-101 HTTP response to the WS upgrade (e.g. a `404` because the relay URL has the wrong path) used to vanish into the INFO backoff line and spin forever silently. #631 makes the **first** such failure per outage loud, while keeping the retry-forever posture:
+
+- **`ErrUpgradeRejected` classification (`realDial`).** `websocket.Dial` returns a non-nil `*http.Response` **iff** the relay answered the upgrade with a non-101 status; a network-level failure (DNS, refused, TLS) leaves `resp == nil`. So `realDial` branches on the response pointer — no string-matching: `resp != nil` → `fmt.Errorf("%w (HTTP %d): %w", ErrUpgradeRejected, resp.StatusCode, err)` (double-`%w` keeps both the sentinel and the underlying error chain — the `websocket.CloseStatus(err)` fatal-close check still takes precedence); `resp == nil` → the unchanged `"dial: %w"`.
+- **Loud-once-per-outage WARN (`Connect`).** A loop-local `warnedUpgrade` bool gates a single `Logger.Warn("transport: relay rejected the WebSocket upgrade; verify the relay URL path is correct", …)` on the first `errors.Is(err, ErrUpgradeRejected)`; subsequent rejects fall to the existing INFO backoff line. `warnedUpgrade` is re-armed (`= false`) on the successful-connect path, so a *fresh* outage after a healthy connection gets its own first-failure WARN. The WARN message carries **no pyrycode-specific path** ("verify the relay URL path is correct") — `transport` stays protocol-agnostic; the layer that knows about `/v1/server` is `internal/relay` (which appends it, see [relay-package.md](relay-package.md) § Configuration constraints).
+- **Not fatal.** `ErrUpgradeRejected` is deliberately **not** in `FatalCloseCodes` and does not unwind the daemon — it is a log-classification signal only. The relay or config may be fixed live and the next dial succeeds, re-arming the warning. Network failures (relay down) stay at INFO — transient, not a config error. See [codebase/631.md](../codebase/631.md).
+
 ## Edge cases and gotchas
 
 - **`Send` before first dial returns `ErrNotConnected`** (not block-forever). Production callers wait for `Connected()` (#248) before issuing the first Send.
@@ -164,6 +173,9 @@ Pinned behaviour:
 - `TestSend_ReturnsErrClosed_AfterClose` / `TestReceive_ReturnsErrClosed_AfterClose` — post-Close sentinels.
 - `TestNew_PanicsWithoutLogger` — pins the "Logger is required" contract.
 - `TestAwaitCloseStatus_GraceBranchPreservesCloseError` (#290) — three flat sub-tests against the `awaitCloseStatus` helper: close-first skips the grace, non-close-first lets a subsequent CloseError land within grace (the regression-catching case), non-close-first with no follower expires after the grace deadline. Pins the contract for the close-frame-race grace branch independently of goroutine scheduling.
+- `TestRealDial_UpgradeRejected` (#631) — `realDial` against an `httptest` handler that 404s (never upgrades) → error `errors.Is` `ErrUpgradeRejected` and contains the status.
+- `TestRealDial_NetworkFailureNotUpgradeRejected` (#631) — `realDial` against a reserved-then-released port (refused, `resp == nil`) → plain `"dial:"` error, **not** `ErrUpgradeRejected`. Together these pin the coder/websocket `resp != nil ⟺ non-101 response` classification.
+- `TestConnect_LoudOnFirstUpgradeReject` (#631) — `dialFn` returns an `ErrUpgradeRejected`-wrapped error every attempt; a recording `slog.Handler` asserts exactly **one** WARN (carrying the actionable path hint) on the first attempt with subsequent attempts demoted to INFO — pins AC#1's "loud on the first failed upgrade, not buried".
 
 ## Consumers and roadmap
 
