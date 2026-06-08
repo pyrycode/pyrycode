@@ -105,9 +105,11 @@ type SessionHost interface {
 }
 
 type Config struct {
-    Subscribe Subscriber             // required; New errors if nil
-    OnEvent   func(turnevent.Event)  // nil ⇒ no-op beyond draining (AC 4)
-    Logger    *slog.Logger           // nil ⇒ slog.Default()
+    Subscribe   Subscriber             // required; New errors if nil
+    OnEvent     func(turnevent.Event)  // nil ⇒ no-op beyond draining (AC 4)
+    FlushSignal <-chan time.Time       // nil ⇒ no periodic-flush arm (#609)
+    OnFlush     func()                 // runs on the Run goroutine when FlushSignal fires; nil ⇒ ignored (#609)
+    Logger      *slog.Logger           // nil ⇒ slog.Default()
 }
 
 func New(cfg Config) (*Producer, error)            // err iff Subscribe == nil
@@ -128,12 +130,21 @@ channel (its per-session ctx was cancelled — see the live Subscriber).
 
 ### `drain` — the inner loop
 
-A `select` over `ctx.Done()` and the event channel:
+A `select` over `ctx.Done()`, the event channel, and (since #609) a flush signal:
 - `ctx.Done()` → return (clean exit on cancel).
 - channel closed → return (clean exit on session restart).
 - event received → if `OnEvent == nil`, `continue` (drains the source, does
   nothing else — AC 4); else `mapEvent(ev)` → on `ok` call `OnEvent(te)`, on
   `!ok` `log.Debug("turnbridge: dropping unrepresentable event", "kind", ev.Kind)`.
+- `<-FlushSignal` (#609) → if `OnFlush != nil`, call it. **The producer stays
+  generic** — it knows "select a flush signal and call back on the Run
+  goroutine," not *why*. This is the seam that lets a consumer give a passive
+  single-`Run`-goroutine emitter a timer without a second goroutine or a lock: the
+  consumer **owns** the `*time.Timer` (arms/resets/stops it from `OnEvent`/`OnFlush`)
+  but hands its channel here to be selected, so the timer-driven flush runs on the
+  **same** goroutine as `OnEvent`. A nil `FlushSignal` is a never-ready arm, so
+  existing callers are unaffected (one branch, no busy-loop). First consumer: the
+  #632 interactive emitter's delta coalescing — see [codebase/609.md](../codebase/609.md).
 
 ### Output is a callback, not a channel
 
@@ -442,3 +453,4 @@ design decision.
 - [codebase/615.md](../codebase/615.md) — producer ticket record (patterns + lessons).
 - [codebase/627.md](../codebase/627.md) — outbound-adapter ticket record (patterns + lessons).
 - [codebase/639.md](../codebase/639.md) — the stall bridge wiring: un-drops `StallDetected` through all three stages to the capability-gated fan-out (#638's `turnevent.Stall` + `protocol.StallPayload`).
+- [codebase/609.md](../codebase/609.md) — delta coalescing: the additive `Config.FlushSignal`/`OnFlush` flush-arm seam + the emitter-owned ~250ms timer it serves.
