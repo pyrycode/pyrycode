@@ -1,42 +1,58 @@
-# `internal/turnbridge` — event-stream bridge (producer)
+# `internal/turnbridge` — event-stream bridge
 
-The **producer half** of the Phase 2 structured-event bridge (EPIC #596,
+The event-mapping core of the Phase 2 structured-event bridge (EPIC #596,
 [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § Phase 2
-structured streaming). It drains the supervised claude session's unified
-tui-driver `Events()` stream and maps each event into the neutral internal
-turn-event model ([`internal/turnevent`](turnevent-package.md), #606). Landed in
-#615.
+structured streaming). The package now bridges in **both** directions around the
+neutral internal turn-event model ([`internal/turnevent`](turnevent-package.md),
+#606):
 
-The **consumer half** — mapping the internal model to v2 wire envelopes (#607)
-and the capability-gated fan-out to phones — is **#616** and consumes this
-producer's output. This package ships **with unit tests, deliberately unwired to
-a live fan-out** (the standard "introduce the producer + tests; wire the consumer
-in the next slice" pattern). With no consumer attached the producer is a no-op
-beyond draining.
+- **Inbound producer** (`producer.go` + `mapper.go`, #615) — drains the supervised
+  claude session's unified tui-driver `Events()` stream and maps each event **into**
+  the `turnevent.Event` model.
+- **Outbound adapter** (`outbound.go`, #627) — a pure value-to-value mapper from a
+  `turnevent.Event` + explicit turn context **out** to the matching v2 interactive
+  wire payload (#607). The exact mirror of `mapEvent`. See
+  [The outbound adapter](#the-outbound-adapter-mapevent--buildturnstate) below.
+
+The **consumer half** — the turn-lifecycle state machine, envelope ID minting /
+sealing, and the capability-gated fan-out to phones — is **#616** and consumes both
+this producer's output and the outbound adapter's payloads. This package ships
+**with unit tests, deliberately unwired to a live fan-out** (the standard "introduce
+the mapping core + tests; wire the consumer in the next slice" pattern). With no
+consumer attached the producer is a no-op beyond draining, and the outbound adapter
+has no caller until the integration slice wires it.
 
 > #615 + #616 are the two halves of the originally-combined #608. Docs in #606 /
 > #607 that say "the bridge (#608)" mean: producer = #615 (here), consumer = #616.
 
 Dependency direction stays clean — `cmd/pyry → internal/turnbridge →
-{tuidriver, turnevent}`. The package does **not** import `internal/supervisor`
-(it defines its own `SessionHost` seam, which `*supervisor.Supervisor` satisfies
-structurally) and does **not** import `internal/sessions` (the JSONL resolver is
-injected). Package name reads naturally beside `turnevent`: `turnbridge` bridges
-tui-driver events into the `turnevent` model.
+{tuidriver, turnevent, protocol}`. Only `mapper.go`/`producer.go` reach
+`tuidriver`; only `outbound.go` reaches `internal/protocol` (#627 added that
+import). The package does **not** import `internal/supervisor` (it defines its own
+`SessionHost` seam, which `*supervisor.Supervisor` satisfies structurally) and does
+**not** import `internal/sessions` (the JSONL resolver is injected). Package name
+reads naturally beside `turnevent`: `turnbridge` bridges tui-driver events into —
+and the `turnevent` model out to — the wire.
 
-- Spec: [`specs/architecture/615-event-stream-producer.md`](../../specs/architecture/615-event-stream-producer.md).
-- Ticket record: [codebase/615.md](../codebase/615.md).
-- Output model: [turnevent-package.md](turnevent-package.md) (#606).
-- Wire target of the consumer: [protocol-package.md](protocol-package.md) (#607, interactive payloads).
+- Specs: [`615-event-stream-producer.md`](../../specs/architecture/615-event-stream-producer.md)
+  (producer), [`627-outbound-turnevent-wire-mapper.md`](../../specs/architecture/627-outbound-turnevent-wire-mapper.md)
+  (outbound adapter).
+- Ticket records: [codebase/615.md](../codebase/615.md) (producer),
+  [codebase/627.md](../codebase/627.md) (outbound adapter).
+- Pivot model: [turnevent-package.md](turnevent-package.md) (#606) — what the
+  producer maps INTO and the outbound adapter maps OUT of.
+- Outbound wire target: [protocol-package.md](protocol-package.md) (#607, interactive payloads).
 
 ## Files
 
 ```
 internal/turnbridge/
 ├── producer.go        Producer lifecycle (drain + re-subscribe) + the live NewSessionSubscriber
-├── mapper.go          mapEvent + pure helpers (the tui-event → turnevent type switch)
+├── mapper.go          mapEvent + pure helpers (the inbound tui-event → turnevent type switch)
+├── outbound.go        MapEvent / BuildTurnState + summary helpers (the outbound turnevent → wire-payload type switch, #627)
 ├── producer_test.go   drain / re-subscribe-across-restart / nil-OnEvent tests (fake Subscriber)
-└── mapper_test.go     table-driven event→model + drop tests; toolResultText / toolKind / rawInput
+├── mapper_test.go     table-driven event→model + drop tests; toolResultText / toolKind / rawInput
+└── outbound_test.go   table-driven model→payload + drop tests; inputSummary / resultSummary / truncate / BuildTurnState
 ```
 
 Plus an additive `Session()` accessor on the supervisor (`internal/supervisor/supervisor.go`).
@@ -171,6 +187,117 @@ dropped. This follows #606's posture: the producer drops what the model can't
 hold; it does not invent error envelopes. (Malformed JSONL never reaches the
 mapper — tui-driver's `TailJSONL` silently drops unparseable lines upstream.)
 
+## The outbound adapter (`MapEvent` / `BuildTurnState`)
+
+The exact mirror of `mapEvent` (#627, `outbound.go`): where `mapEvent` maps a
+tui-driver event **into** the `turnevent.Event` model, `MapEvent` maps that model
+**out** to the matching v2 interactive wire payload (#607). It is **pure** — no
+logger, no I/O, no state, no envelope-ID minting, no clock read, no sealing. Every
+one of those belongs to the consumer (the turn-lifecycle integration slice, #616);
+keeping them out is what makes the adapter table-testable and isolates it from the
+lifecycle state machine.
+
+```go
+// TurnContext is the per-event turn addressing the consumer supplies. The adapter
+// never derives these — which conversation / turn / seq applies is a lifecycle
+// decision owned by the consumer.
+type TurnContext struct {
+    ConversationID string
+    TurnID         string
+    Seq            int // per-turn assistant-delta order; consumed ONLY by TextChunk
+}
+
+// TurnState is the coarse lifecycle state BuildTurnState shapes into a turn_state
+// payload. String-backed so the call site is enum-safe.
+type TurnState string
+const (
+    StateThinking   TurnState = "thinking"
+    StateResponding TurnState = "responding"
+    StateIdle       TurnState = "idle"
+)
+
+func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok bool)
+func BuildTurnState(conversationID string, state TurnState) (typ string, payload protocol.TurnStatePayload)
+```
+
+Two exported types (`TurnContext`, `TurnState`), two functions, three state constants.
+
+### `MapEvent` — the outbound type switch
+
+A pure type-switch over the sealed `Event`, mirroring `mapEvent`'s `(value, ok)`
+idiom. Every field is carried verbatim from `tc` + the event:
+
+| `ev` concrete type | `typ` | `payload` | `ok` |
+|---|---|---|---|
+| `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
+| `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput)}` | true |
+| `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content)}` | true |
+| `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason)}` | true |
+| `ThoughtChunk` | `""` | `nil` | **false** (drop) |
+| nil / unknown | `""` | `nil` | false (drop) |
+
+- `payload` is `any` because the four payload structs share no marker interface; the
+  consumer `json.Marshal`s it directly (same path as `MessagePayload`). It is always
+  one of the four concrete `protocol.*Payload` value structs, or `nil` when `!ok`.
+- **Zero-value-safe.** A nil `ev` falls to the default → drop, exactly like
+  `mapEvent`. Because #607's payloads carry no `omitempty`, boundary zero-values
+  (`seq:0`, `is_error:false`) are always serialized — they reach the wire rather than
+  vanishing.
+- **Internal-only fields are not forwarded.** `ToolStart.Kind`/`Locations` and
+  `*.MessageID` have no #607 wire home and are correctly dropped.
+- **`is_error = (Status == ToolStatusFailed)`** — `completed`/`pending`/`in_progress`
+  all map to `false`. Round-trips with the inbound `toolStatus` (failed↔error,
+  completed↔success).
+- **`ThoughtChunk` drops (ADR 025).** #607 defines no thought-text envelope and
+  ADR 025 classes thinking as screen-sourced; so the thought *text is not forwarded*.
+  The thinking **state** surfaces via `BuildTurnState(convID, StateThinking)`, which
+  the **consumer's** lifecycle machine calls when it observes a `ThoughtChunk` —
+  deciding "a ThoughtChunk means we are thinking" is a lifecycle decision, kept out of
+  the pure mapper. The mapper supplies the *builder*; the consumer owns the *decision
+  to call it*.
+
+### `BuildTurnState` — the lifecycle payload builder
+
+Returns `TypeTurnState` + `TurnStatePayload{conversationID, string(state)}`. Concrete
+return type (not `any`) because it is monomorphic — no consumer type assertion. The
+consumer's lifecycle machine decides *which* state applies (thinking / responding /
+idle) and calls this; the adapter only shapes the payload.
+
+### Summary derivation (`inputSummary` / `resultSummary` / `truncate`)
+
+The wire envelopes carry a human-readable **précis** (not the raw input/output). Three
+pure helpers derive a bounded, single-line summary:
+
+- **`inputSummary(json.RawMessage)`** — `json.Compact` (whitespace → one line) then
+  `truncate`. Empty/nil **and** invalid-JSON both yield `""` — `RawInput` is
+  best-effort/opaque (#606), so a malformed blob is a précis-less `tool_use`, not an
+  error (mirrors the inbound `rawInput` posture).
+- **`resultSummary(turnevent.ToolContent)`** — **exhaustive** over the sealed
+  `ToolContent` sum type so a future producer variant cannot silently vanish:
+  `nil`→`""` (the legal status-only `ToolUpdate`), `TextContent`→its text,
+  `DiffContent`→`Path`, `TerminalContent`→`"terminal <id>"` — each truncated. The
+  current inbound producer (`toolResultContent`) only ever emits `TextContent` or
+  `nil`; the Diff/Terminal arms are unreachable today but handled (kept deliberately
+  minimal) until a producer (the ACP adapter #600, or a refinement) emits them.
+- **`truncate(s, max)`** — returns `s` unchanged at ≤ `max` runes; otherwise cuts at
+  `max` runes (`[]rune`, not bytes) and appends `"…"`. Rune-aware so multibyte text
+  never splits mid-rune.
+
+`const maxSummaryLen = 200` bounds the précis to one line of ≤ 200 runes — a
+**phone-display** bound, not a wire constraint (the envelope cap is far larger);
+tunable if the mobile view wants a different cap.
+
+### What the outbound adapter does NOT do (the seam)
+
+`MapEvent`/`BuildTurnState` produce only the typed payload + discriminant. The
+consumer (integration slice, building on #616's fan-out) owns the envelope `ID` mint,
+`TS` clock read, `json.Marshal`, AEAD seal, `Push`, the drop-log for un-mappable
+events, **and** every lifecycle decision (which conversation/turn/seq/state applies,
+turn-id assignment, seq advancement, coalescing). See
+`cmd/pyry/assistant_turn_v2.go` for the existing shape that wraps a payload into an
+`Envelope`. This is why the adapter is pure: every clock read, counter, and I/O lives
+in the consumer.
+
 ## The live `Subscriber` (`NewSessionSubscriber`)
 
 Builds the production `Subscriber`. Per call:
@@ -256,11 +383,13 @@ re-subscribes per session via the supervisor's restart signal.
 
 ## Not `security-sensitive`
 
-The producer reads the supervised claude session's structured events — **trusted
-local input** — and maps them to an internal model. No untrusted-party input, no
-dispatch to phones, no trust decision, no capability enforcement. All of that
+Neither direction of this package carries the label. The **producer** reads the
+supervised claude session's structured events — **trusted local input** — and maps
+them to an internal model. The **outbound adapter** (#627) is a pure value-to-value
+mapper: no untrusted-party input, no capability decision, no dispatch. No trust
+decision or capability enforcement lives here in either direction — all of that
 lives in the consumer slice (#616), which carries the `security-sensitive` label.
-Labelling this producer would track data lineage rather than the security-relevant
+Labelling this package would track data lineage rather than the security-relevant
 design decision.
 
 ## Related
@@ -268,9 +397,12 @@ design decision.
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Phase 2
   structured streaming, § "The event model", § "Key architectural insight" (the
   JSONL-robust / PTY-brittle split), § Backpressure.
-- [turnevent-package.md](turnevent-package.md) (#606) — the output model this maps INTO.
-- [protocol-package.md](protocol-package.md) (#607) — the v2 wire types #616 maps OUT to.
+- [turnevent-package.md](turnevent-package.md) (#606) — the pivot model: what the
+  producer maps INTO and the outbound adapter maps OUT of.
+- [protocol-package.md](protocol-package.md) (#607) — the v2 interactive wire types
+  the outbound adapter (#627) maps OUT to.
 - [codebase/513.md](../codebase/513.md) — `ptyrunner.Run`, the sibling consumer of
   the same `tuidriver.Session.Events()` unified stream (different consumer, same
   per-session-ctx Wait discipline).
-- [codebase/615.md](../codebase/615.md) — ticket record (patterns + lessons).
+- [codebase/615.md](../codebase/615.md) — producer ticket record (patterns + lessons).
+- [codebase/627.md](../codebase/627.md) — outbound-adapter ticket record (patterns + lessons).
