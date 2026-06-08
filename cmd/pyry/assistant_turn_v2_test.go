@@ -23,15 +23,15 @@ type pushCall struct {
 }
 
 // stubV2Broadcaster is a test double for the V2SessionManager surface the
-// v2 emitter consumes (ActiveConnIDs + Push). It returns a scripted
-// sequence of open-conn snapshots (the last entry is reused once the
-// sequence is exhausted, modelling a steady set) and can inject a per-conn
-// Push error. Every Push attempt is recorded and mirrored onto a buffered
-// channel so a test can wait for N attempts without sleeping.
+// v2 emitter consumes (ActiveConns + Push). It returns a scripted sequence
+// of open-conn snapshots (the last entry is reused once the sequence is
+// exhausted, modelling a steady set) and can inject a per-conn Push error.
+// Every Push attempt is recorded and mirrored onto a buffered channel so a
+// test can wait for N attempts without sleeping.
 type stubV2Broadcaster struct {
 	mu sync.Mutex
 
-	snapshots [][]string // one entry consumed per ActiveConnIDs call
+	snapshots [][]relay.ActiveConn // one entry consumed per ActiveConns call
 	callIdx   int
 	pushErr   map[string]error // connID → error Push returns for it
 
@@ -39,7 +39,7 @@ type stubV2Broadcaster struct {
 	pushed   chan pushCall
 }
 
-func newStubV2Broadcaster(snapshots ...[]string) *stubV2Broadcaster {
+func newStubV2Broadcaster(snapshots ...[]relay.ActiveConn) *stubV2Broadcaster {
 	return &stubV2Broadcaster{
 		snapshots: snapshots,
 		pushErr:   map[string]error{},
@@ -47,7 +47,18 @@ func newStubV2Broadcaster(snapshots ...[]string) *stubV2Broadcaster {
 	}
 }
 
-func (s *stubV2Broadcaster) ActiveConnIDs(ctx context.Context) []string {
+// nonInteractive builds a snapshot of non-interactive conns from bare ids —
+// the shape every pre-#634 coarse-emitter test assumes (the coarse `message`
+// fans to non-interactive conns only).
+func nonInteractive(ids ...string) []relay.ActiveConn {
+	out := make([]relay.ActiveConn, len(ids))
+	for i, id := range ids {
+		out[i] = relay.ActiveConn{ConnID: id, Interactive: false}
+	}
+	return out
+}
+
+func (s *stubV2Broadcaster) ActiveConns(ctx context.Context) []relay.ActiveConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.snapshots) == 0 {
@@ -58,7 +69,7 @@ func (s *stubV2Broadcaster) ActiveConnIDs(ctx context.Context) []string {
 		idx = len(s.snapshots) - 1 // steady-state: reuse the last snapshot
 	}
 	s.callIdx++
-	out := make([]string, len(s.snapshots[idx]))
+	out := make([]relay.ActiveConn, len(s.snapshots[idx]))
 	copy(out, s.snapshots[idx])
 	return out
 }
@@ -105,7 +116,7 @@ func msgIDOf(t *testing.T, env protocol.Envelope) string {
 func TestAssistantTurnEmitterV2_DropsWhenCursorEmpty(t *testing.T) {
 	t.Parallel()
 
-	bc := newStubV2Broadcaster([]string{"conn-x"})
+	bc := newStubV2Broadcaster(nonInteractive("conn-x"))
 	cur := &stubCursor{} // empty cursor
 	em := newAssistantTurnEmitterV2(cur, bc, discardLogger())
 
@@ -129,7 +140,7 @@ func TestAssistantTurnEmitterV2_DropsWhenCursorEmpty(t *testing.T) {
 func TestAssistantTurnEmitterV2_FansOutToAllOpenConns(t *testing.T) {
 	t.Parallel()
 
-	bc := newStubV2Broadcaster([]string{"conn-a", "conn-b"})
+	bc := newStubV2Broadcaster(nonInteractive("conn-a", "conn-b"))
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	em := newAssistantTurnEmitterV2(cur, bc, discardLogger())
@@ -183,7 +194,7 @@ func TestAssistantTurnEmitterV2_FansOutToAllOpenConns(t *testing.T) {
 func TestAssistantTurnEmitterV2_PushFailureDoesNotAbortTurn(t *testing.T) {
 	t.Parallel()
 
-	bc := newStubV2Broadcaster([]string{"conn-a", "conn-b", "conn-c"})
+	bc := newStubV2Broadcaster(nonInteractive("conn-a", "conn-b", "conn-c"))
 	bc.pushErr["conn-b"] = relay.ErrConnNotFound
 	cur := &stubCursor{}
 	cur.set(testConvID)
@@ -226,7 +237,7 @@ func TestAssistantTurnEmitterV2_PushFailureDoesNotAbortTurn(t *testing.T) {
 func TestAssistantTurnEmitterV2_EnvelopeIDIncrements(t *testing.T) {
 	t.Parallel()
 
-	bc := newStubV2Broadcaster([]string{"conn-a", "conn-b"})
+	bc := newStubV2Broadcaster(nonInteractive("conn-a", "conn-b"))
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	em := newAssistantTurnEmitterV2(cur, bc, discardLogger())
@@ -279,7 +290,7 @@ func TestAssistantTurnEmitterV2_EnvelopeIDIncrements(t *testing.T) {
 func TestAssistantTurnEmitterV2_EnqueueCopiesChunk(t *testing.T) {
 	t.Parallel()
 
-	bc := newStubV2Broadcaster([]string{"conn-x"})
+	bc := newStubV2Broadcaster(nonInteractive("conn-x"))
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	em := newAssistantTurnEmitterV2(cur, bc, discardLogger())
@@ -317,7 +328,7 @@ func TestAssistantTurnEmitterV2_EnqueueCopiesChunk(t *testing.T) {
 func TestAssistantTurnEmitterV2_CtxCancelStopsRun(t *testing.T) {
 	t.Parallel()
 
-	bc := newStubV2Broadcaster([]string{"conn-x"})
+	bc := newStubV2Broadcaster(nonInteractive("conn-x"))
 	cur := &stubCursor{}
 	em := newAssistantTurnEmitterV2(cur, bc, discardLogger())
 
@@ -339,7 +350,7 @@ func TestAssistantTurnEmitterV2_CtxCancelStopsRun(t *testing.T) {
 func TestAssistantTurnEmitterV2_MidTurnConnectIncludedNextChunk(t *testing.T) {
 	t.Parallel()
 
-	bc := newStubV2Broadcaster([]string{"conn-a"}, []string{"conn-a", "conn-b"})
+	bc := newStubV2Broadcaster(nonInteractive("conn-a"), nonInteractive("conn-a", "conn-b"))
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	em := newAssistantTurnEmitterV2(cur, bc, discardLogger())
@@ -372,6 +383,67 @@ func TestAssistantTurnEmitterV2_MidTurnConnectIncludedNextChunk(t *testing.T) {
 	}
 	if p.Text != "chunk-two" {
 		t.Errorf("conn-b Text: got %q, want %q (mid-turn join misses the first chunk)", p.Text, "chunk-two")
+	}
+
+	cancel()
+	<-done
+}
+
+// Inverse oracle (AC1, AC3): the coarse `message` fans only to non-interactive
+// conns. A mixed snapshot {a:interactive, b:non-interactive} pushes exactly
+// once, to b; the interactive conn a never receives the coarse message — it is
+// on the #632 structured-stream path, the exact complement of this filter. With
+// #632's interactive-only matrix, this proves the two paths are mutually
+// exclusive per conn (AC3).
+func TestAssistantTurnEmitterV2_SkipsInteractiveConns(t *testing.T) {
+	t.Parallel()
+
+	bc := newStubV2Broadcaster([]relay.ActiveConn{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	})
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	em := newAssistantTurnEmitterV2(cur, bc, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { em.Run(ctx); close(done) }()
+
+	em.Enqueue([]byte(testChunk))
+
+	// Ask for 2 pushes but expect 1: draining a second slot proves no push to
+	// the interactive conn ever arrives (the second slot times out empty).
+	pushes := drainPushes(t, bc.pushed, 2, 200*time.Millisecond)
+	if len(pushes) != 1 {
+		t.Fatalf("expected exactly 1 push (non-interactive conn only), got %d: %+v", len(pushes), pushes)
+	}
+	pc := pushes[0]
+	if pc.connID != "b" {
+		t.Fatalf("push addressed to %q, want non-interactive conn %q (interactive conn must be skipped)", pc.connID, "b")
+	}
+	if pc.env.Type != protocol.TypeMessage {
+		t.Errorf("env.Type: got %q, want %q", pc.env.Type, protocol.TypeMessage)
+	}
+	if pc.env.InReplyTo != nil {
+		t.Errorf("env.InReplyTo: got %v, want nil (server-initiated)", pc.env.InReplyTo)
+	}
+	var p protocol.MessagePayload
+	if err := json.Unmarshal(pc.env.Payload, &p); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if p.ConversationID != testConvID {
+		t.Errorf("ConversationID: got %q, want %q", p.ConversationID, testConvID)
+	}
+	if p.Role != "assistant" {
+		t.Errorf("Role: got %q, want %q", p.Role, "assistant")
+	}
+	if p.Text != testChunk {
+		t.Errorf("Text: got %q, want %q", p.Text, testChunk)
+	}
+	if !conversations.ValidID(p.MessageID) {
+		t.Errorf("MessageID %q is not a valid UUIDv4", p.MessageID)
 	}
 
 	cancel()

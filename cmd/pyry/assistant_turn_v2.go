@@ -8,16 +8,23 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // v2Broadcaster is the minimal *relay.V2SessionManager surface the v2
-// assistant-turn emitter needs: the open-session snapshot (#588) and the
-// per-conn sealed push (#571). *relay.V2SessionManager satisfies it.
+// assistant-turn emitter needs: the capability-aware open-session snapshot
+// (#626) and the per-conn sealed push (#571). *relay.V2SessionManager
+// satisfies it (structurally identical to interactiveBroadcaster).
+//
+// The coarse `message` path now fans only to NON-interactive conns — the
+// exact complement of #632's interactive-only structured filter. An
+// interactive-granted conn gets the structured stream instead and never the
+// coarse message, so the two paths are mutually exclusive per conn.
 // Declared at the consumer (CODING-STYLE) so the emitter unit tests can
 // drive it without spinning up a real manager.
 type v2Broadcaster interface {
-	ActiveConnIDs(ctx context.Context) []string
+	ActiveConns(ctx context.Context) []relay.ActiveConn
 	Push(ctx context.Context, connID string, env protocol.Envelope) error
 }
 
@@ -25,8 +32,9 @@ type v2Broadcaster interface {
 // it owns the buffered queue between Bridge.Write and the broadcast
 // goroutine, copies PTY chunks on Enqueue, and drains them by reading the
 // supervisor's conversation cursor and fanning a `message` envelope out to
-// every currently-open v2 session via the manager's ActiveConnIDs/Push
-// funnel. The application-layer minting (cursor read → message ID → payload
+// every currently-open NON-interactive v2 session via the manager's
+// ActiveConns/Push funnel (interactive conns get the #632 structured stream
+// instead). The application-layer minting (cursor read → message ID → payload
 // marshal) is identical to the v1 emitter; only the per-conn delivery
 // differs (a sealed Push per open conn, not dispatch.Conn.Send).
 //
@@ -139,7 +147,10 @@ func (e *assistantTurnEmitterV2) broadcast(ctx context.Context, chunk []byte) {
 	// Fresh snapshot per chunk: a phone that opens its session between
 	// chunks is included next round; one that dropped is absent here, or
 	// surfaces as a Push error below.
-	for _, connID := range e.bcast.ActiveConnIDs(ctx) {
+	for _, c := range e.bcast.ActiveConns(ctx) {
+		if c.Interactive {
+			continue // structured-stream conns get the #632 path, never the coarse message
+		}
 		e.nextID++
 		env := protocol.Envelope{
 			ID:      e.nextID,
@@ -147,13 +158,13 @@ func (e *assistantTurnEmitterV2) broadcast(ctx context.Context, chunk []byte) {
 			TS:      time.Now().UTC(),
 			Payload: payloadJSON,
 		}
-		if err := e.bcast.Push(ctx, connID, env); err != nil {
+		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			e.logger.Debug("relay: assistant-turn push dropped",
 				"event", "assistant_turn.push_err",
-				"conn_id", connID,
+				"conn_id", c.ConnID,
 				"conversation_id", convID,
 				"message_id", string(msgID),
 				"err", err)
