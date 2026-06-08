@@ -15,15 +15,22 @@ neutral internal turn-event model ([`internal/turnevent`](turnevent-package.md),
   [The outbound adapter](#the-outbound-adapter-mapevent--buildturnstate) below.
 
 The **consumer half** — the turn-lifecycle state machine, envelope ID minting /
-sealing, and the capability-gated fan-out to phones — is **#616** and consumes both
-this producer's output and the outbound adapter's payloads. This package ships
+sealing, and the capability-gated fan-out to phones — was originally one slice
+(#616) but shipped as a chain: capability negotiation (#626, the per-conn
+`interactive` grant + capability-aware `ActiveConns`), then the **stateful
+structured emitter** (#632, `cmd/pyry/interactive_turn_v2.go` — consumes the
+outbound adapter's payloads, derives `turn_state`, gates the fan-out on the
+`interactive` grant), then the **production wiring** (#633 — constructs this
+`Producer` and attaches `OnEvent: emitter.Handle`). This package still ships
 **with unit tests, deliberately unwired to a live fan-out** (the standard "introduce
-the mapping core + tests; wire the consumer in the next slice" pattern). With no
-consumer attached the producer is a no-op beyond draining, and the outbound adapter
-has no caller until the integration slice wires it.
+the mapping core + tests; wire the consumer in the next slice" pattern). The
+outbound adapter now has an in-process caller — #632's emitter (unit-tested against
+a scripted event source) — but the **producer → emitter** wiring lands in #633; until
+then the producer is a no-op beyond draining. See [codebase/632.md](../codebase/632.md).
 
 > #615 + #616 are the two halves of the originally-combined #608. Docs in #606 /
-> #607 that say "the bridge (#608)" mean: producer = #615 (here), consumer = #616.
+> #607 that say "the bridge (#608)" mean: producer = #615 (here), consumer = the
+> #626 → #632 → #633 chain (#616's slices).
 
 Dependency direction stays clean — `cmd/pyry → internal/turnbridge →
 {tuidriver, turnevent, protocol}`. Only `mapper.go`/`producer.go` reach
