@@ -25,14 +25,6 @@ func eventIDs(evs []Event) []uint64 {
 	return out
 }
 
-func eventTypes(evs []Event) []string {
-	out := make([]string, len(evs))
-	for i, e := range evs {
-		out[i] = e.Type
-	}
-	return out
-}
-
 func equalU64(a, b []uint64) bool {
 	if len(a) != len(b) {
 		return false
