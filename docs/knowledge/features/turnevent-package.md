@@ -1,11 +1,11 @@
 # `internal/turnevent` — neutral outbound turn-event model
 
 Pure-data leaf package. Declares the daemon-owned, neutral set of **outbound
-turn-event** types for Phase 2 structured streaming (EPIC #596): five event
-structs behind a sealed `Event` sum type, three string-backed ACP enums, and a
-sealed `ToolContent` sum type. No transport, no I/O, no goroutines, no `context`,
-no `slog` — **standard library only** (`encoding/json` for `json.RawMessage` is
-the sole import).
+turn-event** types for Phase 2 structured streaming (EPIC #596): five ACP-shaped
+event structs plus one internal-only event (`Stall`, #638) behind a sealed
+`Event` sum type, three string-backed ACP enums, and a sealed `ToolContent` sum
+type. No transport, no I/O, no goroutines, no `context`, no `slog` — **standard
+library only** (`encoding/json` for `json.RawMessage` is the sole import).
 
 The daemon owns this model; the mobile wire (now) and the future `pyry acp`
 adapter (#600) are **thin adapters on top of it**. It is shaped ~90% like ACP so
@@ -30,7 +30,7 @@ envelope mapping live here. Landed in #606.
 
 ```
 internal/turnevent/
-├── event.go         Event sealed sum type; the 5 event structs; Location; value-receiver markers; var _ Event = … assertions
+├── event.go         Event sealed sum type; the 5 ACP-shaped event structs + the internal-only Stall (#638); Location; value-receiver markers; var _ Event = … assertions
 ├── taxonomy.go      ToolKind / ToolStatus / TurnEndReason enums + const blocks + unexported canonical slices + Valid() methods
 ├── content.go       ToolContent sealed sum type; TextContent / DiffContent / TerminalContent; markers; var _ ToolContent = … assertions
 ├── event_test.go    field round-trip, the Event-stream type switch, RawInput opacity
@@ -58,7 +58,7 @@ type ToolContent interface{ isToolContent() } // content.go
   external ACP-spec churn cannot inject a variant. The bridge (#608) ranges a
   stream of `Event`; the wire adapter (#607) type-switches to map each kind.
 - This is **not** a preemptive interface (which `CODING-STYLE.md` warns against):
-  there are already five / three concrete implementations and a known consumer
+  there are already six / three concrete implementations and a known consumer
   (#608) that needs a single typed stream element. The sealed-marker exception is
   justified by the closed-set, known-consumer shape.
 - Each marker is implemented on a **value receiver** (`func (TextChunk)
@@ -66,7 +66,9 @@ type ToolContent interface{ isToolContent() } // content.go
   interface. The events are pure value types. Compile-time `var _ Event =
   TextChunk{}` (and one per content shape) assertions live alongside the markers.
 
-## The five event types (`event.go`)
+## The event types (`event.go`)
+
+Five ACP-shaped outbound turn events plus one internal-only event (`Stall`):
 
 | Type | Fields | Notes |
 |---|---|---|
@@ -75,6 +77,18 @@ type ToolContent interface{ isToolContent() } // content.go
 | `ToolStart` | `ToolCallID, Title string`, `Kind ToolKind`, `RawInput json.RawMessage`, `Locations []Location` | a new tool invocation |
 | `ToolUpdate` | `ToolCallID string`, `Status ToolStatus`, `Content ToolContent` | changed fields of an existing tool call; `Content` may be `nil` (status-only update) |
 | `TurnEnd` | `Reason TurnEndReason` | end of a claude turn; carries the reason only |
+| `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
+
+- **`Stall` is an internal-only, onset-only empty marker (#638).** It mirrors
+  tui-driver's one-shot `stall_detected` signal (no payload, no clearing edge), so
+  it carries no fields — no "cleared" state (the phone self-clears on the next
+  turn activity) and, like every variant here, no `conversation_id` (the bridge
+  injects identity when mapping to the wire). It is a first-class member of the
+  same `Event` sum, but the **adapters** decide its fate per-variant: the mobile
+  adapter sends it as the wire `stall` event ([protocol-package.md](protocol-package.md)
+  § Stall), the future ACP adapter (#600) drops it. This is exactly the
+  internal-only asymmetry the package was always designed to host (see *What's
+  deliberately NOT in the package* — `Stall` graduated out of that list in #638).
 
 - **`RawInput` is opaque.** Typed `json.RawMessage` (undecoded pass-through
   bytes). The package **never inspects, parses, or mutates it** — consumers decode
@@ -186,8 +200,9 @@ imposes nothing.
 - **Inbound commands** — `Prompt`, `PermissionResponse`, `Cancel`, `DropQueued`.
   This is the *outbound* turn-event core only.
 - **Non-turn / internal-only events** — `PermissionRequest`, `BusyState`,
-  `QueueState`, `Stall`, `ScreenSnapshot`. Out of scope for #606; a later ticket
-  gives them a home.
+  `QueueState`, `ScreenSnapshot`. Out of scope for #606; a later ticket gives them
+  a home. (`Stall` was on this list through #606/#607; it **graduated in** as an
+  internal-only `Event` variant in #638 — see *The event types* above.)
 - **Any transport / wire / envelope mapping.** `Events()` draining is #608; v2
   wire types are #607; the ACP `stopReason` return conversion is the #600 adapter.
 - **Constructors, `Validate()` returning `error`, exported enumeration accessors.**
@@ -206,6 +221,8 @@ imposes nothing.
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — mobile
   remote-head plan; § "The event model" + § "Wire-protocol extension".
 - [codebase/606.md](../codebase/606.md) — ticket record (patterns + lessons).
+- [codebase/638.md](../codebase/638.md) — the `Stall` internal-only variant +
+  its v2 `stall` wire peer (data vocabulary; bridge is #624-B / #608).
 - [protocol-package.md](protocol-package.md) — the sibling pure-data leaf package
   whose const-block layout, drift-detector test pattern, and consumer-owns-wire-
   codes convention this package mirrors.

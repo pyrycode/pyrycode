@@ -12,18 +12,19 @@
 // claude's screen.
 //
 // This is the outbound turn-event core only. No Events() draining and no
-// envelope mapping live here. Inbound commands (Prompt, Cancel, …) and
-// internal-only events (BusyState, Stall, …) are out of scope and get a home
-// in a later ticket.
+// envelope mapping live here. Inbound commands (Prompt, Cancel, …) and the
+// internal-only BusyState event are out of scope and get a home in a later
+// ticket. The internal-only Stall event now lives here (mobile-sent,
+// ACP-dropped); see its type doc.
 package turnevent
 
 import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
-// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd. The unexported marker keeps the
-// variant set closed to this package, so external ACP-spec churn cannot inject
-// a variant. The bridge (#608) ranges a stream of Event and the wire adapter
-// (#607) type-switches to map each kind.
+// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, and the internal-only Stall.
+// The unexported marker keeps the variant set closed to this package, so
+// external ACP-spec churn cannot inject a variant. The bridge (#608) ranges a
+// stream of Event and the wire adapter (#607) type-switches to map each kind.
 type Event interface{ isTurnEvent() }
 
 // TextChunk is incremental assistant text, grouped by message.
@@ -68,6 +69,14 @@ type TurnEnd struct {
 	Reason TurnEndReason
 }
 
+// Stall is an internal-only onset marker: tui-driver raised a one-shot
+// stall_detected signal (no payload, no clearing edge). It carries no fields —
+// onset only, no "cleared" state, and (like every variant here) no
+// conversation identity; the bridge injects that when mapping to the wire. The
+// mobile adapter sends it as the wire "stall" event; the future ACP adapter
+// (#600) drops it (no ACP equivalent).
+type Stall struct{}
+
 // Location is a file a tool call touches (ACP tool-call location). Line is
 // 1-based; 0 means unspecified.
 type Location struct {
@@ -82,6 +91,7 @@ func (ThoughtChunk) isTurnEvent() {}
 func (ToolStart) isTurnEvent()    {}
 func (ToolUpdate) isTurnEvent()   {}
 func (TurnEnd) isTurnEvent()      {}
+func (Stall) isTurnEvent()        {}
 
 var (
 	_ Event = TextChunk{}
@@ -89,4 +99,5 @@ var (
 	_ Event = ToolStart{}
 	_ Event = ToolUpdate{}
 	_ Event = TurnEnd{}
+	_ Event = Stall{}
 )

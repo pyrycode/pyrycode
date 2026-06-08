@@ -95,13 +95,14 @@ const (
 // MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: an old
 // phone receives the coarse v1 "message" fan-out, not these. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; these five live in the latter.
+// between v1TypeSet and v2OnlyTypes; these six live in the latter.
 const (
 	TypeTurnState      = "turn_state"
 	TypeAssistantDelta = "assistant_delta"
 	TypeToolUse        = "tool_use"
 	TypeToolResult     = "tool_result"
 	TypeTurnEnd        = "turn_end"
+	TypeStall          = "stall"
 )
 
 // Mobile Protocol v2 screen-snapshot types. The always-available,

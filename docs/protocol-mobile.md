@@ -421,6 +421,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`tool_use`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 
@@ -465,7 +466,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These five envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These six envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
 
 #### `turn_state`
 
@@ -512,6 +513,14 @@ These five envelope types form the structured live-session stream. They are sent
 | `stop_reason` | string | Why the turn ended; one of `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`. These mirror the ACP turn-end reasons. |
 
 ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` is added here per the implementing ticket (#607), following the "spec follows the code" convention (ADR 025 § Consequences).
+
+#### `stall`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation that stalled. |
+
+`stall` is the wire form of an internal-only daemon signal (a one-shot stall-onset marker; no ACP equivalent). Like `turn_state`, it is a coarse conversation-level signal and carries no `turn_id`. It is onset-only — there is no clearing event; the phone self-clears on the next turn activity.
 
 ### Screen snapshot (v2)
 

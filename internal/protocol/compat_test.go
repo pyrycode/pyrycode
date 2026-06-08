@@ -43,6 +43,7 @@ func TestIsV1Compatible(t *testing.T) {
 		{"tool_use-rejected", TypeToolUse, false, ErrUnknownType},
 		{"tool_result-rejected", TypeToolResult, false, ErrUnknownType},
 		{"turn_end-rejected", TypeTurnEnd, false, ErrUnknownType},
+		{"stall-rejected", TypeStall, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -97,6 +98,7 @@ var v2OnlyTypes = map[string]bool{
 	TypeToolUse:         true,
 	TypeToolResult:      true,
 	TypeTurnEnd:         true,
+	TypeStall:           true,
 	TypeRequestSnapshot: true,
 	TypeScreenSnapshot:  true,
 }
@@ -122,7 +124,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRekeyRequest,
 		// v2 interactive application events.
 		TypeTurnState, TypeAssistantDelta, TypeToolUse,
-		TypeToolResult, TypeTurnEnd,
+		TypeToolResult, TypeTurnEnd, TypeStall,
 		// v2 screen-snapshot types.
 		TypeRequestSnapshot, TypeScreenSnapshot,
 	}

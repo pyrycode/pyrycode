@@ -9,13 +9,13 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617)
+├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
 ├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607)
-├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607) — v2 interactive binary→phone event bodies
+├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607), StallPayload (#638) — v2 interactive binary→phone event bodies
 ├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsV1Compatible + drift detectors
@@ -24,7 +24,7 @@ internal/protocol/
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
 ├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
-├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads via Envelope.Payload
+├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads + the #638 stall payload via Envelope.Payload
 ├── snapshot_test.go             golden round-trip for the two #617 snapshot payloads + empty-conversation_id boundary
 └── testdata/                    envelope_full.json, envelope_minimal.json, routing_envelope.json,
                                  register_push_token.json, send_message.json, message.json,
@@ -33,7 +33,7 @@ internal/protocol/
                                  create_conversation.json, conversation_created.json,
                                  promote_conversation.json, conversation_updated.json,
                                  hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
-                                 turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json,
+                                 turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json, stall.json,
                                  request_snapshot.json, screen_snapshot.json
 ```
 
@@ -268,15 +268,17 @@ Five fixture files under `testdata/` (one per type, each a complete `Envelope` w
 
 Sibling payload slices not yet landed: messaging (`send_message` / `message`), conversations (`list_conversations` / `conversations` / `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated`), backfill (`backfill_since` / `message_chunk` / `backfill_done`), push (`register_push_token`).
 
-## Interactive event payloads (#607)
+## Interactive event payloads (#607, #638)
 
-The first **v2 additive application events** — the wire representation of
-`internal/turnevent`'s neutral turn-event model (#606). All five are **binary →
+The **v2 additive application events** — the wire representation of
+`internal/turnevent`'s neutral turn-event model (#606). All six are **binary →
 phone only**, sent **only** to a phone whose `interactive` capability was echoed in
 `hello_ack`; an old phone never sees them and keeps the coarse v1 `message`
 fan-out. Spec source: `docs/protocol-mobile.md` § Interactive events. They map 1:1
 to the `Type*` constants `TypeTurnState` / `TypeAssistantDelta` / `TypeToolUse` /
-`TypeToolResult` / `TypeTurnEnd`.
+`TypeToolResult` / `TypeTurnEnd` (all #607) and `TypeStall` (#638). The first five
+are the wire form of ACP-shaped turn events; `stall` is the wire form of an
+**internal-only** signal (no ACP equivalent), added in #638.
 
 ```go
 type TurnStatePayload struct {
@@ -312,6 +314,11 @@ type TurnEndPayload struct {
     TurnID         string `json:"turn_id"`
     StopReason     string `json:"stop_reason"` // turnevent.TurnEndReason values, verbatim
 }
+
+// #638 — the wire form of the internal-only turnevent.Stall onset marker.
+type StallPayload struct {
+    ConversationID string `json:"conversation_id"`
+}
 ```
 
 - **No `omitempty` on any field — the deliberate inverse of the handshake/optional
@@ -335,12 +342,20 @@ type TurnEndPayload struct {
   package count-field idiom: `BackfillDonePayload.Delivered`,
   `BackfillSincePayload.MaxMessages`); `uint64` is reserved for the
   session-monotonic `Envelope.ID`.
+- **`StallPayload` (#638) carries `conversation_id` only — no `turn_id`.** Like
+  `turn_state`, a stall is a coarse conversation-level signal, not turn-scoped. It
+  is the wire form of the internal-only `turnevent.Stall` (an onset-only marker:
+  no clearing field — the phone self-clears on the next turn activity). The
+  internal `Stall` carries no identity, so the bridge (#608 / #624-B) supplies
+  `ConversationID` at wire-mapping time. Same no-`omitempty` discipline as its five
+  predecessors. `internal/protocol` does **not** import `internal/turnevent` — the
+  two layers are decoupled, bridged only at the string value `"stall"`.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to
   every v1 slice. The intersection-of-capabilities trust decision, the
   internal-event → envelope mapping, and the capability-gated push all live in the
   consumer (#608).
 
-Five golden round-trip tests in `interactive_test.go` decode each fixture through
+Six golden round-trip tests in `interactive_test.go` decode each fixture through
 `Envelope` → `Envelope.Payload` → per-type struct, assert each field (incl. the
 boundary `Seq == 0` / `IsError == false` and `StopReason == "end_turn"`), then
 re-marshal byte-equivalently. The shared `roundTripEnvelope` helper re-marshals the
@@ -483,7 +498,7 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 
 ### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454) and `TypeRequestSnapshot` (#617)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types and `TypeScreenSnapshot` (#617)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
+Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454) and `TypeRequestSnapshot` (#617)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), and `TypeScreenSnapshot` (#617)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
 
 **v1 application types** (16; spec § v1 Message types):
 
@@ -501,13 +516,13 @@ Wire values for `Envelope.Type` (spec § Message types). Two architectural parti
 |-------|-----------|
 | Re-key | `TypeRekeyRequest` |
 
-**v2 interactive application-event types** (#607; spec `docs/protocol-mobile.md` § Interactive events):
+**v2 interactive application-event types** (#607, extended #638; spec `docs/protocol-mobile.md` § Interactive events):
 
 | Group | Constants |
 |-------|-----------|
-| Interactive | `TypeTurnState`, `TypeAssistantDelta`, `TypeToolUse`, `TypeToolResult`, `TypeTurnEnd` |
+| Interactive | `TypeTurnState`, `TypeAssistantDelta`, `TypeToolUse`, `TypeToolResult`, `TypeTurnEnd` (#607), `TypeStall` (#638) |
 
-These five live in their **own** const block (not merged into the `TypeRekeyRequest` block) so the doc comment can distinguish control envelopes from application events — but both are "v2-only" for the partition's purpose. `CapabilityInteractive = "interactive"` (the wire-vocabulary constant a phone advertises to opt into this stream) lives in `handshake.go` next to the `Capabilities` field, not here.
+These six live in their **own** const block (not merged into the `TypeRekeyRequest` block) so the doc comment can distinguish control envelopes from application events — but both are "v2-only" for the partition's purpose. `TypeStall` (#638) is the wire form of an internal-only `turnevent.Stall` signal; on the wire it is just another v2 capability-gated event, so it lives in this block with its ACP-shaped siblings (the internal-vs-ACP distinction is an adapter concern, invisible to the phone). `CapabilityInteractive = "interactive"` (the wire-vocabulary constant a phone advertises to opt into this stream) lives in `handshake.go` next to the `Capabilities` field, not here.
 
 **v2 screen-snapshot types** (#617; spec `docs/protocol-mobile.md` § Screen snapshot):
 
@@ -525,7 +540,7 @@ The v1 type list appears three times: in the `Type*` constants block (`codes.go`
 
 - `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
 - `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds eight entries (`TypeRekeyRequest` + the five interactive types + the two snapshot types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 8 == 24`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds nine entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 9 == 25`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
@@ -543,7 +558,7 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - Per-type payload structs beyond the now-complete #256 catalog — `RegisterPushTokenPayload` (#275), the five messaging + backfill payloads (#272), the conversations-read pair plus row type (#273), the four conversations-write payloads (#274), and the handshake/control payloads (#271). All slices are wired; no more #256 sub-tickets pending.
 - **The interactive bridge, push, and capability trust decision (#607's consumer surface)** — mapping `turnevent` events → the five interactive payloads, the actual push/fan-out, and the daemon intersecting the phone's advertised capabilities with its own supported set all live in #608, never in this leaf package. `interactive.go` is wire vocabulary only.
 - **The screen-snapshot intercept, render, and push (#617's consumer surface)** — intercepting `request_snapshot` at the v2 dispatch boundary (before `dispatch.Route`), rendering the current screen to text via tui-driver, and pushing `screen_snapshot` back all live in the consumer (the screen-snapshot handler child, which carries `security-sensitive`), never in this leaf package. `snapshot.go` is wire vocabulary only; the trust boundary — accepting a remote inbound frame and returning rendered screen content — is the consumer's, not this declaration's.
-- **Other v2 event/control types** — `modal_*`, `queue_state`, `stall_detected`, and the remaining phone → binary control verbs (`modal_answer`, `interrupt`, …) are deliberately out of scope here; they belong to other #596 children and Phase 3 (#597). (`request_snapshot` / `screen_snapshot` landed in #617 as wire vocabulary; their consumer is the separate `security-sensitive` ticket above.)
+- **Other v2 event/control types** — `modal_*`, `queue_state`, and the remaining phone → binary control verbs (`modal_answer`, `interrupt`, …) are deliberately out of scope here; they belong to other #596 children and Phase 3 (#597). (`request_snapshot` / `screen_snapshot` landed in #617 as wire vocabulary; their consumer is the separate `security-sensitive` ticket above. The `stall` event landed in #638 as wire vocabulary — `StallPayload` above; its bridge consumer, mapping tui-driver's `stall_detected` → `turnevent.Stall` → `stall` and gating the fan-out, is #624-B, which carries `security-sensitive`.)
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.
@@ -579,4 +594,5 @@ No production consumers in this slice. Future:
 - [turnevent-package.md](turnevent-package.md) — the neutral internal turn-event model (#606) the interactive payloads are the wire representation of; `stop_reason` carries its `TurnEndReason` strings verbatim
 - [codebase/607.md](../codebase/607.md) — the #607 implementation note (interactive payloads + capabilities negotiation)
 - [codebase/617.md](../codebase/617.md) — the #617 implementation note (screen-snapshot wire types + v2 partition)
+- [codebase/638.md](../codebase/638.md) — the #638 implementation note (the `stall` wire type + its internal-only `turnevent.Stall` peer; the sixth member of the v2 interactive partition)
 - Future consumers: `internal/dispatch` (#248), `internal/relay-client`, the interactive event-stream bridge + capability enforcement (#608), the screen-snapshot handler (intercept `request_snapshot` + render + push `screen_snapshot`; `security-sensitive`)

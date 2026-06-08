@@ -184,3 +184,25 @@ func TestTurnEndPayload_RoundTrip(t *testing.T) {
 
 	roundTripEnvelope(t, env, payload, raw)
 }
+
+func TestStallPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "stall.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeStall {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeStall)
+	}
+
+	var payload StallPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}

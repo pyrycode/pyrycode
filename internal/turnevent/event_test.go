@@ -54,8 +54,9 @@ func TestEvent_StreamTypeSwitch(t *testing.T) {
 		ToolStart{ToolCallID: "tc1", Kind: ToolKindRead},
 		ToolUpdate{ToolCallID: "tc1", Status: ToolStatusCompleted},
 		TurnEnd{Reason: TurnEndReasonEndTurn},
+		Stall{},
 	}
-	want := []string{"text", "thought", "tool_start", "tool_update", "turn_end"}
+	want := []string{"text", "thought", "tool_start", "tool_update", "turn_end", "stall"}
 	for i, ev := range stream {
 		if got := eventKind(ev); got != want[i] {
 			t.Errorf("stream[%d] (%T): got %q, want %q", i, ev, got, want[i])
@@ -75,6 +76,8 @@ func eventKind(e Event) string {
 		return "tool_update"
 	case TurnEnd:
 		return "turn_end"
+	case Stall:
+		return "stall"
 	default:
 		return "unknown"
 	}
