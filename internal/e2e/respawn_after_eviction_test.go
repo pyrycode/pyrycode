@@ -35,12 +35,6 @@ import (
 //     respawn-latency upper bound.
 //  5. Assert `pyry status` reports a NEW supervised PID.
 func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
-	// Blocked on #603: since #594, WriteUserTurn delivers via DeliverPrompt
-	// behind a WaitReady idle-gate and acks only on a confirmed commit.
-	// fakeclaude renders no claude TUI (no idle prompt / spinner), so WaitReady
-	// never reaches idle and send_message replies binary_offline, not ack.
-	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
-
 	const (
 		knownConvID = "55555555-5555-4555-8555-555555555555"
 		knownText   = "e2e-398-marker:wake up\n"
@@ -187,18 +181,33 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 	if err := phone.Send(req); err != nil {
 		t.Fatalf("phone send send_message: %v", err)
 	}
-	ack, err := phone.Receive(15 * time.Second)
-	if err != nil {
-		t.Fatalf("respawn did not complete within 15s after send_message: %v\nstderr:\n%s",
-			err, h.Stderr.String())
+	// Drain until the ack within the documented 15s respawn-latency bound.
+	// After respawn the fresh fakeclaude re-seeds the idle glyph and emits the
+	// thinking-spinner on the prompt write; the supervisor forwards that
+	// spinner chunk as a `message` envelope racing the ack, so skip non-ack
+	// envelopes.
+	var ack protocol.Envelope
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("respawn did not complete within 15s after send_message\nstderr:\n%s",
+				h.Stderr.String())
+		}
+		env, err := phone.Receive(remaining)
+		if err != nil {
+			t.Fatalf("respawn did not complete within 15s after send_message: %v\nstderr:\n%s",
+				err, h.Stderr.String())
+		}
+		if env.Type == protocol.TypeAck {
+			ack = env
+			break
+		}
+		t.Logf("ignoring non-ack envelope type=%q id=%d awaiting ack", env.Type, env.ID)
 	}
 	respawnLatency := time.Since(sentAt)
 	if respawnLatency > 15*time.Second {
 		t.Fatalf("respawn latency %s exceeded documented 15s upper bound", respawnLatency)
-	}
-	if ack.Type != protocol.TypeAck {
-		t.Fatalf("ack Type: got %q, want %q (payload=%s)",
-			ack.Type, protocol.TypeAck, string(ack.Payload))
 	}
 	if ack.InReplyTo == nil || *ack.InReplyTo != reqID {
 		t.Fatalf("ack InReplyTo: got %v, want pointer to %d", ack.InReplyTo, reqID)
@@ -251,6 +260,7 @@ func startEvictionHarness(t *testing.T, home, sessionsDir, initialUUID, trigger,
 			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
 			"PYRY_FAKE_CLAUDE_TRIGGER=" + trigger,
 			"PYRY_FAKE_CLAUDE_STDIN_LOG=" + stdinLog,
+			"PYRY_FAKE_CLAUDE_TUI=1",
 		},
 	})
 

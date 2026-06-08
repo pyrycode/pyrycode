@@ -33,12 +33,6 @@ import (
 // message out with the same id), per-conn ID stamping (monotonic above
 // the ack), role labelling ("assistant"), MessageID well-formedness.
 func TestRelay_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
-	// Blocked on #603: since #594, WriteUserTurn delivers via DeliverPrompt
-	// behind a WaitReady idle-gate and acks only on a confirmed commit. This
-	// test's send_message setup step never acks against fakeclaude (no claude
-	// TUI), so the downstream assistant-echo assertion is unreachable.
-	t.Skip("blocked on #603 — fakeclaude renders no claude TUI; WaitReady-gated WriteUserTurn (#594) cannot confirm a commit")
-
 	const (
 		knownConvID        = "55555555-5555-4555-8555-555555555555"
 		knownUserText      = "e2e-311-user:hi\n"
@@ -74,6 +68,7 @@ func TestRelay_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
 
 	h := StartRotationWithRelay(t, home, sessionsDir, initialUUID, rotateTrigger,
 		stdinLog, fr.URL()+"/v1/server",
+		"PYRY_FAKE_CLAUDE_TUI=1",
 		"PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER="+asstTrigger,
 	)
 	t.Cleanup(func() { h.Stop(t) })
@@ -134,14 +129,10 @@ func TestRelay_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
 	if err := phone.Send(req); err != nil {
 		t.Fatalf("phone send send_message: %v", err)
 	}
-	ack, err := phone.Receive(3 * time.Second)
-	if err != nil {
-		t.Fatalf("phone receive ack: %v", err)
-	}
-	if ack.Type != protocol.TypeAck {
-		t.Fatalf("ack Type: got %q, want %q (payload=%s)",
-			ack.Type, protocol.TypeAck, string(ack.Payload))
-	}
+	// Drain until the ack: in TUI mode fakeclaude emits the thinking-spinner
+	// glyph on stdin, forwarded as a `message` envelope (cursor stamped before
+	// delivery) that races this synchronous ack.
+	ack := recvEnvelope(t, phone, protocol.TypeAck, 3*time.Second)
 	if ack.InReplyTo == nil || *ack.InReplyTo != reqID {
 		t.Errorf("ack InReplyTo: got %v, want pointer to %d", ack.InReplyTo, reqID)
 	}

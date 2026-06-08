@@ -23,6 +23,14 @@ and opens a new one in the same directory. It does **not** mimic claude's
 stdin/stdout protocol, conversation content, or any other surface — the
 rotation watcher only observes the fd table and the directory.
 
+The one exception is the opt-in **TUI mode** (`PYRY_FAKE_CLAUDE_TUI`, #603):
+it emits exactly two of claude's TUI substrate glyphs so tui-driver's
+`IsIdle`/`IsThinking` detection — and #594's `WaitReady → DeliverPrompt →
+commit` contract — can confirm a turn against it. See
+[§ TUI mode](#tui-mode-603). The earlier optional `STDIN_LOG` (#323) and
+`ASSISTANT_TRIGGER` (#311) modes likewise extend the binary past pure
+rotation; see [§ Configuration](#configuration--env).
+
 | Step | Effect |
 |---|---|
 | Start | open `<dir>/<initialUUID>.jsonl` `O_WRONLY\|O_APPEND\|O_CREATE 0o600`, `WriteString("{}\n")`, `Sync()` |
@@ -38,7 +46,10 @@ the instant the watcher's CREATE-driven probe runs. If the binary held
 both fds open across the rotation, the probe could match either path and
 the watcher's exact-match gate (`watcher.go:167`) would race.
 
-## Configuration — env-only
+## Configuration — env
+
+**Required** (a missing or empty value prints `fakeclaude: missing env
+<NAME>` to stderr and exits 1):
 
 ```
 PYRY_FAKE_CLAUDE_SESSIONS_DIR  directory that must already exist
@@ -46,10 +57,56 @@ PYRY_FAKE_CLAUDE_INITIAL_UUID  stem for the first <uuid>.jsonl
 PYRY_FAKE_CLAUDE_TRIGGER       path watched for the rotation signal
 ```
 
-All three are required. A missing or empty value prints
-`fakeclaude: missing env <NAME>` to stderr and exits 1. No flags, no
-stdin, no positional args — env is the entire input surface, matching
-how the harness consumer will configure the child via `cmd.Env`.
+**Optional** (each unset by default; together they layer behaviour on top
+of the bare rotation primitive):
+
+```
+PYRY_FAKE_CLAUDE_STDIN_LOG          append every stdin byte to this file,
+                                    fsynced per read (#323; lets a sibling
+                                    test process observe the prompt)
+PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER  path watched; on appearance, write the
+                                    file's bytes to stdout as a scripted
+                                    assistant chunk (#311)
+PYRY_FAKE_CLAUDE_TUI                when non-empty, emit the idle/thinking
+                                    glyphs (#603; see § TUI mode)
+```
+
+No flags, no positional args — env is the entire configuration surface,
+matching how the harness consumer configures the child via `cmd.Env`.
+fakeclaude reads stdin only when `STDIN_LOG` or `TUI` is set; otherwise it
+ignores stdin entirely.
+
+## TUI mode (#603)
+
+When `PYRY_FAKE_CLAUDE_TUI` is non-empty, fakeclaude emits two of claude's
+TUI substrate glyphs so the #594 `WaitReady → DeliverPrompt → commit`
+delivery contract can confirm a turn against it (otherwise `WaitReady`
+never reaches idle, the 30 s deliver timeout elapses, and `send_message`
+replies `server.binary_offline` instead of `ack`):
+
+| Moment | Action | Effect |
+|---|---|---|
+| startup | write `❯` (U+276F idle prompt) once to stdout | tui-driver `IsIdle` true → first `WaitReady` returns immediately |
+| first stdin bytes | write `✻` (U+273B thinking spinner) once | `IsThinking` true → `DeliverPrompt` confirms a **fast** commit |
+
+A *single* `❯` write suffices because tui-driver's `Snapshot()` is a
+**rolling 4096-byte raw-byte window, not a grid emulator** — the glyph
+persists until evicted; no continuous redraw is needed (each consumer flow
+drives exactly one idle→thinking transition). All `os.Stdout` writes (both
+glyphs + the assistant chunk) are serialised under one `sync.Mutex` so a
+spinner write cannot interleave mid-chunk and corrupt a marker. fakeclaude
+**never echoes stdin content to stdout** — it writes only the fixed glyph,
+holding the trust boundary against reflecting phone-controlled prompt bytes
+onto the observed PTY.
+
+**When unset, fakeclaude is byte-identical to its pre-#603 behaviour**, so
+TUI-off callers (`StartRotation`, the rotation tests, the two-phone-coarse
+e2e) are unperturbed. Because TUI mode makes `main.go` carry the two
+glyphs, the file is on the `cmd/substrate-guard` allowlist (#603),
+mirroring the sanctioned `internal/agentrun/ptyrunner/helper_test.go`
+exemption. Consumers must drain the spinner `message` envelope that the
+assistant-turn emitter fans to the phone (it races the ack); see
+[codebase/603.md](../codebase/603.md) for the drain pattern.
 
 The initial UUID must satisfy
 `internal/sessions/rotation/watcher.go:19`'s `uuidStemPattern`
@@ -62,7 +119,8 @@ helper, which mirrors `internal/sessions/id.go` byte-for-byte (same
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~90 LOC, package main, no build tag
+  main.go        ~240 LOC, package main, no build tag (grew from the
+                 #122 rotation core with the #311/#323/#603 optional modes)
   main_test.go   ~125 LOC, //go:build e2e
 ```
 
@@ -142,7 +200,13 @@ affect correctness.
 
 ## Related
 
-- Spec: `docs/specs/architecture/122-fake-claude-test-binary.md`
+- Spec: `docs/specs/architecture/122-fake-claude-test-binary.md`;
+  TUI mode: `docs/specs/architecture/603-fakeclaude-tui-idle-thinking-glyphs.md`
+- TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
+  emission, the ack-pollution drain, the substrate-guard exemption)
+- Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
+  alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
+  fake-claude helpers that emit claude-TUI glyphs)
 - Mirrors: `internal/sessions/id.go` (`NewID` UUIDv4 generator),
   `internal/sessions/rotation/watcher.go:17-19` (`uuidStemPattern`)
 - Lessons: `docs/lessons.md § Claude session storage on disk` (the
