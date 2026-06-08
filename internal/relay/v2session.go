@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/coder/websocket"
@@ -113,13 +114,14 @@ type pushReq struct {
 	reply  chan error
 }
 
-// snapshotReq is enqueued by (*V2SessionManager).ActiveConnIDs and dequeued
+// snapshotReq is enqueued by (*V2SessionManager).ActiveConns and dequeued
 // by Run on the snapshot channel arm. reply is per-request (cap=1) so Run's
 // reply send is non-blocking even if the caller's ctx fires between enqueue
 // and reply. Mirrors pushReq minus the per-conn inputs — a snapshot takes no
-// addressed-conn argument.
+// addressed-conn argument. The reply carries the capability-aware enumeration
+// ([]ActiveConn); ActiveConnIDs is a thin projection over the same reply.
 type snapshotReq struct {
-	reply chan []string
+	reply chan []ActiveConn
 }
 
 // wakeBufferSize sizes the manager's wake channel. The 1-hour rekey
@@ -176,6 +178,15 @@ type V2Session struct {
 	// handleNoiseInit's token-OK path before state advances to
 	// V2StateOpen. Nil before the token check completes.
 	device *devices.Device
+
+	// interactive is the negotiated interactive-capability decision (the
+	// phone's advertised set ∩ supportedV2Capabilities contained
+	// CapabilityInteractive). Set exactly once in handleNoiseInit's token-OK
+	// path BEFORE s.state advances to V2StateOpen; the zero value (false) is
+	// the fail-closed default for every other path. Re-key (handleRekeyInit)
+	// preserves it by never touching it, like device/peerStatic. Read by
+	// handleActiveConns on the same dispatch goroutine — no lock/atomic.
+	interactive bool
 
 	// peerStatic is the initiator's 32-byte X25519 static public key
 	// captured at the initial handshake (immediately after
@@ -388,13 +399,13 @@ type V2SessionManager struct {
 	// unblock via ctx.Done.
 	push chan pushReq
 
-	// snapshot funnels (*V2SessionManager).ActiveConnIDs calls onto Run's
-	// dispatch goroutine so the read of m.sessions runs under the
-	// single-owner-goroutine invariant, serialised against every map write
-	// (lazy-create, delete, state transitions). Unbuffered: backpressure is
-	// correct — if Run is busy, ActiveConnIDs waits; the caller's ctx is the
-	// escape arm. Not closed by the manager on Run exit; in-flight callers
-	// unblock via ctx.Done.
+	// snapshot funnels (*V2SessionManager).ActiveConns (and ActiveConnIDs,
+	// which projects over it) calls onto Run's dispatch goroutine so the read
+	// of m.sessions runs under the single-owner-goroutine invariant, serialised
+	// against every map write (lazy-create, delete, state transitions).
+	// Unbuffered: backpressure is correct — if Run is busy, the caller waits;
+	// the caller's ctx is the escape arm. Not closed by the manager on Run
+	// exit; in-flight callers unblock via ctx.Done.
 	snapshot chan snapshotReq
 }
 
@@ -460,7 +471,7 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 		case req := <-m.push:
 			req.reply <- m.handlePush(runCtx, req.connID, req.env)
 		case req := <-m.snapshot:
-			req.reply <- m.handleActiveConnIDs()
+			req.reply <- m.handleActiveConns()
 		}
 	}
 }
@@ -613,6 +624,29 @@ type InnerFrameV2Decoded struct {
 	Data []byte
 }
 
+// supportedV2Capabilities is the daemon's authoritative capability set. The
+// negotiation output is built from THESE entries only — never from the phone's
+// advertised set — so an unsupported/spoofed advertisement can never be echoed
+// in the hello_ack or recorded on the session.
+var supportedV2Capabilities = []string{protocol.CapabilityInteractive}
+
+// negotiateCapabilities returns the phone's advertised set ∩
+// supportedV2Capabilities, in supported-set order. It iterates the supported
+// set (not the advertised one), so the result is a subset of supported by
+// construction: duplicates collapse, an unsupported/spoofed advertisement is
+// dropped, and an advertise-nothing / only-unsupported set yields nil (the
+// omitempty ack field then drops the key, preserving v1 byte-stability, and
+// the recorded interactive flag fails closed to false).
+func negotiateCapabilities(advertised []string) []string {
+	var out []string
+	for _, name := range supportedV2Capabilities {
+		if slices.Contains(advertised, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // handleNoiseInit processes an inbound noise_init frame. The initial
 // handshake path is documented step-by-step in
 // docs/specs/architecture/445-internal-relay-v2-inner-frame-handshake-token-gating.md.
@@ -705,6 +739,14 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		return
 	}
 
+	// Negotiate capabilities: intersect the phone's advertised set with the
+	// daemon's authoritative supported set. The result is echoed in the
+	// hello_ack on every handshake and (on the token-OK branch only) recorded
+	// as s.interactive below. Computed before the ack literal so the same
+	// negotiated slice is the single source of truth for both the echo and the
+	// flag — ack and flag can never disagree.
+	negotiated := negotiateCapabilities(helloPayload.Capabilities)
+
 	// Build and AEAD-seal hello_ack via WriteResp's early-data slot. The
 	// hello_ack carries InReplyTo=hello.ID to mirror v1's request/response
 	// pairing convention (auth.go's buildResponse).
@@ -713,6 +755,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		ProtocolVersion: "v2",
 		ServerID:        m.cfg.ServerID,
 		ConnID:          s.connID,
+		Capabilities:    negotiated, // omitempty: nil/empty → key absent
 	})
 	if err != nil {
 		m.cfg.Logger.Warn("relay: v2 handshake reject",
@@ -804,6 +847,11 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		"device_name", device.Name)
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
 	s.device = &device
+	// Record the negotiated interactive decision from the same slice the ack
+	// echoed (single source of truth) BEFORE the session becomes enumerable.
+	// A spoofed/unsupported advertisement never appears in negotiated, so it
+	// can never flag the session.
+	s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)
 	s.state = V2StateOpen
 	s.rekeyTimer = m.armRekeyTimer(ctx, s)
 }
@@ -1566,25 +1614,36 @@ func (m *V2SessionManager) handlePush(_ context.Context, connID string, env prot
 	return nil
 }
 
-// ActiveConnIDs returns a snapshot of the conn IDs of every session currently
-// in V2StateOpen — the authenticated, token-validated sessions to which Push
-// may deliver. The result is an unordered set (Go's randomized map-iteration
-// order); a caller that needs a stable order must sort it.
+// ActiveConn is one open v2 session in the capability-aware enumeration: its
+// routing conn-id and the negotiated interactive-capability decision recorded
+// at handshake. It holds only non-secret routing/decision data — never a
+// *V2Session, CipherState, key, or plaintext — so the snapshot is safe to hand
+// to a consumer goroutine. The downstream structured-stream fan-out selects
+// interactive vs non-interactive conns on the Interactive flag.
+type ActiveConn struct {
+	ConnID      string
+	Interactive bool
+}
+
+// ActiveConns returns a snapshot of every session currently in V2StateOpen —
+// the authenticated, token-validated sessions to which Push may deliver — each
+// paired with its negotiated interactive flag. The result is an unordered set
+// (Go's randomized map-iteration order); a caller that needs a stable order
+// must sort it.
 //
 // Safe to call from any goroutine other than the dispatch goroutine: the
 // request is funneled onto Run via m.snapshot so m.sessions is never read
 // concurrently with an in-flight handshake transition, dispatchAppFrame
 // reply, re-key swap, or closeWith teardown. It is the enumeration half of
-// the server-initiated fan-out primitive — the consumer (#572's assistant-
-// turn bridge) calls this, then Push on each returned id to fan one
-// unsolicited message envelope out to every connected phone. It is the v2
-// analog of v1's dispatch.Dispatcher.ActiveConns().
+// the server-initiated fan-out primitive — a consumer calls this, then Push on
+// each conn-id, fanning interactive events only to conns with Interactive set.
+// It is the capability-aware v2 analog of v1's dispatch.Dispatcher.ActiveConns().
 //
 // Sessions still handshaking (V2StateAwaitingInit) or handshake-complete-but-
 // token-unvalidated (V2StateHandshakeComplete) are excluded — the same
-// V2StateOpen security gate handlePush enforces, so a server push never
-// reaches an un-authenticated peer. A torn-down session (deleted from the map
-// by closeWith) cannot appear.
+// V2StateOpen security gate handlePush enforces, so the negotiated flag of an
+// un-authenticated peer is never observable. A torn-down session (deleted from
+// the map by closeWith) cannot appear.
 //
 // Returns nil on caller ctx cancellation, or when Run has already exited
 // (Frames closed, no receiver on m.snapshot) and the caller's ctx then fires
@@ -1592,42 +1651,64 @@ func (m *V2SessionManager) handlePush(_ context.Context, connID string, env prot
 // fans out to nobody this round and re-enumerates on the next turn. nil and an
 // empty non-nil slice are interchangeable (both len 0); a snapshot has no
 // failure the caller can act on, so no error is returned.
-//
-// Production wire-up of *V2SessionManager into the cmd/pyry daemon for
-// server-initiated fan-out lands in a separate ticket (#572); until then this
-// method is reachable only from internal/relay tests.
-func (m *V2SessionManager) ActiveConnIDs(ctx context.Context) []string {
-	req := snapshotReq{reply: make(chan []string, 1)}
+func (m *V2SessionManager) ActiveConns(ctx context.Context) []ActiveConn {
+	req := snapshotReq{reply: make(chan []ActiveConn, 1)}
 	select {
 	case m.snapshot <- req:
 	case <-ctx.Done():
 		return nil
 	}
 	select {
-	case ids := <-req.reply:
-		return ids
+	case conns := <-req.reply:
+		return conns
 	case <-ctx.Done():
 		return nil
 	}
 }
 
-// handleActiveConnIDs runs on Run's dispatch goroutine — the only site that
+// ActiveConnIDs returns a snapshot of the conn IDs of every session currently
+// in V2StateOpen — the authenticated, token-validated sessions to which Push
+// may deliver. It is a thin projection over ActiveConns (dropping the
+// interactive flag) preserved for the capability-agnostic #589 fan-out
+// consumer; its signature and observable contract (unordered set, nil on ctx
+// cancellation, non-nil-empty on an empty manager) are unchanged.
+//
+// Production wire-up of *V2SessionManager into the cmd/pyry daemon for
+// server-initiated fan-out lands in a separate ticket (#572); until then this
+// method is reachable only from internal/relay tests.
+func (m *V2SessionManager) ActiveConnIDs(ctx context.Context) []string {
+	conns := m.ActiveConns(ctx)
+	if conns == nil {
+		// Preserve the nil-on-cancel contract: a cancelled snapshot is nil,
+		// distinct from a non-nil-empty snapshot of an open-session-less
+		// manager.
+		return nil
+	}
+	ids := make([]string, len(conns))
+	for i, c := range conns {
+		ids[i] = c.ConnID
+	}
+	return ids
+}
+
+// handleActiveConns runs on Run's dispatch goroutine — the only site that
 // reads m.sessions for the snapshot, serialised by Run's select against every
 // map write (lazy-create in handleFrame, delete in closeWith, state
 // transitions in the handshake handlers). No read can observe a half-updated
-// map or a torn s.state.
+// map, a torn s.state, or a torn s.interactive (set before V2StateOpen on the
+// same goroutine).
 //
 // The returned slice is freshly allocated and owned by the caller; it holds
-// only conn-id strings (non-secret routing identifiers), never a *V2Session
-// or any key/plaintext bytes. Order is Go's randomized map-iteration order —
-// an unordered set by design: the AC requires no ordering and the broadcast
-// consumer fans out order-independently, so no O(n log n) sort is paid on the
-// single dispatch goroutine.
-func (m *V2SessionManager) handleActiveConnIDs() []string {
-	out := make([]string, 0, len(m.sessions))
+// only conn-id strings + the negotiated interactive bool (non-secret routing /
+// decision data), never a *V2Session or any key/plaintext bytes. Order is Go's
+// randomized map-iteration order — an unordered set by design: the AC requires
+// no ordering and the broadcast consumer fans out order-independently, so no
+// O(n log n) sort is paid on the single dispatch goroutine.
+func (m *V2SessionManager) handleActiveConns() []ActiveConn {
+	out := make([]ActiveConn, 0, len(m.sessions))
 	for connID, s := range m.sessions {
 		if s.state == V2StateOpen {
-			out = append(out, connID)
+			out = append(out, ActiveConn{ConnID: connID, Interactive: s.interactive})
 		}
 	}
 	return out

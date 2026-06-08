@@ -113,9 +113,19 @@ func startManager(t *testing.T, cfg V2SessionConfig) (*V2SessionManager, func())
 	}
 }
 
-// buildHelloEarlyData marshals a v2 hello envelope (with token) suitable
-// for embedding in IK message 1 early-data.
+// buildHelloEarlyData marshals a v2 hello envelope (with token, no advertised
+// capabilities) suitable for embedding in IK message 1 early-data. Thin
+// wrapper over buildHelloEarlyDataCaps so the no-caps shape (capabilities key
+// absent via omitempty) stays byte-identical for its existing callers.
 func buildHelloEarlyData(t *testing.T, token string) []byte {
+	t.Helper()
+	return buildHelloEarlyDataCaps(t, token, nil)
+}
+
+// buildHelloEarlyDataCaps is buildHelloEarlyData with an explicit advertised
+// capability set (the #626 negotiation input). A nil/empty caps drops the
+// capabilities key via omitempty.
+func buildHelloEarlyDataCaps(t *testing.T, token string, caps []string) []byte {
 	t.Helper()
 	payload, err := json.Marshal(protocol.HelloClientPayload{
 		Role:             "client",
@@ -123,6 +133,7 @@ func buildHelloEarlyData(t *testing.T, token string) []byte {
 		ClientVersion:    "v2-test",
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
+		Capabilities:     caps,
 	})
 	if err != nil {
 		t.Fatalf("marshal hello payload: %v", err)
@@ -741,6 +752,80 @@ func driveToOpen(t *testing.T, cfg V2SessionConfig, frames chan protocol.Routing
 		initPriv:  initPriv,
 		stop:      stop,
 	}
+}
+
+// driveToOpenCaps runs a paired-device handshake whose hello advertises caps,
+// captures the hello_ack early-data (which driveToOpen discards), and returns
+// the open session plus the raw ack-envelope bytes for the capability echo
+// assertions (#626). Mirrors driveToOpen otherwise.
+func driveToOpenCaps(t *testing.T, cfg V2SessionConfig, frames chan protocol.RoutingEnvelope, rec *v2Recorder, respPub, initPriv []byte, token string, caps []string) (*openSession, []byte) {
+	t.Helper()
+	mgr, stop := startManager(t, cfg)
+	initiator, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		stop()
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	initMsg, err := initiator.WriteInit(buildHelloEarlyDataCaps(t, token, caps))
+	if err != nil {
+		stop()
+		t.Fatalf("WriteInit: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
+
+	envs := waitForEnvelopes(t, rec, 1)
+	if len(envs) != 1 {
+		stop()
+		t.Fatalf("handshake: got %d envelopes, want 1", len(envs))
+	}
+	respRaw := decodeRespFrame(t, envs[0])
+	earlyAck, initSend, initRecv, err := initiator.ReadResp(respRaw)
+	if err != nil {
+		stop()
+		t.Fatalf("ReadResp: %v", err)
+	}
+	return &openSession{
+		mgr:       mgr,
+		rec:       rec,
+		frames:    frames,
+		initiator: initiator,
+		initSend:  initSend,
+		initRecv:  initRecv,
+		respPub:   respPub,
+		initPriv:  initPriv,
+		stop:      stop,
+	}, earlyAck
+}
+
+// decodeHelloAck unmarshals the hello_ack early-data (an Envelope wrapping a
+// HelloAckPayload) recovered from the noise_resp and returns the payload.
+func decodeHelloAck(t *testing.T, earlyData []byte) protocol.HelloAckPayload {
+	t.Helper()
+	var ackEnv protocol.Envelope
+	if err := json.Unmarshal(earlyData, &ackEnv); err != nil {
+		t.Fatalf("decode hello_ack envelope: %v", err)
+	}
+	if ackEnv.Type != protocol.TypeHelloAck {
+		t.Fatalf("ack type = %q, want %q", ackEnv.Type, protocol.TypeHelloAck)
+	}
+	var ack protocol.HelloAckPayload
+	if err := json.Unmarshal(ackEnv.Payload, &ack); err != nil {
+		t.Fatalf("decode hello_ack payload: %v", err)
+	}
+	return ack
+}
+
+// activeConnFor returns the ActiveConn snapshot entry for connID, failing if
+// no open conn with that id is enumerated.
+func activeConnFor(t *testing.T, mgr *V2SessionManager, ctx context.Context, connID string) ActiveConn {
+	t.Helper()
+	for _, c := range mgr.ActiveConns(ctx) {
+		if c.ConnID == connID {
+			return c
+		}
+	}
+	t.Fatalf("ActiveConns has no open conn %q", connID)
+	return ActiveConn{}
 }
 
 // sealAppFrame AEAD-seals env under cs, wraps as noise_msg, and returns
@@ -3422,5 +3507,214 @@ func TestV2Session_OpenState_RequestSnapshot_NeverLogsScreenText(t *testing.T) {
 	sess.stop()
 	if got := logBuf.String(); strings.Contains(got, sentinel) {
 		t.Errorf("rendered screen text leaked into logs:\n%s", got)
+	}
+}
+
+// --- capability negotiation (#626) tests ---
+
+// TestNegotiateCapabilities is the AC#2/#3 matrix for the pure intersection:
+// advertised ∩ supportedV2Capabilities, in supported-set order. Because the
+// function iterates the supported set and filters by the advertised one, the
+// output is a subset of supported by construction — an unsupported/spoofed
+// advertisement is never a candidate, and duplicates collapse.
+func TestNegotiateCapabilities(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		advertised []string
+		want       []string
+	}{
+		{"interactive granted", []string{protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive}},
+		{"unsupported dropped", []string{protocol.CapabilityInteractive, "snapshot-unknown"}, []string{protocol.CapabilityInteractive}},
+		{"only unsupported yields nil", []string{"snapshot-unknown"}, nil},
+		{"nil yields nil", nil, nil},
+		{"empty yields nil", []string{}, nil},
+		{"duplicates collapse", []string{protocol.CapabilityInteractive, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := negotiateCapabilities(tc.advertised); !slices.Equal(got, tc.want) {
+				t.Errorf("negotiateCapabilities(%v) = %v, want %v", tc.advertised, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestV2Session_Handshake_CapabilityNegotiation drives a paired-device
+// handshake to open for each advertisement, decodes the hello_ack early-data,
+// and asserts (a) the ack echoes exactly the negotiated intersection, (b) a
+// no-grant negotiation drops the capabilities key entirely (omitempty
+// byte-stability, AC#5), and (c) the per-conn negotiated flag surfaced by
+// ActiveConns matches the echo (AC#1/#2/#3). A spoofed "god-mode" is never
+// echoed nor flagged.
+func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		advertised []string
+		wantAck    []string // expected ack.Capabilities (nil → key absent)
+		wantFlag   bool
+	}{
+		{"advertise interactive", []string{protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive}, true},
+		{"advertise nothing", nil, nil, false},
+		{"spoof drops unsupported", []string{protocol.CapabilityInteractive, "god-mode"}, []string{protocol.CapabilityInteractive}, true},
+		{"only unsupported granted nothing", []string{"god-mode"}, nil, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			respPriv, respPub := genV2Keypair(t)
+			initPriv, _ := genV2Keypair(t)
+			reg := v2PairedRegistry(t, v2TestToken)
+			frames := make(chan protocol.RoutingEnvelope, 1)
+			rec := &v2Recorder{}
+			sess, earlyAck := driveToOpenCaps(t, V2SessionConfig{
+				Frames:     frames,
+				Outbound:   rec.outbound,
+				StaticPriv: respPriv,
+				Devices:    reg,
+				ServerID:   v2TestServerID,
+				Logger:     silentLogger(),
+			}, frames, rec, respPub, initPriv, v2TestToken, tc.advertised)
+			t.Cleanup(sess.stop)
+
+			// (a) the ack echoes exactly the negotiated intersection.
+			ack := decodeHelloAck(t, earlyAck)
+			if !slices.Equal(ack.Capabilities, tc.wantAck) {
+				t.Errorf("hello_ack Capabilities = %v, want %v", ack.Capabilities, tc.wantAck)
+			}
+			// (b) a no-grant negotiation drops the key entirely — not an empty
+			// array. The substring can only occur in the payload's capabilities
+			// key, so its absence in the whole ack envelope is the byte check.
+			if len(tc.wantAck) == 0 && bytes.Contains(earlyAck, []byte("capabilities")) {
+				t.Errorf("no-grant hello_ack carries a capabilities key: %s", earlyAck)
+			}
+
+			// (c) the per-conn negotiated flag matches the echo.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if got := activeConnFor(t, sess.mgr, ctx, v2TestConnID); got.Interactive != tc.wantFlag {
+				t.Errorf("ActiveConns Interactive = %v, want %v", got.Interactive, tc.wantFlag)
+			}
+		})
+	}
+}
+
+// TestV2Session_ActiveConns_MixedInteractive pins the capability-aware
+// enumeration on a mixed map: an interactive open conn, a non-interactive open
+// conn, and a flagged-but-still-handshaking conn. ActiveConns reports the
+// correct flag per open conn and excludes the non-open one (the V2StateOpen
+// gate wins over the interactive flag — belt-and-suspenders of different
+// fabric). ActiveConnIDs is an unchanged projection: every open conn-id, flag
+// dropped. White-box injection mirrors TestV2Session_ActiveConnIDs_OpenOnly;
+// the snapshot channel-send is the happens-before edge publishing the writes
+// to Run.
+func TestV2Session_ActiveConns_MixedInteractive(t *testing.T) {
+	t.Parallel()
+
+	respPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	frames := make(chan protocol.RoutingEnvelope)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+
+	mgr.sessions["c-int"] = &V2Session{connID: "c-int", state: V2StateOpen, interactive: true}
+	mgr.sessions["c-plain"] = &V2Session{connID: "c-plain", state: V2StateOpen, interactive: false}
+	mgr.sessions["c-flagged-handshake"] = &V2Session{connID: "c-flagged-handshake", state: V2StateHandshakeComplete, interactive: true}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	got := map[string]bool{}
+	for _, c := range mgr.ActiveConns(ctx) {
+		got[c.ConnID] = c.Interactive
+	}
+	if len(got) != 2 || !got["c-int"] || got["c-plain"] {
+		t.Errorf("ActiveConns flags = %v, want {c-int:true, c-plain:false} (open only)", got)
+	}
+
+	ids := mgr.ActiveConnIDs(ctx)
+	slices.Sort(ids)
+	if want := []string{"c-int", "c-plain"}; !slices.Equal(ids, want) {
+		t.Errorf("ActiveConnIDs() = %v, want %v (projection: all open ids, flag dropped)", ids, want)
+	}
+}
+
+// TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated is the security
+// proof: a phone that advertises [interactive] but fails the device-token check
+// is closed at 4401 and deleted, so its negotiated capability is never
+// observable in ActiveConns. The ack on the noise_resp DID echo [interactive]
+// (it is sealed before the token check, security-review Threat 3) — but that
+// echo grants nothing because the session never reaches V2StateOpen
+// (Threat 2/3, AC#1/#3).
+func TestV2Session_CapabilitySpoof_TokenFail_NeverEnumerated(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := &devices.Registry{} // empty: every token rejects
+
+	frames := make(chan protocol.RoutingEnvelope, 1)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+
+	initiator, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	initMsg, err := initiator.WriteInit(buildHelloEarlyDataCaps(t, "wrong-token", []string{protocol.CapabilityInteractive}))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
+
+	// noise_resp + the combined error+4401 close. Observing the close envelope
+	// guarantees closeWith's delete has happened on Run, so the subsequent
+	// snapshot sees the post-delete map.
+	envs := waitForEnvelopes(t, rec, 2)
+	if envs[1].CloseCode != uint16(StatusUnauthorized) {
+		t.Fatalf("close_code = %d, want %d", envs[1].CloseCode, StatusUnauthorized)
+	}
+
+	// The ack was echoed (sealed before the token check) — leaks nothing.
+	respRaw := decodeRespFrame(t, envs[0])
+	earlyAck, _, _, err := initiator.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("ReadResp: %v", err)
+	}
+	if ack := decodeHelloAck(t, earlyAck); !slices.Equal(ack.Capabilities, []string{protocol.CapabilityInteractive}) {
+		t.Errorf("hello_ack Capabilities = %v, want [interactive]", ack.Capabilities)
+	}
+
+	// The grant: the token-failed conn never reaches V2StateOpen, so the
+	// negotiated capability is never observable in the enumeration.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for _, c := range mgr.ActiveConns(ctx) {
+		if c.ConnID == v2TestConnID {
+			t.Errorf("token-failed conn %q enumerated (interactive=%v); a non-authenticated peer must never be granted", c.ConnID, c.Interactive)
+		}
 	}
 }
