@@ -1,0 +1,140 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/supervisor"
+	"github.com/pyrycode/pyrycode/internal/turnbridge"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
+)
+
+// jsonlStreamExt is the suffix claude writes for session transcripts.
+const jsonlStreamExt = ".jsonl"
+
+// jsonlStemPattern matches the canonical 36-char lowercase UUIDv4 stem claude
+// uses for its <uuid>.jsonl filenames. Duplicated (not reused) from
+// internal/sessions.uuidStemPattern: the resolver lives in package main and the
+// sessions helper is private. Filtering to the same stem shape means the
+// resolver selects the SAME file mostRecentJSONL (reconcile + the fsnotify
+// rotation watcher) would for the same dir — coherent-by-construction with the
+// rest of the daemon over claudeSessionsDir.
+var jsonlStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// startInteractiveTurnStreamV2 wires the #615 structured-event producer to the
+// #632 capability-gated emitter so the supervised session's turn events flow to
+// interactive phones, and keep flowing across a /clear-rotated JSONL on the next
+// (re)subscription. It constructs the emitter over the v2 manager, builds the
+// producer with NewSessionSubscriber (over Supervisor.Session()) + a
+// rotation-following JSONL resolver + an OnEvent callback bridging each event to
+// emitter.Handle, starts the producer goroutine, and returns a cleanup that
+// blocks until that goroutine exits.
+//
+// The OnEvent closure captures ctx (the relay lifecycle ctx) — the ctx-less
+// OnEvent -> ctx-ful Handle seam #632 named. It runs ONLY on the producer's
+// single Run goroutine (drain invokes OnEvent serially), so the emitter's
+// unguarded counters never race — #632's named single-Run-goroutine assumption
+// holds by construction.
+func startInteractiveTurnStreamV2(
+	ctx context.Context,
+	sup *supervisor.Supervisor,
+	mgr *relay.V2SessionManager,
+	claudeSessionsDir string,
+	logger *slog.Logger,
+) func() {
+	emitter := newInteractiveTurnEmitterV2(sup, mgr, logger)
+	// Session.Events requires a Tracker; zero opts -> package defaults (drives
+	// only the dropped stall arm, which the mapper discards anyway).
+	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
+	resolve := resolveLatestSessionJSONL(claudeSessionsDir)
+	sub := turnbridge.NewSessionSubscriber(sup, resolve, tr, logger)
+
+	prod, err := turnbridge.New(turnbridge.Config{
+		Subscribe: sub,
+		OnEvent:   func(ev turnevent.Event) { emitter.Handle(ctx, ev) },
+		Logger:    logger,
+	})
+	if err != nil {
+		// Unreachable: New errors only on a nil Subscribe. Fail soft for an
+		// optional surface rather than taking down the relay leg.
+		logger.Warn("relay: interactive turn stream disabled; producer build failed",
+			"event", "interactive_turn_stream.build_err", "err", err)
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := prod.Run(ctx); err != nil {
+			// Run returns only ctx.Err() per its contract; debug-log and exit.
+			logger.Debug("relay: interactive turn stream run returned", "err", err)
+		}
+	}()
+	return func() { <-done }
+}
+
+// resolveLatestSessionJSONL returns the resolve closure for
+// turnbridge.NewSessionSubscriber. Each call scans dir for <uuid>.jsonl files
+// and returns the most-recently-modified one plus its current size as
+// startOffset. Because NewSessionSubscriber calls resolve fresh on every
+// (re)subscription, returning the newest file each time is what makes a live
+// /clear rotation pick up the new JSONL — this rotation-following is load-bearing
+// for the /clear AC, not incidental.
+//
+// startOffset = size means the tail starts at EOF, so a (re)subscription streams
+// only NEW events and never replays the historical transcript to the phone.
+//
+// The resolver is pure (dir -> newest path, size): no $HOME / cwd / symlink
+// dependency, so it unit-tests against a t.TempDir(). It reuses the daemon's
+// already-computed claudeSessionsDir (the exact dir reconcile + the rotation
+// watcher use) rather than recomputing via a second cwd-encoder — single source
+// of truth, coherent with the shipped machinery.
+func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path string, startOffset int64, err error) {
+	return func(ctx context.Context) (string, int64, error) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			// Wrap with the path (an os. error — a path/errno, never file bytes).
+			return "", 0, fmt.Errorf("read claude sessions dir %s: %w", dir, err)
+		}
+		var (
+			bestName string
+			bestSize int64
+			bestTime = int64(-1)
+		)
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.HasSuffix(name, jsonlStreamExt) {
+				continue
+			}
+			if !jsonlStemPattern.MatchString(name[:len(name)-len(jsonlStreamExt)]) {
+				continue
+			}
+			info, err := os.Stat(filepath.Join(dir, name))
+			if err != nil {
+				continue // vanished/raced between ReadDir and Stat — skip, not fatal
+			}
+			// Tie-break on the lexicographically-larger name (deterministic for
+			// tests; matches mostRecentJSONL). Stable across map-free iteration.
+			mt := info.ModTime().UnixNano()
+			if mt > bestTime || (mt == bestTime && name > bestName) {
+				bestTime = mt
+				bestName = name
+				bestSize = info.Size()
+			}
+		}
+		if bestName == "" {
+			return "", 0, fmt.Errorf("no session jsonl found in %s", dir)
+		}
+		return filepath.Join(dir, bestName), bestSize, nil
+	}
+}

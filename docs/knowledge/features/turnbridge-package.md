@@ -20,13 +20,17 @@ sealing, and the capability-gated fan-out to phones — was originally one slice
 `interactive` grant + capability-aware `ActiveConns`), then the **stateful
 structured emitter** (#632, `cmd/pyry/interactive_turn_v2.go` — consumes the
 outbound adapter's payloads, derives `turn_state`, gates the fan-out on the
-`interactive` grant), then the **production wiring** (#633 — constructs this
-`Producer` and attaches `OnEvent: emitter.Handle`). This package still ships
-**with unit tests, deliberately unwired to a live fan-out** (the standard "introduce
-the mapping core + tests; wire the consumer in the next slice" pattern). The
-outbound adapter now has an in-process caller — #632's emitter (unit-tested against
-a scripted event source) — but the **producer → emitter** wiring lands in #633; until
-then the producer is a no-op beyond draining. See [codebase/632.md](../codebase/632.md).
+`interactive` grant), then the **production wiring** (#633,
+`cmd/pyry/interactive_turn_stream_v2.go` — constructs this `Producer` over
+`Supervisor.Session()` + a rotation-following JSONL resolver and attaches
+`OnEvent: emitter.Handle(relayCtx, ev)` inside `startRelayV2`). **As of #633 the
+producer is wired live:** `startInteractiveTurnStreamV2` builds it under the v2
+foreground + sessions-dir gate, so the supervised session's structured events now flow
+to interactive phones (and keep flowing across a restart-driven `/clear` rotation).
+Before #633 the package shipped deliberately unwired — the standard "introduce the
+mapping core + tests; wire the consumer in the next slice" pattern. See
+[codebase/632.md](../codebase/632.md) (emitter) and
+[codebase/633.md](../codebase/633.md) (the live wiring + resolver).
 
 > #615 + #616 are the two halves of the originally-combined #608. Docs in #606 /
 > #607 that say "the bridge (#608)" mean: producer = #615 (here), consumer = the
@@ -70,7 +74,7 @@ The producer is split into a **testable core** (drain + re-subscribe loop, drive
 by an injected `Subscriber`) and **live glue** (the production `Subscriber` that
 calls `Session.Events`). The split is what makes the lifecycle guarantees
 unit-testable without spawning a real claude — a `*tuidriver.Session` can only be
-`Spawn`ed, so the live subscriber is verified downstream (#616 wiring + the v2
+`Spawn`ed, so the live subscriber is verified downstream (#633's wiring + the v2
 e2e oracle), while this slice unit-tests the core via a fake `Subscriber` and the
 pure mapper directly.
 
@@ -351,8 +355,9 @@ pyrycode and `cmd/substrate-guard` stays green.
 
 ## Concurrency model
 
-- **One producer goroutine** (`Producer.Run`, started by #616 under the daemon
-  root ctx). Single owner of the `OnEvent` invocation.
+- **One producer goroutine** (`Producer.Run`, started by #633's
+  `startInteractiveTurnStreamV2` under the relay lifecycle ctx). Single owner of the
+  `OnEvent` invocation.
 - **One short-lived Wait-watcher goroutine per subscription**, inside the live
   Subscriber. Exits when the session closes. No leak (see above).
 - **tui-driver's own merge + tail goroutines** inside `Session.Events`, governed
@@ -367,26 +372,33 @@ pyrycode and `cmd/substrate-guard` stays green.
 
 **The producer does not own JSONL-path resolution or live-`/clear`-rotation
 survival.** It accepts an injected `resolve func(ctx)(path, startOffset, err)` and
-re-subscribes per session via the supervisor's restart signal.
+re-subscribes per session via the supervisor's restart signal. #615 ships the
+mechanism; #633 supplies the production resolver + the wiring.
 
 - **Supervisor restart is handled here.** A newly-hosted session ends the prior
   one (`sess.Wait()` returns) → per-session ctx cancels → Events channel closes →
   `Run` re-subscribes → `WaitForPTY` blocks for the new session → `resolve` runs
   again. This is exactly the "no leak across restart" guarantee, unit-tested via
   the fake `Subscriber`.
-- **Live `/clear` rotation is deferred to #616.** A `/clear` rotates claude's
-  on-disk session UUID **without** restarting the supervised process, so the
-  Events channel does not close and the producer keeps tailing the now-silent old
-  JSONL. Detecting this needs the rotation watcher / fsnotify machinery the
-  producer must not import; #616 (where the pool + rotation watcher are in scope)
-  supplies the trigger.
-- **The production resolver belongs to #616.** Because the supervisor spawns with
-  `--continue` (no `--session-id`), there is no stable UUID at spawn time — exactly
-  why `deliverViaSession` leaves `JSONLPath` empty. #616's resolver can be
-  `tuidriver.SessionJSONLPath(home, workDir, pool.Default().ID())`, re-evaluated
-  per subscription, returning the current file size as `startOffset` so a
+- **The production resolver (#633) is a most-recently-modified scan, NOT
+  `SessionJSONLPath`.** Because the supervised relay session spawns with `--continue`
+  (no `--session-id`), there is **no stable UUID** at spawn time — exactly why
+  `deliverViaSession` leaves `JSONLPath` empty — and `*tuidriver.Session` exposes no
+  path accessor, so `SessionJSONLPath(home, cwd, sessionID)` **cannot** be used.
+  #633's `resolveLatestSessionJSONL(dir)` instead returns the
+  **most-recently-modified `<uuid>.jsonl`** under the daemon's `claudeSessionsDir`
+  plus its current size as `startOffset`, re-evaluated fresh per subscription so a
   (re)subscription streams only new events instead of replaying the whole
-  conversation. #615 ships the mechanism; #616 supplies the policy.
+  conversation. See [codebase/633.md](../codebase/633.md).
+- **`/clear` survival is restart-driven (#633).** A `/clear` rotates claude's on-disk
+  session UUID **without** restarting the supervised process, so the Events channel
+  does not close on the `/clear` itself. On the **next supervisor restart**, `Run`
+  re-subscribes and the resolver re-evaluates to the newest (post-`/clear`) JSONL —
+  the per-call freshness of the resolver is the load-bearing half. A `/clear` *not*
+  followed by a restart keeps tailing the pre-`/clear` file until the next restart
+  (the producer has no live rotation signal — the fsnotify watcher feeds
+  `Pool.RotateID`, not the producer); gap-free in-process rotation is a Phase 2
+  follow-up.
 
 ## Not `security-sensitive`
 
