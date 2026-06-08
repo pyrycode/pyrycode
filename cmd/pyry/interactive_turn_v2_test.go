@@ -183,13 +183,15 @@ func TestInteractiveTurnEmitterV2_PerTurnSeqReset(t *testing.T) {
 	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
-		// turn A
-		turnevent.TextChunk{Text: "a1"},
-		turnevent.TextChunk{Text: "a2"},
+		// turn A — distinct MessageIDs so each TextChunk is its own delta: the
+		// a2 boundary flushes a1 (seq 0), the trailing TurnEnd flushes a2 (seq 1).
+		turnevent.TextChunk{MessageID: "ma1", Text: "a1"},
+		turnevent.TextChunk{MessageID: "ma2", Text: "a2"},
 		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
-		// turn B
-		turnevent.TextChunk{Text: "b1"},
-		turnevent.TextChunk{Text: "b2"},
+		// turn B — likewise; the trailing TurnEnd flushes b2 so both deltas emit.
+		turnevent.TextChunk{MessageID: "mb1", Text: "b1"},
+		turnevent.TextChunk{MessageID: "mb2", Text: "b2"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
 	} {
 		e.Handle(context.Background(), ev)
 	}
@@ -299,7 +301,8 @@ func TestInteractiveTurnEmitterV2_MidTurnJoin(t *testing.T) {
 	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.ThoughtChunk{Text: "reasoning"}) // emit#1: [a]
-	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})        // emit#2,#3: [a,b]
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})        // buffers; turn_state responding emit#2: [a,b]
+	e.flushDelta(context.Background())                                        // coalesced delta emit#3: [a,b]
 
 	// a saw everything: thinking, responding, assistant_delta.
 	wantA := []string{protocol.TypeTurnState, protocol.TypeTurnState, protocol.TypeAssistantDelta}
@@ -486,6 +489,7 @@ func TestInteractiveTurnEmitterV2_StallNoLifecycleMutation(t *testing.T) {
 	// The next content opens a fresh turn: first subsequent envelope is
 	// turn_state: responding (the stall left inTurn/currentState untouched).
 	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background()) // emit the coalesced delta (models a flush)
 	wantTypes := []string{
 		protocol.TypeStall,
 		protocol.TypeTurnState,      // responding — fresh turn opens after the stall
@@ -510,16 +514,17 @@ func TestInteractiveTurnEmitterV2_StallMidTurnDoesNotDisturbOpenTurn(t *testing.
 	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
-		turnevent.TextChunk{Text: "a1"}, // opens turn: responding + delta seq 0
-		turnevent.Stall{},               // stall mid-turn
-		turnevent.TextChunk{Text: "a2"}, // delta seq 1, same turn
+		turnevent.TextChunk{Text: "a1"}, // opens turn: responding, buffers a1
+		turnevent.Stall{},               // stall mid-turn flushes a1 (seq 0) first
+		turnevent.TextChunk{Text: "a2"}, // buffers a2 (same id), seq 1 on flush
 	} {
 		e.Handle(context.Background(), ev)
 	}
+	e.flushDelta(context.Background()) // flush the trailing a2 delta
 
 	wantTypes := []string{
 		protocol.TypeTurnState,      // responding
-		protocol.TypeAssistantDelta, // a1
+		protocol.TypeAssistantDelta, // a1 (flushed by the stall)
 		protocol.TypeStall,          // stall, no surrounding turn_state
 		protocol.TypeAssistantDelta, // a2
 	}
@@ -566,5 +571,225 @@ func TestInteractiveTurnEmitterV2_TurnEndOutsideTurnDropped(t *testing.T) {
 
 	if len(bcast.pushes) != 0 {
 		t.Fatalf("turn_end outside a turn pushed %d envelopes; want 0", len(bcast.pushes))
+	}
+}
+
+// --- #609 delta coalescing ---------------------------------------------------
+
+// AC#1: consecutive TextChunks with the SAME MessageID concatenate in arrival
+// order into ONE assistant_delta (per-JSONL-message batching, not per-line),
+// flushed before turn_end at the turn boundary.
+func TestInteractiveTurnEmitterV2_SameIDCoalesce(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.TextChunk{MessageID: "m1", Text: "Hel"},
+		turnevent.TextChunk{MessageID: "m1", Text: "lo"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 1 {
+		t.Fatalf("same-id chunks: got %d assistant_delta, want 1 (coalesced)", len(deltas))
+	}
+	if deltas[0].Text != "Hello" {
+		t.Fatalf("coalesced text: got %q, want %q (concatenated in arrival order)", deltas[0].Text, "Hello")
+	}
+	if deltas[0].Seq != 0 {
+		t.Fatalf("coalesced delta seq: got %d, want 0", deltas[0].Seq)
+	}
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // "Hello" (coalesced)
+		protocol.TypeTurnEnd,
+		protocol.TypeTurnState, // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+}
+
+// AC#1: a TextChunk with a NEW MessageID flushes the buffered delta first, then
+// starts a fresh buffer — two deltas, each its own message, seq 0 then 1.
+func TestInteractiveTurnEmitterV2_NewIDBoundaryFlush(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.TextChunk{MessageID: "m1", Text: "A"},
+		turnevent.TextChunk{MessageID: "m2", Text: "B"}, // new id flushes "A" first
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("two message ids: got %d assistant_delta, want 2", len(deltas))
+	}
+	if deltas[0].Text != "A" || deltas[0].Seq != 0 {
+		t.Fatalf("delta[0]: got {%q, seq %d}, want {A, 0}", deltas[0].Text, deltas[0].Seq)
+	}
+	if deltas[1].Text != "B" || deltas[1].Seq != 1 {
+		t.Fatalf("delta[1]: got {%q, seq %d}, want {B, 1}", deltas[1].Text, deltas[1].Seq)
+	}
+	if deltas[0].TurnID != deltas[1].TurnID {
+		t.Fatalf("both deltas are one turn but carry different turn ids: %q vs %q", deltas[0].TurnID, deltas[1].TurnID)
+	}
+}
+
+// AC#2: a timer flush mid-message (modelled by a direct flushDelta call — the
+// spec's deterministic stand-in for the ~250ms fire) emits the accumulated
+// prefix; the same message split across the window keeps one rising seq.
+func TestInteractiveTurnEmitterV2_TimerFlushMidMessage(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "A"})
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "B"})
+	e.flushDelta(context.Background()) // ~250ms timer fires mid-message
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "C"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	want := []struct {
+		text string
+		seq  int
+	}{{"AB", 0}, {"C", 1}}
+	if len(deltas) != len(want) {
+		t.Fatalf("got %d assistant_delta, want %d", len(deltas), len(want))
+	}
+	for i, w := range want {
+		if deltas[i].Text != w.text || deltas[i].Seq != w.seq {
+			t.Fatalf("delta[%d]: got {%q, seq %d}, want {%q, %d}", i, deltas[i].Text, deltas[i].Seq, w.text, w.seq)
+		}
+	}
+}
+
+// AC#3: a non-empty buffer is flushed BEFORE any interleaved non-text envelope
+// (tool_use / turn_state{thinking} / stall) so wire ordering is preserved.
+func TestInteractiveTurnEmitterV2_FlushBeforeNonText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		trailing  turnevent.Event
+		wantTypes []string
+	}{
+		{
+			name:     "before tool_use",
+			trailing: turnevent.ToolStart{ToolCallID: "t1", Title: "Read"},
+			wantTypes: []string{
+				protocol.TypeTurnState,      // responding
+				protocol.TypeAssistantDelta, // "A" — flushed before the tool
+				protocol.TypeToolUse,
+			},
+		},
+		{
+			name:     "before thinking",
+			trailing: turnevent.ThoughtChunk{Text: "hmm"},
+			wantTypes: []string{
+				protocol.TypeTurnState,      // responding
+				protocol.TypeAssistantDelta, // "A" — flushed before the thinking transition
+				protocol.TypeTurnState,      // thinking
+			},
+		},
+		{
+			name:     "before stall",
+			trailing: turnevent.Stall{},
+			wantTypes: []string{
+				protocol.TypeTurnState,      // responding
+				protocol.TypeAssistantDelta, // "A" — flushed before the stall
+				protocol.TypeStall,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cur := &stubCursor{}
+			cur.set(testConvID)
+			bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+			e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+			e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "A"})
+			e.Handle(context.Background(), tt.trailing)
+
+			if got := pushTypes(bcast.pushes); !slices.Equal(got, tt.wantTypes) {
+				t.Fatalf("%s envelope order:\n got %v\nwant %v", tt.name, got, tt.wantTypes)
+			}
+			deltas := assistantDeltas(t, bcast.pushes)
+			if len(deltas) != 1 || deltas[0].Text != "A" {
+				t.Fatalf("%s: want one assistant_delta {A} before the non-text envelope, got %+v", tt.name, deltas)
+			}
+		})
+	}
+}
+
+// AC#3: the buffer is flushed at the turn boundary — the delta precedes turn_end
+// and the idle turn_state.
+func TestInteractiveTurnEmitterV2_FlushAtTurnBoundary(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.TextChunk{MessageID: "m1", Text: "A"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // "A" — flushed before turn_end, before idle
+		protocol.TypeTurnEnd,
+		protocol.TypeTurnState, // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("turn-boundary envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+}
+
+// AC#3: seq advances ONCE per emitted coalesced delta, never once per buffered
+// TextChunk — three same-id chunks yield one delta at seq 0.
+func TestInteractiveTurnEmitterV2_OneSeqPerCoalescedDelta(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.TextChunk{MessageID: "m1", Text: "x"},
+		turnevent.TextChunk{MessageID: "m1", Text: "y"},
+		turnevent.TextChunk{MessageID: "m1", Text: "z"},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 1 {
+		t.Fatalf("three same-id chunks: got %d assistant_delta, want 1", len(deltas))
+	}
+	if deltas[0].Seq != 0 {
+		t.Fatalf("seq advanced per buffered chunk: got %d, want 0 (one seq per coalesced delta)", deltas[0].Seq)
+	}
+	if deltas[0].Text != "xyz" {
+		t.Fatalf("coalesced text: got %q, want %q", deltas[0].Text, "xyz")
 	}
 }

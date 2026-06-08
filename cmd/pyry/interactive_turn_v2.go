@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -12,6 +13,13 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
+
+// coalesceWindow bounds the delivery latency of a single long-streaming
+// assistant message: a non-empty delta buffer flushes after at most this long
+// even when no message-boundary or non-text event arrives first (ADR 025
+// § Phase 2, "per JSONL message or ~250 ms"). Tunable here; not exposed as
+// config in this slice (no AC asks for it).
+const coalesceWindow = 250 * time.Millisecond
 
 // interactiveBroadcaster is the capability-aware fan-out surface the structured
 // emitter needs: the interactive-conn snapshot (#626) and the per-conn sealed
@@ -38,6 +46,17 @@ type interactiveBroadcaster interface {
 // serially (turnbridge/producer.go). #633 wires that goroutine; here unit
 // tests call Handle directly with a scripted sequence.
 //
+// Delta coalescing (#609): consecutive TextChunks sharing a MessageID are
+// buffered and emitted as ONE assistant_delta — flushed at the next message
+// boundary, before any interleaved non-text envelope, at the turn boundary, or
+// on the ~250ms coalesceWindow timer, whichever comes first. The timer is owned
+// here but its channel is selected by the producer's drain loop and routed back
+// into flushDelta on that SAME single Run goroutine (Config.FlushSignal /
+// OnFlush, wired by startInteractiveTurnStreamV2). So the emitter still spawns
+// no goroutine and the coalescing fields stay unguarded-but-race-free. Go 1.26
+// timer semantics (no stale fire after Stop/Reset) make the single-goroutine
+// arm/reset correct without a manual channel drain.
+//
 // SECURITY: application output — assistant text, thought text (never even
 // mapped), tool title/input/result summaries — is NEVER logged at any level.
 // Logs carry only lengths-free discriminants: event, kind (the event-type
@@ -61,16 +80,35 @@ type interactiveTurnEmitterV2 struct {
 	// gets a distinct env.ID on each conn — each conn still sees a strictly
 	// increasing subsequence.
 	nextID uint64
+
+	// Delta-coalescing state (#609) — read/written only on the single Handle/
+	// flush goroutine, same contract as the lifecycle fields above. The invariant
+	// the timer relies on: flushTimer is armed iff deltaBuf is non-empty.
+	deltaBuf    strings.Builder // accumulated assistant text for the open (un-flushed) delta
+	deltaMsgID  string          // MessageID of the buffered text; meaningful only while deltaBuf.Len() > 0
+	deltaConvID string          // conversation cursor captured when buffering began; the flush emits against it
+	flushTimer  *time.Timer     // ~250ms latency timer; owned here, its channel selected by the producer (flushC)
 }
 
-// newInteractiveTurnEmitterV2 constructs an emitter wired to sup and bcast.
+// newInteractiveTurnEmitterV2 constructs an emitter wired to sup and bcast. The
+// coalescing timer is created disarmed (NewTimer then Stop — Go 1.26 needs no
+// channel drain) and armed only when the first chunk of a delta is buffered.
 func newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster, logger *slog.Logger) *interactiveTurnEmitterV2 {
+	t := time.NewTimer(coalesceWindow)
+	t.Stop()
 	return &interactiveTurnEmitterV2{
-		sup:    sup,
-		bcast:  bcast,
-		logger: logger,
+		sup:        sup,
+		bcast:      bcast,
+		logger:     logger,
+		flushTimer: t,
 	}
 }
+
+// flushC exposes the coalescing timer's channel for the producer's drain select
+// (#609). The producer selects it and routes each fire back into flushDelta on
+// the single Run goroutine; the emitter never reads this channel itself, so the
+// timer fire is not a second goroutine touching the emitter's state.
+func (e *interactiveTurnEmitterV2) flushC() <-chan time.Time { return e.flushTimer.C }
 
 // Handle drives the emitter one event at a time. It reads the conversation
 // cursor once; on an empty cursor it drops the event (mirrors #589). Otherwise
@@ -86,30 +124,50 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		return
 	}
 
-	switch ev.(type) {
+	switch v := ev.(type) {
 	case turnevent.ThoughtChunk:
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
+		e.flushDelta(ctx) // any pending delta precedes the thinking transition
 		// Thought text is never forwarded; thinking surfaces only as a state.
 		e.transitionTo(ctx, convID, turnbridge.StateThinking)
 	case turnevent.TextChunk:
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
+		// Message-boundary flush: a new JSONL message id ends the prior delta
+		// before this chunk opens a fresh one (per-JSONL-message batching).
+		if e.deltaBuf.Len() > 0 && v.MessageID != e.deltaMsgID {
+			e.flushDelta(ctx)
+		}
+		// Safe before buffering: during a text run the state is already
+		// responding, so this is a no-op and never emits a turn_state ahead of
+		// buffered text; it only emits on the first content of a turn, when the
+		// buffer is necessarily empty.
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
-		e.emitMapped(ctx, convID, ev)
-		e.seq++ // advance only after an assistant_delta emit
+		wasEmpty := e.deltaBuf.Len() == 0
+		e.deltaConvID = convID
+		e.deltaMsgID = v.MessageID
+		e.deltaBuf.WriteString(v.Text)
+		if wasEmpty {
+			// Arm the latency window from the OLDEST unflushed chunk; never re-arm
+			// on a same-message append, so a long-streaming message is bounded to
+			// one window, not one-per-chunk.
+			e.flushTimer.Reset(coalesceWindow)
+		}
 	case turnevent.ToolStart:
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
+		e.flushDelta(ctx) // buffered text precedes the tool_use it logically preceded
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ToolUpdate:
 		if !e.startTurnIfNeeded(convID) {
 			return
 		}
+		e.flushDelta(ctx) // buffered text precedes the tool_result
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.TurnEnd:
@@ -118,17 +176,20 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 				"event", "interactive_turn.turn_end_no_turn")
 			return
 		}
+		e.flushDelta(ctx) // turn-boundary flush: delta precedes turn_end, before idle
 		e.emitMapped(ctx, convID, ev)
 		e.transitionTo(ctx, convID, turnbridge.StateIdle)
 		e.endTurn()
 	case turnevent.Stall:
 		// Onset-only control/state signal — a peer of turn_state. Emit with NO
-		// lifecycle mutation: a stall is orthogonal to thinking/responding/idle
-		// and not turn-scoped (no startTurnIfNeeded / transitionTo / endTurn;
-		// inTurn, turnID, seq, currentState all untouched). The phone self-clears
-		// on the next turn activity. Like turn_state it flows through emit() and
-		// is NOT a droppable delta — the droppable set is assistant_delta only
-		// (#610), so a stall is never silently coalesced/discarded.
+		// turn-lifecycle mutation: a stall is orthogonal to thinking/responding/
+		// idle and not turn-scoped (no startTurnIfNeeded / transitionTo / endTurn;
+		// inTurn, turnID, currentState all untouched). It only flushes any pending
+		// delta first so buffered text keeps its wire position ahead of the stall.
+		// The phone self-clears on the next turn activity. Like turn_state it flows
+		// through emit() and is NOT a droppable delta — the droppable set is
+		// assistant_delta only (#610), so a stall is never silently discarded.
+		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
@@ -174,9 +235,37 @@ func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID stri
 }
 
 // endTurn closes the current turn. The next content/thought event re-mints a
-// fresh turn id and resets seq/currentState via startTurnIfNeeded.
+// fresh turn id and resets seq/currentState via startTurnIfNeeded. It need not
+// touch the delta buffer — the TurnEnd arm already flushed it, and the buffer
+// is only ever non-empty inside an open turn.
 func (e *interactiveTurnEmitterV2) endTurn() {
 	e.inTurn = false
+}
+
+// flushDelta emits the buffered assistant text as ONE coalesced assistant_delta
+// (current turnID + seq), advances seq exactly once, clears the buffer, and
+// stops the timer. It is a NO-OP on an empty buffer, which is what makes every
+// flush trigger — message boundary, interleaved non-text envelope, turn end, or
+// the timer firing on no pending text — harmless. Reached from Handle (inside
+// the producer's OnEvent) and from the producer's OnFlush, both on the single
+// Run goroutine; never concurrently (see the struct doc). seq advances once per
+// emitted coalesced delta, NEVER once per buffered TextChunk.
+func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
+	if e.deltaBuf.Len() == 0 {
+		return
+	}
+	// Reconstruct a synthetic TextChunk and reuse emitMapped — no new payload
+	// path. MapEvent reads only Text for the assistant_delta; MessageID is the
+	// coalescing key, not a wire field.
+	e.emitMapped(ctx, e.deltaConvID, turnevent.TextChunk{
+		MessageID: e.deltaMsgID,
+		Text:      e.deltaBuf.String(),
+	})
+	e.seq++
+	e.deltaBuf.Reset()
+	e.deltaMsgID = ""
+	e.deltaConvID = ""
+	e.flushTimer.Stop()
 }
 
 // emitMapped maps a content event to its wire envelope via the pure #627

@@ -317,13 +317,17 @@ func TestInteractiveTurnStream_RotationReSubscribes(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() { _ = prod.Run(ctx); close(runDone) }()
 
-	// Subscription 1: a text event, then the session ends.
+	// Subscription 1: a text event then end-of-turn (which flushes the coalesced
+	// delta #609), then the session ends.
 	ch1 <- jsonlStreamEvent(streamEntry(t, "assistant", "m1", map[string]any{"type": "text", "text": "before"}))
+	ch1 <- endOfTurnEvent()
 	close(ch1)
 
 	// Subscription 2: the blocking send only completes once Run has re-subscribed
-	// (got ch2) and is draining it — proving the rotation re-subscription.
+	// (got ch2) and is draining it — proving the rotation re-subscription. The
+	// end-of-turn flushes the second coalesced delta.
 	ch2 <- jsonlStreamEvent(streamEntry(t, "assistant", "m2", map[string]any{"type": "text", "text": "after"}))
+	ch2 <- endOfTurnEvent()
 	close(ch2)
 
 	cancel()
