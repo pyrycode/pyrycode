@@ -33,6 +33,30 @@ type BackfillSincePayload struct {
 	MaxMessages    int       `json:"max_messages"`
 }
 
+// SessionTransitionPayload is the body of an Envelope whose Type ==
+// TypeSessionTransition (docs/protocol-mobile.md § session_transition).
+// Binary → phone direction; the wire form of a session boundary the phone
+// renders as a ThreadItem.SessionBoundary marker (pyrycode-mobile#336).
+//
+// Reason is a plain string (not a named enum, matching MessagePayload.Role /
+// TurnEndPayload.StopReason — internal/protocol is a stdlib-only leaf data
+// package) over the closed wire set {clear, idle_evict, workspace_change}.
+// OccurredAt is RFC3339Nano per the envelope timestamp rule.
+//
+// WorkspaceCwd is *string with no omitempty (mirroring
+// BackfillSincePayload.ConversationID): it carries the new workspace dir for
+// reason "workspace_change" and renders literal JSON null for "clear" /
+// "idle_evict". This encodes the workspaceCwd-non-null-iff-workspace_change
+// invariant directly on the wire — omitempty would drop the key and lose that
+// distinction.
+type SessionTransitionPayload struct {
+	PreviousSessionID string    `json:"previous_session_id"`
+	NewSessionID      string    `json:"new_session_id"`
+	Reason            string    `json:"reason"`
+	OccurredAt        time.Time `json:"occurred_at"`
+	WorkspaceCwd      *string   `json:"workspace_cwd"` // *string + no omitempty: literal `null` for non-workspace_change reasons; omitempty would drop the key.
+}
+
 // MessageChunkPayload is the body of an Envelope whose Type ==
 // TypeMessageChunk (docs/protocol-mobile.md § message_chunk). Binary →
 // phone direction; streamed during a backfill response. Messages reuses

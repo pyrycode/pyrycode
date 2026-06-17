@@ -139,3 +139,22 @@ const (
 const (
 	TypeResync = "resync" // binary → phone, outbound v2 mid-turn-reconnect resync marker
 )
+
+// Mobile Protocol v2 session-boundary marker. When the daemon's session
+// rotates (a /clear, an idle eviction, or a workspace change), it emits this
+// outbound binary → phone event so the phone can construct a
+// ThreadItem.SessionBoundary marker (pyrycode-mobile#336) instead of inferring
+// boundaries from message fields that do not exist. The multi-field payload
+// lives in SessionTransitionPayload (messaging.go): previous/new session id,
+// the transition reason, when it occurred, and the workspace cwd.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: it is an
+// outbound binary → phone v2 event an old phone must never receive. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+//
+// This ticket (#656) is wire vocabulary only — the producer that emits the
+// marker on session transitions is sibling #657.
+const (
+	TypeSessionTransition = "session_transition" // binary → phone, outbound v2 session-boundary marker
+)

@@ -1,0 +1,1 @@
+{"id":403,"type":"session_transition","ts":"2026-06-09T11:00:00Z","payload":{"previous_session_id":"sess-b","new_session_id":"sess-c","reason":"workspace_change","occurred_at":"2026-06-09T11:00:00Z","workspace_cwd":"/home/user/project"}}
