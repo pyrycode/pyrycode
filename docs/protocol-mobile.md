@@ -431,6 +431,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -540,6 +541,22 @@ ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` i
 | `conversation_id` | string | Conversation that stalled. |
 
 `stall` is the wire form of an internal-only daemon signal (a one-shot stall-onset marker; no ACP equivalent). Like `turn_state`, it is a coarse conversation-level signal and carries no `turn_id`. It is onset-only — there is no clearing event; the phone self-clears on the next turn activity.
+
+#### `session_transition`
+
+Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the six turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `previous_session_id` | string | The session id that ended. Always present (a transition sits between two sessions). |
+| `new_session_id` | string | The session id that began. |
+| `reason` | string | Why the session rotated. Closed set: `clear`, `idle_evict`, `workspace_change`. |
+| `occurred_at` | string | When the transition occurred (RFC3339Nano). |
+| `workspace_cwd` | string \| null | The new workspace directory — non-null **iff** `reason == workspace_change`; literal `null` for `clear` and `idle_evict`. |
+
+**Invariant:** `workspace_cwd` is non-null **if and only if** `reason` is `workspace_change`. The field is always present on the wire (literal `null`, never absent) so the invariant is decodable directly.
+
+The **producer** is **#657**. Until a server-side workspace-change source exists, the producer emits only `clear` and `idle_evict` — yet the type admits `workspace_change` so the mobile decoder stays exhaustive and the invariant above is expressible. This ticket (#656) defines the wire shape only.
 
 #### Reconnect replay & resync (consumer, #647)
 

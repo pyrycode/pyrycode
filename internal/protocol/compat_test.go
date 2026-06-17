@@ -50,6 +50,9 @@ func TestIsV1Compatible(t *testing.T) {
 		// the v2-only reconnect resync marker is binary → phone; an old phone
 		// must never receive it, so IsV1Compatible must reject it.
 		{"resync-rejected", TypeResync, false, ErrUnknownType},
+		// the v2-only session-boundary marker is binary → phone; an old phone
+		// must never receive it, so IsV1Compatible must reject it.
+		{"session_transition-rejected", TypeSessionTransition, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,16 +98,17 @@ func TestV1TypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 // must not, so the partition is the architectural seam between v1 traffic
 // and v2 traffic.
 var v2OnlyTypes = map[string]bool{
-	TypeRekeyRequest:    true,
-	TypeTurnState:       true,
-	TypeAssistantDelta:  true,
-	TypeToolUse:         true,
-	TypeToolResult:      true,
-	TypeTurnEnd:         true,
-	TypeStall:           true,
-	TypeRequestSnapshot: true,
-	TypeScreenSnapshot:  true,
-	TypeResync:          true,
+	TypeRekeyRequest:      true,
+	TypeTurnState:         true,
+	TypeAssistantDelta:    true,
+	TypeToolUse:           true,
+	TypeToolResult:        true,
+	TypeTurnEnd:           true,
+	TypeStall:             true,
+	TypeRequestSnapshot:   true,
+	TypeScreenSnapshot:    true,
+	TypeResync:            true,
+	TypeSessionTransition: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -133,6 +137,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestSnapshot, TypeScreenSnapshot,
 		// v2 reconnect resync marker.
 		TypeResync,
+		// v2 session-boundary marker.
+		TypeSessionTransition,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]

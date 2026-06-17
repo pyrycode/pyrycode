@@ -117,6 +117,92 @@ func TestBackfillSincePayload_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionTransitionPayload_RoundTrip(t *testing.T) {
+	cwd := "/home/user/project"
+	cases := []struct {
+		name         string
+		fixture      string
+		wantPrevID   string
+		wantNewID    string
+		wantReason   string
+		wantOccurred time.Time
+		wantCwd      *string // nil ⇒ expect WorkspaceCwd == nil (literal JSON null)
+	}{
+		{
+			name:         "cwd-unset",
+			fixture:      "session_transition.json",
+			wantPrevID:   "sess-a",
+			wantNewID:    "sess-b",
+			wantReason:   "idle_evict",
+			wantOccurred: time.Date(2026, 6, 9, 10, 33, 14, 500000000, time.UTC),
+			wantCwd:      nil,
+		},
+		{
+			name:         "cwd-set",
+			fixture:      "session_transition_workspace.json",
+			wantPrevID:   "sess-b",
+			wantNewID:    "sess-c",
+			wantReason:   "workspace_change",
+			wantOccurred: time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC),
+			wantCwd:      &cwd,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := readFixture(t, tc.fixture)
+
+			var env Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if env.Type != TypeSessionTransition {
+				t.Errorf("Type: got %q, want %q", env.Type, TypeSessionTransition)
+			}
+
+			var payload SessionTransitionPayload
+			if err := json.Unmarshal(env.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.PreviousSessionID != tc.wantPrevID {
+				t.Errorf("PreviousSessionID: got %q, want %q", payload.PreviousSessionID, tc.wantPrevID)
+			}
+			if payload.NewSessionID != tc.wantNewID {
+				t.Errorf("NewSessionID: got %q, want %q", payload.NewSessionID, tc.wantNewID)
+			}
+			if payload.Reason != tc.wantReason {
+				t.Errorf("Reason: got %q, want %q", payload.Reason, tc.wantReason)
+			}
+			// .Equal (never == / reflect.DeepEqual): RFC3339Nano strips the
+			// monotonic clock on marshal, so the wall clocks compare equal but
+			// the structs do not.
+			if !payload.OccurredAt.Equal(tc.wantOccurred) {
+				t.Errorf("OccurredAt: got %v, want %v", payload.OccurredAt, tc.wantOccurred)
+			}
+			switch {
+			case tc.wantCwd == nil && payload.WorkspaceCwd != nil:
+				t.Errorf("WorkspaceCwd: got %q, want nil (literal null for non-workspace_change)", *payload.WorkspaceCwd)
+			case tc.wantCwd != nil && payload.WorkspaceCwd == nil:
+				t.Errorf("WorkspaceCwd: got nil, want %q", *tc.wantCwd)
+			case tc.wantCwd != nil && *payload.WorkspaceCwd != *tc.wantCwd:
+				t.Errorf("WorkspaceCwd: got %q, want %q", *payload.WorkspaceCwd, *tc.wantCwd)
+			}
+
+			out, err := json.Marshal(env)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			// Byte-equal check is the regression detector for the
+			// *string-without-omitempty design: if a future contributor adds
+			// omitempty, the "workspace_cwd":null key disappears from the
+			// cwd-unset output and this fails (mirrors backfill_since's guard).
+			if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+				t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+			}
+		})
+	}
+}
+
 func TestMessageChunkPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "message_chunk.json")
 
