@@ -275,11 +275,24 @@ func (s *Session) Run(ctx context.Context) error {
 	for {
 		switch s.snapshotState() {
 		case stateActive:
-			if err := s.runActive(ctx); err != nil {
+			reason, err := s.runActive(ctx)
+			if err != nil {
 				return err
 			}
 			if err := s.transitionTo(stateEvicted); err != nil {
 				return fmt.Errorf("persist evicted: %w", err)
+			}
+			// Fire the eviction signal AFTER transitionTo (post-persist, no
+			// lcMu held — the leaf, off-lock callback point). reason == ""
+			// is the defensive spontaneous-exit path (<-runErr): the wire has
+			// no "crashed" reason, so it signals nothing. s.pool != nil
+			// mirrors transitionTo's guard for test-constructed sessions.
+			if reason != "" && s.pool != nil {
+				s.pool.notifyTransition(SessionTransition{
+					PreviousID: s.id,
+					Reason:     reason,
+					OccurredAt: time.Now().UTC(),
+				})
 			}
 		case stateEvicted:
 			if err := s.runEvicted(ctx); err != nil {
@@ -301,14 +314,18 @@ func (s *Session) snapshotState() lifecycleState {
 
 // runActive supervises the session while it is active: spawns the supervisor
 // on an inner ctx, arms the idle timer, and returns when one of:
-//   - outer ctx cancels → returns ctx.Err() (terminal; outer Run propagates)
-//   - supervisor exits spontaneously → returns nil (loop will evict)
-//   - idle timer fires AND attached==0 → returns nil (loop will evict)
+//   - outer ctx cancels → returns ("", ctx.Err()) (terminal; outer Run propagates)
+//   - supervisor exits spontaneously → returns ("", nil) (loop will evict; no
+//     signal — the wire has no "crashed" reason)
+//   - idle timer fires AND attached==0 → returns (ReasonEviction, nil)
+//   - cap-policy evict signal → returns (ReasonEviction, nil)
 //
-// While attached>0, idle eviction is deferred (poll-with-grace: re-arm on
-// fire — eviction may overshoot the configured timeout by up to one window).
-// A zero idleTimeout disables the timer entirely.
-func (s *Session) runActive(ctx context.Context) error {
+// The first (non-empty) return value is the transition reason Run fires to the
+// pool's observer once the eviction is persisted; an empty reason fires
+// nothing. While attached>0, idle eviction is deferred (poll-with-grace:
+// re-arm on fire — eviction may overshoot the configured timeout by up to one
+// window). A zero idleTimeout disables the timer entirely.
+func (s *Session) runActive(ctx context.Context) (TransitionReason, error) {
 	subCtx, cancelSup := context.WithCancel(ctx)
 	defer cancelSup()
 
@@ -331,16 +348,18 @@ func (s *Session) runActive(ctx context.Context) error {
 		case <-ctx.Done():
 			cancelSup()
 			drainSup()
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-runErr:
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return "", ctx.Err()
 			}
 			// Supervisor exited on its own. Today this is largely
 			// defensive — supervisor.Run only returns on ctx cancel —
 			// but treating it as an evict trigger keeps the lifecycle
-			// loop consistent if that contract ever loosens.
-			return nil
+			// loop consistent if that contract ever loosens. No reason
+			// is surfaced: the wire has no "crashed" transition, so Run
+			// fires no signal on this path.
+			return "", nil
 		case <-timerCh:
 			s.lcMu.Lock()
 			attached := s.attached
@@ -362,12 +381,12 @@ func (s *Session) runActive(ctx context.Context) error {
 				"bootstrap", s.bootstrap)
 			cancelSup()
 			drainSup()
-			return nil
+			return ReasonEviction, nil
 		case <-s.evictCh:
 			// Cap-policy eviction: forced, regardless of attached count.
 			cancelSup()
 			drainSup()
-			return nil
+			return ReasonEviction, nil
 		}
 	}
 }

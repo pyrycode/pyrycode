@@ -212,6 +212,13 @@ type Pool struct {
 	// the same fallback New() applies to the bootstrap when the per-session
 	// IdleTimeout is zero. Read-only after New.
 	idleTimeoutDefault time.Duration
+
+	// transitionObserver is the optional, injectable signal surfaced on
+	// /clear rotations and evictions. Set once via SetTransitionObserver
+	// BEFORE Pool.Run; read-only thereafter, so the lifecycle + watcher
+	// goroutines (both spawned by Run) read it lock-free via Run's
+	// goroutine-start happens-before. nil disables it. See transition.go.
+	transitionObserver TransitionObserver
 }
 
 // SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. Carries
@@ -808,7 +815,7 @@ func (p *Pool) Run(ctx context.Context) error {
 				return p.IsAllocated(SessionID(id))
 			},
 			OnRotate: func(oldID, newID string) error {
-				return p.RotateID(SessionID(oldID), SessionID(newID))
+				return p.onRotate(SessionID(oldID), SessionID(newID))
 			},
 		})
 		if err != nil {
