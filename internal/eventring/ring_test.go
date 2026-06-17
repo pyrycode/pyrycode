@@ -169,6 +169,52 @@ func TestAfter_UnknownConversation(t *testing.T) {
 	}
 }
 
+// #663: NewestID surfaces the newest retained id (nextID-1) so replayMissed can
+// clamp the caught-up watermark to min(afterID, NewestID) — an unknown
+// conversation is 0, advancing once per Append independent of retention.
+func TestNewestID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unknown conversation is zero", func(t *testing.T) {
+		t.Parallel()
+		r := New(MaxEventsPerConversation)
+		if got := r.NewestID("never-seen"); got != 0 {
+			t.Fatalf("NewestID(never-seen) = %d, want 0", got)
+		}
+	})
+
+	t.Run("tracks the last assigned id", func(t *testing.T) {
+		t.Parallel()
+		r := New(MaxEventsPerConversation)
+		appendControl(t, r, "A", 5) // ids 1..5
+		if got := r.NewestID("A"); got != 5 {
+			t.Fatalf("NewestID(A) = %d, want 5", got)
+		}
+	})
+
+	t.Run("advances past eviction (the clamp's load-bearing property)", func(t *testing.T) {
+		t.Parallel()
+		r := New(2)
+		appendControl(t, r, "A", 5) // cap 2 → only ids 4,5 retained, counter at 5
+		if got := r.NewestID("A"); got != 5 {
+			t.Fatalf("NewestID(A) = %d, want 5 (counter advances independent of retention)", got)
+		}
+	})
+
+	t.Run("conversations are independent", func(t *testing.T) {
+		t.Parallel()
+		r := New(MaxEventsPerConversation)
+		appendControl(t, r, "A", 3)
+		appendControl(t, r, "B", 7)
+		if got := r.NewestID("A"); got != 3 {
+			t.Errorf("NewestID(A) = %d, want 3", got)
+		}
+		if got := r.NewestID("B"); got != 7 {
+			t.Errorf("NewestID(B) = %d, want 7", got)
+		}
+	})
+}
+
 // AC-3: when the bound is reached, the oldest assistant_delta is evicted first;
 // every control event is retained.
 func TestAppend_EvictsDeltasFirst(t *testing.T) {

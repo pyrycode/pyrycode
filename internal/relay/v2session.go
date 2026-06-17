@@ -1468,6 +1468,12 @@ func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, after
 		return // no active conversation; nothing to catch up on.
 	}
 
+	// Read the newest retained id BEFORE classifying with After: any event the
+	// emitter appends concurrently then carries an id > newest and reaches the
+	// live stream instead of the clamp below (staleness can only lower the
+	// watermark — deliver more — never raise it, the safe direction for the
+	// never-a-silent-gap guarantee).
+	newest := ring.NewestID(convID)
 	events, gap := ring.After(convID, afterID)
 	if gap {
 		// The requested position aged out of the bounded ring (AC-4): emit one
@@ -1477,11 +1483,14 @@ func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, after
 		m.emitResync(ctx, s, convID)
 		return
 	}
-	// Set the watermark first so a late in-flight live push <= afterID is
-	// dropped even in the caught-up case (no replay frames). During the loop it
-	// trails one event behind the frame being forwarded, so forwardEnvelope's
-	// guard never self-drops a replay envelope.
-	s.replayThrough = afterID
+	// Clamp the watermark to server-known reality (#663). afterID is untrusted:
+	// a stale cross-/clear id or a hostile 2^64-1 would otherwise set the
+	// watermark above this conversation's id space and silently mute every live
+	// frame at or below it. min preserves legitimate same-conversation dedup
+	// (afterID == newest in the caught-up case there); during the loop the
+	// watermark trails one event behind the frame being forwarded, so
+	// forwardEnvelope's guard never self-drops a replay envelope.
+	s.replayThrough = min(afterID, newest)
 	for _, ev := range events {
 		id := ev.ID // per-iteration local; never &ev.ID of the range variable.
 		replay := protocol.Envelope{

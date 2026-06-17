@@ -181,3 +181,27 @@ func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool) {
 	}
 	return nil, false // unreachable: afterID < latestID guarantees a match
 }
+
+// NewestID returns the newest durable event id retained for convID — the id the
+// most recent Append assigned (c.nextID-1, the same boundary After uses for its
+// caught-up decision) — or 0 if the conversation is unknown / has had no events.
+// Because the newest event is never evicted (eviction takes the oldest first)
+// and nextID advances on every Append independent of retention, this equals the
+// highest retained event's id.
+//
+// It is the #647-MUST-FIX (#663) caught-up-watermark clamp source: replayMissed
+// bounds the per-conn dedup watermark to min(afterID, NewestID), so an untrusted
+// remote last_event_id beyond this conversation's id space can never set the
+// watermark above a real id and silently mute the live stream. Locked by the
+// ring's existing mutex — same safe-off-the-emitter-goroutine guarantee as
+// After.
+func (r *Ring) NewestID(convID string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	c := r.convs[convID]
+	if c == nil {
+		return 0
+	}
+	return c.nextID - 1
+}
