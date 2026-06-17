@@ -24,6 +24,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 1.1+:** `Request.SessionID` on the wire (#71 — `sessions.new` verb consumes `Pool.Create`), per-session log lines, channel-driven auto-mint.
 - **Phase 3 (#243):** `Config.ConversationsRegistry *conversations.Registry` + `Config.ConversationsRegistryPath string` plumbing fields; matching unexported `Pool.convReg` / `Pool.convRegistryPath`. When `convReg` is non-nil, `Pool.Run` registers a sibling goroutine to the rotation watcher inside its errgroup: `g.Go(func() error { return conversations.RunSweepLoop(gctx, p.convReg, p.convRegistryPath, p.convSweepInterval, p.log) })`. nil-registry disables the goroutine — preserves test default. See [conversations-auto-archive.md § Daemon wiring (#243)](conversations-auto-archive.md).
 - **Phase 3 (#262):** `Config.SweepInterval time.Duration` (zero = use `conversations.SweepInterval` of one hour) + matching unexported `Pool.convSweepInterval` resolved in `New` with the `<= 0` fallback baked in. Replaces the prior package-level `var convSweepInterval` test seam — one seam, not two. Surfaced via the `cmd/pyry` `-pyry-conv-sweep-interval` flag (visible, annotated `(testing; 0 = production default of 1h)`) so out-of-process e2e tests downstream of #251 can drive the sweep loop at ~100ms instead of waiting one hour. Production callers leave the field zero; in-package tests set `pool.convSweepInterval = …` directly after construction (mirrors the existing `pool.convReg` / `pool.convRegistryPath` pattern). See [conversations-auto-archive.md § Single seam: `Config.SweepInterval` (#262)](conversations-auto-archive.md).
+- **Phase 2 mobile (#659):** `Pool.SetTransitionObserver(TransitionObserver)` — an injectable, in-process signal fired on `/clear` rotations and evictions (idle + cap). New types `TransitionReason` / `SessionTransition` / `TransitionObserver` in `transition.go`; new unexported field `Pool.transitionObserver`. The `cmd/pyry` consumer (#657) maps it onto the v2 `session_transition` wire event without `internal/sessions` importing `internal/protocol` / `internal/relay`. See *Transition observer* below and [codebase/659.md](../codebase/659.md).
 
 ## Package Layout
 
@@ -97,6 +98,7 @@ func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (Ses
 func (p *Pool) List() []SessionInfo
 func (p *Pool) Rename(id SessionID, newLabel string) error
 func (p *Pool) ResolveID(arg string) (SessionID, error)
+func (p *Pool) SetTransitionObserver(obs TransitionObserver) // #659; call before Run
 ```
 
 `New` generates a `SessionID`, constructs the underlying `*supervisor.Supervisor` from `cfg.Bootstrap`, and installs the result as the single bootstrap entry. Both `NewID` failure and `supervisor.New` failure are wrapped (`sessions: generate bootstrap id: %w`, `sessions: bootstrap supervisor: %w`) and treated as fatal-at-startup.
@@ -470,6 +472,83 @@ The take-path's silent label drop is documented in the docstring. Today's only c
 **Lock order — unchanged.** `Pool.mu (write) → Session.lcMu` (briefly inside `saveLocked`) → release → `Pool.Activate` (`capMu → Pool.mu (R) → Session.lcMu`). The `g.Go`-under-`p.mu` edge introduces no new ordering: `errgroup.Group.Go` takes its own internal mutex and the spawned goroutine's parking on `activateCh` does not touch `p.mu`.
 
 **Tests** (in `internal/sessions/pool_get_or_create_test.go`): `TestValidID` (table — empty/short/long/wrong-dash/non-hex/v3/non-RFC-4122-variant + canonical-NewID-output); `TestPool_GetOrCreate_Take_ReturnsExisting` (existing label preserved on take); `TestPool_GetOrCreate_Create_Persists` (caller's id written verbatim, claude spawned); `TestPool_GetOrCreate_PersistsPostDetach` (AC #1 — registry survives evict; this test surfaced ticket #169's persist-ordering race against `-race`); `TestPool_GetOrCreate_InvalidID` (`errors.Is(err, ErrInvalidSessionID)` for empty/malformed/v3); `TestPool_GetOrCreate_PoolNotRunning` (`ErrPoolNotRunning`, registry rolled back); `TestPool_GetOrCreate_ConcurrentSameID` (AC #4 — N=8 goroutines racing on one id, exactly one registry entry, label is one of the inputs, `-race`-clean); `TestPool_GetOrCreate_HonorsCap` (cap=1; bootstrap evicted via `Pool.Activate`'s cap-aware path).
+
+### Transition observer (#659)
+
+The injectable, in-process signal a `cmd/pyry`-side consumer (#657) wires to map
+session boundaries onto the v2 `session_transition` wire event — **without**
+`internal/sessions` importing `internal/protocol` / `internal/relay` (the import
+cycle that forces the producer to the `cmd/pyry` boundary). All the machinery
+lives in `transition.go`.
+
+```go
+type TransitionReason string
+
+const (
+    ReasonClear    TransitionReason = "clear"    // /clear rotation: id changed in place
+    ReasonEviction TransitionReason = "eviction" // idle OR cap; no successor id
+)
+
+type SessionTransition struct {
+    PreviousID SessionID
+    NewID      SessionID // empty for eviction (no successor)
+    Reason     TransitionReason
+    OccurredAt time.Time // stamped by internal/sessions at fire
+}
+
+type TransitionObserver func(SessionTransition)
+
+func (p *Pool) SetTransitionObserver(obs TransitionObserver)
+```
+
+**Package-local reason vocabulary, not the wire's.** `TransitionReason` is a
+`string` type owned by this package; #657 maps it onto the wire
+`{clear, idle_evict, workspace_change}`. Mirrors the standing "refusal-to-wire-code
+mapping is the consumer's job, not the primitive's" convention — the cycle-free
+boundary stays at `internal/sessions`.
+
+**Func type, not interface.** Matches the package's closure-injection precedent
+(`rotation.Config.OnRotate`, `supervisor.Config.ValidateConversation`).
+
+**Post-construction setter, set-once-before-`Run`.** The pool is built via
+`sessions.New` at `cmd/pyry/main.go:460`; the consumer/emitter (#657) comes up
+later (`startRelay`), so the observer cannot be a `Config` field. `SetTransitionObserver`
+writes `Pool.transitionObserver`; the field is then **read-only**, read lock-free
+by the lifecycle + watcher goroutines (both spawned by `Run`) via `Run`'s
+goroutine-start happens-before edge — the same "read-only after New" convention as
+`convReg` / `activeCap`. A set-after-`Run` call is a programming error the race
+detector flags. `nil` (the zero value) disables signalling.
+
+**Two fire sites, both off-lock and post-persist** (the `#41`/`#155`/`#169`
+lock-order + pre-persist-exposure lessons):
+
+- **Clear** — `Pool.onRotate(old, new)` (the `Pool.Run` `OnRotate` closure routes
+  through it instead of calling `RotateID` directly): on `RotateID` success, fire
+  `ReasonClear` with old/new ids; the `RotateID` error is returned verbatim and a
+  failed/no-op rotation fires nothing. Fires after `Pool.mu` is released.
+  Startup reconciliation (`reconcile.go`) calls `RotateID` **directly**, so no
+  spurious clear fires at boot before an observer is wired — the only production
+  clear path is the live fsnotify watcher.
+- **Eviction** — `Session.runActive` now returns `(TransitionReason, error)`;
+  `Session.Run` fires `ReasonEviction` (empty `NewID`) **after** `transitionTo(stateEvicted)`
+  returns (post-persist, no `lcMu` held), behind a `reason != "" && s.pool != nil`
+  guard. The idle (`<-timerCh`, `attached==0`) and cap (`<-s.evictCh`) paths both
+  return `ReasonEviction`; the defensive spontaneous-exit (`<-runErr`) and
+  shutdown (`<-ctx.Done()`) paths return `""` / `ctx.Err()` and fire nothing — the
+  wire has no "crashed"/shutdown reason.
+
+`Pool.notifyTransition` (unexported) is the nil-guarded leaf callback both sites
+call; it takes no lock and the observer runs with no `Pool.mu`/`Session.lcMu`/`capMu`
+held. **Idle and cap collapse to one `ReasonEviction`** (evidence-based — #656's
+wire has no separate cap reason); the `string` type leaves room for a future
+`ReasonCapEviction` with zero signature churn.
+
+**Synchronous, no new goroutine.** Fires run on the goroutine that already owns
+the transition (lifecycle for eviction, rotation-watcher for clear) — a per-fire
+goroutine would add goroutines to paths that deliberately have none and could
+reorder signals. The non-blocking burden is therefore the observer's: the
+`TransitionObserver` contract documents "MUST NOT block — hand off to a buffered
+channel"; #657 owns the non-blocking impl. See [codebase/659.md](../codebase/659.md).
 
 ## Concurrency
 
