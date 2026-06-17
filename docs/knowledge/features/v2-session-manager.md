@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; **daemon code carries an unresolved code-review MUST FIX, not yet merged** — see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; the caught-up watermark is clamped to the conversation's newest retained id so an out-of-range / hostile `last_event_id` cannot suppress the live stream — #663, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -439,14 +439,13 @@ func negotiateCapabilities(advertised []string) []string {
 
 ### Reconnect replay (#647) — `hello.last_event_id` → ring replay / resync
 
-> ⚠️ **Unresolved code-review MUST FIX — daemon behaviour is provisional.** PR
-> #651 is not merged; the caught-up branch of `replayMissed` sets the dedup
-> watermark from the *untrusted* `last_event_id`, which can silently suppress the
-> live stream after a `/clear`-rotated reconnect or a hostile-large
-> `last_event_id`. The wire surface (`LastEventID`, `TypeResync`) is stable; the
-> replay/resync *behaviour* below should be treated as the intended contract, not
-> a shipped guarantee, until the fix lands. Full analysis + fix direction:
-> [codebase/647.md](../codebase/647.md#️-known-issue--unresolved-code-review-must-fix-do-not-merge-as-is).
+> **Note (#663).** #647 shipped (PR #651, merged 2026-06-08) with a code-review
+> MUST FIX outstanding: the caught-up branch of `replayMissed` set the dedup
+> watermark from the *untrusted* `last_event_id`, silently suppressing the live
+> stream after a `/clear`-rotated reconnect or a hostile-large id.
+> [#663](../codebase/663.md) resolved it — the caught-up watermark is now clamped
+> to `min(afterID, NewestID(convID))`, so the behaviour below is the shipped
+> guarantee. (Defect history: [codebase/647.md](../codebase/647.md) § Known issue.)
 
 The inbound **consumer** of mid-turn replay (ADR 025 § Backpressure / replay). It
 closes the loop opened by the [#646](../codebase/646.md) event ring (the replay
@@ -478,8 +477,9 @@ or emits a `resync` marker if the position aged out of the bounded ring.
     the fresh session keys. Because `Run` is single-threaded, the whole replay
     completes before `Run` services the live `drainCh` — the structural guarantee
     behind "before the live stream resumes".
-  - **caught-up** `(nil, false)` → no frames. *(This branch also sets the
-    watermark from the untrusted `afterID` — the MUST FIX above.)*
+  - **caught-up** `(nil, false)` → no replay frames; the watermark is clamped to
+    `min(afterID, NewestID(convID))` (#663, read before `After`) so an
+    out-of-range / hostile `last_event_id` cannot mute the subsequent live stream.
   - **gap** `(nil, true)` → `emitResync` forwards one `resync` marker
     (`TypeResync`, inline `{conversation_id}` payload, no `EventID`), never a
     partial gap-ful replay.
@@ -492,8 +492,10 @@ or emits a `resync` marker if the position aged out of the bounded ring.
   resync) are never dropped; conns that never advertised `last_event_id` keep
   `replayThrough == 0` and live ids are ≥ 1, so the guard is inert for them. The
   watermark is "different fabric" from the phone's own `event_id` dedup (defence
-  in depth). **The defect is that the caught-up branch sources this watermark
-  from remote input rather than from the ring's newest retained id.**
+  in depth). The watermark is only ever set to a *real* ring id: the replay loop
+  advances it per forwarded frame, and the caught-up branch clamps it to
+  `min(afterID, NewestID(convID))` (#663) — a remote `last_event_id` beyond the
+  conversation's id space can never raise it above the newest retained id.
 - **Untrusted input.** `last_event_id` is range/shape-validated by the `*uint64`
   decode (a non-integer fails `HelloClientPayload` decode → existing 4421 close),
   bounded by `MaxEventsPerConversation`, and scoped to the daemon-resolved
@@ -601,7 +603,7 @@ Capability negotiation (#626) — `buildHelloEarlyDataCaps` / `driveToOpenCaps` 
 
 The pre-existing `TestV2Session_ActiveConnIDs_*` suite (`OpenOnly`, `TornDownSessionAbsent`, `ConcurrentWithDispatch_RaceClean`, `EmptyManager`, `CtxCancelled_ReturnsNil`) passes **unchanged** — the `[]string` projection preserves #588's contract (AC#5).
 
-Reconnect replay (#647) — `internal/relay/v2session_replay_test.go` (new): each drives a real Noise handshake whose hello carries `last_event_id` against a manager whose `SetReplaySource` was given a hand-populated `eventring.Ring` + a stub cursor, decrypts the forwarded frames, and asserts. `TestV2Session_Reconnect_ReplaysMissedTail` (3,4,5 ascending before any live frame), `…_CaughtUp_NoReplay`, `…_Gap_EmitsResync` (one `resync` with `conversation_id`), `…_AbsentLastEventID_NoReplay`, `…_ScopedToCursorConversation` (cursor→B, ring holds A → zero A events, AC-5), `…_ReplayDisabled_NoReplay` (nil ring), `…_OtherConnsUnaffected`, `…_ForwardEnvelope_ReplayWatermarkGuard` (drops `EventID ≤ replayThrough`, forwards above, never drops `EventID == nil`). **Coverage gap:** no test asserts the live stream still flows after a caught-up/out-of-range `last_event_id` — exactly the path the unresolved MUST FIX breaks (see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync) and [codebase/647.md](../codebase/647.md)).
+Reconnect replay (#647) — `internal/relay/v2session_replay_test.go` (new): each drives a real Noise handshake whose hello carries `last_event_id` against a manager whose `SetReplaySource` was given a hand-populated `eventring.Ring` + a stub cursor, decrypts the forwarded frames, and asserts. `TestV2Session_Reconnect_ReplaysMissedTail` (3,4,5 ascending before any live frame), `…_CaughtUp_NoReplay`, `…_Gap_EmitsResync` (one `resync` with `conversation_id`), `…_AbsentLastEventID_NoReplay`, `…_ScopedToCursorConversation` (cursor→B, ring holds A → zero A events, AC-5), `…_ReplayDisabled_NoReplay` (nil ring), `…_OtherConnsUnaffected`, `…_ForwardEnvelope_ReplayWatermarkGuard` (drops `EventID ≤ replayThrough`, forwards above, never drops `EventID == nil`). The #647 caught-up/out-of-range tests asserted only *no replay frames* and missed that the live stream was muted afterward; **#663 closes that gap** — `…_OutOfRangeLastEventID_LiveStreamDelivered` (incl. `math.MaxUint64`), `…_ClearRotation_LiveStreamDelivered`, and `…_SameConversation_DedupPreserved` push a live frame after the caught-up handshake and assert **delivery** (see [codebase/663.md](../codebase/663.md)).
 
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)
 
@@ -663,7 +665,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`codebase/589.md`](../codebase/589.md) — the v2 assistant-turn bridge: the production consumer of `Push` + `ActiveConnIDs`, fanning finished assistant turns to every open v2 phone.
 - [`codebase/618.md`](../codebase/618.md) — the inbound screen-snapshot handler (`security-sensitive`); `ScreenSnapshotter` interface, the two optional `V2SessionConfig` seams, the `dispatchAppFrame` snapshot arm, `handleRequestSnapshot` + `snapshotReplyError`, and the `(*supervisor.Supervisor).ScreenSnapshot` render seam. Reuses `forwardEnvelope` (renamed from `handlePush` in #610), never the public `Push`.
 - [`codebase/617.md`](../codebase/617.md) — the screen-snapshot wire vocabulary (`request_snapshot` / `screen_snapshot` payloads + `Type` constants) #618 consumes.
-- [`codebase/647.md`](../codebase/647.md) — the inbound mid-turn reconnect-replay consumer (`security-sensitive`); `SetReplaySource` (late-bound ring), `replayMissed`/`emitResync`, the `handleNoiseInit` hook, the `replayThrough` watermark + `forwardEnvelope` guard, and `HelloClientPayload.LastEventID` / `TypeResync`. **Carries an unresolved code-review MUST FIX (caught-up watermark sourced from untrusted input); not yet merged.** Consumes the [`codebase/646.md`](../codebase/646.md) ring + [`codebase/649.md`](../codebase/649.md) outbound `event_id`.
+- [`codebase/647.md`](../codebase/647.md) — the inbound mid-turn reconnect-replay consumer (`security-sensitive`); `SetReplaySource` (late-bound ring), `replayMissed`/`emitResync`, the `handleNoiseInit` hook, the `replayThrough` watermark + `forwardEnvelope` guard, and `HelloClientPayload.LastEventID` / `TypeResync`. Shipped with a caught-up-watermark MUST FIX outstanding, resolved by [`codebase/663.md`](../codebase/663.md) (clamp to `min(afterID, NewestID(convID))`). Consumes the [`codebase/646.md`](../codebase/646.md) ring + [`codebase/649.md`](../codebase/649.md) outbound `event_id`.
 - [`codebase/626.md`](../codebase/626.md) — capability negotiation on the handshake (`security-sensitive`); `supportedV2Capabilities` + `negotiateCapabilities`, the `hello_ack` echo, the `s.interactive` flag, and the capability-aware `ActiveConns`/`ActiveConn` enumeration (`ActiveConnIDs` becomes a projection). The daemon-side trust decision [#607](../codebase/607.md) deferred.
 - [`codebase/607.md`](../codebase/607.md) — the v2 interactive wire vocabulary (`CapabilityInteractive`, the `Capabilities []string` fields) that #626 enforces.
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Safe degradation (the parser-independent snapshot floor) and § Security model (line 141: read-only screen viewing outside the per-device permission gate).

@@ -66,7 +66,17 @@ type Ring struct { /* sync.Mutex + map[convID]*convRing */ }
 func New(maxPerConversation int) *Ring                                  // panics if < 1
 func (r *Ring) Append(convID, typ string, payload json.RawMessage, ts time.Time) uint64
 func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool)
+func (r *Ring) NewestID(convID string) uint64                           // nextID-1, or 0 if unknown (#663)
 ```
+
+`NewestID` ([#663]) returns `nextID - 1` (the highest id ever assigned) for a known
+conversation, `0` for an unknown one — mutex-guarded like `After`. It surfaces
+`After`'s internal `latestID` caught-up boundary so the #647 reconnect consumer can
+**clamp** its per-conn dedup watermark to `min(afterID, NewestID(convID))`, ruling
+out an untrusted `last_event_id` beyond the conversation's id space silently muting
+the live stream (see [codebase/663.md](../codebase/663.md)). Sound because the
+newest event is never evicted (below) and `nextID` advances independent of
+retention, so `nextID - 1` is always the highest *retained* id.
 
 `Ring` deliberately does **not** store `protocol.Envelope`: the envelope's `ID`
 is the per-conn `nextID`, meaningless for replay across connections. It stores the
@@ -199,9 +209,10 @@ within `package main`).
 
 ```
 internal/eventring/
-├── ring.go        Event, Ring, convRing; MaxEventsPerConversation; New / Append / After; evictOldest
+├── ring.go        Event, Ring, convRing; MaxEventsPerConversation; New / Append / After / NewestID; evictOldest
 └── ring_test.go   id assignment, replay/caught-up/gap, isolation, unknown-conv,
-                   delta-first + all-control eviction, no-fabricated-gap, cap-1, New(<1) panic, -race
+                   delta-first + all-control eviction, no-fabricated-gap, cap-1, New(<1) panic,
+                   NewestID (unknown→0, last-assigned, advances-past-eviction, conv-isolation; #663), -race
 ```
 
 ~130 LOC of production code (one new package), plus the ~+10 LOC emitter edit
@@ -226,3 +237,8 @@ integration tests live in `cmd/pyry/interactive_turn_v2_test.go` (additions only
 - **Consumer (deferred — none wired in #646):** #647 — per-conn `last_event_id`
   tracking + on-reconnect replay/resync; the `security-sensitive` slice that reads
   `After`.
+- [codebase/663.md](../codebase/663.md) — adds `NewestID` and consumes it to clamp
+  the #647 caught-up watermark to `min(afterID, NewestID)`, closing a trust-boundary
+  silent-suppression defect.
+
+[#663]: https://github.com/pyrycode/pyrycode/issues/663
