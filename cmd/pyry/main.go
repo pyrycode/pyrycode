@@ -486,7 +486,7 @@ func runSupervisor(args []string) error {
 	// `pyry pair preflight` first to confirm no v1 pairings will break.
 	v2Enabled := os.Getenv("PYRY_MOBILE_V2") == "1"
 	bootstrap := pool.Default()
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir)
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, pool)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}

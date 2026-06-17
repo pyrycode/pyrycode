@@ -96,6 +96,7 @@ func startRelay(
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
 	claudeSessionsDir string,
+	transitions transitionObserverSink,
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -139,7 +140,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess, sup, bridge, claudeSessionsDir)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess, sup, bridge, claudeSessionsDir, transitions)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -277,6 +278,7 @@ func startRelayV2(
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
 	claudeSessionsDir string,
+	transitions transitionObserverSink,
 ) (drain func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
 	if err != nil {
@@ -343,6 +345,17 @@ func startRelayV2(
 			"event", "interactive_turn_stream.no_sessions_dir")
 	}
 
+	// Wire the session-transition producer (#657): install #659's pool-side
+	// observer and fan a session_transition envelope to capability-gated
+	// interactive phones on each /clear rotation or idle/cap eviction. Unlike the
+	// coarse bridge and the structured turn stream above, this has NO PTY
+	// dependency — it consumes pool transitions, which fire in any mode — so it is
+	// wired unconditionally whenever the v2 manager exists (no bridge != nil
+	// gate). The capability filter (ActiveConns → Interactive) is the real
+	// delivery gate: with no interactive phone connected, the fan-out reaches
+	// nobody.
+	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr, logger)
+
 	return func() {
 		// Stop both producers before waiting on the manager so no fan-out races a
 		// winding-down manager. Each cleanup waits for its goroutine on ctx-cancel
@@ -354,6 +367,7 @@ func startRelayV2(
 		if streamCleanup != nil {
 			streamCleanup()
 		}
+		streamTransitionsCleanup()
 		<-mgrDone
 	}, nil
 }
