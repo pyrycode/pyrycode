@@ -9,9 +9,9 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647)
+├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
-├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272)
+├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
 ├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
@@ -20,7 +20,7 @@ internal/protocol/
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsV1Compatible + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
-├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload
+├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload; + SessionTransitionPayload round-trip (#656)
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
 ├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
@@ -102,6 +102,27 @@ type BackfillDonePayload struct {
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to `RegisterPushTokenPayload`. Required-field validation, role-set enforcement, ID monotonicity, clock-skew bounds — all dispatcher concerns.
 
 Golden round-trip tests in `messaging_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. `TestBackfillSincePayload_RoundTrip`'s byte-equal check doubles as a regression guard against `omitempty` being re-added to `ConversationID`. `message_chunk.json` carries 2 messages so the slice round-trip is non-trivially covered.
+
+### Session-transition payload (#656)
+
+Body of an `Envelope` whose `Type == TypeSessionTransition` (`docs/protocol-mobile.md` § session_transition). Binary → phone; the wire form of a session boundary the phone renders as a `ThreadItem.SessionBoundary` marker (`pyrycode-mobile#336`) when the daemon's session rotates (a `/clear`, an idle eviction, or a workspace change) — instead of inferring the boundary from message fields that do not exist. Lives in `messaging.go` (not `interactive.go`: a session boundary is not a turn-stream event, and `messaging.go` already houses the `time.Time` + `*string`-no-omitempty precedents this struct copies). **Wire shape only** — the producer that emits it is sibling #657 (`security-sensitive`, blocked on #656).
+
+```go
+type SessionTransitionPayload struct {
+    PreviousSessionID string    `json:"previous_session_id"`
+    NewSessionID      string    `json:"new_session_id"`
+    Reason            string    `json:"reason"`
+    OccurredAt        time.Time `json:"occurred_at"`
+    WorkspaceCwd      *string   `json:"workspace_cwd"` // *string + no omitempty: literal `null` for non-workspace_change reasons
+}
+```
+
+- **`WorkspaceCwd` is `*string` WITHOUT `omitempty` — encodes a cross-field invariant on the wire.** Same discipline as `BackfillSincePayload.ConversationID` (#272): non-nil **iff** `Reason == "workspace_change"` (the new workspace dir), literal JSON `null` for `clear` / `idle_evict`. `omitempty` would drop the key and lose the "absent vs null vs value" distinction, so the *workspaceCwd-non-null-iff-`workspace_change`* invariant is decodable from the wire alone. The byte-equal round-trip is the regression detector against an accidental `omitempty` re-add (the `backfill_since.json` guard role).
+- **`Reason` stays a plain `string`, not a named enum** — `MessagePayload.Role` / `TurnEndPayload.StopReason` precedent. Closed wire set `{clear, idle_evict, workspace_change}`; the closed-set guarantee belongs at the decoder. The mobile enum names (`Clear`/`IdleEvict`/`WorkspaceChange`) map to the lowercase-snake wire values by the mobile decoder. **The type admits `workspace_change` even though the producer (#657) cannot emit it** until a server-side workspace-change source exists — so the mobile decoder stays exhaustive and the invariant is expressible (type child carries the full vocabulary; producer child defers the unemittable value).
+- **`OccurredAt` is `time.Time` (RFC3339Nano on the wire) per the envelope timestamp rule.** Marshal strips the monotonic clock; tests compare with `.Equal`, never `==`. Same discipline as `Envelope.TS` / `BackfillSincePayload.SinceTS`.
+- **No `event_id` field.** `event_id` is an `Envelope`-level field (#649) stamped by the producer on structured-stream frames; a session boundary is **not** a structured turn-stream event and carries no `event_id`.
+
+`TestSessionTransitionPayload_RoundTrip` (`messaging_test.go`) is table-driven over two fixtures authored in **struct-field order** (`canonical()` compacts but does not sort keys): `session_transition.json` (cwd-unset, `reason: "idle_evict"`, `"workspace_cwd": null` — the `omitempty`-regression guard) and `session_transition_workspace.json` (cwd-set, `reason: "workspace_change"`, `"workspace_cwd": "/home/user/project"`). See [codebase/656.md](../codebase/656.md).
 
 ### Conversations-read payloads (#273)
 
@@ -547,6 +568,14 @@ These two live in their **own** cohesive const block, grouping the request/respo
 
 `TypeResync = "resync"` is an outbound binary → phone control marker the daemon emits when a reconnecting phone's advertised `last_event_id` aged out of the bounded event ring (it must full-reload). Its **own** const block; like `TypeRekeyRequest` it has **no named payload struct** — `internal/relay` marshals an inline `struct{ ConversationID string }` at emit time. Stays out of `v1TypeSet` (an old phone must never receive it; `{"resync-rejected", TypeResync, false, ErrUnknownType}` in `compat_test.go` pins that v1 `IsV1Compatible` rejects it).
 
+**v2 session-boundary marker** (#656; spec `docs/protocol-mobile.md` § Interactive events / session_transition):
+
+| Group | Constants |
+|-------|-----------|
+| Session boundary | `TypeSessionTransition` |
+
+`TypeSessionTransition = "session_transition"` is an outbound binary → phone marker the daemon emits when its session rotates (a `/clear`, an idle eviction, or a workspace change), so a phone renders a `ThreadItem.SessionBoundary` marker (`pyrycode-mobile#336`). Its **own** const block; **unlike** `TypeResync` it carries a real multi-field named payload (`SessionTransitionPayload` in `messaging.go` — see [Session-transition payload](#session-transition-payload-656)) rather than an inline struct. A **session boundary is distinct from the six turn-stream events** and carries **no** `event_id`. Stays out of `v1TypeSet` (an old phone must never receive it; `{"session_transition-rejected", TypeSessionTransition, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). The producer is sibling #657 (`security-sensitive`); this slice is wire vocabulary only.
+
 `TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out; the interactive block carries the same MUST-NOT instruction. The advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
 
 ## Drift detectors
@@ -555,7 +584,7 @@ The v1 type list appears three times: in the `Type*` constants block (`codes.go`
 
 - `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
 - `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds ten entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync`), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 10 == 26`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds eleven entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition`), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 11 == 27`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
