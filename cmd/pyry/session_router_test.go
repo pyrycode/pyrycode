@@ -43,9 +43,15 @@ func TestSessionRouter_Route(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
 	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
 
-	r := sessionRouter{pool: pool, convReg: reg}
+	// Each subtest gets a fresh router with its own active-conversation holder so
+	// the #687 cursor assertions are order-independent (a successful route in one
+	// subtest must not bleed into another's "stays empty" check).
+	newRouter := func() sessionRouter {
+		return sessionRouter{pool: pool, convReg: reg, active: &activeConversation{}}
+	}
 
 	t.Run("bound resolves to the per-conversation session", func(t *testing.T) {
+		r := newRouter()
 		w, err := r.Route("conv-bound")
 		if err != nil {
 			t.Fatalf("Route: unexpected err %v", err)
@@ -60,15 +66,24 @@ func TestSessionRouter_Route(t *testing.T) {
 		if b.sess != pool.Default() {
 			t.Errorf("boundSession.sess = %p, want bootstrap %p", b.sess, pool.Default())
 		}
+		// #687 AC#1: a successful route stamps the active-conversation cursor.
+		if got := r.active.CurrentConversation(); got != "conv-bound" {
+			t.Errorf("active cursor = %q, want %q after a successful route", got, "conv-bound")
+		}
 	})
 
 	t.Run("unknown conversation maps to ErrConversationNotFound", func(t *testing.T) {
+		r := newRouter()
 		w, err := r.Route("conv-does-not-exist")
 		if !errors.Is(err, conversations.ErrConversationNotFound) {
 			t.Errorf("err = %v, want ErrConversationNotFound", err)
 		}
 		if w != nil {
 			t.Errorf("writer = %v, want nil on reject", w)
+		}
+		// #687 AC#4: a rejected route never moves the cursor.
+		if got := r.active.CurrentConversation(); got != "" {
+			t.Errorf("active cursor = %q, want empty after a rejected route", got)
 		}
 	})
 
@@ -79,6 +94,7 @@ func TestSessionRouter_Route(t *testing.T) {
 		if err != nil || boot != pool.Default() {
 			t.Fatalf("precondition: Lookup(\"\") = (%v, %v), want bootstrap session", boot, err)
 		}
+		r := newRouter()
 		w, err := r.Route("conv-unbound")
 		if !errors.Is(err, errNoBoundSession) {
 			t.Errorf("err = %v, want errNoBoundSession", err)
@@ -86,15 +102,24 @@ func TestSessionRouter_Route(t *testing.T) {
 		if w != nil {
 			t.Errorf("writer = %v, want nil — an unbound conversation must NEVER route to the bootstrap", w)
 		}
+		// #687 AC#4: an unbound conversation never stamps the cursor.
+		if got := r.active.CurrentConversation(); got != "" {
+			t.Errorf("active cursor = %q, want empty after an unbound route", got)
+		}
 	})
 
 	t.Run("bound id absent from pool flows ErrSessionNotFound through", func(t *testing.T) {
+		r := newRouter()
 		w, err := r.Route("conv-dangling")
 		if !errors.Is(err, sessions.ErrSessionNotFound) {
 			t.Errorf("err = %v, want ErrSessionNotFound", err)
 		}
 		if w != nil {
 			t.Errorf("writer = %v, want nil on reject", w)
+		}
+		// #687 AC#4: a dangling binding never stamps the cursor.
+		if got := r.active.CurrentConversation(); got != "" {
+			t.Errorf("active cursor = %q, want empty after a dangling route", got)
 		}
 	})
 }

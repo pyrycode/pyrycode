@@ -42,14 +42,23 @@ var jsonlStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
 // single Run goroutine (drain invokes OnEvent serially), so the emitter's
 // unguarded counters never race — #632's named single-Run-goroutine assumption
 // holds by construction.
+//
+// The cursor for both the live emitter and the #647 replay source is the
+// active-conversation signal (#687), NOT the bootstrap supervisor's
+// CurrentConversation(). Since #678 routes turns to bound-session supervisors,
+// the bootstrap cursor stays empty and the structured stream would drop every
+// event; active is stamped by sessionRouter.Route, so the stream emits and
+// stamps the routed conversation's id. sup stays a param — the subscriber
+// (NewSessionSubscriber) still streams over the supervised session.
 func startInteractiveTurnStreamV2(
 	ctx context.Context,
 	sup *supervisor.Supervisor,
+	active *activeConversation,
 	mgr *relay.V2SessionManager,
 	claudeSessionsDir string,
 	logger *slog.Logger,
 ) func() {
-	emitter := newInteractiveTurnEmitterV2(sup, mgr, logger)
+	emitter := newInteractiveTurnEmitterV2(active, mgr, logger)
 	// Publish the emitter's event ring + the conversation cursor to the manager
 	// so a phone reconnecting with hello.last_event_id can be replayed the
 	// missed tail (#647). Late-bound here (not a V2SessionConfig field) to break
@@ -57,7 +66,12 @@ func startInteractiveTurnStreamV2(
 	// emitter constructor above, after NewV2SessionManager already ran. This is
 	// the only call site; when the stream is disabled the manager keeps a nil
 	// replay source and a reconnecting phone simply gets the live stream.
-	mgr.SetReplaySource(emitter.ring, sup.CurrentConversation)
+	//
+	// The replay cursor must follow the SAME active-conversation signal as the
+	// live emitter (#687): leaving it on the empty bootstrap CurrentConversation
+	// would re-introduce the empty-cursor drop on the reconnect-replay path, so
+	// replayed envelopes would drop or carry the wrong attribution.
+	mgr.SetReplaySource(emitter.ring, active.CurrentConversation)
 	// Session.Events requires a Tracker; zero opts -> package defaults. The
 	// tracker's stall_detected marker now maps through to a stall envelope
 	// (the mapper no longer discards it).

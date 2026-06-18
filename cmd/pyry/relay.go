@@ -94,6 +94,7 @@ func startRelay(
 	convReg *conversations.Registry,
 	creator handlers.SessionCreator,
 	router handlers.SessionRouter,
+	active *activeConversation,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
 	claudeSessionsDir string,
@@ -142,7 +143,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, sup, bridge, claudeSessionsDir, defaultCwd, transitions)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, active, sup, bridge, claudeSessionsDir, defaultCwd, transitions)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -279,6 +280,7 @@ func startRelayV2(
 	convReg *conversations.Registry,
 	creator handlers.SessionCreator,
 	router handlers.SessionRouter,
+	active *activeConversation,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
 	claudeSessionsDir string,
@@ -345,7 +347,7 @@ func startRelayV2(
 	// retry; "" already disables reconcile + the rotation watcher).
 	var streamCleanup func()
 	if bridge != nil && claudeSessionsDir != "" {
-		streamCleanup = startInteractiveTurnStreamV2(ctx, sup, mgr, claudeSessionsDir, logger)
+		streamCleanup = startInteractiveTurnStreamV2(ctx, sup, active, mgr, claudeSessionsDir, logger)
 	} else if bridge != nil {
 		logger.Info("relay: interactive turn stream disabled; claude sessions dir unresolved",
 			"event", "interactive_turn_stream.no_sessions_dir")
