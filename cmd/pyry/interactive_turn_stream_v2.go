@@ -97,24 +97,59 @@ func startInteractiveTurnStreamV2(
 
 // resolveLatestSessionJSONL returns the resolve closure for
 // turnbridge.NewSessionSubscriber. Each call scans dir for <uuid>.jsonl files
-// and returns the most-recently-modified one plus its current size as
-// startOffset. Because NewSessionSubscriber calls resolve fresh on every
-// (re)subscription, returning the newest file each time is what makes a live
-// /clear rotation pick up the new JSONL — this rotation-following is load-bearing
-// for the /clear AC, not incidental.
+// and returns the most-recently-modified one plus a startOffset. Because
+// NewSessionSubscriber calls resolve fresh on every (re)subscription, returning
+// the newest file each time is what makes a live /clear rotation pick up the new
+// JSONL — this rotation-following is load-bearing for the /clear AC, not
+// incidental.
 //
 // startOffset = size means the tail starts at EOF, so a (re)subscription streams
 // only NEW events and never replays the historical transcript to the phone.
+// This is the right default for a warm resume (a --continue transcript already
+// on disk) and for a /clear rotation.
 //
-// The resolver is pure (dir -> newest path, size): no $HOME / cwd / symlink
+// Cold start (#671) is the one exception. On a fresh relay session there is no
+// transcript on disk when the producer first subscribes (claude under --continue
+// defers JSONL creation until the first input lands), so an early resolve reports
+// not-found and the subscriber retries. The phone's prompt then lands and claude
+// writes the user turn + the assistant reply in one go, so the next resolve finds
+// a brand-new file whose whole content IS the current turn. Returning size there
+// would start the tail at EOF — past the in-flight reply — and the reply would
+// never stream to the phone (the live mobile#421 drop). For that case alone the
+// resolver returns startOffset = 0 so the tail begins at the file's start.
+//
+// The discrimination is stateful across calls: the FIRST file returned after one
+// or more not-found results (and before any file has been returned) is a
+// cold-start file -> offset 0. A file present at the first look (warm resume) or
+// any file after one has already been returned (a rotation) -> size. Offset 0 is
+// confined to a brand-new session file — there is no prior transcript to leak,
+// because a resumed transcript would already exist on disk and take the warm
+// path (see TestResolveLatestSessionJSONL_WarmStartTailsFromSize).
+//
+// Concurrency: resolvedOnce / sawEmpty are read and written only inside the
+// returned closure, which NewSessionSubscriber invokes from the single
+// Producer.Run goroutine (Run -> subscribe -> resolve). They therefore need no
+// mutex — the same single-Run-goroutine invariant the OnEvent / flushDelta
+// closures rely on. Do NOT call this resolver from multiple goroutines.
+//
+// The resolver is otherwise pure (dir -> newest path): no $HOME / cwd / symlink
 // dependency, so it unit-tests against a t.TempDir(). It reuses the daemon's
 // already-computed claudeSessionsDir (the exact dir reconcile + the rotation
 // watcher use) rather than recomputing via a second cwd-encoder — single source
 // of truth, coherent with the shipped machinery.
 func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path string, startOffset int64, err error) {
+	var (
+		resolvedOnce bool // a session file has been returned at least once
+		sawEmpty     bool // an earlier call found no file (empty/absent dir)
+	)
 	return func(ctx context.Context) (string, int64, error) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			// A not-yet-created project dir is a cold-start signal too (claude
+			// creates it lazily on first input), so count it as "no file yet".
+			if !resolvedOnce {
+				sawEmpty = true
+			}
 			// Wrap with the path (an os. error — a path/errno, never file bytes).
 			return "", 0, fmt.Errorf("read claude sessions dir %s: %w", dir, err)
 		}
@@ -148,8 +183,18 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 			}
 		}
 		if bestName == "" {
+			if !resolvedOnce {
+				sawEmpty = true
+			}
 			return "", 0, fmt.Errorf("no session jsonl found in %s", dir)
 		}
-		return filepath.Join(dir, bestName), bestSize, nil
+		off := bestSize
+		if !resolvedOnce && sawEmpty {
+			// Cold start: this fresh file appeared only after an earlier
+			// not-found, so the whole file is the current turn — tail from 0.
+			off = 0
+		}
+		resolvedOnce = true
+		return filepath.Join(dir, bestName), off, nil
 	}
 }
