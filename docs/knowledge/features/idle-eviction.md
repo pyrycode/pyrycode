@@ -74,7 +74,7 @@ func (s *Session) Run(ctx context.Context) error
 **Activate-before-Attach contract.** `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it). Callers must Activate first. Two attach paths exist today and both Activate first with a 30s budget:
 
 1. **Control plane** — `handleAttach` in `internal/control/server.go` (CLI `pyry attach`, since #40).
-2. **Relay-routed `send_message`** — `handlers.SendMessage` in `internal/relay/handlers/send_message.go` (Discord/Telegram phone/plugin inbound, since #396). Without Activate, an inbound `send_message` against an idle-evicted bootstrap silently dropped through `Supervisor.WriteUserTurn`'s `ptmx == nil` discard branch — the failure mode that produced a 7.5h pyrybox outage on 2026-05-15.
+2. **Relay-routed `send_message`** — `handlers.SendMessage` in `internal/relay/handlers/send_message.go` (Discord/Telegram phone/plugin inbound, since #396). Without Activate, an inbound `send_message` against an idle-evicted session silently dropped through `Supervisor.WriteUserTurn`'s `ptmx == nil` discard branch — the failure mode that produced a 7.5h pyrybox outage on 2026-05-15. Since #678 the Activate target is the frame's **per-conversation bound session** (not the bootstrap), and it funnels through the cap-enforcing `Pool.Activate` (see [§ Relay-routed `send_message`](#relay-routed-send_message-396) and [conversation-session-binding.md § Routing](conversation-session-binding.md#routing-send_message-consumes-the-binding)).
 
 A busted respawn surfaces as `attach: activate: <err>` on the control wire and as `protocol.CodeServerBinaryOffline` (`Retryable=true`) + `send_message.activate_failed` WARN log on the relay wire.
 
@@ -305,7 +305,9 @@ cancelActivate()
 err := w.WriteUserTurn(p.ConversationID, []byte(p.Text))
 ```
 
-`sendMessageActivateTimeout` is the same 30s the CLI attach path uses, deliberately. `*sessions.Session` satisfies the extended interface adapter-free at `cmd/pyry/relay.go`. Activate timeout maps to `protocol.CodeServerBinaryOffline` with `Retryable=true`; `ctx.Canceled` (conn closing) propagates to the dispatcher's per-conn unwind.
+`sendMessageActivateTimeout` is the same 30s the CLI attach path uses, deliberately. Activate timeout maps to `protocol.CodeServerBinaryOffline` with `Retryable=true`; `ctx.Canceled` (conn closing) propagates to the dispatcher's per-conn unwind.
+
+**Since #678, `w` is the per-conversation bound session, not the bootstrap.** The handler resolves the frame's `ConversationID` → `CurrentSessionID` → session via a `handlers.SessionRouter` seam before this block, and `w` is a `cmd/pyry` `boundSession` adapter whose `Activate` calls `Pool.Activate(ctx, id)` rather than `Session.Activate` directly — so a re-activated per-conversation session is a full `ActiveCap` citizen (the bootstrap path used `Session.Activate` because the bootstrap is never cap-evicted). The two-phase block itself is byte-identical; only the source of `w` changed. See [conversation-session-binding.md § Routing](conversation-session-binding.md#routing-send_message-consumes-the-binding).
 
 ### Eviction cause record
 
