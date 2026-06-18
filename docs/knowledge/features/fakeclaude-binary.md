@@ -32,7 +32,12 @@ commit` contract — can confirm a turn against it. See
 (`PYRY_FAKE_CLAUDE_JSONL_TRIGGER`, #642) that appends captured claude-format
 turn events to the live session JSONL, likewise extend the binary past pure
 rotation; see [§ Configuration](#configuration--env) and
-[§ JSONL-trigger mode](#jsonl-trigger-mode-642).
+[§ JSONL-trigger mode](#jsonl-trigger-mode-642). Whenever the stdin reader is
+active (TUI or `STDIN_LOG`), a delivered turn also triggers **on-turn
+transcript growth** (#673): the live session JSONL grows by one inert line so
+the daemon's #668 transcript-growth commit-confirm observes growth and acks
+(otherwise it times out with `ErrTurnNotCommitted`); see
+[§ On-turn transcript growth](#on-turn-transcript-growth-673).
 
 | Step | Effect |
 |---|---|
@@ -40,6 +45,7 @@ rotation; see [§ Configuration](#configuration--env) and
 | Idle | poll trigger file every 50ms |
 | Trigger | `f.Close()` (OLD), mint `uuidV4()`, open `<dir>/<newU>.jsonl` (NEW), write+fsync, `os.Remove(trigger)`, set `rotated=true` |
 | Idle (post-rotation) | poll continues; trigger reappearance ignored |
+| Delivered turn (stdin bytes, TUI/`STDIN_LOG` only) | reader sets `turnPending`; main loop appends `{}\n`+fsync to current `f` (growth-confirm signal, #673) |
 | SIGTERM | Go runtime default-terminates; OS auto-closes the open fd |
 
 Strict close-OLD-before-open-NEW is **load-bearing**. The downstream
@@ -178,12 +184,71 @@ Two harness preconditions make the appended events actually reach the producer
    appended line lands inside the tailed range (fixes a cold-start
    producer-subscribe race — see [codebase/642.md](../codebase/642.md)).
 
+## On-turn transcript growth (#673)
+
+#668 made the supervised-bootstrap delivery path confirm a turn by observing the
+resolved claude session JSONL **grow** past a pre-delivery baseline
+(`confirmViaTranscriptGrowth`): `WriteUserTurn` returns `nil` only on growth, else
+`ErrTurnNotCommitted` after a 10 s timeout. Real claude appends the turn at commit
+time, so growth is guaranteed in production — but fakeclaude only wrote `{}\n` at
+session open / rotation and **never grew on a delivered turn**, so every e2e test
+that drives a turn timed out. #673 closes that fidelity gap: a delivered turn now
+grows the live session JSONL by one inert line, the same on-disk signal a committed
+turn produces.
+
+A user turn reaches fakeclaude as **stdin bytes** (supervisor `DeliverPrompt` → PTY
+write), observed in `startStdinReader`. The fix grows `f` **while preserving the
+single-writer-of-`f` invariant** (only the main goroutine writes `f`):
+
+| Site | Goroutine | Action |
+|---|---|---|
+| `startStdinReader`, on `n > 0` | stdin reader | `turnPending.Store(true)` — **signal only, never touches `f`** |
+| `main()` poll loop, each cycle | main | `if turnPending.Swap(false) { appendTurnGrowth(f) }` — `f.WriteString("{}\n")` + `f.Sync()`, best-effort |
+
+- **Signal across the boundary, write on the owner.** `turnPending atomic.Bool` is
+  the only added shared state; `Store`/`Swap` need no lock. All four `f` writers
+  (`openSession`, `emitStructuredJSONLIfTriggered`, `appendTurnGrowth`, the rotation
+  re-open) stay on the main goroutine — **no mutex on `f`**. This is the general
+  shape for any future cross-goroutine fakeclaude trigger.
+- **`Swap(false)` per poll cycle** collapses chunked stdin into one append per
+  ~50 ms cycle (far inside the 10 s confirm timeout, ahead of the 150 ms confirm
+  poll) and re-arms for a later turn. The grow always targets the **current** `f`
+  (post-rotate, if a rotation fired earlier in the same iteration).
+- **The inert `{}\n` is invisible to every assertion except "the file grew".** It is
+  the exact line `openSession` writes; the turnbridge mapper maps an empty/typeless
+  line to `(nil, false)` (`mapper.go:72-73`), so the v2/structured producer tails it
+  and emits no event. Growth-confirm checks **size only** — no glyph, no new
+  substrate, **no allowlist change** (the seal is untouched).
+- **Best-effort write.** A failed `Write`/`Sync` is silenced (mirrors
+  `emitStructuredJSONLIfTriggered`); the e2e asserts the ack downstream. A
+  persistently-failing write surfaces as the daemon's loud `ErrTurnNotCommitted`,
+  never a false ack.
+- **Race-free vs the baseline.** The supervisor captures the baseline *after*
+  `WaitReady` and *before* `deliver`; stdin bytes (hence any grow) arrive only
+  *after* `deliver`, so a grow always lands strictly past the baseline.
+
+**Blast radius is exactly the TUI tests.** The stdin reader runs only when
+`logPath != "" || tui` (`main.go:129`), so the grow fires only there — the other e2e
+callers (`StartRotation`, the fakeclaude primitive, attach-stdio) set neither and are
+unperturbed.
+
+**Sessions-dir alignment is still required** for a test to observe the growth. The
+daemon's resolver has no env override — it always scans `<HOME>/.claude/projects/
+encode(workdir)` — so a test that drives a turn must point `sessionsDir` at that
+**computed** dir and pre-create `<initialUUID>.jsonl` before startup (the same
+alignment the JSONL-trigger mode needs, above). A `t.TempDir()` subdir is a dir the
+daemon never scans; the misalignment is *silent* on the resolver side (an
+exist-but-empty computed dir resolves to `("", 0, nil)`, **no WARN**) and surfaces
+only as the 10 s `ErrTurnNotCommitted`. See [codebase/673.md](../codebase/673.md) for
+the five tests aligned by #673.
+
 ## Layout
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~260 LOC, package main, no build tag (grew from the
-                 #122 rotation core with the #311/#323/#603/#642 optional modes)
+  main.go        ~320 LOC, package main, no build tag (grew from the #122
+                 rotation core with the #311/#323/#603/#642 optional modes and
+                 the #673 on-turn transcript growth)
   main_test.go   ~125 LOC, //go:build e2e
 ```
 
@@ -265,12 +330,16 @@ affect correctness.
 
 - Spec: `docs/specs/architecture/122-fake-claude-test-binary.md`;
   TUI mode: `docs/specs/architecture/603-fakeclaude-tui-idle-thinking-glyphs.md`;
-  JSONL-trigger mode: `docs/specs/architecture/642-structured-receive-two-phone-e2e-capstone.md`
+  JSONL-trigger mode: `docs/specs/architecture/642-structured-receive-two-phone-e2e-capstone.md`;
+  on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
 - JSONL-trigger per-ticket notes: [codebase/642.md](../codebase/642.md) (the
   structured-receive capstone it feeds, the sessions-dir alignment +
   pre-create-JSONL preconditions, the cold-start producer-subscribe race)
+- On-turn growth per-ticket notes: [codebase/673.md](../codebase/673.md) (the
+  cross-goroutine `turnPending` signal, the #668 commit-confirm it satisfies, the
+  five `sessionsDir` alignments, the six broken tests)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)
