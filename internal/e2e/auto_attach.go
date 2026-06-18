@@ -205,6 +205,9 @@ func startForegroundAutoAttach(t *testing.T, label string) *ForegroundAutoAttach
 	// and is forward-compatible.
 	foregroundCmd := exec.Command(bin,
 		"-pyry-socket="+socket,
+		// Workdir must resolve within $HOME (#670 confinement) for the
+		// fall-through-to-supervisor path; the test cwd is the repo dir.
+		"-pyry-workdir="+home,
 		"--",
 		"--session-id", id,
 		"--input-format", "stream-json",
@@ -276,6 +279,9 @@ func spawnAutoAttachDaemon(t *testing.T, home string) (string, *exec.Cmd, *bytes
 		"-pyry-name=test",
 		"-pyry-claude=" + claudeBin,
 		"-pyry-idle-timeout=0",
+		// Workdir must resolve within $HOME (#670 confinement); the test
+		// process cwd is the repo dir, outside the isolated HOME.
+		"-pyry-workdir=" + home,
 		// ResumeLast prepends --continue on respawn; the wrapper
 		// ignores its argv anyway, but disable for parity with
 		// spawnAttachableDaemon.
@@ -463,6 +469,9 @@ func startForegroundSupervised(t *testing.T, sessionID string, extraEnv []string
 		"-pyry-socket="+socketPath,
 		"-pyry-claude="+claudeBin,
 		"-pyry-idle-timeout=0",
+		// Workdir must resolve within $HOME (#670 confinement); the test
+		// process cwd is the repo dir, outside the isolated HOME.
+		"-pyry-workdir="+home,
 		"-pyry-resume=false",
 		"--",
 		"--session-id", sessionID,

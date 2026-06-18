@@ -368,9 +368,13 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 // Unlike StartIn, no Harness is returned: there is no live daemon to drive,
 // no socket to clean up. The caller pre-populates HOME (e.g. with a corrupt
 // sessions.json) and asserts on the RunResult.
-func StartExpectingFailureIn(t *testing.T, home string) RunResult {
+//
+// Optional extraFlags are appended after the standard set with last-wins
+// semantics, so a caller can drive a deliberately-failing startup (e.g.
+// -pyry-workdir pointing outside $HOME) past the harness's default workdir.
+func StartExpectingFailureIn(t *testing.T, home string, extraFlags ...string) RunResult {
 	t.Helper()
-	socket, cmd, stdout, stderr, doneCh := spawn(t, home)
+	socket, cmd, stdout, stderr, doneCh := spawn(t, home, extraFlags...)
 
 	deadline := time.Now().Add(readyDeadline)
 	for time.Now().Before(deadline) {
@@ -460,6 +464,13 @@ func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *safe
 		"-pyry-name=test",
 		"-pyry-claude=" + o.claudeBin,
 		"-pyry-idle-timeout=0",
+		// Default the daemon's workdir to its $HOME. The serve path confines
+		// the workdir to $HOME (#670) and the test process cwd is the repo
+		// dir — outside the isolated HOME — so without this the daemon would
+		// fail-fast on the confinement check. extraFlags are appended after
+		// and win (flag.Parse is last-wins), so a test can still point the
+		// workdir elsewhere (e.g. an out-of-$HOME reject case).
+		"-pyry-workdir=" + home,
 	}
 	args = append(args, o.extraFlags...)
 	args = append(args, "--")

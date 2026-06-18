@@ -166,6 +166,9 @@ func spawnAttachableDaemon(t *testing.T, home string) (string, *exec.Cmd, *bytes
 		"-pyry-name=test",
 		"-pyry-claude=" + os.Args[0],
 		"-pyry-idle-timeout=0",
+		// Workdir must resolve within $HOME (#670 confinement); the test
+		// process cwd is the repo dir, outside the isolated HOME.
+		"-pyry-workdir=" + home,
 		// Default ResumeLast prepends --continue on respawn; the test
 		// helper is a Go test binary that doesn't recognize that flag.
 		"-pyry-resume=false",
