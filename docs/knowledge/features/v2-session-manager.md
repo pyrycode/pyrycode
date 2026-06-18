@@ -75,7 +75,9 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 // and manager have a circular dependency (the ring does not exist when
 // NewV2SessionManager runs). Stored under pushMu (the existing leaf lock). ring
 // is the emitter's per-conversation event ring; currentConv resolves the
-// conversation a reconnecting conn replays for (the supervisor's #312 cursor).
+// conversation a reconnecting conn replays for (the cmd/pyry active-conversation
+// cursor as of #687 — was the supervisor's #312 cursor, which #678 emptied for
+// routed turns).
 // nil ring or cursor (the setter never called, or the stream off) leaves replay
 // disabled — a phone advertising last_event_id then just gets the live stream.
 func (m *V2SessionManager) SetReplaySource(ring *eventring.Ring, currentConv func() string)
@@ -460,12 +462,18 @@ or emits a `resync` marker if the position aged out of the bounded ring.
   is a construction cycle (the emitter takes the manager as its broadcaster; the
   replay path needs the emitter-owned `eventring.Ring`, created *inside* the
   emitter constructor — [#646](../codebase/646.md)). `SetReplaySource(ring, currentConv)` publishes
-  the ring + the `func() string` conversation cursor (`sup.CurrentConversation`,
-  the #312 cursor) to the manager once during wiring, after the emitter exists.
-  Stored under the existing `pushMu` leaf lock; nil ⇒ replay disabled. One call
-  site, in [`startInteractiveTurnStreamV2`](../codebase/633.md). (This is the
-  inbound mirror of #646's "emitter-owns-the-ring retires the constructor
-  cascade".)
+  the ring + the `func() string` conversation cursor to the manager once during
+  wiring, after the emitter exists. As of [#687](../codebase/687.md) the cursor
+  is the `cmd/pyry` active-conversation signal (`active.CurrentConversation`), not
+  `sup.CurrentConversation` (the #312 bootstrap cursor) — #678 routes turns to
+  bound-session supervisors, leaving the bootstrap cursor empty, so the replay
+  path re-keys to the same active-conversation signal as the live emitter or it
+  re-introduces the empty-cursor drop on the reconnect-replay path. Stored under
+  the existing `pushMu` leaf lock; nil ⇒ replay disabled. One call site, in
+  [`startInteractiveTurnStreamV2`](../codebase/633.md). (This is the inbound
+  mirror of #646's "emitter-owns-the-ring retires the constructor cascade".)
+  Note `cursor()` here runs on the **manager's** `Run` goroutine — a distinct
+  goroutine from the live emitter's reader; the holder's mutex makes that safe.
 - **`replayMissed` runs inline on `Run`, at the `handleNoiseInit` success tail.**
   After `noise_resp` is sent, `state == V2StateOpen`, and the push queue exists,
   the hook fires iff `helloPayload.LastEventID != nil`. It reads `(ring, cursor)`
