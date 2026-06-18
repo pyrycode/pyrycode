@@ -578,7 +578,7 @@ func runSupervisor(args []string) error {
 	// `pyry pair preflight` first to confirm no v1 pairings will break.
 	v2Enabled := os.Getenv("PYRY_MOBILE_V2") == "1"
 	bootstrap := pool.Default()
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
@@ -630,6 +630,17 @@ func (r poolResolver) Lookup(id sessions.SessionID) (control.Session, error) {
 
 func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 	return r.p.ResolveID(arg)
+}
+
+// sessionMinter adapts *sessions.Pool to handlers.SessionCreator. Pool.Create
+// returns sessions.SessionID; the handler-side interface speaks plain string so
+// internal/relay/handlers stays free of an internal/sessions import. The wrapper
+// is the single type-narrowing seam — the precedent is poolResolver above.
+type sessionMinter struct{ p *sessions.Pool }
+
+func (m sessionMinter) Create(ctx context.Context, label string) (string, error) {
+	id, err := m.p.Create(ctx, label)
+	return string(id), err
 }
 
 // parseClientFlags handles the shared flags every control verb accepts:

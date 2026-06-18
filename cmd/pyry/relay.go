@@ -92,6 +92,7 @@ func startRelay(
 	allowInsecure, v2Enabled bool,
 	shutdown context.CancelFunc,
 	convReg *conversations.Registry,
+	creator handlers.SessionCreator,
 	sess handlers.TurnWriter,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
@@ -141,7 +142,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, sess, sup, bridge, claudeSessionsDir, defaultCwd, transitions)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, sess, sup, bridge, claudeSessionsDir, defaultCwd, transitions)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -159,7 +160,7 @@ func startRelay(
 			FirstFrame: authGate(registry, string(serverID), logger),
 		})
 		d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
-		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(convReg, resolveConversationsRegistryPath(instanceName), defaultCwd, logger))
+		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger))
 		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 		d.Register(protocol.TypeSendMessage, handlers.SendMessage(sess, logger))
 
@@ -276,6 +277,7 @@ func startRelayV2(
 	registry *devices.Registry,
 	serverID identity.ServerID,
 	convReg *conversations.Registry,
+	creator handlers.SessionCreator,
 	sess handlers.TurnWriter,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
@@ -298,7 +300,7 @@ func startRelayV2(
 		Logger:     logger,
 		Handlers: map[string]dispatch.Handler{
 			protocol.TypeListConversations:  handlers.ListConversations(convReg),
-			protocol.TypeCreateConversation: handlers.CreateConversation(convReg, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),
+			protocol.TypeCreateConversation: handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),
 			protocol.TypeRegisterPushToken:  handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
 			protocol.TypeSendMessage:        handlers.SendMessage(sess, logger),
 		},
