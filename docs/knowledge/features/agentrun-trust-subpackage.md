@@ -135,6 +135,11 @@ Test cases:
 ## Consumers
 
 - `pyry agent-run` (cutover in #470) — after flag validation, calls `MarkWorkdirTrusted(parsed.workdir)`, then passes the returned realpath to `ptyrunner.Config.WorkDir`. The trust pre-write must run before `ptyrunner.Run` to side-step the modal; if pre-writing fails the verb exits 1 (the helper surfaces the failure; the caller chooses to abort).
+- **`pyry` daemon serve path** (`runSupervisor`, #670) — the long-lived supervised host is the second consumer. Before any spawn it pre-marks its workdir and threads the returned realpath into `Bootstrap.WorkDir` (→ `supervisor.Config.WorkDir` → `cmd.Dir`), so the marked key and the child's cwd are byte-identical. Without this, the supervised claude wedged on the trust modal — and unlike agent-run, the daemon has no dispatcher retry: it fell into the #421 clean-exit restart loop (`claude exited cleanly` forever), invisible to the phone (the bridge forwards only transcript events). See [`codebase/670.md`](../codebase/670.md).
+
+### `$HOME` confinement is caller-side, not in this helper (#670)
+
+`MarkWorkdirTrusted` performs **no** confinement and must not — it is shared by an *unconfined* agent-run path. The daemon serve path is `security-sensitive` because it auto-accepts the trust gate for the host that executes phone-originated (untrusted-party) turns, so #670 added a `$HOME` bound as a strict-tightening deny-gate **at the `runSupervisor` call site only**: a workdir whose realpath resolves outside `$HOME` is rejected as a loud startup failure, never trusted, never launched. The check canonicalises *both* sides (`EvalSymlinks` on `$HOME` and the workdir) and uses a boundary-aware `filepath.Rel` containment test (not a string prefix), so a symlinked home isn't a false reject and `/home/userfoo` isn't treated as inside `/home/user` (the #118/#221 gotcha). Rejection errors name the path and the boundary, never `~/.claude.json` contents. Pushing the bound into this helper would silently confine agent-run too — which is why it stays at the caller. The same canonicalise-and-confine check will extend to the phone-supplied `conversation.Cwd` once per-conversation sessions (#672) land (rejection then surfaced to the phone, not at startup); not built yet.
 
 ## Out of scope
 
