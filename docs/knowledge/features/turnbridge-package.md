@@ -414,9 +414,23 @@ mechanism; #633 supplies the production resolver + the wiring.
   path accessor, so `SessionJSONLPath(home, cwd, sessionID)` **cannot** be used.
   #633's `resolveLatestSessionJSONL(dir)` instead returns the
   **most-recently-modified `<uuid>.jsonl`** under the daemon's `claudeSessionsDir`
-  plus its current size as `startOffset`, re-evaluated fresh per subscription so a
+  plus a `startOffset`, re-evaluated fresh per subscription so a
   (re)subscription streams only new events instead of replaying the whole
   conversation. See [codebase/633.md](../codebase/633.md).
+- **Cold start tails from offset 0 (#671).** `startOffset = size` (EOF) is the
+  right default for a warm `--continue` resume (don't replay the prior transcript
+  to the internet-exposed phone) and a `/clear` rotation, but it dropped the live
+  reply on a **fresh** session: claude under `--continue` defers JSONL creation
+  until first input, so the producer's first resolve finds nothing and retries; the
+  phone's prompt then lands and claude writes the user turn + reply together, so the
+  next resolve finds a brand-new file already sized *past* the in-flight reply and
+  tails from EOF. The resolver closure is now stateful (`resolvedOnce`/`sawEmpty`,
+  read/written only on the single `Producer.Run` goroutine): the **first** file
+  returned after one or more not-found results is a cold-start file → `startOffset =
+  0` so its whole content (the current turn) streams; warm-present and post-cold-start
+  files keep `size`. Offset 0 is structurally confined to brand-new files (a resumed
+  transcript would already exist → warm path), so no prior session leaks. See
+  [codebase/671.md](../codebase/671.md).
 - **`/clear` survival is restart-driven (#633).** A `/clear` rotates claude's on-disk
   session UUID **without** restarting the supervised process, so the Events channel
   does not close on the `/clear` itself. On the **next supervisor restart**, `Run`

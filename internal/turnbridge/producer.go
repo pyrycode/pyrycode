@@ -208,6 +208,15 @@ func NewSessionSubscriber(
 				_ = sess.Wait()
 				cancel()
 			}()
+			// Diagnostic for the #671 cold-start fix: records the tailed file and
+			// the chosen offset so the operator can confirm during the live
+			// mobile#421 run that the resolve-retry path fired and the subscribe
+			// landed at offset 0 (offset 0 ⇒ a fresh cold-start session tailed
+			// from its start). Logs only the path (a UUID filename under the
+			// trusted dir), the offset, and the derived cold_start bool — never
+			// any JSONL bytes (substrate seal).
+			log.Debug("turnbridge: subscribed to session jsonl",
+				"path", path, "offset", off, "cold_start", off == 0)
 			return ch, nil
 		}
 	}

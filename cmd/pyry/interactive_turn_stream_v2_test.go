@@ -192,6 +192,80 @@ func TestResolveLatestSessionJSONL_UnreadableDirErrors(t *testing.T) {
 	}
 }
 
+// TestResolveLatestSessionJSONL_ColdStartTailsFromZero is the #671 regression
+// gate. A fresh relay session (mobile#421: fresh $HOME, claude under --continue
+// defers JSONL creation until first input lands) has no transcript on disk when
+// the producer first subscribes, so resolve#1 reports not-found and the
+// subscriber retries. The phone's prompt then lands and claude writes the user
+// turn + the "ping" reply, so resolve#2 finds a brand-new file whose whole
+// content IS the current turn. It must tail from offset 0 — returning the file
+// size (EOF) would race past the in-flight reply, the live drop this ticket
+// fixes. RED before the fix (returns size), GREEN after.
+func TestResolveLatestSessionJSONL_ColdStartTailsFromZero(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	resolve := resolveLatestSessionJSONL(dir)
+
+	// resolve#1: no session file yet — not-found, subscriber retries.
+	if _, _, err := resolve(context.Background()); err == nil {
+		t.Fatal("cold-start resolve#1 over empty dir: got nil error, want 'no session jsonl found'")
+	}
+
+	// claude creates the JSONL and writes the turn + reply before resolve#2.
+	want := writeJSONL(t, dir, uuidA, 42, time.Now())
+
+	// resolve#2: the cold-start file is the current turn — tail from its start.
+	path, off, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("cold-start resolve#2: %v", err)
+	}
+	if path != want {
+		t.Fatalf("cold-start path: got %q, want %q", path, want)
+	}
+	if off != 0 {
+		t.Fatalf("cold-start startOffset: got %d, want 0 (tail from the file's start so the in-flight reply is not skipped)", off)
+	}
+
+	// After the first file is returned, a later /clear rotation is no longer a
+	// cold start: a newer file returns its size (EOF), not 0, so a prior
+	// transcript is never replayed. (The post-/clear first-reply race is a
+	// separate, unobserved mode — out of scope for #671.)
+	rotated := writeJSONL(t, dir, uuidB, 17, time.Now().Add(time.Minute))
+	path, off, err = resolve(context.Background())
+	if err != nil {
+		t.Fatalf("post-cold-start rotation resolve: %v", err)
+	}
+	if path != rotated {
+		t.Fatalf("rotation path: got %q, want %q (most-recently-modified)", path, rotated)
+	}
+	if off != 17 {
+		t.Fatalf("post-cold-start rotation startOffset: got %d, want 17 (EOF, not a cold start)", off)
+	}
+}
+
+// TestResolveLatestSessionJSONL_WarmStartTailsFromSize is the mandatory security
+// guard (spec § Security review). A --continue resume transcript already on disk
+// when the resolver first looks is a warm start, NOT a cold start: it must tail
+// from the file size so the historical transcript is never replayed to the
+// internet-exposed phone. Offset 0 here would leak prior-session content.
+func TestResolveLatestSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A prior transcript is present at the first (and only) resolve.
+	want := writeJSONL(t, dir, uuidA, 128, time.Now())
+
+	path, off, err := resolveLatestSessionJSONL(dir)(context.Background())
+	if err != nil {
+		t.Fatalf("warm-start resolve: %v", err)
+	}
+	if path != want {
+		t.Fatalf("warm-start path: got %q, want %q", path, want)
+	}
+	if off != 128 {
+		t.Fatalf("warm-start startOffset: got %d, want 128 (do not replay the prior transcript to the phone)", off)
+	}
+}
+
 // --- wiring tests (producer ⇄ emitter via a fake Subscriber) -----------------
 
 // scriptedSubscriber returns each channel in streams in turn (incrementing a
