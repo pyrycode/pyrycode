@@ -1,6 +1,9 @@
 package sessions
 
 import (
+	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -156,5 +159,81 @@ func TestMostRecentJSONL_MissingDir(t *testing.T) {
 	got, err := mostRecentJSONL(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {
 		t.Errorf("got %q nil err, want a read error", got)
+	}
+}
+
+// --- #668: newTranscriptResolver ----------------------------------------------
+
+// TestNewTranscriptResolver_PicksNewestWithSize confirms the resolver returns
+// the newest <uuid>.jsonl path (the same file mostRecentJSONL selects) and its
+// real current byte size — the baseline/growth signal the commit-confirm reads.
+func TestNewTranscriptResolver_PicksNewestWithSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	older := "00000000-0000-4000-8000-000000000001"
+	newest := "00000000-0000-4000-8000-000000000002"
+	base := time.Now().Add(-time.Hour)
+	touchJSONL(t, dir, older, base)
+
+	newestPath := filepath.Join(dir, newest+".jsonl")
+	content := []byte(`{"type":"user"}` + "\n")
+	if err := os.WriteFile(newestPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newestPath, base.Add(time.Minute), base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	path, size, err := newTranscriptResolver(dir)(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if path != newestPath {
+		t.Errorf("path = %q, want %q", path, newestPath)
+	}
+	if size != int64(len(content)) {
+		t.Errorf("size = %d, want %d", size, len(content))
+	}
+}
+
+// TestNewTranscriptResolver_EmptyDir: a dir with no <uuid>.jsonl resolves to the
+// no-transcript-yet sentinel ("", 0, nil) — a valid baseline, not an error.
+func TestNewTranscriptResolver_EmptyDir(t *testing.T) {
+	t.Parallel()
+	path, size, err := newTranscriptResolver(t.TempDir())(context.Background())
+	if err != nil || path != "" || size != 0 {
+		t.Errorf("resolve = (%q, %d, %v), want (\"\", 0, nil)", path, size, err)
+	}
+}
+
+// TestNewTranscriptResolver_MissingDir: an unreadable dir propagates the ReadDir
+// error so the confirm path can fall back rather than treat it as no-growth.
+func TestNewTranscriptResolver_MissingDir(t *testing.T) {
+	t.Parallel()
+	_, _, err := newTranscriptResolver(filepath.Join(t.TempDir(), "does-not-exist"))(context.Background())
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want errors.Is(err, fs.ErrNotExist)", err)
+	}
+}
+
+// TestNewTranscriptResolver_IgnoresNonMatching: non-UUID / non-.jsonl noise is
+// skipped (inherited from mostRecentJSONL), even when newer than the real one.
+func TestNewTranscriptResolver_IgnoresNonMatching(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	valid := "11111111-1111-4111-8111-111111111111"
+	touchJSONL(t, dir, valid, time.Now().Add(-time.Hour))
+	if err := os.WriteFile(filepath.Join(dir, "not-a-uuid.jsonl"), []byte("xxxx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	path, _, err := newTranscriptResolver(dir)(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	want := filepath.Join(dir, valid+".jsonl")
+	if path != want {
+		t.Errorf("path = %q, want %q (noise ignored)", path, want)
 	}
 }

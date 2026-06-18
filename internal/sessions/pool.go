@@ -367,6 +367,15 @@ func New(cfg Config) (*Pool, error) {
 			return nil
 		}
 	}
+	// Growth-confirm for the bootstrap turn-delivery path (#668): when claude's
+	// sessions dir is known, WriteUserTurn confirms a turn committed by observing
+	// its transcript grow instead of trusting tui-driver's chip heuristic, which
+	// false-acks the first mobile turn lost to a --continue restart race. The
+	// --session-id buildSession path keeps the nil-resolver Committed behaviour
+	// (see spec § Out of scope).
+	if cfg.ClaudeSessionsDir != "" {
+		supCfg.ResolveTranscript = newTranscriptResolver(cfg.ClaudeSessionsDir)
+	}
 	sup, err := supervisor.New(supCfg)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: bootstrap supervisor: %w", err)
