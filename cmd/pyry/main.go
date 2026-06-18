@@ -130,6 +130,28 @@ func resolveClaudeSessionsDir(workdir string) string {
 	return sessions.DefaultClaudeSessionsDir(abs)
 }
 
+// resolveDefaultCwd returns the absolute working directory recorded on a
+// conversation created (via the create_conversation handler) with a null cwd.
+// It mirrors the bootstrap session's WorkDir resolution: the absolute form of
+// workdir, or the process cwd when workdir is empty, so a created conversation's
+// recorded cwd matches where the bootstrap session actually runs. Falls back to
+// the raw value when the path cannot be made absolute (Getwd/Abs failure) so the
+// call site always receives a usable string.
+func resolveDefaultCwd(workdir string) string {
+	if workdir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		workdir = cwd
+	}
+	abs, err := filepath.Abs(workdir)
+	if err != nil {
+		return workdir
+	}
+	return abs
+}
+
 // sanitizeName keeps a-z, A-Z, 0-9, _, ., - and replaces anything else with
 // _. Empty input becomes "_". Defends the on-disk socket filename against
 // path-traversal and other filesystem-unsafe input (e.g. PYRY_NAME from a
@@ -415,6 +437,7 @@ func runSupervisor(args []string) error {
 	registryPath := resolveRegistryPath(*name)
 	convRegistryPath := resolveConversationsRegistryPath(*name)
 	claudeSessionsDir := resolveClaudeSessionsDir(*workdir)
+	defaultCwd := resolveDefaultCwd(*workdir)
 
 	// Phase 1.3c-2: foreground binary auto-attaches when the daemon
 	// hosts the requested --session-id. Conservative — falls through on
@@ -486,7 +509,7 @@ func runSupervisor(args []string) error {
 	// `pyry pair preflight` first to confirm no v1 pairings will break.
 	v2Enabled := os.Getenv("PYRY_MOBILE_V2") == "1"
 	bootstrap := pool.Default()
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, pool)
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
