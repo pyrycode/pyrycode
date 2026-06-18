@@ -414,6 +414,56 @@ func parseFlagSyntax(a string) (name, value string, hasValue bool) {
 	return a, "", false
 }
 
+// confineWorkdirToHome resolves workdir to its canonical realpath and verifies
+// it lies within the operator's home directory, returning the realpath on
+// success. The supervised claude's workdir is auto-trusted in ~/.claude.json so
+// claude never wedges on the workspace-trust modal; the $HOME bound keeps that
+// machine-level auto-accept from extending to system paths or other users'
+// spaces. An empty workdir resolves to the process working directory, matching
+// how the supervisor launches claude when -pyry-workdir is unset.
+//
+// Both sides are canonicalised with EvalSymlinks (macOS /var→/private/var,
+// case-folding) before the containment test, so a symlinked home does not yield
+// a false reject and a sibling like /home/userfoo is not treated as inside
+// /home/user (the #118/#221 two-path-sources gotcha). The rejection error names
+// the offending path and the $HOME boundary only — never any file contents.
+func confineWorkdirToHome(workdir string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	homeReal, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory %q: %w", home, err)
+	}
+	absWork, err := filepath.Abs(workdir)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir %q: %w", workdir, err)
+	}
+	workReal, err := filepath.EvalSymlinks(absWork)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir %q: %w", workdir, err)
+	}
+	if !withinDir(homeReal, workReal) {
+		return "", fmt.Errorf("workdir %q resolves outside the home directory %q: the supervised claude's workdir must be within $HOME", workReal, homeReal)
+	}
+	return workReal, nil
+}
+
+// withinDir reports whether path is dir itself or lies beneath it, using a
+// boundary-aware comparison (filepath.Rel) so /home/userfoo is not treated as
+// inside /home/user. Both arguments must be cleaned, canonical absolute paths.
+func withinDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
 // runSupervisor starts the supervisor and the control server together, blocks
 // until the context is cancelled by SIGINT/SIGTERM, then drains both.
 func runSupervisor(args []string) error {
@@ -444,6 +494,25 @@ func runSupervisor(args []string) error {
 	// every failure mode except "definitely registered".
 	if handled, err := tryAutoAttach(socketPath, claudeArgs); handled {
 		return err
+	}
+
+	// Pre-mark the supervised claude's workdir trusted in ~/.claude.json so it
+	// never wedges on claude's workspace-trust modal — the #421 clean-exit
+	// restart loop the bridge can't surface to the phone. Confine the auto-
+	// trust to $HOME: running the daemon here already implies the operator
+	// trusts this folder, but the auto-accept must never reach system paths or
+	// other users' spaces, so a workdir resolving outside $HOME is rejected as a
+	// loud startup failure rather than a silent loop. Claude is launched in the
+	// returned realpath (threaded into Bootstrap.WorkDir below), so the marked
+	// path and the child's cwd stay byte-identical — a symlinked or wrong-case
+	// workdir cannot re-render the modal (#470/#473).
+	workdirReal, err := confineWorkdirToHome(*workdir)
+	if err != nil {
+		return err
+	}
+	trustedWorkdir, err := trustMark(workdirReal)
+	if err != nil {
+		return fmt.Errorf("mark workdir trusted in ~/.claude.json: %w", err)
 	}
 
 	convReg, err := conversations.Load(convRegistryPath)
@@ -491,7 +560,7 @@ func runSupervisor(args []string) error {
 		SweepInterval:             *convSweepInterval,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
-			WorkDir:    *workdir,
+			WorkDir:    trustedWorkdir,
 			ResumeLast: *resume,
 			ClaudeArgs: claudeArgs,
 			Bridge:     bridge,
