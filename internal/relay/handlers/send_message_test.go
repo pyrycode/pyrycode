@@ -52,6 +52,40 @@ func (s *stubTurnWriter) WriteUserTurn(ctx context.Context, id string, payload [
 	return s.err
 }
 
+// stubSessionRouter is the test double for SessionRouter. It records every
+// conversationID it was asked to route. When multi is non-nil it maps each id
+// to its own writer (the AC#2 no-cross-delivery shape); otherwise it returns
+// tw/err for any id. A non-nil err short-circuits before tw is consulted, so a
+// reject test can also set tw to prove the writer is never reached.
+type stubSessionRouter struct {
+	tw     TurnWriter
+	err    error
+	multi  map[string]TurnWriter
+	gotIDs []string
+}
+
+func (s *stubSessionRouter) Route(conversationID string) (TurnWriter, error) {
+	s.gotIDs = append(s.gotIDs, conversationID)
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.multi != nil {
+		w, ok := s.multi[conversationID]
+		if !ok {
+			return nil, conversations.ErrConversationNotFound
+		}
+		return w, nil
+	}
+	return s.tw, nil
+}
+
+// routeTo wraps a single TurnWriter in a stubSessionRouter that returns it for
+// any conversationID — the uniform rewiring shim for the existing two-phase
+// behaviour tests, which assert handler conduct independent of routing.
+func routeTo(w TurnWriter) SessionRouter {
+	return &stubSessionRouter{tw: w}
+}
+
 func sendMsgLogger(t *testing.T) *slog.Logger {
 	t.Helper()
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -128,7 +162,7 @@ func TestSendMessage_Success_EmitsAck(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(stub, sendMsgLogger(t))
+	h := SendMessage(routeTo(stub), sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -171,7 +205,7 @@ func TestSendMessage_ActivateTimeout_EmitsBinaryOffline(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(stub, sendMsgLogger(t))
+	h := SendMessage(routeTo(stub), sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -212,7 +246,7 @@ func TestSendMessage_HandlerCtxCanceled_PropagatesError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // ensure ctx.Err() is non-nil at handler entry
 
-	h := SendMessage(stub, sendMsgLogger(t))
+	h := SendMessage(routeTo(stub), sendMsgLogger(t))
 	err := h(ctx, c, req)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("handler err = %v, want context.Canceled", err)
@@ -238,7 +272,7 @@ func TestSendMessage_ConversationNotFound_EmitsErrorEnvelope(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(stub, sendMsgLogger(t))
+	h := SendMessage(routeTo(stub), sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -279,7 +313,7 @@ func TestSendMessage_DeliveryFailure_EmitsBinaryOffline(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(stub, sendMsgLogger(t))
+	h := SendMessage(routeTo(stub), sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -319,7 +353,7 @@ func TestSendMessage_DeliveryCtxCanceled_PropagatesError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // parent ctx.Err() non-nil → propagate, don't reply
 
-	h := SendMessage(stub, sendMsgLogger(t))
+	h := SendMessage(routeTo(stub), sendMsgLogger(t))
 	err := h(ctx, c, req)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("handler err = %v, want context.Canceled", err)
@@ -343,7 +377,7 @@ func TestSendMessage_MalformedPayload_EmitsProtocolMalformed(t *testing.T) {
 		Payload: []byte("not-json"),
 	}
 
-	h := SendMessage(stub, sendMsgLogger(t))
+	h := SendMessage(routeTo(stub), sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -361,5 +395,158 @@ func TestSendMessage_MalformedPayload_EmitsProtocolMalformed(t *testing.T) {
 	}
 	if stub.calls != 0 {
 		t.Errorf("WriteUserTurn calls = %d, want 0 (malformed payload must not reach writer)", stub.calls)
+	}
+}
+
+// TestSendMessage_RoutesToBoundSession covers AC#1: the handler resolves the
+// frame's ConversationID through the router and runs Activate-then-WriteUserTurn
+// on the *resolved* writer (the conversation's bound session), passing the
+// frame's ConversationID (the cursor-stamp contract) and verbatim text.
+func TestSendMessage_RoutesToBoundSession(t *testing.T) {
+	t.Parallel()
+	bound := &stubTurnWriter{}
+	router := &stubSessionRouter{tw: bound}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	h := SendMessage(router, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+	if got := router.gotIDs; len(got) != 1 || got[0] != sendMsgConvID {
+		t.Errorf("router routed %v, want [%q]", got, sendMsgConvID)
+	}
+	if got := bound.callOrder; len(got) != 2 || got[0] != "activate" || got[1] != "write" {
+		t.Errorf("bound writer callOrder = %v, want [activate write]", got)
+	}
+	if bound.gotID != sendMsgConvID {
+		t.Errorf("WriteUserTurn id = %q, want %q (cursor-stamp contract)", bound.gotID, sendMsgConvID)
+	}
+	if string(bound.gotPayload) != sendMsgText {
+		t.Errorf("WriteUserTurn payload = %q, want %q", string(bound.gotPayload), sendMsgText)
+	}
+}
+
+// TestSendMessage_TwoConversations_NoCrossDelivery covers AC#2: a router that
+// maps each conversation id to its own bound writer must deliver A's turn only
+// to A's session and B's turn only to B's session — neither writer sees the
+// other's turn.
+func TestSendMessage_TwoConversations_NoCrossDelivery(t *testing.T) {
+	t.Parallel()
+	const (
+		convA = "conv-A"
+		convB = "conv-B"
+		textA = "message for A"
+		textB = "message for B"
+	)
+	writerA := &stubTurnWriter{}
+	writerB := &stubTurnWriter{}
+	router := &stubSessionRouter{multi: map[string]TurnWriter{
+		convA: writerA,
+		convB: writerB,
+	}}
+
+	deliver := func(t *testing.T, convID, text string) {
+		t.Helper()
+		c, recv, _ := newSendMsgConn(t)
+		req := sendMsgRequest(t, protocol.SendMessagePayload{
+			ConversationID: convID,
+			MessageID:      sendMsgMessageID,
+			Text:           text,
+		})
+		h := SendMessage(router, sendMsgLogger(t))
+		if err := h(context.Background(), c, req); err != nil {
+			t.Fatalf("handler(%s): %v", convID, err)
+		}
+		assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+	}
+
+	deliver(t, convA, textA)
+	deliver(t, convB, textB)
+
+	if writerA.calls != 1 || string(writerA.gotPayload) != textA {
+		t.Errorf("writerA: calls=%d payload=%q, want 1 / %q", writerA.calls, string(writerA.gotPayload), textA)
+	}
+	if writerB.calls != 1 || string(writerB.gotPayload) != textB {
+		t.Errorf("writerB: calls=%d payload=%q, want 1 / %q", writerB.calls, string(writerB.gotPayload), textB)
+	}
+}
+
+// TestSendMessage_UnknownConversation_RoutingTime covers AC#4's first arm: a
+// router that fails resolution with conversations.ErrConversationNotFound makes
+// the handler reply conversation.not_found (not retryable) at routing time,
+// before any Activate/WriteUserTurn — the writer is never reached.
+func TestSendMessage_UnknownConversation_RoutingTime(t *testing.T) {
+	t.Parallel()
+	bound := &stubTurnWriter{}
+	// tw is set to prove it is never invoked once err short-circuits Route.
+	router := &stubSessionRouter{tw: bound, err: conversations.ErrConversationNotFound}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: "unknown",
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	h := SendMessage(router, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeConversationNotFound {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeConversationNotFound)
+	}
+	if payload.Retryable {
+		t.Errorf("Retryable = true, want false")
+	}
+	if bound.activateCalls != 0 || bound.calls != 0 {
+		t.Errorf("writer reached on routing reject: activate=%d write=%d, want 0/0", bound.activateCalls, bound.calls)
+	}
+}
+
+// TestSendMessage_NoBoundSession_EmitsBinaryOffline covers AC#4's second arm: a
+// router error that is NOT ErrConversationNotFound (the conversation exists but
+// has no live bound session) maps to a retryable server.binary_offline reply,
+// and the writer is never reached.
+func TestSendMessage_NoBoundSession_EmitsBinaryOffline(t *testing.T) {
+	t.Parallel()
+	bound := &stubTurnWriter{}
+	router := &stubSessionRouter{tw: bound, err: errors.New("conversation has no bound session")}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	h := SendMessage(router, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeServerBinaryOffline {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeServerBinaryOffline)
+	}
+	if !payload.Retryable {
+		t.Errorf("Retryable = false, want true (no-bound-session is transient)")
+	}
+	if bound.activateCalls != 0 || bound.calls != 0 {
+		t.Errorf("writer reached on no-bound-session reject: activate=%d write=%d, want 0/0", bound.activateCalls, bound.calls)
 	}
 }

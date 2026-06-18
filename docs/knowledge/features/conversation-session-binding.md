@@ -1,12 +1,15 @@
 # Conversation → session binding
 
-How each phone-created discussion gets its own dedicated, isolated claude session. This is the create-path wiring that ties `internal/conversations` (the `Conversation.CurrentSessionID` binding field) to `internal/sessions` (the `Pool` that mints and supervises sessions), landed by the `create_conversation` handler in `internal/relay/handlers`.
+How each phone-created discussion gets its own dedicated, isolated claude session. Two halves tie `internal/conversations` (the `Conversation.CurrentSessionID` binding field) to `internal/sessions` (the `Pool` that mints and supervises sessions):
 
-Foundational slice: #677 (EPIC #672, "per-conversation sessions"). See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md), [`docs/multi-session.md`](../../multi-session.md).
+- **Create path (#677)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`.
+- **Routing path (#678)** — `send_message` resolves that bound session and delivers the inbound turn there instead of to the bootstrap.
+
+Both land in the `internal/relay/handlers` package. Foundational + consumer slices of EPIC #672 ("per-conversation sessions"). See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md), [`docs/multi-session.md`](../../multi-session.md).
 
 ## What it does and why
 
-Before #677 there was exactly one supervised claude — the bootstrap session — and `create_conversation` only wrote a registry row, leaving `CurrentSessionID` empty. Every discussion therefore shared the single bootstrap claude: a turn in one discussion could disturb another. #677 wires the create path onto the existing `sessions.Pool` so **each conversation mints and binds its own dedicated session**, recorded via the existing `Conversation.CurrentSessionID` field. Discussions are now isolated.
+Before #677 there was exactly one supervised claude — the bootstrap session — and `create_conversation` only wrote a registry row, leaving `CurrentSessionID` empty. Every discussion therefore shared the single bootstrap claude: a turn in one discussion could disturb another. #677 wires the create path onto the existing `sessions.Pool` so **each conversation mints and binds its own dedicated session**, recorded via the existing `Conversation.CurrentSessionID` field. #678 then makes `send_message` actually *route* to that bound session, so inbound turns are now isolated per discussion (until then, the binding existed but every turn still went to the bootstrap). See [§ Routing](#routing-send_message-consumes-the-binding).
 
 ## How it works
 
@@ -61,8 +64,67 @@ The mint is bounded by a 30s timeout (`createConversationMintTimeout`, matching 
 
 Any mint error (pool not running, activate timeout, in-pool save failure, ctx deadline) fails the whole create: the handler logs at `Warn` (`create_conversation.session_mint_failed`, fields `conn_id` / `conversation_id` / wrapped `err`) and replies `protocol.CodeServerBinaryOffline` **retryable**, returning **before** `reg.Create` — so there is no half-bound orphan conversation row. The phone retries onto a fresh conversation + session.
 
+## Routing: `send_message` consumes the binding
+
+#678 is the consumer half. Where the create path *writes* `CurrentSessionID`, `send_message` *reads* it to select the session a turn is delivered to. Before #678 the handler held a single `TurnWriter` (the bootstrap session) and routed every turn there regardless of `ConversationID`; now it resolves the frame's conversation to its bound session and runs the existing Activate-before-write against *that* session.
+
+### The `SessionRouter` seam (mirrors `SessionCreator`)
+
+The handler depends on a second consumer-declared interface that *returns* the existing `TurnWriter`, so `handlers/` still imports no `internal/sessions`:
+
+```go
+// internal/relay/handlers/send_message.go
+type SessionRouter interface {
+    Route(conversationID string) (TurnWriter, error)
+}
+```
+
+`Route` is **ctx-free** — a pure in-memory lookup (registry read + field check + pool lookup), non-blocking, no cancellation surface. The blocking work (`Activate`, `WriteUserTurn`) still happens in the returned writer under the handler's unchanged two 30s budgets.
+
+The implementation lives at `cmd/pyry` (the only package importing both `conversations` and `sessions`), beside `sessionMinter`:
+
+```go
+// cmd/pyry/main.go
+type sessionRouter struct {
+    pool    *sessions.Pool
+    convReg *conversations.Registry
+}
+func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error) {
+    conv, ok := r.convReg.Get(conversations.ConversationID(conversationID))
+    if !ok {
+        return nil, conversations.ErrConversationNotFound      // → conversation.not_found
+    }
+    if conv.CurrentSessionID == "" {
+        return nil, errNoBoundSession                          // → server.binary_offline (before any Lookup!)
+    }
+    id := sessions.SessionID(conv.CurrentSessionID)
+    sess, err := r.pool.Lookup(id)
+    if err != nil {
+        return nil, err                                        // ErrSessionNotFound → server.binary_offline
+    }
+    return boundSession{pool: r.pool, sess: sess, id: id}, nil
+}
+```
+
+### Two load-bearing invariants
+
+- **The empty-`CurrentSessionID` guard fires *before* any `Lookup`.** `Pool.Lookup("")` returns the **bootstrap** session. Without the up-front `== ""` rejection, an unbound conversation would silently route the phone's turn into the shared bootstrap claude — the confused-deputy / isolation break AC#4 forbids. Rejecting first maps the case to a retryable `server.binary_offline` instead. (The phone supplies only the `ConversationID` lookup key and the `Text`; the routing *target* is the server-stored `CurrentSessionID`, never phone-writable — so the phone can only address a conversation whose server-minted id it already holds, and can never point it at an arbitrary session.)
+- **`boundSession.Activate` funnels through `Pool.Activate`, not `Session.Activate`.** `*sessions.Session` already satisfies `TurnWriter` directly; the `boundSession` wrapper exists *only* to redirect `Activate` through the cap-enforcing `Pool.Activate(ctx, id)`. The bootstrap was special (always active, never cap-evicted) so it could use `Session.Activate`; per-conversation sessions are full `ActiveCap` citizens — activating one may LRU-evict a peer, which only happens inside `Pool.Activate`. Bypassing it would break the invariant the idle-evict follow-up (#680) relies on. An idle-evicted bound session therefore re-activates on the next `send_message` (the [idle-eviction.md](idle-eviction.md) lazy-respawn contract, now per-conversation).
+
+### Error mapping (no new wire code)
+
+| Case | Detected in | Reply | Retryable |
+|---|---|---|---|
+| Unknown `ConversationID` | `Route`: `Registry.Get` miss | `conversation.not_found` | no |
+| No bound session (`CurrentSessionID == ""`) | `Route`: empty-id guard | `server.binary_offline` | yes |
+| Bound id not in pool (`ErrSessionNotFound`) | `Route`: `Pool.Lookup` | `server.binary_offline` | yes |
+| Conversation deleted mid-flight (TOCTOU) | `WriteUserTurn` → bound session's `ValidateConversation` | `conversation.not_found` | no |
+
+The unknown-conversation reject now fires at *routing* time rather than delivery time — net behaviour to the phone is identical, but it no longer spends an Activate budget on a doomed turn. The deliver-switch `ErrConversationNotFound` arm stays to defend the TOCTOU where the conversation is deleted between `Route` and delivery. `errNoBoundSession` is an unexported sentinel with no wire surface. The two-phase Activate→WriteUserTurn block is otherwise **byte-identical** to the pre-#678 handler (AC#5: only the session-selection step is new).
+
 ## Edge cases & limitations
 
+- **Inbound routes per-conversation; outbound still taps the bootstrap PTY (#678).** The assistant-turn → `message` bridge (#311) still reads `bootstrap.Bridge()`, so claude's *replies* fan out from the bootstrap session's PTY even though inbound turns now land in per-conversation sessions. This inbound/outbound asymmetry is a deliberate, documented phased-migration step — out of #678's scope — and the real-claude e2e confirms the full phone→claude→phone round-trip is intact. Routing the outbound half per-conversation is a #672-family follow-up.
 - **Accepted residue — unbound session on a non-empty-id error.** `Pool.Create` can return a non-empty id *with* an error (e.g. the mint persisted, then `Activate` timed out; the lifecycle goroutine may still bring the session up against the pool ctx after the handler's timeout fires). The handler treats *any* error as a clean mint failure and does not bind it, so such a session is left registered in the Pool with no conversation pointing at it. This is benign — the same shape as a session that ran and idled out, recoverable by the Pool's own lifecycle — and the race is unobserved, so per evidence-based fix selection no cleanup logic was added.
 - **Process-exhaustion / spawn amplification (deferred).** Eager binding makes `create_conversation` a process-spawning operation; an authenticated phone spamming creates can exhaust host processes/memory. The existing in-architecture bound is `Pool.ActiveCap` (LRU-evicts a victim when the cap is hit) — but it **defaults to uncapped** (`-pyry-active-cap 0`). A dedicated per-operator create quota / rate-limit is new dispatch policy and is a named #672-family follow-up. Ops mitigation today: set `-pyry-active-cap` and/or `-pyry-idle-timeout`.
 - **`ActiveCap` churn.** When `ActiveCap` *is* set, each `create_conversation` activation can LRU-evict another conversation's live claude. Acceptable: eviction preserves the on-disk JSONL and the session re-activates on the next `send_message`.
@@ -72,13 +134,14 @@ Any mint error (pool not running, activate timeout, in-pool save failure, ctx de
 
 - **Distinct per-conversation working directory** + the trust/boundary validation that makes `conversation.Cwd` a safe spawn input. Until then, all conversation sessions share the trusted bootstrap workdir.
 - **Per-operator create quota / rate-limit** (dispatch policy).
+- **Per-conversation outbound routing.** The assistant-turn bridge still fans out from the bootstrap PTY; routing replies per-conversation (the symmetric half of #678's inbound routing) is deferred.
 
 ## Related
 
 - [conversations-package.md](conversations-package.md) — the `Conversation.CurrentSessionID` binding field (and `SessionHistory`).
 - [conversations-registry.md](conversations-registry.md) — atomic Save/Load that round-trips the binding (AC#3).
 - [sessions-package.md](sessions-package.md) — `Pool.Create` mint primitive (§ *Pool.Create*) and `buildSession` (the `tpl.WorkDir` / `--session-id`-only spawn point).
-- [idle-eviction.md](idle-eviction.md) — "evicted is a state, not removal"; lazy respawn on next `send_message`.
-- [relay-package.md](relay-package.md) — the `create_conversation` handler and the `SessionCreator` seam alongside `TurnWriter`.
-- [codebase/677.md](../codebase/677.md) — per-ticket implementation notes.
+- [idle-eviction.md](idle-eviction.md) — "evicted is a state, not removal"; lazy respawn on next `send_message`, now per-conversation via `Pool.Activate`.
+- [relay-package.md](relay-package.md) — the `create_conversation` / `send_message` handlers and the `SessionCreator` / `SessionRouter` seams alongside `TurnWriter`.
+- [codebase/677.md](../codebase/677.md), [codebase/678.md](../codebase/678.md) — per-ticket implementation notes (create + routing halves).
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — mobile remote-head interactive session.

@@ -59,10 +59,27 @@ type TurnWriter interface {
 	WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
 }
 
+// SessionRouter resolves a send_message frame's conversation id to the write
+// surface for that conversation's bound claude session (#678). Resolution is a
+// pure in-memory lookup (no I/O, non-blocking) — the blocking activation
+// happens in the returned TurnWriter's Activate, under the handler's existing
+// budget. The interface lives in this package, returning a TurnWriter rather
+// than any internal/sessions type, so handlers/ stays free of an
+// internal/sessions import (mirrors SessionCreator in create_conversation.go).
+//
+// Failure mapping the handler relies on:
+//   - unknown conversation → conversations.ErrConversationNotFound
+//     (maps to conversation.not_found, not retryable)
+//   - conversation has no bound session, or the bound session id is not in the
+//     pool → any other non-nil error (maps to retryable server.binary_offline)
+type SessionRouter interface {
+	Route(conversationID string) (TurnWriter, error)
+}
+
 // SendMessage returns a dispatch.Handler that processes a send_message
-// frame from the phone. w is the per-conn write surface (the bootstrap
-// session in production); logger is the daemon's slog logger used for
-// every branch's structured event.
+// frame from the phone. router resolves the frame's ConversationID to the
+// write surface for that conversation's bound claude session (#678); logger
+// is the daemon's slog logger used for every branch's structured event.
 //
 // SECURITY:
 //   - payload.Text reaches the supervised claude child's stdin verbatim
@@ -71,7 +88,12 @@ type TurnWriter interface {
 //   - payload.Text is NEVER logged at any level. conversation_id and
 //     message_id (phone-supplied opaque ids) are logged on ack and
 //     unknown-conversation paths only.
-func SendMessage(w TurnWriter, logger *slog.Logger) dispatch.Handler {
+//   - The phone supplies only the ConversationID lookup key and the Text; the
+//     routing target (the bound session) is read from the server-stored
+//     registry row, never phone-writable. An unbound conversation is rejected
+//     before any pool Lookup, so a turn is never silently routed to the shared
+//     bootstrap session (AC#4).
+func SendMessage(router SessionRouter, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.SendMessagePayload
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -80,6 +102,35 @@ func SendMessage(w TurnWriter, logger *slog.Logger) dispatch.Handler {
 				"conn_id", c.ConnID(),
 				"err", err)
 			return replyError(ctx, c, env, protocol.CodeProtocolMalformed, msgSendMessageMalformed, false)
+		}
+
+		// Resolve the conversation's bound session before any Activate/write, so
+		// the turn lands in that discussion's own claude rather than the shared
+		// bootstrap (#678). Route is a pure in-memory lookup; the blocking
+		// Activate/WriteUserTurn below run against the resolved surface under the
+		// unchanged two-phase budgets.
+		w, routeErr := router.Route(p.ConversationID)
+		if routeErr != nil {
+			switch {
+			case errors.Is(routeErr, conversations.ErrConversationNotFound):
+				logger.Warn("relay: send_message unknown conversation",
+					"event", "send_message.unknown_conversation",
+					"conn_id", c.ConnID(),
+					"conversation_id", p.ConversationID)
+				return replyError(ctx, c, env, protocol.CodeConversationNotFound, msgConversationNotFound, false)
+			default:
+				// The conversation exists but has no live bound session (empty
+				// CurrentSessionID, or the bound id is no longer in the pool).
+				// Retryable so the phone re-issues after the session is (re)bound;
+				// never falls through to the bootstrap — Route rejects an empty
+				// binding before any Lookup (AC#4).
+				logger.Warn("relay: send_message no bound session",
+					"event", "send_message.no_bound_session",
+					"conn_id", c.ConnID(),
+					"conversation_id", p.ConversationID,
+					"err", routeErr)
+				return replyError(ctx, c, env, protocol.CodeServerBinaryOffline, msgServerBinaryOffline, true)
+			}
 		}
 
 		// Activate first so an idle-evicted bootstrap session respawns
