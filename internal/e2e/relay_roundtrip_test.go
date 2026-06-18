@@ -53,8 +53,21 @@ func TestRelay_Roundtrip_Appendix(t *testing.T) {
 	}
 
 	tmp := t.TempDir()
-	sessionsDir := filepath.Join(tmp, "claude-sessions")
+	// Align the sessions dir to the daemon's COMPUTED path (resolveClaudeSessionsDir
+	// has no env override — always <HOME>/.claude/projects/encode(workdir), with
+	// HOME=home and -pyry-workdir=home) so the #668 growth-confirm resolver scans
+	// exactly the file fakeclaude grows on the delivered turn. rotation_test pattern.
+	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
 	initialUUID := "88888888-8888-4888-8888-888888888888"
+	// Pre-create <initialUUID>.jsonl BEFORE the daemon starts so the first
+	// growth-confirm baseline resolves at a tiny offset, not racing fakeclaude's open.
+	initialJSONL := filepath.Join(sessionsDir, initialUUID+".jsonl")
+	if err := os.WriteFile(initialJSONL, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("pre-create initial jsonl: %v", err)
+	}
 	rotateTrigger := filepath.Join(tmp, "rotate.trigger.never-created")
 	stdinLog := filepath.Join(tmp, "fakeclaude-stdin.log")
 	asstTrigger := filepath.Join(tmp, "assistant.trigger")
