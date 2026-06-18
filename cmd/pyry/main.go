@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -579,7 +580,11 @@ func runSupervisor(args []string) error {
 	// `pyry pair preflight` first to confirm no v1 pairings will break.
 	v2Enabled := os.Getenv("PYRY_MOBILE_V2") == "1"
 	bootstrap := pool.Default()
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, sessionRouter{pool: pool, convReg: convReg}, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
+	// One activeConversation holder, shared two ways: the sessionRouter writes it
+	// on each successful route, and startRelay threads it (read-side) to the
+	// structured turn stream as its cursor (#687).
+	active := &activeConversation{}
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, sessionRouter{pool: pool, convReg: convReg, active: active}, active, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
@@ -662,6 +667,11 @@ var errNoBoundSession = errors.New("conversation has no bound session")
 type sessionRouter struct {
 	pool    *sessions.Pool
 	convReg *conversations.Registry
+	// active records the conversation each successful Route resolves — the signal
+	// the structured turn stream reads as its cursor (#687). Route has a value
+	// receiver behind the handlers.SessionRouter interface, so this is a pointer:
+	// the copy must write the one holder the emitter reads.
+	active *activeConversation
 }
 
 // Route resolves conversationID to its bound session's write surface. The order
@@ -681,6 +691,9 @@ func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error)
 	if err != nil {
 		return nil, err
 	}
+	// Stamp the active-conversation cursor only on the successful-route path, so
+	// a rejected route (unknown / unbound / dangling) never moves it (#687).
+	r.active.set(conversationID)
 	return boundSession{pool: r.pool, sess: sess, id: id}, nil
 }
 
@@ -702,6 +715,45 @@ func (b boundSession) Activate(ctx context.Context) error {
 
 func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	return b.sess.WriteUserTurn(ctx, conversationID, payload)
+}
+
+// activeConversation holds the id of the conversation the operator is currently
+// interacting with — the one most recently resolved by sessionRouter.Route. It
+// is the structured turn stream's cursor source (#687): the emitter
+// (interactive_turn_v2.go:131) and the #647 reconnect-replay source
+// (interactive_turn_stream_v2.go:60) read it instead of the bootstrap
+// supervisor's CurrentConversation(), which #678 emptied for routed turns —
+// those commit on bound-session supervisors and never touch the bootstrap cursor
+// (docs/knowledge/codebase/678.md). Before any route the zero value is "", the
+// well-defined "no conversation routed yet" state the emitter drops on.
+//
+// It is written on the routing-path goroutine (set, from Route) and read on the
+// producer's single Run goroutine (CurrentConversation — live emit + replay).
+// The mutex makes that cross-goroutine hand-off race-free; it is a leaf lock,
+// never held across a call-out. This is the one piece of new synchronisation —
+// it absorbs the hand-off so the emitter's other counters stay unguarded-single-
+// goroutine (interactive_turn_v2.go:42-44). Mirrors the supervisor's own
+// convMu+currentConvID cursor.
+type activeConversation struct {
+	mu sync.Mutex
+	id string
+}
+
+// set stamps id as the current conversation. Called from sessionRouter.Route on
+// the successful-route path only.
+func (a *activeConversation) set(id string) {
+	a.mu.Lock()
+	a.id = id
+	a.mu.Unlock()
+}
+
+// CurrentConversation returns the stamped conversation id, "" before any route.
+// It satisfies the cursorReader interface (assistant_turn.go:24) verbatim, and
+// its method value satisfies SetReplaySource's func() string.
+func (a *activeConversation) CurrentConversation() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.id
 }
 
 // parseClientFlags handles the shared flags every control verb accepts:
