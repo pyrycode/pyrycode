@@ -1095,3 +1095,186 @@ func TestSupervisor_WriteUserTurn_CursorConcurrency(t *testing.T) {
 		t.Errorf("final CurrentConversation = %q, want %q or %q", got, "c-a", "c-b")
 	}
 }
+
+// --- #668: deterministic transcript-growth commit-confirm ----------------------
+
+// transcriptStep scripts one resolve() outcome for the growth-confirm tests.
+type transcriptStep struct {
+	path string
+	size int64
+	err  error
+}
+
+// scriptedResolve replays steps in order, clamping to the final step for any
+// further calls. confirmViaTranscriptGrowth runs on a single goroutine, so the
+// call counter needs no synchronisation.
+func scriptedResolve(steps ...transcriptStep) func(context.Context) (string, int64, error) {
+	i := 0
+	return func(context.Context) (string, int64, error) {
+		s := steps[i]
+		if i < len(steps)-1 {
+			i++
+		}
+		return s.path, s.size, s.err
+	}
+}
+
+// TestSupervisor_ConfirmViaTranscriptGrowth drives every branch of the pure
+// growth-confirm helper through fake deps — no live claude, no screen literal.
+// The resolver is the one signal under test; waitReady/deliver are scripted to
+// isolate the growth decision (committed is deliberately ignored on the growth
+// path, which is the whole point of #668).
+func TestSupervisor_ConfirmViaTranscriptGrowth(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	boom := errors.New("pty closed")
+	baselineErr := errors.New("read dir")
+	waitOK := func(context.Context) error { return nil }
+	// deliverIgnored returns committed=false; the growth path ignores it.
+	deliverIgnored := func(context.Context) (bool, error) { return false, nil }
+
+	cases := []struct {
+		name      string
+		waitReady func(context.Context) error
+		deliver   func(context.Context) (bool, error)
+		resolve   func(context.Context) (string, int64, error)
+		check     func(t *testing.T, err error)
+	}{
+		{
+			name:      "growth on first poll",
+			waitReady: waitOK,
+			deliver:   deliverIgnored,
+			resolve:   scriptedResolve(transcriptStep{"a.jsonl", 100, nil}, transcriptStep{"a.jsonl", 200, nil}),
+			check:     wantNil,
+		},
+		{
+			name:      "growth after several polls",
+			waitReady: waitOK,
+			deliver:   deliverIgnored,
+			resolve: scriptedResolve(
+				transcriptStep{"a.jsonl", 100, nil}, // baseline
+				transcriptStep{"a.jsonl", 100, nil},
+				transcriptStep{"a.jsonl", 100, nil},
+				transcriptStep{"a.jsonl", 100, nil},
+				transcriptStep{"a.jsonl", 200, nil}, // grows
+			),
+			check: wantNil,
+		},
+		{
+			name:      "never grows is loud",
+			waitReady: waitOK,
+			deliver:   deliverIgnored,
+			resolve:   scriptedResolve(transcriptStep{"a.jsonl", 100, nil}),
+			check:     wantIs(ErrTurnNotCommitted),
+		},
+		{
+			name:      "rotation counts as growth",
+			waitReady: waitOK,
+			deliver:   deliverIgnored,
+			resolve:   scriptedResolve(transcriptStep{"old.jsonl", 5000, nil}, transcriptStep{"new.jsonl", 200, nil}),
+			check:     wantNil,
+		},
+		{
+			name:      "empty baseline then file appears",
+			waitReady: waitOK,
+			deliver:   deliverIgnored,
+			resolve:   scriptedResolve(transcriptStep{"", 0, nil}, transcriptStep{"a.jsonl", 120, nil}),
+			check:     wantNil,
+		},
+		{
+			name:      "wait ready error wraps and matches",
+			waitReady: func(context.Context) error { return context.DeadlineExceeded },
+			deliver:   deliverIgnored,
+			resolve:   scriptedResolve(transcriptStep{"a.jsonl", 100, nil}),
+			check: func(t *testing.T, err error) {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("err = %v, want errors.Is(context.DeadlineExceeded)", err)
+				}
+				if err == nil || !strings.Contains(err.Error(), "wait ready:") {
+					t.Errorf("err = %v, want the %q wrap", err, "wait ready:")
+				}
+			},
+		},
+		{
+			name:      "deliver error returned no panic",
+			waitReady: waitOK,
+			deliver:   func(context.Context) (bool, error) { return false, boom },
+			resolve:   scriptedResolve(transcriptStep{"a.jsonl", 100, nil}),
+			check:     wantIs(boom),
+		},
+		{
+			name:      "baseline error falls back to committed true",
+			waitReady: waitOK,
+			deliver:   func(context.Context) (bool, error) { return true, nil },
+			resolve:   scriptedResolve(transcriptStep{"", 0, baselineErr}),
+			check:     wantNil,
+		},
+		{
+			name:      "baseline error falls back to committed false",
+			waitReady: waitOK,
+			deliver:   func(context.Context) (bool, error) { return false, nil },
+			resolve:   scriptedResolve(transcriptStep{"", 0, baselineErr}),
+			check:     wantIs(ErrTurnNotCommitted),
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			err := confirmViaTranscriptGrowth(context.Background(), deliverGrowthDeps{
+				waitReady: c.waitReady,
+				deliver:   c.deliver,
+				resolve:   c.resolve,
+				log:       discard,
+				timeout:   200 * time.Millisecond,
+				poll:      2 * time.Millisecond,
+			})
+			c.check(t, err)
+		})
+	}
+}
+
+// TestSupervisor_ConfirmViaTranscriptGrowth_CtxCancelledMidPoll proves a ctx
+// cancelled after delivery (e.g. the handler's deliver budget expiring) ends the
+// poll with a matchable context.Canceled — the handler maps it to a retryable
+// reply, never a false ack.
+func TestSupervisor_ConfirmViaTranscriptGrowth_CtxCancelledMidPoll(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := confirmViaTranscriptGrowth(ctx, deliverGrowthDeps{
+		waitReady: func(context.Context) error { return nil },
+		deliver: func(context.Context) (bool, error) {
+			cancel() // cancel before any poll observes growth
+			return false, nil
+		},
+		resolve: scriptedResolve(transcriptStep{"a.jsonl", 100, nil}), // never grows
+		log:     discard,
+		timeout: 2 * time.Second,
+		poll:    5 * time.Millisecond,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled)", err)
+	}
+}
+
+func wantNil(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+}
+
+func wantIs(target error) func(*testing.T, error) {
+	return func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, target) {
+			t.Errorf("err = %v, want errors.Is(err, %v)", err, target)
+		}
+	}
+}

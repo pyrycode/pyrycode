@@ -29,6 +29,20 @@ import (
 // should drain promptly; the timeout is a safety net.
 const goroutineDrainTimeout = 100 * time.Millisecond
 
+// transcriptConfirmTimeout bounds the post-delivery wait for the resolved claude
+// transcript to grow on the growth-confirm path (Config.ResolveTranscript set).
+// Generous on purpose: claude appends the user turn to its JSONL at commit time,
+// so a real commit shows growth within ~1-2s; the margin covers a slow
+// --continue resume drain. A too-tight value risks a false negative (turn
+// committed late) → phone retry → duplicate turn. Tuning knob, not a contract;
+// bump if a slow-resume false negative is ever observed. Always capped further by
+// the caller's ctx (the handler's 30s deliver budget).
+const transcriptConfirmTimeout = 10 * time.Second
+
+// transcriptConfirmPoll is the growth poll interval — matches tui-driver's
+// promptCommitPoll.
+const transcriptConfirmPoll = 150 * time.Millisecond
+
 // ErrNoLiveSession is returned by WriteUserTurn when no claude session is
 // registered at delivery time — the supervisor is between runOnce iterations,
 // has not yet spawned, or is mid-restart. Formerly this was a silent drop
@@ -110,6 +124,19 @@ type Config struct {
 	// receiving the sentinel through the closure. When nil, WriteUserTurn
 	// skips validation (test ergonomics).
 	ValidateConversation func(id string) error
+
+	// ResolveTranscript, when non-nil, resolves the newest claude transcript for
+	// the supervised workdir: its absolute path and current byte size. ("", 0,
+	// nil) means no transcript exists yet (valid — a fresh session that has
+	// written no turn). A non-nil error means the dir is unreadable.
+	//
+	// When set, deliverViaSession uses transcript *growth* as a deterministic
+	// commit signal instead of trusting DeliverResult.Committed (tui-driver's
+	// chip heuristic, which false-acks short single-line turns lost to a
+	// --continue restart race). When nil, the #594 Committed-based behaviour is
+	// preserved (foreground mode, tests). Modelled on ValidateConversation:
+	// optional, nil-safe, the production-vs-test seam.
+	ResolveTranscript func(ctx context.Context) (path string, size int64, err error)
 
 	// helperEnv is extra environment variables appended to the child process
 	// environment. Used only in tests (TestHelperProcess pattern).
@@ -221,37 +248,156 @@ func (s *Supervisor) WriteUserTurn(ctx context.Context, id string, payload []byt
 }
 
 // deliverViaSession is the production deliverFn. It gates on claude reaching
-// idle (WaitReady), then delivers the turn and confirms the commit with
-// corrupted-paste recovery (DeliverPrompt), reporting ErrTurnNotCommitted when
-// no commit could be confirmed. The WaitReady idle gate is load-bearing: it is
-// what makes DeliverPrompt's "no pasted-text chip ⇒ committed-but-slow"
-// heuristic trustworthy — without a prior idle gate that heuristic would fire
-// for an attached-but-not-ready claude (still booting MCP) and report a false
-// commit. A blocking trust/network condition that prevents idle simply surfaces
-// as a WaitReady ctx timeout → loud failure, so no trust/mcp/network policy
-// branch is needed on this long-lived supervised path.
+// idle (WaitReady), then delivers the turn and confirms the commit. The
+// WaitReady idle gate is load-bearing: a blocking trust/network condition that
+// prevents idle simply surfaces as a WaitReady ctx timeout → loud failure, so no
+// trust/mcp/network policy branch is needed on this long-lived supervised path.
 //
-// JSONLPath is deliberately left empty: the relay-driven bootstrap session
-// spawns with --continue (not --session-id), so the supervisor holds no stable
-// claude session UUID to build SessionJSONLPath from, and claude rotates the
-// on-disk UUID on /clear anyway. With the idle gate in front, DeliverPrompt's
-// spinner commit signal is sufficient. All claude-screen knowledge stays inside
-// tui-driver; this method sees only classified errors and the Committed bool.
+// Commit confirmation has two modes:
+//
+//   - Config.ResolveTranscript == nil (foreground / tests): trust
+//     DeliverResult.Committed — DeliverPrompt's "no pasted-text chip ⇒
+//     committed-but-slow" heuristic, sufficient with the idle gate in front.
+//   - Config.ResolveTranscript != nil (the relay-driven --continue bootstrap):
+//     ignore Committed and confirm via deterministic transcript *growth*. That
+//     heuristic false-acks the short single-line first mobile turn when it is
+//     lost to claude's ~7.5s --continue restart racing the send (#668): no chip
+//     ever renders for a typed prompt, so DeliverPrompt reports a false commit.
+//     Growth (the resolved JSONL got bigger, or a /clear-rotated newer file
+//     appeared) is the only reliable signal; tui-driver's appearance-based
+//     JSONLPath is not — under --continue the per-session JSONL already exists.
+//
+// JSONLPath in DeliverOpts stays empty in both modes: we own the growth signal
+// now, and the supervisor holds no stable claude session UUID anyway (--continue,
+// not --session-id; claude rotates the on-disk UUID on /clear). All claude-screen
+// knowledge stays inside tui-driver; this method sees only classified
+// errors, the Committed bool, and file sizes — never JSONL content.
 func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Session, payload []byte) error {
-	if _, err := sess.WaitReady(ctx); err != nil {
+	deliver := func(ctx context.Context) (bool, error) {
+		res, err := sess.DeliverPrompt(ctx, tuidriver.DeliverOpts{
+			Prompt: string(payload),
+			Logger: s.log,
+		})
+		return res.Committed, err
+	}
+
+	if s.cfg.ResolveTranscript == nil {
+		if _, err := sess.WaitReady(ctx); err != nil {
+			return fmt.Errorf("wait ready: %w", err)
+		}
+		committed, err := deliver(ctx)
+		if err != nil {
+			return err
+		}
+		if !committed {
+			return ErrTurnNotCommitted
+		}
+		return nil
+	}
+
+	return confirmViaTranscriptGrowth(ctx, deliverGrowthDeps{
+		waitReady: func(ctx context.Context) error {
+			_, err := sess.WaitReady(ctx)
+			return err
+		},
+		deliver: deliver,
+		resolve: s.cfg.ResolveTranscript,
+		log:     s.log,
+		timeout: transcriptConfirmTimeout,
+		poll:    transcriptConfirmPoll,
+	})
+}
+
+// deliverGrowthDeps are the seams confirmViaTranscriptGrowth drives.
+// deliverViaSession wires the real Session methods + Config.ResolveTranscript;
+// tests inject fakes to script readiness, delivery, and transcript-growth
+// outcomes with no live claude and no claude-screen literal — the same
+// "seam one level above the screen" pattern as deliverFn (#594). timeout/poll
+// are fields rather than package vars so parallel -race tests can shrink them
+// without sharing mutable global state.
+type deliverGrowthDeps struct {
+	waitReady func(ctx context.Context) error                                // wraps Session.WaitReady
+	deliver   func(ctx context.Context) (committed bool, err error)          // wraps Session.DeliverPrompt
+	resolve   func(ctx context.Context) (path string, size int64, err error) // Config.ResolveTranscript
+	log       *slog.Logger
+	timeout   time.Duration // post-delivery growth-wait budget; defaults to transcriptConfirmTimeout
+	poll      time.Duration // growth poll interval; defaults to transcriptConfirmPoll
+}
+
+// confirmViaTranscriptGrowth delivers a turn and returns nil only after it
+// observes the resolved claude transcript grow past a pre-delivery baseline —
+// the deterministic commit signal that replaces tui-driver's stochastic chip
+// heuristic on the supervised-bootstrap path (#668). No growth within the
+// bounded window → ErrTurnNotCommitted (a loud, retryable failure), never a
+// false ack. Runs synchronously on the caller's goroutine; the poll is fully
+// bounded by timeout and ctx.
+func confirmViaTranscriptGrowth(ctx context.Context, d deliverGrowthDeps) error {
+	log := d.log
+	if log == nil {
+		log = slog.Default()
+	}
+	timeout := d.timeout
+	if timeout <= 0 {
+		timeout = transcriptConfirmTimeout
+	}
+	poll := d.poll
+	if poll <= 0 {
+		poll = transcriptConfirmPoll
+	}
+
+	if err := d.waitReady(ctx); err != nil {
 		return fmt.Errorf("wait ready: %w", err)
 	}
-	res, err := sess.DeliverPrompt(ctx, tuidriver.DeliverOpts{
-		Prompt: string(payload),
-		Logger: s.log,
-	})
-	if err != nil {
+
+	// Baseline is captured after WaitReady returns idle, so any JSONL writes
+	// claude makes during the --continue resume are already counted and cannot be
+	// mistaken for the user turn.
+	basePath, baseSize, berr := d.resolve(ctx)
+	if berr != nil {
+		// No baseline → we cannot use growth. Fall back to the Committed
+		// heuristic rather than manufacture a false negative that would drive a
+		// duplicate send.
+		log.Warn("supervisor: transcript baseline resolve failed; falling back to commit heuristic", "err", berr)
+		committed, err := d.deliver(ctx)
+		if err != nil {
+			return err
+		}
+		if !committed {
+			return ErrTurnNotCommitted
+		}
+		return nil
+	}
+
+	// Ignore Committed on the growth path — it is the unreliable heuristic we are
+	// replacing. A delivery (PTY write) error is still loud.
+	if _, err := d.deliver(ctx); err != nil {
 		return err
 	}
-	if !res.Committed {
-		return ErrTurnNotCommitted
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return ErrTurnNotCommitted
+		case <-ticker.C:
+			newPath, newSize, err := d.resolve(ctx)
+			if err == nil && grew(basePath, baseSize, newPath, newSize) {
+				return nil
+			}
+		}
 	}
-	return nil
+}
+
+// grew reports whether the newest transcript advanced past the pre-delivery
+// baseline: a larger file (turn appended) or a different newest file (/clear
+// rotation). A still-empty resolution (newPath == "") is not growth.
+func grew(basePath string, baseSize int64, newPath string, newSize int64) bool {
+	return newPath != "" && (newPath != basePath || newSize > baseSize)
 }
 
 // CurrentConversation returns the most recently written conversation_id, or

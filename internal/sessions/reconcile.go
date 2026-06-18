@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -86,6 +87,32 @@ func mostRecentJSONL(dir string) (SessionID, error) {
 		}
 	}
 	return bestID, nil
+}
+
+// newTranscriptResolver returns a supervisor.Config.ResolveTranscript closure
+// over dir: the newest <uuid>.jsonl plus its current byte size, ("", 0, nil)
+// when none exists yet. Reuses mostRecentJSONL so it selects the same file
+// reconcile and the rotation watcher do — which is what lets the turn-bridge
+// stream the very turn a growth-confirm observed. A file that vanishes between
+// the scan and the os.Stat surfaces as the stat error (the caller treats it as
+// "no baseline" / "no growth", never a panic). The ctx param is unused today; it
+// satisfies the field signature and lets a future resolver honour cancellation.
+func newTranscriptResolver(dir string) func(ctx context.Context) (string, int64, error) {
+	return func(context.Context) (string, int64, error) {
+		id, err := mostRecentJSONL(dir)
+		if err != nil {
+			return "", 0, err
+		}
+		if id == "" {
+			return "", 0, nil
+		}
+		path := filepath.Join(dir, string(id)+jsonlExt)
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", 0, err
+		}
+		return path, info.Size(), nil
+	}
 }
 
 // reconcileBootstrapOnNew inspects claude's session dir for the workdir and,
