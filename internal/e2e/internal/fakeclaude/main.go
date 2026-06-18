@@ -60,6 +60,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -93,6 +94,15 @@ var (
 // write could interleave mid-assistant-chunk and corrupt the marker the echo
 // tests match on.
 var stdoutMu sync.Mutex
+
+// turnPending signals — from the stdin-reader goroutine to the main poll loop —
+// that a user turn was delivered (stdin bytes arrived), so the main goroutine
+// can grow the live session JSONL and let the daemon's #668 transcript-growth
+// commit-confirm (confirmViaTranscriptGrowth) observe it. It is a signal only:
+// the stdin reader never writes f, preserving the single-writer-of-f invariant;
+// the main goroutine performs the actual append (appendTurnGrowth). Store/Swap
+// are race-free, so no mutex on f is needed.
+var turnPending atomic.Bool
 
 // writeStdout writes p to os.Stdout under stdoutMu and fsyncs. Best-effort:
 // errors are silenced, mirroring emitAssistantIfTriggered — the e2e asserts
@@ -143,6 +153,13 @@ func main() {
 				_ = os.Remove(trig)
 				rotated = true
 			}
+		}
+		// A delivered turn (stdin bytes, signalled by the reader) grows the live
+		// session JSONL so the daemon's #668 commit-confirm observes growth and
+		// acks. Swap collapses chunked stdin into one append per poll cycle and
+		// re-arms for a later turn. Targets the current f (post-rotate).
+		if turnPending.Swap(false) {
+			appendTurnGrowth(f)
 		}
 		if asstTrig != "" {
 			emitAssistantIfTriggered(asstTrig)
@@ -200,6 +217,24 @@ func emitStructuredJSONLIfTriggered(f *os.File, path string) {
 	_ = os.Remove(path)
 }
 
+// appendTurnGrowth grows the current session JSONL f by one inert line so the
+// daemon's #668 transcript-growth commit-confirm (confirmViaTranscriptGrowth)
+// observes growth past its pre-delivery baseline and acks the delivered turn —
+// the same signal real claude produces when it commits a turn to its session
+// JSONL. Runs ONLY on the main goroutine, preserving the single-writer-of-f
+// invariant (see turnPending). The line is the inert "{}\n" openSession already
+// writes: the turnbridge mapper maps an empty/typeless line to (nil, false), so
+// it injects no structured event — invisible to every assertion except "the
+// file grew". Best-effort, mirroring emitStructuredJSONLIfTriggered; a
+// persistently-failing write surfaces as the daemon's loud ErrTurnNotCommitted,
+// never a false ack.
+func appendTurnGrowth(f *os.File) {
+	if _, err := f.WriteString("{}\n"); err != nil {
+		return
+	}
+	_ = f.Sync()
+}
+
 func openSession(dir, uuid string) *os.File {
 	path := filepath.Join(dir, uuid+".jsonl")
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -239,6 +274,10 @@ func startStdinReader(logPath string, tui bool) {
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
+				// Signal the main goroutine that a turn was delivered so it can
+				// grow the live session JSONL (appendTurnGrowth). Signal only:
+				// this goroutine must never write f (single-writer-of-f).
+				turnPending.Store(true)
 				if logF != nil {
 					if _, werr := logF.Write(buf[:n]); werr != nil {
 						return
