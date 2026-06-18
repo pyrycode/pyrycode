@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +12,30 @@ import (
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
+
+// stubSessionCreator records each Create(ctx, label) call and returns a
+// configurable id + error. With err == nil and id == "" it returns a fresh
+// distinct id per call ("sess-1", "sess-2", …) so per-conversation distinctness
+// is observable without per-test wiring; a fixed id pins the binding assertion.
+// Mirrors stubTurnWriter in send_message_test.go.
+type stubSessionCreator struct {
+	err    error  // when non-nil, every Create returns ("", err)
+	id     string // when non-empty, every Create returns this fixed id
+	calls  int
+	labels []string
+}
+
+func (s *stubSessionCreator) Create(ctx context.Context, label string) (string, error) {
+	s.calls++
+	s.labels = append(s.labels, label)
+	if s.err != nil {
+		return "", s.err
+	}
+	if s.id != "" {
+		return s.id, nil
+	}
+	return fmt.Sprintf("sess-%d", s.calls), nil
+}
 
 const (
 	createConvConnID    = "c-create-conv"
@@ -100,7 +125,7 @@ func TestCreateConversation_AllNull_CreatesRowAndReplies(t *testing.T) {
 	c, recv := newCreateConvConn(t)
 	req := createConvRequest(t, protocol.CreateConversationPayload{}) // all fields nil
 
-	h := CreateConversation(reg, regPath, createConvDefault, testLogger(t))
+	h := CreateConversation(reg, &stubSessionCreator{}, regPath, createConvDefault, testLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -159,7 +184,7 @@ func TestCreateConversation_ExplicitFields_RecordedVerbatim(t *testing.T) {
 		Cwd:        &cwd,
 	})
 
-	h := CreateConversation(reg, regPath, createConvDefault, testLogger(t))
+	h := CreateConversation(reg, &stubSessionCreator{}, regPath, createConvDefault, testLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -190,14 +215,16 @@ func TestCreateConversation_ExplicitFields_RecordedVerbatim(t *testing.T) {
 
 // TestCreateConversation_EagerPersist_SurvivesReload asserts the create path
 // Saves eagerly (not lazily like the sweep loop): the row is readable after a
-// fresh Load from disk, proving it survives a daemon-process restart.
+// fresh Load from disk, proving it survives a daemon-process restart. It also
+// covers AC#3 — the CurrentSessionID binding given at create time round-trips
+// through the registry's atomic Save/Load unchanged.
 func TestCreateConversation_EagerPersist_SurvivesReload(t *testing.T) {
 	t.Parallel()
 	reg, regPath := newCreateConvReg(t)
 	c, recv := newCreateConvConn(t)
 	req := createConvRequest(t, protocol.CreateConversationPayload{})
 
-	h := CreateConversation(reg, regPath, createConvDefault, testLogger(t))
+	h := CreateConversation(reg, &stubSessionCreator{}, regPath, createConvDefault, testLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -207,12 +234,26 @@ func TestCreateConversation_EagerPersist_SurvivesReload(t *testing.T) {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 
+	// Capture the binding recorded in-memory at create time so the reload
+	// assertion compares against the value actually given, not a literal.
+	created, ok := reg.Get(conversations.ConversationID(payload.ID))
+	if !ok {
+		t.Fatalf("registry missing created row %q", payload.ID)
+	}
+	if created.CurrentSessionID == "" {
+		t.Fatalf("created row has empty CurrentSessionID; expected a bound session")
+	}
+
 	reloaded, err := conversations.Load(regPath)
 	if err != nil {
 		t.Fatalf("reload registry from disk: %v", err)
 	}
-	if _, ok := reloaded.Get(conversations.ConversationID(payload.ID)); !ok {
-		t.Errorf("created conversation %q not found after reload from disk", payload.ID)
+	got, ok := reloaded.Get(conversations.ConversationID(payload.ID))
+	if !ok {
+		t.Fatalf("created conversation %q not found after reload from disk", payload.ID)
+	}
+	if got.CurrentSessionID != created.CurrentSessionID {
+		t.Errorf("reloaded CurrentSessionID = %q, want %q (binding must round-trip)", got.CurrentSessionID, created.CurrentSessionID)
 	}
 }
 
@@ -231,7 +272,8 @@ func TestCreateConversation_Malformed_EmitsProtocolMalformed(t *testing.T) {
 		Payload: []byte("{"),
 	}
 
-	h := CreateConversation(reg, regPath, createConvDefault, testLogger(t))
+	creator := &stubSessionCreator{}
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -253,20 +295,25 @@ func TestCreateConversation_Malformed_EmitsProtocolMalformed(t *testing.T) {
 	if got := reg.List(); len(got) != 0 {
 		t.Errorf("registry has %d rows after malformed frame, want 0", len(got))
 	}
+	// A malformed frame must short-circuit before the mint — no session spawned.
+	if creator.calls != 0 {
+		t.Errorf("creator.Create called %d times on a malformed frame, want 0", creator.calls)
+	}
 }
 
-// TestCreateConversation_CreatedID_ValidatesForSendMessage proves AC#3's
-// daemon-side contract at the unit level: a freshly created row is immediately
-// resolvable via Registry.Get — the same predicate the pool's
-// ValidateConversation closure uses to admit a send_message — so a phone can
-// send on the new id with no claude session spawned at create time.
-func TestCreateConversation_CreatedID_ValidatesForSendMessage(t *testing.T) {
+// TestCreateConversation_BindsDedicatedSession covers AC#1: a create frame mints
+// exactly one session and records its id on the conversation row, and the mint
+// label is the server-minted conversation id echoed in the reply (a stable
+// session↔conversation breadcrumb). Replaces the pre-eager-binding
+// "no claude session spawned at create time" test, whose premise inverts here.
+func TestCreateConversation_BindsDedicatedSession(t *testing.T) {
 	t.Parallel()
 	reg, regPath := newCreateConvReg(t)
 	c, recv := newCreateConvConn(t)
 	req := createConvRequest(t, protocol.CreateConversationPayload{})
 
-	h := CreateConversation(reg, regPath, createConvDefault, testLogger(t))
+	creator := &stubSessionCreator{id: "sess-bound"}
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -276,7 +323,127 @@ func TestCreateConversation_CreatedID_ValidatesForSendMessage(t *testing.T) {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 
-	if _, ok := reg.Get(conversations.ConversationID(payload.ID)); !ok {
-		t.Errorf("created id %q does not validate via Registry.Get; a follow-up send_message would be rejected", payload.ID)
+	// Exactly one mint, labelled with the conversation id echoed in the reply.
+	if creator.calls != 1 {
+		t.Fatalf("creator.Create called %d times, want exactly 1", creator.calls)
+	}
+	if creator.labels[0] != payload.ID {
+		t.Errorf("mint label = %q, want the conversation id %q", creator.labels[0], payload.ID)
+	}
+
+	// The stored row points at the minted session.
+	stored, ok := reg.Get(conversations.ConversationID(payload.ID))
+	if !ok {
+		t.Fatalf("registry has no row for created id %q", payload.ID)
+	}
+	if stored.CurrentSessionID != "sess-bound" {
+		t.Errorf("stored CurrentSessionID = %q, want %q (the minted session id)", stored.CurrentSessionID, "sess-bound")
+	}
+}
+
+// TestCreateConversation_DistinctSessionPerConversation covers AC#2: two create
+// frames yield two rows bound to two different, non-empty session ids.
+func TestCreateConversation_DistinctSessionPerConversation(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newCreateConvReg(t)
+	creator := &stubSessionCreator{} // default: a fresh distinct id per call
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
+
+	ids := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		c, recv := newCreateConvConn(t)
+		req := createConvRequest(t, protocol.CreateConversationPayload{})
+		if err := h(context.Background(), c, req); err != nil {
+			t.Fatalf("handler call %d: %v", i, err)
+		}
+		env := assertCreateConvEnvelopeShape(t, recv(), protocol.TypeConversationCreated)
+		var payload protocol.ConversationCreatedPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal payload %d: %v", i, err)
+		}
+		stored, ok := reg.Get(conversations.ConversationID(payload.ID))
+		if !ok {
+			t.Fatalf("registry missing row for created id %q", payload.ID)
+		}
+		if stored.CurrentSessionID == "" {
+			t.Fatalf("row %d has empty CurrentSessionID, want a bound session", i)
+		}
+		ids = append(ids, stored.CurrentSessionID)
+	}
+	if ids[0] == ids[1] {
+		t.Errorf("both conversations bound the same session id %q, want distinct sessions", ids[0])
+	}
+}
+
+// TestCreateConversation_CwdNeverReachesMint covers AC#4: the phone-influenced
+// Cwd is never a mint/spawn input. The mint label is the server-minted
+// conversation id (a UUID), never the cwd; structurally the SessionCreator
+// interface carries no cwd argument at all, so Cwd cannot reach the spawn path.
+func TestCreateConversation_CwdNeverReachesMint(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newCreateConvReg(t)
+	c, recv := newCreateConvConn(t)
+
+	cwd := "/work/phone-chosen/dir"
+	req := createConvRequest(t, protocol.CreateConversationPayload{Cwd: &cwd})
+
+	creator := &stubSessionCreator{}
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	env := assertCreateConvEnvelopeShape(t, recv(), protocol.TypeConversationCreated)
+	var payload protocol.ConversationCreatedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+
+	if creator.calls != 1 {
+		t.Fatalf("creator.Create called %d times, want exactly 1", creator.calls)
+	}
+	if creator.labels[0] == cwd {
+		t.Errorf("mint label = the phone-supplied cwd %q; Cwd must not reach the spawn path", cwd)
+	}
+	if creator.labels[0] != payload.ID || !conversations.ValidID(creator.labels[0]) {
+		t.Errorf("mint label = %q, want the conversation id %q (a canonical UUIDv4)", creator.labels[0], payload.ID)
+	}
+	// The Cwd is still recorded verbatim as inert metadata.
+	stored, _ := reg.Get(conversations.ConversationID(payload.ID))
+	if stored.Cwd != cwd {
+		t.Errorf("stored Cwd = %q, want %q (recorded but inert)", stored.Cwd, cwd)
+	}
+}
+
+// TestCreateConversation_MintFailure_NoRowAndBinaryOffline covers the mint-error
+// path: when the session mint fails, the handler replies a retryable
+// server.binary_offline and creates no conversation row (no half-bound orphan).
+func TestCreateConversation_MintFailure_NoRowAndBinaryOffline(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newCreateConvReg(t)
+	c, recv := newCreateConvConn(t)
+	req := createConvRequest(t, protocol.CreateConversationPayload{})
+
+	creator := &stubSessionCreator{err: fmt.Errorf("pool not running")}
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertCreateConvEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeServerBinaryOffline {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeServerBinaryOffline)
+	}
+	if !payload.Retryable {
+		t.Errorf("Retryable = false, want true (the phone retries onto a fresh conversation)")
+	}
+	if payload.Message != msgCreateConversationMintFailed {
+		t.Errorf("Message = %q, want %q", payload.Message, msgCreateConversationMintFailed)
+	}
+	if got := reg.List(); len(got) != 0 {
+		t.Errorf("registry has %d rows after a mint failure, want 0 (no half-bound orphan)", len(got))
 	}
 }
