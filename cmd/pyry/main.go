@@ -50,6 +50,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/install"
+	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"golang.org/x/term"
@@ -578,7 +579,7 @@ func runSupervisor(args []string) error {
 	// `pyry pair preflight` first to confirm no v1 pairings will break.
 	v2Enabled := os.Getenv("PYRY_MOBILE_V2") == "1"
 	bootstrap := pool.Default()
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, bootstrap, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, sessionRouter{pool: pool, convReg: convReg}, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
@@ -641,6 +642,66 @@ type sessionMinter struct{ p *sessions.Pool }
 func (m sessionMinter) Create(ctx context.Context, label string) (string, error) {
 	id, err := m.p.Create(ctx, label)
 	return string(id), err
+}
+
+// errNoBoundSession is the sentinel sessionRouter.Route returns when a
+// conversation exists but has no live bound session — an empty
+// CurrentSessionID. It has no wire surface; the send_message handler maps any
+// non-ErrConversationNotFound Route error to a retryable server.binary_offline
+// reply. Rejecting the empty binding here, before any Pool.Lookup, is
+// load-bearing: Pool.Lookup("") returns the bootstrap session, so without this
+// guard an unbound conversation would silently route the phone's turn into the
+// shared bootstrap claude (the isolation break #678 AC#4 forbids).
+var errNoBoundSession = errors.New("conversation has no bound session")
+
+// sessionRouter adapts *sessions.Pool + *conversations.Registry to
+// handlers.SessionRouter (#678). cmd/pyry is the only package importing both,
+// so the conversation→session resolution that bridges them lives here, beside
+// sessionMinter and poolResolver. Route maps a send_message frame's
+// ConversationID to the write surface for that conversation's bound session.
+type sessionRouter struct {
+	pool    *sessions.Pool
+	convReg *conversations.Registry
+}
+
+// Route resolves conversationID to its bound session's write surface. The order
+// is load-bearing: the empty-CurrentSessionID guard fires before any Lookup so
+// an unbound conversation never resolves to the bootstrap session that
+// Pool.Lookup("") returns (#678 AC#4).
+func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error) {
+	conv, ok := r.convReg.Get(conversations.ConversationID(conversationID))
+	if !ok {
+		return nil, conversations.ErrConversationNotFound
+	}
+	if conv.CurrentSessionID == "" {
+		return nil, errNoBoundSession
+	}
+	id := sessions.SessionID(conv.CurrentSessionID)
+	sess, err := r.pool.Lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	return boundSession{pool: r.pool, sess: sess, id: id}, nil
+}
+
+// boundSession is the per-conversation write surface sessionRouter.Route
+// returns. *sessions.Session already satisfies handlers.TurnWriter directly;
+// this wrapper exists only to redirect Activate through Pool.Activate — the
+// single cap-enforcing spawn-path entry — instead of Session.Activate, which
+// would bypass ActiveCap (the invariant the idle-evict follow-up #680 relies
+// on). WriteUserTurn passes straight through to the resolved session.
+type boundSession struct {
+	pool *sessions.Pool
+	sess *sessions.Session
+	id   sessions.SessionID
+}
+
+func (b boundSession) Activate(ctx context.Context) error {
+	return b.pool.Activate(ctx, b.id)
+}
+
+func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
+	return b.sess.WriteUserTurn(ctx, conversationID, payload)
 }
 
 // parseClientFlags handles the shared flags every control verb accepts:

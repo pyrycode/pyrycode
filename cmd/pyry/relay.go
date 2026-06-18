@@ -93,7 +93,7 @@ func startRelay(
 	shutdown context.CancelFunc,
 	convReg *conversations.Registry,
 	creator handlers.SessionCreator,
-	sess handlers.TurnWriter,
+	router handlers.SessionRouter,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
 	claudeSessionsDir string,
@@ -142,7 +142,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, sess, sup, bridge, claudeSessionsDir, defaultCwd, transitions)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, sup, bridge, claudeSessionsDir, defaultCwd, transitions)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -162,7 +162,7 @@ func startRelay(
 		d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
 		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger))
 		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
-		d.Register(protocol.TypeSendMessage, handlers.SendMessage(sess, logger))
+		d.Register(protocol.TypeSendMessage, handlers.SendMessage(router, logger))
 
 		// The assistant-turn bridge taps Bridge.Write so PTY chunks fan out
 		// to every active phone conn as a `message` envelope (#311). Skip in
@@ -278,7 +278,7 @@ func startRelayV2(
 	serverID identity.ServerID,
 	convReg *conversations.Registry,
 	creator handlers.SessionCreator,
-	sess handlers.TurnWriter,
+	router handlers.SessionRouter,
 	sup *supervisor.Supervisor,
 	bridge *supervisor.Bridge,
 	claudeSessionsDir string,
@@ -302,7 +302,7 @@ func startRelayV2(
 			protocol.TypeListConversations:  handlers.ListConversations(convReg),
 			protocol.TypeCreateConversation: handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),
 			protocol.TypeRegisterPushToken:  handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
-			protocol.TypeSendMessage:        handlers.SendMessage(sess, logger),
+			protocol.TypeSendMessage:        handlers.SendMessage(router, logger),
 		},
 		// Screen-snapshot seam (#618): the supervisor renders the live screen
 		// inside the tui-driver seal; KnownConversation gates request_snapshot
