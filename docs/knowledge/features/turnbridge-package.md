@@ -69,7 +69,7 @@ and the `turnevent` model out to — the wire.
 
 ```
 internal/turnbridge/
-├── producer.go        Producer lifecycle (drain + re-subscribe) + the live NewSessionSubscriber
+├── producer.go        Producer lifecycle (drain + re-subscribe) + the follow-active NewTargetSubscriber (#679)
 ├── mapper.go          mapEvent + pure helpers (the inbound tui-event → turnevent type switch)
 ├── outbound.go        MapEvent / BuildTurnState + summary helpers (the outbound turnevent → wire-payload type switch, #627)
 ├── producer_test.go   drain / re-subscribe-across-restart / nil-OnEvent tests (fake Subscriber)
@@ -104,6 +104,21 @@ type SessionHost interface {
     WaitForPTY(ctx context.Context) error
 }
 
+// Target is everything one (re)subscription needs, resolved fresh per
+// subscription: which host to WaitForPTY/Session() on, which JSONL to tail
+// (and from what offset), and an optional Switch that forces a re-subscribe
+// when it fires. The follow-active generalisation (#679) of the single fixed
+// host + resolver the subscriber used to bake in.
+type Target struct {
+    Host    SessionHost
+    Resolve func(ctx context.Context) (path string, startOffset int64, err error)
+    Switch  <-chan struct{} // nil ⇒ session-end + ctx are the only teardown triggers
+}
+
+// TargetResolver yields the current Target, called once per (re)subscription.
+// A non-nil error is retried (subscribeRetryDelay backoff) unless ctx is done.
+type TargetResolver func(ctx context.Context) (Target, error)
+
 type Config struct {
     Subscribe   Subscriber             // required; New errors if nil
     OnEvent     func(turnevent.Event)  // nil ⇒ no-op beyond draining (AC 4)
@@ -114,10 +129,10 @@ type Config struct {
 
 func New(cfg Config) (*Producer, error)            // err iff Subscribe == nil
 func (p *Producer) Run(ctx context.Context) error  // outer re-subscribe loop
-func NewSessionSubscriber(host SessionHost, resolve func(ctx) (path string, off int64, err error), tr *tuidriver.Tracker, log *slog.Logger) Subscriber
+func NewTargetSubscriber(resolve TargetResolver, tr *tuidriver.Tracker, log *slog.Logger) Subscriber
 ```
 
-Four exported types — `Producer`, `Config`, `Subscriber`, `SessionHost`.
+Six exported types — `Producer`, `Config`, `Subscriber`, `SessionHost`, `Target`, `TargetResolver` (the last two added by #679; `NewSessionSubscriber` was removed in the same slice).
 
 ### `Run` — the outer re-subscribe loop
 
@@ -335,18 +350,54 @@ turn-id assignment, seq advancement, coalescing). See
 `Envelope`. This is why the adapter is pure: every clock read, counter, and I/O lives
 in the consumer.
 
-## The live `Subscriber` (`NewSessionSubscriber`)
+## The follow-active subscriber (`NewTargetSubscriber`, #679)
 
-Builds the production `Subscriber`. Per call:
-1. `host.WaitForPTY(ctx)` — block until a session is live; return `ctx.Err()` on cancel.
-2. `sess := host.Session()`; if `nil` (torn down between WaitForPTY and capture),
-   retry — `WaitForPTY` blocks for the next session, so no spin.
-3. `resolve(ctx)` → `tuidriver.WaitForSessionJSONL(ctx, path)` — on ctx-cancel
-   return the error; on any other transient error, `log.Warn` + retry after a
-   bounded `subscribeRetryDelay` (500ms) to cap the spin.
-4. `sessCtx, cancel := context.WithCancel(ctx)`; `go func(){ sess.Wait(); cancel() }()`.
-5. `sess.Events(sessCtx, path, off, tr)`; on error `cancel()` + retry; on success
-   return the channel.
+Builds the production `Subscriber`. The single-host `NewSessionSubscriber` was
+**replaced** by a target-driven subscriber so the producer can **follow the
+active conversation** — re-keying its subscription host, JSONL resolver, and
+PTY-state source to whichever conversation the operator is interacting with, and
+re-subscribing when that changes. The whole re-key rides the **existing**
+`Producer.Run` re-subscribe loop (a switch closes the stream → `Run`
+re-subscribes → the fresh `TargetResolver` snapshots the now-active session);
+`Producer` itself is unchanged. The conv→session knowledge lives in the
+**caller's** `TargetResolver` callback (`cmd/pyry`'s `resolveTarget`), so this
+package stays import-neutral — see [conversation-session-binding.md](conversation-session-binding.md)
+and [codebase/679.md](../codebase/679.md) for the resolver/routing side.
+
+**Two-loop structure.** An **outer** loop calls `resolve(ctx)` once per
+(re)subscription to snapshot a `Target`; an **inner** loop runs the per-target
+sequence. Per inner iteration:
+1. `target.Host.WaitForPTY(subCtx)` — block until a session is live; abort on a
+   switch. (`WaitForPTY` returns only nil/ctx-err, so a non-nil err means
+   `subCtx` is done — parent cancel → return, else a switch → `continue resubscribe`.)
+2. `sess := target.Host.Session()`; if `nil` (torn down between wait and
+   capture), retry — `WaitForPTY` blocks for the next session, so no spin.
+3. `target.Resolve(subCtx)` → `tuidriver.WaitForSessionJSONL(subCtx, path)`.
+4. `go func(){ sess.Wait(); cancel() }()` (session-end watcher); `sess.Events(subCtx, path, off, tr)`.
+
+The outer loop snapshots the `Target` once and, if `target.Switch != nil`, spawns
+a **switch watcher** (`select { case <-target.Switch: cancel(); case <-subCtx.Done(): }`)
+that cancels the per-subscription `subCtx` on a switch and exits on
+session-end/parent-cancel — so it never outlives its subscription. Both watchers
+call the idempotent `cancel()`.
+
+**Switch-abortable pre-stream waits** (steps 1, 3, 4 all take `subCtx`) are the
+one new invariant beyond the old single-host body and are **load-bearing for
+follow-active re-key (#679 AC3)**: without them the producer can wedge forever in
+`WaitForPTY` of a stale evicted session after the operator switches
+conversations. The error arms **discriminate the cancel cause before calling the
+local `cancel()`** — `ctx.Err()` (parent → return) then `subCtx.Err()` (switch →
+`continue resubscribe`) then transient (file not present → `subscribeRetryDelay`
+backoff + retry) — because calling `cancel()` first would make `subCtx.Err()`
+unconditionally non-nil and mask a transient as a switch.
+
+**The cold/warm offset state is per-subscription, not per-retry.** The inner
+loop's transient retries reuse the **same** `target.Resolve` closure, so its
+`resolvedOnce`/`sawEmpty` state (the #671 cold-start gate) survives a
+not-yet-present JSONL within one subscription but resets on a re-subscription
+(switch / session-end → a fresh `Target` with a fresh resolver). A flat
+"re-resolve on every retry" loop would silently reintroduce the #671 cold-start
+drop for bound sessions.
 
 **The Wait-watcher is the linchpin of "no leaked goroutine across a session
 restart."** The Events merge loop exits only on its ctx or when its internal
@@ -387,6 +438,12 @@ pyrycode and `cmd/substrate-guard` stays green.
   `OnEvent` invocation.
 - **One short-lived Wait-watcher goroutine per subscription**, inside the live
   Subscriber. Exits when the session closes. No leak (see above).
+- **One switch-watcher goroutine per subscription** (#679, only when
+  `target.Switch != nil`) — selects the switch channel vs `subCtx.Done()` and
+  cancels `subCtx` on a switch. Bounded by the subscription: it exits on
+  `subCtx.Done()`, so it cannot outlive its subscription, and calls the
+  idempotent `cancel()`. (The switched-away session's Wait-watcher lingers until
+  that session ends — bounded by live-session count ≤ `ActiveCap`.)
 - **tui-driver's own merge + tail goroutines** inside `Session.Events`, governed
   by the per-session ctx; they close the channel and exit when it is cancelled.
 - **Shutdown:** root ctx cancel → `WaitForPTY`/`drain`/Events-merge all observe
@@ -398,9 +455,19 @@ pyrycode and `cmd/substrate-guard` stays green.
 ## Which JSONL, and surviving `/clear` rotation
 
 **The producer does not own JSONL-path resolution or live-`/clear`-rotation
-survival.** It accepts an injected `resolve func(ctx)(path, startOffset, err)` and
-re-subscribes per session via the supervisor's restart signal. #615 ships the
-mechanism; #633 supplies the production resolver + the wiring.
+survival.** It accepts an injected resolver and re-subscribes per session. #615
+ships the mechanism; #633 supplies the original production resolver + the wiring.
+
+> **Since #679 the resolver is chosen per-subscription by the caller's
+> `TargetResolver`, not fixed at construction.** `resolveTarget` (`cmd/pyry`) picks
+> the **recency** resolver below for the `convID == ""` no-route-yet bootstrap
+> branch, and a **by-id** resolver (`resolveBoundSessionJSONL`, tails
+> `<bound-session-id>.jsonl`, mtime-independent) once a turn is routed to a
+> conversation's bound session — so the reply follows the active conversation's own
+> transcript and never another conversation's more-recently-written file
+> (cross-conversation confidentiality). See [codebase/679.md](../codebase/679.md)
+> and [conversation-session-binding.md](conversation-session-binding.md). The
+> recency-resolver description below is now specifically the **bootstrap branch**.
 
 - **Supervisor restart is handled here.** A newly-hosted session ends the prior
   one (`sess.Wait()` returns) → per-session ctx cancels → Events channel closes →
@@ -468,3 +535,4 @@ design decision.
 - [codebase/627.md](../codebase/627.md) — outbound-adapter ticket record (patterns + lessons).
 - [codebase/639.md](../codebase/639.md) — the stall bridge wiring: un-drops `StallDetected` through all three stages to the capability-gated fan-out (#638's `turnevent.Stall` + `protocol.StallPayload`).
 - [codebase/609.md](../codebase/609.md) — delta coalescing: the additive `Config.FlushSignal`/`OnFlush` flush-arm seam + the emitter-owned ~250ms timer it serves.
+- [codebase/679.md](../codebase/679.md) — the follow-active producer lifecycle: generalises the subscriber to `Target`/`TargetResolver`/`NewTargetSubscriber` (removing `NewSessionSubscriber`) so the reply tails the active conversation's bound-session transcript by id, re-subscribing on a switch.
