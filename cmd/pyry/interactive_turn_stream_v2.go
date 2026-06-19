@@ -29,13 +29,12 @@ const jsonlStreamExt = ".jsonl"
 var jsonlStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // startInteractiveTurnStreamV2 wires the #615 structured-event producer to the
-// #632 capability-gated emitter so the supervised session's turn events flow to
-// interactive phones, and keep flowing across a /clear-rotated JSONL on the next
-// (re)subscription. It constructs the emitter over the v2 manager, builds the
-// producer with NewSessionSubscriber (over Supervisor.Session()) + a
-// rotation-following JSONL resolver + an OnEvent callback bridging each event to
-// emitter.Handle, starts the producer goroutine, and returns a cleanup that
-// blocks until that goroutine exits.
+// #632 capability-gated emitter so the active conversation's turn events flow to
+// interactive phones. It constructs the emitter over the v2 manager, builds the
+// producer with NewTargetSubscriber driven by the follow-active resolveTarget
+// (#679) + an OnEvent callback bridging each event to emitter.Handle, starts the
+// producer goroutine, and returns a cleanup that blocks until that goroutine
+// exits.
 //
 // The OnEvent closure captures ctx (the relay lifecycle ctx) — the ctx-less
 // OnEvent -> ctx-ful Handle seam #632 named. It runs ONLY on the producer's
@@ -48,12 +47,19 @@ var jsonlStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
 // CurrentConversation(). Since #678 routes turns to bound-session supervisors,
 // the bootstrap cursor stays empty and the structured stream would drop every
 // event; active is stamped by sessionRouter.Route, so the stream emits and
-// stamps the routed conversation's id. sup stays a param — the subscriber
-// (NewSessionSubscriber) still streams over the supervised session.
+// stamps the routed conversation's id.
+//
+// The producer now FOLLOWS the active conversation (#679): resolveTarget maps
+// the active conversation to its bound session's supervisor + a by-id JSONL
+// resolver (mtime-independent), so the reply tails that conversation's own
+// transcript and never another conversation's more-recently-written file. boundHost
+// is the conv→session→supervisor lookup; sup stays a param as the
+// before-any-route bootstrap fallback host (AC4).
 func startInteractiveTurnStreamV2(
 	ctx context.Context,
 	sup *supervisor.Supervisor,
 	active *activeConversation,
+	boundHost boundHostFunc,
 	mgr *relay.V2SessionManager,
 	claudeSessionsDir string,
 	logger *slog.Logger,
@@ -76,8 +82,8 @@ func startInteractiveTurnStreamV2(
 	// tracker's stall_detected marker now maps through to a stall envelope
 	// (the mapper no longer discards it).
 	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
-	resolve := resolveLatestSessionJSONL(claudeSessionsDir)
-	sub := turnbridge.NewSessionSubscriber(sup, resolve, tr, logger)
+	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir)
+	sub := turnbridge.NewTargetSubscriber(resolve, tr, logger)
 
 	prod, err := turnbridge.New(turnbridge.Config{
 		Subscribe: sub,
@@ -109,13 +115,13 @@ func startInteractiveTurnStreamV2(
 	return func() { <-done }
 }
 
-// resolveLatestSessionJSONL returns the resolve closure for
-// turnbridge.NewSessionSubscriber. Each call scans dir for <uuid>.jsonl files
-// and returns the most-recently-modified one plus a startOffset. Because
-// NewSessionSubscriber calls resolve fresh on every (re)subscription, returning
-// the newest file each time is what makes a live /clear rotation pick up the new
-// JSONL — this rotation-following is load-bearing for the /clear AC, not
-// incidental.
+// resolveLatestSessionJSONL is the recency resolver. Each call scans dir for
+// <uuid>.jsonl files and returns the most-recently-modified one plus a
+// startOffset. Since #679 this is the convID == "" (no-route-yet / bootstrap)
+// branch of resolveTarget — the AC4 unchanged-bootstrap path; once a turn is
+// routed the by-id resolveBoundSessionJSONL takes over. Because the subscriber
+// calls resolve fresh on every (re)subscription, returning the newest file each
+// time still lets a pre-route bootstrap rotation pick up the new JSONL.
 //
 // startOffset = size means the tail starts at EOF, so a (re)subscription streams
 // only NEW events and never replays the historical transcript to the phone.
@@ -141,7 +147,7 @@ func startInteractiveTurnStreamV2(
 // path (see TestResolveLatestSessionJSONL_WarmStartTailsFromSize).
 //
 // Concurrency: resolvedOnce / sawEmpty are read and written only inside the
-// returned closure, which NewSessionSubscriber invokes from the single
+// returned closure, which NewTargetSubscriber invokes from the single
 // Producer.Run goroutine (Run -> subscribe -> resolve). They therefore need no
 // mutex — the same single-Run-goroutine invariant the OnEvent / flushDelta
 // closures rely on. Do NOT call this resolver from multiple goroutines.
@@ -210,5 +216,109 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 		}
 		resolvedOnce = true
 		return filepath.Join(dir, bestName), off, nil
+	}
+}
+
+// boundHostFunc resolves a conversation id to the supervisor hosting its bound
+// claude session plus that session's id. (nil, "", false) when the conversation
+// is unknown, has no bound session, or its session id misses in the pool — the
+// follow-active resolver turns that into a retry, never a bootstrap fallback
+// (cross-conversation confidentiality, #679). Built in runSupervisor where the
+// pool + conversations registry are concrete; *supervisor.Supervisor satisfies
+// turnbridge.SessionHost, so the bound supervisor is both subscription host and
+// PTY-state source.
+type boundHostFunc func(convID string) (host turnbridge.SessionHost, sessionID string, ok bool)
+
+// resolveTarget is the follow-active TargetResolver (#679). On each
+// (re)subscription it snapshots the active conversation — its id AND the channel
+// that fires when the id next changes, atomically via active.watch() so host +
+// path + teardown all key off one consistent view — and maps it to a Target:
+//
+//   - convID == "" (no route yet): the bootstrap host + the recency resolver, the
+//     unchanged pre-#679 path (AC4). Switch is still set so the first route
+//     re-subscribes onto the routed bound session.
+//   - convID != "" and resolvable: the bound session's supervisor + a by-id
+//     resolver that tails <bound-session-id>.jsonl, mtime-independent (AC1/AC2).
+//   - convID != "" but unresolvable (deleted/unbound mid-flight): an error so the
+//     subscriber backs off and retries. It NEVER falls back to the bootstrap under
+//     a non-empty cursor — the emitter stamps convID, so tailing any other
+//     transcript would cross-stream another conversation's output (the
+//     confidentiality property this ticket protects).
+//
+// A fresh JSONL resolver closure is built per call so its cold/warm offset state
+// is per-subscription: a brand-new bound session cold-starts at offset 0; a
+// switch-back to a live session warm-tails from EOF.
+func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstrap turnbridge.SessionHost, dir string) turnbridge.TargetResolver {
+	return func(ctx context.Context) (turnbridge.Target, error) {
+		convID, switchCh := active.watch()
+		if convID == "" {
+			return turnbridge.Target{
+				Host:    bootstrap,
+				Resolve: resolveLatestSessionJSONL(dir),
+				Switch:  switchCh,
+			}, nil
+		}
+		host, sessionID, ok := boundHost(convID)
+		if !ok {
+			return turnbridge.Target{}, fmt.Errorf("no bound session for active conversation %q", convID)
+		}
+		return turnbridge.Target{
+			Host:    host,
+			Resolve: resolveBoundSessionJSONL(dir, sessionID),
+			Switch:  switchCh,
+		}, nil
+	}
+}
+
+// resolveBoundSessionJSONL returns a resolve closure that tails a FIXED bound
+// session transcript — <sessionID>.jsonl under dir — instead of scanning for the
+// newest file. Because the path is keyed off the bound session id, another
+// session writing more recently can never redirect the tail (AC2, the
+// cross-conversation confidentiality property). Sibling of
+// resolveLatestSessionJSONL, mirroring that resolver's per-subscription cold/warm
+// offset rule over one fixed file.
+//
+// Offset (mtime-independent): the file absent at the first look then appearing is
+// a cold start (a brand-new bound session whose whole file is the current turn)
+// → offset 0 so the in-flight reply streams (#671, per bound session). Present at
+// the first look is a warm resume / switch-back → offset = size (tail from EOF,
+// never replay the conversation's history to the internet-exposed phone).
+//
+// Concurrency: resolvedOnce / sawEmpty are read and written only inside the
+// returned closure, which NewTargetSubscriber invokes from the single
+// Producer.Run goroutine. They therefore need no mutex — the same
+// single-Run-goroutine invariant resolveLatestSessionJSONL relies on. Do NOT
+// call this resolver from multiple goroutines.
+func resolveBoundSessionJSONL(dir, sessionID string) func(ctx context.Context) (path string, startOffset int64, err error) {
+	var (
+		resolvedOnce bool
+		sawEmpty     bool
+	)
+	return func(ctx context.Context) (string, int64, error) {
+		// Path-safety guard (defense-in-depth): sessionID is already a
+		// server-minted UUID from the trusted registry/pool, but validate the
+		// stem before the Join so a malformed id can never escape dir. A clean
+		// UUID stem contains no '/' or '.', so filepath.Join(dir, stem+ext)
+		// cannot traverse out.
+		if !jsonlStemPattern.MatchString(sessionID) {
+			return "", 0, fmt.Errorf("invalid bound session id %q", sessionID)
+		}
+		path := filepath.Join(dir, sessionID+jsonlStreamExt)
+		info, err := os.Stat(path)
+		if err != nil {
+			if !resolvedOnce {
+				sawEmpty = true
+			}
+			// Wrap with the path (a path/errno, never file bytes).
+			return "", 0, fmt.Errorf("stat bound session jsonl %s: %w", path, err)
+		}
+		off := info.Size()
+		if !resolvedOnce && sawEmpty {
+			// Cold start: this fresh file appeared only after an earlier absent
+			// look, so the whole file is the current turn — tail from 0.
+			off = 0
+		}
+		resolvedOnce = true
+		return path, off, nil
 	}
 }

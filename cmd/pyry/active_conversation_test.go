@@ -70,6 +70,110 @@ func TestActiveConversation_ConcurrentSetGetNoRace(t *testing.T) {
 	wg.Wait()
 }
 
+// chanClosed reports whether ch is closed without blocking.
+func chanClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// TestActiveConversation_WatchZeroValue (#679): before any route watch returns
+// the empty id and a non-nil, open channel (the lazy-init keeps the zero-value
+// literal valid); CurrentConversation stays "" (regression on #687).
+func TestActiveConversation_WatchZeroValue(t *testing.T) {
+	t.Parallel()
+	var a activeConversation
+	id, changed := a.watch()
+	if id != "" {
+		t.Fatalf("zero-value watch id = %q, want empty", id)
+	}
+	if changed == nil {
+		t.Fatal("zero-value watch changed channel is nil; a switch could never fire")
+	}
+	if chanClosed(changed) {
+		t.Fatal("zero-value watch channel is already closed; want open")
+	}
+	if got := a.CurrentConversation(); got != "" {
+		t.Fatalf("zero-value cursor = %q, want empty", got)
+	}
+}
+
+// TestActiveConversation_SameIDDoesNotFire (#679): consecutive messages to the
+// SAME conversation must not re-subscribe — the tail stays open and catches each
+// turn continuously, as the bootstrap stream did. A repeat set leaves the watched
+// channel open.
+func TestActiveConversation_SameIDDoesNotFire(t *testing.T) {
+	t.Parallel()
+	var a activeConversation
+	a.set("conv-x")
+	_, changed := a.watch()
+	a.set("conv-x") // same id — no change
+	if chanClosed(changed) {
+		t.Fatal("set with the same id fired the switch signal; want no re-subscribe")
+	}
+}
+
+// TestActiveConversation_DifferentIDFires (#679): a set to a DIFFERENT id closes
+// the channel a prior watch captured (so the follow-active subscriber tears down
+// and re-subscribes), and a fresh watch then yields the new id + a new open
+// channel.
+func TestActiveConversation_DifferentIDFires(t *testing.T) {
+	t.Parallel()
+	var a activeConversation
+	a.set("conv-a")
+	id, changed := a.watch()
+	if id != "conv-a" {
+		t.Fatalf("watch id = %q, want conv-a", id)
+	}
+
+	a.set("conv-b") // different id — fires
+	if !chanClosed(changed) {
+		t.Fatal("set with a different id did not close the captured channel; the switch would be missed")
+	}
+
+	id2, changed2 := a.watch()
+	if id2 != "conv-b" {
+		t.Fatalf("post-switch watch id = %q, want conv-b", id2)
+	}
+	if chanClosed(changed2) {
+		t.Fatal("post-switch channel is already closed; want a fresh open channel")
+	}
+}
+
+// TestActiveConversation_ConcurrentSetWatchNoRace (#679, -race): set on the
+// routing goroutine races watch + CurrentConversation on the producer's Run
+// goroutine. Proves the close+replace of the change signal is race-free and a
+// watched channel is never closed twice.
+func TestActiveConversation_ConcurrentSetWatchNoRace(t *testing.T) {
+	t.Parallel()
+	var a activeConversation
+	values := []string{"conv-a", "conv-b", "conv-c"}
+
+	const iters = 1000
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			a.set(values[i%len(values)])
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			_, changed := a.watch()
+			// Touch the channel the way the switch watcher does — a non-blocking
+			// select. The close+replace under mu must make this safe.
+			_ = chanClosed(changed)
+			_ = a.CurrentConversation()
+		}
+	}()
+	wg.Wait()
+}
+
 // TestActiveConversation_EmitterStampsCursor (AC#2): the production holder
 // satisfies cursorReader, so injecting it as the emitter's cursor makes the
 // emitted envelope carry the stamped conversation_id — the injection swap this

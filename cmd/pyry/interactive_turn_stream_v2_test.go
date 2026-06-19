@@ -266,11 +266,217 @@ func TestResolveLatestSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
 	}
 }
 
+// --- by-id resolver tests (#679) --------------------------------------------
+
+// TestResolveBoundSessionJSONL_KeysOffIDNotMtime is the deterministic
+// cross-conversation confidentiality proof (AC#2). With the bound session's
+// JSONL present AND another session's JSONL present and written MORE recently,
+// the resolver must still return the bound <id>.jsonl — resolution keys off the
+// bound session id, never the file mtime, so another conversation's output can
+// never be tailed into the active conversation's reply.
+func TestResolveBoundSessionJSONL_KeysOffIDNotMtime(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	bound := writeJSONL(t, dir, uuidA, 40, base)            // the bound session, older
+	writeJSONL(t, dir, uuidB, 99, base.Add(10*time.Minute)) // another session, NEWER + larger
+
+	path, off, err := resolveBoundSessionJSONL(dir, uuidA)(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if path != bound {
+		t.Fatalf("path: got %q, want %q (the bound session's transcript, not the newer one)", path, bound)
+	}
+	if off != 40 {
+		t.Fatalf("startOffset: got %d, want 40 (bound file size — warm tail, mtime-independent)", off)
+	}
+}
+
+// TestResolveBoundSessionJSONL_ColdStartTailsFromZero: a brand-new bound session
+// has no transcript when the producer first subscribes (claude defers JSONL
+// creation until the first input lands). The first look is absent → not-found;
+// once the file appears its whole content IS the current turn, so it tails from
+// offset 0 (the #671 cold-start rule, now per bound session). RED if the resolver
+// returned the file size there — the in-flight reply would be skipped.
+func TestResolveBoundSessionJSONL_ColdStartTailsFromZero(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	resolve := resolveBoundSessionJSONL(dir, uuidA)
+
+	if _, _, err := resolve(context.Background()); err == nil {
+		t.Fatal("cold-start resolve#1 over absent file: got nil error, want not-found")
+	}
+
+	want := writeJSONL(t, dir, uuidA, 42, time.Now())
+
+	path, off, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("cold-start resolve#2: %v", err)
+	}
+	if path != want {
+		t.Fatalf("cold-start path: got %q, want %q", path, want)
+	}
+	if off != 0 {
+		t.Fatalf("cold-start startOffset: got %d, want 0 (tail from the file's start so the in-flight reply is not skipped)", off)
+	}
+}
+
+// TestResolveBoundSessionJSONL_WarmStartTailsFromSize: a bound transcript already
+// on disk at the first look (a --continue resume, or a switch-back to a live
+// session) is a warm start — it tails from the file size so the conversation's
+// history is never replayed to the internet-exposed phone. Offset 0 here would
+// leak prior turns.
+func TestResolveBoundSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := writeJSONL(t, dir, uuidA, 128, time.Now())
+
+	path, off, err := resolveBoundSessionJSONL(dir, uuidA)(context.Background())
+	if err != nil {
+		t.Fatalf("warm-start resolve: %v", err)
+	}
+	if path != want {
+		t.Fatalf("warm-start path: got %q, want %q", path, want)
+	}
+	if off != 128 {
+		t.Fatalf("warm-start startOffset: got %d, want 128 (do not replay the bound transcript)", off)
+	}
+}
+
+// TestResolveBoundSessionJSONL_InvalidIDErrors is the path-safety guard. A
+// sessionID that is not a clean UUID stem must error before any path is
+// constructed, so a malformed binding can never traverse out of dir. (sessionID
+// is a server-minted UUID in production; this is defense-in-depth.)
+func TestResolveBoundSessionJSONL_InvalidIDErrors(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Plant a real file so a buggy resolver that ignored the guard could "succeed".
+	writeJSONL(t, dir, uuidA, 10, time.Now())
+
+	for _, id := range []string{"", "../" + uuidA, uuidA + "/..", "not-a-uuid", uuidA + ".jsonl"} {
+		path, off, err := resolveBoundSessionJSONL(dir, id)(context.Background())
+		if err == nil {
+			t.Fatalf("sessionID %q: got nil error, want invalid-id error", id)
+		}
+		if path != "" || off != 0 {
+			t.Fatalf("sessionID %q: got (%q, %d), want (\"\", 0) — no path constructed", id, path, off)
+		}
+	}
+}
+
+// --- resolveTarget tests (#679 follow-active mapping) ------------------------
+
+// fakeSessionHost is a turnbridge.SessionHost test double; pointer identity lets
+// the resolveTarget tests assert which host a Target keys onto.
+type fakeSessionHost struct{ name string }
+
+func (*fakeSessionHost) WaitForPTY(ctx context.Context) error { return nil }
+func (*fakeSessionHost) Session() *tuidriver.Session          { return nil }
+
+// TestResolveTarget_BootstrapWhenNoRoute: before any route (empty cursor) the
+// target is the bootstrap host + the recency resolver — the unchanged pre-#679
+// path (AC#4) — with the switch channel set so the first route re-subscribes.
+func TestResolveTarget_BootstrapWhenNoRoute(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeJSONL(t, dir, uuidB, 12, time.Now()) // newest in dir — what recency picks
+
+	active := &activeConversation{}
+	bootstrap := &fakeSessionHost{name: "bootstrap"}
+	boundHost := func(string) (turnbridge.SessionHost, string, bool) {
+		t.Error("boundHost must not be consulted before any route")
+		return nil, "", false
+	}
+
+	target, err := resolveTarget(active, boundHost, bootstrap, dir)(context.Background())
+	if err != nil {
+		t.Fatalf("resolveTarget: %v", err)
+	}
+	if target.Host != turnbridge.SessionHost(bootstrap) {
+		t.Fatalf("bootstrap path host: got %v, want the bootstrap host", target.Host)
+	}
+	if target.Switch == nil {
+		t.Fatal("bootstrap path: Switch is nil; the first route would not re-subscribe")
+	}
+	path, _, err := target.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("bootstrap resolve: %v", err)
+	}
+	if want := filepath.Join(dir, uuidB+".jsonl"); path != want {
+		t.Fatalf("bootstrap resolve path: got %q, want %q (recency)", path, want)
+	}
+}
+
+// TestResolveTarget_BoundSessionWhenRouted (AC#1/AC#2): a routed conversation maps
+// to its bound session's host + a by-id resolver that tails <bound-id>.jsonl even
+// when another session's JSONL is newer — the confidentiality property, asserted
+// at the resolveTarget seam.
+func TestResolveTarget_BoundSessionWhenRouted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	boundFile := writeJSONL(t, dir, uuidA, 30, base)       // the bound session
+	writeJSONL(t, dir, uuidB, 50, base.Add(5*time.Minute)) // another session, newer
+
+	active := &activeConversation{}
+	active.set("conv-1")
+	host := &fakeSessionHost{name: "bound"}
+	boundHost := func(convID string) (turnbridge.SessionHost, string, bool) {
+		if convID != "conv-1" {
+			t.Errorf("boundHost convID = %q, want conv-1", convID)
+		}
+		return host, uuidA, true
+	}
+
+	target, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir)(context.Background())
+	if err != nil {
+		t.Fatalf("resolveTarget: %v", err)
+	}
+	if target.Host != turnbridge.SessionHost(host) {
+		t.Fatalf("bound path host: got %v, want the bound session host", target.Host)
+	}
+	if target.Switch == nil {
+		t.Fatal("bound path: Switch is nil; a conversation switch would not re-subscribe")
+	}
+	path, off, err := target.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("bound resolve: %v", err)
+	}
+	if path != boundFile {
+		t.Fatalf("bound resolve path: got %q, want %q (by bound id, not the newer file)", path, boundFile)
+	}
+	if off != 30 {
+		t.Fatalf("bound resolve offset: got %d, want 30 (bound file size)", off)
+	}
+}
+
+// TestResolveTarget_UnresolvableConversationErrors is the load-bearing
+// confidentiality guard: when the active conversation cannot be resolved to a
+// bound session, resolveTarget returns an ERROR (subscriber backs off + retries)
+// — it must NEVER fall back to the bootstrap or any other transcript while the
+// emitter stamps a non-empty conversation_id, which would cross-stream.
+func TestResolveTarget_UnresolvableConversationErrors(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A bootstrap transcript exists — a buggy fallback would happily tail it.
+	writeJSONL(t, dir, uuidB, 64, time.Now())
+
+	active := &activeConversation{}
+	active.set("conv-gone")
+	boundHost := func(string) (turnbridge.SessionHost, string, bool) { return nil, "", false }
+
+	_, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir)(context.Background())
+	if err == nil {
+		t.Fatal("unresolvable bound conversation: got nil error, want a retry error (no bootstrap fallback under a non-empty cursor)")
+	}
+}
+
 // --- wiring tests (producer ⇄ emitter via a fake Subscriber) -----------------
 
 // scriptedSubscriber returns each channel in streams in turn (incrementing a
 // re-subscription counter and calling resolveSpy on each call, mirroring
-// NewSessionSubscriber's resolve-fresh-per-subscription contract), then blocks
+// NewTargetSubscriber's resolve-fresh-per-subscription contract), then blocks
 // on ctx — so the producer's Run re-subscribe loop is driven deterministically.
 type scriptedSubscriber struct {
 	mu       sync.Mutex
