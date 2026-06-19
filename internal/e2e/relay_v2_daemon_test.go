@@ -436,15 +436,6 @@ func TestRelayV2_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	// Seed the conversation row the cursor will reference.
-	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
-	convJSON := []byte(`{"conversations":[{"id":"` + knownConvID +
-		`","cwd":"` + home +
-		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
-	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
-		t.Fatalf("seed conversations.json: %v", err)
-	}
-
 	tmp := t.TempDir()
 	// Align the sessions dir to the daemon's COMPUTED path (resolveClaudeSessionsDir
 	// has no env override — always <HOME>/.claude/projects/encode(workdir), with
@@ -461,6 +452,9 @@ func TestRelayV2_AssistantTurn_BroadcastsMessageEnvelope(t *testing.T) {
 	if err := os.WriteFile(initialJSONL, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("pre-create initial jsonl: %v", err)
 	}
+	// Bind knownConvID to the bootstrap session (== initialUUID after
+	// reconciliation) so sessionRouter.Route resolves under #678's contract.
+	seedBoundConversation(t, home, knownConvID, initialUUID)
 	rotateTrigger := filepath.Join(tmp, "rotate.trigger.never-created")
 	stdinLog := filepath.Join(tmp, "fakeclaude-stdin.log")
 	asstTrigger := filepath.Join(tmp, "assistant.trigger")

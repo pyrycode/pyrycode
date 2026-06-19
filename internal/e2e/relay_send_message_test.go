@@ -44,17 +44,6 @@ func TestRelay_SendMessage_AckAndPTYDelivery(t *testing.T) {
 	}
 	pairPayload := decodePairPayload(t, r.Stdout)
 
-	// Seed the conversations registry so ValidateConversation accepts
-	// knownConvID. The parent dir already exists from `pyry pair`'s
-	// side-effect (devices.json was written there).
-	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
-	convJSON := []byte(`{"conversations":[{"id":"` + knownConvID +
-		`","cwd":"` + home +
-		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
-	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
-		t.Fatalf("seed conversations.json: %v", err)
-	}
-
 	// fakeclaude wiring. trigger is a path that is never created — this
 	// test does not exercise the rotation path.
 	tmp := t.TempDir()
@@ -73,6 +62,9 @@ func TestRelay_SendMessage_AckAndPTYDelivery(t *testing.T) {
 	if err := os.WriteFile(initialJSONL, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("pre-create initial jsonl: %v", err)
 	}
+	// Bind knownConvID to the bootstrap session (== initialUUID after
+	// reconciliation) so sessionRouter.Route resolves under #678's contract.
+	seedBoundConversation(t, home, knownConvID, initialUUID)
 	trigger := filepath.Join(tmp, "rotate.trigger.never-created")
 	stdinLog := filepath.Join(tmp, "fakeclaude-stdin.log")
 

@@ -123,15 +123,11 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	// Seed the conversation row the cursor will reference (the
-	// ValidateConversation gate in WriteUserTurn must pass so the stamp lands).
-	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
-	convJSON := []byte(`{"conversations":[{"id":"` + knownConvID +
-		`","cwd":"` + home +
-		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
-	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
-		t.Fatalf("seed conversations.json: %v", err)
-	}
+	// Bind knownConvID to the bootstrap session (== initialUUID after
+	// reconciliation) so sessionRouter.Route resolves under #678's contract;
+	// the ValidateConversation gate in WriteUserTurn then passes and the
+	// supervisor cursor stamp lands.
+	seedBoundConversation(t, home, knownConvID, initialUUID)
 
 	// Align the sessions dir to the daemon's COMPUTED path so the structured
 	// producer (resolveLatestSessionJSONL over claudeSessionsDir) tails exactly
