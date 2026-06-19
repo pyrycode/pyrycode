@@ -54,6 +54,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
+	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"golang.org/x/term"
 )
 
@@ -582,9 +583,27 @@ func runSupervisor(args []string) error {
 	bootstrap := pool.Default()
 	// One activeConversation holder, shared two ways: the sessionRouter writes it
 	// on each successful route, and startRelay threads it (read-side) to the
-	// structured turn stream as its cursor (#687).
+	// structured turn stream as its cursor (#687) and its follow-active switch
+	// signal (#679).
 	active := &activeConversation{}
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, sessionRouter{pool: pool, convReg: convReg, active: active}, active, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
+	// boundHost is the conv→session→supervisor lookup the follow-active turn
+	// stream re-keys its subscription onto (#679): convReg.Get → CurrentSessionID
+	// (non-empty guard) → pool.Lookup → the bound session's supervisor (which is
+	// both the subscription host and the PTY-state source). (nil, "", false) on an
+	// unknown conversation, an empty binding, or a Lookup miss — resolveTarget
+	// turns that into a retry, never a bootstrap fallback (confidentiality).
+	var boundHost boundHostFunc = func(convID string) (turnbridge.SessionHost, string, bool) {
+		conv, ok := convReg.Get(conversations.ConversationID(convID))
+		if !ok || conv.CurrentSessionID == "" {
+			return nil, "", false
+		}
+		sess, err := pool.Lookup(sessions.SessionID(conv.CurrentSessionID))
+		if err != nil {
+			return nil, "", false
+		}
+		return sess.Supervisor(), conv.CurrentSessionID, true
+	}
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, sessionRouter{pool: pool, convReg: convReg, active: active}, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
@@ -728,23 +747,42 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 // well-defined "no conversation routed yet" state the emitter drops on.
 //
 // It is written on the routing-path goroutine (set, from Route) and read on the
-// producer's single Run goroutine (CurrentConversation — live emit + replay).
-// The mutex makes that cross-goroutine hand-off race-free; it is a leaf lock,
-// never held across a call-out. This is the one piece of new synchronisation —
-// it absorbs the hand-off so the emitter's other counters stay unguarded-single-
-// goroutine (interactive_turn_v2.go:42-44). Mirrors the supervisor's own
+// producer's single Run goroutine (CurrentConversation — live emit + replay;
+// watch — follow-active subscription). The mutex makes that cross-goroutine
+// hand-off race-free; it is a leaf lock, never held across a call-out. This is
+// the one piece of new synchronisation — it absorbs the hand-off so the
+// emitter's other counters stay unguarded-single-goroutine
+// (interactive_turn_v2.go:42-44). Mirrors the supervisor's own
 // convMu+currentConvID cursor.
+//
+// changed is the follow-active switch signal (#679): it is closed-and-replaced
+// whenever set records a DIFFERENT id, so a watcher snapshotted via watch sees
+// its captured channel close and re-subscribes onto the now-active bound
+// session. Consecutive messages to the same conversation do NOT fire it (the
+// tail stays open and catches each turn continuously, as the bootstrap did).
+// It is lazy-initialised under mu so the zero-value &activeConversation{}
+// literal (main.go + session_router_test.go) stays valid with no constructor.
 type activeConversation struct {
-	mu sync.Mutex
-	id string
+	mu      sync.Mutex
+	id      string
+	changed chan struct{}
 }
 
 // set stamps id as the current conversation. Called from sessionRouter.Route on
-// the successful-route path only.
+// the successful-route path only. When id differs from the current value it
+// fires the change signal (close + replace changed) so a follow-active watcher
+// re-subscribes; the same id is a no-op on the signal.
 func (a *activeConversation) set(id string) {
 	a.mu.Lock()
-	a.id = id
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	if a.changed == nil {
+		a.changed = make(chan struct{})
+	}
+	if id != a.id {
+		a.id = id
+		close(a.changed)
+		a.changed = make(chan struct{})
+	}
 }
 
 // CurrentConversation returns the stamped conversation id, "" before any route.
@@ -754,6 +792,21 @@ func (a *activeConversation) CurrentConversation() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.id
+}
+
+// watch snapshots the current conversation id AND the channel that closes when
+// the id next changes to a different value — atomically under mu, so a resolver
+// keys host + path + teardown off one consistent view and they never disagree
+// (#679). The capture-then-wait race is benign: if set fires between watch
+// returning and a watcher selecting, the closed channel makes the select fire
+// immediately → re-subscribe → re-snapshot, no missed switch.
+func (a *activeConversation) watch() (id string, changed <-chan struct{}) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.changed == nil {
+		a.changed = make(chan struct{})
+	}
+	return a.id, a.changed
 }
 
 // parseClientFlags handles the shared flags every control verb accepts:
