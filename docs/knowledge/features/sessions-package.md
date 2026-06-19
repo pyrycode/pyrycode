@@ -25,6 +25,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 3 (#243):** `Config.ConversationsRegistry *conversations.Registry` + `Config.ConversationsRegistryPath string` plumbing fields; matching unexported `Pool.convReg` / `Pool.convRegistryPath`. When `convReg` is non-nil, `Pool.Run` registers a sibling goroutine to the rotation watcher inside its errgroup: `g.Go(func() error { return conversations.RunSweepLoop(gctx, p.convReg, p.convRegistryPath, p.convSweepInterval, p.log) })`. nil-registry disables the goroutine — preserves test default. See [conversations-auto-archive.md § Daemon wiring (#243)](conversations-auto-archive.md).
 - **Phase 3 (#262):** `Config.SweepInterval time.Duration` (zero = use `conversations.SweepInterval` of one hour) + matching unexported `Pool.convSweepInterval` resolved in `New` with the `<= 0` fallback baked in. Replaces the prior package-level `var convSweepInterval` test seam — one seam, not two. Surfaced via the `cmd/pyry` `-pyry-conv-sweep-interval` flag (visible, annotated `(testing; 0 = production default of 1h)`) so out-of-process e2e tests downstream of #251 can drive the sweep loop at ~100ms instead of waiting one hour. Production callers leave the field zero; in-package tests set `pool.convSweepInterval = …` directly after construction (mirrors the existing `pool.convReg` / `pool.convRegistryPath` pattern). See [conversations-auto-archive.md § Single seam: `Config.SweepInterval` (#262)](conversations-auto-archive.md).
 - **Phase 2 mobile (#659):** `Pool.SetTransitionObserver(TransitionObserver)` — an injectable, in-process signal fired on `/clear` rotations and evictions (idle + cap). New types `TransitionReason` / `SessionTransition` / `TransitionObserver` in `transition.go`; new unexported field `Pool.transitionObserver`. The `cmd/pyry` consumer (#657) maps it onto the v2 `session_transition` wire event without `internal/sessions` importing `internal/protocol` / `internal/relay`. See *Transition observer* below and [codebase/659.md](../codebase/659.md).
+- **EPIC #672 (#684):** `Pool.CreateIn(ctx, label, spawnDir)` / `Pool.GetOrCreateIn(ctx, id, label, spawnDir)` — sibling methods carrying an explicit per-session spawn working directory through the shared `buildSession` seam into `supervisor.Config.WorkDir`. Empty `spawnDir` falls back to `tpl.WorkDir`, so `Create` / `GetOrCreate` become thin delegators (`=> CreateIn(ctx, label, "")` / `=> GetOrCreateIn(ctx, id, label, "")`) with byte-identical behaviour for every existing caller. The pool treats the path as **opaque** (no validation / canonicalisation / trust) — that is the consumer slice #685's job. See *Per-session spawn workdir* below and [codebase/684.md](../codebase/684.md).
 
 ## Package Layout
 
@@ -94,7 +95,9 @@ func (p *Pool) Run(ctx context.Context) error
 func (p *Pool) RotateID(oldID, newID SessionID) error
 func (p *Pool) Activate(ctx context.Context, id SessionID) error
 func (p *Pool) Create(ctx context.Context, label string) (SessionID, error)
+func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID, error) // #684
 func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (SessionID, error)
+func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error) // #684
 func (p *Pool) List() []SessionInfo
 func (p *Pool) Rename(id SessionID, newLabel string) error
 func (p *Pool) ResolveID(arg string) (SessionID, error)
@@ -472,6 +475,27 @@ The take-path's silent label drop is documented in the docstring. Today's only c
 **Lock order — unchanged.** `Pool.mu (write) → Session.lcMu` (briefly inside `saveLocked`) → release → `Pool.Activate` (`capMu → Pool.mu (R) → Session.lcMu`). The `g.Go`-under-`p.mu` edge introduces no new ordering: `errgroup.Group.Go` takes its own internal mutex and the spawned goroutine's parking on `activateCh` does not touch `p.mu`.
 
 **Tests** (in `internal/sessions/pool_get_or_create_test.go`): `TestValidID` (table — empty/short/long/wrong-dash/non-hex/v3/non-RFC-4122-variant + canonical-NewID-output); `TestPool_GetOrCreate_Take_ReturnsExisting` (existing label preserved on take); `TestPool_GetOrCreate_Create_Persists` (caller's id written verbatim, claude spawned); `TestPool_GetOrCreate_PersistsPostDetach` (AC #1 — registry survives evict; this test surfaced ticket #169's persist-ordering race against `-race`); `TestPool_GetOrCreate_InvalidID` (`errors.Is(err, ErrInvalidSessionID)` for empty/malformed/v3); `TestPool_GetOrCreate_PoolNotRunning` (`ErrPoolNotRunning`, registry rolled back); `TestPool_GetOrCreate_ConcurrentSameID` (AC #4 — N=8 goroutines racing on one id, exactly one registry entry, label is one of the inputs, `-race`-clean); `TestPool_GetOrCreate_HonorsCap` (cap=1; bootstrap evicted via `Pool.Activate`'s cap-aware path).
+
+### Per-session spawn workdir: `CreateIn` / `GetOrCreateIn` (#684)
+
+The pool-level primitive (EPIC #672, split from #681) that lets a session spawn its supervised claude in a directory **other than** the shared `tpl.WorkDir`. Until #684 `buildSession` hard-wired `supervisor.Config{ WorkDir: tpl.WorkDir }` for every session; a forthcoming consumer (#685) needs each per-conversation session to spawn in its conversation's own directory.
+
+```go
+func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID, error)
+func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error)
+```
+
+**`XxxIn` siblings, not functional options.** `Create` / `GetOrCreate` keep byte-identical signatures and shrink to one-line delegators (`=> CreateIn(ctx, label, "")` / `=> GetOrCreateIn(ctx, id, label, "")`); the create/persist/supervise body moves into the `In` variant unchanged. The mechanism mirrors the existing `StartIn` idiom (`internal/e2e/harness.go:201`) — the codebase has zero functional-options precedent, so a framework for one optional string was rejected. Every existing caller (`sessionMinter` `cmd/pyry/main.go:667`, the `sessions.new` verb, `GetOrCreate` in the control server, the `create_conversation` interface caller, all tests) compiles and behaves unchanged with zero churn.
+
+**Spawn-seam conditional.** `buildSession(id, label, spawnDir)` (the seam shared by both public entry points) resolves `workDir := tpl.WorkDir; if spawnDir != "" { workDir = spawnDir }` and sets `supervisor.Config.WorkDir = workDir`. Empty `spawnDir` is byte-identical to today's behaviour (the AC-2 default-fallback). Exposing the option on the shared seam makes it available to whichever public entry point #685 ends up using.
+
+**Survives respawn with no new state.** The workdir lives only in `supervisor.Config`, which the supervisor reads as `cmd.Dir` on **every** (re)spawn (`supervisor.go:638-639`, `spawn.go:40-41`), so a custom spawn dir survives child crash-respawns automatically — no new `Session` field, no registry-schema change. It is **not** persisted to `sessions.json` (a spawn-time input only); surviving a daemon *process* restart would be a separate slice if ever needed.
+
+**Opaque path — deliberately not `security-sensitive`.** The pool does **not** `os.Stat`, validate, canonicalise, or trust-check `spawnDir`; it is passed verbatim. An inaccessible directory surfaces at spawn time via the supervisor's existing chdir-failure → backoff path, not here. No untrusted input reaches this slice and its only caller after it still passes the default, so the trust / canonicalisation / `$HOME`-containment work (and the `security-sensitive` label) lives in the consumer #685.
+
+**Take-path drops `spawnDir`.** `GetOrCreateIn` applies the workdir only on the *create* path; on the take path (session already registered) `spawnDir` is ignored — the existing session keeps its own workdir, mirroring the existing take-path label-drop.
+
+**Tests** (`pool_spawndir_test.go`): a cwd-recorder fake claude (`/bin/sh -c 'pwd > "cwd-$2.txt"; exec sleep 3600' --`) writes a per-uuid marker into its own cwd, so the marker's *location* proves the spawn directory with no production accessor added. Existence-check (not content-compare) sidesteps the macOS `/tmp`→`/private/tmp` symlink rewrite. Covers `CreateIn` explicit-dir, plain `Create` template-workdir default-leg, the `GetOrCreateIn` create path, and the take-path-ignores-spawnDir negative case. See [codebase/684.md](../codebase/684.md).
 
 ### Transition observer (#659)
 

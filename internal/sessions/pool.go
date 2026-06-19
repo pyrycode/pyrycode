@@ -898,12 +898,25 @@ func (p *Pool) supervise(sess *Session) error {
 // respects the pool's run-context, not the caller's. Tests should not
 // assume "Activate returned ctx.Err → claude is not running."
 func (p *Pool) Create(ctx context.Context, label string) (SessionID, error) {
+	return p.CreateIn(ctx, label, "")
+}
+
+// CreateIn is Create with an explicit per-session spawn working directory.
+// spawnDir == "" spawns in the shared template workdir (tpl.WorkDir),
+// byte-identical to Create. A non-empty spawnDir is used verbatim and is NOT
+// validated, canonicalised, or trust-checked by the pool — callers supply a
+// pre-resolved path (see #685). An inaccessible directory surfaces at spawn
+// time via the supervisor's existing chdir-failure path, not here.
+//
+// Otherwise identical to Create: see its docstring for the full create
+// sequence, concurrency, and error semantics.
+func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID, error) {
 	id, err := NewID()
 	if err != nil {
 		return "", fmt.Errorf("sessions: create id: %w", err)
 	}
 
-	sess, err := p.buildSession(id, label)
+	sess, err := p.buildSession(id, label, spawnDir)
 	if err != nil {
 		return "", err
 	}
@@ -941,10 +954,16 @@ func (p *Pool) Create(ctx context.Context, label string) (SessionID, error) {
 // and its lifecycle goroutine has not yet been scheduled). Caller is
 // responsible for registering it in p.sessions, persisting, and supervising.
 //
-// Used by Pool.Create (UUID-minted) and Pool.GetOrCreate (caller-supplied
+// Used by Pool.CreateIn (UUID-minted) and Pool.GetOrCreateIn (caller-supplied
 // id). Sharing this helper keeps the supervisor.Config + Session field
 // shape in one place.
-func (p *Pool) buildSession(id SessionID, label string) (*Session, error) {
+//
+// spawnDir is the per-session spawn working directory: when non-empty it is
+// used verbatim as supervisor.Config.WorkDir; when empty the child spawns in
+// the shared template workdir (tpl.WorkDir), today's behaviour. The pool does
+// NOT validate, canonicalise, or trust-check spawnDir — callers supply a
+// pre-resolved path (see #685).
+func (p *Pool) buildSession(id SessionID, label, spawnDir string) (*Session, error) {
 	tpl := p.sessionTpl
 	args := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
 	var bridge *supervisor.Bridge
@@ -952,9 +971,14 @@ func (p *Pool) buildSession(id SessionID, label string) (*Session, error) {
 		bridge = supervisor.NewBridge(p.log)
 	}
 
+	workDir := tpl.WorkDir
+	if spawnDir != "" {
+		workDir = spawnDir
+	}
+
 	supCfg := supervisor.Config{
 		ClaudeBin:      tpl.ClaudeBin,
-		WorkDir:        tpl.WorkDir,
+		WorkDir:        workDir,
 		ResumeLast:     false,
 		ClaudeArgs:     args,
 		Bridge:         bridge,

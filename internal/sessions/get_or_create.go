@@ -42,6 +42,20 @@ var ErrInvalidSessionID = errors.New("sessions: invalid session id")
 // and lifecycle goroutine is scheduled) plus the underlying error — same shape
 // as Pool.Create.
 func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (SessionID, error) {
+	return p.GetOrCreateIn(ctx, id, label, "")
+}
+
+// GetOrCreateIn is GetOrCreate with an explicit per-session spawn working
+// directory, applied only on the *create* path. On the take path (session
+// already registered) spawnDir is ignored — the existing session keeps its
+// own workdir, mirroring how the take path already drops the caller's label
+// (see below). spawnDir == "" spawns in the shared template workdir,
+// byte-identical to GetOrCreate; a non-empty spawnDir is used verbatim and is
+// NOT validated, canonicalised, or trust-checked by the pool (see #685).
+//
+// Otherwise identical to GetOrCreate: see its docstring for the full
+// take/create semantics, concurrency, and return shapes.
+func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error) {
 	if !ValidID(string(id)) {
 		return "", ErrInvalidSessionID
 	}
@@ -51,7 +65,7 @@ func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (Ses
 	// p.mu so the critical section stays small for concurrent same-id
 	// callers and so we can discard the loser's freshly-built session
 	// cheaply.
-	sess, err := p.buildSession(id, label)
+	sess, err := p.buildSession(id, label, spawnDir)
 	if err != nil {
 		return "", err
 	}
