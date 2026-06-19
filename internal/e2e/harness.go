@@ -359,6 +359,27 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 	return h
 }
 
+// seedBoundConversation writes conversations.json for the "test" instance with a
+// single conversation row bound to boundSessionID. Binding is load-bearing under
+// #678: sessionRouter.Route rejects an empty current_session_id before any pool
+// Lookup, so an unbound row yields a retryable server.binary_offline instead of
+// reaching WriteUserTurn. The daemon loads conversations.json once at startup
+// (in-memory registry, no reload), so the row must exist BEFORE the daemon
+// starts; boundSessionID MUST equal the bootstrap session's pool id, which
+// reconcileBootstrapOnNew rotates to the most-recent <uuid>.jsonl in the computed
+// sessions dir — i.e. the caller's pre-created initialUUID.
+func seedBoundConversation(t *testing.T, home, convID, boundSessionID string) {
+	t.Helper()
+	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
+	convJSON := []byte(`{"conversations":[{"id":"` + convID +
+		`","cwd":"` + home +
+		`","current_session_id":"` + boundSessionID +
+		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
+	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
+		t.Fatalf("seed conversations.json: %v", err)
+	}
+}
+
 // StartExpectingFailureIn spawns pyry against the given home, expects it to
 // exit before the readiness deadline elapses, and returns the captured exit
 // code, stdout, and stderr. Fails the test if pyry instead becomes ready

@@ -49,17 +49,6 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 	}
 	pairPayload := decodePairPayload(t, r.Stdout)
 
-	// Seed the conversations registry so ValidateConversation accepts
-	// knownConvID once the supervisor is back up after respawn. The
-	// parent dir already exists from `pyry pair`'s side-effect.
-	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
-	convJSON := []byte(`{"conversations":[{"id":"` + knownConvID +
-		`","cwd":"` + home +
-		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
-	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
-		t.Fatalf("seed conversations.json: %v", err)
-	}
-
 	tmp := t.TempDir()
 	// Align the sessions dir to the daemon's COMPUTED path (resolveClaudeSessionsDir
 	// has no env override — always <HOME>/.claude/projects/encode(workdir), with
@@ -76,6 +65,11 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 	if err := os.WriteFile(initialJSONL, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("pre-create initial jsonl: %v", err)
 	}
+	// Bind knownConvID to the bootstrap session (== initialUUID after
+	// reconciliation). AC#3: an idle-evicted bound session stays in the pool
+	// (parked in runEvicted), so Route→Lookup(boundID) resolves it and
+	// Activate respawns it — the #396 silent-outage contract under #678.
+	seedBoundConversation(t, home, knownConvID, initialUUID)
 	rotateTrigger := filepath.Join(tmp, "rotate.trigger.never-created")
 	stdinLog := filepath.Join(tmp, "fakeclaude-stdin.log")
 
