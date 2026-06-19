@@ -467,6 +467,41 @@ func withinDir(dir, path string) bool {
 	return true
 }
 
+// resolveSpawnDir validates a phone-requested per-conversation spawn workdir for
+// create_conversation, mirroring the daemon bootstrap's confine→trust sequence
+// (runSupervisor below). It returns the directory to hand sessions.Pool.CreateIn:
+//
+//	requested == "" → ("", nil): the pool spawns in the shared trusted template
+//	                  workdir (today's behaviour for a conversation with no Cwd);
+//	                  trustMark is NOT called.
+//	requested set   → confineWorkdirToHome (canonicalise both sides, confine to
+//	                  $HOME) then trustMark the realpath; returns trustMark's
+//	                  realpath so claude's cwd and the trust-marked path are
+//	                  byte-identical (AC#3).
+//
+// Order is load-bearing: confine gates the $HOME bound BEFORE trust — trustMark
+// has no $HOME bound, so trust-marking first could auto-trust a path outside
+// $HOME. A requested dir that escapes $HOME (including via a symlink resolving
+// outside $HOME) or is unresolvable fails confinement and is returned wrapping
+// handlers.ErrSpawnDirRejected — a deterministic, non-retryable rejection (the
+// confine detail is wrapped via %v for logs; errors.Is matches the sentinel). A
+// trustMark failure (a transient ~/.claude.json write error) is returned plain so
+// the handler classifies it retryable.
+func resolveSpawnDir(requested string) (string, error) {
+	if requested == "" {
+		return "", nil
+	}
+	realpath, err := confineWorkdirToHome(requested)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", handlers.ErrSpawnDirRejected, err)
+	}
+	trusted, err := trustMark(realpath)
+	if err != nil {
+		return "", fmt.Errorf("mark conversation workdir trusted in ~/.claude.json: %w", err)
+	}
+	return trusted, nil
+}
+
 // runSupervisor starts the supervisor and the control server together, blocks
 // until the context is cancelled by SIGINT/SIGTERM, then drains both.
 func runSupervisor(args []string) error {
@@ -657,14 +692,22 @@ func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 	return r.p.ResolveID(arg)
 }
 
-// sessionMinter adapts *sessions.Pool to handlers.SessionCreator. Pool.Create
-// returns sessions.SessionID; the handler-side interface speaks plain string so
-// internal/relay/handlers stays free of an internal/sessions import. The wrapper
-// is the single type-narrowing seam — the precedent is poolResolver above.
+// sessionMinter adapts *sessions.Pool to handlers.SessionCreator. It narrows the
+// type (Pool returns sessions.SessionID; the handler interface speaks plain
+// string, keeping internal/relay/handlers free of an internal/sessions import)
+// and owns the cmd-layer validation of the phone-requested spawn workdir:
+// resolveSpawnDir confines + trust-marks a set spawnDir before it reaches
+// Pool.CreateIn, which uses the resolved realpath verbatim (#685). A rejected
+// spawnDir wraps handlers.ErrSpawnDirRejected and short-circuits before any
+// mint. The precedent for this type-narrowing seam is poolResolver above.
 type sessionMinter struct{ p *sessions.Pool }
 
-func (m sessionMinter) Create(ctx context.Context, label string) (string, error) {
-	id, err := m.p.Create(ctx, label)
+func (m sessionMinter) Create(ctx context.Context, label, spawnDir string) (string, error) {
+	resolved, err := resolveSpawnDir(spawnDir)
+	if err != nil {
+		return "", err
+	}
+	id, err := m.p.CreateIn(ctx, label, resolved)
 	return string(id), err
 }
 

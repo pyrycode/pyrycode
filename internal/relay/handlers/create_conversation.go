@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -32,6 +33,23 @@ const msgCreateConversationServerError = "server error creating conversation"
 // logged but never echoed.
 const msgCreateConversationMintFailed = "could not start conversation session"
 
+// msgCreateConversationCwdRejected is the user-facing message emitted in the
+// protocol.malformed error payload when the conversation's requested Cwd is
+// rejected as a spawn workdir — it escapes $HOME after symlink resolution, or is
+// unresolvable. Non-retryable: re-issuing the same Cwd fails identically. The
+// message is static — it does NOT echo the path or ~/.claude.json (the wrapped
+// confine error is logged but never sent on the wire).
+const msgCreateConversationCwdRejected = "conversation working directory not allowed"
+
+// ErrSpawnDirRejected marks a deterministic rejection of a conversation's
+// requested spawn workdir (it escapes $HOME after symlink resolution, or is
+// unresolvable). SessionCreator implementations wrap it; the handler maps it to
+// a non-retryable protocol.malformed reply rather than a retryable
+// server.binary_offline, because re-issuing the same Cwd fails identically. The
+// sentinel lives in this consumer/mapper package (cmd/pyry wraps it, no import
+// cycle); mirrors the errors.Is mapping convention pinned in PROJECT-MEMORY.
+var ErrSpawnDirRejected = errors.New("conversation spawn directory rejected")
+
 // createConversationMintTimeout caps the per-handler wait for creator.Create to
 // mint, supervise, and activate the conversation's dedicated session. Pool
 // activation blocks until claude's PTY is ready or ctx-cancel, so an unbounded
@@ -49,13 +67,20 @@ type ConversationCreator interface {
 }
 
 // SessionCreator is the minimal session-mint surface this handler consumes from
-// the sessions pool: mint, supervise, and activate one dedicated claude session,
-// returning its id. *sessions.Pool.Create has the shape (SessionID, error), so
-// it is adapted at the cmd/pyry boundary (sessionMinter) rather than satisfying
-// this directly — keeping handlers/ free of internal/sessions imports, mirroring
+// the sessions pool: mint, supervise, and activate one dedicated claude session
+// whose claude spawns in spawnDir, returning the session id. It is adapted at
+// the cmd/pyry boundary (sessionMinter) rather than satisfying *sessions.Pool
+// directly — keeping handlers/ free of internal/sessions imports, mirroring
 // TurnWriter.
+//
+// spawnDir == "" → the daemon's shared trusted workdir (default, unchanged). A
+// non-empty spawnDir is the phone's *requested* working directory (the raw,
+// untrusted conversation Cwd); the implementation validates it (confine to
+// $HOME, symlink-resolve both sides) and trust-marks it before spawning. A
+// requested dir that escapes $HOME is rejected with an error wrapping
+// ErrSpawnDirRejected; the handler maps that to a non-retryable reply.
 type SessionCreator interface {
-	Create(ctx context.Context, label string) (string, error)
+	Create(ctx context.Context, label, spawnDir string) (string, error)
 }
 
 // CreateConversation returns a dispatch.Handler that processes a
@@ -71,18 +96,22 @@ type SessionCreator interface {
 // defaultCwd is the absolute cwd recorded when the payload's cwd is null; logger
 // is the daemon's slog logger.
 //
-// SECURITY: this handler is now a spawn-consumer — it mints a per-conversation
-// claude session via creator.Create. That session spawns in the daemon's
-// already-trust-marked shared workdir (the pool's buildSession uses tpl.WorkDir,
-// = the trusted Bootstrap.WorkDir), never conversation.Cwd: the handler passes
-// only (mintCtx, string(id)) to creator.Create, so the one phone-influenced
-// field that could be a spawn input (conversation.Cwd) is structurally excluded
-// and remains inert stored metadata. Canonicalising + boundary-checking
-// Cwd-as-spawn-input is deferred to the per-conversation-workdir follow-up, which
-// will make Cwd the spawn workdir. The session id reaching claude's argv
-// (--session-id) is server-minted (sessions.NewID, crypto/rand); the created
-// conversation id is server-minted (conversations.NewID), never phone-supplied,
-// so a phone cannot choose, collide, or overwrite a row (Create appends).
+// SECURITY: this handler is a spawn-consumer — it mints a per-conversation claude
+// session via creator.Create, which now spawns in the conversation's own
+// (phone-influenced) Cwd rather than the daemon's shared workdir (#685, reversing
+// the prior deferral). The phone's raw requested Cwd is forwarded verbatim as
+// creator.Create's spawnDir; this handler does NO path handling and stays free of
+// internal/sessions / cmd-layer imports. The cmd-layer adapter (sessionMinter →
+// resolveSpawnDir) is the sole validator: it canonicalises + confines the Cwd to
+// $HOME (rejecting any path that escapes after symlink resolution) and
+// trust-marks the realpath before claude spawns, identical to the daemon's own
+// bootstrap-workdir posture. A rejected Cwd surfaces as a non-retryable
+// protocol.malformed reply (errors.Is ErrSpawnDirRejected) with no half-bound
+// row; a null Cwd yields an empty spawnDir → the shared trusted workdir
+// (unchanged). The session id reaching claude's argv (--session-id) is
+// server-minted (sessions.NewID, crypto/rand); the created conversation id is
+// server-minted (conversations.NewID), never phone-supplied, so a phone cannot
+// choose, collide, or overwrite a row (Create appends).
 func CreateConversation(reg ConversationCreator, creator SessionCreator, registryPath, defaultCwd string, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.CreateConversationPayload
@@ -104,6 +133,18 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 		}
 		name := p.Name
 
+		// spawnDir is the *raw* phone-requested working directory, read from the
+		// nullable p.Cwd directly rather than the defaulted cwd above. Null → ""
+		// so the pool spawns in the shared trusted workdir (AC#4, byte-identical
+		// to today); a set Cwd is validated + trust-marked downstream at the
+		// cmd-layer adapter before reaching the spawn. Keeping "where to spawn"
+		// (spawnDir) separate from "what to record" (cwd) is what lets a default
+		// conversation record defaultCwd yet still spawn in tpl.WorkDir.
+		spawnDir := ""
+		if p.Cwd != nil {
+			spawnDir = *p.Cwd
+		}
+
 		id, err := conversations.NewID()
 		if err != nil {
 			logger.Error("relay: create_conversation id generation failed",
@@ -121,13 +162,25 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 		// --session-id. The 30s budget turns a wedged spawn into a retryable reply
 		// rather than pinning the per-conn goroutine indefinitely.
 		mintCtx, cancel := context.WithTimeout(ctx, createConversationMintTimeout)
-		sessionID, err := creator.Create(mintCtx, string(id))
+		sessionID, err := creator.Create(mintCtx, string(id), spawnDir)
 		cancel()
 		if err != nil {
-			// Any mint failure (pool not running, activate timeout, save failure,
-			// ctx deadline) fails the whole create: returning before reg.Create
-			// leaves no half-bound orphan row, and the phone retries onto a fresh
-			// conversation + session.
+			// A rejected Cwd (escapes $HOME / unresolvable) is deterministic:
+			// re-issuing the same Cwd fails identically, so it maps to a
+			// non-retryable protocol.malformed. The static message never echoes
+			// the path; the wrapped confine error is logged only.
+			if errors.Is(err, ErrSpawnDirRejected) {
+				logger.Warn("relay: create_conversation spawn dir rejected",
+					"event", "create_conversation.spawn_dir_rejected",
+					"conn_id", c.ConnID(),
+					"conversation_id", string(id),
+					"err", err)
+				return replyError(ctx, c, env, protocol.CodeProtocolMalformed, msgCreateConversationCwdRejected, false)
+			}
+			// Any other mint failure (pool not running, activate timeout, save
+			// failure, ctx deadline, transient trust-mark write error) is
+			// retryable. Returning before reg.Create leaves no half-bound orphan
+			// row, and the phone retries onto a fresh conversation + session.
 			logger.Warn("relay: create_conversation session mint failed",
 				"event", "create_conversation.session_mint_failed",
 				"conn_id", c.ConnID(),
