@@ -2,7 +2,7 @@
 
 How each phone-created discussion gets its own dedicated, isolated claude session. Two halves tie `internal/conversations` (the `Conversation.CurrentSessionID` binding field) to `internal/sessions` (the `Pool` that mints and supervises sessions):
 
-- **Create path (#677)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`.
+- **Create path (#677, workdir #685)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`, and (since #685) spawns it in the conversation's own validated, trust-marked `Cwd` so discussions targeting different projects are isolated on disk.
 - **Routing path (#678)** — `send_message` resolves that bound session and delivers the inbound turn there instead of to the bootstrap.
 
 Both land in the `internal/relay/handlers` package. Foundational + consumer slices of EPIC #672 ("per-conversation sessions"). See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md), [`docs/multi-session.md`](../../multi-session.md).
@@ -19,7 +19,7 @@ When the daemon handles a `create_conversation` frame, the handler mints a sessi
 
 1. Decode payload, resolve `cwd` / `name` / `promoted` (server defaults for null fields).
 2. `id, err := conversations.NewID()` — server-minted conversation id (crypto/rand UUIDv4).
-3. **Mint the session:** `creator.Create(mintCtx, string(id))` where `mintCtx` is a 30s timeout context. `Pool.Create` mints a session UUID → registers + persists it in the sessions registry → supervises → activates (spawns claude). Returns the new `SessionID`.
+3. **Mint the session:** `creator.Create(mintCtx, string(id), spawnDir)` where `mintCtx` is a 30s timeout context and `spawnDir` is the conversation's validated spawn workdir — empty for a default `Cwd`, the trust-marked realpath for a set `Cwd` (#685; see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685)). `Pool.CreateIn` mints a session UUID → registers + persists it in the sessions registry → supervises → activates (spawns claude). Returns the new `SessionID`.
 4. `reg.Create(Conversation{ID, Name, Cwd, CurrentSessionID: sessionID, IsPromoted, LastUsedAt})` — the bound session id is populated on the row.
 5. `reg.Save(registryPath)` — eager persist (the field round-trips through the registry's atomic Save/Load, so the binding survives a daemon restart).
 6. Reply `conversation_created`. The wire reply is **unchanged** — it carries no session field; the binding is internal state surfaced only in the registry row.
@@ -35,28 +35,46 @@ The handler depends on a narrow consumer-declared interface, mirroring the sibli
 ```go
 // internal/relay/handlers/create_conversation.go
 type SessionCreator interface {
-    Create(ctx context.Context, label string) (string, error)
+    // spawnDir == "" → the daemon's shared trusted workdir (default, unchanged).
+    // A non-empty spawnDir is the phone's raw requested Cwd, validated +
+    // trust-marked by the impl before spawning (#685); an escape wraps
+    // ErrSpawnDirRejected.
+    Create(ctx context.Context, label, spawnDir string) (string, error)
 }
 ```
 
-`*sessions.Pool.Create` returns `(sessions.SessionID, error)`, not `(string, error)`, so it does **not** satisfy this directly. It is adapted at the `cmd/pyry` boundary — the only package that knows both `*sessions.Pool` and `handlers.SessionCreator` — by a thin wrapper mirroring the existing `poolResolver`:
+`*sessions.Pool.CreateIn` returns `(sessions.SessionID, error)`, not `(string, error)`, so it does **not** satisfy this directly. It is adapted at the `cmd/pyry` boundary — the only package that knows both `*sessions.Pool` and `handlers.SessionCreator` — by a thin wrapper mirroring the existing `poolResolver`, which **also owns the cmd-layer validation** of the phone-requested spawn workdir:
 
 ```go
 // cmd/pyry/main.go
 type sessionMinter struct{ p *sessions.Pool }
-func (m sessionMinter) Create(ctx context.Context, label string) (string, error) {
-    id, err := m.p.Create(ctx, label)
+func (m sessionMinter) Create(ctx context.Context, label, spawnDir string) (string, error) {
+    resolved, err := resolveSpawnDir(spawnDir)   // confine to $HOME + trust-mark (#685)
+    if err != nil {
+        return "", err
+    }
+    id, err := m.p.CreateIn(ctx, label, resolved)
     return string(id), err
 }
 ```
 
-`sessionMinter{pool}` is threaded through `startRelay` → `startRelayV2` and into both `handlers.CreateConversation(...)` registration sites (the v1 dispatcher and the v2 manager handler map). Result: `internal/relay/handlers` stays free of any `internal/sessions` import — the cycle-free property is preserved.
+`sessionMinter{pool}` is threaded through `startRelay` → `startRelayV2` and into both `handlers.CreateConversation(...)` registration sites (the v1 dispatcher and the v2 manager handler map). Result: `internal/relay/handlers` stays free of any `internal/sessions` import — the cycle-free property is preserved, and the cmd-layer adapter is the sole validator of the spawn workdir (see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685)).
 
-### `Cwd` is structurally excluded from the spawn path (AC#4)
+### `Cwd` is the validated, trust-marked spawn workdir (#685)
 
-The session spawns in the daemon's **already-trust-marked shared workdir** — `Pool.buildSession` uses `tpl.WorkDir` (= `cfg.Bootstrap.WorkDir`), and claude's argv gets only `--session-id <server-minted-uuid>`. The phone-influenced `conversation.Cwd` is **never** a spawn input: the handler passes only `(mintCtx, string(id))` to `creator.Create`, and the `SessionCreator` interface carries no cwd argument at all. `Cwd` remains inert stored metadata, echoed back only to the operator's own paired devices.
+Through #677, the session spawned in the daemon's **shared** trusted workdir and the phone-influenced `conversation.Cwd` was inert stored metadata — *structurally* excluded from the spawn path. **#685 reverses that deferral:** the conversation's `Cwd` is now a validated spawn input, so a discussion's claude runs in its own recorded directory and discussions targeting different projects are isolated on disk.
 
-This is enforced *structurally*, not by validation — there is no path for `Cwd` to reach `exec.Command`. Giving each conversation its own *distinct* working directory (and the canonicalisation + boundary validation that requires) is the deferred per-conversation-workdir follow-up.
+Because `Cwd` is phone-influenced, it is an **untrusted spawn input** — validated with the *same* posture as the daemon's own bootstrap workdir before it is used:
+
+1. The handler reads the **raw nullable** `p.Cwd` into `spawnDir` (`null → ""`, set → the raw requested path) — kept separate from the defaulted `cwd` that feeds the recorded row + reply. So "where to spawn" (`spawnDir`) and "what to record" (`cwd`) stay distinct: a default conversation records `defaultCwd` yet spawns in `tpl.WorkDir`, byte-identical to today (**AC#4**).
+2. The cmd-layer adapter's `resolveSpawnDir` (`cmd/pyry/main.go`, sibling of `confineWorkdirToHome`) is the **sole validator**, mirroring the bootstrap's own `confine → trust → spawn-in-realpath` sequence:
+   - `""` → `("", nil)`: `Pool.CreateIn` falls back to the shared `tpl.WorkDir`; `trustMark` is **not** called.
+   - set → `confineWorkdirToHome` (canonicalise *both* the candidate and `$HOME` via `EvalSymlinks`, confine to `$HOME`, return the realpath) → `trustMark(realpath)` → return **trustMark's** realpath. Order is load-bearing — `trustMark` has no `$HOME` bound, so confining first is what keeps an out-of-`$HOME` path from being auto-trusted. Returning trustMark's own value (not a re-derived path) makes claude's cwd and the trust-marked path byte-identical, so the spawned claude does not wedge on the first-run workspace-trust modal (**AC#3**).
+3. A `Cwd` that escapes `$HOME` after symlink resolution (including via a symlink under `$HOME` pointing outside, or a non-existent path) is **rejected**: `resolveSpawnDir` wraps `handlers.ErrSpawnDirRejected`, and the handler maps it to a **non-retryable** `protocol.malformed` reply (static message, no path echoed). The handler returns **before** `reg.Create`, so an escape never leaves a half-bound conversation row (**AC#2**). A transient `trustMark` write failure is returned *plain* (no sentinel) → retryable `server.binary_offline`.
+
+`internal/relay/handlers` still does **no** path handling — it forwards the raw value through the typed `SessionCreator` seam and maps the sentinel; the canonicalise + confine + trust all live at the cmd layer. `Pool.CreateIn` ([#684](sessions-package.md#per-session-spawn-workdir-createin--getorcreatein-684)) uses the resolved realpath verbatim (it does not re-validate — by contract the caller hands it a pre-resolved realpath). See [codebase/685.md](../codebase/685.md).
+
+> **Residual TOCTOU window (accepted).** Between `confineWorkdirToHome`'s `EvalSymlinks` and claude's eventual `chdir`, a path that resolved inside `$HOME` could be swapped to an escaping symlink — the *same* window the daemon's own bootstrap workdir already accepts, requiring control of the operator's home to win. #685 does not widen it; no new mitigation is in scope.
 
 ### Mint-failure and timeout behaviour
 
@@ -132,7 +150,7 @@ The unknown-conversation reject now fires at *routing* time rather than delivery
 
 ## Deferred to follow-ups (EPIC #672)
 
-- **Distinct per-conversation working directory** + the trust/boundary validation that makes `conversation.Cwd` a safe spawn input. Until then, all conversation sessions share the trusted bootstrap workdir.
+- **Distinct per-conversation working directory — done (#685).** `conversation.Cwd` is now validated (confine to `$HOME` + trust-mark realpath) and used as the bound session's spawn workdir; see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685). Still open from this strand: the **per-`Cwd` turn bridge** (#686, `blocked-by #685`) so the outbound reply stream follows a transcript that now lives in a per-conversation directory; and a dedicated `conversation.cwd_rejected` error code (reused `protocol.malformed` for now).
 - **Per-operator create quota / rate-limit** (dispatch policy).
 - **Per-conversation outbound routing — structured stream done.** Both halves landed: the structured stream's attribution follows the active conversation ([#687](../codebase/687.md)) and its reply **content** now follows the bound session's transcript by id ([#679](../codebase/679.md)). Still open: the **coarse** v1/v2 bridges (`assistant_turn.go` / `assistant_turn_v2.go`) still fan out from the bootstrap cursor — re-keying them is a further #672-family follow-up. **Multi-operator isolation** (two phones each viewing a *different* conversation concurrently) is also deferred — the structured stream fans out to all interactive conns by capability with no connection→conversation binding for output; #679 covers only the *single* active reply stream following the operator's current conversation.
 
