@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -220,14 +221,43 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 }
 
 // boundHostFunc resolves a conversation id to the supervisor hosting its bound
-// claude session plus that session's id. (nil, "", false) when the conversation
-// is unknown, has no bound session, or its session id misses in the pool — the
-// follow-active resolver turns that into a retry, never a bootstrap fallback
-// (cross-conversation confidentiality, #679). Built in runSupervisor where the
-// pool + conversations registry are concrete; *supervisor.Supervisor satisfies
+// claude session, that session's id, AND the directory claude writes that
+// session's transcript into (its per-Cwd JSONL dir since #686 — see
+// perConversationSessionsDir). (nil, "", "", false) when the conversation is
+// unknown, has no bound session, its session id misses in the pool, or its
+// per-Cwd directory can't be derived — the follow-active resolver turns any of
+// those into a retry, never a bootstrap fallback (cross-conversation
+// confidentiality, #679/#686). Built in runSupervisor where the pool +
+// conversations registry are concrete; *supervisor.Supervisor satisfies
 // turnbridge.SessionHost, so the bound supervisor is both subscription host and
 // PTY-state source.
-type boundHostFunc func(convID string) (host turnbridge.SessionHost, sessionID string, ok bool)
+type boundHostFunc func(convID string) (host turnbridge.SessionHost, sessionID, dir string, ok bool)
+
+// perConversationSessionsDir returns the directory claude writes a bound
+// session's <id>.jsonl into, given that session's spawn workdir (#686). claude
+// keys its transcript directory off the cwd it was launched with, so the
+// authoritative input is supervisor.Config.WorkDir — the realpath captured at
+// CreateIn time (#685), not the raw recorded conv.Cwd.
+//
+//   - sessionWorkDir == bootstrapWorkDir → sharedDir. A default (null-Cwd)
+//     conversation spawns in the bootstrap workdir, so it keeps resolving from
+//     the startup-computed shared claudeSessionsDir, byte-for-byte unchanged
+//     (AC3) — including the latent abs-vs-realpath skew that dir already carries.
+//   - sessionWorkDir == "" → sharedDir (defensive default; a supervisor built
+//     with no WorkDir inherits the process cwd, same shared-dir treatment).
+//   - otherwise → sessions.DefaultClaudeSessionsDir(sessionWorkDir), the single
+//     source of truth for the ~/.claude/projects/<encoded-cwd>/ encoding
+//     (AC1/AC2). Returns "" only when DefaultClaudeSessionsDir can't encode (no
+//     $HOME); the caller treats "" as unresolvable (retry, never fall back).
+//
+// Pure string logic over its three inputs (the one os.UserHomeDir read inside
+// DefaultClaudeSessionsDir aside) — no re-canonicalisation, no symlink syscalls.
+func perConversationSessionsDir(sessionWorkDir, bootstrapWorkDir, sharedDir string) string {
+	if sessionWorkDir == "" || sessionWorkDir == bootstrapWorkDir {
+		return sharedDir
+	}
+	return sessions.DefaultClaudeSessionsDir(sessionWorkDir)
+}
 
 // resolveTarget is the follow-active TargetResolver (#679). On each
 // (re)subscription it snapshots the active conversation — its id AND the channel
@@ -238,7 +268,9 @@ type boundHostFunc func(convID string) (host turnbridge.SessionHost, sessionID s
 //     unchanged pre-#679 path (AC4). Switch is still set so the first route
 //     re-subscribes onto the routed bound session.
 //   - convID != "" and resolvable: the bound session's supervisor + a by-id
-//     resolver that tails <bound-session-id>.jsonl, mtime-independent (AC1/AC2).
+//     resolver that tails <bound-session-id>.jsonl in that conversation's OWN
+//     per-Cwd JSONL directory (returned by boundHost since #686), mtime-
+//     independent and never another Cwd's directory (AC1/AC2).
 //   - convID != "" but unresolvable (deleted/unbound mid-flight): an error so the
 //     subscriber backs off and retries. It NEVER falls back to the bootstrap under
 //     a non-empty cursor — the emitter stamps convID, so tailing any other
@@ -258,13 +290,18 @@ func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstra
 				Switch:  switchCh,
 			}, nil
 		}
-		host, sessionID, ok := boundHost(convID)
+		host, sessionID, convDir, ok := boundHost(convID)
 		if !ok {
 			return turnbridge.Target{}, fmt.Errorf("no bound session for active conversation %q", convID)
 		}
+		// convDir is the bound session's OWN per-Cwd JSONL directory (#686), not
+		// the bootstrap-branch dir param (which stays the shared claudeSessionsDir
+		// for the convID == "" path above). A per-Cwd conversation's transcript
+		// lives in its own ~/.claude/projects/<encoded-cwd>/ folder, so the by-id
+		// resolver must tail <sessionID>.jsonl under convDir.
 		return turnbridge.Target{
 			Host:    host,
-			Resolve: resolveBoundSessionJSONL(dir, sessionID),
+			Resolve: resolveBoundSessionJSONL(convDir, sessionID),
 			Switch:  switchCh,
 		}, nil
 	}

@@ -49,6 +49,31 @@ func TestSupervisor_NewAppliesDefaults(t *testing.T) {
 	}
 }
 
+// TestSupervisor_WorkDir confirms the accessor returns Config.WorkDir verbatim —
+// the spawn cwd the turn bridge encodes into a conversation's per-Cwd transcript
+// directory (#686). Empty config returns "".
+func TestSupervisor_WorkDir(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		dir  string
+	}{
+		{name: "set", dir: "/x/y"},
+		{name: "empty", dir: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sup, err := New(Config{ClaudeBin: "/bin/sleep", WorkDir: tc.dir})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if got := sup.WorkDir(); got != tc.dir {
+				t.Errorf("WorkDir() = %q, want %q", got, tc.dir)
+			}
+		})
+	}
+}
+
 // TestSupervisor_NewRejectsMissingClaudeBin covers the early-validation
 // path in New: if the binary is not on PATH, construction fails with a
 // wrapped "claude binary not found" error rather than letting Run discover

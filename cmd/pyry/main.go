@@ -624,19 +624,29 @@ func runSupervisor(args []string) error {
 	// boundHost is the conv→session→supervisor lookup the follow-active turn
 	// stream re-keys its subscription onto (#679): convReg.Get → CurrentSessionID
 	// (non-empty guard) → pool.Lookup → the bound session's supervisor (which is
-	// both the subscription host and the PTY-state source). (nil, "", false) on an
-	// unknown conversation, an empty binding, or a Lookup miss — resolveTarget
-	// turns that into a retry, never a bootstrap fallback (confidentiality).
-	var boundHost boundHostFunc = func(convID string) (turnbridge.SessionHost, string, bool) {
+	// both the subscription host and the PTY-state source). Since #686 it also
+	// derives that session's OWN per-Cwd transcript directory from its spawn
+	// WorkDir (the realpath captured at CreateIn time, NOT the raw conv.Cwd):
+	// perConversationSessionsDir routes a default/shared-workdir session to the
+	// startup claudeSessionsDir (AC3, unchanged) and a per-Cwd session to its own
+	// ~/.claude/projects/<encoded-cwd>/ (AC1/AC2). (nil, "", "", false) on an
+	// unknown conversation, an empty binding, a Lookup miss, or an underivable
+	// directory — resolveTarget turns that into a retry, never a bootstrap
+	// fallback (cross-conversation confidentiality).
+	var boundHost boundHostFunc = func(convID string) (turnbridge.SessionHost, string, string, bool) {
 		conv, ok := convReg.Get(conversations.ConversationID(convID))
 		if !ok || conv.CurrentSessionID == "" {
-			return nil, "", false
+			return nil, "", "", false
 		}
 		sess, err := pool.Lookup(sessions.SessionID(conv.CurrentSessionID))
 		if err != nil {
-			return nil, "", false
+			return nil, "", "", false
 		}
-		return sess.Supervisor(), conv.CurrentSessionID, true
+		dir := perConversationSessionsDir(sess.Supervisor().WorkDir(), trustedWorkdir, claudeSessionsDir)
+		if dir == "" {
+			return nil, "", "", false
+		}
+		return sess.Supervisor(), conv.CurrentSessionID, dir, true
 	}
 	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, sessionRouter{pool: pool, convReg: convReg, active: active}, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
 	if err != nil {

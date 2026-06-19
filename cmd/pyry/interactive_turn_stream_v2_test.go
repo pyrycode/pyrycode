@@ -15,6 +15,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
@@ -365,6 +366,68 @@ func TestResolveBoundSessionJSONL_InvalidIDErrors(t *testing.T) {
 	}
 }
 
+// --- perConversationSessionsDir tests (#686 per-Cwd directory derivation) ----
+
+// TestPerConversationSessionsDir covers the discriminate-and-encode logic that
+// maps a bound session's spawn workdir to the directory claude writes its
+// <id>.jsonl into. Pure string logic over three inputs — no t.Setenv needed
+// (sharedDir / bootstrapWorkDir are passed explicitly; the per-Cwd case asserts
+// against DefaultClaudeSessionsDir's own output).
+func TestPerConversationSessionsDir(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bootstrapWorkDir = "/home/op/.pyry-workdir"
+		sharedDir        = "/home/op/.claude/projects/-home-op--pyry-workdir"
+		convCwdA         = "/home/op/projects/alpha"
+		convCwdB         = "/home/op/projects/beta"
+	)
+
+	tests := []struct {
+		name           string
+		sessionWorkDir string
+		want           string
+	}{
+		{
+			name:           "default session (spawn workdir == bootstrap) routes to shared dir (AC3)",
+			sessionWorkDir: bootstrapWorkDir,
+			want:           sharedDir,
+		},
+		{
+			name:           "empty spawn workdir routes to shared dir (defensive default)",
+			sessionWorkDir: "",
+			want:           sharedDir,
+		},
+		{
+			name:           "per-Cwd session encodes its own directory (AC1)",
+			sessionWorkDir: convCwdA,
+			want:           sessions.DefaultClaudeSessionsDir(convCwdA),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := perConversationSessionsDir(tc.sessionWorkDir, bootstrapWorkDir, sharedDir)
+			if got != tc.want {
+				t.Fatalf("perConversationSessionsDir(%q, %q, %q) = %q, want %q",
+					tc.sessionWorkDir, bootstrapWorkDir, sharedDir, got, tc.want)
+			}
+		})
+	}
+
+	// AC1/AC2: a per-Cwd session's directory differs from the shared dir, and two
+	// distinct per-Cwd workdirs map to two distinct directories — the on-disk
+	// isolation the by-id filename boundary rests on.
+	dirA := perConversationSessionsDir(convCwdA, bootstrapWorkDir, sharedDir)
+	dirB := perConversationSessionsDir(convCwdB, bootstrapWorkDir, sharedDir)
+	if dirA == sharedDir {
+		t.Fatalf("per-Cwd dir %q must differ from the shared dir %q (AC1)", dirA, sharedDir)
+	}
+	if dirA == dirB {
+		t.Fatalf("distinct per-Cwd workdirs collapsed to the same dir %q (AC2 isolation)", dirA)
+	}
+}
+
 // --- resolveTarget tests (#679 follow-active mapping) ------------------------
 
 // fakeSessionHost is a turnbridge.SessionHost test double; pointer identity lets
@@ -384,9 +447,9 @@ func TestResolveTarget_BootstrapWhenNoRoute(t *testing.T) {
 
 	active := &activeConversation{}
 	bootstrap := &fakeSessionHost{name: "bootstrap"}
-	boundHost := func(string) (turnbridge.SessionHost, string, bool) {
+	boundHost := func(string) (turnbridge.SessionHost, string, string, bool) {
 		t.Error("boundHost must not be consulted before any route")
-		return nil, "", false
+		return nil, "", "", false
 	}
 
 	target, err := resolveTarget(active, boundHost, bootstrap, dir)(context.Background())
@@ -409,27 +472,33 @@ func TestResolveTarget_BootstrapWhenNoRoute(t *testing.T) {
 }
 
 // TestResolveTarget_BoundSessionWhenRouted (AC#1/AC#2): a routed conversation maps
-// to its bound session's host + a by-id resolver that tails <bound-id>.jsonl even
-// when another session's JSONL is newer — the confidentiality property, asserted
-// at the resolveTarget seam.
+// to its bound session's host + a by-id resolver that tails <bound-id>.jsonl in
+// the conversation's OWN per-Cwd directory (the dir boundHost returns, #686), NOT
+// the bootstrap dir param — and never another session's newer JSONL in that same
+// per-Cwd dir (the confidentiality property), asserted at the resolveTarget seam.
 func TestResolveTarget_BoundSessionWhenRouted(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	bootstrapDir := t.TempDir() // the resolveTarget dir param (bootstrap branch)
+	convDir := t.TempDir()      // the conversation's own per-Cwd dir (boundHost return)
 	base := time.Now().Add(-time.Hour)
-	boundFile := writeJSONL(t, dir, uuidA, 30, base)       // the bound session
-	writeJSONL(t, dir, uuidB, 50, base.Add(5*time.Minute)) // another session, newer
+	// A same-stem decoy in the bootstrap dir: a buggy bound branch that tailed the
+	// dir param instead of the per-conv dir would resolve to THIS file (AC2 — must
+	// not happen).
+	writeJSONL(t, bootstrapDir, uuidA, 99, base.Add(10*time.Minute))
+	boundFile := writeJSONL(t, convDir, uuidA, 30, base)       // the bound session, in its own dir
+	writeJSONL(t, convDir, uuidB, 50, base.Add(5*time.Minute)) // another session in the same dir, newer
 
 	active := &activeConversation{}
 	active.set("conv-1")
 	host := &fakeSessionHost{name: "bound"}
-	boundHost := func(convID string) (turnbridge.SessionHost, string, bool) {
+	boundHost := func(convID string) (turnbridge.SessionHost, string, string, bool) {
 		if convID != "conv-1" {
 			t.Errorf("boundHost convID = %q, want conv-1", convID)
 		}
-		return host, uuidA, true
+		return host, uuidA, convDir, true
 	}
 
-	target, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir)(context.Background())
+	target, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, bootstrapDir)(context.Background())
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
@@ -444,7 +513,7 @@ func TestResolveTarget_BoundSessionWhenRouted(t *testing.T) {
 		t.Fatalf("bound resolve: %v", err)
 	}
 	if path != boundFile {
-		t.Fatalf("bound resolve path: got %q, want %q (by bound id, not the newer file)", path, boundFile)
+		t.Fatalf("bound resolve path: got %q, want %q (by bound id under the per-conv dir, not the dir param's same-stem decoy nor the newer sibling)", path, boundFile)
 	}
 	if off != 30 {
 		t.Fatalf("bound resolve offset: got %d, want 30 (bound file size)", off)
@@ -464,7 +533,7 @@ func TestResolveTarget_UnresolvableConversationErrors(t *testing.T) {
 
 	active := &activeConversation{}
 	active.set("conv-gone")
-	boundHost := func(string) (turnbridge.SessionHost, string, bool) { return nil, "", false }
+	boundHost := func(string) (turnbridge.SessionHost, string, string, bool) { return nil, "", "", false }
 
 	_, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir)(context.Background())
 	if err == nil {
