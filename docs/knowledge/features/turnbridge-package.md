@@ -468,6 +468,19 @@ ships the mechanism; #633 supplies the original production resolver + the wiring
 > (cross-conversation confidentiality). See [codebase/679.md](../codebase/679.md)
 > and [conversation-session-binding.md](conversation-session-binding.md). The
 > recency-resolver description below is now specifically the **bootstrap branch**.
+>
+> **Since #686 the by-id resolver's *directory* is per-conversation, not the
+> shared dir.** Once [#685](conversation-session-binding.md#cwd-is-the-validated-trust-marked-spawn-workdir-685)
+> spawns each conversation's session in its own `Cwd`, claude writes that session's
+> transcript under `~/.claude/projects/<encoded-cwd>/<id>.jsonl`, not the daemon's
+> shared `claudeSessionsDir`. `boundHost` now derives the directory from the bound
+> session's captured spawn `WorkDir` (`Supervisor.WorkDir()` → `perConversationSessionsDir`
+> → `sessions.DefaultClaudeSessionsDir`) and `resolveTarget` feeds *that* dir to
+> `resolveBoundSessionJSONL`. A default (null-`Cwd`) session, whose `WorkDir` equals
+> the bootstrap workdir, still resolves from the shared `claudeSessionsDir`
+> unchanged; an underivable dir is a hard miss (retry, never a fallback). So
+> confidentiality is now layered on **two** axes — the filename (bound UUID, #679)
+> *and* the directory (spawn workdir, #686). See [codebase/686.md](../codebase/686.md).
 
 - **Supervisor restart is handled here.** A newly-hosted session ends the prior
   one (`sess.Wait()` returns) → per-session ctx cancels → Events channel closes →
@@ -536,3 +549,4 @@ design decision.
 - [codebase/639.md](../codebase/639.md) — the stall bridge wiring: un-drops `StallDetected` through all three stages to the capability-gated fan-out (#638's `turnevent.Stall` + `protocol.StallPayload`).
 - [codebase/609.md](../codebase/609.md) — delta coalescing: the additive `Config.FlushSignal`/`OnFlush` flush-arm seam + the emitter-owned ~250ms timer it serves.
 - [codebase/679.md](../codebase/679.md) — the follow-active producer lifecycle: generalises the subscriber to `Target`/`TargetResolver`/`NewTargetSubscriber` (removing `NewSessionSubscriber`) so the reply tails the active conversation's bound-session transcript by id, re-subscribing on a switch.
+- [codebase/686.md](../codebase/686.md) — re-points the by-id resolver's directory to the conversation's own per-`Cwd` JSONL dir (derived from the bound session's captured spawn `WorkDir`) once #685 spawns sessions in distinct directories; default sessions keep resolving from the shared dir.

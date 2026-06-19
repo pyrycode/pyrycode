@@ -189,6 +189,17 @@ func (s *Supervisor) State() State {
 	return s.state
 }
 
+// WorkDir returns the working directory the supervised claude was spawned in
+// (Config.WorkDir, immutable post-New, so no lock — unlike State which guards
+// mutable state). Empty when the supervisor was built with no WorkDir (inherits
+// the process cwd). The turn bridge derives a conversation's per-Cwd transcript
+// directory from it: claude writes <session-id>.jsonl under
+// ~/.claude/projects/<encoded-WorkDir>/, so this is the authoritative,
+// byte-exact spawn cwd to encode (#686).
+func (s *Supervisor) WorkDir() string {
+	return s.cfg.WorkDir
+}
+
 func (s *Supervisor) updateState(fn func(*State)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
