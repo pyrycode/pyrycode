@@ -467,6 +467,116 @@ func withinDir(dir, path string) bool {
 	return true
 }
 
+// expandTilde performs minimal, leading-only home expansion on a phone-supplied
+// path: a bare "~" and a "~/"-prefix expand to the daemon's $HOME; everything
+// else (an absolute path, a relative path, or a "~user" form) is returned
+// verbatim. A "~user" is intentionally NOT resolved to another user's home — it
+// passes through as a literal segment and fails the later confinement/existence
+// check as a deterministic reject. No $VAR / arbitrary env expansion (out of
+// scope, larger attack surface). The phone cannot know the daemon's absolute
+// home, so it sends the default scratch Cwd as "~/.pyrycode/scratch" meaning
+// "the daemon's home"; this anchors that at the real $HOME before path
+// resolution, never under the process working directory (#696).
+func expandTilde(p string) (string, error) {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	if p == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, p[2:]), nil
+}
+
+// confineWorkdirToHomeCreating is the create-aware variant of
+// confineWorkdirToHome: same return contract (the canonical realpath on
+// success, confined to $HOME), but it tolerates a not-yet-existing leaf/parents
+// by canonicalising the longest existing ancestor and creating the rest only
+// after the $HOME check passes (#696, the default-scratch case #685 previously
+// rejected). When the whole path already exists this reduces exactly to
+// confineWorkdirToHome (rest == "" → no MkdirAll, identical realpath).
+//
+// Order is security-load-bearing. A naive "containment-check the filepath.Abs
+// (un-symlink-resolved) path, then MkdirAll" lets a symlinked ancestor (e.g.
+// ~/link -> /tmp/evil) pass a textual check and create outside $HOME. So the
+// candidate is built from the symlink-RESOLVED longest existing ancestor: the
+// ancestor walk probes with os.Lstat (not os.Stat) so a symlink counts as
+// existing and is resolved by EvalSymlinks, never stepped over; containment
+// check #1 runs on that resolved candidate BEFORE any directory is created; and
+// after creation the full path is re-EvalSymlinks'd and re-confined (check #2),
+// catching a path that became escaping during creation and yielding the realpath
+// to return. The residual confine→chdir TOCTOU window is the same one #685
+// accepts; MkdirAll does not widen it.
+func confineWorkdirToHomeCreating(workdir string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	homeReal, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory %q: %w", home, err)
+	}
+	absWork, err := filepath.Abs(workdir)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir %q: %w", workdir, err)
+	}
+
+	// Split absWork into the longest leading ancestor that exists on disk
+	// (probed with Lstat, so a symlink is "existing" and gets resolved, not
+	// stepped over) and the not-yet-existing suffix `rest`.
+	existing := absWork
+	var rest string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break // reached the filesystem root; guard against looping
+		}
+		rest = filepath.Join(filepath.Base(existing), rest)
+		existing = parent
+	}
+
+	existingReal, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir %q: %w", workdir, err)
+	}
+	candidate := existingReal
+	if rest != "" {
+		candidate = filepath.Join(existingReal, rest)
+	}
+
+	// Containment check #1 (pre-creation): the candidate is built from the
+	// symlink-resolved existing ancestor, so a symlinked ancestor escaping
+	// $HOME is rejected here, before any directory is created. The error names
+	// the resolved path and the $HOME boundary only — never file contents.
+	if !withinDir(homeReal, candidate) {
+		return "", fmt.Errorf("workdir %q resolves outside the home directory %q: the supervised claude's workdir must be within $HOME", candidate, homeReal)
+	}
+
+	if rest != "" {
+		if err := os.MkdirAll(candidate, 0o700); err != nil {
+			return "", fmt.Errorf("create workdir %q: %w", candidate, err)
+		}
+	}
+
+	// Containment check #2 (post-creation re-confine): the path now exists, so
+	// EvalSymlinks fully canonicalises it; re-check the $HOME bound to catch a
+	// path that became escaping during creation and to yield the realpath.
+	final, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve workdir %q: %w", workdir, err)
+	}
+	if !withinDir(homeReal, final) {
+		return "", fmt.Errorf("workdir %q resolves outside the home directory %q: the supervised claude's workdir must be within $HOME", final, homeReal)
+	}
+	return final, nil
+}
+
 // resolveSpawnDir validates a phone-requested per-conversation spawn workdir for
 // create_conversation, mirroring the daemon bootstrap's confine→trust sequence
 // (runSupervisor below). It returns the directory to hand sessions.Pool.CreateIn:
@@ -474,14 +584,19 @@ func withinDir(dir, path string) bool {
 //	requested == "" → ("", nil): the pool spawns in the shared trusted template
 //	                  workdir (today's behaviour for a conversation with no Cwd);
 //	                  trustMark is NOT called.
-//	requested set   → confineWorkdirToHome (canonicalise both sides, confine to
-//	                  $HOME) then trustMark the realpath; returns trustMark's
-//	                  realpath so claude's cwd and the trust-marked path are
-//	                  byte-identical (AC#3).
+//	requested set   → expandTilde (leading "~"/"~/" → $HOME) then
+//	                  confineWorkdirToHomeCreating (canonicalise, confine to
+//	                  $HOME, create the dir if missing) then trustMark the
+//	                  realpath; returns trustMark's realpath so claude's cwd and
+//	                  the trust-marked path are byte-identical (AC#4).
 //
 // Order is load-bearing: confine gates the $HOME bound BEFORE trust — trustMark
 // has no $HOME bound, so trust-marking first could auto-trust a path outside
-// $HOME. A requested dir that escapes $HOME (including via a symlink resolving
+// $HOME. The phone-default scratch Cwd ("~/.pyrycode/scratch") must resolve under
+// $HOME and be created before spawn (#696): expandTilde anchors a leading "~" at
+// the daemon's $HOME, and confineWorkdirToHomeCreating creates the dir only after
+// the $HOME check passes (a symlinked-ancestor escape is rejected and never
+// created). A requested dir that escapes $HOME (including via a symlink resolving
 // outside $HOME) or is unresolvable fails confinement and is returned wrapping
 // handlers.ErrSpawnDirRejected — a deterministic, non-retryable rejection (the
 // confine detail is wrapped via %v for logs; errors.Is matches the sentinel). A
@@ -491,7 +606,11 @@ func resolveSpawnDir(requested string) (string, error) {
 	if requested == "" {
 		return "", nil
 	}
-	realpath, err := confineWorkdirToHome(requested)
+	expanded, err := expandTilde(requested)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", handlers.ErrSpawnDirRejected, err)
+	}
+	realpath, err := confineWorkdirToHomeCreating(expanded)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", handlers.ErrSpawnDirRejected, err)
 	}
