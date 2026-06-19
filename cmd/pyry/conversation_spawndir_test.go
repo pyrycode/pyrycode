@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
@@ -135,6 +136,164 @@ func TestResolveSpawnDir_SymlinkEscapingHome_Rejected(t *testing.T) {
 	}
 	if rec.calls != 0 {
 		t.Errorf("trustMark called %d times for an escaping symlink, want 0", rec.calls)
+	}
+}
+
+// TestResolveSpawnDir_BareTilde_ExpandsToHome covers AC#1: a bare "~" expands
+// to the daemon's $HOME (never a literal "~" segment under the process cwd). The
+// resolved realpath trustMark receives is EvalSymlinks(home), and no "~" literal
+// survives into the path.
+func TestResolveSpawnDir_BareTilde_ExpandsToHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	homeReal, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(home): %v", err)
+	}
+	const trustedSentinel = "/trusted/realpath/sentinel"
+	rec := installRecordingTrustMark(t, trustedSentinel, nil)
+
+	got, err := resolveSpawnDir("~")
+	if err != nil {
+		t.Fatalf("resolveSpawnDir(\"~\") error = %v", err)
+	}
+	if got != trustedSentinel {
+		t.Errorf("resolveSpawnDir = %q, want trustMark's return %q", got, trustedSentinel)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("trustMark called %d times, want exactly 1", rec.calls)
+	}
+	if rec.gotWorkdir != homeReal {
+		t.Errorf("trustMark got %q, want EvalSymlinks(home) %q", rec.gotWorkdir, homeReal)
+	}
+	if strings.Contains(rec.gotWorkdir, "~") {
+		t.Errorf("resolved path %q still contains a literal ~", rec.gotWorkdir)
+	}
+}
+
+// TestResolveSpawnDir_TildePrefixMissing_ExpandsCreatesResolves covers AC#1 +
+// AC#2: a "~/"-prefixed path whose dir (and parents) do not yet exist expands to
+// $HOME, is created under $HOME, and resolves so the spawn proceeds. The realpath
+// trustMark receives is an existing directory equal to EvalSymlinks(home)/.pyrycode/scratch.
+func TestResolveSpawnDir_TildePrefixMissing_ExpandsCreatesResolves(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	homeReal, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(home): %v", err)
+	}
+	const trustedSentinel = "/trusted/realpath/sentinel"
+	rec := installRecordingTrustMark(t, trustedSentinel, nil)
+
+	got, err := resolveSpawnDir("~/.pyrycode/scratch")
+	if err != nil {
+		t.Fatalf("resolveSpawnDir(\"~/.pyrycode/scratch\") error = %v", err)
+	}
+	if got != trustedSentinel {
+		t.Errorf("resolveSpawnDir = %q, want trustMark's return %q", got, trustedSentinel)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("trustMark called %d times, want exactly 1", rec.calls)
+	}
+	want := filepath.Join(homeReal, ".pyrycode", "scratch")
+	if rec.gotWorkdir != want {
+		t.Errorf("resolved realpath = %q, want %q", rec.gotWorkdir, want)
+	}
+	info, err := os.Stat(rec.gotWorkdir)
+	if err != nil {
+		t.Fatalf("resolved path %q does not exist after resolve: %v", rec.gotWorkdir, err)
+	}
+	if !info.IsDir() {
+		t.Errorf("resolved path %q is not a directory", rec.gotWorkdir)
+	}
+}
+
+// TestResolveSpawnDir_SymlinkedAncestorEscaping_RejectedNotCreated is the key new
+// security regression guard for AC#3: a symlinked ancestor under $HOME pointing
+// outside it (with a not-yet-existing suffix) is rejected, trustMark is never
+// called, and the escaping target is NEVER created — the containment check runs
+// against the symlink-resolved candidate BEFORE MkdirAll.
+func TestResolveSpawnDir_SymlinkedAncestorEscaping_RejectedNotCreated(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv("HOME", home)
+	link := filepath.Join(home, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	rec := installRecordingTrustMark(t, "/unused", nil)
+
+	if _, err := resolveSpawnDir("~/link/scratch"); err == nil {
+		t.Fatalf("resolveSpawnDir(\"~/link/scratch\") = nil error, want rejection of symlinked-ancestor escape")
+	} else if !errors.Is(err, handlers.ErrSpawnDirRejected) {
+		t.Errorf("error %v does not match ErrSpawnDirRejected", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("trustMark called %d times for an escaping symlinked ancestor, want 0", rec.calls)
+	}
+	target := filepath.Join(outside, "scratch")
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("escaping target %q was created (Stat err = %v), want never created", target, err)
+	}
+}
+
+// TestResolveSpawnDir_DeepMissingChain_CreatesAllParents guards the longest-
+// existing-ancestor walk past a single level: a "~/a/b/c" whose every component
+// is missing is created in full (each dir 0o700) and resolves under $HOME.
+func TestResolveSpawnDir_DeepMissingChain_CreatesAllParents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	homeReal, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(home): %v", err)
+	}
+	const trustedSentinel = "/trusted/realpath/sentinel"
+	rec := installRecordingTrustMark(t, trustedSentinel, nil)
+
+	got, err := resolveSpawnDir("~/a/b/c")
+	if err != nil {
+		t.Fatalf("resolveSpawnDir(\"~/a/b/c\") error = %v", err)
+	}
+	if got != trustedSentinel {
+		t.Errorf("resolveSpawnDir = %q, want trustMark's return %q", got, trustedSentinel)
+	}
+	want := filepath.Join(homeReal, "a", "b", "c")
+	if rec.gotWorkdir != want {
+		t.Errorf("resolved realpath = %q, want %q", rec.gotWorkdir, want)
+	}
+	for _, p := range []string{
+		filepath.Join(homeReal, "a"),
+		filepath.Join(homeReal, "a", "b"),
+		filepath.Join(homeReal, "a", "b", "c"),
+	} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("expected created dir %q missing: %v", p, err)
+		}
+		if !info.IsDir() {
+			t.Errorf("%q is not a directory", p)
+		}
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Errorf("created dir %q mode = %o, want 0700", p, perm)
+		}
+	}
+}
+
+// TestResolveSpawnDir_TildeUser_NotExpanded pins the minimal-expansion boundary:
+// only a leading "~/" and a bare "~" expand. A "~user" form is treated as a
+// literal segment, fails resolution under the process cwd, and is rejected.
+func TestResolveSpawnDir_TildeUser_NotExpanded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	rec := installRecordingTrustMark(t, "/unused", nil)
+
+	if _, err := resolveSpawnDir("~root/x"); err == nil {
+		t.Fatalf("resolveSpawnDir(\"~root/x\") = nil error, want rejection (no ~user expansion)")
+	} else if !errors.Is(err, handlers.ErrSpawnDirRejected) {
+		t.Errorf("error %v does not match ErrSpawnDirRejected", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("trustMark called %d times for an unexpanded ~user path, want 0", rec.calls)
 	}
 }
 
