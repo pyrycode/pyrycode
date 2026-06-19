@@ -71,19 +71,30 @@ func TestTwoPhoneCoarse_NonInteractiveOnly(t *testing.T) {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	// Seed the conversation row the cursor will reference (the
-	// ValidateConversation gate in WriteUserTurn must pass so the stamp lands).
-	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
-	convJSON := []byte(`{"conversations":[{"id":"` + knownConvID +
-		`","cwd":"` + home +
-		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
-	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
-		t.Fatalf("seed conversations.json: %v", err)
-	}
-
 	tmp := t.TempDir()
-	sessionsDir := filepath.Join(tmp, "claude-sessions")
+	// Align the sessions dir to the daemon's COMPUTED path (resolveClaudeSessionsDir
+	// has no env override — always <HOME>/.claude/projects/encode(workdir), with
+	// HOME=home and -pyry-workdir=home) so reconcileBootstrapOnNew rotates the
+	// bootstrap session id to initialUUID — the id the binding below points at.
+	// Unlike its structured sibling this test awaits no ack and asserts nothing
+	// about JSONL content, so moving the sessions dir off tmp is inert to its
+	// assertions; the only effect is making reconciliation set the bootstrap id.
+	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
 	initialUUID := "44444444-4444-4444-8444-444444444444"
+	// Pre-create <initialUUID>.jsonl BEFORE the daemon starts so reconciliation
+	// finds it and rotates the bootstrap session id to initialUUID.
+	initialJSONL := filepath.Join(sessionsDir, initialUUID+".jsonl")
+	if err := os.WriteFile(initialJSONL, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("pre-create initial jsonl: %v", err)
+	}
+	// Bind knownConvID to the bootstrap session (== initialUUID after
+	// reconciliation) so sessionRouter.Route resolves under #678's contract;
+	// the ValidateConversation gate in WriteUserTurn then passes and the
+	// supervisor cursor stamp lands.
+	seedBoundConversation(t, home, knownConvID, initialUUID)
 	rotateTrigger := filepath.Join(tmp, "rotate.trigger.never-created")
 	stdinLog := filepath.Join(tmp, "fakeclaude-stdin.log")
 	asstTrigger := filepath.Join(tmp, "assistant.trigger")
