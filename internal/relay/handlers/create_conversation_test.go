@@ -13,21 +13,25 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// stubSessionCreator records each Create(ctx, label) call and returns a
-// configurable id + error. With err == nil and id == "" it returns a fresh
+// stubSessionCreator records each Create(ctx, label, spawnDir) call and returns
+// a configurable id + error. With err == nil and id == "" it returns a fresh
 // distinct id per call ("sess-1", "sess-2", …) so per-conversation distinctness
 // is observable without per-test wiring; a fixed id pins the binding assertion.
-// Mirrors stubTurnWriter in send_message_test.go.
+// The stub IS the cmd-layer seam: it records the raw spawnDir the handler
+// forwards (no validation happens handler-side). Mirrors stubTurnWriter in
+// send_message_test.go.
 type stubSessionCreator struct {
-	err    error  // when non-nil, every Create returns ("", err)
-	id     string // when non-empty, every Create returns this fixed id
-	calls  int
-	labels []string
+	err       error  // when non-nil, every Create returns ("", err)
+	id        string // when non-empty, every Create returns this fixed id
+	calls     int
+	labels    []string
+	spawnDirs []string // the spawnDir arg recorded per call
 }
 
-func (s *stubSessionCreator) Create(ctx context.Context, label string) (string, error) {
+func (s *stubSessionCreator) Create(ctx context.Context, label, spawnDir string) (string, error) {
 	s.calls++
 	s.labels = append(s.labels, label)
+	s.spawnDirs = append(s.spawnDirs, spawnDir)
 	if s.err != nil {
 		return "", s.err
 	}
@@ -375,11 +379,12 @@ func TestCreateConversation_DistinctSessionPerConversation(t *testing.T) {
 	}
 }
 
-// TestCreateConversation_CwdNeverReachesMint covers AC#4: the phone-influenced
-// Cwd is never a mint/spawn input. The mint label is the server-minted
-// conversation id (a UUID), never the cwd; structurally the SessionCreator
-// interface carries no cwd argument at all, so Cwd cannot reach the spawn path.
-func TestCreateConversation_CwdNeverReachesMint(t *testing.T) {
+// TestCreateConversation_SetCwd_ThreadsRawSpawnDir covers AC#1: a set Cwd is
+// forwarded verbatim as the mint's spawnDir (the cmd-layer seam, here the stub,
+// validates it — the handler does no path handling). The row + reply still record
+// the raw requested Cwd, and the mint label remains the server-minted id, never
+// the cwd. Replaces the pre-#685 CwdNeverReachesMint test, whose premise inverts.
+func TestCreateConversation_SetCwd_ThreadsRawSpawnDir(t *testing.T) {
 	t.Parallel()
 	reg, regPath := newCreateConvReg(t)
 	c, recv := newCreateConvConn(t)
@@ -401,16 +406,93 @@ func TestCreateConversation_CwdNeverReachesMint(t *testing.T) {
 	if creator.calls != 1 {
 		t.Fatalf("creator.Create called %d times, want exactly 1", creator.calls)
 	}
-	if creator.labels[0] == cwd {
-		t.Errorf("mint label = the phone-supplied cwd %q; Cwd must not reach the spawn path", cwd)
+	// The set Cwd reaches the spawn path verbatim as spawnDir.
+	if creator.spawnDirs[0] != cwd {
+		t.Errorf("mint spawnDir = %q, want the requested cwd %q", creator.spawnDirs[0], cwd)
 	}
+	// The label remains the server-minted conversation id, never the cwd.
 	if creator.labels[0] != payload.ID || !conversations.ValidID(creator.labels[0]) {
 		t.Errorf("mint label = %q, want the conversation id %q (a canonical UUIDv4)", creator.labels[0], payload.ID)
 	}
-	// The Cwd is still recorded verbatim as inert metadata.
+	// The row + reply record the raw requested Cwd.
+	if payload.Cwd != cwd {
+		t.Errorf("reply Cwd = %q, want %q", payload.Cwd, cwd)
+	}
 	stored, _ := reg.Get(conversations.ConversationID(payload.ID))
 	if stored.Cwd != cwd {
-		t.Errorf("stored Cwd = %q, want %q (recorded but inert)", stored.Cwd, cwd)
+		t.Errorf("stored Cwd = %q, want %q", stored.Cwd, cwd)
+	}
+}
+
+// TestCreateConversation_NullCwd_EmptySpawnDir covers AC#4: a null Cwd yields an
+// empty spawnDir (→ the shared trusted workdir downstream, byte-identical to
+// today) while the recorded row still carries defaultCwd. This pins the
+// "where to spawn" (empty) vs "what to record" (defaultCwd) separation.
+func TestCreateConversation_NullCwd_EmptySpawnDir(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newCreateConvReg(t)
+	c, recv := newCreateConvConn(t)
+	req := createConvRequest(t, protocol.CreateConversationPayload{}) // Cwd nil
+
+	creator := &stubSessionCreator{}
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	env := assertCreateConvEnvelopeShape(t, recv(), protocol.TypeConversationCreated)
+	var payload protocol.ConversationCreatedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+
+	if creator.calls != 1 {
+		t.Fatalf("creator.Create called %d times, want exactly 1", creator.calls)
+	}
+	if creator.spawnDirs[0] != "" {
+		t.Errorf("mint spawnDir = %q, want \"\" (null Cwd → shared workdir)", creator.spawnDirs[0])
+	}
+	if payload.Cwd != createConvDefault {
+		t.Errorf("reply Cwd = %q, want %q (defaultCwd recorded for null Cwd)", payload.Cwd, createConvDefault)
+	}
+	stored, _ := reg.Get(conversations.ConversationID(payload.ID))
+	if stored.Cwd != createConvDefault {
+		t.Errorf("stored Cwd = %q, want %q", stored.Cwd, createConvDefault)
+	}
+}
+
+// TestCreateConversation_SpawnDirRejected_NonRetryableMalformed covers AC#2: when
+// the cmd-layer seam rejects the requested Cwd (wraps ErrSpawnDirRejected), the
+// handler replies a NON-retryable protocol.malformed with the static message
+// (no path echoed) and records no row — no half-bound conversation.
+func TestCreateConversation_SpawnDirRejected_NonRetryableMalformed(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newCreateConvReg(t)
+	c, recv := newCreateConvConn(t)
+	cwd := "/etc/escape"
+	req := createConvRequest(t, protocol.CreateConversationPayload{Cwd: &cwd})
+
+	creator := &stubSessionCreator{err: fmt.Errorf("confine workdir: %w", ErrSpawnDirRejected)}
+	h := CreateConversation(reg, creator, regPath, createConvDefault, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertCreateConvEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeProtocolMalformed {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeProtocolMalformed)
+	}
+	if payload.Retryable {
+		t.Errorf("Retryable = true, want false (a $HOME escape is deterministic)")
+	}
+	if payload.Message != msgCreateConversationCwdRejected {
+		t.Errorf("Message = %q, want static %q", payload.Message, msgCreateConversationCwdRejected)
+	}
+	if got := reg.List(); len(got) != 0 {
+		t.Errorf("registry has %d rows after a rejected Cwd, want 0 (no half-bound row)", len(got))
 	}
 }
 
