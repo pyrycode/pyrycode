@@ -4,6 +4,8 @@
 
 **Accepted** for the load-bearing decisions (drive model, wire versioning, remote-permission model), operator-confirmed across the 2026-06-06 / 2026-06-07 design sessions. **Implementation is phased.** Phase 1 (foundation) is in flight; Phases 2 and 3 are tracked as epics that decompose into XS/S children when their prior gate is met on live claude. Extends ADR 024 (Noise_IK mobile E2E); does not change the transport or the `noise_msg` frame.
 
+**Amendment — 2026-06-22: no old-app-version support; capability negotiation is no longer a requirement.** Decision 2 below kept backward compatibility for already-paired phones running an older app: a phone advertises `interactive`, and a phone that does not falls back to the coarse `message` fan-out. That premise no longer holds. This is a self-hosted, single-operator tool. The operator controls both ends and always ships the daemon and the app together, so there is no install base of old phones to protect. Consequences: (a) the daemon may assume every phone is `interactive`; (b) the coarse / non-interactive `message` fan-out is dead code, slated for removal under a cleanup ticket; (c) no future work should treat capability negotiation or old-phone interop as a requirement. The negotiation field may remain in the wire spec as a harmless additive field, but it carries no compatibility obligation. The rest of this ADR — drive model, permission model, phasing — stands unchanged. Anything below that describes the old-vs-new phone split records what was built, not a forward requirement.
+
 ## Context
 
 ### The vision
