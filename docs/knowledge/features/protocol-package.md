@@ -9,9 +9,9 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656)
+├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656) + v2-modal Type* (modal_shown / modal_answer / modal_cancel / modal_dismissed, #701)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
-├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body)
+├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
 ├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
@@ -20,7 +20,7 @@ internal/protocol/
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsV1Compatible + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
-├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload; + SessionTransitionPayload round-trip (#656)
+├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload; + SessionTransitionPayload round-trip (#656); + four modal payload round-trips (#701)
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
 ├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
@@ -34,7 +34,8 @@ internal/protocol/
                                  promote_conversation.json, conversation_updated.json,
                                  hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
                                  turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json, stall.json,
-                                 request_snapshot.json, screen_snapshot.json
+                                 request_snapshot.json, screen_snapshot.json,
+                                 modal_shown.json, modal_answer.json, modal_cancel.json, modal_dismissed.json
 ```
 
 Nine production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the v1 per-type payload DTOs, one file per spec-section group — the full #256 catalog is wired — `interactive.go` (#607) carries the first v2 additive application-event DTOs, and `snapshot.go` (#617) carries the v2 screen-snapshot request/response DTOs.
@@ -123,6 +124,94 @@ type SessionTransitionPayload struct {
 - **No `event_id` field.** `event_id` is an `Envelope`-level field (#649) stamped by the producer on structured-stream frames; a session boundary is **not** a structured turn-stream event and carries no `event_id`.
 
 `TestSessionTransitionPayload_RoundTrip` (`messaging_test.go`) is table-driven over two fixtures authored in **struct-field order** (`canonical()` compacts but does not sort keys): `session_transition.json` (cwd-unset, `reason: "idle_evict"`, `"workspace_cwd": null` — the `omitempty`-regression guard) and `session_transition_workspace.json` (cwd-set, `reason: "workspace_change"`, `"workspace_cwd": "/home/user/project"`). See [codebase/656.md](../codebase/656.md).
+
+### Modal v2 wire payloads (#701)
+
+The wire vocabulary for a **modal** the supervised `claude` surfaces over the
+encrypted mobile wire (`docs/protocol-mobile.md` § Modal; epic #597 Phase 3,
+[ADR 025]). Lifecycle `modal_shown` → `modal_answer` / `modal_cancel` →
+`modal_dismissed`. Five new exported types in `messaging.go` (a modal is a
+control/boundary concern, not a turn-stream event, so `messaging.go` not
+`interactive.go`), mapping to the four `Type*` constants. `modal_shown` /
+`modal_dismissed` are outbound binary → phone events; `modal_answer` /
+`modal_cancel` are **inbound phone → binary control** envelopes the v2 session
+manager intercepts at `v2session.go`'s `dispatchAppFrame` **before**
+`dispatch.Route` (the `RequestSnapshotPayload` / `TypeRekeyRequest` precedent —
+**no `dispatch.Route` handler**). **Wire shape only** — the minting/dedup/
+validation/fan-out runtime is the producer's (#703, with #706/#702 building
+ownership/gating).
+
+```go
+type ModalOption struct { // a single ordered choice
+    ID    string `json:"id"`
+    Label string `json:"label"`
+}
+
+type ModalShownPayload struct { // binary → phone
+    ModalID         string        `json:"modal_id"`
+    Class           string        `json:"class"`
+    Title           string        `json:"title"`
+    Prompt          string        `json:"prompt"`
+    Options         []ModalOption `json:"options"`           // ordered: array order is display/selection order
+    DefaultOptionID string        `json:"default_option_id"` // MUST equal one of Options[].ID (documented invariant)
+}
+
+type ModalAnswerPayload struct { // phone → binary, inbound control
+    ModalID     string `json:"modal_id"`
+    OptionID    string `json:"option_id"`
+    AnswerToken string `json:"answer_token"` // client-minted idempotency key
+}
+
+type ModalCancelPayload struct { // phone → binary, inbound control
+    ModalID string `json:"modal_id"`
+}
+
+type ModalDismissedPayload struct { // binary → phone
+    ModalID string `json:"modal_id"`
+    Outcome string `json:"outcome"` // selected option id, or producer-defined cancel/timeout sentinel
+    Source  string `json:"source"`  // closed set {remote, local, timeout}
+}
+```
+
+- **No `omitempty` on any field** — the same deliberate inverse as the #607
+  interactive and #617 snapshot payloads. Every field is always present so the
+  fixtures pin the full shape and boundary values (an empty `default_option_id`,
+  an empty `option_id`) cannot silently vanish. No `time.Time` field — the
+  envelope's `ts` covers timing — so **no new import**.
+- **`modal_id` is the sole correlation key — there is no `conversation_id`.** The
+  daemon resolves `modal_id` against its **own** outstanding-modal state and never
+  trusts a phone-asserted conversation; `option_id` maps against the daemon's own
+  recorded option list. A shape carrying both `conversation_id` and `modal_id`
+  would admit a disagreeing pair the daemon must adjudicate — the single-key shape
+  forecloses cross-conversation `modal_id` confusion structurally. (Producer
+  obligation: `modal_id` minted from `crypto/rand`, globally unique across
+  concurrently-outstanding modals.)
+- **`answer_token` is an idempotency key, not a credential.** Uniqueness and
+  stability matter; secrecy does not. It lets the daemon collapse a replayed/
+  reordered `modal_answer` to a no-op via `(modal_id, answer_token)`. It is **not**
+  the authorization — that is `modal_id` validity (#706) + the per-device answer
+  gate (#702, default OFF); `answer_token` only deduplicates among already-
+  authorized answers.
+- **`Options` is ordered + `DefaultOptionID ∈ Options[].ID`.** JSON-array order is
+  the canonical display/selection order; the default-in-options invariant is
+  documented (the producer enforces it).
+- **`Source` is the closed set `{remote, local, timeout}`**; `Class` / `Outcome`
+  stay plain strings whose exhaustive vocabularies the producer (#703) owns
+  (documented, not enforced) — the `MessagePayload.Role` /
+  `SessionTransitionPayload.Reason` leaf-data convention. Only `source` is pinned
+  to a closed set because it is fully determined by the resolution mechanism.
+- **`security-sensitive` rides the *shape* review, not code** — no handler ships,
+  but this is the new inbound (phone→daemon) control surface for a high-consequence
+  action. Architect security pass verdict **PASS**; it forecloses the
+  cross-conversation-confusion class and keeps validity-gate vs dedup-key separate.
+
+Four flat **one-func-per-type** round-trips in `messaging_test.go`
+(`TestModalShownPayload_RoundTrip` asserts `len(Options)==2` + positional ids +
+`DefaultOptionID`; `TestModalAnswerPayload_RoundTrip` asserts `AnswerToken`
+round-trips per the AC; `TestModalDismissedPayload_RoundTrip` asserts
+`Source=="remote"`), each on the shared `roundTripEnvelope` helper, over four
+single-line fixtures authored in **struct-field order**. See
+[codebase/701.md](../codebase/701.md).
 
 ### Conversations-read payloads (#273)
 
@@ -526,7 +615,7 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 
 ### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454) and `TypeRequestSnapshot` (#617)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), and `TypeScreenSnapshot` (#617)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
+Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454), `TypeRequestSnapshot` (#617), and `TypeModalAnswer` / `TypeModalCancel` (#701)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), `TypeScreenSnapshot` (#617), `TypeResync` (#647), `TypeSessionTransition` (#656), and `TypeModalShown` / `TypeModalDismissed` (#701)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
 
 **v1 application types** (16; spec § v1 Message types):
 
@@ -576,6 +665,14 @@ These two live in their **own** cohesive const block, grouping the request/respo
 
 `TypeSessionTransition = "session_transition"` is an outbound binary → phone marker the daemon emits when its session rotates (a `/clear`, an idle eviction, or a workspace change), so a phone renders a `ThreadItem.SessionBoundary` marker (`pyrycode-mobile#336`). Its **own** const block; **unlike** `TypeResync` it carries a real multi-field named payload (`SessionTransitionPayload` in `messaging.go` — see [Session-transition payload](#session-transition-payload-656)) rather than an inline struct. A **session boundary is distinct from the six turn-stream events** and carries **no** `event_id`. Stays out of `v1TypeSet` (an old phone must never receive it; `{"session_transition-rejected", TypeSessionTransition, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). The producer is sibling #657 (`security-sensitive`); this slice is wire vocabulary only.
 
+**v2 modal vocabulary** (#701; spec `docs/protocol-mobile.md` § Modal):
+
+| Group | Constants |
+|-------|-----------|
+| Modal | `TypeModalShown`, `TypeModalAnswer`, `TypeModalCancel`, `TypeModalDismissed` |
+
+The four modal types share **one** const block with **one** rationale comment — the **mixed inbound+outbound** cluster precedent set by the `request_snapshot`/`screen_snapshot` pair. `TypeModalShown` / `TypeModalDismissed` are outbound binary → phone events; `TypeModalAnswer` / `TypeModalCancel` are inbound phone → binary **control** envelopes intercepted at `internal/relay/v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeRekeyRequest` / `TypeRequestSnapshot` precedent — **no `dispatch.Route` handler**). All four carry real named payload structs in `messaging.go` (`ModalShownPayload` / `ModalAnswerPayload` / `ModalCancelPayload` / `ModalDismissedPayload` — see [Modal v2 wire payloads](#modal-v2-wire-payloads-701)). All four stay out of `v1TypeSet` (four `{"modal_*-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producers are siblings #703 (control loop) / #706 (two-heads ownership) / #702 (per-device answer gate); this slice is wire vocabulary only, `security-sensitive` for the **shape** review (no handler ships).
+
 `TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out; the interactive block carries the same MUST-NOT instruction. The advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
 
 ## Drift detectors
@@ -584,7 +681,7 @@ The v1 type list appears three times: in the `Type*` constants block (`codes.go`
 
 - `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
 - `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds eleven entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition`), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 11 == 27`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656/#701) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds fifteen entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition` + the four modal types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 15 == 31`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
@@ -602,7 +699,8 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 - Per-type payload structs beyond the now-complete #256 catalog — `RegisterPushTokenPayload` (#275), the five messaging + backfill payloads (#272), the conversations-read pair plus row type (#273), the four conversations-write payloads (#274), and the handshake/control payloads (#271). All slices are wired; no more #256 sub-tickets pending.
 - **The interactive bridge, push, and capability trust decision (#607's consumer surface)** — mapping `turnevent` events → the five interactive payloads, the actual push/fan-out, and the daemon intersecting the phone's advertised capabilities with its own supported set all live in #608, never in this leaf package. `interactive.go` is wire vocabulary only.
 - **The screen-snapshot intercept, render, and push (#617's consumer surface)** — intercepting `request_snapshot` at the v2 dispatch boundary (before `dispatch.Route`), rendering the current screen to text via tui-driver, and pushing `screen_snapshot` back all live in the consumer (the screen-snapshot handler child, which carries `security-sensitive`), never in this leaf package. `snapshot.go` is wire vocabulary only; the trust boundary — accepting a remote inbound frame and returning rendered screen content — is the consumer's, not this declaration's.
-- **Other v2 event/control types** — `modal_*`, `queue_state`, and the remaining phone → binary control verbs (`modal_answer`, `interrupt`, …) are deliberately out of scope here; they belong to other #596 children and Phase 3 (#597). (`request_snapshot` / `screen_snapshot` landed in #617 as wire vocabulary; their consumer is the separate `security-sensitive` ticket above. The `stall` event landed in #638 as wire vocabulary — `StallPayload` above; its bridge consumer, mapping tui-driver's `stall_detected` → `turnevent.Stall` → `stall` and gating the fan-out, is #624-B, which carries `security-sensitive`.)
+- **The modal control-loop runtime (#701's consumer surface)** — the four modal wire types landed in #701 as wire vocabulary (`ModalShownPayload` / `ModalAnswerPayload` / `ModalCancelPayload` / `ModalDismissedPayload` above). The runtime that mints `modal_id` nonces, emits `modal_shown`, intercepts `modal_answer` / `modal_cancel` at `dispatchAppFrame` before `dispatch.Route` (→ tui-driver keystroke), dedups by `answer_token`, and runs deny-on-timeout is #703 (with #706 two-heads ownership, #702 the per-device answer gate) — all `security-sensitive`, never in this leaf package. `messaging.go`'s modal structs are wire vocabulary only.
+- **Other v2 event/control types** — `queue_state` and the remaining phone → binary control verbs (`interrupt`, …) are deliberately out of scope here; they belong to other #596 children and Phase 3 (#597). (`request_snapshot` / `screen_snapshot` landed in #617 as wire vocabulary; their consumer is the separate `security-sensitive` ticket above. The `stall` event landed in #638 as wire vocabulary — `StallPayload` above; its bridge consumer, mapping tui-driver's `stall_detected` → `turnevent.Stall` → `stall` and gating the fan-out, is #624-B, which carries `security-sensitive`.)
 - WS close codes (`1000`/`1011`/`4401`/`4404`/`4409`) — transport concern, lives with #247 (WSS dial+handshake).
 - Auth/dispatch wiring (`hello_ack`-on-connect, role-based type restriction) — #248–#250.
 - A `Validate(*Envelope)` that gates on payload shape, ID monotonicity, or TS skew — those are dispatcher obligations, named in the predicate's doc-comment as out-of-scope.
@@ -641,4 +739,6 @@ No production consumers in this slice. Future:
 - [codebase/638.md](../codebase/638.md) — the #638 implementation note (the `stall` wire type + its internal-only `turnevent.Stall` peer; the sixth member of the v2 interactive partition)
 - [codebase/649.md](../codebase/649.md) — the #649 implementation note (the additive `Envelope.EventID *uint64` field surfacing the eventring durable id on the interactive stream; producer half of mid-turn reconnect)
 - [codebase/647.md](../codebase/647.md) — the #647 implementation note (`HelloClientPayload.LastEventID` + `TypeResync`; the inbound reconnect-replay consumer — `security-sensitive`, carries an unresolved code-review MUST FIX, not yet merged)
+- [codebase/656.md](../codebase/656.md) — the #656 implementation note (the `session_transition` wire type; the vocab→producer split this slice and #701 both mirror)
+- [codebase/701.md](../codebase/701.md) — the #701 implementation note (the four modal wire types + `ModalOption`; the `modal_id` nonce / `answer_token` idempotency contract; `security-sensitive` for the wire-shape security pass, producers #703/#706/#702)
 - Future consumers: `internal/dispatch` (#248), `internal/relay-client`, the interactive event-stream bridge + capability enforcement (#608), the screen-snapshot handler (intercept `request_snapshot` + render + push `screen_snapshot`; `security-sensitive`)
