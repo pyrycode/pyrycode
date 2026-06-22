@@ -363,6 +363,35 @@ type ScreenSnapshotter interface {
 	ScreenSnapshot() (text string, live bool)
 }
 
+// ModalDismissal is the wire outcome+source the manager broadcasts after a
+// resolver consumes an outstanding modal. The manager already holds modal_id
+// (from the inbound control payload), so it is not repeated here.
+type ModalDismissal struct {
+	Outcome string // e.g. "cancelled" (cancel); #717 uses the answered option_id
+	Source  string // closed set {remote, local, timeout}; cancel ⇒ "remote"
+}
+
+// ModalResolver resolves an inbound modal control frame against the daemon's
+// outstanding-modal state. Declared here (consumer side), beside
+// ScreenSnapshotter, so internal/relay imports neither internal/supervisor nor
+// cmd/pyry; the cmd/pyry resolver satisfies it. *devices.Device crosses the
+// seam (the per-conn s.device); internal/relay already imports internal/devices,
+// so no new import. Both methods run on the manager's single Run dispatch
+// goroutine.
+type ModalResolver interface {
+	// ResolveCancel consumes modalID (registry Resolve), routes a cancel/ESC
+	// keystroke, audits outcome=cancelled, and returns the dismissal to
+	// broadcast with ok=true. An unknown/already-resolved id ⇒ (zero, false):
+	// no keystroke, no audit, no dismissal.
+	ResolveCancel(modalID string, dev *devices.Device) (ModalDismissal, bool)
+
+	// ResolveAnswer resolves an inbound modal_answer. In this slice it is a
+	// deferred no-op — always (zero, false): no keystroke, no mutation, no
+	// audit. #717 fills the gated answer arm; the manager code is already
+	// general (broadcasts on ok=true) so #717 changes only the impl.
+	ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (ModalDismissal, bool)
+}
+
 // V2SessionConfig parameterises V2SessionManager. The handshake/transport
 // fields are required; NewV2SessionManager validates and panics or errors on
 // missing required values per the documentation below. Handlers, Snapshotter,
@@ -430,6 +459,12 @@ type V2SessionConfig struct {
 	// every request_snapshot is rejected as not-found. Production wires it to
 	// a conversations.Registry membership check.
 	KnownConversation func(conversationID string) bool
+
+	// ModalResolver resolves inbound modal_answer / modal_cancel control
+	// frames. Optional: when nil, both are inert no-ops (the modal bridge is
+	// simply unwired — foreground, or pre-#708 before the producer is live).
+	// Production wires the cmd/pyry resolver.
+	ModalResolver ModalResolver
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -1215,6 +1250,12 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeRequestSnapshot:
 			m.handleRequestSnapshot(ctx, s, probeEnv)
 			return
+		case protocol.TypeModalCancel:
+			m.handleModalCancel(ctx, s, probeEnv)
+			return
+		case protocol.TypeModalAnswer:
+			m.handleModalAnswer(ctx, s, probeEnv)
+			return
 		}
 	}
 
@@ -1414,6 +1455,122 @@ func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session,
 			"conn_id", s.connID,
 			"code", code,
 			"err", err)
+	}
+}
+
+// handleModalCancel resolves an inbound modal_cancel control frame: it consumes
+// the named modal via the ModalResolver seam, then — only if the resolver
+// consumed an outstanding modal — fans a modal_dismissed broadcast to every
+// interactive-capable conn. Intercepted in dispatchAppFrame before
+// dispatch.Route, exactly like handleRequestSnapshot, and runs on the manager's
+// single Run dispatch goroutine. There is no reply to the caller — modal control
+// is fire-and-broadcast, not request/reply.
+//
+// A nil ModalResolver (foreground / pre-#708) makes the frame inert. A decode
+// failure is tolerated → empty modal_id → the resolver's unknown-id no-op; the
+// decode error is never echoed back to the phone. An unknown/already-resolved id
+// returns ok=false ⇒ no keystroke, no audit, no broadcast (AC #4).
+//
+// SECURITY: the untrusted modal_id is decoded into a typed struct and used only
+// as a registry key downstream; the payload bytes are never logged or echoed.
+func (m *V2SessionManager) handleModalCancel(ctx context.Context, s *V2Session, env protocol.Envelope) {
+	if m.cfg.ModalResolver == nil {
+		m.cfg.Logger.Debug("relay: v2 modal_cancel inert; no resolver wired",
+			"event", "v2.modal.cancel.inert",
+			"conn_id", s.connID)
+		return
+	}
+	var payload protocol.ModalCancelPayload
+	// A decode failure is tolerated: it leaves ModalID == "", which the
+	// resolver rejects as the unknown-id no-op. Never echoed back to the phone.
+	_ = json.Unmarshal(env.Payload, &payload)
+
+	d, ok := m.cfg.ModalResolver.ResolveCancel(payload.ModalID, s.device)
+	if !ok {
+		return // unknown / already-resolved id: no keystroke, no audit, no broadcast (AC #4)
+	}
+	m.broadcastModalDismissed(ctx, payload.ModalID, d)
+}
+
+// handleModalAnswer resolves an inbound modal_answer control frame through the
+// same ModalResolver seam as handleModalCancel. In this slice ResolveAnswer is a
+// deferred no-op (always ok=false), so the broadcast line is unreachable until
+// #717 fills the gated answer arm — but it is present, so #717 needs no manager
+// change. The escalating ALLOW path stays inert until the per-device gate exists
+// (the fail-safe property of this slice). Runs on the manager's single Run
+// dispatch goroutine; see handleModalCancel for the nil-resolver / decode /
+// never-echo discipline it shares.
+func (m *V2SessionManager) handleModalAnswer(ctx context.Context, s *V2Session, env protocol.Envelope) {
+	if m.cfg.ModalResolver == nil {
+		m.cfg.Logger.Debug("relay: v2 modal_answer inert; no resolver wired",
+			"event", "v2.modal.answer.inert",
+			"conn_id", s.connID)
+		return
+	}
+	var payload protocol.ModalAnswerPayload
+	_ = json.Unmarshal(env.Payload, &payload)
+
+	d, ok := m.cfg.ModalResolver.ResolveAnswer(payload.ModalID, payload.OptionID, payload.AnswerToken, s.device)
+	if !ok {
+		return // deferred no-op in this slice (AC #3); #717 fills the gated arm
+	}
+	m.broadcastModalDismissed(ctx, payload.ModalID, d)
+}
+
+// broadcastModalDismissed fans a modal_dismissed envelope to every
+// interactive-capable open session. Runs on the Run goroutine; reads m.sessions
+// directly (like handleActiveConns) and Pushes per conn — it MUST NOT call
+// ActiveConns, which funnels onto this same goroutine via m.snapshot and would
+// deadlock. Push is non-blocking and Run-goroutine-safe (it touches only
+// m.queues under pushMu; the seal+forward happens on a later Run iteration via
+// drainOnce).
+//
+// The capability filter (s.interactive) is the same #607 gate modal_shown rides:
+// an old, non-interactive phone never receives v2 modal events. The fan-out
+// reaches every interactive conn (including ones that never saw this modal's
+// modal_shown); the payload carries only the opaque modal_id + outcome/source,
+// no modal body, so it discloses nothing — a conn with no matching outstanding
+// modal ignores it.
+//
+// SECURITY: the payload bytes are never logged; a per-conn Push error (ctx
+// teardown or ErrConnNotFound from a raced teardown) is debug-logged with the
+// transport sentinel only and the fan-out continues.
+func (m *V2SessionManager) broadcastModalDismissed(ctx context.Context, modalID string, d ModalDismissal) {
+	payload, err := json.Marshal(protocol.ModalDismissedPayload{
+		ModalID: modalID,
+		Outcome: d.Outcome,
+		Source:  d.Source,
+	})
+	if err != nil {
+		// ModalDismissedPayload is a closed struct of three strings; marshal
+		// cannot fail in practice. Defensive — NEVER echo err (it could quote
+		// the payload). Skip the broadcast rather than crash.
+		m.cfg.Logger.Warn("relay: v2 modal_dismissed marshal failed",
+			"event", "v2.modal.dismissed.marshal_err",
+			"modal_id", modalID)
+		return
+	}
+	// One timestamp shared by every conn for this logical dismissal.
+	ts := time.Now().UTC()
+	for connID, s := range m.sessions {
+		if s.state != V2StateOpen || !s.interactive {
+			continue
+		}
+		env := protocol.Envelope{
+			ID:      1, // non-load-bearing; the phone correlates on modal_id.
+			Type:    protocol.TypeModalDismissed,
+			TS:      ts,
+			Payload: payload,
+		}
+		if err := m.Push(ctx, connID, env); err != nil {
+			// ctx teardown or a conn torn down between enumeration and Push:
+			// debug-log the transport sentinel and continue the fan-out; the
+			// missed conn re-syncs on reconnect. NEVER echo payload bytes.
+			m.cfg.Logger.Debug("relay: v2 modal_dismissed push dropped",
+				"event", "v2.modal.dismissed.push_err",
+				"conn_id", connID,
+				"err", err)
+		}
 	}
 }
 

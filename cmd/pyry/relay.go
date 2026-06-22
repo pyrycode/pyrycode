@@ -12,6 +12,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/keys"
+	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
@@ -291,6 +292,12 @@ func startRelayV2(
 	}
 	priv := staticKey.PrivateKey()
 
+	// Daemon-singleton outstanding-modal registry. #708 wires the producer
+	// (interactiveModalEmitterV2) to this same instance; until then nothing
+	// Records, so every production modal_cancel takes the unknown-id no-op path
+	// (harmless). The cmd/pyry resolver consumes it via the ModalResolver seam.
+	modalReg := modalbridge.New()
+
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:     conn.Frames(),
 		Outbound:   conn.Send,
@@ -314,6 +321,12 @@ func startRelayV2(
 			_, ok := convReg.Get(conversations.ConversationID(id))
 			return ok
 		},
+		// Inbound modal-control resolver (#727): consumes the outstanding-modal
+		// registry, routes the resolving keystroke via the supervisor safe-answer
+		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker
+		// (it has SendEsc). modal_cancel resolves here; modal_answer is a deferred
+		// no-op until #717 fills the gated arm.
+		ModalResolver: newModalResolverV2(modalReg, sup, logger),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build v2 session manager: %w", err)
