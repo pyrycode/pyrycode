@@ -6,8 +6,11 @@ invariant). When tui-driver detects a permission or trust modal on claude's scre
 the daemon turns it into a typed `modal_shown` event and pushes it to
 interactive-capable phones — **never raw PTY bytes**. This slice (#716, split from
 #703) establishes the **outstanding-modal registry**, keyed by a one-time `modal_id`
-nonce, that #717's inbound resolution half consumes to route answers back and to
-reject stale/replayed answers.
+nonce, that the inbound resolution half consumes to route answers/cancels back and
+to reject stale/replayed answers — `Resolve` (the consume-and-retire idempotency
+gate) is wired by #727's `modal_cancel` resolver; `Lookup` by #717's gated
+`modal_answer`. The inbound relay seam itself is documented in
+[v2-session-manager.md § Inbound modal control](v2-session-manager.md#inbound-modal-control-727--modalresolver-seam--modal_dismissed-broadcast).
 
 Two new files, in two packages:
 
@@ -61,11 +64,14 @@ func PermissionRequestForClass(class tuidriver.ModalClass, screenText string) (t
 func (r *Registry) Record(req turnevent.PermissionRequest, wireClass string) (protocol.ModalShownPayload, error)
 
 func (r *Registry) Lookup(modalID string) (Outstanding, bool)  // #717's read seam
-func (r *Registry) Resolve(modalID string) (Outstanding, bool) // #717's look-up-and-delete one-shot
+func (r *Registry) Resolve(modalID string) (Outstanding, bool) // #727's consume-and-retire one-shot
 ```
 
-`Lookup`/`Resolve` are **defined now, exercised by #717** — they belong with the
-type's contract even though #716 only calls `Record`.
+`Lookup`/`Resolve` were **defined in #716, exercised downstream** — `Resolve` by
+#727's `modal_cancel` resolver (the atomic consume-and-retire that makes the first
+cancel win and every replay/unknown id a no-op), `Lookup` by #717's gated
+`modal_answer`. They belong with the type's contract even though #716 only calls
+`Record`.
 
 ## Class → option mapping (the minimal fixed-option-set, design option (a))
 
@@ -106,8 +112,8 @@ unguessable), mirroring `conversations.NewID` (`internal/conversations/id.go`). 
 `math/rand`. It is minted **only** inside `Registry.Record`, called **only** from the
 surfacer's single goroutine, **exactly once** per `EventKindPtyModalShown` event —
 tui-driver's modal axis is rising-edge (one `Shown` per appearance), so one event ⇒
-one modal ⇒ one mint, no per-modal de-dup machinery. This is the primitive #717 relies
-on to reject stale/replayed answers. `Record` mints **and** stores atomically under the
+one modal ⇒ one mint, no per-modal de-dup machinery. This is the primitive the inbound
+resolvers rely on to reject stale/replayed answers (#727's `Resolve`, #717's `Lookup`). `Record` mints **and** stores atomically under the
 mutex: no `modal_shown` is ever emitted without a recorded registry entry, and no entry
 without a successfully-minted id.
 
@@ -173,8 +179,10 @@ byte — so no raw terminal bytes reach the phone. There is exactly one structur
 - **Outbound only.** This slice mints + records; the **inbound boundary** (an untrusted
   phone-asserted `modal_id`) is #717's, out of scope.
 - **`modal_id`** = `crypto/rand` UUIDv4, in-memory only, an opaque correlation nonce (not a
-  credential). Unbounded-registry-growth is bounded by #717's resolve/timeout; until #717
-  lands there is no live producer feeding the registry, so no live growth path exists.
+  credential). Unbounded-registry-growth is bounded by the inbound resolvers' consume
+  (#727's `modal_cancel` `Resolve`, #717's gated `modal_answer`, #725's deny-on-timeout);
+  until #708 wires a live producer there is nothing feeding the registry, so no live
+  growth path exists.
 - **The modal body (`title`/`prompt`/`screenText`) is application content and is NEVER
   logged** at any level. Logs carry only content-free discriminants (`event`, `class` (a
   closed set), `conn_id`, `env_id`) + the transport-sentinel `err`.
@@ -232,7 +240,13 @@ two-phone path is #708.
   doc is the outbound `modal_shown` half).
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — no-raw-bytes
   invariant; `docs/protocol-mobile.md` § Modal — the wire field table + security contract.
-- **Consumer (deferred — not in #716):** #717 (inbound `modal_answer` resolution; reads
-  `Registry.Lookup`/`Resolve`) and #708 (live wiring + two-phone e2e).
+- **Inbound resolution seam — #727** (landed): introduces the relay-side
+  `ModalResolver` seam + `modal_dismissed` broadcast and wires `Resolve` via the
+  `cmd/pyry` `modalResolverV2` to resolve `modal_cancel`. `modal_answer` is
+  intercepted but a deferred no-op until #717 fills the gated arm. See
+  [v2-session-manager.md § Inbound modal control](v2-session-manager.md#inbound-modal-control-727--modalresolver-seam--modal_dismissed-broadcast)
+  and [codebase/727.md](../codebase/727.md).
+- **Consumer (deferred — not in #716):** #717 (gated `modal_answer` resolution;
+  reads `Registry.Lookup`) and #708 (live producer wiring + two-phone e2e).
 </content>
 </invoke>

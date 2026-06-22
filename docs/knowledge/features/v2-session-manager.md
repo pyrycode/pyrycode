@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; the caught-up watermark is clamped to the conversation's newest retained id so an out-of-range / hostile `last_event_id` cannot suppress the live stream — #663, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; the caught-up watermark is clamped to the conversation's newest retained id so an out-of-range / hostile `last_event_id` cannot suppress the live stream — #663, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), intercepts the inbound `modal_answer` / `modal_cancel` control envelopes at the dispatch boundary and — via a consumer-declared `ModalResolver` seam — resolves a `modal_cancel` (consume the outstanding modal, route the fail-safe ESC, audit) then fans a `modal_dismissed` broadcast to every interactive-capable conn, while `modal_answer` stays a deferred no-op until the per-device gate exists (#727, `security-sensitive`, see [Inbound modal control](#inbound-modal-control-727--modalresolver-seam--modal_dismissed-broadcast)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -38,6 +38,32 @@ type ScreenSnapshotter interface {
     ScreenSnapshot() (text string, live bool) // live==false (text "") ⇒ no child attached
 }
 
+// ModalDismissal is the wire outcome+source the manager broadcasts after a
+// resolver consumes an outstanding modal (#727). modal_id is held by the manager
+// already, so it is not repeated here.
+type ModalDismissal struct {
+    Outcome string // e.g. "cancelled" (cancel); #717 uses the answered option_id
+    Source  string // closed set {remote, local, timeout}; cancel ⇒ "remote"
+}
+
+// ModalResolver resolves an inbound modal control frame against the daemon's
+// outstanding-modal state (#727). Declared in the consumer (beside
+// ScreenSnapshotter) so internal/relay imports neither internal/supervisor,
+// internal/modalbridge, internal/audit, nor cmd/pyry; the cmd/pyry resolver
+// satisfies it. *devices.Device crosses the seam (the per-conn s.device).
+// Both methods run on the manager's single Run dispatch goroutine.
+type ModalResolver interface {
+    // ResolveCancel consumes modalID (registry Resolve), routes a cancel/ESC
+    // keystroke, audits outcome=cancelled, and returns the dismissal to
+    // broadcast with ok=true. An unknown/already-resolved id ⇒ (zero, false):
+    // no keystroke, no audit, no dismissal.
+    ResolveCancel(modalID string, dev *devices.Device) (ModalDismissal, bool)
+    // ResolveAnswer resolves an inbound modal_answer. Deferred no-op in #727
+    // (always (zero, false)); #717 fills the gated answer arm without touching
+    // the manager (it already broadcasts on ok=true).
+    ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (ModalDismissal, bool)
+}
+
 type V2SessionConfig struct {
     Frames     <-chan protocol.RoutingEnvelope         // required; closes ⇒ Run returns nil
     Outbound   func(protocol.RoutingEnvelope) error    // required; production passes (*Connection).Send
@@ -48,6 +74,7 @@ type V2SessionConfig struct {
     Handlers   map[string]dispatch.Handler             // optional; open-state envelope-type → handler
     Snapshotter       ScreenSnapshotter                // optional (#618); nil ⇒ request_snapshot → server.binary_offline
     KnownConversation func(conversationID string) bool // optional (#618); nil ⇒ request_snapshot → conversation.not_found
+    ModalResolver     ModalResolver                    // optional (#727); nil ⇒ modal_answer/modal_cancel inert no-ops
 }
 
 type V2SessionManager struct { /* unexported */ }
@@ -120,7 +147,7 @@ var (
 )
 ```
 
-`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618) are also **optional and unvalidated** — leaving them nil keeps the ~42 existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash. `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
+`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618) and `ModalResolver` (#727) are also **optional and unvalidated** — leaving them nil keeps the existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash; a nil `ModalResolver` makes both modal-control frames inert debug-logged no-ops (the modal bridge unwired — foreground, or pre-#708 before the producer is live). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
 
 ## Wire types (`internal/protocol/v2envelope.go`)
 
@@ -214,7 +241,7 @@ The two `open`-row cells filled by [#446](../codebase/446.md).
 **Happy path** (`dispatchAppFrame`):
 
 1. `s.recv.Decrypt(inner.Data)` → plaintext envelope JSON. The handler chain is unreached on `Decrypt` failure (see below).
-2. **v2 control-envelope discriminator** (#454, extended #618): `json.Unmarshal(plaintext, &probeEnv)`; on decode success a `switch probeEnv.Type` intercepts control envelopes before the application chain — `TypeRekeyRequest` → `handleRekeyRequest`, `TypeRequestSnapshot` → `handleRequestSnapshot` (#618) — then returns. The application handler chain is NOT consulted for either. Decode failures (and any other type) deliberately fall through to step 3 so `dispatch.Route`'s malformed-envelope branch emits the sealed `protocol.malformed` reply established by #446. The probe is a re-decode (`dispatch.Route` decodes the same plaintext again); the cost is one small JSON parse per application frame, well below the per-frame AEAD cost.
+2. **v2 control-envelope discriminator** (#454, extended #618/#727): `json.Unmarshal(plaintext, &probeEnv)`; on decode success a `switch probeEnv.Type` intercepts control envelopes before the application chain — `TypeRekeyRequest` → `handleRekeyRequest`, `TypeRequestSnapshot` → `handleRequestSnapshot` (#618), `TypeModalCancel` → `handleModalCancel`, `TypeModalAnswer` → `handleModalAnswer` (#727) — then returns. The application handler chain is NOT consulted for any of them. Decode failures (and any other type) deliberately fall through to step 3 so `dispatch.Route`'s malformed-envelope branch emits the sealed `protocol.malformed` reply established by #446. The probe is a re-decode (`dispatch.Route` decodes the same plaintext again); the cost is one small JSON parse per application frame, well below the per-frame AEAD cost.
 3. Allocate a per-frame `outbound chan protocol.RoutingEnvelope` (buffer 8 — `handlerOutboundBuf`) and a per-frame `*dispatch.Conn` via [`dispatch.NewConn`](dispatch-package.md), carrying the matched device snapshot captured in step 10 of the handshake.
 4. `dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)` — same error-envelope paths as v1 `Dispatcher.handleOne` (malformed JSON → sealed `protocol.malformed`; unsupported / unknown type / no handler → sealed `protocol.unsupported`-or-`unknown_type`; handler error → log WARN, no synthesised reply).
 5. Drain `outbound` non-blockingly. For each captured reply: `s.send.Encrypt(reply.Frame)` → `marshalInnerFrameV2(TypeNoiseMsg, ciphertext)` → emit via `m.send` with `CloseCode: 0`. The reply's `CloseCode` is ignored — close intent is reserved for the manager's own close-with paths.
@@ -406,6 +433,68 @@ The `conversation_id` is validated by `KnownConversation` **before any render** 
 **Concurrency.** No new goroutine, channel, or shutdown step — the handler runs only on `Run`. `ScreenSnapshot` takes `supervisor.sessMu` (leaf, pointer read) then a bounded in-memory render; `KnownConversation` takes a `conversations.Registry` RLock (leaf, bounded). Both are leaf locks in other packages, never nested with relay state. The TOCTOU window between `KnownConversation` and `ScreenSnapshot` is benign — a session that dies in the gap yields a deterministic `server.binary_offline`, not a crash or a stale render.
 
 **Deferred (recorded in `codebase/618.md` § Out of scope):** per-conversation screen routing — this single-bootstrap-conversation phase validates *registry membership*, so any registered id renders the one live screen; the multi-conversation phase ([#596]+) MUST tighten the render to the named conversation's session. Also deferred: resized-foreground render dimensions, eager push on `stall_detected`, and request-flood rate-limiting.
+
+### Inbound modal control (#727) — `ModalResolver` seam + `modal_dismissed` broadcast
+
+`modal_answer` / `modal_cancel` are v2 **control** envelopes (phone → binary),
+intercepted in `dispatchAppFrame`'s discriminator switch **before** `dispatch.Route`
+(the same boundary `rekey_request` / `request_snapshot` use) — there is **no**
+`dispatch.Route` handler. This is the **inbound** half of the daemon-side modal
+bridge: the outbound half surfaces a modal to phones ([`modal_shown` + the
+outstanding-modal registry](modalbridge-package.md), #716); this slice lets a
+phone *resolve* it. The seam is the foundation #717 (gated `modal_answer`) and
+#725 (deny-on-timeout) layer on; #727 proves it via `modal_cancel` (dismiss =
+fail-safe deny). **`security-sensitive`**: an inbound untrusted frame mutates the
+modal lifecycle and fans out a broadcast on the internet-exposed relay (spec-stage
+security review, verdict PASS). See [`codebase/727.md`](../codebase/727.md).
+
+Modal control is **fire-and-broadcast, not request/reply** — there is no reply to
+the caller, so no decode error or attacker-controlled byte is ever echoed back.
+
+- **`ModalResolver` consumer seam.** The relay declares the two-method interface
+  (beside `ScreenSnapshotter`) and reaches the daemon's outstanding-modal state
+  through it, so `internal/relay` imports neither `internal/supervisor`,
+  `internal/modalbridge`, `internal/audit`, nor `cmd/pyry`. The `cmd/pyry`
+  `modalResolverV2` (`cmd/pyry/modal_resolve_v2.go`) implements it: `ResolveCancel`
+  does registry `Resolve` → supervisor `SendEsc` → `audit.Log({cancelled, remote})`;
+  `ResolveAnswer` is a deferred no-op. Wired in `cmd/pyry/relay.go`'s `startRelayV2`
+  over the **daemon-singleton** `modalbridge.New()` registry (the same instance
+  #708 live-wires the producer into).
+- **`handleModalCancel`** — nil-resolver ⇒ debug-log + return (inert). Else decode
+  `ModalCancelPayload` (a decode failure is tolerated → empty `modal_id` → the
+  resolver's unknown-id no-op, never echoed), `ResolveCancel(modal_id, s.device)`;
+  on `ok=false` return (unknown/already-resolved id → no keystroke, no audit, no
+  broadcast — **AC-4**); on `ok=true` call `broadcastModalDismissed`.
+- **`handleModalAnswer`** — symmetric, but `ResolveAnswer` is a deferred no-op in
+  this slice (always `ok=false`), so its broadcast line is reachable-by-type but
+  **unreachable until #717** — present so #717 needs no manager change. The
+  escalating ALLOW path stays inert until the per-device gate (#702/#717) exists,
+  the fail-safe property of this slice.
+- **`broadcastModalDismissed(ctx, modalID, d)`** — the **load-bearing concurrency
+  fact**: it fires from inside `dispatchAppFrame`, on the single `Run` goroutine,
+  and **MUST NOT call `ActiveConns`** (which funnels its request *back* onto this
+  same goroutine via `m.snapshot` → **deadlock**). Instead it reads `m.sessions`
+  **directly** (the `handleActiveConns` pattern), filters `s.state == V2StateOpen
+  && s.interactive` (the same #607 gate `modal_shown` rides), and `Push`es a
+  `modal_dismissed{modal_id, outcome, source}` per conn. `Push` is
+  `Run`-goroutine-safe — it touches only `m.queues` under `pushMu` and returns
+  immediately (seal+forward on a later `Run` iteration via `drainOnce`), so the
+  fan-out never blocks the dispatch goroutine. One shared `time.Now().UTC()`;
+  envelope `ID: 1` is non-load-bearing (the phone correlates on `modal_id`;
+  `modal_dismissed` is a control event, `EventID == nil`, never in the #647 ring,
+  so no per-session counter is added to `V2Session`). A per-conn `Push` error
+  (ctx teardown / `ErrConnNotFound` from a raced teardown) is debug-logged with
+  the transport sentinel only and the fan-out continues — payload bytes are never
+  logged.
+
+The fan-out reaches *every* interactive conn, including ones that never saw this
+modal's `modal_shown`; the payload carries only the opaque `modal_id` +
+`cancelled`/`remote` (no modal body), so a conn with no matching outstanding modal
+just ignores it. **`TestV2Session_ModalCancel_FanOut`** drives the cancel through
+the real `Frames`/`Run` loop with three heads (two interactive, one not) — an
+accidental `ActiveConns` call would hang it, making the test a *structural*
+no-deadlock proof — and asserts the dismissal reaches both interactive heads and
+neither the non-interactive one.
 
 ### Capability negotiation on the handshake (#626) — `negotiateCapabilities` + `s.interactive` + capability-aware `ActiveConns`
 
@@ -613,6 +702,8 @@ The pre-existing `TestV2Session_ActiveConnIDs_*` suite (`OpenOnly`, `TornDownSes
 
 Reconnect replay (#647) — `internal/relay/v2session_replay_test.go` (new): each drives a real Noise handshake whose hello carries `last_event_id` against a manager whose `SetReplaySource` was given a hand-populated `eventring.Ring` + a stub cursor, decrypts the forwarded frames, and asserts. `TestV2Session_Reconnect_ReplaysMissedTail` (3,4,5 ascending before any live frame), `…_CaughtUp_NoReplay`, `…_Gap_EmitsResync` (one `resync` with `conversation_id`), `…_AbsentLastEventID_NoReplay`, `…_ScopedToCursorConversation` (cursor→B, ring holds A → zero A events, AC-5), `…_ReplayDisabled_NoReplay` (nil ring), `…_OtherConnsUnaffected`, `…_ForwardEnvelope_ReplayWatermarkGuard` (drops `EventID ≤ replayThrough`, forwards above, never drops `EventID == nil`). The #647 caught-up/out-of-range tests asserted only *no replay frames* and missed that the live stream was muted afterward; **#663 closes that gap** — `…_OutOfRangeLastEventID_LiveStreamDelivered` (incl. `math.MaxUint64`), `…_ClearRotation_LiveStreamDelivered`, and `…_SameConversation_DedupPreserved` push a live frame after the caught-up handshake and assert **delivery** (see [codebase/663.md](../codebase/663.md)).
 
+Inbound modal control (#727) — `internal/relay/v2session_modal_test.go` (new): a fake `ModalResolver` (records calls; canned `ModalDismissal{cancelled,remote}` with `ok=true` for the configured cancel id) + a conn-aware handshake helper (`openModalConn`) that stands up ≥2 interactive heads on one manager and recovers each conn's `noise_resp` from the shared `v2Recorder` by `ConnID`. `TestV2Session_ModalCancel_FanOut` (three heads — two interactive, one not; asserts `ResolveCancel` routed once with the right `modal_id` + per-conn device, `modal_dismissed{cancelled,remote}` decrypts at **both** interactive heads, **zero** noise_msg at the non-interactive one — AC-1/AC-2; running through the real `Frames`/`Run` loop is the structural no-deadlock proof), `…_ModalAnswer_NoOp` (routed through the seam, no dismissal — AC-3), `…_ModalCancel_UnknownID_NoOp` (resolver `ok=false` → no dismissal — AC-4), `…_ModalControl_NilResolver` (both frames inert debug-logged no-ops, session stays `V2StateOpen`). The resolver-side assertions (consume + keystroke + audit + no-body-leak) live in `cmd/pyry/modal_resolve_v2_test.go` (the relay can't import supervisor/audit/registry). See [codebase/727.md](../codebase/727.md).
+
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)
 
 Spins up `fakerelay` (now with both `/v1/server` and `/v2/server`), wires `relay.Connect` + `V2SessionManager` **inline** (no daemon — this is the manager-in-isolation harness; the daemon-level wiring is covered separately by `relay_v2_daemon_test.go`, [#549](../codebase/549.md)), dials a `fakephone` against `/v1/client` (unchanged routing wire under v2), and drives a Noise_IK handshake from the phone side.
@@ -648,7 +739,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`internal/noise`](noise-package.md) (#433) — `Responder`, `ReadInit`, `WriteResp`, `CipherState`, `KeyLen`. The wrapper's empty-AD-at-the-type-system invariant flows through to every AEAD operation here.
 - [`internal/devices`](devices-package.md) — `Registry.Validate(plain)` predicate (two-state, bumps `LastSeenAt` under `reg.mu`).
 - [`internal/dispatch`](dispatch-package.md) — `Handler`, `Conn`, `NewConn`, `Route` (#446). The same handler-table dispatch primitives used by v1's `Dispatcher`, factored out so the v2 manager does not duplicate the malformed/unsupported/unknown-type error-envelope logic.
-- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, the `Token` field on `HelloClientPayload`, and (#618) `RequestSnapshotPayload` / `ScreenSnapshotPayload` + `TypeRequestSnapshot` / `TypeScreenSnapshot` / `CodeConversationNotFound` / `CodeServerBinaryOffline` (the #617 snapshot vocabulary).
+- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, the `Token` field on `HelloClientPayload`, and (#618) `RequestSnapshotPayload` / `ScreenSnapshotPayload` + `TypeRequestSnapshot` / `TypeScreenSnapshot` / `CodeConversationNotFound` / `CodeServerBinaryOffline` (the #617 snapshot vocabulary), and (#727) `ModalCancelPayload` / `ModalAnswerPayload` / `ModalDismissedPayload` + `TypeModalCancel` / `TypeModalAnswer` / `TypeModalDismissed` (the #701 modal vocabulary).
 - [`internal/eventring`](eventring-package.md) (#646, consumed #647) — the bounded per-conversation event ring; the manager reads `Ring.After(convID, afterID)` (self-synchronised) on the reconnect-replay path. Late-bound via `SetReplaySource`, never imported at construction.
 - [`github.com/coder/websocket`](relay-package.md#dependencies) — only for the `StatusCode` type aliasing the two new exported close codes.
 
@@ -673,6 +764,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`codebase/589.md`](../codebase/589.md) — the v2 assistant-turn bridge: the production consumer of `Push` + `ActiveConnIDs`, fanning finished assistant turns to every open v2 phone.
 - [`codebase/618.md`](../codebase/618.md) — the inbound screen-snapshot handler (`security-sensitive`); `ScreenSnapshotter` interface, the two optional `V2SessionConfig` seams, the `dispatchAppFrame` snapshot arm, `handleRequestSnapshot` + `snapshotReplyError`, and the `(*supervisor.Supervisor).ScreenSnapshot` render seam. Reuses `forwardEnvelope` (renamed from `handlePush` in #610), never the public `Push`.
 - [`codebase/617.md`](../codebase/617.md) — the screen-snapshot wire vocabulary (`request_snapshot` / `screen_snapshot` payloads + `Type` constants) #618 consumes.
+- [`codebase/727.md`](../codebase/727.md) — the inbound modal-control interception (`security-sensitive`); the consumer-declared `ModalResolver` seam + `ModalDismissal`, the optional `V2SessionConfig.ModalResolver` field, the two `dispatchAppFrame` arms (`handleModalCancel` / `handleModalAnswer`), and the `broadcastModalDismissed` fan-out (reads `m.sessions` directly, never `ActiveConns` — deadlock). `modal_cancel` resolves (consume → ESC → audit → broadcast); `modal_answer` is a deferred no-op until the #717 gate. The `cmd/pyry` `modalResolverV2` impl consumes the #716 registry (`Resolve`), the #726 `SendEsc` seam, and the #712 audit sink. See also [`features/modalbridge-package.md`](modalbridge-package.md) (the outbound `modal_shown` half).
 - [`codebase/647.md`](../codebase/647.md) — the inbound mid-turn reconnect-replay consumer (`security-sensitive`); `SetReplaySource` (late-bound ring), `replayMissed`/`emitResync`, the `handleNoiseInit` hook, the `replayThrough` watermark + `forwardEnvelope` guard, and `HelloClientPayload.LastEventID` / `TypeResync`. Shipped with a caught-up-watermark MUST FIX outstanding, resolved by [`codebase/663.md`](../codebase/663.md) (clamp to `min(afterID, NewestID(convID))`). Consumes the [`codebase/646.md`](../codebase/646.md) ring + [`codebase/649.md`](../codebase/649.md) outbound `event_id`.
 - [`codebase/626.md`](../codebase/626.md) — capability negotiation on the handshake (`security-sensitive`); `supportedV2Capabilities` + `negotiateCapabilities`, the `hello_ack` echo, the `s.interactive` flag, and the capability-aware `ActiveConns`/`ActiveConn` enumeration (`ActiveConnIDs` becomes a projection). The daemon-side trust decision [#607](../codebase/607.md) deferred.
 - [`codebase/607.md`](../codebase/607.md) — the v2 interactive wire vocabulary (`CapabilityInteractive`, the `Capabilities []string` fields) that #626 enforces.
