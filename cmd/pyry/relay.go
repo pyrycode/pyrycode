@@ -255,17 +255,13 @@ func startRelay(
 // pinned at pairing. On error the leg fails fast at startup, mirroring the
 // identity.LoadOrCreate / devices.Load posture in startRelay's prologue.
 //
-// The assistant-turn bridge (v2) taps Bridge.Write so finished assistant turns
-// fan out to every open v2 session as a sealed `message` envelope (#589). Like
-// the v1 bridge it is skipped in foreground mode (bridge == nil): there is no
-// PTY-output observer surface there, and inbound send_message still works.
-//
 // The structured interactive turn stream (#633) wires the #615 producer to the
 // #632 capability-gated emitter, fanning turn_state / assistant_delta / tool /
-// turn_end envelopes to interactive phones. It is gated the same way as the
-// coarse bridge (bridge != nil) plus a non-empty claudeSessionsDir (the dir the
-// rotation-following JSONL resolver scans; "" already disables reconcile + the
-// rotation watcher, so disabling the producer too is coherent).
+// turn_end envelopes to interactive phones. It is gated on bridge != nil
+// (foreground has no PTY-output observer surface) plus a non-empty
+// claudeSessionsDir (the dir the rotation-following JSONL resolver scans; ""
+// already disables reconcile + the rotation watcher, so disabling the producer
+// too is coherent).
 //
 // SECURITY: StaticPriv is the binary's 32-byte X25519 static secret. It is
 // passed to the manager as an opaque slice and is never logged, wrapped into
@@ -331,19 +327,9 @@ func startRelayV2(
 		}
 	}()
 
-	// Tap the PTY output so finished assistant turns fan out to every open
-	// non-interactive v2 session (#589, re-targeted in #634). mgr is the
-	// v2Broadcaster (ActiveConns + Push); interactive conns get the #632
-	// structured stream instead. Skip in foreground mode (bridge == nil) —
-	// no PTY-output observer there.
-	var bridgeCleanup func()
-	if bridge != nil {
-		bridgeCleanup = startAssistantTurnBridgeV2(ctx, sup, bridge, mgr, logger)
-	}
-
 	// Wire the structured interactive turn stream (#633): the #615 producer over
 	// Supervisor.Session() + the rotation-following JSONL resolver, bridged to the
-	// #632 capability-gated emitter over mgr. Gated like the coarse bridge
+	// #632 capability-gated emitter over mgr. Gated on bridge != nil
 	// (foreground has no phone-mirroring surface) plus a resolvable sessions dir
 	// (an empty dir would make the resolver perpetually error and Warn-spam every
 	// retry; "" already disables reconcile + the rotation watcher).
@@ -367,13 +353,11 @@ func startRelayV2(
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr, logger)
 
 	return func() {
-		// Stop both producers before waiting on the manager so no fan-out races a
-		// winding-down manager. Each cleanup waits for its goroutine on ctx-cancel
-		// (already cancelled by the time drain runs). Then wait for the manager's
-		// Run to exit on the closed Frames channel.
-		if bridgeCleanup != nil {
-			bridgeCleanup()
-		}
+		// Stop both producers — the structured turn stream and the session-
+		// transition producer — before waiting on the manager so no fan-out races
+		// a winding-down manager. Each cleanup waits for its goroutine on
+		// ctx-cancel (already cancelled by the time drain runs). Then wait for the
+		// manager's Run to exit on the closed Frames channel.
 		if streamCleanup != nil {
 			streamCleanup()
 		}

@@ -113,13 +113,15 @@ holding the trust boundary against reflecting phone-controlled prompt bytes
 onto the observed PTY.
 
 **When unset, fakeclaude is byte-identical to its pre-#603 behaviour**, so
-TUI-off callers (`StartRotation`, the rotation tests, the two-phone-coarse
-e2e) are unperturbed. Because TUI mode makes `main.go` carry the two
+TUI-off callers (`StartRotation`, the rotation tests) are unperturbed.
+Because TUI mode makes `main.go` carry the two
 glyphs, the file is on the `cmd/substrate-guard` allowlist (#603),
 mirroring the sanctioned `internal/agentrun/ptyrunner/helper_test.go`
-exemption. Consumers must drain the spinner `message` envelope that the
-assistant-turn emitter fans to the phone (it races the ack); see
-[codebase/603.md](../codebase/603.md) for the drain pattern.
+exemption. On the surviving **v1** coarse leg, consumers must drain the
+spinner `message` envelope the v1 assistant-turn emitter fans to the phone
+(it races the ack); see [codebase/603.md](../codebase/603.md) for the drain
+pattern. (The v2 coarse emitter that also did this was removed in
+[#699](../codebase/699.md), and its two-phone-coarse e2e was deleted.)
 
 The initial UUID must satisfy
 `internal/sessions/rotation/watcher.go:19`'s `uuidStemPattern`
