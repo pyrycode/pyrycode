@@ -27,6 +27,7 @@ func TestParsePairArgs(t *testing.T) {
 		args       []string
 		wantDevice string
 		wantRelay  string
+		wantAllow  bool
 		wantErr    string
 	}{
 		{name: "empty", args: nil, wantDevice: "", wantRelay: ""},
@@ -34,6 +35,8 @@ func TestParsePairArgs(t *testing.T) {
 		{name: "relay only", args: []string{"--relay=wss://x"}, wantDevice: "", wantRelay: "wss://x"},
 		{name: "both", args: []string{"--name=phone", "--relay=wss://x"}, wantDevice: "phone", wantRelay: "wss://x"},
 		{name: "name space form", args: []string{"--name", "phone"}, wantDevice: "phone"},
+		{name: "allow-remote-permissions", args: []string{"--allow-remote-permissions"}, wantAllow: true},
+		{name: "allow-remote-permissions explicit false", args: []string{"--allow-remote-permissions=false"}, wantAllow: false},
 		{name: "positional rejected", args: []string{"--name=phone", "extra"}, wantErr: "unexpected positional"},
 		{name: "unknown flag rejected", args: []string{"--bogus"}, wantErr: "flag provided but not defined"},
 	}
@@ -58,6 +61,9 @@ func TestParsePairArgs(t *testing.T) {
 			}
 			if got.relay != tc.wantRelay {
 				t.Errorf("relay=%q want %q", got.relay, tc.wantRelay)
+			}
+			if got.allowRemotePermissions != tc.wantAllow {
+				t.Errorf("allowRemotePermissions=%v want %v", got.allowRemotePermissions, tc.wantAllow)
 			}
 		})
 	}
@@ -644,6 +650,58 @@ func TestRunPairDefault_PopulatesStaticPubkey(t *testing.T) {
 	if p2.ServerStaticPubkey != p1.ServerStaticPubkey {
 		t.Errorf("ServerStaticPubkey changed across invocations: first=%q second=%q",
 			p1.ServerStaticPubkey, p2.ServerStaticPubkey)
+	}
+}
+
+// TestRunPairDefault_AllowRemotePermissionsPersists runs `pyry pair`
+// end-to-end against an isolated HOME and asserts the bit reaches disk
+// through the real Save/Load path: `--allow-remote-permissions` records a
+// device with the bit set, while a bare pair records one with it OFF.
+// Covers AC1 (flag records the bit) + AC4 (survives the real Save/Load).
+func TestRunPairDefault_AllowRemotePermissionsPersists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pyry is linux+macOS only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	if _, err := captureStdout(t, func() error {
+		return runPairDefault([]string{"--allow-remote-permissions"})
+	}); err != nil {
+		t.Fatalf("runPairDefault(--allow-remote-permissions): %v", err)
+	}
+
+	reg, err := devices.Load(resolveDevicesPath(defaultName()))
+	if err != nil {
+		t.Fatalf("Load after first pair: %v", err)
+	}
+	list := reg.List()
+	if len(list) != 1 {
+		t.Fatalf("len(List) = %d, want 1", len(list))
+	}
+	if !list[0].AllowRemotePermissions {
+		t.Errorf("paired device AllowRemotePermissions = false, want true")
+	}
+
+	if _, err := captureStdout(t, func() error { return runPairDefault(nil) }); err != nil {
+		t.Fatalf("runPairDefault(nil): %v", err)
+	}
+
+	reg2, err := devices.Load(resolveDevicesPath(defaultName()))
+	if err != nil {
+		t.Fatalf("Load after second pair: %v", err)
+	}
+	var allowed, denied int
+	for _, d := range reg2.List() {
+		if d.AllowRemotePermissions {
+			allowed++
+		} else {
+			denied++
+		}
+	}
+	if allowed != 1 || denied != 1 {
+		t.Errorf("after bare pair: allowed=%d denied=%d, want 1 and 1", allowed, denied)
 	}
 }
 

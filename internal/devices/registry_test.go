@@ -124,6 +124,70 @@ func TestRegistry_AddSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRegistry_AllowRemotePermissionsPersists is the AC4 registry
+// round-trip: the bit survives Save -> Load (true stays true, false stays
+// false), and a hand-authored pre-field devices.json reloads to false.
+func TestRegistry_AllowRemotePermissionsPersists(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+	later := when.Add(time.Second)
+
+	r := &Registry{}
+	r.Add(Device{
+		TokenHash:              HashToken("plain-on"),
+		Name:                   "allowed",
+		PairedAt:               when,
+		LastSeenAt:             when,
+		AllowRemotePermissions: true,
+	})
+	r.Add(Device{
+		TokenHash:  HashToken("plain-off"),
+		Name:       "denied",
+		PairedAt:   later,
+		LastSeenAt: later,
+	})
+
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := back.List()
+	if len(got) != 2 {
+		t.Fatalf("len(List) = %d, want 2", len(got))
+	}
+	byName := map[string]Device{}
+	for _, d := range got {
+		byName[d.Name] = d
+	}
+	if !byName["allowed"].AllowRemotePermissions {
+		t.Errorf("allowed device AllowRemotePermissions = false, want true after reload")
+	}
+	if byName["denied"].AllowRemotePermissions {
+		t.Errorf("denied device AllowRemotePermissions = true, want false after reload")
+	}
+
+	// A pre-field on-disk envelope (no allow_remote_permissions key) reloads OFF.
+	prefield := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(prefield, []byte(`{"devices":[{"token_hash":"deadbeef","name":"legacy","paired_at":"2026-01-01T00:00:00Z","last_seen_at":"2026-01-01T00:00:00Z"}]}`), 0o600); err != nil {
+		t.Fatalf("write pre-field file: %v", err)
+	}
+	legacyReg, err := Load(prefield)
+	if err != nil {
+		t.Fatalf("Load(pre-field): %v", err)
+	}
+	legacy := legacyReg.List()
+	if len(legacy) != 1 {
+		t.Fatalf("len(pre-field List) = %d, want 1", len(legacy))
+	}
+	if legacy[0].AllowRemotePermissions {
+		t.Errorf("pre-field device AllowRemotePermissions = true, want false")
+	}
+}
+
 func TestRegistry_RemovePresent(t *testing.T) {
 	t.Parallel()
 	r := &Registry{}

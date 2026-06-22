@@ -40,6 +40,18 @@ type Device struct {
 	// never marshalled across the wire (the wire form is
 	// protocol.RegisterPushTokenPayload).
 	PushToken string `json:"push_token,omitempty"`
+
+	// AllowRemotePermissions authorizes THIS device to ANSWER a remote
+	// permission / trust / destructive modal (ADR 025 § "Security model").
+	// Default OFF (the zero value): an omitted/pre-field on-disk record
+	// decodes to false = denied. Set only by
+	// `pyry pair --allow-remote-permissions`; never set or carried over the
+	// wire. Read off the authenticated *Device by the modal control loop
+	// (#703) via dispatch.Conn.Auth(). Gating applies ONLY to answering a
+	// permission-class modal; everything else a paired phone does is
+	// ungated. omitempty keeps the secure-default (false) off disk, matching
+	// the Platform/PushToken precedent.
+	AllowRemotePermissions bool `json:"allow_remote_permissions,omitempty"`
 }
 
 // HashToken returns the lowercase SHA-256 hex of plain. Output is

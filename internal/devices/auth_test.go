@@ -113,6 +113,70 @@ func TestRegistry_Validate_Miss(t *testing.T) {
 	}
 }
 
+func TestDevice_MayAnswerRemotePermission(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		dev  *Device
+		want bool
+	}{
+		{name: "bit set -> eligible", dev: &Device{AllowRemotePermissions: true}, want: true},
+		{name: "bit off -> denied", dev: &Device{AllowRemotePermissions: false}, want: false},
+		{name: "nil device -> denied", dev: nil, want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.dev.MayAnswerRemotePermission(); got != tc.want {
+				t.Errorf("MayAnswerRemotePermission() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuthorizeRemotePermission(t *testing.T) {
+	t.Parallel()
+
+	eligible := &Device{AllowRemotePermissions: true}
+	ineligible := &Device{AllowRemotePermissions: false}
+
+	tests := []struct {
+		name    string
+		dev     *Device
+		outcome RemotePermissionOutcome
+		want    bool
+	}{
+		// The sole ALLOW: eligible device AND an explicit allow.
+		{name: "eligible + allow -> grant", dev: eligible, outcome: OutcomeAllow, want: true},
+
+		// Eligible device, every non-allow outcome -> deny (AC3 fail-closed).
+		{name: "eligible + explicit deny -> deny", dev: eligible, outcome: OutcomeDeny, want: false},
+		{name: "eligible + no answer -> deny", dev: eligible, outcome: OutcomeNoAnswer, want: false},
+		{name: "eligible + timeout -> deny", dev: eligible, outcome: OutcomeTimeout, want: false},
+		{name: "eligible + cancel -> deny", dev: eligible, outcome: OutcomeCancel, want: false},
+
+		// Zero-value outcome (== OutcomeNoAnswer): default-constructed call denies.
+		{name: "eligible + zero-value outcome -> deny", dev: eligible, outcome: RemotePermissionOutcome(0), want: false},
+
+		// Ineligible / nil device never grants, even on an explicit allow (AC2).
+		{name: "ineligible + allow -> deny", dev: ineligible, outcome: OutcomeAllow, want: false},
+		{name: "nil device + allow -> deny", dev: nil, outcome: OutcomeAllow, want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AuthorizeRemotePermission(tc.dev, tc.outcome); got != tc.want {
+				t.Errorf("AuthorizeRemotePermission(%+v, %v) = %v, want %v", tc.dev, tc.outcome, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRegistry_Validate_ConcurrentSameToken(t *testing.T) {
 	t.Parallel()
 	when := mustParseTime(t, "2020-01-01T00:00:00Z")

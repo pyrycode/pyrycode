@@ -72,9 +72,10 @@ func resolveStaticKeyBaseDir() string {
 
 // pairArgs is the parsed shape of `pyry pair`'s flag set.
 type pairArgs struct {
-	instanceName string // -pyry-name
-	deviceName   string // --name
-	relay        string // --relay
+	instanceName           string // -pyry-name
+	deviceName             string // --name
+	relay                  string // --relay
+	allowRemotePermissions bool   // --allow-remote-permissions
 }
 
 // parsePairArgs parses the flag set for `pyry pair`. Returns the parsed
@@ -86,6 +87,7 @@ func parsePairArgs(args []string) (pairArgs, error) {
 	instance := fs.String("pyry-name", defaultName(), "instance name (state dir: ~/.pyry/<name>/)")
 	deviceName := fs.String("name", "", "device label persisted in the registry (default: device-<short>)")
 	relay := fs.String("relay", "", "relay URL override (default: ~/.pyry/config.json or built-in default)")
+	allowRemotePermissions := fs.Bool("allow-remote-permissions", false, "authorize this device to answer remote permission/trust/destructive modals (default OFF)")
 	if err := fs.Parse(args); err != nil {
 		return pairArgs{}, err
 	}
@@ -93,9 +95,10 @@ func parsePairArgs(args []string) (pairArgs, error) {
 		return pairArgs{}, fmt.Errorf("unexpected positional %q", fs.Arg(0))
 	}
 	return pairArgs{
-		instanceName: *instance,
-		deviceName:   *deviceName,
-		relay:        *relay,
+		instanceName:           *instance,
+		deviceName:             *deviceName,
+		relay:                  *relay,
+		allowRemotePermissions: *allowRemotePermissions,
 	}, nil
 }
 
@@ -159,7 +162,7 @@ func runPairDefault(args []string) error {
 	parsed, err := parsePairArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pyry pair:", err)
-		fmt.Fprintln(os.Stderr, "usage: pyry pair [-pyry-name=<instance>] [--name <label>] [--relay <url>]")
+		fmt.Fprintln(os.Stderr, "usage: pyry pair [-pyry-name=<instance>] [--name <label>] [--relay <url>] [--allow-remote-permissions]")
 		os.Exit(2)
 	}
 
@@ -203,9 +206,10 @@ func runPairDefault(args []string) error {
 	}
 
 	registry.Add(devices.Device{
-		TokenHash: hash,
-		Name:      deviceName,
-		PairedAt:  time.Now().UTC(),
+		TokenHash:              hash,
+		Name:                   deviceName,
+		PairedAt:               time.Now().UTC(),
+		AllowRemotePermissions: parsed.allowRemotePermissions,
 	})
 	if err := registry.Save(devicesPath); err != nil {
 		return fmt.Errorf("pair: %w", err)
