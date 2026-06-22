@@ -26,7 +26,7 @@ Mirrors `runSessions`'s sub-router shape ([ADR 010](../decisions/010-sessions-cl
 ## Surface
 
 ```
-pyry pair [-pyry-name=<instance>] [--name <device-label>] [--relay <url>]
+pyry pair [-pyry-name=<instance>] [--name <device-label>] [--relay <url>] [--allow-remote-permissions]
 pyry pair list [-pyry-name=<instance>]
 pyry pair revoke [-pyry-name=<instance>] <name>
 pyry pair preflight [-pyry-name=<instance>]
@@ -37,6 +37,9 @@ pyry pair preflight [-pyry-name=<instance>]
 | `-pyry-name` | Instance scope (state dir: `~/.pyry/<name>/`) | `defaultName()` — `PYRY_NAME` env or literal `"pyry"` |
 | `--name` | Device label persisted in the registry | `device-<short>` (first 8 hex chars of the token hash) |
 | `--relay` | Override the relay URL printed in the payload (does NOT mutate config.json) | resolved from config, then built-in default |
+| `--allow-remote-permissions` | Authorize THIS device to answer a remote permission/trust/destructive modal (#702) — records `Device.AllowRemotePermissions` on the pairing record | `false` (OFF — the safe default; the only writer of the bit) |
+
+The `--allow-remote-permissions` bit (added #702) is the per-device authorization for the highest-trust mobile action: answering a permission modal. `pyry pair` is its **only** writer — it is never settable over the wire. Everything else a paired phone does stays ungated. Bare `--allow-remote-permissions` → `true`; absent → `false`; `--allow-remote-permissions=false` → `false` (Go `flag` bool semantics). See [`features/devices-package.md`](devices-package.md) § "Remote-permission gate" and [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § "Security model".
 
 `-pyry-name` is added because `devices.json` and `server-id` are per-instance — same scoping as `pyry sessions *` and the supervisor itself. A single-instance user gets one consistent state directory across every verb.
 
@@ -54,7 +57,7 @@ Chosen so no failure path leaves a plaintext token in any context outside this p
  7. crypto/rand.Read(32 bytes) → hex.EncodeToString                      → exit 1 on rng error
  8. devices.HashToken(plain) → 64-char hex SHA-256
  9. deviceName := --name OR "device-" + hash[:8]
-10. registry.Add(Device{TokenHash, Name, PairedAt: now.UTC()})
+10. registry.Add(Device{TokenHash, Name, PairedAt: now.UTC(), AllowRemotePermissions: --allow-remote-permissions})
 11. registry.Save(devicesPath)                                           → exit 1 on I/O error
 12. pair.Render(Payload{Server, Relay, Token, ServerStaticPubkey}, os.Stdout)  → exit 1 on write error
 ```
