@@ -622,11 +622,11 @@ Direction **binary → phone** (outbound v2 modal-surfaced event; not in `v1Type
 | Field | Type | Meaning |
 |---|---|---|
 | `modal_id` | string | One-time opaque nonce minted per surfaced modal. The **sole correlation key** — see the security note below. |
-| `class` | string | Modal kind over a closed wire set (e.g. `permission`). Plain string, not a named enum; the exhaustive vocabulary is the producer's (#703). |
-| `title` | string | Short modal title. |
-| `prompt` | string | The modal's body/question text. |
-| `options` | array | Ordered list of `{id, label}` choices. **Array order is the canonical display/selection order.** |
-| `default_option_id` | string | The `id` of the default/highlighted option. **Invariant:** MUST equal one of `options[].id`. |
+| `class` | string | Modal kind over a closed wire set. Plain string, not a named enum; the exhaustive vocabulary is the producer's. The outbound surfacer (#716) ships the first concrete values: **`permission`** and **`trust`** (mapped from tui-driver's `ModalClassPermission` / `ModalClassTrustFolder`); non-permission/trust classes produce no `modal_shown`. |
+| `title` | string | Short modal title (a fixed per-class label, e.g. `Permission required` / `Trust this folder?`). |
+| `prompt` | string | The modal's body/question text — claude's rendered modal screen in plain text (ANSI/OSC-free, defensively length-bounded; #716). |
+| `options` | array | Ordered list of `{id, label}` choices. **Array order is the canonical display/selection order** (claude's display order, allow-first). For `permission` the ids are the four `turnevent.PermissionOptionKind`s (`allow_once`/`allow_always`/`reject_once`/`reject_always`); for `trust`, `proceed`/`exit`. |
+| `default_option_id` | string | The `id` of the default/highlighted option. **Invariant:** MUST equal one of `options[].id`. **Fail-safe convention (#716):** the producer sets this to the **deny** option (`reject_once` / `exit`), *not* `options[0]`, so a careless confirm on this remote surface denies rather than allows. Display order (allow-first) and the highlighted default are deliberately decoupled. This is UI pre-selection only — answering is gated separately (#702) and deny-on-timeout is the resolution half's (#717). |
 
 #### `modal_answer`
 
