@@ -39,8 +39,8 @@
     {
       "type": "system",
       "subtype": "init",
-      "cwd": "/private/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike1679086679/001",
-      "session_id": "4e6b8980-d48e-448b-8e32-ecaa917d8c44",
+      "cwd": "/private/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike2203952302/001",
+      "session_id": "40fcffe7-d66c-4fba-94a5-98f7ea532723",
       "tools": [
         "Task",
         "AskUserQuestion",
@@ -138,9 +138,9 @@
       "plugins": [],
       "analytics_disabled": false,
       "product_feedback_disabled": false,
-      "uuid": "4a6d545f-6140-47f6-8d76-4a5230ab27a1",
+      "uuid": "3ac10700-d8f6-470d-bf80-97fea8cda404",
       "memory_paths": {
-        "auto": "/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike1679086679/001/.claude/projects/-private-tmp-claude-501-TestRealClaude-PermissionProtocol-Spike1679086679-001/memory/"
+        "auto": "/tmp/claude-501/TestRealClaude_PermissionProtocol_Spike2203952302/001/.claude/projects/-private-tmp-claude-501-TestRealClaude-PermissionProtocol-Spike2203952302-001/memory/"
       },
       "fast_mode_state": "off"
     },
@@ -148,14 +148,14 @@
       "type": "assistant",
       "message": {
         "model": "claude-haiku-4-5-20251001",
-        "id": "msg_015qK2y1WZLv2gf9z6zYLTn7",
+        "id": "msg_01U31nAvphTtF3SNTJFtc4e5",
         "type": "message",
         "role": "assistant",
         "content": [
           {
             "type": "thinking",
-            "thinking": "The user is asking me to run `ls -la` and report the result. This is a straightforward request to list the files in the current directory with detailed information.\n\nI'll use the Bash tool to execute this command.",
-            "signature": "EqUDCm0IDxgCKkCfNL6t6V1zxSLu4JM58u+qwIkp9j/PWoMWqcMOKKzHGFojZDI8rF9kWt4uq4FW6sF2ppISkL/UpXIt8exnEujOMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOABCCHRoaW5raW5nEgzed3FPkgY8YNTSbEAaDBzRx+fyKgW+WtRE/CIwQQ6MQ53tbH+61y3/h793pWchUo3dK08LOEHAOJPPvdxGvcEEPMmlsIdmj3JEA7ROKuUBHV0CkRM28O59yj5bqWxi+b2rJCbPSFbLQ6RU4vkzwjT1DV9SBY1LUsaqSwc+qSeqFsSfMq3jBdSHmITCzkukKuMLhfLGpN4OOTgtlcDvMjKqRmWAp7crnWscV6HeSFhJz8djmV2xDvoY7Y9bF/PnQ6bnqL/8dbJkADAs56Xa2dQUHDuXqewAR3eGoeZsT5InPvmmqDeD+9R+S4Md4675NsrVUbBCfBvzjUe0App3iovrf0gB4wf1eU5Wy5Knj6vUY5ILc0sVVUmgotWV/no24pOzZlj/OrXWsHO5Gi8quH9C9ze2HBgB"
+            "thinking": "The user is asking me to run `ls -la` in the primary working directory and report the result. This is straightforward - I should use the Bash tool to execute this command and then report what I find.",
+            "signature": "EpcDCm0IDxgCKkCxv98y7vfbRU4HlPo5VfEZ7Fdy966sn8YPqhunBB2IoGdVmFbi2BUWuOk1iZlgwPUa3dIGTDyTO6k5RA7SQwbAMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOABCCHRoaW5raW5nEgyUMjnjruyvz1GF0WUaDGCMwDFYteSePPDAkCIwfqVEpc5EMxocDM6XpFwyDuAoSYiFv7g8iT7DepjqGt/aZ3ZHczhBk/LikNGcMeboKtcBuyacwsq1VWHSUll1IBl+avpd1WjLKiS6j2teeIex5HstiQudRILu6HvmiVc+bJDv9ocF2/RA3aArGXemwF4bs0ebIIDqLZZQE6oBIf3WOvx15hlICZHsKi2a91jYTw6tMJ5OW4vJGzCe64eUICGotTGYKMq8vmYNwSOD/kY4YlJXVvrN+V5t9mQo5JfYEInJmEQ24D6ovnjKsezxWF6YAjOslilJ68ZmdOjcnn2RKBhfW3fCHTJfSUo8u8aILHLY275iBaxKKXu7Xzx32Iw5yGtFgcp6Rp8YAQ=="
           }
         ],
         "stop_reason": null,
@@ -169,7 +169,7 @@
             "ephemeral_5m_input_tokens": 0,
             "ephemeral_1h_input_tokens": 6450
           },
-          "output_tokens": 8,
+          "output_tokens": 4,
           "service_tier": "standard",
           "inference_geo": "not_available"
         },
@@ -177,21 +177,21 @@
         "context_management": null
       },
       "parent_tool_use_id": null,
-      "session_id": "4e6b8980-d48e-448b-8e32-ecaa917d8c44",
-      "uuid": "21997b98-c0ae-4df1-891d-4de2e510576e",
-      "request_id": "req_011CcJdU9t1hibVXFnWNHv8i"
+      "session_id": "40fcffe7-d66c-4fba-94a5-98f7ea532723",
+      "uuid": "ea5453bb-0105-4ab4-b6da-fb145f6c59af",
+      "request_id": "req_011CcJgU5AM4p32bVseqewyx"
     },
     {
       "type": "assistant",
       "message": {
         "model": "claude-haiku-4-5-20251001",
-        "id": "msg_015qK2y1WZLv2gf9z6zYLTn7",
+        "id": "msg_01U31nAvphTtF3SNTJFtc4e5",
         "type": "message",
         "role": "assistant",
         "content": [
           {
             "type": "tool_use",
-            "id": "toolu_01RDSYtqfeMHJscp3sHNWdzW",
+            "id": "toolu_01F8CzSQXF8HVt9CGrR7LF3M",
             "name": "Bash",
             "input": {
               "command": "ls -la",
@@ -213,7 +213,7 @@
             "ephemeral_5m_input_tokens": 0,
             "ephemeral_1h_input_tokens": 6450
           },
-          "output_tokens": 8,
+          "output_tokens": 4,
           "service_tier": "standard",
           "inference_geo": "not_available"
         },
@@ -221,34 +221,9 @@
         "context_management": null
       },
       "parent_tool_use_id": null,
-      "session_id": "4e6b8980-d48e-448b-8e32-ecaa917d8c44",
-      "uuid": "3bae7b6e-0007-4397-8e3c-27bf2d11ac91",
-      "request_id": "req_011CcJdU9t1hibVXFnWNHv8i"
-    },
-    {
-      "type": "user",
-      "message": {
-        "role": "user",
-        "content": [
-          {
-            "tool_use_id": "toolu_01RDSYtqfeMHJscp3sHNWdzW",
-            "type": "tool_result",
-            "content": "total 872\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun 22 19:40 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun 22 19:40 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun 22 19:40 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  442440 Jun 22 19:40 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun 22 19:40 Library",
-            "is_error": false
-          }
-        ]
-      },
-      "parent_tool_use_id": null,
-      "session_id": "4e6b8980-d48e-448b-8e32-ecaa917d8c44",
-      "uuid": "f47d576f-a5fe-4da9-812f-9367e2b5d730",
-      "timestamp": "2026-06-22T16:40:25.651Z",
-      "tool_use_result": {
-        "stdout": "total 872\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun 22 19:40 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun 22 19:40 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun 22 19:40 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  442440 Jun 22 19:40 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun 22 19:40 Library",
-        "stderr": "",
-        "interrupted": false,
-        "isImage": false,
-        "noOutputExpected": false
-      }
+      "session_id": "40fcffe7-d66c-4fba-94a5-98f7ea532723",
+      "uuid": "fc41673c-1d35-40c7-b396-4eee55f5cf8b",
+      "request_id": "req_011CcJgU5AM4p32bVseqewyx"
     },
     {
       "type": "rate_limit_event",
@@ -257,23 +232,48 @@
         "resetsAt": 1782160200,
         "rateLimitType": "five_hour",
         "overageStatus": "allowed",
-        "overageResetsAt": 1782146400,
+        "overageResetsAt": 1782148800,
         "isUsingOverage": false
       },
-      "uuid": "f03aac72-a99c-47b3-bd99-02b07f9f8651",
-      "session_id": "4e6b8980-d48e-448b-8e32-ecaa917d8c44"
+      "uuid": "94e7cb3b-d7e8-461c-b1fc-9b60a21c7798",
+      "session_id": "40fcffe7-d66c-4fba-94a5-98f7ea532723"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_01F8CzSQXF8HVt9CGrR7LF3M",
+            "type": "tool_result",
+            "content": "total 872\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun 22 20:19 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun 22 20:19 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun 22 20:19 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  443274 Jun 22 20:19 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun 22 20:19 Library",
+            "is_error": false
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "40fcffe7-d66c-4fba-94a5-98f7ea532723",
+      "uuid": "1fc84014-aa1d-4cd3-af43-76d4f1b8ed5f",
+      "timestamp": "2026-06-22T17:19:44.658Z",
+      "tool_use_result": {
+        "stdout": "total 872\ndrwxr-xr-x@ 5 juhanailmoniemi  wheel     160 Jun 22 20:19 .\ndrwx------@ 3 juhanailmoniemi  wheel      96 Jun 22 20:19 ..\ndrwxr-xr-x@ 8 juhanailmoniemi  wheel     256 Jun 22 20:19 .claude\n-rw-------@ 1 juhanailmoniemi  wheel  443274 Jun 22 20:19 .claude.json\ndrwxr-xr-x@ 3 juhanailmoniemi  wheel      96 Jun 22 20:19 Library",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      }
     },
     {
       "type": "assistant",
       "message": {
         "model": "claude-haiku-4-5-20251001",
-        "id": "msg_01LgKu6wxLMSubKydEAJvBsN",
+        "id": "msg_014z1TzmSWkPkV8AzVvaCNgB",
         "type": "message",
         "role": "assistant",
         "content": [
           {
             "type": "text",
-            "text": "The working directory contains:\n- `.claude/` — Claude Code configuration directory\n- `.claude.json` — Claude Code state file (442KB)\n- `Library/` — macOS Library directory\n- Standard dot-file ownership and permissions for a development environment"
+            "text": "The current directory contains:\n- `.claude` directory (Claude Code configuration)\n- `.claude.json` file (session data)\n- `Library` directory\n\nThis appears to be a Claude Code working environment with no additional project files visible at the root level."
           }
         ],
         "stop_reason": null,
@@ -300,28 +300,28 @@
         "context_management": null
       },
       "parent_tool_use_id": null,
-      "session_id": "4e6b8980-d48e-448b-8e32-ecaa917d8c44",
-      "uuid": "de13910b-adbf-4010-8450-47e64508f34e",
-      "request_id": "req_011CcJdUQAzhyE9CPWhgwdo7"
+      "session_id": "40fcffe7-d66c-4fba-94a5-98f7ea532723",
+      "uuid": "d892cc9c-2490-4772-833e-e43a3453b0f3",
+      "request_id": "req_011CcJgUHwHzDsunCYL8jSiy"
     },
     {
       "type": "result",
       "subtype": "success",
       "is_error": false,
       "api_error_status": null,
-      "duration_ms": 6603,
-      "duration_api_ms": 10153,
-      "ttft_ms": 3300,
+      "duration_ms": 5326,
+      "duration_api_ms": 5282,
+      "ttft_ms": 2633,
       "num_turns": 2,
-      "result": "The working directory contains:\n- `.claude/` — Claude Code configuration directory\n- `.claude.json` — Claude Code state file (442KB)\n- `Library/` — macOS Library directory\n- Standard dot-file ownership and permissions for a development environment",
+      "result": "The current directory contains:\n- `.claude` directory (Claude Code configuration)\n- `.claude.json` file (session data)\n- `Library` directory\n\nThis appears to be a Claude Code working environment with no additional project files visible at the root level.",
       "stop_reason": "end_turn",
-      "session_id": "4e6b8980-d48e-448b-8e32-ecaa917d8c44",
-      "total_cost_usd": 0.0212138,
+      "session_id": "40fcffe7-d66c-4fba-94a5-98f7ea532723",
+      "total_cost_usd": 0.0206608,
       "usage": {
         "input_tokens": 16,
         "cache_creation_input_tokens": 12984,
         "cache_read_input_tokens": 34748,
-        "output_tokens": 192,
+        "output_tokens": 188,
         "server_tool_use": {
           "web_search_requests": 0,
           "web_fetch_requests": 0
@@ -335,7 +335,7 @@
         "iterations": [
           {
             "input_tokens": 6,
-            "output_tokens": 59,
+            "output_tokens": 58,
             "cache_read_input_tokens": 17374,
             "cache_creation_input_tokens": 6534,
             "cache_creation": {
@@ -350,21 +350,11 @@
       "modelUsage": {
         "claude-haiku-4-5": {
           "inputTokens": 16,
-          "outputTokens": 192,
+          "outputTokens": 188,
           "cacheReadInputTokens": 34748,
           "cacheCreationInputTokens": 12984,
           "webSearchRequests": 0,
-          "costUSD": 0.0206808,
-          "contextWindow": 200000,
-          "maxOutputTokens": 32000
-        },
-        "claude-haiku-4-5-20251001": {
-          "inputTokens": 453,
-          "outputTokens": 16,
-          "cacheReadInputTokens": 0,
-          "cacheCreationInputTokens": 0,
-          "webSearchRequests": 0,
-          "costUSD": 0.000533,
+          "costUSD": 0.0206608,
           "contextWindow": 200000,
           "maxOutputTokens": 32000
         }
@@ -372,11 +362,11 @@
       "permission_denials": [],
       "terminal_reason": "completed",
       "fast_mode_state": "off",
-      "uuid": "cc3ff059-774c-483b-95d4-d6c03309eb12"
+      "uuid": "51e66926-9b64-4b3c-b868-38bb1a418188"
     }
   ],
   "stderr_capture": "",
   "exit_code": 0,
   "context_deadline_tripped": false,
-  "duration_ms": 7615
+  "duration_ms": 6347
 }
