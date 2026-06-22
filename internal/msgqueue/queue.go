@@ -69,6 +69,19 @@ const defaultRetryInterval = 1 * time.Second
 // the drain retries the same message at the FIFO head.
 type DeliverFunc func(ctx context.Context, convID string, payload []byte) error
 
+// ChangeFunc is the injected change-notification seam — it mirrors the
+// DeliverFunc seam style. It is invoked, NEVER while holding q.mu, with the id
+// of the conversation whose backlog changed (on enqueue, on delivery-advance,
+// and on a successful Remove). It carries only convID; the consumer re-reads the
+// current backlog via Snapshot (the seam is edge-triggered — coalescing is the
+// consumer's choice). nil disables notification.
+//
+// It MUST NOT block (a blocking ChangeFunc on the drain path stalls that
+// conversation's drain) and MUST be safe for concurrent invocation: it fires
+// from the Enqueue caller's goroutine, from each drain goroutine, and from the
+// Remove caller's goroutine. The consumer owns its own synchronization.
+type ChangeFunc func(convID string)
+
 // Config configures a Queue.
 type Config struct {
 	// Deliver is the reliable-delivery seam; required. New errors if it is nil.
@@ -76,8 +89,21 @@ type Config struct {
 	// RetryInterval is the poll cadence while delivery keeps failing.
 	// <= 0 ⇒ defaultRetryInterval.
 	RetryInterval time.Duration
+	// OnChange is the optional change-notification seam; nil ⇒ disabled.
+	OnChange ChangeFunc
 	// Logger; nil ⇒ slog.Default().
 	Logger *slog.Logger
+}
+
+// QueuedMessage is the engine-side projection of ADR 025's
+// {queued_msg_id, text, ts} record (the producer maps ID -> queued_msg_id). It
+// is the ordered element Snapshot returns. Text is untrusted, phone-originated
+// transit content: the consumer must never log it and must only surface it to
+// the authorized conversation it belongs to.
+type QueuedMessage struct {
+	ID   uint64
+	Text string
+	TS   time.Time
 }
 
 // queued is one buffered inbound message: the stable per-conversation id, the
@@ -101,9 +127,10 @@ type convQueue struct {
 // drain goroutine per active conversation. The zero value is not usable —
 // construct with New. Enqueue is safe for concurrent use; Run is called once.
 type Queue struct {
-	deliver DeliverFunc
-	retry   time.Duration
-	log     *slog.Logger
+	deliver  DeliverFunc
+	retry    time.Duration
+	onChange ChangeFunc // nil ⇒ change notification disabled
+	log      *slog.Logger
 
 	mu      sync.Mutex
 	convs   map[string]*convQueue
@@ -130,10 +157,11 @@ func New(cfg Config) (*Queue, error) {
 		log = slog.Default()
 	}
 	return &Queue{
-		deliver: cfg.Deliver,
-		retry:   retry,
-		log:     log,
-		convs:   make(map[string]*convQueue),
+		deliver:  cfg.Deliver,
+		retry:    retry,
+		onChange: cfg.OnChange,
+		log:      log,
+		convs:    make(map[string]*convQueue),
 	}, nil
 }
 
@@ -144,8 +172,6 @@ func New(cfg Config) (*Queue, error) {
 // queues are independent — appending to one never blocks or reorders another.
 func (q *Queue) Enqueue(convID, text string) uint64 {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-
 	c := q.convs[convID]
 	if c == nil {
 		c = &convQueue{nextID: 1}
@@ -156,7 +182,84 @@ func (q *Queue) Enqueue(convID, text string) uint64 {
 	c.items = append(c.items, queued{id: id, text: text, ts: time.Now()})
 
 	q.maybeSpawnDrainLocked(convID, c)
+	q.mu.Unlock()
+
+	// Fire the change seam after releasing q.mu: a re-entrant OnChange can call
+	// Snapshot/Remove/Enqueue without deadlocking against the lock.
+	q.notify(convID)
 	return id
+}
+
+// Snapshot returns convID's not-yet-confirmed-delivered backlog as an ordered
+// copy (the data queue_state reports). An unknown conversation yields an empty
+// snapshot, not an error. The returned slice is freshly allocated and the
+// elements are value copies, so a caller cannot mutate engine state through it.
+//
+// The snapshot includes the head even while it is mid-delivery: an item is in
+// the backlog until advanceLocked drops it on a confirmed commit, so "current
+// items" is exactly "not-yet-delivered". The snapshot does not flag which entry
+// is in-flight — Remove returning false is how a consumer learns the head is
+// non-removable.
+func (q *Queue) Snapshot(convID string) []QueuedMessage {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	c := q.convs[convID]
+	if c == nil {
+		return nil
+	}
+	out := make([]QueuedMessage, len(c.items))
+	for i := range c.items {
+		out[i] = QueuedMessage{ID: c.items[i].id, Text: c.items[i].text, TS: c.items[i].ts}
+	}
+	return out
+}
+
+// Remove drops a queued, not-in-flight message by id from convID's FIFO,
+// preserving the surviving order, and returns true iff it removed one. An
+// unknown conversation, an unknown or already-delivered id, or the in-flight
+// (draining) head is a safe no-op that returns false — no panic, no reorder.
+// This is the engine op behind dequeue_message; the in-flight-head no-op is what
+// guarantees dequeue_message cannot cancel an in-flight delivery.
+func (q *Queue) Remove(convID string, id uint64) bool {
+	q.mu.Lock()
+	c := q.convs[convID]
+	if c == nil {
+		q.mu.Unlock()
+		return false
+	}
+	idx := -1
+	for i := range c.items {
+		if c.items[i].id == id {
+			idx = i
+			break
+		}
+	}
+	// Not found, or the in-flight head: a no-op. The draining flag is set/cleared
+	// under q.mu, the same lock the drain peeks and advances under, so the
+	// in-flight-head decision is atomic w.r.t. the drain — removing index 0 only
+	// when !draining (no goroutine owns items) can never make advanceLocked drop
+	// the wrong message. Non-head removal (idx >= 1) is always safe: the drain
+	// only ever touches index 0 and holds a value copy of the head.
+	if idx == -1 || (idx == 0 && c.draining) {
+		q.mu.Unlock()
+		return false
+	}
+	c.items = append(c.items[:idx], c.items[idx+1:]...)
+	c.shrinkLocked()
+	q.mu.Unlock()
+
+	q.notify(convID)
+	return true
+}
+
+// notify fires the change seam for convID if one is configured. The caller MUST
+// have released q.mu — OnChange is a caller-supplied seam that may block or
+// re-enter Snapshot/Remove/Enqueue, so it is never called under the lock.
+func (q *Queue) notify(convID string) {
+	if q.onChange != nil {
+		q.onChange(convID)
+	}
 }
 
 // Run binds the lifecycle ctx, starts a drain for any conversation that already
@@ -251,16 +354,27 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		q.mu.Lock()
 		c.advanceLocked()
 		q.mu.Unlock()
+
+		// A confirmed-delivered head left the backlog. Fire after unlock; do NOT
+		// fire on the empty-exit or delivery-error/retry paths — those aren't
+		// backlog changes.
+		q.notify(convID)
 	}
 }
 
-// advanceLocked drops the just-delivered head. It releases the backing array
-// when the FIFO empties and compacts when capacity dwarfs the live length, so a
-// long-lived conversation's slice does not retain an ever-growing backing array
-// from past bursts. Queues are expected shallow, so the compaction rarely fires.
-// The caller must hold q.mu.
+// advanceLocked drops the just-delivered head and runs the backing-array
+// hygiene. The caller must hold q.mu.
 func (c *convQueue) advanceLocked() {
 	c.items = c.items[1:]
+	c.shrinkLocked()
+}
+
+// shrinkLocked releases the backing array when the FIFO empties and compacts
+// when capacity dwarfs the live length, so a long-lived conversation's slice
+// does not retain an ever-growing backing array from past bursts. Shared by
+// advanceLocked (head drop) and Remove (mid-FIFO drop). Queues are expected
+// shallow, so the compaction rarely fires. The caller must hold q.mu.
+func (c *convQueue) shrinkLocked() {
 	switch {
 	case len(c.items) == 0:
 		c.items = nil
