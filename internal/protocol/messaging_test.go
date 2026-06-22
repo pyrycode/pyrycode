@@ -270,3 +270,126 @@ func TestBackfillDonePayload_RoundTrip(t *testing.T) {
 		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
 	}
 }
+
+func TestModalShownPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "modal_shown.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModalShown {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModalShown)
+	}
+
+	var payload ModalShownPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ModalID != "mdl-7f3a" {
+		t.Errorf("ModalID: got %q, want %q", payload.ModalID, "mdl-7f3a")
+	}
+	if payload.Class != "permission" {
+		t.Errorf("Class: got %q, want %q", payload.Class, "permission")
+	}
+	if payload.Title != "Allow Bash?" {
+		t.Errorf("Title: got %q, want %q", payload.Title, "Allow Bash?")
+	}
+	if payload.Prompt != "claude wants to run: rm -rf build/" {
+		t.Errorf("Prompt: got %q, want %q", payload.Prompt, "claude wants to run: rm -rf build/")
+	}
+	// Array order IS option order: assert both length and the positional ids.
+	if len(payload.Options) != 2 {
+		t.Fatalf("Options: got len %d, want 2", len(payload.Options))
+	}
+	if payload.Options[0].ID != "allow" || payload.Options[0].Label != "Allow" {
+		t.Errorf("Options[0]: got %+v, want {allow Allow}", payload.Options[0])
+	}
+	if payload.Options[1].ID != "deny" || payload.Options[1].Label != "Deny" {
+		t.Errorf("Options[1]: got %+v, want {deny Deny}", payload.Options[1])
+	}
+	if payload.DefaultOptionID != "deny" {
+		t.Errorf("DefaultOptionID: got %q, want %q", payload.DefaultOptionID, "deny")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestModalAnswerPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "modal_answer.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModalAnswer {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModalAnswer)
+	}
+
+	var payload ModalAnswerPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ModalID != "mdl-7f3a" {
+		t.Errorf("ModalID: got %q, want %q", payload.ModalID, "mdl-7f3a")
+	}
+	if payload.OptionID != "allow" {
+		t.Errorf("OptionID: got %q, want %q", payload.OptionID, "allow")
+	}
+	// AnswerToken round-trip is AC-pinned: it is the idempotency key #703 dedups on.
+	if payload.AnswerToken != "atk-91c2" {
+		t.Errorf("AnswerToken: got %q, want %q", payload.AnswerToken, "atk-91c2")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestModalCancelPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "modal_cancel.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModalCancel {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModalCancel)
+	}
+
+	var payload ModalCancelPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ModalID != "mdl-7f3a" {
+		t.Errorf("ModalID: got %q, want %q", payload.ModalID, "mdl-7f3a")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestModalDismissedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "modal_dismissed.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModalDismissed {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModalDismissed)
+	}
+
+	var payload ModalDismissedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ModalID != "mdl-7f3a" {
+		t.Errorf("ModalID: got %q, want %q", payload.ModalID, "mdl-7f3a")
+	}
+	if payload.Outcome != "allow" {
+		t.Errorf("Outcome: got %q, want %q", payload.Outcome, "allow")
+	}
+	if payload.Source != "remote" {
+		t.Errorf("Source: got %q, want %q", payload.Source, "remote")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}

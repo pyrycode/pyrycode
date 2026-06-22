@@ -432,6 +432,10 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`modal_shown`** | binary → phone | no | **New in v2** (interactive, capability-gated). Modal surfaced to the phone (#597 Phase 3). See [Modal](#modal-v2). |
+| **`modal_answer`** | phone → binary | no | **New in v2.** Inbound control — phone answers a modal. See [Modal](#modal-v2). |
+| **`modal_cancel`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a modal. See [Modal](#modal-v2). |
+| **`modal_dismissed`** | binary → phone | no | **New in v2.** Modal resolution notice. See [Modal](#modal-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -606,6 +610,53 @@ Direction **binary → phone**. The one-shot text picture answering a `request_s
 | `conversation_id` | string | Conversation this snapshot belongs to. |
 | `text` | string | The current screen rendered to **plain text only — never raw terminal control codes** (preserves ADR 025's no-raw-bytes invariant). Multi-line. |
 | `ts` | RFC3339 | When the snapshot was rendered. |
+
+### Modal (v2)
+
+When the supervised claude surfaces a modal — a permission prompt, a plan-approval, a tool-confirmation — the daemon describes it to the phone, the phone answers, and the daemon drives that answer back into claude (#597 Phase 3). The lifecycle is `modal_shown` → `modal_answer` / `modal_cancel` → `modal_dismissed`. `modal_shown` rides the `interactive` capability (#607): **viewing a modal is ungated**, but **answering is gated separately, per-device, default OFF** in the [Security model](#security-model) (#702) — that gate is not a wire capability. All fields are always present (no omitempty). This section is wire vocabulary only; the minting, dedup, validation, and fan-out runtime is the producer's (#703, with #706/#702 building ownership/gating).
+
+#### `modal_shown`
+
+Direction **binary → phone** (outbound v2 modal-surfaced event; not in `v1TypeSet` — an old phone never receives it).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `modal_id` | string | One-time opaque nonce minted per surfaced modal. The **sole correlation key** — see the security note below. |
+| `class` | string | Modal kind over a closed wire set (e.g. `permission`). Plain string, not a named enum; the exhaustive vocabulary is the producer's (#703). |
+| `title` | string | Short modal title. |
+| `prompt` | string | The modal's body/question text. |
+| `options` | array | Ordered list of `{id, label}` choices. **Array order is the canonical display/selection order.** |
+| `default_option_id` | string | The `id` of the default/highlighted option. **Invariant:** MUST equal one of `options[].id`. |
+
+#### `modal_answer`
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler; the interception, validation (against the daemon's current outstanding `modal_id`, #703/#706), and dedup live in the producer.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `modal_id` | string | The modal being answered. Validated against the daemon's current outstanding `modal_id`; a stale one is rejected (#706, first-answer-wins). |
+| `option_id` | string | The selected `options[].id`. |
+| `answer_token` | string | Client-minted idempotency key — see the security note below. |
+
+#### `modal_cancel`
+
+Direction **phone → binary** (inbound v2 control). Intercepted before `dispatch.Route` like `modal_answer`; no `dispatch.Route` handler.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `modal_id` | string | The modal to cancel/dismiss from the phone. |
+
+#### `modal_dismissed`
+
+Direction **binary → phone** (outbound v2 modal-resolution event; not in `v1TypeSet` — an old phone never receives it).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `modal_id` | string | The modal that was resolved. |
+| `outcome` | string | The selected `options[].id` when answered, or a producer-defined sentinel for cancel/timeout. Plain string; the sentinel vocabulary is the producer's (#703), documented not enforced. |
+| `source` | string | What resolved it. Closed set: `remote` (a phone `modal_answer`/`modal_cancel`), `local` (answered/cancelled at the desktop TTY), `timeout` (deny-on-timeout fired). |
+
+**Security & validation contract.** `modal_id` is a one-time, **opaque, unguessable** nonce minted per surfaced modal, and it is the **sole correlation key**: these payloads carry no `conversation_id`. The daemon resolves `modal_id` against its **own** outstanding-modal state — it never trusts a phone-asserted conversation, and maps `option_id` against its own recorded option list. The daemon **rejects** an inbound `modal_answer`/`modal_cancel` whose `modal_id` is not the current outstanding one (#703/#706, first-answer-wins), so a stale or guessed `modal_id` resolves nothing. `answer_token` is a **client-minted idempotency key** (its uniqueness and stability matter; secrecy does not) that lets the daemon collapse a replayed or reordered `modal_answer` to a no-op. It is **not** the authorization: authorization is `modal_id` validity (#706) plus the per-device answer gate (#702, default OFF); `answer_token` only deduplicates among already-authorized answers. The minting + dedup + validation runtime is **#703/#706**; the answer gate is **#702**.
 
 ## Backfill semantics
 

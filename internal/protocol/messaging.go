@@ -72,3 +72,91 @@ type MessageChunkPayload struct {
 type BackfillDonePayload struct {
 	Delivered int `json:"delivered"`
 }
+
+// Modal v2 wire payloads (epic #597 Phase 3, docs/protocol-mobile.md § Modal).
+// These describe a modal the supervised claude surfaced (a permission prompt, a
+// plan-approval, a tool-confirmation) over the encrypted mobile wire and the
+// phone's answer to it. This is wire vocabulary only: pure structs and their
+// (de)serialization. The minting of modal_id nonces, the dedup of answers by
+// answer_token, the inbound-answer validation, and the fan-out gate all live in
+// the producer (#703, with #706/#702 building ownership/gating), NOT here.
+//
+// No field carries omitempty: every field is always present on the wire so the
+// testdata fixtures pin the full shape and boundary values like an empty
+// default_option_id or option_id do not silently vanish.
+
+// ModalOption is a single, ordered choice offered by a ModalShownPayload. ID is
+// the stable identifier ModalAnswerPayload.OptionID and
+// ModalShownPayload.DefaultOptionID reference; Label is the human-readable
+// display text.
+type ModalOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// ModalShownPayload is the body of an Envelope whose Type == TypeModalShown
+// (docs/protocol-mobile.md § Modal). Binary → phone direction; surfaces a modal
+// to the phone. It rides the "interactive" capability (#607) — viewing a modal
+// is ungated; answering is gated separately, per-device (#702).
+//
+// ModalID is a one-time, opaque, unguessable nonce minted per surfaced modal
+// (by #703). It is the sole correlation key: there is no conversation_id, so
+// the daemon resolves ModalID against its own outstanding-modal state and never
+// trusts a phone-asserted conversation. Options is ordered — the JSON-array
+// order is the canonical display/selection order. DefaultOptionID MUST equal
+// one of Options[].ID (documented invariant; the producer enforces it). Class
+// is a plain string over a closed wire set (e.g. "permission"), not a named
+// enum (leaf-data convention, matching MessagePayload.Role); the exhaustive
+// class vocabulary is #703's to finalize.
+type ModalShownPayload struct {
+	ModalID         string        `json:"modal_id"`
+	Class           string        `json:"class"`
+	Title           string        `json:"title"`
+	Prompt          string        `json:"prompt"`
+	Options         []ModalOption `json:"options"`
+	DefaultOptionID string        `json:"default_option_id"`
+}
+
+// ModalAnswerPayload is the body of an Envelope whose Type == TypeModalAnswer
+// (docs/protocol-mobile.md § Modal). Phone → binary direction.
+//
+// This is an inbound v2 *control* envelope, structurally like
+// RequestSnapshotPayload / TypeRekeyRequest: the v2 session manager intercepts
+// it at dispatchAppFrame before dispatch.Route. There is NO dispatch.Route
+// handler — the interception, validation (against the daemon's current
+// outstanding ModalID, #703/#706), and dedup live in the producer.
+//
+// AnswerToken is a client-minted idempotency key (uniqueness and stability
+// matter, secrecy does not): it lets the daemon collapse a replayed or
+// reordered modal_answer to a no-op (#703). It is NOT the authorization —
+// authorization is ModalID validity (#706) plus the per-device gate (#702).
+type ModalAnswerPayload struct {
+	ModalID     string `json:"modal_id"`
+	OptionID    string `json:"option_id"`
+	AnswerToken string `json:"answer_token"`
+}
+
+// ModalCancelPayload is the body of an Envelope whose Type == TypeModalCancel
+// (docs/protocol-mobile.md § Modal). Phone → binary direction; cancels an
+// outstanding modal from the phone.
+//
+// Like ModalAnswerPayload this is an inbound v2 control envelope intercepted at
+// dispatchAppFrame before dispatch.Route — there is NO dispatch.Route handler.
+type ModalCancelPayload struct {
+	ModalID string `json:"modal_id"`
+}
+
+// ModalDismissedPayload is the body of an Envelope whose Type ==
+// TypeModalDismissed (docs/protocol-mobile.md § Modal). Binary → phone
+// direction; notifies the phone that a modal was resolved.
+//
+// Outcome is the selected ModalOption.ID when answered, or a producer-defined
+// sentinel for cancel/timeout (plain string; the sentinel vocabulary is #703's,
+// documented not enforced). Source is the closed set {remote, local, timeout}:
+// remote = a phone modal_answer/modal_cancel, local = answered/cancelled at the
+// desktop TTY, timeout = deny-on-timeout fired. Plain string, not a named enum.
+type ModalDismissedPayload struct {
+	ModalID string `json:"modal_id"`
+	Outcome string `json:"outcome"`
+	Source  string `json:"source"`
+}
