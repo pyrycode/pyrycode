@@ -179,6 +179,14 @@ type Supervisor struct {
 	// literal (idle prompt, spinner, pasted-text chip) leaks into pyrycode — all
 	// that knowledge stays inside tui-driver.
 	deliverFn func(ctx context.Context, sess *tuidriver.Session, payload []byte) error
+
+	// keystrokeFn actuates one abstract modal keystroke against a captured live
+	// Session. Set once in New to sendModalKeystroke; overridden only in tests —
+	// the same unexported-injection seam as deliverFn — because the real
+	// tui-driver calls nil-deref the PTY on a zero-value Session, so verb
+	// dispatch cannot otherwise be unit-tested without a live claude. Immutable
+	// post-New, so the modal methods read it lock-free.
+	keystrokeFn func(sess *tuidriver.Session, k modalKey, choice string) error
 }
 
 // State returns a snapshot of the current supervisor state. Safe to call from
@@ -545,6 +553,7 @@ func New(cfg Config) (*Supervisor, error) {
 		sessReadyCh: make(chan struct{}),
 	}
 	s.deliverFn = s.deliverViaSession
+	s.keystrokeFn = sendModalKeystroke
 	return s, nil
 }
 
