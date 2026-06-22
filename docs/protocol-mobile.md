@@ -467,6 +467,8 @@ Binary validates the token after decrypting the handshake message. If invalid, t
 
 ### Capability negotiation (v2)
 
+> **Superseded as a requirement — 2026-06-22 (ADR 025 amendment).** This tool is self-hosted with a single operator who controls both ends and ships the app and daemon together, so there is no old-app install base. The daemon may assume every phone is `interactive`; the non-interactive coarse `message` fan-out is dead code slated for removal. The `capabilities` field below stays as a harmless additive field, but it carries no backward-compatibility obligation and no future work should treat old-phone interop as a requirement.
+
 Both `hello` and `hello_ack` carry an optional `capabilities: []string` field (omitempty — absent, not `null`, when empty, so a v1 phone's `hello` stays byte-identical). The phone advertises the features it understands in its `hello`; the daemon echoes the features *it* supports in `hello_ack`.
 
 | Field | Type | On | Meaning |
