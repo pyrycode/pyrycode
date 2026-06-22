@@ -1,0 +1,1 @@
+{"id":501,"type":"modal_shown","ts":"2026-06-22T10:00:00Z","payload":{"modal_id":"mdl-7f3a","class":"permission","title":"Allow Bash?","prompt":"claude wants to run: rm -rf build/","options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}],"default_option_id":"deny"}}

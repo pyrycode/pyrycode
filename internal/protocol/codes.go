@@ -158,3 +158,36 @@ const (
 const (
 	TypeSessionTransition = "session_transition" // binary → phone, outbound v2 session-boundary marker
 )
+
+// Mobile Protocol v2 modal vocabulary (epic #597 Phase 3,
+// docs/protocol-mobile.md § Modal). When the supervised claude surfaces a modal
+// (a permission prompt, a plan-approval, a tool-confirmation), the daemon
+// describes it to the phone, the phone answers, and the daemon drives that
+// answer back into claude. modal_shown rides the existing "interactive"
+// capability (#607) negotiated in hello/hello_ack — viewing a modal is ungated;
+// answering is gated separately, per-device, default OFF, in the security model
+// (#702), which is NOT a wire capability.
+//
+// Two natures in one cluster. modal_shown / modal_dismissed are outbound
+// binary → phone events an old phone must never receive. modal_answer /
+// modal_cancel are inbound phone → binary *control* envelopes the v2 session
+// manager intercepts at internal/relay/v2session.go's dispatchAppFrame before
+// internal/dispatch.Route (like TypeRekeyRequest / TypeRequestSnapshot); there
+// is NO dispatch.Route handler for them.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// either route an inbound control envelope to the handler chain or offer an
+// outbound modal event to an old phone, violating the v1/v2 boundary. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; these four live in the latter.
+//
+// This ticket (#701) is wire vocabulary only — the producer that mints modal_id
+// nonces, dedups answers by answer_token, validates inbound answers, and gates
+// the fan-out is sibling #703 (with #706 building two-heads ownership and #702
+// the per-device answer gate).
+const (
+	TypeModalShown     = "modal_shown"     // binary → phone, outbound v2 modal-surfaced event
+	TypeModalAnswer    = "modal_answer"    // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+	TypeModalCancel    = "modal_cancel"    // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+	TypeModalDismissed = "modal_dismissed" // binary → phone, outbound v2 modal-resolution event
+)
