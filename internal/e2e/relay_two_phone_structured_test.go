@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/noise"
@@ -25,25 +24,26 @@ import (
 
 // TestTwoPhoneStructured_InteractiveReceivesStream is the live structured-receive
 // capstone for #642 (EPIC #596, ADR 025 § Phase 2). It is the LIVE confirmation
-// of the capability-gated dual-path that #632/#633/#634 shipped and proved
-// deterministically: two phones handshake to ONE daemon over real Noise
-// sessions; phone A is granted `interactive`, phone B is not. A drives a turn
-// (stamping the supervisor cursor) and then real claude-format turn events are
-// fed into the daemon's live structured-turn producer via fakeclaude. The test
-// asserts the full dual-path end to end:
+// that the capability-gated structured stream reaches an interactive phone while
+// a non-interactive phone is kept out at the gate. Two phones handshake to ONE
+// daemon over real Noise sessions; phone A is granted `interactive`, phone B is
+// not. A drives a turn (stamping the supervisor cursor) and then real
+// claude-format turn events are fed into the daemon's live structured-turn
+// producer via fakeclaude. The test asserts:
 //
 //   - A (interactive) RECEIVES and decrypts the structured envelopes
-//     (turn_state / assistant_delta / tool_use / turn_end) and NEVER a coarse
-//     `message` (AC1, AC2/AC3 A-side).
-//   - B (non-interactive) receives ONLY the coarse `message` (the spinner chunk
-//     fanned by the #589/#634 coarse path) and NEVER a structured envelope
-//     (AC2/AC3 B-side).
+//     (turn_state / assistant_delta / tool_use / turn_end) (AC1, AC2 A-side).
+//   - B (non-interactive) receives NOTHING turn-related: neither a structured
+//     envelope (the #632 capability gate skips it) nor a coarse `message` (the v2
+//     coarse fan-out was removed in #699). A non-interactive conn gets no
+//     assistant output at all — the delivery boundary is preserved (AC2/AC3
+//     B-side).
 //
 // The structured events flow through the REAL production stack (tui-driver
 // JSONL parse → turnbridge mapper → #632 capability-gated emitter → Noise seal
 // → phone decrypt); only the claude *process* is the fakeclaude stand-in, as it
 // is for every other e2e in this suite (option (b) of the ticket's harness
-// choice). No production change — the dual-path code already shipped.
+// choice).
 //
 // VACUOUS-PASS GUARD (security-relevant, the headline AC): B's "never receives
 // a structured envelope" negative is meaningless unless the structured path is
@@ -220,11 +220,12 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 	}
 	sendNoiseMsg(t, phoneA, ciphertext)
 
-	// Decrypt-drain A to the sealed ack. A is interactive, so the coarse spinner
-	// `message` is never pushed to A — A's pre-fixture stream is the ack alone.
-	// Every binary→phone frame is decrypted in capture order (sequential receive
-	// nonce). TUI mode makes the ack prompt; the deadline allows for first-run
-	// fakeclaude build + startup slack.
+	// Decrypt-drain A to the sealed ack. No `message` is ever pushed to A (the v2
+	// coarse fan-out was removed in #699), so A's pre-fixture stream is the ack
+	// alone. The TypeMessage check below stays as a regression tripwire. Every
+	// binary→phone frame is decrypted in capture order (sequential receive nonce).
+	// TUI mode makes the ack prompt; the deadline allows for first-run fakeclaude
+	// build + startup slack.
 	var ackEnv protocol.Envelope
 	ackDeadline := time.Now().Add(15 * time.Second)
 	for {
@@ -234,7 +235,7 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 		}
 		env := decryptInnerEnvelope(t, readInnerFrame(t, phoneA, remaining), recvA)
 		if env.Type == protocol.TypeMessage {
-			t.Fatalf("interactive phone A received a coarse `message` before the ack (coarse must route only to non-interactive conns): payload=%s", string(env.Payload))
+			t.Fatalf("phone A received a `message` envelope before the ack; the v2 coarse fan-out was removed in #699 and no v2 path should mint one: payload=%s", string(env.Payload))
 		}
 		if env.Type == protocol.TypeAck {
 			ackEnv = env
@@ -271,8 +272,9 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 	// under one deadline (fakephone closes the WS on a timed-out Receive, so a
 	// single long deadline with back-to-back reads, never a short poll). Collect
 	// structured types; break once all four required types are seen; fail loud
-	// on any coarse `message`; assert every structured payload addresses the
-	// cursor'd conversation.
+	// on any `message` (the v2 coarse path is gone post-#699 — a regression
+	// tripwire); assert every structured payload addresses the cursor'd
+	// conversation.
 	failVacuous := func(seen int) {
 		t.Fatalf("interactive phone A did not receive the full structured stream within the deadline "+
 			"(observed %d structured envelope(s); missing required types %v). The structured path must be "+
@@ -303,7 +305,7 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 		}
 		env := decryptInnerEnvelope(t, inner, recvA)
 		if env.Type == protocol.TypeMessage {
-			t.Fatalf("interactive phone A received a coarse `message` envelope (the structured and coarse paths must be mutually exclusive per conn): payload=%s", string(env.Payload))
+			t.Fatalf("phone A received a `message` envelope; the v2 coarse fan-out was removed in #699 and no v2 path should mint one: payload=%s", string(env.Payload))
 		}
 		if !structuredTypes[env.Type] {
 			continue
@@ -324,18 +326,17 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 	}
 	t.Logf("interactive phone A received the full structured stream (%d envelopes incl. turn_state/assistant_delta/tool_use/turn_end)", seenStructured)
 
-	// --- AC2/AC3 (B side). The NON-interactive phone receives the coarse
-	// `message` (the spinner chunk fanned by the #589/#634 coarse path to
-	// non-interactive conns) and NEVER a structured envelope. All of B's frames
-	// are already queued by now (the coarse message was pushed during the turn
-	// drive, before A's ack; any structured leak would have been pushed during
-	// A's now-complete structured drain), so once the coarse marker is in hand a
-	// short trailing window suffices to surface a leak before the receive
-	// timeout exits the loop.
-	var bCoarse protocol.Envelope
-	var bCoarsePayload protocol.MessagePayload
-	gotCoarse := false
-	bDeadline := time.Now().Add(15 * time.Second)
+	// --- AC2/AC3 (B side). The NON-interactive phone receives NOTHING
+	// turn-related: the #632 capability gate keeps it off the structured stream,
+	// and the v2 coarse `message` fan-out was removed in #699, so no coarse
+	// envelope is minted for it either. All of B's frames are already queued by
+	// now (any structured leak would have been pushed during A's now-complete
+	// structured drain), so a bounded drain that surfaces no turn-related
+	// envelope confirms the delivery boundary. fakephone closes the WS on a
+	// timed-out Receive, so use a single deadline and read back-to-back: queued
+	// frames return at wire speed and only the terminal empty read consumes the
+	// deadline.
+	bDeadline := time.Now().Add(5 * time.Second)
 	for {
 		remaining := time.Until(bDeadline)
 		if remaining <= 0 {
@@ -360,47 +361,20 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 			t.Fatalf("non-interactive phone B received a structured envelope %q (capability-gate leak): payload=%s", env.Type, string(env.Payload))
 		}
 		if env.Type == protocol.TypeMessage {
-			var p protocol.MessagePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("phone B decode message payload: %v", err)
-			}
-			bCoarse = env
-			bCoarsePayload = p
-			gotCoarse = true
-			// Coarse marker in hand; tighten the deadline so the trailing
-			// leak-check exits promptly (every B frame is already queued).
-			if d := time.Now().Add(2 * time.Second); d.Before(bDeadline) {
-				bDeadline = d
-			}
+			t.Fatalf("non-interactive phone B received a coarse `message` envelope; the v2 coarse fan-out was removed in #699 and no v2 path should mint one: payload=%s", string(env.Payload))
 		}
-	}
-	if !gotCoarse {
-		t.Fatal("non-interactive phone B never received the coarse `message` envelope")
-	}
-	if bCoarse.InReplyTo != nil {
-		t.Errorf("B coarse InReplyTo: got %v, want nil (server-initiated)", bCoarse.InReplyTo)
-	}
-	if bCoarsePayload.ConversationID != knownConvID {
-		t.Errorf("B coarse ConversationID: got %q, want %q", bCoarsePayload.ConversationID, knownConvID)
-	}
-	if bCoarsePayload.Role != "assistant" {
-		t.Errorf("B coarse Role: got %q, want %q", bCoarsePayload.Role, "assistant")
-	}
-	if !conversations.ValidID(bCoarsePayload.MessageID) {
-		t.Errorf("B coarse MessageID %q is not a valid UUIDv4", bCoarsePayload.MessageID)
 	}
 }
 
 // driveHandshakeNonInteractivePinned mirrors driveHandshakeToOpenDaemon
 // (relay_v2_daemon_test.go) but additionally asserts the hello_ack early data
 // does NOT echo the interactive grant — the complement of
-// driveHandshakeToOpenDaemonInteractive's pin (relay_two_phone_coarse_test.go).
-// This makes phone B's "never receives a structured envelope" negative airtight
-// at the capability-gate boundary: a mis-granted B would otherwise only fail
-// downstream (when it received a structured envelope), so pinning the non-grant
-// closes the gap between "advertised nothing" and "was not granted interactive".
-// Defined locally (not in relay_v2_handshake_test.go, which is off-limits to the
-// in-flight feature/449 overlap), mirroring the coarse test's local helpers.
+// driveHandshakeToOpenDaemonInteractive's pin (below). This makes phone B's
+// "never receives a structured envelope" negative airtight at the capability-gate
+// boundary: a mis-granted B would otherwise only fail downstream (when it
+// received a structured envelope), so pinning the non-grant closes the gap
+// between "advertised nothing" and "was not granted interactive". Defined locally
+// (not in relay_v2_handshake_test.go) alongside the other v2 two-phone helpers.
 func driveHandshakeNonInteractivePinned(t *testing.T, phone *fakephone.Client, pubKey []byte, token string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
 	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -443,6 +417,84 @@ func driveHandshakeNonInteractivePinned(t *testing.T, phone *fakephone.Client, p
 	}
 	if slices.Contains(ack.Capabilities, protocol.CapabilityInteractive) {
 		t.Fatalf("daemon granted interactive to a phone that advertised none (hello_ack capabilities=%v); B's no-structured negative would be testing the wrong gate state", ack.Capabilities)
+	}
+	return initSend, initRecv
+}
+
+// buildHelloEarlyInteractive mirrors buildHelloEarly (relay_v2_handshake_test.go)
+// but advertises the interactive capability so the daemon grants it. Defined here
+// (not in relay_v2_handshake_test.go) alongside the other v2 two-phone helpers.
+func buildHelloEarlyInteractive(t *testing.T, token string) []byte {
+	t.Helper()
+	payload, err := json.Marshal(protocol.HelloClientPayload{
+		Role:             "client",
+		DeviceName:       "v2-e2e-phone",
+		ClientVersion:    "0.0.1-test",
+		ProtocolVersions: []string{"v2"},
+		Token:            token,
+		Capabilities:     []string{protocol.CapabilityInteractive},
+	})
+	if err != nil {
+		t.Fatalf("marshal interactive hello payload: %v", err)
+	}
+	envBytes, err := json.Marshal(protocol.Envelope{
+		ID:      1,
+		Type:    protocol.TypeHello,
+		TS:      time.Now().UTC(),
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("marshal interactive hello envelope: %v", err)
+	}
+	return envBytes
+}
+
+// driveHandshakeToOpenDaemonInteractive is driveHandshakeToOpenDaemon
+// (relay_v2_daemon_test.go) with a capability-advertising hello. It also asserts
+// the hello_ack early data echoes the interactive grant, pinning the precondition
+// that this conn is on the structured-stream path (the grant phone A relies on).
+func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client, pubKey []byte, token string) (*noise.CipherState, *noise.CipherState) {
+	t.Helper()
+	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("phone keygen: %v", err)
+	}
+	initiator, err := noise.NewInitiator(initPriv.Bytes(), pubKey)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	initMsg, err := initiator.WriteInit(buildHelloEarlyInteractive(t, token))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	sendNoiseInit(t, phone, initMsg)
+
+	inner := readInnerFrame(t, phone, 3*time.Second)
+	if inner.Type != protocol.TypeNoiseResp {
+		t.Fatalf("handshake: got inner type %q, want %q", inner.Type, protocol.TypeNoiseResp)
+	}
+	respRaw, err := base64.StdEncoding.DecodeString(inner.Data)
+	if err != nil {
+		t.Fatalf("decode noise_resp data: %v", err)
+	}
+	earlyAck, initSend, initRecv, err := initiator.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("initiator.ReadResp: %v", err)
+	}
+
+	var ackEnv protocol.Envelope
+	if err := json.Unmarshal(earlyAck, &ackEnv); err != nil {
+		t.Fatalf("decode hello_ack envelope: %v", err)
+	}
+	if ackEnv.Type != protocol.TypeHelloAck {
+		t.Fatalf("early-data type = %q, want %q", ackEnv.Type, protocol.TypeHelloAck)
+	}
+	var ack protocol.HelloAckPayload
+	if err := json.Unmarshal(ackEnv.Payload, &ack); err != nil {
+		t.Fatalf("decode hello_ack payload: %v", err)
+	}
+	if !slices.Contains(ack.Capabilities, protocol.CapabilityInteractive) {
+		t.Fatalf("daemon did not grant interactive (hello_ack capabilities=%v); test precondition unmet", ack.Capabilities)
 	}
 	return initSend, initRecv
 }

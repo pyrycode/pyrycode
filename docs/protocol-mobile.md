@@ -408,7 +408,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `hello` | phone → binary | yes (in `noise_init`) | Includes device-token, last_seen_ts; optional `last_event_id` for mid-turn reconnect replay (#647). |
 | `hello_ack` | binary → phone | yes (in `noise_resp`) | Includes `conn_id`. |
 | `send_message` | phone → binary | no | |
-| `message` | binary → phone | no | |
+| `message` | binary → phone | no | v1 / dispatch-leg coarse assistant-turn type. Not minted on the v2 interactive path — the v2 coarse `message` fan-out was removed in #699; v2 assistant output flows only through the structured interactive stream below. |
 | `list_conversations` | phone → binary | no | |
 | `conversations` | binary → phone | no | |
 | `create_conversation` | phone → binary | no | |
@@ -467,7 +467,7 @@ Binary validates the token after decrypting the handshake message. If invalid, t
 
 ### Capability negotiation (v2)
 
-> **Superseded as a requirement — 2026-06-22 (ADR 025 amendment).** This tool is self-hosted with a single operator who controls both ends and ships the app and daemon together, so there is no old-app install base. The daemon may assume every phone is `interactive`; the non-interactive coarse `message` fan-out is dead code slated for removal. The `capabilities` field below stays as a harmless additive field, but it carries no backward-compatibility obligation and no future work should treat old-phone interop as a requirement.
+> **Superseded as a requirement — 2026-06-22 (ADR 025 amendment).** This tool is self-hosted with a single operator who controls both ends and ships the app and daemon together, so there is no old-app install base. The daemon assumes every phone is `interactive`; the non-interactive coarse `message` fan-out has been removed (#699). The `capabilities` field below stays as a harmless additive field, but it carries no backward-compatibility obligation and no future work should treat old-phone interop as a requirement.
 
 Both `hello` and `hello_ack` carry an optional `capabilities: []string` field (omitempty — absent, not `null`, when empty, so a v1 phone's `hello` stays byte-identical). The phone advertises the features it understands in its `hello`; the daemon echoes the features *it* supports in `hello_ack`.
 
@@ -482,7 +482,7 @@ Defined capability strings:
 |---|---|
 | `interactive` | The phone can render the structured interactive event stream below. |
 
-The daemon MUST echo only what it itself supports — the agreed set is the **intersection** of the phone's advertised set with the daemon's own, never a blind mirror of the phone's claims. A phone that does not advertise `interactive` (or whose `interactive` is not echoed back) continues to receive the coarse v1 `message` fan-out only. The intersection logic — the daemon-side trust decision computing advertised ∩ supported, echoing it in `hello_ack`, and recording the negotiated `interactive` flag per connection — is implemented in #626 (`internal/relay` v2 session manager; `negotiateCapabilities` + the capability-aware `ActiveConns` enumeration). The capability-gated fan-out that routes the interactive event stream only to granted connections remains a later #596 child; the wire fields here are advertisement only.
+The daemon MUST echo only what it itself supports — the agreed set is the **intersection** of the phone's advertised set with the daemon's own, never a blind mirror of the phone's claims. A phone that does not advertise `interactive` (or whose `interactive` is not echoed back) simply does not receive the structured interactive event stream; there is no separate non-interactive `message` fan-out on v2 (it was removed in #699). The intersection logic — the daemon-side trust decision computing advertised ∩ supported, echoing it in `hello_ack`, and recording the negotiated `interactive` flag per connection — is implemented in #626 (`internal/relay` v2 session manager; `negotiateCapabilities` + the capability-aware `ActiveConns` enumeration). The capability-gated fan-out that routes the interactive event stream only to granted connections shipped in #632/#633.
 
 ### Interactive events (v2, capability-gated)
 
