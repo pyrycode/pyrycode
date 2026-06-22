@@ -346,9 +346,10 @@ consumer (integration slice, building on #616's fan-out) owns the envelope `ID` 
 `TS` clock read, `json.Marshal`, AEAD seal, `Push`, the drop-log for un-mappable
 events, **and** every lifecycle decision (which conversation/turn/seq/state applies,
 turn-id assignment, seq advancement, coalescing). See
-`cmd/pyry/assistant_turn_v2.go` for the existing shape that wraps a payload into an
-`Envelope`. This is why the adapter is pure: every clock read, counter, and I/O lives
-in the consumer.
+`cmd/pyry/session_transition_v2.go` (or the v1 `cmd/pyry/assistant_turn.go`) for the
+existing shape that wraps a payload into an `Envelope` — the structurally-identical v2
+coarse emitter `assistant_turn_v2.go` was removed in [#699](../codebase/699.md). This is
+why the adapter is pure: every clock read, counter, and I/O lives in the consumer.
 
 ## The follow-active subscriber (`NewTargetSubscriber`, #679)
 
