@@ -7,13 +7,16 @@ turns, with one serial drain goroutine per active conversation. It is the
 event stream), `msgqueue` buffers what phones send **in** while claude is busy,
 and releases it into the live claude session in order, one at a time, paced by
 claude reaching idle / turn-end. Landed in #704 (EPIC #597 Phase 3 — interactive
-modals/permissions/queue, ADR 025).
+modals/permissions/queue, ADR 025); the introspection / remove-by-id /
+change-notification API was added additively in #719.
 
-This slice ships the **engine only, unwired** — no package depends on it yet, the
+The package ships **engine only, unwired** — no package depends on it yet, the
 same rhythm as the `turnbridge` producer (#606 shipped unwired, #616 wired it).
 The live wiring into the `send_message` handler + the `cmd/pyry` constructor, the
 `queue_state` / `dequeue_message` reporting/removal wire types, and any inbound
-bound/backpressure policy are **separate slices** (#705 / the wiring slice).
+bound/backpressure policy are **separate slices** (#705 / the wiring slice). #719
+added the engine-side primitives those consumers need (`Snapshot`, `Remove`,
+`OnChange`) — still additive and unwired.
 
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   — `send_message` is "queued by the daemon when claude is busy" (line 123); each
@@ -33,7 +36,7 @@ with no defined order. `msgqueue` replaces that synchronous request/response wit
 **enqueue-then-drain**: `Enqueue` is non-blocking and returns an id immediately;
 the drain delivers asynchronously through the same #594 reliable path.
 
-## Exported surface (3 types)
+## Exported surface
 
 ```go
 // DeliverFunc is the injected reliable-delivery seam — the shape of
@@ -42,21 +45,42 @@ the drain delivers asynchronously through the same #594 reliable path.
 // drain's turn-end pacing. A non-nil return ⇒ retry the same FIFO head.
 type DeliverFunc func(ctx context.Context, convID string, payload []byte) error
 
+// ChangeFunc is the injected change-notification seam (#719) — same seam style
+// as DeliverFunc. Fires, NEVER under q.mu, with the convID whose backlog
+// changed (enqueue / delivery-advance / successful Remove). Carries only convID;
+// the consumer re-reads via Snapshot (edge-triggered, coalescing is the
+// consumer's choice). MUST NOT block, MUST be concurrency-safe. nil ⇒ disabled.
+type ChangeFunc func(convID string)
+
+// QueuedMessage is the engine-side projection of ADR 025's {queued_msg_id, text,
+// ts} record (#719); the element Snapshot returns. Text is untrusted phone
+// transit content — never log it, only surface it to the authorized conversation.
+type QueuedMessage struct {
+    ID   uint64
+    Text string
+    TS   time.Time
+}
+
 type Config struct {
     Deliver       DeliverFunc   // required; New errors if nil
     RetryInterval time.Duration // <= 0 ⇒ defaultRetryInterval (1s); poll cadence while claude is unavailable
+    OnChange      ChangeFunc    // optional (#719); nil ⇒ change notification disabled
     Logger        *slog.Logger  // nil ⇒ slog.Default()
 }
 
-func New(cfg Config) (*Queue, error)                // errors if cfg.Deliver == nil
-func (q *Queue) Enqueue(convID, text string) uint64 // non-blocking; returns the stable per-conv id (>= 1)
-func (q *Queue) Run(ctx context.Context) error      // lifecycle; blocks until ctx done, then joins all drains
+func New(cfg Config) (*Queue, error)                       // errors if cfg.Deliver == nil
+func (q *Queue) Enqueue(convID, text string) uint64        // non-blocking; returns the stable per-conv id (>= 1)
+func (q *Queue) Run(ctx context.Context) error             // lifecycle; blocks until ctx done, then joins all drains
+func (q *Queue) Snapshot(convID string) []QueuedMessage    // #719: ordered copy of the backlog; unknown conv ⇒ nil
+func (q *Queue) Remove(convID string, id uint64) bool      // #719: drop a not-in-flight queued msg; true iff removed
 ```
 
 `New` **returns an error** (does not panic) on a nil `Deliver` — the seam is
 caller-supplied wiring, so a missing one is a wiring error to surface, not a
 programmer-constant to panic on (contrast `eventring.New`'s bound, which *does*
-panic). `RetryInterval` and `Logger` fall back to their defaults.
+panic). `RetryInterval`, `OnChange`, and `Logger` fall back to their defaults; a
+nil `OnChange` is the supported "notification disabled" default (no validation,
+unlike the required `Deliver`).
 
 Internal shapes mirror ADR 025's record: `queued{id, text, ts}`, and a
 per-conversation `convQueue{items []queued, nextID uint64, draining bool}` held in
@@ -117,16 +141,68 @@ all. A `ctx.Err()`-based gate would **not** give this happens-before — ctx
 cancellation isn't serialized by the mutex — so the explicit flag is what makes the
 shutdown join `-race`-clean.
 
+## Introspection, removal, and change notification (#719)
+
+An additive read/remove/notify layer the `queue_state` / `dequeue_message`
+consumers (#705) need. No goroutine, no new lock; `Enqueue`/`Run`/stable-id
+semantics untouched.
+
+- **`Snapshot(convID)` — copy under the lock.** Takes `q.mu`, looks up the conv
+  (`nil` ⇒ return `nil`, not an error), else projects each internal `queued` into
+  a `QueuedMessage` value into a freshly allocated slice and returns it. Same
+  snapshot-under-lock + copy-out idiom as the outbound sibling `eventring.After`,
+  so the caller cannot mutate engine state through the result. The **whole**
+  `items` slice is returned, **including the in-flight head**: an item is in the
+  backlog until `advanceLocked` drops it on a confirmed commit, so "current
+  `items`" maps exactly to "not-yet-delivered." The snapshot does **not** flag
+  which entry is in-flight — `Remove` returning `false` is that signal.
+- **`Remove(convID, id)` — the in-flight-head no-op is the load-bearing rule.**
+  `advanceLocked` blindly drops index 0 (`items[1:]`) on the assumption it is
+  still the just-delivered head; `Enqueue` only ever appends to the tail, so
+  `Remove` is the **first** op that can touch index 0. It refuses index 0 **iff**
+  `c.draining`, decided under the same `q.mu` the drain uses to set/clear
+  `draining` and to peek/advance — making the check-and-splice atomic w.r.t. the
+  drain. `draining == false` ⟺ no goroutine owns `items` (safe to drop index 0);
+  `draining == true` ⟹ no-op on the head, so `advanceLocked` can never drop the
+  wrong message. Non-head removal (`idx >= 1`) is always safe — the drain only
+  touches index 0 and holds a value copy of the head. Unknown conv / unknown /
+  already-delivered id / in-flight head ⇒ `false` no-op (no panic, no reorder);
+  surviving order preserved. This is what guarantees `dequeue_message` **cannot
+  cancel an in-flight delivery** (the #705 handler relies on it).
+- **`shrinkLocked` — shared backing-array hygiene.** The trailing "release at
+  empty / compact when `cap > 2*len`" `switch` was lifted out of `advanceLocked`
+  into `convQueue.shrinkLocked()`, now called by both `advanceLocked` (head drop)
+  and `Remove` (mid-FIFO drop) — extracted, not duplicated, so a mid-FIFO removal
+  doesn't leave a stale backing array. (`Remove`'s slice-delete leaves the freed
+  `queued` value — holding the untrusted `text` — beyond the new `len` until
+  `shrinkLocked` compacts, exactly as `advanceLocked`/`items[1:]` already does;
+  consistent precedent, deliberately not zeroed.)
+- **Change-notification fires after unlock, three sites.** A `notify(convID)`
+  helper does the `onChange != nil` nil-check and is always called **after** `q.mu`
+  is released, only on a real change: `Enqueue` (restructured from `defer
+  q.mu.Unlock()` to explicit unlock + `notify`), the drain's delivery-advance
+  (after `advanceLocked` drops a confirmed head — **not** on the empty-exit or
+  delivery-error/retry paths), and a successful `Remove` (no-ops fire nothing).
+  Firing strictly after unlock is what makes a re-entrant `OnChange` (a consumer
+  that calls back into `Snapshot`/`Remove`/`Enqueue`) re-acquire the lock cleanly
+  and not deadlock against the goroutine that fired it. `OnChange` carries only
+  `convID`; the seam is edge-triggered and the consumer coalesces by re-reading
+  `Snapshot` (matches how the #647 reconnect path treats `eventring`).
+
 ## Concurrency model
 
 - **Goroutines:** one `Run` goroutine (the daemon adds it to its errgroup in the
   wiring slice) + **one drain goroutine per active conversation**, spawned lazily
-  and exiting when its FIFO empties.
+  and exiting when its FIFO empties. `Snapshot`/`Remove` add **no** goroutine —
+  they run on the caller's goroutine; `notify` runs on whichever goroutine
+  performed the mutation (Enqueue caller, a drain, or a Remove caller).
 - **Shared state:** a single `sync.Mutex` (`q.mu`) guards `convs`, each
   `convQueue`, `started`, `closed`, and `q.ctx`. **Leaf lock** — never held across
-  the blocking `deliver` (which can block for a whole claude turn), never nested.
-  This is the same "release before the seconds-long delivery" discipline
-  `WriteUserTurn` itself uses.
+  the blocking `deliver` (which can block for a whole claude turn), and (since
+  #719) never held across `onChange` either, never nested. Both `deliver` and
+  `onChange` are caller-supplied seams that could block or re-enter, so both are
+  called lock-free. This is the same "release before the seconds-long delivery"
+  discipline `WriteUserTurn` itself uses.
 - **TOCTOU on the FIFO head:** the drain **peeks** under the lock and advances only
   **after** a confirmed commit, under the lock again. A concurrent `Enqueue` can
   only append (FIFO tail), never mutate the head, so the in-flight head can't be
@@ -218,25 +294,49 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   return an `ErrQueueFull` sentinel before appending. Zero call sites today, so
   deferring the signature costs no churn — the wiring slice adopts whatever exists
   then.
+- **`Snapshot` / `Remove` boundary crossings (#719) — convID trust is the
+  consumer's job.** Both key by **caller-supplied `convID`**, and `Snapshot`
+  *returns* the opaque `text` (it will flow out to a phone via `queue_state`).
+  Per-conversation maps give isolation-by-construction **once `convID` is
+  trusted**; trusting it is #705's job (bind `convID` to the requesting phone's
+  authorized conversation, exactly as `send_message` does). Cross-conversation
+  **confidentiality** (`Snapshot` reading another conv's queued text) and
+  **integrity** (`Remove` mutating another conv's FIFO) are prevented only there.
+  The engine adds **zero** new log lines — `Snapshot` returns `text` as a value,
+  never logs it; the consumer must preserve the "`text` never logged" discipline
+  across the new exit. `Remove` never touches `nextID`, so the stable-id contract
+  is preserved and a removed id is simply never reused. ADR 025 § Security model
+  lists viewing/dequeuing as a paired phone's **ungated** capability (only
+  answering permission-class modals is gated), so no permission gate is needed.
 
 ## Files
 
 ```
 internal/msgqueue/
-├── queue.go        DeliverFunc, Config, Queue, queued, convQueue; New / Enqueue / Run;
-│                   maybeSpawnDrainLocked, drain, advanceLocked, sleepCtx; defaultRetryInterval
-└── queue_test.go   ordered one-at-a-time drain (in-flight counter fails >1), empty no-op,
-                    per-conversation independence, idle-drains-promptly, lossless-retry/
-                    respawn, stable independent ids, clean-shutdown-no-leak, New(nil) rejects
+├── queue.go                  DeliverFunc, ChangeFunc, QueuedMessage, Config, Queue, queued,
+│                             convQueue; New / Enqueue / Snapshot / Remove / Run; notify,
+│                             maybeSpawnDrainLocked, drain, advanceLocked, shrinkLocked,
+│                             sleepCtx; defaultRetryInterval
+├── queue_test.go             #704: ordered one-at-a-time drain (in-flight counter fails >1),
+│                             empty no-op, per-conversation independence, idle-drains-promptly,
+│                             lossless-retry/respawn, stable independent ids,
+│                             clean-shutdown-no-leak, New(nil) rejects (unmodified by #719)
+└── queue_introspect_test.go  #719: snapshot-in-order, snapshot-is-a-copy, Remove drops
+                              non-head / no-ops on in-flight-head|unknown|already-delivered,
+                              OnChange fires on enqueue|advance|remove (no-op fires nothing),
+                              OnChange fires without holding the lock (re-entrant), new-API
+                              preserves #704 invariants
 ```
 
-~285 LOC production (one new package) + ~368 LOC tests. Stdlib-only
-(`context`, `errors`, `log/slog`, `sync`, `time`); imports **no** `internal/*`
-package — the delivery path arrives as the injected `DeliverFunc`.
+Stdlib-only (`context`, `errors`, `log/slog`, `sync`, `time`); imports **no**
+`internal/*` package — the delivery path arrives as the injected `DeliverFunc`,
+the change-notification path as the injected `ChangeFunc`.
 
 ## Related
 
-- [codebase/704.md](../codebase/704.md) — ticket record (patterns + lessons).
+- [codebase/704.md](../codebase/704.md) — engine ticket record (patterns + lessons).
+- [codebase/719.md](../codebase/719.md) — introspection / remove / change-notify
+  ticket record (the in-flight-head no-op rule, fire-after-unlock).
 - [features/eventring-package.md](eventring-package.md) — the **outbound** sibling
   this mirrors (per-conversation in-memory store, daemon-resident, same restart
   boundary).
@@ -246,6 +346,9 @@ package — the delivery path arrives as the injected `DeliverFunc`.
   injected-function-seam, `Config` + `New` + `Run`" template this engine follows.
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § wire
   protocol (`send_message` queued-by-daemon, the `{queued_msg_id, text, ts}` record).
-- **Consumers (deferred — none wired in #704):** the live `send_message` + `cmd/pyry`
-  wiring slice and #705 (`queue_state` / `dequeue_message` reporting + removal types,
-  and the inbound-bound decision).
+- **Consumers (deferred — none wired in #704/#719):** the live `send_message` +
+  `cmd/pyry` wiring slice and #705 (`queue_state` / `dequeue_message` reporting +
+  removal handlers binding `convID` to the authorized phone, and the inbound-bound
+  decision). #719 added the engine-side primitives (`Snapshot` / `Remove` /
+  `OnChange`) those consumers map onto; the wire types and convID-trust binding
+  remain theirs.
