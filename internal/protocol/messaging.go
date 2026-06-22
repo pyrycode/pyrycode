@@ -160,3 +160,55 @@ type ModalDismissedPayload struct {
 	Outcome string `json:"outcome"`
 	Source  string `json:"source"`
 }
+
+// Queue v2 wire payloads (epic #597 Phase 3, docs/protocol-mobile.md § Queue).
+// These describe the queued-message backlog the daemon reports to the phone and
+// the phone's request to cancel one entry. This is wire vocabulary only: pure
+// structs and their (de)serialization. The emission on queue change, the
+// resolution of conversation_id to an authorized conversation, and the
+// msgqueue.Remove call all live in the producer (#722) / handler (#723), NOT
+// here.
+//
+// No field carries omitempty: every field is always present on the wire so the
+// testdata fixtures pin the full shape. Note that []QueuedItem(nil) marshals to
+// JSON null while a non-nil empty slice marshals to []; the leaf type cannot
+// force non-nil, so an empty backlog's [] vs null rendering is the producer's
+// (#722) call (recommended: emit []) — both round-trip here.
+
+// QueuedItem is one element of QueueStatePayload.Queued — the wire form of
+// msgqueue.QueuedMessage (the producer #722 maps QueuedMessage.ID → QueuedMsgID).
+// Named for its role in the array (the ModalOption precedent), not after the
+// engine type, to keep it wire-scoped. Text is untrusted, phone-originated
+// transit content (see the producer/handler #722/#723 for the never-log
+// discipline).
+type QueuedItem struct {
+	QueuedMsgID uint64    `json:"queued_msg_id"`
+	Text        string    `json:"text"`
+	TS          time.Time `json:"ts"`
+}
+
+// QueueStatePayload is the body of an Envelope whose Type == TypeQueueState
+// (docs/protocol-mobile.md § Queue). Binary → phone direction; the wire form of
+// msgqueue.Snapshot(convID). Queued is ordered (FIFO/enqueue order, the
+// options []ModalOption precedent). ConversationID is the daemon's own resolved
+// id (#722), never attacker-derived.
+type QueueStatePayload struct {
+	ConversationID string       `json:"conversation_id"`
+	Queued         []QueuedItem `json:"queued"`
+}
+
+// DequeueMessagePayload is the body of an Envelope whose Type ==
+// TypeDequeueMessage (docs/protocol-mobile.md § Queue). Phone → binary
+// direction.
+//
+// This is an inbound v2 *control* envelope, structurally like
+// ModalAnswerPayload / RequestSnapshotPayload: the v2 session manager intercepts
+// it at dispatchAppFrame before dispatch.Route. There is NO dispatch.Route
+// handler — resolving ConversationID to an authorized conversation and applying
+// msgqueue.Remove(convID, QueuedMsgID) is the handler's (#723) job. Unlike
+// modal_answer this is ungated for any paired phone (ADR 025 § Security model).
+// ConversationID is untrusted phone input.
+type DequeueMessagePayload struct {
+	ConversationID string `json:"conversation_id"`
+	QueuedMsgID    uint64 `json:"queued_msg_id"`
+}

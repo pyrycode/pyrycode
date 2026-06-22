@@ -60,6 +60,10 @@ func TestIsV1Compatible(t *testing.T) {
 		{"modal_answer-rejected", TypeModalAnswer, false, ErrUnknownType},
 		{"modal_cancel-rejected", TypeModalCancel, false, ErrUnknownType},
 		{"modal_dismissed-rejected", TypeModalDismissed, false, ErrUnknownType},
+		// the v2-only queue vocabulary: outbound queue_state an old phone never
+		// receives, and inbound dequeue_message control that is never a v1 type.
+		{"queue_state-rejected", TypeQueueState, false, ErrUnknownType},
+		{"dequeue_message-rejected", TypeDequeueMessage, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,6 +125,9 @@ var v2OnlyTypes = map[string]bool{
 	TypeModalAnswer:    true,
 	TypeModalCancel:    true,
 	TypeModalDismissed: true,
+	// v2 queue vocabulary.
+	TypeQueueState:     true,
+	TypeDequeueMessage: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -153,6 +160,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeSessionTransition,
 		// v2 modal vocabulary.
 		TypeModalShown, TypeModalAnswer, TypeModalCancel, TypeModalDismissed,
+		// v2 queue vocabulary.
+		TypeQueueState, TypeDequeueMessage,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]

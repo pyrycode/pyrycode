@@ -393,3 +393,99 @@ func TestModalDismissedPayload_RoundTrip(t *testing.T) {
 
 	roundTripEnvelope(t, env, payload, raw)
 }
+
+func TestQueueStatePayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "queue_state.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeQueueState {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeQueueState)
+	}
+
+	var payload QueueStatePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conv-1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conv-1")
+	}
+	// Array order IS enqueue order: assert both length and the positional fields.
+	if len(payload.Queued) != 2 {
+		t.Fatalf("Queued: got len %d, want 2", len(payload.Queued))
+	}
+	wantItems := []struct {
+		id   uint64
+		text string
+		ts   time.Time
+	}{
+		{1, "first queued", time.Date(2026, 6, 23, 9, 59, 58, 0, time.UTC)},
+		{2, "second queued", time.Date(2026, 6, 23, 9, 59, 59, 0, time.UTC)},
+	}
+	for i, want := range wantItems {
+		got := payload.Queued[i]
+		if got.QueuedMsgID != want.id {
+			t.Errorf("Queued[%d].QueuedMsgID: got %d, want %d", i, got.QueuedMsgID, want.id)
+		}
+		if got.Text != want.text {
+			t.Errorf("Queued[%d].Text: got %q, want %q", i, got.Text, want.text)
+		}
+		// .Equal (never == / reflect.DeepEqual): RFC3339Nano strips the monotonic
+		// clock on marshal, so the wall clocks compare equal but the structs do not.
+		if !got.TS.Equal(want.ts) {
+			t.Errorf("Queued[%d].TS: got %v, want %v", i, got.TS, want.ts)
+		}
+	}
+
+	// Byte-equal round-trip catches an accidental omitempty re-introduction.
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestDequeueMessagePayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "dequeue_message.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeDequeueMessage {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeDequeueMessage)
+	}
+
+	var payload DequeueMessagePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conv-1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conv-1")
+	}
+	if payload.QueuedMsgID != 2 {
+		t.Errorf("QueuedMsgID: got %d, want 2", payload.QueuedMsgID)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestDequeueMessagePayload_Malformed pins the AC's "malformed dequeue_message
+// rejected cleanly (error, no panic)". A queued_msg_id that is not a JSON
+// number fails to unmarshal into the uint64 field via stdlib json — no new code
+// path, no panic.
+func TestDequeueMessagePayload_Malformed(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"queued_msg_id-as-string", `{"conversation_id":"conv-1","queued_msg_id":"2"}`},
+		{"queued_msg_id-negative", `{"conversation_id":"conv-1","queued_msg_id":-1}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload DequeueMessagePayload
+			if err := json.Unmarshal([]byte(tc.raw), &payload); err == nil {
+				t.Errorf("Unmarshal(%s): got nil error, want non-nil", tc.raw)
+			}
+		})
+	}
+}

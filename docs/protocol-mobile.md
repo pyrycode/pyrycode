@@ -436,6 +436,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`modal_answer`** | phone → binary | no | **New in v2.** Inbound control — phone answers a modal. See [Modal](#modal-v2). |
 | **`modal_cancel`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a modal. See [Modal](#modal-v2). |
 | **`modal_dismissed`** | binary → phone | no | **New in v2.** Modal resolution notice. See [Modal](#modal-v2). |
+| **`queue_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). Queued-message backlog snapshot (#597 Phase 3). See [Queue](#queue-v2). |
+| **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -657,6 +659,28 @@ Direction **binary → phone** (outbound v2 modal-resolution event; not in `v1Ty
 | `source` | string | What resolved it. Closed set: `remote` (a phone `modal_answer`/`modal_cancel`), `local` (answered/cancelled at the desktop TTY), `timeout` (deny-on-timeout fired). |
 
 **Security & validation contract.** `modal_id` is a one-time, **opaque, unguessable** nonce minted per surfaced modal, and it is the **sole correlation key**: these payloads carry no `conversation_id`. The daemon resolves `modal_id` against its **own** outstanding-modal state — it never trusts a phone-asserted conversation, and maps `option_id` against its own recorded option list. The daemon **rejects** an inbound `modal_answer`/`modal_cancel` whose `modal_id` is not the current outstanding one (#703/#706, first-answer-wins), so a stale or guessed `modal_id` resolves nothing. `answer_token` is a **client-minted idempotency key** (its uniqueness and stability matter; secrecy does not) that lets the daemon collapse a replayed or reordered `modal_answer` to a no-op. It is **not** the authorization: authorization is `modal_id` validity (#706) plus the per-device answer gate (#702, default OFF); `answer_token` only deduplicates among already-authorized answers. The minting + dedup + validation runtime is **#703/#706**; the answer gate is **#702**.
+
+### Queue (v2)
+
+A phone that types while claude is busy has its turn buffered in the daemon's queued-message backlog (#597 Phase 3, `internal/msgqueue`). `queue_state` (view) lets the phone see that backlog and `dequeue_message` (cancel) lets it drop an entry it no longer wants. Unlike the [Modal](#modal-v2) cluster — where answering is gated per-device — **both viewing and dequeuing are ungated for any paired phone** (ADR 025 [Security model](#security-model)): there is no per-device gate and no nonce; `queued_msg_id` is a plain per-conversation counter. All fields are always present (no omitempty). This section is wire vocabulary only; *when* the daemon emits `queue_state` and *how* the handler applies `dequeue_message` is the producer's (#722) / handler's (#723) runtime, documented there.
+
+#### `queue_state`
+
+Direction **binary → phone** (outbound v2 queued-backlog snapshot; not in `v1TypeSet` — an old phone never receives it).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation this backlog belongs to. The daemon's own resolved id (#722), never attacker-derived. |
+| `queued` | array | Ordered backlog (FIFO/enqueue order) of `{queued_msg_id, text, ts}`. **Always present**; the producer (#722) should emit `[]` (not `null`) for an empty backlog so the mobile decoder keeps `queued` a plain array. Each element: `queued_msg_id` (integer, stable per-conversation counter ≥ 1), `text` (string, the queued message), `ts` (RFC3339Nano, enqueue time). |
+
+#### `dequeue_message`
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler. It is **ungated**; resolving `conversation_id` to an authorized conversation and applying the removal (`msgqueue.Remove`) is the handler's (#723) job.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation to dequeue from. Untrusted phone input — the handler (#723) resolves it to an authorized conversation. |
+| `queued_msg_id` | integer | The id to remove (the `queued_msg_id` from a `queue_state` entry). |
 
 ## Backfill semantics
 

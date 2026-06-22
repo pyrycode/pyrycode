@@ -1,0 +1,1 @@
+{"id":601,"type":"queue_state","ts":"2026-06-23T10:00:00Z","payload":{"conversation_id":"conv-1","queued":[{"queued_msg_id":1,"text":"first queued","ts":"2026-06-23T09:59:58Z"},{"queued_msg_id":2,"text":"second queued","ts":"2026-06-23T09:59:59Z"}]}}

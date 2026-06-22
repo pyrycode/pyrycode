@@ -191,3 +191,37 @@ const (
 	TypeModalCancel    = "modal_cancel"    // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 	TypeModalDismissed = "modal_dismissed" // binary → phone, outbound v2 modal-resolution event
 )
+
+// Mobile Protocol v2 queued-backlog vocabulary (epic #597 Phase 3,
+// docs/protocol-mobile.md § Queue). A phone that types while claude is busy has
+// its turn buffered in internal/msgqueue; queue_state (daemon → phone) is the
+// wire form of msgqueue.Snapshot(convID) so the phone can see the backlog, and
+// dequeue_message (phone → daemon) drives msgqueue.Remove(convID, id) so the
+// phone can cancel an entry it no longer wants.
+//
+// Two natures in one cluster. queue_state is an outbound binary → phone event
+// an old phone must never receive. dequeue_message is an inbound phone → binary
+// *control* envelope the v2 session manager intercepts at
+// internal/relay/v2session.go's dispatchAppFrame before internal/dispatch.Route
+// (like TypeModalAnswer / TypeRequestSnapshot); there is NO dispatch.Route
+// handler for it.
+//
+// Trust contrast with the modal cluster: unlike modal_answer, dequeuing is
+// ungated for any paired phone (ADR 025 § Security model) — viewing and
+// dequeuing are an ordinary capability, with no nonce and no per-device gate.
+// queued_msg_id is a plain per-conversation counter from internal/msgqueue, not
+// a security primitive.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// either route the inbound control envelope to the handler chain or offer the
+// outbound queue_state event to an old phone, violating the v1/v2 boundary. The
+// drift detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; these two live in the latter.
+//
+// This ticket (#720) is wire vocabulary only — the producer that emits
+// queue_state is sibling #722 and the handler that applies dequeue_message is
+// sibling #723.
+const (
+	TypeQueueState     = "queue_state"     // binary → phone, outbound v2 queued-backlog snapshot
+	TypeDequeueMessage = "dequeue_message" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+)
