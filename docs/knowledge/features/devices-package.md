@@ -15,15 +15,23 @@ type Device struct {
 
     Platform  string `json:"platform,omitempty"`   // "fcm" | "apns" | ""
     PushToken string `json:"push_token,omitempty"` // opaque APNs/FCM token
+
+    // #702 — authorizes THIS device to ANSWER a remote permission modal.
+    AllowRemotePermissions bool `json:"allow_remote_permissions,omitempty"`
 }
 
 func HashToken(plain string) string
 func VerifyToken(plain, hash string) bool
+
+// #702 — the remote-permission gate (in auth.go, beside Validate).
+func (d *Device) MayAnswerRemotePermission() bool
+func AuthorizeRemotePermission(d *Device, outcome RemotePermissionOutcome) bool
+type RemotePermissionOutcome int // OutcomeNoAnswer (zero) | OutcomeAllow | OutcomeDeny | OutcomeTimeout | OutcomeCancel
 ```
 
-Three exports. No exported errors, no sentinels — `VerifyToken` returns bool by design. Auth-decision-as-error is the caller's concern, not the crypto primitive's.
+The crypto primitives (`HashToken` / `VerifyToken`) export no errors, no sentinels — `VerifyToken` returns bool by design. Auth-decision-as-error is the caller's concern, not the crypto primitive's.
 
-JSON tags use snake_case. The four identity / lifecycle fields have no `omitempty` — required fields round-trip at their zero value. The two push-registration fields (`Platform`, `PushToken`, added by #282) DO carry `omitempty` so a pre-#282 `devices.json` round-trips through load → save without sprouting `"platform": ""` / `"push_token": ""` entries; zero-migration change. Mirrors the `registryEntry` pattern in `internal/sessions/registry.go:17-29`, so the sibling registry CRUD marshals `Device` with stdlib `encoding/json` unchanged.
+JSON tags use snake_case. The four identity / lifecycle fields have no `omitempty` — required fields round-trip at their zero value. The optional fields (`Platform`, `PushToken`, added by #282; `AllowRemotePermissions`, added by #702) DO carry `omitempty` so a pre-existing `devices.json` round-trips through load → save without sprouting `"platform": ""` / `"push_token": ""` / `"allow_remote_permissions": false` entries; zero-migration change. Mirrors the `registryEntry` pattern in `internal/sessions/registry.go:17-29`, so the sibling registry CRUD marshals `Device` with stdlib `encoding/json` unchanged.
 
 `Platform`'s doc comment mirrors `protocol.RegisterPushTokenPayload.Platform` verbatim (`"fcm"` Android, `"apns"` iOS) so the on-disk and wire contracts stay aligned. `PushToken` is the opaque platform-supplied wake token; written by the future `register_push_token` handler (#250), never marshalled across the wire (the wire form is `protocol.RegisterPushTokenPayload` from #275).
 
@@ -54,6 +62,42 @@ func VerifyToken(plain, hash string) bool {
 `subtle.ConstantTimeCompare` returns 0 (false) when slice lengths differ, in constant time relative to the slice arguments. Empty `hash`, malformed `hash`, or any-length-≠-64 `hash` all fall out via the length-mismatch path. There is intentionally **no early-return guard on `hash == ""`** — the unguarded shape is shorter, makes the constant-time discipline auditable in one line, and the AC bullet "false on empty/malformed hash" is satisfied by `ConstantTimeCompare`'s documented semantics.
 
 `==`, `bytes.Equal`, and `strings.EqualFold` are forbidden on hash material. Code review enforces this.
+
+## Remote-permission gate (#702)
+
+`AllowRemotePermissions` (the `Device` field, default OFF) plus two pure predicates in `auth.go` are the **authorization primitive** for answering a remote permission / trust / destructive modal from a paired phone ([ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § "Security model"; [EPIC #597] Phase 3). Answering such a modal is the highest-trust action the mobile head can take, so it is gated separately — everything else a paired phone does (watch the stream, snapshot, send, interrupt, dequeue) stays **ungated**. The bit is set **only** locally by `pyry pair --allow-remote-permissions` ([`pyry-pair-command.md`](pyry-pair-command.md)), never over the wire; it is read off the already-authenticated `*Device` by the modal control loop (#703, the sole consumer) via `dispatch.Conn.Auth()`.
+
+```go
+// Fail-closed eligibility: true ONLY when the per-device bit is set. A nil
+// receiver (no authenticated device on the connection) → false. The nil-guard
+// makes the safe default structural — the predicate is total.
+func (d *Device) MayAnswerRemotePermission() bool { return d != nil && d.AllowRemotePermissions }
+
+// What #703 observed for a surfaced modal. The zero value (OutcomeNoAnswer) is
+// the safe default and resolves to DENY, so a default-constructed call denies.
+type RemotePermissionOutcome int
+const (
+    OutcomeNoAnswer RemotePermissionOutcome = iota // default → DENY
+    OutcomeAllow                                    // phone explicitly chose an allow option
+    OutcomeDeny
+    OutcomeTimeout                                  // deny-on-timeout window elapsed (#703's timer)
+    OutcomeCancel                                   // phone cancelled / dismissed (ESC)
+)
+
+// Fail-closed decision. ALLOW (true) ONLY on eligible × OutcomeAllow; every
+// other (device, outcome) — ineligible/nil device, no answer, timeout, cancel,
+// explicit deny — DENIES. Re-checks eligibility internally (defense in depth).
+func AuthorizeRemotePermission(d *Device, outcome RemotePermissionOutcome) bool {
+    return d.MayAnswerRemotePermission() && outcome == OutcomeAllow
+}
+```
+
+Two design choices make the safe default **structural** rather than a convention a caller must remember:
+
+- **An enum, not a bare bool, for the outcome.** A bool would collapse no-answer / timeout / cancel into one indistinguishable input. The enum keeps the only ALLOW branch a single conjunction in one unit-tested place; any future outcome defaults to DENY unless explicitly mapped. This realizes the deny-on-timeout model in deterministic code (the safety-net fabric the security model needs).
+- **Two predicates for two #703 paths.** `MayAnswerRemotePermission` gates "may this device answer at all" → reject a non-permitted phone with an *error envelope* before resolving anything. `AuthorizeRemotePermission` resolves "given the outcome, did it grant." The decision re-checks eligibility, so it is correct standalone *and* composes — defense in depth, not a single bypassable point.
+
+Both predicates are **pure** — no logging, no I/O, no token handling — keeping the gate unit-testable in isolation and uncoupled from observability. Audit-writing on a decision is #712's primitive, called by #703, deliberately separate. See [`codebase/702.md`](../codebase/702.md) for the full data flow and producer obligations handed to #703.
 
 ## Why no bcrypt or salt
 

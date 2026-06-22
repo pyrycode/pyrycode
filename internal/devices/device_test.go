@@ -171,3 +171,75 @@ func TestDevice_DecodeLegacyDiskShape(t *testing.T) {
 		t.Errorf("PushToken = %q, want \"\"", d.PushToken)
 	}
 }
+
+func TestDevice_AllowRemotePermissionsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	in := Device{
+		TokenHash:              HashToken("xyz"),
+		Name:                   "pixel-8",
+		PairedAt:               time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt:             time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		AllowRemotePermissions: true,
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"allow_remote_permissions":true`)) {
+		t.Errorf("encoded form missing allow_remote_permissions=true: %s", b)
+	}
+	var out Device
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out != in {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", out, in)
+	}
+}
+
+func TestDevice_OmitsAllowRemotePermissionsWhenFalse(t *testing.T) {
+	t.Parallel()
+
+	in := Device{
+		TokenHash:  HashToken("abc"),
+		Name:       "off-device",
+		PairedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if bytes.Contains(b, []byte(`"allow_remote_permissions"`)) {
+		t.Errorf("encoded form leaked false allow_remote_permissions key: %s", b)
+	}
+	var out Device
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.AllowRemotePermissions {
+		t.Errorf("AllowRemotePermissions = true, want false")
+	}
+}
+
+// TestDevice_DecodeAllowRemotePermissionsAbsent is the AC4 "device paired
+// before this field existed reads OFF" proof: a pre-field on-disk record
+// decodes the new field to its zero value (false = denied).
+func TestDevice_DecodeAllowRemotePermissionsAbsent(t *testing.T) {
+	t.Parallel()
+
+	legacy := []byte(`{
+      "token_hash": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "name": "legacy",
+      "paired_at": "2026-01-01T00:00:00Z",
+      "last_seen_at": "2026-01-02T00:00:00Z"
+    }`)
+	var d Device
+	if err := json.Unmarshal(legacy, &d); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if d.AllowRemotePermissions {
+		t.Errorf("AllowRemotePermissions = true, want false (pre-field record reads OFF)")
+	}
+}
