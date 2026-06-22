@@ -226,6 +226,10 @@ two-phone path is #708.
   follow-active producer" template, and the future `OnModal` wiring seam.
 - [v2-session-manager.md](v2-session-manager.md) — `Push` / `ActiveConns` / `forwardEnvelope`
   (the push surface this fans out over; `EventID==nil` control envelopes are never dropped).
+- [codebase/726.md](../codebase/726.md) — the **inbound actuator** half: the supervisor's
+  `AcceptTrust`/`Answer`/`SendEsc` safe-answer seam that turns an abstract modal choice into
+  the tui-driver keystroke #717's gated `modal_answer` eventually drives against claude (this
+  doc is the outbound `modal_shown` half).
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — no-raw-bytes
   invariant; `docs/protocol-mobile.md` § Modal — the wire field table + security contract.
 - **Consumer (deferred — not in #716):** #717 (inbound `modal_answer` resolution; reads
