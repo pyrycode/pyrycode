@@ -120,3 +120,40 @@ func TestTurnEndReason_Taxonomy(t *testing.T) {
 		})
 	}
 }
+
+func TestPermissionOptionKind_Taxonomy(t *testing.T) {
+	t.Parallel()
+
+	want := []PermissionOptionKind{
+		"allow_once", "allow_always", "reject_once", "reject_always",
+	}
+	if got := len(permissionOptionKinds); got != 4 {
+		t.Fatalf("permissionOptionKinds length: got %d, want %d", got, 4)
+	}
+	if !reflect.DeepEqual(permissionOptionKinds, want) {
+		t.Fatalf("permissionOptionKinds: got %v, want %v", permissionOptionKinds, want)
+	}
+	for _, k := range permissionOptionKinds {
+		if !k.Valid() {
+			t.Errorf("canonical %q reports Valid() == false", k)
+		}
+	}
+
+	cases := []struct {
+		name string
+		kind PermissionOptionKind
+		want bool
+	}{
+		{"in-taxonomy", PermissionOptionKindAllowOnce, true},
+		{"fabricated", PermissionOptionKind("nope"), false},
+		{"empty", PermissionOptionKind(""), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.kind.Valid(); got != tc.want {
+				t.Errorf("PermissionOptionKind(%q).Valid(): got %v, want %v", tc.kind, got, tc.want)
+			}
+		})
+	}
+}

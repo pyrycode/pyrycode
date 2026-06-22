@@ -1,6 +1,6 @@
 package turnevent
 
-// The three enums below carry exactly the ACP taxonomy values. They are
+// The four enums below carry exactly the ACP taxonomy values. They are
 // string-backed so the values ARE the ACP strings, which keeps the model
 // faithful and lets adapters marshal them directly. Layout mirrors
 // internal/protocol/codes.go: grouped, doc-commented const blocks named
@@ -42,6 +42,17 @@ const (
 	TurnEndReasonCancelled       TurnEndReason = "cancelled"
 )
 
+// PermissionOptionKind is the ACP session/request_permission option-kind
+// taxonomy.
+type PermissionOptionKind string
+
+const (
+	PermissionOptionKindAllowOnce    PermissionOptionKind = "allow_once"
+	PermissionOptionKindAllowAlways  PermissionOptionKind = "allow_always"
+	PermissionOptionKindRejectOnce   PermissionOptionKind = "reject_once"
+	PermissionOptionKindRejectAlways PermissionOptionKind = "reject_always"
+)
+
 // Canonical value slices are the single source of truth that each Valid()
 // scans and each exactness test asserts against — so slice/predicate/const
 // drift is structurally impossible. They stay unexported (no consumer needs to
@@ -59,6 +70,10 @@ var (
 	turnEndReasons = []TurnEndReason{
 		TurnEndReasonEndTurn, TurnEndReasonMaxTokens, TurnEndReasonMaxTurnRequests,
 		TurnEndReasonRefusal, TurnEndReasonCancelled,
+	}
+	permissionOptionKinds = []PermissionOptionKind{
+		PermissionOptionKindAllowOnce, PermissionOptionKindAllowAlways,
+		PermissionOptionKindRejectOnce, PermissionOptionKindRejectAlways,
 	}
 )
 
@@ -87,6 +102,16 @@ func (s ToolStatus) Valid() bool {
 func (r TurnEndReason) Valid() bool {
 	for _, v := range turnEndReasons {
 		if r == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Valid reports whether k is one of the ACP permission-option kinds.
+func (k PermissionOptionKind) Valid() bool {
+	for _, v := range permissionOptionKinds {
+		if k == v {
 			return true
 		}
 	}
