@@ -122,6 +122,7 @@ func TestSessionTransitionPayload_RoundTrip(t *testing.T) {
 	cases := []struct {
 		name         string
 		fixture      string
+		wantConvID   string
 		wantPrevID   string
 		wantNewID    string
 		wantReason   string
@@ -131,6 +132,7 @@ func TestSessionTransitionPayload_RoundTrip(t *testing.T) {
 		{
 			name:         "cwd-unset",
 			fixture:      "session_transition.json",
+			wantConvID:   "", // producer emits "" until #741 binds it
 			wantPrevID:   "sess-a",
 			wantNewID:    "sess-b",
 			wantReason:   "idle_evict",
@@ -140,6 +142,7 @@ func TestSessionTransitionPayload_RoundTrip(t *testing.T) {
 		{
 			name:         "cwd-set",
 			fixture:      "session_transition_workspace.json",
+			wantConvID:   "", // producer emits "" until #741 binds it
 			wantPrevID:   "sess-b",
 			wantNewID:    "sess-c",
 			wantReason:   "workspace_change",
@@ -163,6 +166,9 @@ func TestSessionTransitionPayload_RoundTrip(t *testing.T) {
 			var payload SessionTransitionPayload
 			if err := json.Unmarshal(env.Payload, &payload); err != nil {
 				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.ConversationID != tc.wantConvID {
+				t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, tc.wantConvID)
 			}
 			if payload.PreviousSessionID != tc.wantPrevID {
 				t.Errorf("PreviousSessionID: got %q, want %q", payload.PreviousSessionID, tc.wantPrevID)

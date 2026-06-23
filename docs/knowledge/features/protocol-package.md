@@ -110,6 +110,7 @@ Body of an `Envelope` whose `Type == TypeSessionTransition` (`docs/protocol-mobi
 
 ```go
 type SessionTransitionPayload struct {
+    ConversationID    string    `json:"conversation_id"` // #740: routing key; plain string, no omitempty — mirrors the sibling interactive payloads
     PreviousSessionID string    `json:"previous_session_id"`
     NewSessionID      string    `json:"new_session_id"`
     Reason            string    `json:"reason"`
@@ -118,12 +119,13 @@ type SessionTransitionPayload struct {
 }
 ```
 
+- **`ConversationID` is the routing key — plain `string`, no `omitempty`, first field (#740).** Mirrors the four sibling interactive payloads (`SendMessagePayload` / `MessagePayload` / `QueueStatePayload` / `DequeueMessagePayload`) that all lead with `ConversationID string json:"conversation_id"` and route by it, so the phone folds the boundary marker into the correct conversation's thread (`pyrycode-mobile#336`). Deliberately a plain `string`, **not** `*string` — unlike `WorkspaceCwd` / `BackfillSincePayload.ConversationID` it has **no** literal-null ("all conversations") semantics; it is a present-or-empty routing key like `MessagePayload.ConversationID`. **Wire-vocabulary half only**: the producer (`toWirePayload`, `cmd/pyry/session_transition_v2.go`) uses keyed composite literals, so it compiles untouched and emits `conversation_id: ""` until the binding is wired from the active conversation↔session mapping in #741 (`addBlockedBy` #740). The transient `""` is harmless — the mobile consumer (#336) is parked. See [codebase/740.md](../codebase/740.md).
 - **`WorkspaceCwd` is `*string` WITHOUT `omitempty` — encodes a cross-field invariant on the wire.** Same discipline as `BackfillSincePayload.ConversationID` (#272): non-nil **iff** `Reason == "workspace_change"` (the new workspace dir), literal JSON `null` for `clear` / `idle_evict`. `omitempty` would drop the key and lose the "absent vs null vs value" distinction, so the *workspaceCwd-non-null-iff-`workspace_change`* invariant is decodable from the wire alone. The byte-equal round-trip is the regression detector against an accidental `omitempty` re-add (the `backfill_since.json` guard role).
 - **`Reason` stays a plain `string`, not a named enum** — `MessagePayload.Role` / `TurnEndPayload.StopReason` precedent. Closed wire set `{clear, idle_evict, workspace_change}`; the closed-set guarantee belongs at the decoder. The mobile enum names (`Clear`/`IdleEvict`/`WorkspaceChange`) map to the lowercase-snake wire values by the mobile decoder. **The type admits `workspace_change` even though the producer (#657) cannot emit it** until a server-side workspace-change source exists — so the mobile decoder stays exhaustive and the invariant is expressible (type child carries the full vocabulary; producer child defers the unemittable value).
 - **`OccurredAt` is `time.Time` (RFC3339Nano on the wire) per the envelope timestamp rule.** Marshal strips the monotonic clock; tests compare with `.Equal`, never `==`. Same discipline as `Envelope.TS` / `BackfillSincePayload.SinceTS`.
 - **No `event_id` field.** `event_id` is an `Envelope`-level field (#649) stamped by the producer on structured-stream frames; a session boundary is **not** a structured turn-stream event and carries no `event_id`.
 
-`TestSessionTransitionPayload_RoundTrip` (`messaging_test.go`) is table-driven over two fixtures authored in **struct-field order** (`canonical()` compacts but does not sort keys): `session_transition.json` (cwd-unset, `reason: "idle_evict"`, `"workspace_cwd": null` — the `omitempty`-regression guard) and `session_transition_workspace.json` (cwd-set, `reason: "workspace_change"`, `"workspace_cwd": "/home/user/project"`). See [codebase/656.md](../codebase/656.md).
+`TestSessionTransitionPayload_RoundTrip` (`messaging_test.go`) is table-driven over two fixtures authored in **struct-field order** (`canonical()` compacts but does not sort keys, so struct field order == fixture `payload` key order == doc-table row order, all now **leading with `"conversation_id":""`** — #740): `session_transition.json` (cwd-unset, `reason: "idle_evict"`, `"workspace_cwd": null` — the `omitempty`-regression guard) and `session_transition_workspace.json` (cwd-set, `reason: "workspace_change"`, `"workspace_cwd": "/home/user/project"`). The `wantConvID` column pins the transient `""` zero value. See [codebase/656.md](../codebase/656.md) and [codebase/740.md](../codebase/740.md).
 
 ### Modal v2 wire payloads (#701)
 
