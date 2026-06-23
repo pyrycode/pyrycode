@@ -80,13 +80,13 @@ Because `Cwd` is phone-influenced, it is an **untrusted spawn input** — valida
 
 ### Mint-failure and timeout behaviour
 
-The mint is bounded by a 30s timeout (`createConversationMintTimeout`, matching `sendMessageActivateTimeout` and control's session-create budget). `Pool.Activate` blocks until claude's PTY is ready (~2–15s) or ctx-cancel; the bound turns a wedged spawn into a retryable error instead of pinning the per-conn goroutine.
+The mint is bounded by a 30s timeout (`createConversationMintTimeout`, matching the drain's `inboundActivateTimeout` — #721's successor to the removed `sendMessageActivateTimeout` — and control's session-create budget). `Pool.Activate` blocks until claude's PTY is ready (~2–15s) or ctx-cancel; the bound turns a wedged spawn into a retryable error instead of pinning the per-conn goroutine.
 
 Any mint error (pool not running, activate timeout, in-pool save failure, ctx deadline) fails the whole create: the handler logs at `Warn` (`create_conversation.session_mint_failed`, fields `conn_id` / `conversation_id` / wrapped `err`) and replies `protocol.CodeServerBinaryOffline` **retryable**, returning **before** `reg.Create` — so there is no half-bound orphan conversation row. The phone retries onto a fresh conversation + session.
 
 ## Routing: `send_message` consumes the binding
 
-#678 is the consumer half. Where the create path *writes* `CurrentSessionID`, `send_message` *reads* it to select the session a turn is delivered to. Before #678 the handler held a single `TurnWriter` (the bootstrap session) and routed every turn there regardless of `ConversationID`; now it resolves the frame's conversation to its bound session and runs the existing Activate-before-write against *that* session.
+#678 is the consumer half. Where the create path *writes* `CurrentSessionID`, `send_message` *reads* it to select the session a turn is delivered to. Before #678 the handler held a single `TurnWriter` (the bootstrap session) and routed every turn there regardless of `ConversationID`; now it resolves the frame's conversation to its bound session. Since [#721](../codebase/721.md) the handler no longer *delivers* synchronously — it validates the binding, **enqueues**, and acks; the daemon's `msgqueue` drain runs Activate-before-write against *that* session asynchronously (see [§ Enqueue-and-ack (#721)](#enqueue-and-ack-721)).
 
 ### The `SessionRouter` seam (mirrors `SessionCreator`)
 
@@ -99,7 +99,7 @@ type SessionRouter interface {
 }
 ```
 
-`Route` is **ctx-free** — a pure in-memory lookup (registry read + field check + pool lookup), non-blocking, no cancellation surface. The blocking work (`Activate`, `WriteUserTurn`) still happens in the returned writer under the handler's unchanged two 30s budgets.
+`Route` is **ctx-free** — a pure in-memory lookup (registry read + field check + pool lookup), non-blocking, no cancellation surface. Since #721 the handler **discards** the returned writer (it only validates the binding before enqueue); the blocking work (`Activate`, `WriteUserTurn`) happens on the `msgqueue` drain, which re-resolves the writer per attempt via `sessionRouter.resolve` — see [§ Enqueue-and-ack (#721)](#enqueue-and-ack-721).
 
 The implementation lives at `cmd/pyry` (the only package importing both `conversations` and `sessions`), beside `sessionMinter`:
 
@@ -108,8 +108,10 @@ The implementation lives at `cmd/pyry` (the only package importing both `convers
 type sessionRouter struct {
     pool    *sessions.Pool
     convReg *conversations.Registry
+    active  *activeConversation   // the #687 follow-active cursor Route stamps
 }
-func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error) {
+// resolve is the single resolution authority — the side-effect-free core (#721).
+func (r sessionRouter) resolve(conversationID string) (handlers.TurnWriter, error) {
     conv, ok := r.convReg.Get(conversations.ConversationID(conversationID))
     if !ok {
         return nil, conversations.ErrConversationNotFound      // → conversation.not_found
@@ -124,12 +126,24 @@ func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error)
     }
     return boundSession{pool: r.pool, sess: sess, id: id}, nil
 }
+
+// Route layers the active-conversation cursor stamp (#687) onto resolve.
+func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error) {
+    w, err := r.resolve(conversationID)
+    if err != nil {
+        return nil, err
+    }
+    r.active.set(conversationID)   // stamp only on success — the phone-interaction moment
+    return w, nil
+}
 ```
+
+Since #721, `Route` is a thin wrapper that adds the `r.active.set` cursor stamp; `resolve` is the stamp-free core. Both the handler (validation) and the `msgqueue` drain (`newInboundDeliver`) go through `resolve`, so neither can bypass the empty-binding guard, and **only `Route` moves the cursor** — the drain must not (it would re-stamp at *drain* time, corrupting the #679/#687 follow-active signal). Guarded by `TestSessionRouter_ResolveDoesNotStamp`.
 
 ### Two load-bearing invariants
 
 - **The empty-`CurrentSessionID` guard fires *before* any `Lookup`.** `Pool.Lookup("")` returns the **bootstrap** session. Without the up-front `== ""` rejection, an unbound conversation would silently route the phone's turn into the shared bootstrap claude — the confused-deputy / isolation break AC#4 forbids. Rejecting first maps the case to a retryable `server.binary_offline` instead. (The phone supplies only the `ConversationID` lookup key and the `Text`; the routing *target* is the server-stored `CurrentSessionID`, never phone-writable — so the phone can only address a conversation whose server-minted id it already holds, and can never point it at an arbitrary session.)
-- **`boundSession.Activate` funnels through `Pool.Activate`, not `Session.Activate`.** `*sessions.Session` already satisfies `TurnWriter` directly; the `boundSession` wrapper exists *only* to redirect `Activate` through the cap-enforcing `Pool.Activate(ctx, id)`. The bootstrap was special (always active, never cap-evicted) so it could use `Session.Activate`; per-conversation sessions are full `ActiveCap` citizens — activating one may LRU-evict a peer, which only happens inside `Pool.Activate`. Bypassing it would break the invariant the idle-evict follow-up (#680) relies on. An idle-evicted bound session therefore re-activates on the next `send_message` (the [idle-eviction.md](idle-eviction.md) lazy-respawn contract, now per-conversation).
+- **`boundSession.Activate` funnels through `Pool.Activate`, not `Session.Activate`.** `*sessions.Session` already satisfies `TurnWriter` directly; the `boundSession` wrapper exists *only* to redirect `Activate` through the cap-enforcing `Pool.Activate(ctx, id)`. The bootstrap was special (always active, never cap-evicted) so it could use `Session.Activate`; per-conversation sessions are full `ActiveCap` citizens — activating one may LRU-evict a peer, which only happens inside `Pool.Activate`. Bypassing it would break the invariant the idle-evict follow-up (#680) relies on. An idle-evicted bound session therefore re-activates on the next **drain delivery attempt** for that conversation (since #721; before #721, on the next `send_message`) — the [idle-eviction.md](idle-eviction.md) lazy-respawn contract, now per-conversation.
 
 ### Error mapping (no new wire code)
 
@@ -138,9 +152,14 @@ func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error)
 | Unknown `ConversationID` | `Route`: `Registry.Get` miss | `conversation.not_found` | no |
 | No bound session (`CurrentSessionID == ""`) | `Route`: empty-id guard | `server.binary_offline` | yes |
 | Bound id not in pool (`ErrSessionNotFound`) | `Route`: `Pool.Lookup` | `server.binary_offline` | yes |
-| Conversation deleted mid-flight (TOCTOU) | `WriteUserTurn` → bound session's `ValidateConversation` | `conversation.not_found` | no |
 
-The unknown-conversation reject now fires at *routing* time rather than delivery time — net behaviour to the phone is identical, but it no longer spends an Activate budget on a doomed turn. The deliver-switch `ErrConversationNotFound` arm stays to defend the TOCTOU where the conversation is deleted between `Route` and delivery. `errNoBoundSession` is an unexported sentinel with no wire surface. The two-phase Activate→WriteUserTurn block is otherwise **byte-identical** to the pre-#678 handler (AC#5: only the session-selection step is new).
+All three are checked synchronously **before enqueue** (#721): the handler's only wire replies are these rejects + the ack. `errNoBoundSession` is an unexported sentinel with no wire surface. A conversation that becomes unbound/deleted *after* the ack (a TOCTOU window) no longer maps to a wire reply — the drain's `resolve`/`WriteUserTurn` error is **absorbed and retried** (the ack already promised delivery). There is no conversation-delete verb today, so a permanent post-ack unbind is currently unreachable; the daemon-restart boundary bounds it.
+
+### Enqueue-and-ack (#721)
+
+[#721](../codebase/721.md) makes the [#704](../codebase/704.md) `internal/msgqueue` queue live and swaps `send_message` from synchronous delivery to **enqueue-and-ack**. The handler now: decodes → `Route` (validate binding + stamp cursor) → `Enqueue(convID, text)` → `replyAck`. The two pre-#721 timeout constants (`sendMessageActivateTimeout`, `sendMessageDeliverTimeout`) and the whole delivery-result switch are gone — no blocking call remains in the handler. The daemon's `msgqueue` drain delivers the backlog one message at a time through the reliable `WriteUserTurn` path, re-resolving the bound session per attempt via the stamp-free `sessionRouter.resolve`, `Activate`ing under `inboundActivateTimeout` (30s), then writing with the **raw lifecycle ctx** (no deliver cap — that block is the drain's turn-end pacing).
+
+**The ack now means "accepted into the backlog," not "delivered."** This is asymmetric by design: at enqueue we have a live phone to tell "retry" (malformed / unknown / unbound all reject synchronously, preserving the "unbound → error, not bootstrap" guarantee above); once enqueued the ack promised delivery, so a transient resolve/activate/write failure is held and retried by the drain rather than surfaced. The wire-level `send_message` request/reply is unchanged ([ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) line 123). See [codebase/721.md](../codebase/721.md) for the full ack-contract table and [features/msgqueue-package.md](msgqueue-package.md) for the drain engine.
 
 ## Edge cases & limitations
 

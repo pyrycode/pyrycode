@@ -74,9 +74,9 @@ func (s *Session) Run(ctx context.Context) error
 **Activate-before-Attach contract.** `bridge.Attach` on an evicted session would block on the pipe forever (no claude to drain it). Callers must Activate first. Two attach paths exist today and both Activate first with a 30s budget:
 
 1. **Control plane** — `handleAttach` in `internal/control/server.go` (CLI `pyry attach`, since #40).
-2. **Relay-routed `send_message`** — `handlers.SendMessage` in `internal/relay/handlers/send_message.go` (Discord/Telegram phone/plugin inbound, since #396). Without Activate, an inbound `send_message` against an idle-evicted session silently dropped through `Supervisor.WriteUserTurn`'s `ptmx == nil` discard branch — the failure mode that produced a 7.5h pyrybox outage on 2026-05-15. Since #678 the Activate target is the frame's **per-conversation bound session** (not the bootstrap), and it funnels through the cap-enforcing `Pool.Activate` (see [§ Relay-routed `send_message`](#relay-routed-send_message-396) and [conversation-session-binding.md § Routing](conversation-session-binding.md#routing-send_message-consumes-the-binding)).
+2. **Relay-routed `send_message`** — `internal/relay/handlers/send_message.go` (Discord/Telegram phone/plugin inbound, since #396). Without Activate, an inbound `send_message` against an idle-evicted session silently dropped through `Supervisor.WriteUserTurn`'s `ptmx == nil` discard branch — the failure mode that produced a 7.5h pyrybox outage on 2026-05-15. Since #678 the Activate target is the frame's **per-conversation bound session** (not the bootstrap), and it funnels through the cap-enforcing `Pool.Activate`. **Since #721 this Activate runs on the daemon's `msgqueue` drain** (`cmd/pyry.newInboundDeliver`), not the handler — the handler enqueues-and-acks (see [§ Relay-routed `send_message`](#relay-routed-send_message-396) and [conversation-session-binding.md § Routing](conversation-session-binding.md#routing-send_message-consumes-the-binding)).
 
-A busted respawn surfaces as `attach: activate: <err>` on the control wire and as `protocol.CodeServerBinaryOffline` (`Retryable=true`) + `send_message.activate_failed` WARN log on the relay wire.
+A busted respawn surfaces as `attach: activate: <err>` on the control wire. On the relay wire, before #721 it mapped to a `protocol.CodeServerBinaryOffline` (`Retryable=true`) reply + a `send_message.activate_failed` WARN; since #721 the phone is already acked on enqueue, so the drain instead **absorbs and retries** it (warn-on-retry log, no wire reply).
 
 ## `Pool` surface
 
@@ -265,7 +265,7 @@ func (s *Session) transitionTo(newState lifecycleState) error {
 
 ## Attach-event integration
 
-Two callers reach Activate before driving the supervisor — the control plane and the relay-routed `send_message` handler. Both use the same 30s budget so operator mental models for "how long before the binary gives up" stay uniform.
+Two callers reach Activate before driving the supervisor — the control plane and the relay-routed `send_message` path (since #721 the daemon's `msgqueue` drain, `cmd/pyry.newInboundDeliver`, rather than the handler itself). Both use the same 30s budget (`inboundActivateTimeout` on the relay path) so operator mental models for "how long before the binary gives up" stay uniform.
 
 ### Control plane
 
@@ -288,26 +288,26 @@ The 30s window caps the documented 2-15s respawn latency with safety margin. A b
 
 ### Relay-routed `send_message` (#396)
 
-`internal/relay/handlers/send_message.go` extends `TurnWriter` with `Activate(ctx) error` and runs it before `WriteUserTurn`:
+The `TurnWriter` extends `Activate(ctx) error` and runs it before `WriteUserTurn`. **Since #721 this Activate-before-write moved out of the handler onto the daemon's `msgqueue` drain** (`cmd/pyry.newInboundDeliver`): the handler now enqueues-and-acks (non-blocking), and the drain delivers asynchronously one message at a time. The mechanism is unchanged, only relocated:
 
 ```go
-activateCtx, cancelActivate := context.WithTimeout(ctx, sendMessageActivateTimeout)
-if err := w.Activate(activateCtx); err != nil {
-    cancelActivate()
-    if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-        return err
-    }
-    logger.Warn("relay: send_message activate failed",
-        "event", "send_message.activate_failed", ...)
-    return replyError(ctx, c, env, protocol.CodeServerBinaryOffline, msgServerBinaryOffline, true)
+// cmd/pyry.newInboundDeliver — the msgqueue.DeliverFunc seam (#721)
+w, err := resolve(convID)                                     // stamp-free re-resolve per attempt
+if err != nil {
+    return err                                                // drain retries the FIFO head after 1s
 }
+activateCtx, cancelActivate := context.WithTimeout(ctx, inboundActivateTimeout)
+err = w.Activate(activateCtx)
 cancelActivate()
-err := w.WriteUserTurn(p.ConversationID, []byte(p.Text))
+if err != nil {
+    return err                                                // drain retries (no wire reply)
+}
+return w.WriteUserTurn(ctx, convID, payload)                  // raw ctx — blocks for a whole turn
 ```
 
-`sendMessageActivateTimeout` is the same 30s the CLI attach path uses, deliberately. Activate timeout maps to `protocol.CodeServerBinaryOffline` with `Retryable=true`; `ctx.Canceled` (conn closing) propagates to the dispatcher's per-conn unwind.
+`inboundActivateTimeout` (#721's successor to the removed `sendMessageActivateTimeout`) is the same 30s the CLI attach path uses, deliberately. Before #721 a failed Activate mapped to a `protocol.CodeServerBinaryOffline` (`Retryable=true`) wire reply + a `send_message.activate_failed` WARN; **since #721 the phone already got its ack on enqueue**, so a failed Activate (or resolve/write) is **absorbed and retried by the drain** — a warn-on-retry log, no wire reply. Only an *unbound* binding still rejects synchronously, before enqueue (the [conversation-session-binding.md § Enqueue-and-ack (#721)](conversation-session-binding.md#enqueue-and-ack-721) asymmetry).
 
-**Since #678, `w` is the per-conversation bound session, not the bootstrap.** The handler resolves the frame's `ConversationID` → `CurrentSessionID` → session via a `handlers.SessionRouter` seam before this block, and `w` is a `cmd/pyry` `boundSession` adapter whose `Activate` calls `Pool.Activate(ctx, id)` rather than `Session.Activate` directly — so a re-activated per-conversation session is a full `ActiveCap` citizen (the bootstrap path used `Session.Activate` because the bootstrap is never cap-evicted). The two-phase block itself is byte-identical; only the source of `w` changed. See [conversation-session-binding.md § Routing](conversation-session-binding.md#routing-send_message-consumes-the-binding).
+**Since #678, `w` is the per-conversation bound session, not the bootstrap.** `resolve` maps the frame's `ConversationID` → `CurrentSessionID` → session, and `w` is a `cmd/pyry` `boundSession` adapter whose `Activate` calls `Pool.Activate(ctx, id)` rather than `Session.Activate` directly — so a re-activated per-conversation session is a full `ActiveCap` citizen (the bootstrap path used `Session.Activate` because the bootstrap is never cap-evicted). See [conversation-session-binding.md § Routing](conversation-session-binding.md#routing-send_message-consumes-the-binding).
 
 ### Eviction cause record
 

@@ -10,13 +10,17 @@ claude reaching idle / turn-end. Landed in #704 (EPIC #597 Phase 3 — interacti
 modals/permissions/queue, ADR 025); the introspection / remove-by-id /
 change-notification API was added additively in #719.
 
-The package ships **engine only, unwired** — no package depends on it yet, the
-same rhythm as the `turnbridge` producer (#606 shipped unwired, #616 wired it).
-The live wiring into the `send_message` handler + the `cmd/pyry` constructor, the
-`queue_state` / `dequeue_message` reporting/removal wire types, and any inbound
-bound/backpressure policy are **separate slices** (#705 / the wiring slice). #719
-added the engine-side primitives those consumers need (`Snapshot`, `Remove`,
-`OnChange`) — still additive and unwired.
+The package shipped **engine only, unwired** in #704 — the same rhythm as the
+`turnbridge` producer (#606 shipped unwired, #616 wired it). [#721](../codebase/721.md)
+**wired it live**: the daemon constructs one `Queue` in `cmd/pyry/runSupervisor`,
+runs `Queue.Run(ctx)` under the daemon lifecycle, and `send_message` now
+**enqueues-and-acks** instead of delivering synchronously (delivery seam =
+`newInboundDeliver(router.resolve)`, the reliable `WriteUserTurn` path). The
+`queue_state` / `dequeue_message` reporting/removal wire types (#720) + their
+handlers, and any inbound bound/backpressure policy, remain **separate slices**
+(#705 / a PO follow-up). #719 added the engine-side primitives the #705
+reporting/removal handlers map onto (`Snapshot`, `Remove`, `OnChange`) — still
+additive and unwired.
 
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   — `send_message` is "queued by the daemon when claude is busy" (line 123); each
@@ -26,15 +30,16 @@ added the engine-side primitives those consumers need (`Snapshot`, `Remove`,
 
 ## Why a new store
 
-Today `send_message` delivers **synchronously**: the handler calls
+Before #721, `send_message` delivered **synchronously**: the handler called
 `Supervisor.WriteUserTurn` (`internal/supervisor/supervisor.go:209-259`), whose
-`WaitReady` idle-gate blocks the per-conn goroutine while claude is busy and which
-fails (bounded by `sendMessageDeliverTimeout`, 30s) if claude stays busy past the
-cap (#594). So a message typed mid-turn either **blocks** the handler or — on a
-long turn — **fails**, and concurrent messages **race** across handler goroutines
-with no defined order. `msgqueue` replaces that synchronous request/response with
-**enqueue-then-drain**: `Enqueue` is non-blocking and returns an id immediately;
-the drain delivers asynchronously through the same #594 reliable path.
+`WaitReady` idle-gate blocked the per-conn goroutine while claude was busy and
+which failed (bounded by `sendMessageDeliverTimeout`, 30s) if claude stayed busy
+past the cap (#594). So a message typed mid-turn either **blocked** the handler or
+— on a long turn — **failed**, and concurrent messages **raced** across handler
+goroutines with no defined order. `msgqueue` replaces that synchronous
+request/response with **enqueue-then-drain**: `Enqueue` is non-blocking and returns
+an id immediately; the drain delivers asynchronously through the same #594 reliable
+path. #721 swapped the handler over to it (see [codebase/721.md](../codebase/721.md)).
 
 ## Exported surface
 
@@ -191,8 +196,9 @@ semantics untouched.
 
 ## Concurrency model
 
-- **Goroutines:** one `Run` goroutine (the daemon adds it to its errgroup in the
-  wiring slice) + **one drain goroutine per active conversation**, spawned lazily
+- **Goroutines:** one `Run` goroutine (the daemon spawns it in `runSupervisor` and
+  joins it via a buffered `qDone` channel after `pool.Run` returns, #721) + **one
+  drain goroutine per active conversation**, spawned lazily
   and exiting when its FIFO empties. `Snapshot`/`Remove` add **no** goroutine —
   they run on the caller's goroutine; `notify` runs on whichever goroutine
   performed the mutation (Enqueue caller, a drain, or a Remove caller).
@@ -346,9 +352,11 @@ the change-notification path as the injected `ChangeFunc`.
   injected-function-seam, `Config` + `New` + `Run`" template this engine follows.
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § wire
   protocol (`send_message` queued-by-daemon, the `{queued_msg_id, text, ts}` record).
-- **Consumers (deferred — none wired in #704/#719):** the live `send_message` +
-  `cmd/pyry` wiring slice and #705 (`queue_state` / `dequeue_message` reporting +
-  removal handlers binding `convID` to the authorized phone, and the inbound-bound
-  decision). #719 added the engine-side primitives (`Snapshot` / `Remove` /
-  `OnChange`) those consumers map onto; the wire types and convID-trust binding
-  remain theirs.
+- [codebase/721.md](../codebase/721.md) — the **live wiring** ticket record: the
+  `cmd/pyry` constructor, `newInboundDeliver` delivery seam, the `Route`/`resolve`
+  split (the drain re-resolves without stamping the #687 cursor), and the
+  enqueue-and-ack contract change in `send_message`.
+- **Consumers still deferred:** **#705** (`queue_state` / `dequeue_message` reporting +
+  removal handlers binding `convID` to the authorized phone — built on #719's
+  `Snapshot` / `Remove` / `OnChange`) and the inbound bound/backpressure decision (a PO
+  follow-up; chokepoint pre-specified at `Enqueue`).
