@@ -4,9 +4,10 @@ Pure-data leaf package. Declares the daemon-owned, neutral set of event types
 for Phase 2/3 structured streaming (EPIC #596 / #597). Predominantly **outbound**:
 six ACP-shaped outbound event structs (`TextChunk`, `ThoughtChunk`, `ToolStart`,
 `ToolUpdate`, `TurnEnd`, and `PermissionRequest`, #700) plus one internal-only
-event (`Stall`, #638) behind a sealed `Event` sum type. It also seals the first
-**inbound** member — `PermissionResponse` (#700) — behind a sealed `Inbound`
-sum type. Four string-backed ACP enums and a sealed `ToolContent` sum type round
+event (`Stall`, #638) behind a sealed `Event` sum type. It also seals the
+**inbound** members behind a sealed `Inbound` sum type — `PermissionResponse`
+(#700, first) and `Cancel` (#707, the neutral remote-Esc / ACP `session/cancel`
+command). Four string-backed ACP enums and a sealed `ToolContent` sum type round
 it out. No transport, no I/O, no goroutines, no `context`, no `slog` — **standard
 library only** (`encoding/json` for `json.RawMessage` is the sole import;
 `permission.go` needs none).
@@ -37,7 +38,7 @@ the first inbound member `PermissionResponse`, see [codebase/700.md](../codebase
 ```
 internal/turnevent/
 ├── event.go         Event sealed sum type; the 5 ACP-shaped event structs + the internal-only Stall (#638); Location; value-receiver markers; var _ Event = … assertions
-├── permission.go    (#700) PermissionRequest (outbound Event variant) + PermissionOption + NewPermissionRequest; Inbound sealed sum type + PermissionResponse (first member); markers + assertions. Zero imports.
+├── permission.go    (#700) PermissionRequest (outbound Event variant) + PermissionOption + NewPermissionRequest; Inbound sealed sum type + PermissionResponse (first member) + Cancel (#707, fieldless inbound command); markers + assertions. Zero imports.
 ├── taxonomy.go      ToolKind / ToolStatus / TurnEndReason / PermissionOptionKind (#700) enums + const blocks + unexported canonical slices + Valid() methods
 ├── content.go       ToolContent sealed sum type; TextContent / DiffContent / TerminalContent; markers; var _ ToolContent = … assertions
 ├── event_test.go    field round-trip, the Event-stream type switch, RawInput opacity
@@ -217,6 +218,20 @@ validation is the inbound parser's job, consistent with the package's
 construct-then-validate-downstream stance. No `Valid()` on the response (YAGNI
 until the inbound parser needs one).
 
+**`Cancel`** (#707, second `Inbound` member): an inbound command to **stop the
+current turn** — the neutral form of a remote Esc / ACP `session/cancel` (#600).
+**Fieldless** (`type Cancel struct{}`): the daemon has one live turn context, so no
+correlation id is needed yet; #600 adds a session/turn id additively if ACP needs
+one. The slot was reserved since #700 (the `permission.go:43` comment), and the
+marker **stays in `permission.go`** beside its sibling — the relocation-to-own-file
+hinted there is optional churn #707 declined. Crucially, `Cancel` is **declared
+vocabulary, not a live producer path**: the mobile `interrupt` frame routes to Esc
+directly via the `internal/relay` seam (`handleInterrupt`, #707), it does **not**
+construct a `Cancel` value — exactly as the mobile `modal_cancel` frame routes to
+`ModalResolver.ResolveCancel` rather than building a `PermissionResponse`. The
+mobile-wire → neutral-`Cancel` translator is the ACP adapter's job (#600); `Cancel`
+exists now so #600 has its target. See [codebase/707.md](../codebase/707.md).
+
 ## Why no errors, and no construction-time validation
 
 The package returns **no errors** and does **no construction-time validation**.
@@ -260,11 +275,12 @@ imposes nothing.
 
 ## What's deliberately NOT in the package
 
-- **The remaining inbound commands** — `Prompt`, `Cancel`, `DropQueued`. #700
-  established the `Inbound` sealed sum type with `PermissionResponse` as its first
-  member; these three join it in the deferred inbound-commands ticket (a now
-  purely *additive* change, and that ticket may relocate `Inbound` to its own
-  `inbound.go` when it does).
+- **The remaining inbound commands** — `Prompt`, `DropQueued`. #700 established
+  the `Inbound` sealed sum type with `PermissionResponse` as its first member;
+  **`Cancel` graduated off this list in #707** (see § The permission seam). `Prompt`
+  and `DropQueued` join the set when their tickets land — a purely *additive*
+  change. (The relocation of `Inbound` to its own `inbound.go` that #700 hinted is
+  optional churn #707 declined; the marker stays in `permission.go`.)
 - **Non-turn / internal-only events** — `BusyState`, `QueueState`,
   `ScreenSnapshot`. Out of scope for #606; a later ticket gives them a home.
   (Two types have already **graduated off** this list: `Stall` as an
@@ -303,6 +319,10 @@ imposes nothing.
 - [codebase/700.md](../codebase/700.md) — the permission request/response seam:
   `PermissionRequest` outbound, the `Inbound` sum type + `PermissionResponse`, and
   the fourth `PermissionOptionKind` enum.
+- [codebase/707.md](../codebase/707.md) — `Cancel`, the second `Inbound` member
+  (the neutral remote-Esc / ACP `session/cancel` target); declared here, routed to
+  Esc via the `internal/relay` `Interrupter` seam (the mobile `interrupt` frame
+  does not construct a `Cancel` — the `modal_cancel` precedent).
 - [protocol-package.md](protocol-package.md) — the sibling pure-data leaf package
   whose const-block layout, drift-detector test pattern, and consumer-owns-wire-
   codes convention this package mirrors.
