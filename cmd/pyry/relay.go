@@ -331,6 +331,10 @@ func startRelayV2(
 		// (it has SendEsc). modal_cancel resolves here; modal_answer is a deferred
 		// no-op until #717 fills the gated arm.
 		ModalResolver: newModalResolverV2(modalReg, sup, logger),
+		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes
+		// one Esc through the sealed supervisor keystroke surface. sup
+		// (*supervisor.Supervisor) satisfies Interrupter via SendEsc (#726).
+		Interrupter: sup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build v2 session manager: %w", err)

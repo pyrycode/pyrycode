@@ -64,6 +64,9 @@ func TestIsV1Compatible(t *testing.T) {
 		// receives, and inbound dequeue_message control that is never a v1 type.
 		{"queue_state-rejected", TypeQueueState, false, ErrUnknownType},
 		{"dequeue_message-rejected", TypeDequeueMessage, false, ErrUnknownType},
+		// the v2-only interrupt control: an inbound control type an old phone
+		// never sees, so IsV1Compatible must reject it.
+		{"interrupt-rejected", TypeInterrupt, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,6 +131,8 @@ var v2OnlyTypes = map[string]bool{
 	// v2 queue vocabulary.
 	TypeQueueState:     true,
 	TypeDequeueMessage: true,
+	// v2 interrupt control.
+	TypeInterrupt: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -162,6 +167,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeModalShown, TypeModalAnswer, TypeModalCancel, TypeModalDismissed,
 		// v2 queue vocabulary.
 		TypeQueueState, TypeDequeueMessage,
+		// v2 interrupt control.
+		TypeInterrupt,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]

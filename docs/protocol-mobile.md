@@ -438,6 +438,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`modal_dismissed`** | binary → phone | no | **New in v2.** Modal resolution notice. See [Modal](#modal-v2). |
 | **`queue_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). Queued-message backlog snapshot (#597 Phase 3). See [Queue](#queue-v2). |
 | **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
+| **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -685,6 +686,16 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 |---|---|---|
 | `conversation_id` | string | The conversation to dequeue from. Untrusted phone input — the handler (#723) resolves it to an authorized conversation. |
 | `queued_msg_id` | integer | The id to remove (the `queued_msg_id` from a `queue_state` entry). |
+
+### Interrupt (v2)
+
+A paired phone sends `interrupt` to stop the running turn — the remote equivalent of pressing **Esc** at the local terminal (#597 Phase 3, #707). The daemon maps it to the neutral `turnevent.Cancel` command and routes it to the supervised claude as a single Esc keystroke (claude's own interrupt). #600 maps ACP `session/cancel` onto the same neutral shape.
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler (like [`modal_cancel`](#modal-v2) / [`dequeue_message`](#queue-v2)).
+
+It carries **no payload** — a bare control frame, with no `conversation_id`, no `modal_id` nonce, no `answer_token`, and no idempotency key. A replayed `interrupt` simply sends another Esc (an Esc with no running turn is a no-op in claude), so no nonce or dedup is needed.
+
+`interrupt` is **gated on the `interactive` capability**: a non-interactive connection's `interrupt` is inert (no Esc). It is **exempt from the per-device permission gate** ([#702](#security-model)) because interrupting one's own paired session is a normal paired-phone action, not a tool-permission decision. Any interactive paired phone can interrupt the single live claude — there is no per-connection conversation binding for interrupt, consistent with the broadcast fan-out model (a user's paired devices are one trust domain, per the [Security model](#security-model)). It is **not** part of the reconnect-replay ring and needs no correlation key.
 
 ## Backfill semantics
 

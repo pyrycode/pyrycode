@@ -87,6 +87,24 @@ func TestPermissionResponse_IsInbound(t *testing.T) {
 	}
 }
 
+// Cancel is an inbound command (#707), recoverable from a []Inbound by type
+// switch — the same seam PermissionResponse rides. The ACP adapter (#600) is the
+// only future producer of a Cancel value; the mobile interrupt path routes to
+// Esc directly without constructing one.
+func TestCancel_IsInbound(t *testing.T) {
+	t.Parallel()
+
+	var _ Inbound = Cancel{} // compile-time membership
+
+	stream := []Inbound{Cancel{}}
+	switch stream[0].(type) {
+	case Cancel:
+		// recovered
+	default:
+		t.Fatalf("stream[0] (%T) did not type-switch to Cancel", stream[0])
+	}
+}
+
 // An option carrying a fabricated kind reports Kind.Valid() == false — proving
 // the field is the enum, not a free string at the call site.
 func TestPermissionOption_KindValidity(t *testing.T) {

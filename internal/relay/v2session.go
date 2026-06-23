@@ -373,6 +373,16 @@ type ScreenSnapshotter interface {
 	ScreenSnapshot() (text string, live bool)
 }
 
+// Interrupter delivers a single Esc to the supervised claude — the remote
+// equivalent of a local Esc, claude's own interrupt. *supervisor.Supervisor
+// satisfies it via SendEsc (#726), so the supervisor needs no new method.
+// Declared here (consumer side), beside ScreenSnapshotter, so internal/relay
+// imports neither internal/supervisor nor tui-driver. Named for its relay-domain
+// role (matching ScreenSnapshotter.ScreenSnapshot / ModalResolver.Resolve*),
+// even though the method keeps the sealed surface's name. SendEsc is safe to call
+// from any goroutine — it is the same seam ResolveCancel / ResolveTimeout use.
+type Interrupter interface{ SendEsc() error }
+
 // ModalDismissal is the wire outcome+source the manager broadcasts after a
 // resolver consumes an outstanding modal. The manager already holds modal_id
 // (from the inbound control payload), so it is not repeated here.
@@ -486,6 +496,12 @@ type V2SessionConfig struct {
 	// simply unwired — foreground, or pre-#708 before the producer is live).
 	// Production wires the cmd/pyry resolver.
 	ModalResolver ModalResolver
+
+	// Interrupter routes an inbound interactive `interrupt` control frame to
+	// the supervised claude as one Esc (#707). Optional: nil ⇒ interrupt is
+	// inert (no Esc) — the foreground / unwired case. Production wires
+	// *supervisor.Supervisor.
+	Interrupter Interrupter
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -1315,6 +1331,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeModalAnswer:
 			m.handleModalAnswer(ctx, s, probeEnv)
 			return
+		case protocol.TypeInterrupt:
+			m.handleInterrupt(s)
+			return
 		}
 	}
 
@@ -1652,6 +1671,50 @@ func (m *V2SessionManager) broadcastModalDismissed(ctx context.Context, modalID 
 				"conn_id", connID,
 				"err", err)
 		}
+	}
+}
+
+// handleInterrupt routes an inbound `interrupt` control frame to the supervised
+// claude as one Esc — the remote equivalent of pressing Esc at the local
+// terminal (#707). The frame carries no payload, so there is nothing to decode;
+// there is no reply and no broadcast (fire-and-forget). Intercepted in
+// dispatchAppFrame before dispatch.Route, like handleModalCancel, and runs on the
+// manager's single Run dispatch goroutine — so the s.interactive read is lock-free
+// under the package's single-owner invariant.
+//
+// The signature takes only s (no ctx, no env): the frame has no payload to decode
+// and the handler does no cancellable work — an intentional deviation from the
+// (ctx, s, env) sibling handlers.
+//
+// Order is load-bearing — the capability gate comes first:
+//  1. A non-interactive conn's interrupt is inert (no Esc). This is the new
+//     inbound capability gate (#707): existing inbound controls gate outbound
+//     emission on s.interactive, but interrupt is the first whose authorization
+//     IS the interactive capability. A one-line check, NOT a reusable inbound-gate
+//     abstraction — interrupt is its only consumer (dequeue is ungated, modal_answer
+//     uses the per-device gate, modal_cancel a nonce), so a shared gate would be a
+//     one-consumer abstraction (YAGNI).
+//  2. A nil Interrupter (foreground / pre-wire) makes the frame inert, mirroring
+//     handleModalCancel's nil-resolver guard.
+//  3. SendEsc is best-effort: an error (no live session / mid-teardown) is
+//     Warn-logged with the supervisor sentinel + conn_id and tolerated — there is
+//     nothing to roll back and no reply is owed. NEVER log payload bytes (there
+//     are none) or the rendered screen.
+func (m *V2SessionManager) handleInterrupt(s *V2Session) {
+	if !s.interactive {
+		return // non-interactive conn: inert, no Esc (the AC-2 negative path)
+	}
+	if m.cfg.Interrupter == nil {
+		m.cfg.Logger.Debug("relay: v2 interrupt inert; no interrupter wired",
+			"event", "v2.interrupt.inert",
+			"conn_id", s.connID)
+		return
+	}
+	if err := m.cfg.Interrupter.SendEsc(); err != nil {
+		m.cfg.Logger.Warn("relay: v2 interrupt keystroke failed",
+			"event", "v2.interrupt.keystroke_err",
+			"conn_id", s.connID,
+			"err", err)
 	}
 }
 
