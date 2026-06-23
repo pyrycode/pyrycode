@@ -40,8 +40,10 @@ func NewPermissionRequest(requestID, toolCallID, title string, options []Permiss
 // Inbound is the sealed sum type of inbound commands the consumer sends back to
 // the daemon. The unexported marker keeps the variant set closed to this
 // package, mirroring Event and ToolContent. PermissionResponse is the first
-// member; the deferred inbound-commands ticket adds Prompt / Cancel / DropQueued
-// here (and may relocate this marker to its own file when it does).
+// member; #707 adds Cancel. The remaining deferred inbound commands (Prompt /
+// DropQueued) join the same set when their tickets land. Cancel keeps the marker
+// here beside its sibling — the relocation to a separate file hinted above is
+// optional churn this slice declines.
 type Inbound interface{ isInbound() }
 
 // PermissionResponse is an inbound command answering a PermissionRequest, matched
@@ -55,12 +57,27 @@ type PermissionResponse struct {
 	Cancelled bool   // true => the consumer dismissed the modal without selecting
 }
 
+// Cancel is an inbound command: stop the current turn (the neutral form of a
+// remote Esc / ACP session/cancel, #600). Fieldless — the daemon has one live
+// turn context, so no correlation id is needed yet; #600 adds a session/turn id
+// additively if ACP needs one.
+//
+// Cancel is declared vocabulary in this slice: the mobile interrupt frame routes
+// to Esc directly via the relay seam (internal/relay handleInterrupt), it does
+// not construct a Cancel value — mirroring how the mobile modal_cancel frame
+// routes to ModalResolver.ResolveCancel rather than building a PermissionResponse.
+// The mobile-wire → neutral-Cancel translator is the ACP adapter's job (#600);
+// Cancel exists now so #600 has its target.
+type Cancel struct{}
+
 // Pure value types, so each marker is on a value receiver: the zero value
 // satisfies its sum type.
 func (PermissionRequest) isTurnEvent() {}
 func (PermissionResponse) isInbound()  {}
+func (Cancel) isInbound()              {}
 
 var (
 	_ Event   = PermissionRequest{}
 	_ Inbound = PermissionResponse{}
+	_ Inbound = Cancel{}
 )

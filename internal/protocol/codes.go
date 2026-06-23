@@ -225,3 +225,31 @@ const (
 	TypeQueueState     = "queue_state"     // binary → phone, outbound v2 queued-backlog snapshot
 	TypeDequeueMessage = "dequeue_message" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )
+
+// Mobile Protocol v2 interrupt control (epic #597 Phase 3,
+// docs/protocol-mobile.md § Interrupt). A paired phone sends interrupt to stop
+// the running turn — the remote equivalent of pressing Esc at the local
+// terminal. The daemon maps it to the neutral turnevent.Cancel command and
+// routes it to the supervised claude as a single Esc keystroke (claude's own
+// interrupt). #600 maps ACP session/cancel onto the same neutral shape.
+//
+// It is an inbound phone → binary *control* envelope the v2 session manager
+// intercepts at internal/relay/v2session.go's dispatchAppFrame before
+// internal/dispatch.Route (like TypeModalCancel / TypeDequeueMessage); there is
+// NO dispatch.Route handler for it. Unlike the modal frames it carries NO
+// payload — no conversation_id, no modal_id nonce, no answer_token, no
+// idempotency key: a bare control frame.
+//
+// Trust posture: interrupt is gated on the negotiated `interactive` capability
+// (a non-interactive conn's interrupt is inert) and is exempt from the
+// per-device permission gate (#702) — interrupting one's own paired session is
+// a normal paired-phone action (ADR 025 § Security model), not a privileged
+// tool-permission decision.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// route this inbound control envelope to the handler chain. The drift detector
+// in internal/protocol/compat_test.go partitions Type* constants between
+// v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+const (
+	TypeInterrupt = "interrupt" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+)
