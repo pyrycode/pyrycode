@@ -338,8 +338,8 @@ func TestPool_OnRotate_NoOwnerNoOp(t *testing.T) {
 	newID := SessionID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
 
 	const (
-		convID    conversations.ConversationID = "11111111-2222-4333-8444-555555555555"
-		otherSess                              = "99999999-9999-4999-8999-999999999999"
+		convID    = "11111111-2222-4333-8444-555555555555"
+		otherSess = "99999999-9999-4999-8999-999999999999"
 	)
 	// Conversation bound to a DIFFERENT session than the one being rotated.
 	reg, path := seedBoundConvRegistry(t, pool, convID, SessionID(otherSess))

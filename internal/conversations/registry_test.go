@@ -861,10 +861,10 @@ func TestRegistry_RebindSession_Hit(t *testing.T) {
 func TestRegistry_RebindSession_AppendOrder(t *testing.T) {
 	t.Parallel()
 	const (
-		ownerID ConversationID = "11111111-2222-4333-8444-555555555555"
-		s0                     = "00000000-0000-4000-8000-000000000000"
-		oldSess                = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		newSess                = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		ownerID = "11111111-2222-4333-8444-555555555555"
+		s0      = "00000000-0000-4000-8000-000000000000"
+		oldSess = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		newSess = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	)
 	r := &Registry{}
 	r.Create(Conversation{ID: ownerID, Cwd: "/owner", CurrentSessionID: oldSess, SessionHistory: []string{s0}})
@@ -885,10 +885,10 @@ func TestRegistry_RebindSession_AppendOrder(t *testing.T) {
 func TestRegistry_RebindSession_Miss(t *testing.T) {
 	t.Parallel()
 	const (
-		ownerID ConversationID = "11111111-2222-4333-8444-555555555555"
-		bound                  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		unowned                = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
-		newSess                = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		ownerID = "11111111-2222-4333-8444-555555555555"
+		bound   = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		unowned = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+		newSess = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	)
 	r := &Registry{}
 	orig := Conversation{ID: ownerID, Cwd: "/owner", CurrentSessionID: bound}
@@ -909,8 +909,8 @@ func TestRegistry_RebindSession_Miss(t *testing.T) {
 func TestRegistry_RebindSession_EmptyOldIDGuard(t *testing.T) {
 	t.Parallel()
 	const (
-		unboundID ConversationID = "11111111-2222-4333-8444-555555555555"
-		newSess                  = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		unboundID = "11111111-2222-4333-8444-555555555555"
+		newSess   = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	)
 	r := &Registry{}
 	unbound := Conversation{ID: unboundID, Cwd: "/unbound"} // CurrentSessionID == ""
@@ -931,9 +931,9 @@ func TestRegistry_RebindSession_EmptyOldIDGuard(t *testing.T) {
 func TestRegistry_RebindSession_DoesNotPersist(t *testing.T) {
 	t.Parallel()
 	const (
-		ownerID ConversationID = "11111111-2222-4333-8444-555555555555"
-		oldSess                = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		newSess                = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		ownerID = "11111111-2222-4333-8444-555555555555"
+		oldSess = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		newSess = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	)
 	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
 	r := &Registry{}
