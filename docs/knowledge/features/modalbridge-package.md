@@ -12,6 +12,12 @@ gate) is wired by #727's `modal_cancel` resolver; `Lookup` by #717's gated
 `modal_answer`. The inbound relay seam itself is documented in
 [v2-session-manager.md § Inbound modal control](v2-session-manager.md#inbound-modal-control-727--modalresolver-seam--modal_dismissed-broadcast).
 
+The surfacer also owns the **local resolution arm** (#706): when the operator answers a
+modal at the local `pyry attach` TTY it reacts to `EventKindPtyModalHidden`, `Resolve`s
+the outstanding `modal_id`, and broadcasts `modal_dismissed{source: local}` — making
+resolution single-shot **across both heads** (local TTY + paired phone). See
+[§ The local resolution arm](#the-local-resolution-arm--handlemodalhidden-706-first-answer-wins).
+
 Two new files, in two packages:
 
 - `internal/modalbridge/modal.go` — the **relay-free modal domain**: the `Registry`
@@ -121,26 +127,95 @@ without a successfully-minted id.
 
 A **passive state machine** — spawns no goroutine, owns no queue (the `Registry` mutex
 is its only synchronisation), same posture as `interactiveTurnEmitterV2`. The single
-entry point:
+entry point dispatches on event kind to two arms (#706 added the `Hidden` arm; every
+other event is a no-op):
 
 ```go
-func (e *interactiveModalEmitterV2) Handle(ctx context.Context, ev tuidriver.Event, screenText string)
+func (e *interactiveModalEmitterV2) Handle(ctx context.Context, ev tuidriver.Event, screenText string) {
+    switch ev.Kind {
+    case tuidriver.EventKindPtyModalShown:  e.handleModalShown(ctx, ev, screenText)
+    case tuidriver.EventKindPtyModalHidden: e.handleModalHidden(ctx, ev) // local resolution (#706)
+    }
+}
 ```
 
-1. `ev.Kind != EventKindPtyModalShown` → no-op.
-2. `PermissionRequestForClass(ev.Modal, screenText)`; `!ok` → no-op (non-permission/trust
+### `handleModalShown` — surface a modal to phones
+
+1. `PermissionRequestForClass(ev.Modal, screenText)`; `!ok` → no-op (non-permission/trust
    class; AC1).
-3. `reg.Record(...)` mints the `modal_id` + records the `Outstanding`. RNG failure →
+2. `reg.Record(...)` mints the `modal_id` + records the `Outstanding`. RNG failure →
    drop (never push an id-less payload), `Warn` with no payload bytes.
+3. `armer.ArmModalTimeout(ctx, modalID)` arms the deny-on-timeout (#725), then **track
+   the just-surfaced modal** (`outstandingID = modalID; outstandingClass = ev.Modal`) so
+   a later `Hidden` can correlate back to this id (#706, below). Set here — consistent
+   with the registry entry + armed timeout — even on the defensive marshal-fail return.
 4. Marshal the payload **once**; build a `protocol.Envelope{Type: TypeModalShown, TS: now}`
    with **`EventID` left nil** — a `modal_shown` is a *control* event, not part of the
    turn-event replay ring (`forwardEnvelope` never drops `EventID==nil` envelopes, so
    delivery is real).
-5. **Capability-gated fan-out** (exactly `interactiveTurnEmitterV2.emit`'s shape): for
-   each `ActiveConns(ctx)`, skip `!c.Interactive` (`modal_shown` rides the `interactive`
-   capability, #607), assign a per-conn monotonic `env.ID = ++nextID`, `Push`. A `Push`
-   error debug-logs the transport sentinel and **continues** to the next conn (a
-   slow/closed conn never blocks the others); `ctx.Err()` → return (teardown).
+5. **Capability-gated fan-out** via the shared `broadcastInteractive` helper (below).
+
+### `broadcastInteractive` — the shared fan-out helper (#706)
+
+Both arms fan one control envelope to every interactive-capable conn through one private
+helper (exactly `interactiveTurnEmitterV2.emit`'s shape): one shared timestamp, skip
+`!c.Interactive` (v2 modal events ride the `interactive` capability, #607), assign a
+per-conn monotonic `env.ID = ++nextID`, **`EventID` nil**, `Push`. A `Push` error
+debug-logs the transport sentinel (tagged by the caller's `pushErrEvent`) and
+**continues** to the next conn (a slow/closed conn never blocks the others); `ctx.Err()`
+→ return (teardown). Factored out so `Shown` (`TypeModalShown`) and `Hidden`
+(`TypeModalDismissed`) share one tested loop; the existing `Shown` fan-out tests guard
+it. The cross-package `relay.broadcastModalDismissed` is deliberately **not** reused — it
+iterates `m.sessions` on the Run goroutine and must not be reached from this producer
+goroutine (see § The local resolution arm).
+
+### The local resolution arm — `handleModalHidden` (#706, first-answer-wins)
+
+When the operator answers a modal at the local `pyry attach` TTY, claude's modal
+vanishes and tui-driver fires `EventKindPtyModalHidden` for the just-hidden **class**
+([ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § Security model
+#4). The arm correlates that class back to the `modal_id` this emitter surfaced,
+`Resolve`s it through the shared registry, and — **only if this head wins the race**
+against a remote answer/cancel (#717/#727) or the deny-on-timeout (#725) — audits the
+local resolution and broadcasts one `modal_dismissed{source: local}`.
+
+```
+handleModalHidden(ctx, ev):
+  if outstandingID == ""          → return  // nothing we surfaced is outstanding (AC1 gate)
+  if ev.Modal != outstandingClass → warn + return WITHOUT clearing  // defensive, unreachable
+  id := outstandingID; clear outstandingID/Class   // modal gone regardless of who consumes
+  out, ok := reg.Resolve(id)
+  if !ok → return     // first-answer-wins LOSER: a remote/timeout arm already consumed it
+                      //   — no audit, no broadcast, no second modal_dismissed (AC2 / AC3-b)
+  // WINNER:
+  audit.Log({id, out.Class, OutcomeDismissedLocal, SourceLocal})         // no answering device
+  broadcastInteractive(ctx, TypeModalDismissed, {id, dismissed_local, local}, …)
+```
+
+- **Correlation = emitter-tracked outstanding id + class** (the architect's call over a
+  registry "resolve-the-current" method, which would force the registry to track
+  recency/insertion-order — state a precise keyed one-shot must not carry). tui-driver's
+  single-modal + `Hidden(old)`-before-`Shown(new)` invariants guarantee the tracked id
+  always names the showing modal when a `Hidden` arrives, and `Handle` is single-goroutine
+  so the tracking (`outstandingID`/`outstandingClass`) needs **no lock** — same posture as
+  `nextID`.
+- **First-answer-wins is structural in `Registry.Resolve`**, not added here. All four
+  resolution paths (remote answer #717, remote cancel #727, deny-on-timeout #725, and this
+  local arm) route through the one mutex-guarded one-shot `Resolve`. Each broadcasts/audits
+  **only on `ok`**, so a `modal_id` is resolved/broadcast/audited **at most once** across
+  the two real goroutines (producer Run vs relay dispatch).
+- **No keystroke-after-resolution window.** The remote answer path consumes via `Resolve`
+  *strictly before* routing its keystroke, so a local resolution that won first makes the
+  remote `Resolve` miss and the remote path return **before any keystroke** — an
+  internet-sourced answer can never act on a modal the operator already resolved locally.
+  The local arm itself routes **no** keystroke (the operator already pressed the key; the
+  modal is already gone) — strictly less actuation surface than the remote arms.
+- **Local outcome is a producer-defined sentinel, not an `option_id`.** The daemon cannot
+  observe *which* option the operator picked locally — only that the modal vanished — so
+  `modal_dismissed{local}` carries `outcome: dismissed_local` (the phone uses it only to
+  clear its prompt). One `audit`/`protocol` vocabulary feeds both the wire dismissal and
+  the [audit](audit-package.md) entry; the local resolution audits with **no answering
+  device** (empty `DeviceHash`/`DeviceLabel`, the no-device case), winner-only.
 
 ### Defensive prompt bound
 
@@ -160,16 +235,20 @@ byte — so no raw terminal bytes reach the phone. There is exactly one structur
 
 ## Concurrency model
 
-- **Surfacer is single-goroutine.** `nextID` is unguarded (no atomic/mutex) — `Handle`
-  runs only on the producer's single Run goroutine, the same invariant
-  `interactiveTurnEmitterV2` documents.
+- **Surfacer is single-goroutine.** `nextID`, `outstandingID`, `outstandingClass` are
+  unguarded (no atomic/mutex) — `Handle` runs only on the producer's single Run goroutine,
+  the same invariant `interactiveTurnEmitterV2` documents.
 - **The `Registry` mutex is a deterministic safety net, not goroutine-confinement.** The
-  registry is the one piece touched by **two real goroutines**: the surfacer goroutine
-  (`Record`) and — in #717 — the relay dispatch goroutine (`Lookup`/`Resolve`). So it
-  carries a `sync.Mutex` (a **leaf lock**: O(1) holds, never nested with any other lock).
-  Single-writer-nonce (only the surfacer *mints*) does **not** by itself make the map safe
-  against #717's concurrent reads, so a real mutex is the right fabric (belt-and-suspenders:
-  the safety net is deterministic code).
+  registry is the one piece touched by **two real goroutines**: the surfacer/producer
+  goroutine (`Record` on `Shown`, `Resolve` on a local `Hidden` #706) and the relay
+  dispatch goroutine (`Lookup`/`Resolve` for remote answer/cancel #717/#727, and the
+  deny-on-timeout #725). So it carries a `sync.Mutex` (a **leaf lock**: O(1) holds, never
+  nested with any other lock). Single-writer-nonce (only the surfacer *mints*) does **not**
+  by itself make the map safe against the relay's concurrent reads/resolves, so a real
+  mutex is the right fabric (belt-and-suspenders: the safety net is deterministic code).
+- **First-answer-wins is structural in `Resolve`** (#706). All four resolution paths route
+  through the one mutex-guarded one-shot `Resolve`; each broadcasts/audits only on `ok`, so
+  a `modal_id` is resolved at most once regardless of which goroutine wins the race.
 
 ## Security
 
@@ -197,9 +276,11 @@ driving a scripted modal through a fake interactive push surface**; there is **n
 `Session.Events()` subscription**. This is the [#632 emitter → #633 wiring] precedent — a
 clean, self-contained, unit-tested component. The wiring slice (#708's capstone, or a thin
 wiring slice) must: (1) construct the surfacer with the daemon-singleton `*Registry` (the
-same instance #717 wires into `dispatchAppFrame`), (2) feed it `EventKindPtyModalShown`
-events from the **follow-active** `Session.Events()` stream, and (3) supply the active
-session's rendered screen as `screenText`. The named seam: add an `OnModal
+same instance #717/#725 wire into the relay — the shared instance is what makes the
+cross-head `Resolve` arbitration real in production), (2) feed it both
+`EventKindPtyModalShown` **and** `EventKindPtyModalHidden` events (#706's local arm) from
+the **follow-active** `Session.Events()` stream, and (3) supply the active session's
+rendered screen as `screenText`. The named seam: add an `OnModal
 func(tuidriver.ModalClass)` callback to `turnbridge.Config` (fired from `Producer.drain`),
 and resolve the active bound supervisor's `ScreenSnapshot()` in the wiring closure. "Which
 screen / timing of the snapshot vs the modal edge" is the wiring slice's to resolve.
@@ -225,7 +306,9 @@ two-phone path is #708.
 
 ## Related
 
-- [codebase/716.md](../codebase/716.md) — ticket record (patterns + lessons).
+- [codebase/716.md](../codebase/716.md) — ticket record (patterns + lessons);
+  [codebase/706.md](../codebase/706.md) — the local resolution arm + cross-head
+  first-answer-wins (this surfacer's `handleModalHidden`).
 - [turnevent-package.md](turnevent-package.md) — the internal `PermissionRequest` /
   `PermissionOption` / `PermissionOptionKind` this maps a modal class *into*.
 - [codebase/702.md](../codebase/702.md) — the per-device remote-permission **answer gate**
@@ -251,8 +334,13 @@ two-phone path is #708.
   its **1-based position in `Outstanding.Options`** (the surfaced order this package
   records is the single source of truth, doubling as membership validation). See
   [codebase/717.md](../codebase/717.md).
+- **Local resolution arm — #706** (landed): the surfacer's `handleModalHidden` resolves a
+  locally-answered modal through the shared `Resolve` and broadcasts
+  `modal_dismissed{local}`, making resolution single-shot across both heads. See
+  [codebase/706.md](../codebase/706.md) and [§ The local resolution arm](#the-local-resolution-arm--handlemodalhidden-706-first-answer-wins).
 - **Consumer (still deferred — not in #716):** #708 (live producer wiring +
-  two-phone e2e). Until #708 `Record`s into the daemon-singleton registry, every
-  production `modal_answer`/`modal_cancel` takes the unknown-`modal_id` no-op path.
+  two-phone e2e). Until #708 feeds the surfacer live `Shown`/`Hidden` events from the
+  follow-active stream, every production modal path (surface + #706 local resolution +
+  remote `modal_answer`/`modal_cancel`) is inert — the registry is never `Record`ed into.
 </content>
 </invoke>

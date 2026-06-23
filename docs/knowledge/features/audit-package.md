@@ -63,6 +63,7 @@ const (
     OutcomeDeniedTimeout      Outcome = "denied_timeout"      // denied: deny-on-timeout window elapsed
     OutcomeCancelled          Outcome = "cancelled"           // phone cancelled / dismissed (ESC)
     OutcomeDenied             Outcome = "denied"              // authorized phone explicitly chose a deny option
+    OutcomeDismissedLocal     Outcome = "dismissed_local"     // resolved at the desktop TTY; the picked choice is not observable by the daemon (#706)
 )
 
 type Source string // mirrors protocol.ModalDismissedPayload.Source's closed set
@@ -187,7 +188,11 @@ internal/audit/
   "Security model" item 6 "Audit" — the governing requirement.
 - **Consumer (deferred — none wired in #712):** #703 — the modal control loop
   that constructs the `Entry` and calls `Log` on every resolved decision branch.
-- **Two-heads ownership:** #706 — stale-`modal_id` rejection / first-answer-wins
-  (the `SourceLocal` path a local resolution would record).
+- **Two-heads ownership — #706** (landed): the **first live `SourceLocal` consumer** —
+  the surfacer's local resolution arm (`cmd/pyry/interactive_modal_v2.go`'s
+  `handleModalHidden`) logs exactly one `{OutcomeDismissedLocal, SourceLocal}` entry, with
+  **empty device identity** (a local TTY resolution has no answering device — the no-device
+  case), on the first-answer-wins winner path only. See [codebase/706.md](../codebase/706.md)
+  and [features/modalbridge-package.md](modalbridge-package.md).
 
 [ADR 025]: ../decisions/025-mobile-remote-head-interactive-session.md
