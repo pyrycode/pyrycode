@@ -103,6 +103,7 @@ func startRelay(
 	claudeSessionsDir string,
 	defaultCwd string,
 	transitions transitionObserverSink,
+	qse *queueStateEmitterV2,
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -146,7 +147,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -287,6 +288,7 @@ func startRelayV2(
 	claudeSessionsDir string,
 	defaultCwd string,
 	transitions transitionObserverSink,
+	qse *queueStateEmitterV2,
 ) (drain func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
 	if err != nil {
@@ -367,16 +369,27 @@ func startRelayV2(
 	// nobody.
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr, logger)
 
+	// Wire the queue_state producer (#722): start the pre-built emitter's Run
+	// goroutine over mgr, fanning a queue_state envelope to capability-gated
+	// interactive phones whenever a conversation's inbound backlog changes
+	// (enqueue, drain-advance, or remove). Like the session-transition producer it
+	// has NO PTY dependency — it consumes msgqueue changes — so it is wired
+	// unconditionally whenever the v2 manager exists. The capability filter
+	// (ActiveConns → Interactive) is the delivery gate: with no interactive phone
+	// connected, the fan-out reaches nobody.
+	streamQueueStateCleanup := startQueueStateStreamV2(ctx, qse, mgr)
+
 	return func() {
-		// Stop both producers — the structured turn stream and the session-
-		// transition producer — before waiting on the manager so no fan-out races
-		// a winding-down manager. Each cleanup waits for its goroutine on
-		// ctx-cancel (already cancelled by the time drain runs). Then wait for the
-		// manager's Run to exit on the closed Frames channel.
+		// Stop the producers — the structured turn stream, the session-transition
+		// producer, and the queue_state producer — before waiting on the manager so
+		// no fan-out races a winding-down manager. Each cleanup waits for its
+		// goroutine on ctx-cancel (already cancelled by the time drain runs). Then
+		// wait for the manager's Run to exit on the closed Frames channel.
 		if streamCleanup != nil {
 			streamCleanup()
 		}
 		streamTransitionsCleanup()
+		streamQueueStateCleanup()
 		<-mgrDone
 	}, nil
 }
