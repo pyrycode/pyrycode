@@ -242,11 +242,17 @@ two-phone path is #708.
   invariant; `docs/protocol-mobile.md` § Modal — the wire field table + security contract.
 - **Inbound resolution seam — #727** (landed): introduces the relay-side
   `ModalResolver` seam + `modal_dismissed` broadcast and wires `Resolve` via the
-  `cmd/pyry` `modalResolverV2` to resolve `modal_cancel`. `modal_answer` is
-  intercepted but a deferred no-op until #717 fills the gated arm. See
+  `cmd/pyry` `modalResolverV2` to resolve `modal_cancel`. See
   [v2-session-manager.md § Inbound modal control](v2-session-manager.md#inbound-modal-control-727--modalresolver-seam--modal_dismissed-broadcast)
   and [codebase/727.md](../codebase/727.md).
-- **Consumer (deferred — not in #716):** #717 (gated `modal_answer` resolution;
-  reads `Registry.Lookup`) and #708 (live producer wiring + two-phone e2e).
+- **Gated `modal_answer` — #717** (landed): fills the answer arm of the
+  `ModalResolver`. Reads `Registry.Lookup` (no consume) to gate, then `Resolve`
+  (consume) only for a fully-authorized answer; maps `option_id` to a keystroke by
+  its **1-based position in `Outstanding.Options`** (the surfaced order this package
+  records is the single source of truth, doubling as membership validation). See
+  [codebase/717.md](../codebase/717.md).
+- **Consumer (still deferred — not in #716):** #708 (live producer wiring +
+  two-phone e2e). Until #708 `Record`s into the daemon-singleton registry, every
+  production `modal_answer`/`modal_cancel` takes the unknown-`modal_id` no-op path.
 </content>
 </invoke>

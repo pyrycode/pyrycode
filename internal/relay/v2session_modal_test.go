@@ -24,17 +24,19 @@ type modalCallRecord struct {
 }
 
 // fakeModalResolver is a relay-side test double for ModalResolver: it records
-// every call and returns a canned ModalDismissal with ok=true for a cancel of
-// the configured cancelOKFor id (any other id ⇒ the unknown-id no-op).
-// ResolveAnswer is always the deferred no-op (ok=false), matching this slice's
-// contract. The mutex guards the cross-goroutine read (Run goroutine writes, the
-// test goroutine reads).
+// every call and returns a canned ModalDismissal with ok=true for the configured
+// cancelOKFor / answerOKFor id (any other id ⇒ the no-op). An empty *OKFor field
+// makes that arm an unconditional no-op (the #727 deferred-answer default). The
+// mutex guards the cross-goroutine read (Run goroutine writes, the test goroutine
+// reads).
 type fakeModalResolver struct {
-	mu          sync.Mutex
-	cancelOKFor string
-	dismissal   ModalDismissal
-	cancelCalls []modalCallRecord
-	answerCalls []modalCallRecord
+	mu              sync.Mutex
+	cancelOKFor     string
+	answerOKFor     string
+	dismissal       ModalDismissal
+	answerDismissal ModalDismissal
+	cancelCalls     []modalCallRecord
+	answerCalls     []modalCallRecord
 }
 
 func (f *fakeModalResolver) ResolveCancel(modalID string, dev *devices.Device) (ModalDismissal, bool) {
@@ -51,7 +53,10 @@ func (f *fakeModalResolver) ResolveAnswer(modalID, optionID, answerToken string,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.answerCalls = append(f.answerCalls, modalCallRecord{modalID: modalID, optionID: optionID, answerToken: answerToken, dev: dev})
-	return ModalDismissal{}, false
+	if f.answerOKFor == "" || modalID != f.answerOKFor {
+		return ModalDismissal{}, false
+	}
+	return f.answerDismissal, true
 }
 
 func (f *fakeModalResolver) cancelSnapshot() []modalCallRecord {
@@ -281,11 +286,90 @@ func TestV2Session_ModalCancel_FanOut(t *testing.T) {
 	}
 }
 
+// TestV2Session_ModalAnswer_FanOut drives a modal_answer through the real
+// Frames/Run loop with three open heads — two interactive, one not — and asserts
+// the manager routes ResolveAnswer with the right modal_id/option_id + device and
+// fans the modal_dismissed{outcome: option_id, source: remote} to BOTH
+// interactive heads but not the non-interactive one. The gated resolver impl
+// (keystroke/audit) is exercised cmd/pyry-side; here we prove only the answer-arm
+// broadcast on ok=true. Mirrors TestV2Session_ModalCancel_FanOut. AC-1, AC-3.
+func TestV2Session_ModalAnswer_FanOut(t *testing.T) {
+	t.Parallel()
+
+	const (
+		connA      = "c-v2-A" // interactive; the answering head
+		connB      = "c-v2-B" // interactive; a second head showing the same modal
+		connC      = "c-v2-C" // non-interactive; must NOT receive the dismissal
+		modalID    = "modal-fanout-answer"
+		optionID   = "allow_once"
+		wantSource = "remote"
+	)
+
+	respPriv, respPub := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	fake := &fakeModalResolver{
+		answerOKFor:     modalID,
+		answerDismissal: ModalDismissal{Outcome: optionID, Source: wantSource},
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:        frames,
+		Outbound:      rec.outbound,
+		StaticPriv:    respPriv,
+		Devices:       reg,
+		ServerID:      v2TestServerID,
+		Logger:        silentLogger(),
+		ModalResolver: fake,
+	})
+	t.Cleanup(stop)
+
+	aSend, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
+	_, bRecv := openModalConn(t, mgr, frames, rec, respPub, connB, []string{protocol.CapabilityInteractive})
+	openModalConn(t, mgr, frames, rec, respPub, connC, nil) // non-interactive
+
+	frames <- sealAppFrameConn(t, aSend, connA, protocol.Envelope{
+		ID:      42,
+		Type:    protocol.TypeModalAnswer,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"modal_id":"` + modalID + `","option_id":"` + optionID + `","answer_token":"tok-1"}`),
+	})
+
+	// Three handshake noise_resp + two dismissals (A and B, not C) = five total.
+	waitForEnvelopes(t, rec, 5)
+
+	// AC-1: ResolveAnswer routed once with the right modal_id/option_id + device.
+	calls := fake.answerSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("ResolveAnswer calls = %d, want 1", len(calls))
+	}
+	if calls[0].modalID != modalID || calls[0].optionID != optionID {
+		t.Errorf("ResolveAnswer args = %+v, want {%s %s}", calls[0], modalID, optionID)
+	}
+	if calls[0].dev == nil {
+		t.Fatal("ResolveAnswer device is nil, want the per-conn paired device")
+	}
+	if calls[0].dev.Name != v2TestDevName {
+		t.Errorf("ResolveAnswer device.Name = %q, want %q", calls[0].dev.Name, v2TestDevName)
+	}
+
+	// AC-1/AC-3: the dismissal carries the answered option_id and fans to BOTH
+	// interactive heads...
+	assertModalDismissed(t, rec, connA, aRecv, modalID, optionID, wantSource)
+	assertModalDismissed(t, rec, connB, bRecv, modalID, optionID, wantSource)
+
+	// ...and the capability gate withholds it from the non-interactive head.
+	if msgs := noiseMsgsForConn(t, rec, connC); len(msgs) != 0 {
+		t.Errorf("non-interactive conn %q got %d noise_msg, want 0", connC, len(msgs))
+	}
+}
+
 // TestV2Session_ModalAnswer_NoOp proves an inbound modal_answer is intercepted
-// and routed to the resolver seam but, with this slice's deferred-no-op
-// ResolveAnswer, broadcasts NO modal_dismissed (AC-3). The relay owns the
-// "routed through the seam + no dismissal" half; the resolver test owns "no
-// keystroke / no audit / modal untouched".
+// and routed to the resolver seam but, when ResolveAnswer reports ok=false (an
+// ungated/forged/stale answer), broadcasts NO modal_dismissed (AC-3). The relay
+// owns the "routed through the seam + no dismissal" half; the resolver test owns
+// "no keystroke / no audit / modal untouched".
 func TestV2Session_ModalAnswer_NoOp(t *testing.T) {
 	t.Parallel()
 
