@@ -16,11 +16,23 @@ import (
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
-func newModalEmitterTestDeps(conns []relay.ActiveConn) (*modalbridge.Registry, *fakeInteractiveBcast, *interactiveModalEmitterV2) {
+// fakeArmer records every ArmModalTimeout call so a surfacer test can assert the
+// deny-on-timeout was armed for the surfaced modal_id (#725). Handle runs
+// single-goroutine in these tests, so no mutex is needed.
+type fakeArmer struct {
+	armed []string // modalID per ArmModalTimeout call, in order
+}
+
+func (f *fakeArmer) ArmModalTimeout(ctx context.Context, modalID string) {
+	f.armed = append(f.armed, modalID)
+}
+
+func newModalEmitterTestDeps(conns []relay.ActiveConn) (*modalbridge.Registry, *fakeInteractiveBcast, *fakeArmer, *interactiveModalEmitterV2) {
 	reg := modalbridge.New()
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{conns}}
+	armer := &fakeArmer{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return reg, bcast, newInteractiveModalEmitterV2(reg, bcast, logger)
+	return reg, bcast, armer, newInteractiveModalEmitterV2(reg, bcast, armer, logger)
 }
 
 func decodeModalShown(t *testing.T, env protocol.Envelope) protocol.ModalShownPayload {
@@ -42,7 +54,7 @@ func TestModalEmitter_PermissionFanout(t *testing.T) {
 		{ConnID: "c2", Interactive: false},
 		{ConnID: "c3", Interactive: true},
 	}
-	reg, bcast, e := newModalEmitterTestDeps(conns)
+	reg, bcast, armer, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}
 	e.Handle(context.Background(), ev, "  a plain modal body  ")
@@ -63,6 +75,10 @@ func TestModalEmitter_PermissionFanout(t *testing.T) {
 	}
 	if !conversations.ValidID(payload.ModalID) {
 		t.Errorf("ModalID %q is not a canonical UUIDv4", payload.ModalID)
+	}
+	// #725: the deny-on-timeout is armed exactly once, for the surfaced modal_id.
+	if len(armer.armed) != 1 || armer.armed[0] != payload.ModalID {
+		t.Errorf("ArmModalTimeout calls = %v, want exactly [%s]", armer.armed, payload.ModalID)
 	}
 	// The minted id is recorded in the registry with the option list (AC2/AC4).
 	got, ok := reg.Lookup(payload.ModalID)
@@ -102,7 +118,7 @@ func TestModalEmitter_PermissionFanout(t *testing.T) {
 func TestModalEmitter_Trust(t *testing.T) {
 	t.Parallel()
 	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
-	_, bcast, e := newModalEmitterTestDeps(conns)
+	_, bcast, _, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassTrustFolder}
 	e.Handle(context.Background(), ev, "trust this folder body")
@@ -130,7 +146,7 @@ func TestModalEmitter_Trust(t *testing.T) {
 func TestModalEmitter_NonPermissionClass_NoOp(t *testing.T) {
 	t.Parallel()
 	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
-	_, bcast, e := newModalEmitterTestDeps(conns)
+	_, bcast, armer, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassSlashPicker}
 	e.Handle(context.Background(), ev, "/some picker")
@@ -138,18 +154,26 @@ func TestModalEmitter_NonPermissionClass_NoOp(t *testing.T) {
 	if len(bcast.pushes) != 0 {
 		t.Errorf("non-permission/trust class produced %d pushes, want 0 (AC1)", len(bcast.pushes))
 	}
+	// #725: a non-permission class arms no deny-on-timeout.
+	if len(armer.armed) != 0 {
+		t.Errorf("non-permission class armed %d timeouts, want 0", len(armer.armed))
+	}
 }
 
 func TestModalEmitter_NonModalEvent_NoOp(t *testing.T) {
 	t.Parallel()
 	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
-	_, bcast, e := newModalEmitterTestDeps(conns)
+	_, bcast, armer, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyIdle}
 	e.Handle(context.Background(), ev, "")
 
 	if len(bcast.pushes) != 0 {
 		t.Errorf("non-modal event produced %d pushes, want 0", len(bcast.pushes))
+	}
+	// #725: a non-modal event arms no deny-on-timeout.
+	if len(armer.armed) != 0 {
+		t.Errorf("non-modal event armed %d timeouts, want 0", len(armer.armed))
 	}
 }
 
@@ -165,7 +189,7 @@ func TestModalEmitter_PushErrorContinues(t *testing.T) {
 		pushErr:   map[string]error{"c1": errors.New("conn gone")},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e := newInteractiveModalEmitterV2(reg, bcast, logger)
+	e := newInteractiveModalEmitterV2(reg, bcast, &fakeArmer{}, logger)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}
 	e.Handle(context.Background(), ev, "body")

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"sync"
@@ -30,13 +31,16 @@ type modalCallRecord struct {
 // mutex guards the cross-goroutine read (Run goroutine writes, the test goroutine
 // reads).
 type fakeModalResolver struct {
-	mu              sync.Mutex
-	cancelOKFor     string
-	answerOKFor     string
-	dismissal       ModalDismissal
-	answerDismissal ModalDismissal
-	cancelCalls     []modalCallRecord
-	answerCalls     []modalCallRecord
+	mu               sync.Mutex
+	cancelOKFor      string
+	answerOKFor      string
+	timeoutOKFor     string
+	dismissal        ModalDismissal
+	answerDismissal  ModalDismissal
+	timeoutDismissal ModalDismissal
+	cancelCalls      []modalCallRecord
+	answerCalls      []modalCallRecord
+	timeoutCalls     []modalCallRecord
 }
 
 func (f *fakeModalResolver) ResolveCancel(modalID string, dev *devices.Device) (ModalDismissal, bool) {
@@ -59,6 +63,16 @@ func (f *fakeModalResolver) ResolveAnswer(modalID, optionID, answerToken string,
 	return f.answerDismissal, true
 }
 
+func (f *fakeModalResolver) ResolveTimeout(modalID string) (ModalDismissal, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.timeoutCalls = append(f.timeoutCalls, modalCallRecord{modalID: modalID})
+	if f.timeoutOKFor == "" || modalID != f.timeoutOKFor {
+		return ModalDismissal{}, false
+	}
+	return f.timeoutDismissal, true
+}
+
 func (f *fakeModalResolver) cancelSnapshot() []modalCallRecord {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -69,6 +83,12 @@ func (f *fakeModalResolver) answerSnapshot() []modalCallRecord {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]modalCallRecord(nil), f.answerCalls...)
+}
+
+func (f *fakeModalResolver) timeoutSnapshot() []modalCallRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]modalCallRecord(nil), f.timeoutCalls...)
 }
 
 // sealAppFrameConn AEAD-seals env under cs, wraps as a noise_msg addressed to
@@ -524,5 +544,166 @@ func TestV2Session_ModalControl_NilResolver(t *testing.T) {
 				t.Errorf("session state after nil-resolver %s not V2StateOpen", tt.ftype)
 			}
 		})
+	}
+}
+
+// --- #725 deny-on-timeout arm → fire → broadcast ---
+
+// TestV2Session_ModalTimeout_FanOut arms a deny-on-timeout, lets the (shrunk)
+// window elapse with no answer, and asserts the manager fires ResolveTimeout
+// exactly once and fans the modal_dismissed{denied_timeout, timeout} to BOTH
+// interactive heads but NOT the non-interactive one. The off-Run arm (AfterFunc
+// callback) → on-Run fire (handleModalTimeout) crossing is the -race proof. AC-1,
+// AC-3 (broadcast half).
+func TestV2Session_ModalTimeout_FanOut(t *testing.T) {
+	// Not t.Parallel: mutates the package-level modalDenyTimeout var, which other
+	// arms could read.
+	prev := modalDenyTimeout
+	modalDenyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { modalDenyTimeout = prev })
+
+	const (
+		connA      = "c-v2-A" // interactive
+		connB      = "c-v2-B" // interactive; a second head showing the same modal
+		connC      = "c-v2-C" // non-interactive; must NOT receive the dismissal
+		modalID    = "modal-fanout-timeout"
+		wantOutT   = "denied_timeout"
+		wantSource = "timeout"
+	)
+
+	respPriv, respPub := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	fake := &fakeModalResolver{
+		timeoutOKFor:     modalID,
+		timeoutDismissal: ModalDismissal{Outcome: wantOutT, Source: wantSource},
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:        frames,
+		Outbound:      rec.outbound,
+		StaticPriv:    respPriv,
+		Devices:       reg,
+		ServerID:      v2TestServerID,
+		Logger:        silentLogger(),
+		ModalResolver: fake,
+	})
+	t.Cleanup(stop)
+
+	_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
+	_, bRecv := openModalConn(t, mgr, frames, rec, respPub, connB, []string{protocol.CapabilityInteractive})
+	openModalConn(t, mgr, frames, rec, respPub, connC, nil) // non-interactive
+
+	// Arm the deny-on-timeout; nothing answers, so the window elapses and the
+	// safe-deny fires on the Run goroutine.
+	mgr.ArmModalTimeout(context.Background(), modalID)
+
+	// Three handshake noise_resp + two dismissals (A and B, not C) = five total.
+	waitForEnvelopes(t, rec, 5)
+
+	// AC-1: ResolveTimeout fired exactly once with the armed modal_id.
+	calls := fake.timeoutSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("ResolveTimeout calls = %d, want 1", len(calls))
+	}
+	if calls[0].modalID != modalID {
+		t.Errorf("ResolveTimeout modal_id = %q, want %q", calls[0].modalID, modalID)
+	}
+
+	// AC-1/AC-3: the dismissal fans out to BOTH interactive heads...
+	assertModalDismissed(t, rec, connA, aRecv, modalID, wantOutT, wantSource)
+	assertModalDismissed(t, rec, connB, bRecv, modalID, wantOutT, wantSource)
+
+	// ...and the capability gate withholds it from the non-interactive head.
+	if msgs := noiseMsgsForConn(t, rec, connC); len(msgs) != 0 {
+		t.Errorf("non-interactive conn %q got %d noise_msg, want 0", connC, len(msgs))
+	}
+}
+
+// TestV2Session_ModalTimeout_AlreadyResolved_NoBroadcast proves a timeout whose
+// resolver reports ok=false — an answer/cancel already consumed the modal —
+// broadcasts NO modal_dismissed (AC-2: no second dismissal when an answer wins
+// the race). The resolver test owns the "no keystroke / no denied_timeout audit"
+// half; here we prove the manager broadcasts nothing on the loser path.
+func TestV2Session_ModalTimeout_AlreadyResolved_NoBroadcast(t *testing.T) {
+	// Not t.Parallel: mutates the package-level modalDenyTimeout var.
+	prev := modalDenyTimeout
+	modalDenyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { modalDenyTimeout = prev })
+
+	respPriv, respPub := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+	fake := &fakeModalResolver{} // ResolveTimeout always (zero,false): already consumed
+
+	frames := make(chan protocol.RoutingEnvelope, 4)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:        frames,
+		Outbound:      rec.outbound,
+		StaticPriv:    respPriv,
+		Devices:       reg,
+		ServerID:      v2TestServerID,
+		Logger:        silentLogger(),
+		ModalResolver: fake,
+	})
+	t.Cleanup(stop)
+
+	openModalConn(t, mgr, frames, rec, respPub, v2TestConnID, []string{protocol.CapabilityInteractive})
+
+	mgr.ArmModalTimeout(context.Background(), "already-answered-modal")
+
+	// No outbound dismissal is emitted on the no-op path; synchronise on the
+	// resolver call instead, then stop Run so the recorder is final.
+	waitForResolverCall(t, func() int { return len(fake.timeoutSnapshot()) }, 1, "ResolveTimeout")
+	stop()
+
+	if msgs := noiseMsgsForConn(t, rec, v2TestConnID); len(msgs) != 0 {
+		t.Errorf("already-resolved timeout broadcast %d noise_msg, want 0", len(msgs))
+	}
+	if s := mgr.sessions[v2TestConnID]; s == nil || s.State() != V2StateOpen {
+		t.Errorf("session state after no-op timeout not V2StateOpen")
+	}
+}
+
+// TestV2Session_ModalTimeout_NilResolver proves that with no ModalResolver wired
+// (foreground / pre-#708) an armed timeout firing is inert: it debug-logs and
+// returns, broadcasts nothing, and never panics. Mirrors
+// TestV2Session_ModalControl_NilResolver.
+func TestV2Session_ModalTimeout_NilResolver(t *testing.T) {
+	// Not t.Parallel: mutates the package-level modalDenyTimeout var.
+	prev := modalDenyTimeout
+	modalDenyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { modalDenyTimeout = prev })
+
+	respPriv, respPub := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 4)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+		// ModalResolver intentionally nil.
+	})
+	t.Cleanup(stop)
+
+	openModalConn(t, mgr, frames, rec, respPub, v2TestConnID, []string{protocol.CapabilityInteractive})
+
+	mgr.ArmModalTimeout(context.Background(), "x")
+
+	waitForLogContains(t, logBuf, "event=v2.modal.timeout.inert")
+	stop()
+
+	if msgs := noiseMsgsForConn(t, rec, v2TestConnID); len(msgs) != 0 {
+		t.Errorf("nil-resolver timeout broadcast %d noise_msg, want 0", len(msgs))
+	}
+	if s := mgr.sessions[v2TestConnID]; s == nil || s.State() != V2StateOpen {
+		t.Errorf("session state after nil-resolver timeout not V2StateOpen")
 	}
 }

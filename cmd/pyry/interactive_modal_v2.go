@@ -30,6 +30,7 @@ import (
 type interactiveModalEmitterV2 struct {
 	reg    *modalbridge.Registry
 	bcast  interactiveBroadcaster
+	armer  modalTimeoutArmer
 	logger *slog.Logger
 
 	// nextID is the session-monotonic per-conn envelope-ID counter, mirroring
@@ -38,11 +39,20 @@ type interactiveModalEmitterV2 struct {
 	nextID uint64
 }
 
+// modalTimeoutArmer arms the daemon-side deny-on-timeout for a surfaced modal
+// (#725). Defined here on the consumer side rather than widening the shared
+// interactiveBroadcaster (which three emitters implement) — only this surfacer
+// arms timeouts. *relay.V2SessionManager satisfies it structurally; #708 wires
+// the live manager here.
+type modalTimeoutArmer interface {
+	ArmModalTimeout(ctx context.Context, modalID string)
+}
+
 // newInteractiveModalEmitterV2 constructs a surfacer wired to a daemon-singleton
-// registry (the same instance #717 wires into dispatchAppFrame) and the
-// capability-aware broadcaster.
-func newInteractiveModalEmitterV2(reg *modalbridge.Registry, bcast interactiveBroadcaster, logger *slog.Logger) *interactiveModalEmitterV2 {
-	return &interactiveModalEmitterV2{reg: reg, bcast: bcast, logger: logger}
+// registry (the same instance #717 wires into dispatchAppFrame), the
+// capability-aware broadcaster, and the deny-on-timeout armer (#725).
+func newInteractiveModalEmitterV2(reg *modalbridge.Registry, bcast interactiveBroadcaster, armer modalTimeoutArmer, logger *slog.Logger) *interactiveModalEmitterV2 {
+	return &interactiveModalEmitterV2{reg: reg, bcast: bcast, armer: armer, logger: logger}
 }
 
 // Handle drives the surfacer one tui-driver event at a time (the single-goroutine
@@ -79,6 +89,13 @@ func (e *interactiveModalEmitterV2) Handle(ctx context.Context, ev tuidriver.Eve
 			"class", class)
 		return
 	}
+
+	// Arm the fail-closed deny-on-timeout BEFORE the marshal/broadcast (#725):
+	// the arm is unconditional on a successful Record, so a modal that records
+	// but fails to marshal — or surfaces to zero interactive conns — is still
+	// safe-denied on the window. claude is blocked on the prompt regardless of
+	// who is watching, so it must be denied if nothing resolves it.
+	e.armer.ArmModalTimeout(ctx, payload.ModalID)
 
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {

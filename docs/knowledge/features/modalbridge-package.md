@@ -103,7 +103,7 @@ highlighted default are deliberately **decoupled**, which keeps both AC-valid
 (`default_option_id ∈ options[].id`, true by construction since the deny option is
 always in the set). This is **UI pre-selection only**, not an auto-answer: the human
 still confirms, [#702](../codebase/702.md) gates answering (per-device, default OFF),
-and #717 owns deny-on-timeout.
+and [#725](../codebase/725.md) owns deny-on-timeout (safe-deny ESC on a bounded window).
 
 ## `modal_id` nonce — the single-writer security primitive
 

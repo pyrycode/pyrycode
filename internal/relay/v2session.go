@@ -61,6 +61,16 @@ var rekeyInterval = 1 * time.Hour
 // the public API.
 var rekeyReplyTimeout = 30 * time.Second
 
+// modalDenyTimeout is the bounded window between a surfaced modal and the
+// fail-closed safe-deny: if no modal_answer / modal_cancel resolves it first,
+// the daemon denies it (ESC) so a permission claude is waiting on can never
+// linger or be silently granted. ADR 025 § Security model specifies "a bounded
+// window" but no number; 2 minutes balances "long enough for a human to react to
+// a push notification and tap" against "short enough not to leave claude
+// blocked." Test-overridable (lowercase, save/restore in tests); not part of the
+// public API and not yet config-driven (a deferred #708 concern).
+var modalDenyTimeout = 2 * time.Minute
+
 // ErrConnNotFound is returned by (*V2SessionManager).Rekey when connID
 // is not currently registered in the manager's sessions map. Wraps
 // control.ErrConnNotFound so the control dispatcher's
@@ -390,6 +400,17 @@ type ModalResolver interface {
 	// audit. #717 fills the gated answer arm; the manager code is already
 	// general (broadcasts on ok=true) so #717 changes only the impl.
 	ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (ModalDismissal, bool)
+
+	// ResolveTimeout safe-denies an unanswered modal whose deny-on-timeout
+	// window elapsed (#725): it consumes modalID (registry Resolve), routes the
+	// fail-closed deny keystroke (ESC), audits outcome=denied_timeout /
+	// source=timeout with an empty device (a timeout has no answering device),
+	// and returns the dismissal to broadcast with ok=true. An unknown or
+	// already-resolved id (an answer/cancel won the race) ⇒ (zero, false): no
+	// keystroke, no audit, no broadcast — the AC-2 loser path. Takes no device
+	// (unlike ResolveCancel/ResolveAnswer): the safe-deny is unconditional, so
+	// there is nothing to gate.
+	ResolveTimeout(modalID string) (ModalDismissal, bool)
 }
 
 // V2SessionConfig parameterises V2SessionManager. The handshake/transport
@@ -539,6 +560,15 @@ type V2SessionManager struct {
 	// exit; in-flight callers unblock via ctx.Done.
 	snapshot chan snapshotReq
 
+	// modalTimeout carries a surfaced modal's id from its time.AfterFunc
+	// callback goroutine (armed off-Run by ArmModalTimeout) to the Run goroutine
+	// for the deny-on-timeout safe-deny (#725). Daemon-global (a modal is not
+	// bound to one conn), keyed by modal_id — unlike wake, which is keyed by
+	// *V2Session. Buffered (wakeBufferSize) so a timer callback almost never
+	// blocks; callbacks also honour the Run-derived ctx so they unblock cleanly
+	// on Run exit and leak no goroutine.
+	modalTimeout chan string
+
 	// replayRing + replayCursor are the mid-turn-reconnect replay source
 	// (#647), published once after the interactive emitter (which owns the
 	// ring) is built — see SetReplaySource for why this is a late-bound setter
@@ -577,13 +607,14 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 			noise.KeyLen, len(cfg.StaticPriv))
 	}
 	return &V2SessionManager{
-		cfg:         cfg,
-		sessions:    make(map[string]*V2Session),
-		wake:        make(chan wakeSignal, wakeBufferSize),
-		manualRekey: make(chan manualRekeyReq),
-		queues:      make(map[string]*pushQueue),
-		drainCh:     make(chan struct{}, 1),
-		snapshot:    make(chan snapshotReq),
+		cfg:          cfg,
+		sessions:     make(map[string]*V2Session),
+		wake:         make(chan wakeSignal, wakeBufferSize),
+		manualRekey:  make(chan manualRekeyReq),
+		queues:       make(map[string]*pushQueue),
+		drainCh:      make(chan struct{}, 1),
+		snapshot:     make(chan snapshotReq),
+		modalTimeout: make(chan string, wakeBufferSize),
 	}, nil
 }
 
@@ -610,6 +641,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleFrame(runCtx, env)
 		case w := <-m.wake:
 			m.handleWake(runCtx, w)
+		case modalID := <-m.modalTimeout:
+			m.handleModalTimeout(runCtx, modalID)
 		case req := <-m.manualRekey:
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case <-m.drainCh:
@@ -670,6 +703,32 @@ func (m *V2SessionManager) armRekeyReplyTimer(ctx context.Context, s *V2Session)
 	return time.AfterFunc(rekeyReplyTimeout, func() {
 		select {
 		case m.wake <- wakeSignal{s: s, kind: wakeRekeyReplyTimeout}:
+		case <-ctx.Done():
+		}
+	})
+}
+
+// ArmModalTimeout arms the daemon-side deny-on-timeout for a surfaced modal
+// (#725). The surfacer calls it (off the Run goroutine) immediately after
+// reg.Record; the time.AfterFunc callback runs on a fresh runtime goroutine and
+// funnels modalID onto m.modalTimeout so the Run goroutine fires the safe-deny
+// under the single-owner invariant (mirrors armRekeyTimer's callback shape). ctx
+// is the surfacer's ctx (the daemon ctx in production, since cmd/pyry runs the
+// surfacer and Run under the same ctx); its Done arm releases a fired-but-
+// undelivered callback on shutdown, so no goroutine outlives Run.
+//
+// The *time.Timer is deliberately discarded — never stored, never Stopped. The
+// registry's one-shot Resolve is the idempotency gate: a timer that fires after
+// an answer/cancel already consumed the modal simply runs handleModalTimeout →
+// ResolveTimeout → Resolve-miss → no-op. Tracking timers to Stop them on resolve
+// would need a map[modalID]*time.Timer mutated by both the surfacer (arm) and Run
+// (cancel) — new cross-goroutine state and a new lock — for zero correctness gain
+// (see § Concurrency in the spec). An un-fired AfterFunc holds only a heap entry,
+// not a parked goroutine, so leaving it un-Stopped leaks nothing.
+func (m *V2SessionManager) ArmModalTimeout(ctx context.Context, modalID string) {
+	time.AfterFunc(modalDenyTimeout, func() {
+		select {
+		case m.modalTimeout <- modalID:
 		case <-ctx.Done():
 		}
 	})
@@ -1515,6 +1574,28 @@ func (m *V2SessionManager) handleModalAnswer(ctx context.Context, s *V2Session, 
 		return // deferred no-op in this slice (AC #3); #717 fills the gated arm
 	}
 	m.broadcastModalDismissed(ctx, payload.ModalID, d)
+}
+
+// handleModalTimeout fires the fail-closed safe-deny for a modal whose
+// deny-on-timeout window elapsed with no answer/cancel (#725). Funneled onto the
+// Run goroutine via m.modalTimeout, so it shares the single-owner serialisation
+// with handleModalCancel / handleModalAnswer: the answer-vs-timeout race cannot
+// double-act — whichever the Run select services first consumes the modal via the
+// registry's one-shot Resolve; the loser's ResolveTimeout reports ok=false. A nil
+// ModalResolver (foreground / pre-#708) makes it inert (mirrors handleModalCancel's
+// nil guard). An already-resolved id ⇒ ok=false ⇒ no keystroke, no audit, no
+// broadcast (the AC-2 loser path); only a fresh consume broadcasts.
+func (m *V2SessionManager) handleModalTimeout(ctx context.Context, modalID string) {
+	if m.cfg.ModalResolver == nil {
+		m.cfg.Logger.Debug("relay: v2 modal timeout inert; no resolver wired",
+			"event", "v2.modal.timeout.inert")
+		return
+	}
+	d, ok := m.cfg.ModalResolver.ResolveTimeout(modalID)
+	if !ok {
+		return // already answered/cancelled: no keystroke, no audit, no broadcast (AC-2)
+	}
+	m.broadcastModalDismissed(ctx, modalID, d)
 }
 
 // broadcastModalDismissed fans a modal_dismissed envelope to every
