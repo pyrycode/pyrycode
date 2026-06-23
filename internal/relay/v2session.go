@@ -383,6 +383,18 @@ type ScreenSnapshotter interface {
 // from any goroutine — it is the same seam ResolveCancel / ResolveTimeout use.
 type Interrupter interface{ SendEsc() error }
 
+// QueueRemover drops a not-yet-drained queued message from a conversation's
+// inbound backlog by id (#723). *msgqueue.Queue satisfies it. Declared here, in
+// the consumer, beside Interrupter / ModalResolver, so internal/relay imports
+// neither internal/msgqueue nor cmd/pyry (CODING-STYLE: define interfaces where
+// they are consumed). Returns true iff a message was removed; an unknown or
+// foreign conversationID, an unknown or already-delivered id, or the in-flight
+// (draining) head is a safe no-op (false). The conversationID arg IS the
+// mutation scope: Remove(A,…) provably never touches conversation B's backlog.
+type QueueRemover interface {
+	Remove(conversationID string, queuedMsgID uint64) bool
+}
+
 // ModalDismissal is the wire outcome+source the manager broadcasts after a
 // resolver consumes an outstanding modal. The manager already holds modal_id
 // (from the inbound control payload), so it is not repeated here.
@@ -502,6 +514,11 @@ type V2SessionConfig struct {
 	// inert (no Esc) — the foreground / unwired case. Production wires
 	// *supervisor.Supervisor.
 	Interrupter Interrupter
+
+	// QueueRemover drops a queued message named by an inbound dequeue_message
+	// control frame (#723). Optional: nil ⇒ dequeue_message is inert (foreground
+	// / unwired). Production wires *msgqueue.Queue.
+	QueueRemover QueueRemover
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -1334,6 +1351,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeInterrupt:
 			m.handleInterrupt(s)
 			return
+		case protocol.TypeDequeueMessage:
+			m.handleDequeueMessage(s, probeEnv)
+			return
 		}
 	}
 
@@ -1691,9 +1711,11 @@ func (m *V2SessionManager) broadcastModalDismissed(ctx context.Context, modalID 
 //     inbound capability gate (#707): existing inbound controls gate outbound
 //     emission on s.interactive, but interrupt is the first whose authorization
 //     IS the interactive capability. A one-line check, NOT a reusable inbound-gate
-//     abstraction — interrupt is its only consumer (dequeue is ungated, modal_answer
-//     uses the per-device gate, modal_cancel a nonce), so a shared gate would be a
-//     one-consumer abstraction (YAGNI).
+//     abstraction — interrupt shares this bare-capability shape only with
+//     dequeue_message (which also gates on the interactive capability since #723
+//     but carries no per-device gate; modal_answer uses the per-device gate,
+//     modal_cancel a nonce), and a one-line check shared by two consumers does not
+//     warrant a helper abstraction (CODING-STYLE: over-DRY).
 //  2. A nil Interrupter (foreground / pre-wire) makes the frame inert, mirroring
 //     handleModalCancel's nil-resolver guard.
 //  3. SendEsc is best-effort: an error (no live session / mid-teardown) is
@@ -1716,6 +1738,71 @@ func (m *V2SessionManager) handleInterrupt(s *V2Session) {
 			"conn_id", s.connID,
 			"err", err)
 	}
+}
+
+// handleDequeueMessage removes a not-yet-drained queued message named by an
+// inbound dequeue_message control frame (#723), letting a phone cancel a turn it
+// queued before it drains. Intercepted in dispatchAppFrame before dispatch.Route,
+// like handleInterrupt / handleModalCancel, and runs on the manager's single Run
+// dispatch goroutine — so the s.interactive read is lock-free under the package's
+// single-owner invariant.
+//
+// The signature takes (s, env) — no ctx — mirroring handleInterrupt's deviation
+// from the (ctx, s, env) siblings: Remove takes no context, there is no
+// forwardEnvelope, and queue_state convergence is decoupled onto the #722 emitter
+// goroutine (the OnChange seam Remove fires), so the handler has no cancellable
+// work.
+//
+// Order is load-bearing — the capability gate comes first:
+//  1. A non-interactive conn's dequeue_message is inert: no Remove call, no
+//     mutation, no panic (AC-3). This is the new inbound capability gate; like
+//     handleInterrupt it is the bare interactive check, read on the Run goroutine
+//     lock-free.
+//  2. A nil QueueRemover (foreground / pre-wire) makes the frame inert, mirroring
+//     handleInterrupt's nil-Interrupter guard.
+//  3. The payload is decoded tolerantly: a decode failure leaves zero-value
+//     fields, which Remove("", 0) no-ops on. The decode error and the payload
+//     bytes are NEVER echoed back to the phone or into a log (encoding/json can
+//     quote attacker bytes into its error string) — the never-echo discipline of
+//     handleRequestSnapshot / handleModalCancel.
+//  4. Remove returning false (unknown/already-delivered/in-flight-head id, or an
+//     unknown/foreign conversation_id) is success of a valid request, not an error
+//     (AC-2): no reply, no broadcast. The convID arg confines the effect to that
+//     one FIFO — a hostile id cannot touch another conversation's backlog.
+//  5. There is no reply and no broadcast. AC-4's queue_state convergence is the
+//     automatic OnChange → #722-producer path that Remove's notify fires on a
+//     successful removal; the handler MUST NOT push or re-emit queue_state itself.
+func (m *V2SessionManager) handleDequeueMessage(s *V2Session, env protocol.Envelope) {
+	if !s.interactive {
+		return // non-interactive conn: inert, no Remove (the AC-3 negative path)
+	}
+	if m.cfg.QueueRemover == nil {
+		m.cfg.Logger.Debug("relay: v2 dequeue_message inert; no queue remover wired",
+			"event", "v2.dequeue.inert",
+			"conn_id", s.connID)
+		return
+	}
+	var p protocol.DequeueMessagePayload
+	// A decode failure is tolerated: it leaves zero-value fields, which
+	// Remove("", 0) no-ops on. Never echoed back to the phone or into a log.
+	_ = json.Unmarshal(env.Payload, &p)
+
+	if m.cfg.QueueRemover.Remove(p.ConversationID, p.QueuedMsgID) {
+		m.cfg.Logger.Info("relay: v2 dequeue_message removed",
+			"event", "v2.dequeue.removed",
+			"conn_id", s.connID,
+			"conversation_id", p.ConversationID,
+			"queued_msg_id", p.QueuedMsgID)
+		return
+	}
+	// false ⇒ success of a valid request (AC-2): unknown / already-delivered /
+	// in-flight-head id, or an unknown/foreign conversation_id. Nothing changed,
+	// so emitting nothing is correct — no reply, no broadcast.
+	m.cfg.Logger.Debug("relay: v2 dequeue_message no-op",
+		"event", "v2.dequeue.noop",
+		"conn_id", s.connID,
+		"conversation_id", p.ConversationID,
+		"queued_msg_id", p.QueuedMsgID)
 }
 
 // SetReplaySource publishes the mid-turn-reconnect replay source to the manager

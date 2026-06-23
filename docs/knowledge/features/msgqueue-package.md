@@ -148,8 +148,8 @@ shutdown join `-race`-clean.
 
 ## Introspection, removal, and change notification (#719)
 
-An additive read/remove/notify layer the `queue_state` / `dequeue_message`
-consumers (#705) need. No goroutine, no new lock; `Enqueue`/`Run`/stable-id
+An additive read/remove/notify layer the `queue_state` (#722) / `dequeue_message`
+(#723) consumers need. No goroutine, no new lock; `Enqueue`/`Run`/stable-id
 semantics untouched.
 
 - **`Snapshot(convID)` — copy under the lock.** Takes `q.mu`, looks up the conv
@@ -173,7 +173,8 @@ semantics untouched.
   touches index 0 and holds a value copy of the head. Unknown conv / unknown /
   already-delivered id / in-flight head ⇒ `false` no-op (no panic, no reorder);
   surviving order preserved. This is what guarantees `dequeue_message` **cannot
-  cancel an in-flight delivery** (the #705 handler relies on it).
+  cancel an in-flight delivery** (the #723 handler relies on it via the `QueueRemover`
+  seam).
 - **`shrinkLocked` — shared backing-array hygiene.** The trailing "release at
   empty / compact when `cap > 2*len`" `switch` was lifted out of `advanceLocked`
   into `convQueue.shrinkLocked()`, now called by both `advanceLocked` (head drop)
@@ -359,7 +360,12 @@ the change-notification path as the injected `ChangeFunc`.
 - **Consumers:** **#722 landed the `queue_state` producer** ([codebase/722.md](../codebase/722.md))
   — `cmd/pyry`'s `queueStateEmitterV2` hooks `OnChange`, re-reads via `Snapshot`, and
   fans a per-conversation `queue_state` to interactive phones (the first live consumer
-  of `OnChange` + the read side of `Snapshot`). Still deferred: **#723** (`dequeue_message`
-  removal handler binding `convID` to the authorized phone, built on `Remove`) and the
-  inbound bound/backpressure decision (a PO follow-up; chokepoint pre-specified at
-  `Enqueue`). (Both #722/#723 split from the original #705 reporting/removal slice.)
+  of `OnChange` + the read side of `Snapshot`). **#723 landed the `dequeue_message`
+  handler** ([codebase/723.md](../codebase/723.md)) — `internal/relay`'s
+  `handleDequeueMessage` (via the consumer-declared `QueueRemover` seam) calls `Remove`
+  on an interactive phone's inbound control frame, and its successful-removal `notify`
+  drives the #722 producer to refresh `queue_state` (the **first live consumer of
+  `Remove`**; the in-flight-head/unknown-id `false` no-op is what makes a hostile or
+  stale id a safe no-op). Both #722/#723 split from the original #705 reporting/removal
+  slice. Still deferred: the inbound bound/backpressure decision (a PO follow-up;
+  chokepoint pre-specified at `Enqueue`).

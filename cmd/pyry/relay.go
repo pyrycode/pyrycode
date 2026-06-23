@@ -13,6 +13,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/keys"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
+	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
@@ -95,7 +96,7 @@ func startRelay(
 	convReg *conversations.Registry,
 	creator handlers.SessionCreator,
 	router handlers.SessionRouter,
-	queue handlers.Enqueuer,
+	queue *msgqueue.Queue,
 	active *activeConversation,
 	boundHost boundHostFunc,
 	sup *supervisor.Supervisor,
@@ -280,7 +281,7 @@ func startRelayV2(
 	convReg *conversations.Registry,
 	creator handlers.SessionCreator,
 	router handlers.SessionRouter,
-	queue handlers.Enqueuer,
+	queue *msgqueue.Queue,
 	active *activeConversation,
 	boundHost boundHostFunc,
 	sup *supervisor.Supervisor,
@@ -335,6 +336,12 @@ func startRelayV2(
 		// one Esc through the sealed supervisor keystroke surface. sup
 		// (*supervisor.Supervisor) satisfies Interrupter via SendEsc (#726).
 		Interrupter: sup,
+		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
+		// frame removes a not-yet-drained queued message by id from the live
+		// daemon queue; the OnChange seam Remove fires drives the #722 producer to
+		// push an updated queue_state. The concrete *msgqueue.Queue (built at
+		// main.go) satisfies QueueRemover via Remove(string, uint64) bool.
+		QueueRemover: queue,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build v2 session manager: %w", err)
