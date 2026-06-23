@@ -123,3 +123,42 @@ func TestSessionRouter_Route(t *testing.T) {
 		}
 	})
 }
+
+// TestSessionRouter_ResolveDoesNotStamp guards the #721 side-effect split: the
+// drain delivers via resolve (the stamp-free core), so a successful resolve must
+// leave the active-conversation cursor untouched while a successful Route on the
+// same binding still stamps it. Without this, a deferred drain would re-stamp
+// the follow-active cursor at DRAIN time (drain order) rather than at phone-
+// interaction time, breaking the #679/#687 invariant.
+func TestSessionRouter_ResolveDoesNotStamp(t *testing.T) {
+	t.Parallel()
+	pool := newRouterTestPool(t)
+	bootstrapID := pool.Default().ID()
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-bound", CurrentSessionID: string(bootstrapID), LastUsedAt: time.Now().UTC()})
+
+	t.Run("resolve does not stamp the active cursor", func(t *testing.T) {
+		r := sessionRouter{pool: pool, convReg: reg, active: &activeConversation{}}
+		w, err := r.resolve("conv-bound")
+		if err != nil {
+			t.Fatalf("resolve: unexpected err %v", err)
+		}
+		if w == nil {
+			t.Fatalf("resolve returned a nil writer for a bound conversation")
+		}
+		if got := r.active.CurrentConversation(); got != "" {
+			t.Errorf("active cursor = %q, want empty — resolve must NOT stamp (drain-time re-resolve)", got)
+		}
+	})
+
+	t.Run("Route stamps the active cursor", func(t *testing.T) {
+		r := sessionRouter{pool: pool, convReg: reg, active: &activeConversation{}}
+		if _, err := r.Route("conv-bound"); err != nil {
+			t.Fatalf("Route: unexpected err %v", err)
+		}
+		if got := r.active.CurrentConversation(); got != "conv-bound" {
+			t.Errorf("active cursor = %q, want conv-bound — Route must stamp", got)
+		}
+	})
+}

@@ -51,6 +51,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/install"
+	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
@@ -767,7 +768,28 @@ func runSupervisor(args []string) error {
 		}
 		return sess.Supervisor(), conv.CurrentSessionID, dir, true
 	}
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, sessionRouter{pool: pool, convReg: convReg, active: active}, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
+	router := sessionRouter{pool: pool, convReg: convReg, active: active}
+
+	// The inbound message queue (#704/#721): send_message enqueues here instead
+	// of delivering synchronously, and one serial drain goroutine per conversation
+	// delivers the backlog through the reliable WriteUserTurn path, paced by claude
+	// reaching idle. The delivery seam re-resolves the bound session per attempt
+	// via router.resolve (the stamp-free core — the drain must NOT move the
+	// active-conversation cursor). It runs under the daemon ctx; on shutdown Run
+	// stops spawning drains, joins the in-flight ones, and returns. The in-memory
+	// backlog survives a claude child respawn but not a daemon-process restart
+	// (resync covers it) — the same loss boundary as the event ring.
+	queue, err := msgqueue.New(msgqueue.Config{
+		Deliver: newInboundDeliver(router.resolve),
+		Logger:  logger,
+	})
+	if err != nil {
+		return fmt.Errorf("msgqueue init: %w", err)
+	}
+	qDone := make(chan error, 1)
+	go func() { qDone <- queue.Run(ctx) }()
+
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
@@ -798,6 +820,12 @@ func runSupervisor(args []string) error {
 	// and ensures the socket file is gone before we return).
 	_ = ctrl.Close()
 	<-ctrlDone
+
+	// Join the inbound-queue lifecycle: pool.Run returned because ctx was
+	// cancelled, so queue.Run has observed ctx.Done and is winding down its
+	// drains. Waiting here keeps the daemon from exiting while a drain goroutine
+	// is still in flight.
+	<-qDone
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("supervisor: %w", runErr)
@@ -865,11 +893,16 @@ type sessionRouter struct {
 	active *activeConversation
 }
 
-// Route resolves conversationID to its bound session's write surface. The order
-// is load-bearing: the empty-CurrentSessionID guard fires before any Lookup so
-// an unbound conversation never resolves to the bootstrap session that
-// Pool.Lookup("") returns (#678 AC#4).
-func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error) {
+// resolve maps conversationID to its bound session's write surface WITHOUT
+// stamping the active-conversation cursor. It is the single resolution
+// authority: the order is load-bearing — the empty-CurrentSessionID guard fires
+// before any Lookup so an unbound conversation never resolves to the bootstrap
+// session that Pool.Lookup("") returns (#678 AC#4). Both Route (handler-side
+// validation, which layers the cursor stamp on top) and newInboundDeliver (the
+// drain seam, which must NOT stamp) go through resolve, so neither path can
+// bypass the guard. The drain re-resolves per attempt because the binding may
+// change between enqueue and delivery (#721).
+func (r sessionRouter) resolve(conversationID string) (handlers.TurnWriter, error) {
 	conv, ok := r.convReg.Get(conversations.ConversationID(conversationID))
 	if !ok {
 		return nil, conversations.ErrConversationNotFound
@@ -882,10 +915,21 @@ func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error)
 	if err != nil {
 		return nil, err
 	}
-	// Stamp the active-conversation cursor only on the successful-route path, so
-	// a rejected route (unknown / unbound / dangling) never moves it (#687).
-	r.active.set(conversationID)
 	return boundSession{pool: r.pool, sess: sess, id: id}, nil
+}
+
+// Route resolves conversationID to its bound session's write surface and stamps
+// the active-conversation cursor on success. It is a thin wrapper over resolve:
+// the only thing it adds is the cursor stamp, fired on the successful-route path
+// only, so a rejected route (unknown / unbound / dangling) never moves it
+// (#687). The drain path must not move the cursor, so it calls resolve directly.
+func (r sessionRouter) Route(conversationID string) (handlers.TurnWriter, error) {
+	w, err := r.resolve(conversationID)
+	if err != nil {
+		return nil, err
+	}
+	r.active.set(conversationID)
+	return w, nil
 }
 
 // boundSession is the per-conversation write surface sessionRouter.Route
@@ -906,6 +950,50 @@ func (b boundSession) Activate(ctx context.Context) error {
 
 func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	return b.sess.WriteUserTurn(ctx, conversationID, payload)
+}
+
+// inboundActivateTimeout caps the drain's per-attempt wait for an idle-evicted
+// session to respawn its supervisor and bind its PTY. It matches the CLI attach
+// budget (#396): a wedged respawn surfaces as a delivery error so the drain
+// retries the FIFO head rather than blocking forever inside Activate. Unlike the
+// removed #594 deliver timeout, it does NOT bound the WriteUserTurn that follows
+// — that block is the drain's turn-end pacing and may run for a whole claude
+// turn. A tuning knob, not a contract.
+const inboundActivateTimeout = 30 * time.Second
+
+// newInboundDeliver builds the msgqueue.DeliverFunc seam over the stamp-free
+// resolve core. The engine (#704) calls it on a per-conversation drain
+// goroutine, one delivery at a time. It:
+//
+//   - re-resolves the bound session per attempt (the binding may change between
+//     enqueue and drain), returning any resolve error so the drain retries the
+//     head (a conversation that becomes transiently unbound post-ack is held,
+//     not dropped);
+//   - Activates under a bounded budget so a wedged respawn becomes a retryable
+//     error instead of a permanent block;
+//   - writes the turn with the RAW lifecycle ctx — no deliver timeout, because
+//     that blocking IS the drain's turn-end pacing (DeliverFunc must return nil
+//     only on a confirmed commit, queue.go:65-70).
+//
+// It is built over router.resolve, NOT router.Route, so it never stamps the
+// active-conversation cursor: the cursor stays single-writer (the routing-path
+// goroutine via Route), preserving the #679/#687 follow-active invariant against
+// a drain-time re-stamp. Taking resolve as a func value (not the struct) keeps
+// the seam unit-testable with a fake resolve.
+func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error)) msgqueue.DeliverFunc {
+	return func(ctx context.Context, convID string, payload []byte) error {
+		w, err := resolve(convID)
+		if err != nil {
+			return err
+		}
+		activateCtx, cancelActivate := context.WithTimeout(ctx, inboundActivateTimeout)
+		err = w.Activate(activateCtx)
+		cancelActivate()
+		if err != nil {
+			return err
+		}
+		return w.WriteUserTurn(ctx, convID, payload)
+	}
 }
 
 // activeConversation holds the id of the conversation the operator is currently
