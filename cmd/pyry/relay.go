@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -378,7 +379,12 @@ func startRelayV2(
 	// gate). The capability filter (ActiveConns → Interactive) is the real
 	// delivery gate: with no interactive phone connected, the fan-out reaches
 	// nobody.
-	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr, logger)
+	// The resolver closure (#741) stamps the owning conversation_id onto each
+	// emitted envelope. It captures convReg (in scope here, already a startRelayV2
+	// parameter) so session_transition_v2.go never imports internal/conversations
+	// — the same purity discipline that keeps toWirePayload registry-free.
+	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr,
+		func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger)
 
 	// Wire the queue_state producer (#722): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a queue_state envelope to capability-gated
@@ -403,4 +409,33 @@ func startRelayV2(
 		streamQueueStateCleanup()
 		<-mgrDone
 	}, nil
+}
+
+// conversationForSession resolves a claude session id to the id of the
+// conversation that owns it, scanning the maintained registry binding
+// (CurrentSessionID + the append-only SessionHistory). It is the #741 read
+// counterpart to #739's RebindSession write maintenance; the registry exposes
+// no by-session-id read method, so the scan is duplicated here cmd-side (its
+// only consumer — PROJECT-MEMORY "Resist over-DRY on duplicated registry
+// primitives").
+//
+// An empty sid returns ("", false) immediately, mirroring RebindSession's
+// empty-oldID guard: an unbound conversation carries CurrentSessionID == ""
+// and must never be matched by a stray empty-id lookup. First match wins —
+// the single-owner invariant (a session id binds exactly one conversation for
+// life) makes the first match the only match.
+//
+// Race-safe against a concurrent RebindSession: List() copies the slice header
+// under the registry mutex, and a concurrent append writes at/above len (or
+// reallocates), never overwriting an index the captured [0,len) read touches.
+func conversationForSession(convReg *conversations.Registry, sid string) (string, bool) {
+	if sid == "" {
+		return "", false
+	}
+	for _, c := range convReg.List() {
+		if c.CurrentSessionID == sid || slices.Contains(c.SessionHistory, sid) {
+			return string(c.ID), true
+		}
+	}
+	return "", false
 }
