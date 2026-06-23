@@ -188,6 +188,44 @@ func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool {
 	return false
 }
 
+// RebindSession re-points the conversation currently bound to oldID at newID,
+// recording oldID in SessionHistory. Returns true iff a conversation was
+// rebound. The scan and mutation happen atomically under r.mu, so there is no
+// find-then-update window a concurrent Create/Delete could redirect.
+//
+//   - hit  → CurrentSessionID = newID; SessionHistory = append(SessionHistory, oldID)
+//   - miss → no mutation, false (the rotated session is owned by no conversation)
+//
+// An empty oldID returns false immediately without scanning: an unbound
+// conversation carries CurrentSessionID == "" (the unset sentinel) and must
+// NEVER be swept into a rebind by a stray empty-id call. This is a
+// data-integrity guard at the primitive boundary, not the primary eviction
+// defense — that lives at the call site, which only rebinds on a /clear
+// rotation (where NewID is non-empty). Precondition (caller-guaranteed on the
+// rotation path): oldID and newID are non-empty and distinct.
+//
+// First match wins, mirroring Get/Update: a session id binds exactly one
+// conversation (set once at creation), so the first match is the only match;
+// pathological duplicates rebind the first only — deterministic and documented.
+//
+// RebindSession does NOT call Save — disk persistence is the caller's concern,
+// matching the Create / Update / Promote / Delete convention.
+func (r *Registry) RebindSession(oldID, newID string) bool {
+	if oldID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].CurrentSessionID == oldID {
+			r.conversations[i].CurrentSessionID = newID
+			r.conversations[i].SessionHistory = append(r.conversations[i].SessionHistory, oldID)
+			return true
+		}
+	}
+	return false
+}
+
 // Delete removes the conversation whose ID equals id. Returns true on hit,
 // false on miss. Mutex-guarded; safe for concurrent use alongside the other
 // Registry methods.

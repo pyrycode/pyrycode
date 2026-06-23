@@ -1,12 +1,17 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/conversations"
 )
 
 // transitionRecorder is a TransitionObserver that appends every observed
@@ -242,6 +247,243 @@ func TestPool_TransitionObserver_NilIsNoOp(t *testing.T) {
 		return sess.LifecycleState() == stateEvicted
 	}) {
 		t.Fatalf("nil observer altered idle eviction; state=%v", sess.LifecycleState())
+	}
+}
+
+// seedBoundConvRegistry wires a freshly-saved conversations.json into pool,
+// containing one conversation (convID) bound to boundSession. Returns the
+// registry, the on-disk path, and convID for assertions.
+func seedBoundConvRegistry(t *testing.T, pool *Pool, convID conversations.ConversationID, boundSession SessionID) (*conversations.Registry, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               convID,
+		Cwd:              "/owner",
+		CurrentSessionID: string(boundSession),
+	})
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+	pool.convReg = reg
+	pool.convRegistryPath = path
+	return reg, path
+}
+
+// TestPool_OnRotate_RebindsOwningConversation covers AC#1 + AC#3: a /clear
+// rotation re-points the owning conversation's binding in memory, that rebind
+// survives a reload from disk, and the observer fan-out still fires exactly once
+// with the clear signal.
+func TestPool_OnRotate_RebindsOwningConversation(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	oldID := pool.Default().ID()
+	newID := SessionID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+
+	const convID conversations.ConversationID = "11111111-2222-4333-8444-555555555555"
+	reg, path := seedBoundConvRegistry(t, pool, convID, oldID)
+
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	if err := pool.onRotate(oldID, newID); err != nil {
+		t.Fatalf("onRotate: %v", err)
+	}
+
+	// In-memory rebind (AC#1).
+	got, ok := reg.Get(convID)
+	if !ok {
+		t.Fatal("Get(conv): not found")
+	}
+	if got.CurrentSessionID != string(newID) {
+		t.Errorf("CurrentSessionID = %q, want %q", got.CurrentSessionID, newID)
+	}
+	if len(got.SessionHistory) != 1 || got.SessionHistory[0] != string(oldID) {
+		t.Errorf("SessionHistory = %v, want [%q]", got.SessionHistory, oldID)
+	}
+
+	// On-disk reload survives (AC#3).
+	back, err := conversations.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	reloaded, ok := back.Get(convID)
+	if !ok {
+		t.Fatal("Get(conv) after reload: not found")
+	}
+	if reloaded.CurrentSessionID != string(newID) {
+		t.Errorf("reloaded CurrentSessionID = %q, want %q", reloaded.CurrentSessionID, newID)
+	}
+	if len(reloaded.SessionHistory) != 1 || reloaded.SessionHistory[0] != string(oldID) {
+		t.Errorf("reloaded SessionHistory = %v, want [%q]", reloaded.SessionHistory, oldID)
+	}
+
+	// Observer fan-out unchanged: still fires exactly once with the clear signal.
+	signals := rec.snapshot()
+	if len(signals) != 1 {
+		t.Fatalf("observer fired %d times, want 1: %+v", len(signals), signals)
+	}
+	if tr := signals[0]; tr.Reason != ReasonClear || tr.PreviousID != oldID || tr.NewID != newID {
+		t.Errorf("signal = %+v, want {ReasonClear, %q, %q}", tr, oldID, newID)
+	}
+}
+
+// TestPool_OnRotate_NoOwnerNoOp covers AC#4: rotating a session no conversation
+// owns mutates nothing, writes nothing (the file bytes are untouched, so Save
+// was skipped), returns nil, and still fires the observer once.
+func TestPool_OnRotate_NoOwnerNoOp(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	oldID := pool.Default().ID()
+	newID := SessionID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+
+	const (
+		convID    conversations.ConversationID = "11111111-2222-4333-8444-555555555555"
+		otherSess                              = "99999999-9999-4999-8999-999999999999"
+	)
+	// Conversation bound to a DIFFERENT session than the one being rotated.
+	reg, path := seedBoundConvRegistry(t, pool, convID, SessionID(otherSess))
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pre-rotation file: %v", err)
+	}
+
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	if err := pool.onRotate(oldID, newID); err != nil {
+		t.Fatalf("onRotate: %v", err)
+	}
+
+	// No conversation mutated.
+	got, _ := reg.Get(convID)
+	if got.CurrentSessionID != otherSess {
+		t.Errorf("CurrentSessionID = %q, want %q (unchanged)", got.CurrentSessionID, otherSess)
+	}
+	if len(got.SessionHistory) != 0 {
+		t.Errorf("SessionHistory = %v, want empty (no-op)", got.SessionHistory)
+	}
+
+	// No write: Save is skipped on a miss, so the file is byte-identical.
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read post-rotation file: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("conversations.json was rewritten on a no-owner rotation; want untouched")
+	}
+
+	// Observer fan-out unchanged.
+	if n := rec.len(); n != 1 {
+		t.Errorf("observer fired %d times, want 1", n)
+	}
+}
+
+// TestPool_Eviction_BindingNeutral covers AC#2: an idle eviction leaves the
+// conversation binding exactly as-is — CurrentSessionID still points at the
+// (still-resolvable) evicted id and no colliding history entry is appended.
+// Proves the reason-branch skips eviction end-to-end.
+func TestPool_Eviction_BindingNeutral(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolIdle(t, 100*time.Millisecond)
+	sess := pool.Default()
+	boundID := sess.ID()
+
+	const convID conversations.ConversationID = "11111111-2222-4333-8444-555555555555"
+	reg, _ := seedBoundConvRegistry(t, pool, convID, boundID)
+
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = sess.Run(ctx) }()
+
+	if !pollUntil(t, 2*time.Second, func() bool {
+		return sess.LifecycleState() == stateEvicted
+	}) {
+		t.Fatalf("session did not evict within 2s; state=%v", sess.LifecycleState())
+	}
+	// Wait for the eviction signal to actually reach notifyTransition — only then
+	// has the reason-branch had its chance to (wrongly) rebind, were it buggy.
+	if !pollUntil(t, 1*time.Second, func() bool { return rec.len() >= 1 }) {
+		t.Fatal("no eviction signal observed")
+	}
+
+	got, _ := reg.Get(convID)
+	if got.CurrentSessionID != string(boundID) {
+		t.Errorf("CurrentSessionID = %q, want %q (eviction must be binding-neutral)", got.CurrentSessionID, boundID)
+	}
+	if len(got.SessionHistory) != 0 {
+		t.Errorf("SessionHistory = %v, want empty (eviction must not append a colliding id)", got.SessionHistory)
+	}
+}
+
+// TestPool_OnRotate_RebindRaceConcurrentSave mirrors
+// TestPool_TransitionObserver_RaceConcurrentFires but wires a registry whose
+// conversations are each bound to one rotating id. Under -race it exercises the
+// new edge — concurrent RebindSession + atomic Save on the same registry/path —
+// alongside the lock-free observer read and the lifecycle eviction fire.
+func TestPool_OnRotate_RebindRaceConcurrentSave(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolIdle(t, 80*time.Millisecond)
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	const N = 6
+	oldIDs := make([]SessionID, N)
+	newIDs := make([]SessionID, N)
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	reg := &conversations.Registry{}
+	for i := 0; i < N; i++ {
+		id := SessionID(fmt.Sprintf("%08x-0000-4000-8000-%012x", i+1, i+1))
+		oldIDs[i] = addCapTestSession(t, pool, ctx, id).ID()
+		newIDs[i] = SessionID(fmt.Sprintf("%08x-1111-4111-8111-%012x", i+1, i+1))
+		reg.Create(conversations.Conversation{
+			ID:               conversations.ConversationID(fmt.Sprintf("%08x-2222-4222-8222-%012x", i+1, i+1)),
+			Cwd:              fmt.Sprintf("/conv-%d", i),
+			CurrentSessionID: string(oldIDs[i]),
+		})
+	}
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+	pool.convReg = reg
+	pool.convRegistryPath = path
+
+	// Bootstrap lifecycle goroutine — fires one eviction signal once it idles.
+	go func() { _ = pool.Default().Run(ctx) }()
+
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := pool.onRotate(oldIDs[i], newIDs[i]); err != nil {
+				t.Errorf("onRotate(%d): %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Every conversation rebound to its new id; each history trail is exactly
+	// [oldID].
+	for i := 0; i < N; i++ {
+		convID := conversations.ConversationID(fmt.Sprintf("%08x-2222-4222-8222-%012x", i+1, i+1))
+		got, ok := reg.Get(convID)
+		if !ok {
+			t.Fatalf("Get(conv %d): not found", i)
+		}
+		if got.CurrentSessionID != string(newIDs[i]) {
+			t.Errorf("conv %d CurrentSessionID = %q, want %q", i, got.CurrentSessionID, newIDs[i])
+		}
+		if len(got.SessionHistory) != 1 || got.SessionHistory[0] != string(oldIDs[i]) {
+			t.Errorf("conv %d SessionHistory = %v, want [%q]", i, got.SessionHistory, oldIDs[i])
+		}
 	}
 }
 

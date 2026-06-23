@@ -47,9 +47,43 @@ func (p *Pool) SetTransitionObserver(obs TransitionObserver) {
 // notifyTransition invokes the observer if one is wired. Takes no lock and is
 // always called with no Pool.mu/Session.lcMu held (a leaf, off-lock callback —
 // see docs/lessons.md "Lock order with callback into the host").
+//
+// A /clear rotation changed the session id in place, so the owning
+// conversation's binding is re-pointed BEFORE the observer fan-out: the
+// downstream consumer (#741) resolves session→conversation against the CURRENT
+// binding, and driving the rebind ahead of the hand-off makes that ordering
+// structural. Eviction keeps its id (NewID == ""), is binding-neutral, and
+// skips this branch entirely (AC#2).
 func (p *Pool) notifyTransition(t SessionTransition) {
+	if t.Reason == ReasonClear {
+		p.rebindConversation(t.PreviousID, t.NewID)
+	}
 	if p.transitionObserver != nil {
 		p.transitionObserver(t)
+	}
+}
+
+// rebindConversation maintains the conversation↔session binding after a /clear
+// rotation re-keyed a session (oldID → newID). It is a no-op when no registry
+// is wired (test pools, p.convReg == nil) or when no conversation owns oldID
+// (AC#4 — Save is skipped so the file mtime stays stable). On a successful
+// rebind it persists conversations.json via the registry's atomic Save; a Save
+// error is logged at Warn and swallowed — the in-memory rebind is already
+// applied and usable, so durability is best-effort, matching
+// create_conversation's eager persist and RotateID's non-fatal save.
+func (p *Pool) rebindConversation(oldID, newID SessionID) {
+	if p.convReg == nil {
+		return
+	}
+	if !p.convReg.RebindSession(string(oldID), string(newID)) {
+		return
+	}
+	if err := p.convReg.Save(p.convRegistryPath); err != nil {
+		p.log.Warn("sessions: rebind conversation persist failed",
+			"event", "rebind_conversation.persist_failed",
+			"session_id", string(newID),
+			"previous_session_id", string(oldID),
+			"err", err)
 	}
 }
 
