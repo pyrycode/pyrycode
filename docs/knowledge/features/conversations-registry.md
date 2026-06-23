@@ -9,6 +9,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Phase 3 foundation (#217):** mutex-guarded `Registry` + atomic save + load. ID generator + validator (`NewID`, `ValidID`) co-located in the same package. Six exports on the registry: `Load`, `(*Registry).Save / Create / Get / List / Update`. One `ListFilter` struct.
 - **Promotion primitive (#218):** `(*Registry).Promote(id, name)` flips a discussion to a named channel under the registry lock; four exported sentinel errors (`ErrConversationNotFound`, `ErrConversationAlreadyPromoted`, `ErrPromotionNameInUse`, `ErrPromotionNameEmpty`) cover the refusal cases.
 - **Deletion primitive (#237):** `(*Registry).Delete(id) bool` removes a single entry by ID under the registry lock; consumed by the auto-archive sweep ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)). #217 explicitly deferred deletion until a real consumer surfaced; #220's sweep is that consumer.
+- **Rotation-rebind primitive (#739):** `(*Registry).RebindSession(oldID, newID string) bool` re-points the conversation bound to `oldID` at `newID` and appends `oldID` to `SessionHistory`, under the registry lock; consumed by the pool's `/clear` rotation path so the conversation↔session binding stays current beyond the first rotation ([`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation*). The first production caller to **write** `SessionHistory`.
 
 ## Surface
 
@@ -39,6 +40,7 @@ func (r *Registry) List(filter ...ListFilter) []Conversation
 func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool
 func (r *Registry) Delete(id ConversationID) bool
 func (r *Registry) Promote(id ConversationID, name string) error
+func (r *Registry) RebindSession(oldID, newID string) bool
 ```
 
 `Registry` holds the in-memory conversation slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk) or directly via `&Registry{}` (zero value is the empty registry — documented). Methods are safe for concurrent use.
@@ -118,7 +120,7 @@ r.mu.Unlock()
 
 Concurrent `Create` / `Get` / `List` / `Update` calls are not blocked behind the I/O syscall window. Two concurrent `Save` calls produce two complete temp files and two renames; the later rename wins (`os.Rename` is atomic per call, no torn write). Callers that need "Save once, everyone observes the new state" call `Save` from a single goroutine.
 
-`Conversation`'s slice field (`SessionHistory []string`) is **not** deep-copied at the snapshot boundary. The shallow copy is safe today because nothing in the caller mutates `SessionHistory` after handing the value to `Create` or after `Update`'s callback returns. If a future mutation pattern starts mutating in place outside the registry lock, the snapshot will need a per-element `append([]string(nil), c.SessionHistory...)` deep copy.
+`Conversation`'s slice field (`SessionHistory []string`) is **not** deep-copied at the snapshot boundary. The shallow copy is safe even though `RebindSession` (#739) now **appends** to `SessionHistory` in production: the append runs **under `r.mu`** (serialized against the snapshot copy) and only ever writes at index ≥ the old length, while a Save snapshot's view is exactly `[0:old-len]` — so the encode and a concurrent append touch disjoint addresses, and the snapshot captures a consistent pre- or post-rebind history with no torn read. `TestPool_OnRotate_RebindRaceConcurrentSave` (`internal/sessions`) exercises concurrent `RebindSession` + `Save` under `-race`. The deep-copy caveat still applies only to a hypothetical *in-place element* mutation of `SessionHistory` outside the registry lock — which no caller does; such a pattern would need a per-element `append([]string(nil), c.SessionHistory...)` deep copy.
 
 ## Sort discipline
 
@@ -200,6 +202,19 @@ Order-preserving: surrounding entries' relative order is unchanged. O(n) linear 
 
 The byte-exact `==` comparison on `ID` matches `Get`'s contract; no normalization. Does not race a concurrent `Create` of the same id — both serialize through `r.mu`.
 
+### `RebindSession(oldID, newID string) bool` (#739)
+
+Re-points the conversation **currently bound** to `oldID` at `newID`, recording `oldID` in the history trail. Locate the entry whose `CurrentSessionID == oldID`, set `CurrentSessionID = newID` and `SessionHistory = append(SessionHistory, oldID)`, return `true`. On miss, return `false` and mutate nothing. The scan and mutation are a **single critical section under `r.mu`** — no find-then-update window a concurrent `Create`/`Delete` could redirect (the same no-TOCTOU posture as `Update`/`Promote`).
+
+This is the **write side** of the conversation↔session binding maintenance: the pool's `/clear` rotation path calls it after `RotateID` re-keys the session map, so the binding stays current beyond the first rotation. See [`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation* for the full data flow and the eviction-neutrality argument. The matching reverse **read** lookup (session id → conversation id) is deferred to the downstream consumer #741, which adds its own scan rather than sharing one (PROJECT-MEMORY "Resist over-DRY on duplicated registry primitives").
+
+Contract:
+
+- **Match key is `CurrentSessionID`, not `ID`.** Unlike every other CRUD method, this scans by the *bound session id*. A session id binds exactly one conversation (set once at creation), so **first match wins and stops**, mirroring `Get`/`Update`; pathological duplicates rebind the first only — deterministic and documented.
+- **Empty `oldID` returns `false` before scanning.** An unbound conversation carries `CurrentSessionID == ""` (the unset sentinel), so a stray empty-id call must never sweep the first unbound row into a rebind. This is a **data-integrity guard at the primitive boundary**, not the eviction defense — that lives at the call site, which only rebinds on a `/clear` rotation (where `newID` is non-empty and distinct). Precondition (caller-guaranteed on the rotation path): `oldID` and `newID` non-empty and distinct.
+- **`SessionHistory` is oldest-first, append-in-place.** `append(SessionHistory, oldID)` — the retired id goes on the **end**, satisfying the field's documented "rotation appends in place" contract ([`features/conversations-package.md`](conversations-package.md)). #739 is the first production caller to write this field.
+- **No implicit `Save`.** Disk persistence stays with the caller, matching the `Create`/`Update`/`Promote`/`Delete` convention. The rotation caller (`Pool.rebindConversation`) `Save`s only on a `true` return, treats a `Save` error as non-fatal (the in-memory rebind is already usable), and skips `Save` entirely on a miss so the file mtime stays stable.
+
 ### `Promote(id ConversationID, name string) error`
 
 In-memory primitive that turns a discussion into a named channel: flips `IsPromoted` to `true` and sets `Name` to a non-nil pointer to `name`. Validation, the uniqueness scan, and the two-field mutation all run under `r.mu`; on any refusal the registry is left untouched. Persistence is the caller's job — `Promote` does not call `Save`, matching the `Create` / `Update` convention.
@@ -246,6 +261,7 @@ New (no devices counterpart):
 - `TestRegistry_Promote` (#218) — table-driven, one row per AC bullet: success, unknown id, already promoted, name conflict against another *promoted* record (refused), name conflict against an *unpromoted* record (accepted — pins uniqueness scope), empty name, whitespace-only name. Each refusal row also asserts the target is byte-equal to its pre-call state via `Get`.
 - `TestRegistry_Promote_DoesNotPersist` (#218) — `Save` → `Promote` → `Load` from the same path; the loaded registry shows `IsPromoted == false`, pinning that `Promote` does not call `Save` implicitly.
 - `TestRegistry_Delete` (#237) — table-driven: `hit` (seed 1, delete returns `true`, `Get` returns `ok=false`); `miss-empty-registry`; `miss-non-matching` (seed `A`, delete `B`, `A` untouched); `preserves-order` (seed `A`, `B`, `C`; delete `B`; `List` returns `[A, C]` in order — pins the order-preserving slice idiom against an accidental swap-with-last optimisation); `delete-snapshot-safety` (seed 2, take `snap := r.List()`, `Delete(snap[0].ID)`, assert `snap` unchanged in length and element identity — pins the documented "List returns a copy" contract from #217); `delete-twice-second-misses` (seed 1, delete returns `true`, second delete returns `false`).
+- `TestRegistry_RebindSession_*` (#739) — six scenarios mirroring `TestRegistry_Update_*`: `_Hit` (rebind returns `true`, target's `CurrentSessionID == newID` and `SessionHistory` tail `== oldID`, unrelated rows byte-identical); `_AppendOrder` (a row already carrying `[s0]` becomes `[s0, oldID]` — oldest-first append, not prepend); `_Miss` (no row bound to `oldID` → `false`, snapshot equality before/after); `_EmptyOldIDGuard` (a registry containing an **unbound** row, `CurrentSessionID == ""`, is **not** matched by `RebindSession("", new)` — pins the data-integrity guard); `_DoesNotPersist` (mirror `TestRegistry_Promote_DoesNotPersist` — `RebindSession` alone writes no file); `_FirstMatchOnly` (two rows pathologically bound to the same `oldID` → only the first rebinds). The pool-side rotation/eviction tests live in `internal/sessions/transition_test.go` — see [codebase/739.md](../codebase/739.md).
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -272,5 +288,8 @@ New (no devices counterpart):
 - [ADR 020](../decisions/020-devices-registry-snapshot-then-write.md) — Save snapshots under lock, performs I/O outside (the pattern this registry inherits).
 - [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) — `Update` runs the caller's callback under the registry lock (over snapshot-mutate-swap).
 - `internal/sessions/id.go` — the `NewID` / `ValidID` template `internal/conversations/id.go` clones.
+- [`features/conversation-session-binding.md`](conversation-session-binding.md) — the consumer of `RebindSession`: the `/clear` rotation rebind that keeps the binding current (§ *Maintaining the binding across rotation*).
+- [codebase/739.md](../codebase/739.md) — per-ticket note for the `RebindSession` write primitive + the pool-side rotation/eviction wiring.
 - `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec for the CRUD foundation.
 - `docs/specs/architecture/218-conversations-promotion-api.md` — architect's spec for `Promote`.
+- `docs/specs/architecture/739-conversation-session-binding-rotation.md` — architect's spec for `RebindSession` + the rotation rebind.

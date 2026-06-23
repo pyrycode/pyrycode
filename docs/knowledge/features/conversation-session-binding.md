@@ -4,8 +4,9 @@ How each phone-created discussion gets its own dedicated, isolated claude sessio
 
 - **Create path (#677, workdir #685, scratch creation #696)** — `create_conversation` eagerly mints + binds a session, recording it on `CurrentSessionID`, and (since #685) spawns it in the conversation's own validated, trust-marked `Cwd` so discussions targeting different projects are isolated on disk. #696 lets the phone's default `~/.pyrycode/scratch` resolve under `$HOME` and be created before spawn (expand leading `~`, `MkdirAll` after the `$HOME` check).
 - **Routing path (#678)** — `send_message` resolves that bound session and delivers the inbound turn there instead of to the bootstrap.
+- **Rotation maintenance (#739)** — when a bound session is re-keyed by a `/clear` rotation (old id → new id), the owning conversation's `CurrentSessionID` is re-pointed at the new id and the retired id is appended to `SessionHistory`, so the binding stays current beyond the session's first rotation. Eviction is binding-neutral. See [§ Maintaining the binding across rotation](#maintaining-the-binding-across-rotation-739).
 
-Both land in the `internal/relay/handlers` package. Foundational + consumer slices of EPIC #672 ("per-conversation sessions"). See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md), [`docs/multi-session.md`](../../multi-session.md).
+The create + routing halves land in the `internal/relay/handlers` package; the rotation maintenance lands in `internal/sessions` + `internal/conversations`. Foundational + consumer slices of EPIC #672 ("per-conversation sessions"). See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md), [`docs/multi-session.md`](../../multi-session.md).
 
 ## What it does and why
 
@@ -161,6 +162,49 @@ All three are checked synchronously **before enqueue** (#721): the handler's onl
 
 **The ack now means "accepted into the backlog," not "delivered."** This is asymmetric by design: at enqueue we have a live phone to tell "retry" (malformed / unknown / unbound all reject synchronously, preserving the "unbound → error, not bootstrap" guarantee above); once enqueued the ack promised delivery, so a transient resolve/activate/write failure is held and retried by the drain rather than surfaced. The wire-level `send_message` request/reply is unchanged ([ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) line 123). See [codebase/721.md](../codebase/721.md) for the full ack-contract table and [features/msgqueue-package.md](msgqueue-package.md) for the drain engine.
 
+## Maintaining the binding across rotation (#739)
+
+The create path writes `CurrentSessionID` **once**, at conversation creation, then froze it. But a bound session's id is not stable for life: a `/clear` rotation re-keys it in place (old id → new id; `Pool.RotateID`, driven by the [rotation watcher](rotation-watcher.md)). Through #738 the registry was never told, so after the **first** rotation the conversation still pointed at the retired id — the binding was stale, the documented `SessionHistory` trail did not exist, and a reverse lookup (session id → owning conversation) silently missed. #739 implements the **write side** of that maintenance so the downstream consumer #741 (the read side) resolves against a correct binding.
+
+### The rebind, driven from the transition chokepoint
+
+`notifyTransition` (`internal/sessions/transition.go`) is the off-lock chokepoint **both** transition reasons pass through. #739 adds a reason-branch that rebinds **before** the observer fan-out:
+
+```go
+func (p *Pool) notifyTransition(t SessionTransition) {
+    if t.Reason == ReasonClear {
+        p.rebindConversation(t.PreviousID, t.NewID)   // /clear only
+    }
+    if p.transitionObserver != nil {
+        p.transitionObserver(t)                        // #657/#659 emitter; #741 reads the binding later
+    }
+}
+```
+
+`Pool.rebindConversation` calls the new `conversations.Registry.RebindSession(oldID, newID)` write primitive (scan by `CurrentSessionID == oldID` under `r.mu`, set `CurrentSessionID = newID`, `append(SessionHistory, oldID)`, first-match-and-stop — see [conversations-registry.md](conversations-registry.md#rebindsessionoldid-newid-string-bool-739)) and, **only on a hit**, persists `conversations.json` via the registry's atomic `Save`. It is a no-op when no registry is wired (`p.convReg == nil`, the case for test pools) or when no conversation owns the rotated id (AC#4 — `Save` skipped, file mtime stable). A `Save` error is logged at `Warn` and swallowed: the in-memory rebind is already applied and usable, so durability is best-effort (matching `create_conversation`'s eager persist and `RotateID`'s non-fatal save). #739 is the first production caller to **write** `SessionHistory` — it was a documented-but-unwritten field until now.
+
+Data flow on a `/clear` rotation:
+
+```
+rotation watcher → onRotate(old,new)
+    → RotateID(old,new)                      [Pool.mu held: map re-key + sessions.json save]
+    → notifyTransition({Clear, old, new})    [no pool locks held]
+        → rebindConversation(old,new)        [ReasonClear branch]
+            → convReg.RebindSession(old,new) [conversations.Registry.mu: scan + mutate]
+            → convReg.Save(path)             [on hit only; atomic temp+fsync+rename]
+        → transitionObserver({Clear,old,new})[#741 resolves session→conversation later, against the CURRENT binding]
+```
+
+**Why drive from `notifyTransition`, not a new observer.** The transition signal has a **single** observer slot (`SetTransitionObserver`, "set once"), already owned by the `session_transition_v2.go` producer (installed before `Pool.Run`) — a second observer is impossible. Placing the rebind at the common chokepoint, rebind *then* observer, makes the #741 ordering **structural**: the in-memory rebind (and its `Save`) complete synchronously before the observer hands the signal to its buffered channel, so #741 never resolves against a half-applied binding.
+
+### Eviction is binding-neutral, by construction
+
+`ReasonEviction` (idle timeout or cap-policy) fires with `PreviousID = s.id` and an **empty `NewID`**: the session keeps its id, stays in the pool map, and re-activates later under the *same* id (the [idle-eviction](idle-eviction.md) "evicted is a state, not removal" contract). So `CurrentSessionID` stays valid across eviction with **no write needed**. Because `runActive` returns only `ReasonEviction`/`""` (never `ReasonClear`), an eviction never enters the rebind branch — binding-neutrality (AC#2) holds by control flow, not by a runtime guard. This matters: a naive "set `CurrentSessionID = NewID`, append `PreviousID`" applied to the empty-`NewID` eviction signal would **clear** the binding (breaking the `send_message` respawn guard at `main.go:923`) and append a colliding duplicate of the current id. The reason-branch is the real defense against that corruption; a second `oldID == ""` guard inside `RebindSession` defends the *unrelated* stray-empty-call case (it would **not** catch a mis-routed eviction, which carries a non-empty `PreviousID`).
+
+### Confidentiality (security-sensitive)
+
+The binding maintained here is the attribution a downstream mobile-facing consumer (#741) uses to route a session-boundary event to a conversation, so a mis-write is a cross-conversation leak that **originates here**. The rebind is driven **entirely by server-internal state** — the daemon's own rotation watcher and pool-managed session UUIDs; no untrusted phone input flows in. Mis-attribution is prevented by deterministic byte-exact first-match (each session id binds exactly one conversation), and the persisted file is updated atomically (mutate exactly the matched row → whole-snapshot temp+fsync+rename, no torn write). The only log line is a `Save`-failure `Warn` carrying non-secret session-id routing fields. Spec verdict: **PASS**. See [codebase/739.md](../codebase/739.md).
+
 ## Edge cases & limitations
 
 - **Inbound + the structured outbound stream now route per-conversation (#678 → #687 → #679).** When #678 landed, claude's *replies* still fanned out from the bootstrap session — and worse, the structured interactive turn stream read its conversation cursor from the bootstrap supervisor, which #678 leaves empty for routed turns, so the structured reply stream went **silent** after the first per-conversation route. [#687](../codebase/687.md) closed the first half — *attribution*: a `cmd/pyry` *active-conversation* signal (`activeConversation`, stamped by `sessionRouter.Route` on success) re-keys the structured stream's two cursor readers (live emitter + #647 reconnect-replay) to it, so the stream **emits again** and each envelope carries the routed conversation's `conversation_id`. [#679](../codebase/679.md) closes the second half — *content*: the producer now **follows the active conversation**, tailing the bound session's transcript **by bound session id** (`resolveBoundSessionJSONL`, mtime-independent) over the bound session's own supervisor, and re-subscribing when the active conversation (or its session) changes. So a *different* session writing more recently can no longer cross-stream its output into the active conversation's reply — the cross-conversation confidentiality property is now enforced, not merely coincidental in the single-operator case. [#686](../codebase/686.md) then re-points that by-id resolver at the conversation's **own per-`Cwd` JSONL directory** (`~/.claude/projects/<encoded-cwd>/`, derived from the bound session's captured spawn `WorkDir`), since #685 spawns per-conversation sessions in distinct directories — so the filename (#679) *and* the directory (#686) are both per-conversation; a default null-`Cwd` session keeps resolving from the shared dir unchanged. The **coarse** v1 bridge (`assistant_turn.go`, the non-interactive dispatch-leg surface) still reads the bootstrap cursor and is unchanged; the v2 coarse bridge (`assistant_turn_v2.go`) was deleted in [#699](../codebase/699.md). The real-claude e2e confirms the full phone→claude→phone round-trip is intact.
@@ -177,12 +221,14 @@ All three are checked synchronously **before enqueue** (#721): the handler's onl
 
 ## Related
 
-- [conversations-package.md](conversations-package.md) — the `Conversation.CurrentSessionID` binding field (and `SessionHistory`).
-- [conversations-registry.md](conversations-registry.md) — atomic Save/Load that round-trips the binding (AC#3).
+- [conversations-package.md](conversations-package.md) — the `Conversation.CurrentSessionID` binding field (and `SessionHistory`, written in production for the first time by #739's rotation rebind).
+- [conversations-registry.md](conversations-registry.md) — atomic Save/Load that round-trips the binding (AC#3); the `RebindSession` write primitive (#739).
+- [rotation-watcher.md](rotation-watcher.md) — live `/clear` detection → `Pool.RotateID`, the re-key that precedes the #739 rebind.
 - [sessions-package.md](sessions-package.md) — `Pool.Create` mint primitive (§ *Pool.Create*) and `buildSession` (the `tpl.WorkDir` / `--session-id`-only spawn point).
 - [idle-eviction.md](idle-eviction.md) — "evicted is a state, not removal"; lazy respawn on next `send_message`, now per-conversation via `Pool.Activate`.
 - [relay-package.md](relay-package.md) — the `create_conversation` / `send_message` handlers and the `SessionCreator` / `SessionRouter` seams alongside `TurnWriter`.
 - [codebase/677.md](../codebase/677.md), [codebase/678.md](../codebase/678.md) — per-ticket implementation notes (create + routing halves).
+- [codebase/739.md](../codebase/739.md) — per-ticket note for the rotation-maintenance half (`RebindSession` + the `notifyTransition` reason-branch).
 - [codebase/680.md](../codebase/680.md) — Phase 2.0 capstone: e2e proving per-conversation sessions idle-evict, reactivate, and obey the active cap without cross-bleed.
 - [codebase/687.md](../codebase/687.md), [codebase/679.md](../codebase/679.md), [codebase/686.md](../codebase/686.md) — the outbound structured-stream migration (attribution + content + per-`Cwd` directory).
 - [turnbridge-package.md](turnbridge-package.md) — the producer / follow-active subscriber (`NewTargetSubscriber`) #679 re-keys.

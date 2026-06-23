@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -811,5 +812,184 @@ func TestRegistry_Update_PointerStability(t *testing.T) {
 	}
 	if len(got.SessionHistory) != 2 || got.SessionHistory[0] != "sess-1" || got.SessionHistory[1] != "sess-2" {
 		t.Errorf("SessionHistory = %v, want [sess-1 sess-2]", got.SessionHistory)
+	}
+}
+
+// TestRegistry_RebindSession_Hit covers AC#1: the owning conversation's
+// CurrentSessionID becomes newID and oldID is appended to SessionHistory, while
+// unrelated rows are left byte-identical.
+func TestRegistry_RebindSession_Hit(t *testing.T) {
+	t.Parallel()
+	const (
+		ownerID ConversationID = "11111111-2222-4333-8444-555555555555"
+		otherID ConversationID = "22222222-2222-4333-8444-555555555555"
+		oldSess                = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		newSess                = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{ID: ownerID, Cwd: "/owner", CurrentSessionID: oldSess, LastUsedAt: when})
+	other := Conversation{ID: otherID, Cwd: "/other", CurrentSessionID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", LastUsedAt: when}
+	r.Create(other)
+
+	if ok := r.RebindSession(oldSess, newSess); !ok {
+		t.Fatal("RebindSession returned false, want true")
+	}
+
+	got, found := r.Get(ownerID)
+	if !found {
+		t.Fatal("Get(owner) after rebind: not found")
+	}
+	if got.CurrentSessionID != newSess {
+		t.Errorf("CurrentSessionID = %q, want %q", got.CurrentSessionID, newSess)
+	}
+	if len(got.SessionHistory) != 1 || got.SessionHistory[len(got.SessionHistory)-1] != oldSess {
+		t.Errorf("SessionHistory = %v, want tail %q (len 1)", got.SessionHistory, oldSess)
+	}
+
+	// The unrelated row is untouched.
+	gotOther, _ := r.Get(otherID)
+	if !reflect.DeepEqual(gotOther, other) {
+		t.Errorf("unrelated row mutated: got %+v, want %+v", gotOther, other)
+	}
+}
+
+// TestRegistry_RebindSession_AppendOrder covers AC#1's oldest-first contract: a
+// conversation that already carries history gets oldID appended at the tail
+// (append-in-place, not prepend).
+func TestRegistry_RebindSession_AppendOrder(t *testing.T) {
+	t.Parallel()
+	const (
+		ownerID = "11111111-2222-4333-8444-555555555555"
+		s0      = "00000000-0000-4000-8000-000000000000"
+		oldSess = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		newSess = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	r := &Registry{}
+	r.Create(Conversation{ID: ownerID, Cwd: "/owner", CurrentSessionID: oldSess, SessionHistory: []string{s0}})
+
+	if ok := r.RebindSession(oldSess, newSess); !ok {
+		t.Fatal("RebindSession returned false, want true")
+	}
+
+	got, _ := r.Get(ownerID)
+	want := []string{s0, oldSess}
+	if !reflect.DeepEqual(got.SessionHistory, want) {
+		t.Errorf("SessionHistory = %v, want %v (oldest-first append)", got.SessionHistory, want)
+	}
+}
+
+// TestRegistry_RebindSession_Miss covers AC#4: a rotation of a session no
+// conversation owns mutates nothing and returns false.
+func TestRegistry_RebindSession_Miss(t *testing.T) {
+	t.Parallel()
+	const (
+		ownerID = "11111111-2222-4333-8444-555555555555"
+		bound   = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		unowned = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+		newSess = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	r := &Registry{}
+	orig := Conversation{ID: ownerID, Cwd: "/owner", CurrentSessionID: bound}
+	r.Create(orig)
+
+	if ok := r.RebindSession(unowned, newSess); ok {
+		t.Errorf("RebindSession(unowned) = true, want false")
+	}
+	got, _ := r.Get(ownerID)
+	if !reflect.DeepEqual(got, orig) {
+		t.Errorf("row mutated on miss: got %+v, want %+v", got, orig)
+	}
+}
+
+// TestRegistry_RebindSession_EmptyOldIDGuard covers the security layer-2
+// data-integrity guard: an empty oldID must never match an unbound conversation
+// (CurrentSessionID == "") and must return false without mutation.
+func TestRegistry_RebindSession_EmptyOldIDGuard(t *testing.T) {
+	t.Parallel()
+	const (
+		unboundID = "11111111-2222-4333-8444-555555555555"
+		newSess   = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	r := &Registry{}
+	unbound := Conversation{ID: unboundID, Cwd: "/unbound"} // CurrentSessionID == ""
+	r.Create(unbound)
+
+	if ok := r.RebindSession("", newSess); ok {
+		t.Fatal("RebindSession(\"\", new) = true, want false (must not match unbound row)")
+	}
+	got, _ := r.Get(unboundID)
+	if !reflect.DeepEqual(got, unbound) {
+		t.Errorf("unbound row mutated by empty-oldID call: got %+v, want %+v", got, unbound)
+	}
+}
+
+// TestRegistry_RebindSession_DoesNotPersist mirrors
+// TestRegistry_Promote_DoesNotPersist: RebindSession alone writes no file; the
+// caller owns Save.
+func TestRegistry_RebindSession_DoesNotPersist(t *testing.T) {
+	t.Parallel()
+	const (
+		ownerID = "11111111-2222-4333-8444-555555555555"
+		oldSess = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		newSess = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+	r := &Registry{}
+	r.Create(Conversation{ID: ownerID, Cwd: "/owner", CurrentSessionID: oldSess, LastUsedAt: when})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save (pre-rebind): %v", err)
+	}
+	if ok := r.RebindSession(oldSess, newSess); !ok {
+		t.Fatal("RebindSession returned false, want true")
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := back.Get(ownerID)
+	if !ok {
+		t.Fatal("Get after Load: not found")
+	}
+	if got.CurrentSessionID != oldSess {
+		t.Errorf("loaded CurrentSessionID = %q, want %q (RebindSession must not persist implicitly)", got.CurrentSessionID, oldSess)
+	}
+	if len(got.SessionHistory) != 0 {
+		t.Errorf("loaded SessionHistory = %v, want empty (no implicit persist)", got.SessionHistory)
+	}
+}
+
+// TestRegistry_RebindSession_FirstMatchOnly: two rows pathologically bound to
+// the same oldID — only the first is rebound; the second is untouched.
+func TestRegistry_RebindSession_FirstMatchOnly(t *testing.T) {
+	t.Parallel()
+	const (
+		firstID  ConversationID = "11111111-2222-4333-8444-555555555555"
+		secondID ConversationID = "22222222-2222-4333-8444-555555555555"
+		dup                     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		newSess                 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	)
+	r := &Registry{}
+	r.Create(Conversation{ID: firstID, Cwd: "/first", CurrentSessionID: dup})
+	r.Create(Conversation{ID: secondID, Cwd: "/second", CurrentSessionID: dup})
+
+	if ok := r.RebindSession(dup, newSess); !ok {
+		t.Fatal("RebindSession returned false, want true")
+	}
+
+	first, _ := r.Get(firstID)
+	if first.CurrentSessionID != newSess {
+		t.Errorf("first row CurrentSessionID = %q, want %q (rebound)", first.CurrentSessionID, newSess)
+	}
+	second, _ := r.Get(secondID)
+	if second.CurrentSessionID != dup {
+		t.Errorf("second row CurrentSessionID = %q, want %q (untouched)", second.CurrentSessionID, dup)
+	}
+	if len(second.SessionHistory) != 0 {
+		t.Errorf("second row SessionHistory = %v, want empty (untouched)", second.SessionHistory)
 	}
 }
