@@ -38,14 +38,23 @@ type transitionObserverSink interface {
 // SECURITY: the only fields logged at any level are content-free discriminants —
 // `event`, `reason`, `conn_id`, and Push's transport-sentinel `err`. The
 // marshaled payload is NEVER logged (no payloadJSON, no err.Error() on the
-// marshal path). The payload carries no application content (session ids + reason
-// + timestamp only), so there is nothing sensitive to leak — but the discipline
-// is kept verbatim so a future field addition can't quietly start leaking through
-// a log line. Session ids are non-secret routing identifiers (session_id is
-// already a standard log field across internal/sessions).
+// marshal path). The payload's `conversation_id` (#741) is a routing key treated
+// as sensitive alongside the session ids and `workspace_cwd`: it is resolved from
+// the maintained registry binding, stamped onto the wire, and never logged — the
+// unresolved-drop log carries `reason` only (no ids). Session ids are non-secret
+// routing identifiers (session_id is already a standard log field across
+// internal/sessions); the discipline is kept verbatim so a future field addition
+// can't quietly start leaking through a log line.
 type sessionTransitionEmitterV2 struct {
 	bcast  interactiveBroadcaster
 	logger *slog.Logger
+
+	// resolveConv maps a session id to its owning conversation id (#741),
+	// injected so this file never imports internal/conversations — toWirePayload
+	// stays registry-free and pure. The bool is false when no conversation owns
+	// the id (race: session torn down); broadcast drops the whole event in that
+	// case rather than emit a guessed or empty routing key.
+	resolveConv func(string) (string, bool)
 
 	in chan sessions.SessionTransition
 
@@ -56,13 +65,15 @@ type sessionTransitionEmitterV2 struct {
 	nextID uint64
 }
 
-// newSessionTransitionEmitterV2 constructs an emitter wired to bcast. Run must be
-// called once on a goroutine before Enqueue takes effect.
-func newSessionTransitionEmitterV2(bcast interactiveBroadcaster, logger *slog.Logger) *sessionTransitionEmitterV2 {
+// newSessionTransitionEmitterV2 constructs an emitter wired to bcast and the
+// session→conversation resolveConv closure (#741). Run must be called once on a
+// goroutine before Enqueue takes effect.
+func newSessionTransitionEmitterV2(bcast interactiveBroadcaster, resolveConv func(string) (string, bool), logger *slog.Logger) *sessionTransitionEmitterV2 {
 	return &sessionTransitionEmitterV2{
-		bcast:  bcast,
-		logger: logger,
-		in:     make(chan sessions.SessionTransition, sessionTransitionQueueSize),
+		bcast:       bcast,
+		logger:      logger,
+		resolveConv: resolveConv,
+		in:          make(chan sessions.SessionTransition, sessionTransitionQueueSize),
 	}
 }
 
@@ -97,12 +108,15 @@ func (e *sessionTransitionEmitterV2) Run(ctx context.Context) {
 	}
 }
 
-// broadcast maps one transition to a wire payload, marshals it once, then fans a
-// session_transition envelope to every currently-open INTERACTIVE conn. An
-// unknown reason is dropped (toWirePayload ok=false) so a future #659 reason can
-// never emit a malformed envelope. A per-conn Push error is logged at DEBUG and
-// the loop continues — a dropped conn must not abort the others (AC#2);
-// ctx-cancel mid-fan-out returns early.
+// broadcast maps one transition to a wire payload, resolves and stamps the
+// owning conversation_id (#741), marshals it once, then fans a session_transition
+// envelope to every currently-open INTERACTIVE conn. An unknown reason is dropped
+// (toWirePayload ok=false) so a future #659 reason can never emit a malformed
+// envelope. An unresolvable binding (race: the session was torn down before this
+// drained) drops the whole event — no guessed or empty routing key reaches the
+// wire (AC#3) — and Run survives to the next transition. A per-conn Push error is
+// logged at DEBUG and the loop continues — a dropped conn must not abort the
+// others (AC#2); ctx-cancel mid-fan-out returns early.
 func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.SessionTransition) {
 	payload, ok := toWirePayload(t)
 	if !ok {
@@ -111,6 +125,20 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 			"reason", string(t.Reason))
 		return
 	}
+	// Resolve the owning conversation once per transition, before the per-conn
+	// loop — the same conversation_id applies to every conn. payload.NewSessionID
+	// is the live binding id for both reasons (the rotated id post-#739-rebind for
+	// clear; the evicted id mirrored onto new_session_id for idle_evict). An
+	// unresolvable binding drops the whole event rather than leak a guessed key.
+	convID, ok := e.resolveConv(payload.NewSessionID)
+	if !ok {
+		e.logger.Debug("relay: session-transition drop; unresolvable conversation",
+			"event", "session_transition.unresolved_conversation",
+			"reason", payload.Reason)
+		return
+	}
+	payload.ConversationID = convID
+
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		// SessionTransitionPayload is a closed struct of strings/time/*string and
@@ -201,9 +229,10 @@ func startSessionTransitionStreamV2(
 	ctx context.Context,
 	sink transitionObserverSink,
 	bcast interactiveBroadcaster,
+	resolveConv func(string) (string, bool),
 	logger *slog.Logger,
 ) func() {
-	emitter := newSessionTransitionEmitterV2(bcast, logger)
+	emitter := newSessionTransitionEmitterV2(bcast, resolveConv, logger)
 	sink.SetTransitionObserver(emitter.Enqueue)
 
 	done := make(chan struct{})
