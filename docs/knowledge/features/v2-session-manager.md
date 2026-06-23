@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; the caught-up watermark is clamped to the conversation's newest retained id so an out-of-range / hostile `last_event_id` cannot suppress the live stream — #663, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), intercepts the inbound `modal_answer` / `modal_cancel` control envelopes at the dispatch boundary and — via a consumer-declared `ModalResolver` seam — resolves a `modal_cancel` (consume the outstanding modal, route the fail-safe ESC, audit) then fans a `modal_dismissed` broadcast to every interactive-capable conn, while `modal_answer` resolves **only from a per-device-gated device** — `option_id` validated against the surfaced modal, the safe-answer keystroke routed, the terminal decision audited (#727 seam + #717 gated answer arm, `security-sensitive`, see [Inbound modal control](#inbound-modal-control-727--modalresolver-seam--modal_dismissed-broadcast)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; the caught-up watermark is clamped to the conversation's newest retained id so an out-of-range / hostile `last_event_id` cannot suppress the live stream — #663, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), intercepts the inbound `modal_answer` / `modal_cancel` control envelopes at the dispatch boundary and — via a consumer-declared `ModalResolver` seam — resolves a `modal_cancel` (consume the outstanding modal, route the fail-safe ESC, audit) then fans a `modal_dismissed` broadcast to every interactive-capable conn, while `modal_answer` resolves **only from a per-device-gated device** — `option_id` validated against the surfaced modal, the safe-answer keystroke routed, the terminal decision audited — and, when **no** device answers within a bounded window, arms a daemon-global deny-on-timeout that safe-denies the modal (ESC), fans the same `modal_dismissed{timeout}` broadcast, and audits `denied_timeout` (#727 seam + #717 gated answer arm + #725 deny-on-timeout, `security-sensitive`, see [Inbound modal control](#inbound-modal-control-727717--deny-on-timeout-725--modalresolver-seam--modal_dismissed-broadcast)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -46,12 +46,13 @@ type ModalDismissal struct {
     Source  string // closed set {remote, local, timeout}; cancel ⇒ "remote"
 }
 
-// ModalResolver resolves an inbound modal control frame against the daemon's
-// outstanding-modal state (#727). Declared in the consumer (beside
-// ScreenSnapshotter) so internal/relay imports neither internal/supervisor,
-// internal/modalbridge, internal/audit, nor cmd/pyry; the cmd/pyry resolver
-// satisfies it. *devices.Device crosses the seam (the per-conn s.device).
-// Both methods run on the manager's single Run dispatch goroutine.
+// ModalResolver resolves an inbound modal control frame (or a deny-on-timeout)
+// against the daemon's outstanding-modal state (#727, extended #725). Declared in
+// the consumer (beside ScreenSnapshotter) so internal/relay imports neither
+// internal/supervisor, internal/modalbridge, internal/audit, nor cmd/pyry; the
+// cmd/pyry resolver satisfies it. *devices.Device crosses the seam (the per-conn
+// s.device) on the cancel/answer arms. All three methods run on the manager's
+// single Run dispatch goroutine.
 type ModalResolver interface {
     // ResolveCancel consumes modalID (registry Resolve), routes a cancel/ESC
     // keystroke, audits outcome=cancelled, and returns the dismissal to
@@ -63,6 +64,14 @@ type ModalResolver interface {
     // returns the dismissal (Outcome=answered option_id) on ok=true. The manager
     // already broadcasts on ok=true, so #717 touched no manager code.
     ResolveAnswer(modalID, optionID, answerToken string, dev *devices.Device) (ModalDismissal, bool)
+    // ResolveTimeout safe-denies an unanswered modal whose deny-on-timeout window
+    // elapsed (#725): consume modalID (registry Resolve) → fail-closed ESC →
+    // audit outcome=denied_timeout/source=timeout with an EMPTY device (a timeout
+    // has no answering device) → return the dismissal with ok=true. Takes no
+    // device (the deny is unconditional, nothing to gate). An unknown/already-
+    // resolved id (an answer/cancel won the race) ⇒ (zero, false): no keystroke,
+    // no audit, no dismissal — the loser path.
+    ResolveTimeout(modalID string) (ModalDismissal, bool)
 }
 
 type V2SessionConfig struct {
@@ -75,7 +84,7 @@ type V2SessionConfig struct {
     Handlers   map[string]dispatch.Handler             // optional; open-state envelope-type → handler
     Snapshotter       ScreenSnapshotter                // optional (#618); nil ⇒ request_snapshot → server.binary_offline
     KnownConversation func(conversationID string) bool // optional (#618); nil ⇒ request_snapshot → conversation.not_found
-    ModalResolver     ModalResolver                    // optional (#727); nil ⇒ modal_answer/modal_cancel inert no-ops
+    ModalResolver     ModalResolver                    // optional (#727/#725); nil ⇒ modal_answer/modal_cancel + deny-on-timeout inert no-ops
 }
 
 type V2SessionManager struct { /* unexported */ }
@@ -148,7 +157,7 @@ var (
 )
 ```
 
-`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618) and `ModalResolver` (#727) are also **optional and unvalidated** — leaving them nil keeps the existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash; a nil `ModalResolver` makes both modal-control frames inert debug-logged no-ops (the modal bridge unwired — foreground, or pre-#708 before the producer is live). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
+`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618) and `ModalResolver` (#727) are also **optional and unvalidated** — leaving them nil keeps the existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash; a nil `ModalResolver` makes both modal-control frames **and** an armed deny-on-timeout (#725) inert debug-logged no-ops (the modal bridge unwired — foreground, or pre-#708 before the producer is live). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
 
 ## Wire types (`internal/protocol/v2envelope.go`)
 
@@ -435,7 +444,7 @@ The `conversation_id` is validated by `KnownConversation` **before any render** 
 
 **Deferred (recorded in `codebase/618.md` § Out of scope):** per-conversation screen routing — this single-bootstrap-conversation phase validates *registry membership*, so any registered id renders the one live screen; the multi-conversation phase ([#596]+) MUST tighten the render to the named conversation's session. Also deferred: resized-foreground render dimensions, eager push on `stall_detected`, and request-flood rate-limiting.
 
-### Inbound modal control (#727) — `ModalResolver` seam + `modal_dismissed` broadcast
+### Inbound modal control (#727/#717) + deny-on-timeout (#725) — `ModalResolver` seam + `modal_dismissed` broadcast
 
 `modal_answer` / `modal_cancel` are v2 **control** envelopes (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before** `dispatch.Route`
@@ -500,6 +509,59 @@ the real `Frames`/`Run` loop with three heads (two interactive, one not) — an
 accidental `ActiveConns` call would hang it, making the test a *structural*
 no-deadlock proof — and asserts the dismissal reaches both interactive heads and
 neither the non-interactive one.
+
+#### Deny-on-timeout (#725) — fail-closed safe-deny on an unanswered modal
+
+The fail-closed safety net: if **no** authorized device answers within a bounded
+window, the daemon **safe-denies** the modal rather than leave claude blocked
+forever or risk a silent grant. It reuses `broadcastModalDismissed` unchanged and
+adds a third `ModalResolver` arm (`ResolveTimeout`) plus a daemon-global timer
+funnelled onto `Run`. **`security-sensitive`** (a timer on the permission surface;
+spec-stage security review verdict PASS). See [`codebase/725.md`](../codebase/725.md).
+
+Unlike `modal_answer`/`modal_cancel`, a timeout is **not** an inbound frame — it
+originates internally and rides a new path:
+
+- **Arm (off `Run`).** The producer surfacer (`interactiveModalEmitterV2.Handle`,
+  cmd/pyry, live in #708) calls `(*V2SessionManager).ArmModalTimeout(ctx, modalID)`
+  **immediately after `reg.Record`** — before the marshal/broadcast, so a modal that
+  fails to marshal, or one surfaced to **zero** interactive conns, is still denied on
+  the window (claude is blocked regardless of who is watching). `ArmModalTimeout` only
+  calls `time.AfterFunc(modalDenyTimeout, cb)` and touches no `Run`-owned state, so it
+  is safe off the `Run` goroutine. `modalDenyTimeout` is a package var (2 min default,
+  test-overridable; ADR 025 specifies "a bounded window" but no number).
+- **Funnel (`AfterFunc` callback → `Run`).** `cb` does
+  `select { case m.modalTimeout <- modalID: case <-ctx.Done(): }` — the `armRekeyTimer`
+  callback shape. `modalTimeout` is a **daemon-global** buffered (`wakeBufferSize`=16)
+  channel keyed by `modal_id` (unlike `wake`, keyed by `*V2Session` — a modal is not
+  bound to one conn). The `*time.Timer` is **deliberately discarded, never `Stop`ped**:
+  the registry's one-shot `Resolve` is the idempotency gate, so a timer that fires after
+  an answer/cancel already consumed the modal simply no-ops; an un-fired `AfterFunc`
+  parks no goroutine, so leaving it un-`Stop`ped leaks nothing (avoids a
+  `map[modalID]*time.Timer` + new lock for zero correctness gain).
+- **Fire (on `Run`).** A new `Run` select arm
+  `case modalID := <-m.modalTimeout: m.handleModalTimeout(runCtx, modalID)`.
+  `handleModalTimeout` is a near-copy of `handleModalCancel`: nil-resolver ⇒ inert
+  debug-log; else `ResolveTimeout(modalID)`; on `ok=false` return (already
+  answered/cancelled — no keystroke, no audit, no broadcast); on `ok=true` call
+  `broadcastModalDismissed` (the **same** fan-out, with `{denied_timeout, timeout}`).
+- **`ResolveTimeout`** (cmd/pyry `modalResolverV2`) mirrors `ResolveCancel`: registry
+  `Resolve` → best-effort `SendEsc` → `audit.Log({denied_timeout, timeout})` → return
+  `{denied_timeout, timeout}, true`. Differences: **no device** (empty audit identity —
+  the documented no-device-timeout case), and `denied_timeout`/`timeout` classification.
+
+**Exactly-once is structural, not lock-defended.** Answer/cancel-resolution
+(`handleModalAnswer`/`handleModalCancel`, via `m.cfg.Frames`) and timeout-resolution
+(`handleModalTimeout`, via `m.modalTimeout`) are **both arms of the same `Run`
+`select`** — serviced one at a time. Whichever `Run` services first consumes the modal
+via the one-shot `Resolve`; the loser sees `ok=false` and no-ops. So an answer-vs-timeout
+race cannot double-deny, double-broadcast, or double-audit; the registry mutex still
+guards `Record` (surfacer goroutine) against `Resolve` (`Run`). The timeout leg **only
+ever drives the deny keystroke**, never a grant — fail-closed by construction (ADR 025
+§ Security model: "answered with the SAFE default (deny / ESC) … Never auto-grant").
+**Production-inert until #708** live-wires the surfacer (nothing `Record`s a modal, so no
+timer arms). `TestV2Session_ModalTimeout_FanOut` proves the off-`Run`-arm → on-`Run`-fire
+crossing under `-race`.
 
 ### Capability negotiation on the handshake (#626) — `negotiateCapabilities` + `s.interactive` + capability-aware `ActiveConns`
 
@@ -708,6 +770,8 @@ The pre-existing `TestV2Session_ActiveConnIDs_*` suite (`OpenOnly`, `TornDownSes
 Reconnect replay (#647) — `internal/relay/v2session_replay_test.go` (new): each drives a real Noise handshake whose hello carries `last_event_id` against a manager whose `SetReplaySource` was given a hand-populated `eventring.Ring` + a stub cursor, decrypts the forwarded frames, and asserts. `TestV2Session_Reconnect_ReplaysMissedTail` (3,4,5 ascending before any live frame), `…_CaughtUp_NoReplay`, `…_Gap_EmitsResync` (one `resync` with `conversation_id`), `…_AbsentLastEventID_NoReplay`, `…_ScopedToCursorConversation` (cursor→B, ring holds A → zero A events, AC-5), `…_ReplayDisabled_NoReplay` (nil ring), `…_OtherConnsUnaffected`, `…_ForwardEnvelope_ReplayWatermarkGuard` (drops `EventID ≤ replayThrough`, forwards above, never drops `EventID == nil`). The #647 caught-up/out-of-range tests asserted only *no replay frames* and missed that the live stream was muted afterward; **#663 closes that gap** — `…_OutOfRangeLastEventID_LiveStreamDelivered` (incl. `math.MaxUint64`), `…_ClearRotation_LiveStreamDelivered`, and `…_SameConversation_DedupPreserved` push a live frame after the caught-up handshake and assert **delivery** (see [codebase/663.md](../codebase/663.md)).
 
 Inbound modal control (#727) — `internal/relay/v2session_modal_test.go` (new): a fake `ModalResolver` (records calls; canned `ModalDismissal{cancelled,remote}` with `ok=true` for the configured cancel id) + a conn-aware handshake helper (`openModalConn`) that stands up ≥2 interactive heads on one manager and recovers each conn's `noise_resp` from the shared `v2Recorder` by `ConnID`. `TestV2Session_ModalCancel_FanOut` (three heads — two interactive, one not; asserts `ResolveCancel` routed once with the right `modal_id` + per-conn device, `modal_dismissed{cancelled,remote}` decrypts at **both** interactive heads, **zero** noise_msg at the non-interactive one — AC-1/AC-2; running through the real `Frames`/`Run` loop is the structural no-deadlock proof), `…_ModalAnswer_NoOp` (routed through the seam, no dismissal — AC-3), `…_ModalCancel_UnknownID_NoOp` (resolver `ok=false` → no dismissal — AC-4), `…_ModalControl_NilResolver` (both frames inert debug-logged no-ops, session stays `V2StateOpen`). The resolver-side assertions (consume + keystroke + audit + no-body-leak) live in `cmd/pyry/modal_resolve_v2_test.go` (the relay can't import supervisor/audit/registry). See [codebase/727.md](../codebase/727.md).
+
+Deny-on-timeout (#725) — same `v2session_modal_test.go` (`fakeModalResolver` extended with `ResolveTimeout`; `modalDenyTimeout` shrunk via save/restore): `TestV2Session_ModalTimeout_FanOut` arms a timeout, lets the window elapse with no answer, and asserts `ResolveTimeout` fired exactly once and `modal_dismissed{denied_timeout,timeout}` reaches both interactive heads but not the non-interactive one — the off-`Run`-arm (`AfterFunc`) → on-`Run`-fire (`handleModalTimeout`) crossing is the `-race` proof; `…_ModalTimeout_AlreadyResolved_NoBroadcast` (resolver `ok=false` ⇒ no dismissal — AC-2 loser path); `…_ModalTimeout_NilResolver` (armed timeout firing is inert, no panic). The resolver-side `ResolveTimeout` assertions (one ESC, single `denied_timeout` audit with **empty** device + no modal body, the already-consumed/unknown/keystroke-error paths) live in `cmd/pyry/modal_resolve_v2_test.go`; the surfacer arms exactly one timeout per surfaced modal in `cmd/pyry/interactive_modal_v2_test.go` (`fakeArmer`). See [codebase/725.md](../codebase/725.md).
 
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)
 
