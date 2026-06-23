@@ -38,6 +38,12 @@ type BackfillSincePayload struct {
 // Binary → phone direction; the wire form of a session boundary the phone
 // renders as a ThreadItem.SessionBoundary marker (pyrycode-mobile#336).
 //
+// ConversationID is the routing key — a plain string with no omitempty,
+// mirroring the sibling interactive payloads (SendMessagePayload, etc.) — so
+// the phone folds the boundary marker into the correct conversation's thread.
+// The producer binds it from the active conversation↔session mapping in #741;
+// until that lands it emits "" (harmless: the mobile consumer is parked).
+//
 // Reason is a plain string (not a named enum, matching MessagePayload.Role /
 // TurnEndPayload.StopReason — internal/protocol is a stdlib-only leaf data
 // package) over the closed wire set {clear, idle_evict, workspace_change}.
@@ -50,6 +56,7 @@ type BackfillSincePayload struct {
 // invariant directly on the wire — omitempty would drop the key and lose that
 // distinction.
 type SessionTransitionPayload struct {
+	ConversationID    string    `json:"conversation_id"` // routing key; plain string (no literal-null semantics), no omitempty — mirrors the sibling interactive payloads
 	PreviousSessionID string    `json:"previous_session_id"`
 	NewSessionID      string    `json:"new_session_id"`
 	Reason            string    `json:"reason"`

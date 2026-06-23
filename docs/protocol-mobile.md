@@ -557,6 +557,7 @@ Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1T
 
 | Field | Type | Meaning |
 |---|---|---|
+| `conversation_id` | string | Conversation this session-boundary marker belongs to (routing key, matching every other interactive event). |
 | `previous_session_id` | string | The session id that ended. Always present (a transition sits between two sessions). |
 | `new_session_id` | string | The session id that began. |
 | `reason` | string | Why the session rotated. Closed set: `clear`, `idle_evict`, `workspace_change`. |
