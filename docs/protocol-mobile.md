@@ -671,7 +671,11 @@ Direction **binary → phone** (outbound v2 queued-backlog snapshot; not in `v1T
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation this backlog belongs to. The daemon's own resolved id (#722), never attacker-derived. |
-| `queued` | array | Ordered backlog (FIFO/enqueue order) of `{queued_msg_id, text, ts}`. **Always present**; the producer (#722) should emit `[]` (not `null`) for an empty backlog so the mobile decoder keeps `queued` a plain array. Each element: `queued_msg_id` (integer, stable per-conversation counter ≥ 1), `text` (string, the queued message), `ts` (RFC3339Nano, enqueue time). |
+| `queued` | array | Ordered backlog (FIFO/enqueue order) of `{queued_msg_id, text, ts}`. **Always present**; the producer (#722) emits `[]` (not `null`) for an empty backlog so the mobile decoder keeps `queued` a plain array. Each element: `queued_msg_id` (integer, stable per-conversation counter ≥ 1), `text` (string, the queued message), `ts` (RFC3339Nano, enqueue time). |
+
+**Emission (#722).** The daemon pushes a `queue_state` for a conversation whenever that conversation's backlog **changes** — a message is enqueued (a phone `send_message` buffered while claude is busy), drains to claude (the FIFO head delivered), or is removed before draining (`dequeue_message`). An empty backlog emits `queued: []` so the phone can clear its view. Each push carries **only** the changed conversation's items: the producer snapshots the single conversation named by the change and never bundles another conversation's queued text into the same payload (the `conversation_id` and `queued` are derived from one id, so they cannot desync).
+
+`queue_state` fans **only** to connections that negotiated the `interactive` capability; a non-interactive connection never receives it (the same gate as the rest of the structured stream). The fan-out reaches *every* interactive connection, each payload stamped with its own `conversation_id` — there is no per-connection conversation binding, so a phone attributes each `queue_state` by id (consistent with the [Security model](#security-model): a user's paired devices are one trust domain). It is **not** part of the reconnect-replay ring; a phone that reconnects after missing a `queue_state` sees the current backlog only on the next change.
 
 #### `dequeue_message`
 

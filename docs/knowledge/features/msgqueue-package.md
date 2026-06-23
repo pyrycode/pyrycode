@@ -356,7 +356,10 @@ the change-notification path as the injected `ChangeFunc`.
   `cmd/pyry` constructor, `newInboundDeliver` delivery seam, the `Route`/`resolve`
   split (the drain re-resolves without stamping the #687 cursor), and the
   enqueue-and-ack contract change in `send_message`.
-- **Consumers still deferred:** **#705** (`queue_state` / `dequeue_message` reporting +
-  removal handlers binding `convID` to the authorized phone — built on #719's
-  `Snapshot` / `Remove` / `OnChange`) and the inbound bound/backpressure decision (a PO
-  follow-up; chokepoint pre-specified at `Enqueue`).
+- **Consumers:** **#722 landed the `queue_state` producer** ([codebase/722.md](../codebase/722.md))
+  — `cmd/pyry`'s `queueStateEmitterV2` hooks `OnChange`, re-reads via `Snapshot`, and
+  fans a per-conversation `queue_state` to interactive phones (the first live consumer
+  of `OnChange` + the read side of `Snapshot`). Still deferred: **#723** (`dequeue_message`
+  removal handler binding `convID` to the authorized phone, built on `Remove`) and the
+  inbound bound/backpressure decision (a PO follow-up; chokepoint pre-specified at
+  `Enqueue`). (Both #722/#723 split from the original #705 reporting/removal slice.)

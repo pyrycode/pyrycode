@@ -779,9 +779,16 @@ func runSupervisor(args []string) error {
 	// stops spawning drains, joins the in-flight ones, and returns. The in-memory
 	// backlog survives a claude child respawn but not a daemon-process restart
 	// (resync covers it) — the same loss boundary as the event ring.
+	// queueChanges is the hand-off channel from msgqueue's OnChange seam to the
+	// queue_state producer (#722). It is created BEFORE msgqueue.New so OnChange
+	// can send to it, and shared with newQueueStateEmitterV2 below — this breaks
+	// the chicken-and-egg (OnChange is a Config field set at New, before startRelay
+	// builds the broadcaster) without any late-bound field.
+	queueChanges := make(chan string, queueStateQueueSize)
 	queue, err := msgqueue.New(msgqueue.Config{
-		Deliver: newInboundDeliver(router.resolve),
-		Logger:  logger,
+		Deliver:  newInboundDeliver(router.resolve),
+		OnChange: queueStateNotify(queueChanges, logger),
+		Logger:   logger,
 	})
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
@@ -789,7 +796,13 @@ func runSupervisor(args []string) error {
 	qDone := make(chan error, 1)
 	go func() { qDone <- queue.Run(ctx) }()
 
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool)
+	// The queue_state producer (#722): on each backlog change it snapshots the
+	// changed conversation and fans a queue_state envelope to interactive phones.
+	// Built here (so queue.Snapshot is bound) but its Run goroutine starts inside
+	// startRelayV2, where the broadcaster exists.
+	qse := newQueueStateEmitterV2(queueChanges, queue.Snapshot, logger)
+
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
