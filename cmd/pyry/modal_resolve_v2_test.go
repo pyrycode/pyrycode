@@ -274,6 +274,164 @@ func TestModalResolverV2_Cancel_KeystrokeError(t *testing.T) {
 	}
 }
 
+// TestModalResolverV2_Timeout_HappyPath proves the deny-on-timeout safe-deny
+// consumes the modal, routes exactly one ESC (and nothing else), audits
+// {denied_timeout, timeout} with EMPTY device identity (no answering device) and
+// no modal body, and returns a {denied_timeout, timeout} dismissal. AC-1, AC-3.
+func TestModalResolverV2_Timeout_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	reg := modalbridge.New()
+	modalID := recordPermissionModal(t, reg, secretModalBody)
+	kb := &fakeKeystroker{}
+	logger, logBuf := auditLogger()
+
+	r := newModalResolverV2(reg, kb, logger)
+	d, ok := r.ResolveTimeout(modalID)
+
+	if !ok {
+		t.Fatal("ResolveTimeout ok = false, want true")
+	}
+	if d.Outcome != string(audit.OutcomeDeniedTimeout) || d.Source != string(audit.SourceTimeout) {
+		t.Errorf("dismissal = %+v, want {denied_timeout timeout}", d)
+	}
+	if kb.escCalls != 1 {
+		t.Errorf("SendEsc calls = %d, want 1", kb.escCalls)
+	}
+	if len(kb.answerCalls) != 0 || kb.trustCalls != 0 {
+		t.Errorf("unexpected non-ESC keystroke: answer=%v trust=%d", kb.answerCalls, kb.trustCalls)
+	}
+	// The modal is consumed: a second Resolve misses.
+	if _, stillThere := reg.Resolve(modalID); stillThere {
+		t.Error("modal still in registry after timeout; Resolve must consume it")
+	}
+
+	recs := auditRecords(t, logBuf)
+	if len(recs) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(recs))
+	}
+	rec := recs[0]
+	wantFields := map[string]string{
+		"level":        "INFO",
+		"outcome":      "denied_timeout",
+		"source":       "timeout",
+		"modal_id":     modalID,
+		"modal_class":  "permission",
+		"device_hash":  "", // no answering device on a timeout
+		"device_label": "",
+	}
+	for k, want := range wantFields {
+		if got, _ := rec[k].(string); got != want {
+			t.Errorf("audit field %q = %q, want %q", k, got, want)
+		}
+	}
+	// SECURITY: no modal body/prompt/title in ANY log field.
+	if strings.Contains(logBuf.String(), secretModalBody) {
+		t.Error("modal body leaked into a log field")
+	}
+	if strings.Contains(logBuf.String(), "Permission required") {
+		t.Error("modal title leaked into a log field")
+	}
+}
+
+// TestModalResolverV2_Timeout_AlreadyConsumed proves the AC-2 loser path: a
+// timeout firing for a modal that an answer/cancel already consumed is a no-op —
+// no keystroke, no denied_timeout audit, (zero,false). Here the modal is consumed
+// directly via the registry to isolate the timeout path's behaviour from any
+// winning resolver's keystroke/audit.
+func TestModalResolverV2_Timeout_AlreadyConsumed(t *testing.T) {
+	t.Parallel()
+
+	reg := modalbridge.New()
+	modalID := recordPermissionModal(t, reg, secretModalBody)
+	kb := &fakeKeystroker{}
+	logger, logBuf := auditLogger()
+
+	// Simulate an answer/cancel having already consumed the modal before the
+	// timer fired (the answer-before-timeout race the timeout loses).
+	if _, ok := reg.Resolve(modalID); !ok {
+		t.Fatal("setup: reg.Resolve did not consume the modal")
+	}
+
+	r := newModalResolverV2(reg, kb, logger)
+	d, ok := r.ResolveTimeout(modalID)
+
+	if ok {
+		t.Error("ResolveTimeout ok = true for an already-consumed id, want false")
+	}
+	if d != (relay.ModalDismissal{}) {
+		t.Errorf("dismissal = %+v, want zero", d)
+	}
+	if !kb.routedNothing() {
+		t.Errorf("already-consumed timeout routed a keystroke: esc=%d answer=%v trust=%d", kb.escCalls, kb.answerCalls, kb.trustCalls)
+	}
+	if recs := auditRecords(t, logBuf); len(recs) != 0 {
+		t.Errorf("audit records = %d, want 0 (no denied_timeout on the loser path)", len(recs))
+	}
+}
+
+// TestModalResolverV2_Timeout_KeystrokeError proves a SendEsc error is tolerated:
+// the modal is still consumed, a Warn (with the non-secret err) is logged, and
+// the audit record + {denied_timeout, timeout, true} return still happen. Mirrors
+// the cancel keystroke-error test.
+func TestModalResolverV2_Timeout_KeystrokeError(t *testing.T) {
+	t.Parallel()
+
+	reg := modalbridge.New()
+	modalID := recordPermissionModal(t, reg, secretModalBody)
+	kb := &fakeKeystroker{err: supervisor.ErrNoLiveSession}
+	logger, logBuf := auditLogger()
+
+	r := newModalResolverV2(reg, kb, logger)
+	d, ok := r.ResolveTimeout(modalID)
+
+	if !ok {
+		t.Fatal("ResolveTimeout ok = false on keystroke error, want true (modal already consumed)")
+	}
+	if d.Outcome != string(audit.OutcomeDeniedTimeout) || d.Source != string(audit.SourceTimeout) {
+		t.Errorf("dismissal = %+v, want {denied_timeout timeout}", d)
+	}
+	if _, stillThere := reg.Resolve(modalID); stillThere {
+		t.Error("modal still in registry after keystroke-error timeout; it must be consumed")
+	}
+	if recs := auditRecords(t, logBuf); len(recs) != 1 {
+		t.Errorf("audit records = %d, want 1 despite keystroke error", len(recs))
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "modal_timeout.keystroke_err") {
+		t.Errorf("expected a keystroke_err warn log; got:\n%s", out)
+	}
+	if strings.Contains(out, secretModalBody) {
+		t.Error("modal body leaked into a log field on the keystroke-error path")
+	}
+}
+
+// TestModalResolverV2_Timeout_UnknownID proves an unknown id is a no-op: no
+// keystroke, no audit, (zero,false) return. AC-2.
+func TestModalResolverV2_Timeout_UnknownID(t *testing.T) {
+	t.Parallel()
+
+	reg := modalbridge.New()
+	kb := &fakeKeystroker{}
+	logger, logBuf := auditLogger()
+
+	r := newModalResolverV2(reg, kb, logger)
+	d, ok := r.ResolveTimeout("nonexistent-modal")
+
+	if ok {
+		t.Error("ResolveTimeout ok = true for unknown id, want false")
+	}
+	if d != (relay.ModalDismissal{}) {
+		t.Errorf("dismissal = %+v, want zero", d)
+	}
+	if !kb.routedNothing() {
+		t.Error("unknown id routed a keystroke")
+	}
+	if recs := auditRecords(t, logBuf); len(recs) != 0 {
+		t.Errorf("audit records = %d, want 0", len(recs))
+	}
+}
+
 // TestModalResolverV2_Answer_Authorized drives the four authorized answer paths
 // (allow/deny × permission/trust) from a gated device and asserts each routes the
 // correct safe-answer verb, consumes the modal, audits the right outcome with the

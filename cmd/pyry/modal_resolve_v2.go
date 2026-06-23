@@ -99,6 +99,56 @@ func (r *modalResolverV2) ResolveCancel(modalID string, dev *devices.Device) (re
 	}, true
 }
 
+// ResolveTimeout safe-denies an unanswered modal when its deny-on-timeout window
+// elapses (#725). It mirrors ResolveCancel — consume (the single idempotency
+// gate) → best-effort ESC → audit → return the dismissal — with two differences:
+// it takes NO device (a timeout has no answering device, so the audit
+// DeviceHash/DeviceLabel are empty, the documented no-device-timeout case), and
+// outcome/source are denied_timeout/timeout instead of cancelled/remote. An
+// unknown or already-consumed id (an answer/cancel won the race) returns
+// (zero, false) before any keystroke or audit — the AC #2 loser path, identical
+// to ResolveCancel's unknown-id no-op.
+//
+// ESC is the fail-closed deny for both modal classes (ADR 025 § Security model
+// "answered with the SAFE default (deny / ESC)"): for a permission modal ESC
+// dismisses the prompt (claude treats it as deny); for a trust modal ESC is the
+// "exit" = deny option (classifyAnswer maps exit → verbEsc). It is the same
+// keystroke cancel routes — only the audit classification differs.
+//
+// Runs on the manager's single Run dispatch goroutine (handleModalTimeout calls
+// it). SECURITY: no modal body/prompt/title and no payload bytes are ever logged.
+func (r *modalResolverV2) ResolveTimeout(modalID string) (relay.ModalDismissal, bool) {
+	out, ok := r.reg.Resolve(modalID)
+	if !ok {
+		return relay.ModalDismissal{}, false
+	}
+
+	if err := r.kb.SendEsc(); err != nil {
+		// Best-effort actuation: the modal is already consumed (idempotency
+		// committed above), so do NOT abort the audit/broadcast — that would
+		// orphan the consumed modal. err is a supervisor sentinel, never a secret.
+		r.logger.Warn("relay: modal timeout keystroke failed",
+			"event", "modal_timeout.keystroke_err",
+			"modal_id", modalID,
+			"err", err)
+	}
+
+	// No answering device on a timeout ⇒ the audit identity is empty by
+	// construction (the no-device-timeout case audit.Entry documents).
+	audit.Log(r.logger, audit.Entry{
+		ModalID:    modalID,
+		ModalClass: out.Class,
+		Outcome:    audit.OutcomeDeniedTimeout,
+		Source:     audit.SourceTimeout,
+	})
+
+	// One source vocabulary feeds both the wire dismissal and the audit entry.
+	return relay.ModalDismissal{
+		Outcome: string(audit.OutcomeDeniedTimeout),
+		Source:  string(audit.SourceTimeout),
+	}, true
+}
+
 // ResolveAnswer is the security-critical gated answer arm: it routes an
 // internet-sourced modal_answer into claude's permission prompt ONLY from a
 // gated device. The hard invariant is that nothing but a fully-authorized, valid
