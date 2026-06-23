@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/audit"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -200,5 +202,234 @@ func TestModalEmitter_PushErrorContinues(t *testing.T) {
 	}
 	if len(pushesFor(bcast.pushes, "c2")) != 1 {
 		t.Errorf("c2 attempts after c1 failed: got %d, want 1 (loop must continue)", len(pushesFor(bcast.pushes, "c2")))
+	}
+}
+
+func decodeModalDismissed(t *testing.T, env protocol.Envelope) protocol.ModalDismissedPayload {
+	t.Helper()
+	if env.Type != protocol.TypeModalDismissed {
+		t.Fatalf("envelope type: got %q, want %q", env.Type, protocol.TypeModalDismissed)
+	}
+	var p protocol.ModalDismissedPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("decode modal_dismissed payload: %v", err)
+	}
+	return p
+}
+
+// dismissedPushes returns every recorded push that carried a modal_dismissed
+// envelope, in call order.
+func dismissedPushes(pushes []recordedPush) []recordedPush {
+	var out []recordedPush
+	for _, p := range pushes {
+		if p.env.Type == protocol.TypeModalDismissed {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// newModalEmitterWithLogger builds an emitter wired to a fresh registry, a bcast
+// scripted with conns, and a record-capturing JSON logger whose buffer is
+// returned (so a test can assert the local-arm audit record). It returns the
+// shared registry so a sibling resolver can be driven against it (the cross-head
+// first-answer-wins tests).
+func newModalEmitterWithLogger(conns []relay.ActiveConn) (*modalbridge.Registry, *fakeInteractiveBcast, *bytes.Buffer, *interactiveModalEmitterV2) {
+	reg := modalbridge.New()
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{conns}}
+	logger, buf := auditLogger()
+	e := newInteractiveModalEmitterV2(reg, bcast, &fakeArmer{}, logger)
+	return reg, bcast, buf, e
+}
+
+// TestModalEmitter_LocalFirst_WinsThenRemoteRejected is AC3-(a): a local Hidden
+// resolves the outstanding modal and emits exactly one modal_dismissed{local};
+// a following remote modal_answer for the same modal_id is rejected — no
+// keystroke, no second modal_dismissed. The capability gate (#607) is exercised
+// too: a non-interactive conn receives neither the shown nor the dismissed event.
+func TestModalEmitter_LocalFirst_WinsThenRemoteRejected(t *testing.T) {
+	t.Parallel()
+	conns := []relay.ActiveConn{
+		{ConnID: "c1", Interactive: true},
+		{ConnID: "c2", Interactive: false},
+		{ConnID: "c3", Interactive: true},
+	}
+	reg, bcast, eBuf, e := newModalEmitterWithLogger(conns)
+	ctx := context.Background()
+
+	// Surface a permission modal locally and capture the minted modal_id.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "permission body")
+	if len(bcast.pushes) != 2 {
+		t.Fatalf("modal_shown push count: got %d, want 2 (one per interactive conn)", len(bcast.pushes))
+	}
+	modalID := decodeModalShown(t, bcast.pushes[0].env).ModalID
+	if modalID == "" {
+		t.Fatal("ModalID must be non-empty")
+	}
+
+	// Local Hidden for the outstanding modal -> exactly one modal_dismissed{local}
+	// per interactive conn, carrying the same modal_id.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+
+	dis := dismissedPushes(bcast.pushes)
+	if len(dis) != 2 {
+		t.Fatalf("modal_dismissed push count: got %d, want 2 (one per interactive conn)", len(dis))
+	}
+	for _, p := range dis {
+		got := decodeModalDismissed(t, p.env)
+		if got.ModalID != modalID {
+			t.Errorf("modal_dismissed modal_id = %q, want %q", got.ModalID, modalID)
+		}
+		if got.Outcome != string(audit.OutcomeDismissedLocal) {
+			t.Errorf("modal_dismissed outcome = %q, want %q", got.Outcome, audit.OutcomeDismissedLocal)
+		}
+		if got.Source != string(audit.SourceLocal) {
+			t.Errorf("modal_dismissed source = %q, want %q", got.Source, audit.SourceLocal)
+		}
+	}
+	// The non-interactive conn received nothing (capability gate, #607).
+	if got := len(pushesFor(bcast.pushes, "c2")); got != 0 {
+		t.Errorf("non-interactive conn c2 received %d pushes, want 0", got)
+	}
+	// The local arm consumed the registry entry.
+	if _, ok := reg.Lookup(modalID); ok {
+		t.Error("modal still in registry after local dismissal; Resolve must consume it")
+	}
+
+	// Exactly one audit record from the emitter: {dismissed_local, local}, no
+	// answering device.
+	recs := auditRecords(t, eBuf)
+	if len(recs) != 1 {
+		t.Fatalf("emitter audit records = %d, want 1", len(recs))
+	}
+	wantAudit := map[string]string{
+		"outcome":      "dismissed_local",
+		"source":       "local",
+		"modal_id":     modalID,
+		"modal_class":  "permission",
+		"device_hash":  "",
+		"device_label": "",
+	}
+	for k, want := range wantAudit {
+		if got, _ := recs[0][k].(string); got != want {
+			t.Errorf("audit field %q = %q, want %q", k, got, want)
+		}
+	}
+	// A following remote modal_answer for the same id is the first-answer-wins
+	// loser: rejected, no keystroke, no second modal_dismissed.
+	kb := &fakeKeystroker{}
+	rLogger, _ := auditLogger()
+	r := newModalResolverV2(reg, kb, rLogger)
+	d, ok := r.ResolveAnswer(modalID, "allow_once", "tok-1", eligibleDevice(t))
+	if ok {
+		t.Error("remote ResolveAnswer ok = true after a local dismissal, want false (already resolved)")
+	}
+	if d != (relay.ModalDismissal{}) {
+		t.Errorf("remote dismissal = %+v, want zero", d)
+	}
+	if !kb.routedNothing() {
+		t.Errorf("remote answer routed a keystroke after a local dismissal: esc=%d answer=%v trust=%d", kb.escCalls, kb.answerCalls, kb.trustCalls)
+	}
+	if got := len(dismissedPushes(bcast.pushes)); got != 2 {
+		t.Errorf("modal_dismissed push count after rejected remote answer = %d, want still 2", got)
+	}
+}
+
+// TestModalEmitter_RemoteFirst_LocalEmitsNothing is AC3-(b): a remote answer
+// resolves and dismisses; a following local Hidden for the same modal_id emits
+// no second modal_dismissed and writes no source=local audit record.
+func TestModalEmitter_RemoteFirst_LocalEmitsNothing(t *testing.T) {
+	t.Parallel()
+	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
+	reg, bcast, eBuf, e := newModalEmitterWithLogger(conns)
+	ctx := context.Background()
+
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "permission body")
+	modalID := decodeModalShown(t, bcast.pushes[0].env).ModalID
+
+	// Remote answer wins the race and consumes the modal.
+	kb := &fakeKeystroker{}
+	rLogger, _ := auditLogger()
+	r := newModalResolverV2(reg, kb, rLogger)
+	if _, ok := r.ResolveAnswer(modalID, "allow_once", "tok-1", eligibleDevice(t)); !ok {
+		t.Fatal("remote ResolveAnswer ok = false, want true")
+	}
+
+	// Local Hidden now finds the modal already consumed: emitter emits nothing.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+
+	if got := len(dismissedPushes(bcast.pushes)); got != 0 {
+		t.Errorf("emitter pushed %d modal_dismissed after a remote win, want 0", got)
+	}
+	if recs := auditRecords(t, eBuf); len(recs) != 0 {
+		t.Errorf("emitter wrote %d audit records after a remote win, want 0 (loser path)", len(recs))
+	}
+}
+
+// TestModalEmitter_Hidden_NothingOutstanding_NoOp proves a local Hidden with no
+// modal this emitter surfaced is a no-op: no push, no audit.
+func TestModalEmitter_Hidden_NothingOutstanding_NoOp(t *testing.T) {
+	t.Parallel()
+	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
+	_, bcast, eBuf, e := newModalEmitterWithLogger(conns)
+
+	e.Handle(context.Background(), tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+
+	if len(bcast.pushes) != 0 {
+		t.Errorf("Hidden with nothing outstanding produced %d pushes, want 0", len(bcast.pushes))
+	}
+	if recs := auditRecords(t, eBuf); len(recs) != 0 {
+		t.Errorf("Hidden with nothing outstanding wrote %d audit records, want 0", len(recs))
+	}
+}
+
+// TestModalEmitter_Hidden_NonPermissionNeverSurfaced_NoOp proves a Hidden whose
+// preceding Shown was a non-permission class (never surfaced, never tracked) is a
+// no-op: outstandingID stayed "".
+func TestModalEmitter_Hidden_NonPermissionNeverSurfaced_NoOp(t *testing.T) {
+	t.Parallel()
+	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
+	_, bcast, _, e := newModalEmitterWithLogger(conns)
+	ctx := context.Background()
+
+	// A slash-picker Shown is a no-op (AC1) and records nothing to track.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassSlashPicker}, "/picker")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassSlashPicker}, "")
+
+	if len(bcast.pushes) != 0 {
+		t.Errorf("non-permission Shown/Hidden produced %d pushes, want 0", len(bcast.pushes))
+	}
+}
+
+// TestModalEmitter_Hidden_ClassMismatch_KeepsTracking proves the defensive
+// class-mismatch branch: a Hidden for a different class than the outstanding one
+// neither resolves nor clears the tracking, so the correct Hidden still resolves
+// the modal afterwards. (Unreachable under tui-driver's single-modal invariant,
+// but the branch must fail safe.)
+func TestModalEmitter_Hidden_ClassMismatch_KeepsTracking(t *testing.T) {
+	t.Parallel()
+	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
+	reg, bcast, _, e := newModalEmitterWithLogger(conns)
+	ctx := context.Background()
+
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "permission body")
+	modalID := decodeModalShown(t, bcast.pushes[0].env).ModalID
+
+	// A Hidden for a different class: no dismissal, modal still outstanding.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassTrustFolder}, "")
+	if got := len(dismissedPushes(bcast.pushes)); got != 0 {
+		t.Errorf("class-mismatch Hidden pushed %d modal_dismissed, want 0", got)
+	}
+	if _, ok := reg.Lookup(modalID); !ok {
+		t.Error("class-mismatch Hidden consumed the modal; it must stay outstanding")
+	}
+
+	// The correct Hidden still resolves it.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+	if got := len(dismissedPushes(bcast.pushes)); got != 1 {
+		t.Errorf("matching Hidden after a mismatch pushed %d modal_dismissed, want 1", got)
+	}
+	if _, ok := reg.Lookup(modalID); ok {
+		t.Error("matching Hidden did not consume the modal")
 	}
 }

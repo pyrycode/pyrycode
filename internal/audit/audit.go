@@ -46,6 +46,7 @@ const (
 	OutcomeDeniedTimeout      Outcome = "denied_timeout"      // denied: deny-on-timeout window elapsed
 	OutcomeCancelled          Outcome = "cancelled"           // phone cancelled / dismissed (ESC)
 	OutcomeDenied             Outcome = "denied"              // authorized phone explicitly chose a deny option
+	OutcomeDismissedLocal     Outcome = "dismissed_local"     // resolved at the desktop TTY; the picked choice is not observable by the daemon (#706)
 )
 
 // Source is where the decision originated. The value set deliberately mirrors
