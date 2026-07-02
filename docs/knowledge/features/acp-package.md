@@ -1,21 +1,28 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757)
 
-The **inbound transport floor** for the Agent Client Protocol (ACP,
+The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
-one `io.Writer` (outbound), and a method dispatch table. Part of epic
+one `io.Writer` (outbound), a method dispatch table for host→agent requests, and
+an **outbound-request primitive** for agent→client calls. Part of epic
 [#600](https://github.com/pyrycode/pyrycode/issues/600) — the `pyry acp`
 subcommand that lets an ACP host (e.g. Zed) drive a supervised claude session.
 
-The host writes one JSON object per line to the agent's stdin; the agent replies
-and streams notifications one JSON object per line to stdout; stderr carries
-human-readable diagnostics only, **never protocol frames**.
+ACP is bidirectional. Inbound: the host writes one JSON object per line to the
+agent's stdin; the agent replies and streams notifications one JSON object per
+line to stdout. Outbound: the agent issues its own request to the client —
+`session/request_permission`, the held `session/prompt` return path — and blocks
+for the id-correlated response ([`Transport.Call`](#outbound-request-primitive-transportcall-757)).
+stderr carries human-readable diagnostics only, **never protocol frames**.
 
-#755 built the floor and nothing above it: the package, the framing, the dispatch
-table, the diagnostics. #756 added the [`pyry acp` subcommand](#subcommand-pyry-acp-756)
-that serves this transport over real stdio. Still deferred to later epic-#600
-tickets: the **outbound-request primitive** ([#757](https://github.com/pyrycode/pyrycode/issues/757)),
-**claude driving**, and every **real ACP method** — later tickets register
-handlers against the dispatch table this package builds.
+#755 built the inbound floor: the package, the framing, the dispatch table, the
+diagnostics. #756 added the [`pyry acp` subcommand](#subcommand-pyry-acp-756)
+that serves this transport over real stdio. #757 added the
+[outbound direction](#outbound-request-primitive-transportcall-757): id
+generation, a pending-call registry, the blocking `Call`, and routing of inbound
+*response* lines to their waiters — replacing #755's response-frame log-and-drop.
+Still deferred to later epic-#600 tickets: **claude driving** and every **real
+ACP method** — later tickets register handlers against the dispatch table this
+package builds and issue outbound calls through `Call`.
 
 Greenfield, stdlib-only package: imports `bufio`, `context`, `encoding/json`,
 `errors`, `fmt`, `io`, `log/slog`, `sync`, `sync/atomic` — **no repo packages**.
@@ -35,6 +42,10 @@ the invariant.
 
 ## Exported surface (3 types — under the 5-type sizing line)
 
+#757 added **one new exported method** (`Call`) but **zero new exported types**:
+it reuses the existing `*Error` for the mapped error response, so the surface
+stays at three types.
+
 ```go
 package acp
 
@@ -45,14 +56,23 @@ package acp
 // message, the detail logged to stderr and never leaked to the client.
 type Handler func(ctx context.Context, params json.RawMessage) (result any, err error)
 
-// Transport owns the framing + the method dispatch table.
+// Transport owns the framing, the inbound dispatch table, and the outbound
+// pending-call registry.
 type Transport struct { /* unexported */ }
 
 func New(r io.Reader, w io.Writer, log *slog.Logger) *Transport
 func (t *Transport) Register(method string, h Handler) // before Serve only
 func (t *Transport) Serve(ctx context.Context) error
 
-// Error is a JSON-RPC error a handler may return to control the wire code.
+// Call issues an agent→client JSON-RPC request with a freshly-generated id and
+// blocks until the matching response is read, returning the raw result or the
+// mapped *Error (#757). ctx cancellation returns ctx.Err() and reclaims the
+// pending slot. MUST be called from a goroutine other than the one running
+// Serve. See "Outbound-request primitive" below.
+func (t *Transport) Call(ctx context.Context, method string, params any) (json.RawMessage, error)
+
+// Error is a JSON-RPC error a handler may return to control the wire code, and
+// the type Call returns for a mapped error response.
 type Error struct { Code int; Message string; Data any } // Data omitempty
 func (e *Error) Error() string
 func NewError(code int, message string) *Error
@@ -95,7 +115,7 @@ line is skipped** — no output, no dispatch.
 | `json.Unmarshal` into `rpcMessage` fails (valid object, wrong field types, e.g. `{"method":5}`) | invalid request | `-32600`, `null` |
 | `method` present **and** `id` present | **request** → dispatch | one response, echoed id |
 | `method` present, `id` absent | **notification** → dispatch | none written |
-| `method` absent, `id` present, (`result` or `error` present) | **response frame** → **tolerated** | none — dropped, logged debug (#757 seam) |
+| `method` absent, `id` present, (`result` or `error` present) | **response frame** → **routed** to the `Call` awaiting this id (#757); unknown / reclaimed id → logged debug + dropped | none written |
 | object, none of the above | invalid request | `-32600`, `null` |
 
 **Handler mapping for a request:**
@@ -120,15 +140,16 @@ response id `null`) from a *notification* (no `id` key — no response). A one-t
 decoder (over separate request/notification/response structs) holds the exported
 surface to three types.
 
-### The `#757` response-frame tolerance seam
+### The response-frame case (filled by #757)
 
 A well-formed JSON-RPC **response** frame (an `id` plus a `result`/`error`, no
-`method`) is **tolerated** — dropped with no writer output, logged at debug —
-rather than rejected as invalid request. This is the scope boundary with the
-outbound sibling ([#757](https://github.com/pyrycode/pyrycode/issues/757)): when
-#757 makes the transport bidirectional (adds the agent→client outbound-request
-primitive), it replaces this drop with response routing. AC 3 pins the
-observable: a response-shaped line produces **no** writer output.
+`method`) is **routed to its waiter** — `handleLine` calls `t.routeResponse(&msg)`
+(see [Outbound-request primitive](#outbound-request-primitive-transportcall-757)).
+Either way it produces **no** writer output. #755 originally left this as a
+tolerated log-and-drop (a documented scope boundary), pinned by a test so #757
+changed the behaviour against a known baseline; #757 replaced the drop with
+response routing. An **unknown or already-reclaimed id** keeps the log-and-drop
+behaviour, now *inside* `routeResponse`.
 
 ### Batch rejection (recorded in the package doc comment)
 
@@ -139,18 +160,24 @@ is inert in practice and keeps the transport a strict one-frame-per-line reader.
 
 ## Concurrency model
 
-- **One goroutine.** `Serve` runs the read loop and dispatches each handler
-  **serially, inline** on that goroutine. Simplest correct model for a single
-  host connection — no handler-scheduling machinery. A slow handler blocks the
-  loop; acceptable for the transport floor (no real handlers yet), revisited only
-  on an observed need.
+- **The read loop is one goroutine.** `Serve` runs the read loop and dispatches
+  each handler **serially, inline** on that goroutine, and (since #757) runs
+  `routeResponse` to deliver an inbound response. Simplest correct model for a
+  single host connection — no handler-scheduling machinery. A slow handler blocks
+  the loop; acceptable for the transport floor (no real handlers yet), revisited
+  only on an observed need.
+- **Outbound `Call` runs on a *separate* caller goroutine** (#757) — it must, or
+  it would block the read loop that reads the response it awaits. This makes the
+  transport's first cross-goroutine state necessary: the pending-call registry.
+  See [Outbound-request primitive](#outbound-request-primitive-transportcall-757).
 - **Writer serialization.** All writes go through one unexported
   `writeMessage(v any) error` guarded by a leaf `sync.Mutex` (`writeMu`), using a
   `*json.Encoder` bound to `w` (one compact object + `\n` per `Encode`). The
-  mutex is **redundant under today's single-goroutine dispatch** but is the seam
-  #757's outbound-request writer shares — adding an agent→client caller then
-  needs no rework of the write path. Leaf lock: never held across a handler call
-  or a read.
+  mutex was redundant under #755's single-goroutine dispatch but is **load-bearing
+  since #757**: a `Call` and an inbound reply can now race on `w`. Both already
+  funnel through `writeMessage`, so no change was needed — this is exactly the
+  seam #755 pre-built. Leaf lock: never held across a handler call, a read, or
+  `pendingMu`.
 - **Register/Serve ordering.** An `atomic.Bool` `started` flag: `Serve` sets it;
   `Register` panics if it is set. The handler map is therefore
   **write-once-before-Serve, read-only during Serve** — no map mutex needed.
@@ -193,6 +220,98 @@ material (mirrors `internal/agentrun/jsonl`'s no-content-logging rule). Handler
 errors surfaced as `-32603` log the real detail to stderr and put only a generic
 message on the wire.
 
+## Outbound-request primitive (`Transport.Call`) (#757)
+
+ACP is bidirectional: besides answering host requests, the agent issues its own
+request to the client. `Call` is a textbook JSON-RPC **pending-call registry** —
+the transport's first cross-goroutine state.
+
+### The registry
+
+Three fields on `Transport`, all touched only under the discipline below:
+
+```go
+nextID    atomic.Uint64              // Add(1) ⇒ 1,2,3,… never 0. Lock-free id gen.
+pendingMu sync.Mutex                 // guards pending. Leaf lock.
+pending   map[uint64]chan callResult // id ⇒ waiter's cap-1 channel
+```
+
+`pending` is **written by the caller's goroutine** (in `Call`) and
+**read/deleted by the read-loop goroutine** (in `routeResponse`) — the
+synchronisation `pendingMu` provides is the real cost of #757, and is why AC-2
+demands `-race`. `nextID` is atomic so id generation needs no lock. **No lock
+nesting:** `pendingMu` and `writeMu` are never held simultaneously.
+
+**Id namespace.** Outbound ids come from `nextID`. Inbound requests are answered
+by echoing the host's id verbatim, so the transport generates no inbound ids and
+an outbound id cannot collide with one.
+
+### `Call(ctx, method, params) (json.RawMessage, error)`
+
+Ordering is load-bearing (documented at the call site):
+
+1. **Marshal `params` first**, before touching shared state — a marshal failure
+   (`fmt.Errorf("acp: marshal params: %w", …)`) returns immediately, so no id is
+   burned into a dangling slot. `nil` params → the field is omitted from the
+   wire; a `json.RawMessage` round-trips verbatim.
+2. `id := nextID.Add(1)`.
+3. **Register the waiter before writing** — `ch := make(chan callResult, 1)`;
+   under `pendingMu`, `pending[id] = ch`. Registering before the write closes the
+   race where a fast response arrives before the waiter exists.
+4. `writeMessage(request{...})` — reuses the `writeMu` seam **unchanged**. On a
+   write error: reclaim the slot, return the wrapped error.
+5. `select` on `ctx.Done()` (→ reclaim slot, return `ctx.Err()`) and the waiter
+   channel (→ return `r.result` or `r.err`).
+
+**`Call` MUST be issued from a goroutine other than the one running `Serve`.**
+Inbound handlers dispatch inline on the read loop, so a `Call` that blocked that
+loop would deadlock — only the read loop reads the response `Call` awaits. This
+is documented in `Call`'s doc comment; enforcing it (the handler re-entrancy
+question) is a T8 consumer concern, explicitly out of scope.
+
+### `routeResponse` — delivery on the read loop (must never block)
+
+Replaces #755's response-frame log-and-drop. On the read-loop goroutine:
+
+1. Decode the id; non-numeric / out-of-range → **unknown id: log Debug + drop**.
+2. Under `pendingMu`: look up `ch`, `delete` if present.
+3. `!ok` → **unknown or already-reclaimed id: log Debug + drop** — the *normal*
+   fate of a cancelled call's late response (Debug, not Warn, to avoid log spam).
+4. Build `callResult`: an error frame → `&Error{Code,Message,Data}` (a malformed
+   error object synthesises `&Error{CodeInternalError,"malformed error response"}`
+   — deterministic, never blocks); a success frame → `result = msg.Result` (may
+   be JSON null).
+5. `ch <- r` — the **cap-1 buffer guarantees this send returns immediately**.
+
+### Why the read loop never stalls (AC-3)
+
+- **Cap-1 waiter channel.** Exactly one response exists per id, so the buffer
+  always has room; `routeResponse`'s send returns immediately whether the waiter
+  is still blocked, has been reclaimed (cancellation), or the id was unknown
+  (which never reaches the send). The read loop is never stalled by an absent or
+  slow waiter — this is the "no goroutine or pending-slot leak" guarantee.
+- **Idempotent reclaim resolves every cancel-vs-deliver ordering.** Both the
+  cancellation-`delete` and the delivery-`lookup+delete` run under `pendingMu`.
+  If the read loop delivers first, the caller's cancel-path `delete` is a no-op
+  and the buffered value is GC'd unread; if the caller reclaims first, the read
+  loop's lookup misses → unknown-id drop. No double-delivery, no leak, either
+  order.
+- **No defensive copy needed across goroutines.** `json.RawMessage.UnmarshalJSON`
+  copies its input into a fresh backing array, so `msg.Result` is already
+  independent of the reused `bufio.Scanner` buffer and is safe to hand to the
+  caller goroutine (`-race` confirms).
+
+### Shutdown
+
+`Serve`-exit does **not** drain pending waiters. If `Serve` returns while a
+`Call` is blocked and its `ctx` never fires, the call blocks until the ctx does —
+consumers (T7/T8) always pass a session-lifetime context, so there is no observed
+need to fail-fast pending calls on `Serve` return. If a later ticket needs it,
+the read loop can range over `pending` and deliver a sentinel error on exit —
+additive, no wire change.
+
+Full per-ticket detail: [`codebase/757.md`](../codebase/757.md).
+
 ## Subcommand: `pyry acp` (#756)
 
 The composition root that serves this transport over real stdio ships in
@@ -224,9 +343,14 @@ in [`codebase/756.md`](../codebase/756.md).
 
 ## Deferred / scope boundaries
 
-- **Outbound-request primitive** — [#757](https://github.com/pyrycode/pyrycode/issues/757).
-  Makes the transport bidirectional; replaces the response-frame drop with
-  response routing; reuses the `writeMu` write seam.
+- **Serve-exit pending-call drain** ([#757](https://github.com/pyrycode/pyrycode/issues/757)) —
+  `Serve`-exit does not fail-fast blocked `Call`s; the caller's `ctx` liberates
+  them. Additive if a later ticket needs it (range `pending`, deliver a
+  sentinel). See [Outbound-request primitive § Shutdown](#shutdown).
+- **Handler re-entrancy** — whether an inbound handler may itself issue a blocking
+  `Call` (it runs inline on the read loop → deadlock) is a T8 consumer concern;
+  `Call` documents the "call from a different goroutine" constraint but does not
+  enforce it.
 - **Concurrent dispatch** — serial-inline chosen for simplicity. Moving dispatch
   to a worker (if a future long-running ACP method must not block inbound
   framing) needs no wire-contract change — the `writeMu` seam already serializes
@@ -237,9 +361,10 @@ in [`codebase/756.md`](../codebase/756.md).
 
 ## Test surface (`internal/acp/acp_test.go`)
 
-Same-package, stdlib `testing` only, `t.Parallel()`, `-race`-clean. Driven
-against in-memory pipes (`strings.NewReader` / `io.Pipe` for `r`, `bytes.Buffer`
-for `w`, a separate `bytes.Buffer`-backed slog handler as the diagnostics sink).
+Same-package, stdlib `testing` only, `t.Parallel()`, `-race`-clean. **Inbound**
+tests use the single-shot `run`/`runErr` harness (`strings.NewReader` fed whole,
+`Serve` runs to EOF, output parsed). **Outbound** tests (#757) use a separate
+**live-Serve harness** (`liveTransport`) — see below.
 
 - `TestTransport_Request_SingleResponseMatchingID` / `_NullIDIsARequest` —
   request → exactly one framed response, echoed id; the null-id-is-a-request edge.
@@ -262,14 +387,45 @@ for `w`, a separate `bytes.Buffer`-backed slog handler as the diagnostics sink).
   framing edges.
 - `TestTransport_RegisterGuards` / `TestNew_NilArgs` — programmer-error posture.
 
+**Outbound `Call` tests (#757)** run against `liveTransport`: `Serve` on its own
+goroutine over paired `io.Pipe`s; the test reads request frames off the writer to
+learn the generated id, then feeds a matching response on the reader. `Call` is
+issued from a spawned goroutine and its outcome collected over a channel, so
+`t.Fatalf` only ever runs on the test goroutine. The diagnostics sink is a
+mutex-guarded `syncBuffer` (a bare `bytes.Buffer` would `-race` against the Serve
+goroutine — the `docs/lessons.md` gotcha).
+
+- `TestTransport_Call_ResultPath` — request has a numeric id + method + params;
+  the matching-id `result` response resolves `Call` to that result, nil error.
+- `TestTransport_Call_ErrorPath` — nil params is omitted from the wire; a
+  matching-id `error` response maps to an `*Error` with the code/message/`Data`
+  (`errors.As`).
+- `TestTransport_Call_ConcurrentDistinctIDs` — 32 concurrent `Call`s get distinct
+  ids and each resolves to its *own* response (each echoes its own params). Under
+  `-race` — the AC-2 race-safety proof.
+- `TestTransport_Call_UnknownIDDropped` — a response with no outstanding call is
+  dropped + logged ("no waiter" in the diag sink); a subsequent real call still
+  resolves (Serve stayed live, registry uncorrupted).
+- `TestTransport_Call_ContextCancelledReclaims` — cancel before feeding a
+  response → `context.Canceled`; a late response for the reclaimed id is dropped;
+  a fresh call with a new id still resolves (no waiter lingers).
+- `TestTransport_Call_MalformedErrorObject` — an `error` that is not an object →
+  a synthesized `*Error{CodeInternalError}`, `Call` does not hang.
+- `TestTransport_Call_MarshalParamsError` — an unmarshallable param (a channel) →
+  `Call` returns a marshal error before any id is burned or frame written.
+
 `make check` (vet, race, staticcheck, substrate-guard) is green. Substrate-guard
 is trivially green — `internal/acp` names no claude-TUI substrate literals (it
 drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
 
 ## Related
 
-- Per-ticket record: [`codebase/755.md`](../codebase/755.md)
-- Spec: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md)
+- Per-ticket records: [`codebase/755.md`](../codebase/755.md) (transport floor),
+  [`codebase/756.md`](../codebase/756.md) (`pyry acp` subcommand),
+  [`codebase/757.md`](../codebase/757.md) (outbound-request primitive)
+- Specs: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md),
+  [`specs/architecture/756-acp-subcommand.md`](../../specs/architecture/756-acp-subcommand.md),
+  [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md)
 - Dispatch-table precedent: [`features/dispatch-package.md`](dispatch-package.md)
   (`Register`-before-`Run` `atomic.Bool` gate, carrier-agnostic handler table).
   `internal/acp` mirrors the shape but defines its own JSON-RPC wire types —
