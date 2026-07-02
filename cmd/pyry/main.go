@@ -23,6 +23,8 @@
 //	pyry install-service  Write a systemd / launchd unit file for pyry
 //	pyry agent-run        Drive a single supervised claude turn headlessly
 //	                       (replaces `claude -p` in the dispatcher)
+//	pyry acp              Serve the ACP JSON-RPC transport over stdio
+//	                       (spawned by an ACP host)
 //	pyry help             Show help
 //
 // See https://github.com/pyrycode/pyrycode for documentation.
@@ -212,6 +214,8 @@ func run() error {
 			return runUpdate(os.Args[2:])
 		case "agent-run":
 			return runAgentRun(os.Stdout, os.Args[2:])
+		case "acp":
+			return runACP(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -1867,6 +1871,9 @@ Usage:
                                                   ` + "`claude -p`" + ` in the dispatcher
                                                   (see --help on the verb for the
                                                   full flag list)
+  pyry acp                                       serve the ACP JSON-RPC transport
+                                                  over stdio (spawned by an ACP
+                                                  host; takes no flags or args)
   pyry version                                   print version
   pyry help                                      show this help
 

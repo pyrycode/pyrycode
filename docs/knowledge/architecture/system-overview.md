@@ -7,7 +7,8 @@ Pyrycode is a process supervisor that keeps a Claude Code session alive across c
 ```
 pyrycode/
 ├── cmd/pyry/                  Binary entry point
-│   └── main.go                CLI parsing, signal setup, supervisor init
+│   ├── main.go                CLI parsing, signal setup, supervisor init
+│   └── acp.go                 `pyry acp` verb (#756): runACP composition root + serveACP core — serves internal/acp over real stdio (io.Pipe-bridged stdin closer for prompt SIGINT/SIGTERM shutdown), plain-stderr logger, exit 0 on EOF + signal; registers no handlers, drives no claude (EPIC #600)
 ├── internal/supervisor/       Core process supervision
 │   ├── supervisor.go          Supervisor type: hosts claude via a tui-driver Session, I/O bridge, restart loop
 │   ├── backoff.go             Backoff timer: exponential delay with stability reset
@@ -77,7 +78,7 @@ pyrycode/
 │   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
 │   ├── attach.go              Attach handoff to supervisor bridge
 │   └── logs.go                Ring-buffer log streaming
-├── internal/acp/              ACP inbound transport floor (EPIC #600 pyry acp, #755)
+├── internal/acp/              ACP inbound transport floor (EPIC #600 pyry acp, #755; served by cmd/pyry/acp.go, #756)
 │   ├── acp.go                 Transport (line-delimited JSON-RPC 2.0 over io.Reader/io.Writer + method dispatch table), New/Register/Serve, bufio.Scanner read loop, handleLine classify+dispatch, writeMu-guarded write helpers, package doc (hard interactive-claude cost invariant + batch-rejection decision); stdlib-only, does NOT import internal/protocol
 │   ├── jsonrpc.go             Code* error-code constants, exported Error + NewError, unexported wire types (single decode-by-shape rpcMessage inbound + successResponse/errorResponse/rpcError outbound)
 │   └── acp_test.go            Same-package, table-driven, -race-clean; framing/dispatch/response-frame-tolerance/diagnostics-isolation/no-panic/register-guards

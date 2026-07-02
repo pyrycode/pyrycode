@@ -1,4 +1,4 @@
-# `internal/acp` (#755)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756)
 
 The **inbound transport floor** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -10,10 +10,11 @@ The host writes one JSON object per line to the agent's stdin; the agent replies
 and streams notifications one JSON object per line to stdout; stderr carries
 human-readable diagnostics only, **never protocol frames**.
 
-This ticket is the floor and nothing above it: the package, the framing, the
-dispatch table, the diagnostics. It ships **no subcommand** ([#756](https://github.com/pyrycode/pyrycode/issues/756)),
-**no outbound-request primitive** ([#757](https://github.com/pyrycode/pyrycode/issues/757)),
-**no claude driving**, and **no real ACP method**. Later tickets register
+#755 built the floor and nothing above it: the package, the framing, the dispatch
+table, the diagnostics. #756 added the [`pyry acp` subcommand](#subcommand-pyry-acp-756)
+that serves this transport over real stdio. Still deferred to later epic-#600
+tickets: the **outbound-request primitive** ([#757](https://github.com/pyrycode/pyrycode/issues/757)),
+**claude driving**, and every **real ACP method** — later tickets register
 handlers against the dispatch table this package builds.
 
 Greenfield, stdlib-only package: imports `bufio`, `context`, `encoding/json`,
@@ -175,9 +176,13 @@ inline before the next `Scan` as a secondary guard.
 
 > **ctx vs a blocked `Read`.** A `Read` already blocked on a quiet reader cannot
 > be unblocked by ctx alone (Go limitation) — the ctx check happens between
-> frames. In-memory callers terminate naturally at EOF; the subcommand (#756)
-> unblocks a real blocked stdin by **closing the reader** on shutdown. A closer
-> seam is #756's concern, not this ticket's.
+> frames. In-memory callers terminate naturally at EOF; the subcommand
+> ([#756](https://github.com/pyrycode/pyrycode/issues/756)) unblocks a real
+> blocked stdin by **closing the reader** on shutdown. It does **not** close
+> `os.Stdin` directly (a `Read` parked in-kernel on the non-pollable stdin fd
+> can't be woken by `Close` — lesson #78); it bridges real stdin through an
+> in-memory `io.Pipe` and calls `pr.CloseWithError` on cancel. See the
+> [`pyry acp` subcommand](#subcommand-pyry-acp-756) section.
 
 ## Diagnostics discipline
 
@@ -188,12 +193,37 @@ material (mirrors `internal/agentrun/jsonl`'s no-content-logging rule). Handler
 errors surfaced as `-32603` log the real detail to stderr and put only a generic
 message on the wire.
 
+## Subcommand: `pyry acp` (#756)
+
+The composition root that serves this transport over real stdio ships in
+[#756](https://github.com/pyrycode/pyrycode/issues/756) — `cmd/pyry/acp.go`. It
+registers the `pyry acp` verb (no flags, no positional args), constructs
+`acp.New(os.Stdin, os.Stdout, logger)` and calls `Serve(ctx)`, and exits **zero**
+on both EOF (host closes stdin) and SIGINT/SIGTERM. It registers **no** handlers
+and drives **no** claude — later epic-#600 tickets register `session/*` handlers
+against it.
+
+- **Plain stderr logger, no ring buffer.** `slog.NewTextHandler(os.Stderr, …)` —
+  deliberately **not** `runSupervisor`'s `control.SlogTee` + `NewRingBuffer`. The
+  ACP host captures this subprocess's stderr and keeps its own diagnostics ring;
+  there is no `pyry logs` consumer for `pyry acp`, so the tee/ring is dead weight.
+- **The blocked-read closer (AC#4).** The ticket's suggested `os.Stdin.Close()` is
+  a trap — a `Read` parked in-kernel on the non-pollable stdin fd can't be woken
+  by `Close` (lesson #78). The subcommand instead **bridges real stdin through an
+  in-memory `io.Pipe`**: a closer goroutine (`<-ctx.Done()` →
+  `pr.CloseWithError`) synchronously unblocks the blocked `PipeReader.Read`, and a
+  bridge goroutine (`io.Copy(pw, os.Stdin)`) surfaces host EOF as a pipe close.
+  `Serve` reads the in-memory pipe, never `os.Stdin` directly.
+- **Clean-exit guard is `ctx.Err() != nil`**, not `errors.Is(err, context.Canceled)`
+  — the forced-pipe-close path surfaces a wrapped `os.ErrClosed`, so guarding on
+  "did we deliberately cancel?" absorbs both shutdown error shapes as exit-0 while
+  still surfacing a genuine stream break (only reachable with `ctx.Err() == nil`).
+
+Full detail, concurrency model, and the one-shot bridge-goroutine-leak rationale
+in [`codebase/756.md`](../codebase/756.md).
+
 ## Deferred / scope boundaries
 
-- **Subcommand wiring** — [#756](https://github.com/pyrycode/pyrycode/issues/756).
-  Owns real stdio, the `internal/control` `SlogTee` + `NewRingBuffer`
-  stderr-diagnostics wiring, and the closer that unblocks a blocked stdin read on
-  shutdown.
 - **Outbound-request primitive** — [#757](https://github.com/pyrycode/pyrycode/issues/757).
   Makes the transport bidirectional; replaces the response-frame drop with
   response routing; reuses the `writeMu` write seam.
@@ -244,8 +274,10 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   (`Register`-before-`Run` `atomic.Bool` gate, carrier-agnostic handler table).
   `internal/acp` mirrors the shape but defines its own JSON-RPC wire types —
   it does **not** import `internal/protocol`.
-- Stderr-diagnostics convention it mirrors: `internal/control` `SlogTee` /
-  `NewRingBuffer` (the tee/ring wiring itself is #756's concern).
+- Stderr-diagnostics convention: `internal/control` `SlogTee` / `NewRingBuffer`
+  (used by `runSupervisor`). The `pyry acp` subcommand (#756) deliberately does
+  **not** reuse it — the ACP host captures this subprocess's stderr and keeps its
+  own ring, so a plain `slog.NewTextHandler(os.Stderr, …)` suffices.
 - No-content-logging discipline: [`features/jsonl-reader.md`](jsonl-reader.md)
   (`internal/agentrun/jsonl` — offsets and error kinds only, never line bytes).
 - Epic: [#600](https://github.com/pyrycode/pyrycode/issues/600) `pyry acp`. The
