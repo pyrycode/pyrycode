@@ -74,3 +74,24 @@ type rpcError struct {
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
+
+// request is the outbound agent→client JSON-RPC 2.0 request frame issued by
+// Transport.Call. ID is a JSON number drawn from the transport's own counter;
+// inbound requests are answered by echoing the host id verbatim, so the
+// transport generates no inbound ids and an outbound id cannot collide with
+// one. Params is omitted from the wire when the caller passes nil.
+type request struct {
+	Jsonrpc string          `json:"jsonrpc"`
+	ID      uint64          `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+// callResult is the value delivered to a Call blocked on its pending channel.
+// Exactly one of result / err is meaningful per response: result on a success
+// frame (nil ⇒ JSON null result), err on an error frame (reuses the exported
+// *Error).
+type callResult struct {
+	result json.RawMessage
+	err    *Error
+}
