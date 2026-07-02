@@ -72,12 +72,21 @@ type Transport struct {
 	handlers map[string]Handler
 	started  atomic.Bool
 
-	// writeMu serialises all writes to w through enc. Redundant under today's
-	// single-goroutine dispatch, but it is the seam #757's outbound-request
-	// writer shares — adding an agent→client caller then needs no rework of
-	// the write path. Leaf lock: never held across a handler call or a read.
+	// writeMu serialises all writes to w through enc. Redundant under #755's
+	// single-goroutine dispatch, but load-bearing now: a Call and an inbound
+	// reply can race on w. Both funnel through writeMessage under writeMu.
+	// Leaf lock: never held across a handler call or a read.
 	writeMu sync.Mutex
 	enc     *json.Encoder
+
+	// nextID generates outbound request ids: Add(1) yields 1,2,3,… never 0.
+	nextID atomic.Uint64
+	// pendingMu guards pending. Leaf lock: never held across a write or a read.
+	pendingMu sync.Mutex
+	// pending maps an outbound id to its waiter's cap-1 channel. This is the
+	// first cross-goroutine transport state: written by the caller goroutine in
+	// Call, read/deleted by the read-loop goroutine in routeResponse.
+	pending map[uint64]chan callResult
 }
 
 // New constructs a Transport reading JSON-RPC frames from r and writing them
@@ -102,6 +111,7 @@ func New(r io.Reader, w io.Writer, log *slog.Logger) *Transport {
 		log:      log,
 		handlers: make(map[string]Handler),
 		enc:      enc,
+		pending:  make(map[uint64]chan callResult),
 	}
 }
 
@@ -197,10 +207,10 @@ func (t *Transport) handleLine(ctx context.Context, line []byte) {
 	case msg.Method != nil:
 		t.dispatchNotification(ctx, &msg)
 	case msg.ID != nil && (msg.Result != nil || msg.Error != nil):
-		// A JSON-RPC response frame. Tolerated — dropped with no writer
-		// output — so the outbound sibling (#757) can later replace this
-		// drop with response routing. Log kind only.
-		t.log.Debug("acp: dropping inbound response frame (outbound routing lands in #757)")
+		// A JSON-RPC response frame: route it to the Call awaiting this id.
+		// An unknown / already-reclaimed id is logged and dropped inside
+		// routeResponse — never delivered to a waiter, never a panic.
+		t.routeResponse(&msg)
 	default:
 		// Object, valid JSON, but neither request, notification, nor response.
 		t.log.Debug("acp: invalid request: object is not a JSON-RPC frame")
@@ -245,6 +255,107 @@ func (t *Transport) dispatchNotification(ctx context.Context, msg *rpcMessage) {
 	if _, err := h(ctx, msg.Params); err != nil {
 		t.log.Warn("acp: notification handler error", "method", method, "err", err.Error())
 	}
+}
+
+// Call issues a JSON-RPC 2.0 request to the client with a freshly-generated id
+// and blocks until the response with the matching id is read, returning the
+// result as raw JSON or the mapped *Error. A ctx cancellation returns ctx.Err()
+// and reclaims the pending slot; a later matching response for a reclaimed id is
+// dropped, not delivered.
+//
+// Call MUST be issued from a goroutine other than the one running Serve. Inbound
+// handlers dispatch inline on the read loop, so a Call that blocked that loop
+// would deadlock — only the read loop reads the response Call awaits.
+//
+// Ordering is load-bearing: params is marshalled first so a marshal failure
+// burns no id and leaves no dangling slot, and the waiter is registered before
+// the request is written so a fast response can never arrive before the slot
+// exists.
+func (t *Transport) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	var raw json.RawMessage
+	if params != nil {
+		p, err := json.Marshal(params)
+		if err != nil {
+			return nil, fmt.Errorf("acp: marshal params: %w", err)
+		}
+		raw = p
+	}
+
+	id := t.nextID.Add(1)
+	ch := make(chan callResult, 1)
+	t.pendingMu.Lock()
+	t.pending[id] = ch
+	t.pendingMu.Unlock()
+
+	if err := t.writeMessage(request{Jsonrpc: "2.0", ID: id, Method: method, Params: raw}); err != nil {
+		t.reclaim(id)
+		return nil, fmt.Errorf("acp: write request: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		t.reclaim(id)
+		return nil, ctx.Err()
+	case r := <-ch:
+		if r.err != nil {
+			return nil, r.err
+		}
+		return r.result, nil
+	}
+}
+
+// reclaim removes id's pending slot. Idempotent: a delete of an already-removed
+// id is a no-op, so it is safe whether the read loop delivered first (its
+// delete already ran; the buffered value is GC'd unread) or the caller cancels
+// first (this delete makes a later response an unknown-id drop).
+func (t *Transport) reclaim(id uint64) {
+	t.pendingMu.Lock()
+	delete(t.pending, id)
+	t.pendingMu.Unlock()
+}
+
+// routeResponse delivers an inbound response frame to the Call awaiting its id,
+// or logs-and-drops it when the id is unrecognised or already reclaimed
+// (cancellation). It runs on the read-loop goroutine and MUST NOT block: the
+// waiter's channel is buffered cap-1 and holds exactly one response, so the send
+// always returns immediately and an absent waiter never stalls the read loop.
+func (t *Transport) routeResponse(msg *rpcMessage) {
+	var id uint64
+	if err := json.Unmarshal(msg.ID, &id); err != nil {
+		// A response id the transport never issues (non-numeric / out of range):
+		// drop. Debug, not Warn — never leak the id source, never panic.
+		t.log.Debug("acp: dropping response with unrecognised id")
+		return
+	}
+
+	t.pendingMu.Lock()
+	ch, ok := t.pending[id]
+	if ok {
+		delete(t.pending, id)
+	}
+	t.pendingMu.Unlock()
+	if !ok {
+		// Unknown or already-reclaimed id — the normal fate of a cancelled
+		// call's late response. Debug (not Warn) to match the drop precedent
+		// and avoid log spam.
+		t.log.Debug("acp: dropping response with no waiter", "id", id)
+		return
+	}
+
+	var r callResult
+	if msg.Error != nil {
+		var re rpcError
+		if err := json.Unmarshal(msg.Error, &re); err != nil {
+			// Malformed error object: synthesize a deterministic *Error rather
+			// than block the read loop or leak the raw bytes.
+			r.err = &Error{Code: CodeInternalError, Message: "malformed error response"}
+		} else {
+			r.err = &Error{Code: re.Code, Message: re.Message, Data: re.Data}
+		}
+	} else {
+		r.result = msg.Result // non-nil per the response-frame guard; may be JSON null
+	}
+	ch <- r // cap-1 buffer guarantees this returns immediately
 }
 
 // writeSuccess writes a success response, marshalling result into the wire

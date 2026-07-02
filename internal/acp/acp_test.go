@@ -1,12 +1,16 @@
 package acp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -403,4 +407,303 @@ func assertPanics(t *testing.T, fn func()) {
 		}
 	}()
 	fn()
+}
+
+// --- Outbound-request primitive (Transport.Call) ---
+
+// syncBuffer is a concurrency-safe diagnostics sink: Serve runs on its own
+// goroutine and writes log records while the test reads them. A bare
+// bytes.Buffer would be a -race failure (see docs/lessons.md).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// liveTransport drives the outbound direction: Serve runs in its own goroutine
+// over in-memory pipes while the test reads outbound request frames off the
+// writer and feeds response lines back on the reader. The single-shot run
+// harness cannot express this — it parses output only after Serve reaches EOF,
+// but an outbound Call needs a response written *after* the request is observed.
+//
+// All nextRequest / feedResp / assertion calls run on the test goroutine; only
+// Call is issued from a spawned goroutine (its outcome collected over a channel)
+// so t.Fatalf is never called off the test goroutine.
+type liveTransport struct {
+	t        *testing.T
+	tr       *Transport
+	respW    *io.PipeWriter // test writes response lines → Transport reads
+	reqR     *bufio.Reader  // test reads outbound request frames
+	diag     *syncBuffer
+	serveErr chan error
+}
+
+func newLiveTransport(t *testing.T) *liveTransport {
+	t.Helper()
+	rIn, wIn := io.Pipe()   // Transport reads rIn; test feeds responses on wIn
+	rOut, wOut := io.Pipe() // Transport writes wOut; test reads requests on rOut
+	diag := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(diag, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	tr := New(rIn, wOut, logger)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- tr.Serve(context.Background()) }()
+
+	lt := &liveTransport{t: t, tr: tr, respW: wIn, reqR: bufio.NewReader(rOut), diag: diag, serveErr: serveErr}
+	t.Cleanup(func() {
+		_ = wIn.Close() // EOF the reader → Serve returns nil
+		if err := <-serveErr; err != nil {
+			t.Errorf("Serve returned error: %v", err)
+		}
+		_ = rOut.Close() // unblock any stray outbound write (buggy-test safety net)
+	})
+	return lt
+}
+
+// nextRequest reads one outbound request frame off the writer and returns its
+// id, method, and raw params, asserting the JSON-RPC envelope shape.
+func (lt *liveTransport) nextRequest() (id uint64, method string, params json.RawMessage) {
+	lt.t.Helper()
+	line, err := lt.reqR.ReadBytes('\n')
+	if err != nil {
+		lt.t.Fatalf("reading outbound request: %v", err)
+	}
+	var req struct {
+		Jsonrpc string          `json:"jsonrpc"`
+		ID      uint64          `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if uerr := json.Unmarshal(line, &req); uerr != nil {
+		lt.t.Fatalf("outbound request is not valid JSON: %q: %v", line, uerr)
+	}
+	if req.Jsonrpc != "2.0" {
+		lt.t.Fatalf("outbound request missing jsonrpc:2.0: %q", line)
+	}
+	if req.ID == 0 {
+		lt.t.Fatalf("outbound request must carry a nonzero id: %q", line)
+	}
+	return req.ID, req.Method, req.Params
+}
+
+// feedResp writes one response line (a trailing newline is appended) onto the
+// transport's reader.
+func (lt *liveTransport) feedResp(line string) {
+	lt.t.Helper()
+	if _, err := io.WriteString(lt.respW, line+"\n"); err != nil {
+		lt.t.Fatalf("feeding response line: %v", err)
+	}
+}
+
+// callOutcome carries a Call's return values back to the test goroutine.
+type callOutcome struct {
+	res json.RawMessage
+	err error
+}
+
+// goCall issues Call on a spawned goroutine and returns a channel that yields
+// its outcome once it resolves.
+func (lt *liveTransport) goCall(ctx context.Context, method string, params any) <-chan callOutcome {
+	out := make(chan callOutcome, 1)
+	go func() {
+		res, err := lt.tr.Call(ctx, method, params)
+		out <- callOutcome{res, err}
+	}()
+	return out
+}
+
+func TestTransport_Call_ResultPath(t *testing.T) {
+	t.Parallel()
+	lt := newLiveTransport(t)
+	done := lt.goCall(context.Background(), "session/x", map[string]any{"a": 1})
+
+	id, method, params := lt.nextRequest()
+	if method != "session/x" {
+		t.Fatalf("want method session/x, got %q", method)
+	}
+	var p map[string]any
+	if err := json.Unmarshal(params, &p); err != nil || p["a"] != float64(1) {
+		t.Fatalf("want params {a:1}, got %s (err %v)", params, err)
+	}
+
+	lt.feedResp(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"ok":true}}`, id))
+
+	oc := <-done
+	if oc.err != nil {
+		t.Fatalf("Call returned error: %v", oc.err)
+	}
+	var r map[string]any
+	if err := json.Unmarshal(oc.res, &r); err != nil || r["ok"] != true {
+		t.Fatalf("want result {ok:true}, got %s (err %v)", oc.res, err)
+	}
+}
+
+func TestTransport_Call_ErrorPath(t *testing.T) {
+	t.Parallel()
+	lt := newLiveTransport(t)
+	done := lt.goCall(context.Background(), "session/x", nil)
+
+	id, _, params := lt.nextRequest()
+	if params != nil {
+		t.Fatalf("nil params must be omitted from the wire, got %s", params)
+	}
+	lt.feedResp(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32602,"message":"bad","data":{"field":"x"}}}`, id))
+
+	oc := <-done
+	if oc.res != nil {
+		t.Fatalf("error response must yield a nil result, got %s", oc.res)
+	}
+	var rpcErr *Error
+	if !errors.As(oc.err, &rpcErr) {
+		t.Fatalf("want *Error, got %T: %v", oc.err, oc.err)
+	}
+	if rpcErr.Code != CodeInvalidParams || rpcErr.Message != "bad" {
+		t.Fatalf("want code %d message \"bad\", got %d %q", CodeInvalidParams, rpcErr.Code, rpcErr.Message)
+	}
+	data, ok := rpcErr.Data.(map[string]any)
+	if !ok || data["field"] != "x" {
+		t.Fatalf("want error data {field:x}, got %v", rpcErr.Data)
+	}
+}
+
+func TestTransport_Call_ConcurrentDistinctIDs(t *testing.T) {
+	t.Parallel()
+	lt := newLiveTransport(t)
+
+	const n = 32
+	outs := make([]<-chan callOutcome, n)
+	for i := 0; i < n; i++ {
+		outs[i] = lt.goCall(context.Background(), "m", map[string]int{"n": i})
+	}
+
+	// Read all n requests and echo each one's params back as its result, keyed
+	// by the request's own id. Distinct ids ⇒ each response reaches its own
+	// waiter. Writes serialise through writeMu, so ids arrive one line at a time.
+	ids := make(map[uint64]bool, n)
+	for i := 0; i < n; i++ {
+		id, _, params := lt.nextRequest()
+		if ids[id] {
+			t.Fatalf("duplicate outbound id %d", id)
+		}
+		ids[id] = true
+		lt.feedResp(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, id, params))
+	}
+	if len(ids) != n {
+		t.Fatalf("want %d distinct ids, got %d", n, len(ids))
+	}
+
+	// Every call must resolve to the response echoing its own params (n==i).
+	for i := 0; i < n; i++ {
+		oc := <-outs[i]
+		if oc.err != nil {
+			t.Fatalf("call %d returned error: %v", i, oc.err)
+		}
+		var r struct {
+			N int `json:"n"`
+		}
+		if err := json.Unmarshal(oc.res, &r); err != nil {
+			t.Fatalf("call %d result not decodable: %s (%v)", i, oc.res, err)
+		}
+		if r.N != i {
+			t.Fatalf("call %d resolved to the wrong response: got n=%d", i, r.N)
+		}
+	}
+}
+
+func TestTransport_Call_UnknownIDDropped(t *testing.T) {
+	t.Parallel()
+	lt := newLiveTransport(t)
+
+	// A response with no outstanding call: dropped, logged, Serve stays live.
+	lt.feedResp(`{"jsonrpc":"2.0","id":999999,"result":{}}`)
+
+	// A subsequent real call still resolves — proof Serve was not stalled and
+	// the unknown response never corrupted the registry.
+	done := lt.goCall(context.Background(), "m", nil)
+	id, _, _ := lt.nextRequest()
+	lt.feedResp(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"ok":true}}`, id))
+	oc := <-done
+	if oc.err != nil {
+		t.Fatalf("real call after an unknown-id response failed: %v", oc.err)
+	}
+	if !strings.Contains(lt.diag.String(), "no waiter") {
+		t.Fatalf("unknown-id drop not recorded in diagnostics: %q", lt.diag.String())
+	}
+}
+
+func TestTransport_Call_ContextCancelledReclaims(t *testing.T) {
+	t.Parallel()
+	lt := newLiveTransport(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := lt.goCall(ctx, "m", nil)
+	id, _, _ := lt.nextRequest() // observe the request, then cancel with no response fed
+	cancel()
+
+	oc := <-done
+	if !errors.Is(oc.err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", oc.err)
+	}
+
+	// A late response for the cancelled id must be dropped (slot reclaimed) —
+	// never delivered, no panic.
+	lt.feedResp(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"late":true}}`, id))
+
+	// A fresh call with a new id still resolves, proving no waiter lingers.
+	done2 := lt.goCall(context.Background(), "m", nil)
+	id2, _, _ := lt.nextRequest()
+	if id2 == id {
+		t.Fatalf("fresh call reused the reclaimed id %d", id)
+	}
+	lt.feedResp(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"ok":true}}`, id2))
+	if oc2 := <-done2; oc2.err != nil {
+		t.Fatalf("fresh call after cancellation failed: %v", oc2.err)
+	}
+}
+
+func TestTransport_Call_MalformedErrorObject(t *testing.T) {
+	t.Parallel()
+	lt := newLiveTransport(t)
+	done := lt.goCall(context.Background(), "m", nil)
+
+	id, _, _ := lt.nextRequest()
+	// error is a string, not an error object: Call must not hang and must
+	// return a synthesized *Error.
+	lt.feedResp(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":"not an object"}`, id))
+
+	oc := <-done
+	var rpcErr *Error
+	if !errors.As(oc.err, &rpcErr) {
+		t.Fatalf("want a non-nil *Error for a malformed error object, got %T: %v", oc.err, oc.err)
+	}
+	if rpcErr.Code != CodeInternalError {
+		t.Fatalf("want synthesized code %d, got %d", CodeInternalError, rpcErr.Code)
+	}
+}
+
+func TestTransport_Call_MarshalParamsError(t *testing.T) {
+	t.Parallel()
+	lt := newLiveTransport(t)
+	// A channel cannot be marshalled: Call returns before any id is burned or
+	// any frame is written.
+	res, err := lt.tr.Call(context.Background(), "m", make(chan int))
+	if err == nil {
+		t.Fatal("want a marshal error, got nil")
+	}
+	if res != nil {
+		t.Fatalf("want nil result on marshal failure, got %s", res)
+	}
+	if !strings.Contains(err.Error(), "marshal params") {
+		t.Fatalf("want a marshal-params error, got %v", err)
+	}
 }
