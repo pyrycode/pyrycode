@@ -26,6 +26,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 3 (#262):** `Config.SweepInterval time.Duration` (zero = use `conversations.SweepInterval` of one hour) + matching unexported `Pool.convSweepInterval` resolved in `New` with the `<= 0` fallback baked in. Replaces the prior package-level `var convSweepInterval` test seam — one seam, not two. Surfaced via the `cmd/pyry` `-pyry-conv-sweep-interval` flag (visible, annotated `(testing; 0 = production default of 1h)`) so out-of-process e2e tests downstream of #251 can drive the sweep loop at ~100ms instead of waiting one hour. Production callers leave the field zero; in-package tests set `pool.convSweepInterval = …` directly after construction (mirrors the existing `pool.convReg` / `pool.convRegistryPath` pattern). See [conversations-auto-archive.md § Single seam: `Config.SweepInterval` (#262)](conversations-auto-archive.md).
 - **Phase 2 mobile (#659):** `Pool.SetTransitionObserver(TransitionObserver)` — an injectable, in-process signal fired on `/clear` rotations and evictions (idle + cap). New types `TransitionReason` / `SessionTransition` / `TransitionObserver` in `transition.go`; new unexported field `Pool.transitionObserver`. The `cmd/pyry` consumer (#657) maps it onto the v2 `session_transition` wire event without `internal/sessions` importing `internal/protocol` / `internal/relay`. See *Transition observer* below and [codebase/659.md](../codebase/659.md).
 - **EPIC #672 (#684):** `Pool.CreateIn(ctx, label, spawnDir)` / `Pool.GetOrCreateIn(ctx, id, label, spawnDir)` — sibling methods carrying an explicit per-session spawn working directory through the shared `buildSession` seam into `supervisor.Config.WorkDir`. Empty `spawnDir` falls back to `tpl.WorkDir`, so `Create` / `GetOrCreate` become thin delegators (`=> CreateIn(ctx, label, "")` / `=> GetOrCreateIn(ctx, id, label, "")`) with byte-identical behaviour for every existing caller. The pool treats the path as **opaque** (no validation / canonicalisation / trust) — that is the consumer slice #685's job. See *Per-session spawn workdir* below and [codebase/684.md](../codebase/684.md).
+- **EPIC #600 (#761):** `Config.BootstrapEvicted bool` + `Pool.Ready() <-chan struct{}` — two purely-additive primitives for **embedded pool hosts** (`pyry acp`) that must run exactly one interactive claude per caller session. `BootstrapEvicted` parks the bootstrap in `stateEvicted` so it spawns no eager claude (a single `Pool.Create` is then the only interactive claude — ACP divergence 6); `Ready()` is a `sync.Once`-closed channel gating the unrecoverable first-`Create → ErrPoolNotRunning` startup race. Both zero-value-safe, single-consumer, no call-site fan-out. See *`Config.BootstrapEvicted` + `Pool.Ready()`* below, [codebase/761.md](../codebase/761.md), and [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md).
 
 ## Package Layout
 
@@ -131,6 +132,7 @@ type Config struct {
     RegistryPath      string        // sessions.json path; "" disables persistence (test-only)
     ClaudeSessionsDir string        // claude's <uuid>.jsonl dir; "" disables startup reconcile
     IdleTimeout       time.Duration // default per-session eviction window; 0 disables
+    BootstrapEvicted  bool          // true → bootstrap parks evicted, spawns no claude (#761)
 }
 
 type SessionConfig struct {
@@ -176,6 +178,61 @@ The watcher fan-out (`g.Go(func() error { return w.Run(gctx) })`) does **not** g
 **Lock discipline.** `supervise` takes only `Pool.mu` (RLock) briefly; it does not call into `Session.lcMu`. The documented orders (`Pool.mu → Session.lcMu`, `Pool.capMu → Pool.mu → Session.lcMu`) are unchanged. Concurrent `supervise` callers contend only with `Run`'s one-shot setup and one-shot teardown, never with each other.
 
 **Race windows.** A `supervise` call racing teardown either acquires RLock first (sees the handle, schedules onto a group whose ctx is about to be cancelled — `Session.Run` handles `ctx.Done` cleanly) or after (sees `nil`, returns the sentinel). The "scheduled onto a soon-cancelled group" case is safe: `errgroup.Group.Go` is documented as concurrency-safe and the scheduled func observes the cancelled ctx immediately, exiting via the existing shutdown path.
+
+### `Config.BootstrapEvicted` + `Pool.Ready()` (#761)
+
+Two purely-additive primitives for **embedded pool hosts** that map each caller
+session onto its own `Pool.Create`'d claude and must run no eager, unaddressed
+bootstrap claude. The sole consumer is `pyry acp`'s composition root (epic #600);
+both preserve today's behaviour at their zero value with no call-site fan-out.
+Design rationale: [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md).
+
+**`Config.BootstrapEvicted bool`** — when true, `New` forces the bootstrap to
+`stateEvicted` *after* the warm/cold-start `lcState` choice, so `Pool.Run →
+supervise(bootstrap) → runEvicted` parks it and it **spawns no claude**. The
+default (both warm-start and fresh-mint) forces `stateActive` — the daemon-mode
+startup contract "claude is available" ([ADR 016](016-bootstrap-ignores-persisted-lifecycle-state.md))
+— which eager-spawns a bootstrap claude the moment `Pool.Run` starts. With
+`BootstrapEvicted`, a single `Pool.Create` is the only interactive claude
+(ACP's divergence 6 / hard-cost invariant).
+
+```go
+if cfg.BootstrapEvicted {
+    lcState = stateEvicted        // → activeCh open, evictedCh closed (existing branch)
+}
+```
+
+**Soundness constraint (documented on the field).** Sound only when the
+bootstrap is **never Activated and never persisted evicted**: the pool keeps it
+as a dormant `Default()`/`Lookup("")` placeholder until `Run`'s ctx cancels. Do
+**not** pair it with a `RegistryPath` that would persist "evicted" for the
+bootstrap and later warm-start it with no attach client to drive `Activate` —
+that is the [#202 hang the warm-start branch guards against](016-bootstrap-ignores-persisted-lifecycle-state.md).
+Embedded, non-persistent hosts (`RegistryPath == ""`) satisfy this by
+construction.
+
+**`Pool.Ready() <-chan struct{}`** — a channel (internal `readyCh`, created in
+`New`) closed **once** by `Run` under `sync.Once` (`readyOnce`), right after
+`runGroup`/`runCtx` are wired and `supervise(bootstrap)` returns nil — i.e. once
+`Pool.Create`'s `supervise` can no longer return `ErrPoolNotRunning`. Before
+`Run` is ever called the channel is open (never ready). Read lock-free (set once
+in `New`, never reassigned; safe to `select` on repeatedly and from multiple
+goroutines).
+
+```go
+func (p *Pool) Ready() <-chan struct{}   // closed once Create's supervise is safe
+```
+
+Why this is a **correctness gate, not a nicety**: `Create → supervise` returns
+`ErrPoolNotRunning` when `runGroup` is nil, and on that path `Create` returns a
+**non-empty id** for a session that is minted (would-be persisted) but **never
+supervised** — there is no public re-supervise, and `Activate` on it blocks
+forever. The session is permanently stuck; the failure is unrecoverable. A
+microsecond window between backgrounding `pool.Run` and the first `Create` is
+enough to strand the first call. So an embedded host must background `Run`, then
+`select` on `Ready()` before issuing any `Create`. Same channel-backed
+readiness shape as [ADR 023](023-activate-waits-pty-readiness.md)'s
+`Supervisor.WaitForPTY`.
 
 ### Pool.Create (1.1a-A2)
 

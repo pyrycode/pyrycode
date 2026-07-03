@@ -377,3 +377,117 @@ func TestPool_Create_CapPassthrough_EvictsLRU(t *testing.T) {
 			newSess.LifecycleState(), newSess.State().ChildPID)
 	}
 }
+
+// helperPoolEvicted builds a Pool like helperPoolCreate but with
+// BootstrapEvicted set and no registry — the shape pyry acp stands up (#761):
+// the bootstrap parks in runEvicted and spawns no claude, so a single
+// Pool.Create is the only interactive claude.
+func helperPoolEvicted(t *testing.T) *Pool {
+	t.Helper()
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skipf("benign binary not available: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pool, err := New(Config{
+		BootstrapEvicted: true,
+		Bootstrap: SessionConfig{
+			ClaudeBin:      "/bin/sh",
+			ClaudeArgs:     []string{"-c", "exec sleep 3600", "--"},
+			BackoffInitial: 10 * time.Millisecond,
+			BackoffMax:     10 * time.Millisecond,
+			BackoffReset:   1 * time.Second,
+			Bridge:         supervisor.NewBridge(logger),
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("sessions.New: %v", err)
+	}
+	return pool
+}
+
+// TestPool_BootstrapEvicted_NoEagerClaude pins divergence 6 at the pool layer:
+// with BootstrapEvicted the bootstrap never spawns a claude, and one Pool.Create
+// brings up exactly one supervised claude total — no stray bootstrap peer.
+func TestPool_BootstrapEvicted_NoEagerClaude(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolEvicted(t)
+	ctx, _ := runPoolInBackground(t, pool)
+	<-pool.Ready()
+
+	// Evicted bootstrap parks in runEvicted: no supervisor, no claude.
+	if got := pool.Default().LifecycleState(); got != stateEvicted {
+		t.Fatalf("bootstrap lifecycle = %v, want stateEvicted", got)
+	}
+	if pid := pool.Default().State().ChildPID; pid != 0 {
+		t.Fatalf("evicted bootstrap ChildPID = %d, want 0 (no eager claude)", pid)
+	}
+
+	id, err := pool.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	newSess, err := pool.Lookup(id)
+	if err != nil {
+		t.Fatalf("Lookup(new): %v", err)
+	}
+	if !pollUntil(t, 5*time.Second, func() bool {
+		return newSess.State().ChildPID > 0
+	}) {
+		t.Fatalf("created session never spawned a claude; state=%+v", newSess.State())
+	}
+
+	// Exactly one supervised claude across the whole pool.
+	var withChild int
+	for _, e := range pool.Snapshot() {
+		if e.PID > 0 {
+			withChild++
+		}
+	}
+	if withChild != 1 {
+		t.Fatalf("supervised claude count = %d, want exactly 1 (divergence 6)", withChild)
+	}
+	if pid := pool.Default().State().ChildPID; pid != 0 {
+		t.Fatalf("bootstrap ChildPID = %d after Create, want 0", pid)
+	}
+}
+
+// TestPool_Ready_GatesCreate pins the readiness gate: Ready() is open before Run
+// and closes once Run has wired its handle, at which point Create schedules the
+// session instead of returning ErrPoolNotRunning.
+func TestPool_Ready_GatesCreate(t *testing.T) {
+	t.Parallel()
+	pool := helperPoolEvicted(t)
+
+	select {
+	case <-pool.Ready():
+		t.Fatal("Ready() closed before Run")
+	default:
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- pool.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("pool.Run did not exit within 15s after cancel")
+		}
+	})
+
+	select {
+	case <-pool.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ready() did not close within 5s of Run")
+	}
+
+	id, err := pool.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create after Ready: %v", err)
+	}
+	if !ValidID(string(id)) {
+		t.Fatalf("Create id = %q, want a valid UUID", id)
+	}
+}
