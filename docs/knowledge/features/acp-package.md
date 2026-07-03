@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -769,8 +769,90 @@ there is no held prompt to resolve until #749/#765 land. This ticket asserts onl
 that the interrupt reaches the supervisor. Full per-ticket detail in
 [`codebase/753.md`](../codebase/753.md).
 
+## ACP permission proxy (`session/request_permission`) (#752)
+
+The **highest-risk seam in the epic** (T8, [ADR 027](../decisions/027-acp-mapping.md) divergence 2).
+`acpPermissionProxy` (`cmd/pyry/acp_permission.go`, two new files, unwired) answers claude's on-screen
+permission modal by asking the ACP host: on a permission-class modal it issues a blocking
+`session/request_permission` `Call` to the host, then routes the host's choice back into claude's live
+prompt as the correct keystroke — the interactive path, **no** `claude -p` / Agent SDK mechanism (the
+hard cost invariant). **security-sensitive**; an architect security pass (spec § Security review pass,
+verdict PASS) and code-review security goggles both cleared it. It is the ACP analogue of the mobile
+`interactiveModalEmitterV2` but far thinner — one blocking `Call` in place of the broadcast + nonce
+registry.
+
+### Where permission surfaces — its own modal-event subscription
+
+A permission modal is a **tui-driver PTY-state event** (`tuidriver.EventKindPtyModalShown` / `…Hidden`
+with `ev.Modal == ModalClassPermission`), **not** a `turnevent.Event` (`turnbridge.mapEvent` drops
+modal kinds). So the adapter takes its **own** modal-event subscription off the live session;
+`Session.Events(...)` mints a fresh channel + merge goroutine per call, so it does not contend with the
+T6/T7 turn-event subscription ([outbound streaming adapter](#outbound-streaming-adapter-acpturnstream-750)).
+
+### Two goroutines, one atomic arbiter
+
+`Handle(ctx, ev)` is the modal-event sink, called serially on the **drain goroutine** (the deferred
+wiring's). A permission `ModalShown` → `handleShown`; any `ModalHidden` → `retireInflight`; everything
+else (a non-permission `ModalShown` included) → no-op. It takes no `screenText` — `session/request_permission`
+carries no prompt body and the option set is class-fixed, so the wiring never sources `ScreenSnapshot`.
+
+- **`handleShown`** builds the four-option set via `modalbridge.PermissionRequestForClass(ev.Modal, "")`
+  (option order + ACP `kind`s share one source of truth), stores a `permissionRoundTrip`, and **spawns
+  one round-trip goroutine** — the "off the Serve read loop" guarantee (AC-5; a `Call` on the read loop
+  deadlocks, since only it reads the response).
+- **`runRoundTrip`** blocks in `Call`, then claims the one-shot (`rt.resolved.CompareAndSwap(false,true)`)
+  and routes **at most one** keystroke; `defer rt.cancel()` releases the deadline timer.
+- **`retireInflight`** (drain goroutine) claims + clears the round-trip; if it wins the CAS it cancels
+  the in-flight `Call`, so `runRoundTrip` unblocks, sees the failed CAS, and routes nothing (AC-4).
+
+`inflight` is drain-goroutine-confined (no lock); the only cross-goroutine state is the `atomic.Bool`
+one-shot + `rt.cancel` (written before spawn). Retiring on **any** `ModalHidden` (vs the mobile
+surfacer's class-match) is safe: an `inflight` round-trip only ever exists for a `ModalClassPermission`
+modal, and tui-driver's single-modal invariant means no unrelated `Hidden` fires while it shows.
+
+### Default-safe resolution (`route`) — deny is the failure mode, not a branch
+
+The **only** path to an allow keystroke is a decoded `outcome:"selected"` whose `optionId` is a
+**member of the daemon-built option set** → `Answer(digit)`, `digit = strconv.Itoa(idx+1)` (the index
+is the single source of truth for wire option order and the keystroke digit — `classifyAnswer`'s
+discipline over the neutral `[]turnevent.PermissionOption`). Every other outcome routes deny
+(`SendEsc`): call error / ctx-deadline timeout / teardown-cancel, undecodable body, forged/unknown
+`optionId`, `outcome:"cancelled"`, unknown/empty outcome. A forged id is simply not locatable in the
+set, so it can never route an allow.
+
+### Routing seam — keystrokes, not `PermissionResponse`
+
+The host's selection routes through the supervisor **keystroke seam** (`modalKeystroker`:
+`Answer`/`SendEsc`; `*supervisor.Supervisor` satisfies it, #726). There is **no** `turnevent.PermissionResponse`
+consumer — the neutral type stays unwired and the adapter does not construct one. This refines
+[ADR 027](../decisions/027-acp-mapping.md) divergence 2, whose prose sketched a `PermissionResponse`
+feed-back; the built adapter routes the keystroke directly.
+
+### Correlation — transport-owned, doubly guarded
+
+`Transport.Call`'s pending map matches reply↔request by outbound id and drops a no-waiter reply, so a
+stale/replayed/mismatched id never reaches the adapter (AC-4). The `atomic.Bool` one-shot adds the
+modal-retirement guarantee on top — belt-and-suspenders, both deterministic. The `Call` takes its own
+outbound id space and cannot resolve or touch the held inbound `session/prompt` (#749/#765), which
+resolves only on `TurnEnd` (AC-5).
+
+### Wire types + trust class
+
+Consumer-owned `requestPermissionParams{sessionId, toolCall?, options[]}` mirroring
+`acp_turn_stream.go`'s local params. `toolCall` is **omitted** (`omitempty`) — the modal-event path
+yields no gating tool-call id; reserved for a future `ToolStart`-correlation ticket. The response
+decodes the **nested** `{"outcome":{"outcome","optionId"}}` form; the decode is default-safe (shape
+mismatch ⇒ `Outcome` zero ⇒ deny), so a wrong guess fails **closed**. The composition root pre-trusts
+the workdir (`trustMark`), so a **trust** modal does not surface; the adapter gates on
+`ModalClassPermission` only (`AcceptTrust` unused) — evidence-based, avoiding an untested trust→ACP
+mapping for a modal that cannot appear. Full per-ticket detail in [`codebase/752.md`](../codebase/752.md).
+
 ## Deferred / scope boundaries
 
+- **Live wiring of the permission proxy** ([#752](https://github.com/pyrycode/pyrycode/issues/752)) —
+  the adapter ships **unwired**; subscribing it to `Session.Events()` and driving `Handle` per modal
+  event belongs to the modal-event wiring follow-up (T7 #751 territory), exactly as #708 defers
+  `interactiveModalEmitterV2`'s wiring.
 - **Serve-exit pending-call drain** ([#757](https://github.com/pyrycode/pyrycode/issues/757)) —
   `Serve`-exit does not fail-fast blocked `Call`s; the caller's `ctx` liberates
   them. Additive if a later ticket needs it (range `pending`, deliver a
@@ -855,7 +937,8 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   [`codebase/762.md`](../codebase/762.md) (`session/load` + `session/cancel` lifecycle),
   [`codebase/747.md`](../codebase/747.md) (`initialize` + `authenticate` handshake),
   [`codebase/750.md`](../codebase/750.md) (`Transport.Notify` + outbound streaming adapter),
-  [`codebase/753.md`](../codebase/753.md) (`session/cancel` actuation + mode/config pin)
+  [`codebase/753.md`](../codebase/753.md) (`session/cancel` actuation + mode/config pin),
+  [`codebase/752.md`](../codebase/752.md) (permission proxy via `session/request_permission`)
 - Specs: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md),
   [`specs/architecture/756-acp-subcommand.md`](../../specs/architecture/756-acp-subcommand.md),
   [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md),
@@ -863,7 +946,8 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   [`specs/architecture/762-acp-session-load-cancel.md`](../../specs/architecture/762-acp-session-load-cancel.md),
   [`specs/architecture/747-acp-initialize-handshake.md`](../../specs/architecture/747-acp-initialize-handshake.md),
   [`specs/architecture/750-acp-outbound-streaming-adapter.md`](../../specs/architecture/750-acp-outbound-streaming-adapter.md),
-  [`specs/architecture/753-acp-cancel-mode-config.md`](../../specs/architecture/753-acp-cancel-mode-config.md)
+  [`specs/architecture/753-acp-cancel-mode-config.md`](../../specs/architecture/753-acp-cancel-mode-config.md),
+  [`specs/architecture/752-acp-permission-proxy.md`](../../specs/architecture/752-acp-permission-proxy.md)
 - Outbound mapping layer (the pure `MapUpdate` the streaming adapter consumes):
   [`features/acpbridge-package.md`](acpbridge-package.md) (#769),
   [ADR 027](../decisions/027-acp-mapping.md) (§ Outbound table, divergences 1 & 3).
