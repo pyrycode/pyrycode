@@ -120,5 +120,3 @@ A separate ACP-shaped internal model distinct from the mobile one. Rejected: two
 - **Substrate seal** — `cmd/substrate-guard`; tui-driver v1.0.1 sealed surface.
 - **Epic** — [#600](https://github.com/pyrycode/pyrycode/issues/600) `pyry acp`; the neutral model lives in `internal/turnevent`.
 - **Design history (vault):** `Structured-Event Bridge — internal model and ACP mapping`; `Drop-In Contract`. Superseded as the implementation contract by this ADR.
-</content>
-</invoke>
