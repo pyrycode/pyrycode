@@ -63,23 +63,29 @@ func TestFakeClaude_OpensInitialAndRotatesOnTrigger(t *testing.T) {
 	var rotatedUUID string
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		entries, _ := os.ReadDir(sessionsDir)
-		for _, e := range entries {
-			name := e.Name()
-			if filepath.Ext(name) != ".jsonl" {
-				continue
+		if rotatedUUID == "" {
+			entries, _ := os.ReadDir(sessionsDir)
+			for _, e := range entries {
+				name := e.Name()
+				if filepath.Ext(name) != ".jsonl" {
+					continue
+				}
+				stem := name[:len(name)-len(".jsonl")]
+				if stem == initialUUID {
+					continue
+				}
+				if !uuidStem.MatchString(stem) {
+					continue
+				}
+				rotatedUUID = stem
+				break
 			}
-			stem := name[:len(name)-len(".jsonl")]
-			if stem == initialUUID {
-				continue
-			}
-			if !uuidStem.MatchString(stem) {
-				continue
-			}
-			rotatedUUID = stem
-			break
 		}
-		if rotatedUUID != "" {
+		// Break only once both post-conditions hold: the rotated JSONL is
+		// observable AND the trigger has been removed. fakeclaude opens the
+		// rotated file before removing the trigger (main.go rotation block), so
+		// breaking on the JSONL alone races the still-present trigger.
+		if _, err := os.Stat(triggerPath); rotatedUUID != "" && os.IsNotExist(err) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)

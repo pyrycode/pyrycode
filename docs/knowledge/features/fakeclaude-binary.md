@@ -272,10 +272,17 @@ the e2e harness, without pyry**:
 2. `exec.Command(binPath)` with the three env vars set.
 3. Poll (50ms gap, 3s deadline) until the initial JSONL appears.
 4. `os.WriteFile(trigger, nil, 0o600)`.
-5. Poll (50ms gap, 3s deadline) until a fresh `<uuid>.jsonl` appears in
-   the same directory whose stem matches `uuidStemPattern` and is not
-   the initial UUID.
-6. Assert the trigger file is gone.
+5. Poll (50ms gap, 3s deadline) until **both** post-conditions hold: a
+   fresh `<uuid>.jsonl` whose stem matches `uuidStemPattern` (and isn't
+   the initial UUID) has appeared **and** the trigger file has been
+   removed. fakeclaude opens the rotated file *before* removing the
+   trigger (§ *What It Does* table), so breaking on the JSONL alone races
+   the still-present trigger — folding the trigger-gone check into the
+   break condition closes that flake (#584, see
+   [codebase/584.md](../codebase/584.md)).
+6. Assert the trigger file is gone (now only a timeout diagnostic — the
+   poll loop already waited for it, so this fires only on a genuine
+   rotation regression, not the pre-#584 race).
 7. `cmd.Process.Signal(SIGTERM)`; assert `WaitStatus.Signaled() &&
    Signal()==SIGTERM` within 3s, escalate to SIGKILL on grace expiry.
 
