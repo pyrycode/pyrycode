@@ -107,7 +107,18 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 		registerHandshake(t) // initialize + authenticate (stateless, no pool)
 		t.Register("session/new", newSessionHandler(pool))
 		t.Register("session/load", loadSessionHandler(pool))
-		t.Register("session/cancel", cancelSessionHandler(pool))
+		t.Register("session/cancel", cancelSessionHandler(func(p json.RawMessage) (interrupter, error) {
+			// Return a true nil interface on error: resolveCancelTarget's typed
+			// *supervisor.Supervisor would otherwise wrap a nil pointer in a
+			// non-nil interface and defeat the handler's err short-circuit.
+			sup, err := resolveCancelTarget(pool, p)
+			if err != nil {
+				return nil, err
+			}
+			return sup, nil
+		}))
+		t.Register("session/set_mode", setModeHandler)                  // single-mode pin (ADR 027)
+		t.Register("session/set_config_option", setConfigOptionHandler) // no config surface (ADR 027)
 	}
 	serveErr := serveACP(runCtx, stdin, stdout, logger, register)
 
@@ -118,10 +129,14 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 	return serveErr
 }
 
-// newSessionResult is the session/new success payload. Unexported type with an
-// exported, json-tagged field marshals fine and adds zero exported types.
+// newSessionResult is the session/new (and session/load) success payload. The
+// unexported type with json-tagged fields marshals fine and adds zero exported
+// types. Modes advertises the single-mode pin (ADR 027 Open Item #1) so a host is
+// never offered a mode switch that does nothing — populated from pinnedModeState()
+// at both construction sites.
 type newSessionResult struct {
-	SessionID string `json:"sessionId"`
+	SessionID string           `json:"sessionId"`
+	Modes     sessionModeState `json:"modes"`
 }
 
 // newSessionHandler returns the acp.Handler for session/new. It allocates one
@@ -140,7 +155,7 @@ func newSessionHandler(pool *sessions.Pool) acp.Handler {
 		if err != nil {
 			return nil, fmt.Errorf("session/new: %w", err)
 		}
-		return newSessionResult{SessionID: string(id)}, nil
+		return newSessionResult{SessionID: string(id), Modes: pinnedModeState()}, nil
 	}
 }
 
@@ -190,7 +205,7 @@ func loadSessionHandler(pool *sessions.Pool) acp.Handler {
 		if err := pool.Activate(ctx, id); err != nil {
 			return nil, fmt.Errorf("session/load: %w", err)
 		}
-		return newSessionResult{SessionID: string(id)}, nil
+		return newSessionResult{SessionID: string(id), Modes: pinnedModeState()}, nil
 	}
 }
 
@@ -212,18 +227,29 @@ func resolveCancelTarget(pool *sessions.Pool, params json.RawMessage) (*supervis
 	return sess.Supervisor(), nil
 }
 
+// interrupter is the one-method cancel-actuation seam: *supervisor.Supervisor
+// satisfies it via SendEsc (#726), the same lever the mobile interrupt /
+// modal_cancel frames route through (relay.Interrupter). Declared here in package
+// main so cancelSessionHandler is unit-testable with a double, while resolution
+// correctness stays in resolveCancelTarget's own test.
+type interrupter interface{ SendEsc() error }
+
 // cancelSessionHandler returns the acp.Handler for session/cancel, an ACP
-// notification. It resolves the target session's supervisor (via
-// resolveCancelTarget, the T9 (#753) seam) and returns (nil, nil): delivering the
-// abort keystroke is T9's job, and the transport's dispatchNotification discards
-// this return, so registering the handler is the whole no-response mechanism
-// (AC-4). A resolution error is returned so the notification path logs it — it too
-// emits no response frame.
-func cancelSessionHandler(pool *sessions.Pool) acp.Handler {
+// notification that aborts the running turn. resolve maps the params onto the
+// target session's interrupter (the composition root wires resolveCancelTarget).
+// On a resolve error the handler returns it so dispatchNotification logs it once
+// and writes no response frame (unchanged from #762). On success it actuates the
+// interrupt best-effort: a SendEsc failure (no live turn / mid-teardown) is
+// swallowed — there is nothing to roll back and a notification owes no reply,
+// mirroring relay.handleInterrupt. dispatchNotification discards the (nil, nil)
+// return, so no frame is written on either path.
+func cancelSessionHandler(resolve func(json.RawMessage) (interrupter, error)) acp.Handler {
 	return func(_ context.Context, params json.RawMessage) (any, error) {
-		if _, err := resolveCancelTarget(pool, params); err != nil {
+		intr, err := resolve(params)
+		if err != nil {
 			return nil, err
 		}
+		_ = intr.SendEsc()
 		return nil, nil
 	}
 }

@@ -233,6 +233,8 @@ func TestACP_SessionNew_SpawnsOneInteractiveClaude(t *testing.T) {
 	if resp.Result == nil || !sessions.ValidID(resp.Result.SessionID) {
 		t.Fatalf("response = %q, want result.sessionId to be a valid UUID", line)
 	}
+	// AC-3 (#753): the response advertises the single-mode pin.
+	assertPinnedModes(t, resp.Result.Modes)
 
 	// AC-3/AC-4: exactly one spawn, on the interactive path. The child records
 	// argv after exec, so poll until the line lands.
@@ -545,6 +547,70 @@ func TestResolveCancelTarget(t *testing.T) {
 	}
 }
 
+// fakeInterrupter is a package-main test double for the cancel actuation seam: it
+// counts SendEsc calls and returns an injectable error. cancelSessionHandler
+// invokes it synchronously on the caller goroutine, so no mutex is needed (unlike
+// the relay fakeInterrupter driven from the Run goroutine).
+type fakeInterrupter struct {
+	escCalls int
+	err      error
+}
+
+func (f *fakeInterrupter) SendEsc() error {
+	f.escCalls++
+	return f.err
+}
+
+// TestCancelSessionHandler_Actuation pins AC-1's actuation half: the handler
+// actuates SendEsc exactly once on a resolved interrupter, does not actuate when
+// resolution fails (returning the error for the notification path to log), and
+// swallows a SendEsc failure best-effort (mirroring relay.handleInterrupt). Paired
+// with TestResolveCancelTarget's routing proof, this shows the interrupt reaches
+// the correct session's supervisor without a brittle live-PTY keystroke assertion.
+func TestCancelSessionHandler_Actuation(t *testing.T) {
+	t.Parallel()
+
+	resolveErr := errors.New("no such session")
+
+	tests := []struct {
+		name       string
+		intr       *fakeInterrupter
+		resolveErr error
+		wantEsc    int
+		wantErr    error
+	}{
+		{"resolved actuates once", &fakeInterrupter{}, nil, 1, nil},
+		{"resolve error: no actuation", nil, resolveErr, 0, resolveErr},
+		{"sendEsc error swallowed", &fakeInterrupter{err: errors.New("no live session")}, nil, 1, nil},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := cancelSessionHandler(func(json.RawMessage) (interrupter, error) {
+				if tt.resolveErr != nil {
+					return nil, tt.resolveErr
+				}
+				return tt.intr, nil
+			})
+			res, err := h(context.Background(), nil)
+			if res != nil {
+				t.Fatalf("result = %v, want nil (a notification owes no reply)", res)
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			got := 0
+			if tt.intr != nil {
+				got = tt.intr.escCalls
+			}
+			if got != tt.wantEsc {
+				t.Fatalf("SendEsc calls = %d, want %d", got, tt.wantEsc)
+			}
+		})
+	}
+}
+
 // TestACP_SessionLoad_ResumesExistingClaude pins AC-1 and AC-3: session/load of a
 // known id resumes its supervised claude and returns {"sessionId":id}, and a
 // second load of the same id spawns no second claude (divergence 6) — the
@@ -561,6 +627,8 @@ func TestACP_SessionLoad_ResumesExistingClaude(t *testing.T) {
 	if newReply.Result == nil || !sessions.ValidID(newReply.Result.SessionID) {
 		t.Fatalf("session/new result = %q, want a valid session id", line)
 	}
+	// AC-3 (#753): session/new advertises the single-mode pin.
+	assertPinnedModes(t, newReply.Result.Modes)
 	id := newReply.Result.SessionID
 
 	// AC-1: known id resumes and echoes the id back.
@@ -572,6 +640,8 @@ func TestACP_SessionLoad_ResumesExistingClaude(t *testing.T) {
 	if loadReply.Result == nil || loadReply.Result.SessionID != id {
 		t.Fatalf("session/load result = %q, want sessionId %q", line, id)
 	}
+	// AC-3 (#753): the resumed session carries the same single-mode pin.
+	assertPinnedModes(t, loadReply.Result.Modes)
 
 	// AC-3 / divergence 6: a second load of the same id resumes the existing
 	// claude, never a second.
@@ -687,6 +757,84 @@ func TestACP_SessionCancel_NotificationEmitsNoResponse(t *testing.T) {
 	if got := strings.Count(h.stderr.String(), "acp: notification handler error"); got != 1 {
 		t.Fatalf("notification handler error count = %d, want 1 (unknown-id cancel only)\nstderr:\n%s", got, h.stderr.String())
 	}
+}
+
+// assertPinnedModes fails unless modes matches the single-mode pin (AC-3): the
+// current mode is the pinned id and availableModes holds exactly that one
+// self-referential entry, so a compliant host is offered no switch that does
+// nothing.
+func assertPinnedModes(t *testing.T, modes sessionModeState) {
+	t.Helper()
+	if modes.CurrentModeID != pinnedModeID {
+		t.Fatalf("currentModeId = %q, want %q", modes.CurrentModeID, pinnedModeID)
+	}
+	if len(modes.AvailableModes) != 1 {
+		t.Fatalf("availableModes = %+v, want exactly one entry", modes.AvailableModes)
+	}
+	if modes.AvailableModes[0].ID != pinnedModeID {
+		t.Fatalf("availableModes[0].id = %q, want %q", modes.AvailableModes[0].ID, pinnedModeID)
+	}
+}
+
+// TestACP_SetMode pins AC-2's mode half: under the single-mode pin, session/set_mode
+// with the pinned modeId succeeds with an empty result, while any other modeId or a
+// non-object params is rejected with CodeInvalidParams. Each is an ACP request, so
+// dispatchRequest writes exactly one response frame — the defined result AC-2 wants.
+func TestACP_SetMode(t *testing.T) {
+	t.Parallel()
+	h := newACPHarness(t)
+
+	tests := []struct {
+		name      string
+		frame     string
+		wantError bool
+	}{
+		{"pinned mode accepted", `{"jsonrpc":"2.0","id":1,"method":"session/set_mode","params":{"sessionId":"s","modeId":"default"}}`, false},
+		{"other mode rejected", `{"jsonrpc":"2.0","id":2,"method":"session/set_mode","params":{"sessionId":"s","modeId":"plan"}}`, true},
+		{"empty mode rejected", `{"jsonrpc":"2.0","id":3,"method":"session/set_mode","params":{"sessionId":"s","modeId":""}}`, true},
+		{"non-string modeId rejected", `{"jsonrpc":"2.0","id":4,"method":"session/set_mode","params":{"modeId":5}}`, true},
+		{"array params rejected", `{"jsonrpc":"2.0","id":5,"method":"session/set_mode","params":[1,2,3]}`, true},
+	}
+	for _, tt := range tests {
+		h.send(tt.frame)
+		reply, line := h.read()
+		if tt.wantError {
+			if reply.Error == nil {
+				t.Fatalf("%s: want error, got %q", tt.name, line)
+			}
+			if reply.Error.Code != acp.CodeInvalidParams {
+				t.Fatalf("%s: code = %d, want CodeInvalidParams (%d)", tt.name, reply.Error.Code, acp.CodeInvalidParams)
+			}
+			continue
+		}
+		if reply.Error != nil {
+			t.Fatalf("%s: want success, got error %+v", tt.name, *reply.Error)
+		}
+		if !bytes.Contains(line, []byte(`"result":{}`)) {
+			t.Fatalf("%s: want empty result {}, got %q", tt.name, line)
+		}
+	}
+
+	h.shutdown()
+}
+
+// TestACP_SetConfigOption pins AC-2's config half: pyry advertises no configurable
+// options, so every session/set_config_option request is rejected with
+// CodeInvalidParams (the deliberate asymmetry with mode).
+func TestACP_SetConfigOption(t *testing.T) {
+	t.Parallel()
+	h := newACPHarness(t)
+
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"session/set_config_option","params":{"sessionId":"s","key":"anything","value":true}}`)
+	reply, line := h.read()
+	if reply.Error == nil {
+		t.Fatalf("set_config_option: want error, got %q", line)
+	}
+	if reply.Error.Code != acp.CodeInvalidParams {
+		t.Fatalf("set_config_option: code = %d, want CodeInvalidParams (%d)", reply.Error.Code, acp.CodeInvalidParams)
+	}
+
+	h.shutdown()
 }
 
 // handshakeReply is the decode-by-shape view of the single frame the handshake
