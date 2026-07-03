@@ -81,7 +81,7 @@ Ported for self-containment. Source: `agentclientprotocol.com` (JSON-RPC 2.0, li
 - **`session/update` variants** (the `sessionUpdate` discriminant): `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan`, `available_commands_update`, `current_mode_update`, `usage_update`, `config_option_update`.
 - **Tool kinds** (== `turnevent.ToolKind`): `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`, `other`.
 - **Tool statuses** (== `turnevent.ToolStatus`): `pending`, `in_progress`, `completed`, `failed`.
-- **Tool content shapes** (== `turnevent` `content.go`): regular content blocks (text / image / resource) → `TextContent`; diffs (`path, oldText, newText`) → `DiffContent`; terminals (a live `terminalId`) → `TerminalContent`.
+- **Tool content shapes** (== `turnevent` `content.go`): regular content blocks — `text` → `TextContent` (**built**); ACP `image` / `resource` blocks have **no `turnevent` shape yet** (planned — `content.go` only builds text/diff/terminal today); diffs (`path, oldText, newText`) → `DiffContent`; terminals (a live `terminalId`) → `TerminalContent`.
 - **Client→agent methods:** `initialize`, `authenticate`, `session/new`, `session/load`, `session/prompt`, `session/cancel` (notification), `session/set_mode`, `session/set_config_option`.
 - **`stopReason` values** (== `turnevent.TurnEndReason`): `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`.
 - **Agent→client methods:** `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/create`, `terminal/output`, `terminal/release`, `terminal/wait_for_exit`, `terminal/kill`. Of these, `pyry acp` uses only `session/request_permission` (divergence 5).
