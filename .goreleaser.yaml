@@ -52,6 +52,30 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 
+# Sign checksums.txt with the release Ed25519 key so `pyry update` can verify
+# it against the public key baked into the binary
+# (cmd/pyry/update.go:releaseSigningPublicKeyHex) before trusting any digest.
+# `openssl pkeyutl -sign -rawin` over an Ed25519 key emits the raw 64-byte
+# RFC 8032 signature crypto/ed25519.Verify accepts — no envelope, no
+# algorithm tag, no new tooling. The private key is materialized from the
+# PYRY_RELEASE_SIGNING_KEY secret into PYRY_SIGNING_KEY_FILE by the release
+# workflow. See docs/release-tooling.md.
+signs:
+  - id: checksums
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    cmd: openssl
+    args:
+      - pkeyutl
+      - -sign
+      - -inkey
+      - "{{ .Env.PYRY_SIGNING_KEY_FILE }}"
+      - -rawin
+      - -in
+      - "${artifact}"
+      - -out
+      - "${signature}"
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 

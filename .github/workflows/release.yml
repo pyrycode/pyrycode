@@ -40,6 +40,19 @@ jobs:
         with:
           go-version: '1.26.x'
 
+      # Materialize the checksums-signing private key from the repo secret
+      # into an ephemeral file under the runner temp dir (destroyed with the
+      # job). goreleaser's `signs:` block reads it via PYRY_SIGNING_KEY_FILE.
+      # PYRY_RELEASE_SIGNING_KEY is a distinct secret from HOMEBREW_TAP_TOKEN
+      # and must have tighter custody than the release-publishing capability.
+      # See docs/release-tooling.md.
+      - name: Materialize signing key
+        run: |
+          install -m 600 /dev/null "${RUNNER_TEMP}/pyry-signing-key.pem"
+          printf '%s' "${PYRY_RELEASE_SIGNING_KEY}" > "${RUNNER_TEMP}/pyry-signing-key.pem"
+        env:
+          PYRY_RELEASE_SIGNING_KEY: ${{ secrets.PYRY_RELEASE_SIGNING_KEY }}
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -52,3 +65,7 @@ jobs:
           # to pyrycode/homebrew-tap. Create as a repo secret on
           # pyrycode/pyrycode. See docs/release-tooling.md for setup.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # Path to the Ed25519 private key that signs checksums.txt. The
+          # matching public key is baked into the binary. See
+          # docs/release-tooling.md.
+          PYRY_SIGNING_KEY_FILE: ${{ runner.temp }}/pyry-signing-key.pem

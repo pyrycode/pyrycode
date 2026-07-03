@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +20,24 @@ import (
 	"github.com/pyrycode/pyrycode/internal/update"
 )
 
+// releaseSigningPublicKeyHex is the hex-encoded raw 32-byte Ed25519 public
+// key whose private half signs checksums.txt in the release pipeline. Every
+// `pyry update` verifies the downloaded checksums.txt against this key before
+// trusting any digest in it, so a compromised GitHub release or stolen
+// publishing token cannot install attacker-chosen bytes: without the private
+// key an attacker cannot produce a signature that verifies here.
+//
+// Generated with:
+//
+//	openssl genpkey -algorithm ed25519 -out signing_key.pem
+//	openssl pkey -in signing_key.pem -pubout -outform DER | tail -c 32 | xxd -p -c 32
+//
+// The private half lives only as the PYRY_RELEASE_SIGNING_KEY Actions secret
+// on pyrycode/pyrycode — never committed. Regenerating the keypair means
+// updating this constant in the same change (a mismatch makes every update
+// fail closed). See docs/release-tooling.md.
+const releaseSigningPublicKeyHex = "cf38d7cd95ec06b5e42fc254c2958f3160a8fc80ef335ff35acc502aeb66a495"
+
 // runUpdate implements `pyry update`: fetch the latest release, verify the
 // tarball's SHA-256, extract the pyry binary, atomically replace the running
 // binary on disk, and (unless --no-restart is set) restart the managed pyry
@@ -29,6 +49,15 @@ func runUpdate(args []string) error {
 	noRestart := fs.Bool("no-restart", false, "skip daemon restart even if a managed unit is detected")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	signingPubKey, err := hex.DecodeString(releaseSigningPublicKeyHex)
+	if err != nil {
+		return fmt.Errorf("update: signing key: decode hex: %w", err)
+	}
+	if len(signingPubKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("update: signing key: got %d bytes, want %d",
+			len(signingPubKey), ed25519.PublicKeySize)
 	}
 
 	return doUpdate(context.Background(), updateOptions{
@@ -43,6 +72,7 @@ func runUpdate(args []string) error {
 		},
 		executablePath: resolveExecutable,
 		replace:        update.AtomicReplace,
+		signingPubKey:  ed25519.PublicKey(signingPubKey),
 		out:            os.Stdout,
 		checkOnly:      *checkOnly,
 		pinVersion:     *pinVersion,
@@ -64,9 +94,10 @@ func resolveExecutable() string {
 
 // updateOptions bundles the seams the integration test overrides: the
 // fetcher's BaseURL, the release-asset BaseURL template, the executable-path
-// resolver, the AtomicReplace function, the daemon-restart probe and
-// executor, and stdout. Production callers pass real defaults; tests
-// substitute httptest + tempdir equivalents.
+// resolver, the AtomicReplace function, the checksums-signing public key,
+// the daemon-restart probe and executor, and stdout. Production callers pass
+// real defaults; tests substitute httptest + tempdir equivalents (and their
+// own throwaway test key, never the production key).
 type updateOptions struct {
 	currentVersion string
 	goos, goarch   string
@@ -75,6 +106,7 @@ type updateOptions struct {
 	fetcher        *update.Fetcher
 	executablePath func() string
 	replace        func(target string, data []byte, mode os.FileMode) error
+	signingPubKey  ed25519.PublicKey
 	out            io.Writer
 	checkOnly      bool
 	pinVersion     string
@@ -168,6 +200,26 @@ func doUpdate(ctx context.Context, o updateOptions) error {
 	if err != nil {
 		return fmt.Errorf("update: download checksums: %w", err)
 	}
+
+	// Verify checksums.txt against the baked-in signing key *before* any
+	// digest is parsed from it. A missing signature (404) fails closed here
+	// exactly like a missing tarball — there is no unsigned fallback — and a
+	// signature that does not verify aborts before the binary is extracted or
+	// written over the target. Verify over the raw fetched bytes: the
+	// signature covers the exact file GoReleaser signed, so do not trim or
+	// normalize sumsBytes first.
+	fmt.Fprint(o.out, "==> Verifying signature... ")
+	sig, err := o.fetcher.FetchAsset(ctx, checksumsURL+".sig")
+	if err != nil {
+		fmt.Fprintln(o.out, "FAIL")
+		return fmt.Errorf("update: download signature: %w", err)
+	}
+	if err := update.VerifySignature(sumsBytes, sig, o.signingPubKey); err != nil {
+		fmt.Fprintln(o.out, "FAIL")
+		return fmt.Errorf("update: verify signature: %w", err)
+	}
+	fmt.Fprintln(o.out, "ok")
+
 	digest, err := update.ParseChecksumsFile(string(sumsBytes), asset)
 	if err != nil {
 		return fmt.Errorf("update: parse checksums: %w", err)
