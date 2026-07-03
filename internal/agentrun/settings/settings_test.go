@@ -86,7 +86,7 @@ func TestWriteSettings_SingleToolGoldenBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	want := []byte(`{"permissions":{"allow":["Bash"],"defaultMode":"dontAsk"}}` + "\n")
+	want := []byte(`{"permissions":{"allow":["Bash"],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}` + "\n")
 	if string(got) != string(want) {
 		t.Fatalf("bytes mismatch\n got: %q\nwant: %q", got, want)
 	}
@@ -106,7 +106,7 @@ func TestWriteSettings_PreservesOrderAndDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	want := []byte(`{"permissions":{"allow":["Bash","Read","Bash","Edit"],"defaultMode":"dontAsk"}}` + "\n")
+	want := []byte(`{"permissions":{"allow":["Bash","Read","Bash","Edit"],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}` + "\n")
 	if string(got) != string(want) {
 		t.Fatalf("bytes mismatch\n got: %q\nwant: %q", got, want)
 	}
@@ -132,9 +132,13 @@ func TestWriteSettings_RoundTripParseable(t *testing.T) {
 			Allow       []string `json:"allow"`
 			DefaultMode string   `json:"defaultMode"`
 		} `json:"permissions"`
+		EnableAllProjectMcpServers bool `json:"enableAllProjectMcpServers"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !parsed.EnableAllProjectMcpServers {
+		t.Errorf("enableAllProjectMcpServers = false, want true (suppresses claude 2.1.199 MCP-enablement modal)")
 	}
 	if got, want := len(parsed.Permissions.Allow), len(input); got != want {
 		t.Fatalf("allow len = %d, want %d", got, want)

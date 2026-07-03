@@ -21,9 +21,18 @@ import (
 
 // settingsFile and permissions are field-order-load-bearing: Go's struct
 // serialisation produces the canonical
-// {"permissions":{"allow":[...],"defaultMode":"dontAsk"}} byte sequence.
+// {"permissions":{"allow":[...],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}
+// byte sequence.
+//
+// EnableAllProjectMcpServers is always true. It pre-approves the project's MCP
+// servers so claude 2.1.199's startup "N new MCP servers found in this project"
+// enablement modal never renders. Without it the PTY driver false-detects idle
+// on that modal's cursor and the agent hangs on a fresh worktree (tui-driver
+// 2.1.199 spike, 2026-07-03). It enables the servers rather than stripping
+// them, so agents keep codegraph — unlike --strict-mcp-config.
 type settingsFile struct {
-	Permissions permissions `json:"permissions"`
+	Permissions                permissions `json:"permissions"`
+	EnableAllProjectMcpServers bool        `json:"enableAllProjectMcpServers"`
 }
 
 type permissions struct {
@@ -38,7 +47,7 @@ type permissions struct {
 //
 // JSON shape (compact, no whitespace, trailing \n from json.Encoder.Encode):
 //
-//	{"permissions":{"allow":[<allowedTools>],"defaultMode":"dontAsk"}}
+//	{"permissions":{"allow":[<allowedTools>],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}
 //
 // allowedTools is round-tripped verbatim — element order and any duplicates
 // are preserved. The helper performs no deduplication, no sorting, and no
@@ -72,6 +81,7 @@ func WriteSettings(allowedTools []string) (string, error) {
 			Allow:       allowedTools,
 			DefaultMode: "dontAsk",
 		},
+		EnableAllProjectMcpServers: true,
 	}); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpName)
