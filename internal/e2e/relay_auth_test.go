@@ -26,7 +26,7 @@ func TestRelay_AuthReject_4401(t *testing.T) {
 	home := shortHome(t)
 	h := StartInWithEnv(t,
 		home,
-		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
 		"-pyry-relay="+fr.URL()+"/v1/server",
 	)
 	t.Cleanup(func() { h.Stop(t) })

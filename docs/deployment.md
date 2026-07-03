@@ -279,6 +279,8 @@ Note that you have to supply the original claude flags again — pyry does not r
 
 **Pyry logs say "spawning claude" but `pyry attach` produces nothing.** You're attaching to the right pyry, but claude has buffered output and isn't sending it until something changes. Type something — anything from your end of the attach — and claude will respond. This is normal terminal-buffering behavior, not a pyry bug.
 
+**The mobile (or desktop) app connects, then immediately drops and reconnects in a loop.** The relay leg speaks Mobile Protocol v2 (Noise_IK end-to-end encryption). This is the default and the only protocol the mobile and desktop clients speak. If the daemon is forced onto the legacy v1 path (via `PYRY_MOBILE_V2=0` in the unit/plist `Environment`), the client's encrypted handshake is decoded as a plaintext v1 envelope, answered with a v1 error the client cannot parse, so it closes and reconnects forever. The daemon logs `relay: PYRY_MOBILE_V2=0 — legacy v1 dispatch path (DEPRECATED …)` at startup when it is on v1. Fix: remove the `PYRY_MOBILE_V2=0` override so the daemon runs the default v2 path, and restart. (A stale relay deployment that still sends binary WebSocket frames produces the same loop from the other side — redeploy the relay from current `main` if the daemon is already on v2.)
+
 ## See also
 
 - [`guide.md`](guide.md) — full user guide

@@ -72,7 +72,7 @@ func TestRelay_SendMessage_AckAndPTYDelivery(t *testing.T) {
 	t.Cleanup(func() { _ = fr.Close() })
 
 	h := StartRotationWithRelay(t, home, sessionsDir, initialUUID, trigger,
-		stdinLog, fr.URL()+"/v1/server", "PYRY_FAKE_CLAUDE_TUI=1")
+		stdinLog, fr.URL()+"/v1/server", "PYRY_FAKE_CLAUDE_TUI=1", "PYRY_MOBILE_V2=0")
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)

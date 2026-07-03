@@ -309,8 +309,9 @@ func testV2DaemonRequestSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
-// testV2DaemonDisabledDoesNotEngageV2 starts the daemon with the switch unset
-// (v1 default). A phone's noise_init is decoded by the v1 first-frame auth
+// testV2DaemonDisabledDoesNotEngageV2 starts the daemon with the switch
+// explicitly off (PYRY_MOBILE_V2=0). v2 is now the default, so v1 must be
+// opted into. A phone's noise_init is decoded by the v1 first-frame auth
 // gate as an ordinary envelope, the paired token is accepted, and the reply
 // is a v1 hello_ack — never a noise_resp, proving the v2 manager is not
 // engaged. (The unpaired-token 4401 reject is covered by
@@ -332,9 +333,9 @@ func testV2DaemonDisabledDoesNotEngageV2(t *testing.T) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	// Switch unset: no PYRY_MOBILE_V2. Default v1 path, /v1/server route.
+	// Switch off (PYRY_MOBILE_V2=0): legacy v1 path, /v1/server route.
 	h := StartInWithEnv(t, home,
-		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
 		"-pyry-relay="+fr.URL()+"/v1/server",
 	)
 	t.Cleanup(func() { h.Stop(t) })
