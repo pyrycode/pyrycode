@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -12,7 +12,10 @@ which spawns exactly one supervised interactive claude per ACP session. #762 add
 the two **lifecycle** verbs that address a session the host already opened —
 [`session/load`](#sessionload--sessioncancel-762) (resume by id) and
 [`session/cancel`](#sessionload--sessioncancel-762) (a notification that resolves
-onto the session's supervisor for the future abort keystroke).
+onto the session's supervisor for the future abort keystroke). #747 adds the two
+**handshake** methods every connection opens with —
+[`initialize`](#initialize--authenticate-handshake-747) (negotiate protocol
+version, declare pyry's minimal capabilities) and `authenticate` (a no-op stub).
 
 ACP is bidirectional. Inbound: the host writes one JSON object per line to the
 agent's stdin; the agent replies and streams notifications one JSON object per
@@ -360,6 +363,61 @@ unchanged by #761.
 Full detail, concurrency model, and the one-shot bridge-goroutine-leak rationale
 in [`codebase/756.md`](../codebase/756.md).
 
+## `initialize` + `authenticate` handshake (#747)
+
+The two methods every ACP connection opens with, before any session exists.
+`initialize` negotiates the protocol version and declares pyry's capabilities;
+`authenticate` is an optional follow-up. Both are **stateless pure functions** of
+their params — no pool, no goroutines, no shared state — living in a new
+`cmd/pyry/acp_handshake.go` (**package `main`**, not `internal/acp`, keeping the
+transport method-agnostic). `registerHandshake(t)` binds both in `serveACPWithPool`'s
+existing `register` closure, ahead of the `session/*` handlers.
+
+**Divergence 5 is the whole point.** pyry runs claude on the daemon's own machine,
+so it never asks the host to read/write files (`fs/*`) or create terminals
+(`terminal/*`). The handshake declares pyry needs no such client capabilities —
+expressed **structurally, not as a wire field**, because ACP's `InitializeResponse`
+has *no* "agent requires client capability X" field. Two ways: (1) the result
+carries only `protocolVersion` + `agentCapabilities` + `authMethods`, with nowhere
+to request a host capability; (2) pyry issues no `fs/*`/`terminal/*` outbound
+`Call`s. The host's `clientCapabilities` are intentionally **not modelled** in the
+params struct — an unmodelled field is dropped on decode, which *is* "tolerate a
+host that offers fs/terminal and never use them."
+
+- **`SupportedProtocolVersion = 1`, returned unconditionally.** One supported
+  version ⇒ nothing to negotiate; every real client advertises `>= 1`, so `1` is
+  always a valid (`<=` client) response. The `min(client, agent)` clamp is deferred
+  until pyry speaks a second version (evidence-based). Reconcile the literal with
+  ADR #745 (OPEN) when it merges.
+- **`initializeParams` decodes only `protocolVersion`, as a shape gate.** A params
+  value that isn't a JSON object (e.g. an array) fails to unmarshal → `-32602`
+  `CodeInvalidParams`; empty/absent params is tolerated (zero-value defaults).
+- **Minimal-safe agent capabilities — all false today.** ACP capabilities are
+  feature flags, not a method list; core methods (`session/new`, `session/prompt`)
+  are baseline-mandatory and *never* capability-gated. An *optional* flag is turned
+  on only when its backing ticket has landed the full contract. `loadSession: false`
+  and `promptCapabilities.{image,audio,embeddedContext}: false`; `mcpCapabilities` /
+  `set_mode` / `set_config_option` are omitted entirely (backing methods #748/#753
+  not landed). `authMethods` is a non-nil `[]authMethod{}` so it marshals to `[]`,
+  not `null`.
+- **`loadSession` stays `false` despite `session/load` already being registered
+  (#762) — a deliberate, honest under-advertisement.** ACP's `loadSession`
+  capability promises the agent *replays conversation history via `session/update`
+  on load*. That replay is unwired (Phase 2 / #596), so #762's `session/load` is a
+  partial within-process `Lookup`+`Activate`, not the full contract. **Coordination
+  point: #748 flips `loadSession` to `true` when it lands the replay semantics.**
+- **`authenticate` is a no-op stub.** Local `pyry acp` speaks to a co-located,
+  user-launched host over stdio — no token/secret/credential in play — so it ignores
+  params and returns `authenticateResult{}` → `{}` on the wire (object-shaped
+  `AuthenticateResponse`, chosen over `null` for forward-compatibility). A code
+  comment marks the deliberate stub.
+
+Stateless ⇒ the handlers register **without a pool**, which is the structural proof
+of "succeeds before any session exists, holds no session state." **Not
+security-sensitive** — local trusted-host surface; the credential-free stub adds no
+gate and the capability declaration only *minimizes*. Full per-ticket detail in
+[`codebase/747.md`](../codebase/747.md).
+
 ## `session/new` and the embedded pool (#761)
 
 The first ACP method that does real work, plus the composition root it needs: an
@@ -585,12 +643,14 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   [`codebase/756.md`](../codebase/756.md) (`pyry acp` subcommand),
   [`codebase/757.md`](../codebase/757.md) (outbound-request primitive),
   [`codebase/761.md`](../codebase/761.md) (`session/new` + embedded pool),
-  [`codebase/762.md`](../codebase/762.md) (`session/load` + `session/cancel` lifecycle)
+  [`codebase/762.md`](../codebase/762.md) (`session/load` + `session/cancel` lifecycle),
+  [`codebase/747.md`](../codebase/747.md) (`initialize` + `authenticate` handshake)
 - Specs: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md),
   [`specs/architecture/756-acp-subcommand.md`](../../specs/architecture/756-acp-subcommand.md),
   [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md),
   [`specs/architecture/761-acp-session-new-embedded-pool.md`](../../specs/architecture/761-acp-session-new-embedded-pool.md),
-  [`specs/architecture/762-acp-session-load-cancel.md`](../../specs/architecture/762-acp-session-load-cancel.md)
+  [`specs/architecture/762-acp-session-load-cancel.md`](../../specs/architecture/762-acp-session-load-cancel.md),
+  [`specs/architecture/747-acp-initialize-handshake.md`](../../specs/architecture/747-acp-initialize-handshake.md)
 - Cancel abort keystroke (the seam `resolveCancelTarget` exposes): T9
   [#753](https://github.com/pyrycode/pyrycode/issues/753), consuming the neutral
   `Cancel` command from [`turnevent-package.md`](turnevent-package.md) (#707).
