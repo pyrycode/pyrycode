@@ -108,3 +108,69 @@ func registerHandshake(t *acp.Transport) {
 	t.Register("initialize", initializeHandler)
 	t.Register("authenticate", authenticateHandler)
 }
+
+// pinnedModeID is the single session mode pyry acp exposes (ADR 027 Open Item #1,
+// single-mode pin). There is no neutral-model mode source and no tui-driver lever
+// to toggle claude's plan/edit mode, so pyry advertises exactly one mode and offers
+// the host no switch that does nothing.
+const pinnedModeID = "default"
+
+// sessionModeState is the ACP SessionModeState carried by the modes field of the
+// session/new and session/load responses. Under the single-mode pin it always
+// reports the pinned mode as current with a single self-referential entry in
+// availableModes (the faithful "not a switch that does nothing").
+type sessionModeState struct {
+	CurrentModeID  string        `json:"currentModeId"`
+	AvailableModes []sessionMode `json:"availableModes"`
+}
+
+// sessionMode is one entry of sessionModeState.AvailableModes: an ACP SessionMode
+// with a stable id and a human-readable name.
+type sessionMode struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// pinnedModeState builds the advertised single-mode SessionModeState.
+func pinnedModeState() sessionModeState {
+	return sessionModeState{
+		CurrentModeID:  pinnedModeID,
+		AvailableModes: []sessionMode{{ID: pinnedModeID, Name: "Default"}},
+	}
+}
+
+// setModeParams is the subset of the ACP SetSessionModeRequest pyry reads. Only
+// modeId gates the outcome; sessionId is not resolved against the pool because the
+// pin is process-global — the answer is identical for every session (ADR 027).
+type setModeParams struct {
+	SessionID string `json:"sessionId"`
+	ModeID    string `json:"modeId"`
+}
+
+// setModeResult is the empty ACP SetSessionModeResponse: it marshals to {} on
+// accept, matching authenticateResult's all-optional-fields idiom.
+type setModeResult struct{}
+
+// setModeHandler answers session/set_mode under the single-mode pin: it accepts
+// modeId == pinnedModeID as a no-op success ({}) and rejects any other modeId with
+// CodeInvalidParams. Non-object params fail the same decode gate. Stateless — no
+// pool, no session resolution — because the pinned mode is process-global.
+func setModeHandler(_ context.Context, params json.RawMessage) (any, error) {
+	var p setModeParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, acp.NewError(acp.CodeInvalidParams, "invalid params")
+	}
+	if p.ModeID != pinnedModeID {
+		return nil, acp.NewError(acp.CodeInvalidParams, "unsupported session mode")
+	}
+	return setModeResult{}, nil
+}
+
+// setConfigOptionHandler answers session/set_config_option by rejecting every
+// request with CodeInvalidParams: pyry advertises no configurable options, so any
+// option is unknown. This is the deliberate asymmetry with mode (ADR 027 Open Item
+// #1) — pyry has a real, nameable mode but no real config surface — so no params
+// decode is needed.
+func setConfigOptionHandler(_ context.Context, _ json.RawMessage) (any, error) {
+	return nil, acp.NewError(acp.CodeInvalidParams, "no configurable options")
+}

@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -19,7 +19,12 @@ version, declare pyry's minimal capabilities) and `authenticate` (a no-op stub).
 #750 adds the **outbound streaming half** — [`Transport.Notify`](#outbound-notification-primitive-transportnotify-750)
 (the write-only sibling of `Call`) and the stateless
 [`acpTurnStream`](#outbound-streaming-adapter-acpturnstream-750) sink that turns a
-session's neutral turn-event stream into `session/update` notifications.
+session's neutral turn-event stream into `session/update` notifications. #753
+finishes the inbound **control** surface —
+[`session/cancel`](#sessioncancel-actuation--modeconfig-pin-753) now *actuates*
+the interrupt (`SendEsc`) onto #762's resolution seam, and
+[`session/set_mode` / `session/set_config_option`](#sessioncancel-actuation--modeconfig-pin-753)
+get defined answers under a **single-mode pin** (ADR 027 Open Item #1, resolved).
 
 ACP is bidirectional. Inbound: the host writes one JSON object per line to the
 agent's stdin; the agent replies and streams notifications one JSON object per
@@ -38,10 +43,11 @@ generation, a pending-call registry, the blocking `Call`, and routing of inbound
 [`session/new`](#sessionnew-and-the-embedded-pool-761) over an embedded
 `internal/sessions` pool — the subcommand now *drives claude*. #762 added the
 [`session/load` + `session/cancel`](#sessionload--sessioncancel-762) lifecycle
-routing (resume-by-id and the cancel→supervisor resolution seam). Still deferred
-to later epic-#600 tickets: the cancel **abort keystroke** itself (T9, #753), turn
-delivery, and the outbound `session/request_permission` / held-`session/prompt`
-return paths that issue through `Call`.
+routing (resume-by-id and the cancel→supervisor resolution seam); #753 dropped the
+**abort keystroke** onto that seam and added the mode/config pin (below). Still
+deferred to later epic-#600 tickets: turn delivery, and the outbound
+`session/request_permission` / held-`session/prompt` return paths that issue
+through `Call`.
 
 Greenfield, stdlib-only package: imports `bufio`, `context`, `encoding/json`,
 `errors`, `fmt`, `io`, `log/slog`, `sync`, `sync/atomic` — **no repo packages**.
@@ -430,10 +436,14 @@ host that offers fs/terminal and never use them."
   feature flags, not a method list; core methods (`session/new`, `session/prompt`)
   are baseline-mandatory and *never* capability-gated. An *optional* flag is turned
   on only when its backing ticket has landed the full contract. `loadSession: false`
-  and `promptCapabilities.{image,audio,embeddedContext}: false`; `mcpCapabilities` /
-  `set_mode` / `set_config_option` are omitted entirely (backing methods #748/#753
-  not landed). `authMethods` is a non-nil `[]authMethod{}` so it marshals to `[]`,
-  not `null`.
+  and `promptCapabilities.{image,audio,embeddedContext}: false`; `mcpCapabilities`
+  is omitted entirely (backing method #748 not landed), and `set_mode` /
+  `set_config_option` have **no `agentCapabilities` flag at all** — ACP carries no
+  mode/config flag in `initialize`, so #753's single-mode pin is advertised in the
+  `session/new`/`session/load` responses instead (see
+  [session/cancel actuation + mode/config pin](#sessioncancel-actuation--modeconfig-pin-753)),
+  leaving this handshake **unchanged**. `authMethods` is a non-nil `[]authMethod{}`
+  so it marshals to `[]`, not `null`.
 - **`loadSession` stays `false` despite `session/load` already being registered
   (#762) — a deliberate, honest under-advertisement.** ACP's `loadSession`
   capability promises the agent *replays conversation history via `session/update`
@@ -570,9 +580,11 @@ resolveCancelTarget(pool, params) (*supervisor.Supervisor, error)
   = decodeSessionID → pool.Lookup(id) → sess.Supervisor()
 ```
 
-`cancelSessionHandler` calls it and returns `(nil, nil)` on success. **Delivering
-the abort keystroke is T9's (#753) job** — this ticket lands only the resolution
-seam that reaches the per-session `*supervisor.Supervisor`.
+As shipped by #762, `cancelSessionHandler` called the resolver and returned
+`(nil, nil)` on success, landing only the resolution seam to the per-session
+`*supervisor.Supervisor`. **[#753](#sessioncancel-actuation--modeconfig-pin-753)
+now actuates the abort keystroke** (`SendEsc`) on that resolved supervisor — see
+the section below.
 
 **The no-response guarantee is structural, not code.** The transport's
 [`dispatchNotification`](#classification-decision-table-the-core-mechanism)
@@ -671,6 +683,92 @@ need not re-discover it. Every building block #751 needs is shipped:
 no untrusted inbound parsing, no auth/crypto (the inbound handlers #749/#752 carry
 that label). Full per-ticket detail in [`codebase/750.md`](../codebase/750.md).
 
+## `session/cancel` actuation + mode/config pin (#753)
+
+The inbound **control** surface (epic #600 T9). Two independent small changes in
+`cmd/pyry` (`acp.go`, `acp_handshake.go`): `session/cancel` actuates the interrupt
+onto #762's resolution seam, and `session/set_mode` / `session/set_config_option`
+get defined, advertised answers under a **single-mode pin** — resolving
+[ADR 027](../decisions/027-acp-mapping.md) Open Item #1. No new files, no new
+exported types. **Not security-sensitive** — inbound control over local stdio to a
+co-located, user-launched host.
+
+### `session/cancel` → actuate the interrupt
+
+A consumer-declared one-method seam in package `main`, mirroring `relay.Interrupter`,
+keeps the actuation unit-testable while resolution correctness stays in its own
+(#762) test:
+
+```go
+type interrupter interface{ SendEsc() error } // *supervisor.Supervisor satisfies it (#726)
+```
+
+`cancelSessionHandler`'s signature changed from `(pool *sessions.Pool)` to an
+**injected resolver** `(resolve func(json.RawMessage) (interrupter, error))`. On a
+resolve error it returns the error (the notification path logs it once, no frame —
+unchanged from #762); on success it actuates `_ = intr.SendEsc()` **best-effort**
+and returns `(nil, nil)`. `resolveCancelTarget` is **unchanged** (still returns
+`*supervisor.Supervisor`); the composition root wires the resolver and returns a
+**true `nil` interface on error** (`resolveCancelTarget`'s typed
+`*supervisor.Supervisor` would otherwise wrap a nil pointer in a non-nil
+`interrupter`). `SendEsc` is the same lever the mobile `interrupt` / `modal_cancel`
+frames route through (`relay.handleInterrupt`).
+
+**A `SendEsc` failure is swallowed, not returned.** No live turn / mid-teardown
+yields `ErrNoLiveSession`: there is nothing to roll back and a notification owes no
+reply. Returning it would make [`dispatchNotification`](#classification-decision-table-the-core-mechanism)
+log a *second* handler error on the known-id path whenever a session isn't
+keystroke-ready — breaking the `count == 1` assertion of
+`TestACP_SessionCancel_NotificationEmitsNoResponse` and adding non-determinism.
+(Silent-swallow, vs `relay.handleInterrupt`'s `Warn`-then-tolerate — the handler
+has no logger in scope; observability is deferred, evidence-based.) The interrupt
+is **not** routed through the neutral `turnevent.Cancel`
+([turnevent-package.md](turnevent-package.md), #707) — that type is declared
+vocabulary consumers are told not to construct; the handler calls the concrete
+`SendEsc()` lever directly.
+
+### Mode/config — single-mode pin (ADR 027 Open Item #1)
+
+No neutral-model mode source exists, and no tui-driver lever toggles claude's
+plan/edit mode (the [#726](../codebase/726.md) keystroke seam is
+`SendEsc`/`Answer`/`AcceptTrust` only), so a real `set_mode` would need new
+tui-driver + supervisor surface — out of scope. **Decision: pin one mode.**
+
+- **The pin is advertised in the session responses, not the handshake.** ACP
+  `initialize`/`agentCapabilities` has no mode flag, so the ticket's original
+  `acp_handshake.go` advertisement pointer is corrected: `newSessionResult` (shared
+  by `session/new` + `session/load`) gains a `Modes sessionModeState` field,
+  populated from `pinnedModeState()` at both sites — `currentModeId: "default"`
+  with a single self-referential `availableModes` entry. One entry offers a
+  compliant host no alternative to switch to (the faithful "not a switch that does
+  nothing"). The handshake struct is **unchanged**.
+- **`setModeHandler`** (stateless, no pool — the pin is process-global): decode
+  `{sessionId, modeId}`; unmarshal failure → `CodeInvalidParams`; `modeId ==
+  "default"` → empty-`{}` success (`setModeResult{}`); any other `modeId` →
+  `CodeInvalidParams` ("unsupported session mode").
+- **`setConfigOptionHandler`** (stateless): rejects **every** request with
+  `CodeInvalidParams` ("no configurable options") — pyry exposes no config surface.
+  Deliberate asymmetry with mode (a real, nameable mode but no config surface).
+- Both are ACP **requests** carrying an id → `dispatchRequest` writes exactly one
+  response (empty result on accept, or the `CodeInvalidParams` frame). Registered
+  in `serveACPWithPool`'s existing `register` closure alongside the other
+  `session/*` methods.
+
+Because no mode/config ever changes, the sourceless outbound `current_mode_update`
+/ `config_option_update` reflections are **never emitted** — their
+synthesize-vs-omit call stays parked in
+[ADR 027](../decisions/027-acp-mapping.md) Open Item #2 (outbound cluster,
+#750/#769).
+
+### Out of scope
+
+The end-to-end **cancel → `stopReason: cancelled`** assertion is
+[#751](https://github.com/pyrycode/pyrycode/issues/751)'s (T7): the held
+`session/prompt` call is resolved with the mapped stop reason on `TurnEnd`, and
+there is no held prompt to resolve until #749/#765 land. This ticket asserts only
+that the interrupt reaches the supervisor. Full per-ticket detail in
+[`codebase/753.md`](../codebase/753.md).
+
 ## Deferred / scope boundaries
 
 - **Serve-exit pending-call drain** ([#757](https://github.com/pyrycode/pyrycode/issues/757)) —
@@ -756,20 +854,24 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   [`codebase/761.md`](../codebase/761.md) (`session/new` + embedded pool),
   [`codebase/762.md`](../codebase/762.md) (`session/load` + `session/cancel` lifecycle),
   [`codebase/747.md`](../codebase/747.md) (`initialize` + `authenticate` handshake),
-  [`codebase/750.md`](../codebase/750.md) (`Transport.Notify` + outbound streaming adapter)
+  [`codebase/750.md`](../codebase/750.md) (`Transport.Notify` + outbound streaming adapter),
+  [`codebase/753.md`](../codebase/753.md) (`session/cancel` actuation + mode/config pin)
 - Specs: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md),
   [`specs/architecture/756-acp-subcommand.md`](../../specs/architecture/756-acp-subcommand.md),
   [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md),
   [`specs/architecture/761-acp-session-new-embedded-pool.md`](../../specs/architecture/761-acp-session-new-embedded-pool.md),
   [`specs/architecture/762-acp-session-load-cancel.md`](../../specs/architecture/762-acp-session-load-cancel.md),
   [`specs/architecture/747-acp-initialize-handshake.md`](../../specs/architecture/747-acp-initialize-handshake.md),
-  [`specs/architecture/750-acp-outbound-streaming-adapter.md`](../../specs/architecture/750-acp-outbound-streaming-adapter.md)
+  [`specs/architecture/750-acp-outbound-streaming-adapter.md`](../../specs/architecture/750-acp-outbound-streaming-adapter.md),
+  [`specs/architecture/753-acp-cancel-mode-config.md`](../../specs/architecture/753-acp-cancel-mode-config.md)
 - Outbound mapping layer (the pure `MapUpdate` the streaming adapter consumes):
   [`features/acpbridge-package.md`](acpbridge-package.md) (#769),
   [ADR 027](../decisions/027-acp-mapping.md) (§ Outbound table, divergences 1 & 3).
-- Cancel abort keystroke (the seam `resolveCancelTarget` exposes): T9
-  [#753](https://github.com/pyrycode/pyrycode/issues/753), consuming the neutral
-  `Cancel` command from [`turnevent-package.md`](turnevent-package.md) (#707).
+- Cancel abort keystroke (the seam `resolveCancelTarget` exposes) — **built** by
+  T9 [#753](https://github.com/pyrycode/pyrycode/issues/753): `cancelSessionHandler`
+  actuates `SendEsc` best-effort. The neutral `Cancel` command from
+  [`turnevent-package.md`](turnevent-package.md) (#707) is declared vocabulary and
+  deliberately **not** constructed — the handler calls the concrete lever directly.
 - Embedded-pool design: [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md)
   (`BootstrapEvicted` over adopting `Default()`; the `Ready()` correctness gate),
   [`features/sessions-package.md`](sessions-package.md#configbootstrapevicted--poolready-761)
