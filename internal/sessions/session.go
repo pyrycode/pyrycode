@@ -84,6 +84,17 @@ type Session struct {
 	// (test default and operator escape hatch).
 	idleTimeout time.Duration
 
+	// removedCh is closed exactly once by Pool.Remove, after the registry
+	// remove commits. A closed removedCh tells the lifecycle goroutine to
+	// exit its Run loop cleanly (return nil) instead of re-parking in
+	// runEvicted. Write-once: allocated at construction, never reallocated
+	// (unlike activeCh/evictedCh, which swap under lcMu). Readers select/read
+	// it WITHOUT lcMu — it is therefore deliberately outside the lcMu-guarded
+	// block below. A nil channel is a valid "never removed" state (a nil
+	// channel is a never-ready select case), used by any test-constructed
+	// Session that hand-builds a literal.
+	removedCh chan struct{}
+
 	// Lifecycle state, attach bookkeeping, and Activate/Evict signalling.
 	// lcMu protects all fields below it.
 	lcMu         sync.Mutex
@@ -309,6 +320,13 @@ func (s *Session) Run(ctx context.Context) error {
 			if err := s.runEvicted(ctx); err != nil {
 				return err
 			}
+			if s.isRemoved() {
+				// Pool.Remove signalled removal: exit the lifecycle goroutine
+				// with nil so the pool's shared errgroup does NOT cancel gctx
+				// and tear down every other session plus the relay leg. Only a
+				// genuine ctx.Done() (pool shutdown) returns ctx.Err() above.
+				return nil
+			}
 			if err := s.transitionTo(stateActive); err != nil {
 				// Non-fatal, same reasoning as the evict transition above:
 				// memory is already authoritative, the next transition
@@ -328,6 +346,19 @@ func (s *Session) snapshotState() lifecycleState {
 	s.lcMu.Lock()
 	defer s.lcMu.Unlock()
 	return s.lcState
+}
+
+// isRemoved reports whether Pool.Remove has closed removedCh. Non-blocking; no
+// lcMu (removedCh is write-once and never reopens, so the read is race-free and
+// deterministic). A nil removedCh — a never-removed test literal — is a
+// never-ready channel, so the default arm returns false.
+func (s *Session) isRemoved() bool {
+	select {
+	case <-s.removedCh:
+		return true
+	default:
+		return false
+	}
 }
 
 // runActive supervises the session while it is active: spawns the supervisor
@@ -416,6 +447,12 @@ func (s *Session) runEvicted(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-s.removedCh:
+		// Pool.Remove closed removedCh. Return nil; Run's isRemoved() check
+		// turns this into a clean exit (no errgroup error). A concurrent
+		// activateCh signal loses: Run re-checks isRemoved() before
+		// re-activating, so a removed session can never resurrect.
+		return nil
 	case <-s.activateCh:
 		return nil
 	}

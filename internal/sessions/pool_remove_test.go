@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"syscall"
 	"testing"
@@ -575,6 +576,172 @@ func TestPool_Remove_Purge_AbsentNoop(t *testing.T) {
 	}
 	if reg == nil || len(reg.Sessions) != 1 {
 		t.Fatalf("registry sessions = %+v, want 1 (bootstrap only)", reg)
+	}
+}
+
+// TestPool_Remove_NoCollateralTeardown (AC-2): removing one session must not
+// tear down any other live session, the bootstrap, or the pool itself. The
+// removed Run returns nil, so the pool's shared errgroup never cancels gctx.
+// This drives pool.Run manually so it can assert the background Run goroutine
+// is still blocked (no errgroup propagation) after the Remove.
+func TestPool_Remove_NoCollateralTeardown(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	pool := helperPoolCreate(t, regPath, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- pool.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(15 * time.Second):
+			t.Error("pool.Run did not exit within 15s after cancel")
+		}
+	})
+	if !pollUntil(t, 2*time.Second, func() bool {
+		pool.mu.RLock()
+		ready := pool.runGroup != nil
+		pool.mu.RUnlock()
+		return ready
+	}) {
+		t.Fatal("pool.Run did not wire runGroup within 2s")
+	}
+
+	if !pollUntil(t, 5*time.Second, func() bool {
+		return pool.Default().State().ChildPID > 0
+	}) {
+		t.Fatal("bootstrap never spawned")
+	}
+
+	// Two non-bootstrap sessions, both active (activeCap 0 = no eviction).
+	victimID, err := pool.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create(victim): %v", err)
+	}
+	survivorID, err := pool.Create(ctx, "")
+	if err != nil {
+		t.Fatalf("Create(survivor): %v", err)
+	}
+	survivor, err := pool.Lookup(survivorID)
+	if err != nil {
+		t.Fatalf("Lookup(survivor): %v", err)
+	}
+	if !pollUntil(t, 5*time.Second, func() bool {
+		return survivor.State().ChildPID > 0 && survivor.LifecycleState() == stateActive
+	}) {
+		t.Fatalf("survivor never reached active+spawned; state=%+v lc=%v",
+			survivor.State(), survivor.LifecycleState())
+	}
+	survivorPID := survivor.State().ChildPID
+
+	if err := pool.Remove(ctx, victimID, RemoveOptions{}); err != nil {
+		t.Fatalf("Remove(victim): %v", err)
+	}
+
+	// The survivor's child is untouched and still active.
+	if got := survivor.State().ChildPID; got != survivorPID {
+		t.Errorf("survivor ChildPID = %d after Remove, want %d (unchanged)", got, survivorPID)
+	}
+	if got := survivor.LifecycleState(); got != stateActive {
+		t.Errorf("survivor LifecycleState = %v after Remove, want stateActive", got)
+	}
+	if !processAlive(survivorPID) {
+		t.Errorf("survivor child pid %d dead after removing a sibling", survivorPID)
+	}
+
+	// The bootstrap is untouched.
+	if got := pool.Default().State().ChildPID; got <= 0 {
+		t.Errorf("bootstrap ChildPID = %d after Remove, want > 0", got)
+	}
+	if got := pool.Default().LifecycleState(); got != stateActive {
+		t.Errorf("bootstrap LifecycleState = %v after Remove, want stateActive", got)
+	}
+
+	// The pool itself is still running: the removed Run returned nil, so the
+	// shared errgroup did not propagate an error and pool.Run is still blocked.
+	select {
+	case err := <-runErr:
+		t.Fatalf("pool.Run returned after Remove (err=%v); a removed Run propagated through the errgroup", err)
+	default:
+	}
+}
+
+// TestPool_Remove_NoGoroutineLeak (AC-3): repeated create+remove cycles must
+// return the process goroutine count to a stable baseline — no linear growth
+// per remove, confirming each removed session's lifecycle goroutine (and the
+// supervisor/bridge/logger it captures) is released promptly. Not t.Parallel():
+// runtime.NumGoroutine is process-global.
+func TestPool_Remove_NoGoroutineLeak(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	pool := helperPoolCreate(t, regPath, 0)
+	ctx, _ := runPoolInBackground(t, pool)
+
+	if !pollUntil(t, 5*time.Second, func() bool {
+		return pool.Default().State().ChildPID > 0
+	}) {
+		t.Fatal("bootstrap never spawned")
+	}
+
+	// One create+remove cycle for its own poll helper: brings the pool to
+	// steady state so the baseline reflects all long-lived goroutines.
+	cycle := func() {
+		id, err := pool.Create(ctx, "")
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		sess, err := pool.Lookup(id)
+		if err != nil {
+			t.Fatalf("Lookup(%s): %v", id, err)
+		}
+		if !pollUntil(t, 5*time.Second, func() bool {
+			return sess.State().ChildPID > 0 && sess.LifecycleState() == stateActive
+		}) {
+			t.Fatalf("session %s never reached active+spawned", id)
+		}
+		if err := pool.Remove(ctx, id, RemoveOptions{}); err != nil {
+			t.Fatalf("Remove(%s): %v", id, err)
+		}
+		if !pollUntil(t, 5*time.Second, func() bool {
+			_, err := pool.Lookup(id)
+			return errors.Is(err, ErrSessionNotFound)
+		}) {
+			t.Fatalf("session %s still Lookup-able after Remove", id)
+		}
+	}
+
+	// Warm up, then settle and record the baseline after the first cycle's
+	// steady-state goroutines exist.
+	cycle()
+	settle := func() {
+		for i := 0; i < 5; i++ {
+			runtime.GC()
+			runtime.Gosched()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	settle()
+	baseline := runtime.NumGoroutine()
+
+	const cycles = 20
+	for i := 0; i < cycles; i++ {
+		cycle()
+	}
+
+	// Poll-until-settle: child SIGKILL + Wait + goroutine teardown is async, so
+	// a fixed sleep would flake. If the lifecycle goroutines were leaking, the
+	// count would climb toward baseline+cycles and never settle here.
+	const jitter = 3
+	if !pollUntil(t, 10*time.Second, func() bool {
+		settle()
+		return runtime.NumGoroutine() <= baseline+jitter
+	}) {
+		t.Fatalf("goroutine leak: baseline=%d now=%d after %d create+remove cycles (want <= baseline+%d)",
+			baseline, runtime.NumGoroutine(), cycles, jitter)
 	}
 }
 
