@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -16,6 +16,10 @@ onto the session's supervisor for the future abort keystroke). #747 adds the two
 **handshake** methods every connection opens with —
 [`initialize`](#initialize--authenticate-handshake-747) (negotiate protocol
 version, declare pyry's minimal capabilities) and `authenticate` (a no-op stub).
+#750 adds the **outbound streaming half** — [`Transport.Notify`](#outbound-notification-primitive-transportnotify-750)
+(the write-only sibling of `Call`) and the stateless
+[`acpTurnStream`](#outbound-streaming-adapter-acpturnstream-750) sink that turns a
+session's neutral turn-event stream into `session/update` notifications.
 
 ACP is bidirectional. Inbound: the host writes one JSON object per line to the
 agent's stdin; the agent replies and streams notifications one JSON object per
@@ -330,6 +334,36 @@ additive, no wire change.
 
 Full per-ticket detail: [`codebase/757.md`](../codebase/757.md).
 
+## Outbound-notification primitive (`Transport.Notify`) (#750)
+
+`session/update` is a JSON-RPC **notification** — a method + params with **no
+`id`** and no response — so `Call`'s request/pending machinery does not fit. #750
+adds `Notify`, `Call`'s write-only sibling, in a **new file** `internal/acp/notify.go`
+(zero edits to `acp.go`, keeping the package conflict-free with the in-flight
+#765 branch — the same "new outbound concern → new file" precedent as `Call`'s
+future `responder.go`).
+
+```go
+func (t *Transport) Notify(method string, params any) error
+```
+
+- **Marshal `params` first**: nil → the `params` key is omitted; a marshal failure
+  returns a wrapped error and **writes nothing** (no partial frame). Then one
+  `writeMessage` under `writeMu` — the same leaf lock serialising `reply` and
+  `Call`. Adding a third outbound writer is safe by the existing discipline
+  (`writeMu` is never held across a handler call or a read).
+- **A distinct unexported `notification` wire struct** (`{jsonrpc, method,
+  params omitempty}`) is required because `request.ID` is a **non-omitempty
+  `uint64`** and would always serialise an `id` — which a notification must never
+  carry. `request` cannot be reused.
+- Never awaits a response; safe from any goroutine. **Zero new exported types**
+  (`Notify` is a method; `notification` is unexported).
+
+The sole caller is the streaming adapter below; the unit tests
+(`notify_test.go`) are the contract — a generic-map decode asserts `id` is
+**absent** (not `0`), nil-params omission, and no partial frame on marshal
+failure.
+
 ## Subcommand: `pyry acp` (#756)
 
 The composition root that serves this transport over real stdio ships in
@@ -560,6 +594,83 @@ already in memory. Cross-process reload (an id a prior process created) would ne
 Not security-sensitive — resolves *existing* ids only, accepts no caller path.
 Full per-ticket detail in [`codebase/762.md`](../codebase/762.md).
 
+## Outbound streaming adapter (`acpTurnStream`) (#750)
+
+The **streaming consumer** (epic #600 T6) that turns a session's neutral
+[`turnevent.Event`](turnevent-package.md) stream into `session/update`
+notifications. It lives in `cmd/pyry/acp_turn_stream.go` (**package `main`**,
+keeping `internal/acp` method-agnostic) and is the ACP analogue of the mobile
+head's `interactiveTurnEmitterV2` — but **far thinner**: ACP's host owns the
+spinner and turn pacing, so none of the mobile emitter's lifecycle machine,
+delta coalescing, capability fan-out, replay ring, or conversation cursor apply.
+The mapping half is [#769](acpbridge-package.md)'s pure `acpbridge.MapUpdate`;
+this ticket owns the subscription sink, the transport emit, `TurnEnd`→T7
+signalling, and `Stall`→stderr.
+
+`acpTurnStream` is a **stateless sink** — no per-event state, no goroutine, no
+clock read. Its `Handle(ev turnevent.Event)` signature **is**
+`turnbridge.Config.OnEvent` exactly, so the turn owner
+([#751](https://github.com/pyrycode/pyrycode/issues/751)/T7) wires
+`OnEvent: stream.Handle` with no closure. `turnbridge` invokes `Handle` serially
+on its single `Run` goroutine, so no synchronisation is needed.
+
+### `Handle` dispatch (ADR 027 divergences 1 & 3)
+
+`TurnEnd` and `Stall` are type-switched **explicitly, before** `MapUpdate`,
+because `MapUpdate` collapses both to `ok == false` and the adapter must
+distinguish them (a signal vs a stderr drop):
+
+| Event | Action |
+|---|---|
+| `TurnEnd{Reason}` | **No** `session/update` (divergence 1). Call `onTurnEnd(string(Reason))` — the ACP `stopReason` **is** `string(Reason)` by identity (`TurnEndReason` values already are the ACP strings). |
+| `Stall{}` | **No** `session/update` (divergence 3). `logger.Warn` on stderr, content-free (`event`, `session_id` only). |
+| `TextChunk` / `ThoughtChunk` / `ToolStart` / `ToolUpdate` | `acpbridge.MapUpdate(ev)` → `Transport.Notify(MethodSessionUpdate, sessionUpdateParams{sessionID, update})`. |
+| nil / future variant | `MapUpdate` returns `ok == false` → defensive `Debug`-logged drop (unreachable for the four above). |
+
+`sessionUpdateParams{SessionID, Update}` is the `{sessionId, update}` params
+wrapper — **this consumer's**, not `acpbridge`'s (the mapper is pure
+value-to-value; session addressing is the consumer's). The `sessionUpdate`
+discriminant rides *inside* `Update`.
+
+### `TurnEnd` → the T7 (#751) signal seam
+
+`onTurnEnd func(reason string)` is invoked **synchronously on the producer's
+single `Run` goroutine** when `TurnEnd` arrives. #751 supplies a callback that
+resolves the held `session/prompt` call with `reason` as the `stopReason`; **that
+callback must not block** the producer goroutine (buffered hand-off or immediate
+resolve — e.g. #765's `Responder`). A callback (not a channel) keeps #750
+agnostic about #751's hold-and-resolve mechanism. `onTurnEnd` is **nil-tolerant**
+(Debug-log + no-op) so the adapter can be constructed for pure emit tests.
+
+### Chunk grouping is arrival order, not coalescing
+
+The `msgID` from `MapUpdate` is intentionally **discarded**. ACP's
+`agent_message_chunk` carries content only — there is no per-message wire
+delimiter — so chunks sharing a `MessageID` stream as **separate**
+`agent_message_chunk` notifications *in arrival order* and the host concatenates
+them. The adapter is stateless w.r.t. `MessageID` and does **not** coalesce
+(contrast the mobile emitter's `MessageID`-keyed delta coalescing, #609, which
+ACP neither needs nor supports).
+
+### Producer wiring is #751's (the flagged finding)
+
+`acpTurnStream` is a pure **sink**, unit-tested against a scripted
+`turnevent.Event` sequence — no live producer or claude. Standing up a
+`turnbridge` producer over a session's supervisor and feeding this sink belongs to
+the `session/prompt` turn owner (#751/T7), because streaming happens *inside* the
+held `session/prompt` call (divergence 1). **#761's embedded pool does NOT wire a
+producer for ACP sessions** (`session/new` just calls `pool.Create`; the producer
+is wired only for the mobile head, in `runSupervisor`) — recorded here so #751
+need not re-discover it. Every building block #751 needs is shipped:
+`sess.Supervisor()` satisfies `turnbridge.SessionHost`;
+`turnbridge.NewTargetSubscriber` with a fixed-session by-id `TargetResolver`
+(`Switch: nil` — ACP has no active-conversation follow);
+`sessions.DefaultClaudeSessionsDir(bootstrapWorkdir)` as the JSONL dir.
+
+**Not security-sensitive** — outbound-only over local stdio to the host process,
+no untrusted inbound parsing, no auth/crypto (the inbound handlers #749/#752 carry
+that label). Full per-ticket detail in [`codebase/750.md`](../codebase/750.md).
+
 ## Deferred / scope boundaries
 
 - **Serve-exit pending-call drain** ([#757](https://github.com/pyrycode/pyrycode/issues/757)) —
@@ -644,13 +755,18 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   [`codebase/757.md`](../codebase/757.md) (outbound-request primitive),
   [`codebase/761.md`](../codebase/761.md) (`session/new` + embedded pool),
   [`codebase/762.md`](../codebase/762.md) (`session/load` + `session/cancel` lifecycle),
-  [`codebase/747.md`](../codebase/747.md) (`initialize` + `authenticate` handshake)
+  [`codebase/747.md`](../codebase/747.md) (`initialize` + `authenticate` handshake),
+  [`codebase/750.md`](../codebase/750.md) (`Transport.Notify` + outbound streaming adapter)
 - Specs: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md),
   [`specs/architecture/756-acp-subcommand.md`](../../specs/architecture/756-acp-subcommand.md),
   [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md),
   [`specs/architecture/761-acp-session-new-embedded-pool.md`](../../specs/architecture/761-acp-session-new-embedded-pool.md),
   [`specs/architecture/762-acp-session-load-cancel.md`](../../specs/architecture/762-acp-session-load-cancel.md),
-  [`specs/architecture/747-acp-initialize-handshake.md`](../../specs/architecture/747-acp-initialize-handshake.md)
+  [`specs/architecture/747-acp-initialize-handshake.md`](../../specs/architecture/747-acp-initialize-handshake.md),
+  [`specs/architecture/750-acp-outbound-streaming-adapter.md`](../../specs/architecture/750-acp-outbound-streaming-adapter.md)
+- Outbound mapping layer (the pure `MapUpdate` the streaming adapter consumes):
+  [`features/acpbridge-package.md`](acpbridge-package.md) (#769),
+  [ADR 027](../decisions/027-acp-mapping.md) (§ Outbound table, divergences 1 & 3).
 - Cancel abort keystroke (the seam `resolveCancelTarget` exposes): T9
   [#753](https://github.com/pyrycode/pyrycode/issues/753), consuming the neutral
   `Cancel` command from [`turnevent-package.md`](turnevent-package.md) (#707).

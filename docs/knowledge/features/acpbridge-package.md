@@ -14,11 +14,12 @@ payload; and where the mobile adapter **drops** `ThoughtChunk`, ACP **maps** it
 reference) is the authoritative mapping contract this package implements. It is
 the **pure value-to-value layer** of the ACP adapter (ticket #769, split from the
 streaming consumer #750); everything stateful — which session an update belongs
-to, holding the `session/prompt` call open for `TurnEnd`, writing `Stall` to
+to, signalling `TurnEnd` to the held `session/prompt` call, writing `Stall` to
 stderr, grouping chunks into a message — is the **consumer's** job
-([#750](https://github.com/pyrycode/pyrycode/issues/750), blocked on this and not
-yet built). Keeping those out is what makes `MapUpdate` table-testable and
-isolates it from the ACP session lifecycle.
+([#750](https://github.com/pyrycode/pyrycode/issues/750), now built:
+[acp-package.md § Outbound streaming adapter](acp-package.md#outbound-streaming-adapter-acpturnstream-750)).
+Keeping those out is what makes `MapUpdate` table-testable and isolates it from
+the ACP session lifecycle.
 
 - Spec: [`specs/architecture/769-acp-outbound-mapper.md`](../../specs/architecture/769-acp-outbound-mapper.md).
 - Ticket record: [codebase/769.md](../codebase/769.md).
@@ -218,14 +219,21 @@ this package would track data lineage rather than a security-relevant design
 decision — the same posture as [`turnbridge`](turnbridge-package.md#not-security-sensitive)'s
 outbound half.
 
-## Consumer (deferred — not built here)
+## Consumer (built — #750)
 
-The **streaming adapter #750** subscribes to a session's `turnevent` stream, calls
-`MapUpdate(ev)` per event, and — on `ok` — wraps the payload in a `session/update`
-notification (`params = {sessionId: <consumer-owned>, update}`, using `msgID` for
-its own chunk grouping); on `!ok` it resolves the held `session/prompt` with the
-`TurnEnd` stopReason (via the T7 primitive #751) or writes the `Stall` to stderr.
-#750 is blocked on this ticket and not yet built.
+The **streaming adapter [#750](https://github.com/pyrycode/pyrycode/issues/750)**
+(now built — see
+[acp-package.md § Outbound streaming adapter](acp-package.md#outbound-streaming-adapter-acpturnstream-750))
+subscribes to a session's `turnevent` stream, calls `MapUpdate(ev)` per event,
+and — on `ok` — wraps the payload in a `session/update` notification
+(`params = {sessionId: <consumer-owned>, update}` via the new `Transport.Notify`).
+It **discards `msgID`**: ACP has no per-message wire delimiter, so chunks sharing a
+`MessageID` stream as separate `agent_message_chunk` notifications in arrival order
+and the host concatenates them (no coalescing). On `!ok` the adapter type-switches
+`TurnEnd` (→ signals the T7 owner #751 to resolve the held `session/prompt` with
+`string(Reason)` as the stopReason) vs `Stall` (→ stderr) **before** `MapUpdate`,
+since `MapUpdate` collapses both to `ok == false`. Producer wiring (the
+`turnbridge` producer over the session's supervisor) is #751's, not built here.
 
 ## Related
 
@@ -240,13 +248,13 @@ its own chunk grouping); on `!ok` it resolves the held `session/prompt` with the
   template: same `turnevent` source, v2-envelope framing, `ThoughtChunk` dropped
   (the divergence this package reverses). Shares the exhaustive-sealed-switch +
   pure-value-to-value discipline.
-- [acp-package.md](acp-package.md) (#755/#756/#757/#761/#762/#747) — the sealed
-  JSON-RPC transport floor this package deliberately does **not** import; the
-  consumer #750 will drive `session/update` frames through it.
+- [acp-package.md](acp-package.md) (#755/#756/#757/#761/#762/#747/#750) — the
+  sealed JSON-RPC transport floor this package deliberately does **not** import;
+  the consumer #750 drives `session/update` frames through it via `Transport.Notify`.
 - [modalbridge-package.md](modalbridge-package.md) — sibling `*bridge` adapter
   over `turnevent` (the outbound modal surface); same import-discipline framing.
-- Consumer: [#750](https://github.com/pyrycode/pyrycode/issues/750) (streaming
-  adapter, blocked on this); T7 held-`session/prompt` primitive
+- Consumer: [codebase/750.md](../codebase/750.md) (the streaming adapter, built);
+  T7 held-`session/prompt` primitive
   [#751](https://github.com/pyrycode/pyrycode/issues/751).
 </content>
 </invoke>
