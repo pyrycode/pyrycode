@@ -1,6 +1,6 @@
-# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, restart-command detection, HTTP fetcher, tar.gz extraction, atomic in-place replace
+# `internal/update` — release parsing, version comparison, asset naming, SHA-256 verification, Ed25519 signature verification, restart-command detection, HTTP fetcher, tar.gz extraction, atomic in-place replace
 
-Pyrycode's self-update logic (`pyry update`), assembled across several pure-function tickets, one network-I/O ticket, and one disk-I/O ticket. #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 added restart-command detection; #182 added the HTTP fetcher; #186 added tar.gz binary extraction; #187 adds the atomic write-temp + fsync + rename primitive that swaps the installed binary on disk. The restart probe and `pyry update` CLI verb land in sister tickets.
+Pyrycode's self-update logic (`pyry update`), assembled across several pure-function tickets, one network-I/O ticket, and one disk-I/O ticket. #179 landed the JSON parser + semver comparator; #180 added asset-name templating + checksum parsing + verification; #181 added restart-command detection; #182 added the HTTP fetcher; #186 added tar.gz binary extraction; #187 adds the atomic write-temp + fsync + rename primitive that swaps the installed binary on disk; #776 added detached Ed25519 signature verification over `checksums.txt`. The restart probe and `pyry update` CLI verb land in sister tickets.
 
 ## What it does
 
@@ -14,6 +14,10 @@ Pyrycode's self-update logic (`pyry update`), assembled across several pure-func
 - `AssetName(version, goos, goarch string) (string, error)` — returns the GoReleaser-produced tarball filename, e.g. `AssetName("v0.9.1", "darwin", "arm64")` → `"pyry_0.9.1_Darwin_arm64.tar.gz"`. Strips a leading `v`; only the four `linux/darwin × amd64/arm64` combos built by `.goreleaser.yaml` are supported.
 - `ParseChecksumsFile(text, assetName string) (string, error)` — given a GoReleaser-produced `checksums.txt` body and a target asset name, returns the lowercase SHA-256 hex digest for that asset.
 - `VerifySHA256(data []byte, expectedHex string) error` — returns `nil` iff `sha256(data)` lowercase-hex equals `expectedHex`. Mismatch error includes both digests for diagnostic logging.
+
+### Detached signature verification (#776)
+
+- `VerifySignature(data, sig []byte, pub ed25519.PublicKey) error` — returns `nil` iff `pub` is exactly `ed25519.PublicKeySize` (32) bytes, `sig` is exactly `ed25519.SignatureSize` (64) bytes, and `ed25519.Verify(pub, data, sig)` is true. A pure, stdlib-only function (`crypto/ed25519`) — no I/O, no goroutines, no `context.Context`. For `pyry update`, `data` is the raw bytes of `checksums.txt` and `sig` is the raw RFC 8032 signature served at `checksums.txt.sig`. There is no envelope, algorithm tag, or key id — a single algorithm and a single trust root means no algorithm-confusion / downgrade vector (see [ADR 028](../decisions/028-ed25519-checksums-signature.md)). Wraps `ErrInvalidPublicKey` on a wrong-length key and `ErrInvalidSignature` on a wrong-length or non-verifying signature; the length checks run **before** `ed25519.Verify` so a malformed key/sig yields a sentinel error instead of a panic.
 
 ### Restart-command detection (#181)
 
@@ -34,7 +38,7 @@ Pyrycode's self-update logic (`pyry update`), assembled across several pure-func
 
 - `AtomicReplace(targetPath string, newData []byte, mode os.FileMode) error` — overwrites `targetPath` with `newData` using the standard POSIX write-temp + fsync + rename dance: `os.CreateTemp` in `filepath.Dir(targetPath)`, write, fchmod to the requested mode, fsync, close, `os.Rename` over the target. SIGKILL anywhere before the rename leaves the original file untouched; after the rename, the new bytes are durable. Temp file is unconditionally removed on any error path before the successful rename.
 
-The seven pure functions (`ParseLatestRelease`, `CompareVersions`, `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `DetectRestartCommand`, `ExtractBinary`) are stdlib-only and side-effect-free — no I/O, no goroutines, no `context.Context`. The `Fetcher` adds two stdlib-only methods that perform HTTP I/O. `AtomicReplace` is the first member of the package to perform disk I/O — also stdlib-only, also no goroutines or `context.Context`.
+The eight pure functions (`ParseLatestRelease`, `CompareVersions`, `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `VerifySignature`, `DetectRestartCommand`, `ExtractBinary`) are stdlib-only and side-effect-free — no I/O, no goroutines, no `context.Context`. The `Fetcher` adds two stdlib-only methods that perform HTTP I/O. `AtomicReplace` is the first member of the package to perform disk I/O — also stdlib-only, also no goroutines or `context.Context`.
 
 ## Types & errors
 
@@ -55,7 +59,11 @@ var ErrMalformedChecksums   = errors.New("malformed checksums file")
 var ErrChecksumMismatch     = errors.New("sha256 checksum mismatch")
 var ErrBinaryNotInArchive   = errors.New("binary not found in archive")
 var ErrMalformedArchive     = errors.New("malformed tar.gz archive")
+var ErrInvalidSignature     = errors.New("checksums signature verification failed")
+var ErrInvalidPublicKey     = errors.New("invalid signing public key")
 ```
+
+`ErrInvalidSignature` covers both a wrong-length signature and a non-verifying one — a caller only ever branches "signed correctly vs not", so one sentinel suffices. `ErrInvalidPublicKey` is the defensive guard against a malformed baked-in key constant (see [Signature verification](#signature-verification) below).
 
 The fetcher introduces no new sentinel errors — the wiring ticket cannot retry (forbidden by AC) and therefore cannot branch on transient-vs-permanent, so a typed sentinel would be unused. Non-2xx responses surface as `fmt.Errorf("GET %s: unexpected status %d", url, resp.StatusCode)` (no `%w` — no inner error). Transport failures wrap the underlying `*url.Error`, which already participates in `errors.Is` traversal for `context.Canceled` / `context.DeadlineExceeded`. If a future caller needs typed branching, add `ErrUnexpectedStatus` then — defer until observed.
 
@@ -198,6 +206,23 @@ Takes `[]byte`, not `io.Reader`. The wiring ticket already needs the full tarbal
 
 `crypto/sha256.Sum256` returns `[32]byte`; `hex.EncodeToString(sum[:])` produces 64 lowercase hex chars. No allocation beyond the result string. `strings.EqualFold` accepts mixed-case `expectedHex` cheaply; the error message normalises both to lowercase so logs are consistent regardless of input casing.
 
+### Signature verification
+
+| Input | Outcome |
+|-------|---------|
+| Valid raw Ed25519 sig over `data`, correct 32-byte `pub` | `nil` |
+| Tampered `data` (a byte flipped after signing) | `ErrInvalidSignature` |
+| Correct-length sig, wrong public key | `ErrInvalidSignature` |
+| Truncated / over-length `sig` (≠ 64 bytes) | `ErrInvalidSignature` — **not a panic** |
+| Wrong-length `pub` (≠ 32 bytes, e.g. 31) | `ErrInvalidPublicKey` — **not a panic** |
+| Empty `data` with a valid sig over empty | `nil` (canonical edge) |
+
+The signature is a **raw 64-byte RFC 8032 Ed25519 signature** over the exact bytes of `data` — no minisign-style envelope, no algorithm tag, no key id, no BLAKE2b prehash. `pyry update` controls both ends of this wire (this repo both produces the release and consumes it), so an envelope buys nothing; a raw signature carries no algorithm field and therefore no algorithm-confusion / downgrade vector. Full rationale in [ADR 028](../decisions/028-ed25519-checksums-signature.md).
+
+The length checks run **before** `ed25519.Verify` because `ed25519.Verify` *panics* on a wrong-length public key. Guarding first turns a malformed baked-in key constant (or a garbage `.sig` body) into a returned sentinel error rather than a crash. The error strings are clean sentinel-carriers — they name the expected/actual byte lengths but never include the signature or key bytes.
+
+The signing side of this wire lives in CI: `.goreleaser.yaml`'s `signs:` block runs `openssl pkeyutl -sign -rawin` over the release Ed25519 key, which emits exactly the raw signature `ed25519.Verify` accepts. Because Ed25519 signatures are deterministic and canonical, the OpenSSL output is byte-identical to `crypto/ed25519.Sign` for the same key+message — so tests that sign fixtures in-process with `ed25519.Sign` exercise the exact production verify path.
+
 ### HTTP fetcher
 
 | Trigger | Returned error |
@@ -236,6 +261,12 @@ GitHub API
                                        Older/Same/Newer                  assetName string
                                                                               │
                                 Fetcher.FetchAsset(ctx, <release>/checksums.txt)
+                                                                              │
+                                Fetcher.FetchAsset(ctx, <release>/checksums.txt.sig)
+                                                                              │
+                                                                              ▼
+                          VerifySignature(checksumsBytes, sig, releaseSigningPublicKey)
+                                              [gate — aborts before any digest is parsed]
                                                                               │
                                                                               ▼
                                                       ParseChecksumsFile(body, assetName)
@@ -278,6 +309,8 @@ The pure functions hold no state. The fetcher is also stateless across calls: ea
 - `internal/update/version_test.go` — table-driven coverage for the two #179 functions (~155 LOC, two `t.Parallel` tables).
 - `internal/update/checksum.go` — `AssetName`, `ParseChecksumsFile`, `VerifySHA256`, `ErrUnsupportedPlatform`, `ErrAssetNotInChecksums`, `ErrMalformedChecksums`, `ErrChecksumMismatch`, plus the `osTitles` / `archNames` lookup tables (~102 LOC). No package-doc comment — `version.go` already covers the package.
 - `internal/update/checksum_test.go` — table-driven coverage for the three #180 functions (~219 LOC, three `t.Parallel` tables).
+- `internal/update/signature.go` — `VerifySignature`, `ErrInvalidSignature`, `ErrInvalidPublicKey` (#776, ~47 LOC). Stdlib-only (`crypto/ed25519`, `errors`, `fmt`); pure function, sibling to `checksum.go`'s shape.
+- `internal/update/signature_test.go` — table-driven coverage (#776, ~145 LOC, `t.Parallel`): valid, tampered data, wrong key, truncated/over-length sig, wrong-length key (panic guard), empty-data edge. Fixtures via `ed25519.GenerateKey` / `ed25519.NewKeyFromSeed` in-test.
 - `internal/update/restart.go` — `RestartProbe`, `DetectRestartCommand` (~37 LOC). Same shape as `checksum.go`'s pure-function siblings.
 - `internal/update/restart_test.go` — table-driven coverage for the four AC cases (~48 LOC, single `t.Parallel` table; uses `slices.Equal` for argv comparison).
 - `internal/update/fetch.go` — `Fetcher` struct + `FetchLatestRelease` + `FetchAsset` + private `get` helper + zero-value default helpers (`baseURL`, `httpClient`, `userAgent`) (~115 LOC). No package-doc comment — `version.go` covers the package.
@@ -318,6 +351,7 @@ No CI step currently fails on drift. A follow-up could run `goreleaser release -
 - `.goreleaser.yaml:24-46` — build matrix and `archives.name_template` that `osTitles` / `archNames` mirror verbatim.
 - [`lessons.md § Atomic on-disk writes`](../../lessons.md) — same "default decoder, not strict" rationale applied to `sessions.json`.
 - [`internal/sessions/id.go`](../../../internal/sessions/id.go) — convention reference for tiny stdlib-only packages with table-driven tests.
-- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md), [`docs/specs/architecture/182-update-http-fetcher.md`](../../specs/architecture/182-update-http-fetcher.md), [`docs/specs/architecture/186-update-extract-binary.md`](../../specs/architecture/186-update-extract-binary.md), [`docs/specs/architecture/187-update-atomic-replace.md`](../../specs/architecture/187-update-atomic-replace.md) — build-time architecture specs.
+- [ADR 028](../decisions/028-ed25519-checksums-signature.md) — the raw-Ed25519 signature scheme `VerifySignature` implements (over minisign/cosign/openpgp; sign the manifest; OpenSSL in CI).
+- [`docs/specs/architecture/179-update-version-parsing.md`](../../specs/architecture/179-update-version-parsing.md), [`docs/specs/architecture/180-update-checksum.md`](../../specs/architecture/180-update-checksum.md), [`docs/specs/architecture/181-update-restart-detect.md`](../../specs/architecture/181-update-restart-detect.md), [`docs/specs/architecture/182-update-http-fetcher.md`](../../specs/architecture/182-update-http-fetcher.md), [`docs/specs/architecture/186-update-extract-binary.md`](../../specs/architecture/186-update-extract-binary.md), [`docs/specs/architecture/187-update-atomic-replace.md`](../../specs/architecture/187-update-atomic-replace.md), [`docs/specs/architecture/776-sign-update-checksums.md`](../../specs/architecture/776-sign-update-checksums.md) — build-time architecture specs.
 - [`internal/sessions/registry.go`](../../../internal/sessions/registry.go) — `saveRegistryLocked` is the in-tree precedent for the same write-temp + fsync + rename pattern; `AtomicReplace` mirrors its structure with two differences (raw bytes instead of a JSON encoder, no `MkdirAll` on the parent).
 - `launchd/dev.pyrycode.pyry.plist`, `systemd/pyry.service` — the service files whose presence the wiring-ticket probe checks; `pyry install-service` writes them.

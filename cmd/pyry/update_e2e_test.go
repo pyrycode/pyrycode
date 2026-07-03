@@ -139,6 +139,7 @@ func TestUpdate_HappyPath_E2E(t *testing.T) {
 		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
 		executablePath: func() string { return targetPath },
 		replace:        update.AtomicReplace,
+		signingPubKey:  testSigningPub,
 		out:            &out,
 		probeRestart: func() update.RestartProbe {
 			return update.RestartProbe{
@@ -273,6 +274,11 @@ func spawnDaemonE2E(t *testing.T, bin, home, socket string) (*exec.Cmd, *bytes.B
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Env = childEnvE2E(home)
+	// Run the daemon with its working directory inside the test HOME. The
+	// supervisor confines the supervised claude's workdir to $HOME and
+	// aborts startup otherwise; without this the child inherits the test
+	// process's cwd (the package dir), which is outside the temp HOME.
+	cmd.Dir = home
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	cmd.Stdout = stdout
@@ -519,6 +525,30 @@ func newFetchFailReleaseServer(t *testing.T, version string) *httptest.Server {
 	return s
 }
 
+// newMissingSigReleaseServer serves the latest-release endpoint, the tarball,
+// and checksums.txt successfully but returns 404 on checksums.txt.sig. It
+// models an attacker (or an upstream) who deletes the signature to try to
+// downgrade the update to the old unsigned path. Parallel to
+// newFakeReleaseServer / newFetchFailReleaseServer for the same
+// don't-grow-the-happy-path-helper reason.
+func newMissingSigReleaseServer(t *testing.T, version, asset string, tgz, checksums []byte) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/pyrycode/pyrycode/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":%q}`, version)
+	})
+	mux.HandleFunc("/releases/download/"+version+"/"+asset, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(tgz)
+	})
+	mux.HandleFunc("/releases/download/"+version+"/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(checksums)
+	})
+	// No checksums.txt.sig route: the default mux 404s it.
+	s := httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s
+}
+
 func assertBinaryUnchangedE2E(t *testing.T, s *preUpdateState) {
 	t.Helper()
 	if inodeAfter := inodeOfE2E(t, s.targetPath); inodeAfter != s.inodeBefore {
@@ -615,6 +645,51 @@ func TestUpdate_FetchFailure_E2E(t *testing.T) {
 	assertNoSuccessLineE2E(t, &out, "v999.0.0")
 }
 
+// TestUpdate_MissingSignature_E2E is the integration-level proof of the AC-2
+// downgrade defense: the release serves a valid tarball + checksums but the
+// signature asset 404s. doUpdate must abort before AtomicReplace — it must
+// NOT fall through to the old unsigned behaviour — leaving the on-disk binary
+// untouched and the pre-update daemon still answering. Mirrors
+// TestUpdate_FetchFailure_E2E's structure.
+func TestUpdate_MissingSignature_E2E(t *testing.T) {
+	s := installPreUpdateDaemonE2E(t)
+	t.Cleanup(func() { _ = stopDaemonE2E(s.cmd1, s.done1, s.socket) })
+
+	newBytes := []byte("\x7fELF...does-not-matter...")
+	asset, tgz, sums := fakeRelease(t, "v999.0.0", runtime.GOOS, runtime.GOARCH, newBytes)
+	srv := newMissingSigReleaseServer(t, "v999.0.0", asset, tgz, []byte(sums))
+
+	var out bytes.Buffer
+	err := doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.0.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return s.targetPath },
+		replace:        update.AtomicReplace,
+		signingPubKey:  testSigningPub,
+		out:            &out,
+		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
+		runRestart: func(context.Context, []string) error {
+			t.Fatalf("runRestart must not fire on missing-signature path")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "download signature") {
+		t.Errorf("error must mention download signature: %v", err)
+	}
+
+	assertBinaryUnchangedE2E(t, s)
+	assertDaemonAliveE2E(t, s)
+	assertNoStragglersE2E(t, s)
+	assertNoSuccessLineE2E(t, &out, "v999.0.0")
+}
+
 // TestUpdate_VerifyFailure_E2E exercises the checksum-mismatch path: the
 // tarball downloads cleanly but the published digest doesn't match. As
 // with the fetch-failure case, doUpdate must return before AtomicReplace
@@ -642,6 +717,7 @@ func TestUpdate_VerifyFailure_E2E(t *testing.T) {
 		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
 		executablePath: func() string { return s.targetPath },
 		replace:        update.AtomicReplace,
+		signingPubKey:  testSigningPub,
 		out:            &out,
 		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
 		runRestart: func(context.Context, []string) error {
@@ -711,6 +787,7 @@ func TestUpdate_BrokenNewBinary_E2E(t *testing.T) {
 		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
 		executablePath: func() string { return s.targetPath },
 		replace:        update.AtomicReplace,
+		signingPubKey:  testSigningPub,
 		out:            &out,
 		probeRestart: func() update.RestartProbe {
 			return update.RestartProbe{

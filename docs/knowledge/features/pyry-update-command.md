@@ -9,6 +9,7 @@ $ pyry update
 ==> Current version: 0.9.1
 ==> Latest version:  v0.9.2
 ==> Downloading pyry_0.9.2_Darwin_arm64.tar.gz...
+==> Verifying signature... ok
 ==> Verifying SHA-256... ok
 ==> Replacing /Users/me/.local/bin/pyry...
 ==> Restarting daemon (launchd: gui/501/dev.pyrycode.pyry)...
@@ -27,7 +28,7 @@ When no managed daemon unit is present (or `--no-restart` is set), the restart p
 | `--version <tag>` | Pin the target tag (e.g. `--version v0.9.0` for a downgrade). Skips the latest-release API call entirely. |
 | `--no-restart` | Skip the daemon-restart step even if a managed unit is detected. The binary swap still happens; the user runs `launchctl kickstart` / `systemctl --user restart pyry` themselves later. |
 
-Errors print as `pyry: update: <step>: <inner>` to stderr (via `main()`'s standard wrapper) and exit non-zero. Each step in the flow contributes its own context prefix: `update: fetch latest release: …`, `update: download tarball: …`, `update: verify checksum: …`, `update: replace binary: …`.
+Errors print as `pyry: update: <step>: <inner>` to stderr (via `main()`'s standard wrapper) and exit non-zero. Each step in the flow contributes its own context prefix: `update: fetch latest release: …`, `update: download tarball: …`, `update: download signature: …`, `update: verify signature: …`, `update: verify checksum: …`, `update: replace binary: …`.
 
 ## Homebrew hint
 
@@ -52,6 +53,7 @@ type updateOptions struct {
     fetcher        *update.Fetcher
     executablePath func() string
     replace        func(target string, data []byte, mode os.FileMode) error
+    signingPubKey  ed25519.PublicKey                                // #776 — verify checksums.txt.sig against this
     out            io.Writer
     checkOnly      bool
     pinVersion     string
@@ -61,7 +63,7 @@ type updateOptions struct {
 }
 ```
 
-Six field-level seams the integration tests need: (a) `Fetcher.BaseURL` for the latest-release call (already a Fetcher field), (b) `releaseBaseURL` for the tarball + checksums URL templating, (c) `executablePath()` so tests point at a tempdir file rather than the real `/usr/local/bin/pyry`, (d) `out` for capturing progress lines without racing stdout, (e) `probeRestart` so tests fixture a `RestartProbe` instead of stat'ing real plist/unit paths, and (f) `runRestart` so tests record argv instead of exec'ing real `launchctl` / `systemctl`. Bundling them into one struct keeps the `runUpdate → doUpdate` boundary single-argument and lets every default land in one place. No `init()`, no global vars, no `httptest` baked into production code.
+Seven field-level seams the integration tests need: (a) `Fetcher.BaseURL` for the latest-release call (already a Fetcher field), (b) `releaseBaseURL` for the tarball + checksums URL templating, (c) `executablePath()` so tests point at a tempdir file rather than the real `/usr/local/bin/pyry`, (d) `out` for capturing progress lines without racing stdout, (e) `probeRestart` so tests fixture a `RestartProbe` instead of stat'ing real plist/unit paths, (f) `runRestart` so tests record argv instead of exec'ing real `launchctl` / `systemctl`, and (g) `signingPubKey` (#776) so tests inject a throwaway test key and sign fixtures with its private half rather than needing the production private key. Bundling them into one struct keeps the `runUpdate → doUpdate` boundary single-argument and lets every default land in one place. No `init()`, no global vars, no `httptest` baked into production code.
 
 ### Flow
 
@@ -71,12 +73,28 @@ Six field-level seams the integration tests need: (a) `Fetcher.BaseURL` for the 
 4. `update.CompareVersions(current, target)` — branches: `ErrInvalidVersion` (dev build) → "skipping update", return nil; `Same` → "already at latest", return nil; else continue.
 5. If `--check`, return nil here.
 6. `update.AssetName(target, runtime.GOOS, runtime.GOARCH)` produces the GoReleaser tarball filename. URLs are templated against `releaseBaseURL`: `<base>/<tag>/<asset>` and `<base>/<tag>/checksums.txt`.
-7. `Fetcher.FetchAsset` for the tarball, then for `checksums.txt`. `update.ParseChecksumsFile(body, asset)` plucks the SHA-256 hex.
-8. `update.VerifySHA256(tgz, digest)`. On mismatch, print `FAIL` and return wrapped `ErrChecksumMismatch`.
-9. `update.ExtractBinary(tgz, "pyry")` returns the new binary's bytes.
-10. `update.AtomicReplace(target, bin, 0o755)` swaps the on-disk binary.
-11. **Daemon restart (#190).** Unless `--no-restart` is set, call `o.probeRestart()` to stat the canonical launchd plist (`~/Library/LaunchAgents/dev.pyrycode.pyry.plist`) and systemd user-unit (`~/.config/systemd/user/pyry.service`) paths. Pass the resulting `RestartProbe` to `update.DetectRestartCommand`. If non-nil argv is returned, print `==> Restarting daemon (<manager>: <last-argv-element>)...` and call `o.runRestart(ctx, argv)`. If the probe returns no managed unit (both stats fail), the step is silently skipped.
-12. Print `==> Updated to <v>.` — last in the happy path so it terminates the output.
+7. `Fetcher.FetchAsset` for the tarball, then for `checksums.txt`.
+8. **Signature gate (#776).** `Fetcher.FetchAsset` for `checksums.txt.sig` (the checksums URL + `.sig`), then `update.VerifySignature(sumsBytes, sig, o.signingPubKey)` over the **raw** checksums bytes. Prints `==> Verifying signature... ok`/`FAIL`. A missing `.sig` (404) aborts here with `update: download signature: …` — the fail-closed point, structurally identical to a missing tarball, with **no unsigned fallback**. A non-verifying signature aborts with `update: verify signature: …`. Both abort *before* any digest is parsed or the binary extracted/replaced. See [ADR 028](../decisions/028-ed25519-checksums-signature.md).
+9. `update.ParseChecksumsFile(body, asset)` plucks the SHA-256 hex (only reached once the signature has vouched for the checksums bytes).
+10. `update.VerifySHA256(tgz, digest)`. On mismatch, print `FAIL` and return wrapped `ErrChecksumMismatch`.
+11. `update.ExtractBinary(tgz, "pyry")` returns the new binary's bytes.
+12. `update.AtomicReplace(target, bin, 0o755)` swaps the on-disk binary.
+13. **Daemon restart (#190).** Unless `--no-restart` is set, call `o.probeRestart()` to stat the canonical launchd plist (`~/Library/LaunchAgents/dev.pyrycode.pyry.plist`) and systemd user-unit (`~/.config/systemd/user/pyry.service`) paths. Pass the resulting `RestartProbe` to `update.DetectRestartCommand`. If non-nil argv is returned, print `==> Restarting daemon (<manager>: <last-argv-element>)...` and call `o.runRestart(ctx, argv)`. If the probe returns no managed unit (both stats fail), the step is silently skipped.
+14. Print `==> Updated to <v>.` — last in the happy path so it terminates the output.
+
+### Signature gate (#776)
+
+The trust root is a package-level constant in `cmd/pyry/update.go`:
+
+```go
+const releaseSigningPublicKeyHex = "<64 hex chars>" // raw 32-byte Ed25519 public key
+```
+
+`runUpdate` decodes it once (`hex.DecodeString` + a 32-byte length check → `update: signing key: …` on failure) and threads it into `doUpdate` as `updateOptions.signingPubKey`. Kept as a constant (not a new file) to hold the new-file count at three (`signature.go`, `signature_test.go`, `release-tooling.md`). Its doc comment records the `openssl genpkey` / `openssl pkey … | tail -c 32 | xxd -p` generation recipe, notes that the private half lives only as the `PYRY_RELEASE_SIGNING_KEY` Actions secret, and points at [`docs/release-tooling.md`](../../release-tooling.md).
+
+**Fail-closed is structural, not a flag.** The sig-fetch + `VerifySignature` are *unconditional* steps between the checksums fetch and the checksums parse. There is no code path from "signature missing/malformed/non-verifying" to "proceed unsigned." A regenerated keypair means updating the constant **in the same change** as rotating the secret — a mismatch fails every `pyry update` closed (safe, but broken). `TestReleaseSigningKey_Decodes` asserts the constant decodes to 32 bytes so a typo is caught at test time, not release time.
+
+The signing side of the wire lives in `.goreleaser.yaml`'s `signs:` block (`openssl pkeyutl -sign -rawin` over `checksums.txt`) and `.github/workflows/release.yml`'s key-materialization step (`PYRY_RELEASE_SIGNING_KEY` secret → `0600` temp file under `${RUNNER_TEMP}` → `PYRY_SIGNING_KEY_FILE`). See [ADR 028](../decisions/028-ed25519-checksums-signature.md) for the scheme rationale and [`docs/release-tooling.md`](../../release-tooling.md) for the operator procedure.
 
 ### Daemon-restart wiring (#190)
 
@@ -130,7 +148,9 @@ All errors propagate up through `main()`'s wrapper at `cmd/pyry/main.go:141-144`
 |-----------------------|-----------|
 | `update.ErrInvalidVersion` (from `CompareVersions` with `currentVersion == "dev"`) | Print "running a development build" and return nil (exit 0). The only case where a primitive's error is converted to a non-error path. |
 | `update.ErrUnsupportedPlatform` (from `AssetName` on e.g. `freebsd/amd64`) | Propagates as `pyry: update: asset name for freebsd/amd64: unsupported os/arch`. The four supported `linux/darwin × amd64/arm64` combos cover the project's published targets. |
-| `update.ErrChecksumMismatch` | `==> Verifying SHA-256... FAIL` followed by `pyry: update: verify checksum: …`. No retry, no fallback — a checksum miss is either GitHub serving a corrupt asset or a hostile MITM, and silently retrying masks both. |
+| Missing signature asset (`checksums.txt.sig` 404s, or any fetch failure) | `==> Verifying signature... FAIL` followed by `pyry: update: download signature: …`. **Fail-closed (#776, AC-2):** aborts before the digest is parsed, structurally identical to a missing tarball — there is **no** fall-through to the old unsigned behaviour. An attacker who deletes the signature cannot downgrade the check. |
+| `update.ErrInvalidSignature` / `update.ErrInvalidPublicKey` (from `VerifySignature`) | `==> Verifying signature... FAIL` followed by `pyry: update: verify signature: …`. A tampered/mis-signed `checksums.txt`, a wrong-length `.sig`, or a malformed baked-in key all abort **before** extract/replace (#776, AC-3). `ErrInvalidPublicKey` only fires on a corrupt `releaseSigningPublicKeyHex` — caught earlier by `TestReleaseSigningKey_Decodes`. |
+| `update.ErrChecksumMismatch` | `==> Verifying SHA-256... FAIL` followed by `pyry: update: verify checksum: …`. No retry, no fallback — a checksum miss is either GitHub serving a corrupt asset or a hostile MITM, and silently retrying masks both. (Reached only after the signature gate passes — i.e. a genuinely-signed release whose checksums don't match the tarball.) |
 | `update.ErrBinaryNotInArchive` / `update.ErrMalformedArchive` | Indicates an upstream packaging regression; the user sees the wrapped error and re-files an issue. |
 | Restart-step failure (#190) | Wrapped as `update: binary replaced to <v>, but daemon restart failed: <inner>` — surfaces under `pyry:` prefix, exit 1. The binary swap already succeeded; the user retries restart manually with `launchctl kickstart` / `systemctl --user restart pyry`. |
 | `context.Canceled` (test-only path until Ctrl-C handling lands) | Propagates verbatim. |
@@ -139,7 +159,7 @@ No partial-failure cleanup: `AtomicReplace` is the only filesystem-mutating step
 
 ## Tests
 
-`cmd/pyry/update_test.go` (~460 LOC). Ten integration tests, each driving `doUpdate` with the `Fetcher` pointed at an `httptest.NewServer` (canned release JSON + tar.gz fixture + matching `checksums.txt`) and the install path set to a tempdir.
+`cmd/pyry/update_test.go` (~600 LOC). A dozen integration tests, each driving `doUpdate` with the `Fetcher` pointed at an `httptest.NewServer` (canned release JSON + tar.gz fixture + matching `checksums.txt` + auto-signed `checksums.txt.sig`) and the install path set to a tempdir, plus one pure `TestReleaseSigningKey_Decodes` unit test.
 
 | Test | Pins |
 |------|------|
@@ -153,8 +173,13 @@ No partial-failure cleanup: `AtomicReplace` is the only filesystem-mutating step
 | `TestUpdate_NoRestartFlag` | #190 AC #1: `noRestart: true` plus a probe that *would* match. `runRestart` is a `t.Fatalf` sentinel — proves the flag short-circuits before the probe even runs. |
 | `TestUpdate_NoManagedUnit` | #190 silent-skip AC: zero-value `RestartProbe{}`. Success line prints, no restart progress line, `runRestart` never called. |
 | `TestUpdate_RestartFailure` | #190 AC #4: `runRestart` returns `errors.New("exit status 1")`. Asserts the error contains both `binary replaced to v0.9.2` and `daemon restart failed`, and that the success line is NOT in the captured output (returned early). |
+| `TestUpdate_MissingSignature` (#776) | AC #2: a server serving tarball + checksums but 404ing `checksums.txt.sig` → `doUpdate` returns an error containing `download signature`; the `replace` seam is a `t.Fatalf` sentinel (proves no `AtomicReplace`); success line absent. |
+| `TestUpdate_BadSignature` (#776) | AC #3: a `.sig` signed with a *different* key → `doUpdate` returns an error containing `verify signature`; `replace` sentinel not called. |
+| `TestReleaseSigningKey_Decodes` (#776) | Asserts `releaseSigningPublicKeyHex` decodes to exactly 32 bytes — catches a typo/placeholder in the baked-in constant at test time, not release time. |
 
 Helpers `buildTarGzForTest`, `fakeRelease`, `newFakeReleaseServer` are inline in the test file rather than shared with `internal/update/install_test.go` — the test surface is ~10 lines and an `internal/testutil` package would be heavier than the duplication.
+
+**Signature test seam (#776).** A deterministic throwaway keypair (`testSigningPriv/testSigningPub` from `ed25519.NewKeyFromSeed` with a fixed seed) drives the signed-path tests — never the production key. `newFakeReleaseServer` **auto-signs** the checksums bytes it is handed with `testSigningPriv` and serves the detached signature at `checksums.txt.sig`; its call signature is unchanged, so the existing callers keep working (the server signs whatever checksums it serves, so the gate passes and the flow continues to each test's real assertion). `updateOptions` literals that reach the gate set `signingPubKey: testSigningPub`; the early-abort tests (`AlreadyAtLatest`, `CheckOnly`, `DevBuildSkips`) never reach verification and leave it nil.
 
 Real `os.Stat` paths and the real `exec.CommandContext` wrapper are deliberately not unit-tested. The probe helper is two stats + a `strconv.Itoa`; the executor is three lines. Testing them would require manipulating `$HOME` + creating fake plist/unit files, and putting a fake `launchctl` on `$PATH`. Manual smoke test on a Mac with the daemon installed via `pyry install-service` covers the production paths.
 
@@ -218,12 +243,22 @@ Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tes
 
 **No `--release-url` flag, no rollback work.** Per ticket #261's AC body and lessons.md: a `--release-url` CLI flag (or `PYRY_RELEASE_BASE_URL` env var) is forbidden — `doUpdate` is driven directly from the same-package test, same seam #260 established. Rollback / `.bak` behaviour stays out of scope; if a future ticket introduces it, that ticket owns the broken-binary test's revised assertions.
 
+### E2E signature fail-closed (#776)
+
+`TestUpdate_MissingSignature_E2E` mirrors `TestUpdate_FetchFailure_E2E`'s structure with a server that serves tarball + checksums but 404s the `.sig`. Asserts `doUpdate` errors before `AtomicReplace` (inode unchanged), the pre-update daemon is still answering, and the success line is absent — the integration-level proof of the AC-2 downgrade defense. Bad-signature is covered at the `VerifySignature` + `doUpdate` unit level; one e2e for the fail-closed/downgrade case is sufficient. The tagged suite reuses the same `newFakeReleaseServer` (auto-signing) so `HappyPath`/`VerifyFailure`/`BrokenNewBinary` keep working once their `updateOptions` literals set `signingPubKey: testSigningPub`.
+
+**Pre-existing suite bug uncovered.** The `//go:build e2e_update` suite was un-runnable before #776: `spawnDaemonE2E` never set `cmd.Dir`, so the spawned daemon inherited the test process's cwd (the package dir) and the workdir-confinement guard aborted startup for the whole suite. It went unnoticed because **CI does not run the `e2e_update` tag**. Fixed with a one-line `cmd.Dir = home` in the shared helper (required for the new e2e daemon to start at all). See [`codebase/776.md`](../codebase/776.md) § Lessons learned.
+
 ## Files
 
-- `cmd/pyry/update.go` (~215 LOC) — `runUpdate`, `resolveExecutable`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`.
-- `cmd/pyry/update_test.go` (~460 LOC) — integration tests + httptest fixtures.
+- `cmd/pyry/update.go` (~270 LOC) — `runUpdate`, `resolveExecutable`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`, plus the `releaseSigningPublicKeyHex` baked-in constant (#776).
+- `cmd/pyry/update_test.go` (~600 LOC) — integration tests + httptest fixtures + the auto-signing server + signature tests (#776).
 - `cmd/pyry/main.go` — `case "update":` dispatch + `printHelp` entry.
+- `internal/update/signature.go` (#776) — `VerifySignature` + `ErrInvalidSignature` / `ErrInvalidPublicKey`; see [`update-package.md`](update-package.md).
 - `internal/update/restart.go` — `RestartProbe` + `DetectRestartCommand` (#181, consumed unchanged).
+- `.goreleaser.yaml` — `signs:` block that signs `checksums.txt` → `checksums.txt.sig` (#776).
+- `.github/workflows/release.yml` — materializes `PYRY_RELEASE_SIGNING_KEY` into `PYRY_SIGNING_KEY_FILE` for the goreleaser step (#776).
+- `docs/release-tooling.md` — keypair generation, custody, matching, and the first-release smoke test (#776).
 - `internal/brokenpyry/main.go` (#261, ~19 LOC) — deliberately-broken pyry stand-in for `TestUpdate_BrokenNewBinary_E2E`; writes a recognizable stderr token and exits non-zero.
 - `cmd/pyry/update_e2e_test.go` (#260 + #261, ~750 LOC) — happy-path + three failure-path e2e tests, build tag `(darwin || linux) && e2e_update`.
 - `docs/guide.md` — "Updating pyry" section.
@@ -231,6 +266,9 @@ Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tes
 ## Related
 
 - [`update-package.md`](update-package.md) — the `internal/update` primitives this command composes.
+- [ADR 028](../decisions/028-ed25519-checksums-signature.md) — the raw-Ed25519 checksums-signature scheme the gate implements (#776).
+- [`codebase/776.md`](../codebase/776.md) — the per-ticket implementation summary + lessons for the signature gate.
+- [`docs/release-tooling.md`](../../release-tooling.md) — the operator procedure for the signing keypair.
 - [ADR 015](../decisions/015-update-restart-probe-inline.md) — daemon-restart probe placement and executor seam.
 - [`docs/specs/architecture/189-update-subcommand-wiring.md`](../../specs/architecture/189-update-subcommand-wiring.md) — #189 build-time spec.
 - [`docs/specs/architecture/190-update-daemon-restart-wiring.md`](../../specs/architecture/190-update-daemon-restart-wiring.md) — #190 build-time spec.

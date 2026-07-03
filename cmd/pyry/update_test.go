@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +20,17 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/update"
+)
+
+// testSigningPriv / testSigningPub are a deterministic throwaway keypair used
+// to sign checksums fixtures so the signature gate is exercised end-to-end.
+// This is never the production key: the baked-in releaseSigningPublicKeyHex is
+// a distinct key whose private half lives only as a CI secret. Tests inject
+// testSigningPub via updateOptions.signingPubKey; the fake server signs with
+// testSigningPriv.
+var (
+	testSigningPriv = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x7a}, ed25519.SeedSize))
+	testSigningPub  = testSigningPriv.Public().(ed25519.PublicKey)
 )
 
 // buildTarGzForTest is a local copy of internal/update/install_test.go's
@@ -66,9 +79,13 @@ func fakeRelease(t *testing.T, version, goos, goarch string, pyryBytes []byte) (
 
 // newFakeReleaseServer hosts the GitHub-API latest-release endpoint plus the
 // download URLs the wiring code derives from releaseBaseURL. Routes match the
-// production templates exactly so test failures localize cleanly.
+// production templates exactly so test failures localize cleanly. The server
+// signs the checksums bytes it is handed with testSigningPriv and serves the
+// detached signature at checksums.txt.sig, so callers that reach the sig gate
+// pass it unchanged — the call signature stays the same across all callers.
 func newFakeReleaseServer(t *testing.T, latest, asset string, tgz, checksums []byte) *httptest.Server {
 	t.Helper()
+	sig := ed25519.Sign(testSigningPriv, checksums)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/pyrycode/pyrycode/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, `{"tag_name":%q}`, latest)
@@ -78,6 +95,9 @@ func newFakeReleaseServer(t *testing.T, latest, asset string, tgz, checksums []b
 	})
 	mux.HandleFunc("/releases/download/"+latest+"/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(checksums)
+	})
+	mux.HandleFunc("/releases/download/"+latest+"/checksums.txt.sig", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(sig)
 	})
 	s := httptest.NewServer(mux)
 	t.Cleanup(s.Close)
@@ -108,6 +128,7 @@ func TestUpdate_Success(t *testing.T) {
 		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
 		executablePath: func() string { return targetPath },
 		replace:        update.AtomicReplace,
+		signingPubKey:  testSigningPub,
 		out:            &out,
 		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
 		runRestart: func(context.Context, []string) error {
@@ -132,6 +153,7 @@ func TestUpdate_Success(t *testing.T) {
 		"==> Current version: 0.9.1",
 		"==> Latest version:  v0.9.2",
 		"==> Downloading " + asset + "...",
+		"==> Verifying signature... ok",
 		"==> Verifying SHA-256... ok",
 		"==> Replacing " + targetPath + "...",
 		"==> Updated to v0.9.2.",
@@ -229,6 +251,10 @@ func TestUpdate_PinVersion(t *testing.T) {
 	mux.HandleFunc("/releases/download/v0.9.0/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(checksums))
 	})
+	sig := ed25519.Sign(testSigningPriv, []byte(checksums))
+	mux.HandleFunc("/releases/download/v0.9.0/checksums.txt.sig", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(sig)
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
@@ -248,6 +274,7 @@ func TestUpdate_PinVersion(t *testing.T) {
 		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
 		executablePath: func() string { return targetPath },
 		replace:        update.AtomicReplace,
+		signingPubKey:  testSigningPub,
 		out:            &out,
 		pinVersion:     "v0.9.0",
 		probeRestart:   func() update.RestartProbe { return update.RestartProbe{} },
@@ -324,6 +351,7 @@ func restartUpdateOptions(t *testing.T, targetPath string, out *bytes.Buffer, pr
 		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
 		executablePath: func() string { return targetPath },
 		replace:        update.AtomicReplace,
+		signingPubKey:  testSigningPub,
 		out:            out,
 		noRestart:      noRestart,
 		probeRestart:   func() update.RestartProbe { return probe },
@@ -456,5 +484,125 @@ func TestUpdate_RestartFailure(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "==> Updated to v0.9.2.") {
 		t.Errorf("success line must NOT print on restart failure; output:\n%s", out.String())
+	}
+}
+
+// TestUpdate_MissingSignature pins AC #2: a missing signature asset (the .sig
+// URL 404s) aborts with a distinct "download signature" error and does NOT
+// fall through to the unsigned behaviour — an attacker who deletes the
+// signature must not downgrade the check. AtomicReplace must not run.
+func TestUpdate_MissingSignature(t *testing.T) {
+	newBytes := []byte("\x7fELF...bytes...")
+	asset, tgz, checksums := fakeRelease(t, "v0.9.2", runtime.GOOS, runtime.GOARCH, newBytes)
+
+	// Serve tarball + checksums but no checksums.txt.sig (404).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/pyrycode/pyrycode/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":%q}`, "v0.9.2")
+	})
+	mux.HandleFunc("/releases/download/v0.9.2/"+asset, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(tgz)
+	})
+	mux.HandleFunc("/releases/download/v0.9.2/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(checksums))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	err := doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.9.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return "/dev/null/never-touched" },
+		replace: func(string, []byte, os.FileMode) error {
+			t.Fatalf("AtomicReplace must not run when the signature is missing")
+			return nil
+		},
+		signingPubKey: testSigningPub,
+		out:           &out,
+	})
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "download signature") {
+		t.Errorf("error must mention download signature: %v", err)
+	}
+	if strings.Contains(out.String(), "==> Updated to v0.9.2.") {
+		t.Errorf("success line must NOT print when signature is missing; output:\n%s", out.String())
+	}
+}
+
+// TestUpdate_BadSignature pins AC #3: a signature that does not verify against
+// the baked-in key aborts with a distinct "verify signature" error before the
+// binary is extracted or written. Here the checksums are signed with a
+// different key than the one doUpdate is given.
+func TestUpdate_BadSignature(t *testing.T) {
+	newBytes := []byte("\x7fELF...bytes...")
+	asset, tgz, checksums := fakeRelease(t, "v0.9.2", runtime.GOOS, runtime.GOARCH, newBytes)
+
+	wrongKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x5c}, ed25519.SeedSize))
+	badSig := ed25519.Sign(wrongKey, []byte(checksums))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/pyrycode/pyrycode/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":%q}`, "v0.9.2")
+	})
+	mux.HandleFunc("/releases/download/v0.9.2/"+asset, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(tgz)
+	})
+	mux.HandleFunc("/releases/download/v0.9.2/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(checksums))
+	})
+	mux.HandleFunc("/releases/download/v0.9.2/checksums.txt.sig", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(badSig)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	err := doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.9.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return "/dev/null/never-touched" },
+		replace: func(string, []byte, os.FileMode) error {
+			t.Fatalf("AtomicReplace must not run when the signature does not verify")
+			return nil
+		},
+		signingPubKey: testSigningPub,
+		out:           &out,
+	})
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "verify signature") {
+		t.Errorf("error must mention verify signature: %v", err)
+	}
+	if !errors.Is(err, update.ErrInvalidSignature) {
+		t.Errorf("error must wrap ErrInvalidSignature: %v", err)
+	}
+	if strings.Contains(out.String(), "==> Updated to v0.9.2.") {
+		t.Errorf("success line must NOT print on bad signature; output:\n%s", out.String())
+	}
+}
+
+// TestReleaseSigningKey_Decodes catches a typo or placeholder in the baked-in
+// signing-key constant at test time rather than at release time: the constant
+// must decode to exactly an Ed25519 public key.
+func TestReleaseSigningKey_Decodes(t *testing.T) {
+	raw, err := hex.DecodeString(releaseSigningPublicKeyHex)
+	if err != nil {
+		t.Fatalf("releaseSigningPublicKeyHex is not valid hex: %v", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		t.Errorf("releaseSigningPublicKeyHex decodes to %d bytes, want %d",
+			len(raw), ed25519.PublicKeySize)
 	}
 }
