@@ -306,12 +306,13 @@ func startRelayV2(
 	modalReg := modalbridge.New()
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
-		Frames:     conn.Frames(),
-		Outbound:   conn.Send,
-		StaticPriv: priv[:],
-		Devices:    registry,
-		ServerID:   string(serverID),
-		Logger:     logger,
+		Frames:      conn.Frames(),
+		Outbound:    conn.Send,
+		StaticPriv:  priv[:],
+		Devices:     registry,
+		DevicesPath: resolveDevicesPath(instanceName),
+		ServerID:    string(serverID),
+		Logger:      logger,
 		Handlers: map[string]dispatch.Handler{
 			protocol.TypeListConversations:  handlers.ListConversations(convReg),
 			protocol.TypeCreateConversation: handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),

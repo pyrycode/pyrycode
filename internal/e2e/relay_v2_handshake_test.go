@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -33,6 +35,8 @@ func TestRelayV2_Handshake(t *testing.T) {
 	t.Run("ik_reject_4426", testV2IKReject)
 	t.Run("encrypted_echo_round_trip", testV2EncryptedEchoRoundTrip)
 	t.Run("tampered_noise_msg_4421", testV2TamperedNoiseMsg_4421)
+	t.Run("reload_picks_up_newly_paired", testV2ReloadPicksUpNewlyPaired)
+	t.Run("reload_malformed_fails_closed", testV2ReloadMalformedFailsClosed)
 }
 
 // v2Harness bundles the per-test wiring: fakerelay, binary↔relay
@@ -52,7 +56,7 @@ type v2Harness struct {
 // envelopes fall through to protocol.unsupported error replies. Used by
 // #446's open-state dispatch tests, which register echo handlers to
 // exercise the encrypted reply path.
-func startV2Harness(t *testing.T, reg *devices.Registry, handlers map[string]dispatch.Handler) *v2Harness {
+func startV2Harness(t *testing.T, reg *devices.Registry, handlers map[string]dispatch.Handler, opts ...func(*relay.V2SessionConfig)) *v2Harness {
 	t.Helper()
 
 	fr := fakerelay.New(relayTestLogger())
@@ -91,7 +95,7 @@ func startV2Harness(t *testing.T, reg *devices.Registry, handlers map[string]dis
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())
 	t.Cleanup(mgrCancel)
 
-	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
+	cfg := relay.V2SessionConfig{
 		Frames:     conn.Frames(),
 		Outbound:   conn.Send,
 		StaticPriv: binPriv.Bytes(),
@@ -99,7 +103,11 @@ func startV2Harness(t *testing.T, reg *devices.Registry, handlers map[string]dis
 		ServerID:   string(serverID),
 		Logger:     relayTestLogger(),
 		Handlers:   handlers,
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	mgr, err := relay.NewV2SessionManager(cfg)
 	if err != nil {
 		t.Fatalf("NewV2SessionManager: %v", err)
 	}
@@ -455,6 +463,177 @@ func testV2EncryptedEchoRoundTrip(t *testing.T) {
 	if gotPayload["text"] != replyText {
 		t.Errorf("reply payload text = %q, want %q", gotPayload["text"], replyText)
 	}
+}
+
+// echoConversationsHandler returns a handler table whose TypeListConversations
+// handler echoes a fixed reply, so an open-state round-trip can prove a
+// session is genuinely accepted (a rejected token still receives a noise_resp,
+// so the hello_ack alone does not distinguish accept from reject).
+func echoConversationsHandler(t *testing.T, replyText string) map[string]dispatch.Handler {
+	t.Helper()
+	echoPayload, err := json.Marshal(map[string]string{"text": replyText})
+	if err != nil {
+		t.Fatalf("marshal echo payload: %v", err)
+	}
+	return map[string]dispatch.Handler{
+		protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
+			return c.Reply(ctx, env, protocol.TypeConversations, echoPayload)
+		},
+	}
+}
+
+// assertOpenEcho sends one TypeListConversations request through an open v2
+// session and asserts the reply decrypts to a TypeConversations envelope —
+// decisive proof the hello token was accepted (an unpaired token's session is
+// closed at 4401 after the noise_resp, so no encrypted echo comes back).
+func assertOpenEcho(t *testing.T, phone *fakephone.Client, initSend, initRecv *noise.CipherState, reqID uint64) {
+	t.Helper()
+	reqEnv, err := json.Marshal(protocol.Envelope{
+		ID:      reqID,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal request envelope: %v", err)
+	}
+	ciphertext, err := initSend.Encrypt(reqEnv)
+	if err != nil {
+		t.Fatalf("seal request: %v", err)
+	}
+	sendNoiseMsg(t, phone, ciphertext)
+
+	inner := readInnerFrame(t, phone, 3*time.Second)
+	if inner.Type != protocol.TypeNoiseMsg {
+		t.Fatalf("reply inner type = %q, want %q (token not accepted)", inner.Type, protocol.TypeNoiseMsg)
+	}
+	replyCipher, err := base64.StdEncoding.DecodeString(inner.Data)
+	if err != nil {
+		t.Fatalf("decode reply data: %v", err)
+	}
+	replyPlain, err := initRecv.Decrypt(replyCipher)
+	if err != nil {
+		t.Fatalf("phone decrypt reply: %v", err)
+	}
+	var replyEnv protocol.Envelope
+	if err := json.Unmarshal(replyPlain, &replyEnv); err != nil {
+		t.Fatalf("decode reply envelope: %v", err)
+	}
+	if replyEnv.Type != protocol.TypeConversations {
+		t.Fatalf("reply Type = %q, want %q (token not accepted)", replyEnv.Type, protocol.TypeConversations)
+	}
+}
+
+// testV2ReloadPicksUpNewlyPaired is AC1 end-to-end: with DevicesPath wired,
+// a device B appended to devices.json by a separate `pyry pair` process after
+// startup authenticates on its next handshake with no daemon restart. The
+// encrypted echo round-trip confirms B's session is genuinely open.
+func testV2ReloadPicksUpNewlyPaired(t *testing.T) {
+	const (
+		tokenA = "v2-reload-token-a"
+		tokenB = "v2-reload-token-b"
+	)
+	devA := devices.Device{
+		TokenHash: devices.HashToken(tokenA),
+		Name:      "device-a",
+		PairedAt:  time.Now().UTC(),
+	}
+	reg := &devices.Registry{}
+	reg.Add(devA)
+
+	// Seed devices.json with [A] — the snapshot the daemon loaded at startup.
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("Save seed [A]: %v", err)
+	}
+
+	h := startV2Harness(t, reg, echoConversationsHandler(t, "reload-echo-ok"),
+		func(cfg *relay.V2SessionConfig) { cfg.DevicesPath = path })
+
+	// `pyry pair` (a separate process) appends B to the same file after
+	// startup — B is on disk but absent from the in-memory snapshot.
+	diskReg := &devices.Registry{}
+	diskReg.Add(devA)
+	diskReg.Add(devices.Device{
+		TokenHash: devices.HashToken(tokenB),
+		Name:      "device-b",
+		PairedAt:  time.Now().UTC(),
+	})
+	if err := diskReg.Save(path); err != nil {
+		t.Fatalf("Save [A,B]: %v", err)
+	}
+
+	// B handshakes with no restart: the per-handshake reload adopts B.
+	phone := h.dialPhone(t)
+	initSend, initRecv := driveHandshakeToOpen(t, h, phone, tokenB)
+	assertOpenEcho(t, phone, initSend, initRecv, 21)
+}
+
+// testV2ReloadMalformedFailsClosed is AC4 at the handshake: after
+// devices.json is corrupted post-startup, the reload fails closed — an
+// unpaired token is still rejected (4401, accept set not widened) and the
+// startup-known device still authenticates against the retained set.
+func testV2ReloadMalformedFailsClosed(t *testing.T) {
+	const tokenA = "v2-reload-retained-token"
+	reg := &devices.Registry{}
+	reg.Add(devices.Device{
+		TokenHash: devices.HashToken(tokenA),
+		Name:      "device-a",
+		PairedAt:  time.Now().UTC(),
+	})
+
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("Save seed [A]: %v", err)
+	}
+
+	h := startV2Harness(t, reg, echoConversationsHandler(t, "retained-echo-ok"),
+		func(cfg *relay.V2SessionConfig) { cfg.DevicesPath = path })
+
+	// Corrupt devices.json after startup. Reload must fail closed: the
+	// retained in-memory [A] is neither lost nor widened.
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt devices.json: %v", err)
+	}
+
+	// An unpaired token is still rejected with 4401 (accept set not widened).
+	rejectPhone := h.dialPhone(t)
+	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("phone keygen: %v", err)
+	}
+	initiator, err := noise.NewInitiator(initPriv.Bytes(), h.pubKey)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	initMsg, err := initiator.WriteInit(buildHelloEarly(t, "definitely-not-paired"))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	sendNoiseInit(t, rejectPhone, initMsg)
+
+	// noise_resp, then the sealed error noise_msg, then the 4401 close.
+	if first := readInnerFrame(t, rejectPhone, 3*time.Second); first.Type != protocol.TypeNoiseResp {
+		t.Fatalf("first inner type %q, want noise_resp", first.Type)
+	}
+	if second := readInnerFrame(t, rejectPhone, 3*time.Second); second.Type != protocol.TypeNoiseMsg {
+		t.Fatalf("second inner type %q, want noise_msg (sealed error)", second.Type)
+	}
+	if _, err := rejectPhone.ReceiveBytes(3 * time.Second); err == nil {
+		t.Fatal("phone receive: nil err, want WS close")
+	} else if errors.Is(err, fakephone.ErrReceiveTimeout) {
+		t.Fatalf("phone receive timed out without seeing close: %v", err)
+	}
+	if code, ok := rejectPhone.LastCloseStatus(); !ok {
+		t.Fatal("phone LastCloseStatus: not set")
+	} else if int(code) != 4401 {
+		t.Errorf("WS close code = %d, want 4401", int(code))
+	}
+
+	// The startup-known device still authenticates against the retained set.
+	acceptPhone := h.dialPhone(t)
+	initSend, initRecv := driveHandshakeToOpen(t, h, acceptPhone, tokenA)
+	assertOpenEcho(t, acceptPhone, initSend, initRecv, 31)
 }
 
 // testV2TamperedNoiseMsg_4421 drives a paired-device handshake to

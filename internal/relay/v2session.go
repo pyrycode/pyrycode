@@ -525,6 +525,17 @@ type V2SessionConfig struct {
 	// Devices is the token-validation predicate for hello.Token.
 	Devices *devices.Registry
 
+	// DevicesPath is the on-disk devices.json path reloaded into Devices
+	// immediately before each handshake's token Validate (#782), so a device
+	// paired via `pyry pair` after daemon startup is accepted on its next
+	// connection without a restart. Optional: "" disables the reload — the
+	// handshake validates against the startup-loaded in-memory set only
+	// (keeps existing tests byte-stable; mirrors the claudeSessionsDir=""
+	// opt-out idiom). On a reload read error the handshake proceeds against
+	// the retained in-memory set (fail closed — accept set not widened,
+	// loaded devices not lost).
+	DevicesPath string
+
 	// ServerID is surfaced into the hello_ack early-data payload.
 	ServerID string
 
@@ -1164,6 +1175,21 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 			"reason", "marshal_noise_resp")
 		m.closeWith(ctx, s, StatusHandshakeFailure, nil)
 		return
+	}
+
+	// Reload the on-disk registry so a device paired after daemon startup
+	// authenticates without a restart (#782). Fail closed on a read error:
+	// log path + a static reason and proceed to Validate against the retained
+	// in-memory set — the accept set is not widened and no loaded device is
+	// lost. SECURITY: never log the wrapped err; a corrupt devices.json can
+	// carry file bytes (a token_hash) in a json.Unmarshal error.
+	if m.cfg.DevicesPath != "" {
+		if err := m.cfg.Devices.Reload(m.cfg.DevicesPath); err != nil {
+			m.cfg.Logger.Warn("relay: v2 devices reload failed",
+				"event", "v2.devices.reload_failed",
+				"conn_id", s.connID,
+				"path", m.cfg.DevicesPath)
+		}
 	}
 
 	device, tokenOK := m.cfg.Devices.Validate(helloPayload.Token)

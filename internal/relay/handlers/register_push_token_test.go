@@ -114,6 +114,15 @@ func TestRegisterPushToken_FirstTimeRegister_WritesAndAcks(t *testing.T) {
 		LastSeenAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 	reg, path := freshRegistryWithDevice(t, d)
+	// Persist [A] to disk first: post-#782 the handler reloads devices.json
+	// before its Save, mirroring production where the registry was Load'ed
+	// from an existing file (a successful handshake — which reloads the same
+	// file — always precedes register_push_token). Without an on-disk file the
+	// reload would, per the ENOENT->empty contract, correctly reconcile
+	// membership to empty.
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("Save seed [A]: %v", err)
+	}
 	snapshot := d
 	c, recv := newTestConn(t, &snapshot)
 
@@ -216,6 +225,71 @@ func TestRegisterPushToken_ReregisterChanged_WritesAndAcks(t *testing.T) {
 	}
 	if got.PushToken != "new-fcm" {
 		t.Errorf("PushToken = %q, want %q", got.PushToken, "new-fcm")
+	}
+}
+
+// TestRegisterPushToken_ReloadPreventsClobberOfNewlyPairedDevice is the
+// core data-loss guard (#782): device A (authed since startup) sends
+// register_push_token before device B — added to devices.json by a separate
+// `pyry pair` process after startup — ever handshakes. The handler must
+// reload disk into memory before its whole-file Save, or the write erases B.
+func TestRegisterPushToken_ReloadPreventsClobberOfNewlyPairedDevice(t *testing.T) {
+	t.Parallel()
+	a := devices.Device{
+		TokenHash:  devices.HashToken("plain-a"),
+		Name:       "device-a",
+		PairedAt:   time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	// Daemon in-memory registry holds only [A] (the startup snapshot).
+	reg := &devices.Registry{}
+	reg.Add(a)
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := reg.Save(path); err != nil {
+		t.Fatalf("Save [A]: %v", err)
+	}
+
+	// `pyry pair` (a separate process) appends B to the same file.
+	b := devices.Device{
+		TokenHash:  devices.HashToken("plain-b"),
+		Name:       "device-b",
+		PairedAt:   time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2025, 2, 2, 0, 0, 0, 0, time.UTC),
+	}
+	diskReg := &devices.Registry{}
+	diskReg.Add(a)
+	diskReg.Add(b)
+	if err := diskReg.Save(path); err != nil {
+		t.Fatalf("Save [A,B]: %v", err)
+	}
+
+	snapshot := a
+	c, recv := newTestConn(t, &snapshot)
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
+		Platform:   testPlatform,
+		Token:      testPushToken,
+		DeviceName: "device-a",
+	})
+
+	h := RegisterPushToken(reg, path, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	assertEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	back, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := back.FindByTokenHash(devices.HashToken("plain-b")); !ok {
+		t.Fatal("device B erased by A's register_push_token write (clobber regression)")
+	}
+	gotA, ok := back.FindByTokenHash(devices.HashToken("plain-a"))
+	if !ok {
+		t.Fatal("device A missing after write")
+	}
+	if gotA.PushToken != testPushToken {
+		t.Errorf("A.PushToken = %q, want %q", gotA.PushToken, testPushToken)
 	}
 }
 
