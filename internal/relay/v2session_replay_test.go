@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,11 +58,12 @@ func appendRingEvents(r *eventring.Ring, convID, typ string, n int) {
 }
 
 // waitConnOpen polls mgr.ActiveConns until connID is enumerated (V2StateOpen)
-// or the deadline expires. Because the replay runs inline at the tail of
-// handleNoiseInit BEFORE Run returns to its select (and ActiveConns funnels
-// onto that same Run goroutine), once connID appears the whole replay/resync
-// has already been forwarded and recorded — so a snapshot taken afterward is
-// final, with no waitForEnvelopes race.
+// or the deadline expires. It confirms only that the session reached open — NOT
+// that any mid-turn-reconnect replay finished. Paced replay (#777) forwards the
+// replay tail one frame per Run pass AFTER the conn becomes enumerable, so a
+// caller that needs the replay frames recorded must poll with waitForEnvelopes
+// for the expected count; a snapshot taken the instant the conn opens will
+// usually be missing the still-draining tail.
 func waitConnOpen(t *testing.T, mgr *V2SessionManager, connID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -115,8 +117,10 @@ func reconnectScenario(t *testing.T, respPriv, respPub, initPriv []byte, ring *e
 	}
 	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
 
-	waitConnOpen(t, mgr, v2TestConnID)
-	envs := rec.snapshot()
+	// Paced replay (#777) forwards the tail over Run passes AFTER the conn
+	// becomes enumerable, so poll for the full frame count rather than
+	// snapshotting the instant the conn opens.
+	envs := waitForEnvelopes(t, rec, wantEnvs)
 	if len(envs) != wantEnvs {
 		t.Fatalf("envelope count: got %d, want %d", len(envs), wantEnvs)
 	}
@@ -375,8 +379,10 @@ func TestV2Session_Reconnect_OtherConnsUnaffected(t *testing.T) {
 	frames <- wrapInnerFrame(t, connA, protocol.TypeNoiseInit, initMsgA)
 	waitConnOpen(t, mgr, connA)
 
+	// A's replay is paced (#777), draining after A opens; wait for all 5 frames
+	// (connB noise_resp + connA noise_resp + 3 replay) before counting per-conn.
 	counts := map[string]int{}
-	for _, env := range rec.snapshot() {
+	for _, env := range waitForEnvelopes(t, rec, 5) {
 		counts[env.ConnID]++
 	}
 	if counts[connB] != 1 {
@@ -424,8 +430,10 @@ func reconnectOpenLive(t *testing.T, ring *eventring.Ring, cursor func() string,
 	}
 	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
 
-	waitConnOpen(t, mgr, v2TestConnID)
-	envs := rec.snapshot()
+	// Paced replay (#777): wait for every handshake frame (noise_resp + the paced
+	// replay tail) to land before returning, so the caller's live Pushes record
+	// at index >= wantHandshake.
+	envs := waitForEnvelopes(t, rec, wantHandshake)
 	if len(envs) != wantHandshake {
 		t.Fatalf("handshake frames: got %d, want %d", len(envs), wantHandshake)
 	}
@@ -682,4 +690,423 @@ func TestV2Session_ForwardEnvelope_ReplayWatermarkGuard(t *testing.T) {
 	if gotCtl.EventID != nil {
 		t.Errorf("frame 1 EventID = %v, want nil (control envelope never dropped)", gotCtl.EventID)
 	}
+}
+
+// offlineHandshake runs a paired initiator/responder handshake with no manager,
+// returning the responder's send CipherState (for a directly-injected session's
+// s.send) and the initiator's recv CipherState (to decrypt the forwarded
+// noise_msgs in order). Mirrors the setup in the watermark-guard test so the
+// paced-drain unit tests can inject an open session and drive drainReplayOnce /
+// drainOnce directly, single-goroutine and deterministically.
+func offlineHandshake(t *testing.T, respPriv, respPub, initPriv []byte) (respSend, initRecv *noise.CipherState) {
+	t.Helper()
+	initiator, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	responder, err := noise.NewResponder(respPriv)
+	if err != nil {
+		t.Fatalf("NewResponder: %v", err)
+	}
+	initMsg, err := initiator.WriteInit([]byte("{}"))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	if _, err := responder.ReadInit(initMsg); err != nil {
+		t.Fatalf("ReadInit: %v", err)
+	}
+	respMsg, send, _, err := responder.WriteResp([]byte("{}"))
+	if err != nil {
+		t.Fatalf("WriteResp: %v", err)
+	}
+	_, _, recv, err := initiator.ReadResp(respMsg)
+	if err != nil {
+		t.Fatalf("ReadResp: %v", err)
+	}
+	return send, recv
+}
+
+// newInjectManager builds a manager with Run NOT started, for tests that inject
+// a session and call drainReplayOnce / drainOnce directly on the test goroutine.
+func newInjectManager(t *testing.T, respPriv []byte, rec *v2Recorder) *V2SessionManager {
+	t.Helper()
+	mgr, err := NewV2SessionManager(V2SessionConfig{
+		Frames:     make(chan protocol.RoutingEnvelope),
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    &devices.Registry{},
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewV2SessionManager: %v", err)
+	}
+	return mgr
+}
+
+// TestV2Session_Reconnect_Paced_OnePerRunPass pins the core #777 invariant: one
+// drainReplayOnce pass forwards exactly ONE replay frame and leaves the rest of
+// the tail queued, advancing replayThrough by a single event. Run is not
+// started, so the injected session + direct drainReplayOnce calls are
+// single-goroutine (the ForwardEnvelopeReplayWatermarkGuard pattern).
+func TestV2Session_Reconnect_Paced_OnePerRunPass(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	respSend, _ := offlineHandshake(t, respPriv, respPub, initPriv)
+
+	rec := &v2Recorder{}
+	mgr := newInjectManager(t, respPriv, rec)
+
+	const n = 4
+	events := make([]eventring.Event, n)
+	for i := range events {
+		id := uint64(i + 1)
+		events[i] = eventring.Event{
+			ID:      id,
+			Type:    protocol.TypeTurnState,
+			Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, id)),
+			TS:      time.Now().UTC(),
+		}
+	}
+	mgr.sessions[v2TestConnID] = &V2Session{
+		connID:      v2TestConnID,
+		state:       V2StateOpen,
+		send:        respSend,
+		replayQueue: events,
+	}
+	s := mgr.sessions[v2TestConnID]
+	ctx := context.Background()
+
+	// Each pass forwards exactly one frame, advances the watermark by one, and
+	// leaves the rest of the tail queued.
+	for pass := 1; pass <= n; pass++ {
+		mgr.drainReplayOnce(ctx)
+		if got := len(rec.snapshot()); got != pass {
+			t.Fatalf("after %d passes: got %d frames, want %d (not one-per-pass)", pass, got, pass)
+		}
+		if got := len(s.replayQueue); got != n-pass {
+			t.Fatalf("after %d passes: replayQueue len %d, want %d", pass, got, n-pass)
+		}
+		if s.replayThrough != uint64(pass) {
+			t.Fatalf("after %d passes: replayThrough %d, want %d", pass, s.replayThrough, pass)
+		}
+	}
+	// A pass with an empty queue is a no-op — no extra frame, no panic.
+	mgr.drainReplayOnce(ctx)
+	if got := len(rec.snapshot()); got != n {
+		t.Fatalf("no-op pass changed frame count: got %d, want %d", got, n)
+	}
+}
+
+// TestV2Session_Reconnect_LiveGated_DrainOnceSkipsReplayingConn is AC #2: while a
+// conn has a non-empty replayQueue, drainOnce must NOT pop its buffered live
+// events — they stay ordered behind the replay. Once the tail drains, drainOnce
+// releases them, so the wire order is replay ids (ascending) then the live id.
+// Driven by direct drainOnce/drainReplayOnce calls for a deterministic gate
+// assertion (no Run goroutine, no timing).
+func TestV2Session_Reconnect_LiveGated_DrainOnceSkipsReplayingConn(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	respSend, initRecv := offlineHandshake(t, respPriv, respPub, initPriv)
+
+	rec := &v2Recorder{}
+	mgr := newInjectManager(t, respPriv, rec)
+
+	// One open session: replay tail (ids 1,2) + a buffered live event (id 3 >
+	// newest, so it clears the watermark once forwarded).
+	mgr.sessions[v2TestConnID] = &V2Session{
+		connID: v2TestConnID,
+		state:  V2StateOpen,
+		send:   respSend,
+		replayQueue: []eventring.Event{
+			{ID: 1, Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"n":1}`), TS: time.Now().UTC()},
+			{ID: 2, Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"n":2}`), TS: time.Now().UTC()},
+		},
+	}
+	id3 := uint64(3)
+	live := protocol.Envelope{
+		ID:      3,
+		Type:    protocol.TypeTurnState,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"n":3}`),
+		EventID: &id3,
+	}
+	mgr.pushMu.Lock()
+	mgr.queues[v2TestConnID] = &pushQueue{items: []queuedEnv{{env: live}}}
+	mgr.pushMu.Unlock()
+	ctx := context.Background()
+
+	// drainOnce while the replay tail is pending → the live event is GATED.
+	mgr.drainOnce(ctx)
+	if n := len(rec.snapshot()); n != 0 {
+		t.Fatalf("drainOnce forwarded %d frames while replay pending; live event was not gated (AC #2)", n)
+	}
+
+	// Drain the replay tail.
+	mgr.drainReplayOnce(ctx) // forwards id 1
+	mgr.drainReplayOnce(ctx) // forwards id 2, empties replayQueue
+	if got := len(mgr.sessions[v2TestConnID].replayQueue); got != 0 {
+		t.Fatalf("replayQueue not empty after draining: %d left", got)
+	}
+
+	// Now the gate is lifted → drainOnce releases the buffered live event.
+	mgr.drainOnce(ctx)
+	envs := rec.snapshot()
+	if len(envs) != 3 {
+		t.Fatalf("after replay + live drain: got %d frames, want 3 (replay 1,2 + live 3)", len(envs))
+	}
+	for i, wantID := range []uint64{1, 2, 3} {
+		got := decryptAppFrame(t, envs[i], initRecv)
+		if got.EventID == nil || *got.EventID != wantID {
+			t.Fatalf("frame %d EventID = %v, want %d (replay must precede live)", i, got.EventID, wantID)
+		}
+	}
+}
+
+// TestV2Session_Reconnect_LargeReplay_DoesNotBlockOtherConn is AC #1: a large
+// mid-turn-reconnect replay on conn A must not delay servicing conn B's
+// handshake until A's whole replay finishes. Because drainReplayOnce forwards
+// one frame per Run pass and returns to the select, B's noise_init is serviced
+// with at most one seal/forward of delay — so B's noise_resp lands well before
+// A's final replay frame. With a ~200-event replay, "B serviced only after all
+// of A" has probability ≈ 2^-200 under a fair select, i.e. deterministic in
+// practice.
+func TestV2Session_Reconnect_LargeReplay_DoesNotBlockOtherConn(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPrivA, _ := genV2Keypair(t)
+	initPrivB, _ := genV2Keypair(t)
+	const connA, connB = "c-fair-A", "c-fair-B"
+	const replayN = 200
+
+	ring := eventring.New(eventring.MaxEventsPerConversation)
+	appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, replayN)
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    v2PairedRegistry(t, v2TestToken),
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+	mgr.SetReplaySource(ring, func() string { return v2TestConvID })
+
+	// A reconnects from the very start (last_event_id=0) → replays all 200.
+	initA, err := noise.NewInitiator(initPrivA, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator A: %v", err)
+	}
+	lastA := uint64(0)
+	initMsgA, err := initA.WriteInit(buildHelloEarlyDataReplay(t, v2TestToken, &lastA))
+	if err != nil {
+		t.Fatalf("WriteInit A: %v", err)
+	}
+	// B is a fresh conn (no last_event_id → no replay); its noise_init lands
+	// while A's replay is still draining.
+	initB, err := noise.NewInitiator(initPrivB, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator B: %v", err)
+	}
+	initMsgB, err := initB.WriteInit(buildHelloEarlyDataReplay(t, v2TestToken, nil))
+	if err != nil {
+		t.Fatalf("WriteInit B: %v", err)
+	}
+	frames <- wrapInnerFrame(t, connA, protocol.TypeNoiseInit, initMsgA)
+	frames <- wrapInnerFrame(t, connB, protocol.TypeNoiseInit, initMsgB)
+
+	// noise_resp(A) + 200 replay(A) + noise_resp(B) == 202 frames total.
+	envs := waitForEnvelopes(t, rec, replayN+2)
+
+	idxB, idxALast := -1, -1
+	for i, env := range envs {
+		switch env.ConnID {
+		case connB:
+			idxB = i
+		case connA:
+			idxALast = i // last write wins → A's final replay frame
+		}
+	}
+	if idxB == -1 {
+		t.Fatalf("connB noise_resp never forwarded")
+	}
+	if idxALast == -1 {
+		t.Fatalf("connA frames never forwarded")
+	}
+	if idxB >= idxALast {
+		t.Fatalf("connB serviced at index %d, only after connA's last replay frame at %d — replay monopolised Run (AC #1)", idxB, idxALast)
+	}
+}
+
+// TestV2Session_Reconnect_LiveInterleave_OrderedAfterReplay is AC #2 end-to-end:
+// a live event pushed to conn A as its replay drains reaches the wire AFTER every
+// replay frame, never interleaved. Exercises the real Run select + drainOnce gate
+// + drainCh re-signal path (the direct-call test above proves the gate
+// deterministically; this proves the wired-up version). The ordering assertion
+// holds whether or not the live push lands before the tail fully drains, so the
+// test never false-fails on timing — it only fails if a replay frame ever follows
+// the live frame.
+func TestV2Session_Reconnect_LiveInterleave_OrderedAfterReplay(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	const replayN = 20
+
+	ring := eventring.New(eventring.MaxEventsPerConversation)
+	appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, replayN)
+
+	frames := make(chan protocol.RoutingEnvelope, 1)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    v2PairedRegistry(t, v2TestToken),
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+	mgr.SetReplaySource(ring, func() string { return v2TestConvID })
+
+	initiator, err := noise.NewInitiator(initPriv, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator: %v", err)
+	}
+	last := uint64(0) // replay the whole conversation (ids 1..20)
+	initMsg, err := initiator.WriteInit(buildHelloEarlyDataReplay(t, v2TestToken, &last))
+	if err != nil {
+		t.Fatalf("WriteInit: %v", err)
+	}
+	frames <- wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseInit, initMsg)
+
+	// Push a live event (id > newest) as early as the push queue exists — ideally
+	// while the replay tail is still draining. Retrying to the earliest possible
+	// moment maximises the chance the gate is exercised; the ordering assertion is
+	// correct either way.
+	idLive := uint64(replayN + 1)
+	live := protocol.Envelope{
+		ID:      idLive,
+		Type:    protocol.TypeTurnState,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, idLive)),
+		EventID: &idLive,
+	}
+	var pushErr error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pushErr = mgr.Push(context.Background(), v2TestConnID, live); pushErr == nil {
+			break
+		}
+	}
+	if pushErr != nil {
+		t.Fatalf("live push never succeeded: %v", pushErr)
+	}
+
+	// noise_resp + 20 replay + 1 live == 22 frames.
+	envs := waitForEnvelopes(t, rec, replayN+2)
+	if len(envs) != replayN+2 {
+		t.Fatalf("frame count: got %d, want %d", len(envs), replayN+2)
+	}
+	respRaw := decodeRespFrame(t, envs[0])
+	_, _, initRecv, err := initiator.ReadResp(respRaw)
+	if err != nil {
+		t.Fatalf("ReadResp: %v", err)
+	}
+	// Frames 1..20 are the replay tail in ascending id order...
+	for i := 1; i <= replayN; i++ {
+		got := decryptAppFrame(t, envs[i], initRecv)
+		wantID := uint64(i)
+		if got.ID != wantID || got.EventID == nil || *got.EventID != wantID {
+			t.Fatalf("frame %d: id=%d eventID=%v, want replay id %d (live leaked mid-replay?)", i, got.ID, got.EventID, wantID)
+		}
+	}
+	// ...and the live frame strictly last.
+	gotLive := decryptAppFrame(t, envs[replayN+1], initRecv)
+	if gotLive.EventID == nil || *gotLive.EventID != idLive {
+		t.Fatalf("final frame EventID = %v, want %d (live must arrive after the whole replay)", gotLive.EventID, idLive)
+	}
+}
+
+// TestV2Session_Reconnect_PacedReplay_Race is AC #3: a paced replay draining
+// concurrently with off-Run live Pushes to the same conn AND a second conn's
+// handshake stays data-race-free and preserves the single-writer seal. On the
+// -race builder this proves replayQueue/replayThrough are never touched off the
+// Run goroutine and every s.send.Encrypt stays serialised on Run.
+func TestV2Session_Reconnect_PacedReplay_Race(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPrivA, _ := genV2Keypair(t)
+	initPrivB, _ := genV2Keypair(t)
+	const connA, connB = "c-race-A", "c-race-B"
+	const replayN = 100
+
+	ring := eventring.New(eventring.MaxEventsPerConversation)
+	appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, replayN)
+
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    v2PairedRegistry(t, v2TestToken),
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	})
+	t.Cleanup(stop)
+	mgr.SetReplaySource(ring, func() string { return v2TestConvID })
+
+	// A reconnects with a large tail (last_event_id=0 → replay all 100).
+	initA, err := noise.NewInitiator(initPrivA, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator A: %v", err)
+	}
+	lastA := uint64(0)
+	initMsgA, err := initA.WriteInit(buildHelloEarlyDataReplay(t, v2TestToken, &lastA))
+	if err != nil {
+		t.Fatalf("WriteInit A: %v", err)
+	}
+	frames <- wrapInnerFrame(t, connA, protocol.TypeNoiseInit, initMsgA)
+
+	// Concurrently hammer live Pushes to A (interleaving with its paced replay)
+	// while a second conn B opens (other-conn traffic). Early pushes may race
+	// ahead of A's queue creation and return ErrConnNotFound — best-effort by
+	// design; the -race detector is the assertion, not the delivered count.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := replayN + 1; i <= replayN+50; i++ {
+			eid := uint64(i)
+			_ = mgr.Push(context.Background(), connA, protocol.Envelope{
+				ID:      eid,
+				Type:    protocol.TypeTurnState,
+				TS:      time.Now().UTC(),
+				Payload: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)),
+				EventID: &eid,
+			})
+		}
+	}()
+
+	initB, err := noise.NewInitiator(initPrivB, respPub)
+	if err != nil {
+		t.Fatalf("NewInitiator B: %v", err)
+	}
+	initMsgB, err := initB.WriteInit(buildHelloEarlyDataReplay(t, v2TestToken, nil))
+	if err != nil {
+		t.Fatalf("WriteInit B: %v", err)
+	}
+	frames <- wrapInnerFrame(t, connB, protocol.TypeNoiseInit, initMsgB)
+
+	wg.Wait()
+	// Lower bound: A's 100 replay + A's noise_resp + B's noise_resp. Live frames
+	// deliver too, but their exact count varies with the queue-creation race;
+	// waiting for the guaranteed floor keeps the interleave live long enough for
+	// -race to observe it, then t.Cleanup(stop) drains the Run goroutine.
+	waitForEnvelopes(t, rec, replayN+2)
 }

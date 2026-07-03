@@ -363,15 +363,27 @@ type V2Session struct {
 
 	// replayThrough is the highest durable event id already delivered to this
 	// conn by the mid-turn-reconnect replay (#647). Run-owned: written in
-	// replayMissed and read in forwardEnvelope, both on the single Run
-	// goroutine — same single-writer regime as state/interactive, so no lock
-	// or atomic. forwardEnvelope drops a live structured envelope whose EventID
+	// replayMissed (the #663 clamp) and drainReplayOnce (the per-event trailing
+	// advance), read in forwardEnvelope, all on the single Run goroutine — same
+	// single-writer regime as state/interactive, so no lock or atomic.
+	// forwardEnvelope drops a live structured envelope whose EventID
 	// <= replayThrough, so the transient replay/live overlap never
 	// double-delivers an event (the deterministic dedup proven in spec
 	// § Concurrency model). Zero for any conn that never advertised
 	// last_event_id, and live ids are always >= 1, so the guard is inert for
 	// them.
 	replayThrough uint64
+
+	// replayQueue is the not-yet-forwarded tail of a mid-turn-reconnect replay
+	// (#777), populated by replayMissed and drained one event per Run pass by
+	// drainReplayOnce so a large replay can no longer monopolise the Run loop.
+	// Run-owned: written and read only on the dispatch goroutine (replayMissed,
+	// drainReplayOnce, drainOnce's gate, closeWith) — no lock or atomic, same
+	// regime as state/replayThrough. nil/empty ⇒ no replay in flight. Bounded by
+	// ring retention (≤ MaxEventsPerConversation), never the push cap: the
+	// events come straight from ring.After's materialised copy, so there is no
+	// drop/gap risk a second cap would reintroduce (spec § Open questions).
+	replayQueue []eventring.Event
 }
 
 // State returns the externally-observable state. Called from the same
@@ -633,6 +645,16 @@ type V2SessionManager struct {
 	// next pass — a self-perpetuating pump with no lost wakeups.
 	drainCh chan struct{}
 
+	// replayCh signals "some session has a pending reconnect-replay tail" to
+	// Run's replay-drain arm (#777). Mirrors drainCh exactly: capacity 1 with
+	// non-blocking sends (from replayMissed and from drainReplayOnce's
+	// re-signal) collapses concurrent wakes into at most one pending, so a
+	// self-perpetuating pump forwards one replay frame per Run pass with no lost
+	// wakeup. Carries no data — the queued events live on each V2Session
+	// (replayQueue); this channel references no session and spawns no goroutine,
+	// so concurrent multi-conn replays are covered by the single cap-1 channel.
+	replayCh chan struct{}
+
 	// snapshot funnels (*V2SessionManager).ActiveConns (and ActiveConnIDs,
 	// which projects over it) calls onto Run's dispatch goroutine so the read
 	// of m.sessions runs under the single-owner-goroutine invariant, serialised
@@ -695,6 +717,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		manualRekey:  make(chan manualRekeyReq),
 		queues:       make(map[string]*pushQueue),
 		drainCh:      make(chan struct{}, 1),
+		replayCh:     make(chan struct{}, 1),
 		snapshot:     make(chan snapshotReq),
 		modalTimeout: make(chan string, wakeBufferSize),
 	}, nil
@@ -729,6 +752,8 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case <-m.drainCh:
 			m.drainOnce(runCtx)
+		case <-m.replayCh:
+			m.drainReplayOnce(runCtx)
 		case req := <-m.snapshot:
 			req.reply <- m.handleActiveConns()
 		}
@@ -1927,13 +1952,20 @@ func (m *V2SessionManager) SetReplaySource(ring *eventring.Ring, currentConv fun
 	m.replayCursor = currentConv
 }
 
-// replayMissed serves the mid-turn-reconnect replay for s after its hello
-// advertised last_event_id=afterID (#647). It runs inline on the manager's
-// single Run goroutine at the tail of handleNoiseInit's success path, so the
-// whole replay completes BEFORE Run returns to its select to service live
-// events — the structural guarantee behind AC-2's "before the live stream
-// resumes". Replies seal via forwardEnvelope (the established
-// handleRequestSnapshot inline-reply pattern), not the buffered push stream.
+// replayMissed classifies a mid-turn-reconnect for s after its hello advertised
+// last_event_id=afterID (#647) and, when there is a tail to replay, hands it to
+// the paced replay drain (#777). It runs on the manager's single Run goroutine
+// at the tail of handleNoiseInit's success path. The classification work — the
+// ring read, the gap→resync branch, and the #663 watermark clamp — completes
+// inline; the tail itself is stored in s.replayQueue and forwarded one event per
+// Run pass by drainReplayOnce, so a large replay never monopolises Run. Because
+// replayMissed populates replayQueue on this pass (before Run returns to its
+// select) and the drainOnce gate holds the conn's live push queue until the tail
+// empties, every replay frame still reaches the wire before any live frame for
+// this conn — AC-2's "before the live stream resumes", now preserved by the gate
+// rather than by inline completion. Replay frames seal via forwardEnvelope (the
+// established handleRequestSnapshot inline-reply pattern), not the buffered push
+// stream.
 //
 // afterID is untrusted remote input (AC-5): it is only ever an index into the
 // self-synchronised ring (ring.After's own mutex makes the read safe off the
@@ -1978,26 +2010,21 @@ func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, after
 	// watermark trails one event behind the frame being forwarded, so
 	// forwardEnvelope's guard never self-drops a replay envelope.
 	s.replayThrough = min(afterID, newest)
-	for _, ev := range events {
-		id := ev.ID // per-iteration local; never &ev.ID of the range variable.
-		replay := protocol.Envelope{
-			ID:      ev.ID, // per-conn id ascending + self-consistent within the replay.
-			Type:    ev.Type,
-			TS:      ev.TS,
-			Payload: ev.Payload,
-			EventID: &id, // required: the phone advances its cursor from this.
-		}
-		if err := m.forwardEnvelope(ctx, s.connID, replay); err != nil {
-			// Session vanished / seal failure: log at debug and stop — the
-			// package's outbound-drop posture (mirrors handleRequestSnapshot).
-			// NEVER echo payload/ciphertext/key bytes.
-			m.cfg.Logger.Debug("relay: v2 reconnect replay frame dropped",
-				"event", "v2.replay.frame_dropped",
-				"conn_id", s.connID,
-				"err", err)
-			return
-		}
-		s.replayThrough = ev.ID
+	if len(events) == 0 {
+		return // caught up: After returned no tail; the clamp above is all the work.
+	}
+	// Hand the tail to the paced drain instead of forwarding it inline (#777):
+	// sealing and forwarding up to MaxEventsPerConversation frames in this single
+	// Run pass would stall every other conn's delivery (and inbound frames,
+	// wakes, snapshots) until the whole batch finished. drainReplayOnce forwards
+	// one event per Run pass, advancing replayThrough as it goes, so Run returns
+	// to its select between frames. events is the fresh copy ring.After already
+	// materialised — bounded by ring retention, never the push cap, so no
+	// drop/gap on this path.
+	s.replayQueue = events
+	select {
+	case m.replayCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -2192,6 +2219,10 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 		s.idleTimer.Stop()
 		s.idleTimer = nil
 	}
+	// Drop any in-flight reconnect-replay tail (#777). The session is deleted
+	// from m.sessions just below, so drainReplayOnce's scan can no longer find
+	// it; niling matches the timer-cleanup pattern and releases the slice for GC.
+	s.replayQueue = nil
 	delete(m.sessions, s.connID)
 	// Symmetric with the create in handleNoiseInit: drop the per-session push
 	// buffer. Any buffered-but-undrained envelopes are discarded — the conn is
@@ -2366,6 +2397,24 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 // are serviced with at most one in-flight Outbound (≤ one WriteTimeout) of
 // delay. If any queue still has items after the pop, it re-signals drainCh.
 func (m *V2SessionManager) drainOnce(ctx context.Context) {
+	// A conn with an in-flight reconnect-replay tail must keep its live push
+	// queue buffered until the replay finishes, so replay ids (<= replayThrough)
+	// reach the wire before live ids (#777, AC #2). Snapshot the gated conn-ids
+	// from m.sessions BEFORE taking pushMu: m.sessions and replayQueue are
+	// Run-owned and drainOnce runs on Run, so this read needs no lock, and
+	// keeping it outside pushMu preserves pushMu's "guards only m.queues, taken
+	// alone" invariant. drainReplayOnce re-signals drainCh when a tail empties,
+	// so a gated conn's buffered live events are never stranded.
+	var replayPending map[string]struct{}
+	for id, s := range m.sessions {
+		if len(s.replayQueue) > 0 {
+			if replayPending == nil {
+				replayPending = make(map[string]struct{})
+			}
+			replayPending[id] = struct{}{}
+		}
+	}
+
 	m.pushMu.Lock()
 	var (
 		connID string
@@ -2378,6 +2427,9 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 		if len(q.items) == 0 {
 			continue
 		}
+		if _, gated := replayPending[id]; gated {
+			continue // replay in flight for this conn; hold its live events (#777).
+		}
 		connID = id
 		env = q.items[0].env
 		q.items[0] = queuedEnv{} // release the envelope for GC; slot slides out below
@@ -2385,14 +2437,20 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 		found = true
 		break
 	}
-	// After the pop, note whether any queue still has work to re-signal.
+	// After the pop, note whether any UNGATED queue still has work to re-signal.
+	// Gated queues are excluded: their re-signal comes from drainReplayOnce when
+	// the replay tail empties, not from the push pump.
 	more := false
 	if found {
-		for _, q := range m.queues {
-			if len(q.items) > 0 {
-				more = true
-				break
+		for id, q := range m.queues {
+			if len(q.items) == 0 {
+				continue
 			}
+			if _, gated := replayPending[id]; gated {
+				continue
+			}
+			more = true
+			break
 		}
 	}
 	m.pushMu.Unlock()
@@ -2413,6 +2471,83 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 		select {
 		case m.drainCh <- struct{}{}:
 		default:
+		}
+	}
+}
+
+// drainReplayOnce forwards at most ONE buffered reconnect-replay event across
+// all sessions on the Run goroutine, then returns to the select — the same
+// one-per-pass yielding drainOnce provides for the push stream, so a large
+// mid-turn-reconnect replay (up to MaxEventsPerConversation events) can no
+// longer monopolise Run and stall other conns' delivery, inbound frames, wakes,
+// or snapshots (#777, AC #1). replayQueue and replayThrough are Run-owned (no
+// pushMu): the scan, pop, and watermark advance all run on this goroutine — the
+// same single-writer regime forwardEnvelope's s.send.Encrypt relies on, so the
+// Noise send-nonce sequence stays monotonic (AC #3).
+//
+// Re-signal discipline mirrors drainOnce: when the popped conn's tail empties it
+// signals drainCh to release the live events the drainOnce gate held back (they
+// carry ids > replayThrough, so they drain in order after the replay, AC #2);
+// while any session still has a tail it re-signals replayCh to keep the pump
+// running (covers concurrent multi-conn replays through the single cap-1
+// channel). On a forward error the conn's remaining tail is abandoned (matching
+// the old inline loop's early return), but the re-signal scan still runs so a
+// different session's replay is never stranded.
+func (m *V2SessionManager) drainReplayOnce(ctx context.Context) {
+	var s *V2Session
+	// Go randomises map-range order, giving rough cross-conn fairness across the
+	// realistically-tiny open-conn count (same as drainOnce).
+	for _, cand := range m.sessions {
+		if len(cand.replayQueue) > 0 {
+			s = cand
+			break
+		}
+	}
+	if s == nil {
+		return
+	}
+
+	ev := s.replayQueue[0]
+	s.replayQueue[0] = eventring.Event{} // release the event for GC; slot slides out below
+	s.replayQueue = s.replayQueue[1:]    // pop head (ascending id order)
+
+	id := ev.ID // per-frame local; never &ev.ID of the loop-scoped copy.
+	replay := protocol.Envelope{
+		ID:      ev.ID, // per-conn id ascending + self-consistent within the replay.
+		Type:    ev.Type,
+		TS:      ev.TS,
+		Payload: ev.Payload,
+		EventID: &id, // required: the phone advances its cursor from this.
+	}
+	if err := m.forwardEnvelope(ctx, s.connID, replay); err != nil {
+		// Session vanished / seal failure: log at debug and abandon this conn's
+		// remaining tail — the package's outbound-drop posture (mirrors the old
+		// inline loop's early return). NEVER echo payload/ciphertext/key bytes.
+		m.cfg.Logger.Debug("relay: v2 reconnect replay frame dropped",
+			"event", "v2.replay.frame_dropped",
+			"conn_id", s.connID,
+			"err", err)
+		s.replayQueue = nil
+	} else {
+		s.replayThrough = ev.ID // trailing-watermark advance (identical to the old inline loop).
+	}
+
+	// This conn's replay is done (drained to empty or abandoned on error):
+	// release the live events the drainOnce gate held back for it.
+	if len(s.replayQueue) == 0 {
+		select {
+		case m.drainCh <- struct{}{}:
+		default:
+		}
+	}
+	// Keep the pump running while ANY session still has a replay tail.
+	for _, cand := range m.sessions {
+		if len(cand.replayQueue) > 0 {
+			select {
+			case m.replayCh <- struct{}{}:
+			default:
+			}
+			break
 		}
 	}
 }
