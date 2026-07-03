@@ -104,6 +104,7 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 	}
 
 	register := func(t *acp.Transport) {
+		registerHandshake(t) // initialize + authenticate (stateless, no pool)
 		t.Register("session/new", newSessionHandler(pool))
 		t.Register("session/load", loadSessionHandler(pool))
 		t.Register("session/cancel", cancelSessionHandler(pool))

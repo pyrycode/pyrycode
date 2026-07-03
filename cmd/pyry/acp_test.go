@@ -688,3 +688,154 @@ func TestACP_SessionCancel_NotificationEmitsNoResponse(t *testing.T) {
 		t.Fatalf("notification handler error count = %d, want 1 (unknown-id cancel only)\nstderr:\n%s", got, h.stderr.String())
 	}
 }
+
+// handshakeReply is the decode-by-shape view of the single frame the handshake
+// handlers write back: id + either a raw result or an error object. Result is
+// raw so each test unmarshals it into the concrete result type or inspects it as
+// bytes (AC-2b).
+type handshakeReply struct {
+	ID     json.RawMessage `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Error  *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// driveHandshake feeds one JSON-RPC request through serveACP with ONLY the
+// handshake handlers registered (registerHandshake, no pool) and runs to EOF.
+// Registering no pool is the structural proof of AC-1's "holds no session state,
+// succeeds before any session exists": these handlers need nothing else to serve.
+// It returns the parsed reply and the raw response line.
+func driveHandshake(t *testing.T, request string) (handshakeReply, []byte) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	if err := serveACP(ctx, strings.NewReader(request+"\n"), &stdout, testLogger(&stderr), registerHandshake); err != nil {
+		t.Fatalf("serveACP: %v", err)
+	}
+	line := bytes.TrimRight(stdout.Bytes(), "\n")
+	if len(line) == 0 {
+		t.Fatalf("no response frame written for request %q", request)
+	}
+	var r handshakeReply
+	if err := json.Unmarshal(line, &r); err != nil {
+		t.Fatalf("unmarshal response %q: %v", line, err)
+	}
+	return r, line
+}
+
+// TestACP_Initialize_Result pins AC-1 and AC-2: an initialize request driven
+// through the transport returns a well-formed result declaring pyry's protocol
+// version and its minimal agent capabilities (AC-2a), and that result requests no
+// host fs/terminal capability (AC-2b). The host here OFFERS fs+terminal — pyry
+// tolerates and ignores them (divergence 5).
+func TestACP_Initialize_Result(t *testing.T) {
+	t.Parallel()
+	reply, line := driveHandshake(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true}}}`)
+
+	if reply.Error != nil {
+		t.Fatalf("initialize returned error: %+v", *reply.Error)
+	}
+	var gotID uint64
+	if err := json.Unmarshal(reply.ID, &gotID); err != nil {
+		t.Fatalf("reply id unmarshal %q: %v", line, err)
+	}
+	if gotID != 1 {
+		t.Fatalf("reply id = %d, want 1 (echoed request id)", gotID)
+	}
+
+	// AC-2a: the declared capability set.
+	var res initializeResult
+	if err := json.Unmarshal(reply.Result, &res); err != nil {
+		t.Fatalf("unmarshal result %q: %v", reply.Result, err)
+	}
+	if res.ProtocolVersion != SupportedProtocolVersion {
+		t.Fatalf("protocolVersion = %d, want %d", res.ProtocolVersion, SupportedProtocolVersion)
+	}
+	if res.AgentCapabilities.LoadSession {
+		t.Fatal("agentCapabilities.loadSession = true, want false (session/load resume not advertised yet)")
+	}
+	if pc := res.AgentCapabilities.PromptCapabilities; pc.Image || pc.Audio || pc.EmbeddedContext {
+		t.Fatalf("promptCapabilities = %+v, want all false", pc)
+	}
+
+	// authMethods must marshal as [], not null.
+	if !bytes.Contains(reply.Result, []byte(`"authMethods":[]`)) {
+		t.Fatalf("result %q must contain authMethods:[] (empty array, not null)", reply.Result)
+	}
+
+	// AC-2b: pyry's result requests no host filesystem or terminal capability —
+	// none of these substrings appear in the marshalled result.
+	for _, sub := range []string{`"fs"`, `"terminal"`, `"readTextFile"`, `"writeTextFile"`} {
+		if bytes.Contains(reply.Result, []byte(sub)) {
+			t.Fatalf("result %q requests host capability %s (divergence 5 violation)", reply.Result, sub)
+		}
+	}
+}
+
+// TestACP_Initialize_ParamsTolerance pins that initialize succeeds with the same
+// capability set whether the host sends no params, an empty object, or an object
+// carrying only unmodelled capabilities — the divergence-5 "accept and ignore"
+// path — while a params that is not an object is rejected with CodeInvalidParams.
+func TestACP_Initialize_ParamsTolerance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		frame     string
+		wantError bool
+	}{
+		{"absent params", `{"jsonrpc":"2.0","id":1,"method":"initialize"}`, false},
+		{"empty object", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, false},
+		{"only client capabilities", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientCapabilities":{"terminal":true}}}`, false},
+		{"array params", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":[1,2,3]}`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reply, line := driveHandshake(t, tt.frame)
+			if tt.wantError {
+				if reply.Error == nil {
+					t.Fatalf("want error, got result %q", line)
+				}
+				if reply.Error.Code != acp.CodeInvalidParams {
+					t.Fatalf("code = %d, want CodeInvalidParams (%d)", reply.Error.Code, acp.CodeInvalidParams)
+				}
+				return
+			}
+			if reply.Error != nil {
+				t.Fatalf("want success, got error %+v", *reply.Error)
+			}
+			var res initializeResult
+			if err := json.Unmarshal(reply.Result, &res); err != nil {
+				t.Fatalf("unmarshal result %q: %v", reply.Result, err)
+			}
+			if res.ProtocolVersion != SupportedProtocolVersion {
+				t.Fatalf("protocolVersion = %d, want %d", res.ProtocolVersion, SupportedProtocolVersion)
+			}
+		})
+	}
+}
+
+// TestACP_Authenticate_Success pins AC-3: authenticate returns success without
+// any real authentication, echoing the request id, with an empty-object result.
+func TestACP_Authenticate_Success(t *testing.T) {
+	t.Parallel()
+	reply, line := driveHandshake(t, `{"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"whatever"}}`)
+
+	if reply.Error != nil {
+		t.Fatalf("authenticate returned error: %+v", *reply.Error)
+	}
+	var gotID uint64
+	if err := json.Unmarshal(reply.ID, &gotID); err != nil {
+		t.Fatalf("reply id unmarshal %q: %v", line, err)
+	}
+	if gotID != 2 {
+		t.Fatalf("reply id = %d, want 2 (echoed request id)", gotID)
+	}
+	if got := string(bytes.TrimSpace(reply.Result)); got != "{}" {
+		t.Fatalf("authenticate result = %q, want {} (empty object)", got)
+	}
+}
