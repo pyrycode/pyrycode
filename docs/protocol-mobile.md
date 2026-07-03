@@ -722,10 +722,13 @@ WS close codes used at the transport layer:
 | `1011` | Server error | either |
 | `4401` | Unauthorized (bad device token) | binary (forwarded by relay) |
 | `4404` | No server with that server-id | relay |
+| **`4408`** | **Idle-session timeout (no inbound frame within the idle window; encrypted session swept)** | binary (forwarded by relay); v2-new |
 | `4409` | Server-id already claimed | relay (to a binary) |
 | `4421` | Protocol mismatch (unknown `type`, bad `v`, malformed envelope) | either |
 | **`4426`** | **Noise handshake failure** | either; v2-new |
 | **`4429`** | **Per-server phone cap hit (too many phones for this server-id)** | relay |
+
+`4408` is sent by the binary (forwarded by the relay) when an open v2 session receives no inbound frame within its idle window and the daemon's in-repo idle sweep tears it down — dropping the session's Noise cipher states and its armed rekey timer rather than letting them linger up to the 1-hour rekey interval. It echoes HTTP 408 (Request Timeout). The relay↔binary leg is a single multiplexed WebSocket with no per-connection disconnect frame, so a phone that drops or backgrounds (phones close-on-background, then push-to-wake) is only detectable by inbound-frame silence. A phone whose session was swept simply re-connects and performs a fresh Noise handshake; sending `4408` to a conn whose phone has already gone is a harmless relay no-op.
 
 `4426` is sent at the WS-close layer because the AEAD channel doesn't yet exist when a handshake fails — there is no shared key under which to send an `error` envelope.
 
