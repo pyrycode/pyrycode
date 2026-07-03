@@ -25,6 +25,15 @@ import (
 // Mobile Protocol v2 close codes (docs/protocol-mobile.md § Error codes).
 // 4401 (StatusUnauthorized) lives in auth.go and is reused unchanged.
 const (
+	// StatusIdleTimeout is the WS close code the binary asks the relay to
+	// apply when a v2 session receives no inbound frame within idleTimeout
+	// and the manager tears it down through the in-repo idle sweep (#774).
+	// Echoes HTTP 408 (Request Timeout), consistent with the 44xx←HTTP
+	// close-code convention (4401←401, 4404←404, 4409←409, 4429←429). Wire
+	// spec: docs/protocol-mobile.md § Error codes, close-code row 4408.
+	// Sending it to an already-dropped conn is a harmless relay no-op.
+	StatusIdleTimeout websocket.StatusCode = 4408
+
 	// StatusProtocolMismatch is the WS close code the binary asks the
 	// relay to apply when a phone sends an inner frame that violates the
 	// v2 inner-frame shape, the state machine, or the discriminator
@@ -71,6 +80,21 @@ var rekeyReplyTimeout = 30 * time.Second
 // public API and not yet config-driven (a deferred #708 concern).
 var modalDenyTimeout = 2 * time.Minute
 
+// idleTimeout is the bounded window a v2 session may go without any
+// inbound frame before the manager tears it down through the in-repo
+// idle sweep (#774). Well short of the 1-hour rekeyInterval so a dropped
+// or backgrounded phone's two Noise CipherStates and armed rekey timer
+// never linger up to an hour (the relay↔binary leg is a single
+// multiplexed WebSocket with no per-connection disconnect frame, so a
+// silently-gone phone is only detectable by inbound-frame silence). Long
+// enough not to tear down a foregrounded-but-momentarily-quiet phone
+// mid-read (which would force a disruptive re-handshake on the next tap).
+// Exposed as a package var (lowercase) so tests can substitute a
+// sub-second value via a t.Cleanup save-and-restore idiom; not part of
+// the public API and not yet config-driven (a deferred concern, same
+// posture as modalDenyTimeout's #708 note).
+var idleTimeout = 15 * time.Minute
+
 // ErrConnNotFound is returned by (*V2SessionManager).Rekey when connID
 // is not currently registered in the manager's sessions map. Wraps
 // control.ErrConnNotFound so the control dispatcher's
@@ -95,6 +119,7 @@ type wakeKind int
 const (
 	wakeRekeyEmit wakeKind = iota
 	wakeRekeyReplyTimeout
+	wakeIdleTimeout
 )
 
 // wakeSignal is the value the per-session timer-callback goroutines
@@ -311,6 +336,30 @@ type V2Session struct {
 	// fired timer can race with the wake delivery, and the bool is the
 	// stable signal that rekeyComplete already won.
 	awaitingRekeyReply bool
+
+	// idleTimer fires idleTimeout after this session's last inbound frame
+	// and drives the in-repo idle sweep (#774). On fire the AfterFunc
+	// callback delivers a wakeIdleTimeout signal onto m.wake; the manager's
+	// Run goroutine then either reschedules the timer (a frame arrived after
+	// the timer was armed, so time.Since(lastActivityAt) < idleTimeout) or
+	// tears the session down via closeWith(StatusIdleTimeout /* 4408 */,
+	// nil), bounding the lifetime of the two Noise CipherStates under
+	// connect/disconnect churn. Armed at V2StateOpen alongside rekeyTimer;
+	// stopped (and replaced with nil) by closeWith on any close path. Nil
+	// before initial open; nil after closeWith.
+	idleTimer *time.Timer
+
+	// lastActivityAt is the instant of the most recent inbound frame,
+	// stamped in handleFrame for every frame (handshake or app). It is the
+	// idle deadline the idleTimer chases: a fire whose
+	// time.Since(lastActivityAt) is still < idleTimeout reschedules for the
+	// remaining window instead of tearing down, so the timer ends up firing
+	// at exactly lastActivityAt + idleTimeout. Run-owned (written in
+	// handleFrame, read in handleWake) — same single-writer regime as
+	// state/rekeyTimer, no lock or atomic. Never crosses the wire, so the
+	// monotonic reading is retained (PROJECT-MEMORY's time.Time round-trip
+	// discipline does not apply).
+	lastActivityAt time.Time
 
 	// replayThrough is the highest durable event id already delivered to this
 	// conn by the mid-turn-reconnect replay (#647). Run-owned: written in
@@ -712,6 +761,25 @@ func (m *V2SessionManager) handleWake(ctx context.Context, w wakeSignal) {
 			"conn_id", w.s.connID,
 			"close_code", int(StatusHandshakeFailure))
 		m.closeWith(ctx, w.s, StatusHandshakeFailure, nil)
+	case wakeIdleTimeout:
+		if idle := time.Since(w.s.lastActivityAt); idle < idleTimeout {
+			// A frame arrived after this timer was armed but before the
+			// wake was serviced; handleFrame already re-stamped
+			// lastActivityAt. Reschedule for the remaining window so the
+			// timer fires at exactly lastActivityAt + idleTimeout — no
+			// active session is ever torn down by a stale wake.
+			w.s.idleTimer = m.armIdleTimer(ctx, w.s, idleTimeout-idle)
+			return
+		}
+		// Genuinely idle: no inbound frame for idleTimeout. Tear down
+		// through the existing close path, which drops both CipherStates,
+		// stops every per-session timer, and removes the session + push
+		// queue.
+		m.cfg.Logger.Info("relay: v2 idle teardown",
+			"event", "v2.idle.teardown",
+			"conn_id", w.s.connID,
+			"close_code", int(StatusIdleTimeout))
+		m.closeWith(ctx, w.s, StatusIdleTimeout, nil)
 	}
 }
 
@@ -736,6 +804,25 @@ func (m *V2SessionManager) armRekeyReplyTimer(ctx context.Context, s *V2Session)
 	return time.AfterFunc(rekeyReplyTimeout, func() {
 		select {
 		case m.wake <- wakeSignal{s: s, kind: wakeRekeyReplyTimeout}:
+		case <-ctx.Done():
+		}
+	})
+}
+
+// armIdleTimer arms the idle-sweep timer (#774) for d. The callback runs
+// on a fresh runtime goroutine (time.AfterFunc semantics); it pushes a
+// wakeIdleTimeout signal onto m.wake under blocking-send + ctx.Done
+// semantics, exactly like armRekeyTimer. The initial arm (in
+// handleNoiseInit's success tail) passes idleTimeout; the reschedule arm
+// (in handleWake) passes the remaining window so the timer fires at
+// exactly lastActivityAt + idleTimeout. The callback touches only m.wake
+// — never s.send / s.recv / s.state / m.sessions — so it cannot race the
+// cipher states. ctx is the manager's Run-derived runCtx; cancelled on
+// Run exit, which unblocks any pending callback goroutine.
+func (m *V2SessionManager) armIdleTimer(ctx context.Context, s *V2Session, d time.Duration) *time.Timer {
+	return time.AfterFunc(d, func() {
+		select {
+		case m.wake <- wakeSignal{s: s, kind: wakeIdleTimeout}:
 		case <-ctx.Done():
 		}
 	})
@@ -787,6 +874,12 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 		// Late frame on a torn-down conn; drop silently.
 		return
 	}
+	// Every inbound frame — handshake or app — counts as activity for the
+	// idle sweep (#774). Stamp before dispatch so the idle timer chases the
+	// freshest deadline; a torn-down conn's late frame was dropped by the
+	// check above first. A single field write on the hot path — no timer op
+	// here; the armed idleTimer reads this on its next fire (handleWake).
+	s.lastActivityAt = time.Now()
 
 	inner, err := decodeInnerFrameV2(env.Frame)
 	if err != nil {
@@ -1097,6 +1190,12 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	m.queues[s.connID] = &pushQueue{}
 	m.pushMu.Unlock()
 	s.rekeyTimer = m.armRekeyTimer(ctx, s)
+	// Arm the idle sweep (#774) alongside the rekey timer. lastActivityAt
+	// was stamped by this noise_init's handleFrame, so the timer fires
+	// ~idleTimeout from now unless a further inbound frame re-stamps it. No
+	// inbound frame within the window tears the session down via closeWith,
+	// bounding the CipherStates' lifetime under connect/disconnect churn.
+	s.idleTimer = m.armIdleTimer(ctx, s, idleTimeout)
 
 	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
 	// off, replay the conversation's missed tail (or emit a resync marker) on
@@ -2088,6 +2187,10 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 	if s.rekeyReplyTimer != nil {
 		s.rekeyReplyTimer.Stop()
 		s.rekeyReplyTimer = nil
+	}
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
 	}
 	delete(m.sessions, s.connID)
 	// Symmetric with the create in handleNoiseInit: drop the per-session push
