@@ -3,7 +3,6 @@ package sessions
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -280,7 +279,19 @@ func (s *Session) Run(ctx context.Context) error {
 				return err
 			}
 			if err := s.transitionTo(stateEvicted); err != nil {
-				return fmt.Errorf("persist evicted: %w", err)
+				// A registry-persist failure on a lifecycle transition is
+				// NON-FATAL. transitionTo already advanced the in-memory state
+				// and woke waiters before persisting, so memory is
+				// authoritative and the next transition re-persists the whole
+				// registry (self-healing). Returning here would propagate
+				// through the pool's shared error group and tear down EVERY
+				// live session and the relay leg over one disk hiccup during a
+				// routine idle eviction — a blast radius grossly out of
+				// proportion to the trigger.
+				s.log.Warn("session: registry persist failed on evict; keeping in-memory state, retrying next transition",
+					"event", "session.persist_failed",
+					"transition", "evicted",
+					"err", err)
 			}
 			// Fire the eviction signal AFTER transitionTo (post-persist, no
 			// lcMu held — the leaf, off-lock callback point). reason == ""
@@ -299,7 +310,14 @@ func (s *Session) Run(ctx context.Context) error {
 				return err
 			}
 			if err := s.transitionTo(stateActive); err != nil {
-				return fmt.Errorf("persist active: %w", err)
+				// Non-fatal, same reasoning as the evict transition above:
+				// memory is already authoritative, the next transition
+				// re-persists. Do not tear down the daemon over a persist I/O
+				// error on a routine re-activation.
+				s.log.Warn("session: registry persist failed on activate; keeping in-memory state, retrying next transition",
+					"event", "session.persist_failed",
+					"transition", "active",
+					"err", err)
 			}
 		}
 	}
