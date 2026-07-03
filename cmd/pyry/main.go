@@ -734,11 +734,16 @@ func runSupervisor(args []string) error {
 
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
 	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
-	// PYRY_MOBILE_V2=1 flips the daemon's relay leg from the v1 dispatch path
-	// to the Mobile Protocol v2 (Noise_IK E2E) manager. Operator-set switch,
-	// mirroring PYRY_ALLOW_INSECURE_RELAY (env-only, no config/flag); run
-	// `pyry pair preflight` first to confirm no v1 pairings will break.
-	v2Enabled := os.Getenv("PYRY_MOBILE_V2") == "1"
+	// Mobile Protocol v2 (Noise_IK E2E) is the DEFAULT relay protocol and the
+	// only one any shipping client speaks. The cutover is hard, no v1 on the
+	// wire (docs/protocol-mobile.md § Security model, ADR 024). Leaving the
+	// daemon on the legacy v1 dispatch path made mobile's handshake decode as
+	// a v1 envelope, answered with a plaintext v1 error the phone cannot parse,
+	// which it then closes and reconnects — an infinite connect-drop loop
+	// indistinguishable from a stale relay deploy. Default to v2; set
+	// PYRY_MOBILE_V2=0 to opt back into the deprecated v1 path (env-only, no
+	// config/flag, mirroring PYRY_ALLOW_INSECURE_RELAY).
+	v2Enabled := os.Getenv("PYRY_MOBILE_V2") != "0"
 	bootstrap := pool.Default()
 	// One activeConversation holder, shared two ways: the sessionRouter writes it
 	// on each successful route, and startRelay threads it (read-side) to the

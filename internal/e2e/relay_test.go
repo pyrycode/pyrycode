@@ -91,7 +91,7 @@ func TestRelay_4409(t *testing.T) {
 
 	home := shortHome(t)
 	_, cmd, _, stderr, doneCh := spawnWith(t, home, spawnOpts{
-		extraEnv: []string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		extraEnv: []string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
 		extraFlags: []string{
 			"-pyry-relay=" + fr.URL() + "/v1/server",
 		},
@@ -124,7 +124,7 @@ func TestRelay_1011(t *testing.T) {
 	home := shortHome(t)
 	h := StartInWithEnv(t,
 		home,
-		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
 		"-pyry-relay="+fr.URL()+"/v1/server",
 	)
 

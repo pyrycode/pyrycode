@@ -263,6 +263,7 @@ func startEvictionHarness(t *testing.T, home, sessionsDir, initialUUID, trigger,
 		},
 		extraEnv: []string{
 			"PYRY_ALLOW_INSECURE_RELAY=1",
+			"PYRY_MOBILE_V2=0",
 			"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
 			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
 			"PYRY_FAKE_CLAUDE_TRIGGER=" + trigger,

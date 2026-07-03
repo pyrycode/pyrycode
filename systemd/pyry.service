@@ -9,6 +9,11 @@ Type=simple
 WorkingDirectory=%h/pyry-workspace
 # Make sure `claude` is on PATH; override as needed.
 Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Mobile/desktop relay protocol. The daemon speaks Mobile Protocol v2
+# (Noise_IK end-to-end encryption) by DEFAULT — the only protocol the mobile
+# and desktop clients speak. Uncomment the next line ONLY to force the
+# deprecated legacy v1 dispatch path (no shipping client speaks v1).
+#Environment="PYRY_MOBILE_V2=0"
 # -pyry-resume is the default; pass any claude args after pyry's own flags.
 ExecStart=%h/.local/bin/pyry
 Restart=always

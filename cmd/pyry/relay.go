@@ -148,7 +148,7 @@ func startRelay(
 	var legCleanup func()
 
 	if v2Enabled {
-		logger.Info("relay: PYRY_MOBILE_V2=1 — Mobile Protocol v2 (Noise_IK) cutover enabled")
+		logger.Info("relay: Mobile Protocol v2 (Noise_IK) enabled — default; set PYRY_MOBILE_V2=0 to force legacy v1")
 		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse)
 		if err != nil {
 			_ = conn.Close()
@@ -161,6 +161,7 @@ func startRelay(
 			drain()
 		}
 	} else {
+		logger.Warn("relay: PYRY_MOBILE_V2=0 — legacy v1 dispatch path (DEPRECATED; no shipping client speaks v1, mobile/desktop require v2)")
 		d := dispatch.New(dispatch.Config{
 			Frames:     conn.Frames(),
 			Logger:     logger,

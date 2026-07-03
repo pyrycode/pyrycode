@@ -74,6 +74,7 @@ func TestRelay_Roundtrip_Appendix(t *testing.T) {
 		stdinLog, fr.URL()+"/v1/server",
 		"PYRY_FAKE_CLAUDE_TUI=1",
 		"PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER="+asstTrigger,
+		"PYRY_MOBILE_V2=0",
 	)
 	t.Cleanup(func() { h.Stop(t) })
 
