@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -6,6 +6,13 @@ one `io.Writer` (outbound), a method dispatch table for host→agent requests, a
 an **outbound-request primitive** for agent→client calls. Part of epic
 [#600](https://github.com/pyrycode/pyrycode/issues/600) — the `pyry acp`
 subcommand that lets an ACP host (e.g. Zed) drive a supervised claude session.
+As of #761 the subcommand hosts an **embedded `internal/sessions` pool** and
+serves its first real method, [`session/new`](#sessionnew-and-the-embedded-pool-761),
+which spawns exactly one supervised interactive claude per ACP session. #762 adds
+the two **lifecycle** verbs that address a session the host already opened —
+[`session/load`](#sessionload--sessioncancel-762) (resume by id) and
+[`session/cancel`](#sessionload--sessioncancel-762) (a notification that resolves
+onto the session's supervisor for the future abort keystroke).
 
 ACP is bidirectional. Inbound: the host writes one JSON object per line to the
 agent's stdin; the agent replies and streams notifications one JSON object per
@@ -20,9 +27,14 @@ that serves this transport over real stdio. #757 added the
 [outbound direction](#outbound-request-primitive-transportcall-757): id
 generation, a pending-call registry, the blocking `Call`, and routing of inbound
 *response* lines to their waiters — replacing #755's response-frame log-and-drop.
-Still deferred to later epic-#600 tickets: **claude driving** and every **real
-ACP method** — later tickets register handlers against the dispatch table this
-package builds and issue outbound calls through `Call`.
+#761 delivered the **first real ACP method** and the composition root it needs:
+[`session/new`](#sessionnew-and-the-embedded-pool-761) over an embedded
+`internal/sessions` pool — the subcommand now *drives claude*. #762 added the
+[`session/load` + `session/cancel`](#sessionload--sessioncancel-762) lifecycle
+routing (resume-by-id and the cancel→supervisor resolution seam). Still deferred
+to later epic-#600 tickets: the cancel **abort keystroke** itself (T9, #753), turn
+delivery, and the outbound `session/request_permission` / held-`session/prompt`
+return paths that issue through `Call`.
 
 Greenfield, stdlib-only package: imports `bufio`, `context`, `encoding/json`,
 `errors`, `fmt`, `io`, `log/slog`, `sync`, `sync/atomic` — **no repo packages**.
@@ -37,8 +49,11 @@ The package doc comment records it so the constraint stays visible at the
 transport layer: **when a later ticket wires claude behind an ACP method,
 `pyry acp` MUST drive a real *interactive* `claude` session billed under the
 interactive subscription — never the non-interactive `claude -p` path and never
-the metered Agent SDK.** This ticket ships no claude driving and cannot violate
-the invariant.
+the metered Agent SDK.** #755's transport ships no claude driving and cannot
+violate it. **#761 is the first ticket that honours it in code:**
+[`session/new`](#sessionnew-and-the-embedded-pool-761)'s `Pool.Create` spawns
+`claude --session-id <uuid>` through the tui-driver (no `-p`/`--print`, no SDK),
+and a test asserts the spawn argv is exactly the interactive path.
 
 ## Exported surface (3 types — under the 5-type sizing line)
 
@@ -318,9 +333,13 @@ The composition root that serves this transport over real stdio ships in
 [#756](https://github.com/pyrycode/pyrycode/issues/756) — `cmd/pyry/acp.go`. It
 registers the `pyry acp` verb (no flags, no positional args), constructs
 `acp.New(os.Stdin, os.Stdout, logger)` and calls `Serve(ctx)`, and exits **zero**
-on both EOF (host closes stdin) and SIGINT/SIGTERM. It registers **no** handlers
-and drives **no** claude — later epic-#600 tickets register `session/*` handlers
-against it.
+on both EOF (host closes stdin) and SIGINT/SIGTERM. **As shipped in #756** it
+registered **no** handlers and drove **no** claude — a bare transport floor.
+[#761](#sessionnew-and-the-embedded-pool-761) extended it: `runACP` now stands up
+an embedded pool and registers `session/new`, and `serveACP` gained a
+`register func(*acp.Transport)` seam (nil ⇒ register nothing, preserving #756's
+behaviour). The `io.Pipe` stdin bridge / closer / clean-exit machinery below is
+unchanged by #761.
 
 - **Plain stderr logger, no ring buffer.** `slog.NewTextHandler(os.Stderr, …)` —
   deliberately **not** `runSupervisor`'s `control.SlogTee` + `NewRingBuffer`. The
@@ -340,6 +359,148 @@ against it.
 
 Full detail, concurrency model, and the one-shot bridge-goroutine-leak rationale
 in [`codebase/756.md`](../codebase/756.md).
+
+## `session/new` and the embedded pool (#761)
+
+The first ACP method that does real work, plus the composition root it needs: an
+**embedded `internal/sessions` pool** inside the `pyry acp` subprocess, trimmed
+to the ACP subset — **no relay, control socket, conversations registry, or
+message queue**. ACP maps one session onto exactly one running interactive
+`claude` (**divergence 6**); `session/new` allocates one pool session, starts
+one supervised interactive claude, and returns a fresh id the host addresses in
+later calls — **no more, no fewer** claudes.
+
+### Standup (`runACP` → `serveACPWithPool`)
+
+`runACP` trims `runSupervisor`'s spine to the ACP subset before serving:
+`confineWorkdirToHome("")` (process cwd, confined to `$HOME`) → the shared
+cmd-layer `trustMark` (marks the workdir trusted in `~/.claude.json` so claude
+never wedges on the workspace-trust modal) → `sessions.New` with **two
+load-bearing settings**:
+
+- **`BootstrapEvicted: true`** — the pool always eager-spawns a bootstrap claude
+  (`sessions.New` forces the bootstrap `stateActive`; `pool.Run` supervises it
+  immediately). A naive standup that then `Pool.Create`s per `session/new` would
+  yield **two** claudes for one ACP session — a divergence-6 and hard-cost
+  violation. `BootstrapEvicted` parks the bootstrap in `runEvicted` (PID 0, no
+  claude), so `Pool.Create` is the sole spawn. See
+  [`sessions-package.md`](sessions-package.md#configbootstrapevicted--poolready-761)
+  and [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md).
+- **`Bootstrap.Bridge: supervisor.NewBridge(logger)`** — **service mode is
+  mandatory.** Foreground `supervisor.runOnce` copies claude's PTY output to
+  `os.Stdout`, which ACP owns for the JSON-RPC frame stream. Service mode routes
+  each Created session's output to a per-session Bridge (discarded with no
+  attacher/observer), keeping stdout clean for frames. The Bridge is the
+  supervisor's I/O mediator — **not** one of the prohibited subsystems.
+
+`serveACPWithPool` backgrounds `pool.Run` on a buffered(1) `poolErr` channel and
+`select`s on `pool.Ready()` before serving — the **readiness gate** that closes
+the unrecoverable first-`Create → ErrPoolNotRunning` startup race (a stranded,
+never-supervised session with a non-empty id and no recovery; see
+[`sessions-package.md`](sessions-package.md#configbootstrapevicted--poolready-761)).
+On EOF/signal it cancels and joins `<-poolErr` so no supervisor goroutine
+outlives the call.
+
+### The handler
+
+`newSessionHandler(pool)` satisfies `acp.Handler`. It calls `pool.Create(ctx,
+"")` (empty label → a fresh UUID), and returns `newSessionResult{SessionID:
+string(id)}` marshalling to `{"sessionId": "<uuid>"}`. `Pool.Create` spawns
+exactly one `claude --session-id <uuid>` through the tui-driver — the
+**interactive path, no `-p`/`--print`, no Agent SDK** (the hard cost invariant).
+A `Create` error is wrapped (`fmt.Errorf("session/new: %w", …)`) → the mapped
+`CodeInternalError` on the wire, detail logged not leaked.
+
+`newSessionResult` is an **unexported** type with one exported json-tagged field
+— zero new exported types.
+
+### `cwd` is deliberately ignored (why NOT security-sensitive)
+
+ACP `session/new` params carry `cwd`/`mcpServers`; the handler **reads neither**.
+The spawn reuses the daemon's own workdir + the shared `trustMark` seam, so no
+caller-supplied path reaches it — a local, same-user, trusted stdio host like the
+control socket's session verbs. **Flip condition:** if a later ticket honours a
+caller-supplied `cwd` that reaches the spawn *bypassing* the trust seam, the
+cwd-confinement surface returns and the work becomes `security-sensitive`
+(deferred to #762+).
+
+Full per-ticket detail in [`codebase/761.md`](../codebase/761.md).
+
+## `session/load` + `session/cancel` (#762)
+
+The two **lifecycle** verbs that address a session the host already opened. Both
+reduce to one primitive — resolve an ACP `sessionId` onto its pool session via
+`Pool.Lookup` — plus one shared param decode, and both register in #761's existing
+`register` closure. **No new transport wiring, one production file touched
+(`cmd/pyry/acp.go`), zero new exported types.**
+
+### `decodeSessionID` — the shared decode (the bootstrap-trap guard)
+
+`decodeSessionID(params) (sessions.SessionID, *acp.Error)` unmarshals
+`{"sessionId": string}`. A JSON error, a missing key, or an **empty** `sessionId`
+→ `acp.NewError(acp.CodeInvalidParams, …)`. Returning `*acp.Error` (not a plain
+`error`) gives `session/load` the exact `CodeInvalidParams` wire code, and because
+`*acp.Error` also satisfies `error`, `session/cancel` passes it straight into its
+logged-and-discarded return with no conversion.
+
+**The empty-string rejection is load-bearing.** `Pool.Lookup("")` resolves to the
+parked **bootstrap** session, *not* an error (the empty-id → default-session seam
+is deliberate for the control plane). An empty/missing `sessionId` must be refused
+*before* it reaches `Lookup`, or `session/load` would activate the bootstrap.
+
+### `session/load` — resume by id (`Lookup` + `Activate`, never `GetOrCreate`)
+
+`loadSessionHandler` does `decodeSessionID` → `pool.Lookup(id)` →
+`pool.Activate(ctx, id)` → `newSessionResult{SessionID: string(id)}` (reuses
+#761's result struct → `{"sessionId":"<id>"}`).
+
+- **`Lookup` = miss-is-an-error, no side effect.** An unknown non-empty id →
+  `ErrSessionNotFound` → `CodeInvalidParams` ("unknown session"), **no `Activate`,
+  no spawn** (AC-2).
+- **`Activate` is idempotent on the already-active session → divergence 6.** The
+  ACP pool is uncapped (`ActiveCap == 0`), so `Pool.Activate` delegates to
+  `Session.Activate`, whose already-`stateActive` fast path returns immediately off
+  the closed `activeCh` and signals no lifecycle goroutine. A session Created by
+  `session/new` is already active, so loading it (once or twice) spawns **no
+  second claude** (AC-1, AC-3). It re-activates an evicted session in place, same
+  id. See [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md) and
+  [`sessions-package.md`](sessions-package.md).
+- **`GetOrCreate` is deliberately NOT used** — it *creates on miss*, spawning a
+  fresh claude for an unknown id, which would break both AC-2 and divergence 6.
+
+### `session/cancel` — the notification → supervisor seam (T9, #753)
+
+`session/cancel` is an ACP **notification** (a frame with `method` but no `id`).
+The routing is factored into a directly unit-testable resolver:
+
+```
+resolveCancelTarget(pool, params) (*supervisor.Supervisor, error)
+  = decodeSessionID → pool.Lookup(id) → sess.Supervisor()
+```
+
+`cancelSessionHandler` calls it and returns `(nil, nil)` on success. **Delivering
+the abort keystroke is T9's (#753) job** — this ticket lands only the resolution
+seam that reaches the per-session `*supervisor.Supervisor`.
+
+**The no-response guarantee is structural, not code.** The transport's
+[`dispatchNotification`](#classification-decision-table-the-core-mechanism)
+routes a notification to the same handler map but **discards every notification
+handler's return** — success or error. So registering the handler is the whole
+mechanism; a resolution error is returned only so the notification path logs it,
+and it too emits no response frame. (Contrast the request path, where the
+handler's return shapes the wire frame.)
+
+### Scope: within-process boundary only (architect call)
+
+`session/load` resolves ids **this `pyry acp` process** opened. `pyry acp` stands
+up a fresh **in-memory** pool per invocation (#761 leaves
+`RegistryPath`/`ClaudeSessionsDir` zero → no persistence, no reconcile) and is a
+one-shot stdio subprocess bound to one host connection, so every addressable id is
+already in memory. Cross-process reload (an id a prior process created) would need
+`RegistryPath` + reconcile wired into the ACP standup — deferred, additive.
+
+Not security-sensitive — resolves *existing* ids only, accepts no caller path.
+Full per-ticket detail in [`codebase/762.md`](../codebase/762.md).
 
 ## Deferred / scope boundaries
 
@@ -422,10 +583,20 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
 
 - Per-ticket records: [`codebase/755.md`](../codebase/755.md) (transport floor),
   [`codebase/756.md`](../codebase/756.md) (`pyry acp` subcommand),
-  [`codebase/757.md`](../codebase/757.md) (outbound-request primitive)
+  [`codebase/757.md`](../codebase/757.md) (outbound-request primitive),
+  [`codebase/761.md`](../codebase/761.md) (`session/new` + embedded pool),
+  [`codebase/762.md`](../codebase/762.md) (`session/load` + `session/cancel` lifecycle)
 - Specs: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md),
   [`specs/architecture/756-acp-subcommand.md`](../../specs/architecture/756-acp-subcommand.md),
-  [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md)
+  [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md),
+  [`specs/architecture/761-acp-session-new-embedded-pool.md`](../../specs/architecture/761-acp-session-new-embedded-pool.md),
+  [`specs/architecture/762-acp-session-load-cancel.md`](../../specs/architecture/762-acp-session-load-cancel.md)
+- Cancel abort keystroke (the seam `resolveCancelTarget` exposes): T9
+  [#753](https://github.com/pyrycode/pyrycode/issues/753), consuming the neutral
+  `Cancel` command from [`turnevent-package.md`](turnevent-package.md) (#707).
+- Embedded-pool design: [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md)
+  (`BootstrapEvicted` over adopting `Default()`; the `Ready()` correctness gate),
+  [`features/sessions-package.md`](sessions-package.md#configbootstrapevicted--poolready-761)
 - Dispatch-table precedent: [`features/dispatch-package.md`](dispatch-package.md)
   (`Register`-before-`Run` `atomic.Bool` gate, carrier-agnostic handler table).
   `internal/acp` mirrors the shape but defines its own JSON-RPC wire types —

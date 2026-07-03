@@ -54,6 +54,21 @@ type Config struct {
 	Bootstrap SessionConfig
 	Logger    *slog.Logger
 
+	// BootstrapEvicted, when true, constructs the bootstrap session in
+	// stateEvicted instead of the default stateActive, so Pool.Run parks it in
+	// runEvicted and it spawns no claude. The zero value (false) is
+	// byte-identical to today's eager-bootstrap behaviour.
+	//
+	// This exists for embedded hosts that map each caller session onto its own
+	// Pool.Create'd claude and must not run a second, unaddressed bootstrap
+	// claude (pyry acp / divergence 6, #761). It is sound only when the
+	// bootstrap is never Activated and its evicted state is never persisted: the
+	// pool keeps it as a dormant Default()/Lookup("") placeholder until Run's
+	// ctx cancels. Do NOT pair it with a RegistryPath that would persist
+	// "evicted" for the bootstrap and later wake it with no attach client to
+	// drive Activate (the #202 hang the New warm-start branch guards against).
+	BootstrapEvicted bool
+
 	// RegistryPath is the on-disk path of the sessions.json registry. Empty
 	// disables persistence (test-only). In production this is always
 	// ~/.pyry/<sanitized-name>/sessions.json — see cmd/pyry resolveRegistryPath.
@@ -200,6 +215,15 @@ type Pool struct {
 	// half-initialised handle.
 	runGroup *errgroup.Group
 	runCtx   context.Context
+
+	// readyCh is closed once by Run — under readyOnce — after runGroup/runCtx
+	// are wired and the bootstrap is supervised, i.e. once Pool.Create's
+	// supervise call will succeed instead of returning ErrPoolNotRunning.
+	// Created open in New (never ready until Run); read via Ready(). readyOnce
+	// guards the theoretical double-Run. Read lock-free: set once in New and
+	// never reassigned.
+	readyCh   chan struct{}
+	readyOnce sync.Once
 
 	// sessionTpl is the per-session template captured from cfg.Bootstrap
 	// at New(). Pool.Create copies this, overrides ResumeLast/ClaudeArgs,
@@ -348,6 +372,14 @@ func New(cfg Config) (*Pool, error) {
 		createdAt, lastActiveAt = now, now
 	}
 
+	// Embedded hosts (pyry acp, #761) suppress the eager bootstrap claude so a
+	// per-caller Pool.Create is the only interactive claude. Overrides whatever
+	// the warm/cold-start branch chose above; sound only because such callers
+	// never persist or Activate the bootstrap (see Config.BootstrapEvicted).
+	if cfg.BootstrapEvicted {
+		lcState = stateEvicted
+	}
+
 	supCfg := supervisor.Config{
 		ClaudeBin:      cfg.Bootstrap.ClaudeBin,
 		WorkDir:        cfg.Bootstrap.WorkDir,
@@ -412,6 +444,7 @@ func New(cfg Config) (*Pool, error) {
 	p := &Pool{
 		sessions:           map[SessionID]*Session{bootstrapID: sess},
 		bootstrap:          bootstrapID,
+		readyCh:            make(chan struct{}),
 		log:                cfg.Logger,
 		registryPath:       cfg.RegistryPath,
 		claudeSessionsDir:  cfg.ClaudeSessionsDir,
@@ -811,6 +844,11 @@ func (p *Pool) Run(ctx context.Context) error {
 	if err := p.supervise(bootstrap); err != nil {
 		return fmt.Errorf("sessions: supervise bootstrap: %w", err)
 	}
+	// Signal readiness: runGroup/runCtx are wired and the bootstrap is
+	// supervised, so Pool.Create's supervise can no longer hit
+	// ErrPoolNotRunning. Embedded hosts (pyry acp) gate their first
+	// session/new on Ready() to close that unrecoverable startup race.
+	p.readyOnce.Do(func() { close(p.readyCh) })
 
 	if dir != "" {
 		w, err := rotation.New(rotation.Config{
@@ -865,6 +903,15 @@ func (p *Pool) supervise(sess *Session) error {
 	}
 	g.Go(func() error { return sess.Run(gctx) })
 	return nil
+}
+
+// Ready returns a channel closed once Pool.Run has wired its supervisor handle
+// and supervised the bootstrap — i.e. once Pool.Create will schedule the new
+// session instead of returning ErrPoolNotRunning. Before Run is ever called the
+// channel is open (never ready). Closed exactly once; safe to select on
+// repeatedly and from multiple goroutines.
+func (p *Pool) Ready() <-chan struct{} {
+	return p.readyCh
 }
 
 // Create mints a fresh session, persists it, and brings it up under the
