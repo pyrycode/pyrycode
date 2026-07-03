@@ -65,6 +65,14 @@ func (f *Fetcher) FetchAsset(ctx context.Context, url string) ([]byte, error) {
 	return f.get(ctx, url)
 }
 
+// maxAssetBytes bounds an in-memory response body read. It sits far above any
+// real release asset (the pyry binary is tens of MB) but caps an attacker's or
+// a malfunctioning server's ability to stream an unbounded body into memory
+// and OOM the process. A legitimate asset that ever exceeded this would fail
+// the checksum verification downstream, so a truncation is caught, never
+// silently installed.
+const maxAssetBytes int64 = 512 << 20 // 512 MiB
+
 func (f *Fetcher) get(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -85,9 +93,15 @@ func (f *Fetcher) get(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: unexpected status %d", url, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Bounded read: cap the in-memory body so an oversized asset cannot OOM
+	// the process. Read one byte past the cap so an over-cap body is detected
+	// and rejected rather than silently truncated.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body from %s: %w", url, err)
+	}
+	if int64(len(body)) > maxAssetBytes {
+		return nil, fmt.Errorf("response body from %s exceeds %d-byte cap", url, maxAssetBytes)
 	}
 	return body, nil
 }

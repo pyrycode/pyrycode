@@ -189,3 +189,76 @@ func TestSession_EvictActivateStress(t *testing.T) {
 		checkDisk(i, "")
 	}
 }
+
+// setRegistryPath swaps the pool's registry path under the pool lock so a
+// concurrent lifecycle persist reads a consistent value (race-detector safe).
+func setRegistryPath(p *Pool, path string) {
+	p.mu.Lock()
+	p.registryPath = path
+	p.mu.Unlock()
+}
+
+// TestSession_PersistFailure_IsNonFatal proves a registry-persist failure on a
+// lifecycle transition is NON-FATAL: the in-memory transition still completes,
+// the lifecycle goroutine survives, and a later transition (with persistence
+// restored) succeeds and re-persists (self-heals). Before the fix the persist
+// error propagated out of the Run loop and, via the pool's shared error group,
+// tore down every live session over one disk hiccup during a routine eviction.
+func TestSession_PersistFailure_IsNonFatal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	pool := helperPoolPersistentIdle(t, regPath, 0) // manual evict/activate
+	ctx, _ := runPoolInBackground(t, pool)
+
+	sess := pool.Default()
+	if !pollUntil(t, 2*time.Second, func() bool {
+		return sess.LifecycleState() == stateActive
+	}) {
+		t.Fatalf("session never reached stateActive; state=%v", sess.LifecycleState())
+	}
+
+	// Break persistence: point the registry at a path under a non-directory so
+	// saveLocked fails on the next transition (same trick as pool_create_test).
+	setRegistryPath(pool, "/dev/null/cant/sessions.json")
+
+	// Evict: the in-memory transition must still succeed despite the persist
+	// failure — memory is authoritative — and the lifecycle goroutine must NOT
+	// return the error.
+	if err := sess.Evict(ctx); err != nil {
+		t.Fatalf("Evict returned err on persist failure, want nil (non-fatal): %v", err)
+	}
+	if got := sess.LifecycleState(); got != stateEvicted {
+		t.Fatalf("post-Evict lcState = %v, want stateEvicted (memory authoritative)", got)
+	}
+
+	// Restore persistence and Activate. If the lifecycle goroutine had died on
+	// the persist failure (the pre-fix behaviour), this Activate would never
+	// wake and would fail/time out.
+	setRegistryPath(pool, regPath)
+	if err := sess.Activate(ctx); err != nil {
+		t.Fatalf("Activate after restored persistence: %v (lifecycle goroutine likely died on the persist failure)", err)
+	}
+	if got := sess.LifecycleState(); got != stateActive {
+		t.Fatalf("post-Activate lcState = %v, want stateActive", got)
+	}
+
+	// The restored transition re-persisted: on-disk state self-healed to active
+	// (encoded as omitempty / empty string).
+	reg, err := loadRegistry(regPath)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	var found bool
+	for _, e := range reg.Sessions {
+		if e.ID == sess.ID() {
+			found = true
+			if e.LifecycleState != "" {
+				t.Errorf("on-disk lifecycleState = %q, want empty (active) after self-heal", e.LifecycleState)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("entry %q missing from registry after self-heal", sess.ID())
+	}
+}
