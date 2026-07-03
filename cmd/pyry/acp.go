@@ -105,6 +105,8 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 
 	register := func(t *acp.Transport) {
 		t.Register("session/new", newSessionHandler(pool))
+		t.Register("session/load", loadSessionHandler(pool))
+		t.Register("session/cancel", cancelSessionHandler(pool))
 	}
 	serveErr := serveACP(runCtx, stdin, stdout, logger, register)
 
@@ -138,6 +140,90 @@ func newSessionHandler(pool *sessions.Pool) acp.Handler {
 			return nil, fmt.Errorf("session/new: %w", err)
 		}
 		return newSessionResult{SessionID: string(id)}, nil
+	}
+}
+
+// decodeSessionID extracts the sessionId shared by session/load and
+// session/cancel from a JSON-RPC params object. A JSON error, an absent
+// sessionId, or an empty sessionId returns *acp.Error{CodeInvalidParams}. The
+// empty-string rejection is load-bearing: Pool.Lookup("") resolves to the parked
+// bootstrap session rather than erroring, so an empty id must be refused here —
+// before it reaches Lookup — or session/load would activate the bootstrap.
+//
+// The *acp.Error return (not a plain error) gives session/load the exact
+// CodeInvalidParams wire code; it also satisfies error, so session/cancel passes
+// it straight into its logged-and-discarded return with no conversion. Per the
+// internal/acp diagnostics discipline, no params bytes are logged.
+func decodeSessionID(params json.RawMessage) (sessions.SessionID, *acp.Error) {
+	var p struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return "", acp.NewError(acp.CodeInvalidParams, "invalid params")
+	}
+	if p.SessionID == "" {
+		return "", acp.NewError(acp.CodeInvalidParams, "missing sessionId")
+	}
+	return sessions.SessionID(p.SessionID), nil
+}
+
+// loadSessionHandler returns the acp.Handler for session/load: resume an existing
+// session by id. It resolves the id with Pool.Lookup (miss → error, no side
+// effect) then Pool.Activate (idempotent on the already-active session, so no
+// second claude spawns — divergence 6; re-activates in place for the evicted
+// case). An unknown id maps to CodeInvalidParams and spawns nothing. GetOrCreate
+// is deliberately NOT used: it creates on miss, which would spawn a fresh claude
+// for an unknown id and break both AC-2 and divergence 6.
+func loadSessionHandler(pool *sessions.Pool) acp.Handler {
+	return func(ctx context.Context, params json.RawMessage) (any, error) {
+		id, aerr := decodeSessionID(params)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if _, err := pool.Lookup(id); err != nil {
+			if errors.Is(err, sessions.ErrSessionNotFound) {
+				return nil, acp.NewError(acp.CodeInvalidParams, "unknown session")
+			}
+			return nil, fmt.Errorf("session/load: %w", err)
+		}
+		if err := pool.Activate(ctx, id); err != nil {
+			return nil, fmt.Errorf("session/load: %w", err)
+		}
+		return newSessionResult{SessionID: string(id)}, nil
+	}
+}
+
+// resolveCancelTarget maps a session/cancel notification's params onto the
+// per-session supervisor. It returns the supervisor handle T9 (#753) will signal
+// with the abort keystroke, or an error when sessionId is missing/malformed/empty
+// or names no session. Factored out of the handler so AC-4's "resolves onto the
+// correct session's supervisor" is unit-testable without T9's abort logic, and so
+// T9 has a named extension point.
+func resolveCancelTarget(pool *sessions.Pool, params json.RawMessage) (*supervisor.Supervisor, error) {
+	id, aerr := decodeSessionID(params)
+	if aerr != nil {
+		return nil, aerr
+	}
+	sess, err := pool.Lookup(id)
+	if err != nil {
+		return nil, fmt.Errorf("session/cancel: %w", err)
+	}
+	return sess.Supervisor(), nil
+}
+
+// cancelSessionHandler returns the acp.Handler for session/cancel, an ACP
+// notification. It resolves the target session's supervisor (via
+// resolveCancelTarget, the T9 (#753) seam) and returns (nil, nil): delivering the
+// abort keystroke is T9's job, and the transport's dispatchNotification discards
+// this return, so registering the handler is the whole no-response mechanism
+// (AC-4). A resolution error is returned so the notification path logs it — it too
+// emits no response frame.
+func cancelSessionHandler(pool *sessions.Pool) acp.Handler {
+	return func(_ context.Context, params json.RawMessage) (any, error) {
+		if _, err := resolveCancelTarget(pool, params); err != nil {
+			return nil, err
+		}
+		return nil, nil
 	}
 }
 
