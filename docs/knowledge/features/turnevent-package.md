@@ -305,9 +305,13 @@ imposes nothing.
 - The inbound parser + gate / nonce / modal control loop (security-sensitive
   Phase 3 slices) — parse the inbound `PermissionResponse` frame and answer behind
   `--allow-remote-permissions` + deny-on-timeout + the one-time nonce.
-- `pyry acp` adapter (#600) — near pass-through; re-derives ACP's `stopReason`
-  return from `TurnEnd.Reason`, and maps ACP's `session/request_permission` onto
-  `PermissionRequest`.
+- `pyry acp` adapter (#600) — near pass-through. Its **outbound `session/update`
+  half is now built** ([acpbridge-package.md](acpbridge-package.md), #769): the
+  pure `acpbridge.MapUpdate` maps `TextChunk`/`ThoughtChunk`/`ToolStart`/`ToolUpdate`
+  out to ACP `session/update` payloads, drops `Stall`, and reports "no
+  notification" for `TurnEnd` (whose `stopReason` return the consumer re-derives
+  from `TurnEnd.Reason`). Still deferred to later slices: the streaming consumer
+  (#750), and mapping ACP's `session/request_permission` onto `PermissionRequest`.
 
 ## Related
 
@@ -326,5 +330,10 @@ imposes nothing.
 - [protocol-package.md](protocol-package.md) — the sibling pure-data leaf package
   whose const-block layout, drift-detector test pattern, and consumer-owns-wire-
   codes convention this package mirrors.
+- [acpbridge-package.md](acpbridge-package.md) (#769) — the outbound ACP adapter
+  that maps this model to ACP `session/update` payloads; the ACP mirror of
+  `turnbridge`'s outbound `MapEvent`, and the first concrete piece of the `pyry
+  acp` adapter (#600). Its kind/status pass-through is identity precisely because
+  these enum values ARE the ACP strings.
 - [codebase/595.md](../codebase/595.md) — Phase-1 sibling; the coarse `#589`
   fan-out this typed stream eventually replaces (§ Phase 2).
