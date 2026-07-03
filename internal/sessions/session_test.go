@@ -524,6 +524,72 @@ func TestSession_ShutdownFromActive(t *testing.T) {
 	}
 }
 
+// TestSession_Run_RemovedCh_ExitsClean: closing removedCh while the lifecycle
+// goroutine is parked in runEvicted makes Run return nil (a clean exit, not a
+// ctx.Err), so Pool.Remove's shared-errgroup Run never propagates a teardown.
+// Also asserts removal wins over a racing Activate: a removed session can never
+// resurrect back into runActive. Bare Session literals — the evicted→removed
+// path touches neither sup nor pool.
+func TestSession_Run_RemovedCh_ExitsClean(t *testing.T) {
+	t.Parallel()
+
+	newEvictedSession := func() *Session {
+		return &Session{
+			id:         "removed-test",
+			log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+			removedCh:  make(chan struct{}),
+			lcState:    stateEvicted,
+			activeCh:   make(chan struct{}),
+			evictedCh:  closedChan(),
+			activateCh: make(chan struct{}, 1),
+			evictCh:    make(chan struct{}, 1),
+		}
+	}
+
+	t.Run("parked_then_removed", func(t *testing.T) {
+		t.Parallel()
+		sess := newEvictedSession()
+		errCh := make(chan error, 1)
+		go func() { errCh <- sess.Run(context.Background()) }()
+
+		// Level-triggered: the close wakes runEvicted whether it is already
+		// parked or about to enter the select.
+		close(sess.removedCh)
+
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("Run err = %v, want nil (clean removal exit)", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return after removedCh close")
+		}
+	})
+
+	t.Run("removal_wins_over_activate", func(t *testing.T) {
+		t.Parallel()
+		sess := newEvictedSession()
+		// Pre-load a pending Activate AND close removedCh before Run is
+		// scheduled: whichever select arm fires, Run's isRemoved() re-check
+		// sees the closed removedCh and exits nil rather than re-activating
+		// (which would deref the nil supervisor).
+		sess.activateCh <- struct{}{}
+		close(sess.removedCh)
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- sess.Run(context.Background()) }()
+
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("Run err = %v, want nil (removal wins over Activate)", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return; removed session may have re-activated")
+		}
+	})
+}
+
 // TestSession_ShutdownFromEvicted: outer ctx cancel returns ctx.Err from Run
 // while the session is sitting in stateEvicted.
 func TestSession_ShutdownFromEvicted(t *testing.T) {

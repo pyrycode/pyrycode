@@ -430,6 +430,7 @@ func New(cfg Config) (*Pool, error) {
 		lastActiveAt: lastActiveAt,
 		bootstrap:    true,
 		idleTimeout:  idleTimeout,
+		removedCh:    make(chan struct{}), // never closed: bootstrap is ErrCannotRemoveBootstrap
 		lcState:      lcState,
 		activateCh:   make(chan struct{}, 1),
 		evictCh:      make(chan struct{}, 1),
@@ -610,11 +611,14 @@ type RemoveOptions struct {
 // disposition and Evict fail, the disposition error wins (it is the new
 // failure mode this signature introduces, and the more actionable one).
 //
-// Lifecycle goroutine after Remove: sess.Run's loop transitions to
-// runEvicted and parks on activateCh / ctx.Done(). The session is no
-// longer reachable via Pool.sessions, so no caller can signal activateCh;
-// the goroutine survives until pool.Run's runCtx cancels at pool shutdown.
-// Bounded resource cost — see ticket #94 design notes.
+// Lifecycle goroutine after Remove: close(sess.removedCh) signals the
+// session's Run loop to exit promptly. Once Evict drives active→evicted
+// (or the session is already evicted), Run parks in runEvicted, observes
+// the closed removedCh, and returns nil — never through the shared
+// errgroup, so no other session or the relay leg is torn down. The
+// goroutine and everything it captures are released at Remove time rather
+// than surviving until pool shutdown (the bounded-cost note from #94 no
+// longer applies).
 func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) error {
 	p.mu.Lock()
 	sess, ok := p.sessions[id]
@@ -634,6 +638,17 @@ func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) err
 	}
 	disposeErr := p.disposeJSONLLocked(id, opts.JSONL)
 	p.mu.Unlock()
+
+	// Signal the lifecycle goroutine to exit. Placed past the saveLocked
+	// rollback branch (a rolled-back, still-registered session keeps its
+	// goroutine) and off p.mu, next to the already-off-lock Evict call.
+	// Closing a write-once channel needs no lock; the close is level-
+	// triggered, so ordering it before Evict is safe — the removal is
+	// observed the instant Run reaches runEvicted, whether Evict drives the
+	// active→evicted transition or the session is already parked there.
+	// Single-close is structural: Remove is single-shot per id (a second
+	// Remove finds no p.sessions[id] under p.mu and returns before this).
+	close(sess.removedCh)
 
 	evictErr := sess.Evict(ctx)
 	if disposeErr != nil {
@@ -1064,6 +1079,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string) (*Session, err
 		bootstrap:    false,
 		pool:         p,
 		idleTimeout:  idleTimeout,
+		removedCh:    make(chan struct{}),
 		lcState:      stateEvicted,
 		activeCh:     make(chan struct{}),
 		evictedCh:    closedChan(),
