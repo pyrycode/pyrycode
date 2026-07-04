@@ -21,6 +21,22 @@ func deferHandler(respCh chan<- *Responder) Handler {
 	}
 }
 
+// resolveAndRead resolves a held response and reads its one reply frame. The
+// reply write blocks on the synchronous test pipe until nextResponse consumes
+// it, so resolve must run on a goroutine separate from the read or the two wait
+// on each other forever. It asserts the resolve returned nil and returns the
+// frame read off the wire.
+func (lt *liveTransport) resolveAndRead(resolve func() error) map[string]any {
+	lt.t.Helper()
+	errCh := make(chan error, 1)
+	go func() { errCh <- resolve() }()
+	frame := lt.nextResponse()
+	if err := <-errCh; err != nil {
+		lt.t.Fatalf("resolve returned error: %v", err)
+	}
+	return frame
+}
+
 func TestResponder_DeferSuppressesSyncFrame(t *testing.T) {
 	t.Parallel()
 	// A handler that defers must produce no synchronous response frame; Serve
@@ -53,13 +69,13 @@ func TestResponder_ResolveLaterWritesOneFrame(t *testing.T) {
 		})
 		lt.feedResp(`{"jsonrpc":"2.0","method":"hold","id":7}`)
 
-		// Resolve from the test goroutine — not Serve's read loop.
+		// Resolve off the test goroutine: the reply write blocks on the
+		// synchronous pipe until nextResponse reads it, so the two must run
+		// concurrently.
 		resp := <-respCh
-		if err := resp.Reply(map[string]any{"stopReason": "end_turn"}); err != nil {
-			t.Fatalf("Reply returned error: %v", err)
-		}
-
-		frame := lt.nextResponse()
+		frame := lt.resolveAndRead(func() error {
+			return resp.Reply(map[string]any{"stopReason": "end_turn"})
+		})
 		if frame["id"] != float64(7) {
 			t.Fatalf("want echoed id 7, got %v", frame["id"])
 		}
@@ -81,11 +97,9 @@ func TestResponder_ResolveLaterWritesOneFrame(t *testing.T) {
 		lt.feedResp(`{"jsonrpc":"2.0","method":"hold","id":8}`)
 
 		resp := <-respCh
-		if err := resp.ReplyError(NewError(CodeInvalidParams, "bad")); err != nil {
-			t.Fatalf("ReplyError returned error: %v", err)
-		}
-
-		frame := lt.nextResponse()
+		frame := lt.resolveAndRead(func() error {
+			return resp.ReplyError(NewError(CodeInvalidParams, "bad"))
+		})
 		if frame["id"] != float64(8) {
 			t.Fatalf("want echoed id 8, got %v", frame["id"])
 		}
@@ -118,12 +132,11 @@ func TestResponder_ReadLoopAliveWhileHeld(t *testing.T) {
 		t.Fatalf("want #2 result {ok:true}, got %v", frame2["result"])
 	}
 
-	// Now resolve #1 and read its frame.
+	// Now resolve #1 and read its frame, resolving concurrently with the read.
 	resp1 := <-respCh
-	if err := resp1.Reply(map[string]any{"held": true}); err != nil {
-		t.Fatalf("resolving #1: %v", err)
-	}
-	frame1 := lt.nextResponse()
+	frame1 := lt.resolveAndRead(func() error {
+		return resp1.Reply(map[string]any{"held": true})
+	})
 	if frame1["id"] != float64(1) {
 		t.Fatalf("want #1 resolved (id 1), got id %v", frame1["id"])
 	}
@@ -139,10 +152,7 @@ func TestResponder_DoubleResolveWritesOneFrame(t *testing.T) {
 	lt.feedResp(`{"jsonrpc":"2.0","method":"hold","id":3}`)
 
 	resp := <-respCh
-	if err := resp.Reply("first"); err != nil {
-		t.Fatalf("first Reply: %v", err)
-	}
-	frame := lt.nextResponse()
+	frame := lt.resolveAndRead(func() error { return resp.Reply("first") })
 	if frame["id"] != float64(3) || frame["result"] != "first" {
 		t.Fatalf("want first frame id 3 result \"first\", got %v", frame)
 	}
