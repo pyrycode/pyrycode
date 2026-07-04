@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -36,18 +35,7 @@ func newStreamHarness(t *testing.T, onTurnEnd func(string)) *streamHarness {
 // frames decodes the transport writer output into JSON-RPC frames (one per line).
 func (h *streamHarness) frames(t *testing.T) []map[string]any {
 	t.Helper()
-	var out []map[string]any
-	for _, line := range strings.Split(strings.TrimRight(h.wire.String(), "\n"), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Fatalf("frame not valid JSON: %q: %v", line, err)
-		}
-		out = append(out, m)
-	}
-	return out
+	return decodeFrames(t, h.wire)
 }
 
 // assertNotification asserts frame is a well-formed session/update notification
@@ -159,20 +147,39 @@ func TestACPTurnStream_GroupsChunksByMessageID(t *testing.T) {
 	}
 }
 
-// AC-3: TurnEnd emits no session/update and signals onTurnEnd exactly once with
-// the ACP stopReason.
-func TestACPTurnStream_TurnEndSignalsAndEmitsNothing(t *testing.T) {
+// AC-1: every TurnEndReason maps to the ACP stopReason of the same literal
+// string via the sink's identity cast, signalling onTurnEnd exactly once and
+// emitting no session/update frame. The want values are written as string
+// literals (not string(turnevent.X)) so a future divergence between the neutral
+// reason set and the ACP stopReason set fails here — the intended containment
+// point for that divergence.
+func TestACPTurnStream_TurnEndMapsAllReasons(t *testing.T) {
 	t.Parallel()
-	var reasons []string
-	h := newStreamHarness(t, func(r string) { reasons = append(reasons, r) })
-
-	h.stream.Handle(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
-
-	if got := h.frames(t); len(got) != 0 {
-		t.Errorf("TurnEnd emitted %d frames, want 0: %v", len(got), got)
+	tests := []struct {
+		reason turnevent.TurnEndReason
+		want   string
+	}{
+		{turnevent.TurnEndReasonEndTurn, "end_turn"},
+		{turnevent.TurnEndReasonMaxTokens, "max_tokens"},
+		{turnevent.TurnEndReasonMaxTurnRequests, "max_turn_requests"},
+		{turnevent.TurnEndReasonRefusal, "refusal"},
+		{turnevent.TurnEndReasonCancelled, "cancelled"},
 	}
-	if len(reasons) != 1 || reasons[0] != string(turnevent.TurnEndReasonEndTurn) {
-		t.Errorf("onTurnEnd got %v, want exactly [%q]", reasons, turnevent.TurnEndReasonEndTurn)
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			t.Parallel()
+			var reasons []string
+			h := newStreamHarness(t, func(r string) { reasons = append(reasons, r) })
+
+			h.stream.Handle(turnevent.TurnEnd{Reason: tt.reason})
+
+			if got := h.frames(t); len(got) != 0 {
+				t.Errorf("TurnEnd emitted %d frames, want 0: %v", len(got), got)
+			}
+			if len(reasons) != 1 || reasons[0] != tt.want {
+				t.Fatalf("onTurnEnd got %v, want exactly [%q]", reasons, tt.want)
+			}
+		})
 	}
 }
 

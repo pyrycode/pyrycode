@@ -465,3 +465,89 @@ func TestACPPrompt_DeliveryFailureFreesSlot(t *testing.T) {
 
 	h.shutdown()
 }
+
+// TestACPPrompt_ResolvesWithMappedStopReason pins AC-1/AC-2 at the wire level:
+// resolving the held call on TurnEnd yields a stopReason RESULT (never an error
+// frame) carrying the reason mapped from the neutral turn-end reason, across all
+// five reasons. cancelled is exercised explicitly (AC-2): a cancelled turn
+// resolves as a result, not a JSON-RPC error. The reason strings here are the
+// literal ACP stopReasons — identical to the neutral values by design — so this
+// pins the value the host observes on the wire, not just the seam call.
+func TestACPPrompt_ResolvesWithMappedStopReason(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{"end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			dlv := newRecordingDeliverer(false)
+			h := newPromptHarness(t, dlv, "sess-1")
+
+			h.send(promptFrame(t, 7, "sess-1", "hello"))
+			h.waitEntered()
+
+			h.endTurn("sess-1", reason)
+			reply, line := h.readReply()
+			if reply.Error != nil {
+				t.Fatalf("reason %q: want stopReason result, got error frame %q", reason, line)
+			}
+			if reply.Result == nil || reply.Result.StopReason != reason {
+				t.Fatalf("reason %q: result = %+v, want stopReason=%q", reason, reply.Result, reason)
+			}
+
+			h.shutdown()
+		})
+	}
+}
+
+// TestACPPrompt_ExactlyOneResolution pins AC-3: a duplicate TurnEnd (a second
+// holds.end for the same session, after the held call already resolved) is a
+// no-op — it writes no second frame and does not panic. Proven by driving a
+// fresh synchronous reply afterwards and asserting IT, not a stray duplicate, is
+// the next frame on the wire.
+func TestACPPrompt_ExactlyOneResolution(t *testing.T) {
+	t.Parallel()
+	dlv := newRecordingDeliverer(false)
+	h := newPromptHarness(t, dlv, "sess-1")
+
+	h.send(promptFrame(t, 1, "sess-1", "hello"))
+	h.waitEntered()
+
+	// First resolution: the single reply for id 1.
+	h.endTurn("sess-1", "end_turn")
+	reply, line := h.readReply()
+	if reply.Error != nil {
+		t.Fatalf("first resolution: want stopReason result, got error frame %q", line)
+	}
+	if id := replyID(t, reply); id != 1 {
+		t.Fatalf("first reply id = %d, want 1", id)
+	}
+
+	// Duplicate TurnEnd: the entry was deleted by the first end, so this finds no
+	// Responder and writes nothing (and does not panic). Safe to call synchronously
+	// because it never reaches Reply — no blocking write on the single-reader pipe.
+	h.holds.end("sess-1", "end_turn")
+
+	// A fresh synchronous reply (unknown session → error) must be the very next
+	// frame; had the duplicate end written a frame, we would read that instead.
+	h.send(promptFrame(t, 2, "does-not-exist", "hi"))
+	reply2, line2 := h.readReply()
+	if id := replyID(t, reply2); id != 2 {
+		t.Fatalf("next frame id = %d, want 2 (no stray duplicate frame from the second TurnEnd): %q", id, line2)
+	}
+	if reply2.Error == nil {
+		t.Fatalf("second prompt: want error reply, got %q", line2)
+	}
+
+	h.shutdown()
+}
+
+// TestPromptHolds_EndNoPendingIsNoop pins AC-4: end on a session with no
+// registered hold returns without panic and, having no Responder to resolve,
+// writes nothing. A TurnEnd for a never-prompted session is thus handled without
+// error.
+func TestPromptHolds_EndNoPendingIsNoop(t *testing.T) {
+	t.Parallel()
+	holds := newPromptHolds(testLogger(io.Discard))
+	// No begin: the session has no held call. end must be a silent no-op — a panic
+	// or write would fail the test.
+	holds.end("absent-session", "end_turn")
+}
