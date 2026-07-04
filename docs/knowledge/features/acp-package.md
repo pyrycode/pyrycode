@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749, #796)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749, #796, #751)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -47,10 +47,12 @@ routing (resume-by-id and the cancel→supervisor resolution seam); #753 dropped
 **abort keystroke** onto that seam and added the mode/config pin (below). #749 adds
 the **main call** — [`session/prompt`](#sessionprompt--the-held-turn-call-749)
 delivers the host's content blocks into claude as a user turn and **holds the
-in-flight call open** for the whole turn via #765's deferral primitive. Still
-deferred to later epic-#600 tickets: **resolving** the held `session/prompt` call
-with its `stopReason` on `TurnEnd` (T7 #751), and the outbound
-`session/request_permission` return path that issues through `Call`.
+in-flight call open** for the whole turn via #765's deferral primitive. #751 closes
+that loop: on `TurnEnd` the outbound stream **resolves** the held `session/prompt`
+call with its ACP `stopReason` (divergence 1, the event-stream-to-RPC-return join —
+see the [streaming adapter](#outbound-streaming-adapter-acpturnstream-750)). Still
+deferred to a later epic-#600 ticket: the outbound `session/request_permission`
+return path that issues through `Call`.
 
 Greenfield, stdlib-only package: imports `bufio`, `context`, `encoding/json`,
 `errors`, `fmt`, `io`, `log/slog`, `sync`, `sync/atomic` — **no repo packages**.
@@ -624,9 +626,9 @@ signalling, and `Stall`→stderr.
 
 `acpTurnStream` is a **stateless sink** — no per-event state, no goroutine, no
 clock read. Its `Handle(ev turnevent.Event)` signature **is**
-`turnbridge.Config.OnEvent` exactly, so the turn owner
-([#751](https://github.com/pyrycode/pyrycode/issues/751)/T7) wires
-`OnEvent: stream.Handle` with no closure. `turnbridge` invokes `Handle` serially
+`turnbridge.Config.OnEvent` exactly, so the producer wiring
+([#796](https://github.com/pyrycode/pyrycode/issues/796)) sets
+`OnEvent: sink.Handle` with no closure. `turnbridge` invokes `Handle` serially
 on its single `Run` goroutine, so no synchronisation is needed.
 
 ### `Handle` dispatch (ADR 027 divergences 1 & 3)
@@ -647,15 +649,24 @@ wrapper — **this consumer's**, not `acpbridge`'s (the mapper is pure
 value-to-value; session addressing is the consumer's). The `sessionUpdate`
 discriminant rides *inside* `Update`.
 
-### `TurnEnd` → the T7 (#751) signal seam
+### `TurnEnd` → held-call resolution (#751)
 
 `onTurnEnd func(reason string)` is invoked **synchronously on the producer's
-single `Run` goroutine** when `TurnEnd` arrives. #751 supplies a callback that
-resolves the held `session/prompt` call with `reason` as the `stopReason`; **that
-callback must not block** the producer goroutine (buffered hand-off or immediate
-resolve — e.g. #765's `Responder`). A callback (not a channel) keeps #750
-agnostic about #751's hold-and-resolve mechanism. `onTurnEnd` is **nil-tolerant**
-(Debug-log + no-op) so the adapter can be constructed for pure emit tests.
+single `Run` goroutine** when `TurnEnd` arrives — after the last `session/update`,
+so the `stopReason` return is strictly ordered behind every notification (ACP's
+streaming-precedes-return contract). #751 supplies the callback:
+`func(reason){ holds.end(sessionID, reason) }`, resolving the held
+`session/prompt` call with `reason` as the `stopReason` (identity today —
+`string(Reason)` **is** the ACP `stopReason`). It **does not block** the producer
+goroutine — `promptHolds.end` captures the responder under `mu`, deletes, releases
+`mu`, then replies (`mu` stays a leaf; no `mu → writeMu` nesting), and the terminal
+branch emits no frame of its own so there is no `writeMu` re-entrancy. A callback
+(not a channel) keeps the sink agnostic about the hold-and-resolve mechanism.
+`onTurnEnd` is **nil-tolerant** (Debug-log + no-op) so the adapter can still be
+constructed for pure-emit tests and the `dir == ""` path. Cancelled is a **result,
+not an error**: a `session/cancel`-driven `TurnEnd{Reason: cancelled}` resolves with
+`stopReason: "cancelled"` via the same `Reply`, never a JSON-RPC error frame. Full
+per-ticket detail in [`codebase/751.md`](../codebase/751.md).
 
 ### Chunk grouping is arrival order, not coalescing
 
@@ -692,8 +703,11 @@ byte-unchanged. `dir == ""` (no `$HOME`) disables streaming. The manager is
 `Create` / `Activate` (idempotent — a repeated `session/load` spawns no duplicate),
 and joined at shutdown (`cancel()` → `wait()`). The producer runs for the session's
 **lifecycle** (re-subscribing per turn via `Producer.Run`'s outer loop), not a
-single turn. The `onTurnEnd` seam stays **nil** here (a debug no-op); #751 flips it
-to the held-call resolver at the `newACPTurnStream` construction site.
+single turn. #796 shipped `acpTurnStreams` with `onTurnEnd` **nil** (a debug no-op);
+[#751](https://github.com/pyrycode/pyrycode/issues/751) flipped it to the held-call
+resolver — the manager gained an `onTurnEnd func(sessionID, reason string)` seam
+wired to `promptHolds.end` at the composition root, bound to the fixed `sessionID`
+at `start` and passed to the sink (see [held-call resolution](#turnend--held-call-resolution-751)).
 
 **Not security-sensitive** — outbound-only over local stdio to the host process,
 no untrusted inbound parsing, no auth/crypto (the inbound handlers #749/#752 carry
@@ -781,10 +795,11 @@ synthesize-vs-omit call stays parked in
 
 ### Out of scope
 
-The end-to-end **cancel → `stopReason: cancelled`** assertion is
-[#751](https://github.com/pyrycode/pyrycode/issues/751)'s (T7): the held
-`session/prompt` call is resolved with the mapped stop reason on `TurnEnd`, and
-there is no held prompt to resolve until #749/#765 land. This ticket asserts only
+The end-to-end **cancel → `stopReason: cancelled`** assertion belongs to
+[#751](https://github.com/pyrycode/pyrycode/issues/751) (now landed): the held
+`session/prompt` call resolves with the mapped stop reason on `TurnEnd` — a
+`cancel`-driven `TurnEnd{Reason: cancelled}` returns `stopReason: "cancelled"` (see
+[held-call resolution](#turnend--held-call-resolution-751)). This ticket asserts only
 that the interrupt reaches the supervisor. Full per-ticket detail in
 [`codebase/753.md`](../codebase/753.md).
 
@@ -842,7 +857,7 @@ session id, the **sole owner** of held-call resolution:
 | Method | Role |
 |---|---|
 | `begin(id, resp) bool` | Atomic check-and-insert inline on the read loop; `false` if one is already in flight (caller rejects, registers nothing). |
-| `end(id, stopReason)` | **T7 [#751](https://github.com/pyrycode/pyrycode/issues/751) seam** — resolve with `{"stopReason":…}` and free the slot. |
+| `end(id, stopReason)` | Resolve with `{"stopReason":…}` and free the slot — wired to the outbound stream's `onTurnEnd` by [#751](https://github.com/pyrycode/pyrycode/issues/751), so a turn's `TurnEnd` returns the held call. |
 | `fail(id, *acp.Error)` | Delivery failed — resolve with an error frame and free the slot (next prompt for that session is accepted). |
 
 `end`/`fail` **capture the responder under `mu`, delete, then release `mu` before**
@@ -905,16 +920,19 @@ a later ACP revision adds an idiomatic busy code, swapping it is a one-line chan
 
 ### Out of scope
 
-Resolving the held call on real `TurnEnd` with the mapped `stopReason` is T7
-[#751](https://github.com/pyrycode/pyrycode/issues/751), via `holds.end`. Until T7
-lands, a delivered prompt holds until host disconnect; tests drive `end` through a
-**placeholder-end** path. Producer wiring (a `turnbridge` producer + the #750
-`acpTurnStream` sink for ACP sessions) is now built by
-[#796](#producer-wiring-796); #751 only flips its nil `onTurnEnd` seam to
-`holds.end`. Full per-ticket detail —
-including the two test-harness lessons (resolve a held call off the reader
-goroutine; build `ESC[201~` at runtime to satisfy `substrate-guard`) — in
-[`codebase/749.md`](../codebase/749.md).
+Resolving the held call on real `TurnEnd` with the mapped `stopReason` was #749's
+deferred item, now landed as
+[#751](https://github.com/pyrycode/pyrycode/issues/751): the outbound stream's
+`onTurnEnd` seam is wired to `holds.end`, so a turn's terminal `TurnEnd` returns the
+held `session/prompt` with its `stopReason` (see
+[held-call resolution](#turnend--held-call-resolution-751)). The producer that drives
+it (a `turnbridge` producer + the #750 `acpTurnStream` sink for ACP sessions) is
+[#796](#producer-wiring-796). #749's tests originally drove `end` through a
+**placeholder-end** path; #751 pins the mapped values over the wired stream. Full
+per-ticket detail — including #749's two test-harness lessons (resolve a held call
+off the reader goroutine; build `ESC[201~` at runtime to satisfy `substrate-guard`) —
+in [`codebase/749.md`](../codebase/749.md); the join itself in
+[`codebase/751.md`](../codebase/751.md).
 
 ## ACP permission proxy (`session/request_permission`) (#752)
 
