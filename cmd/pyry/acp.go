@@ -103,10 +103,25 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 		return nil
 	}
 
+	// holds is the per-session in-flight registry for held session/prompt calls,
+	// one per `pyry acp` process. T7 (#751) will resolve held calls on TurnEnd;
+	// until then a delivered prompt stays held until host disconnect.
+	holds := newPromptHolds(logger)
+
 	register := func(t *acp.Transport) {
 		registerHandshake(t) // initialize + authenticate (stateless, no pool)
 		t.Register("session/new", newSessionHandler(pool))
 		t.Register("session/load", loadSessionHandler(pool))
+		t.Register("session/prompt", promptHandler(holds, func(id sessions.SessionID) (promptDeliverer, error) {
+			// Return a true nil interface on error: a typed nil *sessions.Session
+			// would wrap a non-nil interface and defeat the handler's err
+			// short-circuit (the same trap the cancel handler documents).
+			sess, err := pool.Lookup(id)
+			if err != nil {
+				return nil, err
+			}
+			return sess, nil
+		}, logger))
 		t.Register("session/cancel", cancelSessionHandler(func(p json.RawMessage) (interrupter, error) {
 			// Return a true nil interface on error: resolveCancelTarget's typed
 			// *supervisor.Supervisor would otherwise wrap a nil pointer in a
