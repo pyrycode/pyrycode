@@ -228,10 +228,11 @@ never split — a pathological screen render can't inflate the control frame.
 ## Plain-text / no-raw-bytes (AC3, ADR 025)
 
 The phone receives **typed events only**. `screenText` arrives already rendered to plain
-text (the live wiring will feed `Supervisor.ScreenSnapshot()` → `tuidriver.Render`,
-ANSI/OSC-free, inside the ADR-025 seal), and `encoding/json` escapes any residual control
-byte — so no raw terminal bytes reach the phone. There is exactly one structured path;
-**no coarse/raw-byte fallback exists**.
+text (the [live wiring (#798)](#live-daemon-wiring-798) feeds
+`Supervisor.ScreenSnapshot()` → `tuidriver.Render`, ANSI/OSC-free, inside the ADR-025
+seal), and `encoding/json` escapes any residual control byte — so no raw terminal bytes
+reach the phone. There is exactly one structured path; **no coarse/raw-byte fallback
+exists**.
 
 ## Concurrency model
 
@@ -260,30 +261,42 @@ byte — so no raw terminal bytes reach the phone. There is exactly one structur
 - **`modal_id`** = `crypto/rand` UUIDv4, in-memory only, an opaque correlation nonce (not a
   credential). Unbounded-registry-growth is bounded by the inbound resolvers' consume
   (#727's `modal_cancel` `Resolve`, #717's gated `modal_answer`, #725's deny-on-timeout);
-  until #708 wires a live producer there is nothing feeding the registry, so no live
-  growth path exists.
+  the live producer ([#798](#live-daemon-wiring-798)) feeds one `Record` per surfaced modal
+  and each entry is consumed on resolve/timeout, so growth is bounded to outstanding modals.
 - **The modal body (`title`/`prompt`/`screenText`) is application content and is NEVER
   logged** at any level. Logs carry only content-free discriminants (`event`, `class` (a
   closed set), `conn_id`, `env_id`) + the transport-sentinel `err`.
-- **Cross-conversation confidentiality** — *which* screen the deferred live wiring resolves
-  as `screenText` is the wiring slice's concern (the property #679 protects). The surfacer
-  treats `screenText` as opaque and chooses no screen.
+- **Cross-conversation confidentiality** — *which* screen the [live wiring (#798)](#live-daemon-wiring-798)
+  resolves as `screenText` is the wiring slice's concern (the property #679/#686 protects).
+  The surfacer treats `screenText` as opaque and chooses no screen.
 
-## Shipped unwired — live daemon wiring is deferred (#708)
+## Live daemon wiring (#798)
 
-Per AC4 this slice ships the producer + registry + class mapping with a **unit test
-driving a scripted modal through a fake interactive push surface**; there is **no live
-`Session.Events()` subscription**. This is the [#632 emitter → #633 wiring] precedent — a
-clean, self-contained, unit-tested component. The wiring slice (#708's capstone, or a thin
-wiring slice) must: (1) construct the surfacer with the daemon-singleton `*Registry` (the
-same instance #717/#725 wire into the relay — the shared instance is what makes the
-cross-head `Resolve` arbitration real in production), (2) feed it both
-`EventKindPtyModalShown` **and** `EventKindPtyModalHidden` events (#706's local arm) from
-the **follow-active** `Session.Events()` stream, and (3) supply the active session's
-rendered screen as `screenText`. The named seam: add an `OnModal
-func(tuidriver.ModalClass)` callback to `turnbridge.Config` (fired from `Producer.drain`),
-and resolve the active bound supervisor's `ScreenSnapshot()` in the wiring closure. "Which
-screen / timing of the snapshot vs the modal edge" is the wiring slice's to resolve.
+The producer + registry + class mapping ship with a **unit test driving a scripted modal
+through a fake interactive push surface** (the [#632 emitter → #633 wiring] precedent — a
+clean, self-contained, unit-tested component). [#798](../codebase/798.md) then live-wires
+the surfacer into `startRelayV2` — `cmd/pyry/interactive_modal_stream_v2.go`
+(`startInteractiveModalStreamV2`), co-located with the turn stream inside the shared
+`bridge != nil && claudeSessionsDir != ""` gate. It: (1) constructs the surfacer with the
+daemon-singleton `*Registry` (the same instance #717/#725 wire into the relay — the shared
+instance is what makes the cross-head `Resolve` arbitration real in production), with the
+`V2SessionManager` as both the capability-gated broadcaster **and** the deny-on-timeout
+armer; (2) feeds it both `EventKindPtyModalShown` **and** `EventKindPtyModalHidden` events
+(#706's local arm) from the **follow-active** `Session.Events()` stream; and (3) supplies
+the active bound host's rendered `ScreenSnapshot()` as `screenText`.
+
+The wiring reuses the turn stream's follow-active machinery **wholesale** —
+`resolveTarget` + `turnbridge.NewTargetSubscriber`, which yield **raw** `tuidriver.Event`s
+(the modal-dropping mapper lives downstream in `turnbridge.Producer.drain`, which the modal
+stream does **not** use). So it is a *second, independent* `Session.Events()` subscription
+(blessed by tui-driver `events.go:159`) driven by a bespoke **mapper-free** drain loop, **not**
+an `OnModal` callback on `turnbridge.Config` and **not** a second `turnbridge.Producer`. The
+paired screen is reached by type-asserting the follow-active host to a `cmd/pyry`-local
+`screenSnapshotter` interface (satisfied by `*supervisor.Supervisor`), keeping the shared
+`turnbridge.SessionHost` contract screen-free. The screen is re-resolved at handle time (a
+narrow, within-operator, cosmetic switch-race is accepted — see [codebase/798.md](../codebase/798.md)),
+only on a `Shown` (no render on idle/thinking ticks). Full detail:
+[codebase/798.md](../codebase/798.md).
 
 ## Testing
 
@@ -301,8 +314,10 @@ screen / timing of the snapshot vs the modal edge" is the wiring slice's to reso
   non-modal event → no push, no registry entry; a `Push` error on one conn does not stop the
   fan-out.
 
-No live tui-driver, no relay, no PTY — the producer is exercised through fakes. The live
-two-phone path is #708.
+No live tui-driver, no relay, no PTY — the producer is exercised through fakes. The
+[live wiring (#798)](#live-daemon-wiring-798) adds its own construction + event-routing +
+cleanup wiring tests (also fake-driven, no live supervisor/JSONL); the live two-phone e2e
+path is #791/#793 (EPIC #597 Phase 3).
 
 ## Related
 
@@ -313,8 +328,8 @@ two-phone path is #708.
   `PermissionOption` / `PermissionOptionKind` this maps a modal class *into*.
 - [codebase/702.md](../codebase/702.md) — the per-device remote-permission **answer gate**
   (the separate authorization #717 enforces; viewing here is ungated beyond `interactive`).
-- [turnbridge-package.md](turnbridge-package.md) — the "shipped unwired, injected-seam,
-  follow-active producer" template, and the future `OnModal` wiring seam.
+- [turnbridge-package.md](turnbridge-package.md) — the follow-active `resolveTarget` +
+  `NewTargetSubscriber` (raw `tuidriver.Event`s) that #798's modal stream reuses wholesale.
 - [v2-session-manager.md](v2-session-manager.md) — `Push` / `ActiveConns` / `forwardEnvelope`
   (the push surface this fans out over; `EventID==nil` control envelopes are never dropped).
 - [codebase/726.md](../codebase/726.md) — the **inbound actuator** half: the supervisor's
@@ -338,9 +353,12 @@ two-phone path is #708.
   locally-answered modal through the shared `Resolve` and broadcasts
   `modal_dismissed{local}`, making resolution single-shot across both heads. See
   [codebase/706.md](../codebase/706.md) and [§ The local resolution arm](#the-local-resolution-arm--handlemodalhidden-706-first-answer-wins).
-- **Consumer (still deferred — not in #716):** #708 (live producer wiring +
-  two-phone e2e). Until #708 feeds the surfacer live `Shown`/`Hidden` events from the
-  follow-active stream, every production modal path (surface + #706 local resolution +
-  remote `modal_answer`/`modal_cancel`) is inert — the registry is never `Record`ed into.
+- **Live producer wiring — #798** (landed): [codebase/798.md](../codebase/798.md) live-wires
+  the surfacer into `startRelayV2`, feeding it live `Shown`/`Hidden` events from the
+  follow-active stream + the bound host's `ScreenSnapshot`. This is the first non-test caller
+  of `newInteractiveModalEmitterV2`; before it, every production modal path (surface + #706
+  local resolution + remote `modal_answer`/`modal_cancel` + #725 deny-on-timeout) was inert —
+  the registry was never `Record`ed into. The live two-phone e2e capstones are #791/#793.
+  See [§ Live daemon wiring (#798)](#live-daemon-wiring-798).
 </content>
 </invoke>
