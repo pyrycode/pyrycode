@@ -21,8 +21,10 @@ import (
 
 // settingsFile and permissions are field-order-load-bearing: Go's struct
 // serialisation produces the canonical
-// {"permissions":{"allow":[...],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}
-// byte sequence.
+// {"permissions":{"allow":[...],"deny":[...],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}
+// byte sequence. The optional "deny" slot appears only when the denylist is
+// non-empty (omitempty); with no deny entries the bytes are identical to the
+// allow-only form {"permissions":{"allow":[...],"defaultMode":"dontAsk"},...}.
 //
 // EnableAllProjectMcpServers is always true. It pre-approves the project's MCP
 // servers so claude 2.1.199's startup "N new MCP servers found in this project"
@@ -37,6 +39,7 @@ type settingsFile struct {
 
 type permissions struct {
 	Allow       []string `json:"allow"`
+	Deny        []string `json:"deny,omitempty"` // omitted entirely when empty/nil — removes named tools from the model's surface
 	DefaultMode string   `json:"defaultMode"`
 }
 
@@ -65,6 +68,28 @@ type permissions struct {
 // before returning the error. Callers never see a leaked path on the
 // error path — they only get a path on success.
 func WriteSettings(allowedTools []string) (string, error) {
+	return writeSettings(allowedTools, nil)
+}
+
+// WriteSettingsWithDeny is WriteSettings plus an optional permissions.deny
+// list. Semantics for allowedTools (verbatim round-trip, order + duplicates
+// preserved, non-empty required) are identical to WriteSettings.
+//
+// disallowedTools lands in permissions.deny, round-tripped verbatim (order
+// and duplicates preserved, no canonicalisation). It is optional: a nil or
+// empty slice omits the "deny" key entirely, producing bytes identical to
+// WriteSettings(allowedTools). Listing a tool in deny removes it from the
+// model's tool surface — it is not offered, not called, no runtime-denial
+// event (#411, origin #398).
+func WriteSettingsWithDeny(allowedTools, disallowedTools []string) (string, error) {
+	return writeSettings(allowedTools, disallowedTools)
+}
+
+// writeSettings is the shared core behind WriteSettings and
+// WriteSettingsWithDeny. The allowedTools non-emptiness guard applies to
+// both public doors; disallowedTools is never validated for emptiness —
+// empty is the legal "no deny key" case.
+func writeSettings(allowedTools, disallowedTools []string) (string, error) {
 	if len(allowedTools) == 0 {
 		return "", errors.New("agentrun/settings: allowedTools required")
 	}
@@ -79,6 +104,7 @@ func WriteSettings(allowedTools []string) (string, error) {
 	if err := enc.Encode(&settingsFile{
 		Permissions: permissions{
 			Allow:       allowedTools,
+			Deny:        disallowedTools,
 			DefaultMode: "dontAsk",
 		},
 		EnableAllProjectMcpServers: true,

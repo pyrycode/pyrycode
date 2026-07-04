@@ -26,7 +26,7 @@ import (
 // Production never assigns to these.
 var (
 	trustMark     = trust.MarkWorkdirTrusted
-	settingsWrite = settings.WriteSettings
+	settingsWrite = settings.WriteSettingsWithDeny
 	ptyRun        = ptyrunner.Run
 	newSessionID  = sessions.NewID
 )
@@ -38,6 +38,7 @@ type agentRunArgs struct {
 	promptFile       string
 	systemPromptFile string
 	allowedTools     []string
+	disallowedTools  []string
 	maxTurns         int
 	effort           string
 	model            string
@@ -106,6 +107,7 @@ func parseAgentRunArgs(args []string) (agentRunArgs, error) {
 	promptFile := fs.String("prompt-file", "", "path to the user-prompt file (required)")
 	systemPromptFile := fs.String("system-prompt-file", "", "path to the system-prompt file (required)")
 	allowedTools := fs.String("allowed-tools", "", "comma- or space-separated tool allowlist (required)")
+	disallowedTools := fs.String("disallowed-tools", "", "comma- or space-separated tool denylist (optional)")
 	maxTurns := fs.Int("max-turns", 0, "maximum claude turns for this run (>0, required)")
 	effort := fs.String("effort", "", "thinking effort: low|medium|high|xhigh|max (required)")
 	model := fs.String("model", "", "claude model identifier (required)")
@@ -154,6 +156,11 @@ func parseAgentRunArgs(args []string) (agentRunArgs, error) {
 		return agentRunArgs{}, fmt.Errorf("agent-run: --allowed-tools: required, non-empty after split")
 	}
 	parsed.allowedTools = tools
+
+	// --disallowed-tools is optional: an absent or empty value yields a nil
+	// slice, which WriteSettingsWithDeny omits from the settings file (no
+	// deny key). Tokenised identically to --allowed-tools.
+	parsed.disallowedTools = splitAllowedTools(*disallowedTools)
 
 	if parsed.maxTurns <= 0 {
 		return agentRunArgs{}, fmt.Errorf("agent-run: --max-turns: must be > 0 (got %d)", parsed.maxTurns)
@@ -295,7 +302,7 @@ func runAgentRunPty(ctx context.Context, stdout io.Writer, parsed agentRunArgs, 
 		return fmt.Errorf("mark workdir trusted in ~/.claude.json: %w", err)
 	}
 
-	settingsPath, err := settingsWrite(parsed.allowedTools)
+	settingsPath, err := settingsWrite(parsed.allowedTools, parsed.disallowedTools)
 	if err != nil {
 		return fmt.Errorf("write per-spawn settings: %w", err)
 	}
