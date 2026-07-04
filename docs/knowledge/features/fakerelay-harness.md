@@ -37,10 +37,16 @@ func (*Server) WaitBinary(ctx context.Context, serverID string) bool  // (#371) 
 
 `WaitBinary` exists because `websocket.Accept` writes the 101 response —
 unblocking the test's `websocket.Dial` — *before* `handleBinary` finishes
-inserting into `s.binaries` under `s.mu`. Tests that probe server-side
-bookkeeping immediately after a raw dial (`ForceCloseBinary` and future
-probes) must synchronize on a positive signal or race the handler under
-`-race`. Polls every 2 ms on a `time.Ticker` under the caller's ctx;
+inserting into `s.binaries` under `s.mu`. Any test that reads that
+server-side state immediately after a raw dial must synchronize on a
+positive signal or race the handler under `-race` — whether it probes the
+maps directly (`ForceCloseBinary` and future probes) **or** issues a
+*dependent dial* that reads the same state inside a handler: a phone on
+`/v1/client` (existence check → `503` if the entry isn't in yet) or a
+second binary claiming the same server-id (claim check → missed `409`).
+The routing/roundtrip tests were swept onto this gate in #789 (see
+[`codebase/789.md`](../codebase/789.md)). Polls every 2 ms on a
+`time.Ticker` under the caller's ctx;
 returns `true` on registration, `false` on ctx expiry. `WaitBinary` first
 served raw-dial unit tests (#371); **as of #581 every e2e readiness gate
 uses it too**, detecting that the binary is up from its WS-upgrade
