@@ -220,6 +220,12 @@ func (t *Transport) handleLine(ctx context.Context, line []byte) {
 
 // dispatchRequest routes a request (method + id) to its handler and writes
 // exactly one response echoing the request id.
+//
+// A handler may instead return ErrDeferred to defer its response: dispatchRequest
+// writes nothing and the read loop moves on, while the handler keeps the
+// *Responder it obtained via ResponderFrom and resolves it later, from any
+// goroutine. Every answer — synchronous or deferred — funnels through that one
+// Responder, so exactly one frame is written per id.
 func (t *Transport) dispatchRequest(ctx context.Context, msg *rpcMessage) {
 	method := *msg.Method
 	h, ok := t.handlers[method]
@@ -227,20 +233,32 @@ func (t *Transport) dispatchRequest(ctx context.Context, msg *rpcMessage) {
 		t.writeError(msg.ID, CodeMethodNotFound, "method not found")
 		return
 	}
+
+	// One Responder is the single answer-authority for this id. Its id is an
+	// owned copy because a deferred resolve may outlive the scanner buffer
+	// backing msg.ID (msg.ID is non-nil here — the classifier guarantees it).
+	resp := &Responder{t: t, id: append(json.RawMessage(nil), msg.ID...)}
+	ctx = context.WithValue(ctx, responderKey{}, resp)
+
 	result, err := h(ctx, msg.Params)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrDeferred):
+		// The handler took ownership of resp and will resolve it later; write
+		// nothing now and let the read loop scan the next frame.
+		return
+	case err != nil:
 		var rpcErr *Error
 		if errors.As(err, &rpcErr) {
-			t.writeErrorWithData(msg.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data)
+			_ = resp.ReplyError(rpcErr)
 			return
 		}
 		// Plain error: internal error. Log the detail; never leak it on the
 		// wire.
 		t.log.Warn("acp: handler error", "method", method, "err", err.Error())
-		t.writeError(msg.ID, CodeInternalError, "internal error")
-		return
+		_ = resp.ReplyError(NewError(CodeInternalError, "internal error"))
+	default:
+		_ = resp.Reply(result)
 	}
-	t.writeSuccess(msg.ID, result)
 }
 
 // dispatchNotification routes a notification (method, no id) to its handler.

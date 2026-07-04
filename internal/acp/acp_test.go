@@ -451,11 +451,22 @@ type liveTransport struct {
 
 func newLiveTransport(t *testing.T) *liveTransport {
 	t.Helper()
+	return newLiveTransportReg(t, nil)
+}
+
+// newLiveTransportReg is newLiveTransport with a registration hook run before
+// Serve starts (Register panics after Serve). Inbound-handler tests — e.g. the
+// deferred-response scenarios — need handlers registered on the live transport.
+func newLiveTransportReg(t *testing.T, reg func(tr *Transport)) *liveTransport {
+	t.Helper()
 	rIn, wIn := io.Pipe()   // Transport reads rIn; test feeds responses on wIn
 	rOut, wOut := io.Pipe() // Transport writes wOut; test reads requests on rOut
 	diag := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(diag, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	tr := New(rIn, wOut, logger)
+	if reg != nil {
+		reg(tr)
+	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- tr.Serve(context.Background()) }()
 
@@ -494,6 +505,26 @@ func (lt *liveTransport) nextRequest() (id uint64, method string, params json.Ra
 		lt.t.Fatalf("outbound request must carry a nonzero id: %q", line)
 	}
 	return req.ID, req.Method, req.Params
+}
+
+// nextResponse reads one frame off the writer and returns it as a decoded map,
+// asserting the JSON-RPC envelope. Used by the deferred-response tests to read a
+// resolve written off the read loop; the frame is a response (id + result/error)
+// rather than an outbound request, so a generic map keeps the assertions simple.
+func (lt *liveTransport) nextResponse() map[string]any {
+	lt.t.Helper()
+	line, err := lt.reqR.ReadBytes('\n')
+	if err != nil {
+		lt.t.Fatalf("reading response frame: %v", err)
+	}
+	var m map[string]any
+	if uerr := json.Unmarshal(line, &m); uerr != nil {
+		lt.t.Fatalf("response frame is not valid JSON: %q: %v", line, uerr)
+	}
+	if m["jsonrpc"] != "2.0" {
+		lt.t.Fatalf("response frame missing jsonrpc:2.0: %q", line)
+	}
+	return m
 }
 
 // feedResp writes one response line (a trailing newline is appended) onto the
