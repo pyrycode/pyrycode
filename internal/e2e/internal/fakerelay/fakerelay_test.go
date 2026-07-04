@@ -119,6 +119,10 @@ func TestBinaryUpgrade_FirstClaimWins(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connA.Close(websocket.StatusNormalClosure, "") })
 
+	if !s.WaitBinary(ctx, "alpha") {
+		t.Fatal("binary registration did not complete")
+	}
+
 	_, resp, err := dialBinary(ctx, t, s, "alpha")
 	if err == nil {
 		t.Fatal("expected second dial for same server-id to fail")
@@ -210,6 +214,10 @@ func TestPhoneToBinary_FrameWrappedWithConnID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = bin.Close(websocket.StatusNormalClosure, "") })
 
+	if !s.WaitBinary(ctx, "alpha") {
+		t.Fatal("binary registration did not complete")
+	}
+
 	phone, _, err := dialPhone(ctx, t, s, "alpha", "tok", "dev")
 	if err != nil {
 		t.Fatalf("dial phone: %v", err)
@@ -240,6 +248,10 @@ func TestBinaryToPhone_FrameUnwrapped(t *testing.T) {
 		t.Fatalf("bind binary: %v", err)
 	}
 	t.Cleanup(func() { _ = bin.Close(websocket.StatusNormalClosure, "") })
+
+	if !s.WaitBinary(ctx, "alpha") {
+		t.Fatal("binary registration did not complete")
+	}
 
 	phone, _, err := dialPhone(ctx, t, s, "alpha", "tok", "dev")
 	if err != nil {
@@ -281,6 +293,10 @@ func TestConnIDIncrementsPerPhone(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = bin.Close(websocket.StatusNormalClosure, "") })
 
+	if !s.WaitBinary(ctx, "alpha") {
+		t.Fatal("binary registration did not complete")
+	}
+
 	for i, want := range []string{"c-1", "c-2"} {
 		ph, _, err := dialPhone(ctx, t, s, "alpha", "tok", "dev")
 		if err != nil {
@@ -307,6 +323,9 @@ func TestPhoneClosedWhenBinaryGoes(t *testing.T) {
 	bin, _, err := dialBinary(ctx, t, s, "alpha")
 	if err != nil {
 		t.Fatalf("bind binary: %v", err)
+	}
+	if !s.WaitBinary(ctx, "alpha") {
+		t.Fatal("binary registration did not complete")
 	}
 	phone, _, err := dialPhone(ctx, t, s, "alpha", "tok", "dev")
 	if err != nil {
@@ -341,6 +360,9 @@ func TestServerClose_NoGoroutineLeaks(t *testing.T) {
 	bin, _, err := dialBinary(ctx, t, s, "alpha")
 	if err != nil {
 		t.Fatalf("bind binary: %v", err)
+	}
+	if !s.WaitBinary(ctx, "alpha") {
+		t.Fatal("binary registration did not complete")
 	}
 	ph1, _, err := dialPhone(ctx, t, s, "alpha", "tok", "dev")
 	if err != nil {
