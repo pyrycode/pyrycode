@@ -202,7 +202,7 @@ func TestACP_SessionNew_SpawnsOneInteractiveClaude(t *testing.T) {
 	defer cancel()
 
 	served := make(chan error, 1)
-	go func() { served <- serveACPWithPool(ctx, pool, hostToAgentR, agentToHostW, logger) }()
+	go func() { served <- serveACPWithPool(ctx, pool, hostToAgentR, agentToHostW, "", logger) }()
 
 	if _, err := io.WriteString(hostToAgentW, `{"jsonrpc":"2.0","id":1,"method":"session/new"}`+"\n"); err != nil {
 		t.Fatalf("write request: %v", err)
@@ -347,7 +347,7 @@ func newACPHarness(t *testing.T) *acpHarness {
 	t.Cleanup(cancel)
 
 	served := make(chan error, 1)
-	go func() { served <- serveACPWithPool(ctx, pool, hostToAgentR, agentToHostW, logger) }()
+	go func() { served <- serveACPWithPool(ctx, pool, hostToAgentR, agentToHostW, "", logger) }()
 
 	return &acpHarness{
 		t:        t,
