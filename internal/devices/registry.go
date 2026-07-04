@@ -27,6 +27,33 @@ type Registry struct {
 	devices []Device
 }
 
+// readDevicesFile reads and decodes the on-disk device slice at path. A
+// missing file (ENOENT) or a zero-byte file returns (nil, nil) — the
+// cold-start / empty contract. Malformed JSON or any other read error
+// returns (nil, wrapped error). Shared by Load (which constructs a fresh
+// registry) and Reload (which reconciles into an existing one).
+//
+// SECURITY: the returned error wraps path only, never the file bytes — a
+// corrupt devices.json may embed a token_hash, so echoing its contents into
+// an error (and thence a log) would leak it.
+func readDevicesFile(path string) ([]Device, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("registry: read %s: %w", path, err)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var rf registryFile
+	if err := json.Unmarshal(data, &rf); err != nil {
+		return nil, fmt.Errorf("registry: parse %s: %w", path, err)
+	}
+	return rf.Devices, nil
+}
+
 // Load reads path. A missing file returns an empty *Registry with no error
 // (cold start). A zero-byte file returns an empty *Registry with no error.
 // Malformed JSON returns a wrapped error and a nil *Registry.
@@ -35,21 +62,72 @@ type Registry struct {
 // calls re-encode from the in-memory slice; the file may move or be deleted
 // between Load and Save without affecting in-memory state.
 func Load(path string) (*Registry, error) {
-	data, err := os.ReadFile(path)
+	devs, err := readDevicesFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &Registry{}, nil
+		return nil, err
+	}
+	return &Registry{devices: devs}, nil
+}
+
+// Reload reconciles the on-disk device set at path INTO the in-memory
+// registry under r.mu, disk being authoritative for membership. It lets a
+// device paired via `pyry pair` after daemon startup authenticate on its
+// next handshake without a restart, and reflects a `pyry pair revoke` the
+// same way (#782).
+//
+// Reconciliation is keyed on TokenHash: a device present in BOTH memory and
+// disk keeps its in-memory struct — preserving the LastSeenAt bumps Validate
+// makes (never persisted) and any in-flight push registration; the daemon is
+// the sole writer of those fields, so memory is >= disk for them, and
+// `pyry pair` has no verb that edits an existing device's fields under a
+// stable TokenHash. A device only on disk is adopted (newly paired); a device
+// only in memory is dropped (revoked). Membership after Reload == disk's exact
+// set, so the accept set is never widened beyond what is on disk.
+//
+// A missing (ENOENT) or zero-byte file reconciles membership to empty (no
+// error) — disk is authoritative and says none. Malformed JSON or any other
+// read error returns a wrapped error and leaves the in-memory set UNCHANGED
+// (fail closed): callers proceed to Validate against the retained set, so no
+// loaded device is lost and no unpaired token becomes acceptable.
+//
+// Lock discipline mirrors Save: the disk read happens OUTSIDE r.mu (I/O off
+// the lock); only the reconcile-and-assign takes r.mu. Reload never nests
+// locks and never calls back into a locked path, so concurrent
+// Reload/Validate/Save from different goroutines serialise safely at r.mu.
+//
+// SECURITY: Reload performs no logging and no token/hash/name handling; the
+// only error it returns is readDevicesFile's path-only wrapped error. It runs
+// BEFORE Validate, never inside it — Validate's contract is untouched.
+func (r *Registry) Reload(path string) error {
+	disk, err := readDevicesFile(path)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.devices = reconcileDevices(r.devices, disk)
+	return nil
+}
+
+// reconcileDevices returns disk's membership, substituting the in-memory
+// struct for any disk device whose TokenHash also appears in memory (the
+// survivor that carries the daemon's un-persisted LastSeenAt / push-
+// registration mutations). Disk order is preserved — irrelevant, since Save
+// re-sorts on write and lookups scan linearly. Pure: no locking, no I/O.
+func reconcileDevices(memory, disk []Device) []Device {
+	byHash := make(map[string]Device, len(memory))
+	for _, d := range memory {
+		byHash[d.TokenHash] = d
+	}
+	out := make([]Device, 0, len(disk))
+	for _, d := range disk {
+		if mem, ok := byHash[d.TokenHash]; ok {
+			out = append(out, mem)
+		} else {
+			out = append(out, d)
 		}
-		return nil, fmt.Errorf("registry: read %s: %w", path, err)
 	}
-	if len(data) == 0 {
-		return &Registry{}, nil
-	}
-	var rf registryFile
-	if err := json.Unmarshal(data, &rf); err != nil {
-		return nil, fmt.Errorf("registry: parse %s: %w", path, err)
-	}
-	return &Registry{devices: rf.Devices}, nil
+	return out
 }
 
 // Save writes the registry atomically: temp file in filepath.Dir(path) at

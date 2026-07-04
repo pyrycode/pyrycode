@@ -1,6 +1,7 @@
 package devices
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,21 @@ import (
 	"testing"
 	"time"
 )
+
+// writeDevicesFile marshals devs into the on-disk registry envelope and
+// writes it to path at mode 0600, overwriting any existing file. Passing no
+// devices writes the valid empty-list form ({"devices":null}), the shape a
+// `pyry pair revoke <last>` leaves behind.
+func writeDevicesFile(t *testing.T, path string, devs ...Device) {
+	t.Helper()
+	data, err := json.Marshal(registryFile{Devices: devs})
+	if err != nil {
+		t.Fatalf("marshal devices: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write devices file: %v", err)
+	}
+}
 
 func mustParseTime(t *testing.T, s string) time.Time {
 	t.Helper()
@@ -495,4 +511,175 @@ func TestRegistry_ConcurrentReadWrite(t *testing.T) {
 	if got := len(r.List()); got != n {
 		t.Errorf("len(List) = %d, want %d", got, n)
 	}
+}
+
+// TestReload covers the membership + fail-closed contract of Reload: disk is
+// authoritative for membership (adds newly-paired, drops revoked), a
+// missing/empty file empties membership, and a malformed/unreadable file
+// fails closed (error, in-memory set unchanged, accept set not widened).
+func TestReload(t *testing.T) {
+	t.Parallel()
+	const (
+		tokA = "reload-tok-a"
+		tokB = "reload-tok-b"
+	)
+	when := mustParseTime(t, "2026-06-01T00:00:00Z")
+	devA := Device{TokenHash: HashToken(tokA), Name: "A", PairedAt: when, LastSeenAt: when}
+	devB := Device{TokenHash: HashToken(tokB), Name: "B", PairedAt: when.Add(time.Second), LastSeenAt: when.Add(time.Second)}
+
+	tests := []struct {
+		name    string
+		seed    []Device
+		mutate  func(t *testing.T, path string)
+		wantErr bool
+		// validate maps a plain token to whether it should authenticate
+		// against the registry after Reload.
+		validate map[string]bool
+	}{
+		{
+			name:     "added device is adopted",
+			seed:     []Device{devA},
+			mutate:   func(t *testing.T, path string) { writeDevicesFile(t, path, devA, devB) },
+			validate: map[string]bool{tokA: true, tokB: true},
+		},
+		{
+			name:     "removed device is dropped",
+			seed:     []Device{devA, devB},
+			mutate:   func(t *testing.T, path string) { writeDevicesFile(t, path, devA) },
+			validate: map[string]bool{tokA: true, tokB: false},
+		},
+		{
+			name: "missing file empties membership",
+			seed: []Device{devA},
+			mutate: func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove file: %v", err)
+				}
+			},
+			validate: map[string]bool{tokA: false},
+		},
+		{
+			name:     "empty-list file empties membership",
+			seed:     []Device{devA},
+			mutate:   func(t *testing.T, path string) { writeDevicesFile(t, path) },
+			validate: map[string]bool{tokA: false},
+		},
+		{
+			name: "malformed file fails closed, no loss",
+			seed: []Device{devA},
+			mutate: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+					t.Fatalf("write malformed: %v", err)
+				}
+			},
+			wantErr:  true,
+			validate: map[string]bool{tokA: true, tokB: false},
+		},
+		{
+			name: "unreadable file fails closed, no loss",
+			seed: []Device{devA},
+			mutate: func(t *testing.T, path string) {
+				// Replace the file with a directory so os.ReadFile errors
+				// deterministically (EISDIR) — CI-safe, no chmod races.
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove file: %v", err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("mkdir over path: %v", err)
+				}
+			},
+			wantErr:  true,
+			validate: map[string]bool{tokA: true, tokB: false},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "devices.json")
+			writeDevicesFile(t, path, tc.seed...)
+			r, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			tc.mutate(t, path)
+
+			err = r.Reload(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Reload: nil error, want error")
+				}
+			} else if err != nil {
+				t.Fatalf("Reload: %v", err)
+			}
+
+			for tok, wantHit := range tc.validate {
+				if _, ok := r.Validate(tok); ok != wantHit {
+					t.Errorf("Validate(%q) = %v, want %v", tok, ok, wantHit)
+				}
+			}
+		})
+	}
+}
+
+// TestReload_PreservesInMemoryLastSeenAt pins the keep-in-memory-survivor
+// reconcile: a Validate-bumped LastSeenAt (never persisted) must survive a
+// Reload whose disk record still shows the older value.
+func TestReload_PreservesInMemoryLastSeenAt(t *testing.T) {
+	t.Parallel()
+	const tok = "reload-lastseen-tok"
+	old := mustParseTime(t, "2026-01-01T00:00:00Z")
+	devA := Device{TokenHash: HashToken(tok), Name: "A", PairedAt: old, LastSeenAt: old}
+
+	path := filepath.Join(t.TempDir(), "devices.json")
+	writeDevicesFile(t, path, devA)
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Validate bumps LastSeenAt in memory to ~now; disk still shows old.
+	if _, ok := r.Validate(tok); !ok {
+		t.Fatal("Validate: miss, want hit")
+	}
+	writeDevicesFile(t, path, devA) // disk record still carries the old LastSeenAt
+
+	if err := r.Reload(path); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	got := r.List()
+	if len(got) != 1 {
+		t.Fatalf("len(List) = %d, want 1", len(got))
+	}
+	if !got[0].LastSeenAt.After(old) {
+		t.Errorf("LastSeenAt = %v, want the in-memory bump (after %v), not the disk value",
+			got[0].LastSeenAt, old)
+	}
+}
+
+// TestReload_ConcurrentReloadValidate is the -race probe: concurrent
+// Reload/Validate/List from many goroutines must serialise cleanly at r.mu.
+func TestReload_ConcurrentReloadValidate(t *testing.T) {
+	t.Parallel()
+	const tok = "reload-race-tok"
+	path := filepath.Join(t.TempDir(), "devices.json")
+	writeDevicesFile(t, path, Device{TokenHash: HashToken(tok), Name: "A"})
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	const n = 8
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = r.Reload(path)
+			_, _ = r.Validate(tok)
+			_ = r.List()
+		}()
+	}
+	wg.Wait()
 }

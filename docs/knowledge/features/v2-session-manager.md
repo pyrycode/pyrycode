@@ -100,6 +100,7 @@ type V2SessionConfig struct {
     Outbound   func(protocol.RoutingEnvelope) error    // required; production passes (*Connection).Send
     StaticPriv []byte                                  // required; must be noise.KeyLen (32) bytes
     Devices    *devices.Registry                       // required; token-validation predicate
+    DevicesPath string                                 // optional (#782); reloaded into Devices before each handshake's Validate; "" disables the reload
     ServerID   string                                  // required; surfaced into hello_ack
     Logger     *slog.Logger                            // required (panic if nil)
     Handlers   map[string]dispatch.Handler             // optional; open-state envelope-type → handler
@@ -252,6 +253,7 @@ The `handshakeComplete` substate is observably distinct from `open` even though 
 7. `Responder.WriteResp(ackEnvJSON)` → response bytes + `(send, recv)` CipherStates. **On err: close(4426)** (practically unreachable under correct flynn/noise; defensive).
 8. Persist `send` / `recv` on the session. **State → `V2StateHandshakeComplete`** (the externally-observable substate, even though step 9 immediately advances or rejects).
 9. Marshal an `InnerFrameV2{Type: noise_resp, Data: base64(respMsg)}`.
+9a. **Registry reload (#782).** If `cfg.DevicesPath != ""`, call `cfg.Devices.Reload(cfg.DevicesPath)` so a device paired via `pyry pair` after daemon startup authenticates here without a restart (and a `pyry pair revoke` stops being accepted). On a reload error: log at Warn (`v2.devices.reload_failed`, `conn_id` + `path` + static reason — **never** the wrapped `err`, which can carry a `token_hash` from a corrupt file) and **proceed to step 10 against the retained in-memory set** (fail closed — accept set not widened, loaded devices not lost). See [`features/devices-registry.md`](devices-registry.md) § Reload and [ADR 029](../decisions/029-devices-registry-reload-at-handshake.md).
 10. `cfg.Devices.Validate(hello.Token)`:
     - **Hit**: emit `RoutingEnvelope{ConnID, Frame: noiseRespFrame}` via `Outbound`, **state → `V2StateOpen`**. Log `v2.handshake.accept` with `conn_id` + `device_name`.
     - **Miss**: emit `noise_resp` first (so the AEAD channel exists on the wire), then AEAD-seal an `Envelope{Type: error, Payload: ErrorPayload{Code: auth.invalid_token, Message: MsgInvalidToken, Retryable: false}}` under `send`, wrap as an `InnerFrameV2{Type: noise_msg, Data: base64(ciphertext)}`, and emit one `RoutingEnvelope{ConnID, Frame: noiseMsgFrame, CloseCode: 4401}`. **State → `V2StateClosed`**, session deleted. Log `v2.handshake.reject.invalid_token` with `conn_id` only (NO device-name on reject — anti-enumeration, mirrors `auth.go:129-132`).

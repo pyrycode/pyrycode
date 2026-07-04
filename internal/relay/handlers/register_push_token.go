@@ -85,6 +85,20 @@ func RegisterPushToken(reg *devices.Registry, registryPath string, logger *slog.
 			return replyError(ctx, c, env, protocol.CodeAuthInvalidToken, msgUnauthorized, false)
 		}
 
+		// Reconcile disk into memory before the whole-file Save so a device
+		// `pyry pair` added since startup is not erased by this write (#782).
+		// Best-effort: on a read error, log path + a static reason and still
+		// Save the known-good in-memory state (self-heal — no worse than the
+		// pre-#782 blind Save). SECURITY: never log the wrapped err; a corrupt
+		// devices.json can carry file bytes (a token_hash).
+		if err := reg.Reload(registryPath); err != nil {
+			logger.Warn("relay: register_push_token reload failed",
+				"event", "register_push_token.reload_failed",
+				"conn_id", c.ConnID(),
+				"device_name", dev.Name,
+				"path", registryPath)
+		}
+
 		if err := reg.Save(registryPath); err != nil {
 			logger.Warn("relay: register_push_token save failed",
 				"event", "register_push_token.save_failed",
