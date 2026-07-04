@@ -1016,8 +1016,9 @@ mapping for a modal that cannot appear. Full per-ticket detail in [`codebase/752
 
 - **Live wiring of the permission proxy** ([#752](https://github.com/pyrycode/pyrycode/issues/752)) —
   the adapter ships **unwired**; subscribing it to `Session.Events()` and driving `Handle` per modal
-  event belongs to the modal-event wiring follow-up (T7 #751 territory), exactly as #708 defers
-  `interactiveModalEmitterV2`'s wiring.
+  event belongs to the modal-event wiring follow-up (T7 #751 territory). The mobile leg's analogous
+  producer wiring landed in [#798](../codebase/798.md) (`interactiveModalEmitterV2`); the ACP proxy
+  is the still-deferred sibling consumer of the same raw modal-event stream.
 - **Serve-exit pending-call drain** ([#757](https://github.com/pyrycode/pyrycode/issues/757)) —
   `Serve`-exit does not fail-fast blocked `Call`s; the caller's `ctx` liberates
   them. Additive if a later ticket needs it (range `pending`, deliver a

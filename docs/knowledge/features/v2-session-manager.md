@@ -181,7 +181,7 @@ var (
 )
 ```
 
-`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618) and `ModalResolver` (#727) are also **optional and unvalidated** — leaving them nil keeps the existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash; a nil `ModalResolver` makes both modal-control frames **and** an armed deny-on-timeout (#725) inert debug-logged no-ops (the modal bridge unwired — foreground, or pre-#708 before the producer is live); a nil `Interrupter` (#707) makes an inbound `interrupt` inert (no Esc — the foreground/unwired case); a nil `QueueRemover` (#723) makes an inbound `dequeue_message` inert (no `Remove` — foreground/unwired). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
+`NewV2SessionManager` panics on missing `Frames` or `Logger` (programmer errors, same posture as `internal/dispatch.New`); returns a wrapped error on missing `Outbound` / `Devices` / `ServerID` or on wrong-length `StaticPriv` (caller-facing config bugs). `Handlers` is optional — nil or empty means every open-state envelope falls through to a sealed `protocol.unsupported` reply via [`dispatch.Route`](dispatch-package.md). `Snapshotter` and `KnownConversation` (#618) and `ModalResolver` (#727) are also **optional and unvalidated** — leaving them nil keeps the existing construction sites compiling unchanged; a nil `KnownConversation` rejects every `request_snapshot` as `conversation.not_found` and a nil `Snapshotter` reports `server.binary_offline`, so the snapshot feature is simply unavailable, never a crash; a nil `ModalResolver` makes both modal-control frames **and** an armed deny-on-timeout (#725) inert debug-logged no-ops (the modal bridge unwired — the foreground case; the relay wires it live, and #798 wired the outbound producer that arms it); a nil `Interrupter` (#707) makes an inbound `interrupt` inert (no Esc — the foreground/unwired case); a nil `QueueRemover` (#723) makes an inbound `dequeue_message` inert (no `Remove` — foreground/unwired). `Run` blocks until `Frames` closes (returns `nil`) or `ctx` is cancelled (returns `ctx.Err()`); every per-conn session is dropped on return.
 
 ## Wire types (`internal/protocol/v2envelope.go`)
 
@@ -387,7 +387,7 @@ The relay↔binary leg is a **single multiplexed WebSocket**: every phone's fram
 
 **New package-level values (mirror the `rekeyInterval` idiom).**
 
-- `idleTimeout` — lowercase, test-overridable `var` defaulting to **15 min**. Well short of the 1-hour `rekeyInterval` so a dropped/backgrounded phone's cipher states never linger up to an hour; long enough not to tear down a foregrounded-but-momentarily-quiet phone mid-read (which would force a disruptive re-handshake on the next tap). Not yet config-driven — the same deferred posture as `modalDenyTimeout`'s #708 note. Tests substitute a sub-second value via `prev := idleTimeout; idleTimeout = …; t.Cleanup(func() { idleTimeout = prev })`.
+- `idleTimeout` — lowercase, test-overridable `var` defaulting to **15 min**. Well short of the 1-hour `rekeyInterval` so a dropped/backgrounded phone's cipher states never linger up to an hour; long enough not to tear down a foregrounded-but-momentarily-quiet phone mid-read (which would force a disruptive re-handshake on the next tap). Not yet config-driven — the same deferred posture as `modalDenyTimeout` (still a package var, not config-exposed). Tests substitute a sub-second value via `prev := idleTimeout; idleTimeout = …; t.Cleanup(func() { idleTimeout = prev })`.
 - `wakeIdleTimeout` — new unexported `wakeKind` const joining `wakeRekeyEmit` / `wakeRekeyReplyTimeout`; the per-session timer-event discriminator carried on `m.wake`.
 - `StatusIdleTimeout websocket.StatusCode = 4408` — the idle-teardown WS close code, echoing HTTP 408 (Request Timeout), consistent with the existing 44xx←HTTP convention (4401←401, 4404←404, 4409←409, 4429←429). Added to the § Error codes table in `docs/protocol-mobile.md` (direction: binary, forwarded by relay).
 
@@ -541,7 +541,7 @@ the caller, so no decode error or attacker-controlled byte is ever echoed back.
   `option_id` classification → `Resolve` consume → safe-answer keystroke → audit).
   Wired in `cmd/pyry/relay.go`'s `startRelayV2`
   over the **daemon-singleton** `modalbridge.New()` registry (the same instance
-  #708 live-wires the producer into).
+  [#798](../codebase/798.md) live-wires the producer into).
 - **`handleModalCancel`** — nil-resolver ⇒ debug-log + return (inert). Else decode
   `ModalCancelPayload` (a decode failure is tolerated → empty `modal_id` → the
   resolver's unknown-id no-op, never echoed), `ResolveCancel(modal_id, s.device)`;
@@ -593,7 +593,7 @@ Unlike `modal_answer`/`modal_cancel`, a timeout is **not** an inbound frame — 
 originates internally and rides a new path:
 
 - **Arm (off `Run`).** The producer surfacer (`interactiveModalEmitterV2.Handle`,
-  cmd/pyry, live in #708) calls `(*V2SessionManager).ArmModalTimeout(ctx, modalID)`
+  cmd/pyry, live-wired by [#798](../codebase/798.md)) calls `(*V2SessionManager).ArmModalTimeout(ctx, modalID)`
   **immediately after `reg.Record`** — before the marshal/broadcast, so a modal that
   fails to marshal, or one surfaced to **zero** interactive conns, is still denied on
   the window (claude is blocked regardless of who is watching). `ArmModalTimeout` only
@@ -629,9 +629,11 @@ race cannot double-deny, double-broadcast, or double-audit; the registry mutex s
 guards `Record` (surfacer goroutine) against `Resolve` (`Run`). The timeout leg **only
 ever drives the deny keystroke**, never a grant — fail-closed by construction (ADR 025
 § Security model: "answered with the SAFE default (deny / ESC) … Never auto-grant").
-**Production-inert until #708** live-wires the surfacer (nothing `Record`s a modal, so no
-timer arms). `TestV2Session_ModalTimeout_FanOut` proves the off-`Run`-arm → on-`Run`-fire
-crossing under `-race`.
+**Live in production since [#798](../codebase/798.md)** wired the surfacer: a real
+permission/trust modal now `Record`s an entry and arms this timer, so an unanswered modal is
+safe-denied on the window even if it reached zero phones (net-positive availability — before
+#798 nothing armed it in production). `TestV2Session_ModalTimeout_FanOut` proves the
+off-`Run`-arm → on-`Run`-fire crossing under `-race`.
 
 ### Inbound interrupt (#707) — `Interrupter` seam + Esc routing
 
