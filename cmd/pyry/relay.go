@@ -299,10 +299,10 @@ func startRelayV2(
 	}
 	priv := staticKey.PrivateKey()
 
-	// Daemon-singleton outstanding-modal registry. #708 wires the producer
-	// (interactiveModalEmitterV2) to this same instance; until then nothing
-	// Records, so every production modal_cancel takes the unknown-id no-op path
-	// (harmless). The cmd/pyry resolver consumes it via the ModalResolver seam.
+	// Daemon-singleton outstanding-modal registry. The interactive modal stream
+	// (#798, startInteractiveModalStreamV2 below) constructs the surfacer over this
+	// same instance, so a live permission/trust prompt Records here and the inbound
+	// resolver (ModalResolver seam) / deny-on-timeout consume the same entries.
 	modalReg := modalbridge.New()
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
@@ -358,17 +358,26 @@ func startRelayV2(
 		}
 	}()
 
-	// Wire the structured interactive turn stream (#633): the #615 producer over
-	// Supervisor.Session() + the rotation-following JSONL resolver, bridged to the
-	// #632 capability-gated emitter over mgr. Gated on bridge != nil
-	// (foreground has no phone-mirroring surface) plus a resolvable sessions dir
-	// (an empty dir would make the resolver perpetually error and Warn-spam every
-	// retry; "" already disables reconcile + the rotation watcher).
-	var streamCleanup func()
+	// Wire the structured interactive turn stream (#633) and the interactive modal
+	// stream (#798) inside one shared PTY gate. Both follow the active conversation
+	// over resolveTarget + NewTargetSubscriber: the turn stream bridges the #615
+	// producer's mapped events to the #632 emitter; the modal stream drains the RAW
+	// event stream (a second, independent Session.Events() subscription) to the
+	// frozen #716/#717/#725/#706 surfacer, so a live permission/trust prompt emits
+	// modal_shown, arms the deny-on-timeout, and resolves modal_dismissed{local}.
+	// Gated on bridge != nil (foreground has no phone-mirroring surface) plus a
+	// resolvable sessions dir (an empty dir would make the resolver perpetually
+	// error and Warn-spam every retry; "" already disables reconcile + the rotation
+	// watcher).
+	var (
+		streamCleanup      func()
+		modalStreamCleanup func()
+	)
 	if bridge != nil && claudeSessionsDir != "" {
 		streamCleanup = startInteractiveTurnStreamV2(ctx, sup, active, boundHost, mgr, claudeSessionsDir, logger)
+		modalStreamCleanup = startInteractiveModalStreamV2(ctx, sup, active, boundHost, mgr, modalReg, claudeSessionsDir, logger)
 	} else if bridge != nil {
-		logger.Info("relay: interactive turn stream disabled; claude sessions dir unresolved",
+		logger.Info("relay: interactive turn + modal streams disabled; claude sessions dir unresolved",
 			"event", "interactive_turn_stream.no_sessions_dir")
 	}
 
@@ -399,13 +408,16 @@ func startRelayV2(
 	streamQueueStateCleanup := startQueueStateStreamV2(ctx, qse, mgr)
 
 	return func() {
-		// Stop the producers — the structured turn stream, the session-transition
-		// producer, and the queue_state producer — before waiting on the manager so
-		// no fan-out races a winding-down manager. Each cleanup waits for its
-		// goroutine on ctx-cancel (already cancelled by the time drain runs). Then
-		// wait for the manager's Run to exit on the closed Frames channel.
+		// Stop the producers — the structured turn stream, the modal stream, the
+		// session-transition producer, and the queue_state producer — before waiting
+		// on the manager so no fan-out races a winding-down manager. Each cleanup
+		// waits for its goroutine on ctx-cancel (already cancelled by the time drain
+		// runs). Then wait for the manager's Run to exit on the closed Frames channel.
 		if streamCleanup != nil {
 			streamCleanup()
+		}
+		if modalStreamCleanup != nil {
+			modalStreamCleanup()
 		}
 		streamTransitionsCleanup()
 		streamQueueStateCleanup()
