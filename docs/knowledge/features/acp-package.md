@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749, #796)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -667,24 +667,40 @@ them. The adapter is stateless w.r.t. `MessageID` and does **not** coalesce
 (contrast the mobile emitter's `MessageID`-keyed delta coalescing, #609, which
 ACP neither needs nor supports).
 
-### Producer wiring is #751's (the flagged finding)
+### Producer wiring (#796)
 
-`acpTurnStream` is a pure **sink**, unit-tested against a scripted
-`turnevent.Event` sequence — no live producer or claude. Standing up a
-`turnbridge` producer over a session's supervisor and feeding this sink belongs to
-the `session/prompt` turn owner (#751/T7), because streaming happens *inside* the
-held `session/prompt` call (divergence 1). **#761's embedded pool does NOT wire a
-producer for ACP sessions** (`session/new` just calls `pool.Create`; the producer
-is wired only for the mobile head, in `runSupervisor`) — recorded here so #751
-need not re-discover it. Every building block #751 needs is shipped:
-`sess.Supervisor()` satisfies `turnbridge.SessionHost`;
-`turnbridge.NewTargetSubscriber` with a fixed-session by-id `TargetResolver`
-(`Switch: nil` — ACP has no active-conversation follow);
-`sessions.DefaultClaudeSessionsDir(bootstrapWorkdir)` as the JSONL dir.
+`acpTurnStream` shipped in #750 with **zero non-test callers** — a scripted-tested
+pure sink. #796 is the composition-root wiring that stands up the live producer to
+drive it, giving the sink its first real caller. `acpTurnStreams`
+(`cmd/pyry/acp_turn_streams.go`, unexported per-process manager) owns one
+[`turnbridge.Producer`](turnbridge-package.md) goroutine per addressable ACP
+session, each tailing that session's `<id>.jsonl` and feeding the sink so
+`session/update` notifications flow as a turn progresses. Far thinner than the
+mobile leg's `startInteractiveTurnStreamV2`: **one host, one fixed session per
+stream** via a `resolveBoundSessionJSONL(dir, id)` resolver with `Switch: nil` (no
+active-conversation follow, never re-keyed) over `sess.Supervisor()` (the
+`turnbridge.SessionHost`) — the degenerate one-host case of the #679 follow-active
+resolver.
+
+`serveACPWithPool` gains a `claudeSessionsDir` param; `runACP` computes it as
+`sessions.DefaultClaudeSessionsDir(trustedWorkdir)` and passes it down. The dir is
+**deliberately NOT set on `sessions.Config.ClaudeSessionsDir`** — that would enable
+the pool's `/clear` rotation watcher, which `RotateID`s a session and breaks the
+host-held id addressing `session/prompt` / `session/cancel` rely on; the pool stays
+byte-unchanged. `dir == ""` (no `$HOME`) disables streaming. The manager is
+`attach`ed to the transport (first line of `register`), `start(id)`ed after
+`Create` / `Activate` (idempotent — a repeated `session/load` spawns no duplicate),
+and joined at shutdown (`cancel()` → `wait()`). The producer runs for the session's
+**lifecycle** (re-subscribing per turn via `Producer.Run`'s outer loop), not a
+single turn. The `onTurnEnd` seam stays **nil** here (a debug no-op); #751 flips it
+to the held-call resolver at the `newACPTurnStream` construction site.
 
 **Not security-sensitive** — outbound-only over local stdio to the host process,
 no untrusted inbound parsing, no auth/crypto (the inbound handlers #749/#752 carry
-that label). Full per-ticket detail in [`codebase/750.md`](../codebase/750.md).
+that label). The content-free logging posture is preserved (every new log site
+carries only the event kind + session id + error sentinel). Full per-ticket detail
+in [`codebase/750.md`](../codebase/750.md) (the sink) and
+[`codebase/796.md`](../codebase/796.md) (the producer wiring).
 
 ## `session/cancel` actuation + mode/config pin (#753)
 
@@ -893,7 +909,9 @@ Resolving the held call on real `TurnEnd` with the mapped `stopReason` is T7
 [#751](https://github.com/pyrycode/pyrycode/issues/751), via `holds.end`. Until T7
 lands, a delivered prompt holds until host disconnect; tests drive `end` through a
 **placeholder-end** path. Producer wiring (a `turnbridge` producer + the #750
-`acpTurnStream` sink for ACP sessions) is also #751's. Full per-ticket detail —
+`acpTurnStream` sink for ACP sessions) is now built by
+[#796](#producer-wiring-796); #751 only flips its nil `onTurnEnd` seam to
+`holds.end`. Full per-ticket detail —
 including the two test-harness lessons (resolve a held call off the reader
 goroutine; build `ESC[201~` at runtime to satisfy `substrate-guard`) — in
 [`codebase/749.md`](../codebase/749.md).
