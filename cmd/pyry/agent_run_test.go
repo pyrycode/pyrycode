@@ -404,6 +404,36 @@ func TestParseAgentRunArgs_AllowedToolsForms(t *testing.T) {
 	}
 }
 
+// TestParseAgentRunArgs_DisallowedToolsForms covers AC2/AC4 at the parse
+// boundary: --disallowed-tools tokenises like --allowed-tools (comma / space
+// / mixed), and absent or empty values yield an empty deny slice (no error —
+// the flag is optional).
+func TestParseAgentRunArgs_DisallowedToolsForms(t *testing.T) {
+	fx := newValidArgsFixture(t)
+	tests := []struct {
+		name string
+		argv []string
+		want []string
+	}{
+		{"comma", append(slices.Clone(fx.argv), "--disallowed-tools", "AskUserQuestion,EnterPlanMode"), []string{"AskUserQuestion", "EnterPlanMode"}},
+		{"space", append(slices.Clone(fx.argv), "--disallowed-tools", "AskUserQuestion EnterPlanMode"), []string{"AskUserQuestion", "EnterPlanMode"}},
+		{"mixed", append(slices.Clone(fx.argv), "--disallowed-tools", "AskUserQuestion, EnterPlanMode , ExitPlanMode"), []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}},
+		{"absent", slices.Clone(fx.argv), []string{}},
+		{"empty", append(slices.Clone(fx.argv), "--disallowed-tools", ""), []string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAgentRunArgs(tc.argv)
+			if err != nil {
+				t.Fatalf("parseAgentRunArgs: unexpected error: %v", err)
+			}
+			if !slices.Equal(got.disallowedTools, tc.want) {
+				t.Errorf("disallowedTools = %v, want %v", got.disallowedTools, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuildStreamRunnerClaudeArgs_Shape pins the legacy claude argv under
 // the stream-json subprocess pipeline (#391, renamed in #470 to reflect
 // streamrunner-specific scope). The security invariants the old
@@ -712,7 +742,7 @@ func installFakeSeams(t *testing.T) {
 	trustMark = func(workdir string) (string, error) {
 		return workdir, nil
 	}
-	settingsWrite = func(tools []string) (string, error) {
+	settingsWrite = func(_, _ []string) (string, error) {
 		f, err := os.CreateTemp("", "pyry-test-settings-*.json")
 		if err != nil {
 			return "", err
@@ -847,7 +877,7 @@ func TestRunAgentRun_PtyPath_SettingsFailure_NamesSettingsStep(t *testing.T) {
 	installFakeSeams(t)
 	t.Setenv("PYRY_USE_STREAMJSON", "")
 
-	settingsWrite = func(_ []string) (string, error) {
+	settingsWrite = func(_, _ []string) (string, error) {
 		return "", errors.New("simulated settings failure")
 	}
 	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
@@ -902,8 +932,8 @@ func TestRunAgentRun_PtyPath_SettingsRemovedOnSuccess(t *testing.T) {
 	t.Setenv("PYRY_USE_STREAMJSON", "")
 
 	var capturedPath string
-	settingsWrite = func(tools []string) (string, error) {
-		p, err := settings.WriteSettings(tools)
+	settingsWrite = func(allow, deny []string) (string, error) {
+		p, err := settings.WriteSettingsWithDeny(allow, deny)
 		capturedPath = p
 		return p, err
 	}
@@ -934,8 +964,8 @@ func TestRunAgentRun_PtyPath_SettingsRemovedOnFailure(t *testing.T) {
 	t.Setenv("PYRY_USE_STREAMJSON", "")
 
 	var capturedPath string
-	settingsWrite = func(tools []string) (string, error) {
-		p, err := settings.WriteSettings(tools)
+	settingsWrite = func(allow, deny []string) (string, error) {
+		p, err := settings.WriteSettingsWithDeny(allow, deny)
 		capturedPath = p
 		return p, err
 	}
@@ -1075,7 +1105,7 @@ func TestRunAgentRun_PtyPath_ConfigWiring(t *testing.T) {
 
 			var capturedCfg ptyrunner.Config
 			var capturedTools []string
-			settingsWrite = func(tools []string) (string, error) {
+			settingsWrite = func(tools, _ []string) (string, error) {
 				capturedTools = slices.Clone(tools)
 				f, err := os.CreateTemp("", "pyry-test-settings-*.json")
 				if err != nil {
@@ -1138,7 +1168,7 @@ func TestRunAgentRun_PtyPath_AllowedToolsPassedToSettings(t *testing.T) {
 	t.Setenv("PYRY_USE_STREAMJSON", "")
 
 	var captured []string
-	settingsWrite = func(tools []string) (string, error) {
+	settingsWrite = func(tools, _ []string) (string, error) {
 		captured = slices.Clone(tools)
 		f, err := os.CreateTemp("", "pyry-test-settings-*.json")
 		if err != nil {
@@ -1154,6 +1184,49 @@ func TestRunAgentRun_PtyPath_AllowedToolsPassedToSettings(t *testing.T) {
 	want := []string{"Read", "Bash", "Edit"}
 	if !slices.Equal(captured, want) {
 		t.Errorf("settingsWrite received tools = %v, want %v", captured, want)
+	}
+}
+
+// TestRunAgentRun_PtyPath_DisallowedToolsPassedToSettings pins AC1 at the
+// CLI boundary: --disallowed-tools tokens reach the settings writer's deny
+// slice in order; absence produces a nil/empty deny slice.
+func TestRunAgentRun_PtyPath_DisallowedToolsPassedToSettings(t *testing.T) {
+	cases := []struct {
+		name string
+		flag []string // extra argv, or nil to omit --disallowed-tools
+		want []string
+	}{
+		{"present", []string{"--disallowed-tools", "AskUserQuestion,EnterPlanMode,ExitPlanMode"}, []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}},
+		{"mixed_separators", []string{"--disallowed-tools", "AskUserQuestion EnterPlanMode,ExitPlanMode"}, []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}},
+		{"absent", nil, []string{}},
+		{"empty", []string{"--disallowed-tools", ""}, []string{}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newValidArgsFixture(t)
+			argv := append(slices.Clone(fx.argv), tc.flag...)
+			installFakeSeams(t)
+			t.Setenv("PYRY_USE_STREAMJSON", "")
+
+			var capturedDeny []string
+			settingsWrite = func(_, deny []string) (string, error) {
+				capturedDeny = slices.Clone(deny)
+				f, err := os.CreateTemp("", "pyry-test-settings-*.json")
+				if err != nil {
+					return "", err
+				}
+				_ = f.Close()
+				return f.Name(), nil
+			}
+
+			if err := runAgentRun(io.Discard, argv); err != nil {
+				t.Fatalf("runAgentRun: %v", err)
+			}
+			if !slices.Equal(capturedDeny, tc.want) {
+				t.Errorf("settingsWrite received deny = %v, want %v", capturedDeny, tc.want)
+			}
+		})
 	}
 }
 

@@ -11,7 +11,7 @@ The CLI verb that replaces `claude -p` in the dispatcher. Phase A spike (#329) g
 5. Installs `signal.NotifyContext` for `SIGTERM` / `SIGINT`.
 6. Branches on `os.Getenv("PYRY_USE_STREAMJSON") == "1"`:
    - **`"1"` → `runAgentRunStreamRunner` (legacy stream-json subprocess path).** Calls `streamrunner.Run` with the assembled argv from `buildStreamRunnerClaudeArgs` and the prompt bytes. Byte-equivalent to the pre-cutover (#391–#469) behaviour. Preserved indefinitely for billing-classification comparison.
-   - **Unset / anything else → `runAgentRunPty` (default).** Pre-marks workdir trust via [`trust.MarkWorkdirTrusted`](agentrun-trust-subpackage.md), receives back the symlink-resolved realpath; writes a per-spawn deny-default permissions JSON via [`settings.WriteSettings(parsed.allowedTools)`](agentrun-settings-subpackage.md), registers `defer os.Remove(settingsPath)`; mints a fresh session UUID via `sessions.NewID`; delegates to [`ptyrunner.Run`](ptyrunner-package.md) with the populated `ptyrunner.Config` (realpath as `WorkDir`, minted UUID as `SessionID`, settings tempfile path as `SettingsPath`, plus parsed `Model` / `Effort` / `MaxTurns` / `SystemPrompt` / `PromptBytes`). ptyrunner spawns claude as an interactive-TUI process under a PTY, delivers the prompt via bracketed-paste, tails claude's session JSONL, re-emits each event as stream-json on stdout, enforces `MaxTurns` via the budget Counter, and runs the PTY-heartbeat + spinner-freeze watchdog.
+   - **Unset / anything else → `runAgentRunPty` (default).** Pre-marks workdir trust via [`trust.MarkWorkdirTrusted`](agentrun-trust-subpackage.md), receives back the symlink-resolved realpath; writes a per-spawn deny-default permissions JSON via [`settings.WriteSettingsWithDeny(parsed.allowedTools, parsed.disallowedTools)`](agentrun-settings-subpackage.md) (#411 — the optional `--disallowed-tools` tokens land in `permissions.deny`), registers `defer os.Remove(settingsPath)`; mints a fresh session UUID via `sessions.NewID`; delegates to [`ptyrunner.Run`](ptyrunner-package.md) with the populated `ptyrunner.Config` (realpath as `WorkDir`, minted UUID as `SessionID`, settings tempfile path as `SettingsPath`, plus parsed `Model` / `Effort` / `MaxTurns` / `SystemPrompt` / `PromptBytes`). ptyrunner spawns claude as an interactive-TUI process under a PTY, delivers the prompt via bracketed-paste, tails claude's session JSONL, re-emits each event as stream-json on stdout, enforces `MaxTurns` via the budget Counter, and runs the PTY-heartbeat + spinner-freeze watchdog.
 7. Maps the helper's return: nil → exit 0; `context.Canceled` (operator teardown) → exit 0; any other error → wrapped as `agent-run: %w` and exit 1. Error prefixes from the ptyrunner-path helpers (`mark workdir trusted in ~/.claude.json: …`, `write per-spawn settings: …`, `mint session id: …`) compose into the final `agent-run: <step>: <underlying>` shape — AC #3's operator-readable surface.
 
 The `PYRY_USE_STREAMJSON` predicate is intentionally strict: only the exact string `"1"` selects the streamrunner branch. `"true"`, `"yes"`, `"on"`, `"streamjson"`, `"0"`, `"false"`, and the empty string all fall through to the ptyrunner default. Pinned table-driven by `TestRunAgentRun_EnvNon1ValueDispatchesToPtyRunner` so a future contributor cannot quietly widen the truthy set.
@@ -40,7 +40,7 @@ Mechanisms by mode:
 
 | Mechanism | streamrunner (`PYRY_USE_STREAMJSON=1`) | ptyrunner (default) |
 |---|---|---|
-| Tool gate | `--allowed-tools` on argv | Per-spawn deny-default `settings.json` written to `os.TempDir()`, claude flag `--settings <path>` |
+| Tool gate | `--allowed-tools` on argv | Per-spawn deny-default `settings.json` (`permissions.allow` whitelist + optional `permissions.deny` from `--disallowed-tools`, #411) written to `os.TempDir()`, claude flag `--settings <path>` |
 | Workspace trust | `--dangerously-skip-permissions` | `trust.MarkWorkdirTrusted` pre-writes `~/.claude.json:projects[<realpath>].hasTrustDialogAccepted=true` |
 | Session id | Claude mints under `-p` mode | Pyry mints via `sessions.NewID`, passes via `--session-id` |
 | Stream-json source | Claude's stdout under `--output-format stream-json` | Pyry tails claude's per-session JSONL at `~/.claude/projects/<realpath>/<sid>.jsonl` and re-emits via `streamjson.Emitter` |
@@ -52,28 +52,31 @@ Wire shape on stdout is identical across both modes — the dispatcher's stream-
 
 ## Flags
 
-All eight are required; each is validated at parse time with a one-line error that names the offending flag.
+Eight required flags plus one optional (`--disallowed-tools`, #411); each is validated at parse time with a one-line error that names the offending flag.
 
 | Flag | Validation |
 |------|-----------|
 | `--prompt-file <path>` | Must exist and be a regular file. |
 | `--system-prompt-file <path>` | Must exist and be a regular file. |
 | `--allowed-tools "<list>"` | Accepts comma- or whitespace-separated tokens (or any mix); trims each; rejects an empty result. |
+| `--disallowed-tools "<list>"` | **Optional.** Tokenised identically to `--allowed-tools` (comma / space / mixed). Absent or empty (`''`) yields a nil deny slice → no `permissions.deny` key (byte-unchanged spawn). Tokens land in the settings file's `permissions.deny`, removing those tools from the model's surface entirely. |
 | `--max-turns <int>` | Must be > 0. |
 | `--effort <enum>` | One of `low`, `medium`, `high`, `xhigh`, `max`. |
 | `--model <string>` | Non-empty after trim. |
 | `--workdir <dir>` | Must exist and be a directory. |
 | `--output-format <stream-json>` | Literal `stream-json` only — any other value rejected. |
 
+The dispatcher passes `--disallowed-tools "AskUserQuestion,EnterPlanMode,ExitPlanMode"` (companion agent-dispatcher#7) so non-interactive agents are never *offered* claude's human-interaction tools — a call to one would waste a turn on a guaranteed `dontAsk` runtime denial and arm the agent-dispatcher#8 permission-denial watchdog. Only load-bearing on the **ptyrunner default path** (the settings file is that path's tool gate); the legacy `PYRY_USE_STREAMJSON=1` path doesn't offer these tools, so `--disallowed-tools` is a no-op there.
+
 Errors render via `main()`'s standard wrapper as `pyry: agent-run: --<flag>: <reason>` and exit non-zero. Trailing positionals are rejected with `agent-run: unexpected positional %q`. `--help` falls through `flag.ContinueOnError` to the registered `fs.Usage`.
 
 ## Implementation
 
-- `cmd/pyry/agent_run.go` — `agentRunArgs` unexported struct (stable field names: `promptFile`, `systemPromptFile`, `allowedTools []string`, `maxTurns`, `effort`, `model`, `workdir`, `outputFormat`), `parseAgentRunArgs(args) (agentRunArgs, error)`, `splitAllowedTools(raw) []string` pure tokeniser (`strings.FieldsFunc` over `r == ',' || unicode.IsSpace(r)` plus trim + empty drop), `validEfforts` package-level set, `requireRegularFile` / `requireDir` helpers that surface `os.Stat` errors verbatim.
+- `cmd/pyry/agent_run.go` — `agentRunArgs` unexported struct (stable field names: `promptFile`, `systemPromptFile`, `allowedTools []string`, `disallowedTools []string` (#411), `maxTurns`, `effort`, `model`, `workdir`, `outputFormat`), `parseAgentRunArgs(args) (agentRunArgs, error)`, `splitAllowedTools(raw) []string` pure tokeniser (`strings.FieldsFunc` over `r == ',' || unicode.IsSpace(r)` plus trim + empty drop — **reused verbatim for `--disallowed-tools`**; name stays historical), `validEfforts` package-level set, `requireRegularFile` / `requireDir` helpers that surface `os.Stat` errors verbatim. `parseAgentRunArgs` tokenises the optional deny flag as `parsed.disallowedTools = splitAllowedTools(*disallowedTools)` with no required/non-empty check.
 - `runAgentRun(stdout io.Writer, args []string)` post-#470 body: `--self-check` short-circuit → parse → `os.ReadFile(promptFile)` → resolve `PYRY_CLAUDE_BIN` → `signal.NotifyContext(SIGTERM, SIGINT)` → branch on `os.Getenv("PYRY_USE_STREAMJSON") == "1"`: `runAgentRunStreamRunner` (legacy) vs `runAgentRunPty` (default) → return nil on nil or `context.Canceled`, else wrap `agent-run: %w`. Both helpers return wrapped-but-not-prefixed chains so the `agent-run:` prefix is added in exactly one place.
 - `runAgentRunStreamRunner(ctx, stdout, parsed, claudeBin, promptBytes)` — extracted from the pre-cutover body; byte-equivalent to the #391–#469 behaviour. Calls `streamrunner.Run` with `Config{ClaudeBin, WorkDir: parsed.workdir, Args: buildStreamRunnerClaudeArgs(parsed), PromptBytes, Stdout, Stderr: os.Stderr}`.
-- `runAgentRunPty(ctx, stdout, parsed, claudeBin, promptBytes)` — flat sequence of three I/O calls plus one delegated `ptyRun`. Order: `trustMark(parsed.workdir)` → wrap as `"mark workdir trusted in ~/.claude.json: %w"` on error; `settingsWrite(parsed.allowedTools)` → wrap as `"write per-spawn settings: %w"` on error, then `defer func() { _ = os.Remove(settingsPath) }()`; `newSessionID()` → wrap as `"mint session id: %w"` on error; `ptyRun(ctx, ptyrunner.Config{ClaudeBin, WorkDir: realpath, SessionID: string(sid), SettingsPath, SystemPrompt, Model, Effort, MaxTurns, PromptBytes, Stdout, Stderr: os.Stderr})`. **`ptyrunner.Config.WorkDir` is `trust.MarkWorkdirTrusted`'s symlink-resolved realpath, NOT `parsed.workdir`** — claude resolves the workdir before keying `projects[<realpath>]` in `~/.claude.json`, so the realpath-from-trust contract keeps pyry's trust-mark key aligned with claude's lookup key. Defer-LIFO fires on every exit path (sessionID error, ptyrun error, ctx-cancel, success) — settings tempfile cleanup is structural.
-- Four package-level **test-only seams** at the top of the file (`var trustMark = trust.MarkWorkdirTrusted` / `settingsWrite = settings.WriteSettings` / `ptyRun = ptyrunner.Run` / `newSessionID = sessions.NewID`). Production never assigns to these; `_test.go` files override via `t.Cleanup` restore-on-exit boilerplate. Documented in a block comment so a future contributor adding a fifth seam pauses to question the decomposition.
+- `runAgentRunPty(ctx, stdout, parsed, claudeBin, promptBytes)` — flat sequence of three I/O calls plus one delegated `ptyRun`. Order: `trustMark(parsed.workdir)` → wrap as `"mark workdir trusted in ~/.claude.json: %w"` on error; `settingsWrite(parsed.allowedTools, parsed.disallowedTools)` → wrap as `"write per-spawn settings: %w"` on error, then `defer func() { _ = os.Remove(settingsPath) }()`; `newSessionID()` → wrap as `"mint session id: %w"` on error; `ptyRun(ctx, ptyrunner.Config{ClaudeBin, WorkDir: realpath, SessionID: string(sid), SettingsPath, SystemPrompt, Model, Effort, MaxTurns, PromptBytes, Stdout, Stderr: os.Stderr})`. **`ptyrunner.Config.WorkDir` is `trust.MarkWorkdirTrusted`'s symlink-resolved realpath, NOT `parsed.workdir`** — claude resolves the workdir before keying `projects[<realpath>]` in `~/.claude.json`, so the realpath-from-trust contract keeps pyry's trust-mark key aligned with claude's lookup key. Defer-LIFO fires on every exit path (sessionID error, ptyrun error, ctx-cancel, success) — settings tempfile cleanup is structural.
+- Four package-level **test-only seams** at the top of the file (`var trustMark = trust.MarkWorkdirTrusted` / `settingsWrite = settings.WriteSettingsWithDeny` (was `settings.WriteSettings` pre-#411; the additive sibling's `func([]string, []string) (string, error)` type is the sole driver of the six test-mock signature edits) / `ptyRun = ptyrunner.Run` / `newSessionID = sessions.NewID`). Production never assigns to these; `_test.go` files override via `t.Cleanup` restore-on-exit boilerplate. Documented in a block comment so a future contributor adding a fifth seam pauses to question the decomposition.
 - `buildStreamRunnerClaudeArgs(parsed) []string` (renamed from `buildClaudeArgs` in #470) — pure helper, emits exactly:
 
   ```
@@ -103,7 +106,7 @@ Errors render via `main()`'s standard wrapper as `pyry: agent-run: --<flag>: <re
 
 ## Tests
 
-- `TestParseAgentRunArgs_HappyPath` / `_Errors` / `_EffortValidValues` / `_AllowedToolsForms` and `TestSplitAllowedTools` — pin the flag surface (unchanged across all cutovers).
+- `TestParseAgentRunArgs_HappyPath` / `_Errors` / `_EffortValidValues` / `_AllowedToolsForms` / `_DisallowedToolsForms` (#411 — comma/space/mixed → tokens; absent/empty → empty slice, no error) and `TestSplitAllowedTools` — pin the flag surface (`splitAllowedTools` covers both allow and deny tokenisation; unchanged across all cutovers).
 - `TestBuildStreamRunnerClaudeArgs_Shape` (renamed in #470 from `TestBuildClaudeArgs_Shape`) — two table rows (canonical + alternate effort). Asserts the exact argv via `slices.Equal` against an explicit `want`, plus named structural assertions and negative pins on the three banned legacy flags.
 - `TestAgentRunUsageDescription` — scaffold-only stale-disclaimer guard plus required-substring pins: `stream-json`, `--max-turns`, `--allowed-tools`, `PYRY_USE_STREAMJSON`, `PTY`.
 
@@ -125,7 +128,8 @@ Errors render via `main()`'s standard wrapper as `pyry: agent-run: --<flag>: <re
 - `TestRunAgentRun_PtyPath_WorkDirIsTrustResolvedRealpath` — feeds a sentinel realpath `"/sentinel/realpath"` through `trustMark`, asserts `captured.WorkDir == sentinel` (not `parsed.workdir`).
 - `TestRunAgentRun_PtyPath_SessionIDIsUUIDv4` — asserts `sessions.ValidID(captured.SessionID)` (canonical UUIDv4 shape).
 - `TestRunAgentRun_PtyPath_ConfigWiring` — table over two fixtures (model `sonnet-4-6` / `opus-4-7`, effort `medium` / `max`, max-turns `3` / `12`); each row asserts every captured Config field round-trips byte-for-byte from `parsed agentRunArgs`.
-- `TestRunAgentRun_PtyPath_AllowedToolsPassedToSettings` — pins the deny-default allowlist's load-bearing path from `--allowed-tools` CLI argument through `splitAllowedTools` to the `settings.WriteSettings` argument slice.
+- `TestRunAgentRun_PtyPath_AllowedToolsPassedToSettings` — pins the deny-default allowlist's load-bearing path from `--allowed-tools` CLI argument through `splitAllowedTools` to the settings writer's first argument slice.
+- `TestRunAgentRun_PtyPath_DisallowedToolsPassedToSettings` (#411) — the symmetric AC1 pin at the CLI boundary: table over present / mixed-separator / absent / empty; asserts the `settingsWrite` mock's second (deny) slice receives the tokens in order (present/mixed → `[A,B,C]`; absent/empty → empty). The `installFakeSeams` no-op stub and the `SettingsRemovedOn{Success,Failure}` capture-wrappers grew a second `_ []string` / `deny []string` param and now call `settings.WriteSettingsWithDeny`.
 
 ### Real-claude smoke (env-gated)
 
@@ -149,6 +153,7 @@ Set `PYRY_USE_STREAMJSON=1` in the dispatcher's `.env` (or in the per-agent serv
 
 - `--self-check` adaptation for the ptyrunner default path — tracked under [#473](https://github.com/pyrycode/pyrycode/issues/473). Until that lands, `--self-check` exercises the streamrunner-style argv path that #336 / #375 originally targeted.
 - streamrunner package deletion — operator decision 2026-05-19: streamrunner stays as a sibling indefinitely for billing-classification comparison post-2026-06-15.
+- `--disallowed-tools` symmetry on the legacy `PYRY_USE_STREAMJSON=1` path (#411) — `buildStreamRunnerClaudeArgs` doesn't offer claude's human-interaction tools, so no deny is load-bearing there. Optional, not required by any AC. See [`codebase/411.md`](../codebase/411.md).
 - `--permission-prompt-tool stdio` protocol handling for the mobile case — separate ticket once mobile design lands.
 - Propagating claude's exact non-zero exit code as the pyry process exit code — AC#4 says "claude's exit code on non-zero exit" but also "no changes required on the dispatcher's salvage path"; the dispatcher's existing tolerance for "exit 1 on any failure" is the binding constraint.
 - Pgid-kill semantics for hostile children — current shape is single-PID SIGTERM/SIGKILL via stdlib `cmd.Cancel` + `cmd.WaitDelay = 5s` on the streamrunner branch, and ptyrunner's own teardown chain on the default branch.

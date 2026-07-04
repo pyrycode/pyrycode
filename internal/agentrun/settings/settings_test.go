@@ -112,6 +112,103 @@ func TestWriteSettings_PreservesOrderAndDuplicates(t *testing.T) {
 	}
 }
 
+func TestWriteSettingsWithDeny_GoldenBytes(t *testing.T) {
+	t.Parallel()
+
+	path, err := WriteSettingsWithDeny([]string{"Bash"}, []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"})
+	if err != nil {
+		t.Fatalf("WriteSettingsWithDeny: %v", err)
+	}
+	defer os.Remove(path)
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	want := []byte(`{"permissions":{"allow":["Bash"],"deny":["AskUserQuestion","EnterPlanMode","ExitPlanMode"],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}` + "\n")
+	if string(got) != string(want) {
+		t.Fatalf("bytes mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestWriteSettingsWithDeny_EmptyDenyOmitsKey proves AC3/AC4: nil and empty
+// disallowedTools both drop the "deny" key, producing bytes byte-identical
+// to the allow-only WriteSettings(["Bash"]) golden. omitempty makes
+// "absent → byte-unchanged" structural rather than a special case.
+func TestWriteSettingsWithDeny_EmptyDenyOmitsKey(t *testing.T) {
+	t.Parallel()
+
+	allowOnly := []byte(`{"permissions":{"allow":["Bash"],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}` + "\n")
+
+	cases := []struct {
+		name string
+		deny []string
+	}{
+		{"nil", nil},
+		{"empty", []string{}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path, err := WriteSettingsWithDeny([]string{"Bash"}, tc.deny)
+			if err != nil {
+				t.Fatalf("WriteSettingsWithDeny: %v", err)
+			}
+			defer os.Remove(path)
+
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if string(got) != string(allowOnly) {
+				t.Fatalf("bytes mismatch (deny key should be absent)\n got: %q\nwant: %q", got, allowOnly)
+			}
+		})
+	}
+}
+
+func TestWriteSettingsWithDeny_PreservesOrderAndDuplicates(t *testing.T) {
+	t.Parallel()
+
+	path, err := WriteSettingsWithDeny([]string{"Bash"}, []string{"ExitPlanMode", "AskUserQuestion", "ExitPlanMode", "EnterPlanMode"})
+	if err != nil {
+		t.Fatalf("WriteSettingsWithDeny: %v", err)
+	}
+	defer os.Remove(path)
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	want := []byte(`{"permissions":{"allow":["Bash"],"deny":["ExitPlanMode","AskUserQuestion","ExitPlanMode","EnterPlanMode"],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}` + "\n")
+	if string(got) != string(want) {
+		t.Fatalf("bytes mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestWriteSettingsWithDeny_EmptyAllowErrors proves the shared-core
+// non-empty-allow guard applies to the new door too, even when a deny list
+// is supplied.
+func TestWriteSettingsWithDeny_EmptyAllowErrors(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+
+	for _, allow := range [][]string{nil, {}} {
+		path, err := WriteSettingsWithDeny(allow, []string{"AskUserQuestion"})
+		if err == nil {
+			_ = os.Remove(path)
+			t.Fatalf("WriteSettingsWithDeny(%v, …) = nil error; want non-nil", allow)
+		}
+		if path != "" {
+			t.Errorf("path = %q on error; want \"\"", path)
+		}
+		if !strings.Contains(err.Error(), "agentrun/settings: allowedTools required") {
+			t.Errorf("err = %q; want it to contain %q", err, "agentrun/settings: allowedTools required")
+		}
+	}
+}
+
 func TestWriteSettings_RoundTripParseable(t *testing.T) {
 	t.Parallel()
 
