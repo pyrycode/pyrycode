@@ -1,6 +1,6 @@
 # `internal/agentrun/settings` — per-spawn deny-default permissions JSON
 
-Writes a `{"permissions":{"allow":[...],"defaultMode":"dontAsk"}}` JSON file to `os.TempDir()` and returns the path. The caller (#470's `runAgentRun`) hands the path to [`ptyrunner.Config.SettingsPath`](ptyrunner-package.md) so PTY-driven interactive `claude` enforces a deny-default tool whitelist — the same semantics `claude -p --allowedTools` had natively in stream-json mode.
+Writes a `{"permissions":{"allow":[...],"defaultMode":"dontAsk"}}` JSON file (optionally with a `"deny":[...]` list, [#411](https://github.com/pyrycode/pyrycode/issues/411)) to `os.TempDir()` and returns the path. The caller (#470's `runAgentRun`) hands the path to [`ptyrunner.Config.SettingsPath`](ptyrunner-package.md) so PTY-driven interactive `claude` enforces a deny-default tool whitelist — the same semantics `claude -p --allowedTools` had natively in stream-json mode.
 
 Introduced [#476](https://github.com/pyrycode/pyrycode/issues/476) as a **slimmed resurrection** of the helper [#339](https://github.com/pyrycode/pyrycode/issues/339) shipped and [#392](https://github.com/pyrycode/pyrycode/issues/392) deleted. The 2026-05-19 pivot back to PTY drive ([`codebase/471.md`](../codebase/471.md)) made the settings file load-bearing again because Phase A (2026-05-14) found `claude --allowedTools <list>` is **additive** in interactive mode — tools omitted from the flag still run when the model asks for them. Only the `--settings <path>` JSON with `defaultMode: "dontAsk"` replicates the `-p` enforcement contract. The original Phase A spike picked `"deny"` by guessing the literal; claude 2.1.145 rejected that value at startup and silently fell back to `"default"` mode — fixed in [#487](https://github.com/pyrycode/pyrycode/issues/487) by switching to the Anthropic-documented value (see [`agent-sdk/permissions` docs](https://code.claude.com/docs/en/agent-sdk/permissions): *"Don't ask mode (`dontAsk`) converts any permission prompt into a denial"*).
 
@@ -12,34 +12,45 @@ Introduced [#476](https://github.com/pyrycode/pyrycode/issues/476) as a **slimme
 // caller is responsible for cleanup via `defer os.Remove(path)`; the
 // helper does not register cleanup itself on the success path.
 func WriteSettings(allowedTools []string) (string, error)
+
+// WriteSettingsWithDeny is WriteSettings plus an optional permissions.deny
+// list (#411). A nil or empty disallowedTools slice omits the "deny" key
+// entirely, producing bytes identical to WriteSettings(allowedTools).
+func WriteSettingsWithDeny(allowedTools, disallowedTools []string) (string, error)
 ```
 
-No exported types, no constructor, one function. `allowedTools` is round-tripped verbatim — element order and duplicates preserved, no sorting, no dedup, no canonicalisation.
+No exported types, no constructor. Both entry points are thin wrappers over an unexported `writeSettings(allowed, disallowed []string)` core (added in #411 — additive entry point, not an atomic signature change, so `selfcheck` and the realclaude byte-equivalence pin stay on the original `WriteSettings` unchanged). `allowedTools` is round-tripped verbatim — element order and duplicates preserved, no sorting, no dedup, no canonicalisation; the same holds for `disallowedTools`. Only `allowedTools` is non-empty-validated (the shared-core guard applies through both doors); `disallowedTools` is optional — empty is the legal "no deny key" case, never an error.
 
 ## JSON shape
 
-Compact, no whitespace, single trailing `\n` from `json.Encoder.Encode`. For `[]string{"Read", "Bash"}` the on-disk bytes are exactly:
+Compact, no whitespace, single trailing `\n` from `json.Encoder.Encode`. For `WriteSettings([]string{"Read", "Bash"})` (or `WriteSettingsWithDeny` with an empty deny) the on-disk bytes are exactly:
 
 ```
-{"permissions":{"allow":["Read","Bash"],"defaultMode":"dontAsk"}}
+{"permissions":{"allow":["Read","Bash"],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}
 ```
 
-(plus a trailing `\n`, 67 bytes total).
+(plus a trailing `\n`). `enableAllProjectMcpServers` is always `true` — a later addition that pre-approves the project's MCP servers so claude's startup "N new MCP servers found" modal doesn't steal the prompt-delivery keystrokes. With a deny list, e.g. `WriteSettingsWithDeny(["Bash"], ["AskUserQuestion","EnterPlanMode","ExitPlanMode"])`, the `deny` key appears **between** `allow` and `defaultMode`:
+
+```
+{"permissions":{"allow":["Bash"],"deny":["AskUserQuestion","EnterPlanMode","ExitPlanMode"],"defaultMode":"dontAsk"},"enableAllProjectMcpServers":true}
+```
 
 Two unexported types make the field order load-bearing — Go's struct serialisation produces the canonical sequence without `SetIndent`:
 
 ```go
 type settingsFile struct {
-    Permissions permissions `json:"permissions"`
+    Permissions                permissions `json:"permissions"`
+    EnableAllProjectMcpServers bool        `json:"enableAllProjectMcpServers"`
 }
 
 type permissions struct {
     Allow       []string `json:"allow"`
+    Deny        []string `json:"deny,omitempty"` // #411 — omitted entirely when empty/nil
     DefaultMode string   `json:"defaultMode"`
 }
 ```
 
-`DefaultMode` is plain `string`, not a typed enum — pinned by the spec to avoid a layer of indirection that adds nothing.
+`Deny`'s `omitempty` is load-bearing: a nil or `len==0` slice drops the `deny` key, so every deny-less caller's bytes are byte-identical to before #411 — the back-compat guarantee (AC3/AC4) is structural, not a special-cased branch. `DefaultMode` is plain `string`, not a typed enum — pinned by the spec to avoid a layer of indirection that adds nothing.
 
 ## Why a subpackage instead of `internal/agentrun/settings.go`
 
@@ -131,7 +142,7 @@ No `context.Context` parameter — the operation is fast-bounded (local filesyst
 
 ## Testing
 
-`internal/agentrun/settings/settings_test.go` — same-package, stdlib `testing` + `encoding/json` only, no testify. Six test functions, all `t.Parallel()`. The helper writes to `os.TempDir()` (not `t.TempDir()`), so each successful-path test owns its `defer os.Remove(path)`. The random tempfile suffix means parallel tests cannot collide.
+`internal/agentrun/settings/settings_test.go` — same-package, stdlib `testing` + `encoding/json` only, no testify. All `t.Parallel()` (except the deny empty-allow case, which sets `TMPDIR`). The helper writes to `os.TempDir()` (not `t.TempDir()`), so each successful-path test owns its `defer os.Remove(path)`. The random tempfile suffix means parallel tests cannot collide.
 
 Test cases:
 
@@ -142,11 +153,19 @@ Test cases:
 - `TestWriteSettings_PathLocationPrefixSuffix` — input `[]string{"Read"}`; asserts `filepath.Dir(path) == os.TempDir()` (after `filepath.Clean` on both sides for trailing-slash normalisation), `strings.HasPrefix(filepath.Base(path), "pyry-agent-run-settings-")`, and `strings.HasSuffix(path, ".json")`.
 - `TestWriteSettings_PathIsAbsolute` — same input; asserts `filepath.IsAbs(path)`. Defensive — `os.CreateTemp` returns absolute paths on Unix by stdlib contract, but ptyrunner's `Config.SettingsPath` only validates non-emptiness, so this test pins the absoluteness the consumer doesn't.
 
+Deny-path tests (#411), mirroring the allow patterns:
+
+- `TestWriteSettingsWithDeny_GoldenBytes` — `(["Bash"], ["AskUserQuestion","EnterPlanMode","ExitPlanMode"])` → exact bytes with `deny` between `allow` and `defaultMode`. (AC1.)
+- `TestWriteSettingsWithDeny_EmptyDenyOmitsKey` — sub-tests `nil` and `[]string{}` deny; both assert bytes **byte-identical** to the allow-only `WriteSettings(["Bash"])` golden (no `deny` key). Proves `omitempty` makes AC3/AC4 structural.
+- `TestWriteSettingsWithDeny_PreservesOrderAndDuplicates` — deny `["ExitPlanMode","AskUserQuestion","ExitPlanMode","EnterPlanMode"]` round-trips verbatim (order + dup, no canonicalisation).
+- `TestWriteSettingsWithDeny_EmptyAllowErrors` — proves the shared-core non-empty-allow guard fires through the new door too, even when a deny list is supplied (`nil` and `{}` allow → `agentrun/settings: allowedTools required`, empty path).
+
 No e2e test. The cutover ticket (#470) owns the e2e smoke that verifies the resulting JSON is accepted by the current claude binary; schema re-validation against the live claude version is explicitly its responsibility (issue body § Out of scope).
 
 ## Consumers
 
-- `pyry agent-run` (cutover in #470) — calls `settings.WriteSettings(parsed.allowedTools)` after flag validation, defers `os.Remove(path)`, and passes the path to `ptyrunner.Config.SettingsPath`. Failure here exits the verb with 1 (the helper surfaces the failure; the caller chooses to abort).
+- `pyry agent-run` (cutover in #470; deny wiring in #411) — its `settingsWrite` seam is now `settings.WriteSettingsWithDeny`, called as `settingsWrite(parsed.allowedTools, parsed.disallowedTools)` after flag validation, defers `os.Remove(path)`, and passes the path to `ptyrunner.Config.SettingsPath`. Failure here exits the verb with 1 (the helper surfaces the failure; the caller chooses to abort). See [pyry-agent-run-command.md](pyry-agent-run-command.md) § `--disallowed-tools`.
+- `internal/agentrun/selfcheck` — keeps its own 1-arg `settingsWrite = settings.WriteSettings` seam (no denylist concept). Deliberately untouched by #411's additive design.
 - [`ptyrunner.Run`](ptyrunner-package.md) consumes the path verbatim via `Config.SettingsPath` (required, validated non-empty at ptyrunner entry); the path becomes claude's `--settings <path>` argv.
 
 No other consumers. The helper is single-purpose and has no in-process API surface beyond the one function.
@@ -172,6 +191,7 @@ No other consumers. The helper is single-purpose and has no in-process API surfa
 - [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) — sibling slim-resurrection landed in #475; same template, complementary concern (workspace-trust pre-write).
 - [ptyrunner-package.md](ptyrunner-package.md) — the spawn primitive that consumes the path via `Config.SettingsPath`.
 - [`codebase/476.md`](../codebase/476.md) — build notes (file inventory, patterns, lessons).
+- [`codebase/411.md`](../codebase/411.md) — the `WriteSettingsWithDeny` sibling + `permissions.deny` extension (additive entry point; `--disallowed-tools` wiring).
 - [`codebase/487.md`](../codebase/487.md) — `"deny"` → `"dontAsk"` literal fix; the original Phase A spike's guessed value was rejected by claude 2.1.145 and silently fell back to `"default"` mode, reopening `/doctor` poisoning on the ptyrunner path.
 - [`docs/specs/architecture/476-agentrun-settings-helper.md`](../../specs/architecture/476-agentrun-settings-helper.md) — architect spec.
 - [`codebase/339.md`](../codebase/339.md) — the original (pre-deletion) helper; this slimmed version's contract is a strict subset of the file-writing behaviour and a deliberate descope of the workdir / overwrite / marker-line semantics.
