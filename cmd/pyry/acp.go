@@ -55,6 +55,15 @@ func runACP(args []string) error {
 	if err != nil {
 		return fmt.Errorf("mark workdir trusted in ~/.claude.json: %w", err)
 	}
+	// The directory claude writes <session-id>.jsonl into for the ACP pool. Every
+	// ACP session spawns in trustedWorkdir (buildSession sets WorkDir there and no
+	// caller cwd reaches the spawn until #762+), so one fixed dir serves every
+	// stream — coherent-by-construction with the cwd claude launches in. Passed
+	// only to serveACPWithPool for the outbound turn-event streams; NOT set on the
+	// pool's Config.ClaudeSessionsDir, which would enable the rotation watcher and
+	// RotateID a session on /clear, breaking the host-held id addressing that
+	// session/prompt and session/cancel rely on.
+	claudeSessionsDir := sessions.DefaultClaudeSessionsDir(trustedWorkdir)
 	pool, err := sessions.New(sessions.Config{
 		Logger:           logger,
 		BootstrapEvicted: true,
@@ -68,7 +77,7 @@ func runACP(args []string) error {
 		return fmt.Errorf("acp: pool init: %w", err)
 	}
 
-	return serveACPWithPool(ctx, pool, os.Stdin, os.Stdout, logger)
+	return serveACPWithPool(ctx, pool, os.Stdin, os.Stdout, claudeSessionsDir, logger)
 }
 
 // serveACPWithPool backgrounds pool.Run, waits for the pool to become ready (so
@@ -76,7 +85,7 @@ func runACP(args []string) error {
 // the transport with session/new registered, and tears the pool down on return.
 // stdin/stdout are parameters (not os.Stdin/os.Stdout) so tests drive it with
 // in-memory pipes against a fake-claude pool.
-func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader, stdout io.Writer, logger *slog.Logger) error {
+func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader, stdout io.Writer, claudeSessionsDir string, logger *slog.Logger) error {
 	// A child ctx so the EOF path (serveACP returns nil) can stop pool.Run; the
 	// signal path cancels the parent, which cancels this too.
 	runCtx, cancel := context.WithCancel(ctx)
@@ -108,10 +117,17 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 	// until then a delivered prompt stays held until host disconnect.
 	holds := newPromptHolds(logger)
 
+	// streams owns one turnbridge.Producer per addressable session, driving the
+	// acpTurnStream sink so session/update notifications flow during a turn. Parented
+	// on runCtx, joined by wait() below after cancel(). claudeSessionsDir == ""
+	// disables streaming.
+	streams := newACPTurnStreams(runCtx, pool, claudeSessionsDir, logger)
+
 	register := func(t *acp.Transport) {
+		streams.attach(t)    // set the transport before any handler dispatch (register-before-Serve)
 		registerHandshake(t) // initialize + authenticate (stateless, no pool)
-		t.Register("session/new", newSessionHandler(pool))
-		t.Register("session/load", loadSessionHandler(pool))
+		t.Register("session/new", newSessionHandler(pool, streams))
+		t.Register("session/load", loadSessionHandler(pool, streams))
 		t.Register("session/prompt", promptHandler(holds, func(id sessions.SessionID) (promptDeliverer, error) {
 			// Return a true nil interface on error: a typed nil *sessions.Session
 			// would wrap a non-nil interface and defeat the handler's err
@@ -137,9 +153,13 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 	}
 	serveErr := serveACP(runCtx, stdin, stdout, logger, register)
 
-	// Stop pool.Run (the EOF path needs this; the signal path already
-	// cancelled) and join so no supervisor goroutine outlives the call.
+	// Stop pool.Run and every producer (the EOF path needs this; the signal path
+	// already cancelled), then join: producers first (streams.wait), then the pool
+	// (<-poolErr). Ordering is not load-bearing — both respond to the one cancel()
+	// — but joining the consumers first reads cleanly and leaves no goroutine
+	// outliving the call.
 	cancel()
+	streams.wait()
 	<-poolErr
 	return serveErr
 }
@@ -164,12 +184,15 @@ type newSessionResult struct {
 // Honouring a caller cwd is a later, security-sensitive ticket (#762+). A
 // Create error is wrapped and returned → CodeInternalError on the wire, detail
 // logged by the transport, never leaked.
-func newSessionHandler(pool *sessions.Pool) acp.Handler {
+func newSessionHandler(pool *sessions.Pool, streams *acpTurnStreams) acp.Handler {
 	return func(ctx context.Context, _ json.RawMessage) (any, error) {
 		id, err := pool.Create(ctx, "")
 		if err != nil {
 			return nil, fmt.Errorf("session/new: %w", err)
 		}
+		// Start the outbound turn-event stream for the fresh session so
+		// session/update notifications flow during its turns (idempotent).
+		streams.start(id)
 		return newSessionResult{SessionID: string(id), Modes: pinnedModeState()}, nil
 	}
 }
@@ -205,7 +228,7 @@ func decodeSessionID(params json.RawMessage) (sessions.SessionID, *acp.Error) {
 // case). An unknown id maps to CodeInvalidParams and spawns nothing. GetOrCreate
 // is deliberately NOT used: it creates on miss, which would spawn a fresh claude
 // for an unknown id and break both AC-2 and divergence 6.
-func loadSessionHandler(pool *sessions.Pool) acp.Handler {
+func loadSessionHandler(pool *sessions.Pool, streams *acpTurnStreams) acp.Handler {
 	return func(ctx context.Context, params json.RawMessage) (any, error) {
 		id, aerr := decodeSessionID(params)
 		if aerr != nil {
@@ -220,6 +243,10 @@ func loadSessionHandler(pool *sessions.Pool) acp.Handler {
 		if err := pool.Activate(ctx, id); err != nil {
 			return nil, fmt.Errorf("session/load: %w", err)
 		}
+		// Idempotent: for a this-process id whose stream is already running this is
+		// a no-op; the call keeps "every addressable session has a running stream"
+		// honest and future-proofs a persistence-backed load.
+		streams.start(id)
 		return newSessionResult{SessionID: string(id), Modes: pinnedModeState()}, nil
 	}
 }
