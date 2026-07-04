@@ -113,15 +113,18 @@ func serveACPWithPool(ctx context.Context, pool *sessions.Pool, stdin io.Reader,
 	}
 
 	// holds is the per-session in-flight registry for held session/prompt calls,
-	// one per `pyry acp` process. T7 (#751) will resolve held calls on TurnEnd;
-	// until then a delivered prompt stays held until host disconnect.
+	// one per `pyry acp` process. Its end resolver is wired into the turn-event
+	// streams below (#751): on TurnEnd the outbound stream resolves the held call
+	// with the mapped stopReason. The same holds instance is shared with the
+	// session/prompt handler registered further down.
 	holds := newPromptHolds(logger)
 
 	// streams owns one turnbridge.Producer per addressable session, driving the
-	// acpTurnStream sink so session/update notifications flow during a turn. Parented
-	// on runCtx, joined by wait() below after cancel(). claudeSessionsDir == ""
-	// disables streaming.
-	streams := newACPTurnStreams(runCtx, pool, claudeSessionsDir, logger)
+	// acpTurnStream sink so session/update notifications flow during a turn and, on
+	// TurnEnd, resolving the held session/prompt call with the turn's stopReason via
+	// holds.end (#751). Parented on runCtx, joined by wait() below after cancel().
+	// claudeSessionsDir == "" disables streaming.
+	streams := newACPTurnStreams(runCtx, pool, claudeSessionsDir, holds.end, logger)
 
 	register := func(t *acp.Transport) {
 		streams.attach(t)    // set the transport before any handler dispatch (register-before-Serve)

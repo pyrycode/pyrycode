@@ -32,9 +32,16 @@ import (
 // session id, and an error sentinel — never JSONL bytes or model output. The sink
 // (#750) enforces the same posture on the notification path.
 type acpTurnStreams struct {
-	ctx       context.Context // runCtx; parent of every producer goroutine
-	pool      *sessions.Pool  // Lookup(id) -> Session -> Supervisor (the SessionHost)
-	dir       string          // claude <id>.jsonl directory; "" => streaming disabled
+	ctx  context.Context // runCtx; parent of every producer goroutine
+	pool *sessions.Pool  // Lookup(id) -> Session -> Supervisor (the SessionHost)
+	dir  string          // claude <id>.jsonl directory; "" => streaming disabled
+	// onTurnEnd (#751) resolves the held session/prompt call for a session when its
+	// turn ends: start binds it to the fixed session id and passes the bound
+	// closure to the sink's own onTurnEnd seam. nil-tolerant — a nil manager seam
+	// leaves the sink's TurnEnd branch a debug no-op (#796's pure-emit tests, and
+	// the dir == "" path, pass nil through). Wired to promptHolds.end at the
+	// composition root.
+	onTurnEnd func(sessionID, reason string)
 	logger    *slog.Logger
 	transport *acp.Transport      // set by attach before Serve accepts frames
 	mu        sync.Mutex          // guards started
@@ -44,13 +51,16 @@ type acpTurnStreams struct {
 
 // newACPTurnStreams builds the per-process manager. ctx is the composition
 // root's runCtx: cancelling it stops every producer, and wait joins them.
-func newACPTurnStreams(ctx context.Context, pool *sessions.Pool, dir string, logger *slog.Logger) *acpTurnStreams {
+// onTurnEnd resolves a session's held session/prompt call on turn end (#751);
+// nil disables resolution (the sink logs the TurnEnd as a debug no-op).
+func newACPTurnStreams(ctx context.Context, pool *sessions.Pool, dir string, onTurnEnd func(sessionID, reason string), logger *slog.Logger) *acpTurnStreams {
 	return &acpTurnStreams{
-		ctx:     ctx,
-		pool:    pool,
-		dir:     dir,
-		logger:  logger,
-		started: make(map[string]struct{}),
+		ctx:       ctx,
+		pool:      pool,
+		dir:       dir,
+		onTurnEnd: onTurnEnd,
+		logger:    logger,
+		started:   make(map[string]struct{}),
 	}
 }
 
@@ -111,9 +121,16 @@ func (m *acpTurnStreams) start(id sessions.SessionID) {
 	// A fresh Tracker per session (not shared) mirrors the mobile path's
 	// one-tracker-per-stream and avoids cross-session parse-state races.
 	sub := turnbridge.NewTargetSubscriber(resolve, tuidriver.NewTracker(tuidriver.TrackerOpts{}), m.logger)
-	// onTurnEnd is nil here: TurnEnd is a logged debug no-op (this ticket). #751
-	// flips it to the held-call resolver at this exact construction site.
-	sink := newACPTurnStream(m.transport, sessionID, nil, m.logger)
+	// Bind the manager's onTurnEnd seam to this fixed session id so the sink
+	// resolves the held session/prompt call with the mapped stopReason on TurnEnd
+	// (#751). Preserve nil-tolerance: a nil manager seam passes nil through, keeping
+	// the sink's debug-no-op TurnEnd branch for #796's pure-emit tests and the
+	// dir == "" path.
+	var onEnd func(string)
+	if m.onTurnEnd != nil {
+		onEnd = func(reason string) { m.onTurnEnd(sessionID, reason) }
+	}
+	sink := newACPTurnStream(m.transport, sessionID, onEnd, m.logger)
 	prod, err := turnbridge.New(turnbridge.Config{
 		Subscribe: sub,
 		OnEvent:   sink.Handle,

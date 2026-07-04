@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/acp"
 	"github.com/pyrycode/pyrycode/internal/acpbridge"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
@@ -155,7 +157,7 @@ func TestACPTurnStreams_LifecycleTeardownJoinsProducer(t *testing.T) {
 	defer mgrCancel()
 	// A fresh tmp dir the fake claude never writes JSONL into, so the producer
 	// parks in WaitForPTY / resolve-retry rather than opening a live stream.
-	streams := newACPTurnStreams(mgrCtx, pool, t.TempDir(), logger)
+	streams := newACPTurnStreams(mgrCtx, pool, t.TempDir(), nil, logger)
 	streams.attach(transport)
 
 	streams.start(id)
@@ -184,7 +186,7 @@ func TestACPTurnStreams_LifecycleTeardownJoinsProducer(t *testing.T) {
 // nothing to join.
 func TestACPTurnStreams_EmptyDirDisablesStreaming(t *testing.T) {
 	t.Parallel()
-	streams := newACPTurnStreams(context.Background(), nil, "", discardLogger())
+	streams := newACPTurnStreams(context.Background(), nil, "", nil, discardLogger())
 	// nil pool is never dereferenced: dir == "" returns before Lookup.
 	streams.start("any-session-id")
 	streams.mu.Lock()
@@ -252,5 +254,120 @@ func TestACPTurnStreams_NoAppContentLogLeak(t *testing.T) {
 		if strings.Contains(logs, secret) {
 			t.Fatalf("application content %q leaked into logs:\n%s", secret, logs)
 		}
+	}
+}
+
+// decodeFrames splits buf into JSON-RPC frames (one per line) and decodes each
+// into a generic map. Shared by streamHarness.frames and the AC-5 end-to-end
+// test, which reads a standalone transport buffer rather than a harness.
+func decodeFrames(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("frame not valid JSON: %q: %v", line, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// AC-5: an end-to-end scripted turn over the wired stream — a held session/prompt,
+// some session/update frames, then a terminal TurnEnd — resolves the held call
+// with the mapped stopReason, and the result frame lands strictly AFTER every
+// notification. One transport over one buffer: the producer's single Run goroutine
+// emits the notifications and then (via onTurnEnd → holds.end) the result, so the
+// streaming-precedes-return ordering is structural, not timing-dependent.
+func TestACPTurnStreams_ScriptedTurnResolvesHeldPromptAfterNotifications(t *testing.T) {
+	t.Parallel()
+	logger := discardLogger()
+
+	// One transport over an in-memory buffer: both the session/update
+	// notifications and the held call's resolution write here.
+	var wire bytes.Buffer
+	holds := newPromptHolds(logger)
+	dlv := newRecordingDeliverer(false) // non-gated: delivery commits, call stays held
+
+	// Register session/prompt and run Serve once over a single frame so a real hold
+	// (with a Responder bound to this transport) is registered. Serve dispatches the
+	// frame (ErrDeferred, no frame written), hits EOF, returns nil. A *Responder is
+	// only obtainable through dispatch, hence the single Serve pass.
+	tr := acp.New(strings.NewReader(promptFrame(t, 42, testStreamSessionID, "hi")+"\n"), &wire, logger)
+	tr.Register("session/prompt", promptHandler(holds, func(sessions.SessionID) (promptDeliverer, error) {
+		return dlv, nil
+	}, logger))
+	if err := tr.Serve(context.Background()); err != nil {
+		t.Fatalf("Serve over the prompt frame: %v", err)
+	}
+
+	// Build the sink on the SAME transport, wiring onTurnEnd to resolve the held
+	// call — exactly the join this ticket adds.
+	sink := newACPTurnStream(tr, testStreamSessionID, func(r string) { holds.end(testStreamSessionID, r) }, logger)
+
+	ch := make(chan tuidriver.Event)
+	sub := &scriptedSubscriber{streams: []<-chan tuidriver.Event{ch}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	prod, err := turnbridge.New(turnbridge.Config{
+		Subscribe: sub.subscribe,
+		OnEvent:   sink.Handle,
+		Logger:    logger,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runDone := make(chan struct{})
+	go func() { _ = prod.Run(ctx); close(runDone) }()
+
+	// Blocking sends are sync points: each returns once drain has received it.
+	for _, ev := range []tuidriver.Event{
+		jsonlStreamEvent(streamEntry(t, "assistant", "m1", map[string]any{"type": "thinking", "thinking": "reasoning"})),
+		jsonlStreamEvent(streamEntry(t, "assistant", "m2", map[string]any{"type": "text", "text": "hello"})),
+		endOfTurnEvent(),
+	} {
+		ch <- ev
+	}
+	close(ch)
+	cancel()
+	waitClosed(t, runDone, "producer Run after ctx cancel")
+
+	// Decode every frame. The notifications (no id) must all precede the one
+	// session/prompt result frame (id 42, stopReason end_turn).
+	frames := decodeFrames(t, &wire)
+	if len(frames) < 2 {
+		t.Fatalf("emitted %d frames, want >=2 (notifications + result): %v", len(frames), frames)
+	}
+	resultIdx := -1
+	for i, f := range frames {
+		_, hasResult := f["result"]
+		_, hasID := f["id"]
+		if hasResult && hasID {
+			if resultIdx != -1 {
+				t.Fatalf("more than one result frame written: %v", frames)
+			}
+			resultIdx = i
+			continue
+		}
+		// Every non-result frame must be a session/update notification (no id).
+		if f["method"] != acpbridge.MethodSessionUpdate {
+			t.Errorf("frame %d is neither a session/update notification nor the result: %v", i, f)
+		}
+	}
+	if resultIdx == -1 {
+		t.Fatalf("no session/prompt result frame written: %v", frames)
+	}
+	if resultIdx != len(frames)-1 {
+		t.Fatalf("result frame at index %d, want last (index %d): all notifications must precede the return", resultIdx, len(frames)-1)
+	}
+	result, _ := frames[resultIdx]["result"].(map[string]any)
+	if result["stopReason"] != "end_turn" {
+		t.Errorf("stopReason = %v, want end_turn", result["stopReason"])
+	}
+	if id, _ := frames[resultIdx]["id"].(float64); id != 42 {
+		t.Errorf("result id = %v, want 42 (the held request id)", frames[resultIdx]["id"])
 	}
 }
