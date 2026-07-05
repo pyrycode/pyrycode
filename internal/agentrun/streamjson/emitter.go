@@ -94,6 +94,7 @@ type Emitter struct {
 	lastAssistantText  string
 	aggUsage           usageTotals
 	exitReason         ExitReason
+	terminalDetail     string // precise cause filling the empty error terminal_reason; see SetTerminalDetail
 	writeErr           error
 	closed             bool
 	closeErr           error
@@ -298,6 +299,29 @@ func (e *Emitter) SetExitReason(r ExitReason) {
 	}
 }
 
+// SetTerminalDetail records a precise, free-form termination cause used to
+// fill the otherwise-empty `terminal_reason` of the error trailer — turning
+// the empty `Agent error ()` into `Agent error (parent_canceled)` and friends.
+// The ptyrunner sets it from the run's cancel path (watchdog arm, external
+// context cancel, stream close). It is ONLY surfaced when the resolved reason
+// is ExitReasonError (the default no-end-of-turn wedge); a completion or a
+// max_turns stop keeps its own terminal_reason and ignores the detail.
+//
+// Idempotent: only the first non-empty value sticks; later calls (and empty)
+// are no-ops, so a watchdog fire recorded mid-run beats the runner's
+// fall-through classification recorded after the event loop. Safe for
+// concurrent use.
+func (e *Emitter) SetTerminalDetail(d string) {
+	if d == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.terminalDetail == "" {
+		e.terminalDetail = d
+	}
+}
+
 // ExitReason reports the run's terminal classification. Before Close it
 // returns whatever SetExitReason recorded (possibly ""); Close resolves and
 // persists the final reason (defaulting to ExitReasonError when no end-of-turn
@@ -343,6 +367,14 @@ func (e *Emitter) Close() error {
 	e.exitReason = exit
 
 	subtype, terminal, isErr := wireFields(exit)
+	// wireFields leaves terminal_reason empty only for the ExitReasonError
+	// default (the no-end-of-turn wedge). Fill it with the precise cause the
+	// ptyrunner recorded, so the wedge trailer names its termination path
+	// instead of an empty `()`. Completion / max_turns already carry a
+	// non-empty terminal_reason and are left untouched.
+	if terminal == "" && e.terminalDetail != "" {
+		terminal = e.terminalDetail
+	}
 
 	tr := trailer{
 		Type:         "result",

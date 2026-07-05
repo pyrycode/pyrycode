@@ -408,8 +408,10 @@ func TestRun_CtxCancelDuringStream(t *testing.T) {
 	if tr.Subtype != "error_during_execution" {
 		t.Errorf("trailer Subtype = %q, want error_during_execution", tr.Subtype)
 	}
-	if tr.TerminalReason != "" {
-		t.Errorf("trailer TerminalReason = %q, want empty", tr.TerminalReason)
+	// The caller cancelled the context, so the instrumentation names the
+	// termination path instead of leaving terminal_reason empty.
+	if tr.TerminalReason != "parent_canceled" {
+		t.Errorf("trailer TerminalReason = %q, want parent_canceled", tr.TerminalReason)
 	}
 	if !tr.IsError {
 		t.Errorf("trailer IsError = false, want true")
@@ -597,8 +599,10 @@ func TestRun_WatchdogFires(t *testing.T) {
 	if tr.Subtype != "error_during_execution" {
 		t.Errorf("trailer Subtype = %q, want error_during_execution", tr.Subtype)
 	}
-	if tr.TerminalReason != "" {
-		t.Errorf("trailer TerminalReason = %q, want empty", tr.TerminalReason)
+	// A watchdog fire names the arm that tripped, so terminal_reason carries a
+	// "watchdog: ..." cause rather than an empty `()`.
+	if !strings.HasPrefix(tr.TerminalReason, "watchdog:") {
+		t.Errorf("trailer TerminalReason = %q, want a watchdog: prefix", tr.TerminalReason)
 	}
 	if !tr.IsError {
 		t.Errorf("trailer IsError = false, want true")

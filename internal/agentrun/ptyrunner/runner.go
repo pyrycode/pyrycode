@@ -511,6 +511,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 
 	var emitErr error
+	var eotSeen bool
 loop:
 	for ev := range ch {
 		switch ev.Kind {
@@ -534,7 +535,26 @@ loop:
 			counter.OnEvent(ev.Entry)
 		case tuidriver.EventKindJsonlEndOfTurn:
 			counter.OnEndOfTurn()
+			eotSeen = true
 			break loop
+		}
+	}
+	// Instrumentation: when the event loop ends without an end-of-turn, record
+	// WHY on the emitter so the wedge trailer's terminal_reason names its
+	// termination path instead of an empty `()`. First-wins on the emitter, so
+	// a watchdog fire (watchdog.go) or the budget's ExitReasonMaxTurns keeps
+	// its own, more-specific cause; this only fills the external-cancel and
+	// stream-closed fall-throughs. ctx is the caller's context (dispatcher
+	// timeout / force-exit / restart, or operator shutdown); runCtx is its
+	// child that the watchdog and budget cancel.
+	if !eotSeen && emitter.ExitReason() != streamjson.ExitReasonMaxTurns {
+		switch {
+		case ctx.Err() != nil:
+			emitter.SetTerminalDetail("parent_canceled")
+		case runCtx.Err() != nil:
+			emitter.SetTerminalDetail("runctx_canceled")
+		default:
+			emitter.SetTerminalDetail("stream_closed")
 		}
 	}
 	if runCtx.Err() != nil {

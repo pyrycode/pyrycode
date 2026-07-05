@@ -30,6 +30,10 @@ func runWatchdog(
 	if err := sess.RunWatchdog(ctx, tr, tuidriver.WatchdogOpts{Tick: tick}); err != nil {
 		logger.Warn("ptyrunner: watchdog fired", "err", err)
 		emitter.SetExitReason(streamjson.ExitReasonError)
+		// Record which arm fired (the tuidriver error carries last-state +
+		// duration, no Event content) so the wedge trailer's terminal_reason
+		// names the watchdog cause instead of an empty `()`.
+		emitter.SetTerminalDetail("watchdog: " + err.Error())
 		cancel()
 	}
 }

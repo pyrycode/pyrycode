@@ -395,6 +395,82 @@ func TestTrailer_Error(t *testing.T) {
 	}
 }
 
+// A precise termination detail fills the otherwise-empty terminal_reason on
+// the error trailer — this is the instrumentation that replaces the empty
+// `Agent error ()` with a real cause (e.g. parent_canceled, stream_closed,
+// watchdog:...).
+func TestTrailer_ErrorWithTerminalDetail(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	if err := em.Emit(assistantEntry(`{"type":"assistant"}`, "tool_use", nil, false)); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	em.SetTerminalDetail("parent_canceled")
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.Subtype != "error_during_execution" || tr.TerminalReason != "parent_canceled" || !tr.IsError {
+		t.Errorf("error+detail trailer: %+v", tr)
+	}
+}
+
+// A terminal detail must NOT override a clean completion's terminal_reason.
+func TestTrailer_TerminalDetailIgnoredOnCompletion(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	if err := em.Emit(assistantEntry(`{"type":"assistant"}`, "end_turn", nil, true)); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	em.SetTerminalDetail("stream_closed")
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.TerminalReason != "completed" || tr.IsError {
+		t.Errorf("completion must ignore terminal detail: %+v", tr)
+	}
+}
+
+// A terminal detail must NOT override the max_turns terminal_reason.
+func TestTrailer_TerminalDetailIgnoredOnMaxTurns(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	if err := em.Emit(assistantEntry(`{"type":"assistant"}`, "tool_use", nil, false)); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	em.SetExitReason(ExitReasonMaxTurns)
+	em.SetTerminalDetail("parent_canceled")
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.TerminalReason != "max_turns" {
+		t.Errorf("max_turns must ignore terminal detail: %+v", tr)
+	}
+}
+
+// First non-empty SetTerminalDetail wins; later calls (and empty) are no-ops —
+// so a watchdog fire (set first, mid-run) beats the runner's fall-through
+// classification set after the loop.
+func TestSetTerminalDetail_Idempotent(t *testing.T) {
+	t.Parallel()
+	em, buf := newTestEmitter(t)
+	if err := em.Emit(assistantEntry(`{"type":"assistant"}`, "tool_use", nil, false)); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	em.SetTerminalDetail("watchdog: pty quiet for 30s")
+	em.SetTerminalDetail("parent_canceled")
+	em.SetTerminalDetail("")
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tr := lastTrailer(t, buf.Bytes())
+	if tr.TerminalReason != "watchdog: pty quiet for 30s" {
+		t.Errorf("first SetTerminalDetail should stick: TerminalReason = %q", tr.TerminalReason)
+	}
+}
+
 func TestTrailer_DefaultErrorFallback_NoEOT(t *testing.T) {
 	t.Parallel()
 	em, buf := newTestEmitter(t)
