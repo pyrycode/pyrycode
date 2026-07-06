@@ -11,12 +11,18 @@ import (
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
-// acpTurnStreams owns one turnbridge.Producer goroutine per addressable ACP
-// session, each driving the acpTurnStream sink (#750) for exactly ONE fixed
-// session id. One instance per `pyry acp` process. It is the composition-root
-// wiring that gives acpTurnStream its first non-test caller: without it, no
-// turnbridge.Producer tails a session's transcript, so no session/update ever
-// reaches the host.
+// acpTurnStreams owns the per-session outbound adapters for the `pyry acp`
+// process: for each addressable session it spawns one turnbridge.Producer
+// goroutine driving the acpTurnStream sink (#750, session/update frames) AND one
+// permission-proxy drain (#801) driving the acpPermissionProxy (#752, the
+// outbound session/request_permission round-trip). One instance per process. It
+// is the composition-root wiring that gives both frozen adapters their first
+// non-test caller: without it, no turnbridge.Producer tails a session's
+// transcript and no permission modal reaches the host.
+//
+// Both goroutines are spawned together by start(id), disabled together when
+// dir == "" (streaming off), guarded by the same started idempotency mark (at
+// most one of each per session id), and joined together by wait().
 //
 // Far thinner than the mobile leg's startInteractiveTurnStreamV2: ACP has one
 // host, one fixed session per stream, no capability fan-out, no replay ring, and
@@ -158,6 +164,11 @@ func (m *acpTurnStreams) start(id sessions.SessionID) {
 				"err", err.Error())
 		}
 	}()
+
+	// The session's second outbound adapter: the permission-proxy drain, spawned
+	// under the same wg (joined by wait) and parented on m.ctx (torn down by the
+	// same cancel). host is both the modalKeystroker and the SessionHost.
+	m.startPermissionProxy(host, sessionID)
 }
 
 // unmark drops id from started so a later start may retry after a soft failure
