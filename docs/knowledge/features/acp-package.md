@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749, #796, #751)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749, #796, #751, #801)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -937,7 +937,8 @@ in [`codebase/749.md`](../codebase/749.md); the join itself in
 ## ACP permission proxy (`session/request_permission`) (#752)
 
 The **highest-risk seam in the epic** (T8, [ADR 027](../decisions/027-acp-mapping.md) divergence 2).
-`acpPermissionProxy` (`cmd/pyry/acp_permission.go`, two new files, unwired) answers claude's on-screen
+`acpPermissionProxy` (`cmd/pyry/acp_permission.go`, two new files; shipped unwired, **live-wired by #801**
+— see [Permission-proxy wiring](#permission-proxy-wiring-801) below) answers claude's on-screen
 permission modal by asking the ACP host: on a permission-class modal it issues a blocking
 `session/request_permission` `Call` to the host, then routes the host's choice back into claude's live
 prompt as the correct keystroke — the interactive path, **no** `claude -p` / Agent SDK mechanism (the
@@ -1012,13 +1013,60 @@ the workdir (`trustMark`), so a **trust** modal does not surface; the adapter ga
 `ModalClassPermission` only (`AcceptTrust` unused) — evidence-based, avoiding an untested trust→ACP
 mapping for a modal that cannot appear. Full per-ticket detail in [`codebase/752.md`](../codebase/752.md).
 
+### Permission-proxy wiring (#801)
+
+`acpPermissionProxy` shipped in #752 with **zero non-test callers**. #801 is the
+composition-root wiring that gives it its first — the exact twin of the [Producer
+wiring (#796)](#producer-wiring-796), and folded into the **same** `acpTurnStreams`
+manager rather than a parallel one (that manager already owns the ctx / transport /
+dir / `started` map / `wg` the proxy needs). `start(id)` now spawns **two** outbound
+adapters per session — the turn producer **and** the permission drain — both parented
+on `runCtx`, both under the one `started` idempotency mark, both joined by `wait()`,
+both disabled when `dir == ""`. `acp.go` is untouched and no constructor signature
+changes.
+
+New file `cmd/pyry/acp_permission_streams.go` supplies three things: a package const
+`acpPermissionTimeout = 2 * time.Minute` (the outbound `Call` deadline — a
+never-answering host denies-and-unblocks after it; mirrors the daemon's
+`modalDenyTimeout`, `internal/relay/v2session.go:81`); `startPermissionProxy(host, sessionID)`,
+the manager glue that constructs `newACPPermissionProxy(m.transport, host, sessionID, acpPermissionTimeout, m.logger)`
+(where `m.transport` is the `permissionCaller` and `host = sess.Supervisor()` is
+**both** the `modalKeystroker` and the `turnbridge.SessionHost`) over a fixed-target
+subscriber **identical in shape** to the turn stream's — `resolveBoundSessionJSONL(m.dir, sessionID)`,
+`Switch: nil`, a **fresh** `Tracker` per session; and `runPermissionModalStream(ctx, sub, proxy)`,
+the drain. The drain is the ACP sibling of the mobile `runModalStream`
+([#798](../codebase/798.md)) but **simpler** — no `screenText`, no per-kind pre-filter:
+it hands *every* raw `tuidriver.Event` to `proxy.Handle`, which owns the filter
+(no-ops every non-permission event). It is the **sole** caller of `Handle`, so the
+proxy's single-goroutine `inflight` invariant holds. This drain is also the
+deterministic **test seam #754 consumes** to observe divergence 2 with no live claude
+modal.
+
+The detached `runRoundTrip` (`cctx = context.WithTimeout(m.ctx, acpPermissionTimeout)`)
+is **not** `wg`-joined — the frozen proxy owns its spawn — but is ctx-bounded: because
+`cctx` descends from `m.ctx`, teardown-cancel unblocks any in-flight `Call` and it
+exits in microseconds, denying (ESC) on the way out. The **drain** is the joined unit,
+matching the turn stream's discipline. The drain needs a valid JSONL `path` even though
+modal events are PTY-sourced (the subscriber surfaces them *through* the JSONL-gated
+`sess.Events`), which is why `resolveBoundSessionJSONL` is reused and why `dir == ""`
+disables the permission drain by the same `start()` guard as the turn stream.
+
+**security-sensitive** (inherited from #752): the wiring drives an outbound
+tool-permission **policy** surface with default-safe-deny. The coerced-allow trust
+boundary lives entirely in the frozen proxy's `route()` — the wiring supplies the
+transport as caller and drives `Handle`, never inspecting the host reply, so the
+boundary is **inherited intact**. Default-safe-deny preserved end to end; content-free
+logging preserved (the new drain and glue log nothing). Full per-ticket detail in
+[`codebase/801.md`](../codebase/801.md).
+
 ## Deferred / scope boundaries
 
-- **Live wiring of the permission proxy** ([#752](https://github.com/pyrycode/pyrycode/issues/752)) —
-  the adapter ships **unwired**; subscribing it to `Session.Events()` and driving `Handle` per modal
-  event belongs to the modal-event wiring follow-up (T7 #751 territory). The mobile leg's analogous
-  producer wiring landed in [#798](../codebase/798.md) (`interactiveModalEmitterV2`); the ACP proxy
-  is the still-deferred sibling consumer of the same raw modal-event stream.
+- **Live wiring of the permission proxy** — **landed in [#801](../codebase/801.md)** (see
+  [Permission-proxy wiring](#permission-proxy-wiring-801) above): the adapter shipped unwired in #752;
+  #801 subscribes it to the raw modal-event stream and drives `Handle` per event inside the
+  `acpTurnStreams` manager, the ACP twin of the mobile leg's #798 (`interactiveModalEmitterV2`) wiring.
+  Remaining sibling deferral: `toolCall` correlation (the gating tool-call id from the turn stream's
+  `ToolStart` is still `omitempty`-reserved).
 - **Serve-exit pending-call drain** ([#757](https://github.com/pyrycode/pyrycode/issues/757)) —
   `Serve`-exit does not fail-fast blocked `Call`s; the caller's `ctx` liberates
   them. Additive if a later ticket needs it (range `pending`, deliver a
