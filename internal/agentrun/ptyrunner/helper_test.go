@@ -93,10 +93,12 @@ func runHelper() {
 	case "idle":
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	case "trust":
-		// "Quicksafetycheck" is the space-stripped header anchor used by
-		// tuidriver.HasTrustModal. The ❯ glyph satisfies IsIdle so the
-		// post-idle modal check fires.
-		fmt.Fprint(os.Stdout, "Quicksafetycheck"+idleGlyph+" ")
+		// "Quick safety check" is the space-preserved header anchor claude
+		// renders. Since tui-driver v1.6.0 (#163) tuidriver.HasTrustModal matches
+		// it on the rendered grid (like DetectModalClass), not a space-stripped
+		// StripANSI substring. The ❯ glyph satisfies IsIdle so the post-idle modal
+		// check fires.
+		fmt.Fprint(os.Stdout, "Quick safety check"+idleGlyph+" ")
 	case "mcp_failure":
 		fmt.Fprint(os.Stdout, "1 MCP server failed "+idleGlyph+" ")
 	case "network_failure":
@@ -194,8 +196,9 @@ func runHelper() {
 			// Mid-run trust detection goes through DetectModalClass, which since
 			// tui-driver v1.5.0 (#152) reads the rendered grid and keys on the
 			// space-preserved "Quick safety check" as claude actually renders it.
-			// (The startup path via HasTrustModal still matches the space-stripped
-			// form, hence the "trust" mode above differs — see tui-driver #163.)
+			// Since tui-driver v1.6.0 (#163) the startup path via HasTrustModal
+			// matches the same spaced header on the grid too, so the "trust" mode
+			// above now renders the identical form.
 			anchor = "Quick safety check" + idleGlyph + " "
 		case "mid_mcp_failure":
 			anchor = "1 MCP server failed " + idleGlyph + " "
