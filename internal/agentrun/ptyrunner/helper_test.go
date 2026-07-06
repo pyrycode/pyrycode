@@ -191,7 +191,12 @@ func runHelper() {
 		var anchor string
 		switch mode {
 		case "mid_trust":
-			anchor = "Quicksafetycheck" + idleGlyph + " "
+			// Mid-run trust detection goes through DetectModalClass, which since
+			// tui-driver v1.5.0 (#152) reads the rendered grid and keys on the
+			// space-preserved "Quick safety check" as claude actually renders it.
+			// (The startup path via HasTrustModal still matches the space-stripped
+			// form, hence the "trust" mode above differs — see tui-driver #163.)
+			anchor = "Quick safety check" + idleGlyph + " "
 		case "mid_mcp_failure":
 			anchor = "1 MCP server failed " + idleGlyph + " "
 		case "mid_network_failure":
