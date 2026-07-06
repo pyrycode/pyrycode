@@ -46,6 +46,25 @@
 //	                               Default off — when unset, fakeclaude emits
 //	                               no TUI substrate and is byte-identical to
 //	                               its pre-#603 behaviour.
+//	PYRY_FAKE_CLAUDE_IDLE_TRIGGER  optional path watched in parallel with the
+//	                               others. When set, fakeclaude starts BUSY:
+//	                               it emits no startup idle glyph and never the
+//	                               thinking spinner, so tui-driver's IsIdle
+//	                               stays false and the supervisor's WaitReady
+//	                               blocks (claude "busy"). On the trigger
+//	                               file's first appearance it emits the idle
+//	                               glyph (U+276F) once — flipping IsIdle true so
+//	                               WaitReady returns — then removes the trigger;
+//	                               claude then stays idle for every later turn
+//	                               (nothing overwrites the bottom status region,
+//	                               and the delivered prompt is not echoed to
+//	                               stdout), so a queued backlog drains
+//	                               back-to-back. Used by the queue-drain e2e
+//	                               (#792) to open a controllable busy window.
+//	                               Mutually exclusive with PYRY_FAKE_CLAUDE_TUI,
+//	                               whose startup idle glyph would defeat the
+//	                               busy window. Default off — when unset, no
+//	                               watch and startup behaviour is unchanged.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -72,6 +91,7 @@ const (
 	envAssistantTrigger  = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
 	envJSONLTrigger      = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
 	envTUI               = "PYRY_FAKE_CLAUDE_TUI"
+	envIdleTrigger       = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
 	assistantMaxBytes    = 64 * 1024
 	pollInterval         = 50 * time.Millisecond
 )
@@ -132,6 +152,7 @@ func main() {
 
 	asstTrig := os.Getenv(envAssistantTrigger)
 	jsonlTrig := os.Getenv(envJSONLTrigger)
+	idleTrig := os.Getenv(envIdleTrigger)
 
 	f := openSession(dir, initU)
 
@@ -144,6 +165,7 @@ func main() {
 	}
 
 	rotated := false
+	idled := false
 	for {
 		if !rotated {
 			if _, err := os.Stat(trig); err == nil {
@@ -152,6 +174,15 @@ func main() {
 				f = openSession(dir, newU)
 				_ = os.Remove(trig)
 				rotated = true
+			}
+		}
+		// Idle-trigger mode (envIdleTrigger): claude came up busy (no startup
+		// idle glyph); on the trigger's first appearance emit the idle glyph
+		// once so WaitReady returns and the queued backlog drains. One-shot,
+		// mirroring the rotation gate above.
+		if idleTrig != "" && !idled {
+			if emitIdleIfTriggered(idleTrig) {
+				idled = true
 			}
 		}
 		// A delivered turn (stdin bytes, signalled by the reader) grows the live
@@ -215,6 +246,28 @@ func emitStructuredJSONLIfTriggered(f *os.File, path string) {
 	}
 	_ = f.Sync()
 	_ = os.Remove(path)
+}
+
+// emitIdleIfTriggered checks for the idle-trigger file
+// (PYRY_FAKE_CLAUDE_IDLE_TRIGGER). When present it writes the idle-prompt glyph
+// to os.Stdout once — flipping tui-driver's IsIdle true so the supervisor's
+// WaitReady returns and a queued backlog drains — removes the trigger, and
+// reports true. When absent it reports false. Gated in main by a one-shot
+// `idled` bool exactly like the `rotated` gate, so the glyph is emitted at most
+// once; thereafter nothing overwrites the bottom status region (the delivered
+// prompt is not echoed to stdout), so claude stays idle and every subsequent
+// queued turn drains back-to-back. Runs only on the main poll goroutine, so it
+// never races the stdin reader for os.Stdout (and in this mode — envTUI off —
+// the reader emits no spinner, so the main goroutine is the sole stdout writer).
+// Errors are silenced, mirroring the sibling emit* helpers: the e2e asserts
+// downstream (the backlog reaches claude in order), never on the write itself.
+func emitIdleIfTriggered(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	writeStdout(idleGlyph)
+	_ = os.Remove(path)
+	return true
 }
 
 // appendTurnGrowth grows the current session JSONL f by one inert line so the

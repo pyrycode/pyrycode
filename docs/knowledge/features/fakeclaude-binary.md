@@ -28,11 +28,14 @@ it emits exactly two of claude's TUI substrate glyphs so tui-driver's
 `IsIdle`/`IsThinking` detection — and #594's `WaitReady → DeliverPrompt →
 commit` contract — can confirm a turn against it. See
 [§ TUI mode](#tui-mode-603). The earlier optional `STDIN_LOG` (#323) and
-`ASSISTANT_TRIGGER` (#311) modes, and the later **JSONL-trigger mode**
+`ASSISTANT_TRIGGER` (#311) modes, the **JSONL-trigger mode**
 (`PYRY_FAKE_CLAUDE_JSONL_TRIGGER`, #642) that appends captured claude-format
-turn events to the live session JSONL, likewise extend the binary past pure
-rotation; see [§ Configuration](#configuration--env) and
-[§ JSONL-trigger mode](#jsonl-trigger-mode-642). Whenever the stdin reader is
+turn events to the live session JSONL, and the **idle-trigger mode**
+(`PYRY_FAKE_CLAUDE_IDLE_TRIGGER`, #792) that opens a controllable *busy → free*
+window by withholding the startup idle glyph until a trigger fires, likewise
+extend the binary past pure rotation; see [§ Configuration](#configuration--env),
+[§ JSONL-trigger mode](#jsonl-trigger-mode-642), and
+[§ Idle-trigger mode](#idle-trigger-mode-792). Whenever the stdin reader is
 active (TUI or `STDIN_LOG`), a delivered turn also triggers **on-turn
 transcript growth** (#673): the live session JSONL grows by one inert line so
 the daemon's #668 transcript-growth commit-confirm observes growth and acks
@@ -82,6 +85,12 @@ PYRY_FAKE_CLAUDE_JSONL_TRIGGER      path watched; on appearance, append the
                                     trigger (#642; see § JSONL-trigger mode)
 PYRY_FAKE_CLAUDE_TUI                when non-empty, emit the idle/thinking
                                     glyphs (#603; see § TUI mode)
+PYRY_FAKE_CLAUDE_IDLE_TRIGGER       path watched; start BUSY (no startup idle
+                                    glyph, never the spinner) until it appears,
+                                    then emit the idle glyph ONCE and remove the
+                                    trigger — a controllable busy→free window
+                                    (#792; see § Idle-trigger mode). Mutually
+                                    exclusive with PYRY_FAKE_CLAUDE_TUI.
 ```
 
 No flags, no positional args — env is the entire configuration surface,
@@ -186,6 +195,57 @@ Two harness preconditions make the appended events actually reach the producer
    appended line lands inside the tailed range (fixes a cold-start
    producer-subscribe race — see [codebase/642.md](../codebase/642.md)).
 
+## Idle-trigger mode (#792)
+
+TUI mode (#603) emits the idle glyph `❯` at **startup**, so claude is idle
+immediately and can serve exactly one turn (the spinner then wedges "thinking").
+`PYRY_FAKE_CLAUDE_IDLE_TRIGGER` (#792) **inverts the startup posture** to give a
+test a controllable **busy → free** window: fakeclaude comes up **busy** and
+frees only when the test drops the trigger — so a phone can pile up an inbound
+backlog that then drains back-to-back. It is the harness piece that made the
+**live** queued-backlog capstone exercisable (what #723's `/bin/sleep` child
+could not do: never idle → never drains).
+
+When `PYRY_FAKE_CLAUDE_IDLE_TRIGGER` is set:
+
+| Moment | Action | Effect |
+|---|---|---|
+| startup | emit **no** idle glyph, **never** the spinner | tui-driver `IsIdle` stays false → supervisor `WaitReady` **blocks** (claude "busy") |
+| trigger's **first** appearance | `emitIdleIfTriggered`: `writeStdout(❯)` once, `os.Remove(trigger)`, set one-shot `idled` | `IsIdle` true → `WaitReady` returns; claude stays idle thereafter |
+
+- **The single `❯` write frees the whole backlog.** After the glyph, **nothing
+  overwrites the bottom status region** — the delivered prompt is not echoed to
+  stdout — so `WaitReady` returns immediately for every subsequent queued turn
+  and they drain one after another with no further signal. This is why the mode
+  is ~15 LOC: no spinner, no scroll/redraw emulation, no per-turn cycling. The
+  load-bearing tui-driver fact (v1.6.0): `IsIdle` = `❯` present in the bottom
+  region AND no spinner there — *withholding* `❯` is a busy gate, *emitting* it
+  once is the release edge.
+- **Gated by a one-shot `idled` bool** in the `main` poll loop, exactly like the
+  `rotated` rotation gate — the glyph is emitted at most once. `emitIdleIfTriggered`
+  runs **only on the main goroutine**, so it never races the stdin reader for
+  `os.Stdout` (and in this mode `PYRY_FAKE_CLAUDE_TUI` is off, so the reader emits
+  no spinner — the main goroutine is the sole stdout writer). Errors are silenced,
+  mirroring the sibling `emit*` helpers.
+- **Per-turn commit relies on `STDIN_LOG`, not on this mode.** Idle-trigger does
+  **not** itself open the stdin reader (the gate is still `logPath != "" || tui`,
+  `main.go:149`). The #792 consumer sets `PYRY_FAKE_CLAUDE_STDIN_LOG` (via
+  `StartRotationWithRelay`), so the reader runs, `turnPending` fires, and the
+  existing `appendTurnGrowth(f)` grows the JSONL that the supervisor's
+  `confirmViaTranscriptGrowth` (#668/#673) observes as the commit. No spinner is
+  needed — the relay bootstrap sets `ResolveTranscript`, so commit is growth-based.
+- **Mutually exclusive with `PYRY_FAKE_CLAUDE_TUI`.** TUI mode's startup `❯` and
+  stdin-spinner would defeat the busy window and wedge the second turn. A test
+  sets one or the other, never both.
+- **No new glyph, no allowlist change.** `❯` (`idleGlyph`) is already declared and
+  the file is already on the `cmd/substrate-guard` allowlist; the mode only
+  changes *when* the existing glyph is emitted. **When unset, byte-identical to
+  today** — every existing caller is unperturbed.
+
+See [codebase/792.md](../codebase/792.md) for the live queue-drain capstone this
+mode feeds (the busy→free choreography, the empty-`queue_state` happens-after
+fence, the ordered vacuous-pass guards).
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -248,9 +308,9 @@ the five tests aligned by #673.
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~320 LOC, package main, no build tag (grew from the #122
-                 rotation core with the #311/#323/#603/#642 optional modes and
-                 the #673 on-turn transcript growth)
+  main.go        ~375 LOC, package main, no build tag (grew from the #122
+                 rotation core with the #311/#323/#603/#642/#792 optional modes
+                 and the #673 on-turn transcript growth)
   main_test.go   ~125 LOC, //go:build e2e
 ```
 
@@ -340,6 +400,7 @@ affect correctness.
 - Spec: `docs/specs/architecture/122-fake-claude-test-binary.md`;
   TUI mode: `docs/specs/architecture/603-fakeclaude-tui-idle-thinking-glyphs.md`;
   JSONL-trigger mode: `docs/specs/architecture/642-structured-receive-two-phone-e2e-capstone.md`;
+  idle-trigger mode: `docs/specs/architecture/792-queue-drain-two-phone-e2e-capstone.md`;
   on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
@@ -349,6 +410,9 @@ affect correctness.
 - On-turn growth per-ticket notes: [codebase/673.md](../codebase/673.md) (the
   cross-goroutine `turnPending` signal, the #668 commit-confirm it satisfies, the
   five `sessionsDir` alignments, the six broken tests)
+- Idle-trigger per-ticket notes: [codebase/792.md](../codebase/792.md) (the live
+  queue-drain capstone this mode feeds — the busy→free window, the empty-`queue_state`
+  happens-after fence, and the ordered vacuous-pass guards)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)
