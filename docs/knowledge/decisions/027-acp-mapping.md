@@ -114,6 +114,7 @@ A separate ACP-shaped internal model distinct from the mobile one. Rejected: two
 - **The mobile wire and `pyry acp` stay independent adapters over one model.** Neither surface constrains the other; each drops or synthesizes the concerns the other needs.
 - **`turnevent` gaps are explicit.** `BusyState`, `Prompt`, and `DropQueued` are named in this contract but not yet built; the built/planned column keeps the ADR honest about what an implementer will and will not find in `internal/turnevent` today.
 - **ADR 026's "divergence 6" reference now resolves in-repo.** 026 links back to this ADR as the home of the canonical numbered list.
+- **The dialect is conformance-locked ([#754](https://github.com/pyrycode/pyrycode/issues/754)).** `cmd/pyry/acp_conformance_test.go` is the epic's integration gate: `TestACPConformance_FullSessionDrive` drives one scripted host through the whole surface and observes all six divergences composing in one session, and `TestACPConformance_DialectLock` asserts the `session/update` discriminants, `stopReason` values, and permission-option kinds equal the **literal** strings in this ADR — so a later change that renames a constant's *value* toward an opencode alias fails there. See [`codebase/754.md`](../codebase/754.md) and [`features/acp-package.md` § Conformance capstone](../features/acp-package.md#conformance-capstone-754).
 
 ## Related
 
