@@ -1,4 +1,4 @@
-# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749, #796, #751, #801)
+# `internal/acp` transport + `pyry acp` subcommand (#755, #756, #757, #761, #762, #747, #750, #753, #752, #749, #796, #751, #801, #754)
 
 The **bidirectional transport** for the Agent Client Protocol (ACP,
 Zed-stewarded): line-delimited JSON-RPC 2.0 over one `io.Reader` (inbound) plus
@@ -50,9 +50,14 @@ delivers the host's content blocks into claude as a user turn and **holds the
 in-flight call open** for the whole turn via #765's deferral primitive. #751 closes
 that loop: on `TurnEnd` the outbound stream **resolves** the held `session/prompt`
 call with its ACP `stopReason` (divergence 1, the event-stream-to-RPC-return join —
-see the [streaming adapter](#outbound-streaming-adapter-acpturnstream-750)). Still
-deferred to a later epic-#600 ticket: the outbound `session/request_permission`
-return path that issues through `Call`.
+see the [streaming adapter](#outbound-streaming-adapter-acpturnstream-750)). #752
+built the [permission proxy](#acp-permission-proxy-sessionrequest_permission-752)
+(the outbound `session/request_permission` round-trip) and #801
+[live-wired it](#permission-proxy-wiring-801) into the session, so divergence 2 is
+observable in a live run. #754 is the epic's
+[**conformance capstone**](#conformance-capstone-754): one scripted host drives the
+whole surface in a single session and asserts the emitted wire shape is the generic
+ADR 027 dialect, observing all six divergences composing at once.
 
 Greenfield, stdlib-only package: imports `bufio`, `context`, `encoding/json`,
 `errors`, `fmt`, `io`, `log/slog`, `sync`, `sync/atomic` — **no repo packages**.
@@ -1059,6 +1064,40 @@ boundary is **inherited intact**. Default-safe-deny preserved end to end; conten
 logging preserved (the new drain and glue log nothing). Full per-ticket detail in
 [`codebase/801.md`](../codebase/801.md).
 
+## Conformance capstone (#754)
+
+The epic's **proof-of-correctness capstone** — one new test file,
+`cmd/pyry/acp_conformance_test.go`, zero production files
+([codebase/754.md](../codebase/754.md)). `TestACPConformance_FullSessionDrive` drives one
+scripted ACP host through the **whole surface in a single session** — `initialize` →
+`session/new` → `session/prompt` + a scripted turn → a permission round-trip →
+`session/cancel` — over the **real** transport against a deterministic fake claude, and
+asserts the emitted wire shape is the generic [ADR 027](../decisions/027-acp-mapping.md)
+dialect. It observes all six divergences *composing at once*: end-of-turn as the
+`session/prompt` **return** (1), permission as a blocking agent→client request (2),
+**no** stall/busy/queue frame on the wire (3, 4), no `fs/*`/`terminal/*` in `initialize`
+(5), one interactive claude per session (6).
+
+The conformance harness is a **scripted ACP host**: it mirrors `serveACPWithPool`'s
+register-closure with the **same handler constructors** (a compile-time-checked mirror),
+substituting `dir == ""` (no-ops `streams.start`, disabling the real outbound) and a
+`newRecordingDeliverer(false)` (delivery commits, the hold stays held until the scripted
+`TurnEnd` resolves it) so a scripted turn and a scripted permission modal can drive the
+surface behind a sleeping fake claude. The real fake-claude pool still backs
+`session/new`/`session/cancel`, so the interactive-spawn argv proof is genuine. A
+**continuous frame classifier** goroutine — the real host read loop — drains the
+agent→host stream, routing replies to the test, recording `session/update` notifications,
+and **auto-answering** the inbound `session/request_permission` (the continuous drain is
+mandatory: the unbuffered `io.Pipe` deadlocks a send-all-then-read host, since the proxy
+`Call` and producer `Notify` write asynchronously).
+
+`TestACPConformance_DialectLock` is the **dialect lock** — the drift guard the per-ticket
+tests **cannot** be. They compare emitted frames against the `acpbridge.SessionUpdate*` /
+`turnevent.*` *constants*, so renaming a constant's *value* to an opencode alias would not
+fail them. The lock asserts those constants equal the **literal** ADR 027 strings
+(`session/update` discriminants, `stopReason` values, permission-option kinds, the one
+`session/request_permission` agent→client method), so any drift of a value fails there.
+
 ## Deferred / scope boundaries
 
 - **Live wiring of the permission proxy** — **landed in [#801](../codebase/801.md)** (see
@@ -1153,7 +1192,10 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   [`codebase/750.md`](../codebase/750.md) (`Transport.Notify` + outbound streaming adapter),
   [`codebase/753.md`](../codebase/753.md) (`session/cancel` actuation + mode/config pin),
   [`codebase/752.md`](../codebase/752.md) (permission proxy via `session/request_permission`),
-  [`codebase/749.md`](../codebase/749.md) (`session/prompt` — content blocks + held call)
+  [`codebase/749.md`](../codebase/749.md) (`session/prompt` — content blocks + held call),
+  [`codebase/796.md`](../codebase/796.md) (producer wiring), [`codebase/751.md`](../codebase/751.md)
+  (`stopReason` on `TurnEnd`), [`codebase/801.md`](../codebase/801.md) (permission-proxy wiring),
+  [`codebase/754.md`](../codebase/754.md) (conformance capstone)
 - Specs: [`specs/architecture/755-acp-transport.md`](../../specs/architecture/755-acp-transport.md),
   [`specs/architecture/756-acp-subcommand.md`](../../specs/architecture/756-acp-subcommand.md),
   [`specs/architecture/757-acp-outbound-request.md`](../../specs/architecture/757-acp-outbound-request.md),
@@ -1163,7 +1205,8 @@ drives no claude), so it needs no allowlist entry in `cmd/substrate-guard`.
   [`specs/architecture/750-acp-outbound-streaming-adapter.md`](../../specs/architecture/750-acp-outbound-streaming-adapter.md),
   [`specs/architecture/753-acp-cancel-mode-config.md`](../../specs/architecture/753-acp-cancel-mode-config.md),
   [`specs/architecture/752-acp-permission-proxy.md`](../../specs/architecture/752-acp-permission-proxy.md),
-  [`specs/architecture/749-acp-session-prompt.md`](../../specs/architecture/749-acp-session-prompt.md)
+  [`specs/architecture/749-acp-session-prompt.md`](../../specs/architecture/749-acp-session-prompt.md),
+  [`specs/architecture/754-acp-conformance-generic-shape.md`](../../specs/architecture/754-acp-conformance-generic-shape.md)
 - Outbound mapping layer (the pure `MapUpdate` the streaming adapter consumes):
   [`features/acpbridge-package.md`](acpbridge-package.md) (#769),
   [ADR 027](../decisions/027-acp-mapping.md) (§ Outbound table, divergences 1 & 3).
