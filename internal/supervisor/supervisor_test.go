@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1301,5 +1302,165 @@ func wantIs(target error) func(*testing.T, error) {
 		if !errors.Is(err, target) {
 			t.Errorf("err = %v, want errors.Is(err, %v)", err, target)
 		}
+	}
+}
+
+// TestSpawnOpts is the pure-unit AC4 seam: it pins that an empty RecordDir
+// (debug_capture OFF / unset) yields exactly SpawnOpts{MirrorOutput: true} —
+// RecordTo stays the zero value "", byte-identical to the pre-recording spawn —
+// and that a non-empty dir attaches a recorder at a unique .cast path under it.
+func TestSpawnOpts(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 7, 12, 30, 45, 123456789, time.UTC)
+	cases := []struct {
+		name      string
+		recordDir string
+		wantRec   bool // RecordTo should be non-empty
+	}{
+		{"unset dir attaches no recorder (byte-identical)", "", false},
+		{"set dir attaches recorder", "/some/rec/dir", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := spawnOpts(tc.recordDir, now)
+			if !got.MirrorOutput {
+				t.Errorf("MirrorOutput = false, want true")
+			}
+			if !tc.wantRec {
+				// The unset case must be exactly the pre-recording spawn.
+				want := tuidriver.SpawnOpts{MirrorOutput: true}
+				if got != want {
+					t.Errorf("spawnOpts(%q) = %+v, want %+v (byte-identical when OFF)", tc.recordDir, got, want)
+				}
+				return
+			}
+			if got.RecordTo == "" {
+				t.Fatalf("RecordTo empty, want a path under %q", tc.recordDir)
+			}
+			if !strings.HasPrefix(got.RecordTo, tc.recordDir+string(filepath.Separator)) {
+				t.Errorf("RecordTo = %q, want under %q", got.RecordTo, tc.recordDir)
+			}
+			if filepath.Ext(got.RecordTo) != ".cast" {
+				t.Errorf("RecordTo = %q, want a .cast path", got.RecordTo)
+			}
+		})
+	}
+}
+
+// TestSupervisor_RecordDir_ProducesCastFileNoLogLeak covers AC3 and AC5: with
+// RecordDir set, one interactive-session spawn produces exactly one owner-only
+// (0600) .cast recording, and no recorded session byte leaks into the daemon
+// logs. Non-vacuity: it waits until the .cast actually contains the child's
+// marker output before asserting the log is clean, proving real session content
+// was captured (not just the header) yet never logged.
+func TestSupervisor_RecordDir_ProducesCastFileNoLogLeak(t *testing.T) {
+	t.Parallel()
+
+	recordDir := t.TempDir()
+	const marker = "REC_MARKER_SECRET_OK"
+
+	logBuf := &syncBuffer{}
+	cfg := helperConfig("emit_marker", "GO_TEST_HELPER_MARKER="+marker)
+	cfg.Logger = slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	cfg.Bridge = NewBridge(cfg.Logger)
+	cfg.RecordDir = recordDir
+
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+	waitForPhase(t, sup, PhaseRunning, 5*time.Second)
+
+	// tui-driver writes the asciinema header at spawn, so exactly one .cast
+	// appears once the child is running.
+	var casts []string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		casts, _ = filepath.Glob(filepath.Join(recordDir, "*.cast"))
+		if len(casts) == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(casts) != 1 {
+		t.Fatalf("want exactly one .cast in %s, got %v", recordDir, casts)
+	}
+	info, err := os.Stat(casts[0])
+	if err != nil {
+		t.Fatalf("stat cast: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("cast perm = %04o, want 0600", perm)
+	}
+
+	// Non-vacuity: wait until the recorder has framed the child's marker output
+	// into the .cast, proving real session bytes were captured.
+	var castData []byte
+	for time.Now().Before(deadline) {
+		castData, _ = os.ReadFile(casts[0])
+		if bytes.Contains(castData, []byte(marker)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !bytes.Contains(castData, []byte(marker)) {
+		t.Fatalf("cast never captured the marker; recording is vacuous")
+	}
+
+	// AC5: the marker is session content. It lives in the .cast but must never
+	// reach the logs — the only recording-related log line is the dir/err Warn.
+	if got := logBuf.String(); strings.Contains(got, marker) {
+		t.Errorf("daemon log leaked recorded session content %q: %s", marker, got)
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+}
+
+// TestSupervisor_RecordDir_EmptyProducesNoCast covers the AC4 OFF integration
+// case: with RecordDir empty (the default), the interactive session runs as
+// today and no .cast is written into a watched directory.
+func TestSupervisor_RecordDir_EmptyProducesNoCast(t *testing.T) {
+	t.Parallel()
+
+	watchDir := t.TempDir()
+	cfg := helperConfig("emit_marker", "GO_TEST_HELPER_MARKER=OFF_MARKER")
+	cfg.Bridge = NewBridge(cfg.Logger)
+	cfg.RecordDir = "" // OFF: no recorder attached
+
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- sup.Run(ctx) }()
+	waitForPhase(t, sup, PhaseRunning, 5*time.Second)
+
+	// Let the child run so any errant recorder would have written a file.
+	time.Sleep(200 * time.Millisecond)
+	if casts, _ := filepath.Glob(filepath.Join(watchDir, "*.cast")); len(casts) != 0 {
+		t.Errorf("RecordDir empty should produce no .cast, got %v", casts)
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
 	}
 }

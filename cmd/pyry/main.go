@@ -136,6 +136,21 @@ func resolveClaudeSessionsDir(workdir string) string {
 	return sessions.DefaultClaudeSessionsDir(abs)
 }
 
+// resolveRecordingsDir returns the fixed directory where debug_capture writes
+// the daemon's interactive-session .cast recordings: ~/.local/share/pyry-recordings
+// — the non-synced, non-backed-up location the ptyrunner SECURITY: comment
+// designates (sibling of ~/.local/share/pyry-artifacts/). Returns "" when $HOME
+// cannot be resolved, in which case capture silently no-ops — the same
+// degrade-to-empty contract as resolveClaudeSessionsDir. The directory is a
+// compile-time-fixed location under $HOME; no untrusted input influences it.
+func resolveRecordingsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "pyry-recordings")
+}
+
 // resolveDefaultCwd returns the absolute working directory recorded on a
 // conversation created (via the create_conversation handler) with a null cwd.
 // It mirrors the bootstrap session's WorkDir resolution: the absolute form of
@@ -711,6 +726,14 @@ func runSupervisor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	// Debug-capture gate (#802): resolve the recordings dir ONLY when the
+	// persisted flag is ON, so the bootstrap supervisor sees a non-empty
+	// RecordDir strictly when the operator opted in. OFF (or unset) leaves it
+	// "" → the interactive spawn is byte-identical to today.
+	var recordDir string
+	if cfg.DebugCapture {
+		recordDir = resolveRecordingsDir()
+	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
 		RegistryPath:              registryPath,
@@ -726,6 +749,7 @@ func runSupervisor(args []string) error {
 			ResumeLast: *resume,
 			ClaudeArgs: claudeArgs,
 			Bridge:     bridge,
+			RecordDir:  recordDir,
 		},
 	})
 	if err != nil {

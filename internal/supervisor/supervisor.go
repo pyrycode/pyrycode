@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -137,6 +138,15 @@ type Config struct {
 	// preserved (foreground mode, tests). Modelled on ValidateConversation:
 	// optional, nil-safe, the production-vs-test seam.
 	ResolveTranscript func(ctx context.Context) (path string, size int64, err error)
+
+	// RecordDir, when non-empty, records each interactive-session spawn to a
+	// unique 0600 .cast file under this directory via tui-driver's
+	// SpawnOpts.RecordTo (#802). Empty (the default) attaches no recorder and
+	// leaves the spawn byte-identical to the pre-recording behaviour. The
+	// directory is created 0700 on demand; tui-driver owns the file (0600
+	// O_EXCL, header, close-on-Close). Only the daemon's bootstrap session
+	// sets this; per-caller sessions leave it empty.
+	RecordDir string
 
 	// helperEnv is extra environment variables appended to the child process
 	// environment. Used only in tests (TestHelperProcess pattern).
@@ -649,6 +659,30 @@ func (w sessionWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// spawnOpts builds the tui-driver SpawnOpts for one interactive-session spawn.
+// recordDir == "" (the default / debug_capture OFF) yields exactly
+// SpawnOpts{MirrorOutput: true} — RecordTo is the zero value "", byte-identical
+// to the pre-recording behaviour and no recorder is attached. A non-empty
+// recordDir attaches the cast recorder at a unique .cast path under it. Pure:
+// no I/O, no side effects — the AC4 "assert the unset case explicitly" seam.
+func spawnOpts(recordDir string, now time.Time) tuidriver.SpawnOpts {
+	opts := tuidriver.SpawnOpts{MirrorOutput: true}
+	if recordDir != "" {
+		opts.RecordTo = recordingPath(recordDir, now)
+	}
+	return opts
+}
+
+// recordingPath returns a unique .cast path under dir stamped from now. tui-driver
+// (via SpawnOpts.RecordTo) opens it 0600 O_EXCL, writes the asciinema header, and
+// closes it on Session.Close; the supervisor owns only path selection. The
+// nanosecond-precision UTC stamp is collision-free across the backoff restart loop
+// (spawns are separated by fork/exec/PTY-alloc wall-clock ≥ BackoffInitial); the
+// O_EXCL open is the deterministic backstop, self-healing via the next fresh stamp.
+func recordingPath(dir string, now time.Time) string {
+	return filepath.Join(dir, now.UTC().Format("20060102T150405.000000000Z")+".cast")
+}
+
 // runOnce hosts claude through a tui-driver Session, bridges its I/O to the
 // controlling terminal (or the configured Bridge in service mode), and returns
 // when the child exits or ctx is cancelled. onSpawn, if non-nil, is called once
@@ -668,7 +702,21 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pi
 	// would change claude's TUI rendering versus today's inherited TERM. That
 	// override exists for downstream screen parsing (#596), which this swap
 	// does not do — behaviour-preservation decision.
-	sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{MirrorOutput: true})
+	//
+	// Opt-in debug capture (#802): when cfg.RecordDir is set (operator flipped
+	// the persisted debug_capture flag), attach tui-driver's cast recorder to
+	// this one spawn. A MkdirAll failure degrades to no-capture — the safe
+	// direction (no recording) that also keeps the daemon alive; never fail the
+	// spawn over an unwritable debug sink. RecordDir empty → spawnOpts leaves
+	// RecordTo "" → byte-identical to the pre-recording behaviour.
+	recordDir := s.cfg.RecordDir
+	if recordDir != "" {
+		if err := os.MkdirAll(recordDir, 0o700); err != nil {
+			s.log.Warn("debug_capture: recordings dir unavailable; continuing without capture", "dir", recordDir, "err", err)
+			recordDir = ""
+		}
+	}
+	sess, err := tuidriver.Spawn(cmd, spawnOpts(recordDir, time.Now()))
 	if err != nil {
 		return fmt.Errorf("spawn: %w", err)
 	}
