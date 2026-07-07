@@ -74,7 +74,7 @@ Backoff:
 - Resets to initial when a child has stayed up longer than 60 s (configurable via `Config.BackoffReset`)
 - The sleep is a `select` against `ctx.Done()`, so SIGINT / SIGTERM during backoff cancels promptly
 
-Restarts pass `--continue` (not `--resume`) so claude rejoins the most-recent session for the working directory. This is robust against the user typing `/clear` inside claude — `--clear` rotates the session-id file on disk, but `--continue`'s "most recent" heuristic still finds the right one. Tracking session IDs explicitly is on the roadmap (Phase 1) but not needed yet.
+Restarts pass `--continue` (not `--resume`) so claude rejoins the most-recent session for the working directory. This is robust against the user typing `/clear` inside claude — `--clear` rotates the session-id file on disk, but `--continue`'s "most recent" heuristic still finds the right one. Explicit session-ID tracking shipped with the multi-session Pool (Phase 1, `v0.8.0`/`v0.9.0`), where each session runs as `claude --session-id <uuid>`; the single-child supervisor described here still uses `--continue` for its own restart-resume path.
 
 ### State
 
@@ -199,11 +199,11 @@ A few decisions worth justifying:
 
 **JSON over Unix socket.** Simple, debuggable, extensible. `socat - UNIX:~/.pyry/pyry.sock` lets you poke at the protocol manually. JSON handshake before raw-byte upgrade is the same pattern WebSocket uses.
 
-**No socket-level auth.** `0600` permissions cover single-user dev/service deployment, which is the entire Phase 0 target. Multi-tenant or cross-user setups need a different threat model; explicit non-goal for now.
+**No socket-level auth.** `0600` permissions cover single-user dev/service deployment on the local host — the threat model for this Unix socket. Remote and cross-device access is handled a layer up by the Pyrycode-Relay (LIVE at `pyrycode-relay.pyryco.de` since 2026-05-29), which carries its own Noise_IK E2E crypto and per-device token auth; see [`plan.md`](plan.md) Phase 5. Multi-tenant or cross-user access to the local socket itself remains out of scope.
 
 **Bridge-based service mode.** Keeps the supervisor's per-restart code path simple — `runOnce` doesn't care whether the bytes are coming from `os.Stdin` or a `Bridge`. The mode toggle is a single `Config.Bridge != nil` check.
 
-**`--continue` over `--resume <id>`.** Lets the user `/clear` inside claude (which rotates the session ID on disk) without orphaning pyry's bookmark. The roadmap revisits explicit session-ID tracking when multi-session lands.
+**`--continue` over `--resume <id>`.** Lets the user `/clear` inside claude (which rotates the session ID on disk) without orphaning pyry's bookmark. Explicit session-ID tracking arrived with the multi-session Pool (`v0.8.0`), where each pooled session is pinned via `claude --session-id <uuid>`; the single-child supervisor keeps `--continue` for its own resume path.
 
 **Names, not cwd-derived paths, for multi-instance.** Tried cwd-derived as a brief detour (PR #7) and reverted (PR #9). The tmux model — explicit names, env var for shell-scoped defaults — is cleaner and matches user mental models better. No `cd` choreography needed.
 
