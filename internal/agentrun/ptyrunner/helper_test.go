@@ -40,11 +40,13 @@ func TestMain(m *testing.M) {
 //
 //   - "idle":            write ❯ + space to stdout so tuidriver.IsIdle
 //                        succeeds, then idle for SIGTERM.
-//   - "trust":           write the trust-modal anchor + ❯ so HasTrustModal
+//   - "trust":           write the trust-folder dialog (header + ❯-marked
+//                        option row, the v1.8.0 #219 shape) so HasTrustModal
 //                        AND IsIdle both fire, then idle for SIGTERM.
 //   - "mcp_failure":     write the MCP-failure banner + ❯ so
 //                        HasMcpFailureBanner AND IsIdle both fire.
-//   - "network_failure": write FailedToOpenSocket + ❯ so HasNetworkFailure
+//   - "network_failure": write the "Unable to connect to API" status line
+//                        (the v1.8.0 #220 anchor) + ❯ so HasNetworkFailure
 //                        AND IsIdle both fire.
 //   - "slow_spawn":      sleep 5s before writing anything (parent's
 //                        ctx-cancel fires inside WaitUntil first).
@@ -60,16 +62,16 @@ func TestMain(m *testing.M) {
 //                        every `max_turns` exhaustion in production.
 //   - "mid_trust":       write ❯ + space (IsIdle, no modal anchor at start),
 //                        then once stdin's first byte arrives (WritePrompt
-//                        landed), write the trust-folder modal anchor +
-//                        ❯ to stdout. The merge loop's 50 ms poll detects
-//                        the rising edge and emits EventKindPtyModalShown
-//                        with Modal=ModalClassTrustFolder.
+//                        landed), write the trust-folder dialog (header +
+//                        ❯-marked option row) to stdout. The merge loop's
+//                        50 ms poll detects the rising edge and emits
+//                        EventKindPtyModalShown with Modal=ModalClassTrustFolder.
 //   - "mid_mcp_failure": same shape as mid_trust but the post-stdinSeen
 //                        write is the "1 MCP server failed" banner. The
 //                        merge loop emits EventKindPtyMcpFailureShown.
 //   - "mid_network_failure": same shape, post-stdinSeen write is the
-//                        FailedToOpenSocket anchor. The merge loop emits
-//                        EventKindPtyNetworkFailureShown.
+//                        "Unable to connect to API" status line. The merge
+//                        loop emits EventKindPtyNetworkFailureShown.
 //
 // All modes install a SIGTERM handler so Session.Close()'s
 // SIGTERM→grace→SIGKILL sequence resolves on the SIGTERM step rather
@@ -88,21 +90,40 @@ func runHelper() {
 	// for (after StripANSI).
 	const idleGlyph = "\xe2\x9d\xaf" // ❯
 
+	// Fake screen shapes for the two detectors tui-driver v1.8.0 made
+	// structural. A bare header/token no longer classifies:
+	//   - trust (#219): needs the "Quick safety check" header AND a ❯-marked
+	//     numbered option row within 3 rows below it, on the rendered grid.
+	//   - network (#220): the pre-2.1.199 "FailedToOpenSocket" token was
+	//     removed; the live 2.1.199 anchor is "Unable to connect to API",
+	//     matched only in the bottom status region.
+	// Rows are separated by \r\n so the PTY returns to column 0. The trailing
+	// ❯ keeps IsIdle firing (idle glyph in the status region, no busy spinner).
+	// Both the startup ("trust"/"network_failure") and mid-run
+	// ("mid_trust"/"mid_network_failure") modes share these, so the fake can
+	// never drift between the two detection paths.
+	trustRender := "Quick safety check\r\n" + idleGlyph + " 1. Yes, I trust this folder\r\n" + idleGlyph + " "
+	networkRender := "Unable to connect to API (ConnectionRefused)\r\n" + idleGlyph + " "
+
 	mode := os.Getenv("GO_PTYRUNNER_HELPER_MODE")
 	switch mode {
 	case "idle":
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
 	case "trust":
-		// "Quick safety check" is the space-preserved header anchor claude
-		// renders. Since tui-driver v1.6.0 (#163) tuidriver.HasTrustModal matches
-		// it on the rendered grid (like DetectModalClass), not a space-stripped
-		// StripANSI substring. The ❯ glyph satisfies IsIdle so the post-idle modal
-		// check fires.
-		fmt.Fprint(os.Stdout, "Quick safety check"+idleGlyph+" ")
+		// Render the real trust-folder dialog shape: the space-preserved
+		// "Quick safety check" header plus the ❯-marked option row below it.
+		// Since tui-driver v1.8.0 (#219) HasTrustModal requires BOTH on the
+		// rendered grid — the header phrase alone no longer classifies as the
+		// modal. The trailing ❯ satisfies IsIdle so the post-idle modal check
+		// fires.
+		fmt.Fprint(os.Stdout, trustRender)
 	case "mcp_failure":
 		fmt.Fprint(os.Stdout, "1 MCP server failed "+idleGlyph+" ")
 	case "network_failure":
-		fmt.Fprint(os.Stdout, "FailedToOpenSocket "+idleGlyph+" ")
+		// Since tui-driver v1.8.0 (#220) the network anchor is the live
+		// 2.1.199 "Unable to connect to API" status line, matched only in the
+		// bottom region; the old "FailedToOpenSocket" token was removed.
+		fmt.Fprint(os.Stdout, networkRender)
 	case "slow_spawn":
 		time.Sleep(5 * time.Second)
 		fmt.Fprint(os.Stdout, idleGlyph+" ")
@@ -193,17 +214,16 @@ func runHelper() {
 		var anchor string
 		switch mode {
 		case "mid_trust":
-			// Mid-run trust detection goes through DetectModalClass, which since
-			// tui-driver v1.5.0 (#152) reads the rendered grid and keys on the
-			// space-preserved "Quick safety check" as claude actually renders it.
-			// Since tui-driver v1.6.0 (#163) the startup path via HasTrustModal
-			// matches the same spaced header on the grid too, so the "trust" mode
-			// above now renders the identical form.
-			anchor = "Quick safety check" + idleGlyph + " "
+			// Mid-run trust detection goes through DetectModalClass, which reads
+			// the rendered grid. Since tui-driver v1.8.0 (#219) both it and the
+			// startup HasTrustModal require the "Quick safety check" header AND a
+			// ❯-marked option row below it, so this renders the identical dialog
+			// shape as the "trust" mode above.
+			anchor = trustRender
 		case "mid_mcp_failure":
 			anchor = "1 MCP server failed " + idleGlyph + " "
 		case "mid_network_failure":
-			anchor = "FailedToOpenSocket " + idleGlyph + " "
+			anchor = networkRender
 		}
 		go func() {
 			select {
