@@ -88,6 +88,29 @@
 //	                               spinner / busy window would perturb the baseline.
 //	                               Default off — when unset, no watch and startup
 //	                               behaviour is unchanged.
+//	PYRY_FAKE_CLAUDE_ESC_ENDS_TURN optional; when set to any non-empty value,
+//	                               fakeclaude puts stdin into raw mode (like modal
+//	                               mode) so the lone interrupt ESC is not withheld by
+//	                               the canonical line discipline, and the stdin
+//	                               reader watches the byte stream for a bare ESC — a
+//	                               0x1b not part of a CSI/bracketed-paste sequence
+//	                               (i.e. not immediately followed by '[').
+//	                               That bare ESC is the remote interrupt keystroke
+//	                               (supervisor.SendEsc writes a lone 0x1b). On the
+//	                               first bare ESC fakeclaude appends one canned
+//	                               assistant end_turn line (interruptEndTurnLine) to
+//	                               the live session JSONL and fsyncs, so the daemon's
+//	                               structured-turn producer maps it to a turn_end —
+//	                               making the Esc the CAUSE of the turn ending (the
+//	                               interrupt-live e2e #794 asserts a turn_end whose
+//	                               only source is this handler). One-shot: a second
+//	                               ESC is inert, matching claude's own re-interrupt
+//	                               no-op. Unlike the idle/modal triggers this
+//	                               coexists with PYRY_FAKE_CLAUDE_TUI (the two touch
+//	                               different bytes: TUI emits the startup glyph +
+//	                               spinner, this scans for the bare ESC). Default off
+//	                               — when unset, fakeclaude is byte-identical to its
+//	                               prior behaviour.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -109,17 +132,18 @@ import (
 )
 
 const (
-	envSessionsDir       = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
-	envInitialUUID       = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
-	envTrigger           = "PYRY_FAKE_CLAUDE_TRIGGER"
-	envStdinLog          = "PYRY_FAKE_CLAUDE_STDIN_LOG"
-	envAssistantTrigger  = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
-	envJSONLTrigger      = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
-	envTUI               = "PYRY_FAKE_CLAUDE_TUI"
-	envIdleTrigger       = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
-	envModalTrigger      = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
-	assistantMaxBytes    = 64 * 1024
-	pollInterval         = 50 * time.Millisecond
+	envSessionsDir      = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
+	envInitialUUID      = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
+	envTrigger          = "PYRY_FAKE_CLAUDE_TRIGGER"
+	envStdinLog         = "PYRY_FAKE_CLAUDE_STDIN_LOG"
+	envAssistantTrigger = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
+	envJSONLTrigger     = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
+	envTUI              = "PYRY_FAKE_CLAUDE_TUI"
+	envIdleTrigger      = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
+	envModalTrigger     = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
+	envEscEndsTurn      = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
+	assistantMaxBytes   = 64 * 1024
+	pollInterval        = 50 * time.Millisecond
 )
 
 // modalScreen is the compact plaintext permission-modal screen fakeclaude writes
@@ -167,6 +191,22 @@ var stdoutMu sync.Mutex
 // are race-free, so no mutex on f is needed.
 var turnPending atomic.Bool
 
+// escPending signals — from the stdin-reader goroutine to the main poll loop —
+// that a bare ESC (the remote interrupt keystroke) was read, so the main
+// goroutine can append the canned end-of-turn line (appendTurnEnd). Signal only,
+// exactly like turnPending: the reader never writes f (single-writer-of-f). Set
+// only in Esc-ends-turn mode (envEscEndsTurn); untouched otherwise.
+var escPending atomic.Bool
+
+// interruptEndTurnLine is the canned claude-format assistant end_turn JSONL line
+// appendTurnEnd writes when Esc-ends-turn mode (envEscEndsTurn) detects the remote
+// interrupt keystroke. Its shape is exactly what turnbridge's mapper requires to
+// emit EventKindJsonlEndOfTurn (assistant + stop_reason=="end_turn" + non-empty
+// text), mirroring relay_two_phone_structured_test.go's end-of-turn fixture line.
+// It is inert JSONL data, not a TUI substrate glyph, so the cmd/substrate-guard
+// allowlist is unaffected.
+const interruptEndTurnLine = `{"type":"assistant","message":{"id":"interrupt-end","stop_reason":"end_turn","content":[{"type":"text","text":"[interrupted]"}]}}` + "\n"
+
 // writeStdout writes p to os.Stdout under stdoutMu and fsyncs. Best-effort:
 // errors are silenced, mirroring emitAssistantIfTriggered — the e2e asserts
 // downstream (the phone receives the bytes), never on the write itself.
@@ -184,24 +224,27 @@ func main() {
 
 	tui := os.Getenv(envTUI) != ""
 	modalTrig := os.Getenv(envModalTrigger)
+	escEndsTurn := os.Getenv(envEscEndsTurn) != ""
 
-	// Modal mode puts stdin into raw mode (as the real claude TUI does) BEFORE the
-	// stdin reader starts, so a modal-resolution keystroke reaches read() verbatim
-	// and unbuffered: the deny-on-timeout actuation is a lone ESC (0x1b) with no
-	// line terminator, which the default canonical line discipline would withhold
-	// indefinitely, and a "2\r" answer would otherwise surface as "2\n" (ICRNL).
-	// Scoped to modal mode so every other mode stays byte-identical to today.
-	if modalTrig != "" {
+	// Modal mode and Esc-ends-turn mode both put stdin into raw mode (as the real
+	// claude TUI does) BEFORE the stdin reader starts, so a lone ESC keystroke — the
+	// modal deny-on-timeout actuation or the remote interrupt, a bare 0x1b with no
+	// line terminator — reaches read() verbatim and unbuffered. The default canonical
+	// line discipline would otherwise withhold a bare ESC indefinitely (it buffers
+	// input until a newline) and map a "2\r" answer to "2\n" (ICRNL). Scoped to these
+	// two modes so every other mode stays byte-identical to today.
+	if modalTrig != "" || escEndsTurn {
 		enterRawMode()
 	}
 
 	// The stdin reader is the only stdin consumer (a second reader would race
 	// it for bytes). It runs when a stdin-log path is configured OR TUI mode is
-	// on — TUI mode needs stdin read independently of logging so the spinner
-	// fires even if STDIN_LOG is unset.
+	// on OR Esc-ends-turn mode is on — TUI mode needs stdin read independently of
+	// logging so the spinner fires even if STDIN_LOG is unset, and Esc-ends-turn
+	// mode needs it to scan for the bare interrupt ESC.
 	logPath := os.Getenv(envStdinLog)
-	if logPath != "" || tui {
-		startStdinReader(logPath, tui)
+	if logPath != "" || tui || escEndsTurn {
+		startStdinReader(logPath, tui, escEndsTurn)
 	}
 
 	asstTrig := os.Getenv(envAssistantTrigger)
@@ -224,6 +267,7 @@ func main() {
 	rotated := false
 	idled := false
 	modalShown := false
+	escEnded := false
 	for {
 		if !rotated {
 			if _, err := os.Stat(trig); err == nil {
@@ -259,6 +303,16 @@ func main() {
 		// re-arms for a later turn. Targets the current f (post-rotate).
 		if turnPending.Swap(false) {
 			appendTurnGrowth(f)
+		}
+		// Esc-ends-turn mode (envEscEndsTurn): the stdin reader signalled a bare
+		// ESC — the remote interrupt keystroke. Append one canned assistant
+		// end_turn line so the daemon's structured-turn producer maps it to a
+		// turn_end, making the Esc the CAUSE of the turn ending. One-shot,
+		// mirroring the rotation / idle / modal gates: a second ESC is inert (a
+		// re-interrupt of an already-ended turn is a no-op, matching claude).
+		if escEndsTurn && !escEnded && escPending.Swap(false) {
+			appendTurnEnd(f)
+			escEnded = true
 		}
 		if asstTrig != "" {
 			emitAssistantIfTriggered(asstTrig)
@@ -369,10 +423,11 @@ func emitModalIfTriggered(path string) bool {
 // "2\r" answer would surface as "2\n". Raw mode (VMIN=1, ICANON/ICRNL cleared)
 // delivers every keystroke byte immediately and verbatim, so the stdin log
 // observes exactly what the supervisor wrote — "2\r" for an answer, a bare 0x1b
-// for the ESC deny. Best-effort, mirroring the rest of this stand-in's
-// silent-error posture: on failure the default discipline remains and the modal
-// e2e's ESC assertion flags it downstream. The prior terminal state is
-// intentionally not restored — the PTY is torn down with the process.
+// for the ESC deny or the remote interrupt (Esc-ends-turn mode). Best-effort,
+// mirroring the rest of this stand-in's silent-error posture: on failure the
+// default discipline remains and the e2e's ESC assertion flags it downstream. The
+// prior terminal state is intentionally not restored — the PTY is torn down with
+// the process.
 func enterRawMode() {
 	_, _ = term.MakeRaw(int(os.Stdin.Fd()))
 }
@@ -393,6 +448,48 @@ func appendTurnGrowth(f *os.File) {
 		return
 	}
 	_ = f.Sync()
+}
+
+// appendTurnEnd grows the current session JSONL f by one canned assistant
+// end_turn line (interruptEndTurnLine) so the daemon's structured-turn producer
+// maps it to turnevent.TurnEnd -> a turn_end envelope: the daemon's "turn
+// stopped" signal after a remote interrupt. Runs ONLY on the main goroutine,
+// preserving the single-writer-of-f invariant (see escPending / turnPending).
+// Best-effort + fsync, mirroring emitStructuredJSONLIfTriggered; the e2e asserts
+// downstream (the phone receives turn_end), never on the write itself.
+func appendTurnEnd(f *os.File) {
+	if _, err := f.WriteString(interruptEndTurnLine); err != nil {
+		return
+	}
+	_ = f.Sync()
+}
+
+// containsBareESC reports whether buf holds a bare ESC — the remote interrupt
+// keystroke (supervisor.SendEsc writes a lone 0x1b), as distinct from the ESC
+// that leads a CSI / bracketed-paste sequence. In this harness the stdin stream
+// carries exactly three ESC sources: the bracketed-paste open (ESC[200~) and
+// close (ESC[201~) that wrap a delivered prompt, and the interrupt's lone ESC.
+// Both paste markers are 0x1b immediately followed by '[' (0x5b); the delivered
+// prompt content between them is raw-ESC/C0-free (#749's paste-content guard),
+// so it contributes no 0x1b. Therefore a 0x1b NOT immediately followed by 0x5b is
+// the interrupt and nothing else. Rule: a 0x1b at index i is bare iff it is the
+// buffer's last byte (i == len(buf)-1) OR buf[i+1] != 0x5b. The last-byte arm is
+// safe because tui-driver writes each paste marker as one writeRaw of the whole
+// ESC[200~…ESC[201~\r unit, so a paste marker's 0x1b is never the last byte of a
+// read (its '[' always follows in the same read); SendEsc writes the lone 0x1b as
+// its own PTY write, so it arrives standalone or trailing. (A future multi-KiB
+// prompt whose paste could split across reads on a marker's 0x1b would need a
+// one-byte cross-buffer carry; not built — this harness controls the prompt size.)
+func containsBareESC(buf []byte) bool {
+	for i, b := range buf {
+		if b != 0x1b {
+			continue
+		}
+		if i == len(buf)-1 || buf[i+1] != 0x5b {
+			return true
+		}
+	}
+	return false
 }
 
 func openSession(dir, uuid string) *os.File {
@@ -418,8 +515,10 @@ func openSession(dir, uuid string) *os.File {
 // claude's "prompt received, turn started" signal, which tui-driver IsThinking
 // reads as the DeliverPrompt commit confirmation. It never echoes stdin
 // content to os.Stdout: TUI mode writes only the fixed spinner glyph, never the
-// phone-controlled prompt bytes.
-func startStdinReader(logPath string, tui bool) {
+// phone-controlled prompt bytes. When escEndsTurn is true it also scans each read
+// for a bare ESC (the remote interrupt keystroke) and, on finding one, signals
+// the main goroutine via escPending — signal only, never writing f.
+func startStdinReader(logPath string, tui, escEndsTurn bool) {
 	var logF *os.File
 	if logPath != "" {
 		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -438,6 +537,12 @@ func startStdinReader(logPath string, tui bool) {
 				// grow the live session JSONL (appendTurnGrowth). Signal only:
 				// this goroutine must never write f (single-writer-of-f).
 				turnPending.Store(true)
+				// Esc-ends-turn mode: a bare ESC in this read is the remote
+				// interrupt keystroke; signal the main goroutine to append the
+				// end_turn line. Signal only (single-writer-of-f), like turnPending.
+				if escEndsTurn && containsBareESC(buf[:n]) {
+					escPending.Store(true)
+				}
 				if logF != nil {
 					if _, werr := logF.Write(buf[:n]); werr != nil {
 						return
