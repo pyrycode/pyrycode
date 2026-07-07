@@ -304,7 +304,11 @@ ordered, cap-respecting chunks ending in a completion marker. **Binary → phone
 direction; wire vocabulary only** — the chunker, the streaming primitive
 (`StreamBundle`), and the reassembly reference (`ReassembleBundle`) live in
 [`internal/relay/v2bundlestream.go`](v2-session-manager.md#debug-bundle-streaming-812--streambundle--bundleenvelopes--reassemblebundle);
-the request verb that drives a stream is sibling #813.
+the request verb that drives a stream is sibling #813 — `TypeRequestDebugBundle =
+"request_debug_bundle"`, an inbound phone → binary **bare control type with no
+payload struct** (the bundle is daemon-global, so there is no field to carry;
+mirrors `TypeInterrupt`), added in the same v2-only const block and registered in
+the three `compat_test.go` drift-detector sites. See [codebase/813.md](../codebase/813.md).
 
 ```go
 type DebugBundleChunkPayload struct {

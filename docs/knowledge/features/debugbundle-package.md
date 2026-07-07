@@ -13,10 +13,14 @@ writes to disk**, does not import `internal/control` (log lines arrive as a
 parameter), and makes **zero `slog` calls** — so no recording byte or log-line
 value can leak through a log emission from this path.
 
-**Ships unwired** — 0 non-test callers, which is correct for a primitive. Serving
-the bytes to a paired client is the sibling serving path: #812 (chunked transport
-under the 64 KB frame cap) then #813 (the request verb + recipient authorization).
-This package carries **no policy about who may receive a bundle**.
+**Shipped unwired** (0 non-test callers, correct for a primitive); **wired by #813**,
+which calls `Assemble` from a `cmd/pyry` closure (`func() ([]byte, error) { archive,
+_, err := debugbundle.Assemble(resolveRecordingsDir(), logRing.Snapshot()); return
+archive, err }`) injected into the v2 session manager as `DebugBundler`. Serving the
+bytes to a paired client is the sibling serving path: #812 (chunked transport under
+the 64 KB frame cap) driven by #813 (the [`request_debug_bundle`](v2-session-manager.md#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle)
+verb + recipient authorization = pairing). This package still carries **no policy
+about who may receive a bundle**.
 
 - Spec: [`811-assemble-session-debug-bundle.md`](../../specs/architecture/811-assemble-session-debug-bundle.md)
 - Ticket record: [codebase/811.md](../codebase/811.md) (patterns + lessons)
