@@ -18,20 +18,26 @@ const jsonlExt = ".jsonl"
 // uses for its <uuid>.jsonl filenames. Identical shape to NewID's output.
 var uuidStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+// workdirNonAlnum matches every character claude replaces when it encodes a
+// working directory into its ~/.claude/projects/ path component.
+var workdirNonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
+
 // encodeWorkdir maps a working directory to the path component claude uses
-// under ~/.claude/projects/. Verified empirically: claude replaces both '/'
-// and '.' with '-', so "/Users/.../.pyrycode-worktrees/x" becomes
-// "-Users-...--pyrycode-worktrees-x" (note the doubled dash).
+// under ~/.claude/projects/. Verified empirically: claude replaces EVERY
+// non-alphanumeric character with '-', not only '/' and '.'. A space counts,
+// so "/Users/.../Second Brain" becomes "-Users-...-Second-Brain" — the earlier
+// '/'-and-'.'-only encoder left the space intact and pointed at a folder that
+// never exists, so the transcript reader could not find claude's reply.
 //
-//	"/foo/bar"  -> "-foo-bar"
-//	"/foo/.bar" -> "-foo--bar"
-//	""          -> ""
+//	"/foo/bar"        -> "-foo-bar"
+//	"/foo/.bar"       -> "-foo--bar"
+//	"/foo/Second Brain" -> "-foo-Second-Brain"
+//	""                -> ""
 func encodeWorkdir(workdir string) string {
 	if workdir == "" {
 		return ""
 	}
-	r := strings.NewReplacer("/", "-", ".", "-")
-	return r.Replace(workdir)
+	return workdirNonAlnum.ReplaceAllString(workdir, "-")
 }
 
 // DefaultClaudeSessionsDir returns the directory where claude writes

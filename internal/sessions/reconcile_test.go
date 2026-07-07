@@ -24,6 +24,13 @@ func TestEncodeWorkdir(t *testing.T) {
 		{"foo.bar", "foo-bar"},
 		{"a..b", "a--b"},
 		{"a//b", "a--b"},
+		// Spaces (and any other non-alphanumeric) must map to '-' too, matching
+		// claude. The '/'-and-'.'-only encoder left spaces intact and could not
+		// find the transcript for a workdir like the vault's "Second Brain".
+		{"a b c", "a-b-c"},
+		{"/foo/Second Brain", "-foo-Second-Brain"},
+		{"/Users/juhanailmoniemi/obsidian-vault/Second Brain",
+			"-Users-juhanailmoniemi-obsidian-vault-Second-Brain"},
 	}
 	for _, c := range cases {
 		if got := encodeWorkdir(c.in); got != c.want {
