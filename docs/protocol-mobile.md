@@ -444,6 +444,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
 | **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
+| **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -713,6 +714,29 @@ the daemon **streams** it as ordered, cap-respecting chunks ending in a completi
 marker rather than trying to fit it in a single reply. Split from #803; the
 streaming transport is #812, the request verb that triggers it is #813.
 
+#### `request_debug_bundle`
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session
+manager before `dispatch.Route` — it is not a `dispatch.Route` handler (like
+[`interrupt`](#interrupt-v2) / [`dequeue_message`](#queue-v2)).
+
+It carries **no payload** — a bare control frame, with no `conversation_id` and no
+other field. The bundle is **daemon-global** by construction (the whole log ring,
+which has no per-session key, plus the newest recording across all sessions), so
+there is nothing for the request to name and no field an attacker could use to
+select another session's data.
+
+**Authorization is pairing**, enforced structurally at the Noise IK handshake: an
+unpaired device is refused at the handshake (WS 4401) and never reaches this
+handler, so there is no per-verb authorization gate. Unlike `interrupt` /
+`dequeue_message`, `request_debug_bundle` is **not** gated on the `interactive`
+capability — any paired, open connection (including a non-interactive desktop
+diagnostic tool) may request a bundle. The daemon replies by **streaming** the
+assembled bundle back to the requesting connection (`debug_bundle_chunk*` +
+`debug_bundle_done`); it is never broadcast. If the bundle cannot be assembled the
+daemon replies with a single `error` envelope carrying a static message and a
+`server.binary_offline` code (`retryable: true`) — never the assembly error text.
+
 The stream rides the manager's own **asynchronous** push path (`StreamBundle` →
 `Push` → drain), the same path every other unsolicited binary → phone frame uses —
 **not** the synchronous request/reply handler path, whose 8-slot outbound buffer
@@ -751,10 +775,14 @@ non-bundle frames (e.g. an `assistant_delta`) are filtered by type and ignored.
 
 **Content hygiene.** The bundle carries session content (recording + logs); the
 chunk framing and completion marker are sealed under the Noise channel like every
-other `noise_msg`, and the daemon never writes the streamed bytes to its logs.
-*Who* may request a bundle and any per-request authorization are the request
-verb's (#813) concern — the streaming transport faithfully seals whatever blob it
-is handed to an already-authenticated, open conn.
+other `noise_msg`, and the daemon never writes the streamed bytes to its logs (not
+even the assembly step, which makes zero log calls — #811). Capture-off
+**withholds** the recording structurally: when no recording exists the archive has
+no `recording.cast` member and the manifest marks it absent — the recording cannot
+leak regardless of how the client reads the manifest. *Who* may request a bundle is
+settled by [`request_debug_bundle`](#request_debug_bundle) above (pairing);
+the streaming transport faithfully seals whatever blob it is handed to an
+already-authenticated, open conn.
 
 ## Backfill semantics
 

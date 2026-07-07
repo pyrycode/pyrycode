@@ -106,6 +106,7 @@ func startRelay(
 	defaultCwd string,
 	transitions transitionObserverSink,
 	qse *queueStateEmitterV2,
+	debugBundler func() ([]byte, error),
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -149,7 +150,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: Mobile Protocol v2 (Noise_IK) enabled — default; set PYRY_MOBILE_V2=0 to force legacy v1")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse, debugBundler)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -292,6 +293,7 @@ func startRelayV2(
 	defaultCwd string,
 	transitions transitionObserverSink,
 	qse *queueStateEmitterV2,
+	debugBundler func() ([]byte, error),
 ) (drain func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
 	if err != nil {
@@ -345,6 +347,13 @@ func startRelayV2(
 		// push an updated queue_state. The concrete *msgqueue.Queue (built at
 		// main.go) satisfies QueueRemover via Remove(string, uint64) bool.
 		QueueRemover: queue,
+		// Inbound debug-bundle seam (#813): a paired `request_debug_bundle` frame
+		// assembles the daemon-global bundle (recent log ring + newest recording)
+		// and streams it back over the encrypted channel. The closure (built at
+		// main.go over debugbundle.Assemble + logRing.Snapshot) returns only
+		// (archive, err), so internal/relay never imports internal/debugbundle. nil
+		// in foreground / v1 makes the verb reply "unavailable" deterministically.
+		DebugBundler: debugBundler,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build v2 session manager: %w", err)

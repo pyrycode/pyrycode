@@ -276,3 +276,31 @@ const (
 	TypeDebugBundleChunk = "debug_bundle_chunk" // binary → phone, outbound v2 bundle chunk
 	TypeDebugBundleDone  = "debug_bundle_done"  // binary → phone, outbound v2 bundle completion marker
 )
+
+// Mobile Protocol v2 debug-bundle request verb (#813, split from #803;
+// docs/protocol-mobile.md § Debug bundle). A paired phone sends
+// request_debug_bundle to ask for the current session's debug bundle — the
+// recent daemon log ring plus the newest terminal recording when debug capture
+// was on. The bundle is daemon-global by construction (the log ring has no
+// per-session key, per #811), so this is a BARE control frame — no payload, no
+// conversation_id, no field an attacker could use to select another session's
+// data — mirroring TypeInterrupt.
+//
+// It is an inbound phone → binary *control* envelope the v2 session manager
+// intercepts at internal/relay/v2session.go's dispatchAppFrame before
+// internal/dispatch.Route (like TypeInterrupt / TypeDequeueMessage); there is NO
+// dispatch.Route handler for it. The daemon replies by STREAMING the assembled
+// bundle back as debug_bundle_chunk* + debug_bundle_done (#812), never through
+// the synchronous 8-frame handler-reply path.
+//
+// Authorization is pairing, enforced structurally at the Noise IK handshake: an
+// unpaired device is refused with 4401 and never reaches dispatchAppFrame, so no
+// new authorization gate lives on this verb.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// route this inbound control envelope to the handler chain. The drift detector
+// in internal/protocol/compat_test.go partitions Type* constants between
+// v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+const (
+	TypeRequestDebugBundle = "request_debug_bundle" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+)

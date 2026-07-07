@@ -591,6 +591,22 @@ type V2SessionConfig struct {
 	// control frame (#723). Optional: nil ⇒ dequeue_message is inert (foreground
 	// / unwired). Production wires *msgqueue.Queue.
 	QueueRemover QueueRemover
+
+	// DebugBundler assembles the current session's debug bundle (recent daemon
+	// logs plus the newest recording when present) as one in-memory archive, for
+	// an inbound request_debug_bundle control frame (#813). Optional: nil ⇒
+	// request_debug_bundle replies with a deterministic unavailable error, never
+	// a silent drop (foreground / unwired). Production wires a closure over
+	// debugbundle.Assemble(recordingsDir, logRing.Snapshot) — the closure returns
+	// only (archive, err) so internal/relay never imports internal/debugbundle
+	// (the Manifest travels inside the archive as manifest.json, not out-of-band).
+	//
+	// SECURITY: the returned bytes are the plaintext bundle (recording + logs) —
+	// the highest-value secret surface in the system. They MUST NOT be logged.
+	// handleDebugBundleRequest streams them ONLY over the AEAD-sealed push path
+	// and logs a byte count on success / the failure event on error, never any
+	// content byte.
+	DebugBundler func() (archive []byte, err error)
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -1504,6 +1520,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeDequeueMessage:
 			m.handleDequeueMessage(s, probeEnv)
 			return
+		case protocol.TypeRequestDebugBundle:
+			m.handleDebugBundleRequest(ctx, s, probeEnv)
+			return
 		}
 	}
 
@@ -1702,6 +1721,110 @@ func (m *V2SessionManager) snapshotReplyError(ctx context.Context, s *V2Session,
 			"event", "v2.snapshot.err_push",
 			"conn_id", s.connID,
 			"code", code,
+			"err", err)
+	}
+}
+
+// msgDebugBundleUnavailable is the static message on every request_debug_bundle
+// error reply. Deliberately generic: the wire reply NEVER echoes the assembly
+// error text — which could quote a recording path or filename — nor any content
+// byte, only this constant. The only failure this verb reports is "unavailable"
+// (nil DebugBundler seam, or an assembly failure), so no per-cause message is
+// needed.
+const msgDebugBundleUnavailable = "debug bundle unavailable"
+
+// handleDebugBundleRequest assembles the current session's debug bundle via the
+// injected DebugBundler and streams it back to s as debug_bundle_chunk* +
+// debug_bundle_done (#812), or sends a single deterministic error reply.
+// Intercepted in dispatchAppFrame before dispatch.Route — like handleInterrupt /
+// handleRequestSnapshot — and runs on the manager's single Run dispatch
+// goroutine. Every branch either enqueues one bundle stream or sends exactly one
+// error reply, then returns: it never panics, hangs, or silently drops the
+// request.
+//
+// The request frame is bare (no payload): the bundle is daemon-global (the whole
+// log ring plus the newest recording across all sessions, per #811), so there is
+// no attacker-controlled field — no conversation_id, no path, no id — that flows
+// into assembly or the wire, and no argument that could select another session's
+// data.
+//
+// SECURITY (AC #4): the assembled archive bytes are the plaintext bundle
+// (recording + logs) — the highest-value secret surface in the system. They are
+// streamed ONLY over the AEAD-sealed push path (StreamBundle → Push → drainOnce
+// seals every chunk before m.send); this method logs a content-free byte count
+// on success and the failure EVENT on error — never the archive, a member, a log
+// line, or a recording byte. Every error reply carries only the static
+// msgDebugBundleUnavailable constant, never the assembly error text.
+func (m *V2SessionManager) handleDebugBundleRequest(ctx context.Context, s *V2Session, env protocol.Envelope) {
+	// A nil DebugBundler (optional seam / foreground / unwired) means the feature
+	// is unavailable; report it deterministically rather than dropping.
+	if m.cfg.DebugBundler == nil {
+		m.debugBundleReplyError(ctx, s, env.ID)
+		return
+	}
+
+	archive, err := m.cfg.DebugBundler()
+	if err != nil {
+		// #811 read-failure honesty: a recording that exists but fails to read
+		// surfaces as an error, not a false-absent. Log the failure EVENT only —
+		// NEVER the wrapped err (it could quote a recording path/filename) — and
+		// send a deterministic error reply.
+		m.cfg.Logger.Warn("relay: v2 debug bundle assemble failed",
+			"event", "v2.bundle.assemble_err",
+			"conn_id", s.connID)
+		m.debugBundleReplyError(ctx, s, env.ID)
+		return
+	}
+
+	if err := m.StreamBundle(ctx, s.connID, archive); err != nil {
+		// Unreachable in practice: s is V2StateOpen on the dispatch goroutine, so
+		// its push queue exists. Logged at debug and dropped — the package's
+		// outbound-drop posture; NEVER echo the archive.
+		m.cfg.Logger.Debug("relay: v2 debug bundle stream dropped",
+			"event", "v2.bundle.stream_err",
+			"conn_id", s.connID,
+			"err", err)
+		return
+	}
+
+	// One content-free info log: conn_id + byte count only, never the archive or
+	// any member (AC #4).
+	m.cfg.Logger.Info("relay: v2 debug bundle served",
+		"event", "v2.bundle.served",
+		"conn_id", s.connID,
+		"bytes", len(archive))
+}
+
+// debugBundleReplyError sends a single deterministic TypeError reply to s,
+// correlated to inReplyTo, via the same m.forwardEnvelope seal-and-forward path
+// handleRequestSnapshot uses. The code/message/retryable are FIXED
+// (server.binary_offline + msgDebugBundleUnavailable + retryable), because the
+// only failure this verb reports is "unavailable" — so no attacker-influenced or
+// assembly-error text ever reaches the wire.
+func (m *V2SessionManager) debugBundleReplyError(ctx context.Context, s *V2Session, inReplyTo uint64) {
+	errPayload, err := json.Marshal(protocol.ErrorPayload{
+		Code:      protocol.CodeServerBinaryOffline,
+		Message:   msgDebugBundleUnavailable,
+		Retryable: true,
+	})
+	if err != nil {
+		// A closed struct of strings + bool; marshal cannot fail in practice.
+		m.cfg.Logger.Warn("relay: v2 debug bundle error reply marshal failed",
+			"event", "v2.bundle.err_marshal",
+			"conn_id", s.connID)
+		return
+	}
+	reply := protocol.Envelope{
+		ID:        1, // non-load-bearing; the phone correlates on InReplyTo.
+		Type:      protocol.TypeError,
+		TS:        time.Now().UTC(),
+		Payload:   errPayload,
+		InReplyTo: &inReplyTo,
+	}
+	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
+		m.cfg.Logger.Debug("relay: v2 debug bundle error reply push dropped",
+			"event", "v2.bundle.err_push",
+			"conn_id", s.connID,
 			"err", err)
 	}
 }
