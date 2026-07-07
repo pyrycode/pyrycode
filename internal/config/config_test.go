@@ -10,7 +10,7 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	t.Parallel()
 	got := DefaultConfig()
-	want := Config{RelayURL: "wss://relay.pyrycode.dev"}
+	want := Config{RelayURL: "wss://relay.pyrycode.dev", DebugCapture: false}
 	if got != want {
 		t.Errorf("DefaultConfig() = %+v, want %+v", got, want)
 	}
@@ -42,6 +42,25 @@ func TestLoad(t *testing.T) {
 			name:     "partial file with missing fields keeps defaults",
 			fileBody: ptr(`{}`),
 			want:     Config{RelayURL: "wss://relay.pyrycode.dev"},
+		},
+		{
+			// AC1: an absent debug_capture field decodes to OFF (Go zero value),
+			// with relay_url still defaulted — the unset case, asserted explicitly.
+			name:     "absent debug_capture is OFF",
+			fileBody: ptr(`{"relay_url": "wss://my-relay.example/"}`),
+			want:     Config{RelayURL: "wss://my-relay.example/", DebugCapture: false},
+		},
+		{
+			// AC2: debug_capture:true in the file round-trips to ON, proving it
+			// persists across a daemon restart (config is reloaded at start).
+			name:     "debug_capture true persists",
+			fileBody: ptr(`{"debug_capture": true}`),
+			want:     Config{RelayURL: "wss://relay.pyrycode.dev", DebugCapture: true},
+		},
+		{
+			name:     "relay_url and debug_capture coexist",
+			fileBody: ptr(`{"relay_url": "wss://my-relay.example/", "debug_capture": true}`),
+			want:     Config{RelayURL: "wss://my-relay.example/", DebugCapture: true},
 		},
 		{
 			name:      "malformed JSON returns wrapped error",

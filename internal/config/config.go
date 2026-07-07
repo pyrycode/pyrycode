@@ -14,6 +14,13 @@ import (
 // defaults via DefaultConfig + overlay-decode in Load.
 type Config struct {
 	RelayURL string `json:"relay_url"`
+
+	// DebugCapture, when true, records the daemon's interactive session to a
+	// .cast file (see #802). Default OFF: the JSON zero value for an absent
+	// field is false, so a config that omits "debug_capture" behaves as OFF
+	// with no DefaultConfig entry. SECURITY: a recording holds every PTY byte
+	// — prompt, output, tool output — so this is strictly opt-in.
+	DebugCapture bool `json:"debug_capture"`
 }
 
 // DefaultConfig returns the built-in defaults. Used directly when no config
