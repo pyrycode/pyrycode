@@ -11,7 +11,7 @@ internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
 ├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656) + v2-modal Type* (modal_shown / modal_answer / modal_cancel / modal_dismissed, #701) + v2-queue Type* (queue_state / dequeue_message, #720) + v2-interrupt Type* (TypeInterrupt, #707, payload-less inbound control)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
-├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies)
+├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies); QueuedItem + QueueStatePayload / DequeueMessagePayload (#720, v2 queue vocabulary); DebugBundleChunkPayload / DebugBundleDonePayload (#812, v2 debug-bundle streaming bodies)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
 ├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
@@ -293,6 +293,51 @@ the inbound control; table-driven `TestDequeueMessagePayload_Malformed` pins the
 AC's "rejected cleanly (error, no panic)". Two fixtures (`queue_state.json` with
 N=2 items, `dequeue_message.json`) authored in **struct-field order**. See
 [codebase/720.md](../codebase/720.md).
+
+### Debug-bundle streaming payloads (#812)
+
+The byte-generic wire bodies for streaming a large debug bundle over the encrypted
+mobile channel (`docs/protocol-mobile.md` § Debug bundle; split from #803). A
+content-bearing bundle (assembled by [`internal/debugbundle`](debugbundle-package.md),
+#811) routinely exceeds one 65535-byte AEAD frame, so the daemon streams it as
+ordered, cap-respecting chunks ending in a completion marker. **Binary → phone
+direction; wire vocabulary only** — the chunker, the streaming primitive
+(`StreamBundle`), and the reassembly reference (`ReassembleBundle`) live in
+[`internal/relay/v2bundlestream.go`](v2-session-manager.md#debug-bundle-streaming-812--streambundle--bundleenvelopes--reassemblebundle);
+the request verb that drives a stream is sibling #813.
+
+```go
+type DebugBundleChunkPayload struct {
+    Seq  int    `json:"seq"`
+    Data []byte `json:"data"`
+}
+
+type DebugBundleDonePayload struct {
+    Total int `json:"total"`
+}
+```
+
+- **`Seq` is 0-based, contiguous, ascending across a stream.** The receiver
+  (`ReassembleBundle` / the phone) requires the next chunk's `Seq` to equal the
+  count of chunks already seen, so a reorder, gap, or duplicate **fails cleanly**
+  rather than corrupting output — the structural half of the two-net integrity
+  contract (AEAD guarantees per-frame content integrity; `Seq`+`Total` add gap /
+  reorder / truncation detection).
+- **`Data []byte` auto-encodes as standard base64 via `encoding/json`** (the phone
+  base64-decodes). It is **content-bearing bundle bytes — never logged** (AC#4);
+  the base64 expansion (×4/3) is why `bundleChunkBytes` is set conservatively
+  under the frame cap, not at it.
+- **`DebugBundleDonePayload.Total` is the exact chunk count.** The receiver uses it
+  to detect a truncated stream: a `done` whose `Total` ≠ the number of chunks
+  actually received is a count-mismatch error, never accepted as complete. An empty
+  blob is a valid stream — 0 chunks + `done{total:0}`, reassembling to empty.
+- **Pure DTOs, no `omitempty`** (the queue/interactive-payload posture). Golden
+  round-trips `TestDebugBundleChunkPayload_RoundTrip` / `TestDebugBundleDonePayload_RoundTrip`
+  against `testdata/debug_bundle_chunk.json` / `debug_bundle_done.json`. Both
+  `Type*` constants are registered in the `compat_test.go` drift detector
+  (`v2OnlyTypes`, the partition `all` list, the `-rejected` cases) and are **not**
+  in `v1TypeSet` — an old phone must never receive these outbound events. See
+  [codebase/812.md](../codebase/812.md).
 
 ### Conversations-read payloads (#273)
 

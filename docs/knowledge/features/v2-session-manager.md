@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), arms a per-session idle timer that tears an open session down at WS 4408 when no inbound frame arrives within a bounded idle window — the in-repo idle sweep that bounds the lifetime of a dropped/backgrounded phone's two Noise `CipherState`s and armed rekey timer under connect/disconnect churn rather than letting them linger up to the 1-hour rekey interval (#774), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; the caught-up watermark is clamped to the conversation's newest retained id so an out-of-range / hostile `last_event_id` cannot suppress the live stream — #663; and the missed tail is forwarded one event per `Run` pass — via a Run-owned `replayQueue` drained by `drainReplayOnce`, with a `drainOnce` gate holding the conn's live events until the tail empties — so a large replay no longer monopolises the dispatch goroutine and stalls other connections' delivery, while replay ids still precede live ids on the wire and every seal stays single-writer — #777, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), intercepts the inbound `modal_answer` / `modal_cancel` control envelopes at the dispatch boundary and — via a consumer-declared `ModalResolver` seam — resolves a `modal_cancel` (consume the outstanding modal, route the fail-safe ESC, audit) then fans a `modal_dismissed` broadcast to every interactive-capable conn, while `modal_answer` resolves **only from a per-device-gated device** — `option_id` validated against the surfaced modal, the safe-answer keystroke routed, the terminal decision audited — and, when **no** device answers within a bounded window, arms a daemon-global deny-on-timeout that safe-denies the modal (ESC), fans the same `modal_dismissed{timeout}` broadcast, and audits `denied_timeout` (#727 seam + #717 gated answer arm + #725 deny-on-timeout, `security-sensitive`, see [Inbound modal control](#inbound-modal-control-727717--deny-on-timeout-725--modalresolver-seam--modal_dismissed-broadcast)), intercepts the inbound `interrupt` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — routes a single Esc to the supervised claude via a consumer-declared `Interrupter` seam (the remote equivalent of pressing Esc locally; `security-sensitive`, the first inbound frame whose authorization *is* the capability — see [Inbound interrupt](#inbound-interrupt-707--interrupter-seam--esc-routing), #707), intercepts the inbound `dequeue_message` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — removes a not-yet-drained queued message by id from the live `msgqueue` backlog via a consumer-declared `QueueRemover` seam, letting a phone cancel a queued `send_message` before it drains (the automatic `OnChange` → #722 producer path then refreshes `queue_state`; `security-sensitive`, the second inbound capability-gated frame — see [Inbound dequeue_message](#inbound-dequeue_message-723--queueremover-seam--msgqueueremove), #723), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), arms a per-session idle timer that tears an open session down at WS 4408 when no inbound frame arrives within a bounded idle window — the in-repo idle sweep that bounds the lifetime of a dropped/backgrounded phone's two Noise `CipherState`s and armed rekey timer under connect/disconnect churn rather than letting them linger up to the 1-hour rekey interval (#774), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a `StreamBundle(ctx, connID, blob)` method that moves an arbitrarily-large `[]byte` to one open conn as ordered, cap-respecting `debug_bundle_chunk` frames ending in a `debug_bundle_done` marker by looping `Push` — the streaming primitive for a bundle too large for a single AEAD frame or the 8-slot synchronous handler-reply buffer, shipped unwired for the sibling #813 request verb (#812, `security-sensitive`), exposes a capability-aware `ActiveConns(ctx)` enumeration (and its `ActiveConnIDs(ctx)` `[]string` projection) that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; the caught-up watermark is clamped to the conversation's newest retained id so an out-of-range / hostile `last_event_id` cannot suppress the live stream — #663; and the missed tail is forwarded one event per `Run` pass — via a Run-owned `replayQueue` drained by `drainReplayOnce`, with a `drainOnce` gate holding the conn's live events until the tail empties — so a large replay no longer monopolises the dispatch goroutine and stalls other connections' delivery, while replay ids still precede live ids on the wire and every seal stays single-writer — #777, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), intercepts the inbound `modal_answer` / `modal_cancel` control envelopes at the dispatch boundary and — via a consumer-declared `ModalResolver` seam — resolves a `modal_cancel` (consume the outstanding modal, route the fail-safe ESC, audit) then fans a `modal_dismissed` broadcast to every interactive-capable conn, while `modal_answer` resolves **only from a per-device-gated device** — `option_id` validated against the surfaced modal, the safe-answer keystroke routed, the terminal decision audited — and, when **no** device answers within a bounded window, arms a daemon-global deny-on-timeout that safe-denies the modal (ESC), fans the same `modal_dismissed{timeout}` broadcast, and audits `denied_timeout` (#727 seam + #717 gated answer arm + #725 deny-on-timeout, `security-sensitive`, see [Inbound modal control](#inbound-modal-control-727717--deny-on-timeout-725--modalresolver-seam--modal_dismissed-broadcast)), intercepts the inbound `interrupt` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — routes a single Esc to the supervised claude via a consumer-declared `Interrupter` seam (the remote equivalent of pressing Esc locally; `security-sensitive`, the first inbound frame whose authorization *is* the capability — see [Inbound interrupt](#inbound-interrupt-707--interrupter-seam--esc-routing), #707), intercepts the inbound `dequeue_message` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — removes a not-yet-drained queued message by id from the live `msgqueue` backlog via a consumer-declared `QueueRemover` seam, letting a phone cancel a queued `send_message` before it drains (the automatic `OnChange` → #722 producer path then refreshes `queue_state`; `security-sensitive`, the second inbound capability-gated frame — see [Inbound dequeue_message](#inbound-dequeue_message-723--queueremover-seam--msgqueueremove), #723), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -129,6 +129,29 @@ func (m *V2SessionManager) Rekey(ctx context.Context, connID string) error
 // session has connID (a queue exists iff V2StateOpen); ctx.Err() only if ctx is
 // already cancelled at entry. A drop is not an error (returns nil + debug-logs).
 func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol.Envelope) error
+
+// Streams an arbitrarily-large blob to one open, authenticated conn as ordered,
+// cap-respecting debug_bundle_chunk frames + a debug_bundle_done marker (#812,
+// security-sensitive). Builds the envelopes with bundleEnvelopes, then loops
+// Push in order — the manager's async send path, NEVER the synchronous
+// handler-reply channel (handlerOutboundBuf = 8, deadlocks on >8 sends from a
+// handler). So a bundle of any size cannot exceed a single AEAD frame or
+// deadlock the handler. Safe from any goroutine (incl. a future #813 handler on
+// Run): Push never blocks and never touches s.send. Returns on ENQUEUE, not
+// delivery; returns the first Push error (ErrConnNotFound → conn not open) and
+// stops. Logs one content-free debug line (conn_id, chunks, bytes — never the
+// streamed bytes, AC#4). Ships unwired; the request verb that drives it is #813.
+func (m *V2SessionManager) StreamBundle(ctx context.Context, connID string, blob []byte) error
+
+// ReassembleBundle is the exported receiver-contract reference + test oracle for
+// the debug-bundle stream (#812): it walks frames in arrival order and rebuilds
+// the blob, requiring each chunk's Seq == chunks-seen and done.Total ==
+// chunks-seen, skipping interleaved non-bundle frames. On ANY failure
+// (reorder / gap / duplicate / count-mismatch / malformed / missing marker) it
+// returns (nil, err) — never partial or corrupt bytes. Pure; it has NO daemon
+// inbound caller (production use is phone-side, out of repo) — it exists so the
+// "fail cleanly on a truncated / reordered stream" contract is testable in-repo.
+func ReassembleBundle(frames []protocol.Envelope) ([]byte, error)
 
 // Mid-turn-reconnect replay source (#647), late-bound once during relay wiring
 // after the interactive emitter (which owns the eventring) is built — a
@@ -872,6 +895,86 @@ or emits a `resync` marker if the position aged out of the bounded ring.
   cursor→B / ring-holds-A test). The replay hook sits *after* Noise IK auth + the
   device-token check, so content is only ever served to an authenticated conn.
 
+### Debug-bundle streaming (#812) — `StreamBundle` + `bundleEnvelopes` + `ReassembleBundle`
+
+`StreamBundle(ctx, connID, blob) error` moves an arbitrarily-large `[]byte` (the
+[#811 debug-bundle assembler](debugbundle-package.md)'s output, routinely
+multi-MB) to one addressed, open, authenticated conn as **ordered, cap-respecting
+chunks ending in a completion marker**. It is the transport primitive #813 (the
+request verb) will drive; this slice ships it **unwired**, test-driven only. New
+file `internal/relay/v2bundlestream.go` holds the whole byte-stream concept —
+the chunk-size const, the pure chunker, the method, and the reassembly reference
+— depending only on `internal/protocol` + the in-package `maxNoisePayloadBytes`.
+`security-sensitive` (content bytes sealed as AEAD frames on the mobile surface);
+architect + code-review security passes both **PASS**. See
+[`codebase/812.md`](../codebase/812.md).
+
+**Two walls a bundle cannot ride a normal reply through, and why `Push` clears
+both.** A `noise_msg`'s decoded ciphertext is capped at `maxNoisePayloadBytes =
+65535` — a multi-MB blob is not one sealed frame — and the synchronous
+handler-reply channel (`handlerOutboundBuf = 8`, drained only *after* the handler
+returns) deadlocks on more than 8 sends from a handler. `StreamBundle` builds
+N+1 envelopes with `bundleEnvelopes` and enqueues each via
+[`Push`](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) — the
+manager's **asynchronous** `Push` → `drainOnce` → `forwardEnvelope` path, the same
+path every unsolicited daemon → client frame uses (#571 push, #618 snapshot, #647
+resync). `Push` never blocks and never touches `s.send`, so `StreamBundle` is
+callable from any goroutine, **including a future #813 handler on the `Run`
+goroutine** (its cap-1 `drainCh` signal is non-blocking) — sidestepping both walls
+with zero new concurrency surface. It returns on **enqueue**, not delivery, and
+returns the first `Push` error and stops (a not-open conn → `ErrConnNotFound`).
+
+**`bundleEnvelopes(blob) ([]protocol.Envelope, error)`** (pure, no manager) splits
+`blob` into `ceil(len/bundleChunkBytes)` `TypeDebugBundleChunk` envelopes with
+ascending 0-based `Seq`, then one trailing `TypeDebugBundleDone{Total: n}`. An
+**empty blob** → 0 chunks + `done{total:0}` (a valid stream reassembling to
+empty). `EventID` is left **nil** on every envelope, so
+[`forwardEnvelope`](#concurrency-safe-unsolicited-push-571--push-method--push-funnel)'s
+reconnect-replay dedup guard is inert for bundle frames; `ID` is non-load-bearing
+(set to `Seq`/`Total` for debuggability — the receiver keys on Type+Seq+Total).
+
+**`bundleChunkBytes = 48000`** bounds the raw bundle bytes per chunk with ~1.3 KB
+headroom below the frame cap (base64 ×4/3 + ~200 B `Envelope` JSON wrapper + 16 B
+AEAD tag → ~64216 B ciphertext < 65535). **Belt-and-suspenders, different
+fabric:** the conservative const is the belt; `TestStreamBundle_EveryFrameWithinCap`
+(decrypts every emitted frame, asserts `len(ciphertext) <= maxNoisePayloadBytes`)
+is the deterministic suspenders. The const's doc-comment pins the rule — **if the
+cap test ever fails, LOWER the const, never raise it.**
+
+**No drop, in order (AC#2).** Bundle frames are **control-class** (`Type !=
+TypeAssistantDelta`), so the `pushQueue` drop policy never evicts them — under cap
+pressure they soft-overflow. Per-conn FIFO + sequential seal on the single `Run`
+goroutine ⇒ chunks arrive in enqueue order with a monotonic Noise send-nonce; the
+`done` marker, enqueued last, seals last. An open session that closes mid-stream
+has its still-buffered chunks dropped by `forwardEnvelope`'s `V2StateOpen` gate at
+drain time — never sealed for an un-authenticated peer.
+
+**`ReassembleBundle(frames) ([]byte, error)`** is the exported, pure
+**receiver-contract reference and test oracle** — production use is phone-side
+(out of repo); the daemon has **no inbound caller**. It walks `frames` in arrival
+order: a `TypeDebugBundleChunk` must carry `Seq ==` the count of chunks already
+seen (0-based contiguous ascending, else reorder/gap/duplicate is rejected); a
+`TypeDebugBundleDone` must carry `Total ==` that count (else truncated /
+count-mismatch is rejected); any other type is **skipped** (tolerates an
+interleaved `assistant_delta`); frames exhausted with no marker is incomplete. On
+**any** failure it returns `(nil, err)` — never partial or corrupt bytes. **Two
+independent integrity nets, different fabric:** the AEAD (ChaChaPoly) guarantees
+per-frame *content* integrity on the wire (intra-chunk corruption is impossible),
+while `Seq` + `Total` add deterministic *structural* gap / reorder / truncation
+detection. It exists in-repo because you cannot test "fail cleanly on a truncated
+/ reordered stream" (the correctness note) without a reassembler to fail.
+
+**Log discipline (AC#4).** `StreamBundle` logs one content-free debug line
+(`event=v2.bundle.stream`, `conn_id`, `chunks`, `bytes` — counts only, never the
+streamed bytes or their base64); `Push` / `drainOnce` / `forwardEnvelope` already
+never log payload/ciphertext/key bytes. `TestStreamBundle_NoBytesLogged` seeds a
+recognizable byte pattern, captures under a `LevelDebug` handler, first asserts
+the `v2.bundle.stream` line **is** present (non-vacuous), then asserts the blob
+bytes and their base64 appear in no record. The wire vocabulary
+(`TypeDebugBundleChunk` / `TypeDebugBundleDone` + the two payloads) lives in
+[`internal/protocol`](protocol-package.md#debug-bundle-streaming-payloads-812) and
+[protocol-mobile.md § Debug bundle](../../protocol-mobile.md#debug-bundle-v2).
+
 ## Concurrency
 
 **One owner goroutine + transient `time.AfterFunc` callbacks routed through a wake channel.** `Run` is the only goroutine the manager owns long-term. It reads `cfg.Frames`, looks up (or lazily creates) `m.sessions[env.ConnID]`, processes the frame synchronously, and ALSO pops `wakeSignal` values from a per-manager buffered channel `m.wake` and dispatches them via `handleWake`. `m.sessions` is mutated exclusively by `Run`; no mutex.
@@ -1017,7 +1120,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`internal/noise`](noise-package.md) (#433) — `Responder`, `ReadInit`, `WriteResp`, `CipherState`, `KeyLen`. The wrapper's empty-AD-at-the-type-system invariant flows through to every AEAD operation here.
 - [`internal/devices`](devices-package.md) — `Registry.Validate(plain)` predicate (two-state, bumps `LastSeenAt` under `reg.mu`).
 - [`internal/dispatch`](dispatch-package.md) — `Handler`, `Conn`, `NewConn`, `Route` (#446). The same handler-table dispatch primitives used by v1's `Dispatcher`, factored out so the v2 manager does not duplicate the malformed/unsupported/unknown-type error-envelope logic.
-- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, the `Token` field on `HelloClientPayload`, and (#618) `RequestSnapshotPayload` / `ScreenSnapshotPayload` + `TypeRequestSnapshot` / `TypeScreenSnapshot` / `CodeConversationNotFound` / `CodeServerBinaryOffline` (the #617 snapshot vocabulary), and (#727) `ModalCancelPayload` / `ModalAnswerPayload` / `ModalDismissedPayload` + `TypeModalCancel` / `TypeModalAnswer` / `TypeModalDismissed` (the #701 modal vocabulary), and (#707) `TypeInterrupt` (the bare, payload-less interrupt control type), and (#723) `TypeDequeueMessage` / `DequeueMessagePayload` (the #720 dequeue vocabulary the handler decodes).
+- [`internal/protocol`](protocol-package.md) — `Envelope`, `RoutingEnvelope`, `HelloClientPayload`, `HelloAckPayload`, `ErrorPayload`, `InnerFrameV2`, `V2Version`, `TypeNoise*` constants, the `Token` field on `HelloClientPayload`, and (#618) `RequestSnapshotPayload` / `ScreenSnapshotPayload` + `TypeRequestSnapshot` / `TypeScreenSnapshot` / `CodeConversationNotFound` / `CodeServerBinaryOffline` (the #617 snapshot vocabulary), and (#727) `ModalCancelPayload` / `ModalAnswerPayload` / `ModalDismissedPayload` + `TypeModalCancel` / `TypeModalAnswer` / `TypeModalDismissed` (the #701 modal vocabulary), and (#707) `TypeInterrupt` (the bare, payload-less interrupt control type), and (#723) `TypeDequeueMessage` / `DequeueMessagePayload` (the #720 dequeue vocabulary the handler decodes), and (#812) `TypeDebugBundleChunk` / `TypeDebugBundleDone` + `DebugBundleChunkPayload` / `DebugBundleDonePayload` (the debug-bundle streaming vocabulary `StreamBundle` / `ReassembleBundle` emit and parse).
 - [`internal/eventring`](eventring-package.md) (#646, consumed #647) — the bounded per-conversation event ring; the manager reads `Ring.After(convID, afterID)` (self-synchronised) on the reconnect-replay path. Late-bound via `SetReplaySource`, never imported at construction.
 - [`github.com/coder/websocket`](relay-package.md#dependencies) — only for the `StatusCode` type aliasing the two new exported close codes.
 
@@ -1045,6 +1148,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`codebase/617.md`](../codebase/617.md) — the screen-snapshot wire vocabulary (`request_snapshot` / `screen_snapshot` payloads + `Type` constants) #618 consumes.
 - [`codebase/727.md`](../codebase/727.md) — the inbound modal-control interception (`security-sensitive`); the consumer-declared `ModalResolver` seam + `ModalDismissal`, the optional `V2SessionConfig.ModalResolver` field, the two `dispatchAppFrame` arms (`handleModalCancel` / `handleModalAnswer`), and the `broadcastModalDismissed` fan-out (reads `m.sessions` directly, never `ActiveConns` — deadlock). `modal_cancel` resolves (consume → ESC → audit → broadcast); `modal_answer` shipped a deferred no-op there, since filled by the #717 gated answer arm (see [`codebase/717.md`](../codebase/717.md)). The `cmd/pyry` `modalResolverV2` impl consumes the #716 registry (`Resolve`), the #726 `SendEsc` seam, and the #712 audit sink. See also [`features/modalbridge-package.md`](modalbridge-package.md) (the outbound `modal_shown` half).
 - [`codebase/707.md`](../codebase/707.md) — the inbound `interrupt` → Esc routing (`security-sensitive`); the consumer-declared `Interrupter` seam (reusing the #726 `SendEsc` surface), the optional `V2SessionConfig.Interrupter` field, the `dispatchAppFrame` interrupt arm, and `handleInterrupt` (the **first** inbound frame gated on the `interactive` capability itself — a one-line `if !s.interactive`, not an abstraction). Maps to the neutral `turnevent.Cancel` (declared in #707, routed via the seam not constructed — the `modal_cancel` precedent).
+- [`codebase/812.md`](../codebase/812.md) — the debug-bundle streaming primitive (`security-sensitive`); `StreamBundle` (loops `Push`, never the synchronous handler-reply channel), the pure `bundleEnvelopes` chunker, the exported `ReassembleBundle` receiver-contract oracle, and `bundleChunkBytes` (conservative const + `TestStreamBundle_EveryFrameWithinCap` cap enforcement). Rides the [#571/#610 push path](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) unchanged — bundle chunks are control-class, never dropped. Ships unwired; the request verb is #813. Streams the [#811 assembler](debugbundle-package.md)'s output.
 - [`codebase/723.md`](../codebase/723.md) — the inbound `dequeue_message` → `msgqueue.Remove` handler (`security-sensitive`); the consumer-declared `QueueRemover` seam, the optional `V2SessionConfig.QueueRemover` field, the `dispatchAppFrame` dequeue arm, and `handleDequeueMessage` (the **second** inbound capability-gated frame, mirroring `handleInterrupt`'s shape; AC-4 convergence via the automatic #722 `OnChange` path, never a direct re-emit; the deliberate no-`KnownConversation`-gate security decision).
 - [`codebase/647.md`](../codebase/647.md) — the inbound mid-turn reconnect-replay consumer (`security-sensitive`); `SetReplaySource` (late-bound ring), `replayMissed`/`emitResync`, the `handleNoiseInit` hook, the `replayThrough` watermark + `forwardEnvelope` guard, and `HelloClientPayload.LastEventID` / `TypeResync`. Shipped with a caught-up-watermark MUST FIX outstanding, resolved by [`codebase/663.md`](../codebase/663.md) (clamp to `min(afterID, NewestID(convID))`). Consumes the [`codebase/646.md`](../codebase/646.md) ring + [`codebase/649.md`](../codebase/649.md) outbound `event_id`.
 - [`codebase/777.md`](../codebase/777.md) — paces that reconnect replay one event per `Run` pass (`security-sensitive`). Moves the inline forward loop onto a Run-owned `V2Session.replayQueue` drained by `drainReplayOnce` (cap-1 `replayCh` pump mirroring `drainCh`/`drainOnce`); a `drainOnce` gate holds a replaying conn's live push queue until its tail empties, preserving replay-before-live ordering without the old inline-completion guarantee. The classification (ring read, gap→resync, #663 clamp) stays inline; the seal stays single-writer on `Run` (send-nonce invariant untouched). Fixes the latent fairness cliff where a ≤ `MaxEventsPerConversation` replay monopolised the dispatch goroutine.
