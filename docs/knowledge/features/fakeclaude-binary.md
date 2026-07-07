@@ -30,12 +30,16 @@ commit` contract — can confirm a turn against it. See
 [§ TUI mode](#tui-mode-603). The earlier optional `STDIN_LOG` (#323) and
 `ASSISTANT_TRIGGER` (#311) modes, the **JSONL-trigger mode**
 (`PYRY_FAKE_CLAUDE_JSONL_TRIGGER`, #642) that appends captured claude-format
-turn events to the live session JSONL, and the **idle-trigger mode**
+turn events to the live session JSONL, the **idle-trigger mode**
 (`PYRY_FAKE_CLAUDE_IDLE_TRIGGER`, #792) that opens a controllable *busy → free*
-window by withholding the startup idle glyph until a trigger fires, likewise
+window by withholding the startup idle glyph until a trigger fires, and the
+**Esc-ends-turn mode** (`PYRY_FAKE_CLAUDE_ESC_ENDS_TURN`, #794) that watches
+stdin for the remote interrupt's bare ESC and, on finding it, appends one canned
+`end_turn` line so the Esc *causes* the turn to stop, likewise
 extend the binary past pure rotation; see [§ Configuration](#configuration--env),
-[§ JSONL-trigger mode](#jsonl-trigger-mode-642), and
-[§ Idle-trigger mode](#idle-trigger-mode-792). Whenever the stdin reader is
+[§ JSONL-trigger mode](#jsonl-trigger-mode-642),
+[§ Idle-trigger mode](#idle-trigger-mode-792), and
+[§ Esc-ends-turn mode](#esc-ends-turn-mode-794). Whenever the stdin reader is
 active (TUI or `STDIN_LOG`), a delivered turn also triggers **on-turn
 transcript growth** (#673): the live session JSONL grows by one inert line so
 the daemon's #668 transcript-growth commit-confirm observes growth and acks
@@ -91,12 +95,19 @@ PYRY_FAKE_CLAUDE_IDLE_TRIGGER       path watched; start BUSY (no startup idle
                                     trigger — a controllable busy→free window
                                     (#792; see § Idle-trigger mode). Mutually
                                     exclusive with PYRY_FAKE_CLAUDE_TUI.
+PYRY_FAKE_CLAUDE_ESC_ENDS_TURN      when non-empty, enter raw mode and watch stdin
+                                    for a bare ESC (the remote interrupt keystroke,
+                                    supervisor.SendEsc's lone 0x1b); on the first
+                                    one append a canned assistant end_turn line to
+                                    the live JSONL so the Esc CAUSES the turn to
+                                    stop (#794; see § Esc-ends-turn mode). A flag,
+                                    not a path. Coexists with PYRY_FAKE_CLAUDE_TUI.
 ```
 
 No flags, no positional args — env is the entire configuration surface,
 matching how the harness consumer configures the child via `cmd.Env`.
-fakeclaude reads stdin only when `STDIN_LOG` or `TUI` is set; otherwise it
-ignores stdin entirely.
+fakeclaude reads stdin only when `STDIN_LOG`, `TUI`, `MODAL_TRIGGER`, or
+`ESC_ENDS_TURN` is set; otherwise it ignores stdin entirely.
 
 ## TUI mode (#603)
 
@@ -246,6 +257,70 @@ See [codebase/792.md](../codebase/792.md) for the live queue-drain capstone this
 mode feeds (the busy→free choreography, the empty-`queue_state` happens-after
 fence, the ordered vacuous-pass guards).
 
+## Esc-ends-turn mode (#794)
+
+`PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` makes the **remote interrupt keystroke itself**
+end the running turn — the harness piece behind the live interrupt capstone
+([codebase/794.md](../codebase/794.md)). The interrupt path routes a phone
+`interrupt` frame → `handleInterrupt` → `supervisor.SendEsc()` → a **lone `0x1b`**
+into the supervised child's stdin. In this mode fakeclaude detects that bare ESC
+and appends one canned `end_turn` line to the live session JSONL, so the daemon's
+structured-turn producer maps it to a `turn_end` — making the Esc the **cause** of
+the turn ending. (Reusing #792's *file*-driven busy→idle flip would instead let an
+"interrupt stopped the turn" assertion pass **vacuously** — the idle would come
+from a file, not the Esc.)
+
+When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
+
+| Moment | Action | Effect |
+|---|---|---|
+| startup | `enterRawMode()` (like modal mode) | a lone ESC with no line terminator reaches `read()` verbatim (canonical discipline would otherwise withhold it) |
+| stdin read containing a bare ESC | `containsBareESC(buf)` → set `escPending` (signal only) | stdin reader flags the interrupt without touching `f` |
+| main poll loop, `escPending.Swap(true)`, one-shot `escEnded` | `appendTurnEnd(f)`: write `interruptEndTurnLine` + `f.Sync()` | producer tails it → `EventKindJsonlEndOfTurn` → `TurnEnd` → `turn_end` to the phone |
+
+- **A bare ESC is unambiguously the interrupt.** The stdin stream carries exactly
+  three ESC sources — bracketed-paste open (`ESC[200~`), close (`ESC[201~`), and
+  the interrupt's lone `0x1b`. Both paste markers are `0x1b` immediately followed by
+  `'['` (`0x5b`); the delivered prompt content between them is raw-ESC/C0-free
+  (#749's paste-content guard), so it contributes no `0x1b`. `containsBareESC` rule:
+  a `0x1b` at index `i` is bare iff `i == len(buf)-1` (last byte) **or**
+  `buf[i+1] != 0x5b`. The last-byte arm is safe because tui-driver writes each paste
+  marker as one `writeRaw` of the whole `ESC[200~…ESC[201~\r` unit (its `[` always
+  follows in the same read), whereas `SendEsc` writes the lone `0x1b` standalone. A
+  future multi-KiB prompt whose paste could split across reads on a marker's `0x1b`
+  would need a one-byte cross-buffer carry — not built (this harness controls the
+  prompt size). The discriminator is pinned by the untagged `esc_detect_test.go`
+  (`TestContainsBareESC`).
+- **Raw mode is load-bearing.** Unlike TUI mode, this mode enters raw mode: a lone
+  ESC with no newline is withheld indefinitely by the default canonical line
+  discipline, so without raw mode the detector would never see the interrupt (the
+  `turn_end` would silently time out). The raw-mode gate is now
+  `if modalTrig != "" || escEndsTurn { enterRawMode() }`.
+- **Single-writer-of-`f` preserved.** The stdin reader only *signals*
+  (`escPending atomic.Bool`, exactly like `turnPending`); the `appendTurnEnd(f)`
+  write runs on the main poll goroutine. No mutex on `f`, no new writer goroutine.
+- **`interruptEndTurnLine` is a fixed literal** —
+  `{"type":"assistant","message":{"id":"interrupt-end","stop_reason":"end_turn",
+  "content":[{"type":"text","text":"[interrupted]"}]}}` — the exact shape
+  `turnbridge`'s mapper needs for `EventKindJsonlEndOfTurn` (assistant +
+  `stop_reason=="end_turn"` + non-empty text). It is inert JSONL data, **not** a TUI
+  substrate glyph, so the `cmd/substrate-guard` allowlist is unchanged.
+- **One-shot.** The `escEnded` gate bounds the append to one end-of-turn line; a
+  second ESC is inert — a re-interrupt of an already-ended turn is a no-op, matching
+  claude.
+- **Coexists with `PYRY_FAKE_CLAUDE_TUI`** (unlike idle-trigger's mutual exclusion).
+  The two touch different bytes: TUI emits the startup `❯` + one spinner; the ESC
+  detector scans for the bare ESC. The #794 capstone runs both ON. **When unset,
+  byte-identical to today** — every existing caller is unperturbed.
+
+The turn_end carries `StopReason == "end_turn"`, **not** `"cancelled"`: tui-driver
+v1.3.0's `EventKindJsonlEndOfTurn` cannot distinguish an interrupt-stop from a
+normal end (`turnbridge/mapper.go:25-28`), so the mode proves **causality** (the
+`turn_end` exists only because the Esc was received), not stop-reason semantics.
+See [codebase/794.md](../codebase/794.md) for the live interrupt capstone this mode
+feeds (the structural-causality guard, the two ordered `t.Fatal`s, the two-oracle
+belt-and-suspenders).
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -308,10 +383,13 @@ the five tests aligned by #673.
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~375 LOC, package main, no build tag (grew from the #122
-                 rotation core with the #311/#323/#603/#642/#792 optional modes
-                 and the #673 on-turn transcript growth)
+  main.go        ~415 LOC, package main, no build tag (grew from the #122
+                 rotation core with the #311/#323/#603/#642/#792/#794 optional
+                 modes and the #673 on-turn transcript growth)
   main_test.go   ~125 LOC, //go:build e2e
+  modal_detect_test.go  untagged unit test for the modal-class detector
+  esc_detect_test.go    ~60 LOC untagged unit test — TestContainsBareESC pins the
+                        bare-ESC discriminator the #794 Esc-ends-turn mode relies on
 ```
 
 The `internal/e2e/internal/` nesting visibility-fences the binary so
@@ -401,6 +479,7 @@ affect correctness.
   TUI mode: `docs/specs/architecture/603-fakeclaude-tui-idle-thinking-glyphs.md`;
   JSONL-trigger mode: `docs/specs/architecture/642-structured-receive-two-phone-e2e-capstone.md`;
   idle-trigger mode: `docs/specs/architecture/792-queue-drain-two-phone-e2e-capstone.md`;
+  Esc-ends-turn mode: `docs/specs/architecture/794-interrupt-stops-turn-two-phone-e2e-capstone.md`;
   on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
@@ -413,6 +492,9 @@ affect correctness.
 - Idle-trigger per-ticket notes: [codebase/792.md](../codebase/792.md) (the live
   queue-drain capstone this mode feeds — the busy→free window, the empty-`queue_state`
   happens-after fence, and the ordered vacuous-pass guards)
+- Esc-ends-turn per-ticket notes: [codebase/794.md](../codebase/794.md) (the live
+  interrupt capstone this mode feeds — the Esc-drives-the-flip structural causality,
+  the bare-ESC discriminator vs paste markers, the two-oracle belt-and-suspenders)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)
