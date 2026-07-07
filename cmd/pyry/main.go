@@ -52,6 +52,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/debugbundle"
 	"github.com/pyrycode/pyrycode/internal/install"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
@@ -835,7 +836,21 @@ func runSupervisor(args []string) error {
 	// startRelayV2, where the broadcaster exists.
 	qse := newQueueStateEmitterV2(queueChanges, queue.Snapshot, logger)
 
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse)
+	// The debug-bundle producer (#813): a paired `request_debug_bundle` frame
+	// assembles the daemon-global bundle — the recent log ring plus the newest
+	// terminal recording — as one in-memory archive and streams it back over the
+	// encrypted v2 channel. The recordings dir is resolved independent of the
+	// DebugCapture flag: recordings written while capture was on persist and stay
+	// readable after it is turned off, and Assemble marks the recording absent
+	// when the dir is empty. Assemble makes zero log calls and the archive bytes
+	// travel only over the sealed push path — no bundle content reaches any log.
+	bundleRecordingsDir := resolveRecordingsDir()
+	debugBundler := func() ([]byte, error) {
+		archive, _, err := debugbundle.Assemble(bundleRecordingsDir, logRing.Snapshot())
+		return archive, err
+	}
+
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse, debugBundler)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
