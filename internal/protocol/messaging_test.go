@@ -277,6 +277,65 @@ func TestBackfillDonePayload_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestDebugBundleChunkPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "debug_bundle_chunk.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeDebugBundleChunk {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeDebugBundleChunk)
+	}
+
+	var payload DebugBundleChunkPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Seq != 0 {
+		t.Errorf("Seq: got %d, want 0", payload.Seq)
+	}
+	if got, want := string(payload.Data), "hello, bundle"; got != want {
+		t.Errorf("Data: got %q, want %q", got, want)
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
+func TestDebugBundleDonePayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "debug_bundle_done.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeDebugBundleDone {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeDebugBundleDone)
+	}
+
+	var payload DebugBundleDonePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Total != 4 {
+		t.Errorf("Total: got %d, want 4", payload.Total)
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
 func TestModalShownPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "modal_shown.json")
 

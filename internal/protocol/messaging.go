@@ -219,3 +219,38 @@ type DequeueMessagePayload struct {
 	ConversationID string `json:"conversation_id"`
 	QueuedMsgID    uint64 `json:"queued_msg_id"`
 }
+
+// Debug-bundle streaming v2 wire payloads (#812, docs/protocol-mobile.md
+// § Debug bundle). These carry a byte-generic bundle stream over the encrypted
+// mobile channel: one debug_bundle_chunk per cap-respecting slice, then one
+// debug_bundle_done marking completion. Binary → phone direction; wire
+// vocabulary only. The chunker, the streaming primitive, and the reassembly
+// reference live in internal/relay/v2bundlestream.go; the request verb that
+// drives a stream is sibling #813.
+
+// DebugBundleChunkPayload is the body of an Envelope whose Type ==
+// TypeDebugBundleChunk (docs/protocol-mobile.md § Debug bundle). Binary → phone
+// direction; one ordered slice of a streamed bundle.
+//
+// Seq is 0-based, contiguous, and ascending across a stream — the receiver
+// (ReassembleBundle / the phone) requires the next chunk's Seq to equal the
+// count of chunks already seen, so a reorder, gap, or duplicate fails cleanly
+// rather than corrupting output. Data is the raw bundle slice; []byte
+// auto-encodes as standard base64 via encoding/json, which the phone decodes.
+// The slice is content-bearing bundle bytes — never logged (AC#4).
+type DebugBundleChunkPayload struct {
+	Seq  int    `json:"seq"`
+	Data []byte `json:"data"`
+}
+
+// DebugBundleDonePayload is the body of an Envelope whose Type ==
+// TypeDebugBundleDone (docs/protocol-mobile.md § Debug bundle). Binary → phone
+// direction; the completion marker sent after the last debug_bundle_chunk.
+//
+// Total is the exact number of chunks in the stream. The receiver uses it to
+// detect a truncated stream: a done whose Total does not equal the count of
+// chunks actually received is a count-mismatch error, never accepted as
+// complete.
+type DebugBundleDonePayload struct {
+	Total int `json:"total"`
+}
