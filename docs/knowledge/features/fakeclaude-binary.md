@@ -35,11 +35,17 @@ turn events to the live session JSONL, the **idle-trigger mode**
 window by withholding the startup idle glyph until a trigger fires, and the
 **Esc-ends-turn mode** (`PYRY_FAKE_CLAUDE_ESC_ENDS_TURN`, #794) that watches
 stdin for the remote interrupt's bare ESC and, on finding it, appends one canned
-`end_turn` line so the Esc *causes* the turn to stop, likewise
+`end_turn` line so the Esc *causes* the turn to stop, and the **modal-clear-on-answer
+mode** (`PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER`, #793) that **extends** modal mode
+(`PYRY_FAKE_CLAUDE_MODAL_TRIGGER`, #791 — the permission-prompt raiser): after the modal
+is shown it clears it on the first post-modal stdin byte (the local `pyry attach` head's
+answer keystroke) so tui-driver fires `EventKindPtyModalHidden` and the daemon's #706
+**local** first-answer-wins arm resolves it, likewise
 extend the binary past pure rotation; see [§ Configuration](#configuration--env),
 [§ JSONL-trigger mode](#jsonl-trigger-mode-642),
-[§ Idle-trigger mode](#idle-trigger-mode-792), and
-[§ Esc-ends-turn mode](#esc-ends-turn-mode-794). Whenever the stdin reader is
+[§ Idle-trigger mode](#idle-trigger-mode-792),
+[§ Esc-ends-turn mode](#esc-ends-turn-mode-794), and
+[§ Modal-clear-on-answer mode](#modal-clear-on-answer-mode-793). Whenever the stdin reader is
 active (TUI or `STDIN_LOG`), a delivered turn also triggers **on-turn
 transcript growth** (#673): the live session JSONL grows by one inert line so
 the daemon's #668 transcript-growth commit-confirm observes growth and acks
@@ -102,12 +108,22 @@ PYRY_FAKE_CLAUDE_ESC_ENDS_TURN      when non-empty, enter raw mode and watch std
                                     the live JSONL so the Esc CAUSES the turn to
                                     stop (#794; see § Esc-ends-turn mode). A flag,
                                     not a path. Coexists with PYRY_FAKE_CLAUDE_TUI.
+PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER  when non-empty AND MODAL_TRIGGER is set (a
+                                    no-op otherwise), clear the permission modal on
+                                    the first post-modal stdin byte (the local pyry
+                                    attach head's answer keystroke) — write a
+                                    modal-clearing screen once so tui-driver's class
+                                    transitions Permission->Unknown and the daemon's
+                                    #706 local arm resolves it (#793; see § Modal-
+                                    clear-on-answer mode). A flag, not a path. EXTENDS
+                                    modal mode; byte-identical when unset.
 ```
 
 No flags, no positional args — env is the entire configuration surface,
 matching how the harness consumer configures the child via `cmd.Env`.
-fakeclaude reads stdin only when `STDIN_LOG`, `TUI`, `MODAL_TRIGGER`, or
-`ESC_ENDS_TURN` is set; otherwise it ignores stdin entirely.
+fakeclaude reads stdin only when `STDIN_LOG`, `TUI`, `MODAL_TRIGGER`,
+`ESC_ENDS_TURN`, or `MODAL_CLEAR_ON_ANSWER` is set; otherwise it ignores stdin
+entirely.
 
 ## TUI mode (#603)
 
@@ -321,6 +337,62 @@ See [codebase/794.md](../codebase/794.md) for the live interrupt capstone this m
 feeds (the structural-causality guard, the two ordered `t.Fatal`s, the two-oracle
 belt-and-suspenders).
 
+## Modal-clear-on-answer mode (#793)
+
+Modal mode (`PYRY_FAKE_CLAUDE_MODAL_TRIGGER`, #791) raises a permission prompt
+(`modalScreen`, the `"Do you want to proceed?"` anchor) and **never clears it** — enough
+for #791, whose phone answers and whose daemon **remote** arm broadcasts the dismissal
+regardless of claude's screen. But the #706 **local** first-answer-wins arm
+(`handleModalHidden`) is `EventKindPtyModalHidden`-driven, and that event fires only on a
+genuine `Permission→Unknown` screen transition. `PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER`
+(#793) closes that gap: after the modal is shown it clears it on the local head's answer
+keystroke, making the keystroke the **cause** of the Hidden event — the harness piece
+behind the live two-head first-answer-wins capstone
+([codebase/793.md](../codebase/793.md)). (Reusing #791's fake unchanged would leave the
+local arm dead; changing `MODAL_TRIGGER` itself to clear would race #791's remote arm on
+the same `modal_id` — hence a **new** default-off env.)
+
+When `PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER` is set **and** `MODAL_TRIGGER` is set (it is
+a no-op without modal mode):
+
+| Moment | Action | Effect |
+|---|---|---|
+| stdin read (any bytes) | `clearPending.Store(true)` (signal only, never touches stdout or `f`) | mirrors `turnPending`/`escPending` — the reader flags, the main goroutine acts |
+| main poll loop, `modalShown && !modalCleared && clearPending.Swap(false)` | `clearModalScreen()` → `writeStdout(modalClearScreen)` + fsync, set one-shot `modalCleared` | `DetectModalClass` Permission→Unknown → merge loop fires `EventKindPtyModalHidden` → #706 local arm `Resolve`s → `modal_dismissed{local}` |
+
+- **The `modalShown` gate defers the clear to a post-modal keystroke.** `clearPending` is
+  set on every read, but the main-loop short-circuit leaves it latched until the modal is
+  up, then fires on the first post-modal byte — a pre-modal keystroke cannot clear early.
+- **`modalClearScreen = strings.Repeat("\r\n", 16) + string(idleGlyph)`.** The 16 blank
+  lines (`modalClearScrollRows`) scroll the `"Do you want to proceed?"` anchor above the
+  bottom `permissionRegionRows` (12) window `DetectModalClass` scans (the fixed 40-row
+  `DefaultPtyRows` grid — `DetectModalClass` always renders at 40×120 regardless of the
+  PTY's live, possibly attach-resized, dimensions). The **trailing idle glyph is
+  load-bearing, not decoration**: `trimGridText` drops trailing empty rows, so a
+  newline-only clear screen collapses back and the anchor re-enters the detection window,
+  still classifying as Permission — a non-empty final row pins the grid height.
+- **Single-writer discipline preserved.** The stdin reader only signals (`clearPending
+  atomic.Bool`); `clearModalScreen` runs on the main poll goroutine (modal mode emits no
+  spinner, so the main goroutine is the sole stdout writer). No mutex on `f`, no new writer
+  goroutine — the same shape as `turnPending`/`escPending`.
+- **One-shot** via `modalCleared`; a second keystroke is inert.
+- **No new glyph, no allowlist change.** `modalClearScreen` reuses the already-declared
+  `idleGlyph` (`❯`), so the `cmd/substrate-guard` seal is untouched. **When unset,
+  byte-identical to today** — #791 sets only `MODAL_TRIGGER` and its fake never clears, so
+  its remote arm stays unaffected.
+
+**De-risk the fixture harness-free.** `TestFakeClaude_ModalClearScreenReturnsToNonPermission`
+(untagged, in `modal_detect_test.go`) asserts `DetectModalClass(modalScreen+modalClearScreen)
+!= Permission` — feeding the concatenated bytes to a fresh detector reproduces the daemon's
+sequential-write vt10x state deterministically, so it predicts the live `Permission→Unknown`
+transition in milliseconds. A non-clearing fixture (too few newlines, or a newline-only
+screen `trimGridText` collapses) fails here rather than timing out inside a slow live-daemon
+run. The original `modalScreen == Permission` assertion (#791) is unchanged.
+
+See [codebase/793.md](../codebase/793.md) for the live two-head first-answer-wins capstone
+this mode feeds (the local `pyry attach` head bound before the modal is raised, the two
+ordered observe-positives gating the loser-no-op, the `dismissed_local` live audit oracle).
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -383,9 +455,9 @@ the five tests aligned by #673.
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~415 LOC, package main, no build tag (grew from the #122
-                 rotation core with the #311/#323/#603/#642/#792/#794 optional
-                 modes and the #673 on-turn transcript growth)
+  main.go        ~440 LOC, package main, no build tag (grew from the #122
+                 rotation core with the #311/#323/#603/#642/#791/#792/#793/#794
+                 optional modes and the #673 on-turn transcript growth)
   main_test.go   ~125 LOC, //go:build e2e
   modal_detect_test.go  untagged unit test for the modal-class detector
   esc_detect_test.go    ~60 LOC untagged unit test — TestContainsBareESC pins the
@@ -480,6 +552,7 @@ affect correctness.
   JSONL-trigger mode: `docs/specs/architecture/642-structured-receive-two-phone-e2e-capstone.md`;
   idle-trigger mode: `docs/specs/architecture/792-queue-drain-two-phone-e2e-capstone.md`;
   Esc-ends-turn mode: `docs/specs/architecture/794-interrupt-stops-turn-two-phone-e2e-capstone.md`;
+  modal-clear-on-answer mode: `docs/specs/architecture/793-two-head-first-answer-wins-e2e-capstone.md`;
   on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
@@ -495,6 +568,10 @@ affect correctness.
 - Esc-ends-turn per-ticket notes: [codebase/794.md](../codebase/794.md) (the live
   interrupt capstone this mode feeds — the Esc-drives-the-flip structural causality,
   the bare-ESC discriminator vs paste markers, the two-oracle belt-and-suspenders)
+- Modal-clear-on-answer per-ticket notes: [codebase/793.md](../codebase/793.md) (the live
+  two-head first-answer-wins capstone this mode feeds — the keystroke-is-the-cause
+  structural causality, the local `pyry attach` head bound before the modal is raised, the
+  two ordered observe-positives, the `dismissed_local` live audit oracle)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)
