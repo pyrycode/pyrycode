@@ -67,6 +67,11 @@ func TestIsV1Compatible(t *testing.T) {
 		// the v2-only interrupt control: an inbound control type an old phone
 		// never sees, so IsV1Compatible must reject it.
 		{"interrupt-rejected", TypeInterrupt, false, ErrUnknownType},
+		// the v2-only debug-bundle streaming vocabulary: outbound binary → phone
+		// chunk/completion events an old phone never receives, so IsV1Compatible
+		// must reject both.
+		{"debug_bundle_chunk-rejected", TypeDebugBundleChunk, false, ErrUnknownType},
+		{"debug_bundle_done-rejected", TypeDebugBundleDone, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +138,9 @@ var v2OnlyTypes = map[string]bool{
 	TypeDequeueMessage: true,
 	// v2 interrupt control.
 	TypeInterrupt: true,
+	// v2 debug-bundle streaming vocabulary.
+	TypeDebugBundleChunk: true,
+	TypeDebugBundleDone:  true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -169,6 +177,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeQueueState, TypeDequeueMessage,
 		// v2 interrupt control.
 		TypeInterrupt,
+		// v2 debug-bundle streaming vocabulary.
+		TypeDebugBundleChunk, TypeDebugBundleDone,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]

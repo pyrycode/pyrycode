@@ -442,6 +442,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`queue_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). Queued-message backlog snapshot (#597 Phase 3). See [Queue](#queue-v2). |
 | **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
 | **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
+| **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
+| **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -700,6 +702,59 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 It carries **no payload** — a bare control frame, with no `conversation_id`, no `modal_id` nonce, no `answer_token`, and no idempotency key. A replayed `interrupt` simply sends another Esc (an Esc with no running turn is a no-op in claude), so no nonce or dedup is needed.
 
 `interrupt` is **gated on the `interactive` capability**: a non-interactive connection's `interrupt` is inert (no Esc). It is **exempt from the per-device permission gate** ([#702](#security-model)) because interrupting one's own paired session is a normal paired-phone action, not a tool-permission decision. Any interactive paired phone can interrupt the single live claude — there is no per-connection conversation binding for interrupt, consistent with the broadcast fan-out model (a user's paired devices are one trust domain, per the [Security model](#security-model)). It is **not** part of the reconnect-replay ring and needs no correlation key.
+
+### Debug bundle (v2)
+
+A paired client can request a **debug bundle** — a session's evidence archive (the
+most-recent terminal `.cast` recording plus a daemon log-ring snapshot), assembled
+in-memory by the daemon (#811). The bundle is content-bearing and routinely
+exceeds one AEAD frame (a real `.cast` recording alone exceeds 65535 bytes), so
+the daemon **streams** it as ordered, cap-respecting chunks ending in a completion
+marker rather than trying to fit it in a single reply. Split from #803; the
+streaming transport is #812, the request verb that triggers it is #813.
+
+The stream rides the manager's own **asynchronous** push path (`StreamBundle` →
+`Push` → drain), the same path every other unsolicited binary → phone frame uses —
+**not** the synchronous request/reply handler path, whose 8-slot outbound buffer
+(drained only after the handler returns) would deadlock on a multi-chunk send.
+Both frame types are outbound **binary → phone** and are **not** in `v1TypeSet` —
+an old phone never receives them.
+
+#### `debug_bundle_chunk`
+
+Direction **binary → phone** (outbound). One ordered slice of the bundle.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `seq` | integer | 0-based, contiguous, ascending chunk index. The receiver requires the next chunk's `seq` to equal the count of chunks already seen, so a reorder, gap, or duplicate is detected — never silently accepted. |
+| `data` | string (base64) | The raw bundle slice for this chunk, standard-base64-encoded. The phone base64-decodes and appends it. Each chunk's raw size is bounded (≈48000 B) so the sealed `noise_msg` ciphertext — base64 ×4/3 + envelope wrapper + 16 B AEAD tag — stays under the 65535-byte cap. |
+
+#### `debug_bundle_done`
+
+Direction **binary → phone** (outbound). The completion marker, sent after the
+last `debug_bundle_chunk`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `total` | integer | The exact number of `debug_bundle_chunk` frames in this stream. The receiver uses it to detect a **truncated** stream: a `done` whose `total` ≠ the count of chunks actually received is a count-mismatch error, never accepted as complete. |
+
+**Reassembly & integrity.** The receiver reassembles by appending each chunk's
+decoded `data` in `seq` order, stopping at `debug_bundle_done` once `total` chunks
+have arrived. It **fails cleanly** (never emits corrupted or partial output) on an
+out-of-order / gap / duplicate `seq`, a `total` mismatch, or a missing marker.
+Two independent integrity nets guard the stream: the AEAD (ChaChaPoly) already
+guarantees per-frame *content* integrity on the wire, and `seq` + `total` add
+*structural* gap / reorder / truncation detection. A **one-chunk** stream is valid
+(a small bundle emits one `debug_bundle_chunk` + one `debug_bundle_done{total:1}`);
+an empty bundle emits zero chunks + `debug_bundle_done{total:0}`. Interleaved
+non-bundle frames (e.g. an `assistant_delta`) are filtered by type and ignored.
+
+**Content hygiene.** The bundle carries session content (recording + logs); the
+chunk framing and completion marker are sealed under the Noise channel like every
+other `noise_msg`, and the daemon never writes the streamed bytes to its logs.
+*Who* may request a bundle and any per-request authorization are the request
+verb's (#813) concern — the streaming transport faithfully seals whatever blob it
+is handed to an already-authenticated, open conn.
 
 ## Backfill semantics
 

@@ -253,3 +253,26 @@ const (
 const (
 	TypeInterrupt = "interrupt" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )
+
+// Mobile Protocol v2 debug-bundle streaming vocabulary (#812, split from #803;
+// docs/protocol-mobile.md § Debug bundle). A content-bearing debug bundle
+// (assembled by #811) routinely exceeds one AEAD frame, so the daemon streams it
+// to a paired phone as ordered, cap-respecting chunks ending in a completion
+// marker. debug_bundle_chunk carries one base64 slice of the bundle with a
+// 0-based contiguous seq; debug_bundle_done carries the exact chunk count so the
+// phone detects a truncated stream. Both ride the manager's asynchronous push
+// path (StreamBundle → Push → drainOnce), never the synchronous handler-reply
+// channel.
+//
+// Both are outbound binary → phone v2 events an old phone must never receive.
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// offer the outbound event to an old phone, violating the v1/v2 boundary. The
+// drift detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; these two live in the latter.
+//
+// This ticket (#812) delivers the streaming primitive unwired; the request verb
+// that drives it for the debug bundle is sibling #813.
+const (
+	TypeDebugBundleChunk = "debug_bundle_chunk" // binary → phone, outbound v2 bundle chunk
+	TypeDebugBundleDone  = "debug_bundle_done"  // binary → phone, outbound v2 bundle completion marker
+)
