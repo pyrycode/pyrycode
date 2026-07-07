@@ -272,30 +272,33 @@ func TestRun_NetworkFailureDetected(t *testing.T) {
 	}
 }
 
+// TestRun_MidRun_ModalAndBannerDetection asserts a mid-run trust-folder modal
+// or network-failure detection is Warn+continue, not fatal (#816). The
+// mid_trust / mid_network_failure fixtures emit the detector event after the
+// prompt lands and then wedge (no end-of-turn), so Run does NOT return the
+// sentinel; the run instead ends via the PTY-quiet watchdog, and the mid-run
+// detection's terminal detail survives onto the wedge trailer (first-wins,
+// beating the watchdog's own "watchdog: …" detail). The startup-abort contract
+// is covered separately by TestRun_TrustModalDetected /
+// TestRun_NetworkFailureDetected.
 func TestRun_MidRun_ModalAndBannerDetection(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name       string
 		mode       string
-		want       error
-		substring  string
 		wantReason string
 	}{
 		{
 			name:       "trust modal mid-run",
 			mode:       "mid_trust",
-			want:       ErrTrustModalDetected,
-			substring:  "#469's MarkWorkdirTrusted",
 			wantReason: "trust_modal_detected",
 		},
-		// mcp failure banner mid-run is intentionally absent: an MCP banner
-		// is non-fatal (see TestRun_McpFailureNonFatal). Trust-modal and
-		// network-failure remain fatal mid-run.
+		// mcp failure banner mid-run is intentionally absent: an MCP banner is
+		// non-fatal and covered by TestRun_McpFailureNonFatal. Trust-modal and
+		// network-failure are now non-fatal mid-run too (#816).
 		{
 			name:       "network failure mid-run",
 			mode:       "mid_network_failure",
-			want:       ErrNetworkFailure,
-			substring:  "claude API unreachable",
 			wantReason: "network_failure_detected",
 		},
 	}
@@ -305,25 +308,42 @@ func TestRun_MidRun_ModalAndBannerDetection(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr bytes.Buffer
 			cfg := helperRunCfg(t, tc.mode, &stdout, &stderr, "")
+			// The demoted path lets the fixture wedge (no end-of-turn): after
+			// the mid-run detection the run ends via the PTY-quiet watchdog.
+			// PromptCommitTimeout must be short — the fixture writes the anchor
+			// right after the prompt lands, then never commits, so with the
+			// default 3s commit window Run's event loop (and the watchdog) don't
+			// start until QuietFor already exceeds a short PTYQuietLimit and the
+			// watchdog wins the first-wins SetTerminalDetail race. A 200ms commit
+			// window starts the event loop fast: it detects the on-grid anchor in
+			// ~one 50ms poll, ~2s before the watchdog fires, so the detection's
+			// terminal detail wins.
+			cfg.PromptCommitTimeout = 200 * time.Millisecond
+			cfg.WatchdogTick = 50 * time.Millisecond
+			cfg.WatchdogTrackerOpts = tuidriver.TrackerOpts{
+				PTYQuietLimit:      2 * time.Second,
+				SpinnerFreezeLimit: 2 * time.Second,
+			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
 			err := Run(ctx, cfg)
-			if err == nil {
-				t.Fatalf("Run: got nil, want %v", tc.want)
+			if errors.Is(err, ErrTrustModalDetected) || errors.Is(err, ErrNetworkFailure) {
+				t.Fatalf("Run: got fatal sentinel %v, want non-fatal warn-and-continue", err)
 			}
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("Run: err = %v, want errors.Is(err, %v)", err, tc.want)
+			if err != nil {
+				t.Fatalf("Run: err = %v, want nil (watchdog-fire collapse)", err)
 			}
-			if !strings.Contains(err.Error(), tc.substring) {
-				t.Errorf("err message missing %q substring: %q", tc.substring, err.Error())
-			}
-			// The mid-run bypass returns now label the trailer's terminal_reason
-			// instead of leaving it blank, so the wedge names itself in the
-			// dispatcher comment rather than surfacing as `Agent error ()`.
-			if tr := parseTrailer(t, stdout.Bytes()); tr.TerminalReason != tc.wantReason {
+			// The demoted branch still records the terminal detail, which
+			// survives onto the wedge trailer: the run ends without an
+			// end-of-turn, so ExitReasonError surfaces the detail (is_error).
+			tr := parseTrailer(t, stdout.Bytes())
+			if tr.TerminalReason != tc.wantReason {
 				t.Errorf("terminal_reason = %q, want %q", tr.TerminalReason, tc.wantReason)
+			}
+			if !tr.IsError {
+				t.Error("trailer.is_error = false, want true (run still fails via the watchdog, just not via the fatal sentinel)")
 			}
 		})
 	}
