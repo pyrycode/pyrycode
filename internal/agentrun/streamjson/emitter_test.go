@@ -390,7 +390,10 @@ func TestTrailer_Error(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	tr := lastTrailer(t, buf.Bytes())
-	if tr.Subtype != "error_during_execution" || tr.TerminalReason != "" || !tr.IsError {
+	// An error trailer with no recorded terminal detail no longer serialises a
+	// blank terminal_reason: the chokepoint in Close defaults it to
+	// "unclassified" so no exit path can produce an empty `Agent error ()`.
+	if tr.Subtype != "error_during_execution" || tr.TerminalReason != "unclassified" || !tr.IsError {
 		t.Errorf("error trailer: %+v", tr)
 	}
 }
@@ -484,6 +487,11 @@ func TestTrailer_DefaultErrorFallback_NoEOT(t *testing.T) {
 	tr := lastTrailer(t, buf.Bytes())
 	if tr.Subtype != "error_during_execution" {
 		t.Errorf("default-no-EOT trailer subtype = %q, want error_during_execution", tr.Subtype)
+	}
+	// The no-classified-reason fallback fills terminal_reason rather than
+	// leaving it blank (the chokepoint guarantee).
+	if tr.TerminalReason != "unclassified" {
+		t.Errorf("default-no-EOT terminal_reason = %q, want unclassified", tr.TerminalReason)
 	}
 }
 

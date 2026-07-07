@@ -65,6 +65,29 @@
 //	                               whose startup idle glyph would defeat the
 //	                               busy window. Default off — when unset, no
 //	                               watch and startup behaviour is unchanged.
+//	PYRY_FAKE_CLAUDE_MODAL_TRIGGER optional path watched in parallel with the
+//	                               others. When set, fakeclaude emits the idle
+//	                               glyph (U+276F) once at startup — a baseline
+//	                               non-modal screen, so tui-driver classifies the
+//	                               child as Unknown/idle — and never the thinking
+//	                               spinner. On the trigger file's first appearance
+//	                               it writes a permission-modal screen once
+//	                               (fsync'd) whose bottom region carries the exact
+//	                               "Do you want to proceed?" anchor, then removes
+//	                               the trigger. tui-driver's merge loop detects the
+//	                               Unknown->Permission class transition on the next
+//	                               poll tick, so the daemon's #798 modal producer
+//	                               surfaces a modal_shown to interactive phones.
+//	                               One-shot: later trigger drops are ignored, and
+//	                               the fake never clears the modal or reads the
+//	                               answer keystroke for coordination (each #791
+//	                               test raises exactly one modal and ends). Used by
+//	                               the remote-permission e2e (#791). Mutually
+//	                               exclusive with PYRY_FAKE_CLAUDE_TUI and
+//	                               PYRY_FAKE_CLAUDE_IDLE_TRIGGER, whose startup
+//	                               spinner / busy window would perturb the baseline.
+//	                               Default off — when unset, no watch and startup
+//	                               behaviour is unchanged.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -81,6 +104,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -92,9 +117,27 @@ const (
 	envJSONLTrigger      = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
 	envTUI               = "PYRY_FAKE_CLAUDE_TUI"
 	envIdleTrigger       = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
+	envModalTrigger      = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
 	assistantMaxBytes    = 64 * 1024
 	pollInterval         = 50 * time.Millisecond
 )
+
+// modalScreen is the compact plaintext permission-modal screen fakeclaude writes
+// on the modal trigger's first appearance (envModalTrigger). Its bottom region
+// carries the exact anchor tui-driver's DetectModalClass keys on for the
+// permission class and no higher-priority anchor (no "Manage MCP servers",
+// "Agents"+tab, "Enter to select", "Quick safety check", or /-prefixed picker
+// row), so a rendered snapshot of it classifies as ModalClassPermission — the
+// sole requirement, because the producer's permission option set is fixed and
+// screen-independent (only the Title is lifted from the screen). It carries no
+// numbered options, separator, or marker. Emitted after the startup idle glyph
+// so the class transitions Unknown->Permission. This file is on the
+// cmd/substrate-guard allowlist; note the "Do you want to proceed?" phrase is
+// not itself a guarded substrate token (only the TUI glyphs above are), so this
+// literal is benign — the allowlist covers the idle-glyph reuse.
+const modalScreen = "Tool request: run a shell command\r\n" +
+	"\r\n" +
+	"Do you want to proceed?\r\n"
 
 // idleGlyph and spinnerGlyph are claude's TUI substrate runes that
 // tui-driver's IsIdle / IsThinking detect (U+276F at idle, U+273B while
@@ -140,6 +183,17 @@ func main() {
 	trig := mustEnv(envTrigger)
 
 	tui := os.Getenv(envTUI) != ""
+	modalTrig := os.Getenv(envModalTrigger)
+
+	// Modal mode puts stdin into raw mode (as the real claude TUI does) BEFORE the
+	// stdin reader starts, so a modal-resolution keystroke reaches read() verbatim
+	// and unbuffered: the deny-on-timeout actuation is a lone ESC (0x1b) with no
+	// line terminator, which the default canonical line discipline would withhold
+	// indefinitely, and a "2\r" answer would otherwise surface as "2\n" (ICRNL).
+	// Scoped to modal mode so every other mode stays byte-identical to today.
+	if modalTrig != "" {
+		enterRawMode()
+	}
 
 	// The stdin reader is the only stdin consumer (a second reader would race
 	// it for bytes). It runs when a stdin-log path is configured OR TUI mode is
@@ -156,16 +210,20 @@ func main() {
 
 	f := openSession(dir, initU)
 
-	// TUI mode: seed the idle-prompt glyph once. tui-driver's rolling snapshot
-	// buffer holds the single write, so IsIdle stays true until the spinner
-	// lands — no continuous redraw needed (each restored flow drives exactly
-	// one idle->thinking transition).
-	if tui {
+	// TUI mode and modal-trigger mode both seed the idle-prompt glyph once at
+	// startup. tui-driver's rolling snapshot buffer holds the single write, so
+	// IsIdle stays true (and the modal class stays Unknown) until a later write
+	// lands — no continuous redraw needed. For modal mode the baseline idle glyph
+	// is what makes the later modal-screen write a genuine Unknown->Permission
+	// class transition (envModalTrigger is mutually exclusive with envTUI, so this
+	// never double-emits).
+	if tui || modalTrig != "" {
 		writeStdout(idleGlyph)
 	}
 
 	rotated := false
 	idled := false
+	modalShown := false
 	for {
 		if !rotated {
 			if _, err := os.Stat(trig); err == nil {
@@ -183,6 +241,16 @@ func main() {
 		if idleTrig != "" && !idled {
 			if emitIdleIfTriggered(idleTrig) {
 				idled = true
+			}
+		}
+		// Modal-trigger mode (envModalTrigger): the child came up idle (startup
+		// idle glyph above); on the trigger's first appearance write the
+		// permission-modal screen once so tui-driver detects an Unknown->Permission
+		// transition and the daemon surfaces modal_shown. One-shot, mirroring the
+		// rotation / idle gates above.
+		if modalTrig != "" && !modalShown {
+			if emitModalIfTriggered(modalTrig) {
+				modalShown = true
 			}
 		}
 		// A delivered turn (stdin bytes, signalled by the reader) grows the live
@@ -268,6 +336,45 @@ func emitIdleIfTriggered(path string) bool {
 	writeStdout(idleGlyph)
 	_ = os.Remove(path)
 	return true
+}
+
+// emitModalIfTriggered checks for the modal-trigger file
+// (PYRY_FAKE_CLAUDE_MODAL_TRIGGER). When present it writes the permission-modal
+// screen (modalScreen) to os.Stdout once — flipping tui-driver's detected modal
+// class from Unknown to Permission so the daemon's #798 modal producer surfaces a
+// modal_shown to interactive phones — removes the trigger, and reports true. When
+// absent it reports false. Gated in main by a one-shot `modalShown` bool exactly
+// like the `idled` / `rotated` gates, so the screen is written at most once; the
+// fake never clears the modal afterwards (each #791 test raises one modal and
+// ends, and the answer/deny keystrokes are fire-and-forget with no dismissal
+// re-read, so nothing blocks on the modal disappearing). Runs only on the main
+// poll goroutine, so it never races the stdin reader for os.Stdout (in modal mode
+// — envTUI off — the reader emits no spinner, so the main goroutine is the sole
+// stdout writer). Errors are silenced, mirroring the sibling emit* helpers: the
+// e2e asserts downstream (the phone receives modal_shown), never on the write.
+func emitModalIfTriggered(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	writeStdout([]byte(modalScreen))
+	_ = os.Remove(path)
+	return true
+}
+
+// enterRawMode puts fakeclaude's stdin (the PTY slave) into raw mode, matching
+// what the real claude TUI does on startup. The tui-driver PTY leaves the slave
+// in the default canonical (cooked) discipline, which buffers input until a line
+// terminator and maps CR->NL: a bare ESC keystroke (the deny-on-timeout
+// actuation, a lone 0x1b) would be withheld from read() indefinitely, and a
+// "2\r" answer would surface as "2\n". Raw mode (VMIN=1, ICANON/ICRNL cleared)
+// delivers every keystroke byte immediately and verbatim, so the stdin log
+// observes exactly what the supervisor wrote — "2\r" for an answer, a bare 0x1b
+// for the ESC deny. Best-effort, mirroring the rest of this stand-in's
+// silent-error posture: on failure the default discipline remains and the modal
+// e2e's ESC assertion flags it downstream. The prior terminal state is
+// intentionally not restored — the PTY is torn down with the process.
+func enterRawMode() {
+	_, _ = term.MakeRaw(int(os.Stdin.Fd()))
 }
 
 // appendTurnGrowth grows the current session JSONL f by one inert line so the

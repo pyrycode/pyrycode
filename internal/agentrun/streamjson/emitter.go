@@ -372,8 +372,23 @@ func (e *Emitter) Close() error {
 	// ptyrunner recorded, so the wedge trailer names its termination path
 	// instead of an empty `()`. Completion / max_turns already carry a
 	// non-empty terminal_reason and are left untouched.
-	if terminal == "" && e.terminalDetail != "" {
-		terminal = e.terminalDetail
+	//
+	// Chokepoint guarantee: an error trailer must NEVER serialise a blank
+	// terminal_reason. Close is the single point every trailer passes through,
+	// so defaulting here covers every current and future exit path — including
+	// one that returns without recording a detail. A blank `Agent error ()` in
+	// the dispatcher is exactly the un-diagnosable wedge this removes; the Warn
+	// flags that some exit reached Close with no cause recorded, which is a bug
+	// signal in its own right.
+	if terminal == "" {
+		switch {
+		case e.terminalDetail != "":
+			terminal = e.terminalDetail
+		default:
+			terminal = "unclassified"
+			e.log.Warn("streamjson: run ended with no classified terminal_reason",
+				"session_id", e.sessionID, "stop_reason", e.lastStopReason)
+		}
 	}
 
 	tr := trailer{
