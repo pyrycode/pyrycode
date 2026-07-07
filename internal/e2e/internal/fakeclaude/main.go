@@ -111,6 +111,28 @@
 //	                               spinner, this scans for the bare ESC). Default off
 //	                               — when unset, fakeclaude is byte-identical to its
 //	                               prior behaviour.
+//	PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER  optional; EXTENDS modal mode (requires
+//	                               PYRY_FAKE_CLAUDE_MODAL_TRIGGER — a no-op otherwise).
+//	                               When set, after the modal has been shown the first
+//	                               stdin bytes fakeclaude reads (the local pyry attach
+//	                               head's answer keystroke) cause it to write a
+//	                               modal-clearing screen once (modalClearScreen): a run
+//	                               of newlines that scrolls the "Do you want to
+//	                               proceed?" anchor above the permission detection
+//	                               window plus a trailing idle glyph, so tui-driver's
+//	                               detected class transitions Permission->Unknown and
+//	                               the merge loop fires EventKindPtyModalHidden. That
+//	                               makes the local keystroke the CAUSE of the modal
+//	                               vanishing, which the daemon's #706 local arm resolves
+//	                               into modal_dismissed{local} (the two-head
+//	                               first-answer-wins e2e #793). The stdin reader only
+//	                               signals (clearPending); the main goroutine writes the
+//	                               clear, preserving the single-writer discipline.
+//	                               One-shot: a second keystroke is inert. Gated on the
+//	                               modal having been shown, so a pre-modal keystroke
+//	                               cannot clear early. Byte-identical to today when
+//	                               unset — #791 sets only MODAL_TRIGGER and its fake
+//	                               never clears, so its remote arm stays unaffected.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -124,6 +146,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,6 +165,7 @@ const (
 	envIdleTrigger      = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
 	envModalTrigger     = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
 	envEscEndsTurn      = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
+	envModalClearOnAns  = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
 	assistantMaxBytes   = 64 * 1024
 	pollInterval        = 50 * time.Millisecond
 )
@@ -175,6 +199,27 @@ var (
 	spinnerGlyph = []byte("✻") // U+273B thinking spinner
 )
 
+// modalClearScrollRows is how many blank lines clearModalScreen scrolls after the
+// permission modal so the "Do you want to proceed?" anchor leaves the bottom
+// permissionRegionRows (12) window DetectModalClass scans. After modalScreen the
+// anchor sits at rendered row 2 and the trailing idle glyph lands at row 3+N,
+// making an (N+4)-row grid whose bottom-12 window starts at row N-8 — so any N>10
+// excludes the anchor. 16 leaves comfortable margin and never scrolls the 40-row
+// (DefaultPtyRows) screen. Pinned by modal_detect_test.go.
+const modalClearScrollRows = 16
+
+// modalClearScreen is what clearModalScreen writes (once, on the local answer
+// keystroke) in modal-clear-on-answer mode (envModalClearOnAns) to make the
+// permission modal vanish: modalClearScrollRows blank lines that scroll the anchor
+// above the bottom-12 detection window, then the idle glyph as a non-empty final
+// row. The trailing glyph is load-bearing — without a non-empty last row
+// trimGridText drops the blank lines and the anchor re-enters the window, so the
+// screen would still classify as Permission. Rendered after modalScreen the
+// combined screen must classify as NOT-Permission (the modal_detect_test.go
+// assertion). Reuses the idle glyph, so it is covered by this file's existing
+// cmd/substrate-guard allowlist entry.
+var modalClearScreen = strings.Repeat("\r\n", modalClearScrollRows) + string(idleGlyph)
+
 // stdoutMu serializes every write to os.Stdout. In TUI mode the main goroutine
 // (startup idle glyph + emitAssistantIfTriggered) and the stdin goroutine
 // (thinking spinner) both write os.Stdout; without serialization a spinner
@@ -197,6 +242,14 @@ var turnPending atomic.Bool
 // exactly like turnPending: the reader never writes f (single-writer-of-f). Set
 // only in Esc-ends-turn mode (envEscEndsTurn); untouched otherwise.
 var escPending atomic.Bool
+
+// clearPending signals — from the stdin-reader goroutine to the main poll loop —
+// that stdin bytes arrived (the local pyry attach head's answer keystroke) in
+// modal-clear-on-answer mode (envModalClearOnAns), so the main goroutine can clear
+// the permission modal (clearModalScreen). Signal only, exactly like turnPending /
+// escPending: the reader never writes stdout or f (single-writer discipline). Set
+// only in clear-on-answer mode; untouched otherwise.
+var clearPending atomic.Bool
 
 // interruptEndTurnLine is the canned claude-format assistant end_turn JSONL line
 // appendTurnEnd writes when Esc-ends-turn mode (envEscEndsTurn) detects the remote
@@ -225,6 +278,12 @@ func main() {
 	tui := os.Getenv(envTUI) != ""
 	modalTrig := os.Getenv(envModalTrigger)
 	escEndsTurn := os.Getenv(envEscEndsTurn) != ""
+	// clearOnAnswer extends modal mode: after the modal is shown, the first stdin
+	// bytes (the local pyry attach head's answer keystroke) clear the modal so
+	// tui-driver fires EventKindPtyModalHidden and the daemon's #706 local arm
+	// resolves it. Only meaningful with envModalTrigger; a no-op (byte-identical)
+	// otherwise, so setting it without modal mode changes nothing.
+	clearOnAnswer := modalTrig != "" && os.Getenv(envModalClearOnAns) != ""
 
 	// Modal mode and Esc-ends-turn mode both put stdin into raw mode (as the real
 	// claude TUI does) BEFORE the stdin reader starts, so a lone ESC keystroke — the
@@ -243,8 +302,8 @@ func main() {
 	// logging so the spinner fires even if STDIN_LOG is unset, and Esc-ends-turn
 	// mode needs it to scan for the bare interrupt ESC.
 	logPath := os.Getenv(envStdinLog)
-	if logPath != "" || tui || escEndsTurn {
-		startStdinReader(logPath, tui, escEndsTurn)
+	if logPath != "" || tui || escEndsTurn || clearOnAnswer {
+		startStdinReader(logPath, tui, escEndsTurn, clearOnAnswer)
 	}
 
 	asstTrig := os.Getenv(envAssistantTrigger)
@@ -267,6 +326,7 @@ func main() {
 	rotated := false
 	idled := false
 	modalShown := false
+	modalCleared := false
 	escEnded := false
 	for {
 		if !rotated {
@@ -313,6 +373,17 @@ func main() {
 		if escEndsTurn && !escEnded && escPending.Swap(false) {
 			appendTurnEnd(f)
 			escEnded = true
+		}
+		// Modal-clear-on-answer mode (envModalClearOnAns): the stdin reader
+		// signalled the local head's answer keystroke arrived. Gated on modalShown
+		// so a pre-modal keystroke cannot clear early — the short-circuit leaves
+		// clearPending set until the modal is up, then fires on the first post-modal
+		// keystroke. Clear the permission modal once so tui-driver fires
+		// EventKindPtyModalHidden and the daemon's #706 local arm broadcasts
+		// modal_dismissed{local}. One-shot via modalCleared, mirroring the gates above.
+		if clearOnAnswer && modalShown && !modalCleared && clearPending.Swap(false) {
+			clearModalScreen()
+			modalCleared = true
 		}
 		if asstTrig != "" {
 			emitAssistantIfTriggered(asstTrig)
@@ -398,10 +469,12 @@ func emitIdleIfTriggered(path string) bool {
 // class from Unknown to Permission so the daemon's #798 modal producer surfaces a
 // modal_shown to interactive phones — removes the trigger, and reports true. When
 // absent it reports false. Gated in main by a one-shot `modalShown` bool exactly
-// like the `idled` / `rotated` gates, so the screen is written at most once; the
-// fake never clears the modal afterwards (each #791 test raises one modal and
-// ends, and the answer/deny keystrokes are fire-and-forget with no dismissal
-// re-read, so nothing blocks on the modal disappearing). Runs only on the main
+// like the `idled` / `rotated` gates, so the screen is written at most once. By
+// default the fake never clears the modal afterwards (each #791 test raises one
+// modal and ends, and the answer/deny keystrokes are fire-and-forget with no
+// dismissal re-read, so nothing blocks on the modal disappearing); only
+// modal-clear-on-answer mode (envModalClearOnAns, the #793 two-head e2e) clears it
+// on the local answer keystroke via clearModalScreen. Runs only on the main
 // poll goroutine, so it never races the stdin reader for os.Stdout (in modal mode
 // — envTUI off — the reader emits no spinner, so the main goroutine is the sole
 // stdout writer). Errors are silenced, mirroring the sibling emit* helpers: the
@@ -413,6 +486,18 @@ func emitModalIfTriggered(path string) bool {
 	writeStdout([]byte(modalScreen))
 	_ = os.Remove(path)
 	return true
+}
+
+// clearModalScreen writes modalClearScreen to os.Stdout once (fsync'd) so
+// tui-driver's detected class transitions Permission->Unknown and the merge loop
+// fires EventKindPtyModalHidden — the daemon's #706 local arm then Resolve()s the
+// modal and broadcasts modal_dismissed{local}. Runs ONLY on the main poll
+// goroutine (like emitModalIfTriggered): the stdin reader only signals via
+// clearPending, never writes stdout, so the single-writer discipline holds.
+// Best-effort per writeStdout; the e2e asserts downstream (the phone receives
+// modal_dismissed), never on the write itself.
+func clearModalScreen() {
+	writeStdout([]byte(modalClearScreen))
 }
 
 // enterRawMode puts fakeclaude's stdin (the PTY slave) into raw mode, matching
@@ -517,8 +602,11 @@ func openSession(dir, uuid string) *os.File {
 // content to os.Stdout: TUI mode writes only the fixed spinner glyph, never the
 // phone-controlled prompt bytes. When escEndsTurn is true it also scans each read
 // for a bare ESC (the remote interrupt keystroke) and, on finding one, signals
-// the main goroutine via escPending — signal only, never writing f.
-func startStdinReader(logPath string, tui, escEndsTurn bool) {
+// the main goroutine via escPending — signal only, never writing f. When
+// clearOnAnswer is true it likewise signals the main goroutine via clearPending on
+// every read (the local head's answer keystroke), so the main loop can clear the
+// permission modal — signal only, never writing stdout.
+func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer bool) {
 	var logF *os.File
 	if logPath != "" {
 		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -542,6 +630,13 @@ func startStdinReader(logPath string, tui, escEndsTurn bool) {
 				// end_turn line. Signal only (single-writer-of-f), like turnPending.
 				if escEndsTurn && containsBareESC(buf[:n]) {
 					escPending.Store(true)
+				}
+				// Clear-on-answer mode: signal the main goroutine that stdin bytes
+				// arrived so it can clear the modal. The main loop's modalShown gate
+				// restricts the actual clear to a post-modal keystroke. Signal only
+				// (single-writer discipline), like escPending.
+				if clearOnAnswer {
+					clearPending.Store(true)
 				}
 				if logF != nil {
 					if _, werr := logF.Write(buf[:n]); werr != nil {

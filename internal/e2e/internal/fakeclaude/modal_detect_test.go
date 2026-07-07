@@ -22,3 +22,21 @@ func TestFakeClaude_ModalScreenClassifiesAsPermission(t *testing.T) {
 			got, tuidriver.ModalClassPermission, tuidriver.Render([]byte(modalScreen), 0, 0))
 	}
 }
+
+// TestFakeClaude_ModalClearScreenReturnsToNonPermission is the mandated fast
+// de-risk for the #793 clear-on-answer fixture. Feeding modalScreen+modalClearScreen
+// to a fresh DetectModalClass reproduces the daemon's sequential-write vt10x state
+// deterministically, so it predicts the live Permission->Unknown transition the
+// local answer keystroke must cause — in milliseconds, with no harness. A
+// clear-screen that still classifies as Permission (e.g. too few newlines, so the
+// "Do you want to proceed?" anchor stays inside the bottom permissionRegionRows
+// window) is caught here rather than inside a slow live-daemon e2e run. Untagged
+// (no //go:build e2e) so plain `go test ./.../fakeclaude/...` exercises it.
+func TestFakeClaude_ModalClearScreenReturnsToNonPermission(t *testing.T) {
+	combined := []byte(modalScreen + modalClearScreen)
+	got := tuidriver.DetectModalClass(combined)
+	if got == tuidriver.ModalClassPermission {
+		t.Fatalf("DetectModalClass(modalScreen+modalClearScreen) = %q, want NOT %q; the clear screen must scroll the permission anchor out of the bottom-%d detection window or the #793 local answer never fires EventKindPtyModalHidden.\ncombined rendered:\n%s",
+			got, tuidriver.ModalClassPermission, 12, tuidriver.Render(combined, 0, 0))
+	}
+}
