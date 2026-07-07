@@ -200,11 +200,17 @@ type Config struct {
 //   - fmt.Errorf("ptyrunner: spawn: %w", err) on Spawn failure.
 //   - fmt.Errorf("ptyrunner: wait idle: %w", err) on a non-ctx WaitUntil
 //     error (defensive — WaitUntil only returns ctx.Cause today).
-//   - ErrTrustModalDetected / ErrMcpFailureBanner / ErrNetworkFailure on
-//     the corresponding post-idle one-shot detection OR on a mid-run
+//   - ErrTrustModalDetected / ErrNetworkFailure only from the startup/idle
+//     WaitReady classification (before prompt delivery), where a trust or
+//     network failure means the run genuinely cannot start. A mid-run
 //     EventKindPty{ModalShown(trust-folder),McpFailureShown,NetworkFailureShown}
-//     transition surfaced on the Session.Events stream. The detection
-//     cadence is tui-driver's DefaultPollInterval (50 ms).
+//     transition on the Session.Events stream is instead logged (Warn) and
+//     consumed — the run continues (#816); the detector cadence is
+//     tui-driver's DefaultPollInterval (50 ms). A mid-run trust/network
+//     detection's terminal detail (trust_modal_detected /
+//     network_failure_detected) still lands on the wedge trailer if the run
+//     subsequently fails to reach end-of-turn. ErrMcpFailureBanner is never
+//     returned — an MCP banner is non-fatal at idle and mid-run alike.
 //   - fmt.Errorf("ptyrunner: deliver prompt: %w", err) on a DeliverPrompt
 //     PTY-write failure.
 //   - fmt.Errorf("ptyrunner: emitter: %w", err) on streamjson.New failure
@@ -518,21 +524,29 @@ func Run(ctx context.Context, cfg Config) (err error) {
 loop:
 	for ev := range ch {
 		switch ev.Kind {
+		// All three mid-run detector events below are Warn + continue, never
+		// fatal (#816). Since tui-driver v1.8.0 the trust/network detectors are
+		// structural (dialog option-row shape / live "Unable to connect to API"
+		// line), so the forgery justification for the old fatal short-circuit is
+		// gone; the real fatal net is the PTY-quiet watchdog plus the
+		// dispatcher's wall-clock cap, and claude self-retries a network blip on
+		// its own backoff. A false kill on one mid-stream match is worse than a
+		// late watchdog stop. SetTerminalDetail is first-wins and surfaces only
+		// on an ExitReasonError wedge: a run that recovers to end-of-turn ignores
+		// it; one that then wedges gets a trailer naming the detection (beating
+		// the watchdog's own, less-specific detail). The startup/idle WaitReady
+		// aborts (above) stay fatal — a failure before the run begins genuinely
+		// means it cannot start.
 		case tuidriver.EventKindPtyModalShown:
 			if ev.Modal == tuidriver.ModalClassTrustFolder {
-				logger.Warn("ptyrunner: trust modal detected")
+				logger.Warn("ptyrunner: trust modal detected mid-run — continuing (non-fatal)")
 				emitter.SetTerminalDetail("trust_modal_detected")
-				return ErrTrustModalDetected
 			}
 		case tuidriver.EventKindPtyMcpFailureShown:
-			// Non-fatal (see the idle-time check above): keep consuming
-			// events so the turn can complete despite an ambient MCP server
-			// being offline.
-			logger.Warn("ptyrunner: mcp failure banner detected — continuing (non-fatal)")
+			logger.Warn("ptyrunner: mcp failure banner detected mid-run — continuing (non-fatal)")
 		case tuidriver.EventKindPtyNetworkFailureShown:
-			logger.Warn("ptyrunner: network failure detected")
+			logger.Warn("ptyrunner: network failure detected mid-run — continuing (non-fatal)")
 			emitter.SetTerminalDetail("network_failure_detected")
-			return ErrNetworkFailure
 		case tuidriver.EventKindJsonlEntry:
 			if eerr := emitter.Emit(ev.Entry); eerr != nil && emitErr == nil {
 				emitErr = eerr
