@@ -275,25 +275,28 @@ func TestRun_NetworkFailureDetected(t *testing.T) {
 func TestRun_MidRun_ModalAndBannerDetection(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		mode      string
-		want      error
-		substring string
+		name       string
+		mode       string
+		want       error
+		substring  string
+		wantReason string
 	}{
 		{
-			name:      "trust modal mid-run",
-			mode:      "mid_trust",
-			want:      ErrTrustModalDetected,
-			substring: "#469's MarkWorkdirTrusted",
+			name:       "trust modal mid-run",
+			mode:       "mid_trust",
+			want:       ErrTrustModalDetected,
+			substring:  "#469's MarkWorkdirTrusted",
+			wantReason: "trust_modal_detected",
 		},
 		// mcp failure banner mid-run is intentionally absent: an MCP banner
 		// is non-fatal (see TestRun_McpFailureNonFatal). Trust-modal and
 		// network-failure remain fatal mid-run.
 		{
-			name:      "network failure mid-run",
-			mode:      "mid_network_failure",
-			want:      ErrNetworkFailure,
-			substring: "claude API unreachable",
+			name:       "network failure mid-run",
+			mode:       "mid_network_failure",
+			want:       ErrNetworkFailure,
+			substring:  "claude API unreachable",
+			wantReason: "network_failure_detected",
 		},
 	}
 	for _, tc := range cases {
@@ -315,6 +318,12 @@ func TestRun_MidRun_ModalAndBannerDetection(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.substring) {
 				t.Errorf("err message missing %q substring: %q", tc.substring, err.Error())
+			}
+			// The mid-run bypass returns now label the trailer's terminal_reason
+			// instead of leaving it blank, so the wedge names itself in the
+			// dispatcher comment rather than surfacing as `Agent error ()`.
+			if tr := parseTrailer(t, stdout.Bytes()); tr.TerminalReason != tc.wantReason {
+				t.Errorf("terminal_reason = %q, want %q", tr.TerminalReason, tc.wantReason)
 			}
 		})
 	}

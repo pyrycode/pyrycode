@@ -481,6 +481,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		Logger: logger,
 	})
 	if err != nil {
+		emitter.SetTerminalDetail("budget_init_error")
 		return fmt.Errorf("ptyrunner: budget: %w", err)
 	}
 	defer counter.Stop()
@@ -498,6 +499,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		if isCtxErr(runCtx, werr) {
 			return nil
 		}
+		emitter.SetTerminalDetail("jsonl_wait_error")
 		return fmt.Errorf("ptyrunner: wait jsonl: %w", werr)
 	}
 	// tracker is the same watchdog Tracker constructed above (line 467);
@@ -507,6 +509,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 		if isCtxErr(runCtx, err) {
 			return nil
 		}
+		emitter.SetTerminalDetail("events_open_error")
 		return fmt.Errorf("ptyrunner: events: %w", err)
 	}
 
@@ -518,6 +521,7 @@ loop:
 		case tuidriver.EventKindPtyModalShown:
 			if ev.Modal == tuidriver.ModalClassTrustFolder {
 				logger.Warn("ptyrunner: trust modal detected")
+				emitter.SetTerminalDetail("trust_modal_detected")
 				return ErrTrustModalDetected
 			}
 		case tuidriver.EventKindPtyMcpFailureShown:
@@ -527,6 +531,7 @@ loop:
 			logger.Warn("ptyrunner: mcp failure banner detected — continuing (non-fatal)")
 		case tuidriver.EventKindPtyNetworkFailureShown:
 			logger.Warn("ptyrunner: network failure detected")
+			emitter.SetTerminalDetail("network_failure_detected")
 			return ErrNetworkFailure
 		case tuidriver.EventKindJsonlEntry:
 			if eerr := emitter.Emit(ev.Entry); eerr != nil && emitErr == nil {
