@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"big context accumulated over many turns"}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"before compaction"}],"usage":{"input_tokens":140000,"cache_creation_input_tokens":4000,"cache_read_input_tokens":5000,"output_tokens":1000}}}
+{"type":"user","message":{"role":"user","content":"continue after auto-compaction shrank the context"}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"after compaction"}],"usage":{"input_tokens":25000,"cache_creation_input_tokens":1500,"cache_read_input_tokens":3000,"output_tokens":500}}}
