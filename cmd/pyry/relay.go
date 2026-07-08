@@ -341,6 +341,11 @@ func startRelayV2(
 		// one Esc through the sealed supervisor keystroke surface. sup
 		// (*supervisor.Supervisor) satisfies Interrupter via SendEsc (#726).
 		Interrupter: sup,
+		// Inbound new_session seam (#831): an interactive `new_session` frame
+		// routes a /clear through the sealed supervisor keystroke surface. sup
+		// (*supervisor.Supervisor) satisfies SessionStarter via StartNewSession
+		// (#830).
+		SessionStarter: sup,
 		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
 		// frame removes a not-yet-drained queued message by id from the live
 		// daemon queue; the OnChange seam Remove fires drives the #722 producer to
