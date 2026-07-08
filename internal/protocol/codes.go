@@ -28,6 +28,9 @@ const (
 	// Relay errors.
 	CodeRelayNoServer         = "relay.no_server"
 	CodeRelayServerIDConflict = "relay.server_id_conflict"
+
+	// Session errors.
+	CodeSessionNotFound = "session.not_found"
 )
 
 // Envelope-type constants — wire values for Envelope.Type
@@ -334,4 +337,36 @@ const (
 // v1TypeSet and v2OnlyTypes; this constant lives in the latter.
 const (
 	TypeNewSession = "new_session" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+)
+
+// Mobile Protocol v2 set-session-settings vocabulary (#844, split from #841;
+// docs/protocol-mobile.md § Session settings). A paired client sends
+// set_session_settings to change one session's per-session model / reasoning
+// effort / YOLO (bypass-permissions); the daemon confirms with
+// session_settings_updated. The request payload (SetSessionSettingsPayload,
+// settings.go) uses per-field pointers so an omitted setting decodes distinctly
+// from one explicitly set to its zero value — nil means "leave unchanged".
+//
+// This ticket (#844) is wire vocabulary ONLY — these two Type* constants, the
+// two payload structs, and CodeSessionNotFound. The handler that intercepts the
+// request, gates on the interactive capability, validates, persists via
+// sessions.Pool.UpdateSettings (#840), and emits the reply is sibling #845.
+// Splitting vocabulary from handler follows the established v2 precedent
+// (#701→#703, #720→#723, #812→#813, #656→#657).
+//
+// Two natures in one cluster. set_session_settings is an inbound phone → binary
+// *control* envelope the v2 session manager intercepts at
+// internal/relay/v2session.go's dispatchAppFrame before internal/dispatch.Route
+// (like TypeModalAnswer / TypeNewSession); there is NO dispatch.Route handler
+// for it. session_settings_updated is an outbound binary → phone reply an old
+// phone must never receive.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// either route the inbound control envelope to the handler chain or offer the
+// outbound reply to an old phone, violating the v1/v2 boundary. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; these two live in the latter.
+const (
+	TypeSetSessionSettings     = "set_session_settings"     // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+	TypeSessionSettingsUpdated = "session_settings_updated" // binary → phone, outbound v2 reply confirming the change
 )
