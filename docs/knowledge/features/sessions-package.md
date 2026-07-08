@@ -406,12 +406,14 @@ so a consumer falls back to daemon defaults — no error path.
 `SessionSettings` is a value type, so the return is a snapshot copy with no
 aliasing of the pool's live field.
 
-Ships **unwired** — nothing calls it yet. The consumer is #848, which
-populates the `screen_snapshot` reply's new `model`/`effort`/`yolo` fields
-(see [protocol-package.md § Screen-snapshot payloads](protocol-package.md)).
+Shipped unwired in #847; wired by #848, which populates the `screen_snapshot`
+reply's `model`/`effort`/`yolo` fields via a closure over this accessor built
+in `cmd/pyry/main.go` and threaded through `V2SessionConfig.SnapshotSettings`
+(see [v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)
+and [protocol-package.md § Screen-snapshot payloads](protocol-package.md)).
 Deliberately has no conversation-keyed variant: the snapshot source is always
 the bootstrap session, so settings-source == snapshot-source by construction.
-See [codebase/847.md](../codebase/847.md).
+See [codebase/847.md](../codebase/847.md) and [codebase/848.md](../codebase/848.md).
 
 ### Pool.Create (1.1a-A2)
 
