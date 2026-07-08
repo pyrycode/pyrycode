@@ -623,6 +623,9 @@ Direction **binary → phone**. The one-shot text picture answering a `request_s
 | `conversation_id` | string | Conversation this snapshot belongs to. |
 | `text` | string | The current screen rendered to **plain text only — never raw terminal control codes** (preserves ADR 025's no-raw-bytes invariant). Multi-line. |
 | `ts` | RFC3339 | When the snapshot was rendered. |
+| `model` | string | Bootstrap session's per-session model override; **empty string = inherited daemon default** (no override). |
+| `effort` | string | Bootstrap session's per-session reasoning-effort override; **empty string = inherited daemon default** (no override). |
+| `yolo` | bool | Bypass-permissions (`--dangerously-skip-permissions`) on/off; **`false` = permissions enforced** (the fail-safe default). |
 
 ### Modal (v2)
 

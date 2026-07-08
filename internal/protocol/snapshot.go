@@ -43,8 +43,20 @@ type RequestSnapshotPayload struct {
 // escape sequences. TS records when the snapshot was rendered; it is a
 // time.Time whose monotonic-clock reading strips on JSON marshal, so callers
 // MUST compare it with time.Time.Equal, never == or reflect.DeepEqual.
+//
+// Model, Effort, and YOLO reflect the bootstrap session's persisted
+// per-session settings so the phone can render the current model / reasoning
+// effort / permissions posture. Model and Effort are the per-session override;
+// an empty string means "inherited daemon default, no override". YOLO is
+// bypass-permissions (--dangerously-skip-permissions) on/off; false means
+// permissions enforced (the fail-safe default). All three carry no omitempty
+// (like the fields above) so an empty model/effort stays distinguishable from
+// unset and yolo:false is explicit on the wire rather than dropped.
 type ScreenSnapshotPayload struct {
 	ConversationID string    `json:"conversation_id"`
 	Text           string    `json:"text"`
 	TS             time.Time `json:"ts"`
+	Model          string    `json:"model"`
+	Effort         string    `json:"effort"`
+	YOLO           bool      `json:"yolo"`
 }

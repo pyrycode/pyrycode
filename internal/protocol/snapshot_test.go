@@ -67,8 +67,37 @@ func TestScreenSnapshotPayload_RoundTrip(t *testing.T) {
 	if !payload.TS.Equal(wantTS) {
 		t.Errorf("TS: got %v, want %v", payload.TS, wantTS)
 	}
+	// The settings-snapshot fields carry representative non-default values in
+	// the fixture; assert they survive unmarshal before the canonical
+	// round-trip below pins the full wire shape.
+	if payload.Model != "opus" {
+		t.Errorf("Model: got %q, want %q", payload.Model, "opus")
+	}
+	if payload.Effort != "high" {
+		t.Errorf("Effort: got %q, want %q", payload.Effort, "high")
+	}
+	if !payload.YOLO {
+		t.Errorf("YOLO: got %v, want true", payload.YOLO)
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestScreenSnapshotPayload_ZeroSettingsFieldsPresent pins the
+// "distinguishable from unset" contract a consumer relies on: with no
+// omitempty, the zero values (model "", effort "", yolo false) stay explicitly
+// on the wire and are not dropped. An empty model/effort means "inherited
+// default, no per-session override"; yolo:false means permissions enforced.
+func TestScreenSnapshotPayload_ZeroSettingsFieldsPresent(t *testing.T) {
+	out, err := json.Marshal(ScreenSnapshotPayload{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"model":""`, `"effort":""`, `"yolo":false`} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Errorf("zero-value field %s should stay on the wire; got %s", want, out)
+		}
+	}
 }
 
 // TestSnapshotPayloads_EmptyConversationID pins the empty-conversation_id
