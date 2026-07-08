@@ -735,11 +735,12 @@ type ScreenSnapshotPayload struct {
   compares `json.Compact`ed bytes (key order preserved, not sorted), so the fixture's
   payload key order must match struct declaration order exactly — `screen_snapshot.json`
   carries representative non-default values (`model:"opus"`, `effort:"high"`, `yolo:true`).
-  Ships **unwired**: the existing keyed-literal handler (`internal/relay/v2session.go:1719`)
-  keeps compiling untouched and serializes the three fields at their zero values; #848
-  (blocked on this ticket) populates them from `Pool.DefaultSettings()`. Not
-  `security-sensitive` — read-only reflection of existing, non-secret session config.
-  See [codebase/847.md](../codebase/847.md).
+  Shipped unwired here (the handler serialized the three fields at their zero values);
+  wired by #848, which populates them from `Pool.DefaultSettings()` via the optional
+  `SnapshotSettings` seam on `V2SessionConfig`
+  ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
+  Not `security-sensitive` — read-only reflection of existing, non-secret session config.
+  See [codebase/847.md](../codebase/847.md) and [codebase/848.md](../codebase/848.md).
 
 Two golden round-trips in `snapshot_test.go` decode each fixture through `Envelope`
 → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently via the shared

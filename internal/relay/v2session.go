@@ -620,6 +620,23 @@ type V2SessionConfig struct {
 	// a conversations.Registry membership check.
 	KnownConversation func(conversationID string) bool
 
+	// SnapshotSettings reports the current model / effort / YOLO for the session
+	// whose screen the Snapshotter renders (the bootstrap), so
+	// handleRequestSnapshot can populate the screen_snapshot reply's settings
+	// fields (#848). Optional: nil ⇒ the handler reports the effective defaults
+	// (empty model/effort, yolo:false) — preserving the pre-#848 zero-value
+	// behaviour. Primitive-typed (three scalars) so internal/relay imports
+	// neither internal/sessions nor its SessionSettings type; production wires a
+	// closure over *sessions.Pool.DefaultSettings. Empty model/effort mean
+	// "inherited daemon default, no per-session override"; yolo:false means
+	// permissions enforced.
+	//
+	// Read-only reflection of an existing, non-secret control — no authz
+	// decision, no mutation, no input parsing (contrast SettingsUpdater below,
+	// the write path, which is security-sensitive because it mutates the YOLO
+	// control from untrusted input).
+	SnapshotSettings func() (model, effort string, yolo bool)
+
 	// ModalResolver resolves inbound modal_answer / modal_cancel control
 	// frames. Optional: when nil, both are inert no-ops (the modal bridge is
 	// simply unwired — foreground, or pre-#708 before the producer is live).
@@ -1716,10 +1733,23 @@ func (m *V2SessionManager) handleRequestSnapshot(ctx context.Context, s *V2Sessi
 		return
 	}
 
+	// Reflect the bootstrap session's persisted model / effort / YOLO (#848). A
+	// nil seam (optional, foreground / unwired) leaves the three at their
+	// defaults — empty model/effort ("inherited daemon default"), yolo:false
+	// (permissions enforced) — byte-identical to the pre-#848 zero-value reply.
+	var model, effort string
+	var yolo bool
+	if m.cfg.SnapshotSettings != nil {
+		model, effort, yolo = m.cfg.SnapshotSettings()
+	}
+
 	snapPayload, err := json.Marshal(protocol.ScreenSnapshotPayload{
 		ConversationID: payload.ConversationID,
 		Text:           text,
 		TS:             time.Now().UTC(),
+		Model:          model,
+		Effort:         effort,
+		YOLO:           yolo,
 	})
 	if err != nil {
 		// ScreenSnapshotPayload is a closed struct of two strings + a time;

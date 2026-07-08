@@ -851,7 +851,25 @@ func runSupervisor(args []string) error {
 		return archive, err
 	}
 
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse, debugBundler, settingsUpdaterAdapter{pool})
+	// The screen-snapshot settings reader (#848): reports the bootstrap session's
+	// persisted model / effort / YOLO so the screen_snapshot reply the phone
+	// already receives can render the current model / reasoning-effort /
+	// permissions posture before offering to change it (desktop#156). Built here,
+	// not in relay.go, so the internal/sessions dependency stays at the
+	// composition root — the closure decodes SessionSettings into three
+	// primitives, so the value crossing into relay.go is a bare
+	// func() (string, string, bool) (same discipline as debugBundler and
+	// settingsUpdaterAdapter). No bootstrap ⇒ defaults, which collapse to the same
+	// wire output as the all-defaults case (empty model/effort, yolo:false).
+	snapshotSettings := func() (model, effort string, yolo bool) {
+		s, ok := pool.DefaultSettings()
+		if !ok {
+			return "", "", false
+		}
+		return s.Model, s.Effort, s.YOLO
+	}
+
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse, debugBundler, settingsUpdaterAdapter{pool}, snapshotSettings)
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}

@@ -108,6 +108,7 @@ func startRelay(
 	qse *queueStateEmitterV2,
 	debugBundler func() ([]byte, error),
 	settings relay.SettingsUpdater,
+	snapshotSettings func() (model, effort string, yolo bool),
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -151,7 +152,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: Mobile Protocol v2 (Noise_IK) enabled — default; set PYRY_MOBILE_V2=0 to force legacy v1")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse, debugBundler, settings)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse, debugBundler, settings, snapshotSettings)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -296,6 +297,7 @@ func startRelayV2(
 	qse *queueStateEmitterV2,
 	debugBundler func() ([]byte, error),
 	settings relay.SettingsUpdater,
+	snapshotSettings func() (model, effort string, yolo bool),
 ) (drain func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
 	if err != nil {
@@ -333,6 +335,17 @@ func startRelayV2(
 			_, ok := convReg.Get(conversations.ConversationID(id))
 			return ok
 		},
+		// Screen-snapshot settings reader (#848): populates the screen_snapshot
+		// reply's model / effort / YOLO fields from the bootstrap session's
+		// persisted settings so the phone can render the current model /
+		// reasoning-effort / permissions posture before offering to change it
+		// (desktop#156). The closure (built at main.go over
+		// *sessions.Pool.DefaultSettings) returns three primitives, so
+		// internal/relay imports neither internal/sessions nor its SessionSettings
+		// type. Read-only reflection — no secret, no authz (contrast
+		// SettingsUpdater below, the write path). nil in foreground / v1 makes the
+		// handler report defaults (empty model/effort, yolo:false).
+		SnapshotSettings: snapshotSettings,
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker
