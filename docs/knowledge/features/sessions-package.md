@@ -354,6 +354,34 @@ explicitly out of scope here and deferred to #826b.
 
 See [codebase/833.md](../codebase/833.md) for the full implementation writeup.
 
+### `Pool.DefaultSettings` (#847)
+
+The read counterpart to `Pool.UpdateSettings` above — a locked accessor that
+surfaces the bootstrap session's currently-persisted `SessionSettings` across
+the package boundary. `SessionInfo` (from `Pool.List()`) does not carry
+`settings`, and `settings` is a private field readable only under `Pool.mu`,
+so a consumer outside `internal/sessions` cannot reach it without this.
+
+```go
+func (p *Pool) DefaultSettings() (SessionSettings, bool)
+```
+
+Mirrors `Default()`'s lock discipline exactly: `p.mu.RLock()`, resolve
+`p.sessions[p.bootstrap]` **fresh** on every call (not cached) so the result
+stays correct across a `RotateID` (which flips `p.bootstrap` under the write
+lock). Returns `(SessionSettings{}, false)` when there is no bootstrap to read
+from (the embedded evicted-bootstrap host, or a zero-value `&Pool{}` map-miss)
+so a consumer falls back to daemon defaults — no error path.
+`SessionSettings` is a value type, so the return is a snapshot copy with no
+aliasing of the pool's live field.
+
+Ships **unwired** — nothing calls it yet. The consumer is #848, which
+populates the `screen_snapshot` reply's new `model`/`effort`/`yolo` fields
+(see [protocol-package.md § Screen-snapshot payloads](protocol-package.md)).
+Deliberately has no conversation-keyed variant: the snapshot source is always
+the bootstrap session, so settings-source == snapshot-source by construction.
+See [codebase/847.md](../codebase/847.md).
+
 ### Pool.Create (1.1a-A2)
 
 The user-facing primitive that ties together every existing seam — `NewID`, `saveLocked`, `RegisterAllocatedUUID`, `supervise`, `Activate` — to mint a fresh non-bootstrap session. One well-tested entry point so downstream callers (Phase 1.1a-B's `sessions.new` verb, future channel-driven auto-mint) don't re-derive the sequence.

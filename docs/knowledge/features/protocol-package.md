@@ -695,6 +695,9 @@ type ScreenSnapshotPayload struct {
     ConversationID string    `json:"conversation_id"`
     Text           string    `json:"text"` // plain rendered text only; never raw control codes
     TS             time.Time `json:"ts"`
+    Model          string    `json:"model"`  // #847: bootstrap session's per-session model override; "" = inherited default
+    Effort         string    `json:"effort"` // #847: bootstrap session's per-session effort override; "" = inherited default
+    YOLO           bool      `json:"yolo"`   // #847: bypass-permissions on/off; false = permissions enforced (fail-safe)
 }
 ```
 
@@ -723,6 +726,20 @@ type ScreenSnapshotPayload struct {
   content to the remote party are the consumer's trust decision — that consumer (the
   screen-snapshot handler child) carries the `security-sensitive` label; this leaf
   declaration does not.
+- **#847 adds `Model`/`Effort`/`YOLO`, always present (no `omitempty`), after `TS`.**
+  They reflect the bootstrap session's persisted `SessionSettings` (`sessions.Pool.DefaultSettings()`,
+  [sessions-package.md § `Pool.DefaultSettings`](sessions-package.md)) so the phone can
+  render the current model / reasoning-effort / permissions posture. Empty `Model`/`Effort`
+  = inherited daemon default (no per-session override); `YOLO: false` = permissions
+  enforced (the fail-safe default). Field order is load-bearing: `roundTripEnvelope`
+  compares `json.Compact`ed bytes (key order preserved, not sorted), so the fixture's
+  payload key order must match struct declaration order exactly — `screen_snapshot.json`
+  carries representative non-default values (`model:"opus"`, `effort:"high"`, `yolo:true`).
+  Ships **unwired**: the existing keyed-literal handler (`internal/relay/v2session.go:1719`)
+  keeps compiling untouched and serializes the three fields at their zero values; #848
+  (blocked on this ticket) populates them from `Pool.DefaultSettings()`. Not
+  `security-sensitive` — read-only reflection of existing, non-secret session config.
+  See [codebase/847.md](../codebase/847.md).
 
 Two golden round-trips in `snapshot_test.go` decode each fixture through `Envelope`
 → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently via the shared

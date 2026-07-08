@@ -891,6 +891,33 @@ func (p *Pool) Default() *Session {
 	return p.sessions[p.bootstrap]
 }
 
+// DefaultSettings returns the bootstrap session's currently-persisted
+// SessionSettings (model, effort, YOLO) plus whether a bootstrap session exists
+// to read from. When none exists (the embedded evicted-bootstrap host, or a
+// zero-value &Pool{} map-miss) it returns (SessionSettings{}, false) so a
+// consumer falls back to the daemon defaults; there is no error path.
+//
+// It resolves p.bootstrap fresh on each call — mirroring Default — so it stays
+// correct across a session-id rotation (RotateID flips p.bootstrap under the
+// write lock). SessionSettings is a value type, so the return is a snapshot
+// copy with no aliasing of the pool's live field.
+//
+// Concurrency: reads sess.settings under p.mu (RLock); does NOT take
+// Session.lcMu — settings is a p.mu-guarded field (the writer UpdateSettings
+// holds p.mu write; the other reader saveLocked holds p.mu), so there is no
+// torn read. This accessor is unavoidable: settings is a private field read
+// only under Pool.mu, so a consumer outside internal/sessions cannot reach it
+// (SessionInfo/List does not carry it).
+func (p *Pool) DefaultSettings() (SessionSettings, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	sess := p.sessions[p.bootstrap]
+	if sess == nil {
+		return SessionSettings{}, false
+	}
+	return sess.settings, true
+}
+
 // Run blocks until ctx is cancelled, supervising every session in the pool,
 // running the rotation watcher (when ClaudeSessionsDir is set) and the
 // conversations auto-archive sweep loop (when ConversationsRegistry is set)
