@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -197,6 +198,30 @@ type Supervisor struct {
 	// dispatch cannot otherwise be unit-tested without a live claude. Immutable
 	// post-New, so the modal methods read it lock-free.
 	keystrokeFn func(sess *tuidriver.Session, k modalKey, choice string) error
+
+	// restartMu guards the live-restart state below (#842). Leaf-only: Restart
+	// releases it before calling the captured cancel, and Run's liveArgs/
+	// setIterCancel take only this lock. Never nested with mu/sessMu/convMu — so
+	// no lock-order edge is added to the Pool.mu → Session.lcMu discipline the
+	// sessions layer relies on.
+	restartMu sync.Mutex
+	// claudeArgs is the live spawn arg list. Initialised in New from
+	// cfg.ClaudeArgs and read (via liveArgs) at the top of each Run iteration
+	// instead of cfg.ClaudeArgs, so Restart can swap the argv a running child
+	// relaunches with. When Restart is never called this is a clone of
+	// cfg.ClaudeArgs and the spawn is byte-identical to the pre-#842 behaviour.
+	claudeArgs []string
+	// iterCancel cancels the current Run iteration's derived ctx; set at
+	// iteration start, cleared (nil) after runOnce returns. Restart calls it to
+	// force the running child to exit so the restart loop relaunches. nil means
+	// no live iteration to interrupt (between iterations, in backoff, or Run not
+	// executing).
+	iterCancel context.CancelFunc
+	// restartCh (buffered 1) carries the "a deliberate restart was requested"
+	// hint. Restart sends on it; Run consumes it either in the post-runOnce
+	// drain (skip backoff) or the backoff-wait select (interrupt the wait) —
+	// exactly once per token. Allocated once in New.
+	restartCh chan struct{}
 }
 
 // State returns a snapshot of the current supervisor state. Safe to call from
@@ -561,16 +586,74 @@ func New(cfg Config) (*Supervisor, error) {
 		log:         cfg.Logger,
 		state:       State{Phase: PhaseStarting},
 		sessReadyCh: make(chan struct{}),
+		claudeArgs:  slices.Clone(cfg.ClaudeArgs),
+		restartCh:   make(chan struct{}, 1),
 	}
 	s.deliverFn = s.deliverViaSession
 	s.keystrokeFn = sendModalKeystroke
 	return s, nil
 }
 
+// Restart swaps the claude spawn args and, if a child is currently running,
+// forces it to exit so the restart loop relaunches with the new args. When no
+// child is running it only swaps the args — they take effect on the session's
+// next spawn (e.g. the next Activate). Non-blocking, fire-and-forget: the
+// supervisor's forever-retry loop guarantees the relaunch (§ crash recovery).
+// Safe from any goroutine.
+//
+// It drives only supervisor-internal state (restartMu, a ctx cancel, a buffered
+// channel); it never touches Pool.mu or Session.lcMu, so the sessions layer can
+// call it after releasing Pool.mu without any lock-order concern (#842).
+//
+// The restartCh hint is always sent (non-blocking): a restart during a run
+// makes the post-runOnce drain skip backoff, and a restart during backoff (no
+// live child to cancel) breaks the backoff wait. Coalescing is correct — two
+// rapid restarts overwrite claudeArgs with the newest value and collapse to the
+// single buffered token, forcing one relaunch with the latest args.
+func (s *Supervisor) Restart(args []string) {
+	s.restartMu.Lock()
+	s.claudeArgs = slices.Clone(args)
+	cancel := s.iterCancel
+	s.restartMu.Unlock()
+
+	// Hint first, then kill, so Run's post-runOnce drain observes the token even
+	// if the child exits the instant it is cancelled.
+	select {
+	case s.restartCh <- struct{}{}:
+	default:
+	}
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// liveArgs returns a clone of the live spawn args under restartMu. Run reads it
+// (rather than cfg.ClaudeArgs) at the top of each iteration so a Restart-swapped
+// argv takes effect on the next spawn.
+func (s *Supervisor) liveArgs() []string {
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+	return slices.Clone(s.claudeArgs)
+}
+
+// setIterCancel publishes (or clears, when c is nil) the current iteration's
+// cancel func under restartMu so Restart can interrupt the running child.
+func (s *Supervisor) setIterCancel(c context.CancelFunc) {
+	s.restartMu.Lock()
+	s.iterCancel = c
+	s.restartMu.Unlock()
+}
+
 // Run supervises the claude child until ctx is cancelled. Each iteration spawns
 // claude in a PTY, streams I/O, and waits for exit. On exit it applies
 // exponential backoff before respawning. The backoff counter resets if a child
 // stayed up longer than Config.BackoffReset.
+//
+// Each iteration runs on a derived ctx (iterCtx) so a Restart can cancel a
+// single child without tearing Run down. Shutdown is therefore detected from
+// the parent ctx (ctx.Err()), not from the child-exit error: an iterCtx-only
+// cancel (a settings restart) falls through to relaunch, while a parent cancel
+// returns. A deliberate restart skips backoff (it is not a crash).
 func (s *Supervisor) Run(ctx context.Context) error {
 	bo := newBackoffTimer(s.cfg.BackoffInitial, s.cfg.BackoffMax, s.cfg.BackoffReset)
 	firstRun := true
@@ -591,7 +674,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		args := buildClaudeArgs(s.cfg.ClaudeArgs, firstRun, s.cfg.ResumeLast)
+		args := buildClaudeArgs(s.liveArgs(), firstRun, s.cfg.ResumeLast)
 
 		start := time.Now()
 		s.log.Info("spawning claude", "args", args, "workdir", s.cfg.WorkDir)
@@ -602,19 +685,35 @@ func (s *Supervisor) Run(ctx context.Context) error {
 				st.NextBackoff = 0
 			})
 		}
-		err := s.runOnce(ctx, args, onSpawn)
+		iterCtx, cancel := context.WithCancel(ctx)
+		s.setIterCancel(cancel)
+		err := s.runOnce(iterCtx, args, onSpawn)
+		cancel()
+		s.setIterCancel(nil)
 		uptime := time.Since(start)
 
-		switch {
-		case errors.Is(err, context.Canceled):
-			return err
-		case err != nil:
+		// Shutdown is a parent-ctx cancel, NOT any child-exit error: an
+		// iterCtx-only cancel (a Restart kill) leaves ctx.Err() nil and falls
+		// through to relaunch. Return value stays a context error for the
+		// graceful-shutdown contract.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if err != nil {
 			s.log.Warn("claude exited", "err", err, "uptime", uptime)
-		default:
+		} else {
 			s.log.Info("claude exited cleanly", "uptime", uptime)
 		}
 
 		firstRun = false
+
+		// A deliberate restart is not a crash: skip backoff and relaunch
+		// immediately with the swapped args.
+		if s.drainRestart() {
+			continue
+		}
+
 		delay := bo.next(uptime)
 
 		s.updateState(func(st *State) {
@@ -630,7 +729,22 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		case <-time.After(delay):
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-s.restartCh:
+			// A restart arrived while the child was already down and we were
+			// waiting out the backoff — relaunch now with the swapped args.
 		}
+	}
+}
+
+// drainRestart non-blockingly consumes a pending deliberate-restart hint,
+// reporting whether one was present. Used post-runOnce to decide whether to
+// skip the crash backoff.
+func (s *Supervisor) drainRestart() bool {
+	select {
+	case <-s.restartCh:
+		return true
+	default:
+		return false
 	}
 }
 

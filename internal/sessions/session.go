@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -108,6 +109,18 @@ func claudeSettingsArgs(s SessionSettings) []string {
 	return args
 }
 
+// spawnArgs composes the full claude spawn argv for the given settings: the
+// settings-free base (spawnBase) plus claudeSettingsArgs(settings). It is the
+// only argv-recompose path outside session construction — the live restart in
+// Pool.UpdateSettings (#842) — and, like construction, routes the settings
+// suffix through claudeSettingsArgs, so the YOLO fail-safe is enforced in
+// exactly one place. Returns a fresh slice that aliases neither spawnBase nor
+// the caller's state; a zero-value settings appends nothing (byte-identical to
+// the base).
+func (s *Session) spawnArgs(settings SessionSettings) []string {
+	return append(slices.Clone(s.spawnBase), claudeSettingsArgs(settings)...)
+}
+
 // Session is one supervised claude instance plus the bridge that mediates its
 // I/O in service mode. As of 1.2c-A each Session owns a lifecycle goroutine
 // (the body of Run) that drives the active↔evicted state machine.
@@ -132,6 +145,16 @@ type Session struct {
 	// under Pool.mu (write); read under Pool.mu by saveLocked (same discipline
 	// as label, NOT under lcMu).
 	settings SessionSettings
+
+	// spawnBase is the settings-free claude spawn argv: the template args plus
+	// any construction-time resume suffix (--session-id <id> for a minted
+	// session), but WITHOUT the claudeSettingsArgs suffix. spawnArgs recomposes
+	// the full argv from this base plus the live settings when a settings change
+	// triggers a live restart (#842). Immutable post-construction, so it is read
+	// without a lock. It never contains a YOLO-derived flag — the bypass flag has
+	// exactly one origin, claudeSettingsArgs — so no persisted-false state can
+	// recompose into a --dangerously-skip-permissions child.
+	spawnBase []string
 
 	// pool is the back-pointer used to persist registry changes after a
 	// state transition. Set once, in Pool.New.

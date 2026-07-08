@@ -328,11 +328,42 @@ re-acquire (`docs/lessons.md` § "Lock order with callback into the host").
 Validating untrusted model/effort values is explicitly **not** this method's
 job — it operates on operator-trusted input; the wire handler (#845, a
 charset/length shape check for `Model`, a closed enum for `Effort`) owns the
-untrusted → trusted crossing. Making a *running* session pick up a change
-without a respawn is also out of scope here (#842); the new values reach
-claude through the existing spawn path (`claudeSettingsArgs`, above) on the
-session's next spawn — for the bootstrap session, its next daemon restart.
-See [codebase/840.md](../codebase/840.md).
+untrusted → trusted crossing. See [codebase/840.md](../codebase/840.md).
+
+**Live-restart on a real change (#842).** After a successful persist of a
+real change (not a no-op, not a failed save), `UpdateSettings` recomposes the
+session's full spawn argv and triggers a live restart of its supervisor —
+so a single client message both persists **and** takes effect on the
+currently-running child, without waiting for the session's next spawn.
+`Session.spawnBase []string` holds the settings-free argv (template/bootstrap
+args + any construction-time resume suffix), set alongside the full
+`ClaudeArgs` at both construction sites (`Pool.New`, `Pool.buildSession`).
+`Session.spawnArgs(settings SessionSettings) []string` —
+`append(slices.Clone(s.spawnBase), claudeSettingsArgs(settings)...)` — is the
+**single** argv-recompose path outside construction, reusing `claudeSettingsArgs`
+verbatim so the YOLO fail-safe has exactly one origin. `UpdateSettings` captures
+`newArgs := sess.spawnArgs(merged)` and `sup := sess.sup` under `Pool.mu`,
+releases the lock, then calls `sup.Restart(newArgs)` — the restart runs
+**outside** `Pool.mu` and never touches `Session.lcMu`.
+
+`Supervisor.Restart(args []string)` (`internal/supervisor`) swaps the live
+spawn args under a leaf `restartMu` and, if a child is currently running,
+forces it to exit (SIGKILL via a per-iteration derived ctx) so the
+supervisor's existing forever-retry loop relaunches it with the new argv,
+resuming the conversation. When no child is running, the swap alone applies
+on the session's next spawn (e.g. its next `Activate`) — which incidentally
+closes a latent gap: a *reused* supervisor (evict → activate within one
+process) previously kept stale baked args across that boundary. `Restart` is
+non-blocking and fire-and-forget by design — see [ADR
+031](../decisions/031-settings-restart-fire-and-forget.md) for why the AC
+"a failed live-apply must not surface as a false success" is satisfied by a
+deterministic kill + the supervisor's retry guarantee rather than a
+synchronous wait. Not-found, no-op, and persist-failure paths in
+`UpdateSettings` all return before `Restart` is ever called — a still-correct
+running child is never disturbed. See [codebase/842.md](../codebase/842.md)
+and `docs/specs/architecture/842-live-restart-on-settings-change.md` (§
+Security review, verdict PASS) for the full design and the argument that the
+YOLO fail-safe survives the restart.
 
 **Security (`security-sensitive` ticket).** `YOLO`'s fail-safe posture — a
 missing or corrupt on-disk value can never enable bypass — rests entirely on

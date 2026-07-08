@@ -391,15 +391,19 @@ func New(cfg Config) (*Pool, error) {
 		lcState = stateEvicted
 	}
 
+	// base is the settings-free bootstrap argv; bootstrapArgs appends the
+	// settings suffix. Clone before appending: today's code aliases
+	// cfg.Bootstrap.ClaudeArgs directly, and we must not mutate the caller's
+	// slice. With zero settings the appended slice has identical elements
+	// (byte-identical argv, AC #5). base is stored on the bootstrap Session so a
+	// live restart (#842) can recompose full argv from the persisted settings.
+	base := slices.Clone(cfg.Bootstrap.ClaudeArgs)
+	bootstrapArgs := append(slices.Clone(base), claudeSettingsArgs(settings)...)
 	supCfg := supervisor.Config{
-		ClaudeBin:  cfg.Bootstrap.ClaudeBin,
-		WorkDir:    cfg.Bootstrap.WorkDir,
-		ResumeLast: cfg.Bootstrap.ResumeLast,
-		// Clone before appending: today's code aliases cfg.Bootstrap.ClaudeArgs
-		// directly, and we must not mutate the caller's slice. With zero
-		// settings the appended slice has identical elements (byte-identical
-		// argv, AC #5).
-		ClaudeArgs:     append(slices.Clone(cfg.Bootstrap.ClaudeArgs), claudeSettingsArgs(settings)...),
+		ClaudeBin:      cfg.Bootstrap.ClaudeBin,
+		WorkDir:        cfg.Bootstrap.WorkDir,
+		ResumeLast:     cfg.Bootstrap.ResumeLast,
+		ClaudeArgs:     bootstrapArgs,
 		Bridge:         cfg.Bootstrap.Bridge,
 		Logger:         cfg.Logger,
 		BackoffInitial: cfg.Bootstrap.BackoffInitial,
@@ -446,6 +450,7 @@ func New(cfg Config) (*Pool, error) {
 		lastActiveAt: lastActiveAt,
 		bootstrap:    true,
 		settings:     settings,
+		spawnBase:    base,
 		idleTimeout:  idleTimeout,
 		removedCh:    make(chan struct{}), // never closed: bootstrap is ErrCannotRemoveBootstrap
 		lcState:      lcState,
@@ -577,16 +582,26 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 // entry. A no-op update (every present field already equal to the stored value,
 // or every field nil) writes nothing to disk, keeping the registry mtime
 // stable. On a saveLocked failure the in-memory settings are rolled back so
-// memory stays consistent with disk. The new values reach claude via #833's
-// spawn path on the session's next spawn.
+// memory stays consistent with disk.
 //
-// Lock order: p.mu (write). Does not take Session.lcMu — Session.settings is
-// guarded by p.mu (the only other reader is saveLocked, under p.mu).
+// After a successful persist of a real change, the session's supervisor is
+// live-restarted (#842): its spawn argv is recomposed from the persisted
+// settings and, if a child is running, that child is killed so the supervisor
+// relaunches it — resuming the conversation — with the new model / effort /
+// YOLO. For an evicted session the argv swap alone applies on the next Activate.
+// The restart runs OUTSIDE p.mu (Restart is non-blocking and drives only
+// supervisor-internal state, so the Pool.mu → Session.lcMu order is untouched)
+// and only on a real change: an unknown id, a no-op update, and a persist
+// failure all skip it, so a still-correct running child is never disturbed.
+//
+// Lock order: p.mu (write), released before Restart. Does not take Session.lcMu
+// — Session.settings is guarded by p.mu (the only other reader is saveLocked,
+// under p.mu); spawnBase and sup are immutable post-construction.
 func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	sess, ok := p.sessions[id]
 	if !ok {
+		p.mu.Unlock()
 		return ErrSessionNotFound
 	}
 	merged := sess.settings
@@ -600,14 +615,25 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 		merged.YOLO = *update.YOLO
 	}
 	if merged == sess.settings {
+		p.mu.Unlock()
 		return nil
 	}
 	prev := sess.settings
 	sess.settings = merged
 	if err := p.saveLocked(); err != nil {
 		sess.settings = prev
+		p.mu.Unlock()
 		return err
 	}
+	// Recompose argv + capture the supervisor while under p.mu (both reads are of
+	// state that is either immutable — spawnBase, sup — or the merged value we
+	// just persisted). Release p.mu BEFORE Restart so no blocking work and no
+	// supervisor-internal lock is taken under it.
+	newArgs := sess.spawnArgs(merged)
+	sup := sess.sup
+	p.mu.Unlock()
+
+	sup.Restart(newArgs)
 	return nil
 }
 
@@ -1121,8 +1147,12 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 // the zero value in this ticket; #826b plumbs real values through the mint path.
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	tpl := p.sessionTpl
-	args := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
-	args = append(args, claudeSettingsArgs(settings)...)
+	// base is the settings-free argv (template + resume suffix); full appends the
+	// settings suffix. Storing base on the Session lets a live restart recompose
+	// full argv from the persisted settings (#842). Clone before the second
+	// append so base and full never share a backing array.
+	base := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
+	args := append(slices.Clone(base), claudeSettingsArgs(settings)...)
 	var bridge *supervisor.Bridge
 	if tpl.Bridge != nil {
 		bridge = supervisor.NewBridge(p.log)
@@ -1173,6 +1203,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		lastActiveAt: now,
 		bootstrap:    false,
 		settings:     settings,
+		spawnBase:    base,
 		pool:         p,
 		idleTimeout:  idleTimeout,
 		removedCh:    make(chan struct{}),

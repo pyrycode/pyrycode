@@ -256,6 +256,29 @@ func TestHelperProcess(t *testing.T) {
 		// Block until killed. Use sleep instead of select{} to avoid
 		// Go's deadlock detector panicking in the child process.
 		time.Sleep(24 * time.Hour)
+	case "record_args":
+		// Append this spawn's argv-after-"--" as one line to
+		// GO_TEST_HELPER_ARGS_FILE, so a test observing that file across
+		// restarts can assert which args each spawn was launched with. Then
+		// either exit 0 (GO_TEST_HELPER_EXIT=1 — used to exercise the backoff
+		// paths) or block until killed (the default — used for the swap /
+		// coalescing paths where the child must stay alive to be restarted).
+		path := os.Getenv("GO_TEST_HELPER_ARGS_FILE")
+		if path == "" {
+			fmt.Fprintln(os.Stderr, "record_args: GO_TEST_HELPER_ARGS_FILE unset")
+			os.Exit(99)
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "record_args: open: %v\n", err)
+			os.Exit(99)
+		}
+		fmt.Fprintln(f, strings.Join(helperArgsAfterDoubleDash(), " "))
+		_ = f.Close()
+		if os.Getenv("GO_TEST_HELPER_EXIT") == "1" {
+			os.Exit(0)
+		}
+		time.Sleep(24 * time.Hour)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_TEST_HELPER_MODE: %q\n", mode)
 		os.Exit(99)
