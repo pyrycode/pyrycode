@@ -425,13 +425,32 @@ func New(cfg Config) (*Pool, error) {
 	// false-acks the first mobile turn lost to a --continue restart race. The
 	// --session-id buildSession path keeps the nil-resolver Committed behaviour
 	// (see spec § Out of scope).
+	//
+	// The baseline tracks the transcript the daemon's OWN bootstrap child holds
+	// open (probe + live child PID) rather than the newest file by mtime (#838), so
+	// a second claude writing into the same shared sessions dir cannot redirect the
+	// baseline onto its own newer transcript. pidFn must read the LIVE PID on every
+	// resolve — the child respawns with a fresh PID across backoff — but supCfg is
+	// copied by value into supervisor.New below, before the supervisor (the PID
+	// source) exists. So pidFn closes over a late-bound holder that we assign once
+	// New has built the supervisor; the resolve callers (WriteUserTurn) run long
+	// after New returns, so the read strictly follows the assignment.
+	var bootstrapSup *supervisor.Supervisor
 	if cfg.ClaudeSessionsDir != "" {
-		supCfg.ResolveTranscript = newTranscriptResolver(cfg.ClaudeSessionsDir)
+		probe := newProbe(cfg.Logger)
+		pidFn := func() int {
+			if bootstrapSup == nil {
+				return 0 // pre-late-bind guard; never observed at resolve time
+			}
+			return bootstrapSup.State().ChildPID
+		}
+		supCfg.ResolveTranscript = newProbePreferredTranscriptResolver(cfg.ClaudeSessionsDir, probe, pidFn)
 	}
 	sup, err := supervisor.New(supCfg)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: bootstrap supervisor: %w", err)
 	}
+	bootstrapSup = sup // late-bind the live-PID source now that the supervisor exists
 	idleTimeout := cfg.Bootstrap.IdleTimeout
 	if idleTimeout == 0 {
 		idleTimeout = cfg.IdleTimeout
