@@ -63,14 +63,28 @@ func closedChan() chan struct{} {
 // The zero value inherits the daemon template for Model/Effort and enforces
 // permissions (YOLO off) — the fail-safe default.
 //
-// Immutable post-construction in this ticket: set once in Pool.New (bootstrap)
-// or Pool.buildSession (minted), read under Pool.mu. A future wire setter (#826b)
-// that mutates it must take Pool.mu (write) and re-persist, exactly as
-// Pool.Rename does for label.
+// Set initially in Pool.New (bootstrap) or Pool.buildSession (minted) and
+// mutated post-construction by Pool.UpdateSettings (#840) under Pool.mu (write);
+// read under Pool.mu — the same discipline Pool.Rename uses for label.
 type SessionSettings struct {
 	Model  string
 	Effort string
 	YOLO   bool
+}
+
+// SettingsUpdate is a partial change to a session's SessionSettings. A nil
+// field means "leave the stored value untouched"; a non-nil field sets that
+// value — including "" for Model/Effort and false for YOLO, which are thereby
+// distinguishable from omitted. It is the presence contract shared with the v2
+// settings verb (#841), which decodes the wire payload into it.
+//
+// YOLO is a *bool for the fail-safe: an omitted (nil) YOLO can never enable
+// bypass — only an explicit non-nil *true turns --dangerously-skip-permissions
+// on, and an explicit *false turns it off.
+type SettingsUpdate struct {
+	Model  *string
+	Effort *string
+	YOLO   *bool
 }
 
 // claudeSettingsArgs returns the extra claude flags implied by s, in a
@@ -113,10 +127,10 @@ type Session struct {
 	bootstrap bool
 
 	// settings holds the per-session model / effort / YOLO applied to the
-	// claude spawn argv (#833). Immutable post-New this ticket — set in
-	// Pool.New (bootstrap) or Pool.buildSession (minted), read under Pool.mu
-	// by saveLocked (same discipline as label). #826b's setter must revisit
-	// synchronization when it mutates and re-persists this.
+	// claude spawn argv (#833). Set in Pool.New (bootstrap) or
+	// Pool.buildSession (minted) and mutated by Pool.UpdateSettings (#840)
+	// under Pool.mu (write); read under Pool.mu by saveLocked (same discipline
+	// as label, NOT under lcMu).
 	settings SessionSettings
 
 	// pool is the back-pointer used to persist registry changes after a

@@ -238,8 +238,8 @@ readiness shape as [ADR 023](023-activate-waits-pty-readiness.md)'s
 ### `SessionSettings` + `claudeSettingsArgs` (#833)
 
 The per-session model / reasoning-effort / YOLO (bypass-permissions) triple —
-the storage + spawn **primitive** the wire setter (#826b) and reader (#826c)
-build on. No wire message ships with this primitive.
+the storage + spawn **primitive** the wire verb (#841) builds on. No wire
+message ships with this primitive.
 
 ```go
 type SessionSettings struct {
@@ -251,10 +251,9 @@ type SessionSettings struct {
 
 Zero value inherits the daemon template for `Model`/`Effort` and enforces
 permissions (`YOLO` off) — the fail-safe default. Stored on `Session.settings`,
-**immutable post-construction**: set once in `Pool.New` (bootstrap) or
-`Pool.buildSession` (minted), read under `Pool.mu` (same discipline as
-`label`). A future wire setter that mutates it must take `Pool.mu` (write) and
-re-persist, exactly as `Pool.Rename` does for `label`.
+set initially in `Pool.New` (bootstrap) or `Pool.buildSession` (minted) and
+mutated post-construction by `Pool.UpdateSettings` (#840, below) under
+`Pool.mu` (write); read under `Pool.mu` (same discipline as `label`).
 
 ```go
 func claudeSettingsArgs(s SessionSettings) []string
@@ -277,8 +276,9 @@ nothing and the argv is byte-identical to pre-#833 behaviour.
   caller's slice.
 - `Pool.buildSession` (minted): gains a `settings SessionSettings` parameter,
   appends after `--session-id`. `CreateIn` / `GetOrCreateIn` — the two callers
-  — both pass `SessionSettings{}` as of #833; #826b is what plumbs real
-  values through the mint path.
+  — both still pass `SessionSettings{}`; plumbing real values through the
+  *mint* path (as opposed to updating an already-minted session, which
+  `Pool.UpdateSettings` below covers) remains unaddressed.
 
 **Persistence.** `registryEntry` (`registry.go`) gains `Model string`,
 `Effort string`, `YOLO bool`, all `json:"...,omitempty"`, following the
@@ -291,6 +291,46 @@ session's settings round-trip is exercised at the registry-serialization layer
 only (this is the same pre-existing "only bootstrap reloads" limitation
 [ADR 016](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md)
 already documents, not something #833 introduces).
+
+### `Pool.UpdateSettings` (#840)
+
+The persistence seam the v2 settings verb (#841) calls to change an existing
+session's `Model` / `Effort` / `YOLO` after creation — `SessionSettings` above
+was immutable post-construction until this ticket.
+
+```go
+type SettingsUpdate struct {
+    Model  *string
+    Effort *string
+    YOLO   *bool
+}
+
+func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error
+```
+
+`SettingsUpdate` is the presence contract: a `nil` field leaves the stored
+value untouched; a non-nil field overwrites it, including `""` for
+`Model`/`Effort` and `false` for `YOLO` — both distinguishable from omitted.
+`YOLO`'s `*bool` is the security-relevant choice: an absent (`nil`) `YOLO` can
+never enable bypass, only an explicit non-nil `*true` can (fail-safe-OFF by
+construction, not convention).
+
+Same shape as `Pool.Rename`: takes `Pool.mu` (write), looks up the session
+(miss → `ErrSessionNotFound`, no entry created), overlays present fields onto
+a copy of `sess.settings`, no-op short-circuits if nothing changed
+(`SessionSettings` is comparable), else swaps in the merged value and calls
+`saveLocked`, rolling the field back to its previous value if the save fails.
+Never takes `Session.lcMu` — `settings` is a `Pool.mu`-guarded field, same as
+`label`, so no lock-order hazard with `saveLocked`'s internal `lcMu`
+re-acquire (`docs/lessons.md` § "Lock order with callback into the host").
+
+Validating untrusted model/effort values is explicitly **not** this method's
+job — it operates on operator-trusted input; the wire verb (#841) owns the
+untrusted → trusted crossing. Making a *running* session pick up a change
+without a respawn is also out of scope here (#842); the new values reach
+claude through the existing spawn path (`claudeSettingsArgs`, above) on the
+session's next spawn — for the bootstrap session, its next daemon restart.
+See [codebase/840.md](../codebase/840.md).
 
 **Security (`security-sensitive` ticket).** `YOLO`'s fail-safe posture — a
 missing or corrupt on-disk value can never enable bypass — rests entirely on

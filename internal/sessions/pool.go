@@ -568,6 +568,49 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 	return nil
 }
 
+// UpdateSettings merges the fields marked present in update into the stored
+// settings of session id and re-persists, taking p.mu (write) exactly as Rename
+// does for label. A nil field in update leaves the stored value untouched; a
+// non-nil field overwrites it (including "" for Model/Effort and false for
+// YOLO). An absent (nil) YOLO can never enable bypass — only an explicit
+// non-nil *true does. Returns ErrSessionNotFound for an unknown id, creating no
+// entry. A no-op update (every present field already equal to the stored value,
+// or every field nil) writes nothing to disk, keeping the registry mtime
+// stable. On a saveLocked failure the in-memory settings are rolled back so
+// memory stays consistent with disk. The new values reach claude via #833's
+// spawn path on the session's next spawn.
+//
+// Lock order: p.mu (write). Does not take Session.lcMu — Session.settings is
+// guarded by p.mu (the only other reader is saveLocked, under p.mu).
+func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sess, ok := p.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	merged := sess.settings
+	if update.Model != nil {
+		merged.Model = *update.Model
+	}
+	if update.Effort != nil {
+		merged.Effort = *update.Effort
+	}
+	if update.YOLO != nil {
+		merged.YOLO = *update.YOLO
+	}
+	if merged == sess.settings {
+		return nil
+	}
+	prev := sess.settings
+	sess.settings = merged
+	if err := p.saveLocked(); err != nil {
+		sess.settings = prev
+		return err
+	}
+	return nil
+}
+
 // JSONLPolicy controls how Pool.Remove handles a session's on-disk JSONL
 // transcript file. The zero value (JSONLLeave) preserves the 1.1d-A1 (#94)
 // behaviour: the JSONL is untouched.
@@ -1220,9 +1263,10 @@ func (p *Pool) saveLocked() error {
 			CreatedAt:    s.createdAt,
 			LastActiveAt: lastActive,
 			Bootstrap:    s.bootstrap,
-			// s.settings is immutable post-New, read under the held Pool.mu
-			// (same discipline as s.label above, NOT under lcMu). omitempty on
-			// the tags keeps the default-session on-disk shape byte-stable.
+			// s.settings is read under the held Pool.mu (same discipline as
+			// s.label above, NOT under lcMu); Pool.UpdateSettings mutates it
+			// under that same lock. omitempty on the tags keeps the
+			// default-session on-disk shape byte-stable.
 			Model:  s.settings.Model,
 			Effort: s.settings.Effort,
 			YOLO:   s.settings.YOLO,
