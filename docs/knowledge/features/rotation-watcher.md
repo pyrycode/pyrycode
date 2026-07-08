@@ -88,6 +88,8 @@ func DefaultProbe(log *slog.Logger) Probe // platform-dispatched via build tags
 
 Returns the absolute path of the first `.jsonl` the PID has open, or `""` if none. `error` is reserved for unrecoverable failures; transient conditions (process gone, permission denied) collapse to `("", nil)` so the watcher silently skips and waits for the next event.
 
+Beyond the watcher, `Probe` is reused directly (not through `rotation.Config`) by two probe-preferred, live-PID resolvers that pick a file "the daemon's own child has open" over any newest-by-mtime scan, so a second claude in the same shared sessions dir can't redirect them: the `cmd/pyry` interactive turn/modal stream resolver (`resolveOwnBootstrapJSONL`, #827) and `internal/sessions`'s delivery-confirm growth baseline (`newProbePreferredTranscriptResolver`, [sessions-package.md § `newProbePreferredTranscriptResolver`](sessions-package.md), #838). Both mirror this package's `noopProbe`-unavailable fallback and PID-reuse confidentiality guard independently rather than sharing code across the `rotation` boundary.
+
 The `noopProbe` (always returns `("", nil)`) is the fallback when a real probe can't be constructed (e.g. `lsof` missing on darwin). The watcher then runs but never confirms a rotation — startup proceeds, no detection on this host.
 
 ## Flow
