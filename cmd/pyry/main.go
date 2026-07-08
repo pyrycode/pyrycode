@@ -55,6 +55,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/debugbundle"
 	"github.com/pyrycode/pyrycode/internal/install"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
+	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
@@ -850,7 +851,7 @@ func runSupervisor(args []string) error {
 		return archive, err
 	}
 
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse, debugBundler)
+	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse, debugBundler, settingsUpdaterAdapter{pool})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
@@ -927,6 +928,29 @@ func (m sessionMinter) Create(ctx context.Context, label, spawnDir string) (stri
 	}
 	id, err := m.p.CreateIn(ctx, label, resolved)
 	return string(id), err
+}
+
+// settingsUpdaterAdapter adapts *sessions.Pool to relay.SettingsUpdater (#845).
+// It narrows the type (relay speaks relay.SettingsUpdate / relay.ErrSessionUnknown
+// so internal/relay imports neither internal/sessions nor cmd/pyry) and owns the
+// single sessions.ErrSessionNotFound → relay.ErrSessionUnknown mapping — the
+// project convention that sentinel-to-wire mapping lives at the consumer call
+// site, not in the primitive. The three presence pointers pass straight through:
+// relay.SettingsUpdate mirrors sessions.SettingsUpdate 1:1, so a nil field still
+// means "leave unchanged" and a nil YOLO can never enable bypass. The precedent
+// for this type-narrowing seam is sessionMinter / poolResolver above.
+type settingsUpdaterAdapter struct{ p *sessions.Pool }
+
+func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate) error {
+	err := a.p.UpdateSettings(sessions.SessionID(id), sessions.SettingsUpdate{
+		Model:  u.Model,
+		Effort: u.Effort,
+		YOLO:   u.YOLO,
+	})
+	if errors.Is(err, sessions.ErrSessionNotFound) {
+		return relay.ErrSessionUnknown
+	}
+	return err
 }
 
 // errNoBoundSession is the sentinel sessionRouter.Route returns when a

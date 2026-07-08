@@ -294,9 +294,10 @@ already documents, not something #833 introduces).
 
 ### `Pool.UpdateSettings` (#840)
 
-The persistence seam the v2 settings verb (#841) calls to change an existing
-session's `Model` / `Effort` / `YOLO` after creation — `SessionSettings` above
-was immutable post-construction until this ticket.
+The persistence seam the v2 settings verb (#841, split into wire vocabulary
+#844 + handler #845) calls to change an existing session's `Model` / `Effort`
+/ `YOLO` after creation — `SessionSettings` above was immutable
+post-construction until this ticket.
 
 ```go
 type SettingsUpdate struct {
@@ -325,7 +326,8 @@ Never takes `Session.lcMu` — `settings` is a `Pool.mu`-guarded field, same as
 re-acquire (`docs/lessons.md` § "Lock order with callback into the host").
 
 Validating untrusted model/effort values is explicitly **not** this method's
-job — it operates on operator-trusted input; the wire verb (#841) owns the
+job — it operates on operator-trusted input; the wire handler (#845, a
+charset/length shape check for `Model`, a closed enum for `Effort`) owns the
 untrusted → trusted crossing. Making a *running* session pick up a change
 without a respawn is also out of scope here (#842); the new values reach
 claude through the existing spawn path (`claudeSettingsArgs`, above) on the

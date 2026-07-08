@@ -107,6 +107,7 @@ func startRelay(
 	transitions transitionObserverSink,
 	qse *queueStateEmitterV2,
 	debugBundler func() ([]byte, error),
+	settings relay.SettingsUpdater,
 ) (cleanup func(), err error) {
 	if relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
@@ -150,7 +151,7 @@ func startRelay(
 
 	if v2Enabled {
 		logger.Info("relay: Mobile Protocol v2 (Noise_IK) enabled — default; set PYRY_MOBILE_V2=0 to force legacy v1")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse, debugBundler)
+		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse, debugBundler, settings)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -294,6 +295,7 @@ func startRelayV2(
 	transitions transitionObserverSink,
 	qse *queueStateEmitterV2,
 	debugBundler func() ([]byte, error),
+	settings relay.SettingsUpdater,
 ) (drain func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
 	if err != nil {
@@ -359,6 +361,14 @@ func startRelayV2(
 		// (archive, err), so internal/relay never imports internal/debugbundle. nil
 		// in foreground / v1 makes the verb reply "unavailable" deterministically.
 		DebugBundler: debugBundler,
+		// Inbound set_session_settings seam (#845): a paired interactive
+		// `set_session_settings` frame validates the untrusted model/effort and
+		// persists the per-session change via *sessions.Pool.UpdateSettings (#840),
+		// applied on the session's next spawn (#833). settingsUpdaterAdapter (built
+		// at main.go over the pool) maps sessions.ErrSessionNotFound → the relay
+		// sentinel, so internal/relay imports neither internal/sessions nor cmd/pyry.
+		// nil in foreground / v1 makes the verb reply "unavailable" deterministically.
+		SettingsUpdater: settings,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build v2 session manager: %w", err)
