@@ -75,6 +75,9 @@ func TestIsV1Compatible(t *testing.T) {
 		// the v2-only debug-bundle request verb: an inbound control type an old
 		// phone never sees, so IsV1Compatible must reject it.
 		{"request_debug_bundle-rejected", TypeRequestDebugBundle, false, ErrUnknownType},
+		// the v2-only new_session control: an inbound control type an old phone
+		// never sees, so IsV1Compatible must reject it.
+		{"new_session-rejected", TypeNewSession, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,6 +149,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeDebugBundleDone:  true,
 	// v2 debug-bundle request verb.
 	TypeRequestDebugBundle: true,
+	// v2 new_session control.
+	TypeNewSession: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -186,6 +191,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeDebugBundleChunk, TypeDebugBundleDone,
 		// v2 debug-bundle request verb.
 		TypeRequestDebugBundle,
+		// v2 new_session control.
+		TypeNewSession,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]

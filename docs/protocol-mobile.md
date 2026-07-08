@@ -442,6 +442,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`queue_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). Queued-message backlog snapshot (#597 Phase 3). See [Queue](#queue-v2). |
 | **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
 | **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
+| **`new_session`** | phone → binary | no | **New in v2.** Inbound control — phone starts a fresh session (remote `/clear`). Interactive-capability-gated; exempt from the permission gate. See [New session](#new-session-v2). |
 | **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
@@ -703,6 +704,18 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 It carries **no payload** — a bare control frame, with no `conversation_id`, no `modal_id` nonce, no `answer_token`, and no idempotency key. A replayed `interrupt` simply sends another Esc (an Esc with no running turn is a no-op in claude), so no nonce or dedup is needed.
 
 `interrupt` is **gated on the `interactive` capability**: a non-interactive connection's `interrupt` is inert (no Esc). It is **exempt from the per-device permission gate** ([#702](#security-model)) because interrupting one's own paired session is a normal paired-phone action, not a tool-permission decision. Any interactive paired phone can interrupt the single live claude — there is no per-connection conversation binding for interrupt, consistent with the broadcast fan-out model (a user's paired devices are one trust domain, per the [Security model](#security-model)). It is **not** part of the reconnect-replay ring and needs no correlation key.
+
+### New session (v2)
+
+A paired phone sends `new_session` to start a fresh session — the remote equivalent of typing **`/clear`** at the local terminal (#597 Phase 3, #831). The daemon routes it to the supervised claude as a `/clear` via the sealed supervisor `StartNewSession` seam (#830); unlike `interrupt` it maps to no neutral `turnevent` command.
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler (like [`interrupt`](#interrupt-v2) / [`modal_cancel`](#modal-v2)).
+
+It carries **no payload** — a bare control frame, with no `conversation_id`, no nonce, and no idempotency key. A replayed `new_session` simply drives another `/clear` (starting a fresh session again is harmless), so no nonce or dedup is needed.
+
+`new_session` is **gated on the `interactive` capability**: a non-interactive connection's `new_session` is inert (no `/clear`). It is **exempt from the per-device permission gate** ([#702](#security-model)) because starting a fresh session in one's own paired session is a normal paired-phone action, not a tool-permission decision. Any interactive paired phone can start a new session on the single live claude — there is no per-connection conversation binding, consistent with the broadcast fan-out model (a user's paired devices are one trust domain, per the [Security model](#security-model)).
+
+The client observes the resulting break through the existing [`session_transition`](#interactive-events-v2-capability-gated) marker (`reason: clear`, #656/#657) — **there is no synchronous ack.** `new_session` is fire-and-forget, like `interrupt`; it is **not** part of the reconnect-replay ring and needs no correlation key.
 
 ### Debug bundle (v2)
 

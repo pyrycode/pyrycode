@@ -304,3 +304,34 @@ const (
 const (
 	TypeRequestDebugBundle = "request_debug_bundle" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )
+
+// Mobile Protocol v2 start-new-session control (#831, split from #824;
+// docs/protocol-mobile.md § New session). A paired phone sends new_session to
+// start a fresh session — the remote equivalent of typing `/clear` at the local
+// terminal. The daemon routes it to the supervised claude as a `/clear` via the
+// sealed supervisor StartNewSession seam (#830); the client observes the
+// resulting break through the EXISTING session_transition marker
+// (reason: "clear", #656/#657) — there is NO synchronous ack (fire-and-forget,
+// like interrupt). Unlike interrupt (→turnevent.Cancel) it maps to no neutral
+// turnevent command; it drives the supervisor seam directly.
+//
+// It is an inbound phone → binary *control* envelope the v2 session manager
+// intercepts at internal/relay/v2session.go's dispatchAppFrame before
+// internal/dispatch.Route (like TypeInterrupt / TypeRequestDebugBundle); there
+// is NO dispatch.Route handler for it. Unlike the modal frames it carries NO
+// payload — no conversation_id, no modal_id nonce, no answer_token, no
+// idempotency key: a bare control frame.
+//
+// Trust posture: new_session is gated on the negotiated `interactive` capability
+// (a non-interactive conn's new_session is inert) and is exempt from the
+// per-device permission gate (#702) — starting a fresh session in one's own
+// paired session is a normal paired-phone action (ADR 025 § Security model), not
+// a privileged tool-permission decision.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// route this inbound control envelope to the handler chain. The drift detector
+// in internal/protocol/compat_test.go partitions Type* constants between
+// v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+const (
+	TypeNewSession = "new_session" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
+)

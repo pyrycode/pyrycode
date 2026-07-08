@@ -444,6 +444,18 @@ type ScreenSnapshotter interface {
 // from any goroutine — it is the same seam ResolveCancel / ResolveTimeout use.
 type Interrupter interface{ SendEsc() error }
 
+// SessionStarter drives the supervised claude's /clear — the remote equivalent
+// of a local `/clear`, starting a fresh session (#831). *supervisor.Supervisor
+// satisfies it via StartNewSession (#830), so the supervisor needs no new
+// method. Declared here (consumer side), beside Interrupter, so internal/relay
+// imports neither internal/supervisor nor tui-driver. Named for its relay-domain
+// role (matching Interrupter / ScreenSnapshotter), even though the method keeps
+// the sealed surface's name; the doc comment fixes the /clear semantics so the
+// name is unambiguous against any pool/session lifecycle "start". StartNewSession
+// is safe to call from any goroutine — it is the same sealed sendModalKey seam
+// SendEsc / ResolveCancel use.
+type SessionStarter interface{ StartNewSession() error }
+
 // QueueRemover drops a not-yet-drained queued message from a conversation's
 // inbound backlog by id (#723). *msgqueue.Queue satisfies it. Declared here, in
 // the consumer, beside Interrupter / ModalResolver, so internal/relay imports
@@ -586,6 +598,12 @@ type V2SessionConfig struct {
 	// inert (no Esc) — the foreground / unwired case. Production wires
 	// *supervisor.Supervisor.
 	Interrupter Interrupter
+
+	// SessionStarter routes an inbound interactive `new_session` control frame
+	// to the supervised claude as a /clear, starting a fresh session (#831).
+	// Optional: nil ⇒ new_session is inert (no /clear) — the foreground /
+	// unwired case. Production wires *supervisor.Supervisor.
+	SessionStarter SessionStarter
 
 	// QueueRemover drops a queued message named by an inbound dequeue_message
 	// control frame (#723). Optional: nil ⇒ dequeue_message is inert (foreground
@@ -1517,6 +1535,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeInterrupt:
 			m.handleInterrupt(s)
 			return
+		case protocol.TypeNewSession:
+			m.handleNewSession(s)
+			return
 		case protocol.TypeDequeueMessage:
 			m.handleDequeueMessage(s, probeEnv)
 			return
@@ -2008,6 +2029,49 @@ func (m *V2SessionManager) handleInterrupt(s *V2Session) {
 	if err := m.cfg.Interrupter.SendEsc(); err != nil {
 		m.cfg.Logger.Warn("relay: v2 interrupt keystroke failed",
 			"event", "v2.interrupt.keystroke_err",
+			"conn_id", s.connID,
+			"err", err)
+	}
+}
+
+// handleNewSession routes an inbound `new_session` control frame to the
+// supervised claude as a /clear — the remote equivalent of typing `/clear` at
+// the local terminal, starting a fresh session (#831). The frame carries no
+// payload, so there is nothing to decode; there is no reply and no broadcast
+// (fire-and-forget) — the client observes the resulting break via the existing
+// session_transition marker (#656/#657). Intercepted in dispatchAppFrame before
+// dispatch.Route, like handleInterrupt, and runs on the manager's single Run
+// dispatch goroutine — so the s.interactive read is lock-free under the
+// package's single-owner invariant.
+//
+// The signature takes only s (no ctx, no env): the frame has no payload to
+// decode and the handler does no cancellable work — the same intentional
+// deviation handleInterrupt established.
+//
+// Order is load-bearing — the capability gate comes first:
+//  1. A non-interactive conn's new_session is inert (no /clear). The inbound
+//     capability gate is the authorization, matching interrupt / dequeue_message
+//     — a one-line check, NOT a reusable inbound-gate abstraction (CODING-STYLE:
+//     over-DRY).
+//  2. A nil SessionStarter (foreground / pre-wire) makes the frame inert,
+//     mirroring handleInterrupt's nil-seam guard.
+//  3. StartNewSession is best-effort: an error (no live session / mid-teardown)
+//     is Warn-logged with the supervisor sentinel + conn_id and tolerated —
+//     there is nothing to roll back and no reply is owed. NEVER log payload bytes
+//     (there are none) or the rendered screen.
+func (m *V2SessionManager) handleNewSession(s *V2Session) {
+	if !s.interactive {
+		return // non-interactive conn: inert, no /clear (the AC-4 negative path)
+	}
+	if m.cfg.SessionStarter == nil {
+		m.cfg.Logger.Debug("relay: v2 new_session inert; no session starter wired",
+			"event", "v2.new_session.inert",
+			"conn_id", s.connID)
+		return
+	}
+	if err := m.cfg.SessionStarter.StartNewSession(); err != nil {
+		m.cfg.Logger.Warn("relay: v2 new_session keystroke failed",
+			"event", "v2.new_session.keystroke_err",
 			"conn_id", s.connID,
 			"err", err)
 	}
