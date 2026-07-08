@@ -383,8 +383,15 @@ func startRelayV2(
 		modalStreamCleanup func()
 	)
 	if bridge != nil && claudeSessionsDir != "" {
-		streamCleanup = startInteractiveTurnStreamV2(ctx, sup, active, boundHost, mgr, claudeSessionsDir, logger)
-		modalStreamCleanup = startInteractiveModalStreamV2(ctx, sup, active, boundHost, mgr, modalReg, claudeSessionsDir, logger)
+		// The bootstrap-branch resolver tails the transcript the daemon's OWN
+		// claude child has open (probe over its PID) rather than the newest file by
+		// mtime, so a second claude in the shared sessions dir can't redirect the
+		// tail. pidFn re-reads State each resolve — the child respawns with a new
+		// PID and State() is mutex-guarded.
+		probe := newBootstrapProbe(logger)
+		pidFn := func() int { return sup.State().ChildPID }
+		streamCleanup = startInteractiveTurnStreamV2(ctx, sup, active, boundHost, mgr, claudeSessionsDir, probe, pidFn, logger)
+		modalStreamCleanup = startInteractiveModalStreamV2(ctx, sup, active, boundHost, mgr, modalReg, claudeSessionsDir, probe, pidFn, logger)
 	} else if bridge != nil {
 		logger.Info("relay: interactive turn + modal streams disabled; claude sessions dir unresolved",
 			"event", "interactive_turn_stream.no_sessions_dir")

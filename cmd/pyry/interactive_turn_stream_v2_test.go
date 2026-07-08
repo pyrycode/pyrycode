@@ -267,6 +267,216 @@ func TestResolveLatestSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
 	}
 }
 
+// --- probe-preferred bootstrap resolver tests (resolveOwnBootstrapJSONL) -----
+
+// dummyPidFn is a placeholder child-PID source for resolveTarget call sites whose
+// bootstrap branch is either not exercised or uses a noop (recency-fallback) probe.
+func dummyPidFn() int { return 1234 }
+
+// probeResult is one scripted OpenJSONL answer.
+type probeResult struct {
+	path string
+	err  error
+}
+
+// fakeProbe is a scripted rotation.Probe: each OpenJSONL call pops the next result
+// (repeating the last once exhausted — the steady state) and records the probed
+// PID. It omits Available(), so bootstrapProbeUsable treats it as a real, usable
+// probe.
+type fakeProbe struct {
+	results []probeResult
+	calls   int
+	pids    []int
+}
+
+func (f *fakeProbe) OpenJSONL(pid int) (string, error) {
+	f.pids = append(f.pids, pid)
+	i := f.calls
+	f.calls++
+	if len(f.results) == 0 {
+		return "", nil
+	}
+	if i >= len(f.results) {
+		i = len(f.results) - 1
+	}
+	return f.results[i].path, f.results[i].err
+}
+
+// noopFakeProbe mirrors the production no-lsof noop: it reports no open JSONL and
+// declares itself unusable, so resolveOwnBootstrapJSONL falls back to the
+// newest-by-mtime resolver.
+type noopFakeProbe struct{}
+
+func (noopFakeProbe) OpenJSONL(int) (string, error) { return "", nil }
+func (noopFakeProbe) Available() bool               { return false }
+
+// TestResolveOwnBootstrapJSONL_ProbeWinsOverNewerSibling is the core-bug gate. Two
+// claudes write into the same shared dir: the daemon's own (older) transcript and a
+// newer sibling from another claude. Newest-by-mtime would pick the sibling; the
+// probe-preferred resolver must return the file the daemon's own child holds.
+func TestResolveOwnBootstrapJSONL_ProbeWinsOverNewerSibling(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	own := writeJSONL(t, dir, uuidA, 30, base)              // the daemon's own, older
+	writeJSONL(t, dir, uuidB, 99, base.Add(10*time.Minute)) // another claude, newer + larger
+
+	probe := &fakeProbe{results: []probeResult{{path: own}}}
+	path, off, err := resolveOwnBootstrapJSONL(dir, probe, func() int { return 4242 })(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if path != own {
+		t.Fatalf("path: got %q, want %q (the file the daemon's own child holds, not the newer sibling)", path, own)
+	}
+	if off != 30 {
+		t.Fatalf("offset: got %d, want 30 (own file size — warm tail)", off)
+	}
+	if len(probe.pids) == 0 || probe.pids[0] != 4242 {
+		t.Fatalf("probe pids: got %v, want first == 4242 (the child PID)", probe.pids)
+	}
+}
+
+// TestResolveOwnBootstrapJSONL_ProbeEmptyDoesNotFallBackToMtime: an empty probe
+// answer (the child holds no JSONL fd yet) returns not-found so the subscriber
+// retries — it must NEVER fall back to the newest file by mtime, the colliding
+// heuristic. A newer decoy is present to catch a regression to mtime.
+func TestResolveOwnBootstrapJSONL_ProbeEmptyDoesNotFallBackToMtime(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeJSONL(t, dir, uuidB, 50, time.Now()) // a decoy the mtime path would pick
+
+	probe := &fakeProbe{results: []probeResult{{path: ""}}}
+	path, off, err := resolveOwnBootstrapJSONL(dir, probe, func() int { return 7 })(context.Background())
+	if err == nil {
+		t.Fatal("empty probe: got nil error, want not-found (no mtime fallback)")
+	}
+	if path != "" || off != 0 {
+		t.Fatalf("empty probe: got (%q, %d), want (\"\", 0) — must not tail the decoy", path, off)
+	}
+}
+
+// TestResolveOwnBootstrapJSONL_PidZeroReportsNotFound: a non-positive PID (child in
+// restart backoff / pre-spawn) returns not-found and NEVER calls the probe.
+func TestResolveOwnBootstrapJSONL_PidZeroReportsNotFound(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	own := writeJSONL(t, dir, uuidA, 10, time.Now())
+
+	probe := &fakeProbe{results: []probeResult{{path: own}}}
+	if _, _, err := resolveOwnBootstrapJSONL(dir, probe, func() int { return 0 })(context.Background()); err == nil {
+		t.Fatal("pid 0: got nil error, want not-found")
+	}
+	if probe.calls != 0 {
+		t.Fatalf("probe called %d times for pid 0, want 0 (no probe when the child is down)", probe.calls)
+	}
+}
+
+// TestResolveOwnBootstrapJSONL_ColdStartTailsFromZero mirrors the by-id cold-start
+// gate. On a fresh session the child holds no JSONL fd yet (claude under --continue
+// defers creation until first input), so the first probe is empty → not-found. Once
+// the file appears and the probe reports it, the whole file IS the current turn, so
+// it tails from offset 0.
+func TestResolveOwnBootstrapJSONL_ColdStartTailsFromZero(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, uuidA+".jsonl")
+	probe := &fakeProbe{results: []probeResult{{path: ""}, {path: file}}}
+	resolve := resolveOwnBootstrapJSONL(dir, probe, func() int { return 4242 })
+
+	if _, _, err := resolve(context.Background()); err == nil {
+		t.Fatal("cold-start resolve#1: got nil error, want not-found (child has no jsonl fd yet)")
+	}
+
+	want := writeJSONL(t, dir, uuidA, 42, time.Now())
+
+	path, off, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("cold-start resolve#2: %v", err)
+	}
+	if path != want {
+		t.Fatalf("cold-start path: got %q, want %q", path, want)
+	}
+	if off != 0 {
+		t.Fatalf("cold-start offset: got %d, want 0 (tail from start so the in-flight reply is not skipped)", off)
+	}
+}
+
+// TestResolveOwnBootstrapJSONL_WarmStartTailsFromSize: a transcript already open at
+// the first look (a --continue resume) is a warm start — it tails from the file
+// size so the history is never replayed to the internet-exposed phone.
+func TestResolveOwnBootstrapJSONL_WarmStartTailsFromSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := writeJSONL(t, dir, uuidA, 128, time.Now())
+
+	probe := &fakeProbe{results: []probeResult{{path: want}}}
+	path, off, err := resolveOwnBootstrapJSONL(dir, probe, func() int { return 4242 })(context.Background())
+	if err != nil {
+		t.Fatalf("warm-start resolve: %v", err)
+	}
+	if path != want {
+		t.Fatalf("warm-start path: got %q, want %q", path, want)
+	}
+	if off != 128 {
+		t.Fatalf("warm-start offset: got %d, want 128 (do not replay the prior transcript)", off)
+	}
+}
+
+// TestResolveOwnBootstrapJSONL_ProbePathOutsideDirRejected is the confidentiality
+// guard. A probed path outside the trusted dir (e.g. PID reuse handing back an
+// unrelated process's fd) and a non-UUID stem inside the dir must both be rejected —
+// never tailed.
+func TestResolveOwnBootstrapJSONL_ProbePathOutsideDirRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	other := t.TempDir()
+	outside := writeJSONL(t, other, uuidA, 20, time.Now()) // valid UUID, wrong dir
+
+	badStem := filepath.Join(dir, "scratch.jsonl") // right dir, non-UUID stem
+	if err := os.WriteFile(badStem, []byte("nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []string{outside, badStem} {
+		probe := &fakeProbe{results: []probeResult{{path: bad}}}
+		path, off, err := resolveOwnBootstrapJSONL(dir, probe, func() int { return 9 })(context.Background())
+		if err == nil {
+			t.Fatalf("probed %q: got nil error, want reject", bad)
+		}
+		if path != "" || off != 0 {
+			t.Fatalf("probed %q: got (%q, %d), want (\"\", 0)", bad, path, off)
+		}
+	}
+}
+
+// TestResolveOwnBootstrapJSONL_NoopProbeFallsBackToMtime: with an unusable (no-lsof)
+// probe the resolver delegates to resolveLatestSessionJSONL — newest file by mtime —
+// and never consults pidFn, so the no-probe path is byte-identical to the pre-fix
+// behaviour.
+func TestResolveOwnBootstrapJSONL_NoopProbeFallsBackToMtime(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	writeJSONL(t, dir, uuidA, 10, base)
+	want := writeJSONL(t, dir, uuidB, 20, base.Add(time.Minute)) // newest
+
+	resolve := resolveOwnBootstrapJSONL(dir, noopFakeProbe{}, func() int {
+		t.Error("pidFn must not be called when the probe is unusable")
+		return 0
+	})
+	path, off, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("noop fallback resolve: %v", err)
+	}
+	if path != want {
+		t.Fatalf("noop fallback path: got %q, want %q (newest by mtime)", path, want)
+	}
+	if off != 20 {
+		t.Fatalf("noop fallback offset: got %d, want 20", off)
+	}
+}
+
 // --- by-id resolver tests (#679) --------------------------------------------
 
 // TestResolveBoundSessionJSONL_KeysOffIDNotMtime is the deterministic
@@ -438,8 +648,10 @@ func (*fakeSessionHost) WaitForPTY(ctx context.Context) error { return nil }
 func (*fakeSessionHost) Session() *tuidriver.Session          { return nil }
 
 // TestResolveTarget_BootstrapWhenNoRoute: before any route (empty cursor) the
-// target is the bootstrap host + the recency resolver — the unchanged pre-#679
-// path (AC#4) — with the switch channel set so the first route re-subscribes.
+// target is the bootstrap host + the bootstrap resolver, with the switch channel
+// set so the first route re-subscribes. A noop (unusable) probe makes the
+// bootstrap resolver fall back to recency, so this keeps asserting the pre-fix
+// newest-by-mtime pick (AC#4).
 func TestResolveTarget_BootstrapWhenNoRoute(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -452,7 +664,7 @@ func TestResolveTarget_BootstrapWhenNoRoute(t *testing.T) {
 		return nil, "", "", false
 	}
 
-	target, err := resolveTarget(active, boundHost, bootstrap, dir)(context.Background())
+	target, err := resolveTarget(active, boundHost, bootstrap, dir, noopFakeProbe{}, dummyPidFn)(context.Background())
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
@@ -468,6 +680,40 @@ func TestResolveTarget_BootstrapWhenNoRoute(t *testing.T) {
 	}
 	if want := filepath.Join(dir, uuidB+".jsonl"); path != want {
 		t.Fatalf("bootstrap resolve path: got %q, want %q (recency)", path, want)
+	}
+}
+
+// TestResolveTarget_BootstrapUsesProbeResolver: with a usable probe the bootstrap
+// branch tails the file the daemon's OWN child holds (the probe's answer), not the
+// newest sibling in the same shared dir — the fix wired through resolveTarget.
+func TestResolveTarget_BootstrapUsesProbeResolver(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	own := writeJSONL(t, dir, uuidA, 30, base)              // the daemon's own, older
+	writeJSONL(t, dir, uuidB, 99, base.Add(10*time.Minute)) // another claude, newer
+
+	active := &activeConversation{}
+	bootstrap := &fakeSessionHost{name: "bootstrap"}
+	boundHost := func(string) (turnbridge.SessionHost, string, string, bool) {
+		t.Error("boundHost must not be consulted before any route")
+		return nil, "", "", false
+	}
+	probe := &fakeProbe{results: []probeResult{{path: own}}}
+
+	target, err := resolveTarget(active, boundHost, bootstrap, dir, probe, func() int { return 4242 })(context.Background())
+	if err != nil {
+		t.Fatalf("resolveTarget: %v", err)
+	}
+	if target.Host != turnbridge.SessionHost(bootstrap) {
+		t.Fatalf("bootstrap path host: got %v, want the bootstrap host", target.Host)
+	}
+	path, _, err := target.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("bootstrap resolve: %v", err)
+	}
+	if path != own {
+		t.Fatalf("bootstrap resolve path: got %q, want %q (probe's own-child file, not the newer sibling)", path, own)
 	}
 }
 
@@ -498,7 +744,7 @@ func TestResolveTarget_BoundSessionWhenRouted(t *testing.T) {
 		return host, uuidA, convDir, true
 	}
 
-	target, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, bootstrapDir)(context.Background())
+	target, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, bootstrapDir, noopFakeProbe{}, dummyPidFn)(context.Background())
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
@@ -535,7 +781,7 @@ func TestResolveTarget_UnresolvableConversationErrors(t *testing.T) {
 	active.set("conv-gone")
 	boundHost := func(string) (turnbridge.SessionHost, string, string, bool) { return nil, "", "", false }
 
-	_, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir)(context.Background())
+	_, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir, noopFakeProbe{}, dummyPidFn)(context.Background())
 	if err == nil {
 		t.Fatal("unresolvable bound conversation: got nil error, want a retry error (no bootstrap fallback under a non-empty cursor)")
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -19,6 +20,30 @@ import (
 
 // jsonlStreamExt is the suffix claude writes for session transcripts.
 const jsonlStreamExt = ".jsonl"
+
+// newBootstrapProbe builds the rotation.Probe the bootstrap resolver uses to ask
+// "which <uuid>.jsonl does the daemon's OWN claude child have open?". Indirected
+// via a package var (mirrors sessions.newProbe) so tests inject a fake without
+// touching the platform-specific build files.
+var newBootstrapProbe = rotation.DefaultProbe
+
+// availabilityReporter is the optional interface a rotation.Probe implements to
+// declare it cannot answer OpenJSONL — the no-lsof noop probe returns false. A
+// probe that does not implement it (the real darwinProbe / linuxProbe) is treated
+// as usable. Kept local so the shared rotation.Probe interface stays unchanged.
+type availabilityReporter interface {
+	Available() bool
+}
+
+// bootstrapProbeUsable reports whether probe can answer OpenJSONL. The no-lsof
+// noop probe declares itself unusable via availabilityReporter; any probe without
+// that method is usable.
+func bootstrapProbeUsable(probe rotation.Probe) bool {
+	if r, ok := probe.(availabilityReporter); ok {
+		return r.Available()
+	}
+	return true
+}
 
 // jsonlStemPattern matches the canonical 36-char lowercase UUIDv4 stem claude
 // uses for its <uuid>.jsonl filenames. Duplicated (not reused) from
@@ -63,6 +88,8 @@ func startInteractiveTurnStreamV2(
 	boundHost boundHostFunc,
 	mgr *relay.V2SessionManager,
 	claudeSessionsDir string,
+	probe rotation.Probe,
+	pidFn func() int,
 	logger *slog.Logger,
 ) func() {
 	emitter := newInteractiveTurnEmitterV2(active, mgr, logger)
@@ -83,7 +110,7 @@ func startInteractiveTurnStreamV2(
 	// tracker's stall_detected marker now maps through to a stall envelope
 	// (the mapper no longer discards it).
 	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
-	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir)
+	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn)
 	sub := turnbridge.NewTargetSubscriber(resolve, tr, logger)
 
 	prod, err := turnbridge.New(turnbridge.Config{
@@ -220,6 +247,125 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 	}
 }
 
+// resolveOwnBootstrapJSONL is the probe-preferred bootstrap resolver. Instead of
+// picking the newest <uuid>.jsonl in dir by mtime (resolveLatestSessionJSONL), it
+// tails the transcript the daemon's OWN claude child actually has open — the file
+// the pid returned by pidFn holds, reported by probe.OpenJSONL. This fixes the
+// shared-directory collision: when a second claude (an interactive Claudian) runs
+// in the same cwd, it writes its own <uuid>.jsonl into the same
+// ~/.claude/projects/<encoded-cwd>/ folder, and the newest-by-mtime heuristic
+// then tails the wrong claude's transcript so the phone gets no reply or the wrong
+// one. The probe answers "which jsonl does exactly THIS pid have open", so the
+// tail follows the daemon's own child regardless of a newer sibling.
+//
+// Construction time: if the probe cannot answer (the no-lsof noop), delegate to
+// resolveLatestSessionJSONL(dir) so the no-lsof path stays byte-identical to the
+// pre-fix behaviour. Otherwise precompute resolvedDir once (EvalSymlinks, falling
+// back to Clean on error) for the confidentiality guard below, mirroring the
+// rotation watcher's dir canonicalisation.
+//
+// Per call (the returned closure keeps resolvedOnce / sawEmpty, the same
+// per-subscription cold/warm offset rule as resolveBoundSessionJSONL):
+//
+//  1. pid := pidFn(). pid <= 0 means the child is in restart backoff or has not
+//     spawned yet, so there is no fd to probe: mark sawEmpty (if not yet resolved)
+//     and return a not-found error so the subscriber retries in 500ms. The probe
+//     is NOT called.
+//  2. probe.OpenJSONL(pid). A probe error → not-found (retry). An empty path is a
+//     cold start (claude under --continue defers JSONL creation until the first
+//     input lands, so the child holds no .jsonl fd yet) → mark sawEmpty, return
+//     not-found. It NEVER falls back to the newest-by-mtime file — that is exactly
+//     the colliding heuristic this resolver exists to avoid.
+//  3. Validate the reported path: canonicalise it, require its directory to equal
+//     resolvedDir (the confidentiality guard — never tail a file outside the
+//     trusted sessions dir, e.g. if PID reuse hands back an unrelated process's
+//     fd), and require its stem to match the UUID pattern.
+//  4. os.Stat (the path may vanish between probe and stat → retry). Offset = size,
+//     or 0 when the file first appears after an earlier empty look (cold start, so
+//     the whole file is the current turn). Set resolvedOnce.
+//
+// The returned path is rebuilt under the original dir (filepath.Join(dir, base)),
+// the same form the sibling resolvers and the rest of the daemon use over
+// claudeSessionsDir; the symlink-resolved form is used only for the guard.
+//
+// Concurrency: resolvedOnce / sawEmpty are read and written only inside the
+// returned closure, which the single Producer.Run goroutine invokes. Same
+// single-Run-goroutine invariant the sibling resolvers rely on; no mutex. Do NOT
+// call this resolver from multiple goroutines.
+func resolveOwnBootstrapJSONL(dir string, probe rotation.Probe, pidFn func() int) func(ctx context.Context) (path string, startOffset int64, err error) {
+	if !bootstrapProbeUsable(probe) {
+		// No lsof (or an otherwise-unusable probe): keep the exact pre-fix
+		// newest-by-mtime behaviour so the no-probe path is unchanged.
+		return resolveLatestSessionJSONL(dir)
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		resolvedDir = filepath.Clean(dir)
+	}
+	var (
+		resolvedOnce bool // a session file has been returned at least once
+		sawEmpty     bool // an earlier call found no file (pid down / no fd yet)
+	)
+	return func(ctx context.Context) (string, int64, error) {
+		pid := pidFn()
+		if pid <= 0 {
+			// Child in restart backoff or pre-spawn — no process to probe.
+			if !resolvedOnce {
+				sawEmpty = true
+			}
+			return "", 0, fmt.Errorf("bootstrap child not running (pid %d)", pid)
+		}
+		open, err := probe.OpenJSONL(pid)
+		if err != nil {
+			// Transient probe failure (e.g. an lsof hiccup) — retry, never mtime.
+			return "", 0, fmt.Errorf("probe open jsonl for pid %d: %w", pid, err)
+		}
+		if open == "" {
+			// Cold start: claude under --continue has not created its JSONL yet,
+			// so the child holds no .jsonl fd. Retry; never fall back to mtime.
+			if !resolvedOnce {
+				sawEmpty = true
+			}
+			return "", 0, fmt.Errorf("bootstrap child pid %d has no jsonl open yet", pid)
+		}
+		// Confidentiality guard: canonicalise the probed path and require it to
+		// live directly in the trusted dir with a UUID stem. A file outside dir
+		// (PID reuse handing back some unrelated process's fd) is rejected, not
+		// tailed.
+		openResolved, resolveErr := filepath.EvalSymlinks(open)
+		if resolveErr != nil {
+			openResolved = filepath.Clean(open)
+		}
+		if filepath.Dir(openResolved) != resolvedDir {
+			return "", 0, fmt.Errorf("probed jsonl outside sessions dir %s", resolvedDir)
+		}
+		base := filepath.Base(openResolved)
+		if !strings.HasSuffix(base, jsonlStreamExt) ||
+			!jsonlStemPattern.MatchString(base[:len(base)-len(jsonlStreamExt)]) {
+			return "", 0, fmt.Errorf("probed file %s is not a session jsonl", base)
+		}
+		// Return the path under the original dir — the same form the sibling
+		// resolvers use — rather than the guard-only symlink-resolved form.
+		candidate := filepath.Join(dir, base)
+		info, err := os.Stat(candidate)
+		if err != nil {
+			// Raced away between probe and stat — retry.
+			if !resolvedOnce {
+				sawEmpty = true
+			}
+			return "", 0, fmt.Errorf("stat probed jsonl %s: %w", candidate, err)
+		}
+		off := info.Size()
+		if !resolvedOnce && sawEmpty {
+			// Cold start: this fresh file appeared only after an earlier empty
+			// look, so the whole file is the current turn — tail from 0.
+			off = 0
+		}
+		resolvedOnce = true
+		return candidate, off, nil
+	}
+}
+
 // boundHostFunc resolves a conversation id to the supervisor hosting its bound
 // claude session, that session's id, AND the directory claude writes that
 // session's transcript into (its per-Cwd JSONL dir since #686 — see
@@ -264,9 +410,12 @@ func perConversationSessionsDir(sessionWorkDir, bootstrapWorkDir, sharedDir stri
 // that fires when the id next changes, atomically via active.watch() so host +
 // path + teardown all key off one consistent view — and maps it to a Target:
 //
-//   - convID == "" (no route yet): the bootstrap host + the recency resolver, the
-//     unchanged pre-#679 path (AC4). Switch is still set so the first route
-//     re-subscribes onto the routed bound session.
+//   - convID == "" (no route yet): the bootstrap host + the probe-preferred
+//     bootstrap resolver (resolveOwnBootstrapJSONL), which tails the transcript
+//     the daemon's OWN claude child has open rather than the newest file by mtime,
+//     so a second claude writing into the same shared dir cannot redirect the
+//     tail. Switch is still set so the first route re-subscribes onto the routed
+//     bound session.
 //   - convID != "" and resolvable: the bound session's supervisor + a by-id
 //     resolver that tails <bound-session-id>.jsonl in that conversation's OWN
 //     per-Cwd JSONL directory (returned by boundHost since #686), mtime-
@@ -280,13 +429,13 @@ func perConversationSessionsDir(sessionWorkDir, bootstrapWorkDir, sharedDir stri
 // A fresh JSONL resolver closure is built per call so its cold/warm offset state
 // is per-subscription: a brand-new bound session cold-starts at offset 0; a
 // switch-back to a live session warm-tails from EOF.
-func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstrap turnbridge.SessionHost, dir string) turnbridge.TargetResolver {
+func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstrap turnbridge.SessionHost, dir string, probe rotation.Probe, pidFn func() int) turnbridge.TargetResolver {
 	return func(ctx context.Context) (turnbridge.Target, error) {
 		convID, switchCh := active.watch()
 		if convID == "" {
 			return turnbridge.Target{
 				Host:    bootstrap,
-				Resolve: resolveLatestSessionJSONL(dir),
+				Resolve: resolveOwnBootstrapJSONL(dir, probe, pidFn),
 				Switch:  switchCh,
 			}, nil
 		}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
@@ -50,6 +51,8 @@ func startInteractiveModalStreamV2(
 	mgr *relay.V2SessionManager,
 	modalReg *modalbridge.Registry,
 	claudeSessionsDir string,
+	probe rotation.Probe,
+	pidFn func() int,
 	logger *slog.Logger,
 ) func() {
 	// mgr is both the interactiveBroadcaster (ActiveConns/Push, already the turn
@@ -57,7 +60,7 @@ func startInteractiveModalStreamV2(
 	emitter := newInteractiveModalEmitterV2(modalReg, mgr, mgr, logger)
 
 	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
-	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir)
+	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn)
 	sub := turnbridge.NewTargetSubscriber(resolve, tr, logger)
 	screenText := boundScreenText(active, boundHost, sup)
 
