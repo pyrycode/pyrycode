@@ -24,6 +24,7 @@ func TestSupervisor_ModalKeystroke_DispatchesAbstractVerb(t *testing.T) {
 		{"accept trust", func(s *Supervisor) error { return s.AcceptTrust() }, keyAcceptTrust, ""},
 		{"answer", func(s *Supervisor) error { return s.Answer("2") }, keyAnswer, "2"},
 		{"send esc", func(s *Supervisor) error { return s.SendEsc() }, keyEsc, ""},
+		{"start new session", func(s *Supervisor) error { return s.StartNewSession() }, keyStartNewSession, ""},
 	}
 
 	for _, tt := range tests {
@@ -76,6 +77,7 @@ func TestSupervisor_ModalKeystroke_NoLiveSessionFailsLoud(t *testing.T) {
 		{"accept trust", func(s *Supervisor) error { return s.AcceptTrust() }, "supervisor: accept trust:"},
 		{"answer", func(s *Supervisor) error { return s.Answer("2") }, "supervisor: answer:"},
 		{"send esc", func(s *Supervisor) error { return s.SendEsc() }, "supervisor: send esc:"},
+		{"start new session", func(s *Supervisor) error { return s.StartNewSession() }, "supervisor: start new session:"},
 	}
 
 	for _, tt := range tests {
@@ -128,6 +130,16 @@ func TestSupervisor_ModalKeystroke_KeystrokeErrorFailsLoud(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "supervisor: accept trust:") {
 		t.Errorf("err = %v, want the wrap prefix", err)
+	}
+
+	// StartNewSession routes through the same sendModalKey wrap, so a seam error
+	// surfaces with its own stable prefix and preserves the underlying error.
+	err = sup.StartNewSession()
+	if !errors.Is(err, boom) {
+		t.Errorf("StartNewSession err = %v, want errors.Is(err, boom)", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "supervisor: start new session:") {
+		t.Errorf("StartNewSession err = %v, want the wrap prefix", err)
 	}
 }
 

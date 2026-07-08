@@ -6,15 +6,18 @@ import (
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
-// modalKey identifies one abstract modal-resolution keystroke, one level up from
-// tui-driver's concrete key methods. It is unexported on purpose: the exported
-// surface is the three verb methods (AcceptTrust/Answer/SendEsc), not the enum.
+// modalKey identifies one abstract keystroke intent, one level up from
+// tui-driver's concrete key methods. Most resolve a modal (AcceptTrust/Answer/
+// SendEsc); keyStartNewSession drives the "/clear" slash command, so the enum is
+// an abstract keystroke intent, not strictly modal-resolution. It is unexported
+// on purpose: the exported surface is the verb methods, not the enum.
 type modalKey int
 
 const (
-	keyAcceptTrust modalKey = iota // → Session.AcceptTrust()
-	keyAnswer                      // → Session.Answer(choice)
-	keyEsc                         // → Session.SendEsc()
+	keyAcceptTrust     modalKey = iota // → Session.AcceptTrust()
+	keyAnswer                          // → Session.Answer(choice)
+	keyEsc                             // → Session.SendEsc()
+	keyStartNewSession                 // → "/clear" via ClearInputLine + TypePrompt
 )
 
 // String renders the verb for the error-wrap prefix ("supervisor: <verb>: …").
@@ -26,6 +29,8 @@ func (k modalKey) String() string {
 		return "answer"
 	case keyEsc:
 		return "send esc"
+	case keyStartNewSession:
+		return "start new session"
 	default:
 		return fmt.Sprintf("modalKey(%d)", int(k))
 	}
@@ -63,6 +68,18 @@ func (s *Supervisor) Answer(choice string) error {
 // See AcceptTrust for the shared contract.
 func (s *Supervisor) SendEsc() error {
 	return s.sendModalKey(keyEsc, "")
+}
+
+// StartNewSession drives claude's "/clear" slash command into the live session,
+// resetting the running conversation to a fresh session. Unlike the modal verbs
+// it resolves no modal: it types a fixed slash command (see sendModalKeystroke
+// for the exact ClearInputLine + TypePrompt sequence). It carries no trust
+// decision and accepts no caller-supplied text — the "/clear" literal is fixed
+// in code; any authorization lives in the future consumer. See AcceptTrust for
+// the shared contract (no ctx, wrapped ErrNoLiveSession when detached, loud
+// wrapped error on PTY failure).
+func (s *Supervisor) StartNewSession() error {
+	return s.sendModalKey(keyStartNewSession, "")
 }
 
 // sendModalKey captures the live Session under sessMu, releases the lock, then
@@ -104,6 +121,20 @@ func sendModalKeystroke(sess *tuidriver.Session, k modalKey, choice string) erro
 		return sess.Answer(choice)
 	case keyEsc:
 		return sess.SendEsc()
+	case keyStartNewSession:
+		// Drive claude's "/clear" (start a new session). ClearInputLine (Ctrl-U)
+		// first so "/" lands at column 0: the slash-picker only opens when "/" is
+		// the first character of the input line, so any drafted text would render
+		// "/clear" as literal text ("hello/clear") and open no picker. TypePrompt
+		// then types "/clear" byte-by-byte — each byte opens then filters the
+		// slash-picker — settles, and commits with a trailing "\r" (Enter runs the
+		// highlighted /clear entry). TypePrompt, not SendKeys or a paste: only
+		// genuine byte-spaced typing makes claude register input and open the
+		// picker; a bulk/paste write is treated as prompt text and opens nothing.
+		if err := sess.ClearInputLine(); err != nil {
+			return err
+		}
+		return sess.TypePrompt("/clear")
 	default:
 		// Unreachable from the exported API (the three verb methods pass only
 		// the constants above). A programmer bug if hit — return loudly rather
