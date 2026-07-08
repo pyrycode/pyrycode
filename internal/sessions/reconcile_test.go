@@ -244,3 +244,171 @@ func TestNewTranscriptResolver_IgnoresNonMatching(t *testing.T) {
 		t.Errorf("path = %q, want %q (noise ignored)", path, want)
 	}
 }
+
+// --- #838: newProbePreferredTranscriptResolver --------------------------------
+
+// stubProbe is a scriptable rotation.Probe: OpenJSONL returns (path, err) and
+// counts calls. It omits Available() so probeUsable treats it as usable — the
+// same "usable by omission" signal the real darwinProbe / linuxProbe give.
+type stubProbe struct {
+	path  string
+	err   error
+	calls int
+}
+
+func (p *stubProbe) OpenJSONL(int) (string, error) {
+	p.calls++
+	return p.path, p.err
+}
+
+// unavailableProbe mirrors the no-lsof noopProbe: Available() == false, so
+// probeUsable reports it unusable and the resolver delegates to
+// newTranscriptResolver (AC5).
+type unavailableProbe struct{}
+
+func (unavailableProbe) OpenJSONL(int) (string, error) { return "", nil }
+func (unavailableProbe) Available() bool               { return false }
+
+func constPID(pid int) func() int { return func() int { return pid } }
+
+// resolvedTempDir returns a t.TempDir() with symlinks resolved, so probed-path
+// fixtures compare cleanly against the resolver's EvalSymlinks(dir) guard base
+// on macOS (where /var -> /private/var).
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("evalsymlinks tempdir: %v", err)
+	}
+	return dir
+}
+
+// TestProbePreferredResolver_TailsOwnChildNotNewestByMtime: the resolver returns
+// the transcript the probe reports for the daemon's own child, with its real byte
+// size, even when a foreign <uuid>.jsonl in the same dir has a NEWER mtime (AC1 +
+// AC2). Proves mtime is never consulted on the probe path.
+func TestProbePreferredResolver_TailsOwnChildNotNewestByMtime(t *testing.T) {
+	t.Parallel()
+	dir := resolvedTempDir(t)
+
+	own := "00000000-0000-4000-8000-00000000dead"
+	foreign := "11111111-1111-4111-8111-111111111111"
+	base := time.Now().Add(-time.Hour)
+
+	ownPath := filepath.Join(dir, own+".jsonl")
+	content := []byte(`{"type":"user"}` + "\n")
+	if err := os.WriteFile(ownPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(ownPath, base, base); err != nil {
+		t.Fatal(err)
+	}
+	// Foreign sibling written more recently — would win newest-by-mtime.
+	touchJSONL(t, dir, foreign, base.Add(30*time.Minute))
+
+	probe := &stubProbe{path: ownPath}
+	resolve := newProbePreferredTranscriptResolver(dir, probe, constPID(4321))
+	path, size, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if path != ownPath {
+		t.Errorf("path = %q, want %q (own child's file, not newest by mtime)", path, ownPath)
+	}
+	if size != int64(len(content)) {
+		t.Errorf("size = %d, want %d", size, len(content))
+	}
+}
+
+// TestProbePreferredResolver_NoBaseline covers every probe-path condition that
+// must yield the ("", 0, nil) no-baseline sentinel — a NIL error, never a non-nil
+// error and never an mtime fallback (AC3, the load-bearing convention inversion
+// vs the cmd/pyry sibling) — plus the AC4 confidentiality-guard rejections.
+func TestProbePreferredResolver_NoBaseline(t *testing.T) {
+	t.Parallel()
+
+	const valid = "22222222-2222-4222-8222-222222222222"
+
+	cases := []struct {
+		name      string
+		pid       int
+		probePath func(t *testing.T, dir string) string // nil / "" -> empty probe result
+		probeErr  error
+		wantCalls int
+	}{
+		{name: "pid zero", pid: 0, wantCalls: 0},
+		{name: "pid negative", pid: -1, wantCalls: 0},
+		{name: "empty probe", pid: 7, wantCalls: 1},
+		{
+			name: "probe error", pid: 7, wantCalls: 1,
+			probePath: func(_ *testing.T, dir string) string { return filepath.Join(dir, valid+".jsonl") },
+			probeErr:  errors.New("lsof boom"),
+		},
+		{
+			name: "outside dir", pid: 7, wantCalls: 1,
+			probePath: func(t *testing.T, _ string) string { return filepath.Join(resolvedTempDir(t), valid+".jsonl") },
+		},
+		{
+			name: "non-uuid stem", pid: 7, wantCalls: 1,
+			probePath: func(_ *testing.T, dir string) string { return filepath.Join(dir, "not-a-uuid.jsonl") },
+		},
+		{
+			name: "missing jsonl suffix", pid: 7, wantCalls: 1,
+			probePath: func(_ *testing.T, dir string) string { return filepath.Join(dir, valid) },
+		},
+		{
+			name: "vanished before stat", pid: 7, wantCalls: 1,
+			probePath: func(_ *testing.T, dir string) string { return filepath.Join(dir, valid+".jsonl") },
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := resolvedTempDir(t)
+			var path string
+			if c.probePath != nil {
+				path = c.probePath(t, dir)
+			}
+			probe := &stubProbe{path: path, err: c.probeErr}
+			resolve := newProbePreferredTranscriptResolver(dir, probe, constPID(c.pid))
+			gotPath, gotSize, err := resolve(context.Background())
+			if gotPath != "" || gotSize != 0 || err != nil {
+				t.Errorf("resolve = (%q, %d, %v), want (\"\", 0, nil)", gotPath, gotSize, err)
+			}
+			if probe.calls != c.wantCalls {
+				t.Errorf("probe calls = %d, want %d", probe.calls, c.wantCalls)
+			}
+		})
+	}
+}
+
+// TestProbePreferredResolver_NoLsofMatchesMtimeBaseline: when the probe is
+// unavailable (no lsof), the constructor delegates to newTranscriptResolver, so
+// its output is byte-identical to today's newest-by-mtime baseline across the
+// newest-pick, empty-dir, and missing-dir fixtures (AC5). pidFn returns a live
+// PID to prove the unusable-probe branch ignores it entirely.
+func TestProbePreferredResolver_NoLsofMatchesMtimeBaseline(t *testing.T) {
+	t.Parallel()
+
+	newestDir := t.TempDir()
+	older := "00000000-0000-4000-8000-000000000001"
+	newest := "00000000-0000-4000-8000-000000000002"
+	b := time.Now().Add(-time.Hour)
+	touchJSONL(t, newestDir, older, b)
+	touchJSONL(t, newestDir, newest, b.Add(time.Minute))
+
+	emptyDir := t.TempDir()
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	for _, dir := range []string{newestDir, emptyDir, missingDir} {
+		got := newProbePreferredTranscriptResolver(dir, unavailableProbe{}, constPID(999))
+		want := newTranscriptResolver(dir)
+		gp, gs, ge := got(context.Background())
+		wp, ws, we := want(context.Background())
+		if gp != wp || gs != ws || (ge == nil) != (we == nil) {
+			t.Errorf("dir %s: probe-preferred = (%q,%d,%v), newTranscriptResolver = (%q,%d,%v)",
+				dir, gp, gs, ge, wp, ws, we)
+		}
+	}
+}
