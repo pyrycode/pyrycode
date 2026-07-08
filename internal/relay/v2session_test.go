@@ -3659,15 +3659,25 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 	knownNone := func(string) bool { return false }
 	convPayload := json.RawMessage(`{"conversation_id":"` + snapConvID + `"}`)
 
+	// SnapshotSettings read-seam doubles (#848). customSettings returns a
+	// non-default triple; defaultSettings returns the all-defaults triple (proves
+	// a seam yielding defaults is indistinguishable from a nil seam on the wire).
+	customSettings := func() (model, effort string, yolo bool) { return "opus", "high", true }
+	defaultSettings := func() (model, effort string, yolo bool) { return "", "", false }
+
 	tests := []struct {
 		name          string
 		knownConv     func(string) bool
 		snap          ScreenSnapshotter
+		settings      func() (model, effort string, yolo bool)
 		reqPayload    json.RawMessage
 		wantType      string
 		wantCode      string // TypeError rows only
 		wantRetryable bool   // TypeError rows only
 		wantText      string // TypeScreenSnapshot rows only
+		wantModel     string // TypeScreenSnapshot rows only
+		wantEffort    string // TypeScreenSnapshot rows only
+		wantYOLO      bool   // TypeScreenSnapshot rows only
 	}{
 		{
 			name:       "happy renders screen_snapshot",
@@ -3684,6 +3694,48 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 			reqPayload: convPayload,
 			wantType:   protocol.TypeScreenSnapshot,
 			wantText:   "",
+		},
+		{
+			// AC #1/#4: injected non-default settings surface on the wire.
+			name:       "injected settings surface in screen_snapshot",
+			knownConv:  knownOnly,
+			snap:       fakeSnapshotter{text: snapScreenText, live: true},
+			settings:   customSettings,
+			reqPayload: convPayload,
+			wantType:   protocol.TypeScreenSnapshot,
+			wantText:   snapScreenText,
+			wantModel:  "opus",
+			wantEffort: "high",
+			wantYOLO:   true,
+		},
+		{
+			// AC #2: a nil seam reports the effective defaults — empty
+			// model/effort, yolo:false — all three present (byte-compatible with
+			// the pre-#848 zero-value reply).
+			name:       "nil settings seam reports all-defaults",
+			knownConv:  knownOnly,
+			snap:       fakeSnapshotter{text: snapScreenText, live: true},
+			settings:   nil,
+			reqPayload: convPayload,
+			wantType:   protocol.TypeScreenSnapshot,
+			wantText:   snapScreenText,
+			wantModel:  "",
+			wantEffort: "",
+			wantYOLO:   false,
+		},
+		{
+			// AC #2: a seam that returns defaults is indistinguishable on the wire
+			// from a nil seam (the no-bootstrap collapse in the cmd/pyry closure).
+			name:       "settings seam returning defaults matches nil seam",
+			knownConv:  knownOnly,
+			snap:       fakeSnapshotter{text: snapScreenText, live: true},
+			settings:   defaultSettings,
+			reqPayload: convPayload,
+			wantType:   protocol.TypeScreenSnapshot,
+			wantText:   snapScreenText,
+			wantModel:  "",
+			wantEffort: "",
+			wantYOLO:   false,
 		},
 		{
 			name:          "foreign conversation rejected",
@@ -3761,6 +3813,7 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 				Logger:            silentLogger(),
 				Snapshotter:       tt.snap,
 				KnownConversation: tt.knownConv,
+				SnapshotSettings:  tt.settings,
 			}, frames, rec, respPub, initPriv)
 			t.Cleanup(sess.stop)
 
@@ -3794,6 +3847,19 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 				}
 				if p.Text != tt.wantText {
 					t.Errorf("Text = %q, want %q", p.Text, tt.wantText)
+				}
+				// #848: model / effort / YOLO reflect the injected read seam (or
+				// defaults for a nil seam). All three are always present on the
+				// wire (no omitempty), so an empty model/effort and yolo:false are
+				// asserted explicitly rather than as an omitted field.
+				if p.Model != tt.wantModel {
+					t.Errorf("Model = %q, want %q", p.Model, tt.wantModel)
+				}
+				if p.Effort != tt.wantEffort {
+					t.Errorf("Effort = %q, want %q", p.Effort, tt.wantEffort)
+				}
+				if p.YOLO != tt.wantYOLO {
+					t.Errorf("YOLO = %v, want %v", p.YOLO, tt.wantYOLO)
 				}
 				// TS is freshly stamped; compare with IsZero/Since, never == (a
 				// JSON round-trip strips the monotonic reading).
