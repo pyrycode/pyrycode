@@ -183,6 +183,136 @@ func TestRegistry_LifecycleStateBackwardsCompat(t *testing.T) {
 	}
 }
 
+// TestRegistry_SettingsRoundTrip: an entry carrying Model/Effort/YOLO survives
+// save → reload unchanged (AC #1, registry-serialization layer).
+func TestRegistry_SettingsRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	when := fixedTime(t)
+	in := &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID:           SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91"),
+			CreatedAt:    when,
+			LastActiveAt: when,
+			Bootstrap:    true,
+			Model:        "opus",
+			Effort:       "high",
+			YOLO:         true,
+		}},
+	}
+	if err := saveRegistryLocked(path, in); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := loadRegistry(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got == nil || len(got.Sessions) != 1 {
+		t.Fatalf("got = %+v, want 1 session", got)
+	}
+	g := got.Sessions[0]
+	if g.Model != "opus" || g.Effort != "high" || !g.YOLO {
+		t.Errorf("settings round-trip mismatch: got Model=%q Effort=%q YOLO=%v, want opus/high/true",
+			g.Model, g.Effort, g.YOLO)
+	}
+}
+
+// TestRegistry_DefaultSettingsOmittedOnDisk: a default entry (empty model/effort,
+// YOLO false) serializes WITHOUT those keys, preserving the byte-stable on-disk
+// shape (AC #5 / omitempty discipline).
+func TestRegistry_DefaultSettingsOmittedOnDisk(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	when := fixedTime(t)
+	if err := saveRegistryLocked(path, &registryFile{
+		Version: 1,
+		Sessions: []registryEntry{{
+			ID:        SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91"),
+			CreatedAt: when, LastActiveAt: when, Bootstrap: true,
+		}},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, key := range []string{`"model"`, `"effort"`, `"yolo"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("default entry serialized %s key; want omitted (byte shape). file:\n%s", key, data)
+		}
+	}
+}
+
+// TestRegistry_MissingSettingsDefaults (AC #2): a registry written before these
+// fields existed loads without error; model/effort default to "" (inherit the
+// template) and YOLO to false (permissions enforced).
+func TestRegistry_MissingSettingsDefaults(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	raw := `{
+      "version": 1,
+      "sessions": [
+        {
+          "id": "8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91",
+          "created_at": "2026-05-01T12:34:56.789Z",
+          "last_active_at": "2026-05-01T12:34:56.789Z",
+          "bootstrap": true
+        }
+      ]
+    }`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := loadRegistry(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got == nil || len(got.Sessions) != 1 {
+		t.Fatalf("got = %+v, want 1 session", got)
+	}
+	g := got.Sessions[0]
+	if g.Model != "" || g.Effort != "" || g.YOLO {
+		t.Errorf("missing settings should default to empty/false; got Model=%q Effort=%q YOLO=%v",
+			g.Model, g.Effort, g.YOLO)
+	}
+}
+
+// TestRegistry_CorruptYOLOFailsLoud (AC #2, security): a wrong-typed yolo value
+// fails the whole parse and never surfaces a registry with YOLO enabled. This
+// is the fail-closed guarantee — corruption can never silently enable bypass.
+func TestRegistry_CorruptYOLOFailsLoud(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	raw := `{
+      "version": 1,
+      "sessions": [
+        {
+          "id": "8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91",
+          "created_at": "2026-05-01T12:34:56.789Z",
+          "last_active_at": "2026-05-01T12:34:56.789Z",
+          "bootstrap": true,
+          "yolo": "maybe"
+        }
+      ]
+    }`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := loadRegistry(path)
+	if err == nil {
+		t.Fatalf("loadRegistry(corrupt yolo) = %+v, want error", got)
+	}
+	if got != nil {
+		t.Errorf("loadRegistry returned non-nil registry on corrupt yolo: %+v (must never surface YOLO=true)", got)
+	}
+}
+
 func TestLoad_TolerateUnknownFields(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -26,6 +26,16 @@ type registryEntry struct {
 	LastActiveAt   time.Time `json:"last_active_at"`
 	Bootstrap      bool      `json:"bootstrap,omitempty"`
 	LifecycleState string    `json:"lifecycle_state,omitempty"`
+
+	// Per-session claude spawn settings (#833). Empty Model/Effort mean
+	// "inherit the daemon template"; YOLO=false (the omitempty default) means
+	// permissions are enforced (bypass OFF). omitempty keeps the on-disk shape
+	// byte-stable for the default session. A missing yolo key decodes to false;
+	// a malformed yolo value fails the whole loadRegistry parse (fail-closed),
+	// so neither absence nor corruption can ever enable bypass.
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	YOLO   bool   `json:"yolo,omitempty"`
 }
 
 // loadRegistry reads sessions.json from path. Returns (nil, nil) when the file

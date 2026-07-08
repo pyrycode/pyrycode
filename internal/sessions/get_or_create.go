@@ -65,7 +65,9 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 	// p.mu so the critical section stays small for concurrent same-id
 	// callers and so we can discard the loser's freshly-built session
 	// cheaply.
-	sess, err := p.buildSession(id, label, spawnDir)
+	// This ticket passes zero settings (byte-identical minted argv); #826b
+	// plumbs real per-session settings through this mint path.
+	sess, err := p.buildSession(id, label, spawnDir, SessionSettings{})
 	if err != nil {
 		return "", err
 	}
