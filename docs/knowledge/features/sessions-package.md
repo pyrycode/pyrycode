@@ -27,6 +27,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **Phase 2 mobile (#659):** `Pool.SetTransitionObserver(TransitionObserver)` — an injectable, in-process signal fired on `/clear` rotations and evictions (idle + cap). New types `TransitionReason` / `SessionTransition` / `TransitionObserver` in `transition.go`; new unexported field `Pool.transitionObserver`. The `cmd/pyry` consumer (#657) maps it onto the v2 `session_transition` wire event without `internal/sessions` importing `internal/protocol` / `internal/relay`. See *Transition observer* below and [codebase/659.md](../codebase/659.md).
 - **EPIC #672 (#684):** `Pool.CreateIn(ctx, label, spawnDir)` / `Pool.GetOrCreateIn(ctx, id, label, spawnDir)` — sibling methods carrying an explicit per-session spawn working directory through the shared `buildSession` seam into `supervisor.Config.WorkDir`. Empty `spawnDir` falls back to `tpl.WorkDir`, so `Create` / `GetOrCreate` become thin delegators (`=> CreateIn(ctx, label, "")` / `=> GetOrCreateIn(ctx, id, label, "")`) with byte-identical behaviour for every existing caller. The pool treats the path as **opaque** (no validation / canonicalisation / trust) — that is the consumer slice #685's job. See *Per-session spawn workdir* below and [codebase/684.md](../codebase/684.md).
 - **EPIC #600 (#761):** `Config.BootstrapEvicted bool` + `Pool.Ready() <-chan struct{}` — two purely-additive primitives for **embedded pool hosts** (`pyry acp`) that must run exactly one interactive claude per caller session. `BootstrapEvicted` parks the bootstrap in `stateEvicted` so it spawns no eager claude (a single `Pool.Create` is then the only interactive claude — ACP divergence 6); `Ready()` is a `sync.Once`-closed channel gating the unrecoverable first-`Create → ErrPoolNotRunning` startup race. Both zero-value-safe, single-consumer, no call-site fan-out. See *`Config.BootstrapEvicted` + `Pool.Ready()`* below, [codebase/761.md](../codebase/761.md), and [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md).
+- **#833:** `SessionSettings{Model, Effort string; YOLO bool}` — a per-session model/reasoning-effort/bypass-permissions triple, persisted on `registryEntry` (`Model`/`Effort`/`YOLO`, all `omitempty`) and applied to the `claude` spawn argv via the pure `claudeSettingsArgs` helper at both spawn sites (`New`'s bootstrap warm-start, `buildSession`'s minted path). Zero value appends no flags — byte-identical argv for every session that doesn't opt in. `security-sensitive`: `YOLO`'s zero value is the fail-safe "permissions enforced" state; no custom decoder needed (see [ADR 030](../decisions/030-plain-bool-failsafe-persisted-flag.md)). Storage + spawn primitive only — no wire verb yet (setter: #826b, reader: #826c). See *`SessionSettings` + `claudeSettingsArgs`* below and [codebase/833.md](../codebase/833.md).
 
 ## Package Layout
 
@@ -233,6 +234,83 @@ enough to strand the first call. So an embedded host must background `Run`, then
 `select` on `Ready()` before issuing any `Create`. Same channel-backed
 readiness shape as [ADR 023](023-activate-waits-pty-readiness.md)'s
 `Supervisor.WaitForPTY`.
+
+### `SessionSettings` + `claudeSettingsArgs` (#833)
+
+The per-session model / reasoning-effort / YOLO (bypass-permissions) triple —
+the storage + spawn **primitive** the wire setter (#826b) and reader (#826c)
+build on. No wire message ships with this primitive.
+
+```go
+type SessionSettings struct {
+    Model  string
+    Effort string
+    YOLO   bool
+}
+```
+
+Zero value inherits the daemon template for `Model`/`Effort` and enforces
+permissions (`YOLO` off) — the fail-safe default. Stored on `Session.settings`,
+**immutable post-construction**: set once in `Pool.New` (bootstrap) or
+`Pool.buildSession` (minted), read under `Pool.mu` (same discipline as
+`label`). A future wire setter that mutates it must take `Pool.mu` (write) and
+re-persist, exactly as `Pool.Rename` does for `label`.
+
+```go
+func claudeSettingsArgs(s SessionSettings) []string
+```
+
+Pure helper, unexported. `Model != ""` → `--model <x>`; `Effort != ""` →
+`--effort <x>`; `YOLO == true` → `--dangerously-skip-permissions`, in that
+deterministic order. `YOLO == false` appends nothing — absence of the flag is
+what enforces permissions, so the function can never emit a
+permission-*disabling* flag. Zero value → `nil`, so both call sites append
+nothing and the argv is byte-identical to pre-#833 behaviour.
+
+**Two spawn sites, both appending to a cloned slice:**
+
+- `Pool.New` (bootstrap): reads `entry.Model/Effort/YOLO` in the warm-start
+  branch (cold start → zero value), then
+  `ClaudeArgs: append(slices.Clone(cfg.Bootstrap.ClaudeArgs), claudeSettingsArgs(settings)...)`.
+  The clone is required because the pre-#833 code aliased
+  `cfg.Bootstrap.ClaudeArgs` directly; appending to an alias would mutate the
+  caller's slice.
+- `Pool.buildSession` (minted): gains a `settings SessionSettings` parameter,
+  appends after `--session-id`. `CreateIn` / `GetOrCreateIn` — the two callers
+  — both pass `SessionSettings{}` as of #833; #826b is what plumbs real
+  values through the mint path.
+
+**Persistence.** `registryEntry` (`registry.go`) gains `Model string`,
+`Effort string`, `YOLO bool`, all `json:"...,omitempty"`, following the
+`Bootstrap`/`LifecycleState` field precedent exactly. `saveLocked` copies
+`s.settings` into the outgoing entry under the held `Pool.mu`.
+
+**Only the bootstrap round-trips settings across a live daemon restart** —
+`Pool.New` only re-materialises the bootstrap entry from disk; a minted
+session's settings round-trip is exercised at the registry-serialization layer
+only (this is the same pre-existing "only bootstrap reloads" limitation
+[ADR 016](../decisions/016-bootstrap-ignores-persisted-lifecycle-state.md)
+already documents, not something #833 introduces).
+
+**Security (`security-sensitive` ticket).** `YOLO`'s fail-safe posture — a
+missing or corrupt on-disk value can never enable bypass — rests entirely on
+`YOLO` being a plain `bool` (Go zero value = `false`) plus the pre-existing
+`loadRegistry` whole-parse strictness (a malformed value fails the entire load,
+not just that field). No new decoder was needed. See [ADR
+030](../decisions/030-plain-bool-failsafe-persisted-flag.md) for the full
+argument. Model/effort values on this path are operator-trusted (local 0600
+registry, delivered to `exec.CommandContext` as discrete argv tokens — no
+shell, no injection surface); validating *wire-supplied* model/effort is
+explicitly out of scope here and deferred to #826b.
+
+**Reference, not a shared code path:** `internal/agentrun/ptyrunner`
+([ptyrunner-package.md](ptyrunner-package.md)) already models `--model` /
+`--effort` / bypass as first-class knobs for `pyry agent-run`, and its
+`buildArgs` supplied the exact flag spellings here — but that path forbids
+`--dangerously-skip-permissions` outright (#538) and uses
+`--permission-mode dontAsk` instead. The two packages do not share code.
+
+See [codebase/833.md](../codebase/833.md) for the full implementation writeup.
 
 ### Pool.Create (1.1a-A2)
 
