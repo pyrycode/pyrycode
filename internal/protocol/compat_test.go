@@ -78,6 +78,11 @@ func TestIsV1Compatible(t *testing.T) {
 		// the v2-only new_session control: an inbound control type an old phone
 		// never sees, so IsV1Compatible must reject it.
 		{"new_session-rejected", TypeNewSession, false, ErrUnknownType},
+		// the v2-only set-session-settings vocabulary: an inbound control
+		// request an old phone never sends and an outbound reply an old phone
+		// never receives, so IsV1Compatible must reject both.
+		{"set_session_settings-rejected", TypeSetSessionSettings, false, ErrUnknownType},
+		{"session_settings_updated-rejected", TypeSessionSettingsUpdated, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,6 +156,9 @@ var v2OnlyTypes = map[string]bool{
 	TypeRequestDebugBundle: true,
 	// v2 new_session control.
 	TypeNewSession: true,
+	// v2 set-session-settings vocabulary.
+	TypeSetSessionSettings:     true,
+	TypeSessionSettingsUpdated: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -193,6 +201,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestDebugBundle,
 		// v2 new_session control.
 		TypeNewSession,
+		// v2 set-session-settings vocabulary.
+		TypeSetSessionSettings, TypeSessionSettingsUpdated,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]
@@ -225,6 +235,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeMessageTooLong":              CodeMessageTooLong,
 		"CodeRelayNoServer":               CodeRelayNoServer,
 		"CodeRelayServerIDConflict":       CodeRelayServerIDConflict,
+		"CodeSessionNotFound":             CodeSessionNotFound,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -239,6 +250,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeMessageTooLong":              "message.too_long",
 		"CodeRelayNoServer":               "relay.no_server",
 		"CodeRelayServerIDConflict":       "relay.server_id_conflict",
+		"CodeSessionNotFound":             "session.not_found",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))

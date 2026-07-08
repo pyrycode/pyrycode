@@ -9,7 +9,7 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
-├── codes.go                     12 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656) + v2-modal Type* (modal_shown / modal_answer / modal_cancel / modal_dismissed, #701) + v2-queue Type* (queue_state / dequeue_message, #720) + v2-interrupt Type* (TypeInterrupt, #707, payload-less inbound control) + v2-debug-bundle Type* (debug_bundle_chunk / debug_bundle_done / request_debug_bundle, #812/#813) + v2-new_session Type* (TypeNewSession, #831, payload-less inbound control)
+├── codes.go                     13 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656) + v2-modal Type* (modal_shown / modal_answer / modal_cancel / modal_dismissed, #701) + v2-queue Type* (queue_state / dequeue_message, #720) + v2-interrupt Type* (TypeInterrupt, #707, payload-less inbound control) + v2-debug-bundle Type* (debug_bundle_chunk / debug_bundle_done / request_debug_bundle, #812/#813) + v2-new_session Type* (TypeNewSession, #831, payload-less inbound control) + v2-session-settings Type* (set_session_settings / session_settings_updated, #844) + Session errors group (CodeSessionNotFound, #844)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies); QueuedItem + QueueStatePayload / DequeueMessagePayload (#720, v2 queue vocabulary); DebugBundleChunkPayload / DebugBundleDonePayload (#812, v2 debug-bundle streaming bodies)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
@@ -17,6 +17,7 @@ internal/protocol/
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
 ├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607), StallPayload (#638) — v2 interactive binary→phone event bodies
 ├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
+├── settings.go                  SetSessionSettingsPayload, SessionSettingsUpdatedPayload (#844) — v2 set-session-settings request (phone→binary) / reply (binary→phone) bodies; wire vocabulary only, handler is #845
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsV1Compatible + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
@@ -26,6 +27,7 @@ internal/protocol/
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
 ├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads + the #638 stall payload via Envelope.Payload
 ├── snapshot_test.go             golden round-trip for the two #617 snapshot payloads + empty-conversation_id boundary
+├── settings_test.go             golden round-trip for the request payload (present-at-zero vs omitted, table-driven) + the reply payload (#844)
 └── testdata/                    envelope_full.json, envelope_minimal.json, routing_envelope.json,
                                  register_push_token.json, send_message.json, message.json,
                                  backfill_since.json, message_chunk.json, backfill_done.json,
@@ -35,10 +37,11 @@ internal/protocol/
                                  hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
                                  turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json, stall.json,
                                  request_snapshot.json, screen_snapshot.json,
-                                 modal_shown.json, modal_answer.json, modal_cancel.json, modal_dismissed.json
+                                 modal_shown.json, modal_answer.json, modal_cancel.json, modal_dismissed.json,
+                                 set_session_settings_full.json, set_session_settings_omitted.json, session_settings_updated.json
 ```
 
-Nine production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the v1 per-type payload DTOs, one file per spec-section group — the full #256 catalog is wired — `interactive.go` (#607) carries the first v2 additive application-event DTOs, and `snapshot.go` (#617) carries the v2 screen-snapshot request/response DTOs.
+Ten production files. `envelope.go` carries the package's behaviour surface (two structs, two sentinels, one predicate). `codes.go` carries the wire-string constants (pure data, grouped by spec table order). `push.go` + `messaging.go` + `conversations_read.go` + `conversations_write.go` + `handshake.go` carry the v1 per-type payload DTOs, one file per spec-section group — the full #256 catalog is wired — `interactive.go` (#607) carries the first v2 additive application-event DTOs, `snapshot.go` (#617) carries the v2 screen-snapshot request/response DTOs, and `settings.go` (#844) carries the v2 set-session-settings request/reply DTOs.
 
 ## Types
 
@@ -342,6 +345,67 @@ type DebugBundleDonePayload struct {
   (`v2OnlyTypes`, the partition `all` list, the `-rejected` cases) and are **not**
   in `v1TypeSet` — an old phone must never receive these outbound events. See
   [codebase/812.md](../codebase/812.md).
+
+### Session settings payloads (#844)
+
+The wire vocabulary for changing a session's per-session model / reasoning
+effort / YOLO (`docs/protocol-mobile.md` § Session settings; split from
+#841). **Wire vocabulary only** — the handler that intercepts
+`set_session_settings` at `v2session.go`'s `dispatchAppFrame` **before**
+`dispatch.Route` (the `TypeModalAnswer` / `TypeNewSession` precedent — **no
+`dispatch.Route` handler**), gates on the `interactive` capability, validates,
+persists via `sessions.Pool.UpdateSettings` (#840), and emits the reply is
+sibling #845. See [codebase/844.md](../codebase/844.md).
+
+```go
+type SetSessionSettingsPayload struct {
+    SessionID string  `json:"session_id"`
+    Model     *string `json:"model,omitempty"`
+    Effort    *string `json:"effort,omitempty"`
+    YOLO      *bool   `json:"yolo,omitempty"`
+}
+
+type SessionSettingsUpdatedPayload struct {
+    SessionID string `json:"session_id"`
+}
+```
+
+- **The three settings fields are pointers with `omitempty` — the presence
+  contract.** `nil` means "leave unchanged"; a non-nil pointer means "set to
+  this value", including a non-nil `*""` (`Model`/`Effort`) or `*false`
+  (`YOLO`), which are thereby distinguishable from omitted. This is the
+  **opposite** of the sibling `*string`-without-`omitempty` payloads
+  (`BackfillSincePayload`, `SessionTransitionPayload`), which encode a
+  literal `null` sentinel. Here an unset field must be *absent*, not `null` —
+  the minimal shape a client changing one setting naturally produces. An
+  absent `yolo` can never masquerade as a sent `false`, and an absent `model`
+  can never masquerade as an instruction to clear a stored value. The struct
+  doc comment flags the divergence explicitly so a future contributor
+  doesn't "fix" it by copying the sibling style.
+- **Mirrors `sessions.SettingsUpdate{Model, Effort *string; YOLO *bool}`
+  (#840) field-for-field** — the #845 handler decodes this payload straight
+  into that seam.
+- **`SessionID` is the addressing key** — matches
+  `sessions.Pool.UpdateSettings(id sessions.SessionID, …)` and is already
+  carried to clients in the `session_transition` marker's `new_session_id`
+  field, so a client already knows it. Plain `string`, always required, no
+  `omitempty`.
+- **The reply does not echo the applied settings** — it only identifies the
+  confirmed session; the request↔reply correlation rides `Envelope.InReplyTo`
+  at the handler layer, and the client already knows what it sent.
+- **Not `security-sensitive`** (per the wire-vocab → handler split precedent
+  #701→#703 / #720→#723 / #812→#813 / #656→#657): this leaf defines shape
+  only, no nonce/token/capability primitive. `yolo` is a shape, not a gate —
+  the fail-safe (nil never enables bypass) lives in `sessions.SettingsUpdate`
+  (#840); the capability gate and persistence are handler sibling #845,
+  which carries the label.
+
+Golden round-trips in `settings_test.go`: a table-driven test over
+`set_session_settings_full.json` (all three fields present at zero value)
+vs `set_session_settings_omitted.json` (only `session_id`), asserting pointer
+nil-ness then a byte-equal re-marshal — the regression guard for the
+`omitempty` decision — plus a `session_settings_updated.json` round-trip for
+the reply.
 
 ### Conversations-read payloads (#273)
 
@@ -724,7 +788,7 @@ Sentinel error strings carry no input bytes and no payload contents — a malfor
 
 ## Constants (`codes.go`)
 
-### Error codes (12)
+### Error codes (13)
 
 Wire values for the `code` field of error payloads (spec § Error codes, lines 525–542). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -742,6 +806,7 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 | `CodeMessageTooLong` | `message.too_long` |
 | `CodeRelayNoServer` | `relay.no_server` |
 | `CodeRelayServerIDConflict` | `relay.server_id_conflict` |
+| `CodeSessionNotFound` | `session.not_found` |
 
 ### Envelope types
 
@@ -827,6 +892,14 @@ The two queue types share **one** const block with **one** rationale comment —
 
 `TypeNewSession = "new_session"` is an inbound phone → binary **control** envelope in its **own** new const block, intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeInterrupt` / `TypeRequestDebugBundle` precedent — **no `dispatch.Route` handler**). It is the **remote start-new-session** — a paired phone's equivalent of typing `/clear` at the local terminal; the daemon routes it directly to the supervised claude as a `/clear` via the sealed `supervisor.StartNewSession` seam (#830). **Unlike `interrupt` it maps to no neutral `turnevent` command** — there is no announced ACP counterpart requiring one, so it drives the relay seam directly (mirroring how `modal_cancel` routes to `ModalResolver.ResolveCancel` without constructing a `turnevent` value). Like `interrupt` / `request_debug_bundle` it carries **NO named payload struct** — no `conversation_id`, no nonce, no idempotency key: a bare control frame (a replayed `new_session` just drives another `/clear`, harmless and idempotent in effect). Stays out of `v1TypeSet` (a `{"new_session-rejected", TypeNewSession, false, ErrUnknownType}` row in `compat_test.go` pins the v1 rejection). The interception, capability gate, and `StartNewSession` routing are the consumer ticket's job in `internal/relay` (`security-sensitive` — reuses the `interactive`-capability-is-the-authorization posture `interrupt` established; exempt from the per-device permission gate #702, since starting a fresh session in one's own paired session is a normal paired-phone action, not a tool-permission decision); this leaf declaration makes no trust decision. See [codebase/831.md](codebase/831.md).
 
+**v2 set-session-settings vocabulary** (#844, split from #841; spec `docs/protocol-mobile.md` § Session settings):
+
+| Group | Constants |
+|-------|-----------|
+| Session settings | `TypeSetSessionSettings`, `TypeSessionSettingsUpdated` |
+
+The two share **one** const block with **one** rationale comment — the same **mixed inbound+outbound** cluster precedent as the modal and queue blocks. `TypeSetSessionSettings` is an inbound phone → binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalAnswer` / `TypeNewSession` precedent — **no `dispatch.Route` handler**); `TypeSessionSettingsUpdated` is an outbound binary → phone reply confirming the change, correlated via `Envelope.InReplyTo`. Both carry real named payload structs in the new `settings.go` (`SetSessionSettingsPayload` / `SessionSettingsUpdatedPayload` — see [Session settings payloads](#session-settings-payloads-844)). Both stay out of `v1TypeSet` (two `{"set_session_settings-rejected"/"session_settings_updated-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producer is handler sibling #845, which decodes into `sessions.Pool.UpdateSettings` (#840); this slice is wire vocabulary only — **not** `security-sensitive` (per the wire-vocab → handler split precedent, this leaf defines shape only, no nonce/token/capability primitive; the YOLO fail-safe lives in `sessions.SettingsUpdate` (#840) and the capability gate in #845). See [codebase/844.md](../codebase/844.md).
+
 `TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out; the interactive block carries the same MUST-NOT instruction. The advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
 
 ## Drift detectors
@@ -835,7 +908,7 @@ The v1 type list appears three times: in the `Type*` constants block (`codes.go`
 
 - `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
 - `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656/#701/#720/#707/#812/#813/#831) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds twenty-two entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition` + the four modal types + the two queue types + `TypeInterrupt` + the two debug-bundle-stream types + `TypeRequestDebugBundle` + `TypeNewSession`), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 22 == 38`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656/#701/#720/#707/#812/#813/#831/#844) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds twenty-four entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition` + the four modal types + the two queue types + `TypeInterrupt` + the two debug-bundle-stream types + `TypeRequestDebugBundle` + `TypeNewSession` + the two set-session-settings types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 24 == 40`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
@@ -891,6 +964,7 @@ No production consumers in this slice. Future:
 - [codebase/607.md](../codebase/607.md) — the #607 implementation note (interactive payloads + capabilities negotiation)
 - [codebase/617.md](../codebase/617.md) — the #617 implementation note (screen-snapshot wire types + v2 partition)
 - [codebase/638.md](../codebase/638.md) — the #638 implementation note (the `stall` wire type + its internal-only `turnevent.Stall` peer; the sixth member of the v2 interactive partition)
+- [codebase/844.md](../codebase/844.md) — the #844 implementation note (`set_session_settings` / `session_settings_updated` wire vocabulary + the presence-contract design; handler sibling #845 not yet built)
 - [codebase/649.md](../codebase/649.md) — the #649 implementation note (the additive `Envelope.EventID *uint64` field surfacing the eventring durable id on the interactive stream; producer half of mid-turn reconnect)
 - [codebase/647.md](../codebase/647.md) — the #647 implementation note (`HelloClientPayload.LastEventID` + `TypeResync`; the inbound reconnect-replay consumer — `security-sensitive`, carries an unresolved code-review MUST FIX, not yet merged)
 - [codebase/656.md](../codebase/656.md) — the #656 implementation note (the `session_transition` wire type; the vocab→producer split this slice and #701 both mirror)

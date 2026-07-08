@@ -446,6 +446,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
+| **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
+| **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -797,6 +799,51 @@ settled by [`request_debug_bundle`](#request_debug_bundle) above (pairing);
 the streaming transport faithfully seals whatever blob it is handed to an
 already-authenticated, open conn.
 
+### Session settings (v2)
+
+A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
+
+#### `set_session_settings`
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler (like [`modal_answer`](#modal-v2) / [`new_session`](#new-session-v2)).
+
+`session_id` is the **addressing key** — it names the session to change, matching the `sessions.Pool.UpdateSettings(id, …)` seam and the `new_session_id` a client already learns from the [`session_transition`](#interactive-events-v2-capability-gated) marker.
+
+The three settings fields are **optional** and encode a *presence contract*: a field that is **absent** from the payload means "leave that setting unchanged", while a field that is **present** — including at its zero value (`""` for `model`/`effort`, `false` for `yolo`) — means "set it to this value". An **absent** `yolo` can therefore never be read as a sent `false`, and an absent `model` can never be read as an instruction to clear the stored value. (On the wire this is `omitempty` over pointer fields: an absent key, not a literal `null`.)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `session_id` | string | The session to change. Always present. |
+| `model` | string (optional) | New model; absent = leave unchanged. |
+| `effort` | string (optional) | New reasoning effort; absent = leave unchanged. |
+| `yolo` | boolean (optional) | New bypass-permissions (YOLO) state; absent = leave unchanged. An absent `yolo` never enables bypass. |
+
+Example (a client changing only the reasoning effort — `model` and `yolo` omitted):
+
+```json
+{
+  "id": 811, "type": "set_session_settings", "ts": "...",
+  "payload": { "session_id": "sess-a", "effort": "high" }
+}
+```
+
+#### `session_settings_updated`
+
+Direction **binary → phone** (outbound). The daemon's confirmation that a `set_session_settings` was applied. It carries only the `session_id` it confirms; the request↔reply correlation rides `in_reply_to` (#845). The client already knows what it sent, so the reply does not echo the applied settings.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `session_id` | string | The session the change was applied to. |
+
+Example:
+
+```json
+{
+  "id": 44, "type": "session_settings_updated", "ts": "...", "in_reply_to": 811,
+  "payload": { "session_id": "sess-a" }
+}
+```
+
 ## Backfill semantics
 
 Unchanged from v1. All backfill frames ride inside `noise_msg`.
@@ -809,6 +856,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 |---|---|---|
 | `noise.handshake_failed` | no | Reported only to local logs — wire-level handshake failure closes the WS with `4426` and no AEAD-sealed envelope can be sent. Included here for completeness. |
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
+| `session.not_found` | no | The `set_session_settings` target `session_id` names no live session. Returned by the handler (#845). |
 
 WS close codes used at the transport layer:
 
