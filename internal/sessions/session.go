@@ -58,6 +58,42 @@ func closedChan() chan struct{} {
 	return ch
 }
 
+// SessionSettings is the per-session model / reasoning-effort / bypass-permissions
+// triple persisted in the registry (#833) and applied to the claude spawn argv.
+// The zero value inherits the daemon template for Model/Effort and enforces
+// permissions (YOLO off) — the fail-safe default.
+//
+// Immutable post-construction in this ticket: set once in Pool.New (bootstrap)
+// or Pool.buildSession (minted), read under Pool.mu. A future wire setter (#826b)
+// that mutates it must take Pool.mu (write) and re-persist, exactly as
+// Pool.Rename does for label.
+type SessionSettings struct {
+	Model  string
+	Effort string
+	YOLO   bool
+}
+
+// claudeSettingsArgs returns the extra claude flags implied by s, in a
+// deterministic order (model, effort, bypass) for testability. Empty Model or
+// Effort emits no flag (inherit the template). YOLO==true appends
+// --dangerously-skip-permissions; YOLO==false appends nothing — the absence of
+// the flag is what enforces permissions. The function never emits a
+// permission-disabling flag, so a zero value yields nil and callers append
+// nothing (byte-identical argv).
+func claudeSettingsArgs(s SessionSettings) []string {
+	var args []string
+	if s.Model != "" {
+		args = append(args, "--model", s.Model)
+	}
+	if s.Effort != "" {
+		args = append(args, "--effort", s.Effort)
+	}
+	if s.YOLO {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	return args
+}
+
 // Session is one supervised claude instance plus the bridge that mediates its
 // I/O in service mode. As of 1.2c-A each Session owns a lifecycle goroutine
 // (the body of Run) that drives the active↔evicted state machine.
@@ -75,6 +111,13 @@ type Session struct {
 	label     string
 	createdAt time.Time
 	bootstrap bool
+
+	// settings holds the per-session model / effort / YOLO applied to the
+	// claude spawn argv (#833). Immutable post-New this ticket — set in
+	// Pool.New (bootstrap) or Pool.buildSession (minted), read under Pool.mu
+	// by saveLocked (same discipline as label). #826b's setter must revisit
+	// synchronization when it mutates and re-persists this.
+	settings SessionSettings
 
 	// pool is the back-pointer used to persist registry changes after a
 	// state transition. Set once, in Pool.New.

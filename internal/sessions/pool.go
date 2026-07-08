@@ -350,13 +350,18 @@ func New(cfg Config) (*Pool, error) {
 		label        string
 		createdAt    time.Time
 		lastActiveAt time.Time
-		lcState      lifecycleState // defaults to stateActive
+		lcState      lifecycleState  // defaults to stateActive
+		settings     SessionSettings // zero on cold start; from disk on warm start
 	)
 	if entry := pickBootstrap(reg); entry != nil {
 		bootstrapID = entry.ID
 		label = entry.Label
 		createdAt = entry.CreatedAt
 		lastActiveAt = entry.LastActiveAt
+		// Honour persisted spawn settings across a daemon restart. Unlike
+		// lifecycle_state (per-process, ignored below), these are the
+		// operator's spawn intent and must survive restart.
+		settings = SessionSettings{Model: entry.Model, Effort: entry.Effort, YOLO: entry.YOLO}
 		// Bootstrap-only: ignore persisted lifecycle_state. The bootstrap
 		// is the per-process auto-spawn entry; daemon-mode startup
 		// contract is "claude is available". Idle eviction within a
@@ -387,10 +392,14 @@ func New(cfg Config) (*Pool, error) {
 	}
 
 	supCfg := supervisor.Config{
-		ClaudeBin:      cfg.Bootstrap.ClaudeBin,
-		WorkDir:        cfg.Bootstrap.WorkDir,
-		ResumeLast:     cfg.Bootstrap.ResumeLast,
-		ClaudeArgs:     cfg.Bootstrap.ClaudeArgs,
+		ClaudeBin:  cfg.Bootstrap.ClaudeBin,
+		WorkDir:    cfg.Bootstrap.WorkDir,
+		ResumeLast: cfg.Bootstrap.ResumeLast,
+		// Clone before appending: today's code aliases cfg.Bootstrap.ClaudeArgs
+		// directly, and we must not mutate the caller's slice. With zero
+		// settings the appended slice has identical elements (byte-identical
+		// argv, AC #5).
+		ClaudeArgs:     append(slices.Clone(cfg.Bootstrap.ClaudeArgs), claudeSettingsArgs(settings)...),
 		Bridge:         cfg.Bootstrap.Bridge,
 		Logger:         cfg.Logger,
 		BackoffInitial: cfg.Bootstrap.BackoffInitial,
@@ -436,6 +445,7 @@ func New(cfg Config) (*Pool, error) {
 		createdAt:    createdAt,
 		lastActiveAt: lastActiveAt,
 		bootstrap:    true,
+		settings:     settings,
 		idleTimeout:  idleTimeout,
 		removedCh:    make(chan struct{}), // never closed: bootstrap is ErrCannotRemoveBootstrap
 		lcState:      lcState,
@@ -985,7 +995,9 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 		return "", fmt.Errorf("sessions: create id: %w", err)
 	}
 
-	sess, err := p.buildSession(id, label, spawnDir)
+	// This ticket passes zero settings (byte-identical minted argv); #826b
+	// plumbs real per-session settings through this mint path.
+	sess, err := p.buildSession(id, label, spawnDir, SessionSettings{})
 	if err != nil {
 		return "", err
 	}
@@ -1032,9 +1044,15 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 // the shared template workdir (tpl.WorkDir), today's behaviour. The pool does
 // NOT validate, canonicalise, or trust-check spawnDir — callers supply a
 // pre-resolved path (see #685).
-func (p *Pool) buildSession(id SessionID, label, spawnDir string) (*Session, error) {
+//
+// settings are the per-session model / effort / YOLO applied to the spawn argv
+// (#833) and stored on the returned Session. The zero value appends no flags,
+// so the argv is byte-identical to today (AC #5). CreateIn/GetOrCreateIn pass
+// the zero value in this ticket; #826b plumbs real values through the mint path.
+func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	tpl := p.sessionTpl
 	args := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
+	args = append(args, claudeSettingsArgs(settings)...)
 	var bridge *supervisor.Bridge
 	if tpl.Bridge != nil {
 		bridge = supervisor.NewBridge(p.log)
@@ -1084,6 +1102,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string) (*Session, err
 		createdAt:    now,
 		lastActiveAt: now,
 		bootstrap:    false,
+		settings:     settings,
 		pool:         p,
 		idleTimeout:  idleTimeout,
 		removedCh:    make(chan struct{}),
@@ -1201,6 +1220,12 @@ func (p *Pool) saveLocked() error {
 			CreatedAt:    s.createdAt,
 			LastActiveAt: lastActive,
 			Bootstrap:    s.bootstrap,
+			// s.settings is immutable post-New, read under the held Pool.mu
+			// (same discipline as s.label above, NOT under lcMu). omitempty on
+			// the tags keeps the default-session on-disk shape byte-stable.
+			Model:  s.settings.Model,
+			Effort: s.settings.Effort,
+			YOLO:   s.settings.YOLO,
 		}
 		// omitempty on the JSON tag keeps the stable on-disk shape for
 		// the dominant active case — important for the existing
