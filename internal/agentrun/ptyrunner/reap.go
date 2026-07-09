@@ -24,6 +24,14 @@ const killGrace = 5 * time.Second
 // ps cannot wedge teardown.
 const reapPSTimeout = 2 * time.Second
 
+// reapDescendantGroupsFn is the seam every teardown reap call site routes
+// through so tests can observe the reap firing on the budget-hit and
+// watchdog-fire paths without standing up a real descendant process tree.
+// Production leaves it pointed at reapDescendantGroups (byte-identical to a
+// direct call); the budget/watchdog unit tests swap it non-parallel and
+// restore the original via t.Cleanup.
+var reapDescendantGroupsFn = reapDescendantGroups
+
 // reapDescendantGroups SIGKILLs every process group that contains a descendant
 // of rootPid, except the caller's own group, rootPid's own group, and the
 // init/invalid group (pgid <= 1). It is the deterministic half of the
