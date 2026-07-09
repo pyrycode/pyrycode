@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 
 	"github.com/pyrycode/pyrycode/internal/config"
@@ -105,6 +106,51 @@ func resolveWorkspaceDir(requested string) (string, error) {
 		return "", fmt.Errorf("%w: %v", handlers.ErrWorkspaceRejected, err)
 	}
 	return realpath, nil
+}
+
+// resolveWorkspaceFolder validates and creates a paired client's requested
+// workspace folder for create_workspace_folder (#887): expandTilde(parent)
+// (leading "~"/"~/" → the daemon's $HOME, since a client cannot know the daemon's
+// absolute home) then filepath.Join(expandedParent, name) then the CREATING
+// confineWorkdirToHomeCreating (canonical realpath, confined to $HOME, created if
+// missing). It returns the created folder's realpath, or an error wrapping
+// handlers.ErrWorkspaceFolderRejected on any failure. It is referenced directly as
+// the create_workspace_folder handler's WorkspaceFolderResolver at both wiring
+// sites below (no startRelay parameter threaded — like resolveWorkspaceDir, it has
+// no external state). The caller (handler) has already validated `name` is a
+// single clean path element, so the join lands the folder directly under parent.
+//
+// A HYBRID of resolveSpawnDir and resolveWorkspaceDir, both choices load-bearing:
+//
+//   - Uses confineWorkdirToHomeCreating (CREATING), like resolveSpawnDir and unlike
+//     resolveWorkspaceDir's strict confiner — this verb's whole purpose is to create
+//     the folder. The creating confiner's containment check runs BEFORE MkdirAll, so
+//     an escaping target is rejected with nothing created (AC #2); MkdirAll is
+//     idempotent (AC #5); it returns the post-creation EvalSymlinks realpath (AC #4).
+//   - Does NOT call trustMark, like resolveWorkspaceDir and UNLIKE resolveSpawnDir.
+//     Creating a folder is not spawning into it; trust-marking auto-accepts claude's
+//     workspace-trust modal and is a SPAWN concern. Marking a folder that may never
+//     host a session would prematurely auto-trust it. The eventual create_conversation
+//     into this folder re-runs resolveSpawnDir → confineWorkdirToHomeCreating
+//     (idempotent on the now-existing realpath) + trustMark then.
+//
+// Every failure — from expandTilde or confineWorkdirToHomeCreating — is wrapped with
+// the sentinel so the handler maps it uniformly to a non-retryable reply. This folds
+// a rare in-$HOME MkdirAll error (EACCES/ENOSPC) into the same non-retryable reject
+// as an escape, exactly as resolveSpawnDir already does for its create path; the
+// dominant, security-relevant failure is the escape, and a retry won't fix a full
+// disk. The confine detail is wrapped via %v for the chain; the handler never logs
+// or echoes it (it names the offending path).
+func resolveWorkspaceFolder(parent, name string) (string, error) {
+	expandedParent, err := expandTilde(parent)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", handlers.ErrWorkspaceFolderRejected, err)
+	}
+	created, err := confineWorkdirToHomeCreating(filepath.Join(expandedParent, name))
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", handlers.ErrWorkspaceFolderRejected, err)
+	}
+	return created, nil
 }
 
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
@@ -219,6 +265,7 @@ func startRelay(
 		d.Register(protocol.TypeArchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true))
 		d.Register(protocol.TypeUnarchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false))
 		d.Register(protocol.TypeChangeWorkspace, handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger))
+		d.Register(protocol.TypeCreateWorkspaceFolder, handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger))
 		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 		d.Register(protocol.TypeSendMessage, handlers.SendMessage(router, queue, logger))
 
@@ -410,6 +457,7 @@ func startRelayV2(
 			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true),
 			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false),
 			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger),
+			protocol.TypeCreateWorkspaceFolder: handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
 			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
 			protocol.TypeSendMessage:           handlers.SendMessage(router, queue, logger),
 		},
