@@ -102,6 +102,25 @@ const (
 	// there is no new reply type.
 	TypeChangeWorkspace = "change_workspace"
 
+	// Workspace.
+	// TypeCreateWorkspaceFolder is a phone → binary dispatch.Route write verb
+	// (like create_conversation / change_workspace): it creates a new folder on
+	// the daemon host under a client-supplied parent path, confined to $HOME, and
+	// replies with the new workspace_folder_created record carrying the created
+	// folder's canonical absolute path. It touches NO conversations registry — it
+	// only creates a directory. It is a v1TypeSet member, not a v2 control frame —
+	// see the v1/v2 partition in envelope.go / compat_test.go ("v2 wire message"
+	// in the ticket title names the encrypted v2 transport, not the v1/v2 type
+	// partition). Unlike change_workspace (which reuses conversation_updated) the
+	// reply is a NEW type, TypeWorkspaceFolderCreated.
+	TypeCreateWorkspaceFolder = "create_workspace_folder"
+	// TypeWorkspaceFolderCreated is the binary → phone reply to a
+	// create_workspace_folder, correlated via in_reply_to. It carries the
+	// canonical (symlink-resolved) absolute path of the created folder — no
+	// conversation is involved, so no conversation record is projected. Also a
+	// v1TypeSet member.
+	TypeWorkspaceFolderCreated = "workspace_folder_created"
+
 	// Backfill.
 	TypeBackfillSince = "backfill_since"
 	TypeMessageChunk  = "message_chunk"

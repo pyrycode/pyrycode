@@ -532,6 +532,28 @@ type ConversationUpdatedPayload struct {
 
 Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Flat test functions (no table-driven; `TestRenameConversationPayload_RoundTrip` #820, `TestDeleteConversationPayload_RoundTrip` / `TestConversationDeletedPayload_RoundTrip` #822, and two `ArchiveConversationPayload` round-trips — one per envelope fixture (`archive_conversation.json` / `unarchive_conversation.json`), differing only in `type` — #881 added alongside the original four), each follows the sibling-slice template. **`ChangeWorkspacePayload` (#823) breaks this pattern** — no `TestChangeWorkspacePayload_RoundTrip` and no `testdata/change_workspace.json` fixture were added; its JSON shape is exercised only indirectly, via `json.Unmarshal` inside `internal/relay/handlers/change_workspace_test.go`. See [codebase/823.md](../codebase/823.md) § Lessons learned.
 
+### Workspace-folder payloads (`workspace.go`, #887)
+
+Body of `create_workspace_folder` / `workspace_folder_created` (`docs/protocol-mobile.md` § `create_workspace_folder`). A **new file**, not an addition to `conversations_write.go`: unlike every verb in the conversations-write slice above, this one names no conversation and carries no `conversation_id` — it creates a directory on the daemon host and returns its path.
+
+```go
+type CreateWorkspaceFolderPayload struct {
+    Parent string `json:"parent"`
+    Name   string `json:"name"`
+}
+
+type WorkspaceFolderCreatedPayload struct {
+    Path string `json:"path"`
+}
+```
+
+- **Both fields required, value-typed strings — no pointers, no `omitempty`.** Same discipline as `PromoteConversationPayload` / `RenameConversationPayload`: no optional-field branch to distinguish.
+- **`Parent` is an untrusted directory path; `Name` is untrusted and must be a single clean path element** — no separator, no `..`, not absolute, non-empty. Confinement to `$HOME` (via the reused `confineWorkdirToHomeCreating`) and the name-shape check are two independent, deterministic gates enforced by the dispatch handler (`internal/relay/handlers.CreateWorkspaceFolder`), not this layer: confinement alone does not guarantee the folder lands *directly* under `Parent` (a name like `sub/dir` stays inside `$HOME` yet escapes that guarantee). See [codebase/887.md](../codebase/887.md).
+- **`WorkspaceFolderCreatedPayload.Path` is the canonical (symlink-resolved) absolute path of the created folder** — a fresh reply type, not a reuse of `ConversationUpdatedPayload` (there is no conversation row to project `name`/`cwd`/`last_used_at` from). Sent `in_reply_to` the request, requester only, no broadcast.
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Same posture as the rest of the package.
+
+Golden round-trip tests in `workspace_test.go` (`TestCreateWorkspaceFolderPayload_RoundTrip`, `TestWorkspaceFolderCreatedPayload_RoundTrip`) against `testdata/create_workspace_folder.json` / `testdata/workspace_folder_created.json` — this slice does **not** repeat `ChangeWorkspacePayload`'s round-trip-test gap.
+
 ### `Envelope`
 
 The outer wire shape every application frame conforms to (`docs/protocol-mobile.md` § Message envelope, lines 177–201). Field order matches the spec table verbatim.
