@@ -436,6 +436,69 @@ func TestRegistry_ConcurrentReadWrite(t *testing.T) {
 	}
 }
 
+// TestRegistry_SaveConcurrentNoLostUpdate is the #868 regression guard: many
+// goroutines each mutate the registry and immediately Save concurrently, so the
+// snapshot→encode→fsync→rename sequences overlap in time. Without saveMu an
+// older snapshot's rename can land after a newer one's, leaving the on-disk file
+// missing a record a prior completed Save already wrote; with saveMu the whole
+// sequence serializes and rename order matches snapshot order, so the final file
+// holds every record.
+//
+// Each goroutine Creates then *immediately* Saves (one mutation per save) rather
+// than a mutate-all-then-save-all barrier: a barrier would make every Save
+// snapshot the identical full state, so no Save could ever clobber another and
+// the test would pass even on the unfixed code (vacuous). The outer loop drives
+// per-iteration detection probability toward 1 for the pre-fix code; on the
+// fixed code the membership assertion holds deterministically every iteration.
+// Run under -race to cover the "no Save-vs-mutator deadlock, no new race" half
+// of the AC.
+func TestRegistry_SaveConcurrentNoLostUpdate(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+	const iterations = 15
+	const n = 24
+
+	for iter := 0; iter < iterations; iter++ {
+		path := filepath.Join(t.TempDir(), "conversations.json")
+		r := &Registry{}
+
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				r.Create(Conversation{
+					ID:         ConversationID(fmt.Sprintf("%08d-2222-4333-8444-555555555555", i)),
+					Cwd:        fmt.Sprintf("/c-%d", i),
+					LastUsedAt: when.Add(time.Duration(i) * time.Second),
+				})
+				if err := r.Save(path); err != nil {
+					t.Errorf("iter %d goroutine %d: Save: %v", iter, i, err)
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		// Every goroutine's Create happens-before its own Save, so the final
+		// in-memory state is all n records; AC#1 says the on-disk file — written
+		// by the last Save to rename — must match it (no lost update).
+		back, err := Load(path)
+		if err != nil {
+			t.Fatalf("iter %d: Load: %v", iter, err)
+		}
+		got := back.List()
+		if len(got) != n {
+			t.Fatalf("iter %d: on-disk record count = %d, want %d (an older snapshot clobbered a newer one)", iter, len(got), n)
+		}
+		for i := 0; i < n; i++ {
+			id := ConversationID(fmt.Sprintf("%08d-2222-4333-8444-555555555555", i))
+			if _, ok := back.Get(id); !ok {
+				t.Errorf("iter %d: on-disk file missing conversation %q (lost update)", iter, id)
+			}
+		}
+	}
+}
+
 func TestRegistry_List_Filter(t *testing.T) {
 	t.Parallel()
 

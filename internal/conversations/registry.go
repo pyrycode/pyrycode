@@ -32,6 +32,13 @@ var (
 // via Load (cold-start or warm-start from disk); persist via Save. All methods
 // are safe for concurrent use.
 type Registry struct {
+	// saveMu serializes the full Save sequence (snapshot → encode → fsync →
+	// rename) so a later snapshot always renames later; an older snapshot can
+	// never clobber a newer one on disk. It is deliberately separate from mu so
+	// the slow disk write does not block concurrent reads/mutations. Lock order
+	// is one-directional: saveMu → mu (Save takes saveMu, then briefly mu for
+	// the snapshot copy), never the reverse.
+	saveMu        sync.Mutex
 	mu            sync.Mutex
 	conversations []Conversation
 }
@@ -70,6 +77,13 @@ func Load(path string) (*Registry, error) {
 // Entries are sorted by LastUsedAt then ID before serialization to guarantee
 // byte-identical output for the same logical content.
 func (r *Registry) Save(path string) error {
+	// Hold saveMu across the whole snapshot→rename sequence so two overlapping
+	// Save calls serialize: snapshot order == saveMu-acquire order == rename
+	// order. The inner r.mu critical section below still guards the snapshot
+	// copy against concurrent mutators. See the saveMu field doc for lock order.
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+
 	r.mu.Lock()
 	snapshot := make([]Conversation, len(r.conversations))
 	copy(snapshot, r.conversations)
