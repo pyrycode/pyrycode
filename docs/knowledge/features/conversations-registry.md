@@ -10,6 +10,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Promotion primitive (#218):** `(*Registry).Promote(id, name)` flips a discussion to a named channel under the registry lock; four exported sentinel errors (`ErrConversationNotFound`, `ErrConversationAlreadyPromoted`, `ErrPromotionNameInUse`, `ErrPromotionNameEmpty`) cover the refusal cases.
 - **Deletion primitive (#237):** `(*Registry).Delete(id) bool` removes a single entry by ID under the registry lock; consumed by the auto-archive sweep ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)). #217 explicitly deferred deletion until a real consumer surfaced; #220's sweep is that consumer.
 - **Rotation-rebind primitive (#739):** `(*Registry).RebindSession(oldID, newID string) bool` re-points the conversation bound to `oldID` at `newID` and appends `oldID` to `SessionHistory`, under the registry lock; consumed by the pool's `/clear` rotation path so the conversation↔session binding stays current beyond the first rotation ([`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation*). The first production caller to **write** `SessionHistory`.
+- **Durable manual-archive primitive (#880):** `(*Registry).SetArchived(id, archived bool) bool` flips the durable `Conversation.IsArchived` flag under the registry lock; `ListFilter.IsArchived *bool` narrows `List` to active-only/archived-only/both, ANDing with `IsPromoted` when both are set on one filter. Distinct from the auto-archive `Sweep` ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)), which permanently deletes rather than flagging — see that doc's *Related* section. Has no production callers yet; the `archive_conversation`/`unarchive_conversation` wire verbs that call it are #881. See [codebase/880.md](../codebase/880.md).
 
 ## Surface
 
@@ -23,6 +24,7 @@ type Registry struct { /* unexported */ }
 
 type ListFilter struct {
     IsPromoted *bool
+    IsArchived *bool
 }
 
 var (
@@ -41,6 +43,7 @@ func (r *Registry) Update(id ConversationID, fn func(*Conversation)) bool
 func (r *Registry) Delete(id ConversationID) bool
 func (r *Registry) Promote(id ConversationID, name string) error
 func (r *Registry) RebindSession(oldID, newID string) bool
+func (r *Registry) SetArchived(id ConversationID, archived bool) bool
 ```
 
 `Registry` holds the in-memory conversation slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk) or directly via `&Registry{}` (zero value is the empty registry — documented). Methods are safe for concurrent use.
@@ -78,6 +81,10 @@ The `ConversationID` doc-comment in `conversation.go` (#216) deferred the genera
   ]
 }
 ```
+
+`is_archived` (#880) is omitted from this example because it's `omitempty` and this row is active
+— it only appears, as `"is_archived": true`, on a row the user has manually archived. See
+*Durable archive flag (`IsArchived`, #880)* below.
 
 Envelope shape (`{"conversations": [...]}`), not a bare top-level array. Reserves room for future top-level fields (schema version, archive cursor) without breaking jq pipelines or stdlib decoder discipline. Same future-proofing rationale as the sessions and devices registries.
 
@@ -175,8 +182,10 @@ Returns a copy of the in-memory list, optionally narrowed by filter:
 - `r.List(ListFilter{IsPromoted: ptrTo(true)})` — only promoted (channels).
 - `r.List(ListFilter{IsPromoted: ptrTo(false)})` — only unpromoted (discussions).
 - `r.List(ListFilter{IsPromoted: nil})` — equivalent to `r.List()` (nil pointer means "no filter on this field").
+- `r.List(ListFilter{IsArchived: ptrTo(true)})` — only archived (#880). `ptrTo(false)` — only active. `nil` (or the field omitted) — both, today's/unfiltered behavior.
+- `r.List(ListFilter{IsPromoted: ptrTo(true), IsArchived: ptrTo(true)})` — both non-nil fields on **one** `ListFilter` AND (#880): archived channels only.
 
-Variadic for ergonomics, **not** AND-composition: when more than one `ListFilter` is supplied, only `filter[0]` is consulted (documented in the doc comment). The returned slice is a copy; callers may mutate it freely without affecting registry state. `IsPromoted *bool` distinguishes "filter out unpromoted" (`true`) from "filter out promoted" (`false`) from "no filter" (`nil`) — three states, which a bare `bool` cannot express.
+Variadic for ergonomics, **not** AND-composition **across separate `ListFilter` args**: when more than one `ListFilter` is supplied as separate variadic args, only `filter[0]` is consulted (documented in the doc comment). This is orthogonal to the AND-of-non-nil-fields rule *within* one `ListFilter` struct — the two rules operate at different levels (across args vs. within one arg) and are not in tension, though a skim can misread them as contradictory (code review NIT on #880; left as-is, not worth a rework). The returned slice is a copy; callers may mutate it freely without affecting registry state. `IsPromoted *bool` / `IsArchived *bool` each distinguish "filter to true" / "filter to false" / "no filter" (`nil`) — three states, which a bare `bool` cannot express.
 
 ### `Update(id ConversationID, fn func(*Conversation)) bool`
 
@@ -214,6 +223,31 @@ Contract:
 - **Empty `oldID` returns `false` before scanning.** An unbound conversation carries `CurrentSessionID == ""` (the unset sentinel), so a stray empty-id call must never sweep the first unbound row into a rebind. This is a **data-integrity guard at the primitive boundary**, not the eviction defense — that lives at the call site, which only rebinds on a `/clear` rotation (where `newID` is non-empty and distinct). Precondition (caller-guaranteed on the rotation path): `oldID` and `newID` non-empty and distinct.
 - **`SessionHistory` is oldest-first, append-in-place.** `append(SessionHistory, oldID)` — the retired id goes on the **end**, satisfying the field's documented "rotation appends in place" contract ([`features/conversations-package.md`](conversations-package.md)). #739 is the first production caller to write this field.
 - **No implicit `Save`.** Disk persistence stays with the caller, matching the `Create`/`Update`/`Promote`/`Delete` convention. The rotation caller (`Pool.rebindConversation`) `Save`s only on a `true` return, treats a `Save` error as non-fatal (the in-memory rebind is already usable), and skips `Save` entirely on a miss so the file mtime stays stable.
+
+### `SetArchived(id ConversationID, archived bool) bool` (#880)
+
+Flips the durable manual-archive flag: locate the entry whose `ID` matches, set
+`IsArchived = archived`, return `true`. On miss, return `false` and mutate nothing. Scan and
+mutation are a single critical section under `r.mu` — same no-TOCTOU posture as `Update` /
+`Promote` / `RebindSession`.
+
+- **One `bool` arg both archives and restores.** `SetArchived(id, true)` on an already-archived
+  row returns `true` and leaves it archived (idempotent); there is no separate `Archive`/
+  `Unarchive` pair.
+- **Flips exactly one field, structurally.** The method has no way to touch `Cwd`, `Name`,
+  `CurrentSessionID`, `SessionHistory`, or `IsPromoted` — this is deterministic enforcement of the
+  #880/#881 contract "toggling archived must not change id, cwd, name, or session binding," not a
+  convention the downstream verb handler has to remember.
+- **No implicit `Save`.** Matches `Create`/`Update`/`Promote`/`Delete`/`RebindSession`; persistence
+  is the caller's job.
+- **Modeled on `Delete`/`RebindSession`, not built on `Update`.** `Update(id, fn func(*Conversation))`
+  could express the same flip, but that hands the closure free rein over every field — the
+  single-field guarantee would then live only in the caller. A dedicated ~10-line method is this
+  package's established idiom for named-semantic mutations (`Promote`, `RebindSession`); `Update`
+  stays the escape hatch for ad hoc multi-field changes.
+
+Has no production callers as of #880; #881's `archive_conversation`/`unarchive_conversation`
+verbs call it. See [codebase/880.md](../codebase/880.md).
 
 ### `Promote(id ConversationID, name string) error`
 
@@ -254,7 +288,7 @@ Mirroring `devices`:
 
 New (no devices counterpart):
 
-- `TestRegistry_List_Filter` — table: nil filter, `IsPromoted=true`, `IsPromoted=false`; verifies the returned slice is a copy (mutating it does not affect a subsequent `List`); verifies the multi-filter case uses `filter[0]` only.
+- `TestRegistry_List_Filter` — table: nil filter, `IsPromoted=true`, `IsPromoted=false`; verifies the returned slice is a copy (mutating it does not affect a subsequent `List`); verifies the multi-filter case uses `filter[0]` only. Extended by #880 with four conversations spanning every `(IsPromoted, IsArchived)` combination so each filter's expected result is an unambiguous id set: `IsArchived=true`/`false`/nil, plus a combined `{IsPromoted, IsArchived}` case pinning the within-one-filter AND semantics.
 - `TestRegistry_Update_Hit` — Update bumps `LastUsedAt`, flips `IsPromoted`, sets `Name`; subsequent `Get` reflects the mutation.
 - `TestRegistry_Update_Miss` — Update on absent id returns `false`, `fn` never invoked (test-controlled flag), registry untouched.
 - `TestRegistry_Update_PointerStability` — within `fn`, mutating `*Conversation` propagates to subsequent reads (pins the contract; trivially true given `&r.conversations[i]`).
@@ -262,6 +296,10 @@ New (no devices counterpart):
 - `TestRegistry_Promote_DoesNotPersist` (#218) — `Save` → `Promote` → `Load` from the same path; the loaded registry shows `IsPromoted == false`, pinning that `Promote` does not call `Save` implicitly.
 - `TestRegistry_Delete` (#237) — table-driven: `hit` (seed 1, delete returns `true`, `Get` returns `ok=false`); `miss-empty-registry`; `miss-non-matching` (seed `A`, delete `B`, `A` untouched); `preserves-order` (seed `A`, `B`, `C`; delete `B`; `List` returns `[A, C]` in order — pins the order-preserving slice idiom against an accidental swap-with-last optimisation); `delete-snapshot-safety` (seed 2, take `snap := r.List()`, `Delete(snap[0].ID)`, assert `snap` unchanged in length and element identity — pins the documented "List returns a copy" contract from #217); `delete-twice-second-misses` (seed 1, delete returns `true`, second delete returns `false`).
 - `TestRegistry_RebindSession_*` (#739) — six scenarios mirroring `TestRegistry_Update_*`: `_Hit` (rebind returns `true`, target's `CurrentSessionID == newID` and `SessionHistory` tail `== oldID`, unrelated rows byte-identical); `_AppendOrder` (a row already carrying `[s0]` becomes `[s0, oldID]` — oldest-first append, not prepend); `_Miss` (no row bound to `oldID` → `false`, snapshot equality before/after); `_EmptyOldIDGuard` (a registry containing an **unbound** row, `CurrentSessionID == ""`, is **not** matched by `RebindSession("", new)` — pins the data-integrity guard); `_DoesNotPersist` (mirror `TestRegistry_Promote_DoesNotPersist` — `RebindSession` alone writes no file); `_FirstMatchOnly` (two rows pathologically bound to the same `oldID` → only the first rebinds). The pool-side rotation/eviction tests live in `internal/sessions/transition_test.go` — see [codebase/739.md](../codebase/739.md).
+- `TestRegistry_SetArchived_HitSetsAndClears` / `_Miss` / `_Idempotent` (#880) — hit asserts `IsArchived` flips **and** every other field (`Name`, `Cwd`, `CurrentSessionID`, `SessionHistory`, `IsPromoted`, `LastUsedAt`) is byte-identical to its pre-call value (the single-field guarantee), then clears via the same method; miss asserts `false` and a sentinel row untouched; idempotent asserts two `true` calls both succeed and the flag stays `true`.
+- `TestRegistry_SetArchived_RoundTrip` (#880, AC2) — an archived and an active conversation both survive `Save` → `Load` with their flag intact.
+- `TestRegistry_Load_AbsentArchivedKeyDecodesActive` (#880, AC1) — hand-written registry JSON with the `is_archived` key omitted from a row decodes that row's `IsArchived == false`, no migration invoked.
+- `TestRegistry_Save_ActiveOmitsArchivedKey` (#880, AC1) — an all-active registry's `Save` output contains no `is_archived` substring; `Save → Load → Save` is byte-identical (the byte-stable reload discipline extended to the new field).
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -290,6 +328,9 @@ New (no devices counterpart):
 - `internal/sessions/id.go` — the `NewID` / `ValidID` template `internal/conversations/id.go` clones.
 - [`features/conversation-session-binding.md`](conversation-session-binding.md) — the consumer of `RebindSession`: the `/clear` rotation rebind that keeps the binding current (§ *Maintaining the binding across rotation*).
 - [codebase/739.md](../codebase/739.md) — per-ticket note for the `RebindSession` write primitive + the pool-side rotation/eviction wiring.
+- [codebase/880.md](../codebase/880.md) — per-ticket note for `SetArchived` + `ListFilter.IsArchived` + the `list_conversations` read surfacing.
+- [`features/conversations-auto-archive.md`](conversations-auto-archive.md) — the pre-existing, unrelated `Sweep`/`ShouldArchive` hard-delete auto-archive; `SetArchived` (#880) is a distinct soft-archive mechanism, not a variant of it.
 - `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec for the CRUD foundation.
 - `docs/specs/architecture/218-conversations-promotion-api.md` — architect's spec for `Promote`.
 - `docs/specs/architecture/739-conversation-session-binding-rotation.md` — architect's spec for `RebindSession` + the rotation rebind.
+- `docs/specs/architecture/880-durable-archived-state.md` — architect's spec for `SetArchived` + `ListFilter.IsArchived` + the read-surface projection.

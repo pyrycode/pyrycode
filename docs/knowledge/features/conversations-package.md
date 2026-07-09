@@ -42,9 +42,20 @@ Canonical shape (#217): UUIDv4, 36 chars, lowercase hex, dashes at positions 8/1
 | `CurrentSessionID` | `string` | `current_session_id,omitempty` | no — empty when no session is bound |
 | `SessionHistory` | `[]string` | `session_history,omitempty` | no — empty/nil omitted |
 | `IsPromoted` | `bool` | `is_promoted` | yes — `false` = discussion, `true` = channel |
+| `IsArchived` | `bool` | `is_archived,omitempty` | no — absent key decodes as active (#880) |
 | `LastUsedAt` | `time.Time` | `last_used_at` | yes — bumped on user activity |
 
 `Name`, `CurrentSessionID`, `SessionHistory` carry `,omitempty` so unpromoted/unnamed conversations and conversations with no session bound serialize without those keys. `IsPromoted`, `Cwd`, `ID`, `LastUsedAt` do **not** use `omitempty` — they must always appear, even at zero value. The `IsPromoted: false` default ("discussion") must be explicit on disk.
+
+**`IsArchived` (#880) is the one exception to "state flags don't use `omitempty`," deliberately.**
+Its contract is the opposite of `IsPromoted`'s: "an absent key decodes as active, with no
+migration step" (durable-archive AC1). `omitempty` delivers that in both directions — a
+pre-#880 row with no `is_archived` key decodes to `false` = active, and an active conversation
+re-serializes with the key omitted, so an all-active registry stays byte-identical to its
+pre-#880 form. Don't "fix" this to drop `omitempty` for consistency with `IsPromoted`; the two
+fields' product contracts are opposite by design. See
+[`features/conversations-registry.md`](conversations-registry.md) § `SetArchived` for the mutator
+that flips it, and [codebase/880.md](../codebase/880.md).
 
 ## Decisions
 
@@ -87,7 +98,8 @@ None. Pure value type — no goroutines, no channels, no mutexes. Safe to copy b
 
 ## Related
 
-- [`features/conversations-registry.md`](conversations-registry.md) — `Registry` + `Load` / `Save` / `Create` / `Get` / `List` / `Update` (#217); the on-disk persistence layer for this type.
+- [`features/conversations-registry.md`](conversations-registry.md) — `Registry` + `Load` / `Save` / `Create` / `Get` / `List` / `Update` / `SetArchived` (#217, #880); the on-disk persistence layer for this type.
+- [codebase/880.md](../codebase/880.md) — per-ticket note for the `IsArchived` field + its `omitempty` asymmetry with `IsPromoted`.
 - [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) — `Registry.Update` runs the caller's callback under the registry lock.
 - [`internal/sessions`](sessions-package.md) — the existing `Session` model. Lives alongside `internal/conversations`; not coupled.
 - [`internal/sessions/id.go`](../../../internal/sessions/id.go) — `SessionID` typedef + `NewID` / `ValidID` template `ConversationID` mirrors byte-for-byte.
