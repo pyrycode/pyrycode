@@ -25,9 +25,14 @@ type ConversationsPayload struct {
 // shows "name": null explicitly, and omitempty on a nil pointer would
 // drop the key entirely, breaking byte-equivalent round-trip.
 type ConversationSummary struct {
-	ID            string    `json:"id"`
-	Name          *string   `json:"name"`
-	IsPromoted    bool      `json:"is_promoted"`
+	ID         string  `json:"id"`
+	Name       *string `json:"name"`
+	IsPromoted bool    `json:"is_promoted"`
+	// IsArchived is the conversation's durable archived flag. Always
+	// serialized (no omitempty, unlike the on-disk Conversation.IsArchived):
+	// a client partitions active vs. archived and counts each side, so it must
+	// read the flag on active rows too, where the value is false.
+	IsArchived    bool      `json:"is_archived"`
 	Cwd           string    `json:"cwd"`
 	LastMessageTS time.Time `json:"last_message_ts"`
 	LastUsedAt    time.Time `json:"last_used_at"`

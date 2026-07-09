@@ -165,6 +165,43 @@ func TestListConversations_SingleConversation(t *testing.T) {
 	}
 }
 
+// The list_conversations reply is unfiltered — both active and archived rows
+// appear, each tagged with its is_archived flag — so a client can partition
+// active vs. archived and count each side without a second query.
+func TestListConversations_SurfacesArchivedFlag(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	tActive := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	tArchived := time.Date(2026, 5, 13, 11, 0, 0, 0, time.UTC)
+	reg.Create(conversations.Conversation{ID: "conv-active", Cwd: "/a", IsArchived: false, LastUsedAt: tActive})
+	reg.Create(conversations.Conversation{ID: "conv-archived", Cwd: "/b", IsArchived: true, LastUsedAt: tArchived})
+
+	in := make(chan protocol.RoutingEnvelope, 1)
+	d := dispatch.New(dispatch.Config{Frames: in, Logger: testLogger(t)})
+	d.Register(protocol.TypeListConversations, ListConversations(reg))
+	stop := runListConvDispatcher(t, d)
+	defer stop()
+
+	in <- makeListConversationsFrame(t, 7)
+
+	out := recvOutbound(t, d)
+	_, payload := decodeConversationsResponse(t, out)
+
+	if len(payload.Conversations) != 2 {
+		t.Fatalf("len(Conversations): got %d, want 2 (both active and archived surface)", len(payload.Conversations))
+	}
+	byID := map[string]protocol.ConversationSummary{}
+	for _, c := range payload.Conversations {
+		byID[c.ID] = c
+	}
+	if got, ok := byID["conv-active"]; !ok || got.IsArchived {
+		t.Errorf("conv-active: got %+v, want present with IsArchived=false", got)
+	}
+	if got, ok := byID["conv-archived"]; !ok || !got.IsArchived {
+		t.Errorf("conv-archived: got %+v, want present with IsArchived=true", got)
+	}
+}
+
 func TestListConversations_DeterministicOrdering(t *testing.T) {
 	t.Parallel()
 	reg := &conversations.Registry{}

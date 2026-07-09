@@ -343,7 +343,7 @@ Seeds two 60-day-idle conversations (one promoted, one unpromoted) into `<home>/
 - Final on-shutdown sweep — AC explicit "does NOT perform any final on-shutdown sweep."
 - Metrics emission (counter of archive runs, histogram of archived counts) — no Phase 3 metrics surface exists yet; defer until one does.
 - `ConversationsRegistry`-shaped façade types or mockable interfaces — the function takes the concrete `*Registry`; the package owns both. An interface seam is premature.
-- Archive destination — Phase 3 archives by removing the row (history retention is a separate concern); a future ticket can add an `archived.json` sidecar if recoverable archive is asked for.
+- Archive destination — `Sweep` still archives by removing the row (history retention is a separate concern). #880 added a *durable, recoverable* archive mechanism (`Conversation.IsArchived` + `Registry.SetArchived`) for **manual** archive/restore, but deliberately did not change `Sweep`/`ShouldArchive` to use it — reconciling auto-archive with the new soft-archive state is still out of scope. See [`features/conversations-registry.md`](conversations-registry.md) § `SetArchived` and [codebase/880.md](../codebase/880.md).
 - Configurable threshold — exported knob deferred until a real ask.
 - Integration with `LastUsedAt` bumps — the future conversations API (rotate session, attach, send message) is what advances `LastUsedAt`; the predicate only reads it.
 - Clock interface / `Clock` type for injection — `now time.Time` is the injection point; tests pass deterministic literals, no fake clock needed.

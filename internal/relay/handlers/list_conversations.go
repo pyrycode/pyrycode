@@ -40,6 +40,7 @@ func ListConversations(reg ConversationLister) dispatch.Handler {
 				ID:         string(conv.ID),
 				Name:       conv.Name,
 				IsPromoted: conv.IsPromoted,
+				IsArchived: conv.IsArchived,
 				Cwd:        conv.Cwd,
 				// LastMessageTS collapses onto LastUsedAt: Conversation
 				// does not carry a distinct last-message timestamp today.
