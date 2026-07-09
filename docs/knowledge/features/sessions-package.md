@@ -127,7 +127,7 @@ func (p *Pool) SetTransitionObserver(obs TransitionObserver) // #659; call befor
 
 `Create(ctx, label)` (1.1a-A2) is the user-facing seam for minting a new session. See *Pool.Create* below for the full sequence and failure modes.
 
-`RotateID` (1.2b-A) atomically swaps the in-memory entry keyed by `oldID` with one keyed by `newID`, updates the bootstrap pointer if `oldID` was the bootstrap, bumps `last_active_at`, and persists. `p.mu` (write) is held across the entire operation. `RotateID(x, x)` is a no-op; unknown `oldID` returns `ErrSessionNotFound`. This is the load-bearing seam shared between startup reconciliation and the upcoming live-detection (`/clear` while claude is running) work — see [jsonl-reconciliation.md](jsonl-reconciliation.md).
+`RotateID` (1.2b-A) atomically swaps the in-memory entry keyed by `oldID` with one keyed by `newID`, updates the bootstrap pointer if `oldID` was the bootstrap, bumps `last_active_at`, and persists. `p.mu` (write) is held across the entire operation, and `sess.id = newID` is written inside the same brief `sess.lcMu` section as `lastActiveAt` (#866) — `sess.id` is a two-lock field, written under both `Pool.mu` and `lcMu`, read race-clean while holding either. `RotateID(x, x)` is a no-op; unknown `oldID` returns `ErrSessionNotFound`. This is the load-bearing seam shared between startup reconciliation and the live-detection (`/clear` while claude is running) work — see [jsonl-reconciliation.md](jsonl-reconciliation.md) and [rotation-watcher.md](rotation-watcher.md). See *Concurrency* below and [codebase/866.md](../codebase/866.md) for the full two-lock rationale.
 
 ### `Config` / `SessionConfig`
 
@@ -489,10 +489,11 @@ func (p *Pool) BootstrapID() SessionID
 
 RLock, resolve `p.bootstrap` fresh, RUnlock — the same shape as
 `Default()`/`DefaultSettings()`. Deliberately reads `p.bootstrap`, never
-`Default().ID()`/`sess.id`: `RotateID` mutates `sess.id` *without*
-`Session.lcMu`, under the documented invariant that `sess.id` has no
-concurrent reader, so a new spawn-time reader has to be routed around
-`sess.id`, not through it.
+`Default().ID()`/`sess.id`: `p.bootstrap` is the `Pool.mu`-guarded value, and
+reading it keeps the spawn path off `Session.lcMu` entirely (`sess.id` is
+guarded by both `Pool.mu` and `lcMu` as of #866 — see *Concurrency* below —
+but there is no reason for this call to take `lcMu` when `Pool.mu` already
+gives it a race-clean answer).
 
 **Wiring (`pool.go`, `New`):** the bootstrap `supCfg` sets `ResumeLast: false`
 and `ResolveSessionID: func() string { return string(p.BootstrapID()) }`.
@@ -923,7 +924,11 @@ channel"; #657 owns the non-blocking impl. See [codebase/659.md](../codebase/659
 - `Run` takes the read lock once briefly to grab the bootstrap pointer and `claudeSessionsDir`.
 - Writers: `RotateID` (1.2b-A), `RegisterAllocatedUUID` / `IsAllocated` mutations (1.2b-B), `persist` (1.2c-A; called from `Session.transitionTo`). Phase 1.1's `Pool.Add(SessionConfig)` plugs in the same way.
 
-`sync.Mutex` on each `Session.lcMu` (1.2c-A): protects `lcState`, `attached`, `activeCh`, `lastActiveAt`. **Lock order: `Pool.mu → Session.lcMu`**. `Session.transitionTo` releases `lcMu` *before* calling `Pool.persist` so `saveLocked`'s per-session re-acquire can't deadlock. `RotateID` mutates `session.id` without `lcMu` — documented invariant: today's only callers run before any lifecycle goroutine begins observing the id.
+`sync.Mutex` on each `Session.lcMu` (1.2c-A): protects `lcState`, `attached`, `activeCh`, `lastActiveAt`, and (as of #866) `id`. **Lock order: `Pool.mu → Session.lcMu`**. `Session.transitionTo` releases `lcMu` *before* calling `Pool.persist` so `saveLocked`'s per-session re-acquire can't deadlock.
+
+**`id` is a two-lock field (#866).** `RotateID` writes `sess.id = newID` under **both** `Pool.mu` (W, via its function-level `defer`) and `lcMu` — the write sits inside the same brief `lcMu` section `RotateID` already opens for `lastActiveAt`, so no new lock and no lock-order change. A read is race-clean while holding *either* lock: `Pool.mu`-holders (`List`, `ResolveID`, `Snapshot`, `saveLocked`) read `sess.id` directly; lifecycle-goroutine readers, which hold neither `Pool.mu` nor (before the read) `lcMu`, go through the unexported `(*Session).currentID()` helper (`sess.lcMu.Lock/Unlock`, return `id`). `Session.ID()` also routes through `currentID()` for the same reason, though it has zero production callers today. This replaced a stale invariant ("`RotateID` mutates `id` without `lcMu`; today's only callers run before any lifecycle goroutine begins observing it") that broke once #839 wired `RotateID` into the live fsnotify `/clear` watcher — that watcher goroutine runs concurrently with the per-session lifecycle goroutines and fires on every `/clear`, so the two lifecycle-goroutine reads of `sess.id` (the eviction-transition notify and the idle-eviction warn log) were a live, if latent, data race. See [codebase/866.md](../codebase/866.md).
+
+**Known residual gap (non-blocking, #866 code review).** `Pool.Activate`'s LRU-eviction path reads `sess.id`/`victim.id` as call arguments to `pickLRUVictim` while holding only `capMu` — `Pool.mu` is acquired *inside* `pickLRUVictim`, after Go has already evaluated those arguments, so this specific read is technically unguarded by either lock. It is pre-existing (unchanged by #866), and nil-impact today (the torn value is only used to exclude an already-known-inactive target from victim candidates), but it means "every `Pool.mu`-holder reads `id` race-clean" is not quite exception-free. Tracked as a follow-up, not yet filed as its own ticket.
 
 Goroutines introduced in this layer (1.2c-A):
 

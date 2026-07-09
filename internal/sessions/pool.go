@@ -539,11 +539,15 @@ func New(cfg Config) (*Pool, error) {
 // at that point; callers decide whether to treat the save error as fatal.
 // RotateID(x, x) is a no-op.
 //
-// Invariant: this mutates session.id without taking session.lcMu. Today the
-// only callers (startup reconciliation, future fsnotify-driven /clear
-// detection) run before any lifecycle goroutine begins observing the id, so
-// no concurrent reader exists. lastActiveAt IS protected by lcMu and is
-// taken briefly. Lock order remains Pool.mu → Session.lcMu.
+// Invariant: sess.id is guarded by two locks — the write below holds BOTH
+// Pool.mu (W, via the function-level defer) and Session.lcMu; a read is
+// race-clean while holding either one. Lifecycle goroutines read it via
+// currentID() (Session.lcMu); Pool.mu-holders (List, ResolveID, Snapshot,
+// saveLocked, Activate) read it directly. The old "no concurrent reader
+// exists" claim went stale when #839 wired RotateID into the live fsnotify
+// rotation watcher, whose goroutine runs concurrently with the per-session
+// lifecycle goroutines and fires on every /clear. lastActiveAt shares the same
+// lcMu section. Lock order remains Pool.mu → Session.lcMu.
 //
 // This is the load-bearing seam the live-detection ticket reuses.
 func (p *Pool) RotateID(oldID, newID SessionID) error {
@@ -556,8 +560,8 @@ func (p *Pool) RotateID(oldID, newID SessionID) error {
 	if oldID == newID {
 		return nil
 	}
-	sess.id = newID
 	sess.lcMu.Lock()
+	sess.id = newID
 	sess.lastActiveAt = time.Now().UTC()
 	sess.lcMu.Unlock()
 	delete(p.sessions, oldID)
@@ -984,10 +988,10 @@ func (p *Pool) DefaultSettings() (SessionSettings, bool) {
 // ResolveSessionID provider (which calls this) resolves the rotated id (#839).
 //
 // Concurrency: reads p.bootstrap (a p.mu-guarded SessionID value), deliberately
-// NOT Default().ID()/sess.id. RotateID mutates sess.id WITHOUT Session.lcMu
-// under the documented "no concurrent reader of sess.id" invariant; routing the
-// spawn-time read through p.bootstrap introduces no new sess.id reader and
-// preserves that invariant. The RLock is race-clean against RotateID's Lock.
+// NOT Default().ID()/sess.id. Reading p.bootstrap keeps the spawn path on the
+// Pool.mu-guarded value and avoids taking Session.lcMu — which now guards
+// sess.id alongside Pool.mu (#866) — while introducing no new sess.id reader.
+// The RLock is race-clean against RotateID's Lock.
 func (p *Pool) BootstrapID() SessionID {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

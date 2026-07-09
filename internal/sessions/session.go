@@ -125,6 +125,10 @@ func (s *Session) spawnArgs(settings SessionSettings) []string {
 // I/O in service mode. As of 1.2c-A each Session owns a lifecycle goroutine
 // (the body of Run) that drives the active↔evicted state machine.
 type Session struct {
+	// id is the session's stable identifier. Guarded by lcMu: written by
+	// Pool.RotateID under BOTH Pool.mu (W) and lcMu on a /clear rotation (#866);
+	// read off the lifecycle goroutine via currentID(), or directly by
+	// Pool.mu-holders (List, ResolveID, Snapshot, saveLocked, Activate).
 	id     SessionID
 	sup    *supervisor.Supervisor
 	bridge *supervisor.Bridge // nil in foreground mode
@@ -188,7 +192,17 @@ type Session struct {
 }
 
 // ID returns the session's stable identifier.
-func (s *Session) ID() SessionID { return s.id }
+func (s *Session) ID() SessionID { return s.currentID() }
+
+// currentID returns s.id under s.lcMu. sess.id is written by Pool.RotateID
+// under both Pool.mu (W) and lcMu (#866); a read is race-clean while holding
+// either. Lifecycle-goroutine readers (those NOT holding Pool.mu) MUST route
+// id reads through this helper; Pool.mu-holders read s.id directly.
+func (s *Session) currentID() SessionID {
+	s.lcMu.Lock()
+	defer s.lcMu.Unlock()
+	return s.id
+}
 
 // State returns a snapshot of the supervisor's runtime state. Pure delegation
 // to (*supervisor.Supervisor).State. Note: in stateEvicted, the supervisor's
@@ -404,7 +418,7 @@ func (s *Session) Run(ctx context.Context) error {
 			// mirrors transitionTo's guard for test-constructed sessions.
 			if reason != "" && s.pool != nil {
 				s.pool.notifyTransition(SessionTransition{
-					PreviousID: s.id,
+					PreviousID: s.currentID(),
 					Reason:     reason,
 					OccurredAt: time.Now().UTC(),
 				})
@@ -518,7 +532,7 @@ func (s *Session) runActive(ctx context.Context) (TransitionReason, error) {
 			// supervision-incomplete state has an explicit log line.
 			s.log.Warn("session: idle eviction firing",
 				"event", "session.idle_eviction",
-				"session_id", string(s.id),
+				"session_id", string(s.currentID()),
 				"idle_timeout", s.idleTimeout,
 				"bootstrap", s.bootstrap)
 			cancelSup()
