@@ -175,6 +175,8 @@ func startRelay(
 		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger))
 		d.Register(protocol.TypeRenameConversation, handlers.RenameConversation(convReg, resolveConversationsRegistryPath(instanceName), logger))
 		d.Register(protocol.TypeDeleteConversation, handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger))
+		d.Register(protocol.TypeArchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true))
+		d.Register(protocol.TypeUnarchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false))
 		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 		d.Register(protocol.TypeSendMessage, handlers.SendMessage(router, queue, logger))
 
@@ -359,12 +361,14 @@ func startRelayV2(
 		ServerID:    string(serverID),
 		Logger:      logger,
 		Handlers: map[string]dispatch.Handler{
-			protocol.TypeListConversations:  handlers.ListConversations(convReg),
-			protocol.TypeCreateConversation: handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),
-			protocol.TypeRenameConversation: handlers.RenameConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
-			protocol.TypeDeleteConversation: handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
-			protocol.TypeRegisterPushToken:  handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
-			protocol.TypeSendMessage:        handlers.SendMessage(router, queue, logger),
+			protocol.TypeListConversations:     handlers.ListConversations(convReg),
+			protocol.TypeCreateConversation:    handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),
+			protocol.TypeRenameConversation:    handlers.RenameConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
+			protocol.TypeDeleteConversation:    handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
+			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true),
+			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false),
+			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
+			protocol.TypeSendMessage:           handlers.SendMessage(router, queue, logger),
 		},
 		// Screen-snapshot seam (#618): the supervisor renders the live screen
 		// inside the tui-driver seal; KnownConversation gates request_snapshot

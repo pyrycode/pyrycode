@@ -77,15 +77,33 @@ type ConversationDeletedPayload struct {
 	ID string `json:"id"`
 }
 
+// ArchiveConversationPayload is the body of BOTH archive_conversation and
+// unarchive_conversation frames (docs/protocol-mobile.md § archive). Phone →
+// binary. The two verbs are a symmetric toggle of one durable flag — archive
+// sets IsArchived, unarchive clears it — so one id-only payload serves both.
+// The value-typed ConversationID mirrors DeleteConversationPayload /
+// PromoteConversationPayload; deliberately NOT a reuse of
+// DeleteConversationPayload (semantic coupling / false dependency).
+type ArchiveConversationPayload struct {
+	ConversationID string `json:"conversation_id"`
+}
+
 // ConversationUpdatedPayload is the body of a conversation_updated frame
 // (docs/protocol-mobile.md § conversation_updated). Binary → phone,
-// broadcast to all phones on this server-id. ID, IsPromoted, Cwd,
+// broadcast to all phones on this server-id. ID, IsPromoted, IsArchived, Cwd,
 // LastUsedAt are required. Name is spec-optional (a previously unnamed
 // conversation can be updated without acquiring a name) and is a pointer
 // for the same round-trip reason given on CreateConversationPayload.
 type ConversationUpdatedPayload struct {
-	ID         string    `json:"id"`
-	IsPromoted bool      `json:"is_promoted"`
+	ID         string `json:"id"`
+	IsPromoted bool   `json:"is_promoted"`
+	// IsArchived is the conversation's durable archived flag. Always serialized
+	// (no omitempty, unlike the on-disk Conversation.IsArchived): a client reads
+	// the flag to partition active vs. archived, so it must read it on active
+	// rows too, where the value is false — an absent key could not distinguish
+	// "restored to active" from "old daemon." Placed right after IsPromoted to
+	// mirror ConversationSummary and group the two state bools.
+	IsArchived bool      `json:"is_archived"`
 	Name       *string   `json:"name"`
 	Cwd        string    `json:"cwd"`
 	LastUsedAt time.Time `json:"last_used_at"`
