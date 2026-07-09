@@ -13,7 +13,7 @@ internal/protocol/
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies); QueuedItem + QueueStatePayload / DequeueMessagePayload (#720, v2 queue vocabulary); DebugBundleChunkPayload / DebugBundleDonePayload (#812, v2 debug-bundle streaming bodies)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
-├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274)
+├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274); RenameConversationPayload (#820)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
 ├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607), StallPayload (#638) — v2 interactive binary→phone event bodies
 ├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
@@ -23,7 +23,7 @@ internal/protocol/
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
 ├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload; + SessionTransitionPayload round-trip (#656); + four modal payload round-trips (#701)
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
-├── conversations_write_test.go  golden round-trip for each of the four #274 payloads via Envelope.Payload
+├── conversations_write_test.go  golden round-trip for each of the four #274 payloads + RenameConversationPayload (#820) via Envelope.Payload
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
 ├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads + the #638 stall payload via Envelope.Payload
 ├── snapshot_test.go             golden round-trip for the two #617 snapshot payloads + empty-conversation_id boundary
@@ -33,7 +33,7 @@ internal/protocol/
                                  backfill_since.json, message_chunk.json, backfill_done.json,
                                  list_conversations.json, conversations.json,
                                  create_conversation.json, conversation_created.json,
-                                 promote_conversation.json, conversation_updated.json,
+                                 promote_conversation.json, conversation_updated.json, rename_conversation.json,
                                  hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
                                  turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json, stall.json,
                                  request_snapshot.json, screen_snapshot.json,
@@ -439,9 +439,9 @@ type ConversationSummary struct {
 
 Golden round-trip tests in `conversations_read_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against `testdata/list_conversations.json` / `testdata/conversations.json`. `TestConversationsPayload_RoundTrip` asserts both rows: row 0 has a non-nil `Name` pointer; row 1 has `Name == nil` (NOT `*c1.Name == ""` — would panic on nil deref AND be the wrong check). The `conversations.json` envelope rides with `in_reply_to: 3`, the first protocol fixture pinning `in_reply_to` alongside an array-carrying payload.
 
-### Conversations-write payloads (#274)
+### Conversations-write payloads (#274, + `RenameConversationPayload` #820)
 
-Bodies of the conversation create/promote lifecycle (`docs/protocol-mobile.md` § Message types → `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated`). Phone → binary: `create_conversation`, `promote_conversation`. Binary → phone: `conversation_created` (reply, rides `in_reply_to`), `conversation_updated` (broadcast on the server-id).
+Bodies of the conversation create/promote/rename lifecycle (`docs/protocol-mobile.md` § Message types → `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated` / `rename_conversation`). Phone → binary: `create_conversation`, `promote_conversation`, `rename_conversation`. Binary → phone: `conversation_created` (reply, rides `in_reply_to`), `conversation_updated` (reply to both `promote_conversation` and `rename_conversation`, rides `in_reply_to`; documented elsewhere as a broadcast type but the #820 handler — like `Promote`'s consumer — replies only to the requester).
 
 ```go
 type CreateConversationPayload struct {
@@ -464,6 +464,14 @@ type PromoteConversationPayload struct {
     Cwd            string `json:"cwd"`
 }
 
+// RenameConversationPayload (#820). Deliberately NOT a reuse of
+// PromoteConversationPayload — promote also carries a required Cwd, which a
+// rename neither has nor means.
+type RenameConversationPayload struct {
+    ConversationID string `json:"conversation_id"`
+    Name           string `json:"name"`
+}
+
 type ConversationUpdatedPayload struct {
     ID         string    `json:"id"`
     IsPromoted bool      `json:"is_promoted"`
@@ -478,10 +486,11 @@ type ConversationUpdatedPayload struct {
 - **Field declaration order matches each spec example verbatim** — `_created` has `{ID, IsPromoted, Cwd, Name, LastUsedAt}`, `_updated` has `{ID, IsPromoted, Name, Cwd, LastUsedAt}` (note `Name` / `Cwd` swap). Go's `encoding/json` emits fields in declaration order; the byte-equal round-trip enforces the swap is correct.
 - **`LastUsedAt` is `time.Time` (RFC3339Nano-on-the-wire envelope rule).** Spec example values (`"2026-05-08T10:34:01Z"` / `"2026-05-08T10:34:30Z"`) have no fractional seconds; `time.Time.MarshalJSON` emits RFC3339Nano which omits the fractional component when none is present, so the round-trip is byte-identical with no custom marshaller. Padding fixtures with `.000Z` would break it. Tests use `time.Time.Equal`, never `==`.
 - **`PromoteConversationPayload` is the only fully-required struct in the slice.** All three fields (`ConversationID`, `Name`, `Cwd`) are non-pointer `string`, no `omitempty`. Promotion requires a name and an effective cwd, and the conversation_id must resolve to an existing row — semantic gates the dispatcher / registry (`Registry.Promote`'s `ErrPromotion*` sentinels) enforce.
+- **`RenameConversationPayload` (#820) is fully-required, two fields, no pointers.** Both `ConversationID` and `Name` are non-pointer `string` — a rename must name a target and a new title; there's no optional-field case to distinguish (contrast `CreateConversationPayload`'s three nullable fields). Empty/whitespace-only `Name` and an unresolvable `ConversationID` are semantic gates the dispatch handler enforces (`internal/relay/handlers.RenameConversation`), not this layer — same posture as `PromoteConversationPayload`.
 - **`conversation_created.json` is the only fixture in the slice carrying `in_reply_to`** (`in_reply_to: 4`, matching the `create_conversation` frame at id 4). The test pins `env.InReplyTo != nil && *env.InReplyTo == 4`.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to #275, #272, #273. Required-field validation, name uniqueness, ID resolution, broadcast fan-out — all dispatcher / registry concerns.
 
-Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Four flat test functions (no table-driven), each follows the sibling-slice template.
+Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Five flat test functions (no table-driven; `TestRenameConversationPayload_RoundTrip` #820 added alongside the original four), each follows the sibling-slice template.
 
 ### `Envelope`
 
@@ -698,6 +707,8 @@ type ScreenSnapshotPayload struct {
     Model          string    `json:"model"`  // #847: bootstrap session's per-session model override; "" = inherited default
     Effort         string    `json:"effort"` // #847: bootstrap session's per-session effort override; "" = inherited default
     YOLO           bool      `json:"yolo"`   // #847: bypass-permissions on/off; false = permissions enforced (fail-safe)
+    UsedTokens     int       `json:"used_tokens"`   // #857: current context size on the latest usage-bearing entry, NOT a running total
+    WindowTokens   int       `json:"window_tokens"` // #857: context-window size (200000 today); 0 = usage seam not wired
 }
 ```
 
@@ -741,6 +752,25 @@ type ScreenSnapshotPayload struct {
   ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
   Not `security-sensitive` — read-only reflection of existing, non-secret session config.
   See [codebase/847.md](../codebase/847.md) and [codebase/848.md](../codebase/848.md).
+- **#857 adds `UsedTokens`/`WindowTokens`, always present (no `omitempty`),
+  after `YOLO`.** They reflect the bootstrap session's current context-window
+  occupancy from [`internal/contextwindow.Read`](contextwindow-package.md)
+  (#856): `UsedTokens` is the current context size on the transcript's latest
+  usage-bearing entry (input + cache-read + cache-creation + output), **not**
+  a running total — a post-compaction snapshot reports a smaller figure with
+  no dedicated marker, since the reader is last-usage-wins. `WindowTokens` is
+  the context-window size (200000 for every current model); `window_tokens:0`
+  means the usage seam was not wired (foreground / unwired), so a client
+  should treat "X of Y" as unavailable rather than divide by zero — this is
+  distinct from a wired-but-fresh session, which reports `(0, 200000)`. The
+  two fields are sufficient for a client to compute "N% used (X of Y)" as
+  `used_tokens / window_tokens` (pyrycode-desktop#182). Shipped unwired at
+  #856 (the handler serialized both fields at their zero values); wired by
+  #857 via the optional `SnapshotUsage` seam on `V2SessionConfig`
+  ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
+  Not `security-sensitive` — read-only reflection of two non-secret aggregate
+  integers; the transcript content itself never crosses the wire.
+  See [codebase/856.md](../codebase/856.md) and [codebase/857.md](../codebase/857.md).
 
 Two golden round-trips in `snapshot_test.go` decode each fixture through `Envelope`
 → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently via the shared
@@ -829,15 +859,15 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 
 ### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454), `TypeRequestSnapshot` (#617), `TypeModalAnswer` / `TypeModalCancel` (#701), `TypeDequeueMessage` (#720), and `TypeInterrupt` (#707)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), `TypeScreenSnapshot` (#617), `TypeResync` (#647), `TypeSessionTransition` (#656), `TypeModalShown` / `TypeModalDismissed` (#701), and `TypeQueueState` (#720)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
+Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 17 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`; 16 from the original #256 catalog + `TypeRenameConversation` #820) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454), `TypeRequestSnapshot` (#617), `TypeModalAnswer` / `TypeModalCancel` (#701), `TypeDequeueMessage` (#720), and `TypeInterrupt` (#707)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), `TypeScreenSnapshot` (#617), `TypeResync` (#647), `TypeSessionTransition` (#656), `TypeModalShown` / `TypeModalDismissed` (#701), and `TypeQueueState` (#720)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
 
-**v1 application types** (16; spec § v1 Message types):
+**v1 application types** (17; spec § v1 Message types):
 
 | Group | Constants |
 |-------|-----------|
 | Handshake / control | `TypeHello`, `TypeHelloAck`, `TypeError`, `TypeAck` |
 | Messaging | `TypeSendMessage`, `TypeMessage` |
-| Conversations | `TypeListConversations`, `TypeConversations`, `TypeCreateConversation`, `TypeConversationCreated`, `TypePromoteConversation`, `TypeConversationUpdated` |
+| Conversations | `TypeListConversations`, `TypeConversations`, `TypeCreateConversation`, `TypeConversationCreated`, `TypePromoteConversation`, `TypeConversationUpdated`, `TypeRenameConversation` (#820) |
 | Backfill | `TypeBackfillSince`, `TypeMessageChunk`, `TypeBackfillDone` |
 | Push | `TypeRegisterPushToken` |
 

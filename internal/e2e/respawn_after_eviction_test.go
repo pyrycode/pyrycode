@@ -252,6 +252,7 @@ func startEvictionHarness(t *testing.T, home, sessionsDir, initialUUID, trigger,
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}
 	fakeBin := ensureFakeClaudeBuilt(t)
+	seedBootstrapRegistry(t, home, initialUUID)
 
 	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
 		claudeBin:  fakeBin,
