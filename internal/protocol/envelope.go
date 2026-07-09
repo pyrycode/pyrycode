@@ -129,6 +129,8 @@ var v1TypeSet = map[string]bool{
 	TypePromoteConversation: true,
 	TypeConversationUpdated: true,
 	TypeRenameConversation:  true,
+	TypeDeleteConversation:  true,
+	TypeConversationDeleted: true,
 	TypeBackfillSince:       true,
 	TypeMessageChunk:        true,
 	TypeBackfillDone:        true,
