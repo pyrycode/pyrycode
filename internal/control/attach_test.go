@@ -770,13 +770,13 @@ func TestServer_ConcurrentAttachRace(t *testing.T) {
 }
 
 // TestServer_HandshakeTimeout confirms a connected-but-silent client gets
-// disconnected by the server after handshakeTimeout. Without this, a slow
+// disconnected by the server after the handshake timeout. Without this, a slow
 // client could pin a server goroutine indefinitely.
 //
-// Note: the test relies on the production handshakeTimeout (5s) being
-// reasonable for CI. We don't override it because the const isn't
-// configurable at the call site; if this becomes a CI flake risk, plumb
-// it through Server.Config.
+// Note: this test deliberately exercises the production default
+// (defaultHandshakeTimeout, 5s) rather than shrinking Server.handshakeTimeout,
+// so it guards the real end-to-end value. #865's fast, sub-second deadline
+// tests use the field override; this one stays slow on purpose.
 func TestServer_HandshakeTimeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping 5s handshake timeout test in -short mode")
@@ -801,9 +801,9 @@ func TestServer_HandshakeTimeout(t *testing.T) {
 	defer conn.Close()
 
 	// Don't send anything. The server's dec.Decode is gated on the
-	// handshakeTimeout. Read should EOF (or err) within ~handshakeTimeout
+	// handshake timeout. Read should EOF (or err) within ~defaultHandshakeTimeout
 	// seconds — give a generous buffer.
-	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout + 2*time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(defaultHandshakeTimeout + 2*time.Second))
 	buf := make([]byte, 256)
 	n, readErr := conn.Read(buf)
 
