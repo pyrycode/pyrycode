@@ -243,6 +243,7 @@ func startPerConvHarness(t *testing.T, home, sessionsDir, initialUUID, relayURL 
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}
 	fakeBin := ensureFakeClaudeBuilt(t)
+	seedBootstrapRegistry(t, home, initialUUID)
 	tmp := t.TempDir()
 
 	flags := append([]string{

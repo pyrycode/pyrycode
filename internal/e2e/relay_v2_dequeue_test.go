@@ -78,6 +78,11 @@ func TestRelayV2_DequeueMessage_RemovesQueuedBeforeDrain(t *testing.T) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
+	// Seed the bootstrap session id explicitly (#861) so it no longer depends
+	// on the startup adopt-by-mtime scan; the <initialUUID>.jsonl pre-create
+	// above stays as the reconcile-confirming no-op / delivery baseline.
+	seedBootstrapRegistry(t, home, initialUUID)
+
 	// No live claude: the default supervised child is /bin/sleep 99999, which
 	// never commits a turn, so the inbound backlog persists deterministically.
 	h := StartInWithEnv(t, home,
