@@ -133,6 +133,7 @@ var v1TypeSet = map[string]bool{
 	TypeConversationDeleted:   true,
 	TypeArchiveConversation:   true,
 	TypeUnarchiveConversation: true,
+	TypeChangeWorkspace:       true,
 	TypeBackfillSince:         true,
 	TypeMessageChunk:          true,
 	TypeBackfillDone:          true,
