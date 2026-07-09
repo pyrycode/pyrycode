@@ -153,6 +153,65 @@ func TestRenameConversationPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestDeleteConversationPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "delete_conversation.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeDeleteConversation {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeDeleteConversation)
+	}
+
+	var p DeleteConversationPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.ConversationID != "c2..." {
+		t.Errorf("ConversationID: got %q, want %q", p.ConversationID, "c2...")
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
+func TestConversationDeletedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "conversation_deleted.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeConversationDeleted {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeConversationDeleted)
+	}
+	if env.InReplyTo == nil || *env.InReplyTo != 6 {
+		t.Errorf("InReplyTo: got %v, want pointer to 6", env.InReplyTo)
+	}
+
+	var p ConversationDeletedPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.ID != "c2..." {
+		t.Errorf("ID: got %q, want %q", p.ID, "c2...")
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
 func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "conversation_updated.json")
 

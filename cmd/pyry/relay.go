@@ -174,6 +174,7 @@ func startRelay(
 		d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
 		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger))
 		d.Register(protocol.TypeRenameConversation, handlers.RenameConversation(convReg, resolveConversationsRegistryPath(instanceName), logger))
+		d.Register(protocol.TypeDeleteConversation, handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger))
 		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 		d.Register(protocol.TypeSendMessage, handlers.SendMessage(router, queue, logger))
 
@@ -361,6 +362,7 @@ func startRelayV2(
 			protocol.TypeListConversations:  handlers.ListConversations(convReg),
 			protocol.TypeCreateConversation: handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),
 			protocol.TypeRenameConversation: handlers.RenameConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
+			protocol.TypeDeleteConversation: handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
 			protocol.TypeRegisterPushToken:  handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
 			protocol.TypeSendMessage:        handlers.SendMessage(router, queue, logger),
 		},

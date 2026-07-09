@@ -13,7 +13,7 @@ internal/protocol/
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies); QueuedItem + QueueStatePayload / DequeueMessagePayload (#720, v2 queue vocabulary); DebugBundleChunkPayload / DebugBundleDonePayload (#812, v2 debug-bundle streaming bodies)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
-├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274); RenameConversationPayload (#820)
+├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274); RenameConversationPayload (#820); DeleteConversationPayload, ConversationDeletedPayload (#822)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
 ├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607), StallPayload (#638) — v2 interactive binary→phone event bodies
 ├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
@@ -23,7 +23,7 @@ internal/protocol/
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
 ├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload; + SessionTransitionPayload round-trip (#656); + four modal payload round-trips (#701)
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
-├── conversations_write_test.go  golden round-trip for each of the four #274 payloads + RenameConversationPayload (#820) via Envelope.Payload
+├── conversations_write_test.go  golden round-trip for each of the four #274 payloads + RenameConversationPayload (#820) + DeleteConversationPayload / ConversationDeletedPayload (#822) via Envelope.Payload
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
 ├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads + the #638 stall payload via Envelope.Payload
 ├── snapshot_test.go             golden round-trip for the two #617 snapshot payloads + empty-conversation_id boundary
@@ -34,6 +34,7 @@ internal/protocol/
                                  list_conversations.json, conversations.json,
                                  create_conversation.json, conversation_created.json,
                                  promote_conversation.json, conversation_updated.json, rename_conversation.json,
+                                 delete_conversation.json, conversation_deleted.json,
                                  hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
                                  turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json, stall.json,
                                  request_snapshot.json, screen_snapshot.json,
@@ -439,9 +440,9 @@ type ConversationSummary struct {
 
 Golden round-trip tests in `conversations_read_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against `testdata/list_conversations.json` / `testdata/conversations.json`. `TestConversationsPayload_RoundTrip` asserts both rows: row 0 has a non-nil `Name` pointer; row 1 has `Name == nil` (NOT `*c1.Name == ""` — would panic on nil deref AND be the wrong check). The `conversations.json` envelope rides with `in_reply_to: 3`, the first protocol fixture pinning `in_reply_to` alongside an array-carrying payload.
 
-### Conversations-write payloads (#274, + `RenameConversationPayload` #820)
+### Conversations-write payloads (#274, + `RenameConversationPayload` #820, + `DeleteConversationPayload` / `ConversationDeletedPayload` #822)
 
-Bodies of the conversation create/promote/rename lifecycle (`docs/protocol-mobile.md` § Message types → `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated` / `rename_conversation`). Phone → binary: `create_conversation`, `promote_conversation`, `rename_conversation`. Binary → phone: `conversation_created` (reply, rides `in_reply_to`), `conversation_updated` (reply to both `promote_conversation` and `rename_conversation`, rides `in_reply_to`; documented elsewhere as a broadcast type but the #820 handler — like `Promote`'s consumer — replies only to the requester).
+Bodies of the conversation create/promote/rename/delete lifecycle (`docs/protocol-mobile.md` § Message types → `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated` / `rename_conversation` / `delete_conversation` / `conversation_deleted`). Phone → binary: `create_conversation`, `promote_conversation`, `rename_conversation`, `delete_conversation`. Binary → phone: `conversation_created` (reply, rides `in_reply_to`), `conversation_updated` (reply to both `promote_conversation` and `rename_conversation`, rides `in_reply_to`; documented elsewhere as a broadcast type but the #820 handler — like `Promote`'s consumer — replies only to the requester), `conversation_deleted` (reply to `delete_conversation`, rides `in_reply_to`, requester only — no live fan-out, see [codebase/822.md](../codebase/822.md)).
 
 ```go
 type CreateConversationPayload struct {
@@ -472,6 +473,19 @@ type RenameConversationPayload struct {
     Name           string `json:"name"`
 }
 
+// DeleteConversationPayload (#822). Hard (permanent) delete — the reversible
+// path is archive/unarchive (#880/#881), a distinct verb.
+type DeleteConversationPayload struct {
+    ConversationID string `json:"conversation_id"`
+}
+
+// ConversationDeletedPayload (#822). Carries only the deleted id — unlike
+// ConversationUpdatedPayload, there is no surviving record to project
+// name/cwd/last_used_at from.
+type ConversationDeletedPayload struct {
+    ID string `json:"id"`
+}
+
 type ConversationUpdatedPayload struct {
     ID         string    `json:"id"`
     IsPromoted bool      `json:"is_promoted"`
@@ -487,10 +501,12 @@ type ConversationUpdatedPayload struct {
 - **`LastUsedAt` is `time.Time` (RFC3339Nano-on-the-wire envelope rule).** Spec example values (`"2026-05-08T10:34:01Z"` / `"2026-05-08T10:34:30Z"`) have no fractional seconds; `time.Time.MarshalJSON` emits RFC3339Nano which omits the fractional component when none is present, so the round-trip is byte-identical with no custom marshaller. Padding fixtures with `.000Z` would break it. Tests use `time.Time.Equal`, never `==`.
 - **`PromoteConversationPayload` is the only fully-required struct in the slice.** All three fields (`ConversationID`, `Name`, `Cwd`) are non-pointer `string`, no `omitempty`. Promotion requires a name and an effective cwd, and the conversation_id must resolve to an existing row — semantic gates the dispatcher / registry (`Registry.Promote`'s `ErrPromotion*` sentinels) enforce.
 - **`RenameConversationPayload` (#820) is fully-required, two fields, no pointers.** Both `ConversationID` and `Name` are non-pointer `string` — a rename must name a target and a new title; there's no optional-field case to distinguish (contrast `CreateConversationPayload`'s three nullable fields). Empty/whitespace-only `Name` and an unresolvable `ConversationID` are semantic gates the dispatch handler enforces (`internal/relay/handlers.RenameConversation`), not this layer — same posture as `PromoteConversationPayload`.
+- **`DeleteConversationPayload` (#822) is one required field, no pointers** — mirrors `PromoteConversationPayload` / `RenameConversationPayload`'s value-typed `ConversationID`. An unresolvable id is not a decode-layer concern: the dispatch handler (`internal/relay/handlers.DeleteConversation`) treats a miss as `conversation.not_found`, not a payload-shape error.
+- **`ConversationDeletedPayload` (#822) is the minimal ack — one `id` field.** Deliberately not a reuse of `ConversationUpdatedPayload`: post-delete there is no row left to source `name`/`cwd`/`last_used_at` from. See [codebase/822.md](../codebase/822.md) for why `conversation_updated` doesn't fit.
 - **`conversation_created.json` is the only fixture in the slice carrying `in_reply_to`** (`in_reply_to: 4`, matching the `create_conversation` frame at id 4). The test pins `env.InReplyTo != nil && *env.InReplyTo == 4`.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to #275, #272, #273. Required-field validation, name uniqueness, ID resolution, broadcast fan-out — all dispatcher / registry concerns.
 
-Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Five flat test functions (no table-driven; `TestRenameConversationPayload_RoundTrip` #820 added alongside the original four), each follows the sibling-slice template.
+Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Seven flat test functions (no table-driven; `TestRenameConversationPayload_RoundTrip` #820 and `TestDeleteConversationPayload_RoundTrip` / `TestConversationDeletedPayload_RoundTrip` #822 added alongside the original four), each follows the sibling-slice template.
 
 ### `Envelope`
 
@@ -859,15 +875,15 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 
 ### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 17 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`; 16 from the original #256 catalog + `TypeRenameConversation` #820) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454), `TypeRequestSnapshot` (#617), `TypeModalAnswer` / `TypeModalCancel` (#701), `TypeDequeueMessage` (#720), and `TypeInterrupt` (#707)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), `TypeScreenSnapshot` (#617), `TypeResync` (#647), `TypeSessionTransition` (#656), `TypeModalShown` / `TypeModalDismissed` (#701), and `TypeQueueState` (#720)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
+Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 19 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`; 16 from the original #256 catalog + `TypeRenameConversation` #820 + `TypeDeleteConversation` / `TypeConversationDeleted` #822) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454), `TypeRequestSnapshot` (#617), `TypeModalAnswer` / `TypeModalCancel` (#701), `TypeDequeueMessage` (#720), and `TypeInterrupt` (#707)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), `TypeScreenSnapshot` (#617), `TypeResync` (#647), `TypeSessionTransition` (#656), `TypeModalShown` / `TypeModalDismissed` (#701), and `TypeQueueState` (#720)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
 
-**v1 application types** (17; spec § v1 Message types):
+**v1 application types** (19; spec § v1 Message types):
 
 | Group | Constants |
 |-------|-----------|
 | Handshake / control | `TypeHello`, `TypeHelloAck`, `TypeError`, `TypeAck` |
 | Messaging | `TypeSendMessage`, `TypeMessage` |
-| Conversations | `TypeListConversations`, `TypeConversations`, `TypeCreateConversation`, `TypeConversationCreated`, `TypePromoteConversation`, `TypeConversationUpdated`, `TypeRenameConversation` (#820) |
+| Conversations | `TypeListConversations`, `TypeConversations`, `TypeCreateConversation`, `TypeConversationCreated`, `TypePromoteConversation`, `TypeConversationUpdated`, `TypeRenameConversation` (#820), `TypeDeleteConversation`, `TypeConversationDeleted` (#822) |
 | Backfill | `TypeBackfillSince`, `TypeMessageChunk`, `TypeBackfillDone` |
 | Push | `TypeRegisterPushToken` |
 
@@ -957,7 +973,7 @@ The v1 type list appears three times: in the `Type*` constants block (`codes.go`
 
 - `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
 - `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656/#701/#720/#707/#812/#813/#831/#844) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds twenty-four entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition` + the four modal types + the two queue types + `TypeInterrupt` + the two debug-bundle-stream types + `TypeRequestDebugBundle` + `TypeNewSession` + the two set-session-settings types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 24 == 40`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656/#701/#720/#707/#812/#813/#831/#844) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds twenty-four entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition` + the four modal types + the two queue types + `TypeInterrupt` + the two debug-bundle-stream types + `TypeRequestDebugBundle` + `TypeNewSession` + the two set-session-settings types), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 19 + 24 == 43`. Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.

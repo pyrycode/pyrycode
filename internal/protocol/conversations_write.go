@@ -56,6 +56,27 @@ type RenameConversationPayload struct {
 	Name           string `json:"name"`
 }
 
+// DeleteConversationPayload is the body of a delete_conversation frame
+// (docs/protocol-mobile.md § delete_conversation). Phone → binary. The one
+// required field is the target conversation's id; deletion is permanent (hard
+// delete — the reversible path is archive/unarchive). Mirrors
+// PromoteConversationPayload / RenameConversationPayload's value-typed
+// ConversationID.
+type DeleteConversationPayload struct {
+	ConversationID string `json:"conversation_id"`
+}
+
+// ConversationDeletedPayload is the body of a conversation_deleted frame
+// (docs/protocol-mobile.md § conversation_deleted). Binary → phone, sent in
+// reply to a delete_conversation. It carries only the deleted conversation's id
+// (the id tag matches ConversationCreatedPayload / ConversationUpdatedPayload):
+// the record no longer exists, so no name/cwd/last_used_at can be projected
+// (contrast ConversationUpdatedPayload). The id is the one fact the ack must
+// identify.
+type ConversationDeletedPayload struct {
+	ID string `json:"id"`
+}
+
 // ConversationUpdatedPayload is the body of a conversation_updated frame
 // (docs/protocol-mobile.md § conversation_updated). Binary → phone,
 // broadcast to all phones on this server-id. ID, IsPromoted, Cwd,

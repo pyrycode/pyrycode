@@ -60,6 +60,19 @@ const (
 	// record. It is a v1TypeSet member, not a v2 control frame — see the
 	// v1/v2 partition in envelope.go / compat_test.go.
 	TypeRenameConversation = "rename_conversation"
+	// TypeDeleteConversation is a phone → binary dispatch.Route write verb
+	// (like rename_conversation / create_conversation): it PERMANENTLY removes
+	// an existing conversation from the registry (hard delete — the reversible
+	// path is archive/unarchive) and replies with a conversation_deleted
+	// acknowledgement. It is a v1TypeSet member, not a v2 control frame — see
+	// the v1/v2 partition in envelope.go / compat_test.go.
+	TypeDeleteConversation = "delete_conversation"
+	// TypeConversationDeleted is the binary → phone acknowledgement replied to
+	// a delete_conversation, correlated via in_reply_to. Unlike
+	// conversation_updated it carries only the deleted conversation's id — the
+	// record no longer exists, so no name/cwd/last_used_at can be projected.
+	// Also a v1TypeSet member.
+	TypeConversationDeleted = "conversation_deleted"
 
 	// Backfill.
 	TypeBackfillSince = "backfill_since"
