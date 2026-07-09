@@ -385,3 +385,164 @@ signature), 4 reject branches, 5 ACs that are facets of one handler. Ships as on
   the PR lands), **not** a developer AC — the developer's worktree mutates only
   code, tests, and this spec file. The payload doc comment may reference the
   section aspirationally, as the sibling payloads do.
+
+---
+
+## Security review
+
+**Verdict:** PASS
+
+This ticket carries the `security-sensitive` label, so this adversarial pass over
+the spec is mandatory. **`change_workspace` is the first verb in the
+conversation-write-verb family where untrusted client input reaches a filesystem
+path** — the exact `[File operations]` surface both direct twins explicitly marked
+**N/A** (#820 rename stored a display string; #822 delete stored nothing). That
+category is therefore walked here as an *active* surface, not waved off. The pass
+was run against the staged implementation on `feature/823` (PR #886), so each
+finding cites the real anchor.
+
+**Findings:**
+
+- **[Trust boundaries]** No MUST-FIX. Single explicit boundary: the handler
+  `ChangeWorkspace`, one `json.Unmarshal` of the phone-supplied
+  `ChangeWorkspacePayload` (`change_workspace.go:117`). Its two untrusted fields
+  are each contained at a named point. `conversation_id` is used *only* as an
+  exact-match registry key inside `Update` (byte comparison, no path/argv/query
+  construction — a miss is `conversation.not_found`; a phone cannot mint or
+  collide an id, only name one that already exists). `cwd` — **the new,
+  label-earning field** — crosses from "untrusted network bytes" to "filesystem
+  path" through exactly one function, `resolveWorkspaceDir` (`relay.go:98`), before
+  it is ever stored; the handler holds no raw path after that call (it stores the
+  resolver's returned `resolved` realpath, `change_workspace.go:173/179`). Within a
+  server-id, paired devices are one trust domain (ADR 025 § Security model): any
+  paired client may change any conversation's workspace, consistent with
+  `list`/`create`/`promote`/`rename`/`delete`. The tenant boundary is the
+  server-id, enforced structurally at the Noise IK handshake (unpaired → 4401,
+  never reaches `dispatchAppFrame`).
+
+- **[Tokens/secrets]** N/A — the verb mints, stores, and compares no token or
+  secret; mints no id (no `crypto/rand` surface).
+
+- **[File operations]** No MUST-FIX — **the active surface for this verb**, and the
+  reason it carries the label. The untrusted `cwd` becomes the conversation's
+  future spawn workdir, so it is confined to `$HOME` **before storage**, fail-closed,
+  by `resolveWorkspaceDir` → `confineWorkdirToHome` (`main.go:455`). Walked
+  sub-surface by sub-surface:
+  - *Path traversal.* `confineWorkdirToHome` runs `filepath.Abs` then
+    `filepath.EvalSymlinks` and tests containment with `withinDir` (`main.go:481`),
+    which uses `filepath.Rel` + a `..`-boundary check — so `../../etc` cleans and
+    resolves to a real path outside `$HOME` and is rejected, and a sibling like
+    `/home/userfoo` is not mistaken for inside `/home/user` (no prefix-match bug,
+    the #118/#221 gotcha).
+  - *Symlink escape.* Containment is tested on the **fully symlink-resolved
+    realpath of the target** (`EvalSymlinks`, `main.go:468`), not on the raw
+    string — a `~/link-to-etc` resolves to `/etc` and is rejected. Both sides
+    (`$HOME` and target) are canonicalised before the test, so a symlinked home
+    yields no false reject.
+  - *TOCTOU (store → next-spawn).* This is the file-op TOCTOU the twins never had.
+    It is closed by two design choices, both implemented: (1) the handler stores
+    the **resolved realpath, not the raw path** (`change_workspace.go:173`), so a
+    symlink swapped in *after* validation cannot redirect a later reader that
+    trusts the stored value; (2) this verb writes **metadata only** — it performs
+    no spawn (`resolveWorkspaceDir` uses the strict, *non-creating*
+    `confineWorkdirToHome`, never `…Creating`, and never `trustMark`), so the
+    confinement here has no filesystem side effect and the *authoritative* gate is
+    re-applied at the next fresh spawn, where `resolveSpawnDir` →
+    `confineWorkdirToHomeCreating` re-confines the stored realpath (idempotent:
+    `EvalSymlinks(realpath) == realpath`; a component swapped to escape `$HOME`
+    is re-caught then). Confinement is thus enforced at *both* store time and the
+    only dangerous-use time. Moving a **live** session into the new dir is
+    explicitly OUT OF SCOPE (see [Threat model alignment]).
+  - *Unresolvable / non-existent target.* The strict non-creating confiner makes
+    `EvalSymlinks` fail on a missing path → rejected, satisfying AC #3's "or is
+    unresolvable" branch for free and guaranteeing the verb never creates a
+    directory as a side effect of a metadata edit.
+  - *Empty-path footgun.* `confineWorkdirToHome("")` resolves to the daemon's
+    process cwd (which may sit inside `$HOME` and *pass*); the handler's
+    empty/whitespace guard (`change_workspace.go:132`) runs **before** confine,
+    so a blank target is a clean `protocol.malformed` reject, never a silent
+    "store the daemon's cwd."
+  - *Tilde.* `expandTilde` (`main.go:502`) runs **before** confine so a phone's
+    `~/…` (it cannot know the daemon's absolute `$HOME`) anchors at the real home,
+    not under the process cwd; `~user` is deliberately *not* resolved to another
+    user's home — it passes through literally and fails the later
+    confine/existence check as a deterministic reject.
+  - *Permissions / atomicity.* This verb creates no file. Persistence reuses
+    `conversations.Registry.Save` (atomic temp-file `0600` + `0700` dir + fsync +
+    rename), unchanged from the twins — no new stat-then-open, no new file mode.
+
+- **[Subprocess / external command execution]** N/A for this handler — it executes
+  no subprocess and passes no value to `exec.Command`. This is a strict
+  attack-surface *reduction* versus `create_conversation`, which mints a claude
+  session with a phone-influenced cwd; `change_workspace` deliberately does **not**
+  spawn (Out of Scope: live respawn). The eventual spawn that consumes the stored
+  `Cwd` is a *future fresh session* that re-runs the full `resolveSpawnDir`
+  confinement + trust-mark — no path this verb stores reaches an `exec.Command`
+  argument un-re-validated.
+
+- **[Cryptographic primitives]** N/A — no crypto in the handler; AEAD framing is
+  the unchanged v2 transport's concern.
+
+- **[Network, I/O & DoS]** No MUST-FIX. The handler reads no socket; inbound frame
+  size is capped by the v2 transport decoder upstream, transitively bounding both
+  `conversation_id` and the `cwd` string length. No explicit application-level
+  path-length cap — acceptable because the verb *replaces* one registry field
+  rather than accumulating (anti-amplifying), fans out to no one (reply goes only
+  to the requester), and a miss is a bounded linear scan over a small per-user
+  registry. `EvalSymlinks` on an attacker path walks only real on-disk components
+  within/around `$HOME` — bounded by the filesystem, not attacker-inflatable into
+  amplification. No HTTP/WS/TLS surface added.
+
+- **[Error messages, logs, telemetry]** No MUST-FIX — the co-crux of the label with
+  [File operations]. (1) All **four** reject branches reply with a fixed static
+  string constant (`change_workspace.go:20/28/35/40`) — no supplied bytes (the
+  path, the id, or a decode-error fragment) reach the wire (AC #5 wire half). (2)
+  Two deliberate logging divergences from the create/rename template, both
+  implemented and both called out in the handler's SECURITY doc comment so a future
+  editor does not "fix" them back by pattern-matching create:
+  - *Malformed branch* (inherited from delete #822, `change_workspace.go:121`):
+    logs **`conn_id` only** — not the decode `err` (Go's `json.Unmarshal` errors
+    can embed offending input bytes) and not `conversation_id` (a decode failure
+    leaves the struct at most partially populated, so `p.ConversationID` may hold
+    raw attacker bytes).
+  - *Confine-rejected branch* (NEW, the load-bearing one, `change_workspace.go:154`):
+    `create_conversation.go` logs the wrapped confine `err` on rejection — and that
+    `err` **names the offending path**. This handler must NOT, per AC #5; it logs
+    `conn_id` + `conversation_id` only, never the confine `err`, never the path.
+    `conversation_id` here is a decode-*success*, slog-escaped structured field
+    (consistent with delete's not_found branch) and is safe.
+  The empty, not_found, save-failure, and success branches log `conversation_id` as
+  a structured slog field (proven-decoded, non-secret opaque id) per the reviewed
+  rename/delete/create precedent; the save-failure branch additionally logs the
+  save `err`, which names the *registry* path (a filesystem error), not attacker
+  bytes. No telemetry.
+
+- **[Concurrency]** No finding. No new goroutines. `*conversations.Registry` is the
+  single writer (`Update`/`Save` each take `r.mu`; no reload-before-save — the
+  daemon owns the file). The `cv.Cwd` set **and** the reply-payload snapshot both
+  happen inside one locked `Update` closure (`change_workspace.go:172`), so there is
+  no find-then-mutate or find-then-read window and no second lock acquisition (no
+  ordering concern). `Save` snapshots under the lock internally, so any interleaving
+  with a concurrent rename/archive persists a consistent state. Replay is harmless:
+  a replayed `change_workspace` re-sets the identical realpath (`Update` is
+  idempotent for a fixed target) — so no nonce/idempotency key is needed (contrast
+  the modal verbs). **Shutdown mid-op:** a kill after the in-memory `Update` but
+  before `Save` reverts the row to its prior `Cwd` on restart — the accepted
+  best-effort durability window shared by rename/delete/create/sweep; AC #1's
+  restart-survival is asserted only on the Save-succeeded success path.
+
+- **[Threat model alignment]** Untrusted-phone-path-input, cross-tenant, and
+  path-traversal/symlink-escape threats are in scope and addressed above. Two
+  concerns are explicitly OUT OF SCOPE, each named with who picks it up: (1)
+  **re-spawning the conversation's *live* session in the new workspace** —
+  `conv.Cwd` is deliberately decoupled from a running session's captured spawn
+  `WorkDir` (#685/#686); this verb changes the *recorded* workspace only, and a
+  swap only takes effect on the next fresh spawn (which re-confines). Moving a live
+  session (teardown + re-mint + trust-mark the new dir) is a separate, larger
+  ticket. (2) **Live fan-out to other connected clients** — the reply goes only to
+  the requester, matching the rest of the family; other clients inherit the new
+  workspace on their next `list_conversations`. A live broadcast is a future
+  ticket.
+
+**Reviewer:** architect (self-review per `architect/security-review.md`)
+**Date:** 2026-07-09
