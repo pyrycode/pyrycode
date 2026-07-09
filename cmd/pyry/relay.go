@@ -66,6 +66,47 @@ func resolveRelayURL(flagValue, envValue string, cfg config.Config) string {
 	return cfg.RelayURL
 }
 
+// resolveWorkspaceDir validates a paired client's requested workspace path for
+// change_workspace (#823): expandTilde (leading "~"/"~/" → the daemon's $HOME,
+// since a client cannot know the daemon's absolute home) then the STRICT
+// confineWorkdirToHome (canonical realpath, confined to $HOME). It returns the
+// realpath, or an error wrapping handlers.ErrWorkspaceRejected on any failure
+// (escape after symlink resolution / unresolvable). It is injected as the
+// change_workspace handler's WorkspaceResolver at both wiring sites below.
+//
+// Two deliberate differences from resolveSpawnDir, both load-bearing:
+//
+//   - Uses the STRICT confineWorkdirToHome, NOT confineWorkdirToHomeCreating.
+//     change_workspace does not spawn and must not create a directory as a side
+//     effect of a metadata edit; a non-existent target is "unresolvable"
+//     (EvalSymlinks fails) → rejected, satisfying AC #3's "or is unresolvable"
+//     branch for free. The desktop picker offers only existing folders; if the
+//     folder is later needed, the next fresh spawn's confineWorkdirToHomeCreating
+//     creates it.
+//   - Does NOT call trustMark. Trust-marking auto-accepts claude's workspace-trust
+//     modal and is a SPAWN concern; marking here would prematurely auto-trust a
+//     dir that may never be spawned into. The next fresh spawn's resolveSpawnDir
+//     trust-marks then. (Same reasoning #686 used to reuse confineWorkdirToHome,
+//     not resolveSpawnDir.)
+//
+// Every failure — from expandTilde or confineWorkdirToHome — is wrapped with the
+// sentinel so the handler sees it on every rejection and maps it uniformly to a
+// non-retryable reply: there is no transient failure mode here, so every confine
+// failure is deterministic and non-retryable. The confine detail is wrapped via
+// %v for the wrapped-error chain; the handler never logs or echoes it (it names
+// the offending path).
+func resolveWorkspaceDir(requested string) (string, error) {
+	expanded, err := expandTilde(requested)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", handlers.ErrWorkspaceRejected, err)
+	}
+	realpath, err := confineWorkdirToHome(expanded)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", handlers.ErrWorkspaceRejected, err)
+	}
+	return realpath, nil
+}
+
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
 // Returns a no-op cleanup and nil err when relayURL is empty (relay
 // disabled — see operator note below). Otherwise loads the server-id,
@@ -177,6 +218,7 @@ func startRelay(
 		d.Register(protocol.TypeDeleteConversation, handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger))
 		d.Register(protocol.TypeArchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true))
 		d.Register(protocol.TypeUnarchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false))
+		d.Register(protocol.TypeChangeWorkspace, handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger))
 		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 		d.Register(protocol.TypeSendMessage, handlers.SendMessage(router, queue, logger))
 
@@ -367,6 +409,7 @@ func startRelayV2(
 			protocol.TypeDeleteConversation:    handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
 			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true),
 			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false),
+			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger),
 			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
 			protocol.TypeSendMessage:           handlers.SendMessage(router, queue, logger),
 		},

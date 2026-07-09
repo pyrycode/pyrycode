@@ -88,6 +88,19 @@ const (
 	// It is a v1TypeSet member, not a v2 control frame — see the v1/v2 partition
 	// in envelope.go / compat_test.go.
 	TypeUnarchiveConversation = "unarchive_conversation"
+	// TypeChangeWorkspace is a phone → binary dispatch.Route write verb (like
+	// rename_conversation / delete_conversation): it moves an existing
+	// conversation to a client-chosen workspace folder by updating its recorded
+	// workspace (its Cwd) to a target filesystem path — confined to $HOME before
+	// it is stored — and replies with the reused conversation_updated record
+	// reflecting the new workspace. "Workspace" IS the conversation's Cwd (this
+	// codebase has no separate workspace-id concept). It is a v1TypeSet member,
+	// not a v2 control frame — see the v1/v2 partition in envelope.go /
+	// compat_test.go ("v2 wire message" in the ticket title names the encrypted
+	// v2 transport, not the v1/v2 type partition). The reply reuses
+	// conversation_updated / ConversationUpdatedPayload (only cwd changed), so
+	// there is no new reply type.
+	TypeChangeWorkspace = "change_workspace"
 
 	// Backfill.
 	TypeBackfillSince = "backfill_since"

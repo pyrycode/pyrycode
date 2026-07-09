@@ -37,8 +37,12 @@ type Conversation struct {
 	// (channels) usually carry a name.
 	Name *string `json:"name,omitempty"`
 
-	// Cwd is the absolute working directory captured at conversation
-	// creation time. Always present; never updated after creation.
+	// Cwd is the absolute working directory recorded for the conversation,
+	// captured at creation time. Always present. Updated by the change_workspace
+	// verb (#823), which stores the $HOME-confined realpath of a client-chosen
+	// target; the new folder takes effect on the conversation's next fresh
+	// session spawn (conv.Cwd is deliberately decoupled from a running session's
+	// captured spawn WorkDir, #685/#686).
 	Cwd string `json:"cwd"`
 
 	// CurrentSessionID is the underlying claude session this conversation

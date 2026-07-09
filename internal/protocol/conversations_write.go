@@ -88,6 +88,27 @@ type ArchiveConversationPayload struct {
 	ConversationID string `json:"conversation_id"`
 }
 
+// ChangeWorkspacePayload is the body of a change_workspace frame
+// (docs/protocol-mobile.md § change_workspace). Phone → binary. Both fields are
+// spec-required: a change_workspace must name a target conversation and a target
+// workspace path.
+//
+// "Workspace" IS the conversation's cwd — this codebase has no separate
+// workspace-id concept — so the target is a filesystem path (mirroring
+// create/promote cwd), not an id. The path is untrusted (a network-paired
+// party supplies it) and becomes the conversation's spawn workdir on its next
+// fresh session, so the daemon confines it to $HOME (symlink-resolved) before
+// storing the resolved realpath. The reply reuses ConversationUpdatedPayload
+// verbatim (the record still exists and only cwd changed).
+//
+// Deliberately NOT a reuse of PromoteConversationPayload — promote also carries
+// a required Name, which a workspace change neither has nor means (semantic
+// coupling / false dependency, the rationale the sibling payloads document).
+type ChangeWorkspacePayload struct {
+	ConversationID string `json:"conversation_id"`
+	Cwd            string `json:"cwd"`
+}
+
 // ConversationUpdatedPayload is the body of a conversation_updated frame
 // (docs/protocol-mobile.md § conversation_updated). Binary → phone,
 // broadcast to all phones on this server-id. ID, IsPromoted, IsArchived, Cwd,
