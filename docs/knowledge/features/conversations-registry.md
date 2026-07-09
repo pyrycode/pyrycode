@@ -113,19 +113,26 @@ No parent-directory fsync (per `lessons.md` § "Atomic on-disk writes" — opera
 
 **The atomic-write recipe is duplicated, not shared.** Per the issue tech note, no shared helper across `internal/sessions`, `internal/devices`, and `internal/conversations`. The three registries will diverge as Phase 3 grows (different sort keys, different envelopes, different uniqueness invariants); a shared helper at this stage would hide divergence.
 
-## Save concurrency: lock, snapshot, release, write
+## Save concurrency: dedicated save mutex serializes the whole sequence (#868)
 
-Like `internal/devices`, `Save` snapshots under the lock and writes outside it:
+`Save` holds a second, dedicated `saveMu sync.Mutex` across the *entire* snapshot→sort→encode→fsync→rename sequence, kept deliberately separate from `mu` (which still guards `conversations` for reads/mutations):
 
 ```go
+r.saveMu.Lock()
+defer r.saveMu.Unlock()
+
 r.mu.Lock()
 snapshot := make([]Conversation, len(r.conversations))
 copy(snapshot, r.conversations)
 r.mu.Unlock()
-// sort + atomic write happen WITHOUT the lock held
+// sort + atomic write happen under saveMu but WITHOUT mu held
 ```
 
-Concurrent `Create` / `Get` / `List` / `Update` calls are not blocked behind the I/O syscall window. Two concurrent `Save` calls produce two complete temp files and two renames; the later rename wins (`os.Rename` is atomic per call, no torn write). Callers that need "Save once, everyone observes the new state" call `Save` from a single goroutine.
+**Lock order is one-directional: `saveMu → mu`, never the reverse.** `Save` takes `saveMu`, then briefly takes `mu` for the snapshot copy and releases it before any I/O; no mutator or reader ever touches `saveMu`. Concurrent `Create` / `Get` / `List` / `Update` calls are not blocked behind the I/O syscall window — only against each other and against the short snapshot-copy critical section, exactly as before.
+
+Taking the snapshot **inside** `saveMu` is what gives the durability guarantee: for any two `Save` calls, snapshot order == `saveMu`-acquire order == rename order, so the last `Save` to acquire `saveMu` always renders on disk. Before #868, `Save` only held `mu` for the snapshot copy and then wrote unlocked — two overlapping saves could interleave so an **older** snapshot's rename landed last, silently clobbering a newer one (self-healing on the next `Save`, but durably lost if the daemon restarted first). Three production goroutines call `Save` concurrently: the v2 manager's `create_conversation`/`rename_conversation` handlers, the auto-archive sweep loop, and the `/clear` rebind observer — making the interleaving a real, not theoretical, hazard. See [codebase/868.md](../codebase/868.md).
+
+This diverges from `internal/devices`, whose `Save` still only snapshots-under-lock-then-writes-unlocked ([ADR 020](../decisions/020-devices-registry-snapshot-then-write.md)) — devices has no known concurrent-`Save` caller today (`pyry pair` / `pyry pair revoke` are single-goroutine CLI paths), so its "later rename wins" posture, which guarantees no torn write but *not* no lost update, was left as-is rather than generalized into a shared helper (per the issue tech note and PROJECT-MEMORY's "duplicate until a fifth registry forces extraction" rule).
 
 `Conversation`'s slice field (`SessionHistory []string`) is **not** deep-copied at the snapshot boundary. The shallow copy is safe even though `RebindSession` (#739) now **appends** to `SessionHistory` in production: the append runs **under `r.mu`** (serialized against the snapshot copy) and only ever writes at index ≥ the old length, while a Save snapshot's view is exactly `[0:old-len]` — so the encode and a concurrent append touch disjoint addresses, and the snapshot captures a consistent pre- or post-rebind history with no torn read. `TestPool_OnRotate_RebindRaceConcurrentSave` (`internal/sessions`) exercises concurrent `RebindSession` + `Save` under `-race`. The deep-copy caveat still applies only to a hypothetical *in-place element* mutation of `SessionHistory` outside the registry lock — which no caller does; such a pattern would need a per-element `append([]string(nil), c.SessionHistory...)` deep copy.
 
@@ -325,11 +332,12 @@ New (no devices counterpart):
 - [`features/conversations-package.md`](conversations-package.md) — `Conversation` + `ConversationID` (#216), the on-disk record shape this registry persists.
 - [`features/devices-registry.md`](devices-registry.md) — the structural reference implementation (atomic write, envelope shape, snapshot-then-write Save).
 - [`features/sessions-registry.md`](sessions-registry.md) — the older atomic-rename recipe both registries trace to.
-- [ADR 020](../decisions/020-devices-registry-snapshot-then-write.md) — Save snapshots under lock, performs I/O outside (the pattern this registry inherits).
+- [ADR 020](../decisions/020-devices-registry-snapshot-then-write.md) — Save snapshots under lock, performs I/O outside (the pattern `devices` still uses; `conversations` diverged from it in #868 — see *Save concurrency* above).
 - [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) — `Update` runs the caller's callback under the registry lock (over snapshot-mutate-swap).
 - `internal/sessions/id.go` — the `NewID` / `ValidID` template `internal/conversations/id.go` clones.
 - [`features/conversation-session-binding.md`](conversation-session-binding.md) — the consumer of `RebindSession`: the `/clear` rotation rebind that keeps the binding current (§ *Maintaining the binding across rotation*).
 - [codebase/739.md](../codebase/739.md) — per-ticket note for the `RebindSession` write primitive + the pool-side rotation/eviction wiring.
+- [codebase/868.md](../codebase/868.md) — per-ticket note for the `saveMu` fix (dedicated save mutex closes the cross-`Save` lost-update race).
 - [codebase/880.md](../codebase/880.md) — per-ticket note for `SetArchived` + `ListFilter.IsArchived` + the `list_conversations` read surfacing.
 - [`features/conversations-auto-archive.md`](conversations-auto-archive.md) — the pre-existing, unrelated `Sweep`/`ShouldArchive` hard-delete auto-archive; `SetArchived` (#880) is a distinct soft-archive mechanism, not a variant of it.
 - `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec for the CRUD foundation.

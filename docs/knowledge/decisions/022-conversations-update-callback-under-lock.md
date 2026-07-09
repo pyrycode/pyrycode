@@ -55,5 +55,5 @@ The callback-under-lock pattern also matches Go stdlib idioms — `sync.Map.Rang
 ## Related
 
 - [`features/conversations-registry.md`](../features/conversations-registry.md) — the registry surface this decision shapes.
-- [ADR 020](020-devices-registry-snapshot-then-write.md) — `devices.Registry.Save` snapshots under lock and writes outside; the conversations registry inherits the same pattern. `Update` is the analogous discipline on the mutation side.
+- [ADR 020](020-devices-registry-snapshot-then-write.md) — `devices.Registry.Save` snapshots under lock and writes outside; `conversations.Registry.Save` diverged from this in #868 (dedicated `saveMu`, see the ADR's 2026-07-10 update). `Update` is the analogous discipline on the mutation side, unaffected by that divergence.
 - `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec, "Open questions" section, item 2 (post-mutation return value).
