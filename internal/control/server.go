@@ -220,6 +220,14 @@ type Server struct {
 	// per-attach detach watcher). Serve waits on it before returning so a
 	// caller blocked on Serve can be sure no per-conn goroutines are left.
 	streamingWG sync.WaitGroup
+
+	// streamConns is the set of live streaming (attach) conns handed off to a
+	// streaming handler, guarded by s.mu. Close closes every entry so an idle
+	// client's read-parked input pump gets a read error and unblocks the
+	// shutdown chain (#863) — the pump owns the conn read, so only closing the
+	// conn releases it. Entries are added at handoff in handleAttach and removed
+	// by the per-attach detach-watcher; conn.Close always runs outside s.mu.
+	streamConns map[net.Conn]struct{}
 }
 
 // NewServer constructs a Server. The socket is not opened until Listen.
@@ -258,13 +266,14 @@ func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, sh
 		log = slog.Default()
 	}
 	return &Server{
-		socketPath: socketPath,
-		sessions:   sessions,
-		logs:       logs,
-		shutdown:   shutdown,
-		log:        log,
-		sessioner:  sessioner,
-		closedCh:   make(chan struct{}),
+		socketPath:  socketPath,
+		sessions:    sessions,
+		logs:        logs,
+		shutdown:    shutdown,
+		log:         log,
+		sessioner:   sessioner,
+		closedCh:    make(chan struct{}),
+		streamConns: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -378,8 +387,8 @@ func (s *Server) Serve(ctx context.Context) error {
 		if err != nil {
 			// If we're shutting down, this is expected.
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				handleWG.Wait()        // wait for in-flight handlers
-				s.streamingWG.Wait()   // wait for active attach detach-watchers
+				handleWG.Wait()      // wait for in-flight handlers
+				s.streamingWG.Wait() // wait for active attach detach-watchers
 				return nil
 			}
 			s.log.Warn("control: accept failed", "err", err)
@@ -397,8 +406,8 @@ func (s *Server) Serve(ctx context.Context) error {
 // call from any goroutine, including the ctx-watcher goroutine in Serve.
 func (s *Server) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
@@ -413,6 +422,24 @@ func (s *Server) Close() error {
 		if firstErr == nil {
 			firstErr = err
 		}
+	}
+	// Snapshot the streaming-conn set while holding s.mu, but close each conn
+	// AFTER releasing the lock: never hold s.mu across a conn.Close (the
+	// detach-watcher also takes s.mu to deregister — closing under the lock
+	// would invert that order). Closing each conn errors its bridge input
+	// pump's in.Read, unblocking an idle attach so Serve's streamingWG.Wait
+	// returns and the daemon exits without a SIGKILL (#863). Setting s.closed
+	// above the snapshot makes the handoff race airtight: a handoff either
+	// lands in the set before this critical section (closed here) or observes
+	// s.closed == true after (closed by handleAttach itself).
+	streams := make([]net.Conn, 0, len(s.streamConns))
+	for c := range s.streamConns {
+		streams = append(streams, c)
+	}
+	s.mu.Unlock()
+
+	for _, c := range streams {
+		_ = c.Close()
 	}
 	return firstErr
 }
@@ -861,14 +888,33 @@ func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, payload *AttachP
 	s.log.Info("control: client attached")
 	_ = enc.Encode(Response{OK: true})
 
-	// Connection ownership transferred. Close it when the bridge's input
-	// pump ends (typically: client disconnected). Tracked on streamingWG
-	// so Serve waits for it before returning.
+	// Register the streaming conn so Server.Close can close it at shutdown,
+	// erroring the bridge input pump's in.Read to unblock an idle attach (#863).
+	// Read s.closed in the same critical section: if Close already snapshotted
+	// the conn set (shutdown raced ahead of this handoff), close conn now — Close
+	// will never see it, so the read-parked pump would otherwise never unblock.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		// Errors the in-flight bridge in.Read; the detach-watcher below still
+		// fires on `done` and cleans up. delete is then a harmless no-op.
+		_ = conn.Close()
+	} else {
+		s.streamConns[conn] = struct{}{}
+		s.mu.Unlock()
+	}
+
+	// Connection ownership transferred. Close it when the bridge's input pump
+	// ends (client disconnected, or Server.Close closed the conn at shutdown).
+	// Tracked on streamingWG so Serve waits for it before returning.
 	s.streamingWG.Add(1)
 	go func() {
 		defer s.streamingWG.Done()
 		<-done
-		_ = conn.Close()
+		s.mu.Lock()
+		delete(s.streamConns, conn)
+		s.mu.Unlock()
+		_ = conn.Close() // double-close (with Server.Close) is safe
 		s.log.Info("control: client detached")
 	}()
 	return true

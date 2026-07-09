@@ -457,6 +457,122 @@ func TestBridge_OutputCoexistence_ObserverCopyContract(t *testing.T) {
 	<-done
 }
 
+// fillThenBlock serves `remaining` full-buffer reads, then blocks on the next
+// Read until `block` is closed. Driving the bridge input pump with this reader
+// while nothing drains b.in parks the pump on the b.in <- send (buffer full)
+// deterministically — the send-parked state #863 must unblock at shutdown.
+// Accessed only from the single pump goroutine, so remaining needs no lock.
+type fillThenBlock struct {
+	remaining int
+	block     chan struct{}
+}
+
+func (r *fillThenBlock) Read(p []byte) (int, error) {
+	if r.remaining > 0 {
+		r.remaining--
+		for i := range p {
+			p[i] = 'x'
+		}
+		return len(p), nil
+	}
+	<-r.block
+	return 0, io.EOF
+}
+
+// TestBridge_ShutdownUnblocksSendParkedPump is the AC-3 regression for #863: a
+// pump blocked on the buffered input-channel send (child in restart backoff,
+// buffer full, supervisor not draining b.in) must still exit at shutdown.
+// Closing the client conn does not cover this case — a channel send is not
+// interrupted by a conn close — so Bridge.Shutdown closes a terminal signal the
+// send selects on.
+func TestBridge_ShutdownUnblocksSendParkedPump(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+
+	// inputChunkBufferSize+1 full-buffer reads: the last send has no slot, so
+	// the pump parks on b.in <-. Nothing calls Bridge.Read, so b.in never drains.
+	r := &fillThenBlock{remaining: inputChunkBufferSize + 1, block: make(chan struct{})}
+	defer close(r.block)
+
+	done, err := b.Attach(r, io.Discard)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	b.Shutdown()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("send-parked pump did not exit within 2s of Shutdown")
+	}
+	if b.Attached() {
+		t.Error("Attached() = true after Shutdown drained the send-parked pump")
+	}
+}
+
+// TestBridge_ShutdownIdempotentAndNoAttach: Shutdown is safe to call more than
+// once (sync.Once) and is a no-op when no client is attached. Guards the
+// defensive Session.Run defer, which may fire on a session that was never
+// attached.
+func TestBridge_ShutdownIdempotentAndNoAttach(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+	b.Shutdown()
+	b.Shutdown() // second call must not panic (close-once via sync.Once)
+
+	if b.Attached() {
+		t.Error("Attached() = true on a bridge that was never attached")
+	}
+}
+
+// TestBridge_RestartDoesNotAbortAttach guards that the shutdown signal is
+// distinct from the per-iteration iterCancel: an attach survives an
+// EndIteration/BeginIteration cycle (a child restart). Attached() stays true
+// across the iteration boundary and clears only on conn EOF (or Shutdown).
+// Using iterCancel for the send-abort would wrongly tear the attach down on
+// every restart backoff (#863).
+func TestBridge_RestartDoesNotAbortAttach(t *testing.T) {
+	t.Parallel()
+
+	b := NewBridge(nil)
+	b.BeginIteration()
+
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	done, err := b.Attach(pr, io.Discard)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if !b.Attached() {
+		t.Fatal("Attached() = false right after Attach")
+	}
+
+	// Simulate a child restart: end the iteration and begin a fresh one. The
+	// attach's input pump reads from pr, not the iteration's read side, so it
+	// must be untouched.
+	b.EndIteration()
+	b.BeginIteration()
+
+	if !b.Attached() {
+		t.Error("Attached() = false after an iteration boundary; restart wrongly tore down the attach")
+	}
+
+	// The attach still ends on conn EOF, proving the pump is alive.
+	pw.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("done did not close after conn EOF post-restart")
+	}
+	if b.Attached() {
+		t.Error("Attached() = true after conn EOF")
+	}
+}
+
 func TestBridge_BlocksReadUntilAttached(t *testing.T) {
 	t.Parallel()
 

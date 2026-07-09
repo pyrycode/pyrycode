@@ -362,6 +362,19 @@ func (s *Session) touchLastActive() {
 // idle timer armed) and runEvicted (no supervisor; waiting for an Activate).
 // A registry write happens after each transition.
 func (s *Session) Run(ctx context.Context) error {
+	// On permanent termination — outer ctx cancel (pool shutdown) or Pool.Remove
+	// — release any attach input pump parked on the bridge's buffered send so
+	// the daemon exits promptly instead of hanging until SIGKILL (#863). This is
+	// the only layer that both holds the Bridge and can distinguish shutdown
+	// from eviction: eviction stays INSIDE the loop below (runActive→runEvicted),
+	// so this defer fires exactly once, only when Run returns for good. Placing
+	// it in supervisor.Run would poison the bridge on every evict (supervisor.Run
+	// returns on eviction too). The Server layer closes the attached conn to
+	// unblock a read-parked pump; Shutdown covers the send-parked pump a conn
+	// close cannot reach. Guarded because foreground sessions have no bridge.
+	if s.bridge != nil {
+		defer s.bridge.Shutdown()
+	}
 	for {
 		switch s.snapshotState() {
 		case stateActive:

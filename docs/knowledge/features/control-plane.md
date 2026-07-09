@@ -1565,7 +1565,15 @@ Two top-level goroutines, unchanged from Phase 0:
 1. **Main goroutine** — calls `pool.Run(ctx)`, blocks until ctx cancellation.
 2. **Control goroutine** — `go ctrl.Serve(ctx)`, accepts client connections, dispatches verbs.
 
-Shutdown is unchanged: `SIGINT`/`SIGTERM` → `signal.NotifyContext` cancels the context → `pool.Run` returns `context.Canceled` → `ctrl.Close()` removes the socket file → in-flight handlers drain via `streamingWG`.
+Shutdown: `SIGINT`/`SIGTERM` → `signal.NotifyContext` cancels the context → `pool.Run` returns `context.Canceled` → `ctrl.Close()` removes the socket file → in-flight handlers drain via `streamingWG`.
+
+Draining `streamingWG` requires every attached bridge's input pump to actually exit, which (pre-#863) never happened for an idle attached client — the pump only exited on a conn read error, and shutdown never produced one, so `Serve` hung until the service manager escalated to SIGKILL. #863 closes that gap with a three-layer abort, one per resource each layer owns:
+
+- `control.Server` tracks every streaming (attach) conn in a set guarded by `s.mu`; `Close` closes each **after** releasing the lock, erroring a read-parked pump's `in.Read`.
+- `supervisor.Bridge` gets a terminal `Shutdown()` that closes a `shutdownCh` the pump's `b.in <- chunk` send now selects on, releasing a pump parked on the buffered channel send (conn close alone can't unblock a channel send). Distinct from the per-iteration `iterCancel` — a routine restart never trips it.
+- `sessions.Session.Run` defers `Bridge.Shutdown()`, firing exactly once on permanent termination (ctx cancel or removal), never on eviction.
+
+See [`docs/knowledge/codebase/863.md`](codebase/863.md) for the full design and lock-order rationale.
 
 ## Testing
 

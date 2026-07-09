@@ -623,6 +623,79 @@ func TestServer_StopWhileAttached(t *testing.T) {
 	t.Fatalf("bridge.Attached() still true 2s after client disconnect")
 }
 
+// TestServer_ShutdownWhileAttached_NoClientClose is the AC-5 regression for
+// #863: with a control client attached and idle, cancelling the daemon context
+// (SIGTERM / `pyry stop`) must make Serve return within a bounded window
+// WITHOUT the test closing the client conn. This drives the production cascade
+// that TestServer_StopWhileAttached cannot — there, the test closes the conn
+// from its own side, masking the server-side hang.
+//
+// Read-parked path: Serve's ctx-watcher fires Server.Close, which closes the
+// tracked streaming conn; that errors the bridge input pump's in.Read, the
+// pump exits, the detach chain fires, streamingWG drains, and Serve returns.
+func TestServer_ShutdownWhileAttached_NoClientClose(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "p.sock")
+
+	bridge := supervisor.NewBridge(nil)
+	srv := NewServer(sock, sessionResolverWith(bridge.Attach), nil, nil, nil, nil)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ctx) }()
+
+	// Attach an idle client — no bytes sent, no detach from this side.
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(Request{Verb: VerbAttach}); err != nil {
+		t.Fatalf("encode attach: %v", err)
+	}
+	var ack Response
+	if err := json.NewDecoder(conn).Decode(&ack); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if !ack.OK {
+		t.Fatalf("attach ack OK=false: %+v", ack)
+	}
+
+	// Confirm the bridge sees the attach before we shut down.
+	deadline := time.Now().Add(2 * time.Second)
+	for !bridge.Attached() {
+		if time.Now().After(deadline) {
+			t.Fatal("bridge never reported attached")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Cancel the daemon ctx — the production SIGTERM / pyry-stop path. The
+	// test deliberately does NOT close conn.
+	cancel()
+
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return within 2s of ctx cancel while a client was attached")
+	}
+
+	// AC-2: the bridge cleared its attached state server-side.
+	if bridge.Attached() {
+		t.Error("bridge.Attached() still true after shutdown")
+	}
+}
+
 // TestServer_ConcurrentAttachRace fires two attach handshakes simultaneously
 // from separate goroutines. At-most-one is enforced via Bridge's mutex;
 // exactly one of the two should land OK, the other ErrBridgeBusy. With the

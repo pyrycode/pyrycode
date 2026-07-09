@@ -530,6 +530,80 @@ func TestSession_ShutdownFromActive(t *testing.T) {
 	}
 }
 
+// infiniteReader yields bytes forever, never returning an error. Driving the
+// bridge input pump with it while nothing drains the bridge's input channel
+// (an evicted session has no supervisor) fills the buffer and parks the pump on
+// the b.in <- send — the send-parked state #863 must clear at shutdown.
+type infiniteReader struct{}
+
+func (infiniteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
+// TestSession_Run_ShutdownFiresBridgeShutdown is the AC-2/AC-3 wiring
+// regression for #863: when Session.Run returns on permanent termination (ctx
+// cancel = pool shutdown), its deferred Bridge.Shutdown must fire and release an
+// input pump parked on the bridge's buffered send. A bare evicted session (no
+// supervisor, so nothing drains b.in) isolates the Run-defer → Bridge.Shutdown
+// path without a live claude child. Eviction stays inside Run's loop, so the
+// defer only fires on terminal exit — never on a routine evict.
+func TestSession_Run_ShutdownFiresBridgeShutdown(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bridge := supervisor.NewBridge(logger)
+	sess := &Session{
+		id:         "shutdown-bridge-test",
+		log:        logger,
+		bridge:     bridge,
+		lcState:    stateEvicted,
+		activeCh:   make(chan struct{}),
+		evictedCh:  closedChan(),
+		activateCh: make(chan struct{}, 1),
+		evictCh:    make(chan struct{}, 1),
+		removedCh:  make(chan struct{}),
+	}
+
+	// Park an input pump on the bridge's buffered send: the evicted session
+	// runs no supervisor, so nothing drains b.in and the pump blocks on b.in <-.
+	done, err := sess.Attach(infiniteReader{}, io.Discard)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- sess.Run(ctx) }()
+
+	// Let the pump fill the bridge buffer and park on the send.
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the session ctx — Run returns and its deferred Bridge.Shutdown
+	// releases the send-parked pump. The test never closes the attach reader.
+	cancel()
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("send-parked pump did not exit after Session.Run fired Bridge.Shutdown")
+	}
+	if bridge.Attached() {
+		t.Error("bridge.Attached() = true after shutdown")
+	}
+}
+
 // TestSession_Run_RemovedCh_ExitsClean: closing removedCh while the lifecycle
 // goroutine is parked in runEvicted makes Run return nil (a clean exit, not a
 // ctx.Err), so Pool.Remove's shared-errgroup Run never propagates a teardown.
