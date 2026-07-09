@@ -2,9 +2,6 @@ package sessions
 
 import (
 	"context"
-	"errors"
-	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -242,36 +239,4 @@ func newProbePreferredTranscriptResolver(dir string, probe rotation.Probe, pidFn
 		}
 		return candidate, info.Size(), nil
 	}
-}
-
-// reconcileBootstrapOnNew inspects claude's session dir for the workdir and,
-// if the most-recent on-disk JSONL belongs to a different UUID than the
-// pool's bootstrap entry, rotates the bootstrap entry to that UUID via
-// p.RotateID. A missing/unreadable dir or empty dir is logged and ignored —
-// startup proceeds with the existing bootstrap.
-//
-// This is the seam the live-detection ticket reuses: same RotateID call,
-// driven by an fsnotify event instead of a startup scan.
-func reconcileBootstrapOnNew(p *Pool, claudeSessionsDir string, log *slog.Logger) error {
-	if claudeSessionsDir == "" {
-		return nil
-	}
-	mostRecent, err := mostRecentJSONL(claudeSessionsDir)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.Warn("reconcile: read claude sessions dir failed",
-				"dir", claudeSessionsDir, "err", err)
-		}
-		return nil
-	}
-	if mostRecent == "" {
-		return nil
-	}
-	current := p.Default().ID()
-	if mostRecent == current {
-		return nil
-	}
-	log.Info("reconcile: rotating bootstrap session id from on-disk JSONL",
-		"from", current, "to", mostRecent, "dir", claudeSessionsDir)
-	return p.RotateID(current, mostRecent)
 }

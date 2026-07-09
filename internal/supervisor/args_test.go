@@ -8,12 +8,15 @@ import (
 func TestBuildClaudeArgs(t *testing.T) {
 	t.Parallel()
 
+	const sid = "11111111-1111-4111-8111-111111111111"
+
 	tests := []struct {
-		name           string
-		claudeArgs     []string
-		firstRun       bool
-		continueLast   bool
-		want           []string
+		name         string
+		claudeArgs   []string
+		firstRun     bool
+		continueLast bool
+		sessionID    string
+		want         []string
 	}{
 		{
 			name:         "first run with no claude args yields no claude args",
@@ -50,15 +53,35 @@ func TestBuildClaudeArgs(t *testing.T) {
 			continueLast: false,
 			want:         []string{"--channels", "plugin:discord"},
 		},
+		{
+			// #839: a resolved session id appends --session-id and suppresses
+			// --continue even when continueLast would otherwise prepend it.
+			name:         "session id appends --session-id and suppresses --continue",
+			claudeArgs:   []string{"--channels", "plugin:discord"},
+			firstRun:     false,
+			continueLast: true,
+			sessionID:    sid,
+			want:         []string{"--channels", "plugin:discord", "--session-id", sid},
+		},
+		{
+			// #839 AC-1: deterministic from the very first spawn — the bootstrap
+			// gets --session-id on firstRun too, never a --continue.
+			name:         "session id on first run still appends --session-id",
+			claudeArgs:   nil,
+			firstRun:     true,
+			continueLast: false,
+			sessionID:    sid,
+			want:         []string{"--session-id", sid},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := buildClaudeArgs(tt.claudeArgs, tt.firstRun, tt.continueLast)
+			got := buildClaudeArgs(tt.claudeArgs, tt.firstRun, tt.continueLast, tt.sessionID)
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("buildClaudeArgs(%v, firstRun=%v, continueLast=%v) = %v, want %v",
-					tt.claudeArgs, tt.firstRun, tt.continueLast, got, tt.want)
+				t.Errorf("buildClaudeArgs(%v, firstRun=%v, continueLast=%v, sessionID=%q) = %v, want %v",
+					tt.claudeArgs, tt.firstRun, tt.continueLast, tt.sessionID, got, tt.want)
 			}
 		})
 	}
@@ -75,7 +98,10 @@ func TestBuildClaudeArgs_DoesNotMutate(t *testing.T) {
 	original := []string{"--channels", "plugin:discord"}
 	snapshot := append([]string(nil), original...)
 
-	_ = buildClaudeArgs(original, false, true)
+	// Both branches must leave the caller's slice untouched: the --continue
+	// prepend path and the #839 --session-id append path.
+	_ = buildClaudeArgs(original, false, true, "")
+	_ = buildClaudeArgs(original, false, true, "11111111-1111-4111-8111-111111111111")
 
 	if !reflect.DeepEqual(original, snapshot) {
 		t.Errorf("buildClaudeArgs mutated input: got %v, want %v", original, snapshot)

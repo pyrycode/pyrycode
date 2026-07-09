@@ -118,17 +118,23 @@ func TestSession_Run_StopsOnContextCancel(t *testing.T) {
 // PhaseStarting transitions happen quickly.
 func helperPoolIdle(t *testing.T, idle time.Duration) *Pool {
 	t.Helper()
-	if _, err := exec.LookPath("/bin/sleep"); err != nil {
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
 	}
 	// Bridge mode: callers run sess.Run, which spawns the bootstrap
 	// supervisor. Foreground mode in a Run-reaching fixture is the deadlock
 	// surface #41 surfaced.
+	//
+	// #839: the bootstrap now spawns with a trailing "--session-id <uuid>", so a
+	// bare `/bin/sleep 3600` stand-in would exit immediately on the unknown flag
+	// and crash-loop (lessons.md "Pool.Create appends --session-id"). The sh
+	// stand-in ignores its positional args and execs a long sleep, restoring the
+	// live long-lived child these fixtures had before the flag was appended.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
 		Bootstrap: SessionConfig{
-			ClaudeBin:      "/bin/sleep",
-			ClaudeArgs:     []string{"3600"},
+			ClaudeBin:      "/bin/sh",
+			ClaudeArgs:     []string{"-c", "exec sleep 3600", "--"},
 			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    idle,
 			BackoffInitial: 10 * time.Millisecond,

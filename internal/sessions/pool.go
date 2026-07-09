@@ -399,17 +399,29 @@ func New(cfg Config) (*Pool, error) {
 	// live restart (#842) can recompose full argv from the persisted settings.
 	base := slices.Clone(cfg.Bootstrap.ClaudeArgs)
 	bootstrapArgs := append(slices.Clone(base), claudeSettingsArgs(settings)...)
+	// p is late-bound: the &Pool{} literal below assigns it, and the
+	// ResolveSessionID closure only reads it at spawn time (supervisor.Run),
+	// long after New returns — identical timing to the pidFn holder above.
+	var p *Pool
 	supCfg := supervisor.Config{
-		ClaudeBin:      cfg.Bootstrap.ClaudeBin,
-		WorkDir:        cfg.Bootstrap.WorkDir,
-		ResumeLast:     cfg.Bootstrap.ResumeLast,
-		ClaudeArgs:     bootstrapArgs,
-		Bridge:         cfg.Bootstrap.Bridge,
-		Logger:         cfg.Logger,
-		BackoffInitial: cfg.Bootstrap.BackoffInitial,
-		BackoffMax:     cfg.Bootstrap.BackoffMax,
-		BackoffReset:   cfg.Bootstrap.BackoffReset,
-		RecordDir:      cfg.Bootstrap.RecordDir,
+		ClaudeBin: cfg.Bootstrap.ClaudeBin,
+		WorkDir:   cfg.Bootstrap.WorkDir,
+		// #839: the bootstrap resumes its OWN deterministic id via
+		// --session-id (ResolveSessionID below), never --continue, so a
+		// supervisor restart in a shared sessions dir cannot latch onto a
+		// second claude's newer transcript. Resolved fresh each spawn so a
+		// /clear rotation (RotateID flips p.bootstrap) is picked up on the
+		// next restart. cfg.Bootstrap.ResumeLast is now vestigial for the
+		// bootstrap; the --continue paths (per-caller/foreground/tests) keep it.
+		ResumeLast:       false,
+		ResolveSessionID: func() string { return string(p.BootstrapID()) },
+		ClaudeArgs:       bootstrapArgs,
+		Bridge:           cfg.Bootstrap.Bridge,
+		Logger:           cfg.Logger,
+		BackoffInitial:   cfg.Bootstrap.BackoffInitial,
+		BackoffMax:       cfg.Bootstrap.BackoffMax,
+		BackoffReset:     cfg.Bootstrap.BackoffReset,
+		RecordDir:        cfg.Bootstrap.RecordDir,
 	}
 	if reg := cfg.ConversationsRegistry; reg != nil {
 		supCfg.ValidateConversation = func(id string) error {
@@ -483,7 +495,7 @@ func New(cfg Config) (*Pool, error) {
 		sess.activeCh = make(chan struct{})
 		sess.evictedCh = closedChan()
 	}
-	p := &Pool{
+	p = &Pool{
 		sessions:           map[SessionID]*Session{bootstrapID: sess},
 		bootstrap:          bootstrapID,
 		readyCh:            make(chan struct{}),
@@ -509,9 +521,11 @@ func New(cfg Config) (*Pool, error) {
 		}
 	}
 
-	if err := reconcileBootstrapOnNew(p, cfg.ClaudeSessionsDir, cfg.Logger); err != nil {
-		return nil, fmt.Errorf("sessions: reconcile bootstrap: %w", err)
-	}
+	// #839: no startup adopt-by-mtime. The bootstrap id is authoritative from
+	// the persisted registry (warm start) or a freshly-minted id (cold start);
+	// it is never rotated to a foreign <uuid>.jsonl found in the shared sessions
+	// dir. mostRecentJSONL and the transcript resolvers stay — they still back
+	// the #838 growth-confirm baseline.
 	return p, nil
 }
 
@@ -961,6 +975,23 @@ func (p *Pool) DefaultSettings() (SessionSettings, bool) {
 		return SessionSettings{}, false
 	}
 	return sess.settings, true
+}
+
+// BootstrapID returns the pool's current bootstrap session id under p.mu
+// (RLock). It resolves p.bootstrap fresh on each call — mirroring
+// Default/DefaultSettings — so it stays correct across a /clear rotation:
+// RotateID flips p.bootstrap under the write lock, so the next spawn's
+// ResolveSessionID provider (which calls this) resolves the rotated id (#839).
+//
+// Concurrency: reads p.bootstrap (a p.mu-guarded SessionID value), deliberately
+// NOT Default().ID()/sess.id. RotateID mutates sess.id WITHOUT Session.lcMu
+// under the documented "no concurrent reader of sess.id" invariant; routing the
+// spawn-time read through p.bootstrap introduces no new sess.id reader and
+// preserves that invariant. The RLock is race-clean against RotateID's Lock.
+func (p *Pool) BootstrapID() SessionID {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.bootstrap
 }
 
 // Run blocks until ctx is cancelled, supervising every session in the pool,

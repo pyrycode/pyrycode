@@ -150,16 +150,20 @@ func TestPool_BootstrapWarmStart_AppliesSettingsToArgv(t *testing.T) {
 	runPoolInBackground(t, pool)
 
 	got := waitArgv(t, tplWorkDir)
-	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
+	// #839: the bootstrap resumes via a trailing --session-id (its own persisted
+	// id), appended after the settings flags; it no longer uses --continue.
+	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
+		"--session-id", string(pool.BootstrapID())}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("bootstrap argv = %v, want %v", got, want)
 	}
 }
 
-// TestPool_BootstrapColdStart_ArgvByteIdentical (AC #5): a cold-start bootstrap
-// (no persisted settings) launches claude with NO extra flags — byte-identical
-// to today.
-func TestPool_BootstrapColdStart_ArgvByteIdentical(t *testing.T) {
+// TestPool_BootstrapColdStart_SpawnsWithSessionID (#839): a cold-start bootstrap
+// (no persisted settings) launches claude with exactly --session-id <bootID> and
+// nothing else — the deterministic resume that replaced the old empty/--continue
+// baseline (#833 AC #5, superseded here).
+func TestPool_BootstrapColdStart_SpawnsWithSessionID(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	regPath := filepath.Join(dir, "sessions.json")
@@ -168,8 +172,10 @@ func TestPool_BootstrapColdStart_ArgvByteIdentical(t *testing.T) {
 	pool := helperPoolArgvRecorder(t, regPath, tplWorkDir)
 	runPoolInBackground(t, pool)
 
-	if got := waitArgv(t, tplWorkDir); len(got) != 0 {
-		t.Errorf("cold-start bootstrap argv = %v, want empty (byte-identical baseline)", got)
+	got := waitArgv(t, tplWorkDir)
+	want := []string{"--session-id", string(pool.BootstrapID())}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("cold-start bootstrap argv = %v, want %v", got, want)
 	}
 }
 
