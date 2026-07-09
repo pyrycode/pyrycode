@@ -21,6 +21,17 @@ func NewServer(
 
 `logs`, `shutdown`, and `sessioner` are optional. When nil, the corresponding verb returns an error response — used in tests that care about isolated verbs. `sessioner` is wired in production to `*sessions.Pool` in `cmd/pyry/main.go` (#116); `*sessions.Pool` satisfies `Sessioner` directly because `Pool.Create` returns `sessions.SessionID`, matching the interface signature with no adapter (contrast with `poolResolver` for the read-side `Lookup`). Pre-#116 the call site passed `nil` and `VerbSessionsNew` returned `"sessions.new: no sessioner configured"`. See `docs/specs/architecture/75-control-sessions-new.md` for the seam design.
 
+## Handshake Deadline: per-conn timeout and the session-verb extend (#865)
+
+`handle` (the per-conn goroutine `Serve` spawns) sets `conn.SetDeadline(time.Now().Add(s.handshakeTimeout))` before decoding the client's JSON request — the bound that limits how long a connected-but-silent client can pin a per-conn goroutine. `s.handshakeTimeout` defaults to `defaultHandshakeTimeout` (5s), set once in `NewServer`'s struct literal; same-package tests may shrink it via the unexported `Server.handshakeTimeout` field (written once before `Serve` starts, read-only per-conn thereafter — no lock needed, same post-construction-override shape as `SetRekeyer`).
+
+Three verbs touch this deadline after the handshake read has already completed:
+
+- `handleAttach` **clears** it (`conn.SetDeadline(time.Time{})`) before handing the conn to the bridge — the attach stream is indefinite, so no deadline applies for the life of the attachment (until #863's shutdown-abort machinery closes it).
+- `handleSessionsNew` / `handleSessionsRm` **extend** it to `sessionOpTimeout + sessionOpConnGrace` (30s + 5s = 35s) immediately before calling `Pool.Create` / `Pool.Remove`. Before #865, the deadline was left at its 5s handshake value while each handler's own ctx budgeted 30s for the op — once `Create`/`Remove` ran past 5s (routine on a cold claude spawn: documented 2-15s latency), the final `enc.Encode(Response{...})` failed with a silently-discarded deadline error and the client's read got EOF, even though the mutation had actually succeeded (an operator-visible orphan on `sessions.new`, a false failure on `sessions.rm`). Extending — not clearing — keeps the 30s op ctx as the binding budget on the normal path, while a write that's still stuck at 35s hits a hard upper bound rather than hanging the conn goroutine forever.
+
+Both extend calls run strictly after `handle` has decoded the request, so the handshake-read bound is unaffected by either verb: a silent client (no request sent) is still cut off at `s.handshakeTimeout` before either handler is reached. See [`codebase/865.md`](codebase/865.md) for the fix and its regression tests.
+
 ## Resolver Seam
 
 The control plane consumes session state through one interface pair, both defined in `internal/control` (the consumer side):
@@ -1325,7 +1336,7 @@ Three boundary rules pinned by AC:
 
 - **Stdout is exactly `<uuid>\n`** — `fmt.Println(id)` writes the canonical 36-character UUIDv4 with a single trailing newline, no surrounding text. Pinned by `TestSessionsNew_E2E_Labelled` / `_Unlabelled` against `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$`.
 - **Empty `--name` / no `--name` are equivalent** — both produce `label=""`, which `Pool.Create` stores verbatim as a no-label registry entry. The synthetic `"bootstrap"` substitution in `Pool.List` does *not* apply because `Bootstrap=false`; non-bootstrap empty-label sessions stay empty-labelled.
-- **30s timeout mirrors the server-side ceiling.** `handleSessionsNew` uses `context.WithTimeout(..., 30s)` for `Pool.Create`; the client matches so neither side hangs the other. Lower would race the claude-spawn path (2-15s typical); higher gains nothing operationally — a stuck `Pool.Create` at 30s is a bug to surface, not paper over.
+- **30s timeout mirrors the server-side ceiling.** `handleSessionsNew` uses `context.WithTimeout(..., sessionOpTimeout)` (30s) for `Pool.Create`; the client matches so neither side hangs the other. Lower would race the claude-spawn path (2-15s typical); higher gains nothing operationally — a stuck `Pool.Create` at 30s is a bug to surface, not paper over. Until #865, the server's conn write deadline stayed at the 5s handshake value across this whole 30s window, so an op that ran past 5s delivered EOF to this client instead of the UUID — see [Handshake Deadline](#handshake-deadline-per-conn-timeout-and-the-session-verb-extend-865).
 
 ### `runSessionsRm` handler (1.1d-B2)
 
