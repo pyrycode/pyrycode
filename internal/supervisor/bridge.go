@@ -61,6 +61,18 @@ type Bridge struct {
 	cancelMu   sync.Mutex
 	iterCancel chan struct{} // closed by EndIteration to make Read return EOF
 
+	// shutdownCh is a terminal signal closed exactly once by Shutdown at
+	// daemon/session termination. The attach input pump selects on it in the
+	// b.in send so a pump parked on the buffered send (child in restart
+	// backoff, buffer full, supervisor not draining) still exits at shutdown —
+	// closing the client conn unblocks the pump's read but not a channel send
+	// (#863). Distinct from iterCancel: iterCancel is per-iteration and closed
+	// on every child exit (restarts included), then re-created by
+	// BeginIteration; shutdownCh is closed once and never re-created, so it does
+	// not tear the attach down on a routine restart.
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+
 	// Output path (PTY → bridge → both heads). This is the Phase-1 two-heads
 	// model (ADR 025, #595): `output` is the local attach head — at-most-one,
 	// guarded by `attached` (ErrBridgeBusy on a second Attach); `outputObserver`
@@ -93,6 +105,7 @@ func NewBridge(log *slog.Logger) *Bridge {
 		log:        log,
 		in:         make(chan []byte, inputChunkBufferSize),
 		iterCancel: make(chan struct{}),
+		shutdownCh: make(chan struct{}),
 	}
 }
 
@@ -231,12 +244,22 @@ func (b *Bridge) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err 
 	go func() {
 		defer close(doneCh)
 		buf := make([]byte, attachReadBufferSize)
+	pump:
 		for {
 			n, rerr := in.Read(buf)
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
-				b.in <- chunk
+				select {
+				case b.in <- chunk:
+				case <-b.shutdownCh:
+					// Daemon/session terminating: no consumer will ever drain
+					// b.in again. Drop this chunk and exit so doneCh closes and
+					// Attached() reports false — the send-parked half of the
+					// shutdown unblock (#863). The read-parked half is handled
+					// by the caller closing `in`.
+					break pump
+				}
 			}
 			if rerr != nil {
 				// EOF on `in` is the normal detach path (client closed
@@ -245,7 +268,7 @@ func (b *Bridge) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err 
 				if !errors.Is(rerr, io.EOF) {
 					b.log.Warn("supervisor: attach input copy ended with error", "err", rerr)
 				}
-				break
+				break pump
 			}
 		}
 
@@ -260,6 +283,21 @@ func (b *Bridge) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err 
 		b.mu.Unlock()
 	}()
 	return doneCh, nil
+}
+
+// Shutdown is a terminal signal: it releases the attach input pump if it is
+// parked on the buffered input-channel send, so a daemon or session shutting
+// down while a client is attached does not hang waiting for a detach that never
+// comes (#863). Idempotent (guarded by a sync.Once) and safe to call from any
+// goroutine, including when no client is attached (a no-op).
+//
+// Once called the bridge is done for good — no further client input will ever
+// be drained — so Shutdown is never paired with a re-open the way
+// EndIteration/BeginIteration are. It aborts only the send; a pump parked on
+// the client read is unblocked by the owner of that reader closing it (the
+// control server closes the streaming conn at Server.Close).
+func (b *Bridge) Shutdown() {
+	b.shutdownOnce.Do(func() { close(b.shutdownCh) })
 }
 
 // Attached reports whether a client is currently attached.
