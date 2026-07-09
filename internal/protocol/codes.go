@@ -120,6 +120,22 @@ const (
 	// conversation is involved, so no conversation record is projected. Also a
 	// v1TypeSet member.
 	TypeWorkspaceFolderCreated = "workspace_folder_created"
+	// TypeRecentWorkspaces is a phone → binary dispatch.Route read verb (like
+	// list_conversations): it asks for the distinct set of recently-used
+	// workspace folders and replies with a recent_workspaces_list record. The
+	// list is derived entirely from Cwd values the daemon already owns in the
+	// conversations registry — no untrusted input drives a filesystem operation,
+	// so it is NOT security-sensitive (contrast create_workspace_folder, which
+	// writes to disk from untrusted input). It is a v1TypeSet member, not a v2
+	// control frame — see the v1/v2 partition in envelope.go / compat_test.go
+	// ("v2 wire message" in the ticket title names the encrypted v2 transport,
+	// not the v1/v2 type partition). Its request payload is empty by spec.
+	TypeRecentWorkspaces = "recent_workspaces"
+	// TypeRecentWorkspacesList is the binary → phone reply to a
+	// recent_workspaces, correlated via in_reply_to. It carries the distinct
+	// workspace paths ordered most-recent-first, each with its most-recent
+	// last_used_at. Also a v1TypeSet member.
+	TypeRecentWorkspacesList = "recent_workspaces_list"
 
 	// Backfill.
 	TypeBackfillSince = "backfill_since"
