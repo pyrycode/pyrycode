@@ -138,9 +138,11 @@ func (r *Registry) Get(id ConversationID) (Conversation, bool) {
 
 // ListFilter narrows the result of List. A nil pointer field means "no filter
 // on this field"; a non-nil pointer matches entries whose corresponding field
-// equals the pointed-to value.
+// equals the pointed-to value. When more than one field is set, they AND: an
+// entry is returned only if it matches every non-nil field.
 type ListFilter struct {
 	IsPromoted *bool
+	IsArchived *bool
 }
 
 // List returns a copy of the in-memory conversation list, optionally narrowed
@@ -159,6 +161,9 @@ func (r *Registry) List(filter ...ListFilter) []Conversation {
 	out := make([]Conversation, 0, len(r.conversations))
 	for _, c := range r.conversations {
 		if f.IsPromoted != nil && c.IsPromoted != *f.IsPromoted {
+			continue
+		}
+		if f.IsArchived != nil && c.IsArchived != *f.IsArchived {
 			continue
 		}
 		out = append(out, c)
@@ -238,6 +243,37 @@ func (r *Registry) Delete(id ConversationID) bool {
 	for i := range r.conversations {
 		if r.conversations[i].ID == id {
 			r.conversations = append(r.conversations[:i], r.conversations[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// SetArchived flips the durable archived flag of the conversation whose ID
+// equals id: archived=true archives it, archived=false restores it to active.
+// Returns true on hit, false on miss; on miss no field of any record is
+// modified (AC: "miss for an unknown id, leaving the registry unmodified").
+//
+// It sets exactly one field — IsArchived — so id, cwd, name, promoted state,
+// and session binding are structurally untouched. This is the deterministic
+// enforcement of the ticket's "flips exactly one field" constraint: the
+// #881 verb handler that calls this cannot get it wrong, because the method
+// has no way to touch another field. The scan and mutation happen atomically
+// under r.mu, so there is no find-then-mutate window a concurrent
+// Create/Delete could redirect.
+//
+// The single archived bool both sets and clears — SetArchived(id, true) on an
+// already-archived row returns true and leaves it archived (idempotent /
+// symmetric toggle), so no separate Archive/Unarchive pair is needed.
+//
+// SetArchived does NOT call Save — disk persistence is the caller's concern,
+// matching the Create / Update / Promote / Delete / RebindSession convention.
+func (r *Registry) SetArchived(id ConversationID, archived bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			r.conversations[i].IsArchived = archived
 			return true
 		}
 	}

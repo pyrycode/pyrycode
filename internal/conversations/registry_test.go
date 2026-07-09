@@ -439,39 +439,70 @@ func TestRegistry_ConcurrentReadWrite(t *testing.T) {
 func TestRegistry_List_Filter(t *testing.T) {
 	t.Parallel()
 
+	// Four conversations spanning every (IsPromoted, IsArchived) combination so
+	// a filter's expected result is a single unambiguous id. The two flags AND:
+	// a set IsPromoted and a set IsArchived both have to match.
+	const (
+		idActiveDiscussion = ConversationID("11111111-2222-4333-8444-555555555555") // promoted=F archived=F
+		idActiveChannel    = ConversationID("22222222-2222-4333-8444-555555555555") // promoted=T archived=F
+		idArchDiscussion   = ConversationID("33333333-2222-4333-8444-555555555555") // promoted=F archived=T
+		idArchChannel      = ConversationID("44444444-2222-4333-8444-555555555555") // promoted=T archived=T
+	)
 	mk := func() *Registry {
 		r := &Registry{}
-		r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/a", IsPromoted: false})
-		r.Create(Conversation{ID: "22222222-2222-4333-8444-555555555555", Cwd: "/b", IsPromoted: true})
-		r.Create(Conversation{ID: "33333333-2222-4333-8444-555555555555", Cwd: "/c", IsPromoted: false})
-		r.Create(Conversation{ID: "44444444-2222-4333-8444-555555555555", Cwd: "/d", IsPromoted: true})
+		r.Create(Conversation{ID: idActiveDiscussion, Cwd: "/a", IsPromoted: false, IsArchived: false})
+		r.Create(Conversation{ID: idActiveChannel, Cwd: "/b", IsPromoted: true, IsArchived: false})
+		r.Create(Conversation{ID: idArchDiscussion, Cwd: "/c", IsPromoted: false, IsArchived: true})
+		r.Create(Conversation{ID: idArchChannel, Cwd: "/d", IsPromoted: true, IsArchived: true})
 		return r
 	}
 
 	tests := []struct {
-		name        string
-		filter      []ListFilter
-		wantPromote map[bool]int
+		name    string
+		filter  []ListFilter
+		wantIDs []ConversationID
 	}{
 		{
-			name:        "no-filter",
-			filter:      nil,
-			wantPromote: map[bool]int{true: 2, false: 2},
+			name:    "no-filter",
+			filter:  nil,
+			wantIDs: []ConversationID{idActiveDiscussion, idActiveChannel, idArchDiscussion, idArchChannel},
 		},
 		{
-			name:        "explicit-nil-pointer",
-			filter:      []ListFilter{{IsPromoted: nil}},
-			wantPromote: map[bool]int{true: 2, false: 2},
+			name:    "explicit-nil-pointers",
+			filter:  []ListFilter{{IsPromoted: nil, IsArchived: nil}},
+			wantIDs: []ConversationID{idActiveDiscussion, idActiveChannel, idArchDiscussion, idArchChannel},
 		},
 		{
-			name:        "promoted-true",
-			filter:      []ListFilter{{IsPromoted: ptrTo(true)}},
-			wantPromote: map[bool]int{true: 2, false: 0},
+			name:    "promoted-true",
+			filter:  []ListFilter{{IsPromoted: ptrTo(true)}},
+			wantIDs: []ConversationID{idActiveChannel, idArchChannel},
 		},
 		{
-			name:        "promoted-false",
-			filter:      []ListFilter{{IsPromoted: ptrTo(false)}},
-			wantPromote: map[bool]int{true: 0, false: 2},
+			name:    "promoted-false",
+			filter:  []ListFilter{{IsPromoted: ptrTo(false)}},
+			wantIDs: []ConversationID{idActiveDiscussion, idArchDiscussion},
+		},
+		{
+			// AC3: unfiltered on archived returns both; here we narrow.
+			name:    "archived-true",
+			filter:  []ListFilter{{IsArchived: ptrTo(true)}},
+			wantIDs: []ConversationID{idArchDiscussion, idArchChannel},
+		},
+		{
+			name:    "archived-false",
+			filter:  []ListFilter{{IsArchived: ptrTo(false)}},
+			wantIDs: []ConversationID{idActiveDiscussion, idActiveChannel},
+		},
+		{
+			// AND semantics: both fields set → intersection is one row.
+			name:    "promoted-and-archived",
+			filter:  []ListFilter{{IsPromoted: ptrTo(true), IsArchived: ptrTo(true)}},
+			wantIDs: []ConversationID{idArchChannel},
+		},
+		{
+			name:    "unpromoted-and-active",
+			filter:  []ListFilter{{IsPromoted: ptrTo(false), IsArchived: ptrTo(false)}},
+			wantIDs: []ConversationID{idActiveDiscussion},
 		},
 	}
 	for _, tc := range tests {
@@ -480,13 +511,16 @@ func TestRegistry_List_Filter(t *testing.T) {
 			t.Parallel()
 			r := mk()
 			got := r.List(tc.filter...)
-			counts := map[bool]int{}
+			gotIDs := map[ConversationID]bool{}
 			for _, c := range got {
-				counts[c.IsPromoted]++
+				gotIDs[c.ID] = true
 			}
-			for k, want := range tc.wantPromote {
-				if counts[k] != want {
-					t.Errorf("count[IsPromoted=%v] = %d, want %d (got = %+v)", k, counts[k], want, got)
+			if len(got) != len(tc.wantIDs) {
+				t.Errorf("len(List) = %d, want %d (got = %+v)", len(got), len(tc.wantIDs), got)
+			}
+			for _, want := range tc.wantIDs {
+				if !gotIDs[want] {
+					t.Errorf("missing id %q (got = %+v)", want, got)
 				}
 			}
 		})
@@ -578,14 +612,14 @@ func TestRegistry_Promote(t *testing.T) {
 	const absentID ConversationID = "ffffffff-2222-4333-8444-555555555555"
 
 	tests := []struct {
-		name           string
-		setup          func() *Registry
-		id             ConversationID
-		input          string
-		wantErr        error
-		wantPromoted   bool
-		wantNamePtr    *string
-		assertOther    func(t *testing.T, r *Registry)
+		name         string
+		setup        func() *Registry
+		id           ConversationID
+		input        string
+		wantErr      error
+		wantPromoted bool
+		wantNamePtr  *string
+		assertOther  func(t *testing.T, r *Registry)
 	}{
 		{
 			name: "success",
@@ -991,5 +1025,202 @@ func TestRegistry_RebindSession_FirstMatchOnly(t *testing.T) {
 	}
 	if len(second.SessionHistory) != 0 {
 		t.Errorf("second row SessionHistory = %v, want empty (untouched)", second.SessionHistory)
+	}
+}
+
+func TestRegistry_SetArchived_HitSetsAndClears(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{
+		ID:               id,
+		Name:             strPtr("general"),
+		Cwd:              "/home/user/project",
+		CurrentSessionID: "sess-current",
+		SessionHistory:   []string{"sess-old"},
+		IsPromoted:       true,
+		LastUsedAt:       when,
+	})
+
+	// Archive → true, and every other field is left untouched (the
+	// "flips exactly one field" guarantee).
+	if ok := r.SetArchived(id, true); !ok {
+		t.Fatal("SetArchived(true) = false, want true")
+	}
+	got, found := r.Get(id)
+	if !found {
+		t.Fatal("Get after SetArchived: not found")
+	}
+	if !got.IsArchived {
+		t.Error("IsArchived = false, want true after SetArchived(true)")
+	}
+	if got.Name == nil || *got.Name != "general" {
+		t.Errorf("Name = %v, want pointer to %q (untouched)", got.Name, "general")
+	}
+	if got.Cwd != "/home/user/project" {
+		t.Errorf("Cwd = %q, want unchanged", got.Cwd)
+	}
+	if got.CurrentSessionID != "sess-current" {
+		t.Errorf("CurrentSessionID = %q, want unchanged", got.CurrentSessionID)
+	}
+	if len(got.SessionHistory) != 1 || got.SessionHistory[0] != "sess-old" {
+		t.Errorf("SessionHistory = %v, want [sess-old] (untouched)", got.SessionHistory)
+	}
+	if !got.IsPromoted {
+		t.Error("IsPromoted = false, want true (untouched)")
+	}
+	if !got.LastUsedAt.Equal(when) {
+		t.Errorf("LastUsedAt = %v, want %v (untouched)", got.LastUsedAt, when)
+	}
+
+	// Clear → false via the same method (symmetric toggle).
+	if ok := r.SetArchived(id, false); !ok {
+		t.Fatal("SetArchived(false) = false, want true")
+	}
+	got, _ = r.Get(id)
+	if got.IsArchived {
+		t.Error("IsArchived = true, want false after SetArchived(false)")
+	}
+}
+
+func TestRegistry_SetArchived_Miss(t *testing.T) {
+	t.Parallel()
+	const present ConversationID = "11111111-2222-4333-8444-555555555555"
+	const absent ConversationID = "22222222-2222-4333-8444-555555555555"
+
+	r := &Registry{}
+	r.Create(Conversation{ID: present, Cwd: "/x", IsArchived: false})
+
+	if ok := r.SetArchived(absent, true); ok {
+		t.Errorf("SetArchived(absent) = true, want false")
+	}
+	// Registry left unmodified on miss: the sentinel row is untouched.
+	if n := len(r.List()); n != 1 {
+		t.Errorf("len(List) = %d, want 1 (unchanged on miss)", n)
+	}
+	got, _ := r.Get(present)
+	if got.IsArchived {
+		t.Error("present row IsArchived = true, want false (miss must not mutate)")
+	}
+}
+
+func TestRegistry_SetArchived_Idempotent(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x"})
+
+	if ok := r.SetArchived(id, true); !ok {
+		t.Fatal("first SetArchived(true) = false, want true")
+	}
+	if ok := r.SetArchived(id, true); !ok {
+		t.Fatal("second SetArchived(true) = false, want true")
+	}
+	got, _ := r.Get(id)
+	if !got.IsArchived {
+		t.Error("IsArchived = false, want true (stays archived across repeated calls)")
+	}
+}
+
+// AC2: the archived flag survives a Save → Load round-trip in both states.
+func TestRegistry_SetArchived_RoundTrip(t *testing.T) {
+	t.Parallel()
+	const archivedID ConversationID = "11111111-2222-4333-8444-555555555555"
+	const activeID ConversationID = "22222222-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{ID: archivedID, Cwd: "/a", IsArchived: true, LastUsedAt: when})
+	r.Create(Conversation{ID: activeID, Cwd: "/b", IsArchived: false, LastUsedAt: when.Add(time.Second)})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	gotArchived, ok := back.Get(archivedID)
+	if !ok {
+		t.Fatal("archived conversation missing after reload")
+	}
+	if !gotArchived.IsArchived {
+		t.Error("archived conversation reloaded as active, want archived")
+	}
+	gotActive, ok := back.Get(activeID)
+	if !ok {
+		t.Fatal("active conversation missing after reload")
+	}
+	if gotActive.IsArchived {
+		t.Error("active conversation reloaded as archived, want active")
+	}
+}
+
+// AC1: a pre-existing on-disk row without an is_archived key decodes as active,
+// with no migration step.
+func TestRegistry_Load_AbsentArchivedKeyDecodesActive(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	// Hand-written registry: the row omits is_archived entirely, as a pre-#880
+	// file would.
+	raw := `{"conversations":[{"id":"11111111-2222-4333-8444-555555555555","cwd":"/legacy","is_promoted":false,"last_used_at":"2026-05-09T12:34:56.789Z"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := r.Get("11111111-2222-4333-8444-555555555555")
+	if !ok {
+		t.Fatal("legacy row missing after Load")
+	}
+	if got.IsArchived {
+		t.Error("absent is_archived key decoded as archived, want active (false)")
+	}
+}
+
+// AC1 (byte-stability): an all-active registry serializes with no is_archived
+// key (omitempty), so it is byte-identical to a pre-#880 file; Save→Load→Save is
+// a fixed point.
+func TestRegistry_Save_ActiveOmitsArchivedKey(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/a", LastUsedAt: when})
+	r.Create(Conversation{ID: "22222222-2222-4333-8444-555555555555", Cwd: "/b", LastUsedAt: when.Add(time.Second)})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	if strings.Contains(string(first), "is_archived") {
+		t.Errorf("all-active registry serialized an is_archived key:\n%s", first)
+	}
+
+	// Save → Load → Save is a fixed point (byte-stable reload discipline).
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	path2 := filepath.Join(t.TempDir(), "conversations.json")
+	if err := back.Save(path2); err != nil {
+		t.Fatalf("re-Save: %v", err)
+	}
+	second, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatalf("read after re-save: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("Save→Load→Save not byte-identical:\n first = %s\nsecond = %s", first, second)
 	}
 }

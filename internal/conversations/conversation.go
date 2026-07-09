@@ -65,6 +65,19 @@ type Conversation struct {
 	// unpromoted default ("discussion") must be explicit on disk.
 	IsPromoted bool `json:"is_promoted"`
 
+	// IsArchived is the durable manual-archive flag: true means the user
+	// archived this conversation, false means it is active. Flipped by
+	// Registry.SetArchived and consumed by the archive/unarchive verbs (#881).
+	//
+	// omitempty is deliberate and, unlike IsPromoted, correct here: the
+	// contract is "absent key decodes as active, with no migration step." A
+	// pre-#880 on-disk row (no is_archived key) decodes to false = active, and
+	// an active conversation re-serializes with the key omitted — so a registry
+	// of all-active rows is byte-identical to its pre-#880 form. Only genuinely
+	// archived rows gain "is_archived": true. Do not "fix" this to drop
+	// omitempty for consistency with IsPromoted: their contracts are opposite.
+	IsArchived bool `json:"is_archived,omitempty"`
+
 	// LastUsedAt is bumped whenever the conversation has user activity.
 	// Used by "recently active" sorts and by the auto-archive predicate
 	// (#219). Always present.
