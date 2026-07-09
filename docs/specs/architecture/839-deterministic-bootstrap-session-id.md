@@ -1,6 +1,6 @@
 # Spec — #839: Deterministic bootstrap `--session-id` (retire `--continue`, remove startup adopt-by-mtime)
 
-**Size:** S (PO sized S; architect confirms S). 3 production files, 2 new exported symbols, e2e alignment centralized to ~6 call sites (under the 10-call-site red line). See § Size note.
+**Size:** S (PO sized S; architect confirms S). 3 production files, 2 new exported symbols, **zero net-new e2e call sites** — the seed cascade already landed with #861 (verified on the merged tree; see § E2e alignment). See § Size note.
 
 **Label:** `security-sensitive` → the architect security-review pass is at the end of this spec (verdict: PASS).
 
@@ -17,7 +17,7 @@
 - `internal/sessions/rotation/watcher.go:144-193` — `handleCreate`; the **165-169** guard (`ref.ID == stem` → early return) is what suppresses a misfire on claude's first `<bootstrapID>.jsonl` CREATE. No `RegisterAllocatedUUID` needed (§ Watcher).
 - `internal/sessions/registry.go:17-28` — on-disk registry JSON schema (`id`, `bootstrap`, `lifecycle_state`, timestamps) for the e2e warm-start seed.
 - `internal/sessions/pool.go:1167-1195` — `buildSession`: the existing per-caller `--session-id` spawn shape (`append(..., "--session-id", string(id))`, `ResumeLast: false`) the bootstrap now matches.
-- `internal/e2e/harness.go:267-360` — `StartRotation` / `StartRotationWithRelay`; `seedBoundConversation` (371-381) is the **raw-JSON seed pattern** `seedBootstrapRegistry` copies.
+- `internal/e2e/harness.go:267-360` + `:399` — `StartRotation` / `StartRotationWithRelay`, which **already call** `seedBootstrapRegistry` (defined at `:399`, added by the merged #861) before spawn. Confirms the e2e warm-start seeding is in the tree; the developer verifies it, does **not** build it (§ E2e alignment).
 - `internal/e2e/restart_test.go:17-131` — e2e-local `registryFile`/`registryEntry`/`writeRegistry`/`newRegistryHome` (the `~/.pyry/test/sessions.json` path convention).
 - `internal/e2e/internal/fakeclaude/main.go:273-338` — fakeclaude keys its jsonl off `PYRY_FAKE_CLAUDE_INITIAL_UUID` (env), **not** `--session-id` argv; on the trigger it mints a fresh uuid (the `/clear` sim). Why warm-start seeding aligns.
 
@@ -158,25 +158,27 @@ Drive `Pool.New` / `RotateID` / `BootstrapID` directly (no live claude). Scenari
 
 ### e2e alignment (see § E2e) — run `go test -tags e2e ./internal/e2e/...`
 
-## E2e alignment (required — the change breaks the existing id-alignment mechanism)
+## E2e alignment — already landed by #861 (verify, do NOT re-migrate)
 
-Removing adopt-by-mtime breaks the ~11 e2e tests that rely on it: today each pre-creates `<initialUUID>.jsonl` (or sets `PYRY_FAKE_CLAUDE_INITIAL_UUID`) so `reconcileBootstrapOnNew` adopts `initialUUID` as the bootstrap id, which `seedBoundConversation(..., initialUUID)` / `waitForBootstrapID(..., initialUUID)` then depend on. Post-change the daemon uses its own minted id → those tests bind/assert against a non-existent session and fail under `-tags e2e`.
+Removing adopt-by-mtime would, on its own, break the ~11 e2e tests that relied on it: each pre-created `<initialUUID>.jsonl` (or set `PYRY_FAKE_CLAUDE_INITIAL_UUID`) so `reconcileBootstrapOnNew` adopted `initialUUID` as the bootstrap id, which `seedBoundConversation(..., initialUUID)` / `waitForBootstrapID(..., initialUUID)` then depended on. **#861 (merged) already absorbed this cascade** — it added `seedBootstrapRegistry` and wired it into every spawn path, warm-starting the daemon with `p.bootstrap == initialUUID` independent of adopt-by-mtime. The seeding this ticket needs is therefore **already in the tree**; the developer's e2e job is to *verify*, not to build.
 
-**Fix (centralized) — warm-start the daemon with `initialUUID` as the bootstrap:**
+Verified on the current (post-#861-merge) tree — do **not** re-create or re-wire any of this:
 
-- Add `seedBootstrapRegistry(t *testing.T, home, initialUUID string)` to `internal/e2e/harness.go`. It `MkdirAll`s `<home>/.pyry/test/` and writes `sessions.json` as a **raw JSON literal** (mirror `seedBoundConversation`'s raw-write style — avoids referencing the test-only `registryFile` types from a non-`_test.go` file). One bootstrap entry: `{"id": initialUUID, "bootstrap": true, "lifecycle_state": "active", "created_at": <fixed>, "last_active_at": <fixed>}` inside `{"version":1,"sessions":[...]}`. Use the field names from `internal/sessions/registry.go:17-28`.
-- Call `seedBootstrapRegistry(t, home, initialUUID)` **before spawn** in the shared helpers: `StartRotation`, `StartRotationWithRelay` (`harness.go`), and `startPerConvHarness` (`per_conversation_eviction_test.go`).
-- For relay tests that spawn inline via `StartInWithEnv` (not a rotation helper) — at minimum `relay_v2_dequeue_test.go` and `relay_v2_modal_answer_test.go` — add a `seedBootstrapRegistry(t, home, initialUUID)` call before the spawn. Grep `initialUUID` across `internal/e2e/*_test.go` and add the seed at every spawn site that isn't already covered by a helper above.
+- `seedBootstrapRegistry(t, home, bootstrapUUID)` already exists at `internal/e2e/harness.go:399` (raw-JSON `sessions.json` writer, exactly the shape the old draft of this section described).
+- `StartRotation` (`harness.go:273`) and `StartRotationWithRelay` (`harness.go:325`) call it internally before spawn — so every test spawning through them is seeded automatically: `rotation_test.go`, `fakeclaude_test.go`, `relay_roundtrip_test.go`, `relay_assistant_turn_test.go`, `relay_send_message_test.go`, `relay_two_phone_structured_test.go`, `relay_v2_queue_drain_test.go`, `relay_v2_interrupt_test.go`, `relay_v2_two_head_modal_test.go`, and — **correcting an earlier draft of this spec** — `relay_v2_modal_answer_test.go`, which spawns via `StartRotationWithRelay` and needs **no** separate seed call.
+- Non-rotation spawns already carry an explicit seed: `respawn_after_eviction_test.go:255`, `relay_v2_dequeue_test.go:84`, `per_conversation_eviction_test.go:246` (`startPerConvHarness`).
 
-Why this aligns: the daemon warm-starts with `p.bootstrap == initialUUID` and spawns fakeclaude with `--session-id initialUUID`; fakeclaude keys its jsonl off `PYRY_FAKE_CLAUDE_INITIAL_UUID == initialUUID` (env, unchanged), so the on-disk file and the daemon's id agree by construction. The first-CREATE watcher guard (`watcher.go:165`) suppresses any misfire. Existing inline `<initialUUID>.jsonl` pre-creations may stay (now harmless — they match the warm-started id) to minimize churn.
+Every `initialUUID` daemon-spawn site on the current tree already resolves to a seed. Grep `seedBootstrapRegistry(` / `initialUUID` to re-confirm before touching any test file. Existing inline `<initialUUID>.jsonl` pre-creations stay (now harmless — they match the warm-started id).
 
-After wiring, run `go test -tags e2e ./internal/e2e/...` and fix any residual per-test assertion that assumed cold-start/adopt semantics (expected: none beyond the seed, but verify — this is the assertion-debugging tail).
+Why the seeding aligns: the daemon warm-starts with `p.bootstrap == initialUUID` and spawns fakeclaude with `--session-id initialUUID`; fakeclaude keys its jsonl off `PYRY_FAKE_CLAUDE_INITIAL_UUID == initialUUID` (env, unchanged), so the on-disk file and the daemon's id agree by construction, and the first-CREATE watcher guard (`watcher.go:165`) suppresses any misfire.
+
+**Developer e2e task is therefore only:** after the production change (remove adopt-by-mtime), run `go test -tags e2e ./internal/e2e/...` and fix any residual assertion that assumed cold-start/adopt semantics rather than the seeded `initialUUID` (expected: none — the seed makes on-disk file and daemon id agree by construction — but the `-tags e2e` run is ground truth). Add a `seedBootstrapRegistry` call **only** if the run surfaces a spawn site the grep missed.
 
 ## Size note
 
 - Production files (new/modified `*.go`, excluding tests): `supervisor.go`, `pool.go`, `reconcile.go` = **3** (< 5 gate).
 - New exported symbols: `Config.ResolveSessionID` field, `Pool.BootstrapID` method = **2** (< 5).
-- Edit fan-out: the one code call site removed (`pool.go:512`); the e2e cascade centralizes to **~6** call sites (3 shared helpers + ~2-3 inline seed calls) via `seedBootstrapRegistry` — under the 10-call-site red line. The ticket's proposed A/B split does **not** reduce this (child A still removes adopt-by-mtime and still breaks the same tests), and the `/clear` reconciliation adds **zero** extra production seams under the pull design — so a split would not lower cost. Confirmed S.
+- Edit fan-out: **one** production code call site removed (`pool.go:512`). The e2e seed cascade (~6 call sites) is **already in the tree from #861** — this ticket adds **zero** new e2e call sites; the developer removes adopt-by-mtime, adds the spawn-time provider + `BootstrapID()`, and runs `-tags e2e` to confirm the already-migrated suite tolerates the removal. Well under the 10-call-site red line. The ticket's proposed A/B split does **not** lower cost (child A still removes adopt-by-mtime; the `/clear` reconciliation adds **zero** extra production seams under the pull design). Confirmed S — comfortably at the small end (the test-fixture bulk that originally justified sizing here is done).
 
 ## Out of scope
 
@@ -187,7 +189,7 @@ After wiring, run `go test -tags e2e ./internal/e2e/...` and fix any residual pe
 ## Open questions
 
 - **Empty-id defense placement.** The spec defends an empty provider return in the supervisor (skip `--session-id`). Equivalent to defending in the provider (never return ""). Supervisor-side is chosen so `buildClaudeArgs` stays the single arg-shape authority. Developer may move it if cleaner; behaviour must match.
-- **e2e residual assertions.** Confidence is high that `seedBootstrapRegistry` is the whole e2e fix, but the `-tags e2e` run is the ground truth; if a specific test asserts on the *cold-start* minted id (rather than `initialUUID`), adjust that test.
+- **e2e residual assertions.** Confidence is high that #861's already-in-tree `seedBootstrapRegistry` wiring is the whole e2e fix (no new seed calls needed), but the `-tags e2e` run is the ground truth; if a specific test asserts on the *cold-start* minted id (rather than `initialUUID`), adjust that test.
 
 ---
 
