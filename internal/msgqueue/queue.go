@@ -30,9 +30,10 @@
 //
 // This slice ships the engine unwired (#704): no package depends on it yet. The
 // live wiring into the send_message handler and the cmd/pyry constructor, plus
-// the queue_state / dequeue_message reporting types and any inbound-bound
-// policy, are separate slices (#705 / the wiring slice). The single insertion
-// point for a future bound is Enqueue.
+// the queue_state / dequeue_message reporting types, are separate slices (#705 /
+// the wiring slice). Enqueue is the single insertion point for the
+// per-conversation backlog bound (#869): an Enqueue past the cap is rejected
+// (returns 0) — never dropped, never evicting the oldest.
 //
 // SECURITY: the queued text is untrusted, phone-originated content bound for
 // claude's stdin verbatim. It is treated as opaque transit bytes — stored,
@@ -62,6 +63,14 @@ import (
 // live. A tuning knob, not a contract.
 const defaultRetryInterval = 1 * time.Second
 
+// defaultMaxQueuedPerConversation caps a single conversation's in-memory inbound
+// backlog. A phone flooding send_message while claude is wedged is rejected past
+// this many not-yet-delivered messages (reject, never drop) — bounding the
+// in-memory DoS surface #704's security review flagged (each queued message can
+// be up to the transport's 1 MiB frame ceiling). A tuning knob, not a contract —
+// same posture as defaultRetryInterval; not load-tested.
+const defaultMaxQueuedPerConversation = 100
+
 // DeliverFunc is the injected reliable-delivery seam — the shape of
 // supervisor.WriteUserTurn. It MUST block while claude is busy (the WaitReady
 // idle gate) and return nil ONLY on a confirmed commit; that blocking IS the
@@ -89,6 +98,11 @@ type Config struct {
 	// RetryInterval is the poll cadence while delivery keeps failing.
 	// <= 0 ⇒ defaultRetryInterval.
 	RetryInterval time.Duration
+	// MaxQueuedPerConversation caps each conversation's not-yet-delivered
+	// backlog; an Enqueue past it is rejected (reject, never drop).
+	// <= 0 ⇒ defaultMaxQueuedPerConversation. A per-conversation bound,
+	// independent across conversations.
+	MaxQueuedPerConversation int
 	// OnChange is the optional change-notification seam; nil ⇒ disabled.
 	OnChange ChangeFunc
 	// Logger; nil ⇒ slog.Default().
@@ -129,6 +143,7 @@ type convQueue struct {
 type Queue struct {
 	deliver  DeliverFunc
 	retry    time.Duration
+	max      int        // per-conversation backlog cap; > 0 always in practice
 	onChange ChangeFunc // nil ⇒ change notification disabled
 	log      *slog.Logger
 
@@ -152,6 +167,10 @@ func New(cfg Config) (*Queue, error) {
 	if retry <= 0 {
 		retry = defaultRetryInterval
 	}
+	max := cfg.MaxQueuedPerConversation
+	if max <= 0 {
+		max = defaultMaxQueuedPerConversation
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -159,6 +178,7 @@ func New(cfg Config) (*Queue, error) {
 	return &Queue{
 		deliver:  cfg.Deliver,
 		retry:    retry,
+		max:      max,
 		onChange: cfg.OnChange,
 		log:      log,
 		convs:    make(map[string]*convQueue),
@@ -170,12 +190,32 @@ func New(cfg Config) (*Queue, error) {
 // It never blocks on delivery: if the lifecycle is running and no drain is
 // already servicing the conversation, it spawns one and returns. Conversations'
 // queues are independent — appending to one never blocks or reorders another.
+//
+// If the conversation's backlog already holds the per-conversation cap
+// (Config.MaxQueuedPerConversation, default defaultMaxQueuedPerConversation),
+// Enqueue REJECTS the message: it returns 0 (never a valid id) without appending,
+// consumes no id, and leaves the existing backlog — including the in-flight head
+// — untouched (reject, never drop). The one caller (the send_message handler)
+// maps a 0 return to a retryable "backlog full" reply so the phone re-issues
+// later.
 func (q *Queue) Enqueue(convID, text string) uint64 {
 	q.mu.Lock()
 	c := q.convs[convID]
 	if c == nil {
 		c = &convQueue{nextID: 1}
 		q.convs[convID] = c
+	}
+	// Cap the backlog at the single insertion point (#869). len(c.items) is the
+	// whole in-memory backlog INCLUDING the in-flight (draining) head — exactly
+	// what Snapshot reports and the memory-DoS surface — so the cap, Snapshot,
+	// and queue_state all agree on "backlog size". At capacity, reject with a
+	// pure early return: no id bump (a rejected message consumes no id, keeping
+	// accepted ids dense), no append, no notify (no backlog change), no drain
+	// spawn. Reject, never drop: the already-queued messages keep draining in
+	// enqueue order. text is untrusted phone content and is never touched here.
+	if q.max > 0 && len(c.items) >= q.max {
+		q.mu.Unlock()
+		return 0
 	}
 	id := c.nextID
 	c.nextID++

@@ -1,14 +1,16 @@
 # `internal/msgqueue` — per-conversation inbound message backlog + drain engine
 
 In-memory, daemon-resident FIFO backlog for phone-originated `send_message`
-turns, with one serial drain goroutine per active conversation. It is the
-**inbound counterpart of [`internal/eventring`](eventring-package.md)**: where
-`eventring` buffers what the daemon pushes **out** to phones (the structured
-event stream), `msgqueue` buffers what phones send **in** while claude is busy,
-and releases it into the live claude session in order, one at a time, paced by
-claude reaching idle / turn-end. Landed in #704 (EPIC #597 Phase 3 — interactive
-modals/permissions/queue, ADR 025); the introspection / remove-by-id /
-change-notification API was added additively in #719.
+turns, with one serial drain goroutine per active conversation, and a bounded,
+reject-never-drop per-conversation backlog. It is the **inbound counterpart of
+[`internal/eventring`](eventring-package.md)**: where `eventring` buffers what
+the daemon pushes **out** to phones (the structured event stream), `msgqueue`
+buffers what phones send **in** while claude is busy, and releases it into the
+live claude session in order, one at a time, paced by claude reaching idle /
+turn-end. Landed in #704 (EPIC #597 Phase 3 — interactive modals/permissions/
+queue, ADR 025); the introspection / remove-by-id / change-notification API was
+added additively in #719; the per-conversation backlog bound landed in
+[#869](../codebase/869.md).
 
 The package shipped **engine only, unwired** in #704 — the same rhythm as the
 `turnbridge` producer (#606 shipped unwired, #616 wired it). [#721](../codebase/721.md)
@@ -17,10 +19,10 @@ runs `Queue.Run(ctx)` under the daemon lifecycle, and `send_message` now
 **enqueues-and-acks** instead of delivering synchronously (delivery seam =
 `newInboundDeliver(router.resolve)`, the reliable `WriteUserTurn` path). The
 `queue_state` / `dequeue_message` reporting/removal wire types (#720) + their
-handlers, and any inbound bound/backpressure policy, remain **separate slices**
-(#705 / a PO follow-up). #719 added the engine-side primitives the #705
-reporting/removal handlers map onto (`Snapshot`, `Remove`, `OnChange`) — still
-additive and unwired.
+handlers landed as #722/#723 (see § Related); the previously-deferred inbound
+bound/backpressure policy landed as [#869](../codebase/869.md) once that live
+wiring shipped. #719 added the engine-side primitives the #722/#723
+reporting/removal handlers map onto (`Snapshot`, `Remove`, `OnChange`).
 
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   — `send_message` is "queued by the daemon when claude is busy" (line 123); each
@@ -67,14 +69,15 @@ type QueuedMessage struct {
 }
 
 type Config struct {
-    Deliver       DeliverFunc   // required; New errors if nil
-    RetryInterval time.Duration // <= 0 ⇒ defaultRetryInterval (1s); poll cadence while claude is unavailable
-    OnChange      ChangeFunc    // optional (#719); nil ⇒ change notification disabled
-    Logger        *slog.Logger  // nil ⇒ slog.Default()
+    Deliver                  DeliverFunc   // required; New errors if nil
+    RetryInterval            time.Duration // <= 0 ⇒ defaultRetryInterval (1s); poll cadence while claude is unavailable
+    MaxQueuedPerConversation int           // #869: <= 0 ⇒ defaultMaxQueuedPerConversation (100); per-conv backlog cap
+    OnChange                 ChangeFunc    // optional (#719); nil ⇒ change notification disabled
+    Logger                   *slog.Logger  // nil ⇒ slog.Default()
 }
 
 func New(cfg Config) (*Queue, error)                       // errors if cfg.Deliver == nil
-func (q *Queue) Enqueue(convID, text string) uint64        // non-blocking; returns the stable per-conv id (>= 1)
+func (q *Queue) Enqueue(convID, text string) uint64        // non-blocking; returns the stable per-conv id (>= 1), or 0 if the backlog is at cap (#869: reject, never drop)
 func (q *Queue) Run(ctx context.Context) error             // lifecycle; blocks until ctx done, then joins all drains
 func (q *Queue) Snapshot(convID string) []QueuedMessage    // #719: ordered copy of the backlog; unknown conv ⇒ nil
 func (q *Queue) Remove(convID string, id uint64) bool      // #719: drop a not-in-flight queued msg; true iff removed
@@ -116,10 +119,15 @@ failure to defend.
 
 ## Lifecycle — lazy per-conversation drains, joined by `Run`
 
-- **`Enqueue`** (under `mu`): get-or-create `convs[convID]`; assign `id =
-  c.nextID; c.nextID++` (starts at 1); append `{id, text, time.Now()}`. If the
-  lifecycle is running and no drain is already servicing the conversation, spawn
-  one (`maybeSpawnDrainLocked`). Return `id`. Non-blocking; never waits on delivery.
+- **`Enqueue`** (under `mu`): get-or-create `convs[convID]`; **(#869) if the
+  conversation's backlog is already at `Config.MaxQueuedPerConversation`
+  (`len(c.items) >= q.max`, default 100), reject** — a pure early return: `0` is
+  returned, no `nextID` bump, no append, no `notify`, no drain spawn, and the
+  existing backlog (including the in-flight head) is left untouched. Otherwise
+  assign `id = c.nextID; c.nextID++` (starts at 1); append `{id, text,
+  time.Now()}`. If the lifecycle is running and no drain is already servicing the
+  conversation, spawn one (`maybeSpawnDrainLocked`). Return `id`. Non-blocking;
+  never waits on delivery.
 - **Per-conversation independence:** each conversation gets its **own** drain
   goroutine, so a conversation whose `deliver` is blocked (claude busy) never
   blocks or reorders another conversation's drain. Idle conversations hold no
@@ -288,19 +296,24 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   pre-validated by the caller.
 - **No tokens/secrets/crypto/file/subprocess surface.** The `id` is a non-secret
   per-conversation counter, not a capability.
-- **Inbound bound / backpressure — deferred (evidence-based).** A phone flooding
-  `send_message` while claude is persistently busy/wedged grows `convs[convID].items`
-  without bound (an in-memory DoS). Severity is **SHOULD-FIX, not MUST-FIX**:
-  `send_message` sits behind the per-conn auth gate (the flooder is a *paired,
-  authenticated* device), this is a self-hosted single-operator tool, the failure is
-  **unobserved**, and the drain's retry actively shrinks the backlog whenever claude
-  accepts a turn. A bound here cannot **drop** (that violates losslessness) — it must
-  **reject** past a cap, which is `send_message` ack **policy** that belongs with the
-  wire types / handler change. The single insertion point is pre-specified: add a
-  `MaxQueuedPerConversation int` to `Config`, change `Enqueue` to `(uint64, error)`,
-  return an `ErrQueueFull` sentinel before appending. Zero call sites today, so
-  deferring the signature costs no churn — the wiring slice adopts whatever exists
-  then.
+- **Inbound bound / backpressure — implemented (#869).** A phone flooding
+  `send_message` while claude is persistently busy/wedged used to grow
+  `convs[convID].items` without bound (an in-memory DoS; each queued message up
+  to the transport's 1 MiB frame ceiling). #869 closes it at the single insertion
+  point: `Config.MaxQueuedPerConversation` (`<= 0` ⇒ `defaultMaxQueuedPerConversation`,
+  100) caps each conversation's not-yet-delivered backlog (`len(c.items)`,
+  including the in-flight head). Past the cap, `Enqueue` **rejects** — returns `0`
+  (never a valid id) without appending, consuming no id, notifying nothing,
+  spawning no drain — **reject, never drop**, preserving losslessness (the mirror
+  of ADR 025's "control never drops": inbound content gets "tell the sender," not
+  silent-drop or drop-oldest). The `uint64` return arity is unchanged — `0` rides
+  an already-impossible id value, so none of the ~45 pre-existing `Enqueue` call
+  sites needed touching. The `send_message` handler maps `id == 0` to a retryable
+  `protocol.CodeServerBinaryBusy` ("server.binary_busy") envelope and does not
+  ack, so the phone re-issues once the backlog drains. Per-conversation only — N
+  conversations can still hold up to N×cap; a daemon-wide ceiling is out of scope
+  (matches `eventring`'s per-conversation `MaxEventsPerConversation` posture). See
+  [codebase/869.md](../codebase/869.md).
 - **`Snapshot` / `Remove` boundary crossings (#719) — convID trust is the
   consumer's job.** Both key by **caller-supplied `convID`**, and `Snapshot`
   *returns* the opaque `text` (it will flow out to a phone via `queue_state`).
@@ -323,7 +336,7 @@ internal/msgqueue/
 ├── queue.go                  DeliverFunc, ChangeFunc, QueuedMessage, Config, Queue, queued,
 │                             convQueue; New / Enqueue / Snapshot / Remove / Run; notify,
 │                             maybeSpawnDrainLocked, drain, advanceLocked, shrinkLocked,
-│                             sleepCtx; defaultRetryInterval
+│                             sleepCtx; defaultRetryInterval, defaultMaxQueuedPerConversation (#869)
 ├── queue_test.go             #704: ordered one-at-a-time drain (in-flight counter fails >1),
 │                             empty no-op, per-conversation independence, idle-drains-promptly,
 │                             lossless-retry/respawn, stable independent ids,
@@ -367,5 +380,7 @@ the change-notification path as the injected `ChangeFunc`.
   drives the #722 producer to refresh `queue_state` (the **first live consumer of
   `Remove`**; the in-flight-head/unknown-id `false` no-op is what makes a hostile or
   stale id a safe no-op). Both #722/#723 split from the original #705 reporting/removal
-  slice. Still deferred: the inbound bound/backpressure decision (a PO follow-up;
-  chokepoint pre-specified at `Enqueue`).
+  slice. **[#869](../codebase/869.md) landed the deferred inbound bound**: a
+  per-conversation `MaxQueuedPerConversation` cap (default 100) at `Enqueue`,
+  reject-never-drop, mapped by `send_message` to a retryable `server.binary_busy`
+  reply. Nothing remains deferred on this engine.

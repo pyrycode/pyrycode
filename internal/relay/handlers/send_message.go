@@ -29,6 +29,14 @@ const msgConversationNotFound = "conversation not found"
 // (re)bound.
 const msgServerBinaryOffline = "server binary offline"
 
+// msgSendMessageBacklogFull is the user-facing message emitted in the
+// server.binary_busy error payload when the conversation's inbound backlog is at
+// its per-conversation cap (msgqueue.Enqueue returned 0). Retryable: the phone
+// re-issues once the backlog drains. Static string only — never echoes
+// payload.Text (untrusted, phone-controlled) — mirroring register_push_token.go's
+// msgBinaryBusy.
+const msgSendMessageBacklogFull = "server busy; message backlog full, retry"
+
 // TurnWriter is the minimal per-conversation write-surface that the inbound
 // delivery seam drives. *sessions.Session satisfies it via one-line
 // passthroughs to Session.Activate and Supervisor.WriteUserTurn. The interface
@@ -53,7 +61,9 @@ type TurnWriter interface {
 // of delivering synchronously. *msgqueue.Queue satisfies it. The interface is
 // defined here, consumer-side, so handlers/ stays free of an internal/msgqueue
 // import (mirrors SessionRouter and TurnWriter). Enqueue is non-blocking and
-// returns the stable per-conversation id assigned to the message.
+// returns the stable per-conversation id assigned to the message (>= 1), or 0 if
+// the conversation's backlog is at capacity and the message was rejected (reject,
+// never drop) — the handler maps a 0 to a retryable "backlog full" reply.
 type Enqueuer interface {
 	Enqueue(conversationID, text string) uint64
 }
@@ -93,7 +103,8 @@ type SessionRouter interface {
 // by the drain) is asymmetric by design:
 //   - At enqueue we have a live phone to tell "retry", so a malformed payload, an
 //     unknown conversation, and an unbound conversation are all rejected
-//     synchronously, before any enqueue.
+//     synchronously, before any enqueue; a full backlog is rejected at the
+//     enqueue point (Enqueue returns 0) with the same retryable shape.
 //   - Once enqueued, the ack promised delivery, so a transient resolve/activate/
 //     write failure is held and retried by the drain rather than surfaced (a
 //     conversation that becomes unbound post-ack is retried, not dropped).
@@ -105,7 +116,9 @@ type SessionRouter interface {
 //     beyond the transport's WS read ceiling (1 MiB; see internal/transport).
 //   - payload.Text is NEVER logged at any level. conversation_id and message_id
 //     (phone-supplied opaque ids) plus the assigned queued_msg_id are logged on
-//     the enqueue path; conversation_id only on the reject paths.
+//     the enqueue path; the binding-reject paths log conversation_id, and the
+//     backlog-full reject logs conversation_id + message_id (no queued_msg_id —
+//     nothing was queued).
 //   - The phone supplies only the ConversationID lookup key and the Text; the
 //     routing target (the bound session) is read from the server-stored registry
 //     row, never phone-writable. An unbound conversation is rejected before
@@ -156,6 +169,19 @@ func SendMessage(router SessionRouter, queue Enqueuer, logger *slog.Logger) disp
 		// and returns the stable id immediately. The ack now means "accepted into
 		// the backlog", not "delivered/committed". payload.Text is NEVER logged.
 		id := queue.Enqueue(p.ConversationID, p.Text)
+		if id == 0 {
+			// The conversation's backlog is at its per-conversation cap (#869).
+			// Reject, never drop: nothing was enqueued and the existing backlog is
+			// untouched. Surface a retryable server-busy so the phone re-issues
+			// after the backlog drains. Log conversation_id + message_id only —
+			// never payload.Text, and there is no queued_msg_id (nothing queued).
+			logger.Warn("relay: send_message backlog full",
+				"event", "send_message.backlog_full",
+				"conn_id", c.ConnID(),
+				"conversation_id", p.ConversationID,
+				"message_id", p.MessageID)
+			return replyError(ctx, c, env, protocol.CodeServerBinaryBusy, msgSendMessageBacklogFull, true)
+		}
 		logger.Info("relay: send_message enqueued",
 			"event", "send_message.enqueued",
 			"conn_id", c.ConnID(),

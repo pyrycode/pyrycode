@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,14 +88,20 @@ type enqueueCall struct {
 // fakeEnqueuer is the test double for Enqueuer. It records every (convID, text)
 // the handler enqueues and hands back a monotonic stub id, so a test can assert
 // the handler enqueued exactly the routed conversation's verbatim text — and, on
-// the reject paths, that it enqueued nothing.
+// the routing-reject paths, that it enqueued nothing. When reject is set it still
+// records the call (the handler DID reach the enqueue point) but returns 0, the
+// backlog-full sentinel, so the cap-reject branch can be exercised.
 type fakeEnqueuer struct {
 	calls  []enqueueCall
 	nextID uint64
+	reject bool
 }
 
 func (f *fakeEnqueuer) Enqueue(convID, text string) uint64 {
 	f.calls = append(f.calls, enqueueCall{convID: convID, text: text})
+	if f.reject {
+		return 0
+	}
 	f.nextID++
 	return f.nextID
 }
@@ -101,6 +109,15 @@ func (f *fakeEnqueuer) Enqueue(convID, text string) uint64 {
 func sendMsgLogger(t *testing.T) *slog.Logger {
 	t.Helper()
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// sendMsgCapturingLogger returns a logger that writes to buf so a test can assert
+// what a handler branch logged. The handler runs synchronously in the test
+// goroutine, so reading buf after the call returns is race-free.
+func sendMsgCapturingLogger(t *testing.T) (*slog.Logger, *bytes.Buffer) {
+	t.Helper()
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
 }
 
 // newSendMsgConn mirrors register_push_token_test.go's newTestConn, with
@@ -332,6 +349,67 @@ func TestSendMessage_NoBoundSession_RejectedBeforeEnqueue(t *testing.T) {
 	}
 	if bound.activateCalls != 0 || bound.calls != 0 {
 		t.Errorf("writer reached on no-bound-session reject: activate=%d write=%d, want 0/0", bound.activateCalls, bound.calls)
+	}
+}
+
+// TestSendMessage_BacklogFull_RetryableReject covers #869 AC#3: a routable send
+// whose Enqueue returns 0 (backlog at the per-conversation cap) replies with the
+// retryable server-busy envelope and does NOT ack. Unlike the routing-reject
+// arms, Enqueue WAS called once (and returned 0) — the reject is at the enqueue
+// point, not before it. The reject log carries conversation_id + message_id but
+// never payload.Text (untrusted, phone-controlled content).
+func TestSendMessage_BacklogFull_RetryableReject(t *testing.T) {
+	t.Parallel()
+	bound := &stubTurnWriter{}
+	router := &stubSessionRouter{tw: bound}
+	q := &fakeEnqueuer{reject: true} // backlog full: Enqueue returns 0
+	logger, logs := sendMsgCapturingLogger(t)
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	h := SendMessage(router, q, logger)
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeServerBinaryBusy {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeServerBinaryBusy)
+	}
+	if !payload.Retryable {
+		t.Errorf("Retryable = false, want true (backlog full is transient)")
+	}
+
+	// Enqueue was reached exactly once and returned 0; the reject is at (not
+	// before) the enqueue point.
+	if len(q.calls) != 1 {
+		t.Fatalf("Enqueue calls = %d, want 1 (cap reject is at the enqueue point)", len(q.calls))
+	}
+
+	// Never ack on reject: the only reply was the error envelope above.
+	if bound.activateCalls != 0 || bound.calls != 0 {
+		t.Errorf("writer reached on backlog-full reject: activate=%d write=%d, want 0/0", bound.activateCalls, bound.calls)
+	}
+
+	// SECURITY: the reject log must never leak payload.Text; it must carry the
+	// opaque ids for diagnosis.
+	logged := logs.String()
+	if strings.Contains(logged, sendMsgText) {
+		t.Errorf("reject log leaked payload.Text %q; logs = %q", sendMsgText, logged)
+	}
+	if !strings.Contains(logged, sendMsgConvID) {
+		t.Errorf("reject log missing conversation_id %q; logs = %q", sendMsgConvID, logged)
+	}
+	if !strings.Contains(logged, sendMsgMessageID) {
+		t.Errorf("reject log missing message_id %q; logs = %q", sendMsgMessageID, logged)
 	}
 }
 

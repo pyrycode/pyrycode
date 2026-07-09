@@ -366,3 +366,152 @@ func TestNew_RejectsNilDeliver(t *testing.T) {
 		t.Fatal("New with nil Deliver returned nil error, want non-nil")
 	}
 }
+
+// #869 AC #1, #2, #5: Enqueue caps the per-conversation backlog. With the cap's
+// worth already queued, a further Enqueue returns 0 without appending; the
+// existing backlog (ids + order) is untouched and the rejected message never
+// appears in Snapshot.
+func TestQueue_CapEnforcedAtEnqueue_RejectNeverDrops(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver, MaxQueuedPerConversation: 2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Below the cap Enqueue behaves as today: appends, returns a dense id >= 1.
+	if id := q.Enqueue("a", "m1"); id != 1 {
+		t.Fatalf("Enqueue m1 id = %d, want 1", id)
+	}
+	if id := q.Enqueue("a", "m2"); id != 2 {
+		t.Fatalf("Enqueue m2 id = %d, want 2", id)
+	}
+	// At the cap the third Enqueue is rejected: returns 0, appends nothing.
+	if id := q.Enqueue("a", "m3"); id != 0 {
+		t.Fatalf("Enqueue m3 at cap id = %d, want 0 (rejected)", id)
+	}
+
+	// Reject, never drop: the backlog still holds exactly the two accepted
+	// messages in enqueue order; the rejected one never entered it, and the
+	// oldest was not evicted to make room.
+	snap := q.Snapshot("a")
+	if len(snap) != 2 {
+		t.Fatalf("Snapshot len = %d, want 2 (backlog untouched by reject)", len(snap))
+	}
+	if snap[0].ID != 1 || snap[0].Text != "m1" || snap[1].ID != 2 || snap[1].Text != "m2" {
+		t.Fatalf("Snapshot = %+v, want ids [1 2] texts [m1 m2] in order", snap)
+	}
+}
+
+// #869 AC #2, #5: after a rejected Enqueue, the two accepted messages still
+// drain in enqueue order and the rejected one is never delivered. Filling the
+// backlog before Run keeps it full while we fill (nothing drains yet).
+func TestQueue_RejectedMessage_NeverDrains(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver, MaxQueuedPerConversation: 2, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	q.Enqueue("a", "m1")
+	q.Enqueue("a", "m2")
+	if id := q.Enqueue("a", "m3"); id != 0 {
+		t.Fatalf("Enqueue m3 at cap id = %d, want 0 (rejected)", id)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	for _, want := range []string{"m1", "m2"} {
+		if got := recvWithin(t, f.completed, "delivery of "+want); got != want {
+			t.Fatalf("delivered %q, want %q", got, want)
+		}
+	}
+	if got := f.deliveredOrder(); !equalStrings(got, []string{"m1", "m2"}) {
+		t.Fatalf("delivery order = %v, want [m1 m2] (rejected m3 never delivered)", got)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// #869 AC #4: the cap is per conversation. Filling A to the cap so it rejects
+// does not affect B — B enqueues normally from its own independent counter.
+func TestQueue_CapIsPerConversation(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver, MaxQueuedPerConversation: 2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	q.Enqueue("a", "a1")
+	q.Enqueue("a", "a2")
+	if id := q.Enqueue("a", "a3"); id != 0 {
+		t.Fatalf("A at cap id = %d, want 0 (rejected)", id)
+	}
+
+	if id := q.Enqueue("b", "b1"); id != 1 {
+		t.Fatalf("B enqueue id = %d, want 1 (independent of a filled A)", id)
+	}
+	if id := q.Enqueue("b", "b2"); id != 2 {
+		t.Fatalf("B enqueue id = %d, want 2", id)
+	}
+}
+
+// #869: a rejected Enqueue consumes no id. After a reject, freeing a slot with
+// Remove lets the next Enqueue succeed and continue the DENSE id sequence — the
+// rejected attempt left no gap.
+func TestQueue_RejectConsumesNoID_RemoveFreesSlot(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver, MaxQueuedPerConversation: 2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	q.Enqueue("a", "m1") // id 1
+	q.Enqueue("a", "m2") // id 2
+	if id := q.Enqueue("a", "m3"); id != 0 {
+		t.Fatalf("Enqueue m3 at cap id = %d, want 0 (rejected)", id)
+	}
+
+	// No drain runs (Run not started), so id 2 is a non-head, non-in-flight
+	// message and is removable — this frees a backlog slot.
+	if !q.Remove("a", 2) {
+		t.Fatal("Remove(a, 2) = false, want true (non-head, not in flight)")
+	}
+
+	// The next Enqueue succeeds and its id is 3, not 4: the rejected m3 consumed
+	// no id, so the accepted sequence stays dense.
+	if id := q.Enqueue("a", "m4"); id != 3 {
+		t.Fatalf("Enqueue m4 id = %d, want 3 (reject consumed no id)", id)
+	}
+}
+
+// #869: an unset MaxQueuedPerConversation resolves to the default cap in New,
+// and that default fires at exactly defaultMaxQueuedPerConversation — small
+// backlogs (every existing scenario) never reject. This is the regression guard
+// that the ~45 existing Enqueue call sites keep passing unchanged.
+func TestQueue_DefaultCap_ResolvesAndFires(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver}) // MaxQueuedPerConversation unset ⇒ default
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 1; i <= defaultMaxQueuedPerConversation; i++ {
+		if id := q.Enqueue("a", "m"); id != uint64(i) {
+			t.Fatalf("Enqueue #%d id = %d, want %d (accepted under default cap)", i, id, i)
+		}
+	}
+	if id := q.Enqueue("a", "over"); id != 0 {
+		t.Fatalf("Enqueue past default cap id = %d, want 0 (rejected)", id)
+	}
+}
