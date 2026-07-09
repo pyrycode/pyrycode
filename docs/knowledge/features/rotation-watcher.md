@@ -183,14 +183,25 @@ func (linuxProbe) OpenJSONL(pid int) (string, error) {
 ### Darwin (`probe_darwin.go`)
 
 ```go
+var lsofProbeTimeout = 2 * time.Second // var, not const: tests shrink it to fire fast
+
+var newLsofCmd = func(ctx context.Context, pid int) *exec.Cmd {
+    return exec.CommandContext(ctx, "lsof", "-nP", "-p", strconv.Itoa(pid), "-F", "fn")
+}
+
 func (darwinProbe) OpenJSONL(pid int) (string, error) {
-    out, err := exec.Command("lsof", "-nP", "-p", strconv.Itoa(pid), "-F", "fn").Output()
+    ctx, cancel := context.WithTimeout(context.Background(), lsofProbeTimeout)
+    defer cancel()
+    out, err := newLsofCmd(ctx, pid).Output()
+    // ctx.Err() != nil (timeout) checked FIRST → wrapped timeout error.
     // Exit code 1 from lsof = "no matching files" / "process gone" → ("", nil).
     // First .jsonl-suffixed name from parseLsofOutput wins.
 }
 ```
 
 `exec.LookPath("lsof")` is checked at probe construction (in `DefaultProbe`). Missing-lsof returns `noopProbe` and logs a startup warning rather than failing on every event. `parseLsofOutput` walks `lsof -F fn` records (lines prefixed with `f<fd>` and `n<name>`), pairs them, and drops entries whose name doesn't start with `/` (sockets, pipes). Orphan `f` records without a following `n` are dropped silently.
+
+The `lsof` invocation is bounded by `lsofProbeTimeout` (2s) so a hung `lsof` — dead network mounts, uninterruptible-sleep targets, loaded hosts — cannot indefinitely wedge a caller (#867). Three synchronous callers are exposed to this: the v2 manager's single dispatch goroutine via `snapshotUsage` (a hang here would freeze the entire phone surface), the turn/modal-stream bootstrap resolvers, and this package's own `probeWithRetry`. Mirrors `ptyrunner.reapPSTimeout` ([`ptyrunner-package.md`](ptyrunner-package.md)) — same discipline, same "bound the external subprocess" shape. `newLsofCmd` is a package-var command-factory seam (mirrors `reapDescendantGroupsFn`) so tests can point at a fake slow/exit-1/success binary via `TestHelperProcess` re-exec without touching a real `lsof` or `PATH`; `lsofProbeTimeout` is a `var` (not a `const`, unlike `reapPSTimeout`) so the timeout-firing test can shrink it to ~100ms instead of waiting out the full 2s. A timeout is classified before the exit-1 check and surfaces as an ordinary probe `error` — no caller change needed, since every caller already treats probe errors as transient (see the error table below).
 
 ## Concurrency
 
@@ -221,7 +232,7 @@ Net result: same shutdown shape as Phase 1.2b-A, plus one extra goroutine that r
 | `fsnotify.NewWatcher()` or `fsw.Add(dir)` fails | `New` returns error → log warn, bootstrap continues. |
 | CREATE for non-`.jsonl` filename or malformed UUID stem | Skip silently. |
 | `IsAllocated(newID)` true | Consume + skip (fresh session, not a rotation). |
-| Probe error (`lsof` missing, /proc unreadable) | Log debug, skip this PID, loop continues. |
+| Probe error (`lsof` missing, /proc unreadable, `lsof` hangs past `lsofProbeTimeout`) | Log debug, skip this PID, loop continues. |
 | `EvalSymlinks` on probe path fails (dangling, gone, permission) | Log debug; fall back to `filepath.Clean(open)`; mismatch path falls through to `continue`. (#221) |
 | All probes empty after retry | Skip event, loop continues. |
 | `OnRotate` returns error (save failure) | Log warn; loop continues. The in-memory rotation already applied; the next mutation's `saveLocked` will retry persistence. |
@@ -279,3 +290,4 @@ The `watcher_test` does not depend on real `/proc` or real `lsof` — it injects
 - Sibling startup half: [`jsonl-reconciliation.md`](jsonl-reconciliation.md)
 - Sessions surface: [`sessions-package.md`](sessions-package.md), [`sessions-registry.md`](sessions-registry.md)
 - Phase plan: [`docs/multi-session.md`](../../multi-session.md), [`docs/plan.md`](../../plan.md)
+- Darwin probe timeout bound: [`codebase/867.md`](../codebase/867.md), mirrors [`ptyrunner-package.md`](ptyrunner-package.md)'s `reapPSTimeout`
