@@ -554,6 +554,31 @@ type WorkspaceFolderCreatedPayload struct {
 
 Golden round-trip tests in `workspace_test.go` (`TestCreateWorkspaceFolderPayload_RoundTrip`, `TestWorkspaceFolderCreatedPayload_RoundTrip`) against `testdata/create_workspace_folder.json` / `testdata/workspace_folder_created.json` — this slice does **not** repeat `ChangeWorkspacePayload`'s round-trip-test gap.
 
+### Recent-workspaces payloads (`workspace.go`, #888)
+
+Body of `recent_workspaces` / `recent_workspaces_list` (`docs/protocol-mobile.md` § `recent_workspaces`). Appended to the same file as the `create_workspace_folder` payloads above (same domain — workspace wire messages), not a new file.
+
+```go
+type RecentWorkspacesPayload struct{}
+
+type RecentWorkspacesListPayload struct {
+    Workspaces []RecentWorkspace `json:"workspaces"`
+}
+
+type RecentWorkspace struct {
+    Path       string    `json:"path"`
+    LastUsedAt time.Time `json:"last_used_at"`
+}
+```
+
+- **`RecentWorkspacesPayload` is empty by spec** — like `ListConversationsPayload`, it exists only so the dispatcher decodes a concrete value instead of a `json.RawMessage`.
+- **`RecentWorkspacesListPayload.Workspaces` is always non-nil** (`make([]RecentWorkspace, 0, n)` at the handler), so an empty result marshals as `"workspaces":[]`, never `null`.
+- **Neither `RecentWorkspace` field carries `omitempty`** — reply-side discipline: the client reads `path` and `last_used_at` on every row. `path` matches `WorkspaceFolderCreatedPayload.Path`; `last_used_at` matches `Conversation.LastUsedAt` / `ConversationSummary.LastUsedAt`.
+- **Ordering is the source of truth, not a client-side sort key.** Entries are most-recent-first by the max `LastUsedAt` across the conversations sharing that `Cwd`, deduped so each distinct path appears exactly once — computed by `internal/relay/handlers.RecentWorkspaces`, not this layer. See [codebase/888.md](../codebase/888.md).
+- **Pure DTOs: no methods, no constructors, no `Validate()`.** Same posture as the rest of the package.
+
+Golden round-trip tests in `workspace_test.go` (`TestRecentWorkspacesPayload_RoundTrip`, `TestRecentWorkspacesListPayload_RoundTrip`) against `testdata/recent_workspaces.json` / `testdata/recent_workspaces_list.json`.
+
 ### `Envelope`
 
 The outer wire shape every application frame conforms to (`docs/protocol-mobile.md` § Message envelope, lines 177–201). Field order matches the spec table verbatim.
