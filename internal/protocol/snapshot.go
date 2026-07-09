@@ -52,6 +52,18 @@ type RequestSnapshotPayload struct {
 // permissions enforced (the fail-safe default). All three carry no omitempty
 // (like the fields above) so an empty model/effort stays distinguishable from
 // unset and yolo:false is explicit on the wire rather than dropped.
+//
+// UsedTokens and WindowTokens carry the bootstrap session's current
+// context-window occupancy (#857) so the phone can render an "N% used (X of Y)"
+// gauge as UsedTokens / WindowTokens without a separate protocol. UsedTokens is
+// the current context size on the latest usage-bearing transcript entry
+// (input + cache-read + cache-creation + output), NOT a running total; a
+// post-compaction snapshot therefore reports a smaller figure. WindowTokens is
+// the context-window size (200000 for every current model today); a zero
+// WindowTokens means the usage seam was not wired (foreground / unwired), so a
+// client should treat "X of Y" as unavailable rather than divide by zero. Both
+// carry no omitempty (like the fields above) so used_tokens:0 / window_tokens:0
+// stay distinguishable from unset rather than dropped.
 type ScreenSnapshotPayload struct {
 	ConversationID string    `json:"conversation_id"`
 	Text           string    `json:"text"`
@@ -59,4 +71,6 @@ type ScreenSnapshotPayload struct {
 	Model          string    `json:"model"`
 	Effort         string    `json:"effort"`
 	YOLO           bool      `json:"yolo"`
+	UsedTokens     int       `json:"used_tokens"`
+	WindowTokens   int       `json:"window_tokens"`
 }

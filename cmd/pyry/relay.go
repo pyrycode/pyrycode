@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/pyrycode/pyrycode/internal/config"
+	"github.com/pyrycode/pyrycode/internal/contextwindow"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
@@ -312,6 +313,42 @@ func startRelayV2(
 	// resolver (ModalResolver seam) / deny-on-timeout consume the same entries.
 	modalReg := modalbridge.New()
 
+	// Screen-snapshot usage reader (#857): reports the bootstrap session's
+	// current context-window occupancy (used tokens + window size) for the
+	// screen_snapshot reply. A dedicated probe-preferred resolver follows the
+	// daemon's OWN claude child's open transcript (same construction as the
+	// turn-stream gate below), so usage-source == snapshot-source == bootstrap
+	// even when a second claude shares the sessions dir. Built here — not
+	// threaded from main.go like snapshotSettings — because it needs no
+	// internal/sessions type: resolveOwnBootstrapJSONL is cmd/pyry-local and
+	// internal/contextwindow imports only internal/agentrun/jsonl. nil when there
+	// is no sessions dir to resolve a transcript from (foreground / unwired),
+	// which makes the handler report zeros. Read-only reflection of two non-secret
+	// integers — no authz, no mutation.
+	var snapshotUsage func() (usedTokens, windowTokens int)
+	if claudeSessionsDir != "" {
+		usageResolve := resolveOwnBootstrapJSONL(claudeSessionsDir, newBootstrapProbe(logger), func() int { return sup.State().ChildPID })
+		snapshotUsage = func() (int, int) {
+			// resolveOwnBootstrapJSONL returns an error (not "",0,nil) for the
+			// fresh / backoff / raced / confined-out cases; collapse it to the
+			// empty path, which contextwindow.Read maps to the zero/window-default
+			// report. The offset return is unused here.
+			path, _, err := usageResolve(ctx)
+			if err != nil {
+				path = ""
+			}
+			u, rerr := contextwindow.Read(path)
+			if rerr != nil {
+				// A genuine open failure on a resolved path (e.g. raced away
+				// between resolve and read). Read("") never errors and yields the
+				// same deterministic fresh-session report, so the error is dead —
+				// never surfaced, never logged with path content.
+				u, _ = contextwindow.Read("")
+			}
+			return u.UsedTokens, u.WindowTokens
+		}
+	}
+
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
 		Outbound:    conn.Send,
@@ -348,6 +385,15 @@ func startRelayV2(
 		// SettingsUpdater below, the write path). nil in foreground / v1 makes the
 		// handler report defaults (empty model/effort, yolo:false).
 		SnapshotSettings: snapshotSettings,
+		// Screen-snapshot usage reader (#857): populates the screen_snapshot
+		// reply's used_tokens / window_tokens from the bootstrap session's current
+		// context-window occupancy so the phone can render an "N% used (X of Y)"
+		// gauge (desktop#182). The closure (built above over
+		// resolveOwnBootstrapJSONL + contextwindow.Read) returns two primitives, so
+		// internal/relay imports neither internal/contextwindow nor internal/sessions.
+		// Read-only reflection — no secret, no authz. nil in foreground / unresolved
+		// sessions dir makes the handler report zeros (used_tokens:0, window_tokens:0).
+		SnapshotUsage: snapshotUsage,
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker

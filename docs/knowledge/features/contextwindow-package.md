@@ -7,12 +7,27 @@ sheet: "73% used (146K of 200K tokens)") without each consumer re-parsing the
 JSONL (#856).
 
 It is a pure leaf: one exported function, no dependency on `internal/sessions`.
-**Shipped unwired** (0 non-test callers, correct for a primitive) — the wire
-child **#857** obtains the transcript path from the [probe-preferred
-resolver](sessions-package.md) (`newProbePreferredTranscriptResolver` /
-`supervisor.Config.ResolveTranscript`) and carries `Read`'s output on
-`screen_snapshot`. Mirrors the #847→#848 settings-on-snapshot split: this
-ticket ships the leaf, #857 wires it.
+Shipped unwired at #856 (0 non-test callers, correct for a primitive); **wired
+by #857**, which carries `Read`'s output on `screen_snapshot` via a new
+optional `SnapshotUsage` seam on `internal/relay`'s `V2SessionConfig`. Mirrors
+the #847→#848 settings-on-snapshot split.
+
+**Resolver used: `resolveOwnBootstrapJSONL`, not `ResolveTranscript`.** This
+package's own spec anticipated #857 would obtain the transcript path via
+`internal/sessions`' [probe-preferred `ResolveTranscript`
+seam](sessions-package.md) (`newProbePreferredTranscriptResolver` /
+`supervisor.Config.ResolveTranscript`, the growth-confirm consumer). #857's
+architect spec deliberately used a different resolver instead:
+`resolveOwnBootstrapJSONL` (`cmd/pyry/interactive_turn_stream_v2.go`), the
+turn-stream's own probe-preferred, cmd/pyry-local resolver, via a **second,
+dedicated instance**. Reasoning: `ResolveTranscript` is a `*sessions.Pool`
+seam and threading it into `relay.go` would re-import `internal/sessions`
+into a file that discipline keeps sessions-free (see
+[v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)
+and [codebase/857.md](../codebase/857.md) for the full rationale). Both
+resolvers are probe-preferred and functionally equivalent for this purpose;
+the choice is about where the `internal/sessions` dependency lives, not
+about correctness.
 
 Not `security-sensitive` — read-only reflection of non-secret runtime state
 from an already-trusted, already-confined local transcript path (no new
@@ -96,8 +111,10 @@ seam.
 The two "nothing to report" cases are deliberately **not** errors, kept
 distinct from genuine I/O failure — a consumer can tell "fresh session" from
 "couldn't read". A raced-away file (`fs.ErrNotExist` on a path that existed
-moments earlier) surfaces here as an error; whether a caller maps that to
-"no usage yet" is that caller's call (#857).
+moments earlier) surfaces here as an error; #857's closure maps that (and
+every other `Read` error) to `Read("")`'s deterministic fresh-session report
+rather than surfacing it — the seam is non-erroring by contract (plain ints,
+mirroring `SnapshotSettings`).
 
 ## Concurrency
 
@@ -111,8 +128,11 @@ by construction).
 
 - [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl`, the decode
   this package reuses (`Event.Usage *UsageBlock`).
-- [sessions-package.md](sessions-package.md) — the probe-preferred transcript
-  resolver (#838) that will supply `Read`'s `path` argument.
+- [sessions-package.md](sessions-package.md) — `ResolveTranscript` /
+  `newProbePreferredTranscriptResolver` (#838), the probe-preferred resolver
+  precedent #857 followed via a *different*, cmd/pyry-local instance
+  (`resolveOwnBootstrapJSONL`) rather than this seam directly — see above.
 - [847](../codebase/847.md) / [848](../codebase/848.md) — the settings-leaf /
   settings-wire split this ticket mirrors.
-- #857 (blocked on this ticket) — wires `Read` onto `screen_snapshot`.
+- [857](../codebase/857.md) — wires `Read` onto `screen_snapshot` via the
+  optional `SnapshotUsage` seam on `V2SessionConfig`.

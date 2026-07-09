@@ -79,21 +79,32 @@ func TestScreenSnapshotPayload_RoundTrip(t *testing.T) {
 	if !payload.YOLO {
 		t.Errorf("YOLO: got %v, want true", payload.YOLO)
 	}
+	// The context-window usage fields (#857) carry representative non-zero
+	// values in the fixture; assert they survive unmarshal before the canonical
+	// round-trip below pins the full wire shape.
+	if payload.UsedTokens != 45000 {
+		t.Errorf("UsedTokens: got %d, want %d", payload.UsedTokens, 45000)
+	}
+	if payload.WindowTokens != 200000 {
+		t.Errorf("WindowTokens: got %d, want %d", payload.WindowTokens, 200000)
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
 }
 
 // TestScreenSnapshotPayload_ZeroSettingsFieldsPresent pins the
 // "distinguishable from unset" contract a consumer relies on: with no
-// omitempty, the zero values (model "", effort "", yolo false) stay explicitly
-// on the wire and are not dropped. An empty model/effort means "inherited
-// default, no per-session override"; yolo:false means permissions enforced.
+// omitempty, the zero values (model "", effort "", yolo false, used_tokens 0,
+// window_tokens 0) stay explicitly on the wire and are not dropped. An empty
+// model/effort means "inherited default, no per-session override"; yolo:false
+// means permissions enforced; window_tokens 0 means the usage seam was not
+// wired (#857).
 func TestScreenSnapshotPayload_ZeroSettingsFieldsPresent(t *testing.T) {
 	out, err := json.Marshal(ScreenSnapshotPayload{})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	for _, want := range []string{`"model":""`, `"effort":""`, `"yolo":false`} {
+	for _, want := range []string{`"model":""`, `"effort":""`, `"yolo":false`, `"used_tokens":0`, `"window_tokens":0`} {
 		if !bytes.Contains(out, []byte(want)) {
 			t.Errorf("zero-value field %s should stay on the wire; got %s", want, out)
 		}

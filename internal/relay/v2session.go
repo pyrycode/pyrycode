@@ -637,6 +637,22 @@ type V2SessionConfig struct {
 	// control from untrusted input).
 	SnapshotSettings func() (model, effort string, yolo bool)
 
+	// SnapshotUsage reports the bootstrap session's current context-window
+	// occupancy — used tokens and window size — so handleRequestSnapshot can
+	// populate the screen_snapshot reply's used_tokens / window_tokens fields
+	// (#857). Optional: nil ⇒ the handler reports both at their zero values
+	// (used_tokens:0, window_tokens:0), preserving the pre-#857 wire shape (the
+	// foreground / unwired case). Primitive-typed (two ints) so internal/relay
+	// imports neither internal/contextwindow nor internal/sessions; the cmd/pyry
+	// closure resolves the bootstrap transcript path and calls
+	// contextwindow.Read, collapsing any open failure to the same zero /
+	// window-default report as a fresh session.
+	//
+	// Read-only reflection of two non-secret aggregate integers — no authz
+	// decision, no mutation, no input parsing (same posture as SnapshotSettings
+	// above; the transcript content itself never crosses the wire).
+	SnapshotUsage func() (usedTokens, windowTokens int)
+
 	// ModalResolver resolves inbound modal_answer / modal_cancel control
 	// frames. Optional: when nil, both are inert no-ops (the modal bridge is
 	// simply unwired — foreground, or pre-#708 before the producer is live).
@@ -1743,6 +1759,16 @@ func (m *V2SessionManager) handleRequestSnapshot(ctx context.Context, s *V2Sessi
 		model, effort, yolo = m.cfg.SnapshotSettings()
 	}
 
+	// Reflect the bootstrap session's current context-window occupancy (#857). A
+	// nil seam (optional, foreground / unwired) leaves both at zero — byte-
+	// identical to the pre-#857 reply apart from the two always-present fields.
+	// The cmd/pyry closure collapses any transcript-open failure to the same
+	// zero/window-default report, so this read never errors.
+	var usedTokens, windowTokens int
+	if m.cfg.SnapshotUsage != nil {
+		usedTokens, windowTokens = m.cfg.SnapshotUsage()
+	}
+
 	snapPayload, err := json.Marshal(protocol.ScreenSnapshotPayload{
 		ConversationID: payload.ConversationID,
 		Text:           text,
@@ -1750,12 +1776,14 @@ func (m *V2SessionManager) handleRequestSnapshot(ctx context.Context, s *V2Sessi
 		Model:          model,
 		Effort:         effort,
 		YOLO:           yolo,
+		UsedTokens:     usedTokens,
+		WindowTokens:   windowTokens,
 	})
 	if err != nil {
-		// ScreenSnapshotPayload is a closed struct of two strings + a time;
-		// marshal cannot fail in practice. Defensive — NEVER echo err (it could
-		// quote the rendered text). Fall back to a deterministic error reply so
-		// the request is still answered, never silently dropped (AC #3).
+		// ScreenSnapshotPayload is a closed struct of scalars + a time; marshal
+		// cannot fail in practice. Defensive — NEVER echo err (it could quote the
+		// rendered text). Fall back to a deterministic error reply so the request
+		// is still answered, never silently dropped (AC #3).
 		m.cfg.Logger.Warn("relay: v2 screen_snapshot marshal failed",
 			"event", "v2.snapshot.marshal_err",
 			"conn_id", s.connID,
