@@ -100,6 +100,16 @@ type Config struct {
 	// supervisor restart.
 	ResumeLast bool
 
+	// ResolveSessionID, when non-nil, is called at the start of every spawn.
+	// A non-empty return appends "--session-id <id>" to the claude args and
+	// suppresses --continue (the two are mutually exclusive). Resolved fresh
+	// each spawn so a /clear id rotation is picked up on the next restart.
+	// Nil preserves the ResumeLast/--continue behaviour (per-caller sessions,
+	// foreground tests). Used by the daemon's bootstrap session (#839) to
+	// resume its OWN deterministic id rather than the most-recent session in a
+	// shared sessions dir.
+	ResolveSessionID func() string
+
 	// ClaudeArgs are forwarded to the claude binary as positional arguments.
 	ClaudeArgs []string
 
@@ -674,7 +684,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		args := buildClaudeArgs(s.liveArgs(), firstRun, s.cfg.ResumeLast)
+		sessionID := ""
+		if s.cfg.ResolveSessionID != nil {
+			sessionID = s.cfg.ResolveSessionID()
+		}
+		args := buildClaudeArgs(s.liveArgs(), firstRun, s.cfg.ResumeLast, sessionID)
 
 		start := time.Now()
 		s.log.Info("spawning claude", "args", args, "workdir", s.cfg.WorkDir)
@@ -748,11 +762,17 @@ func (s *Supervisor) drainRestart() bool {
 	}
 }
 
-// buildClaudeArgs prepends --continue to claude's argument list on every spawn
-// after the first, when ResumeLast is enabled. Pure function — no Supervisor
-// state, easy to unit-test.
-func buildClaudeArgs(claudeArgs []string, firstRun, continueLast bool) []string {
+// buildClaudeArgs builds claude's argument list for one spawn. When sessionID
+// is non-empty it appends "--session-id <sessionID>" and does NOT prepend
+// --continue (the two are mutually exclusive) — the deterministic resume the
+// bootstrap session uses (#839). When sessionID is empty it prepends --continue
+// on every spawn after the first, when continueLast is enabled. Pure function —
+// no Supervisor state, easy to unit-test. Never mutates claudeArgs.
+func buildClaudeArgs(claudeArgs []string, firstRun, continueLast bool, sessionID string) []string {
 	args := append([]string(nil), claudeArgs...)
+	if sessionID != "" {
+		return append(args, "--session-id", sessionID)
+	}
 	if !firstRun && continueLast {
 		args = append([]string{"--continue"}, args...)
 	}

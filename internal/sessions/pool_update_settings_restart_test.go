@@ -123,7 +123,8 @@ func mintEvicted(t *testing.T, pool *Pool, spawnDir string, settings SessionSett
 
 // TestPool_UpdateSettings_LiveRestart_Bootstrap (AC #1/#2/#3): a single
 // UpdateSettings on the running bootstrap both persists the change and restarts
-// its claude with the new argv, resuming via --continue.
+// its claude with the new argv, resuming via its deterministic --session-id
+// (#839 retired --continue for the bootstrap).
 func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -134,9 +135,9 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
 
-	// First spawn: baseline settings, no --continue (firstRun).
-	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--model", "sonnet"}) {
-		t.Fatalf("first spawn argv = %v, want [--model sonnet]", got)
+	// First spawn: baseline settings, plus the deterministic --session-id (#839).
+	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--model", "sonnet", "--session-id", string(id)}) {
+		t.Fatalf("first spawn argv = %v, want [--model sonnet --session-id %s]", got, id)
 	}
 	clearRecording(t, tplWorkDir)
 
@@ -144,9 +145,10 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
-	// AC #1 + #2: relaunch carries --continue (resume) and the new settings.
+	// AC #1 + #2: relaunch resumes via --session-id (#839, not --continue) and
+	// carries the new settings; the id is stable across the restart.
 	got := waitArgv(t, tplWorkDir)
-	want := []string{"--continue", "--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
+	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions", "--session-id", string(id)}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("restart argv = %v, want %v", got, want)
 	}
@@ -293,7 +295,7 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
 
-	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions"}) {
+	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions", "--session-id", string(id)}) {
 		t.Fatalf("first spawn argv = %v, want the bypass flag present", got)
 	}
 	clearRecording(t, tplWorkDir)
@@ -308,7 +310,9 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 			t.Fatalf("post-revoke argv still carries the bypass flag: %v", got)
 		}
 	}
-	if want := []string{"--continue"}; !reflect.DeepEqual(got, want) {
+	// #839: revoked YOLO leaves no settings flags; the bootstrap still resumes via
+	// its deterministic --session-id (not --continue).
+	if want := []string{"--session-id", string(id)}; !reflect.DeepEqual(got, want) {
 		t.Errorf("post-revoke argv = %v, want %v", got, want)
 	}
 }
@@ -338,7 +342,9 @@ func TestPool_UpdateSettings_YOLOAbsent_NoBypassOnRestart(t *testing.T) {
 			t.Fatalf("absent YOLO yielded a bypass child across restart: %v", got)
 		}
 	}
-	if want := []string{"--continue", "--model", "opus"}; !reflect.DeepEqual(got, want) {
+	// #839: the bootstrap resumes via --session-id (not --continue), appended
+	// after the new settings.
+	if want := []string{"--model", "opus", "--session-id", string(id)}; !reflect.DeepEqual(got, want) {
 		t.Errorf("restart argv = %v, want %v", got, want)
 	}
 }

@@ -331,7 +331,10 @@ func TestPool_UpdateSettings_RoundTripToSpawnArgv(t *testing.T) {
 	runPoolInBackground(t, second)
 
 	got := waitArgv(t, tplWorkDir)
-	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
+	// #839: the bootstrap resumes via a trailing --session-id (its own id, stable
+	// across the simulated restart), appended after the settings flags.
+	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
+		"--session-id", string(id)}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("post-update bootstrap argv = %v, want %v", got, want)
 	}
