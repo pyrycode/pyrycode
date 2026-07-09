@@ -416,10 +416,17 @@ func perConversationSessionsDir(sessionWorkDir, bootstrapWorkDir, sharedDir stri
 //     so a second claude writing into the same shared dir cannot redirect the
 //     tail. Switch is still set so the first route re-subscribes onto the routed
 //     bound session.
-//   - convID != "" and resolvable: the bound session's supervisor + a by-id
-//     resolver that tails <bound-session-id>.jsonl in that conversation's OWN
-//     per-Cwd JSONL directory (returned by boundHost since #686), mtime-
-//     independent and never another Cwd's directory (AC1/AC2).
+//   - convID != "" and resolvable to the BOOTSTRAP session: the bootstrap
+//     supervisor + the probe-preferred bootstrap resolver (resolveOwnBootstrapJSONL),
+//     NOT the by-id resolver. The bootstrap claude spawns without --session-id
+//     (#854), so it mints its own on-disk transcript uuid that never equals its
+//     pool id; a by-id resolver would tail <poolID>.jsonl, which never appears,
+//     and loop forever (the fresh-daemon deadlock this ticket fixes). Binding by
+//     PID probe converges the "no jsonl yet" wait once the first turn lands.
+//   - convID != "" and resolvable to a NON-bootstrap session: that session's
+//     supervisor + a by-id resolver that tails <bound-session-id>.jsonl in that
+//     conversation's OWN per-Cwd JSONL directory (returned by boundHost since
+//     #686), mtime-independent and never another Cwd's directory (AC1/AC2).
 //   - convID != "" but unresolvable (deleted/unbound mid-flight): an error so the
 //     subscriber backs off and retries. It NEVER falls back to the bootstrap under
 //     a non-empty cursor — the emitter stamps convID, so tailing any other
@@ -442,6 +449,24 @@ func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstra
 		host, sessionID, convDir, ok := boundHost(convID)
 		if !ok {
 			return turnbridge.Target{}, fmt.Errorf("no bound session for active conversation %q", convID)
+		}
+		if host == bootstrap {
+			// The conversation is bound to the bootstrap session — the daemon's
+			// own interactive claude, spawned WITHOUT --session-id (#854), so
+			// claude mints an on-disk transcript uuid that never equals the
+			// bootstrap POOL id (sessionID here). The by-id resolver would tail
+			// <poolID>.jsonl, which never appears, and loop forever (the
+			// fresh-daemon deadlock). Bind the reply by PID probe instead — the
+			// exact resolver the convID == "" branch uses — so the "no jsonl yet"
+			// wait converges once the first turn creates the transcript. dir is the
+			// shared claudeSessionsDir; boundHost also returns it as convDir for the
+			// bootstrap (perConversationSessionsDir maps the bootstrap workdir back
+			// to it), so the two agree — use dir to mirror the convID == "" branch.
+			return turnbridge.Target{
+				Host:    host,
+				Resolve: resolveOwnBootstrapJSONL(dir, probe, pidFn),
+				Switch:  switchCh,
+			}, nil
 		}
 		// convDir is the bound session's OWN per-Cwd JSONL directory (#686), not
 		// the bootstrap-branch dir param (which stays the shared claudeSessionsDir

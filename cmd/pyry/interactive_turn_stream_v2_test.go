@@ -766,6 +766,57 @@ func TestResolveTarget_BoundSessionWhenRouted(t *testing.T) {
 	}
 }
 
+// TestResolveTarget_BootstrapBoundUsesProbeResolver is the #854 fix gate. A
+// conversation bound to the BOOTSTRAP session (the daemon's own interactive
+// claude, spawned without --session-id) must resolve its reply via the PID
+// probe, NOT the by-id resolver keyed on the bootstrap POOL id. The bootstrap
+// claude mints its own on-disk transcript uuid, so <poolID>.jsonl never exists;
+// the by-id path would stat a file that never appears and loop forever — the
+// fresh-daemon deadlock. RED on main (by-id resolver errors on the missing
+// <poolID>.jsonl), GREEN after (the probe binds to the daemon's own open file).
+func TestResolveTarget_BootstrapBoundUsesProbeResolver(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// The daemon's OWN child holds this transcript, minted by claude at its own
+	// uuid (uuidA) — NOT the bootstrap pool id (uuidC), which has no file on disk.
+	own := writeJSONL(t, dir, uuidA, 30, time.Now())
+
+	active := &activeConversation{}
+	active.set("conv-boot")
+	bootstrap := &fakeSessionHost{name: "bootstrap"}
+	// The conversation is bound to the bootstrap host at the bootstrap POOL id
+	// (uuidC), in the shared dir. host == bootstrap is the bootstrap-bound signal;
+	// <uuidC>.jsonl deliberately does NOT exist, so a by-id resolver would fail.
+	boundHost := func(convID string) (turnbridge.SessionHost, string, string, bool) {
+		if convID != "conv-boot" {
+			t.Errorf("boundHost convID = %q, want conv-boot", convID)
+		}
+		return bootstrap, uuidC, dir, true
+	}
+	probe := &fakeProbe{results: []probeResult{{path: own}}}
+
+	target, err := resolveTarget(active, boundHost, bootstrap, dir, probe, func() int { return 4242 })(context.Background())
+	if err != nil {
+		t.Fatalf("resolveTarget: %v", err)
+	}
+	if target.Host != turnbridge.SessionHost(bootstrap) {
+		t.Fatalf("bootstrap-bound host: got %v, want the bootstrap host", target.Host)
+	}
+	if target.Switch == nil {
+		t.Fatal("bootstrap-bound: Switch is nil; a conversation switch would not re-subscribe")
+	}
+	path, off, err := target.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("bootstrap-bound resolve errored (on main it loops forever on the missing <poolID>.jsonl): %v", err)
+	}
+	if path != own {
+		t.Fatalf("bootstrap-bound resolve path: got %q, want %q (the probe's own-child file, keyed by PID not the pool id)", path, own)
+	}
+	if off != 30 {
+		t.Fatalf("bootstrap-bound resolve offset: got %d, want 30 (own file size — warm tail)", off)
+	}
+}
+
 // TestResolveTarget_UnresolvableConversationErrors is the load-bearing
 // confidentiality guard: when the active conversation cannot be resolved to a
 // bound session, resolveTarget returns an ERROR (subscriber backs off + retries)

@@ -43,6 +43,19 @@ type PromoteConversationPayload struct {
 	Cwd            string `json:"cwd"`
 }
 
+// RenameConversationPayload is the body of a rename_conversation frame
+// (docs/protocol-mobile.md § rename_conversation). Phone → binary. Both
+// fields are spec-required: a rename must name a target conversation and a
+// new display title.
+//
+// Deliberately NOT a reuse of PromoteConversationPayload — promote also
+// carries a required Cwd, which a rename neither has nor means. The reply
+// reuses ConversationUpdatedPayload verbatim.
+type RenameConversationPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Name           string `json:"name"`
+}
+
 // ConversationUpdatedPayload is the body of a conversation_updated frame
 // (docs/protocol-mobile.md § conversation_updated). Binary → phone,
 // broadcast to all phones on this server-id. ID, IsPromoted, Cwd,

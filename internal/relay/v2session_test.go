@@ -3665,11 +3665,18 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 	customSettings := func() (model, effort string, yolo bool) { return "opus", "high", true }
 	defaultSettings := func() (model, effort string, yolo bool) { return "", "", false }
 
+	// SnapshotUsage read-seam doubles (#857). injectedUsage returns a non-zero
+	// pair; freshUsage returns the wired-but-fresh pair (0 used, window default)
+	// that distinguishes a wired seam from a nil one on the wire.
+	injectedUsage := func() (usedTokens, windowTokens int) { return 12345, 200000 }
+	freshUsage := func() (usedTokens, windowTokens int) { return 0, 200000 }
+
 	tests := []struct {
 		name          string
 		knownConv     func(string) bool
 		snap          ScreenSnapshotter
 		settings      func() (model, effort string, yolo bool)
+		usage         func() (usedTokens, windowTokens int)
 		reqPayload    json.RawMessage
 		wantType      string
 		wantCode      string // TypeError rows only
@@ -3678,6 +3685,8 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 		wantModel     string // TypeScreenSnapshot rows only
 		wantEffort    string // TypeScreenSnapshot rows only
 		wantYOLO      bool   // TypeScreenSnapshot rows only
+		wantUsed      int    // TypeScreenSnapshot rows only
+		wantWindow    int    // TypeScreenSnapshot rows only
 	}{
 		{
 			name:       "happy renders screen_snapshot",
@@ -3736,6 +3745,46 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 			wantModel:  "",
 			wantEffort: "",
 			wantYOLO:   false,
+		},
+		{
+			// AC #2 (#857): a wired usage seam's two ints surface on the reply.
+			name:       "injected usage surfaces in screen_snapshot",
+			knownConv:  knownOnly,
+			snap:       fakeSnapshotter{text: snapScreenText, live: true},
+			usage:      injectedUsage,
+			reqPayload: convPayload,
+			wantType:   protocol.TypeScreenSnapshot,
+			wantText:   snapScreenText,
+			wantUsed:   12345,
+			wantWindow: 200000,
+		},
+		{
+			// AC #3 (#857): a nil usage seam reports both at zero, present on the
+			// wire (byte-compatible with the pre-#857 shape apart from the two
+			// always-present zero fields). Note (0,0) is distinct from the wired-
+			// fresh (0, 200000) row below.
+			name:       "nil usage seam reports zeros",
+			knownConv:  knownOnly,
+			snap:       fakeSnapshotter{text: snapScreenText, live: true},
+			usage:      nil,
+			reqPayload: convPayload,
+			wantType:   protocol.TypeScreenSnapshot,
+			wantText:   snapScreenText,
+			wantUsed:   0,
+			wantWindow: 0,
+		},
+		{
+			// AC #5 (#857): a wired-but-fresh session (no usage entry yet) reports
+			// used 0 with the window default, distinguishing it from the nil seam.
+			name:       "fresh session via seam returns window default",
+			knownConv:  knownOnly,
+			snap:       fakeSnapshotter{text: snapScreenText, live: true},
+			usage:      freshUsage,
+			reqPayload: convPayload,
+			wantType:   protocol.TypeScreenSnapshot,
+			wantText:   snapScreenText,
+			wantUsed:   0,
+			wantWindow: 200000,
 		},
 		{
 			name:          "foreign conversation rejected",
@@ -3814,6 +3863,7 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 				Snapshotter:       tt.snap,
 				KnownConversation: tt.knownConv,
 				SnapshotSettings:  tt.settings,
+				SnapshotUsage:     tt.usage,
 			}, frames, rec, respPub, initPriv)
 			t.Cleanup(sess.stop)
 
@@ -3860,6 +3910,16 @@ func TestV2Session_OpenState_RequestSnapshot(t *testing.T) {
 				}
 				if p.YOLO != tt.wantYOLO {
 					t.Errorf("YOLO = %v, want %v", p.YOLO, tt.wantYOLO)
+				}
+				// #857: used_tokens / window_tokens reflect the injected usage seam
+				// (or zeros for a nil seam). Both are always present on the wire (no
+				// omitempty), so window_tokens 0 (nil seam) stays distinguishable
+				// from a wired-fresh window default.
+				if p.UsedTokens != tt.wantUsed {
+					t.Errorf("UsedTokens = %d, want %d", p.UsedTokens, tt.wantUsed)
+				}
+				if p.WindowTokens != tt.wantWindow {
+					t.Errorf("WindowTokens = %d, want %d", p.WindowTokens, tt.wantWindow)
 				}
 				// TS is freshly stamped; compare with IsZero/Since, never == (a
 				// JSON round-trip strips the monotonic reading).
@@ -3940,6 +4000,79 @@ func TestV2Session_OpenState_RequestSnapshot_Repeat(t *testing.T) {
 		if p.TS.IsZero() {
 			t.Errorf("reply %d TS is zero, want a fresh render timestamp", i)
 		}
+	}
+}
+
+// TestV2Session_OpenState_RequestSnapshot_UsageShrinks pins AC #4 (#857): when
+// the usage reader reports a smaller used-tokens figure on a later read (what a
+// compaction produces — contextwindow.Read is last-usage-wins with no running
+// total), a subsequent request_snapshot carries the smaller figure on the wire,
+// so a client can reflect the compaction. The reader's own post-compaction
+// shrink is unit-tested in #856; here a shrinking stub proves the wire relays a
+// changed report faithfully.
+func TestV2Session_OpenState_RequestSnapshot_UsageShrinks(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	// Two successive reads: the second is smaller (a compaction reset). The
+	// counter closure returns each value once, in order, on the single manager
+	// Run goroutine that invokes the seam.
+	usedSeq := []int{50000, 3000}
+	var calls int
+	shrinkingUsage := func() (usedTokens, windowTokens int) {
+		used := usedSeq[calls]
+		if calls < len(usedSeq)-1 {
+			calls++
+		}
+		return used, 200000
+	}
+
+	frames := make(chan protocol.RoutingEnvelope, 3)
+	rec := &v2Recorder{}
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:            frames,
+		Outbound:          rec.outbound,
+		StaticPriv:        respPriv,
+		Devices:           reg,
+		ServerID:          v2TestServerID,
+		Logger:            silentLogger(),
+		Snapshotter:       fakeSnapshotter{text: snapScreenText, live: true},
+		KnownConversation: func(id string) bool { return id == snapConvID },
+		SnapshotUsage:     shrinkingUsage,
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	convPayload := json.RawMessage(`{"conversation_id":"` + snapConvID + `"}`)
+	reqIDs := []uint64{81, 82}
+	for _, id := range reqIDs {
+		frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+			ID:      id,
+			Type:    protocol.TypeRequestSnapshot,
+			TS:      time.Now().UTC(),
+			Payload: convPayload,
+		})
+	}
+
+	// noise_resp + two replies; decrypt in capture order (the receive nonce is
+	// sequential).
+	envs := waitForEnvelopes(t, rec, 3)
+	used := make([]int, len(reqIDs))
+	for i := range reqIDs {
+		reply := decryptAppFrame(t, envs[i+1], sess.initRecv)
+		if reply.Type != protocol.TypeScreenSnapshot {
+			t.Fatalf("reply %d Type = %q, want %q", i, reply.Type, protocol.TypeScreenSnapshot)
+		}
+		var p protocol.ScreenSnapshotPayload
+		if err := json.Unmarshal(reply.Payload, &p); err != nil {
+			t.Fatalf("decode screen_snapshot %d: %v", i, err)
+		}
+		used[i] = p.UsedTokens
+	}
+	if used[1] >= used[0] {
+		t.Errorf("post-compaction UsedTokens = %d, want smaller than pre-compaction %d", used[1], used[0])
 	}
 }
 
