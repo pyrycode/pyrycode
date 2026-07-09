@@ -311,7 +311,7 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	// flush its session JSONL cleanly before exit. Installed before Spawn so the
 	// hook is in place when the os/exec watcher is armed at Start.
 	cmd.Cancel = func() error {
-		reapDescendantGroups(cmd.Process.Pid, logger)
+		reapDescendantGroupsFn(cmd.Process.Pid, logger)
 		return cmd.Process.Signal(syscall.SIGTERM)
 	}
 	// WaitDelay's exact value is non-binding — tui-driver Session.Close's
@@ -384,6 +384,18 @@ func Run(ctx context.Context, cfg Config) (err error) {
 			}
 		}
 	}()
+	// Reap claude's detached Bash process group(s) on EVERY teardown that
+	// reaches here — watchdog-fire, normal end-of-turn, and any post-Spawn
+	// early return. Registered immediately AFTER defer sess.Close so LIFO
+	// fires it FIRST, while claude is still unsignalled-and-alive: sess.Close's
+	// SIGTERM would let claude exit and reparent its Bash group to init (ppid=1)
+	// before the walk — which enumerates descendants of claude's pid — could see
+	// it. Do NOT reorder this defer relative to sess.Close. The operator-cancel
+	// (cmd.Cancel) and budget-hit paths reap their live tree earlier and hit this
+	// defer as a redundant no-op (claude already signalled → empty walk); #565's
+	// reap tolerates that (ESRCH / already-exited groups skipped). cmd.Process is
+	// non-nil here — Spawn succeeded.
+	defer func() { reapDescendantGroupsFn(cmd.Process.Pid, logger) }()
 
 	// Wait for the TUI to reach idle, then apply policy to the readiness
 	// classification. tui-driver detects (trust / mcp / network); ptyrunner
@@ -466,8 +478,10 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	}
 	// Defer-LIFO discipline: do NOT reorder the chain below. Fire order
 	// (top runs first): cancel() → wg.Wait() → counter.Stop() →
-	// emitter.Close() → sess.Close(). See package doc on Run for the
-	// invariants each step protects.
+	// emitter.Close() → cancel() → [reap] → sess.Close(). The [reap] step is
+	// the descendant-group reap defer registered right after sess.Close above —
+	// it MUST stay ordered before sess.Close so it walks a live claude tree. See
+	// package doc on Run for the invariants each step protects.
 	defer func() { _ = emitter.Close() }()
 
 	tracker := tuidriver.NewTracker(cfg.WatchdogTrackerOpts)
@@ -476,6 +490,13 @@ func Run(ctx context.Context, cfg Config) (err error) {
 	counter, err := budget.New(budget.Config{
 		MaxTurns: cfg.MaxTurns,
 		Terminate: func() error {
+			// Reap BEFORE this hook's own SIGTERM, mirroring cmd.Cancel/#565's
+			// reap-before-signal ordering: this hook signals claude itself, so a
+			// trailing defer would run after claude may have exited and reparented
+			// its Bash group to init — the walk (descendants of claude's pid) would
+			// then miss it. Here claude is guaranteed alive (just finished a turn),
+			// so the ps snapshot sees the live tree.
+			reapDescendantGroupsFn(cmd.Process.Pid, logger)
 			emitter.SetExitReason(streamjson.ExitReasonMaxTurns)
 			tracker.RecordTransition("budget-hit")
 			cancel()

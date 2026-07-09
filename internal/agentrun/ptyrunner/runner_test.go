@@ -638,6 +638,114 @@ func TestRun_WatchdogFires(t *testing.T) {
 	}
 }
 
+// reapRecorder is a mutex-guarded double for reapDescendantGroupsFn: it records
+// the rootPid of every reap call so the budget-hit and watchdog-fire tests can
+// assert the wiring fired with a plausible pid — without standing up a real
+// descendant tree (that is TestReapDescendantGroups' job). Mirrors
+// loggerSyncWriter's guarded-double shape because the reap fires from deferred
+// teardown and the budget hook on different goroutines across runs.
+type reapRecorder struct {
+	mu   sync.Mutex
+	pids []int
+}
+
+func (r *reapRecorder) record(rootPid int, _ *slog.Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pids = append(r.pids, rootPid)
+}
+
+func (r *reapRecorder) calls() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.pids...)
+}
+
+// swapReapSeam points reapDescendantGroupsFn at rec.record for the test and
+// restores the real reaper via t.Cleanup. Callers MUST be non-parallel: they
+// mutate a package var. Go runs non-parallel tests — and their t.Cleanup
+// restore — to completion before parked t.Parallel() tests resume, so the swap
+// window never overlaps the parallel TestRun_* siblings.
+func swapReapSeam(t *testing.T, rec *reapRecorder) {
+	t.Helper()
+	orig := reapDescendantGroupsFn
+	reapDescendantGroupsFn = rec.record
+	t.Cleanup(func() { reapDescendantGroupsFn = orig })
+}
+
+// assertReapedLivePid asserts the reap seam captured at least one call with a
+// plausible pid (> 1, matching reap.go's pgid<=1 guard boundary). It is ≥1 not
+// ==1 because the trailing teardown defer can add a second, redundant reap on
+// the budget path (the intended no-op — claude is likely dead by then, so its
+// walk is empty). The test can't know claude's real pid, so it asserts > 1.
+func assertReapedLivePid(t *testing.T, rec *reapRecorder) {
+	t.Helper()
+	calls := rec.calls()
+	if len(calls) == 0 {
+		t.Fatal("reap seam never fired on the teardown path — reap wiring missing")
+	}
+	for _, pid := range calls {
+		if pid > 1 {
+			return
+		}
+	}
+	t.Fatalf("reap seam fired %d time(s) but no call carried a plausible pid > 1: %v", len(calls), calls)
+}
+
+// TestRun_MaxTurnsExhaustion_ReapsDescendantGroups asserts the budget-hit
+// teardown reaps claude's descendant process groups. Clones the
+// TestRun_MaxTurnsExhaustion_NoBenignWarns harness (mode jsonl_exit143,
+// MaxTurns:1); the budget Terminate hook's in-hook reap must fire — before its
+// own SIGTERM — with a plausible claude pid. Non-parallel: it swaps the
+// reapDescendantGroupsFn package var (see swapReapSeam).
+func TestRun_MaxTurnsExhaustion_ReapsDescendantGroups(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl_exit143", &stdout, &stderr, noEotBody)
+	cfg.MaxTurns = 1
+
+	rec := &reapRecorder{}
+	swapReapSeam(t, rec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	assertReapedLivePid(t, rec)
+}
+
+// TestRun_WatchdogFires_ReapsDescendantGroups asserts the watchdog-fire
+// teardown reaps claude's descendant process groups via the trailing defer:
+// runWatchdog only cancels runCtx, so claude stays alive until sess.Close, and
+// the reap defer (registered right after defer sess.Close) fires first — on a
+// live tree. Clones the TestRun_WatchdogFires harness. Non-parallel: it swaps
+// the reapDescendantGroupsFn package var (see swapReapSeam).
+func TestRun_WatchdogFires_ReapsDescendantGroups(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "jsonl", &stdout, &stderr, "")
+	cfg.MaxTurns = 10
+	cfg.WatchdogTick = 50 * time.Millisecond
+	cfg.WatchdogTrackerOpts = tuidriver.TrackerOpts{
+		PTYQuietLimit:      200 * time.Millisecond,
+		SpinnerFreezeLimit: 200 * time.Millisecond,
+	}
+	cfg.PromptCommitTimeout = 100 * time.Millisecond
+
+	rec := &reapRecorder{}
+	swapReapSeam(t, rec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: %v, want nil (watchdog-fire collapse)", err)
+	}
+
+	assertReapedLivePid(t, rec)
+}
+
 // The pure chip detector and its table test moved into tui-driver along with
 // the prompt-deliver + commit-confirm + recovery logic they back
 // (pkg/tuidriver: TestHasPastedChip, TestDeliverPrompt_*). The re-deliver /
