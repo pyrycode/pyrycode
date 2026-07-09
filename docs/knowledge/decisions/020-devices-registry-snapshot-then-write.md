@@ -118,6 +118,10 @@ later mutation under the lock.
   read site) for negligible gain. A simple `Mutex` with a snapshot is
   the smaller surface.
 
+## Update (2026-07-10, #868)
+
+`internal/conversations.Registry`, which had mirrored this pattern, diverged: it grew three concurrent production `Save` callers (create/rename handlers, auto-archive sweep, `/clear` rebind observer) that this ADR's devices-specific traffic analysis never anticipated. Under that load, "later rename wins" turned out to guarantee only *no torn write* — not *no lost update*: an older snapshot's rename could land after a newer one's, silently reverting a durable mutation. #868 added a dedicated `saveMu`, taken across the whole snapshot→rename sequence (the "Separate `mu` (slice) and `saveMu` (file) mutexes" alternative this ADR rejected below), specifically because conversations' concurrency shape differs from devices'. `internal/devices` itself is unchanged — it still has no known concurrent-`Save` caller (`pyry pair` / `pyry pair revoke` are single-goroutine), so the analysis and decision below still hold for devices as scoped. See [`features/conversations-registry.md`](../features/conversations-registry.md) § *Save concurrency* and [codebase/868.md](../codebase/868.md).
+
 ## Related
 
 - Ticket #209 — devices.json registry CRUD.
