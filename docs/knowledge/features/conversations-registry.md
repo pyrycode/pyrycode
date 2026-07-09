@@ -205,7 +205,7 @@ Pointer-to-slice-element is the right shape because `Conversation` carries a `*s
 
 Locate the entry whose `ID` matches and remove it via the slice-element-removal idiom (`r.conversations = append(r.conversations[:i], r.conversations[i+1:]...)`). Returns `true` on hit, `false` on miss. Mutex-guarded, no I/O, no validation, no `Save` — disk persistence stays with the caller, matching the `Create` / `Update` / `Promote` convention.
 
-Order-preserving: surrounding entries' relative order is unchanged. O(n) linear scan + O(n) shift, same complexity as `Get` / `Update`. Returns on first match — the registry does not enforce ID uniqueness on `Create`, but the only present consumer (`Sweep`) iterates a `List()` snapshot exactly once per entry, so a duplicated ID is visited and deleted twice.
+Order-preserving: surrounding entries' relative order is unchanged. O(n) linear scan + O(n) shift, same complexity as `Get` / `Update`. Returns on first match — the registry does not enforce ID uniqueness on `Create`, but `Sweep` (its original consumer) iterates a `List()` snapshot exactly once per entry, so a duplicated ID is visited and deleted twice. The `delete_conversation` handler (#822, [codebase/822.md](../codebase/822.md)) is a second consumer, calling `Delete` once per phone-supplied id rather than iterating a snapshot — this is the terminal hard-delete primitive AC #822 reuses instead of introducing a soft-delete field; a miss maps to `conversation.not_found`.
 
 `List` returns a copy, so a snapshot taken before `Delete` is unaffected by the deletion: a caller iterating the snapshot can call `Delete` mid-loop without disturbing the iteration. This contract is pinned by the `delete-snapshot-safety` test row.
 
