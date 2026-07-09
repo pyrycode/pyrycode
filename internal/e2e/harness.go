@@ -270,6 +270,7 @@ func StartRotation(t *testing.T, home, sessionsDir, initialUUID, trigger string)
 		t.Fatalf("e2e: mkdir sessions dir: %v", err)
 	}
 	fakeBin := ensureFakeClaudeBuilt(t)
+	seedBootstrapRegistry(t, home, initialUUID)
 
 	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
 		claudeBin:  fakeBin,
@@ -321,6 +322,7 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 		t.Fatalf("e2e: mkdir sessions dir: %v", err)
 	}
 	fakeBin := ensureFakeClaudeBuilt(t)
+	seedBootstrapRegistry(t, home, initialUUID)
 
 	envSet := []string{
 		"PYRY_ALLOW_INSECURE_RELAY=1",
@@ -377,6 +379,33 @@ func seedBoundConversation(t *testing.T, home, convID, boundSessionID string) {
 		`","is_promoted":false,"last_used_at":"2026-01-01T00:00:00Z"}]}`)
 	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
 		t.Fatalf("seed conversations.json: %v", err)
+	}
+}
+
+// seedBootstrapRegistry writes sessions.json for the "test" instance with a
+// single bootstrap entry whose id is bootstrapUUID, so Pool.New warm-starts the
+// bootstrap session at that id WITHOUT depending on the startup adopt-by-mtime
+// scan (reconcileBootstrapOnNew). It converges on exactly the post-startup state
+// that adopt-by-mtime produces today (bootstrap id == bootstrapUUID), so the
+// suite stays green pre-#839 while no longer relying on the scan to establish
+// the id — the prep #861 exists to do.
+//
+// Mirrors seedBoundConversation: raw JSON string, fixed past timestamp,
+// os.WriteFile into <home>/.pyry/test/. The raw string (not restart_test.go's
+// registryFile) is deliberate: harness.go compiles under e2e || e2e_install,
+// but registryFile is defined under e2e only, so referencing it would break the
+// e2e_install build. The dir is created here because the seed runs before the
+// daemon (which would otherwise create it) and not every caller pre-creates it.
+func seedBootstrapRegistry(t *testing.T, home, bootstrapUUID string) {
+	t.Helper()
+	regDir := filepath.Join(home, ".pyry", "test")
+	if err := os.MkdirAll(regDir, 0o700); err != nil {
+		t.Fatalf("seed sessions.json: mkdir: %v", err)
+	}
+	regJSON := []byte(`{"version":1,"sessions":[{"id":"` + bootstrapUUID +
+		`","label":"","created_at":"2026-01-01T00:00:00Z","last_active_at":"2026-01-01T00:00:00Z","bootstrap":true,"lifecycle_state":"active"}]}`)
+	if err := os.WriteFile(filepath.Join(regDir, "sessions.json"), regJSON, 0o600); err != nil {
+		t.Fatalf("seed sessions.json: write: %v", err)
 	}
 }
 
