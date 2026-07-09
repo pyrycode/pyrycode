@@ -35,6 +35,13 @@ type fakeSessioner struct {
 	// need per-call resolution (e.g. asserting input id is echoed).
 	getOrCreateOverride func(id sessions.SessionID, label string) (sessions.SessionID, error)
 
+	// opDelay, when > 0, makes Create/Remove sleep before recording and
+	// returning. #865's deadline tests use it to make the op outlast a
+	// shrunken handshake deadline without a multi-second wall-clock sleep.
+	// Set once at construction (each test owns its own fake), so it is read
+	// without the mutex.
+	opDelay time.Duration
+
 	// listSnapshots is a FIFO of canned responses for List. Tests that
 	// don't care about repeated reads can leave it as a single-element
 	// slice — once the FIFO is exhausted, List returns the last entry.
@@ -59,6 +66,9 @@ type renameCall struct {
 }
 
 func (f *fakeSessioner) Create(_ context.Context, label string) (sessions.SessionID, error) {
+	if f.opDelay > 0 {
+		time.Sleep(f.opDelay)
+	}
 	f.mu.Lock()
 	f.createCalls = append(f.createCalls, label)
 	id, err := f.returnID, f.returnErr
@@ -67,6 +77,9 @@ func (f *fakeSessioner) Create(_ context.Context, label string) (sessions.Sessio
 }
 
 func (f *fakeSessioner) Remove(_ context.Context, id sessions.SessionID, opts sessions.RemoveOptions) error {
+	if f.opDelay > 0 {
+		time.Sleep(f.opDelay)
+	}
 	f.mu.Lock()
 	f.removeCalls = append(f.removeCalls, removeCall{ID: id, Opts: opts})
 	err := f.returnErr
@@ -147,10 +160,25 @@ func (f *fakeSessioner) recordedRenames() []renameCall {
 // other tests don't all need to thread a sessioner argument.
 func startServerWithSessioner(t *testing.T, resolver SessionResolver, sessioner Sessioner) (sock string, stop func()) {
 	t.Helper()
+	return startServerWithSessionerHandshake(t, resolver, sessioner, 0)
+}
+
+// startServerWithSessionerHandshake is startServerWithSessioner with an
+// optional per-conn handshake-timeout override. When handshake > 0 the
+// server's handshake deadline is shrunk to it before Serve launches, so
+// #865's deadline tests can make an injected op outlast the pre-fix deadline
+// without a multi-second sleep. handshake == 0 keeps the production default.
+// The field is written before the Serve goroutine starts and read-only
+// per-conn thereafter, so no synchronisation is needed.
+func startServerWithSessionerHandshake(t *testing.T, resolver SessionResolver, sessioner Sessioner, handshake time.Duration) (sock string, stop func()) {
+	t.Helper()
 	dir := shortTempDir(t)
 	sock = filepath.Join(dir, "p.sock")
 
 	srv := NewServer(sock, resolver, nil, nil, nil, sessioner)
+	if handshake > 0 {
+		srv.handshakeTimeout = handshake
+	}
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

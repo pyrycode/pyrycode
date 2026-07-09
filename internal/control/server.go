@@ -203,6 +203,12 @@ type Server struct {
 	log        *slog.Logger
 	sessioner  Sessioner
 
+	// handshakeTimeout bounds the initial request read per conn. Defaults to
+	// defaultHandshakeTimeout in NewServer; same-package tests may shrink it
+	// before Serve launches to keep timing tests sub-second. Written once
+	// before Serve starts and read-only per-conn thereafter — no lock needed.
+	handshakeTimeout time.Duration
+
 	mu       sync.Mutex
 	listener net.Listener
 	closed   bool
@@ -266,14 +272,15 @@ func NewServer(socketPath string, sessions SessionResolver, logs LogProvider, sh
 		log = slog.Default()
 	}
 	return &Server{
-		socketPath:  socketPath,
-		sessions:    sessions,
-		logs:        logs,
-		shutdown:    shutdown,
-		log:         log,
-		sessioner:   sessioner,
-		closedCh:    make(chan struct{}),
-		streamConns: make(map[net.Conn]struct{}),
+		socketPath:       socketPath,
+		sessions:         sessions,
+		logs:             logs,
+		shutdown:         shutdown,
+		log:              log,
+		sessioner:        sessioner,
+		handshakeTimeout: defaultHandshakeTimeout,
+		closedCh:         make(chan struct{}),
+		streamConns:      make(map[net.Conn]struct{}),
 	}
 }
 
@@ -444,10 +451,25 @@ func (s *Server) Close() error {
 	return firstErr
 }
 
-// handshakeTimeout caps how long the server waits for a client to send its
-// JSON request after connecting. Cleared for streaming verbs (VerbAttach)
-// before the ack, since they hold the connection open indefinitely.
-const handshakeTimeout = 5 * time.Second
+// defaultHandshakeTimeout caps how long the server waits for a client to send
+// its JSON request after connecting. Applied per-conn as s.handshakeTimeout
+// (overridable in same-package tests). Cleared for streaming verbs
+// (VerbAttach) before the ack, since they hold the connection open
+// indefinitely; extended — not cleared — for the one-shot session verbs before
+// their long op, so a slow Create/Remove response still lands (see
+// handleSessionsNew, #865).
+const defaultHandshakeTimeout = 5 * time.Second
+
+// sessionOpTimeout is the ctx budget handleSessionsNew / handleSessionsRm give
+// Pool.Create / Pool.Remove — generous past the documented 2-15s claude spawn
+// latency. It stays the binding budget for the operation.
+const sessionOpTimeout = 30 * time.Second
+
+// sessionOpConnGrace is the margin the conn write deadline sits above
+// sessionOpTimeout while a session verb runs its long op, so the op ctx (not
+// the conn deadline) bounds the normal path while a genuinely stuck response
+// write still has an upper bound.
+const sessionOpConnGrace = 5 * time.Second
 
 // handle dispatches a single client connection. One-shot verbs reply with one
 // JSON Response and close. Streaming verbs (currently just VerbAttach) hand
@@ -456,7 +478,7 @@ const handshakeTimeout = 5 * time.Second
 //
 // TODO: a misbehaving client could open a connection, write a partial JSON
 // payload, and hold it. The handshake deadline + per-conn goroutine model
-// bounds the damage to ~handshakeTimeout × N concurrent slow clients. With
+// bounds the damage to ~s.handshakeTimeout × N concurrent slow clients. With
 // the 0600 socket perms the realistic N is "other processes the same user
 // runs", which is fine for Phase 0. Revisit if the socket is ever exposed
 // beyond that boundary.
@@ -467,7 +489,7 @@ func (s *Server) handle(conn net.Conn) {
 			_ = conn.Close()
 		}
 	}()
-	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	_ = conn.SetDeadline(time.Now().Add(s.handshakeTimeout))
 
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
@@ -501,9 +523,9 @@ func (s *Server) handle(conn net.Conn) {
 	case VerbResize:
 		s.handleResize(enc, req.Resize)
 	case VerbSessionsNew:
-		s.handleSessionsNew(enc, req.Sessions)
+		s.handleSessionsNew(conn, enc, req.Sessions)
 	case VerbSessionsRm:
-		s.handleSessionsRm(enc, req.Sessions)
+		s.handleSessionsRm(conn, enc, req.Sessions)
 	case VerbSessionsRename:
 		s.handleSessionsRename(enc, req.Sessions)
 	case VerbSessionsList:
@@ -547,15 +569,18 @@ func (s *Server) handleStop(enc *json.Encoder) {
 // to mint a new session and write the minted UUID back to the client.
 //
 // The handler runs Pool.Create against a fresh background context with a
-// generous 30s deadline (well past the documented 2-15s claude spawn
-// latency). Reusing the conn's handshake deadline would race the
-// 5s handshake timer; a separate ctx is the simpler shape.
+// generous sessionOpTimeout deadline (well past the documented 2-15s claude
+// spawn latency). Before the long call, the conn write deadline — set to the
+// handshake timeout in handle — is extended past that budget so the response
+// write does not fail after the handshake window elapses (mirrors
+// handleAttach, which clears the deadline for its indefinite stream; a
+// one-shot verb bounds it instead). See #865.
 //
 // Errors from sessioner.Create flow to Response.Error verbatim — Pool's own
 // messages already carry package context (e.g. "sessions: create
 // supervisor: ..."). Only the "sessioner not wired" diagnostic carries the
 // "sessions.new: " prefix, mirroring "logs: no log provider configured".
-func (s *Server) handleSessionsNew(enc *json.Encoder, payload *SessionsPayload) {
+func (s *Server) handleSessionsNew(conn net.Conn, enc *json.Encoder, payload *SessionsPayload) {
 	if s.sessioner == nil {
 		_ = enc.Encode(Response{Error: "sessions.new: no sessioner configured"})
 		return
@@ -564,8 +589,14 @@ func (s *Server) handleSessionsNew(enc *json.Encoder, payload *SessionsPayload) 
 	if payload != nil {
 		label = payload.Label
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), sessionOpTimeout)
 	defer cancel()
+	// Extend the conn write deadline past the op budget before the long call.
+	// ctx (sessionOpTimeout) stays the binding budget; this is a backstop so a
+	// genuinely stuck response write still has an upper bound. Best-effort like
+	// handleAttach — a SetDeadline error on a broken conn surfaces on the
+	// Encode below.
+	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
 	id, err := s.sessioner.Create(ctx, label)
 	if err != nil {
 		_ = enc.Encode(Response{Error: err.Error()})
@@ -589,7 +620,7 @@ func (s *Server) handleSessionsNew(enc *json.Encoder, payload *SessionsPayload) 
 // Empty ID is rejected at the handler boundary (a missing-input condition,
 // not a "not found" one). Unknown JSONLPolicy values surface as a clear
 // "unknown jsonl policy" error rather than silently falling back.
-func (s *Server) handleSessionsRm(enc *json.Encoder, payload *SessionsPayload) {
+func (s *Server) handleSessionsRm(conn net.Conn, enc *json.Encoder, payload *SessionsPayload) {
 	if s.sessioner == nil {
 		_ = enc.Encode(Response{Error: "sessions.rm: no sessioner configured"})
 		return
@@ -603,8 +634,11 @@ func (s *Server) handleSessionsRm(enc *json.Encoder, payload *SessionsPayload) {
 		_ = enc.Encode(Response{Error: fmt.Sprintf("sessions.rm: %v", err)})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), sessionOpTimeout)
 	defer cancel()
+	// Extend the conn write deadline past the op budget before the long
+	// Remove; see handleSessionsNew.
+	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
 	err = s.sessioner.Remove(ctx, sessions.SessionID(payload.ID), sessions.RemoveOptions{JSONL: policy})
 	if err != nil {
 		resp := Response{Error: err.Error()}
