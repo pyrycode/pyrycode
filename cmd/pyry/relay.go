@@ -266,6 +266,7 @@ func startRelay(
 		d.Register(protocol.TypeUnarchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false))
 		d.Register(protocol.TypeChangeWorkspace, handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger))
 		d.Register(protocol.TypeCreateWorkspaceFolder, handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger))
+		d.Register(protocol.TypeRecentWorkspaces, handlers.RecentWorkspaces(convReg))
 		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
 		d.Register(protocol.TypeSendMessage, handlers.SendMessage(router, queue, logger))
 
@@ -458,6 +459,7 @@ func startRelayV2(
 			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false),
 			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger),
 			protocol.TypeCreateWorkspaceFolder: handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
+			protocol.TypeRecentWorkspaces:      handlers.RecentWorkspaces(convReg),
 			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
 			protocol.TypeSendMessage:           handlers.SendMessage(router, queue, logger),
 		},

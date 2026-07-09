@@ -1,5 +1,7 @@
 package protocol
 
+import "time"
+
 // CreateWorkspaceFolderPayload is the body of a create_workspace_folder frame
 // (docs/protocol-mobile.md § create_workspace_folder). Phone → binary. Both
 // fields are spec-required and value-typed (mirroring PromoteConversationPayload):
@@ -25,4 +27,32 @@ type CreateWorkspaceFolderPayload struct {
 // (symlink-resolved) absolute path of the created folder, confined to $HOME.
 type WorkspaceFolderCreatedPayload struct {
 	Path string `json:"path"`
+}
+
+// RecentWorkspacesPayload is the body of a recent_workspaces frame
+// (docs/protocol-mobile.md § recent_workspaces). Phone → binary. The payload is
+// empty by spec; the type exists so the dispatcher can decode into a concrete
+// value rather than a json.RawMessage (mirrors ListConversationsPayload).
+type RecentWorkspacesPayload struct{}
+
+// RecentWorkspacesListPayload is the body of a recent_workspaces_list frame
+// (docs/protocol-mobile.md § recent_workspaces_list). Binary → phone, sent in
+// reply to a recent_workspaces request. Ordering is the source of truth:
+// entries are most-recent-first, deduped so each distinct workspace path
+// appears exactly once. The slice is always non-nil so an empty result marshals
+// as "workspaces":[] rather than null.
+type RecentWorkspacesListPayload struct {
+	Workspaces []RecentWorkspace `json:"workspaces"`
+}
+
+// RecentWorkspace is one row of a RecentWorkspacesListPayload
+// (docs/protocol-mobile.md § recent_workspaces_list): one distinct workspace
+// folder — its absolute path and the most-recent LastUsedAt across the
+// conversations that share it. Neither field carries omitempty (reply-side
+// discipline: the client reads both on every row to label and sort the list).
+// path matches WorkspaceFolderCreatedPayload.Path; last_used_at matches
+// Conversation.LastUsedAt / ConversationSummary.LastUsedAt.
+type RecentWorkspace struct {
+	Path       string    `json:"path"`
+	LastUsedAt time.Time `json:"last_used_at"`
 }
