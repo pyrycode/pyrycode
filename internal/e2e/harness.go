@@ -445,6 +445,25 @@ type spawnOpts struct {
 	extraFlags []string
 }
 
+// shortSocketPath returns a control-socket path short enough to stay under
+// macOS's 104-byte sun_path limit regardless of the test name. HOME can be a
+// long t.TempDir() (which on macOS resolves under /var/folders/.../<TestName>/
+// and embeds the sanitised test name); the socket is decoupled to a fresh
+// /tmp dir (~13 bytes via /private/tmp) so the total path stays ~40 bytes.
+// Registers t.Cleanup to remove the containing dir — and the socket inside it
+// — when the test ends. /tmp base (not os.MkdirTemp("", ...), which is
+// /var/folders/... on macOS) matches the established shortTempDir /
+// shortSockTempDir recipe for socket dirs.
+func shortSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "pyry-sock-*")
+	if err != nil {
+		t.Fatalf("e2e: MkdirTemp socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "pyry.sock")
+}
+
 // spawn forks pyry against the given home with the standard test flag set
 // (sleep-as-claude, idle eviction off, -pyry-name=test). Returns the socket
 // path, the running command, captured stdout/stderr buffers, and a channel
@@ -475,7 +494,10 @@ func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *safe
 	}
 
 	bin := ensurePyryBuilt(t)
-	socket := filepath.Join(home, "pyry.sock")
+	// Decouple the control socket from HOME (which may be a long t.TempDir()).
+	// A <home>/pyry.sock under a long-named test overflows macOS's 104-byte
+	// sun_path limit; shortSocketPath binds it under a short /tmp dir instead.
+	socket := shortSocketPath(t)
 
 	stdout := &safeBuffer{}
 	stderr := &safeBuffer{}
