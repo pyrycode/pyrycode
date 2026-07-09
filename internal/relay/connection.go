@@ -195,6 +195,15 @@ func (c *Connection) Send(env protocol.RoutingEnvelope) error {
 	return c.client.Send(raw)
 }
 
+// Connected reports whether the binary↔relay transport leg currently has a live
+// conn — a level poll of the underlying transport.Client for the v2 push drain's
+// pre-seal probe (V2SessionConfig.Connected, #874). A false result means Send
+// would be dropped, so the drain holds the head unsealed rather than burning a
+// Noise nonce on a frame that cannot reach the phone.
+func (c *Connection) Connected() bool {
+	return c.client.IsConnected()
+}
+
 // CloseConn asks the relay to close the named phone conn with the given
 // WS close code. Builds a close-only routing envelope (no Frame) with
 // CloseCode set and forwards via the transport. Returns

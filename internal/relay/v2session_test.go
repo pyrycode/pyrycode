@@ -4598,3 +4598,203 @@ func TestV2Session_SweptThenReconnect_ReHandshakes(t *testing.T) {
 		t.Errorf("reconnect hello_ack = {ver:%q conn:%q}, want {v2 %q}", ack.ProtocolVersion, ack.ConnID, v2TestConnID)
 	}
 }
+
+// --- transport-down HOLD tests (#874) ---
+
+// errTransportDown models a (*relay.Connection).Send hitting
+// transport.ErrNotConnected while the daemon↔relay leg is down.
+var errTransportDown = errors.New("test: relay transport down")
+
+// gatedRecorder wraps a v2Recorder with an atomic transport-up flag so a test
+// can flip the relay leg down and back up (#874). When up, outbound records the
+// frame and returns nil; when down it records nothing and returns
+// errTransportDown — the shape (*relay.Connection).Send exposes when the
+// underlying conn is dropped. connected() reads the same flag and wires
+// V2SessionConfig.Connected, so the drain's pre-seal probe and the send path
+// agree on transport state.
+type gatedRecorder struct {
+	rec *v2Recorder
+	up  atomic.Bool
+}
+
+func newGatedRecorder() *gatedRecorder {
+	g := &gatedRecorder{rec: &v2Recorder{}}
+	g.up.Store(true)
+	return g
+}
+
+func (g *gatedRecorder) outbound(env protocol.RoutingEnvelope) error {
+	if !g.up.Load() {
+		return errTransportDown
+	}
+	return g.rec.outbound(env)
+}
+
+func (g *gatedRecorder) connected() bool { return g.up.Load() }
+
+// queueLen returns the depth of connID's push buffer under the leaf lock, or -1
+// if no queue exists. Safe to call while Run is active (pushMu guards m.queues).
+func queueLen(mgr *V2SessionManager, connID string) int {
+	mgr.pushMu.Lock()
+	defer mgr.pushMu.Unlock()
+	q, ok := mgr.queues[connID]
+	if !ok {
+		return -1
+	}
+	return len(q.items)
+}
+
+// assertHeldQueued verifies the drain is HOLDING while the transport is down:
+// after a settle window (long enough for the Run goroutine to service the
+// drainCh wake and hit the hold guard) the head is still queued at wantQueued —
+// un-popped and unsealed, so no nonce is burned — and nothing beyond the
+// handshake resp reached the recorder. In the pre-fix behaviour the drain would
+// have popped and seal-dropped the head, so the queue would read empty here.
+func assertHeldQueued(t *testing.T, mgr *V2SessionManager, rec *v2Recorder, connID string, wantQueued int) {
+	t.Helper()
+	// A negative assertion ("the drain did NOT pop"): give Run ample time to
+	// process the wake, then assert the head stayed put. drainCh is signalled
+	// synchronously by Push, so a held drain settles well within this window.
+	time.Sleep(100 * time.Millisecond)
+	if got := queueLen(mgr, connID); got != wantQueued {
+		t.Fatalf("queue depth = %d, want %d (head held un-popped while transport down)", got, wantQueued)
+	}
+	if got := rec.snapshot(); len(got) != 1 {
+		t.Fatalf("recorded %d envelopes while down, want 1 (only the handshake resp; drain sealed nothing)", len(got))
+	}
+}
+
+// assertQueueDrains polls until connID's push buffer empties — the transport-up
+// path popping and forwarding the head (a positive assertion, so poll-until is
+// deterministic and fast).
+func assertQueueDrains(t *testing.T, mgr *V2SessionManager, connID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if queueLen(mgr, connID) == 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("queue for %s did not drain to empty (head not popped on transport-up path)", connID)
+}
+
+// TestV2Session_Push_HeldWhileTransportDown_ReflushContiguous pins AC1/AC3/AC4:
+// a control envelope pushed while the relay transport is down is held (not
+// sealed, not lost); once the transport recovers it is delivered exactly once,
+// in FIFO order, and the Noise send-nonce sequence stays contiguous across the
+// down→up window (both surviving frames decrypt under the phone's recv state — a
+// burned/gapped nonce would MAC-fail here). Run under -race.
+func TestV2Session_Push_HeldWhileTransportDown_ReflushContiguous(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	// The handshake runs with the transport UP so the session reaches open and
+	// the noise_resp is emitted.
+	gated := newGatedRecorder()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Flip the transport DOWN, then push a control envelope. The drain must hold
+	// it: un-popped, unsealed, no nonce burned.
+	gated.up.Store(false)
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "held-while-down")); err != nil {
+		t.Fatalf("Push while down: %v", err)
+	}
+	assertHeldQueued(t, sess.mgr, gated.rec, v2TestConnID, 1)
+
+	// Recover the transport, then push a second control envelope. This
+	// re-signals drainCh (the lazy flush): the held head drains first, then the
+	// new one, both in FIFO order.
+	gated.up.Store(true)
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 2, "after-recover")); err != nil {
+		t.Fatalf("Push after recover: %v", err)
+	}
+
+	// Exactly two new frames beyond the handshake resp — no duplicate, no loss.
+	envs := waitForEnvelopes(t, gated.rec, 3)
+	if len(envs) != 3 {
+		t.Fatalf("recorded %d envelopes, want 3 (noise_resp + 2 pushes; no duplicate, no loss)", len(envs))
+	}
+	first := decryptAppFrame(t, envs[1], sess.initRecv)
+	second := decryptAppFrame(t, envs[2], sess.initRecv)
+	if first.ID != 1 || second.ID != 2 {
+		t.Errorf("delivered order = [%d %d], want [1 2] (FIFO: held head before post-recover push)", first.ID, second.ID)
+	}
+}
+
+// TestV2Session_Push_HoldGatedOnProbeNotSendError pins AC2: the drain HOLDS iff
+// the pre-seal Connected() probe reports down. A send that fails while the probe
+// still reports UP is NOT held — the head is popped and forwarded, and its
+// transport error dropped (the pre-#874 drop-on-send posture). Hold is thus
+// distinguished from session-level failure by control-flow position (the probe
+// gates the pop, upstream of the seal), not by inspecting the send error.
+func TestV2Session_Push_HoldGatedOnProbeNotSendError(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	// probeUp drives the pre-seal Connected() gate; sendFail drives whether
+	// Outbound errors. They are independent so the test can set probe=up +
+	// send=fail to prove a send failure alone never holds.
+	var probeUp, sendFail atomic.Bool
+	probeUp.Store(true)
+	rec := &v2Recorder{}
+	outbound := func(env protocol.RoutingEnvelope) error {
+		if sendFail.Load() {
+			return errTransportDown
+		}
+		return rec.outbound(env)
+	}
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   outbound,
+		Connected:  probeUp.Load,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Sub-case (b): probe UP but the send fails. The drain must NOT hold — it
+	// pops and forwards; the transport error is dropped. The head is consumed.
+	sendFail.Store(true)
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "up-send-fails")); err != nil {
+		t.Fatalf("Push (probe up, send fails): %v", err)
+	}
+	assertQueueDrains(t, sess.mgr, v2TestConnID)
+	if got := rec.snapshot(); len(got) != 1 {
+		t.Fatalf("recorded %d, want 1 (send failed, nothing delivered; head still consumed not held)", len(got))
+	}
+
+	// Sub-case (a): probe DOWN. Now the drain holds — head un-popped, unsealed.
+	// sendFail is irrelevant while held (the seal/send never runs).
+	probeUp.Store(false)
+	sendFail.Store(false)
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 2, "probe-down-holds")); err != nil {
+		t.Fatalf("Push (probe down): %v", err)
+	}
+	assertHeldQueued(t, sess.mgr, rec, v2TestConnID, 1)
+}

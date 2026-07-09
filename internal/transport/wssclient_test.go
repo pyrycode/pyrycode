@@ -507,6 +507,68 @@ func TestSend_ReturnsErrClosed_AfterClose(t *testing.T) {
 	}
 }
 
+// TestClient_IsConnected pins the level-poll seam the v2 push drain uses to
+// decide, BEFORE sealing, whether the relay leg is up (#874): false before any
+// successful dial, true once a live conn is established, and false after Close
+// (gated on closeCh, since Close does not nil c.conn). It must agree with Send's
+// own predicate — a live conn means Send does not return ErrNotConnected.
+func TestClient_IsConnected(t *testing.T) {
+	t.Parallel()
+	relay := newTestRelay(t)
+	cfg := Config{URL: relay.URL(), Logger: testLogger(t), WriteTimeout: time.Second}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     50 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+
+	// Before Connect: no live conn.
+	if c.IsConnected() {
+		t.Fatal("IsConnected() = true before Connect, want false")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-relay.connectedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection never established")
+	}
+	// setConn lands shortly after the relay's Accept; poll until IsConnected
+	// agrees, mirroring the Send-becomes-live poll in TestSmoke_HttptestEchoServer.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !c.IsConnected() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !c.IsConnected() {
+		t.Fatal("IsConnected() = false after connect, want true")
+	}
+	// Agrees with Send's predicate: a live conn means Send is not ErrNotConnected.
+	if err := c.Send([]byte("x")); errors.Is(err, ErrNotConnected) {
+		t.Errorf("Send returned ErrNotConnected while IsConnected()=true — predicates disagree")
+	}
+
+	// After Close: reads down via the closeCh gate even though Close leaves
+	// c.conn non-nil.
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if c.IsConnected() {
+		t.Error("IsConnected() = true after Close, want false")
+	}
+	select {
+	case <-connectErr:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Connect did not return after Close")
+	}
+}
+
 func TestReceive_ReturnsErrClosed_AfterClose(t *testing.T) {
 	t.Parallel()
 	c := New(Config{Logger: testLogger(t), WriteTimeout: time.Second})

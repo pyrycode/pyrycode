@@ -445,6 +445,7 @@ func startRelayV2(
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
 		Outbound:    conn.Send,
+		Connected:   conn.Connected,
 		StaticPriv:  priv[:],
 		Devices:     registry,
 		DevicesPath: resolveDevicesPath(instanceName),
