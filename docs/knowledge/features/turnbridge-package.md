@@ -461,14 +461,29 @@ ships the mechanism; #633 supplies the original production resolver + the wiring
 
 > **Since #679 the resolver is chosen per-subscription by the caller's
 > `TargetResolver`, not fixed at construction.** `resolveTarget` (`cmd/pyry`) picks
-> the **recency** resolver below for the `convID == ""` no-route-yet bootstrap
-> branch, and a **by-id** resolver (`resolveBoundSessionJSONL`, tails
-> `<bound-session-id>.jsonl`, mtime-independent) once a turn is routed to a
-> conversation's bound session — so the reply follows the active conversation's own
-> transcript and never another conversation's more-recently-written file
-> (cross-conversation confidentiality). See [codebase/679.md](../codebase/679.md)
-> and [conversation-session-binding.md](conversation-session-binding.md). The
-> recency-resolver description below is now specifically the **bootstrap branch**.
+> a **by-id** resolver (`resolveBoundSessionJSONL`, tails `<bound-session-id>.jsonl`,
+> mtime-independent) once a turn is routed to a **non-bootstrap** conversation's
+> bound session — so the reply follows the active conversation's own transcript and
+> never another conversation's more-recently-written file (cross-conversation
+> confidentiality). See [codebase/679.md](../codebase/679.md) and
+> [conversation-session-binding.md](conversation-session-binding.md).
+>
+> **Corrected 2026-07 (#854): the `convID == ""` bootstrap branch does NOT use a
+> plain mtime "recency" scan.** It was probe-preferred by #827 (undocumented at the
+> time — no `codebase/827.md` exists; see [codebase/838.md](../codebase/838.md)'s
+> note) to `resolveOwnBootstrapJSONL`: it tails the transcript the daemon's *own*
+> claude child holds open (matched by PID via `rotation.Probe`), falling back to the
+> plain mtime scan (`resolveLatestSessionJSONL`, #633) only when no usable probe is
+> available — never picking a second claude's newer file in the same shared dir.
+> **#854 extends this to a third case**: a `convID != ""` conversation that resolves
+> to the **bootstrap** session (`host == bootstrap`, a pointer-identity check) also
+> uses `resolveOwnBootstrapJSONL`, not the by-id resolver. The bootstrap claude
+> spawns without `--session-id`, so it mints its own on-disk transcript uuid that
+> never equals its pool id — a by-id resolver keyed on the pool id would tail a
+> `<poolID>.jsonl` that never exists and loop forever (the fresh-daemon deadlock
+> #854 fixes: on a fresh daemon, before #854, the bootstrap-bound conversation would
+> never get a reply). The by-id resolver is now used **only** for a `convID != ""`
+> conversation bound to a **non-bootstrap** session. See [codebase/854.md](../codebase/854.md).
 >
 > **Since #686 the by-id resolver's *directory* is per-conversation, not the
 > shared dir.** Once [#685](conversation-session-binding.md#cwd-is-the-validated-trust-marked-spawn-workdir-685)
@@ -497,7 +512,10 @@ ships the mechanism; #633 supplies the original production resolver + the wiring
   **most-recently-modified `<uuid>.jsonl`** under the daemon's `claudeSessionsDir`
   plus a `startOffset`, re-evaluated fresh per subscription so a
   (re)subscription streams only new events instead of replaying the whole
-  conversation. See [codebase/633.md](../codebase/633.md).
+  conversation. See [codebase/633.md](../codebase/633.md). **Superseded as the
+  primary bootstrap resolver by #827/#854** (see the corrected callout above) —
+  `resolveLatestSessionJSONL` now survives only as `resolveOwnBootstrapJSONL`'s
+  no-probe-available fallback, not the resolver `resolveTarget` picks directly.
 - **Cold start tails from offset 0 (#671).** `startOffset = size` (EOF) is the
   right default for a warm `--continue` resume (don't replay the prior transcript
   to the internet-exposed phone) and a `/clear` rotation, but it dropped the live
