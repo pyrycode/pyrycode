@@ -2,7 +2,7 @@
 
 PTY-driven sibling of [`internal/agentrun/streamrunner`](streamrunner-package.md): spawns `claude` as an interactive TUI under [`github.com/pyrycode/tui-driver`](https://github.com/pyrycode/tui-driver), waits for the TUI to reach idle, checks for trust-folder / MCP-failure / network-failure modals at the post-idle snapshot, submits one user prompt via `Session.WritePrompt` (bracketed-paste), and tears the session down through `Session.Close` (SIGTERM → grace → SIGKILL → PTY close).
 
-Introduced #471 as a scaffolding-only slice; extended by #478 (JSONL tail + stream-json emit + end-of-turn classification), #479 (pyry-side `MaxTurns` budget Counter + PTY-heartbeat/spinner-freeze watchdog with shared ctx-cancel teardown), #547 (a prompt-commit recovery loop that re-delivers a corrupted/uncommitted bracketed paste), #553 (a `Pasted text` chip gate on that re-delivery so a committed-but-slow turn is never destructively re-pasted — **#227** protection; see [Prompt-commit recovery & the chip gate](#prompt-commit-recovery--the-chip-gate)), and #552 (an opt-in TUI session flight recorder behind `PYRY_RECORD_DIR` that mirrors every PTY byte to an asciinema-v2 `.cast` file — OFF by default, byte-identical to today when unset; see [Session flight recorder](#session-flight-recorder-pyry_record_dir)). **#470 wired it in as the [`pyry agent-run`](pyry-agent-run-command.md) default**, cutting the verb over from `streamrunner` to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline. The pivot is driven by Anthropic's policy article enumerating "Interactive Claude Code in the terminal or IDE" as subscription-eligible while not naming the stream-json subprocess surface; `streamrunner` is retained as a `PYRY_USE_STREAMJSON=1` rollback knob for empirical post-deadline billing-classification comparison.
+Introduced #471 as a scaffolding-only slice; extended by #478 (JSONL tail + stream-json emit + end-of-turn classification), #479 (pyry-side `MaxTurns` budget Counter + PTY-heartbeat/spinner-freeze watchdog with shared ctx-cancel teardown), #547 (a prompt-commit recovery loop that re-delivers a corrupted/uncommitted bracketed paste), #553 (a `Pasted text` chip gate on that re-delivery so a committed-but-slow turn is never destructively re-pasted — **#227** protection; see [Prompt-commit recovery & the chip gate](#prompt-commit-recovery--the-chip-gate)), #552 (an opt-in TUI session flight recorder behind `PYRY_RECORD_DIR` that mirrors every PTY byte to an asciinema-v2 `.cast` file — OFF by default, byte-identical to today when unset; see [Session flight recorder](#session-flight-recorder-pyry_record_dir)), #565 (descendant-Bash-process-group reap on operator SIGTERM), and #864 (the same reap extended to the budget-hit and watchdog-fire teardown paths; see [Teardown reap: descendant process groups](#teardown-reap-descendant-process-groups-reapgo-565-864)). **#470 wired it in as the [`pyry agent-run`](pyry-agent-run-command.md) default**, cutting the verb over from `streamrunner` to land on the explicitly subscription-eligible interactive surface ahead of Anthropic's 2026-06-15 billing-policy deadline. The pivot is driven by Anthropic's policy article enumerating "Interactive Claude Code in the terminal or IDE" as subscription-eligible while not naming the stream-json subprocess surface; `streamrunner` is retained as a `PYRY_USE_STREAMJSON=1` rollback knob for empirical post-deadline billing-classification comparison.
 
 ## Public API
 
@@ -75,9 +75,10 @@ Intentionally **absent** from the argv:
    (3a. if PYRY_RECORD_DIR is set: create the .cast file + recorder and arm mirror — see
         "Session flight recorder" below; otherwise mirror stays nil)
    (3b. install cmd.Cancel (descendant-group reap → graceful SIGTERM) + cmd.WaitDelay — see
-        "Operator-SIGTERM teardown" below; MUST be set before Spawn arms the os/exec ctx watcher)
+        "Teardown reap" below; MUST be set before Spawn arms the os/exec ctx watcher)
 4. sess, err := tuidriver.Spawn(cmd, tuidriver.SpawnOpts{Mirror: mirror})  // mirror nil when off
    defer sess.Close()
+   defer <trailing descendant-group reap>  // #864; registered right after, fires first (LIFO)
 5. tuidriver.WaitUntil(ctx, func() bool { return tuidriver.IsIdle(sess.Buffer.Snapshot()) })
 6. snap := sess.Buffer.Snapshot()
    HasTrustModal(snap)      → ErrTrustModalDetected
@@ -158,33 +159,56 @@ Close errors are advisory: the body's return value already names the operator-vi
 
 Never logs `cfg.PromptBytes` content, any substring of `sess.Buffer.Snapshot()`, or any rendered TUI content. Writers (`Stderr` now, `Stdout` in #472) are opaque. The rule is pinned in the package doc-comment.
 
-## Operator-SIGTERM teardown: descendant-group reap (`reap.go`, #565)
+## Teardown reap: descendant process groups (`reap.go`, #565, #864)
 
-claude (2.1.158) runs **every** Bash command in its own detached process group two levels below pyry — `pyry → claude → zsh -c eval '<cmd>' → <cmd>`, where the `zsh`+`cmd` live in a NEW group claude creates. `sess.Close()` reaps claude (pyry's direct child) but not that group, so on operator SIGTERM the Bash subprocess survives, reparented to init. For a command that never returns (`tail -f /dev/null`) the orphan is **unbounded**.
+claude (2.1.158) runs **every** Bash command in its own detached process group two levels below pyry — `pyry → claude → zsh -c eval '<cmd>' → <cmd>`, where the `zsh`+`cmd` live in a NEW group claude creates. `sess.Close()` reaps claude (pyry's direct child) but not that group, so on any teardown that kills claude the Bash subprocess can survive, reparented to init. For a command that never returns (`tail -f /dev/null`) the orphan is **unbounded**.
 
 A graceful SIGTERM to claude does **not** fix this on its own: measured 3/3 (claude 2.1.158), claude given a graceful SIGTERM + grace exits cleanly but leaves the Bash group it deliberately isolated orphaned. Relying on claude to reap a grandchild it intentionally detached is a stochastic dependency that does not hold, so the no-orphan guarantee comes from deterministic pyry code (*belt-and-suspenders means different fabric*).
 
-`Run` overrides `exec.Cmd.Cancel` — installed after `EnsureClaudeEnv` and **before** `Spawn`, so os/exec's ctx watcher captures it at `Start`:
+`reapDescendantGroups(rootPid, logger)` (`reap.go`) takes one `ps -axo pid=,ppid=,pgid=` snapshot (one portable enumeration across Linux + macOS — no `//go:build` split, no cgo, no new dep), BFS-walks `rootPid`'s transitive descendants, and `syscall.Kill(-pgid, SIGKILL)`s each distinct descendant group (negative pid = whole group). SIGKILL (not SIGTERM-then-grace) because these are abandoned tool commands whose output is already discarded (no `tool_result` will be sent). Three **load-bearing guards** skip a candidate group: `pgid <= 1` (init/invalid), `pgid == syscall.Getpgrp()` (pyry's own group — never suicide), and `pgid == rootPid` (claude is a `setsid`/`pty.Start` group leader so `pgid == pid`; `sess.Close()` owns claude's teardown). Getting the self-group or root-group guard wrong SIGKILLs pyry or init. Best-effort + content-blind: `ps` is bounded by a 2s timeout (`reapPSTimeout`); enumeration/kill failures log at Warn (pgids/counts only — never command strings) and do not propagate; claude still gets its SIGTERM regardless; `ESRCH` (group already exited in the window) is benign.
+
+The walk only sees a descendant group **while claude is still alive** — a dead claude reparents its Bash group to init, and the walk (which enumerates descendants of claude's pid) then misses it. Since #565 (operator-cancel only) and #479 (budget/watchdog) established three teardown paths that kill claude at different moments, the reap needs to observe the live tree at each path's specific moment — one chokepoint per "who signals claude, and when":
+
+| Path | Who signals claude | Chokepoint | Why |
+| --- | --- | --- | --- |
+| Operator cancel | `cmd.Cancel` (reap → SIGTERM) | inside `cmd.Cancel`, before its SIGTERM | Reap already runs before its own SIGTERM — the original #565 chokepoint. |
+| Budget hit | the `Terminate` hook itself (SIGTERM) | inside the `Terminate` hook, before its SIGTERM | A trailing defer would run *after* the hook's SIGTERM — claude may already be exiting and the orphan reparented. Mirrors `cmd.Cancel`'s reap-before-signal ordering (#864). |
+| Watchdog fire (and normal end-of-turn) | nobody until `sess.Close()` | a trailing `defer`, registered right after `defer sess.Close()` (LIFO fires it first) | `runWatchdog` only cancels `runCtx`; claude stays wedged-but-alive until `sess.Close()`'s SIGTERM. A defer firing before `sess.Close()` reaps a live tree — and also covers a clean end-of-turn run whose claude launched a never-returning background command (#864). |
 
 ```go
+// operator-cancel path (#565); installed after EnsureClaudeEnv and before Spawn
 cmd.Cancel = func() error {
-    reapDescendantGroups(cmd.Process.Pid, logger) // SIGKILL claude's detached Bash group(s)
-    return cmd.Process.Signal(syscall.SIGTERM)     // then graceful SIGTERM (lets claude flush JSONL)
+    reapDescendantGroupsFn(cmd.Process.Pid, logger) // SIGKILL claude's detached Bash group(s)
+    return cmd.Process.Signal(syscall.SIGTERM)       // then graceful SIGTERM (lets claude flush JSONL)
 }
 cmd.WaitDelay = killGrace // local const = 5s; mirrors streamrunner.killGrace / supervisor.spawnWaitDelay
+
+// trailing-defer path (#864); registered immediately after defer sess.Close()
+defer func() { reapDescendantGroupsFn(cmd.Process.Pid, logger) }()
+
+// budget in-hook path (#864); first statement in the Terminate hook, before its own SIGTERM
+Terminate: func() error {
+    reapDescendantGroupsFn(cmd.Process.Pid, logger)
+    emitter.SetExitReason(streamjson.ExitReasonMaxTurns)
+    tracker.RecordTransition("budget-hit")
+    cancel()
+    return cmd.Process.Signal(syscall.SIGTERM)
+}
 ```
 
-- **`cmd.Cancel` fires only on operator ctx-cancel** — the `signal.NotifyContext(SIGTERM, SIGINT)` ctx threaded from [`cmd/pyry/agent_run.go`](pyry-agent-run-command.md). Normal completion, budget-hit, and watchdog-fire don't cancel the parent ctx, so those paths are **byte-for-byte unchanged**. Without the override, os/exec's default ctx-cancel is an immediate `Kill()` (SIGKILL) of claude — which both skips the reap and denies claude grace to flush its JSONL.
-- **Race-free chokepoint.** At `cmd.Cancel` time claude and its whole descendant tree are guaranteed alive and not-yet-signalled, so the `ps` snapshot sees the live tree. This is not a hopeful defer-time scan.
-- **`reapDescendantGroups(rootPid, logger)`** (`reap.go`) takes one `ps -axo pid=,ppid=,pgid=` snapshot (one portable enumeration across Linux + macOS — no `//go:build` split, no cgo, no new dep), BFS-walks `rootPid`'s transitive descendants, and `syscall.Kill(-pgid, SIGKILL)`s each distinct descendant group (negative pid = whole group). SIGKILL (not SIGTERM-then-grace) because these are abandoned tool commands whose output is already discarded (no `tool_result` will be sent). Three **load-bearing guards** skip a candidate group: `pgid <= 1` (init/invalid), `pgid == syscall.Getpgrp()` (pyry's own group — never suicide), and `pgid == rootPid` (claude is a `setsid`/`pty.Start` group leader so `pgid == pid`; `sess.Close()` owns claude's teardown). Getting the self-group or root-group guard wrong SIGKILLs pyry or init.
-- **Best-effort + content-blind.** `ps` is bounded by a 2s timeout (`reapPSTimeout`); enumeration/kill failures log at Warn (pgids/counts only — never command strings, preserving the package's logging discipline) and do not propagate; claude still gets its SIGTERM. `ESRCH` (group already exited in the window) is benign.
-- **Bounded exit.** Two SIGKILL backstops follow the SIGTERM: tui-driver `Session.Close`'s 3s grace and `cmd.WaitDelay` (5s). The 3s fires first and is the binding bound, so pyry exits well within the e2e's 5s window (~700 ms happy path). `WaitDelay`'s exact value is **non-binding** — it only has to stay ≥ the `Close` grace so os/exec does not preempt the graceful path.
+All three call sites route through the package-var seam `reapDescendantGroupsFn` (defaults to `reapDescendantGroups`; production behaviour is byte-identical) so unit tests can swap it and assert the reap fired without standing up a real descendant process tree — see `TestRun_MaxTurnsExhaustion_ReapsDescendantGroups` / `TestRun_WatchdogFires_ReapsDescendantGroups` in Testing below.
 
-**Known same-shape gap (not a regression).** The budget-hit and watchdog-fire teardown paths tear claude down without cancelling the parent ctx, so `cmd.Cancel` does not fire and they retain the same structural descendant leak. Out of scope per #565 (operator SIGTERM only, and unobserved); if ever observed, the same `reapDescendantGroups(cmd.Process.Pid, logger)` call drops into the budget `Terminate` hook. See [`codebase/565.md`](../codebase/565.md).
+**Redundant reaps are intentional.** On the budget path the trailing defer also fires later (claude likely already dead → empty walk); on the operator path `cmd.Cancel` reaps live and the trailing defer fires later as a no-op. Both are harmless — `reapDescendantGroups` already tolerates `ESRCH`/already-exited groups — and cost only an extra `ps` snapshot.
+
+**Bounded exit.** Two SIGKILL backstops follow claude's SIGTERM on every path: tui-driver `Session.Close`'s 3s grace and `cmd.WaitDelay` (5s). The 3s fires first and is the binding bound, so pyry exits well within the e2e's 5s window (~700 ms happy path). `WaitDelay`'s exact value is **non-binding** — it only has to stay ≥ the `Close` grace so os/exec does not preempt the graceful path.
+
+**Teardown-latency note (#864):** the trailing defer runs a `ps` snapshot on *every* Run teardown now, not only abnormal ones — one bounded `ps` call (≤2s, normally empty walk on a clean run) is an acceptable cost for closing the leak on the highest-frequency abnormal path (wedge-corpus evidence: most wedges kill claude mid tool-loop, i.e. mid in-flight-Bash).
+
+See [`codebase/565.md`](../codebase/565.md) (original operator-only reap, the measured (a)-insufficient finding, the three guards) and [`codebase/864.md`](../codebase/864.md) (the budget/watchdog extension, the chokepoint-per-signaller lesson).
 
 ## Concurrency
 
-`tui-driver` owns the two background goroutines (PTY reader, `cmd.Wait` observer). `Run` is straight-line foreground code — no goroutines, channels, or timers in this package. `tuidriver.WaitUntil` polls at 50ms via an internal `time.Ticker`. `sess.Close()` (deferred) is idempotent and handles SIGTERM → 3s grace → SIGKILL → PTY close → reader-goroutine join. The #565 descendant-group reap runs synchronously inside `cmd.Cancel` on os/exec's ctx-watcher goroutine (operator-SIGTERM path only); it reads only `cmd.Process.Pid` (immutable after `Start`) + `logger` (concurrency-safe), shells out to `ps`, and issues `syscall.Kill`s — no shared mutable state, no locks (see [Operator-SIGTERM teardown](#operator-sigterm-teardown-descendant-group-reap-reapgo-565)). The #552 flight recorder adds **no** new goroutine either — it is driven entirely by tui-driver's existing PTY reader goroutine (the sole `Mirror` writer); `finalizeRecording`'s file close + rename is ordered strictly after that goroutine exits because its defer is the LIFO tail, running after `sess.Close()`'s `<-readerDone` join (happens-before).
+`tui-driver` owns the two background goroutines (PTY reader, `cmd.Wait` observer). `Run` is straight-line foreground code — no goroutines, channels, or timers in this package. `tuidriver.WaitUntil` polls at 50ms via an internal `time.Ticker`. `sess.Close()` (deferred) is idempotent and handles SIGTERM → 3s grace → SIGKILL → PTY close → reader-goroutine join. The descendant-group reap (#565, extended #864) has three call sites, none adding a new goroutine: the operator-cancel reap runs synchronously inside `cmd.Cancel` on os/exec's ctx-watcher goroutine; the budget in-hook reap runs synchronously inside `Terminate()` on the Run event-loop goroutine (`budget.Counter.OnEvent` calls `Terminate` synchronously); the trailing-defer reap runs on the Run goroutine during deferred teardown, after `wg.Wait()` has joined the watchdog goroutine. Each call reads only `cmd.Process.Pid` (immutable after `Start`) + `logger` (concurrency-safe), shells out to `ps`, and issues `syscall.Kill`s — no shared mutable state, no locks — so a concurrent operator-cancel + trailing-defer overlap is safe by construction (see [Teardown reap](#teardown-reap-descendant-process-groups-reapgo-565-864)). The #552 flight recorder adds **no** new goroutine either — it is driven entirely by tui-driver's existing PTY reader goroutine (the sole `Mirror` writer); `finalizeRecording`'s file close + rename is ordered strictly after that goroutine exits because its defer is the LIFO tail, running after `sess.Close()`'s `<-readerDone` join (happens-before).
 
 ## Dependency direction
 
@@ -227,6 +251,7 @@ Test cases:
 - `TestRun_MissingRequiredFields` (nine subtests, one per required field)
 - `TestHasPastedChip` (pure detector, 6 cases incl. an ANSI-escaped chip that only matches after `StripANSI`, plus a `"Paste text"` near-miss → false)
 - `TestRun_CommitWedge_ChipPresent_ReDelivers` / `TestRun_CommitSlow_NoChip_DoesNotReDeliver` (logger-asserting via the captured `cfg.Logger` + `loggerSyncWriter`; the latter pins the #227 protection by asserting the wedge marker is **absent**. RED→GREEN was demonstrated by toggling the gate to `if false && …`)
+- `TestRun_MaxTurnsExhaustion_ReapsDescendantGroups` / `TestRun_WatchdogFires_ReapsDescendantGroups` (#864; each clones its sibling behavioural test's harness, swaps `reapDescendantGroupsFn` to a mutex-guarded recorder, and asserts `Run` returns nil with ≥1 recorded call at `rootPid > 1` — **non-parallel**, since they mutate the package-var seam; restored via `t.Cleanup`. See [Teardown reap](#teardown-reap-descendant-process-groups-reapgo-565-864).)
 
 The chip-gate integration tests observe the loop decision through the captured `cfg.Logger` (slog `TextHandler` @ `LevelWarn`), **not** a fake-claude stderr sentinel: under the PTY the helper's `os.Stderr` is not wired into the parent's `cfg.Stderr`, so a stderr sentinel observes nothing. The fixtures' `commitModeJSONLDelay` (500ms) only needs to exceed the test's `PromptCommitTimeout` (200ms) so the first commit window elapses with no JSONL and the gate is exercised; control always falls through to `WaitForSessionJSONL`, which keeps the suite `-race -count=5` stable.
 
@@ -252,6 +277,7 @@ CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kerne
 - [`codebase/471.md`](../codebase/471.md) — build notes (file inventory, helper-process mode table, `TestMain` rationale, `GOPRIVATE` setup).
 - [`codebase/553.md`](../codebase/553.md) — chip-gate build notes (decision table, evidence base, the stderr-sentinel-vs-logger testing lesson). Spec [`docs/specs/architecture/553-chip-gated-repaste.md`](../../specs/architecture/553-chip-gated-repaste.md). PR #547 introduced the recovery loop; issue #227 is the destructive re-paste regression the gate prevents.
 - [`codebase/552.md`](../codebase/552.md) — flight-recorder build notes (env-read-in-`Run` rationale, the named-return + wrapping-closure-defer gotcha, fail-fast/best-effort split, the unresolved package-doc carve-out follow-up). Spec [`docs/specs/architecture/552-ptyrunner-session-flight-recorder.md`](../../specs/architecture/552-ptyrunner-session-flight-recorder.md). Consumes tui-driver#125's `NewCastRecorder` via the `SpawnOpts.Mirror` seam.
-- [`codebase/565.md`](../codebase/565.md) — operator-SIGTERM descendant-group reap build notes (the measured (a)-insufficient finding, the three load-bearing guards, the budget/watchdog same-shape gap). Spec [`docs/specs/architecture/565-ptyrunner-descendant-pgroup-reap.md`](../../specs/architecture/565-ptyrunner-descendant-pgroup-reap.md). Strengthens the [`#422`](../codebase/422.md) SIGTERM e2e.
+- [`codebase/565.md`](../codebase/565.md) — operator-SIGTERM descendant-group reap build notes (the measured (a)-insufficient finding, the three load-bearing guards, the budget/watchdog same-shape gap #864 later closed). Spec [`docs/specs/architecture/565-ptyrunner-descendant-pgroup-reap.md`](../../specs/architecture/565-ptyrunner-descendant-pgroup-reap.md). Strengthens the [`#422`](../codebase/422.md) SIGTERM e2e.
+- [`codebase/864.md`](../codebase/864.md) — extends #565's reap to the budget-hit and watchdog-fire teardown paths (the two-chokepoint design, the `reapDescendantGroupsFn` test seam, the chokepoint-per-signaller lesson). Spec [`docs/specs/architecture/864-ptyrunner-reap-abnormal-teardowns.md`](../../specs/architecture/864-ptyrunner-reap-abnormal-teardowns.md).
 - Spec [`docs/specs/architecture/471-ptyrunner-skeleton.md`](../../specs/architecture/471-ptyrunner-skeleton.md) — architect spec.
 - [tui-driver PR #43](https://github.com/pyrycode/tui-driver/pull/43) — `Session.WritePrompt` introduction; the bracketed-paste fix this primitive depends on for prompt commit.
