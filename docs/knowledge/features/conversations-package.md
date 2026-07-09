@@ -38,7 +38,7 @@ Canonical shape (#217): UUIDv4, 36 chars, lowercase hex, dashes at positions 8/1
 |-------|------|----------|-----------------|
 | `ID` | `ConversationID` | `id` | yes |
 | `Name` | `*string` | `name,omitempty` | no — pointer distinguishes nil ("never named") from `""` |
-| `Cwd` | `string` | `cwd` | yes — captured at creation, never updated |
+| `Cwd` | `string` | `cwd` | yes — captured at creation; updated by the `change_workspace` verb (#823, `$HOME`-confined realpath) |
 | `CurrentSessionID` | `string` | `current_session_id,omitempty` | no — empty when no session is bound |
 | `SessionHistory` | `[]string` | `session_history,omitempty` | no — empty/nil omitted |
 | `IsPromoted` | `bool` | `is_promoted` | yes — `false` = discussion, `true` = channel |
