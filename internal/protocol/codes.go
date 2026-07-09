@@ -73,6 +73,21 @@ const (
 	// record no longer exists, so no name/cwd/last_used_at can be projected.
 	// Also a v1TypeSet member.
 	TypeConversationDeleted = "conversation_deleted"
+	// TypeArchiveConversation is a phone → binary dispatch.Route write verb
+	// (like rename_conversation / delete_conversation): it sets an existing
+	// conversation's durable archived flag (IsArchived = true) and replies with
+	// the reused conversation_updated record reflecting the new state. It is a
+	// v1TypeSet member, not a v2 control frame — see the v1/v2 partition in
+	// envelope.go / compat_test.go. Its symmetric restore is
+	// unarchive_conversation; both carry the shared ArchiveConversationPayload.
+	TypeArchiveConversation = "archive_conversation"
+	// TypeUnarchiveConversation is the symmetric restore of
+	// archive_conversation: a phone → binary dispatch.Route write verb that
+	// clears the durable archived flag (IsArchived = false) and replies with the
+	// reused conversation_updated record reflecting the restored (active) state.
+	// It is a v1TypeSet member, not a v2 control frame — see the v1/v2 partition
+	// in envelope.go / compat_test.go.
+	TypeUnarchiveConversation = "unarchive_conversation"
 
 	// Backfill.
 	TypeBackfillSince = "backfill_since"

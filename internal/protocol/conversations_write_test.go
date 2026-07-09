@@ -181,6 +181,49 @@ func TestDeleteConversationPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestArchiveConversationPayload_RoundTrip exercises the shared
+// ArchiveConversationPayload against both wire types: archive_conversation and
+// unarchive_conversation differ only in the envelope type, decode into the same
+// id-only payload, and round-trip byte-equivalently.
+func TestArchiveConversationPayload_RoundTrip(t *testing.T) {
+	cases := []struct {
+		fixture  string
+		wantType string
+	}{
+		{"archive_conversation.json", TypeArchiveConversation},
+		{"unarchive_conversation.json", TypeUnarchiveConversation},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantType, func(t *testing.T) {
+			raw := readFixture(t, tc.fixture)
+
+			var env Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if env.Type != tc.wantType {
+				t.Errorf("Type: got %q, want %q", env.Type, tc.wantType)
+			}
+
+			var p ArchiveConversationPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if p.ConversationID != "c2..." {
+				t.Errorf("ConversationID: got %q, want %q", p.ConversationID, "c2...")
+			}
+
+			out, err := json.Marshal(env)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+				t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+			}
+		})
+	}
+}
+
 func TestConversationDeletedPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "conversation_deleted.json")
 
@@ -232,6 +275,9 @@ func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	}
 	if !p.IsPromoted {
 		t.Errorf("IsPromoted: got false, want true")
+	}
+	if p.IsArchived {
+		t.Errorf("IsArchived: got true, want false (fixture is an active conversation)")
 	}
 	if p.Name == nil || *p.Name != "weekly-planning" {
 		t.Errorf("Name: got %v, want pointer to %q", p.Name, "weekly-planning")

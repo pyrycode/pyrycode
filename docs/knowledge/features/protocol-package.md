@@ -13,7 +13,7 @@ internal/protocol/
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload, BackfillSincePayload, MessageChunkPayload, BackfillDonePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies); QueuedItem + QueueStatePayload / DequeueMessagePayload (#720, v2 queue vocabulary); DebugBundleChunkPayload / DebugBundleDonePayload (#812, v2 debug-bundle streaming bodies)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
-├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274); RenameConversationPayload (#820); DeleteConversationPayload, ConversationDeletedPayload (#822)
+├── conversations_write.go       CreateConversationPayload, ConversationCreatedPayload, PromoteConversationPayload, ConversationUpdatedPayload (#274); RenameConversationPayload (#820); DeleteConversationPayload, ConversationDeletedPayload (#822); ArchiveConversationPayload (#881, shared by archive_conversation + unarchive_conversation)
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
 ├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607), StallPayload (#638) — v2 interactive binary→phone event bodies
 ├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
@@ -23,7 +23,7 @@ internal/protocol/
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
 ├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload; + SessionTransitionPayload round-trip (#656); + four modal payload round-trips (#701)
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
-├── conversations_write_test.go  golden round-trip for each of the four #274 payloads + RenameConversationPayload (#820) + DeleteConversationPayload / ConversationDeletedPayload (#822) via Envelope.Payload
+├── conversations_write_test.go  golden round-trip for each of the four #274 payloads + RenameConversationPayload (#820) + DeleteConversationPayload / ConversationDeletedPayload (#822) + ArchiveConversationPayload for both archive_conversation / unarchive_conversation envelopes (#881) via Envelope.Payload
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
 ├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads + the #638 stall payload via Envelope.Payload
 ├── snapshot_test.go             golden round-trip for the two #617 snapshot payloads + empty-conversation_id boundary
@@ -35,6 +35,7 @@ internal/protocol/
                                  create_conversation.json, conversation_created.json,
                                  promote_conversation.json, conversation_updated.json, rename_conversation.json,
                                  delete_conversation.json, conversation_deleted.json,
+                                 archive_conversation.json, unarchive_conversation.json,
                                  hello_server.json, hello_client.json, hello_ack.json, error.json, ack.json,
                                  turn_state.json, assistant_delta.json, tool_use.json, tool_result.json, turn_end.json, stall.json,
                                  request_snapshot.json, screen_snapshot.json,
@@ -440,9 +441,9 @@ type ConversationSummary struct {
 
 Golden round-trip tests in `conversations_read_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against `testdata/list_conversations.json` / `testdata/conversations.json`. `TestConversationsPayload_RoundTrip` asserts both rows: row 0 has a non-nil `Name` pointer; row 1 has `Name == nil` (NOT `*c1.Name == ""` — would panic on nil deref AND be the wrong check). The `conversations.json` envelope rides with `in_reply_to: 3`, the first protocol fixture pinning `in_reply_to` alongside an array-carrying payload.
 
-### Conversations-write payloads (#274, + `RenameConversationPayload` #820, + `DeleteConversationPayload` / `ConversationDeletedPayload` #822)
+### Conversations-write payloads (#274, + `RenameConversationPayload` #820, + `DeleteConversationPayload` / `ConversationDeletedPayload` #822, + `ArchiveConversationPayload` #881)
 
-Bodies of the conversation create/promote/rename/delete lifecycle (`docs/protocol-mobile.md` § Message types → `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated` / `rename_conversation` / `delete_conversation` / `conversation_deleted`). Phone → binary: `create_conversation`, `promote_conversation`, `rename_conversation`, `delete_conversation`. Binary → phone: `conversation_created` (reply, rides `in_reply_to`), `conversation_updated` (reply to both `promote_conversation` and `rename_conversation`, rides `in_reply_to`; documented elsewhere as a broadcast type but the #820 handler — like `Promote`'s consumer — replies only to the requester), `conversation_deleted` (reply to `delete_conversation`, rides `in_reply_to`, requester only — no live fan-out, see [codebase/822.md](../codebase/822.md)).
+Bodies of the conversation create/promote/rename/delete/archive lifecycle (`docs/protocol-mobile.md` § Message types → `create_conversation` / `conversation_created` / `promote_conversation` / `conversation_updated` / `rename_conversation` / `delete_conversation` / `conversation_deleted` / `archive_conversation` / `unarchive_conversation`). Phone → binary: `create_conversation`, `promote_conversation`, `rename_conversation`, `delete_conversation`, `archive_conversation`, `unarchive_conversation`. Binary → phone: `conversation_created` (reply, rides `in_reply_to`), `conversation_updated` (reply to `promote_conversation`, `rename_conversation`, `archive_conversation`, and `unarchive_conversation`, rides `in_reply_to`; documented elsewhere as a broadcast type but every producer — #820's rename, #881's archive/unarchive — replies only to the requester, no live fan-out), `conversation_deleted` (reply to `delete_conversation`, rides `in_reply_to`, requester only — no live fan-out, see [codebase/822.md](../codebase/822.md)).
 
 ```go
 type CreateConversationPayload struct {
@@ -486,9 +487,19 @@ type ConversationDeletedPayload struct {
     ID string `json:"id"`
 }
 
+// ArchiveConversationPayload (#881) is the body of BOTH archive_conversation
+// and unarchive_conversation — a symmetric toggle of one durable flag, so one
+// id-only payload serves both verbs. Deliberately NOT a reuse of
+// DeleteConversationPayload despite the identical shape (semantic coupling /
+// false dependency).
+type ArchiveConversationPayload struct {
+    ConversationID string `json:"conversation_id"`
+}
+
 type ConversationUpdatedPayload struct {
     ID         string    `json:"id"`
     IsPromoted bool      `json:"is_promoted"`
+    IsArchived bool      `json:"is_archived"` // #881 — always serialized, no omitempty (see below)
     Name       *string   `json:"name"`
     Cwd        string    `json:"cwd"`
     LastUsedAt time.Time `json:"last_used_at"`
@@ -503,10 +514,12 @@ type ConversationUpdatedPayload struct {
 - **`RenameConversationPayload` (#820) is fully-required, two fields, no pointers.** Both `ConversationID` and `Name` are non-pointer `string` — a rename must name a target and a new title; there's no optional-field case to distinguish (contrast `CreateConversationPayload`'s three nullable fields). Empty/whitespace-only `Name` and an unresolvable `ConversationID` are semantic gates the dispatch handler enforces (`internal/relay/handlers.RenameConversation`), not this layer — same posture as `PromoteConversationPayload`.
 - **`DeleteConversationPayload` (#822) is one required field, no pointers** — mirrors `PromoteConversationPayload` / `RenameConversationPayload`'s value-typed `ConversationID`. An unresolvable id is not a decode-layer concern: the dispatch handler (`internal/relay/handlers.DeleteConversation`) treats a miss as `conversation.not_found`, not a payload-shape error.
 - **`ConversationDeletedPayload` (#822) is the minimal ack — one `id` field.** Deliberately not a reuse of `ConversationUpdatedPayload`: post-delete there is no row left to source `name`/`cwd`/`last_used_at` from. See [codebase/822.md](../codebase/822.md) for why `conversation_updated` doesn't fit.
+- **`ArchiveConversationPayload` (#881) is one required field, no pointers — shared by both verbs.** Same value-typed `ConversationID` shape as `DeleteConversationPayload`, kept as a distinct type rather than a reuse: archive/unarchive and delete are semantically unrelated (reversible vs. permanent), so sharing a type would be a false dependency. An unresolvable id is not a decode-layer concern — the dispatch handler (`internal/relay/handlers.ArchiveConversation`) treats a miss as `conversation.not_found`.
+- **`ConversationUpdatedPayload.IsArchived` (#881) has no `omitempty`, unlike the on-disk `Conversation.IsArchived`.** A client must read the flag on active rows too (value `false`) to partition active vs. archived state — an absent key couldn't distinguish "restored to active" from "old daemon." Placed immediately after `IsPromoted` to mirror `ConversationSummary`'s field order (#880) and group the two state bools; the fixture (`testdata/conversation_updated.json`) and both producers (`rename_conversation.go`, `archive_conversation.go`) were updated in lockstep so an archived conversation renamed still reports `is_archived: true` correctly.
 - **`conversation_created.json` is the only fixture in the slice carrying `in_reply_to`** (`in_reply_to: 4`, matching the `create_conversation` frame at id 4). The test pins `env.InReplyTo != nil && *env.InReplyTo == 4`.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to #275, #272, #273. Required-field validation, name uniqueness, ID resolution, broadcast fan-out — all dispatcher / registry concerns.
 
-Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Seven flat test functions (no table-driven; `TestRenameConversationPayload_RoundTrip` #820 and `TestDeleteConversationPayload_RoundTrip` / `TestConversationDeletedPayload_RoundTrip` #822 added alongside the original four), each follows the sibling-slice template.
+Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Flat test functions (no table-driven; `TestRenameConversationPayload_RoundTrip` #820, `TestDeleteConversationPayload_RoundTrip` / `TestConversationDeletedPayload_RoundTrip` #822, and two `ArchiveConversationPayload` round-trips — one per envelope fixture (`archive_conversation.json` / `unarchive_conversation.json`), differing only in `type` — #881 added alongside the original four), each follows the sibling-slice template.
 
 ### `Envelope`
 

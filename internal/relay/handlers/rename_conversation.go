@@ -89,6 +89,7 @@ func RenameConversation(reg ConversationRenamer, registryPath string, logger *sl
 			updated = protocol.ConversationUpdatedPayload{
 				ID:         string(cv.ID),
 				IsPromoted: cv.IsPromoted,
+				IsArchived: cv.IsArchived, // preserve archived state on the shared reply payload
 				Name:       &title,
 				Cwd:        cv.Cwd,
 				LastUsedAt: cv.LastUsedAt, // rename is a metadata edit, not a "use" — not bumped
