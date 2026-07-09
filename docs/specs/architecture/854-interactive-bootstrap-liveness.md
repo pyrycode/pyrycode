@@ -8,6 +8,23 @@ pre-ship gate; a fix-first split makes "fails on main" unverifiable). Do **not**
 test. If the *fix itself* turns out to exceed S (see § Decision), split **within the fix** and
 route back to PO — the test cannot be separated.
 
+> **Re-validated 2026-07-09 (unblock after #860 + #861 merged).** This ticket was blocked by #860
+> (the shared-harness `sun_path` socket-path fix), reset to Backlog, and re-runs now that #860 and
+> #861 (`seedBootstrapRegistry`) have landed on `main`. Re-verification against current `main`:
+> - **Deadlock still present (fix not vacuous):** `resolveOwnBootstrapJSONL` still returns
+>   `"bootstrap child pid %d has no jsonl open yet"` and retries forever
+>   (`cmd/pyry/interactive_turn_stream_v2.go:329`). No other ticket quietly fixed it.
+> - **Transcription sources inherit the shared fixes (the "green shared ≠ green copy" trap).**
+>   #854's real-claude test *transcribes* the daemon harness (build-tag-fenced, not imported), so a
+>   green shared harness does **not** imply a green copy. The daemon spawn **must** route through the
+>   `spawnWith` → `shortSocketPath` pattern (§ Files to read first, § Test step 2), or the control
+>   socket won't bind on macOS and RED never reaches the deadlock it exists to observe. This
+>   re-validation re-anchored every stale line number and folded #861's `seedBootstrapRegistry` into
+>   the binding step (§ Test step 4).
+> - **File-overlap check re-run clean; design unchanged** (§ File-overlap check). Approach A stands;
+>   the security verdict stays **PASS** — #860/#861 touch only the test harness, no production trust
+>   boundary (§ Security review).
+
 ---
 
 ## Files to read first
@@ -17,17 +34,18 @@ surface (mostly transcription sources).
 
 **Fix surface (production):**
 
-- `cmd/pyry/interactive_turn_stream_v2.go:250-457` — `resolveOwnBootstrapJSONL` (the pid-probe
-  bootstrap resolver: `convID == ""` branch, the one that logs `bootstrap child pid <n> has no
-  jsonl open yet` and **retries**) and `resolveTarget` (selects the bootstrap resolver vs the
-  by-id `resolveBoundSessionJSONL`). **This is the outbound-leg core.**
+- `cmd/pyry/interactive_turn_stream_v2.go:290-490` — `resolveOwnBootstrapJSONL` (the pid-probe
+  bootstrap resolver, `func` at :295; logs `bootstrap child pid <n> has no jsonl open yet` at
+  :329 and **retries**; confidentiality guard at :331-346), `resolveTarget` (:432, selects the
+  bootstrap resolver vs the by-id `resolveBoundSessionJSONL` at :478). **This is the outbound-leg
+  core.**
 - `internal/supervisor/supervisor.go:280-455` — `WriteUserTurn` → `deliverViaSession` →
   `confirmViaTranscriptGrowth` → `grew`. The inbound-leg delivery + growth-confirm. Note the
   baseline `("", 0, nil)` path (empty session, no transcript) and that a non-nil baseline error
   diverts to the Committed-chip fallback.
-- `internal/sessions/reconcile.go:146-230` — `newProbePreferredTranscriptResolver` (the
-  growth-confirm baseline resolver). No-baseline conditions return `("", 0, nil)` — never an
-  error, never mtime.
+- `internal/sessions/reconcile.go:185-230` — `newProbePreferredTranscriptResolver` (`func` at
+  :198; the growth-confirm baseline resolver). No-baseline conditions return `("", 0, nil)` —
+  never an error, never mtime (the inverted-convention doc comment is at :185-197).
 - `internal/sessions/pool.go:398-490` — bootstrap `supervisor.Config` wiring: `ClaudeArgs`,
   `ResumeLast`, `ResolveTranscript = newProbePreferredTranscriptResolver`, the late-bound `pidFn`
   reading `bootstrapSup.State().ChildPID`. **Confirms the bootstrap spawns with no `--session-id`.**
@@ -39,7 +57,7 @@ surface (mostly transcription sources).
 - `internal/relay/handlers/send_message.go` — ack-on-enqueue (#721): Route is validated
   **synchronously** pre-enqueue, so a Route reject is the ~20 ms error frame; a post-ack drain
   failure is *not* (it's held + retried).
-- `cmd/pyry/relay.go:409-426` — where `startInteractiveTurnStreamV2` is wired, behind
+- `cmd/pyry/relay.go:461-470` — where `startInteractiveTurnStreamV2` is wired (:469), behind
   `bridge != nil && claudeSessionsDir != ""`, with `probe := newBootstrapProbe(logger)` and
   `pidFn := func() int { return sup.State().ChildPID }`. **The structured reply stream is
   v2-only** (this is inside `startRelayV2`); the v1 leg uses the coarse `startAssistantTurnBridge`.
@@ -54,10 +72,33 @@ surface (mostly transcription sources).
   `decodePairPayload`, `readPersistedServerID`, `sendNoiseInit`, `sendNoiseMsg`, `readInnerFrame`,
   `buildHelloEarly`, `mustJSON`, `relayTestLogger` (grep `internal/e2e/relay_v2_handshake_test.go`
   and `internal/e2e/relay_test.go` for their bodies).
-- `internal/e2e/harness.go:185-360` — `StartInWithEnv` / `spawnWith` / `waitForReady` /
-  `teardown` / `seedBoundConversation`. Transcribe the daemon-spawn + readiness + teardown into a
+- `internal/e2e/harness.go` — the daemon-spawn + readiness + teardown to transcribe into a
   realclaude helper, adapting the child binary to **real** `claude` and HOME to the
-  authenticated-worktree pattern below.
+  authenticated-worktree pattern below. **Anchor on the current post-#860/#861 helpers, not the
+  pre-fix shape:**
+  - `spawnWith` (:516-549) — the **shared spawn core**. It binds the control socket via
+    `shortSocketPath(t)` (:529), **not** `filepath.Join(home, "pyry.sock")`. **This routing is
+    the #860 fix and is load-bearing for RED** (§ Test step 2): a `<home>/pyry.sock` under a long
+    `t.TempDir()` HOME overflows macOS's 104-byte `sun_path` limit, `bind(2)` returns `EINVAL`, the
+    daemon never reaches readiness, and RED can never observe the deadlock it exists to catch.
+    Transcribe the daemon spawn **through this pattern** (call `shortSocketPath` yourself), never a
+    hand-rolled home-relative socket. `StartInWithEnv` (:228) and `StartRotationWithRelay` (:319)
+    are the two spawn templates — the latter is the closest analog (daemon + relay + seeded binding).
+  - `shortSocketPath` (:477-494) — the #860 helper itself; transcribe verbatim (`os.MkdirTemp("/tmp",
+    …)` + `t.Cleanup`).
+  - `waitForReady` / `teardown` — readiness poll (control-socket dial) and SIGTERM→grace→SIGKILL
+    teardown; register `teardown` on `t.Cleanup`.
+- `internal/e2e/harness.go:385-410` — `seedBootstrapRegistry` (#861). Writes `sessions.json` with a
+  bootstrap entry at a **chosen** uuid so `Pool.New` warm-starts the bootstrap **pool id** at that
+  uuid deterministically, without the read-back-after-startup dance. **Prefer this** over reading
+  the id from `sessions.json` post-startup (§ Test step 4). Real claude still mints its *own*
+  on-disk transcript uuid (no `--session-id` — that's approach B), so pool-id ≠ disk-uuid — which is
+  exactly why the outbound leg needs the PID probe, not the by-id resolver (§ The fix, branch 2).
+- `internal/e2e/harness.go:364-383` — `seedBoundConversation`. Writes `conversations.json` binding
+  the driving conversation to a session id; **load-bearing under #678** — `sessionRouter.Route`
+  rejects an empty `current_session_id` before any pool `Lookup`, so an unbound row yields a
+  retryable `server.binary_offline` instead of reaching `WriteUserTurn`. Bind to the same uuid
+  seeded via `seedBootstrapRegistry`.
 - `internal/e2e/realclaude/fixtures.go` — **reuse as-is**: `WithWorktreeAuthenticated` (creds +
   `~/.claude.json` seed so PTY claude skips onboarding), `ensurePyryBuilt`, `buildEnvWithRealHome`,
   `realHome`. The daemon spawn must build pyry with real HOME but run it with the isolated HOME
@@ -128,13 +169,15 @@ The ticket offers two approaches. **Choose A.**
 
 - **B (rejected) — spawn with `--session-id <uuid>` + private per-cwd workdir, wait on the known
   path.** B is *exactly* **#839** ("Deterministic bootstrap `--session-id`: retire `--continue`
-  restart heuristic and startup adopt-by-mtime"), which is **OPEN with `error:developer`**
-  (in-flight, stuck) and touches the same core files (`interactive_turn_stream_v2.go`,
-  `reconcile.go`, the bootstrap spawn). Choosing B would duplicate and collide with #839, and it
-  is the larger change (it re-plumbs the whole bootstrap resume/rotation lifecycle — memory:
-  "removing adopt-by-mtime breaks ~11 e2e"). `origin/feature/839` currently carries **only its
-  spec doc, no code**, so there is no file-overlap block to raise for #854 (§ File-overlap check
-  below), but the design overlap is decisive against B.
+  restart heuristic and startup adopt-by-mtime"), a separate **OPEN** ticket that owns this
+  redesign and touches the same core files (`interactive_turn_stream_v2.go`, `reconcile.go`, the
+  bootstrap spawn). Choosing B would duplicate #839's charter, and it is the larger change (it
+  re-plumbs the whole bootstrap resume/rotation lifecycle — memory: "removing adopt-by-mtime breaks
+  ~11 e2e"). #839 currently has **no remote branch** (`origin/feature/839` was deleted on its own
+  reset), so there is no file-overlap block to raise for #854 (§ File-overlap check below), but the
+  design overlap is decisive against B: this ticket must **not** pre-empt #839's `--session-id`
+  work. Approach A converges the fresh-daemon deadlock without pinning the uuid, leaving #839's
+  redesign untouched.
 
 **Security corollary of A:** A reuses the existing send path verbatim, so it opens **no new
 inject bypass**. Untrusted client content still reaches the child only through
@@ -227,6 +270,7 @@ imported directly):
    for the isolated authenticated HOME (skips cleanly when no creds — this is why the gate is
    operator-run, not CI).
 2. **Fresh daemon, isolated workdir.** Spawn real pyry (`ensurePyryBuilt`) with
+   `-pyry-socket=<shortSocketPath(t)>` (**not** `<home>/pyry.sock` — the #860 fix; see below),
    `-pyry-claude=claude`, `-pyry-workdir=<isolated W under the authenticated HOME>`,
    `-pyry-relay=<fakerelay>/v2/server`, env `PYRY_ALLOW_INSECURE_RELAY=1`, `PYRY_MOBILE_V2=1`;
    build with real HOME, run with the isolated HOME (`buildEnvWithRealHome` split). The isolated
@@ -234,15 +278,30 @@ imported directly):
    *and* sidesteps the shared-session-folder collision (#828) by construction. Wait for the
    control socket (transcribe `waitForReady`) and for the binary's relay registration
    (`fakerelay.WaitBinary`).
+   - **Socket path is load-bearing for RED (#860).** The authenticated HOME is a long
+     `t.TempDir()`; a `<home>/pyry.sock` overflows macOS's 104-byte `sun_path` limit, `bind(2)`
+     returns `EINVAL`, and the daemon never becomes ready — so the RED run dies *before* the
+     deadlock. Route the socket through the shared harness's `shortSocketPath(t)`
+     (`harness.go:477-494`) exactly as `spawnWith` does (`:529`). The prior developer run died on
+     precisely this bug; the fix is on `main` in the *shared* harness but the realclaude test is a
+     *transcription*, so it must copy the fixed pattern, not the pre-fix one.
 3. **Pair + handshake.** `pyry pair` → decode payload → `fakephone.Dial` → drive the Noise_IK
    handshake to open (transcribe `driveHandshakeToOpenDaemon`).
-4. **Bind the driving conversation** to the bootstrap so `send_message` routes to it. Read the
-   bootstrap session id from `~/.pyry/<name>/sessions.json` after startup and seed
-   `conversations.json` with a row whose `current_session_id` is that id and whose `cwd` is `W`
-   (transcribe `seedBoundConversation`; on a fresh daemon with no transcript the bootstrap keeps
-   its cold-minted uuid). If the chosen fix branch removes the need to pre-seed the binding, the
-   test asserts against whatever the fix makes routable — keep the test honest to the shipped
-   behaviour.
+4. **Bind the driving conversation** to the bootstrap so `send_message` routes to it. **Prefer the
+   deterministic #861 seed pair** over reading the id back after startup (mirrors
+   `StartRotationWithRelay`):
+   - `seedBootstrapRegistry(home, chosenUUID)` **before** the daemon starts (`harness.go:385-410`)
+     — pins the bootstrap **pool id** to `chosenUUID` (no post-startup read-back race).
+   - `seedBoundConversation(home, convID, chosenUUID)` (`harness.go:364-383`) — binds the driving
+     conversation to that id so `sessionRouter.Route` resolves to the bootstrap supervisor (#678).
+   Both seeds write `~/.pyry/<name>/...` and must exist before spawn (the daemon loads the
+   registry once at startup). **Real claude still writes its transcript at its own minted uuid**
+   (no `--session-id`), so `chosenUUID` (pool id) ≠ the on-disk transcript stem — this mismatch is
+   *the point*: it is why the outbound reply must bind by PID probe, not by the bound uuid
+   (§ The fix, branch 2), and it makes the fix's `Pool.Default().ID()` identity check clean
+   (`conversation.bound == chosenUUID == bootstrap pool id`). If the chosen fix branch removes the
+   need to pre-seed the binding, the test asserts against whatever the fix makes routable — keep
+   the test honest to the *shipped* behaviour (§ Open questions #2).
 
 Two turns (content-agnostic — **liveness only**, never assert on claude's words; that would be
 non-deterministic and risks the substrate guard):
@@ -289,7 +348,7 @@ teardown is SIGTERM→grace→SIGKILL via the transcribed `teardown`, registered
 - **Outbound.** `resolveOwnBootstrapJSONL` keeps returning a not-found *error* on "no jsonl yet"
   (its subscriber retries on error); `newProbePreferredTranscriptResolver` keeps returning
   `("", 0, nil)` on no-baseline (its consumer must *not* see an error). Do not cross these
-  conventions — they are inverted on purpose (documented at `reconcile.go:164-174`).
+  conventions — they are inverted on purpose (documented at `reconcile.go:185-197`).
 - **Test.** Structural failures (build, spawn, dial, handshake, decrypt) → `t.Fatalf` with context.
   A turn producing no non-empty reply within the timeout → `t.Fatalf` (that *is* the deadlock RED
   captures on `main`). Missing creds → `t.Skip` (via `WithWorktreeAuthenticated`).
@@ -373,13 +432,13 @@ inject or a relaxed isolation guard.
 
 ## File-overlap check (§ 1.5)
 
-`git fetch origin --prune` + branch scan run at architect time. `origin/feature/839` is the only
-sibling on the fix surface; it carries **only** `docs/specs/architecture/839-*.md` (no code — the
-developer errored before touching production files), so there is **no file overlap** with #854's
-production edits or its distinct spec file. No `blockedBy` edge required. (The *design* overlap with
-#839 is handled by choosing approach A — see § Decision.) No other remote `feature/<n>` branch
-touches `cmd/pyry/interactive_turn_stream_v2.go`, `internal/supervisor/supervisor.go`,
-`internal/sessions/pool.go`, or `internal/e2e/realclaude/`.
+`git fetch origin --prune` + branch scan re-run at re-validation time (2026-07-09). **Clean: no
+remote `feature/<n>` branch touches the fix surface** (`cmd/pyry/interactive_turn_stream_v2.go`,
+`internal/supervisor/supervisor.go`, `internal/sessions/pool.go`, `cmd/pyry/main.go`,
+`internal/sessions/reconcile.go`, `cmd/pyry/relay.go`, `internal/e2e/harness.go`). `origin/feature/839`
+**no longer exists** (deleted — the prior run's spec-only branch was cleaned up), so there is no
+file-overlap edge to raise and no `blockedBy` required. The *design* overlap with #839 is handled
+by choosing approach A — see § Decision — and stands independently of the branch's existence.
 
 ---
 
@@ -388,8 +447,9 @@ touches `cmd/pyry/interactive_turn_stream_v2.go`, `internal/supervisor/superviso
 1. **Which leg produces the ~20 ms reject** (routing vs delivery) — pinned by the RED run; drives
    which § Design branch the fix lands in.
 2. **How the driving conversation binds to the bootstrap on a fresh daemon** — whether the fix
-   makes the binding present (seed-free) or the test seeds it (`seedBoundConversation` transcribe).
-   Keep the test asserting the *shipped* behaviour, not a pre-imagined one.
+   makes the binding present (seed-free) or the test seeds it via the #861
+   `seedBootstrapRegistry` + `seedBoundConversation` pair (§ Test step 4). Keep the test asserting
+   the *shipped* behaviour, not a pre-imagined one.
 3. **Turn-1 timeout budget for real claude on `--model haiku`** — start generous (tens of seconds,
    bounded by the test ctx) and tighten only if stable; do not couple it to fakeclaude timings.
 
