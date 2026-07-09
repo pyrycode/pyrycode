@@ -707,6 +707,8 @@ type ScreenSnapshotPayload struct {
     Model          string    `json:"model"`  // #847: bootstrap session's per-session model override; "" = inherited default
     Effort         string    `json:"effort"` // #847: bootstrap session's per-session effort override; "" = inherited default
     YOLO           bool      `json:"yolo"`   // #847: bypass-permissions on/off; false = permissions enforced (fail-safe)
+    UsedTokens     int       `json:"used_tokens"`   // #857: current context size on the latest usage-bearing entry, NOT a running total
+    WindowTokens   int       `json:"window_tokens"` // #857: context-window size (200000 today); 0 = usage seam not wired
 }
 ```
 
@@ -750,6 +752,25 @@ type ScreenSnapshotPayload struct {
   ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
   Not `security-sensitive` — read-only reflection of existing, non-secret session config.
   See [codebase/847.md](../codebase/847.md) and [codebase/848.md](../codebase/848.md).
+- **#857 adds `UsedTokens`/`WindowTokens`, always present (no `omitempty`),
+  after `YOLO`.** They reflect the bootstrap session's current context-window
+  occupancy from [`internal/contextwindow.Read`](contextwindow-package.md)
+  (#856): `UsedTokens` is the current context size on the transcript's latest
+  usage-bearing entry (input + cache-read + cache-creation + output), **not**
+  a running total — a post-compaction snapshot reports a smaller figure with
+  no dedicated marker, since the reader is last-usage-wins. `WindowTokens` is
+  the context-window size (200000 for every current model); `window_tokens:0`
+  means the usage seam was not wired (foreground / unwired), so a client
+  should treat "X of Y" as unavailable rather than divide by zero — this is
+  distinct from a wired-but-fresh session, which reports `(0, 200000)`. The
+  two fields are sufficient for a client to compute "N% used (X of Y)" as
+  `used_tokens / window_tokens` (pyrycode-desktop#182). Shipped unwired at
+  #856 (the handler serialized both fields at their zero values); wired by
+  #857 via the optional `SnapshotUsage` seam on `V2SessionConfig`
+  ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
+  Not `security-sensitive` — read-only reflection of two non-secret aggregate
+  integers; the transcript content itself never crosses the wire.
+  See [codebase/856.md](../codebase/856.md) and [codebase/857.md](../codebase/857.md).
 
 Two golden round-trips in `snapshot_test.go` decode each fixture through `Envelope`
 → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently via the shared
