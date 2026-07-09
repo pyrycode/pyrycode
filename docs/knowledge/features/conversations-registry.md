@@ -10,7 +10,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Promotion primitive (#218):** `(*Registry).Promote(id, name)` flips a discussion to a named channel under the registry lock; four exported sentinel errors (`ErrConversationNotFound`, `ErrConversationAlreadyPromoted`, `ErrPromotionNameInUse`, `ErrPromotionNameEmpty`) cover the refusal cases.
 - **Deletion primitive (#237):** `(*Registry).Delete(id) bool` removes a single entry by ID under the registry lock; consumed by the auto-archive sweep ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)). #217 explicitly deferred deletion until a real consumer surfaced; #220's sweep is that consumer.
 - **Rotation-rebind primitive (#739):** `(*Registry).RebindSession(oldID, newID string) bool` re-points the conversation bound to `oldID` at `newID` and appends `oldID` to `SessionHistory`, under the registry lock; consumed by the pool's `/clear` rotation path so the conversation↔session binding stays current beyond the first rotation ([`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation*). The first production caller to **write** `SessionHistory`.
-- **Durable manual-archive primitive (#880):** `(*Registry).SetArchived(id, archived bool) bool` flips the durable `Conversation.IsArchived` flag under the registry lock; `ListFilter.IsArchived *bool` narrows `List` to active-only/archived-only/both, ANDing with `IsPromoted` when both are set on one filter. Distinct from the auto-archive `Sweep` ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)), which permanently deletes rather than flagging — see that doc's *Related* section. Has no production callers yet; the `archive_conversation`/`unarchive_conversation` wire verbs that call it are #881. See [codebase/880.md](../codebase/880.md).
+- **Durable manual-archive primitive (#880):** `(*Registry).SetArchived(id, archived bool) bool` flips the durable `Conversation.IsArchived` flag under the registry lock; `ListFilter.IsArchived *bool` narrows `List` to active-only/archived-only/both, ANDing with `IsPromoted` when both are set on one filter. Distinct from the auto-archive `Sweep` ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)), which permanently deletes rather than flagging — see that doc's *Related* section. Called by the `archive_conversation`/`unarchive_conversation` wire verbs (#881), the sole production caller. See [codebase/880.md](../codebase/880.md), [codebase/881.md](../codebase/881.md).
 
 ## Surface
 
@@ -246,8 +246,10 @@ mutation are a single critical section under `r.mu` — same no-TOCTOU posture a
   package's established idiom for named-semantic mutations (`Promote`, `RebindSession`); `Update`
   stays the escape hatch for ad hoc multi-field changes.
 
-Has no production callers as of #880; #881's `archive_conversation`/`unarchive_conversation`
-verbs call it. See [codebase/880.md](../codebase/880.md).
+Had no production callers as of #880; #881's `archive_conversation`/`unarchive_conversation`
+handler (`internal/relay/handlers.ArchiveConversation`) is the sole caller, flipping the flag
+then re-reading via `Get` for the reply snapshot (deliberately not folded into a single `Update`
+closure — see [codebase/881.md](../codebase/881.md)). See [codebase/880.md](../codebase/880.md).
 
 ### `Promote(id ConversationID, name string) error`
 
