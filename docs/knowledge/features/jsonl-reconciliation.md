@@ -1,12 +1,37 @@
-# Startup JSONL Reconciliation
+# Startup JSONL Reconciliation (retired 2026-07-09, #839)
 
-On `Pool.New`, pyry scans claude's per-workdir session directory, finds the most-recently-modified `<uuid>.jsonl`, and rotates the registry's bootstrap entry to that UUID if it disagrees. This self-heals the registry after `/clear` (claude rotates session UUIDs on `/clear` and the post-clear UUID is what the operator actually wants to resume).
+**The startup-side mechanism this doc originally described —
+`reconcileBootstrapOnNew`, which scanned claude's per-workdir session
+directory at `Pool.New` and adopted the most-recently-modified `<uuid>.jsonl`
+as the bootstrap id — was deleted in [#839](../codebase/839.md).** It let a
+second, unrelated claude process writing into the same shared
+`~/.claude/projects/<encoded-cwd>/` dir redirect which conversation the
+daemon resumed after a restart (a confused-deputy isolation gap). The
+bootstrap now spawns with an explicit, daemon-owned `--session-id
+<bootstrapID>` on every start and restart instead of `--continue` — see
+[sessions-package.md § `Pool.BootstrapID`](sessions-package.md) and
+[system-overview.md § `supervisor.Config`](../architecture/system-overview.md).
+
+**`/clear` reconciliation still works, unchanged in mechanism** — it just no
+longer runs at startup. `Pool.RotateID` (below) is still the seam the live
+fsnotify watcher (`rotation-watcher.md`) calls when claude rotates its UUID
+on `/clear`; the difference is that `ResolveSessionID` reads the *current*
+`p.bootstrap` fresh at every spawn, so a rotation `RotateID` already
+persisted is picked up on the next restart automatically — no separate
+startup scan needed. `mostRecentJSONL` (below) also survives: it still backs
+`newTranscriptResolver`'s AC5 no-lsof fallback (#838).
+
+The rest of this document (path layout, `RotateID` seam, `mostRecentJSONL`
+semantics) is preserved as historical/reference material for the parts that
+are still true — the **Flow** section's `reconcileBootstrapOnNew` step no
+longer exists.
 
 ## Status
 
 - **Phase 1.2b-A (#38):** startup-side reconciliation introduced. `Pool.RotateID` established as the load-bearing seam.
 - **Phase 1.2b-B (#39, shipped):** live-detection while claude is running (fsnotify watcher + per-PID FD probe). Reuses `RotateID` unchanged. See [`rotation-watcher.md`](rotation-watcher.md).
 - **Phase 1.2c:** idle eviction + lazy respawn. Reads the reconciled UUID via the existing registry.
+- **#839 (2026-07-09):** startup-side `reconcileBootstrapOnNew` **removed**. Replaced by deterministic `--session-id` spawn resolved from `Pool.BootstrapID()` at every spawn. See [codebase/839.md](../codebase/839.md).
 
 ## Why
 
@@ -29,16 +54,20 @@ Files live **directly** in the encoded-cwd dir — there is **no** `sessions/` s
 
 Encoding is verified against an existing entry under `~/.claude/projects/`, not inferred.
 
-## Flow
+## Flow (historical — pre-#839)
+
+This diagram describes the retired startup scan; it no longer runs. Current
+`Pool.New` does `load registry / mint bootstrap → construct *Pool, install
+bootstrap → cold-start save (if reg == nil)` and returns — no reconcile step.
 
 ```
-Pool.New(cfg)
+Pool.New(cfg)  [pre-#839]
   │
   ├── load registry / mint bootstrap            ── existing 1.2a path
   ├── construct *Pool, install bootstrap        ── existing 1.2a path
   ├── cold-start save (if reg == nil)           ── existing 1.2a path
   │
-  └── reconcileBootstrapOnNew(p, cfg.ClaudeSessionsDir, log)
+  └── reconcileBootstrapOnNew(p, cfg.ClaudeSessionsDir, log)   [removed #839]
         │
         ├── ClaudeSessionsDir == ""?            return (test-mode no-op)
         ├── os.ReadDir(dir)                     fs.ErrNotExist → silent return
@@ -48,7 +77,7 @@ Pool.New(cfg)
         └── p.RotateID(bootstrap, mostRecent)   atomic in-memory swap + saveLocked
 ```
 
-`reconcileBootstrapOnNew` lives in `internal/sessions/reconcile.go` and is invoked unconditionally at the end of `Pool.New`, before the function returns. Failure of the directory scan is **never fatal** — startup proceeds with the existing bootstrap entry. Failure of the persistence write is fatal-at-startup, matching the 1.2a cold-start posture.
+`reconcileBootstrapOnNew` lived in `internal/sessions/reconcile.go` and was invoked unconditionally at the end of `Pool.New`, before the function returned. Failure of the directory scan was never fatal — startup proceeded with the existing bootstrap entry. Deleted in #839; `mostRecentJSONL` (below) remains, still backing `newTranscriptResolver`'s AC5 no-lsof fallback (#838).
 
 ## `Pool.RotateID` — the seam
 
@@ -81,16 +110,16 @@ func mostRecentJSONL(dir string) (SessionID, error)
 
 The reconciler **only moves the registry pointer**. The pre-clear JSONL file is never deleted, truncated, or modified. Tests assert this explicitly (file mtime + bytes unchanged after rotation).
 
-## Cold-start non-rotation guarantee
+## Cold-start non-rotation guarantee (historical — pre-#839)
 
-Two cases the AC distinguishes:
+Two cases the AC distinguished, back when this scan ran:
 
 1. **Cold start, no JSONLs yet.** `mostRecentJSONL` returns `("", nil)`. No rotation. Registry holds the freshly-minted UUID.
 2. **Cold start, claude already wrote a JSONL whose UUID differs from pyry's mint.** This is Phase 1.2a's reality (pyry mints `A`, claude writes `<B>.jsonl`). The reconciler detects the mismatch and rotates `A → B`. **This is correct** — the registry should track the actual JSONL. Expect one such rotation on the second restart in 1.2a; harmless and logged at Info.
 
-The forward-looking guarantee — "fresh sessions are not mistaken for rotations" — is satisfied by construction once Phase 1.1+ wires `claude --session-id <uuid>`: the on-disk UUID will then match the registry's mint and `mostRecent == bootstrap` short-circuits before any write.
+The forward-looking guarantee this section originally flagged — "fresh sessions are not mistaken for rotations, once claude is invoked with an explicit id" — is exactly what #839 delivers: the bootstrap now spawns with `--session-id <bootstrapID>`, so the on-disk UUID always matches the registry's id from the first write, and there's no scan left to (not) short-circuit.
 
-## Wiring in `cmd/pyry`
+## `ClaudeSessionsDir` wiring in `cmd/pyry` (current)
 
 `runSupervisor` resolves the directory and passes it through `Config.ClaudeSessionsDir`:
 
@@ -98,11 +127,18 @@ The forward-looking guarantee — "fresh sessions are not mistaken for rotations
 ClaudeSessionsDir: resolveClaudeSessionsDir(*workdir),
 ```
 
-`resolveClaudeSessionsDir` resolves an empty workdir to the process cwd (matching claude), `filepath.Abs`'s the result, then calls `sessions.DefaultClaudeSessionsDir`. If `os.UserHomeDir()` fails, it returns `""` and reconciliation is silently disabled — startup proceeds with the existing 1.2a bootstrap behaviour.
+Post-#839, this field no longer gates a startup reconcile — it gates the live
+rotation watcher (`rotation-watcher.md`) and the #838 growth-confirm probe
+resolver. `resolveClaudeSessionsDir` resolves an empty workdir to the process
+cwd (matching claude), `filepath.Abs`'s the result, then calls
+`sessions.DefaultClaudeSessionsDir`. If `os.UserHomeDir()` fails, it returns
+`""` and both the watcher and the probe resolver are disabled — startup
+proceeds with the deterministic `--session-id` bootstrap behaviour
+regardless.
 
 `encodeWorkdir` is unexported. The encoding is a claude-CLI implementation detail and stays inside `internal/sessions`; `cmd/pyry` only sees the resolved path.
 
-## Error handling
+## Error handling (historical — pre-#839 startup scan)
 
 | Failure | Behaviour |
 |---|---|
@@ -114,26 +150,34 @@ ClaudeSessionsDir: resolveClaudeSessionsDir(*workdir),
 | Most-recent UUID != bootstrap | Call `RotateID`. Save failure → fatal-at-startup (same posture as 1.2a). |
 | Filename present but UUID stem malformed | Skip that file; pick from the rest. |
 
-## Logging
+## Logging (historical)
 
-Rotation event logs at **Info**: `reconcile: rotating bootstrap session id from on-disk JSONL` with `from`, `to`, `dir` fields. Expect one such line per `pyry stop`/restart in 1.2a (claude's UUID ≠ pyry's mint); rare after Phase 1.1+'s `--session-id` wiring lands. Easy to bump to Debug later if it becomes noise.
+The removed startup scan logged rotation events at **Info**:
+`reconcile: rotating bootstrap session id from on-disk JSONL` with `from`,
+`to`, `dir` fields. No longer emitted — startup no longer rotates. Live
+`/clear` rotation via the watcher has its own logging (`rotation-watcher.md`).
 
 ## Testing
 
-`reconcile_test.go` — pure-function tests using `t.TempDir()` and `os.Chtimes`:
+`reconcile_test.go` (still present) — pure-function tests for the surviving
+helpers using `t.TempDir()` and `os.Chtimes`:
 
 - `TestEncodeWorkdir` — `/foo/bar`, `/foo/.bar`, root, empty.
 - `TestMostRecentJSONL_PicksLatestMtime` — three valid JSONLs with stamped mtimes.
 - `TestMostRecentJSONL_IgnoresNonJSONL` — `.txt`, `.jsonl.bak`, dirs, malformed UUID stems all skipped.
 - `TestMostRecentJSONL_EmptyDir`, `_SingleEntry`, `_TieBreakDeterministic`, `_MissingDir`.
 
-`pool_test.go` — end-to-end `Pool.New` + `RotateID` against `t.TempDir()`:
+The `pool_test.go` `TestPool_New_Reconciles_*` table below described the
+now-deleted startup-scan behavior and was removed in #839, replaced by
+`pool_bootstrap_sessionid_test.go`'s no-foreign-adoption /
+`/clear`-via-`RotateID` / id-stability coverage — see
+[codebase/839.md](../codebase/839.md#testing). Historical reference only:
 
-- `TestPool_New_Reconciles_RotatesToNewest` — seed registry with `A`; populate dir with newer `<B>.jsonl`; assert `Default().ID() == B`, registry on disk now has `B`, `<A>.jsonl` untouched.
-- `TestPool_New_Reconciles_NoRotationWhenMatch` — only `<A>.jsonl` on disk, registry has `A`; assert no rewrite (mtime + bytes unchanged).
-- `TestPool_New_Reconciles_MissingDir_ProceedsWithBootstrap`, `_EmptyDir_NoOp`.
-- `TestPool_New_Reconciles_ColdStart_PicksNewestImmediately` — cold start with `<X>.jsonl` already present; registry's bootstrap entry is `X`, not a freshly-minted UUID.
-- `TestPool_RotateID_HappyPath` — map keys, bootstrap pointer, `lastActiveAt` advanced, registry on disk reflects new id.
+- ~~`TestPool_New_Reconciles_RotatesToNewest`~~ — seed registry with `A`; populate dir with newer `<B>.jsonl`; assert `Default().ID() == B`, registry on disk now has `B`, `<A>.jsonl` untouched.
+- ~~`TestPool_New_Reconciles_NoRotationWhenMatch`~~ — only `<A>.jsonl` on disk, registry has `A`; assert no rewrite (mtime + bytes unchanged).
+- ~~`TestPool_New_Reconciles_MissingDir_ProceedsWithBootstrap`, `_EmptyDir_NoOp`~~.
+- ~~`TestPool_New_Reconciles_ColdStart_PicksNewestImmediately`~~ — cold start with `<X>.jsonl` already present; registry's bootstrap entry is `X`, not a freshly-minted UUID.
+- `TestPool_RotateID_HappyPath` (still present) — map keys, bootstrap pointer, `lastActiveAt` advanced, registry on disk reflects new id.
 - `TestPool_RotateID_UnknownOldID` — `ErrSessionNotFound`, no map mutation, no save call.
 - `TestPool_RotateID_Idempotent` — `RotateID(x, x)` is a no-op.
 
@@ -144,4 +188,5 @@ Race detector covers `RotateID`'s lock contract via `go test -race ./internal/se
 - Ticket: [#38](https://github.com/pyrycode/pyrycode/issues/38)
 - Spec: [`docs/specs/architecture/38-startup-jsonl-reconciliation.md`](../../specs/architecture/38-startup-jsonl-reconciliation.md)
 - Sibling features: [`sessions-package.md`](sessions-package.md), [`sessions-registry.md`](sessions-registry.md)
+- **Retirement:** [codebase/839.md](../codebase/839.md) — removed `reconcileBootstrapOnNew`, replaced startup adoption with deterministic `--session-id` spawn resolved via `Pool.BootstrapID()`. Spec: [`docs/specs/architecture/839-deterministic-bootstrap-session-id.md`](../../specs/architecture/839-deterministic-bootstrap-session-id.md).
 - Locked phase design: [`docs/multi-session.md`](../../multi-session.md), [`docs/plan.md`](../../plan.md)

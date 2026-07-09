@@ -555,9 +555,11 @@ invariant.
 The restart-time code path against a pre-populated registry is:
 `loadRegistry` reads → `pickBootstrap` selects the lone `bootstrap: true`
 entry; non-bootstrap entries are *not* materialised into `Pool.sessions` →
-`reg != nil` skips the cold-start save → `reconcileBootstrapOnNew`
-no-ops because `~/.claude/projects/<encoded-cwd>` doesn't exist under the
-test HOME → bootstrap enters `runActive`, idle timer disabled → SIGTERM
+`reg != nil` skips the cold-start save → (pre-#839: `reconcileBootstrapOnNew`
+no-op'd here because `~/.claude/projects/<encoded-cwd>` doesn't exist under
+the test HOME; post-#839 this step is gone entirely — the bootstrap resolves
+its `--session-id` deterministically from the registry, no scan) →
+bootstrap enters `runActive`, idle timer disabled → SIGTERM
 cancels ctx → `runActive` returns `ctx.Err` *before* `transitionTo
 (stateEvicted)`, so no terminal save fires. Net: nothing in pyry calls
 `saveLocked` between pre-write and the second `loadRegistry`. The non-
@@ -1713,9 +1715,10 @@ fake-claude binary and #123's `StartRotation` primitive. It drives a
 real `pyry` daemon through one `/clear`-shaped JSONL rotation and
 asserts the registry's tracked id follows. Production code (the
 fsnotify watcher, the real platform probe — `/proc/<pid>/fd` on Linux,
-`lsof` on macOS — `Pool.RotateID`, `saveLocked`, `reconcileBootstrapOnNew`)
-is exercised exactly as it ships; only the supervised child is replaced
-with `fakeclaude`.
+`lsof` on macOS — `Pool.RotateID`, `saveLocked`) is exercised exactly as
+it ships; only the supervised child is replaced with `fakeclaude`.
+(Pre-#839 this list also named `reconcileBootstrapOnNew` — removed; see
+below.)
 
 ### Sequence
 
@@ -1726,7 +1729,12 @@ with `fakeclaude`.
 4.  os.WriteFile(<sessionsDir>/<initialUUID>.jsonl, "{}\n", 0o600)
 5.  StartRotation(t, home, sessionsDir, initialUUID, trigger)
                                                 // socket ready;
-                                                // reconcile already ran
+                                                // #861: seedBootstrapRegistry
+                                                // writes initialUUID into the
+                                                // registry before spawn, so
+                                                // Pool.New's warm-start
+                                                // (pickBootstrap) picks it
+                                                // directly — no scan/rotate
 6.  pre := waitForBootstrapID(t, regPath, initialUUID, 5s)
 7.  os.WriteFile(trigger, nil, 0o600)            // fake-claude rotates
 8.  post := waitForBootstrapIDChange(t, regPath, initialUUID, 5s)
@@ -1736,21 +1744,30 @@ with `fakeclaude`.
 12. assert after.ID == post.ID                   // no path reverts
 ```
 
-### Pre-create the initial JSONL before `StartRotation`
+### Pre-create the initial JSONL before `StartRotation` (mechanism updated by #861/#839)
 
-`reconcileBootstrapOnNew` runs synchronously inside `Pool.New`, before
-the control socket starts listening. If `<initialUUID>.jsonl` is the
-most-recent jsonl in the watched dir at that point, the bootstrap
-session's id is rotated to `initialUUID` and persisted before the
-harness's readiness gate releases. Step 6's poll then finds it on the
-first read.
+Pre-#861, this pre-created file did the id-establishing work directly:
+`reconcileBootstrapOnNew` ran synchronously inside `Pool.New`, before the
+control socket started listening, and rotated the bootstrap id to
+`<initialUUID>` if it was the most-recent jsonl in the watched dir. #839
+deleted that scan outright.
 
-Letting `fakeclaude` open the initial file inside its own `main()`
-races pyry startup: if reconcile runs first, the dir is empty and the
-registry stays at the freshly-minted bootstrap UUID. `fakeclaude`
-opens with `O_APPEND|O_CREATE`, so writing to an already-existing file
-is harmless — pre-creation removes the race without changing the
-fakeclaude contract.
+**Current mechanism:** `StartRotation` calls `seedBootstrapRegistry(t, home,
+initialUUID)` (#861) immediately before spawning the daemon, writing a
+`bootstrap:true` registry entry for `initialUUID` directly into
+`sessions.json`. `Pool.New`'s warm-start branch (`pickBootstrap`) then picks
+it up with no directory scan at all — the daemon spawns claude with
+`--session-id initialUUID` from the very first spawn. Step 6's poll finds it
+on the first read, same as before.
+
+The `<initialUUID>.jsonl` pre-create (step 4) is now a **confirming no-op**
+for this particular test — the daemon's id already agrees with the on-disk
+file by construction, since `fakeclaude` keys its jsonl filename off
+`PYRY_FAKE_CLAUDE_INITIAL_UUID == initialUUID`, which `StartRotation` also
+sets. It was left in place across the migration (see [codebase/861.md § Implementation](../codebase/861.md))
+rather than removed, since deleting it would touch every call site for no
+behavioral gain. `fakeclaude` still opens with `O_APPEND|O_CREATE`, so
+writing to the already-existing file is harmless.
 
 ### Local `encodeWorkdir` — verbatim copy of the production rule
 
