@@ -122,6 +122,37 @@ func TestPromoteConversationPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestRenameConversationPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "rename_conversation.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeRenameConversation {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeRenameConversation)
+	}
+
+	var p RenameConversationPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.ConversationID != "c2..." {
+		t.Errorf("ConversationID: got %q, want %q", p.ConversationID, "c2...")
+	}
+	if p.Name != "weekly-sync" {
+		t.Errorf("Name: got %q, want %q", p.Name, "weekly-sync")
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
 func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "conversation_updated.json")
 

@@ -54,6 +54,12 @@ const (
 	TypeConversationCreated = "conversation_created"
 	TypePromoteConversation = "promote_conversation"
 	TypeConversationUpdated = "conversation_updated"
+	// TypeRenameConversation is a phone → binary dispatch.Route write verb
+	// (like create_conversation / promote_conversation): it renames an
+	// existing conversation and replies with the reused conversation_updated
+	// record. It is a v1TypeSet member, not a v2 control frame — see the
+	// v1/v2 partition in envelope.go / compat_test.go.
+	TypeRenameConversation = "rename_conversation"
 
 	// Backfill.
 	TypeBackfillSince = "backfill_since"

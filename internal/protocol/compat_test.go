@@ -12,6 +12,7 @@ func TestIsV1Compatible(t *testing.T) {
 		TypeListConversations, TypeConversations,
 		TypeCreateConversation, TypeConversationCreated,
 		TypePromoteConversation, TypeConversationUpdated,
+		TypeRenameConversation,
 		TypeBackfillSince, TypeMessageChunk, TypeBackfillDone,
 		TypeRegisterPushToken,
 	}
@@ -101,10 +102,11 @@ func TestV1TypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeListConversations, TypeConversations,
 		TypeCreateConversation, TypeConversationCreated,
 		TypePromoteConversation, TypeConversationUpdated,
+		TypeRenameConversation,
 		TypeBackfillSince, TypeMessageChunk, TypeBackfillDone,
 		TypeRegisterPushToken,
 	}
-	if got, want := len(all), 16; got != want {
+	if got, want := len(all), 17; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
 	if got, want := len(v1TypeSet), len(all); got != want {
@@ -176,6 +178,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeListConversations, TypeConversations,
 		TypeCreateConversation, TypeConversationCreated,
 		TypePromoteConversation, TypeConversationUpdated,
+		TypeRenameConversation,
 		TypeBackfillSince, TypeMessageChunk, TypeBackfillDone,
 		TypeRegisterPushToken,
 		// v2 control types.
