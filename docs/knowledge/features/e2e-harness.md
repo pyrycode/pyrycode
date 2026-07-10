@@ -49,8 +49,9 @@ split from #51.
 ## What It Does
 
 - Builds `pyry` once per test process (or reuses `$PYRY_E2E_BIN`).
-- Spawns it pointed at a `t.TempDir()` `$HOME`, with `/bin/sleep infinity` as the
-  supervised "claude" and idle eviction disabled.
+- Spawns it pointed at a `t.TempDir()` `$HOME`, with the sleep-claude wrapper
+  (see § Isolation Strategy) as the default supervised "claude" and idle
+  eviction disabled.
 - Polls the Unix socket until `net.Dial` succeeds (5s deadline), short-circuiting
   if pyry exits early.
 - On test cleanup: SIGTERM, escalate to SIGKILL after 3s, then `os.Remove` the
@@ -198,23 +199,30 @@ Spawn args:
 ```
 -pyry-socket=<HomeDir>/pyry.sock
 -pyry-name=test
--pyry-claude=/bin/sleep
+-pyry-claude=<home>/sleep-claude.sh
 -pyry-idle-timeout=0
 <extraFlags...>          # variadic, last-wins via Go's flag package
 -- 99999
 ```
 
-`/bin/sleep 99999` exists on Linux + macOS, survives ~27 hours (longer than
-any test runs), and the readiness gate doesn't depend on the child being a
-real claude. `99999` (a plain integer in seconds) is the only argv form
-portable across both: `infinity` is GNU coreutils only and macOS BSD sleep
-rejects it (see `lessons.md § Test helpers across packages`). #115 changed
-the harness from `infinity` to `99999` because the lazy-respawn test waits
-for `Phase: running` after a respawn — under `infinity`, macOS BSD sleep
-exits immediately, the supervisor enters perpetual backoff, and `Phase:
-running` is never observed. `IdleTimeout=0` defeats the eviction timer by
-default; tests that need eviction pass `-pyry-idle-timeout=<dur>` via the
-variadic on `StartIn`.
+`-pyry-claude` defaults (zero-value `spawnOpts.claudeBin`) to the
+sleep-claude wrapper — `writeSleepClaude(t, home)` writes `#!/bin/sh` +
+`exec sleep 99999` to `<home>/sleep-claude.sh` (0o755) and returns its path
+(#918; was a bare `/bin/sleep` before). The wrapper ignores all argv, so it
+tolerates both the bootstrap invocation's trailing `99999` and any
+daemon-appended spawn-time flag — see § Default Stand-In Argv Tolerance
+below for why a bare `/bin/sleep` stopped working. `exec sleep 99999`
+survives ~27 hours (longer than any test runs), and the readiness gate
+doesn't depend on the child being a real claude. `99999` (a plain integer in
+seconds) is the only argv form portable across BSD and GNU `sleep`:
+`infinity` is GNU coreutils only and macOS BSD sleep rejects it (see
+`lessons.md § Test helpers across packages`). #115 changed the harness from
+`infinity` to `99999` because the lazy-respawn test waits for `Phase:
+running` after a respawn — under `infinity`, macOS BSD sleep exits
+immediately, the supervisor enters perpetual backoff, and `Phase: running`
+is never observed. `IdleTimeout=0` defeats the eviction timer by default;
+tests that need eviction pass `-pyry-idle-timeout=<dur>` via the variadic on
+`StartIn`.
 
 ## Readiness Signal
 
@@ -1053,7 +1061,7 @@ Three production wirings the tests consume (all in `cmd/pyry/main.go`):
 
 ### Tiny shell-script claude stand-in
 
-`Pool.Create` constructs new-session args as `append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))`. With the harness default `claudeBin=/bin/sleep` and `claudeArgs=["99999"]`, the new-session exec is `/bin/sleep 99999 --session-id <uuid>` — both BSD and GNU `sleep(1)` reject the unknown arg and exit with the usage banner. The supervisor would crash-loop the child; lifecycle state would still flip to `stateActive` (Pool tracks lifecycle independently of supervisor health), so cap-evict logic is uncoupled from this — but it generates noisy stderr and risks racing the supervisor backoff window against assertions.
+`Pool.Create` constructs new-session args as `append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))`. With the harness default `claudeBin=/bin/sleep` (pre-#918) and `claudeArgs=["99999"]`, the new-session exec was `/bin/sleep 99999 --session-id <uuid>` — both BSD and GNU `sleep(1)` reject the unknown arg and exit with the usage banner. The supervisor would crash-loop the child; lifecycle state would still flip to `stateActive` (Pool tracks lifecycle independently of supervisor health), so cap-evict logic is uncoupled from this — but it generates noisy stderr and risks racing the supervisor backoff window against assertions.
 
 The fix: a two-line shell script written by the test as `<home>/sleep-claude.sh`, made executable, passed via `-pyry-claude=<path>` through `StartIn`'s variadic `extraFlags`:
 
@@ -1066,14 +1074,14 @@ Both bootstrap (`<script> 99999`) and new sessions (`<script> 99999 --session-id
 
 ### File-local helpers — three new, one polling vs. one-shot
 
-Four helpers in `cap_test.go`, all file-local:
+Three helpers introduced by #116, plus `writeSleepClaude` (moved to `harness.go` by #918 — see § Default Stand-In Argv Tolerance):
 
-- **`writeSleepClaude(t, home) string`** — writes the script and returns its absolute path.
+- **`writeSleepClaude(t, home) string`** — writes the script and returns its absolute path. Originally file-local to `cap_test.go`; relocated verbatim into `harness.go` by #918 so `spawnWith`'s default path can call it too. Every existing call site is unaffected — same package symbol.
 - **`waitForBootstrap(t, regPath, timeout) string`** — polls the registry for the entry with `Bootstrap == true`, returns its `ID`. Tolerates the registry file not yet existing (Pool's first save races the readiness gate). Distinct from `waitForBootstrapState` (#115) which polls a *known* id for a *specific* state — `waitForBootstrap` discovers the id.
 - **`waitForSessionState(t, regPath, id, want, timeout)`** — polls until the entry with `id` has `lifecycle_state` matching `want` (`"evicted"` or `"active"`). The `"active"` arm tolerates either an empty/missing field (today's `omitempty` default) or the literal `"active"` — same convention as `waitForBootstrapState`.
 - **`assertActive(t, regPath, id)`** — one-shot registry checkpoint; fails if the session is `"evicted"` *right now*. Distinct from `waitForSessionState(..., "active", ...)` which returns on first observation; `assertActive` is for "X must be true at this exact moment", not "X eventually becomes true". Used in the interleave test's Phase 1/Phase 2 gate to catch a session that flips to active then evicts before the next poll.
 
-Promoting to `harness.go` deferred — rule of three; only `cap_test.go` consumes them today.
+`waitForBootstrap`, `waitForSessionState`, and `assertActive` stay file-local to `cap_test.go` — rule of three, and none of them are needed from the default spawn path. Only `writeSleepClaude` (and its `sleepClaudeScript` const) moved.
 
 ### Why three `sessions.new` calls in `EvictsLRU`, not two
 
@@ -1092,6 +1100,69 @@ The 50ms inter-call sleep is for **timestamp distinguishability**, not race avoi
 ### Production diff is small but non-zero
 
 `cmd/pyry/main.go` gains ~7 LOC: the new flag, its wire-in to `sessions.Config.ActiveCap`, the `pyryFlagValues` registration, and the `nil → pool` swap on `control.NewServer` with the comment block rewritten. Test diff ~204 LOC, single new file. Default `go test ./...` unaffected.
+
+## Default Stand-In Argv Tolerance (#918)
+
+The zero-value `spawnWith` path (used by `Start` / `StartIn` /
+`StartInWithEnv`, and by `StartExpectingFailureIn` via `spawn`) invoked
+`/bin/sleep` directly until #918. #839 wired `Config.ResolveSessionID` on
+**every** bootstrap spawn (`internal/supervisor/supervisor.go`'s
+`buildClaudeArgs` appends `--session-id <uuid>`, driven from
+`internal/sessions/pool.go`), not just `Pool.Create`'s new-session path
+that #116 already worked around. A bare `/bin/sleep 99999 --session-id
+<uuid>` gets rejected by both BSD and GNU `sleep(1)`, crash-looping the
+bootstrap child under backoff — three default-path tests that need the
+child to reach and hold `running` went red: `TestE2E_BootstrapWarmStart_
+IgnoresEvictedOnDisk`, `TestE2E_IdleEviction_LazyRespawn`, and
+`TestRelayV2_Daemon/v2_enabled_request_snapshot_round_trip`.
+
+Fix: point `spawnWith`'s default at the same argv-ignoring wrapper #116
+already proved (`writeSleepClaude` / `sleepClaudeScript`, see § Active-Cap
+Eviction Pattern), instead of introducing a second wrapper. The helper
+moved verbatim from `cap_test.go` (`//go:build e2e`) into `harness.go`
+(`//go:build e2e || e2e_install`) — `spawnWith` lives in `harness.go`, and
+referencing an `e2e`-only symbol from an `e2e || e2e_install` file would
+have broken the `e2e_install` build. Zero call-site changes: every
+existing `writeSleepClaude` caller resolves to the same package symbol.
+
+```go
+if o.claudeBin == "" {
+    o.claudeBin = writeSleepClaude(t, home)   // was: "/bin/sleep"
+}
+```
+
+`claudeArgs`'s `{"99999"}` default is unchanged — the wrapper ignores it
+identically to any appended flag, so no per-test argv reasoning is needed.
+
+**No-regression argument.** Tests that thread `-pyry-claude=` as an
+extraFlag (the `sessions_*` suite) still have `spawnOpts.claudeBin == ""`,
+so `spawnWith` now also writes `home/sleep-claude.sh` before their extra
+flag overrides it with the identical path and content — an idempotent
+double-write, last-flag-wins per Go's `flag` package, no behavioural
+change. Tests that set `claudeBin` directly (`StartRotation*` →
+fakeclaude) have `claudeBin != ""`, so the wrapper is never written.
+`StartExpectingFailureIn`: the daemon fails before ever exec'ing
+`-pyry-claude` (corrupt registry / workdir confinement), so the wrapper
+is written but never run; its assertions target `.pyry/test/sessions.json`
+and stderr, not `home`'s file listing.
+
+**Scope.** This fixes only the default `/bin/sleep` stand-in. Two other
+red e2e mechanisms found in the same sweep are disjoint and tracked
+separately, with no file overlap: `spawnAttachableDaemon`'s Go-test-binary
+stand-in (4 `TestE2E_Attach_*` tests, rejects `--session-id` via
+`flag.Parse()`) is #257; `TestRelayV2_InterruptStopsRunningTurn`'s
+argv-immune-fakeclaude failure ("turn never started") is a daemon-side
+#839 regression, #929. A **ninth** red test outside the original
+enumeration, `TestTwoPhoneStructured_InteractiveReceivesStream`, fails
+identically on `main` (not a regression) via yet another path
+(`StartRotationWithRelay` sets `claudeBin` directly, bypassing the
+default-stand-in fix entirely) — filed as #930, left red. See
+`docs/knowledge/codebase/918.md` for the full incident/lesson writeup.
+
+`bootstrap_warm_start_test.go:64`'s narrative comment ("Supervisor.Run
+spawns `/bin/sleep`") is now mildly stale (the default stand-in is a
+`#!/bin/sh` wrapper over `sleep`, not a bare `/bin/sleep`) — left
+untouched deliberately, since #918's AC required no test-body changes.
 
 ## Attach PTY Harness Pattern (`attach_pty.go`, `attach_pty_test.go`, #125)
 
@@ -2273,7 +2344,8 @@ session is dead-on-arrival, no echo, the byte round-trip times out.
 
 Workaround: a `<home>/echo-claude.sh` shell wrapper that ignores its
 argv entirely and `exec`s the test binary with fixed args. Mirrors the
-`writeSleepClaude` pattern in `cap_test.go` (#116) — see
+`writeSleepClaude` pattern (#116, now the harness-wide default — see
+§ Default Stand-In Argv Tolerance) — see
 [lessons.md § `Pool.Create` appends `--session-id`, breaking naive
 claude stand-ins](../../lessons.md#poolcreate-appends---session-id-breaking-naive-claude-stand-ins).
 
@@ -2537,8 +2609,9 @@ registry-unchanged assertion.
 
 ### Sleep-claude over echo-claude for the supervised child
 
-The fallback tests reuse `writeSleepClaude` from `cap_test.go` (#116) —
-the supervised child is `#!/bin/sh\nexec sleep 99999\n`, which ignores
+The fallback tests reuse `writeSleepClaude` (#116, relocated to
+`harness.go` by #918) — the supervised child is
+`#!/bin/sh\nexec sleep 99999\n`, which ignores
 the appended `--session-id <uuid>` from `Pool.Create` and stays alive
 indefinitely. The happy-path test (#163) needs an *echo-claude* helper
 because it round-trips bytes; the fallback tests don't, and `sleep` is
