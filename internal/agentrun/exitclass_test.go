@@ -19,6 +19,13 @@ func TestMain(m *testing.M) {
 		runExitHelper(mode)
 		return
 	}
+	// Reap-tree fixture dispatch (TestReapDescendantGroups, reap_test.go). The
+	// two env sets are disjoint — exit tests never set the reap var and
+	// vice-versa — so branch order is irrelevant.
+	if role := os.Getenv("GO_AGENTRUN_REAP_MODE"); role != "" {
+		runReapHelper(role)
+		return
+	}
 	os.Exit(m.Run())
 }
 
