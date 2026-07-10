@@ -291,6 +291,54 @@ func TestMarkWorkdirTrusted_WorkdirSymlinkResolvesToRealpath(t *testing.T) {
 	}
 }
 
+// TestMarkWorkdirTrusted_CaseMismatchWritesOnDiskKey is the #910 AC-2 check:
+// pre-marking a workdir whose configured case differs from disk writes the
+// projects-map key claude derives from its canonicalised (on-disk) cwd, so the
+// trust lookup hits and the trust-folder modal is not rendered. Case-insensitive
+// filesystem only — gated at runtime.
+func TestMarkWorkdirTrusted_CaseMismatchWritesOnDiskKey(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "Workspace"), 0o755); err != nil {
+		t.Fatalf("Mkdir Workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "WORKSPACE")); err != nil {
+		t.Skip("case-sensitive filesystem: no wrong-case fold to test")
+	}
+
+	wrongCase := filepath.Join(base, "WorkSpace")
+	gotRealpath, err := markWorkdirTrustedIn(home, wrongCase)
+	if err != nil {
+		t.Fatalf("markWorkdirTrustedIn: %v", err)
+	}
+	if filepath.Base(gotRealpath) != "Workspace" {
+		t.Fatalf("realpath base = %q, want %q (on-disk case)", filepath.Base(gotRealpath), "Workspace")
+	}
+
+	wantRealpath, err := agentrun.ResolveWorkdir(wrongCase)
+	if err != nil {
+		t.Fatalf("ResolveWorkdir: %v", err)
+	}
+	if gotRealpath != wantRealpath {
+		t.Fatalf("realpath = %q, want %q", gotRealpath, wantRealpath)
+	}
+
+	dataPath := filepath.Join(home, ".claude.json")
+	root := readJSON(t, dataPath)
+	projects, ok := root["projects"].(map[string]any)
+	if !ok {
+		t.Fatalf("projects type %T", root["projects"])
+	}
+	entry, ok := projects[wantRealpath].(map[string]any)
+	if !ok {
+		t.Fatalf("projects missing on-disk key %q; got keys %v", wantRealpath, projects)
+	}
+	if entry["hasTrustDialogAccepted"] != true {
+		t.Fatalf("hasTrustDialogAccepted = %v, want true", entry["hasTrustDialogAccepted"])
+	}
+}
+
 func TestMarkWorkdirTrusted_PreservesNumericPrecision(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()

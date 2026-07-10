@@ -3,6 +3,7 @@ package agentrun
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -70,5 +71,88 @@ func TestResolveWorkdir_MissingPath(t *testing.T) {
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("ResolveWorkdir(%q): error %v, want fs.ErrNotExist", missing, err)
+	}
+}
+
+// TestResolveWorkdir_CaseMismatchFoldsToOnDiskCase is the #910 fix: a workdir
+// whose configured case differs from the on-disk directory resolves to the
+// on-disk case (AC-1, AC-5). Case-insensitive filesystem only — gated at
+// runtime, not on runtime.GOOS, because macOS APFS can be case-sensitive.
+func TestResolveWorkdir_CaseMismatchFoldsToOnDiskCase(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmp, "Workspace"), 0o755); err != nil {
+		t.Fatalf("Mkdir Workspace: %v", err)
+	}
+	// Probe: if an all-caps spelling stats to the just-created dir, the fs
+	// folds case; otherwise it is case-sensitive and there is nothing to fix.
+	if _, err := os.Stat(filepath.Join(tmp, "WORKSPACE")); err != nil {
+		t.Skip("case-sensitive filesystem: no wrong-case fold to test")
+	}
+
+	wrongCase := filepath.Join(tmp, "WorkSpace")
+	got, err := ResolveWorkdir(wrongCase)
+	if err != nil {
+		t.Fatalf("ResolveWorkdir(%q): %v", wrongCase, err)
+	}
+	resolvedTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", tmp, err)
+	}
+	want := filepath.Join(resolvedTmp, "Workspace")
+	if got != want {
+		t.Fatalf("ResolveWorkdir(%q) = %q, want %q (on-disk case)", wrongCase, got, want)
+	}
+}
+
+// TestResolveWorkdir_CorrectlyCasedMixedCaseUnchanged proves canonicalisation
+// does not mangle a component whose case already matches disk (AC-3). Any fs.
+func TestResolveWorkdir_CorrectlyCasedMixedCaseUnchanged(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "MixedCaseDir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("Mkdir MixedCaseDir: %v", err)
+	}
+	got, err := ResolveWorkdir(dir)
+	if err != nil {
+		t.Fatalf("ResolveWorkdir(%q): %v", dir, err)
+	}
+	resolvedTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", tmp, err)
+	}
+	want := filepath.Join(resolvedTmp, "MixedCaseDir")
+	if got != want {
+		t.Fatalf("ResolveWorkdir(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+// TestResolveWorkdir_SiblingSafetyCaseSensitive pins the exact-match-first
+// rule: on a case-sensitive filesystem holding both Workspace and workspace,
+// resolving Workspace must never fold onto the sibling (security property).
+// Case-sensitive fs only — gated at runtime by whether the second create
+// collapses onto the first.
+func TestResolveWorkdir_SiblingSafetyCaseSensitive(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	upper := filepath.Join(tmp, "Workspace")
+	if err := os.Mkdir(upper, 0o755); err != nil {
+		t.Fatalf("Mkdir Workspace: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(tmp, "workspace"), 0o755); err != nil {
+		t.Skip("case-insensitive filesystem: cannot hold two case-differing siblings")
+	}
+	got, err := ResolveWorkdir(upper)
+	if err != nil {
+		t.Fatalf("ResolveWorkdir(%q): %v", upper, err)
+	}
+	resolvedTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", tmp, err)
+	}
+	want := filepath.Join(resolvedTmp, "Workspace")
+	if got != want {
+		t.Fatalf("ResolveWorkdir(%q) = %q, want %q (must not resolve to sibling)", upper, got, want)
 	}
 }
