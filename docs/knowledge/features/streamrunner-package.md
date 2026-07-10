@@ -46,14 +46,21 @@ The `stdin.Close()` error log is filtered through [`agentrun.ExitErrIsBenign`](a
 
 ## ctx-cancel teardown
 
-Delegated entirely to stdlib's `os/exec`:
-
 ```go
-cmd.Cancel    = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-cmd.WaitDelay = 5 * time.Second
+cmd.Cancel = func() error {
+    reapDescendantGroupsFn(cmd.Process.Pid, logger)
+    return cmd.Process.Signal(syscall.SIGTERM)
+}
+cmd.WaitDelay = killGrace // 5 * time.Second
 ```
 
-Stdlib's ctx-watcher invokes `cmd.Cancel` (SIGTERM) → child exits or 5s elapses → stdlib SIGKILLs + closes pipes → `cmd.Wait()` returns → `Run` returns nil. No package-owned goroutine, timer, or state machine. The 5s grace is hardcoded per AC ("no timing knobs") and mirrors `budget.GracePeriod` for symmetry.
+`cmd.Cancel` fires when `childCtx` is done — either the operator ctx (SIGTERM/SIGINT) or the
+idle-stall watchdog's `cancelChild` (`childCtx` wraps the operator `ctx` via
+`exec.CommandContext(childCtx, ...)`; see `watchdog.go`) — so one hook covers both teardowns. Stdlib's
+ctx-watcher invokes `cmd.Cancel` (reap, then SIGTERM) → child exits or `killGrace` elapses → stdlib
+SIGKILLs + closes pipes → `cmd.Wait()` returns → `Run` returns nil. No package-owned goroutine, timer,
+or state machine beyond the watchdog's own. `killGrace` is hardcoded per AC ("no timing knobs") and
+mirrors `budget.GracePeriod` for symmetry. See [Teardown reap: descendant process groups](#teardown-reap-descendant-process-groups-reapgo-924) below for what the reap does and why it's safe to fire unconditionally on both teardown paths.
 
 Return mapping at exit:
 
@@ -62,6 +69,47 @@ waitErr := cmd.Wait()
 if ctx.Err() != nil { return nil }   // operator teardown is success
 return waitErr                       // nil on exit 0; *exec.ExitError otherwise
 ```
+
+## Teardown reap: descendant process groups (`reap.go`, #924)
+
+claude isolates every Bash tool command into its own detached process group two levels below pyry
+(`pyry → claude → zsh -c eval '<cmd>' → <cmd>`) and does not reap that group itself, even on a
+graceful SIGTERM — #565 measured this 3/3 on the interactive PTY path, and it carries by
+construction to headless `claude -p` (the detachment is claude's own `setpgid` isolation of each tool
+command, independent of which runner signals it). Left alone, a dispatcher wall-clock SIGTERM landing
+mid-tool orphans the group to init — unbounded for a command that never returns.
+
+`internal/agentrun/streamrunner/reap.go` defines the consumer-side seam:
+
+```go
+var reapDescendantGroupsFn = agentrun.ReapDescendantGroups
+```
+
+`cmd.Cancel` calls it with `cmd.Process.Pid` (claude's pid, alive and un-signalled at fire time — the
+same race-free invariant ptyrunner relies on) immediately before the existing SIGTERM. Byte-for-byte
+mirror of [ptyrunner's seam](ptyrunner-package.md#teardown-reap-descendant-process-groups-reapgo-565-864-923),
+minus `killGrace` (streamrunner already defines its own SIGTERM-grace const locally). The reaper
+implementation, its enumeration walk, and its three load-bearing guards
+(`pgid<=1` / pyry's own group / claude's own group) live in the shared
+[`internal/agentrun.ReapDescendantGroups`](agentrun-package.md) (lifted from `ptyrunner` in #923) —
+this package only wires the call site, it does not re-implement the walk.
+
+One hook, no `ctx.Err()` discriminator: `cmd.Cancel` fires from **both** the operator ctx
+(SIGTERM/SIGINT) and the idle-stall watchdog's `cancelChild` (§ ctx-cancel teardown above), and the
+reap is safe unconditionally on either — the watchdog only fires while claude owes an assistant turn
+(no tool in flight), so on that path the descendant walk finds nothing and the reap is a harmless
+no-op. Never fires on a clean exit: `cancelChild` there runs only after `cmd.Wait()` returns, by which
+point os/exec has already stopped its ctx watcher.
+
+Test: `TestRun_CtxCancel_ReapsDescendantGroups` swaps `reapDescendantGroupsFn` to a mutex-guarded
+`reapRecorder` (non-parallel — mutates the package var, restored via `t.Cleanup`) and asserts it fired
+with a plausible live pid during the existing ctx-cancel-mid-run scenario. One test covers both
+teardown paths because both route through the identical `cmd.Cancel` closure; the watchdog path
+independently proving it cancels `childCtx` is covered by the existing watchdog tests.
+
+See [`codebase/924.md`](../codebase/924.md) (this ticket), [`codebase/565.md`](../codebase/565.md)
+(the original ptyrunner reap and the 3/3 measurement), and
+[`codebase/923.md`](../codebase/923.md) (the lift into `internal/agentrun`).
 
 ## Logging discipline
 
@@ -80,7 +128,7 @@ Pinned in the package doc-comment.
 
 ## Dependency direction
 
-Imports are limited to stdlib: `context`, `encoding/json`, `errors`, `fmt`, `io`, `log/slog`, `os`, `os/exec`, `syscall`, `time`. Crucially, the package does **not** import `internal/supervisor` (the PTY helper) nor any sibling `internal/agentrun/*` subpackage — it is a leaf primitive. Verifiable by:
+Stdlib (`context`, `encoding/json`, `errors`, `fmt`, `io`, `log/slog`, `os`, `os/exec`, `syscall`, `time`) plus the shared parent `internal/agentrun` — imported for `ExitErrIsBenign` (#527) and, as of #924, `ReapDescendantGroups` (via the local `reapDescendantGroupsFn` seam in `reap.go`). Crucially, the package does **not** import `internal/supervisor` (the PTY helper) nor any **sibling** `internal/agentrun/*` subpackage (`ptyrunner`, `budget`, `jsonl`, `trust`, `settings`) — the parent-only import keeps it a leaf primitive relative to its siblings, which is exactly why #923 lifted the reaper up to the parent instead of leaving it inside `ptyrunner`. Verifiable by:
 
 ```bash
 go list -deps ./internal/agentrun/streamrunner/... | grep pyrycode/internal/supervisor
@@ -103,7 +151,7 @@ Same-package `_test.go` with a `TestStreamRunnerHelperProcess` fake claude (re-e
 - `sleep` — install SIGTERM handler that prints `"got SIGTERM"` to stderr and exits 0 within ~50ms; otherwise sleep 30s.
 - `echo_stdin` — copy stdin to `GO_STREAMRUNNER_HELPER_STDIN_FILE` (mode 0o600), exit 0.
 
-Four test cases against the four observable behaviours: clean exit (stdout substring check), non-zero exit (`errors.As(&exitErr)` + `ExitCode() == 1`), ctx-cancel mid-run (`Run` returns nil, elapsed < 6s, `"got SIGTERM"` on stderr — sanity-checks SIGTERM not SIGKILL was the trigger), and stdin envelope round-trip with a deliberately tricky prompt (embedded `"`, `\n`, `\\`, `\x01`) → assert the helper's captured file unmarshalls into the expected `userTurn` shape with `Content[0].Text` byte-for-byte equal to the input.
+Four test cases against the four observable behaviours: clean exit (stdout substring check), non-zero exit (`errors.As(&exitErr)` + `ExitCode() == 1`), ctx-cancel mid-run (`Run` returns nil, elapsed < 6s, `"got SIGTERM"` on stderr — sanity-checks SIGTERM not SIGKILL was the trigger), and stdin envelope round-trip with a deliberately tricky prompt (embedded `"`, `\n`, `\\`, `\x01`) → assert the helper's captured file unmarshalls into the expected `userTurn` shape with `Content[0].Text` byte-for-byte equal to the input. Plus (#924) `TestRun_CtxCancel_ReapsDescendantGroups`, cloning the ctx-cancel-mid-run `sleep`-mode harness with the `reapDescendantGroupsFn` seam swapped to a recorder — see [Teardown reap](#teardown-reap-descendant-process-groups-reapgo-924) above.
 
 ## Consumers
 
@@ -117,7 +165,9 @@ Four test cases against the four observable behaviours: clean exit (stdout subst
 
 ## Related
 
-- [agentrun-package.md](agentrun-package.md) — the PTY-driven sibling (`Drive`) this primitive parallels; shares the "ctx-cancel is success" return contract and the "log-and-continue on stdin write failure" pattern.
+- [agentrun-package.md](agentrun-package.md) — the PTY-driven sibling (`Drive`) this primitive parallels; shares the "ctx-cancel is success" return contract, the "log-and-continue on stdin write failure" pattern, and (post-#924) the `ReapDescendantGroups` consumer relationship.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb that consumes this primitive (cut over from `Drive` in #391).
 - [streamjson-package.md](streamjson-package.md) — the pre-#391 event-stream emitter; no longer composed with this primitive (claude itself emits the canonical stream-json events on its own stdout under stream-json mode). Package stays in tree pending the cleanup ticket.
-- Spec [`docs/specs/architecture/390-streamrunner-primitive.md`](../../specs/architecture/390-streamrunner-primitive.md) — the build-time architect spec.
+- [ptyrunner-package.md](ptyrunner-package.md#teardown-reap-descendant-process-groups-reapgo-565-864-923) — the parity reference for the #924 teardown reap; same seam shape, same guards, same "reap before signal" ordering.
+- [`codebase/924.md`](../codebase/924.md) — this ticket: wiring the descendant-group reap into the streamrunner teardown.
+- Spec [`docs/specs/architecture/390-streamrunner-primitive.md`](../../specs/architecture/390-streamrunner-primitive.md) — the build-time architect spec for this package. Spec [`docs/specs/architecture/924-streamrunner-reap-descendant-groups.md`](../../specs/architecture/924-streamrunner-reap-descendant-groups.md) — the #924 reap wiring.
