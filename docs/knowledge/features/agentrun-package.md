@@ -4,6 +4,8 @@
 
 Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map — a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface, a **shared logical-turn-boundary predicate** (`IsNewLogicalTurn`, #574) that both `budget`'s `--max-turns` enforcement and `streamjson`'s `num_turns` reporting call so the two counts cannot drift on what a claude turn is, and (#923) the **claude descendant-process-group reaper** (`ReapDescendantGroups`) — colocated here, not appended to `exitclass.go`, so a future second consumer (`streamrunner`, #924) can call it without importing a sibling `agentrun` subpackage. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
 
+> **Post-#924:** `streamrunner` is now the reaper's second consumer (`ptyrunner` was the first). See § "Subpackages" and [`codebase/924.md`](../codebase/924.md).
+
 ## Public API
 
 ```go
@@ -57,7 +59,7 @@ func ReapDescendantGroups(rootPid int, logger *slog.Logger)
 | `internal/agentrun/trust` | [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) | Pre-mark workdirs trusted in `~/.claude.json` so PTY-driven claude skips the workspace-trust modal (#475; slimmed resurrection of #341 / #392). |
 | `internal/agentrun/settings` | [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md) | Write the per-spawn deny-default permissions JSON (`{"permissions":{"allow":[...],"defaultMode":"deny"}}`) to `os.TempDir()` so PTY-driven claude enforces the same tool whitelist `-p --allowedTools` had natively (#476; slimmed resurrection of #339 / #392). |
 | `internal/agentrun/ptyrunner` | [ptyrunner-package.md](ptyrunner-package.md) | Interactive-TUI spawn primitive driven by `tui-driver` — the production spawn after #470 lands the cutover (#471). |
-| `internal/agentrun/streamrunner` | [streamrunner-package.md](streamrunner-package.md) | Stream-json subprocess spawn primitive — the current production spawn until #470 cuts over to `ptyrunner`. |
+| `internal/agentrun/streamrunner` | [streamrunner-package.md](streamrunner-package.md) | Stream-json subprocess spawn primitive — the operator rollback path (`PYRY_USE_STREAMJSON=1`) kept indefinitely per the #914/2026-05-19 decision, now also (#924) a `ReapDescendantGroups` consumer alongside `ptyrunner`. |
 | `internal/agentrun/jsonl` | [jsonl-reader.md](jsonl-reader.md) | Pure JSONL line reader + deterministic end-of-turn detector (#348). Post-[#512](../codebase/512.md) consumed only by `selfcheck` (parses the `streamjson.Emitter` pipe) and `e2e/realclaude/fixtures.go` (parses captured fixtures); both will migrate in a follow-up that finally deletes the package. |
 | `internal/agentrun/budget` | [budget-package.md](budget-package.md) | `Counter` enforces the per-agent `--max-turns` budget; consumed by `ptyrunner.Run` (#334 / #479 / #512). |
 
@@ -66,7 +68,7 @@ Imports of `internal/agentrun` after [#508](../codebase/508.md), [#527](../codeb
 - `trust` imports for `ResolveWorkdir` — the `projects[...]` key shape.
 - `ptyrunner`, `budget`, `streamrunner` each import for `ExitErrIsBenign` — the shared teardown-error predicate at their respective `Session.Close` / `Terminate` / `Kill` / `stdin.Close` error-log sites (#527).
 - `budget` and `streamjson` each import for `IsNewLogicalTurn` — the shared turn-boundary predicate (#574); `budget`'s `Counter.OnEvent` gates `count++` on it and `streamjson`'s `Emitter.Emit` gates `numTurns++` on it, so the enforced and reported turn counts share one definition.
-- `ptyrunner` imports for `ReapDescendantGroups` — its local `reapDescendantGroupsFn` seam (`reap.go`) is re-pointed at it post-#923; `runner.go`'s three teardown call sites are unaffected by the lift. `streamrunner` is not yet a consumer — #924 (blocked-by #923) wires it.
+- `ptyrunner` and (post-#924) `streamrunner` both import for `ReapDescendantGroups` — each through its own local `reapDescendantGroupsFn` seam (`reap.go`), re-pointed at the shared function; `ptyrunner`'s three teardown call sites and `streamrunner`'s single `cmd.Cancel` call site were unaffected by the lift/wire split. See [ptyrunner-package.md](ptyrunner-package.md#teardown-reap-descendant-process-groups-reapgo-565-864-923) and [streamrunner-package.md](streamrunner-package.md#teardown-reap-descendant-process-groups-reapgo-924).
 - `settings` does not import the parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
 
 The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. The `jsonl/tail` subpackage was deleted in [#512](../codebase/512.md) (`ptyrunner.Run` drains `tuidriver.TailJSONL` inline).
@@ -122,3 +124,4 @@ The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrec
 - [`codebase/910.md`](../codebase/910.md) — `ResolveWorkdir`'s on-disk-case canonicalisation fix; the 2026-05-29 incident it resolves.
 - [`codebase/565.md`](../codebase/565.md) — where `ReapDescendantGroups` was originally built (package-local, inside `ptyrunner`) and why `cmd.Cancel` is the race-free reap chokepoint.
 - [`codebase/923.md`](../codebase/923.md) — the lift of `ReapDescendantGroups` from `ptyrunner` into this package.
+- [`codebase/924.md`](../codebase/924.md) — `streamrunner` wired as the reaper's second consumer.

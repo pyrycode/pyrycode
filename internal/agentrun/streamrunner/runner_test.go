@@ -124,6 +124,87 @@ func TestRun_CtxCancelMidRun(t *testing.T) {
 	}
 }
 
+// reapRecorder is a mutex-guarded double for reapDescendantGroupsFn: it records
+// the rootPid of every reap call so the ctx-cancel test can assert the wiring
+// fired with a plausible pid — without standing up a real descendant tree (that
+// is agentrun.TestReapDescendantGroups' job). Mutex-guarded because cmd.Cancel
+// fires from the os/exec ctx-watcher goroutine, not the test goroutine.
+type reapRecorder struct {
+	mu   sync.Mutex
+	pids []int
+}
+
+func (r *reapRecorder) record(rootPid int, _ *slog.Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pids = append(r.pids, rootPid)
+}
+
+func (r *reapRecorder) calls() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.pids...)
+}
+
+// swapReapSeam points reapDescendantGroupsFn at rec.record for the test and
+// restores the real reaper via t.Cleanup. Callers MUST be non-parallel: they
+// mutate a package var. Go runs non-parallel tests — and their t.Cleanup
+// restore — to completion before parked t.Parallel() tests resume, so the swap
+// window never overlaps the parallel TestRun_* siblings.
+func swapReapSeam(t *testing.T, rec *reapRecorder) {
+	t.Helper()
+	orig := reapDescendantGroupsFn
+	reapDescendantGroupsFn = rec.record
+	t.Cleanup(func() { reapDescendantGroupsFn = orig })
+}
+
+// assertReapedLivePid asserts the reap seam captured at least one call with a
+// plausible pid (> 1, matching reap.go's pgid<=1 guard boundary). The test
+// can't know the fake-claude's real pid, so it asserts > 1.
+func assertReapedLivePid(t *testing.T, rec *reapRecorder) {
+	t.Helper()
+	calls := rec.calls()
+	if len(calls) == 0 {
+		t.Fatal("reap seam never fired on the teardown path — reap wiring missing")
+	}
+	for _, pid := range calls {
+		if pid > 1 {
+			return
+		}
+	}
+	t.Fatalf("reap seam fired %d time(s) but no call carried a plausible pid > 1: %v", len(calls), calls)
+}
+
+// TestRun_CtxCancel_ReapsDescendantGroups asserts the operator-SIGTERM teardown
+// reaps claude's detached descendant process groups. Clones TestRun_CtxCancelMidRun
+// (sleep helper mode, cancel the parent ctx ~100ms in) and adds the seam swap +
+// assertion on top: the reap wired into cmd.Cancel must fire with the live
+// fake-claude pid before the SIGTERM. Because cmd.Cancel fires whenever childCtx
+// is done — via both the parent ctx (operator SIGTERM/SIGINT) and the watchdog's
+// cancelChild — exercising the closure once proves the wiring for both teardown
+// paths. Non-parallel: it swaps the reapDescendantGroupsFn package var (see
+// swapReapSeam); do NOT add t.Parallel().
+func TestRun_CtxCancel_ReapsDescendantGroups(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "sleep", &stdout, &stderr)
+	cfg.PromptBytes = []byte("noop")
+
+	rec := &reapRecorder{}
+	swapReapSeam(t, rec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run after ctx cancel: %v, want nil", err)
+	}
+
+	assertReapedLivePid(t, rec)
+}
+
 func TestRun_EarlyExitChild_NoBenignStdinCloseWarn(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
