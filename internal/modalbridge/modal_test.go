@@ -297,3 +297,124 @@ func TestResolve(t *testing.T) {
 		t.Error("Lookup should miss after Resolve removed the entry")
 	}
 }
+
+func TestSnapshot_Empty(t *testing.T) {
+	t.Parallel()
+	if got := New().Snapshot(); len(got) != 0 {
+		t.Errorf("empty registry: got %d payloads, want 0", len(got))
+	}
+}
+
+func TestSnapshot_ResolvedModalDoesNotResurface(t *testing.T) {
+	t.Parallel()
+	reg := New()
+	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "do something")
+	payload, err := reg.Record(req, class)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if _, ok := reg.Resolve(payload.ModalID); !ok {
+		t.Fatalf("Resolve(%q): not found", payload.ModalID)
+	}
+	if got := reg.Snapshot(); len(got) != 0 {
+		t.Errorf("after Resolve: got %d payloads, want 0 (retired modals must not re-surface)", len(got))
+	}
+}
+
+func TestSnapshot_SingleOutstandingRoundTrips(t *testing.T) {
+	t.Parallel()
+	reg := New()
+	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "do something")
+	payload, err := reg.Record(req, class)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got := reg.Snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d payloads, want 1", len(got))
+	}
+	// Equivalent to the payload Record returned: same id and same content.
+	p := got[0]
+	if p.ModalID != payload.ModalID {
+		t.Errorf("ModalID: got %q, want %q", p.ModalID, payload.ModalID)
+	}
+	if p.Class != payload.Class {
+		t.Errorf("Class: got %q, want %q", p.Class, payload.Class)
+	}
+	if p.Title != payload.Title {
+		t.Errorf("Title: got %q, want %q", p.Title, payload.Title)
+	}
+	if p.Prompt != payload.Prompt {
+		t.Errorf("Prompt: got %q, want %q", p.Prompt, payload.Prompt)
+	}
+	if p.DefaultOptionID != payload.DefaultOptionID {
+		t.Errorf("DefaultOptionID: got %q, want %q", p.DefaultOptionID, payload.DefaultOptionID)
+	}
+	if !slicesEqual(optionIDs(p.Options), optionIDs(payload.Options)) {
+		t.Errorf("option ids: got %v, want %v", optionIDs(p.Options), optionIDs(payload.Options))
+	}
+}
+
+func TestSnapshot_MultipleOutstandingKeyedByID(t *testing.T) {
+	t.Parallel()
+	reg := New()
+	permReq, permClass, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "perm")
+	perm, err := reg.Record(permReq, permClass)
+	if err != nil {
+		t.Fatalf("Record permission: %v", err)
+	}
+	trustReq, trustClass, _ := PermissionRequestForClass(tuidriver.ModalClassTrustFolder, "trust")
+	trust, err := reg.Record(trustReq, trustClass)
+	if err != nil {
+		t.Fatalf("Record trust: %v", err)
+	}
+
+	// Reconcile by modal_id, never by position: map-walk order is unspecified.
+	byID := make(map[string]protocol.ModalShownPayload)
+	for _, p := range reg.Snapshot() {
+		byID[p.ModalID] = p
+	}
+	if len(byID) != 2 {
+		t.Fatalf("got %d distinct payloads, want 2", len(byID))
+	}
+	if got, ok := byID[perm.ModalID]; !ok {
+		t.Errorf("permission modal %q missing from snapshot", perm.ModalID)
+	} else if got.Class != classPermission {
+		t.Errorf("permission modal Class: got %q, want %q", got.Class, classPermission)
+	}
+	if got, ok := byID[trust.ModalID]; !ok {
+		t.Errorf("trust modal %q missing from snapshot", trust.ModalID)
+	} else if got.Class != classTrust {
+		t.Errorf("trust modal Class: got %q, want %q", got.Class, classTrust)
+	}
+}
+
+func TestSnapshot_PureReadLeavesStateUndisturbed(t *testing.T) {
+	t.Parallel()
+	reg := New()
+	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "do something")
+	payload, err := reg.Record(req, class)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got := reg.Snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d payloads, want 1", len(got))
+	}
+	// Mutating the returned Options must not corrupt registry state (proves the clone).
+	got[0].Options[0] = protocol.ModalOption{ID: "tampered", Label: "tampered"}
+
+	o, ok := reg.Lookup(payload.ModalID)
+	if !ok {
+		t.Fatalf("Lookup(%q) after Snapshot: not found", payload.ModalID)
+	}
+	if o.Options[0].ID == "tampered" {
+		t.Error("mutating the snapshot's Options corrupted registry state (Options not cloned)")
+	}
+	// Enumeration retired nothing: the modal is still one-shot resolvable.
+	if _, ok := reg.Resolve(payload.ModalID); !ok {
+		t.Error("Resolve after Snapshot: modal was unexpectedly retired")
+	}
+}
