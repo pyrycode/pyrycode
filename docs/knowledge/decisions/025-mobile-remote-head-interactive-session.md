@@ -129,6 +129,8 @@ Transport unchanged: every frame is a `noise_msg` carrying the existing `{id, ty
 
 **Backpressure / replay.** The per-session push queue is bounded and event-class-aware: `assistant_delta` is coalescable and drop-oldest under pressure (the phone backfills the full turn on reconnect); control events (`modal_shown`, `turn_end`, `tool_*`) never drop. On mid-turn reconnect the phone sends `hello` with `last_event_id`; the binary replays from a bounded per-conversation event ring, or emits a resync marker and the phone re-fetches via the existing `backfill_since`.
 
+> **Superseded for control events — 2026-07-10 (ADR 025 amendment).** Control events reconcile by **current-state snapshot on connect, not event-ring replay**: on every (re)connection the daemon re-asserts the still-outstanding modal (#877) and the current per-conversation queue backlog (#878) as **current state**, keyed by stable id (`modal_id`; `conversation_id` + `queued_msg_id`) and applied idempotently — it replays **no** past control events. This supersedes, **for control events specifically**, the sentence above that "the binary replays from a bounded per-conversation event ring." The cursor/ring path (`hello.last_event_id`, #647) **remains** the mechanism for **bulk transcript content** — `assistant_delta` and the turn-event stream. The control-never-drops promise (#874/#875) is unchanged. The authoritative wire contract is `docs/protocol-mobile.md` § Reconnect / Backfill semantics.
+
 The authoritative shapes land in `docs/protocol-mobile.md` per implementing ticket (matching how #569 amended the spec), so the spec never drifts ahead of the code.
 
 ## Security model — remote permission granting (default-safe)
