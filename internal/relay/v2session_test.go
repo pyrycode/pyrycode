@@ -700,15 +700,15 @@ func TestNewV2SessionManager_ConfigValidation(t *testing.T) {
 // (initSend encrypts phone→binary, initRecv decrypts binary→phone), the
 // frames channel for further input, and the recorder.
 type openSession struct {
-	mgr      *V2SessionManager
-	rec      *v2Recorder
-	frames   chan protocol.RoutingEnvelope
+	mgr       *V2SessionManager
+	rec       *v2Recorder
+	frames    chan protocol.RoutingEnvelope
 	initiator *noise.Initiator
-	initSend *noise.CipherState
-	initRecv *noise.CipherState
-	respPub  []byte
-	initPriv []byte
-	stop     func()
+	initSend  *noise.CipherState
+	initRecv  *noise.CipherState
+	respPub   []byte
+	initPriv  []byte
+	stop      func()
 }
 
 // driveToOpen runs a paired-device handshake through cfg and returns
@@ -1270,9 +1270,9 @@ func TestV2Session_OpenState_HandlerAuthDevice(t *testing.T) {
 	t.Cleanup(sess.stop)
 
 	frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
-		ID:   7,
-		Type: protocol.TypeListConversations,
-		TS:   time.Now().UTC(),
+		ID:      7,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
 		Payload: json.RawMessage(`{}`),
 	})
 	waitForEnvelopes(t, rec, 2)
@@ -4797,4 +4797,164 @@ func TestV2Session_Push_HoldGatedOnProbeNotSendError(t *testing.T) {
 		t.Fatalf("Push (probe down): %v", err)
 	}
 	assertHeldQueued(t, sess.mgr, rec, v2TestConnID, 1)
+}
+
+// TestV2Session_Push_FlushesOnReconnectSignal pins AC3 (#875): a control
+// envelope enqueued while the relay transport is down is delivered after the
+// reconnect signal fires with NO intervening Push; multiple held envelopes
+// preserve FIFO order and stay on a contiguous Noise send-nonce (both decrypt
+// under the phone's recv state — a burned/gapped nonce MAC-fails). Mirrors
+// TestV2Session_Push_HeldWhileTransportDown_ReflushContiguous but drives the
+// flush from the reconnect edge instead of a follow-up Push. Run under -race —
+// exercises the reconnect → Run → drainCh → drainOnce cross-goroutine path.
+func TestV2Session_Push_FlushesOnReconnectSignal(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	gated := newGatedRecorder()
+	reconnect := make(chan struct{}, 1)
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		Reconnect:  reconnect,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Transport DOWN: push two control envelopes. Both held — un-popped,
+	// unsealed, nothing delivered beyond the handshake resp.
+	gated.up.Store(false)
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "held-1")); err != nil {
+		t.Fatalf("Push #1 while down: %v", err)
+	}
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 2, "held-2")); err != nil {
+		t.Fatalf("Push #2 while down: %v", err)
+	}
+	assertHeldQueued(t, sess.mgr, gated.rec, v2TestConnID, 2)
+
+	// Recover the transport and fire the reconnect edge — NO further Push. The
+	// arm re-signals drainCh; the held head drains FIFO, self-perpetuating via
+	// drainOnce's more→drainCh re-signal until the queue empties.
+	gated.up.Store(true)
+	reconnect <- struct{}{}
+
+	envs := waitForEnvelopes(t, gated.rec, 3)
+	if len(envs) != 3 {
+		t.Fatalf("recorded %d envelopes, want 3 (noise_resp + 2 held; flushed by reconnect alone)", len(envs))
+	}
+	first := decryptAppFrame(t, envs[1], sess.initRecv)
+	second := decryptAppFrame(t, envs[2], sess.initRecv)
+	if first.ID != 1 || second.ID != 2 {
+		t.Errorf("delivered order = [%d %d], want [1 2] (FIFO held flush on reconnect)", first.ID, second.ID)
+	}
+}
+
+// TestV2Session_Push_NilReconnectInert pins AC1 (#875): with a nil Reconnect
+// seam Run gains no new wake source — a held envelope stays held until a
+// subsequent Push re-signals the drain (pre-#875 behaviour). Confirms "when
+// nil, behaves exactly as before."
+func TestV2Session_Push_NilReconnectInert(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	gated := newGatedRecorder()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		Reconnect:  nil, // explicit: no reconnect wake source
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Transport DOWN: push one control envelope → held.
+	gated.up.Store(false)
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "held-nil-reconnect")); err != nil {
+		t.Fatalf("Push while down: %v", err)
+	}
+	assertHeldQueued(t, sess.mgr, gated.rec, v2TestConnID, 1)
+
+	// Recover the transport. With no reconnect seam nothing wakes the drain — the
+	// head is still held (there is no reconnect edge to re-signal drainCh).
+	gated.up.Store(true)
+	assertHeldQueued(t, sess.mgr, gated.rec, v2TestConnID, 1)
+
+	// A subsequent Push re-signals the drain: both flush FIFO (pre-#875 path).
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 2, "after-recover")); err != nil {
+		t.Fatalf("Push after recover: %v", err)
+	}
+	envs := waitForEnvelopes(t, gated.rec, 3)
+	if len(envs) != 3 {
+		t.Fatalf("recorded %d envelopes, want 3 (flush driven by Push, not reconnect)", len(envs))
+	}
+	first := decryptAppFrame(t, envs[1], sess.initRecv)
+	second := decryptAppFrame(t, envs[2], sess.initRecv)
+	if first.ID != 1 || second.ID != 2 {
+		t.Errorf("delivered order = [%d %d], want [1 2]", first.ID, second.ID)
+	}
+}
+
+// TestV2Session_Push_ReconnectWhileDownDoesNotSeal guards the "seals nothing
+// itself" contract (#875): the reconnect arm only WAKES the drain; drainOnce
+// still consults Connected before the pop. Firing the reconnect edge while the
+// transport is still down leaves the head held — no nonce burned into a dead
+// link.
+func TestV2Session_Push_ReconnectWhileDownDoesNotSeal(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	gated := newGatedRecorder()
+	reconnect := make(chan struct{}, 1)
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		Reconnect:  reconnect,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Transport DOWN: push one control envelope → held.
+	gated.up.Store(false)
+	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "still-down")); err != nil {
+		t.Fatalf("Push while down: %v", err)
+	}
+	assertHeldQueued(t, sess.mgr, gated.rec, v2TestConnID, 1)
+
+	// Fire the reconnect edge while STILL down. The arm wakes the drain, but
+	// drainOnce's transportDown() gate holds the pop — nothing sealed, nothing
+	// delivered, no nonce burned.
+	reconnect <- struct{}{}
+	assertHeldQueued(t, sess.mgr, gated.rec, v2TestConnID, 1)
 }

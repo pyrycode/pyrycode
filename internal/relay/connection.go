@@ -83,6 +83,10 @@ type Connection struct {
 
 	frames chan protocol.RoutingEnvelope
 
+	// reconnected re-broadcasts the transport's fresh-conn edge (see
+	// Reconnected) to the v2 push drain. Cap-1 drop-on-full, single observer.
+	reconnected chan struct{}
+
 	closeOnce sync.Once
 	closed    chan struct{}
 
@@ -128,11 +132,12 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 		FatalCloseCodes: []websocket.StatusCode{statusServerIDConflict},
 	}
 	c := &Connection{
-		cfg:    cfg,
-		client: transport.New(tcfg),
-		frames: make(chan protocol.RoutingEnvelope),
-		closed: make(chan struct{}),
-		done:   make(chan struct{}),
+		cfg:         cfg,
+		client:      transport.New(tcfg),
+		frames:      make(chan protocol.RoutingEnvelope),
+		reconnected: make(chan struct{}, 1),
+		closed:      make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 	go c.run(ctx)
 	return c, nil
@@ -164,11 +169,12 @@ func resolveDialURL(raw string, allowInsecure bool) (string, error) {
 // can use a ws:// httptest server. Production callers use Connect.
 func connectWithClient(ctx context.Context, cfg Config, client *transport.Client) *Connection {
 	c := &Connection{
-		cfg:    cfg,
-		client: client,
-		frames: make(chan protocol.RoutingEnvelope),
-		closed: make(chan struct{}),
-		done:   make(chan struct{}),
+		cfg:         cfg,
+		client:      client,
+		frames:      make(chan protocol.RoutingEnvelope),
+		reconnected: make(chan struct{}, 1),
+		closed:      make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 	go c.run(ctx)
 	return c
@@ -203,6 +209,15 @@ func (c *Connection) Send(env protocol.RoutingEnvelope) error {
 func (c *Connection) Connected() bool {
 	return c.client.IsConnected()
 }
+
+// Reconnected returns a channel that emits once per fresh binary↔relay conn
+// (the initial connect and every reconnect). Cap-1 drop-on-full, single
+// observer — the v2 push drain (V2SessionConfig.Reconnect) uses it to flush
+// held control envelopes the instant the leg recovers, without waiting for the
+// next Push (#875). Derived from the connection's own (sole) observation of
+// transport.Client.Connected(); the manager must NOT observe that transport
+// channel directly, which is documented single-observer.
+func (c *Connection) Reconnected() <-chan struct{} { return c.reconnected }
 
 // CloseConn asks the relay to close the named phone conn with the given
 // WS close code. Builds a close-only routing envelope (no Frame) with
@@ -278,6 +293,15 @@ func (c *Connection) run(ctx context.Context) {
 			// forwarding, no handshake.
 			c.cfg.Logger.Info("relay: conn established",
 				"server_id", string(c.cfg.ServerID))
+			// Re-broadcast the fresh-conn edge to the v2 push drain so a
+			// #874-held control envelope flushes the instant the leg recovers,
+			// without waiting for the next Push (#875). Non-blocking cap-1 send —
+			// a dropped duplicate is harmless (one surviving signal drains the
+			// whole held FIFO). Runs before forwardFrames blocks.
+			select {
+			case c.reconnected <- struct{}{}:
+			default:
+			}
 			c.forwardFrames(ctx)
 		}
 	}

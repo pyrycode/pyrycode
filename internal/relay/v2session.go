@@ -583,6 +583,22 @@ type V2SessionConfig struct {
 	// forwardEnvelope, downstream of the probe.
 	Connected func() bool
 
+	// Reconnect, when non-nil, is an edge-triggered signal that fires once per
+	// fresh relay transport conn. On each fire, Run re-signals the push drain so
+	// a control envelope held while the leg was down (see Connected) flushes the
+	// instant the leg recovers, without waiting for the next Push (#875).
+	// Production wires (*relay.Connection).Reconnected. Cap-1 drop-on-full,
+	// single observer.
+	//
+	// Optional: nil ⇒ no new wake source. Run's select arm reads a nil channel,
+	// which is never ready, so the drain flushes only on the pre-#875
+	// Push-driven re-signal — byte-identical to the foreground / unwired /
+	// existing-test posture. This wakes the drain only; it seals nothing.
+	// drainOnce still consults Connected before the pop, so a conn that drops
+	// again between this edge and the pop burns no nonce (#874). NOT a security
+	// decision.
+	Reconnect <-chan struct{}
+
 	// StaticPriv is the binary's 32-byte X25519 static private key.
 	StaticPriv []byte
 
@@ -890,6 +906,17 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case <-m.drainCh:
 			m.drainOnce(runCtx)
+		case <-m.cfg.Reconnect:
+			// Fresh transport conn: wake the drain so any #874-held head flushes
+			// now (not on the next Push). Re-signal drainCh — do not call
+			// drainOnce here — so the existing drain arm owns the single pop path
+			// and its FIFO self-re-signal. A nil m.cfg.Reconnect makes this a
+			// nil-channel read, permanently not-ready, so the select behaves
+			// exactly as pre-#875.
+			select {
+			case m.drainCh <- struct{}{}:
+			default:
+			}
 		case <-m.replayCh:
 			m.drainReplayOnce(runCtx)
 		case req := <-m.snapshot:

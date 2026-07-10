@@ -394,6 +394,40 @@ func TestTransportDropPostConnect_Reconnects(t *testing.T) {
 	}
 }
 
+// TestTransportReconnect_SignalsReconnected confirms the connection re-broadcasts
+// the transport's fresh-conn edge on Reconnected(): the signal fires on the
+// initial connect and again after a post-connect drop→reconnect. This is the
+// fan-out the v2 push drain consumes (V2SessionConfig.Reconnect) to flush held
+// control envelopes the instant the leg recovers (#875) — the manager must not
+// observe the single-observer transport channel directly.
+func TestTransportReconnect_SignalsReconnected(t *testing.T) {
+	t.Parallel()
+	relay := newTestRelay(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	c := newTestConnection(t, ctx, relay.URL())
+	t.Cleanup(func() { _ = c.Close() })
+
+	// The initial connect fires the edge once. Drain it so the cap-1 buffer is
+	// free for the reconnect signal below.
+	waitConnCount(t, relay, 1, 3*time.Second)
+	select {
+	case <-c.Reconnected():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reconnected did not fire on initial connect")
+	}
+
+	// Drop the live conn; transport reconnects → a second fresh-conn edge.
+	relay.ForceCloseAll()
+	waitConnCount(t, relay, 2, 4*time.Second)
+	select {
+	case <-c.Reconnected():
+	case <-time.After(3 * time.Second):
+		t.Fatal("Reconnected did not fire on reconnect")
+	}
+}
+
 func TestFrames_AfterConnect_InOrder(t *testing.T) {
 	t.Parallel()
 	relay := newTestRelay(t)
@@ -676,4 +710,3 @@ func TestConfig_AllowInsecureScheme(t *testing.T) {
 	}
 	_ = c.Close()
 }
-
