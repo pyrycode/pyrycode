@@ -307,8 +307,10 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload
   deny-on-timeout semantics are unaffected; this is read-only.
 
 Registry-only: no producer, no wire traffic, no session-manager change here. The
-connect-time producer that calls `Snapshot()` and re-sends the payloads over the relay is
-**#877** (out of scope for #876).
+connect-time producer that calls `Snapshot()` and re-sends the payloads over the relay
+**landed in #877** — see
+[`v2-session-manager.md` § Connect-time modal reconcile](v2-session-manager.md#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals)
+and [codebase/877.md](../codebase/877.md).
 
 ## Live daemon wiring (#798)
 
@@ -404,4 +406,11 @@ path is #791/#793 (EPIC #597 Phase 3).
   that answers "what is outstanding right now?" for the reconnect-reliability direction
   (#829). See [§ Current-truth enumeration](#current-truth-enumeration--registrysnapshot-876)
   and [codebase/876.md](../codebase/876.md).
+- **Connect-time modal reconcile — #877** (landed, `security-sensitive`): the
+  `internal/relay` consumer of `Snapshot()` — unicasts the outstanding `modal_shown` set
+  to a freshly interactive-open v2 conn via an optional `V2SessionConfig.OutstandingModals`
+  seam + `reconcileModals` helper, so a phone that (re)connects while a permission prompt
+  is pending is brought to current modal truth. See
+  [`v2-session-manager.md` § Connect-time modal reconcile](v2-session-manager.md#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals)
+  and [codebase/877.md](../codebase/877.md).
 
