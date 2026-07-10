@@ -564,6 +564,25 @@ type V2SessionConfig struct {
 	// (mirrors v1's cmd/pyry/relay.go forwarder posture).
 	Outbound func(protocol.RoutingEnvelope) error
 
+	// Connected reports whether the relay transport leg is currently up. The
+	// push drain (drainOnce) consults it BEFORE sealing a queued envelope: a
+	// false result leaves the head un-popped and unsealed, so no Noise
+	// send-nonce is burned for a frame that cannot reach the phone (a burned
+	// nonce gaps the phone's recv nonce → 4421 close of a still-live session,
+	// #874). This extends queuedEnv's "held unsealed" invariant from the
+	// enqueue side to the drain side.
+	//
+	// Optional: nil ⇒ always-connected — the drain never holds, preserving the
+	// pre-#874 drop-on-send posture for foreground / unwired / existing tests.
+	// Production wires (*relay.Connection).Connected, a level poll of the
+	// transport leg's live-conn state. A true result is best-effort: the conn
+	// may drop between the poll and the send (a single-frame residual race at
+	// the up→down transition instant), but a false result reliably holds. NOT
+	// a security decision — it gates only the timing of a seal that would
+	// otherwise happen anyway; V2StateOpen and per-conn addressing stay in
+	// forwardEnvelope, downstream of the probe.
+	Connected func() bool
+
 	// StaticPriv is the binary's 32-byte X25519 static private key.
 	StaticPriv []byte
 
@@ -2926,6 +2945,15 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 	return nil
 }
 
+// transportDown reports whether the push drain should hold the head rather than
+// seal-and-forward it (#874). A nil Connected seam ⇒ never down ⇒ the drain path
+// is byte-identical to pre-#874 (the foreground / unwired / existing-test case).
+// Called off-lock on the Run goroutine, BEFORE pushMu, so pushMu's "taken alone,
+// never held across an external call" invariant is preserved.
+func (m *V2SessionManager) transportDown() bool {
+	return m.cfg.Connected != nil && !m.cfg.Connected()
+}
+
 // drainOnce pops at most ONE buffered envelope across all sessions and forwards
 // it on the Run goroutine. Popping one-per-pass (rather than draining a whole
 // buffer) is the "a slow m.send must not re-block the producer" guard: Run
@@ -2933,6 +2961,20 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 // are serviced with at most one in-flight Outbound (≤ one WriteTimeout) of
 // delay. If any queue still has items after the pop, it re-signals drainCh.
 func (m *V2SessionManager) drainOnce(ctx context.Context) {
+	// Transport-down HOLD (#874): if the relay leg is down, pop nothing, seal
+	// nothing, re-signal nothing — leave the head un-popped and unsealed so no
+	// Noise send-nonce is burned for a frame that cannot reach the phone (a
+	// burned nonce gaps the phone's recv nonce → 4421 close of a still-live
+	// session). The probe runs off-lock, before pushMu, and BEFORE the seal in
+	// forwardEnvelope — the post-send Outbound error is too late, the nonce is
+	// already gone. The next Push re-signals drainCh (the existing lazy flush),
+	// which re-enters here; once the transport recovers the held head drains in
+	// FIFO order (immediate flush-on-reconnect is #875). Session-level failures
+	// (ErrConnNotFound / ErrSessionNotOpen / seal failure) still drop, downstream
+	// in forwardEnvelope, reached only on this transport-up path (AC2).
+	if m.transportDown() {
+		return
+	}
 	// A conn with an in-flight reconnect-replay tail must keep its live push
 	// queue buffered until the replay finishes, so replay ids (<= replayThrough)
 	// reach the wire before live ids (#777, AC #2). Snapshot the gated conn-ids

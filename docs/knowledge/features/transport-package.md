@@ -36,6 +36,7 @@ func (*Client) Connect(ctx context.Context) error // blocking; ctx.Err() | ErrCl
 func (*Client) Send(frame []byte) error           // ErrNotConnected | ErrClosed | ErrDisconnected | nil
 func (*Client) Receive(ctx context.Context) ([]byte, error) // ErrClosed | ErrDisconnected | ctx.Err() | frame
 func (*Client) Connected() <-chan struct{}        // emits on every fresh conn (#248 addition)
+func (*Client) IsConnected() bool                  // synchronous level poll, agrees with Send's live-conn predicate (#874 addition)
 func (*Client) DropConn()                          // force-close live conn; reconnect via backoff (#248 addition)
 func (*Client) Close() error                      // idempotent
 
@@ -135,6 +136,12 @@ The deferred-decision note in #247's spec assigned four additions to #248 (the r
 - **`ErrDisconnected` + per-conn `connDone`** — `connDone` is per-conn, pre-closed at construction (`Receive`/`Send` before `Connect` return `ErrDisconnected` immediately rather than blocking forever), replaced with a fresh open channel inside `serve` before pumps install, closed in `serve`'s deferred teardown. `Receive` and `Send` capture `connDone` once under `connDoneMu` then select — a serve iteration that replaces `c.connDone` between the capture and the select cannot accidentally wake the caller on the new channel. Without this, a `Receive` blocked when the conn drops would stay blocked until the next conn delivers a frame, wedging the relay's `forwardFrames` receive loop above this layer permanently.
 - **`DropConn()`** — force-closes the live conn (if any) via `conn.CloseNow()` (abrupt 1006-equivalent, no close-frame round-trip). The serve loop sees the closed conn, returns to the dial loop, reconnects via backoff. Does NOT halt the dial loop. Idempotent (no-op when no conn is live). `CloseNow` over `Close(status, reason)` so the caller is not blocked for up to 10s on a close handshake when the only purpose is to recycle the conn. It exists for a consumer wanting to recycle a transport-healthy-but-application-stuck conn; the relay package was its original caller (the binary↔relay handshake-failure path), which #582 retired — `DropConn` now has no caller in `internal/relay` but remains for future consumers.
 
+### #874 addition — `IsConnected() bool`, a synchronous level poll
+
+`IsConnected() bool` reports whether a live conn exists and the client is not closed — a cheap synchronous poll for a caller that must decide **before** a side-effecting operation, in contrast to `Connected() <-chan struct{}` (edge-triggered, fires once per fresh conn, meant for re-running an application handshake). Contract: `false` iff `closeCh` is closed OR `c.conn == nil` (checked under `c.mu`, mirroring `Send`'s own guards); `true` otherwise. Agrees with `Send`'s live-conn predicate — a `false` result reliably means `Send` would return `ErrNotConnected`/`ErrClosed`; a `true` result is best-effort (the conn can still drop before the next `Send`, an inherent TOCTOU with any pre-check that doesn't hold a lock across the send). `Close` does not nil `c.conn` (only closes `closeCh`), so `IsConnected` gates on `closeCh` too — a closed client reads down rather than stale-true.
+
+Added for the v2 push drain's pre-seal transport probe ([`relay.V2SessionConfig.Connected`](v2-session-manager.md#transport-down-hold-on-the-push-drain-874--connected-probe--transportdown), #874): the drain must learn the transport is down **before** sealing a queued envelope (the Noise send nonce is burned by the seal, not the send), and the existing `Connected()` channel is edge-triggered — wrong shape for a "is it up right now" check. `internal/relay/connection.go`'s `Connection.Connected() bool` is a one-line passthrough.
+
 ### #631 additions — loud on a rejected upgrade
 
 A non-101 HTTP response to the WS upgrade (e.g. a `404` because the relay URL has the wrong path) used to vanish into the INFO backoff line and spin forever silently. #631 makes the **first** such failure per outage loud, while keeping the retry-forever posture:
@@ -176,11 +183,13 @@ Pinned behaviour:
 - `TestRealDial_UpgradeRejected` (#631) — `realDial` against an `httptest` handler that 404s (never upgrades) → error `errors.Is` `ErrUpgradeRejected` and contains the status.
 - `TestRealDial_NetworkFailureNotUpgradeRejected` (#631) — `realDial` against a reserved-then-released port (refused, `resp == nil`) → plain `"dial:"` error, **not** `ErrUpgradeRejected`. Together these pin the coder/websocket `resp != nil ⟺ non-101 response` classification.
 - `TestConnect_LoudOnFirstUpgradeReject` (#631) — `dialFn` returns an `ErrUpgradeRejected`-wrapped error every attempt; a recording `slog.Handler` asserts exactly **one** WARN (carrying the actionable path hint) on the first attempt with subsequent attempts demoted to INFO — pins AC#1's "loud on the first failed upgrade, not buried".
+- `TestClient_IsConnected` (#874) — `false` before `Connect`; `true` once a live conn is established (agrees with `Send` no longer returning `ErrNotConnected`); `false` after `Close` (the `closeCh` gate, despite `c.conn` staying non-nil).
 
 ## Consumers and roadmap
 
 - **`internal/relay`** (#248, landed): wraps `Send`/`Receive` with `protocol.Envelope` marshal/unmarshal, treats the conn as established on each `Connected()` signal and goes straight to forwarding (the binary↔relay `hello`/`hello_ack` handshake was retired #582), classifies WS close `4409` as terminal via `Config.FatalCloseCodes`. See [`features/relay-package.md`](relay-package.md) and [`codebase/248.md`](../codebase/248.md). Per-envelope dispatch (`4401`/`4404` interpretation, `Envelope.ID` monotonicity) lives in a future ticket above the relay layer.
 - **`internal/protocol`** (#255, landed): the envelope types this transport's frames will (mostly) carry.
+- **`internal/relay.V2SessionManager`** (#874, landed): via the `Connection.Connected` → `Client.IsConnected` passthrough, gates the v2 push drain's pre-seal transport-down probe — see [`features/v2-session-manager.md`](v2-session-manager.md#transport-down-hold-on-the-push-drain-874--connected-probe--transportdown).
 
 ## Dependencies
 

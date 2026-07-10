@@ -340,6 +340,29 @@ func (c *Client) Receive(ctx context.Context) ([]byte, error) {
 // boot. Multiple observers are NOT supported.
 func (c *Client) Connected() <-chan struct{} { return c.connectedCh }
 
+// IsConnected reports whether a live conn exists AND the client is not closed —
+// a cheap synchronous level poll for callers deciding BEFORE a side-effecting op
+// (contrast Connected() <-chan struct{}, the edge-triggered connect signal used
+// to re-run the application handshake). It agrees with Send's own predicate:
+// false ⇒ Send would return ErrClosed/ErrNotConnected; true ⇒ Send has a live
+// conn at poll time — though the conn may still drop before the next Send, so a
+// true result is best-effort while a false result reliably means "would drop".
+//
+// Gates on closeCh as well as c.conn because Close closes closeCh but does not
+// nil c.conn, so a closed client must still read down. Used by the v2 push
+// drain's pre-seal transport probe (#874).
+func (c *Client) IsConnected() bool {
+	select {
+	case <-c.closeCh:
+		return false
+	default:
+	}
+	c.mu.Lock()
+	live := c.conn != nil
+	c.mu.Unlock()
+	return live
+}
+
 // DropConn force-closes the live conn (if any) abruptly (1006-like),
 // without sending a close frame. The serve loop sees the closed conn,
 // returns to the dial loop, and reconnects via backoff. DropConn does
