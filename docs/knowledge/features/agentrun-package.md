@@ -7,9 +7,11 @@ Stdlib-only helper for `pyry agent-run`. The parent package's residual responsib
 ## Public API
 
 ```go
-// ResolveWorkdir returns the resolved absolute path of workdir, mirroring how
-// claude resolves a workdir before reading ~/.claude.json's projects map.
-// Sole remaining caller after #508: internal/agentrun/trust.
+// ResolveWorkdir returns the resolved absolute path of workdir, canonicalised
+// the way claude canonicalises its own cwd before reading ~/.claude.json's
+// projects map: filepath.Abs, then filepath.EvalSymlinks, then each path
+// component rewritten to its on-disk spelling (#910). Sole remaining caller
+// after #508: internal/agentrun/trust.
 func ResolveWorkdir(workdir string) (string, error)
 
 // ExitErrIsBenign reports whether err is the OS-level "process already gone"
@@ -58,7 +60,7 @@ The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to i
 
 ## Key shape
 
-`projects` map keys are the **resolved** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. `ResolveWorkdir` does `filepath.Abs` then `filepath.EvalSymlinks`. The same pattern is used in `internal/sessions/rotation/watcher.go` for path comparison against the platform probe.
+`projects` map keys are the **resolved, on-disk-cased** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. `ResolveWorkdir` does `filepath.Abs`, then `filepath.EvalSymlinks`, then (#910) rewrites each path component to its actual on-disk spelling via an unexported `canonicalCase` walk. The case step exists because `EvalSymlinks` alone preserves the **input** case of any component that isn't itself a symlink — on a case-insensitive filesystem (default macOS APFS), a workdir configured with the wrong case (e.g. `.../WorkSpace` vs on-disk `.../Workspace`) survived `EvalSymlinks` unchanged and produced a `projects` key claude's on-disk-cased cwd never matches, silently parking every dispatch on the workspace-trust modal (2026-05-29 incident on #208; see [`codebase/910.md`](../codebase/910.md)). `canonicalCase`'s per-component rule prefers an exact-case match over any case-fold — the sibling-safety guarantee on a case-sensitive filesystem — and folds only on a *unique* `strings.EqualFold` match; it is best-effort and cannot fail (an unreadable ancestor just keeps the input component). The same `ResolveWorkdir`-based pattern is used in `internal/sessions/rotation/watcher.go` for path comparison against the platform probe.
 
 ## Encoder lives in tui-driver
 
@@ -104,3 +106,4 @@ The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrec
 - [budget-package.md](budget-package.md) / [streamjson-package.md](streamjson-package.md) — the two callers of the shared `IsNewLogicalTurn` predicate (#574); enforcement and reporting of claude's logical-turn count, kept from drifting by the single shared function. See [codebase/574.md](../codebase/574.md).
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks` pattern for path comparison against claude-resolved paths.
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe each subpackage mirrors.
+- [`codebase/910.md`](../codebase/910.md) — `ResolveWorkdir`'s on-disk-case canonicalisation fix; the 2026-05-29 incident it resolves.
