@@ -1672,20 +1672,23 @@ func (m *V2SessionManager) handleNoiseMsg(ctx context.Context, s *V2Session, inn
 	}
 }
 
-// dispatchAppFrame runs dispatch.Route on a per-frame *dispatch.Conn,
-// drains any reply envelopes the handler emitted, AEAD-seals each one
-// under s.send, wraps as noise_msg, and forwards via m.send.
-// Synchronous; returns only after Route has returned and all replies
-// have been drained.
+// dispatchAppFrame runs dispatch.Route on a per-frame *dispatch.Conn and
+// forwards each reply envelope the handler emits: AEAD-sealed under
+// s.send, wrapped as noise_msg, and sent via m.send. Route runs on a
+// short-lived goroutine while this (the Run) goroutine drains the reply
+// channel concurrently, so a handler emitting more replies than the
+// per-frame outbound buffer (handlerOutboundBuf) holds cannot fill the
+// channel and deadlock Route inside c.Send (#909). Returns only after
+// Route has returned and every buffered reply has been drained.
 //
-// Assumes handlers are synchronous and do not spawn long-lived
-// goroutines that retain a reference to conn; the per-frame outbound
-// buffer (handlerOutboundBuf) is large enough to absorb a handler's
-// synchronous replies without blocking c.Send. The channel is
-// deliberately NOT closed — a misbehaving handler that forks a sender
-// after Route returns writes into a leaked but capacity-bounded channel
-// that the GC reclaims once the goroutine exits; closing here would
-// panic such a sender.
+// The seal (s.send.Encrypt, via forwardAppReply) runs only on the Run
+// goroutine — the Noise send CipherState is single-owner; only Route →
+// handler → c.Send (a marshal + channel push, no AEAD) runs off-Run.
+//
+// The outbound channel is deliberately NOT closed — a misbehaving handler
+// that forks a sender after Route returns writes into a leaked but
+// capacity-bounded channel that the GC reclaims once the goroutine exits;
+// closing here would panic such a sender (#446).
 func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
 	// v2 control-envelope discriminator: a successful JSON decode whose
 	// type matches a v2 control type is routed away from the v1
@@ -1730,33 +1733,73 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 
 	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
 	conn := dispatch.NewConn(s.connID, outbound, s.device)
-	dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)
+
+	// Run dispatch.Route on a short-lived goroutine and drain its reply
+	// envelopes here on the Run goroutine, so a handler emitting more than
+	// handlerOutboundBuf replies cannot fill outbound and deadlock Route
+	// inside c.Send — this loop empties outbound continuously while Route
+	// runs. Only Route (→ handler → c.Send: a marshal + channel push, no
+	// AEAD) runs off-Run; every seal (forwardAppReply → s.send.Encrypt)
+	// stays on the Run goroutine, keeping the Noise send CipherState
+	// single-owner. A single sender (the handler) plus this single
+	// receiver preserves FIFO emission order end to end.
+	//
+	// ctx.Done() is deliberately NOT a third select arm: the handler
+	// already observes cancellation through c.Send's ctx arm (ctx is
+	// runCtx), so a shutdown drives Route to return and fires routeDone
+	// naturally. Adding a ctx arm would risk orphaning the still-running
+	// Route goroutine and dropping ordered replies mid-stream.
+	routeDone := make(chan struct{})
+	go func() {
+		defer close(routeDone)
+		dispatch.Route(ctx, m.cfg.Logger, conn, m.cfg.Handlers, plaintext)
+	}()
 	for {
 		select {
 		case reply := <-outbound:
-			ciphertext, err := s.send.Encrypt(reply.Frame)
-			if err != nil {
-				// Realistically unreachable under correct flynn/noise.
-				// Drop the reply rather than emit the unencrypted frame.
-				m.cfg.Logger.Warn("relay: v2 seal app reply failed; reply dropped",
-					"conn_id", s.connID)
-				continue
+			m.forwardAppReply(s, reply)
+		case <-routeDone:
+			// Route returned (the handler has returned, so no further
+			// c.Send is in flight); drain any residual buffered replies in
+			// FIFO order, then return.
+			for {
+				select {
+				case reply := <-outbound:
+					m.forwardAppReply(s, reply)
+				default:
+					return
+				}
 			}
-			frame, err := marshalInnerFrameV2(protocol.TypeNoiseMsg, ciphertext)
-			if err != nil {
-				m.cfg.Logger.Warn("relay: v2 marshal app reply failed; reply dropped",
-					"conn_id", s.connID)
-				continue
-			}
-			// The reply's CloseCode is ignored: handlers do not signal
-			// closes through c.Send/c.Reply; the close-code field on the
-			// routing envelope is reserved for the manager's own
-			// close-intent emissions (closeWith).
-			m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
-		default:
-			return
 		}
 	}
+}
+
+// forwardAppReply seals one handler reply under s.send and forwards it as
+// a noise_msg via m.send. MUST run only on the manager's Run goroutine —
+// s.send is the single-owner Noise send CipherState, and a concurrent
+// Encrypt would reuse a nonce / corrupt the send counter on the encrypted
+// wire. Drops the reply (WARN, no wire emission) on the
+// realistically-unreachable seal/marshal error, exactly as #446: never
+// emit an unsealed frame.
+func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingEnvelope) {
+	ciphertext, err := s.send.Encrypt(reply.Frame)
+	if err != nil {
+		// Realistically unreachable under correct flynn/noise. Drop the
+		// reply rather than emit the unencrypted frame.
+		m.cfg.Logger.Warn("relay: v2 seal app reply failed; reply dropped",
+			"conn_id", s.connID)
+		return
+	}
+	frame, err := marshalInnerFrameV2(protocol.TypeNoiseMsg, ciphertext)
+	if err != nil {
+		m.cfg.Logger.Warn("relay: v2 marshal app reply failed; reply dropped",
+			"conn_id", s.connID)
+		return
+	}
+	// The reply's CloseCode is ignored: handlers do not signal closes
+	// through c.Send/c.Reply; the close-code field on the routing envelope
+	// is reserved for the manager's own close-intent emissions (closeWith).
+	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: frame})
 }
 
 // handleRekeyRequest classifies an inbound v2 rekey_request control
