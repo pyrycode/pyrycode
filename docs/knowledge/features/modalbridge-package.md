@@ -71,6 +71,7 @@ func (r *Registry) Record(req turnevent.PermissionRequest, wireClass string) (pr
 
 func (r *Registry) Lookup(modalID string) (Outstanding, bool)  // #717's read seam
 func (r *Registry) Resolve(modalID string) (Outstanding, bool) // #727's consume-and-retire one-shot
+func (r *Registry) Snapshot() []protocol.ModalShownPayload     // #876's current-truth read seam
 ```
 
 `Lookup`/`Resolve` were **defined in #716, exercised downstream** — `Resolve` by
@@ -270,6 +271,45 @@ exists**.
   resolves as `screenText` is the wiring slice's concern (the property #679/#686 protects).
   The surfacer treats `screenText` as opaque and chooses no screen.
 
+## Current-truth enumeration — `Registry.Snapshot()` (#876)
+
+`Lookup`/`Resolve` are **id-keyed**: a caller must already know the `modal_id` it wants.
+Nothing could ask *"what is outstanding right now?"* — the question the
+reconnect-reliability direction (#829) needs answered on every (re)connection, so a
+reconnecting client can be reconciled to the daemon's **current control truth**
+(a still-pending modal re-sent under its original stable id; an already-resolved one
+silently absent) instead of replaying past events. `Snapshot()` is that one read seam.
+
+```go
+func (r *Registry) Snapshot() []protocol.ModalShownPayload
+```
+
+- **Direct field copy, not a re-derivation.** `Outstanding` already *is* the flattened
+  fields of the payload `Record` built (`Record` stores `p.Class`/`p.Title`/… from the
+  already-built payload) — so `Snapshot` copies straight from `Outstanding`, restamping
+  the stored `o.ModalID`. It does **not** call `buildPayload`: that assembles a payload
+  *from* a `PermissionRequest`+class, which would require un-mapping `Outstanding` back
+  into a `PermissionRequest` — lossy and unnecessary re-derivation of data the registry
+  already stores verbatim.
+- **Pure read.** Walks `r.outstanding` under the one leaf `r.mu` (same O(n)-map-walk,
+  no-nested-locks discipline as `Lookup`/`Resolve`). Mints no id (`newModalID` untouched),
+  retires nothing — a modal in a snapshot is still `Lookup`/`Resolve`-able afterward. A
+  resolved modal never re-surfaces, since `Resolve` already removed it from `r.outstanding`.
+- **`Options` is cloned per payload** (`slices.Clone`, mirroring `Record`'s clone-on-write)
+  so a mutating consumer can't corrupt the stored `Outstanding` through an aliased slice —
+  the property that keeps "leaves registry state unchanged" true even under a careless
+  caller.
+- **Map-walk order is unspecified.** #877's consumer reconciles by `modal_id`, never by
+  position; an empty registry yields a non-nil, zero-length slice (`len==0`, no
+  nil-vs-empty ambiguity for the consumer).
+- **Not security-sensitive.** No input, no wire traffic, no id minted — a registry-internal
+  enumeration of state the package already owns. The one-time-nonce and #717's
+  deny-on-timeout semantics are unaffected; this is read-only.
+
+Registry-only: no producer, no wire traffic, no session-manager change here. The
+connect-time producer that calls `Snapshot()` and re-sends the payloads over the relay is
+**#877** (out of scope for #876).
+
 ## Live daemon wiring (#798)
 
 The producer + registry + class mapping ship with a **unit test driving a scripted modal
@@ -360,5 +400,8 @@ path is #791/#793 (EPIC #597 Phase 3).
   local resolution + remote `modal_answer`/`modal_cancel` + #725 deny-on-timeout) was inert —
   the registry was never `Record`ed into. The live two-phone e2e capstones are #791/#793.
   See [§ Live daemon wiring (#798)](#live-daemon-wiring-798).
-</content>
-</invoke>
+- **Current-truth enumeration — `Registry.Snapshot()` (#876)** (landed): a read seam
+  that answers "what is outstanding right now?" for the reconnect-reliability direction
+  (#829). See [§ Current-truth enumeration](#current-truth-enumeration--registrysnapshot-876)
+  and [codebase/876.md](../codebase/876.md).
+
