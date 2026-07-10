@@ -185,6 +185,34 @@ func (r *Registry) Resolve(modalID string) (Outstanding, bool) {
 	return o, ok
 }
 
+// Snapshot returns a marshal-ready ModalShownPayload for every currently-
+// outstanding modal, each stamped with its original modal_id. It is the
+// current-truth read seam #877's connect-time producer consumes to reconcile a
+// reconnecting client to the daemon's live control state.
+//
+// Pure read: it mints no id (newModalID is never touched), retires nothing, and
+// mutates no registry state — a still-pending modal remains Lookup/Resolve-able
+// after a call. Each payload's Options is cloned so a mutating consumer cannot
+// corrupt the stored Outstanding (mirroring Record's clone-on-write). Map-walk
+// order is unspecified; callers reconcile by modal_id, never by position. An
+// empty registry yields a non-nil, zero-length slice.
+func (r *Registry) Snapshot() []protocol.ModalShownPayload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]protocol.ModalShownPayload, 0, len(r.outstanding))
+	for _, o := range r.outstanding {
+		out = append(out, protocol.ModalShownPayload{
+			ModalID:         o.ModalID,
+			Class:           o.Class,
+			Title:           o.Title,
+			Prompt:          o.Prompt,
+			Options:         slices.Clone(o.Options),
+			DefaultOptionID: o.DefaultOptionID,
+		})
+	}
+	return out
+}
+
 // buildPayload assembles the marshal-ready ModalShownPayload (sans modal_id) for
 // a permission/trust modal: it maps each PermissionOption{ID,Label} to a wire
 // ModalOption (dropping Kind — not on the wire), sets the fixed per-class Title,
