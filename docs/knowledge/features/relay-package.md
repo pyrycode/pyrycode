@@ -36,6 +36,8 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error)
 func (*Connection) Frames() <-chan protocol.RoutingEnvelope // closes on lifecycle exit
 func (*Connection) Send(env protocol.RoutingEnvelope) error  // binary→relay outbound
 func (*Connection) CloseConn(connID string, code uint16) error // #308; close one phone conn
+func (*Connection) Connected() bool                          // #874; level poll, passthrough to transport.Client.IsConnected
+func (*Connection) Reconnected() <-chan struct{}              // #875; edge signal, fires once per fresh conn (initial + every reconnect)
 func (*Connection) Wait() error                              // blocks until exit
 func (*Connection) Close() error                             // idempotent
 
@@ -116,6 +118,15 @@ WS close-code `4409` (server-id conflict) is classified terminal independently o
 | Malformed JSON on an inbound frame | Logged WARN; frame dropped at the trust boundary; loop continues. Single bad frame does NOT tear the conn. |
 | `ctx` cancelled / `Close()` called | Clean shutdown. `Frames()` closes; `Wait()` returns `ctx.Err()` or `nil`. |
 
+### Reconnect-state accessors for the v2 push drain (#874 `Connected`, #875 `Reconnected`)
+
+`internal/relay`'s [`V2SessionManager`](v2-session-manager.md) needs to know the binary↔relay transport's live-conn state to avoid burning a Noise send-nonce on a dead link ([`Transport-down hold on the push drain`](v2-session-manager.md#transport-down-hold-on-the-push-drain-874--connected-probe--transportdown)). It cannot observe `transport.Client.Connected() <-chan struct{}` directly — that channel is documented single-observer, and `Connection.run()` is already its sole consumer (it re-enters `forwardFrames` on each fire). So `Connection` re-exposes the transport's live-conn state one layer down, in two complementary shapes:
+
+- **`Connected() bool` (#874)** — a synchronous level poll, one-line passthrough to `transport.Client.IsConnected()`. Answers "is the leg up *right now*" at an arbitrary call site.
+- **`Reconnected() <-chan struct{}` (#875)** — an edge-triggered signal, cap-1 drop-on-full, re-broadcasting `client.Connected()`'s fresh-conn edge from inside the same `run()` arm that already consumes it (right after the "conn established" log, before the blocking `forwardFrames` call). Fires on the *initial* connect too, not only reconnects — harmless, since it triggers at most one empty drain pass.
+
+Both are wired in `cmd/pyry/relay.go`'s `V2SessionConfig` literal (`Connected: conn.Connected`, `Reconnect: conn.Reconnected()`) and are otherwise unconsumed inside this package — `Connection` itself never reads either. See [`codebase/874.md`](../codebase/874.md) / [`codebase/875.md`](../codebase/875.md).
+
 ## Error model
 
 | Method | Returns |
@@ -176,6 +187,7 @@ Pinned behaviour:
 - `TestConfig_AllowInsecureScheme` (#301) — pins that `ws://` passes `Connect` when `AllowInsecureScheme=true`; `Close` cancels the lifecycle before the bogus URL's async dial surfaces.
 - `TestCloseConn_WireShape` (#308) — `CloseConn("c-7", 4401)` produces one outbound frame whose JSON has `conn_id=="c-7"`, `close_code==4401`, and no `frame` key.
 - `TestCloseConn_PropagatesNotConnected` (#308) — pre-Connect state returns `transport.ErrNotConnected` verbatim.
+- `TestTransportReconnect_SignalsReconnected` (#875) — mirrors `TestTransportDropPostConnect_Reconnects`; asserts `conn.Reconnected()` receives a signal on the initial connect and again after a post-connect drop→reconnect.
 
 ## Close-conn surface (`CloseConn`, #308)
 
@@ -355,6 +367,8 @@ Build tag `e2e`. `TestRelay_RegisterPushToken_AckAndPersists` pairs a device via
 - **Outbound sending** (#307, landed): `(*Connection).Send(env protocol.RoutingEnvelope) error` marshals the routing envelope and forwards via `transport.Client.Send`. Caller wraps the inner `protocol.Envelope` in `RoutingEnvelope` (the dispatcher's `Conn.Send` does this from the inside). Returns `transport.ErrDisconnected` / `ErrNotConnected` / `ErrClosed` verbatim when the underlying conn is dropped — frames sent during a disconnected window are lost, which is consistent with the protocol's connection-lifecycle semantics (reconnect re-establishes the conn on WS upgrade, so per-conn state on the relay is implicitly the wrong frame of reference for retry). First consumer is `internal/dispatch` via the dispatcher's `Outbound()` forwarder in `cmd/pyry/relay.go`.
 - **Relay-conn wiring** (#308 + #318, landed): the dispatcher's `FirstFrameGate` extracts the token from `RoutingEnvelope.Token` (relay-populated from the phone's `x-pyrycode-token` header on the first frame per `conn_id`), calls `AuthenticateFirstFrame`, and on reject publishes one routing envelope carrying both `Response.Frame` AND `CloseCode=4401` — the WS close is atomic with the error envelope. The dispatcher owns the `2..N` per-conn envelope-ID counter (#308) and stores the auth'd `*devices.Device` snapshot into `*dispatch.Conn`'s per-conn slot via the unexported `setAuth` seam (#318); downstream handlers read it via `c.Auth()` rather than re-validating.
 - **Per-message dispatch** (`internal/dispatch`, #307+#308+#318): consumes `Frames()`, runs the optional `FirstFrame` gate, decodes the inner `protocol.Envelope` and branches on `Type`, routing to the registered handler in `internal/relay/handlers/`. `list_conversations` (#303), `create_conversation` (#666), `rename_conversation` (#820), `delete_conversation` (#822), `archive_conversation` / `unarchive_conversation` (#881), `change_workspace` (#823), `create_workspace_folder` (#887), `recent_workspaces` (#888), `register_push_token` (#319), and `send_message` (#322) are wired in `cmd/pyry/relay.go` on **both** the v1 `d.Register(...)` block (`startRelay`) and the v2 `Handlers` map (`startRelayV2`); the rest of the #256 catalog (the assistant-turn-delivery half of `send_message` plus `backfill_since` / `promote_conversation`) is deferred. (`rename_conversation`, `delete_conversation`, `archive_conversation`/`unarchive_conversation`, `change_workspace`, `create_workspace_folder`, and `recent_workspaces` were not part of the original #256 catalog — later additions, #820/#822/#881/#823/#887/#888 — and (except `create_workspace_folder` and `recent_workspaces`) reuse `promote_conversation`'s still-deferred reply type, `conversation_updated`, without themselves depending on `promote_conversation`'s own wiring landing. `change_workspace` is the first of the group whose untrusted input is a filesystem path rather than a display string or bare id — see [codebase/823.md](../codebase/823.md). `create_workspace_folder` (#887) is the first of the group that touches **no conversations registry at all** — it creates a directory and replies with a brand-new type, `workspace_folder_created`, rather than reusing `conversation_updated` — see [codebase/887.md](../codebase/887.md). `recent_workspaces` (#888) is the group's first **read** verb since `list_conversations` — takes the registry directly with no `cmd/pyry` adapter (unlike every write verb in the group), and is the only member of the group explicitly labeled not-security-sensitive — see [codebase/888.md](../codebase/888.md).)
+
+- **Reconnect-state accessors** (#874 `Connected` + #875 `Reconnected`, landed): sole consumer is `internal/relay.V2SessionManager` via the `V2SessionConfig.Connected` / `.Reconnect` optional seams wired in `cmd/pyry/relay.go`'s `startRelayV2`. See [§ Reconnect-state accessors](#reconnect-state-accessors-for-the-v2-push-drain-874-connected-875-reconnected) above.
 
 ## Dependencies
 
