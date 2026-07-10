@@ -80,6 +80,7 @@ func New(cfg Config) (*Queue, error)                       // errors if cfg.Deli
 func (q *Queue) Enqueue(convID, text string) uint64        // non-blocking; returns the stable per-conv id (>= 1), or 0 if the backlog is at cap (#869: reject, never drop)
 func (q *Queue) Run(ctx context.Context) error             // lifecycle; blocks until ctx done, then joins all drains
 func (q *Queue) Snapshot(convID string) []QueuedMessage    // #719: ordered copy of the backlog; unknown conv ⇒ nil
+func (q *Queue) SnapshotAll() map[string][]QueuedMessage    // #878: every conv's backlog keyed by convID, omitting empty ones
 func (q *Queue) Remove(convID string, id uint64) bool      // #719: drop a not-in-flight queued msg; true iff removed
 ```
 
@@ -169,6 +170,21 @@ semantics untouched.
   backlog until `advanceLocked` drops it on a confirmed commit, so "current
   `items`" maps exactly to "not-yet-delivered." The snapshot does **not** flag
   which entry is in-flight — `Remove` returning `false` is that signal.
+- **`SnapshotAll()` — every conversation's backlog, in one lock hold (#878).**
+  `Snapshot` reads one named conversation; `convs` is private, so there was no way
+  to enumerate the conversations holding a backlog at all. `SnapshotAll` takes
+  `q.mu` for the whole read — a single consistent instant across every
+  conversation, no TOCTOU between enumerating and reading one — and for each
+  `convs` entry projects the items exactly as `Snapshot` does (value-copy,
+  including the in-flight head), keyed into a fresh `map[string][]QueuedMessage`.
+  It **skips any conversation whose `items` is empty**: `shrinkLocked` leaves a
+  drained-but-retained `convQueue` in `convs` with `items == nil`, so without this
+  filter a fully-drained conversation would still surface an entry. This filter
+  *is* the connect-time queue reconcile's AC3 enforcement point — see
+  [`v2-session-manager.md` § Connect-time queue reconcile](v2-session-manager.md#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues).
+  A pure read: mints no id, dequeues nothing. Built for, and so far only consumed
+  by, the `cmd/pyry` `outstandingQueues` adapter that feeds `internal/relay`'s
+  `OutstandingQueues` seam.
 - **`Remove(convID, id)` — the in-flight-head no-op is the load-bearing rule.**
   `advanceLocked` blindly drops index 0 (`items[1:]`) on the assumption it is
   still the just-delivered head; `Enqueue` only ever appends to the tail, so
@@ -328,19 +344,32 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   is preserved and a removed id is simply never reused. ADR 025 § Security model
   lists viewing/dequeuing as a paired phone's **ungated** capability (only
   answering permission-class modals is gated), so no permission gate is needed.
+- **`SnapshotAll` boundary crossing (#878) — same posture as `Snapshot`, no new
+  input trust decision.** `SnapshotAll` takes **no** caller-supplied parameter —
+  it enumerates the engine's own `convs` keys, so there is no `convID` to trust or
+  mistrust at this call. It **returns** the same opaque `text` `Snapshot` does,
+  fanned out to `internal/relay`'s connect-time reconcile ([#878](../codebase/878.md),
+  `security-sensitive`) and from there to a possibly-untrusted v2 peer — the
+  reconcile's own gates (Noise_IK auth + `interactive` capability + unicast
+  addressing) are the trust boundary, not this engine. Zero new log lines; the
+  `text` never-logged discipline is unchanged.
 
 ## Files
 
 ```
 internal/msgqueue/
 ├── queue.go                  DeliverFunc, ChangeFunc, QueuedMessage, Config, Queue, queued,
-│                             convQueue; New / Enqueue / Snapshot / Remove / Run; notify,
-│                             maybeSpawnDrainLocked, drain, advanceLocked, shrinkLocked,
-│                             sleepCtx; defaultRetryInterval, defaultMaxQueuedPerConversation (#869)
+│                             convQueue; New / Enqueue / Snapshot / SnapshotAll (#878) / Remove /
+│                             Run; notify, maybeSpawnDrainLocked, drain, advanceLocked,
+│                             shrinkLocked, sleepCtx; defaultRetryInterval,
+│                             defaultMaxQueuedPerConversation (#869)
 ├── queue_test.go             #704: ordered one-at-a-time drain (in-flight counter fails >1),
 │                             empty no-op, per-conversation independence, idle-drains-promptly,
 │                             lossless-retry/respawn, stable independent ids,
-│                             clean-shutdown-no-leak, New(nil) rejects (unmodified by #719)
+│                             clean-shutdown-no-leak, New(nil) rejects (unmodified by #719);
+│                             #878: SnapshotAll two-conversations, omits-drained-conversation,
+│                             empty-queue, includes-in-flight-head, returns-value-copies,
+│                             -race-with-enqueue-and-drain
 └── queue_introspect_test.go  #719: snapshot-in-order, snapshot-is-a-copy, Remove drops
                               non-head / no-ops on in-flight-head|unknown|already-delivered,
                               OnChange fires on enqueue|advance|remove (no-op fires nothing),
@@ -383,4 +412,9 @@ the change-notification path as the injected `ChangeFunc`.
   slice. **[#869](../codebase/869.md) landed the deferred inbound bound**: a
   per-conversation `MaxQueuedPerConversation` cap (default 100) at `Enqueue`,
   reject-never-drop, mapped by `send_message` to a retryable `server.binary_busy`
-  reply. Nothing remains deferred on this engine.
+  reply. **[#878](../codebase/878.md) landed the connect-time reconcile enumeration
+  seam**: `SnapshotAll` (every non-empty conversation's backlog in one lock hold),
+  consumed by `cmd/pyry`'s `outstandingQueues` adapter and, through it,
+  `internal/relay`'s `OutstandingQueues` seam — see
+  [`v2-session-manager.md` § Connect-time queue reconcile](v2-session-manager.md#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues).
+  Nothing remains deferred on this engine.
