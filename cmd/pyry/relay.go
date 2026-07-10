@@ -495,6 +495,14 @@ func startRelayV2(
 		// Read-only reflection — no secret, no authz. nil in foreground / unresolved
 		// sessions dir makes the handler report zeros (used_tokens:0, window_tokens:0).
 		SnapshotUsage: snapshotUsage,
+		// Connect-time modal reconcile source (#877): enumerates the outstanding-
+		// modal registry as marshal-ready modal_shown payloads so a phone that
+		// connects/reconnects while a permission prompt is pending is unicast the
+		// still-outstanding modal_shown on open. modalReg is the same daemon-
+		// singleton the raise-time producer Records into and the ModalResolver
+		// below consumes, so enumerate-current-truth reflects live control state.
+		// A pure read: it mints no nonce and re-arms no timer.
+		OutstandingModals: modalReg.Snapshot,
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker

@@ -734,6 +734,25 @@ type V2SessionConfig struct {
 	// adapter. The three presence pointers carry no secret; the fail-safe is the
 	// pointer-nil semantics (an absent YOLO never enables bypass).
 	SettingsUpdater SettingsUpdater
+
+	// OutstandingModals enumerates the daemon's currently-outstanding modals as
+	// marshal-ready modal_shown payloads (each already stamped with its original
+	// modal_id) for connect-time reconcile (#877). Called on the Run goroutine
+	// from handleNoiseInit's interactive-open tail; the returned payloads are
+	// unicast to the just-opened conn only. A pure read: it mints no nonce and
+	// retires nothing, so it neither re-arms the deny-on-timeout nor changes
+	// answerability — a re-sent modal_id stays answerable exactly once, governed
+	// by the registry's one-shot Resolve, which this path never calls.
+	//
+	// A closure returning []protocol.ModalShownPayload, not a *modalbridge.Registry:
+	// internal/relay does not import internal/modalbridge, and protocol is already
+	// imported, so the payload crosses the boundary with no new import and no cycle
+	// (matching SnapshotSettings / SnapshotUsage — define the dependency where it is
+	// consumed).
+	//
+	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#877 / foreground /
+	// existing-test posture. Production wires modalbridge.Registry.Snapshot.
+	OutstandingModals func() []protocol.ModalShownPayload
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -1401,6 +1420,18 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// inbound frame within the window tears the session down via closeWith,
 	// bounding the CipherStates' lifetime under connect/disconnect churn.
 	s.idleTimer = m.armIdleTimer(ctx, s, idleTimeout)
+
+	// Connect-time modal reconcile (#877): re-send the still-outstanding
+	// modal_shown set to this conn so a phone that connected/reconnected after a
+	// permission prompt was raised is brought to current modal truth, rather than
+	// letting the prompt silently ride the deny-on-timeout window unseen. No-op
+	// for a non-interactive conn or an unwired seam. Ordering relative to
+	// replayMissed is immaterial: the reconcile's modal_shown lands in m.queues
+	// (held behind any reconnect-replay tail by #777, then drains), while
+	// replayMissed enqueues into the separate replayQueue. Placed first to
+	// document intent — surface the time-sensitive prompt ahead of replayed
+	// history.
+	m.reconcileModals(ctx, s)
 
 	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
 	// off, replay the conversation's missed tail (or emit a resync marker) on
@@ -2132,6 +2163,80 @@ func (m *V2SessionManager) broadcastModalDismissed(ctx context.Context, modalID 
 				"event", "v2.modal.dismissed.push_err",
 				"conn_id", connID,
 				"err", err)
+		}
+	}
+}
+
+// reconcileModals unicasts the current outstanding modal_shown set to a freshly
+// interactive-open conn (#877). A phone that connects or reconnects after a
+// permission prompt was raised never saw the raise-time broadcastInteractive
+// fan-out (EventID == nil, so it is not in the turn-event replay ring); without
+// this, the prompt silently rides the daemon's 2-minute deny-on-timeout unseen.
+//
+// Structural sibling of broadcastModalDismissed, minus the fan-out: it addresses
+// exactly s.connID rather than every open interactive conn, and sources the
+// payloads from the current-truth snapshot instead of a dismissal. Reconciling
+// from current state is idempotent — a still-pending modal is re-sent, an
+// already-resolved one is simply absent from the snapshot and never resurfaces
+// (AC4) — so there is no stale-replay risk and no special-casing of how long the
+// client was away.
+//
+// Run-goroutine only (called from handleNoiseInit's success tail), so
+// s.interactive / s.connID are read lock-free under the package's single-owner
+// invariant. It reaches no cmd/pyry emitter state: the raise-time nextID is
+// producer-goroutine-owned and the modal control ID is non-load-bearing (the
+// phone correlates on modal_id), so the re-send is entirely relay-side with a
+// fixed ID — no cross-goroutine coupling, no lock added.
+//
+// SECURITY: the modal body (title/prompt/options) is application content and is
+// NEVER logged; the two error branches carry only content-free discriminants
+// (event, conn_id, and modal_id — an opaque nonce, not a secret). Matches
+// broadcastModalDismissed's no-body-in-logs discipline.
+func (m *V2SessionManager) reconcileModals(ctx context.Context, s *V2Session) {
+	// Capability gate (AC2) + the unwired/foreground opt-out. s.interactive is
+	// the same negotiated flag broadcastModalDismissed gates on; a nil seam is
+	// the nil-resolver posture the other optional control seams share.
+	if !s.interactive || m.cfg.OutstandingModals == nil {
+		return
+	}
+	outstanding := m.cfg.OutstandingModals()
+	if len(outstanding) == 0 {
+		return // nothing pending ⇒ nothing sent (AC3).
+	}
+	// One timestamp shared by the batch (matches broadcastModalDismissed).
+	ts := time.Now().UTC()
+	for _, p := range outstanding {
+		payload, err := json.Marshal(p)
+		if err != nil {
+			// ModalShownPayload is a closed struct of strings / []struct; marshal
+			// cannot fail in practice. Defensive — NEVER echo err or the body (it
+			// could quote the payload). Skip this one, keep sending the rest.
+			m.cfg.Logger.Warn("relay: v2 modal_shown reconcile marshal failed",
+				"event", "v2.modal.reconcile.marshal_err",
+				"conn_id", s.connID,
+				"modal_id", p.ModalID)
+			continue
+		}
+		env := protocol.Envelope{
+			ID:      1, // non-load-bearing; the phone correlates on modal_id.
+			Type:    protocol.TypeModalShown,
+			TS:      ts,
+			Payload: payload,
+			// EventID left nil: a control event, never part of the turn-event
+			// replay ring (forwardEnvelope's dedup is inert for EventID == nil).
+		}
+		if err := m.Push(ctx, s.connID, env); err != nil {
+			// ctx teardown ⇒ stop (the session is going away); any other sentinel
+			// (ErrConnNotFound is unreachable — the queue was created two
+			// statements earlier on this same goroutine) ⇒ skip and continue.
+			// NEVER echo payload bytes.
+			m.cfg.Logger.Debug("relay: v2 modal_shown reconcile push dropped",
+				"event", "v2.modal.reconcile.push_err",
+				"conn_id", s.connID,
+				"err", err)
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }
