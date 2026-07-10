@@ -1,8 +1,8 @@
 # `internal/agentrun` — workdir helpers and shared types for `pyry agent-run`
 
-> **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts three small exported helpers: `ResolveWorkdir`, `ExitErrIsBenign` (#527), and `IsNewLogicalTurn` (#574). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it.
+> **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts four small exported helpers: `ResolveWorkdir`, `ExitErrIsBenign` (#527), `IsNewLogicalTurn` (#574), and `ReapDescendantGroups` (#923, lifted from `ptyrunner`). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it.
 
-Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map — a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface, and a **shared logical-turn-boundary predicate** (`IsNewLogicalTurn`, #574) that both `budget`'s `--max-turns` enforcement and `streamjson`'s `num_turns` reporting call so the two counts cannot drift on what a claude turn is. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
+Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map — a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface, a **shared logical-turn-boundary predicate** (`IsNewLogicalTurn`, #574) that both `budget`'s `--max-turns` enforcement and `streamjson`'s `num_turns` reporting call so the two counts cannot drift on what a claude turn is, and (#923) the **claude descendant-process-group reaper** (`ReapDescendantGroups`) — colocated here, not appended to `exitclass.go`, so a future second consumer (`streamrunner`, #924) can call it without importing a sibling `agentrun` subpackage. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
 
 ## Public API
 
@@ -34,6 +34,18 @@ func ExitErrIsBenign(err error) bool
 // source of truth shared by budget's --max-turns enforcement and streamjson's
 // num_turns reporting so the two counts cannot drift (#573 inline → #574 extracted).
 func IsNewLogicalTurn(currentID, lastID string) bool
+
+// ReapDescendantGroups SIGKILLs every process group that contains a
+// descendant of rootPid, except the caller's own group, rootPid's own group,
+// and the init/invalid group (pgid <= 1). Best-effort and content-blind: one
+// `ps -axo pid=,ppid=,pgid=` snapshot (bounded by a 2s timeout), pid/ppid/pgid
+// only, Warn-logs pgids/counts (never command strings) on enumeration or kill
+// failure without propagating. Lifted verbatim from ptyrunner (#565) into the
+// shared package in #923 so streamrunner (#924) can consume it without
+// importing a sibling agentrun subpackage; its enumeration helper
+// (descendantPGIDs) relocated alongside it but stays unexported — no
+// consumer outside the reaper.
+func ReapDescendantGroups(rootPid int, logger *slog.Logger)
 ```
 
 `ResolveWorkdir` has the same shape as `internal/install.ResolveWorkDir` — the name overlap is package-scoped (`install.ResolveWorkDir` validates a CLI flag → absolute path; `agentrun.ResolveWorkdir` resolves an absolute path → realpath; orthogonal jobs).
@@ -54,6 +66,7 @@ Imports of `internal/agentrun` after [#508](../codebase/508.md), [#527](../codeb
 - `trust` imports for `ResolveWorkdir` — the `projects[...]` key shape.
 - `ptyrunner`, `budget`, `streamrunner` each import for `ExitErrIsBenign` — the shared teardown-error predicate at their respective `Session.Close` / `Terminate` / `Kill` / `stdin.Close` error-log sites (#527).
 - `budget` and `streamjson` each import for `IsNewLogicalTurn` — the shared turn-boundary predicate (#574); `budget`'s `Counter.OnEvent` gates `count++` on it and `streamjson`'s `Emitter.Emit` gates `numTurns++` on it, so the enforced and reported turn counts share one definition.
+- `ptyrunner` imports for `ReapDescendantGroups` — its local `reapDescendantGroupsFn` seam (`reap.go`) is re-pointed at it post-#923; `runner.go`'s three teardown call sites are unaffected by the lift. `streamrunner` is not yet a consumer — #924 (blocked-by #923) wires it.
 - `settings` does not import the parent package; it has no workdir input (writes to `os.TempDir()`) and is stdlib-only.
 
 The `ptyrunner`, `streamrunner`, and pre-#512 `jsonl/tail` subpackages used to import the parent for `EncodeProjectDir` but now call [`tui-driver/pkg/tuidriver.SessionJSONLPath`](https://github.com/pyrycode/tui-driver) (or `EncodeCwd`) directly — the canonicalisation lives inside tui-driver. The `jsonl/tail` subpackage was deleted in [#512](../codebase/512.md) (`ptyrunner.Run` drains `tuidriver.TailJSONL` inline).
@@ -107,3 +120,5 @@ The 2026-05-19 pivot back to PTY drive (#329 tracking) drives all three resurrec
 - [rotation-watcher.md](rotation-watcher.md) — existing user of the same `EvalSymlinks` pattern for path comparison against claude-resolved paths.
 - [devices-registry.md](devices-registry.md) — the canonical atomic-write recipe each subpackage mirrors.
 - [`codebase/910.md`](../codebase/910.md) — `ResolveWorkdir`'s on-disk-case canonicalisation fix; the 2026-05-29 incident it resolves.
+- [`codebase/565.md`](../codebase/565.md) — where `ReapDescendantGroups` was originally built (package-local, inside `ptyrunner`) and why `cmd.Cancel` is the race-free reap chokepoint.
+- [`codebase/923.md`](../codebase/923.md) — the lift of `ReapDescendantGroups` from `ptyrunner` into this package.
