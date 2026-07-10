@@ -488,6 +488,96 @@ func TestSmoke_HttptestEchoServer(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultsWriteTimeout(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		given time.Duration
+		want  time.Duration
+	}{
+		{"unset defaults to 10s", 0, defaultWriteTimeout},
+		{"negative defaults to 10s", -1, defaultWriteTimeout},
+		{"positive preserved", 3 * time.Second, 3 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(Config{Logger: testLogger(t), WriteTimeout: tt.given})
+			if c.cfg.WriteTimeout != tt.want {
+				t.Errorf("WriteTimeout = %v, want %v", c.cfg.WriteTimeout, tt.want)
+			}
+		})
+	}
+}
+
+// TestNew_UnsetWriteTimeout_SendSucceedsEndToEnd drives a send over the test
+// relay with WriteTimeout left unset. Under the pre-#916 bug a zero
+// WriteTimeout makes sendPump's first Write instantly deadline-exceed, so the
+// conn drops and no echo ever returns; a successful round-trip proves New's
+// default took effect.
+func TestNew_UnsetWriteTimeout_SendSucceedsEndToEnd(t *testing.T) {
+	t.Parallel()
+	relay := newTestRelay(t)
+	cfg := Config{
+		URL:    relay.URL(),
+		Logger: testLogger(t),
+		// WriteTimeout deliberately omitted — this is the whole point.
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     50 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-relay.connectedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection never established")
+	}
+	// Poll Send until setConn lands (until then Send returns ErrNotConnected).
+	sendDeadline := time.Now().Add(500 * time.Millisecond)
+	var sendErr error
+	for time.Now().Before(sendDeadline) {
+		sendErr = c.Send([]byte("hello"))
+		if sendErr == nil {
+			break
+		}
+		if !errors.Is(sendErr, ErrNotConnected) {
+			t.Fatalf("Send: %v", sendErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if sendErr != nil {
+		t.Fatalf("Send did not become live: %v", sendErr)
+	}
+	recvCtx, recvCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer recvCancel()
+	got, err := c.Receive(recvCtx)
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("Receive = %q, want %q", got, "hello")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-connectErr:
+		if !errors.Is(err, ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Errorf("Connect returned %v, want ErrClosed or context.Canceled", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Connect did not return after Close")
+	}
+}
+
 func TestSend_ReturnsErrNotConnected_BeforeConnect(t *testing.T) {
 	t.Parallel()
 	c := New(Config{Logger: testLogger(t), WriteTimeout: time.Second})

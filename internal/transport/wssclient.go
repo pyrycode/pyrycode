@@ -40,14 +40,25 @@ const (
 	closeFrameGrace = 50 * time.Millisecond
 )
 
+// defaultWriteTimeout is the per-frame send-I/O bound New applies when
+// Config.WriteTimeout is left unset (non-positive). It is a local send-I/O
+// bound, not a wire-spec cadence value, so it lives outside the const block
+// above. Kept in sync by convention with the production caller
+// (internal/relay/connection.go), which passes 10s.
+const defaultWriteTimeout = 10 * time.Second
+
 // Config carries the static configuration for a Client. The caller supplies
 // the relay URL and any request headers (server-id, binary-version,
-// protocol-versions); this package does not construct headers. WriteTimeout
-// bounds per-frame send I/O — it is NOT an inactivity timeout; the
-// inactivity contract is the ping/pong heartbeat.
+// protocol-versions); this package does not construct headers.
 type Config struct {
-	URL          string
-	Headers      http.Header
+	URL     string
+	Headers http.Header
+
+	// WriteTimeout bounds per-frame send I/O — it is NOT an inactivity
+	// timeout; the inactivity contract is the ping/pong heartbeat. When
+	// left unset (non-positive), New substitutes defaultWriteTimeout (10s)
+	// so a zero-value config does not produce an instantly-expired write
+	// context that fails every send.
 	WriteTimeout time.Duration
 
 	// Logger receives structured lifecycle logs (dial, reconnect, ping
@@ -152,6 +163,9 @@ var (
 func New(cfg Config) *Client {
 	if cfg.Logger == nil {
 		panic("transport: Config.Logger is required")
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = defaultWriteTimeout
 	}
 	preClosed := make(chan struct{})
 	close(preClosed)
