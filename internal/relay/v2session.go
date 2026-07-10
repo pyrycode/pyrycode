@@ -178,10 +178,16 @@ type pushQueue struct {
 //   - at cap with no queued delta (all control), incoming control: admit past
 //     nominal cap (documented soft overflow — see § Design in the spec). The
 //     trilemma bounded ∧ never-drop-control ∧ never-block-producer is
-//     unsatisfiable here; we yield "strictly bounded". This state needs a
-//     connected-but-very-slow relay sustained across hundreds of control
-//     events with zero interleaved text, and the phone cannot drive control
-//     volume (push is server→phone only), so it is unreachable in practice.
+//     unsatisfiable here; we yield "strictly bounded". This state IS reachable:
+//     StreamBundle (#812) enqueues control-class debug_bundle_chunk /
+//     debug_bundle_done frames, so one request_debug_bundle can drive hundreds
+//     of never-droppable control events onto a connected-but-very-slow relay
+//     with zero interleaved text. What keeps it bounded is
+//     handleDebugBundleRequest's per-conn in-flight gate (#911): while a conn's
+//     queue still holds any bundle frame, further request_debug_bundle on that
+//     conn are rejected before StreamBundle, so a single conn accumulates at
+//     most one bundle's chunks (bounded ≈ 4/3 × archive) and retries can no
+//     longer stack unbounded memory.
 func (q *pushQueue) enqueue(env protocol.Envelope) bool {
 	qe := queuedEnv{env: env, droppable: env.Type == protocol.TypeAssistantDelta}
 	if len(q.items) < pushQueueCap {
@@ -204,7 +210,8 @@ func (q *pushQueue) enqueue(env protocol.Envelope) bool {
 		q.dropped++
 		return true
 	}
-	// Soft overflow: admit the control event past nominal cap.
+	// Soft overflow: admit the control event past nominal cap. Reachable via
+	// StreamBundle's bundle chunks; bounded per conn by #911's in-flight gate.
 	q.items = append(q.items, qe)
 	return false
 }
@@ -233,8 +240,11 @@ const wakeBufferSize = 16
 // 220): post-#609 coalescing makes deltas arrive per-message/~250 ms, so 256
 // gives ample headroom to ride out one transport WriteTimeout window without
 // dropping while bounding worst-case per-session memory. Control events may
-// briefly push the queue past this in the unreachable-in-practice all-control
-// saturated case (see pushQueue.enqueue).
+// push the queue past this: StreamBundle's debug_bundle_chunk / debug_bundle_done
+// frames are control-class, so one request_debug_bundle can soft-overflow the
+// queue (see pushQueue.enqueue). #911's per-conn in-flight gate bounds that to
+// one bundle's chunks per conn (≈ 4/3 × archive); it no longer relies on the
+// all-control saturated state being unreachable.
 const pushQueueCap = 256
 
 // handlerOutboundBuf is the buffer size for the per-frame dispatch.Conn
@@ -2033,6 +2043,20 @@ func (m *V2SessionManager) handleDebugBundleRequest(ctx context.Context, s *V2Se
 		return
 	}
 
+	// #911: bound this conn to one in-flight bundle. If a prior bundle's chunks
+	// are still queued (a slow/stalled transport has not drained them), a retry
+	// must not stack a second bundle's never-droppable control frames onto the
+	// queue — that is unbounded per-retry memory growth (~4/3 × archive per
+	// stacked bundle). Reply with the same deterministic retryable "unavailable"
+	// error as the branches below, so the phone retries later; once the prior
+	// bundle drains the gate clears and the retry is served (AC #4). Placed BEFORE
+	// DebugBundler() so the on-disk assembly is skipped, not merely the enqueue
+	// (AC #1: "no second bundle is assembled or enqueued").
+	if m.bundleInFlight(s.connID) {
+		m.debugBundleReplyError(ctx, s, env.ID)
+		return
+	}
+
 	archive, err := m.cfg.DebugBundler()
 	if err != nil {
 		// #811 read-failure honesty: a recording that exists but fails to read
@@ -2097,6 +2121,49 @@ func (m *V2SessionManager) debugBundleReplyError(ctx context.Context, s *V2Sessi
 			"conn_id", s.connID,
 			"err", err)
 	}
+}
+
+// bundleInFlight reports whether connID's push queue still holds any
+// debug_bundle_chunk or debug_bundle_done envelope from a prior bundle — i.e.
+// a StreamBundle's frames enqueued by an earlier handleDebugBundleRequest have
+// not all drained yet. It is the per-conn in-flight gate for #911: while it is
+// true, a repeated request_debug_bundle on the same conn is rejected before any
+// assembly or enqueue, so a client retry loop against a slow/stalled transport
+// cannot stack a second bundle's never-droppable control frames (unbounded
+// per-retry memory).
+//
+// Both types are scanned because StreamBundle enqueues all N chunks PLUS the
+// trailing debug_bundle_done in one handler invocation and drainOnce pops one
+// per Run pass: during the drain the queue holds a shrinking suffix that always
+// includes the done marker until the very last pop, so scanning for either type
+// covers the whole in-flight window and clears exactly when the done marker has
+// also drained (AC #4).
+//
+// An unknown conn (!ok) has no queue and cannot be bundle-busy → false, the safe
+// direction (a non-open conn's later StreamBundle/Push fails closed with
+// ErrConnNotFound anyway).
+//
+// pushMu is taken ALONE for a pure O(len(items)) read of q.items and released
+// before the caller's reply, preserving the leaf lock's "never held across an
+// Encrypt, m.send, or any channel op … always taken alone" invariant. The scan
+// runs on the Run dispatch goroutine, serialized against this conn's own
+// drainOnce pops; the only concurrent mutator is an off-Run Push, which can only
+// append frames — it can turn a false into a true (more conservative), never
+// clear a true — so there is no TOCTOU that admits a second bundle.
+func (m *V2SessionManager) bundleInFlight(connID string) bool {
+	m.pushMu.Lock()
+	defer m.pushMu.Unlock()
+	q, ok := m.queues[connID]
+	if !ok {
+		return false
+	}
+	for i := range q.items {
+		switch q.items[i].env.Type {
+		case protocol.TypeDebugBundleChunk, protocol.TypeDebugBundleDone:
+			return true
+		}
+	}
+	return false
 }
 
 // handleModalCancel resolves an inbound modal_cancel control frame: it consumes
