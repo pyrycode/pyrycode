@@ -503,6 +503,14 @@ func startRelayV2(
 		// below consumes, so enumerate-current-truth reflects live control state.
 		// A pure read: it mints no nonce and re-arms no timer.
 		OutstandingModals: modalReg.Snapshot,
+		// Connect-time queue reconcile source (#878): enumerates the daemon's
+		// per-conversation inbound backlogs as marshal-ready queue_state payloads so
+		// a phone that connects/reconnects between backlog changes is unicast the
+		// current queue_state for each non-empty conversation on open. queue is the
+		// same live daemon queue the #722 on-change producer snapshots and the
+		// dequeue handler (QueueRemover below) mutates, so enumerate-current-truth
+		// reflects live backlog state. A pure read: it mints no id and dequeues nothing.
+		OutstandingQueues: outstandingQueues(queue),
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker

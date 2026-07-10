@@ -184,6 +184,24 @@ func toQueueStatePayload(convID string, items []msgqueue.QueuedMessage) protocol
 	}
 }
 
+// outstandingQueues adapts msgqueue.SnapshotAll to the relay connect-time
+// reconcile seam (#878): one marshal-ready QueueStatePayload per non-empty
+// conversation, reusing the #722 toQueueStatePayload mapping so mobile consumes
+// the same behaviour later with no daemon change. Every entry SnapshotAll returns
+// is non-empty (it omits drained conversations), so every payload carries
+// len(Queued) >= 1. A pure read: it mints no id and dequeues nothing; the
+// untrusted queued text stays opaque transit and is never logged here.
+func outstandingQueues(queue *msgqueue.Queue) func() []protocol.QueueStatePayload {
+	return func() []protocol.QueueStatePayload {
+		backlogs := queue.SnapshotAll()
+		out := make([]protocol.QueueStatePayload, 0, len(backlogs))
+		for convID, items := range backlogs {
+			out = append(out, toQueueStatePayload(convID, items))
+		}
+		return out
+	}
+}
+
 // startQueueStateStreamV2 starts the pre-built emitter's Run goroutine over
 // bcast and returns a cleanup that waits for Run to exit on ctx-cancel. Mirrors
 // startSessionTransitionStreamV2, except qse is pre-built (the emitter must

@@ -255,6 +255,39 @@ func (q *Queue) Snapshot(convID string) []QueuedMessage {
 	return out
 }
 
+// SnapshotAll returns every conversation's not-yet-confirmed-delivered backlog
+// keyed by conversation id, omitting any conversation whose backlog is empty.
+// Each value is a freshly allocated slice of value copies (identical semantics to
+// Snapshot, including the in-flight head), so a caller cannot mutate engine state
+// through it. A pure read: it mints no id and dequeues nothing. The empty
+// (non-nil) map means no conversation holds a backlog. It is the connect-time
+// queue reconcile's enumeration seam (#878) — Snapshot reads one named
+// conversation, but convs is private, so enumerating the non-empty ones needs
+// this read.
+//
+// The whole read runs under q.mu, so the returned set is a single consistent
+// instant with no window between enumerating the conversations and reading each
+// one. A drained-but-retained convQueue (advanceLocked/shrinkLocked leaves the
+// entry with items == nil) is skipped, so an empty conversation contributes no
+// map entry and therefore no queue_state re-send.
+func (q *Queue) SnapshotAll() map[string][]QueuedMessage {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	out := make(map[string][]QueuedMessage, len(q.convs))
+	for convID, c := range q.convs {
+		if len(c.items) == 0 {
+			continue // drained-but-retained (items == nil) ⇒ no entry (AC3).
+		}
+		msgs := make([]QueuedMessage, len(c.items))
+		for i := range c.items {
+			msgs[i] = QueuedMessage{ID: c.items[i].id, Text: c.items[i].text, TS: c.items[i].ts}
+		}
+		out[convID] = msgs
+	}
+	return out
+}
+
 // Remove drops a queued, not-in-flight message by id from convID's FIFO,
 // preserving the surviving order, and returns true iff it removed one. An
 // unknown conversation, an unknown or already-delivered id, or the in-flight

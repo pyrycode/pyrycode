@@ -369,6 +369,110 @@ func TestQueueStateEmitterV2_Run_DeliversFromChannel(t *testing.T) {
 	}
 }
 
+// #878: outstandingQueues adapts a live queue's SnapshotAll to the relay
+// reconcile seam — one QueueStatePayload per non-empty conversation, mapped via
+// toQueueStatePayload, and none for a drained-empty conversation. Enqueue-only
+// (no Run) keeps both backlogs intact for the two-conversation assertion.
+func TestOutstandingQueues_OnePayloadPerNonEmptyConversation(t *testing.T) {
+	t.Parallel()
+	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	q.Enqueue("conv-A", "alpha-1")
+	q.Enqueue("conv-A", "alpha-2")
+	q.Enqueue("conv-B", "bravo-1")
+
+	got := outstandingQueues(q)()
+	if len(got) != 2 {
+		t.Fatalf("outstandingQueues returned %d payloads, want 2 (one per non-empty conversation)", len(got))
+	}
+
+	byConv := map[string]protocol.QueueStatePayload{}
+	for _, p := range got {
+		if _, dup := byConv[p.ConversationID]; dup {
+			t.Fatalf("conversation_id %q appeared in more than one payload", p.ConversationID)
+		}
+		byConv[p.ConversationID] = p
+	}
+
+	a, ok := byConv["conv-A"]
+	if !ok {
+		t.Fatal("missing payload for conv-A")
+	}
+	if len(a.Queued) != 2 ||
+		a.Queued[0].QueuedMsgID != 1 || a.Queued[0].Text != "alpha-1" ||
+		a.Queued[1].QueuedMsgID != 2 || a.Queued[1].Text != "alpha-2" {
+		t.Errorf("conv-A queued = %+v, want ids [1 2] texts [alpha-1 alpha-2] in order", a.Queued)
+	}
+	b, ok := byConv["conv-B"]
+	if !ok {
+		t.Fatal("missing payload for conv-B")
+	}
+	if len(b.Queued) != 1 || b.Queued[0].QueuedMsgID != 1 || b.Queued[0].Text != "bravo-1" {
+		t.Errorf("conv-B queued = %+v, want single {1 bravo-1}", b.Queued)
+	}
+}
+
+// #878 AC3: a conversation whose backlog fully drained produces no payload — the
+// omission propagates from SnapshotAll through the adapter. A conversation held
+// non-empty (its head gated in delivery) proves the emptiness, not an empty queue.
+func TestOutstandingQueues_OmitsDrainedConversation(t *testing.T) {
+	t.Parallel()
+	// held blocks in deliver forever; gone delivers immediately and drains empty.
+	release := make(chan struct{})
+	deliver := func(_ context.Context, convID string, _ []byte) error {
+		if convID == "held" {
+			<-release
+		}
+		return nil
+	}
+	q, err := msgqueue.New(msgqueue.Config{Deliver: deliver, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer close(release)
+	go func() { _ = q.Run(ctx) }()
+
+	q.Enqueue("held", "h1")
+	q.Enqueue("gone", "g1")
+
+	// Wait for gone to drain empty (its convQueue is retained with items == nil).
+	deadline := time.Now().Add(2 * time.Second)
+	for len(q.Snapshot("gone")) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("conversation \"gone\" did not drain empty")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	got := outstandingQueues(q)()
+	if len(got) != 1 {
+		t.Fatalf("outstandingQueues returned %d payloads, want 1 (drained conv omitted)", len(got))
+	}
+	if got[0].ConversationID != "held" {
+		t.Errorf("payload conversation_id = %q, want held (the still-backlogged one)", got[0].ConversationID)
+	}
+}
+
+// #878: an empty queue yields an empty (non-nil) payload slice — the nil-safe
+// posture the relay seam short-circuits on (len == 0 ⇒ no reconcile).
+func TestOutstandingQueues_EmptyQueue(t *testing.T) {
+	t.Parallel()
+	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	got := outstandingQueues(q)()
+	if len(got) != 0 {
+		t.Errorf("outstandingQueues on an empty queue returned %d payloads, want 0", len(got))
+	}
+}
+
 // notifyingBcast wraps fakeInteractiveBcast and signals after each Push so a
 // test driving the Run goroutine can await delivery without polling. Push is
 // only ever called from the single Run goroutine, so the embedded recorder needs

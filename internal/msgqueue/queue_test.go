@@ -515,3 +515,228 @@ func TestQueue_DefaultCap_ResolvesAndFires(t *testing.T) {
 		t.Fatalf("Enqueue past default cap id = %d, want 0 (rejected)", id)
 	}
 }
+
+// equalMessages compares two backlogs by id, text, and ts (via time.Time.Equal,
+// since JSON round-trips strip the monotonic reading — the project-wide rule).
+func equalMessages(a, b []QueuedMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].Text != b[i].Text || !a[i].TS.Equal(b[i].TS) {
+			return false
+		}
+	}
+	return true
+}
+
+// waitSnapshotEmpty polls until convID's backlog is empty (its drain confirmed
+// the last delivery and advanceLocked dropped the head) or the deadline expires.
+// The synchronisation knob for the drained-conversation scenario: f.completed
+// fires inside deliver, one advanceLocked before the head actually leaves items.
+func waitSnapshotEmpty(t *testing.T, q *Queue, convID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(q.Snapshot(convID)) == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("conversation %q did not drain empty", convID)
+}
+
+// #878: SnapshotAll enumerates every conversation holding a backlog, keyed by
+// conversation id, each value mirroring that conversation's Snapshot (order, id,
+// text, ts). No Run: enqueue-only leaves both backlogs intact.
+func TestQueue_SnapshotAll_TwoConversations(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	q.Enqueue("a", "a1")
+	q.Enqueue("a", "a2")
+	q.Enqueue("b", "b1")
+
+	all := q.SnapshotAll()
+	if len(all) != 2 {
+		t.Fatalf("SnapshotAll len = %d, want 2 (both conversations have a backlog)", len(all))
+	}
+	for _, convID := range []string{"a", "b"} {
+		got, ok := all[convID]
+		if !ok {
+			t.Fatalf("SnapshotAll missing key %q", convID)
+		}
+		if want := q.Snapshot(convID); !equalMessages(got, want) {
+			t.Errorf("SnapshotAll[%q] = %+v, want %+v (must mirror Snapshot)", convID, got, want)
+		}
+	}
+	if all["a"][0].ID != 1 || all["a"][0].Text != "a1" || all["a"][1].ID != 2 || all["a"][1].Text != "a2" {
+		t.Errorf("SnapshotAll[a] = %+v, want ids [1 2] texts [a1 a2] in order", all["a"])
+	}
+}
+
+// #878 AC3: a conversation drained to empty keeps its convQueue entry (items ==
+// nil) but is OMITTED from SnapshotAll. A gated conversation held non-empty proves
+// the omission is the empty-skip, not a trivially empty map.
+func TestQueue_SnapshotAll_OmitsDrainedConversation(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.gates["held"] = make(chan struct{}) // its head blocks in deliver for the whole test
+
+	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("held", "h1") // stays in flight (gated), backlog never empties
+	q.Enqueue("gone", "g1") // drains to completion, leaving an empty-but-retained convQueue
+
+	if got := recvWithin(t, f.completed, "delivery of g1"); got != "g1" {
+		t.Fatalf("delivered %q, want g1", got)
+	}
+	waitSnapshotEmpty(t, q, "gone") // wait for advanceLocked to drop the head
+
+	all := q.SnapshotAll()
+	if _, ok := all["gone"]; ok {
+		t.Errorf("SnapshotAll includes drained conversation %q, want it omitted (AC3)", "gone")
+	}
+	held, ok := all["held"]
+	if !ok {
+		t.Fatalf("SnapshotAll missing the still-backlogged conversation %q", "held")
+	}
+	if len(held) != 1 || held[0].ID != 1 || held[0].Text != "h1" {
+		t.Errorf("SnapshotAll[held] = %+v, want the single in-flight head {1 h1}", held)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// #878: a fresh queue with no conversations yields a non-nil empty map (not nil).
+func TestQueue_SnapshotAll_EmptyQueue(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	all := q.SnapshotAll()
+	if all == nil {
+		t.Fatal("SnapshotAll returned nil, want a non-nil empty map")
+	}
+	if len(all) != 0 {
+		t.Errorf("SnapshotAll len = %d, want 0 (no conversations)", len(all))
+	}
+}
+
+// #878: the in-flight (mid-delivery) head is part of the backlog, so SnapshotAll
+// includes it — mirroring Snapshot's head-included semantics.
+func TestQueue_SnapshotAll_IncludesInFlightHead(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.gates["c"] = make(chan struct{}) // hold the head in flight
+
+	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("c", "m1") // becomes the gated in-flight head
+	q.Enqueue("c", "m2")
+
+	if got := recvWithin(t, f.entered, "delivery start of m1"); got != "m1" {
+		t.Fatalf("first deliver entered with %q, want m1", got)
+	}
+
+	got := q.SnapshotAll()["c"]
+	if len(got) != 2 || got[0].ID != 1 || got[0].Text != "m1" || got[1].ID != 2 || got[1].Text != "m2" {
+		t.Errorf("SnapshotAll[c] = %+v, want [{1 m1} {2 m2}] including the in-flight head", got)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// #878: the returned slices are value copies — mutating one does not change engine
+// state observed by a later Snapshot/SnapshotAll.
+func TestQueue_SnapshotAll_ReturnsValueCopies(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	q, err := New(Config{Deliver: f.deliver})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	q.Enqueue("a", "original")
+
+	first := q.SnapshotAll()
+	first["a"][0].Text = "mutated"      // scribble on the returned copy
+	first["a"] = append(first["a"], QueuedMessage{ID: 99, Text: "injected"})
+
+	if again := q.Snapshot("a"); len(again) != 1 || again[0].Text != "original" {
+		t.Errorf("Snapshot after mutating SnapshotAll result = %+v, want the untouched [{1 original}]", again)
+	}
+	if again := q.SnapshotAll()["a"]; len(again) != 1 || again[0].Text != "original" {
+		t.Errorf("SnapshotAll after mutating a prior result = %+v, want the untouched [{1 original}]", again)
+	}
+}
+
+// #878 -race: SnapshotAll concurrent with Enqueue and the drain must be clean.
+// SnapshotAll takes the same q.mu leaf lock as Enqueue/Snapshot/advanceLocked, so
+// -race must report nothing.
+func TestQueue_SnapshotAll_RaceWithEnqueueAndDrain(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver() // no gates: drains run promptly, racing the snapshots
+	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			conv := string(rune('a' + w))
+			for i := 0; i < 100; i++ {
+				q.Enqueue(conv, "x")
+			}
+		}(w)
+	}
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				_ = q.SnapshotAll()
+			}
+		}()
+	}
+	wg.Wait()
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
