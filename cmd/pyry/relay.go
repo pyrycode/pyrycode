@@ -446,6 +446,7 @@ func startRelayV2(
 		Frames:      conn.Frames(),
 		Outbound:    conn.Send,
 		Connected:   conn.Connected,
+		Reconnect:   conn.Reconnected(),
 		StaticPriv:  priv[:],
 		Devices:     registry,
 		DevicesPath: resolveDevicesPath(instanceName),
