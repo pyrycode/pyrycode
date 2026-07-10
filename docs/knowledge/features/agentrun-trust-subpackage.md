@@ -24,9 +24,11 @@ The public wrapper is two lines: `os.UserHomeDir()` then delegate to unexported 
 
 #341 lived as a sibling file under `internal/agentrun/`. The subpackage layout (`internal/agentrun/trust/`) was chosen for #475 to mirror the sibling spawn primitives `internal/agentrun/ptyrunner/` and `internal/agentrun/streamrunner/`. The parent `internal/agentrun` package now hosts only workdir helpers (`ResolveWorkdir`, `EncodeProjectDir`) that all three subpackages import; spawn concerns and trust concerns are package-scoped, not file-scoped.
 
-## Key shape — realpath, not abspath
+## Key shape — realpath, on-disk case, not abspath
 
-`projects` map keys are the **`filepath.EvalSymlinks`-resolved** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. The helper delegates to `agentrun.ResolveWorkdir`, which does `filepath.Abs` then `filepath.EvalSymlinks` — the single pyrycode-wide source of truth for "claude's realpath rule." `internal/sessions/rotation/watcher.go` uses the same helper for path comparison against platform-probe results.
+`projects` map keys are the **`filepath.EvalSymlinks`-resolved, on-disk-cased** absolute path. The macOS `/var → /private/var` symlink means a non-resolved key never matches claude's lookup. The helper delegates to `agentrun.ResolveWorkdir`, which does `filepath.Abs`, then `filepath.EvalSymlinks`, then (#910) canonicalises each path component to its on-disk spelling — the single pyrycode-wide source of truth for "claude's realpath rule." `internal/sessions/rotation/watcher.go` uses the same helper for path comparison against platform-probe results.
+
+**Why case matters:** `EvalSymlinks` alone preserves the *input* case of a non-symlink component, but claude canonicalises its cwd to the on-disk case before its own trust lookup. Before #910, a workdir configured with the wrong case on a case-insensitive filesystem (macOS APFS) made this helper pre-mark a `projects` key claude never reads — the trust modal rendered anyway and `ptyrunner.Run` aborted with `ErrTrustModalDetected` (the 2026-05-29 incident on #208). See [`codebase/910.md`](../codebase/910.md).
 
 ## Pass-through preservation
 
@@ -157,3 +159,4 @@ Test cases:
 - [`docs/specs/architecture/475-agentrun-trust-helper.md`](../../specs/architecture/475-agentrun-trust-helper.md) — architect spec.
 - [`codebase/392.md`](../codebase/392.md) — the deletion this ticket reverses.
 - [`codebase/341.md`](../codebase/341.md) — the original (pre-deletion) helper; this slimmed version's contract is a strict subset.
+- [`codebase/910.md`](../codebase/910.md) — `ResolveWorkdir`'s on-disk-case canonicalisation fix; closes the case-mismatch gap this doc's "Key shape" section now describes.
