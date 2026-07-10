@@ -400,7 +400,7 @@ Unchanged from v1: WS-native ping/pong every 30s idle; 60s worst-case dead-conne
 
 ### Reconnect
 
-Unchanged from v1: exponential backoff with ±20% jitter, capped at 30s, reset to attempt 1 after any successful connection lasting ≥ 60 seconds.
+Unchanged from v1: exponential backoff with ±20% jitter, capped at 30s, reset to attempt 1 after any successful connection lasting ≥ 60 seconds. This subsection covers reconnect **timing** only; the **application-layer** reconcile-on-connect contract — what control and transcript state the daemon re-asserts once the handshake completes — lives in [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics).
 
 ## Application message types
 
@@ -631,6 +631,8 @@ Direction **binary → phone**. The one-shot text picture answering a `request_s
 
 When the supervised claude surfaces a modal — a permission prompt, a plan-approval, a tool-confirmation — the daemon describes it to the phone, the phone answers, and the daemon drives that answer back into claude (#597 Phase 3). The lifecycle is `modal_shown` → `modal_answer` / `modal_cancel` → `modal_dismissed`. `modal_shown` rides the `interactive` capability (#607): **viewing a modal is ungated**, but **answering is gated separately, per-device, default OFF** in the [Security model](#security-model) (#702) — that gate is not a wire capability. All fields are always present (no omitempty). This section is wire vocabulary only; the minting, dedup, validation, and fan-out runtime is the producer's (#703, with #706/#702 building ownership/gating).
 
+**Reconcile on (re)connect.** On any (re)connection the daemon re-asserts the still-outstanding modal by **unicasting `modal_shown` with the original `modal_id`** (#877) — this is match-and-replace by stable id (see [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)): a re-sent `modal_shown` for a known `modal_id` updates the modal in place and **never double-shows**. Answer semantics are **unchanged under re-delivery**: the one-time `modal_id` nonce plus the client-minted `answer_token` idempotency key keep a prompt answerable **exactly once**, re-sent or not, and **deny-on-timeout is armed once, at raise time, and is never re-armed by a re-send**. Those invariants already live in the **Security & validation contract** note below and in ADR 025 § Security model (1–4); this note only ties them to reconcile-on-connect, it does not restate them.
+
 #### `modal_shown`
 
 Direction **binary → phone** (outbound v2 modal-surfaced event; not in `v1TypeSet` — an old phone never receives it).
@@ -689,7 +691,7 @@ Direction **binary → phone** (outbound v2 queued-backlog snapshot; not in `v1T
 
 **Emission (#722).** The daemon pushes a `queue_state` for a conversation whenever that conversation's backlog **changes** — a message is enqueued (a phone `send_message` buffered while claude is busy), drains to claude (the FIFO head delivered), or is removed before draining (`dequeue_message`). An empty backlog emits `queued: []` so the phone can clear its view. Each push carries **only** the changed conversation's items: the producer snapshots the single conversation named by the change and never bundles another conversation's queued text into the same payload (the `conversation_id` and `queued` are derived from one id, so they cannot desync).
 
-`queue_state` fans **only** to connections that negotiated the `interactive` capability; a non-interactive connection never receives it (the same gate as the rest of the structured stream). The fan-out reaches *every* interactive connection, each payload stamped with its own `conversation_id` — there is no per-connection conversation binding, so a phone attributes each `queue_state` by id (consistent with the [Security model](#security-model): a user's paired devices are one trust domain). It is **not** part of the reconnect-replay ring; a phone that reconnects after missing a `queue_state` sees the current backlog only on the next change.
+`queue_state` fans **only** to connections that negotiated the `interactive` capability; a non-interactive connection never receives it (the same gate as the rest of the structured stream). The fan-out reaches *every* interactive connection, each payload stamped with its own `conversation_id` — there is no per-connection conversation binding, so a phone attributes each `queue_state` by id (consistent with the [Security model](#security-model): a user's paired devices are one trust domain). It is **not** part of the #647 reconnect-replay ring (`EventID` nil). Instead, on (re)connect the daemon reconciles current queue truth by **unicasting a `queue_state` snapshot for every non-empty backlog** (#878) — a current-state snapshot, not ring replay. Because `queue_state` is already snapshot-shaped full state (`queued: []` clears a view), this connect-time re-send is idempotent by construction; it **complements** the change-driven push above (change-time push + connect-time reconcile), and the phone match-and-replaces each backlog by `conversation_id` plus `queued_msg_id` (see [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)).
 
 #### `dequeue_message`
 
@@ -847,9 +849,24 @@ Example:
 }
 ```
 
-## Backfill semantics
+## Reconnect / Backfill semantics
 
-Unchanged from v1. All backfill frames ride inside `noise_msg`.
+Every reconnect performs a fresh Noise_IK handshake (there is no session resumption in v2), and on every (re)connection the daemon brings the client back to **current truth**. Reconciliation runs in **two modes, keyed on the kind of data — not on how long the client was away**. The axis of difference is data type, not outage length: bulk transcript content keeps a cursor backfill; control state is always a cheap current-state snapshot.
+
+**Mode A — bulk transcript content → cursor backfill (replay of past events).** History and the mid-turn live stream reconnect by *replaying past events* from a cursor:
+
+- `last_seen_ts` drives the v1 bulk-history backfill (`backfill_since` → `message_chunk*` → `backfill_done`, unchanged from v1). All backfill frames ride inside `noise_msg`.
+- `hello.last_event_id` drives the #647 mid-turn event-ring replay, with the `resync` marker as the snapshot-fallback when the advertised cursor has aged off the bounded per-conversation ring — see [Reconnect replay & resync (consumer, #647)](#reconnect-replay--resync-consumer-647).
+
+**Mode B — control state → current-state snapshot (the reconcile-on-connect rule).** Control state reconnects by *re-asserting current truth*, replaying no past events. This is the single written contract every client builds against:
+
+- **Reconcile on connect.** On any (re)connection the daemon brings the client to **current control truth** — the still-outstanding modal (#877) and the current queued backlog (#878) — and **replays no past control events**. The still-outstanding `modal_shown` (original `modal_id`) is unicast, and a `queue_state` snapshot is unicast for every non-empty backlog. The exactly-once end-to-end behaviour is exercised in #829/#903/#904.
+- **Match-and-replace by stable id, applied idempotently on every connect.** Reconciliation is keyed on stable identity — `modal_id` for a modal; `conversation_id` plus the per-message `queued_msg_id` for the queue backlog — so the same connect-time re-assertion is safe to apply every time:
+  - a re-delivered `modal_shown` for a **known** `modal_id` **updates the existing modal in place** and **never double-shows**; likewise a re-sent `queue_state` for a known `conversation_id` **replaces** that backlog view rather than appending;
+  - an id the client has **already resolved** is a **no-op**;
+  - control state the daemon does **not** re-assert after a fresh handshake is **gone** (reset-on-reconnect): each reconnect is a fresh Noise_IK handshake, so the client **resets** its control state and rebuilds it from whatever the daemon re-asserts — anything resolved while the client was disconnected simply does not reappear.
+
+The two modes are **complements, not alternatives**: on one and the same connect a client takes a cursor backfill for transcript content and a current-state snapshot for control state. The mechanism is chosen by *what kind of data* it carries, never by *how long the client was away*. Mechanism internals live in #877 (modal reconcile) and #878 (queue reconcile); the answer-once security invariants are stated in [§ Modal](#modal-v2) and are unchanged under re-delivery.
 
 ## Error codes
 
