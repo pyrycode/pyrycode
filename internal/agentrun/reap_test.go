@@ -1,6 +1,7 @@
-package ptyrunner
+package agentrun
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -15,9 +16,9 @@ import (
 
 // TestReapDescendantGroups is the CI-runnable load-bearing net for the #565
 // reaper. It builds real process trees with the reap-helper modes
-// (helper_test.go) and asserts the reaper kills detached descendant groups
-// while sparing the three guarded groups: the caller's own group, rootPid's
-// own group, and init.
+// (runReapHelper, below) and asserts the reaper kills detached descendant
+// groups while sparing the three guarded groups: the caller's own group,
+// rootPid's own group, and init.
 //
 // Subtests run sequentially (no t.Parallel): two of them reap at os.Getpid(),
 // which sweeps every fresh-group descendant of the whole test process, so a
@@ -34,7 +35,7 @@ func TestReapDescendantGroups(t *testing.T) {
 		fresh := startReapHelper(t, reapHelperOpts{role: "leaf", setpgid: true})
 		sibling := startReapHelper(t, reapHelperOpts{role: "leaf", setpgid: false})
 
-		reapDescendantGroups(os.Getpid(), discard)
+		ReapDescendantGroups(os.Getpid(), discard)
 
 		// fresh is a group leader (Setpgid), so its pgid == its pid.
 		if !waitGroupGone(fresh.pid, 2*time.Second) {
@@ -53,7 +54,7 @@ func TestReapDescendantGroups(t *testing.T) {
 	t.Run("NoDescendantsIsNoOp", func(t *testing.T) {
 		leaf := startReapHelper(t, reapHelperOpts{role: "leaf", setpgid: true})
 
-		reapDescendantGroups(leaf.pid, discard)
+		ReapDescendantGroups(leaf.pid, discard)
 
 		if !processAlive(leaf.pid) {
 			t.Fatalf("root leaf (pid=%d) killed by a no-descendant reap", leaf.pid)
@@ -69,7 +70,7 @@ func TestReapDescendantGroups(t *testing.T) {
 		parent := startReapHelper(t, reapHelperOpts{role: "parent_same", setpgid: true, wantReport: true})
 		grandchild := parent.report
 
-		reapDescendantGroups(parent.pid, discard)
+		ReapDescendantGroups(parent.pid, discard)
 
 		if !processAlive(grandchild) {
 			t.Fatalf("same-group grandchild (pid=%d, in rootPid's own group) killed by reap", grandchild)
@@ -88,7 +89,7 @@ func TestReapDescendantGroups(t *testing.T) {
 		parent := startReapHelper(t, reapHelperOpts{role: "parent_fresh", setpgid: true, wantReport: true})
 		grandchild := parent.report // group leader of the fresh group → pgid == pid
 
-		reapDescendantGroups(parent.pid, discard)
+		ReapDescendantGroups(parent.pid, discard)
 
 		if !waitGroupGone(grandchild, 2*time.Second) {
 			t.Fatalf("fresh-group grandchild (pgid=%d) still alive after reap — not reaped", grandchild)
@@ -120,12 +121,12 @@ func startReapHelper(t *testing.T, opts reapHelperOpts) reapHelper {
 	t.Helper()
 
 	cmd := exec.Command(os.Args[0])
-	env := append(os.Environ(), "GO_PTYRUNNER_HELPER=1", "GO_PTYRUNNER_REAP_MODE="+opts.role)
+	env := append(os.Environ(), "GO_AGENTRUN_REAP_MODE="+opts.role)
 
 	var reportPath string
 	if opts.wantReport {
 		reportPath = filepath.Join(t.TempDir(), "grandchild.pid")
-		env = append(env, "GO_PTYRUNNER_REAP_REPORT="+reportPath)
+		env = append(env, "GO_AGENTRUN_REAP_REPORT="+reportPath)
 	}
 	cmd.Env = env
 	if opts.setpgid {
@@ -195,4 +196,74 @@ func waitGroupGone(pgid int, timeout time.Duration) bool {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// runReapHelper is the process-tree fixture for TestReapDescendantGroups,
+// dispatched by GO_AGENTRUN_REAP_MODE (see the TestMain branch in
+// exitclass_test.go). It never stands in for claude; it just shapes a tree the
+// reaper walks:
+//
+//   - "leaf":         block (no children). Used as a fresh-group descendant,
+//                     a same-group sibling, or a no-descendant root.
+//   - "parent_fresh": spawn one "leaf" grandchild in a FRESH process group
+//                     (Setpgid), report its pid via GO_AGENTRUN_REAP_REPORT,
+//                     then block. Mirrors claude → zsh+tail (the reaped group).
+//   - "parent_same":  spawn one "leaf" grandchild in the SAME group (no
+//                     Setpgid), report its pid, then block. Exercises the
+//                     "rootPid's own group is excluded" guard.
+//
+// The reaper kills with SIGKILL (uncatchable), so no mode needs a signal
+// handler; the 30s block is a backstop so a leaked helper self-terminates.
+func runReapHelper(role string) {
+	switch role {
+	case "leaf":
+		blockUntilKilled()
+	case "parent_fresh":
+		spawnGrandchildAndBlock(true)
+	case "parent_same":
+		spawnGrandchildAndBlock(false)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown GO_AGENTRUN_REAP_MODE: %q\n", role)
+		os.Exit(97)
+	}
+}
+
+// blockUntilKilled blocks for a generous backstop window, then exits. The
+// reaper (and the test's cleanup) kill via SIGKILL, which needs no handler;
+// the timer only bounds a helper the test forgot to kill.
+func blockUntilKilled() {
+	time.Sleep(30 * time.Second)
+	os.Exit(0)
+}
+
+// spawnGrandchildAndBlock re-execs this binary as a "leaf" grandchild — in a
+// fresh process group when freshGroup is set — writes the grandchild's pid to
+// GO_AGENTRUN_REAP_REPORT so the parent test can target its assertions, then
+// blocks. It reaps the grandchild in the background so a SIGKILL'd group truly
+// empties: a zombie still answers kill(-pgid, 0), which would otherwise defeat
+// the test's group-gone probe.
+func spawnGrandchildAndBlock(freshGroup bool) {
+	reportPath := os.Getenv("GO_AGENTRUN_REAP_REPORT")
+	if reportPath == "" {
+		fmt.Fprintln(os.Stderr, "parent reap helper requires GO_AGENTRUN_REAP_REPORT")
+		os.Exit(96)
+	}
+	gc := exec.Command(os.Args[0])
+	// os/exec dedups env keeping the LAST occurrence, so appending
+	// GO_AGENTRUN_REAP_MODE=leaf after os.Environ() (which carries the parent's
+	// parent_* mode) makes the grandchild run as a leaf. Do not reorder.
+	gc.Env = append(os.Environ(), "GO_AGENTRUN_REAP_MODE=leaf")
+	if freshGroup {
+		gc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	if err := gc.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "parent reap helper: start grandchild: %v\n", err)
+		os.Exit(95)
+	}
+	go func() { _ = gc.Wait() }()
+	if err := os.WriteFile(reportPath, []byte(strconv.Itoa(gc.Process.Pid)), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "parent reap helper: write report: %v\n", err)
+		os.Exit(94)
+	}
+	blockUntilKilled()
 }
