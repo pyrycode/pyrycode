@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -492,5 +493,282 @@ func TestV2Session_DebugBundle_ErrorReplies(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- #911 per-conn in-flight gate fixtures ---
+
+// bundleGatedManagerFor stands up a paired v2 manager wired with the DebugBundler
+// seam plus an independent transport-down probe, so the #911 gate tests can hold
+// the push drain down to keep a bundle's chunks queued. Connected reads probeUp
+// (probeUp=false ⇒ drainOnce holds the head un-popped/unsealed, so the queued
+// bundle stays put); Outbound records UNCONDITIONALLY (independent of probeUp),
+// so a synchronous busy-reject reply — which forwardEnvelope seals even while the
+// drain is held (it does not consult the #874 transport-down hold) — is still
+// captured on the wire. This mirrors TestV2Session_Push_HoldGatedOnProbeNotSendError's
+// independent probe/send wiring; bundleManagerFor omits Connected entirely, which
+// would drain the queue instantly and make the busy window non-deterministic. The
+// returned reconnect channel re-signals the drain on recovery (AC #4).
+func bundleGatedManagerFor(t *testing.T, bundler func() ([]byte, error), logger *slog.Logger) (mgr *V2SessionManager, frames chan protocol.RoutingEnvelope, rec *v2Recorder, probeUp *atomic.Bool, reconnect chan struct{}, respPub []byte) {
+	t.Helper()
+	var respPriv []byte
+	respPriv, respPub = genV2Keypair(t)
+	frames = make(chan protocol.RoutingEnvelope, 8)
+	rec = &v2Recorder{}
+	probeUp = &atomic.Bool{}
+	probeUp.Store(true)
+	reconnect = make(chan struct{}, 1)
+	var stop func()
+	mgr, stop = startManager(t, V2SessionConfig{
+		Frames:       frames,
+		Outbound:     rec.outbound,
+		Connected:    probeUp.Load,
+		Reconnect:    reconnect,
+		StaticPriv:   respPriv,
+		Devices:      v2PairedRegistry(t, v2TestToken),
+		ServerID:     v2TestServerID,
+		Logger:       logger,
+		DebugBundler: bundler,
+	})
+	t.Cleanup(stop)
+	return mgr, frames, rec, probeUp, reconnect, respPub
+}
+
+// waitQueueLen polls until connID's push buffer reaches exactly want (a positive
+// settle, so poll-until is deterministic and fast). Used to sync on a held bundle
+// finishing its enqueue before the next request is fired.
+func waitQueueLen(t *testing.T, mgr *V2SessionManager, connID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if queueLen(mgr, connID) == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("queue for %s did not reach depth %d (got %d)", connID, want, queueLen(mgr, connID))
+}
+
+// waitCallCount polls until the bundler has been invoked at least n times.
+func waitCallCount(t *testing.T, f *fakeBundler, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.callCount() >= n {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("bundler callCount = %d, want >= %d", f.callCount(), n)
+}
+
+// decryptFrames decrypts msgs in recorded (nonce) order under recv — each exactly
+// once, advancing the recv nonce — and returns the inner envelopes. Splitting the
+// result and feeding slices to ReassembleBundle lets a caller round-trip an
+// arbitrary multi-chunk bundle (reassembleFromFrames hardcodes a single chunk).
+func decryptFrames(t *testing.T, msgs []protocol.RoutingEnvelope, recv *noise.CipherState) []protocol.Envelope {
+	t.Helper()
+	inner := make([]protocol.Envelope, len(msgs))
+	for i, msg := range msgs {
+		inner[i] = decryptAppFrame(t, msg, recv)
+	}
+	return inner
+}
+
+// assertBusyReject decrypts a captured noise_msg and asserts it is the
+// deterministic busy-reject reply: a retryable TypeError correlated to reqID
+// carrying the static server.binary_offline / msgDebugBundleUnavailable shape —
+// byte-identical to the nil-bundler and assembly-error branches, so the phone
+// cannot distinguish "busy" from "offline" (no queue-depth oracle).
+func assertBusyReject(t *testing.T, msg protocol.RoutingEnvelope, recv *noise.CipherState, reqID uint64) {
+	t.Helper()
+	reply := decryptAppFrame(t, msg, recv)
+	if reply.Type != protocol.TypeError {
+		t.Fatalf("reject reply Type = %q, want %q", reply.Type, protocol.TypeError)
+	}
+	if reply.InReplyTo == nil || *reply.InReplyTo != reqID {
+		t.Errorf("reject reply InReplyTo = %v, want pointer to %d", reply.InReplyTo, reqID)
+	}
+	var p protocol.ErrorPayload
+	if err := json.Unmarshal(reply.Payload, &p); err != nil {
+		t.Fatalf("decode reject payload: %v", err)
+	}
+	if p.Code != protocol.CodeServerBinaryOffline {
+		t.Errorf("reject Code = %q, want %q", p.Code, protocol.CodeServerBinaryOffline)
+	}
+	if p.Message != msgDebugBundleUnavailable {
+		t.Errorf("reject Message = %q, want the static %q", p.Message, msgDebugBundleUnavailable)
+	}
+	if !p.Retryable {
+		t.Error("reject Retryable = false, want true")
+	}
+}
+
+func requestBundle(t *testing.T, frames chan protocol.RoutingEnvelope, send *noise.CipherState, connID string, reqID uint64) {
+	t.Helper()
+	frames <- sealAppFrameConn(t, send, connID, protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeRequestDebugBundle,
+		TS:   time.Now().UTC(),
+	})
+}
+
+// TestV2Session_DebugBundle_RejectsSecondWhileQueued pins AC #1 + AC #2: while a
+// conn's push queue still holds a prior bundle's chunks (held down by the drain),
+// every further request_debug_bundle on that conn is rejected with the
+// deterministic error reply BEFORE any assembly or enqueue — so the queued-frame
+// count never grows across retries (per-retry stacking eliminated) and the
+// bundler is never re-invoked. Run under -race.
+func TestV2Session_DebugBundle_RejectsSecondWhileQueued(t *testing.T) {
+	t.Parallel()
+
+	// A multi-chunk archive so the queued bundle is visibly > 2 frames (3 chunks
+	// + done). Any bytes round-trip through StreamBundle/ReassembleBundle; these
+	// need not be a valid tar.gz for the queue mechanics under test.
+	archive := patternBlob(3 * bundleChunkBytes)
+	fake := &fakeBundler{archive: archive}
+	wantFrames := wantChunks(len(archive)) + 1 // N chunks + done
+
+	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+
+	const connID = "c-bundle-busy"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	// Hold the drain down so the first bundle's frames stay queued (unsealed).
+	probeUp.Store(false)
+
+	// Request #1: assembles + streams a full bundle; the held drain keeps every
+	// frame queued. Settle on the full queue depth.
+	requestBundle(t, frames, send, connID, 101)
+	waitQueueLen(t, mgr, connID, wantFrames)
+	if got := fake.callCount(); got != 1 {
+		t.Fatalf("bundler callCount after first request = %d, want 1", got)
+	}
+
+	// Requests #2 and #3 while the first bundle is still queued: each is rejected
+	// before StreamBundle. The queued count must not grow, the bundler must not be
+	// re-invoked, and each request gets exactly one deterministic reject reply
+	// (forwardEnvelope bypasses the drain hold, so Outbound records it even with
+	// the probe down).
+	for i, reqID := range []uint64{202, 303} {
+		requestBundle(t, frames, send, connID, reqID)
+
+		// The reject reply is the (i+1)-th noise_msg beyond the handshake (the held
+		// bundle frames are unsealed, so they emit nothing).
+		msgs := waitNoiseMsgs(t, rec, connID, i+1)
+		assertBusyReject(t, msgs[i], recv, reqID)
+
+		if got := queueLen(mgr, connID); got != wantFrames {
+			t.Fatalf("queue depth after reject #%d = %d, want %d (a rejected retry must not stack a second bundle)", i+1, got, wantFrames)
+		}
+		if got := fake.callCount(); got != 1 {
+			t.Fatalf("bundler callCount after reject #%d = %d, want 1 (assembly must be skipped for a busy conn)", i+1, got)
+		}
+	}
+}
+
+// TestV2Session_DebugBundle_ServedAfterDrain pins AC #4: once a conn's prior
+// bundle fully drains (all chunks PLUS the debug_bundle_done marker forwarded),
+// the gate clears and a subsequent request_debug_bundle on that conn is served
+// normally — a fresh assembly and a full second bundle over the wire. Run under
+// -race.
+func TestV2Session_DebugBundle_ServedAfterDrain(t *testing.T) {
+	t.Parallel()
+
+	archive := patternBlob(3 * bundleChunkBytes)
+	fake := &fakeBundler{archive: archive}
+	framesPerBundle := wantChunks(len(archive)) + 1
+
+	mgr, frames, rec, probeUp, reconnect, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+
+	const connID = "c-bundle-recover"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	// Hold the drain down and request a first bundle; it stays fully queued.
+	probeUp.Store(false)
+	requestBundle(t, frames, send, connID, 111)
+	waitQueueLen(t, mgr, connID, framesPerBundle)
+
+	// Recover the transport and fire the reconnect edge (no further Push): the
+	// held bundle drains FIFO to empty — chunks and the trailing done marker.
+	probeUp.Store(true)
+	reconnect <- struct{}{}
+	assertQueueDrains(t, mgr, connID)
+
+	// The prior bundle (including done) has fully drained, so the gate is clear:
+	// a second request is served with a fresh assembly.
+	requestBundle(t, frames, send, connID, 222)
+	waitCallCount(t, fake, 2)
+
+	// Both bundles reached the wire, in nonce order, and each round-trips to the
+	// source archive — a non-vacuous proof the second request streamed a real,
+	// fresh bundle (not a reject).
+	msgs := waitNoiseMsgs(t, rec, connID, 2*framesPerBundle)
+	inner := decryptFrames(t, msgs, recv)
+	first, err := ReassembleBundle(inner[:framesPerBundle])
+	if err != nil {
+		t.Fatalf("reassemble first bundle: %v", err)
+	}
+	second, err := ReassembleBundle(inner[framesPerBundle:])
+	if err != nil {
+		t.Fatalf("reassemble second bundle: %v", err)
+	}
+	if !bytes.Equal(first, archive) || !bytes.Equal(second, archive) {
+		t.Fatalf("bundles did not both round-trip to the source archive (first=%d second=%d want=%d bytes)", len(first), len(second), len(archive))
+	}
+}
+
+// TestV2Session_DebugBundle_PerConnIsolation pins AC #3: an in-flight bundle on
+// conn A does not cause conn B's request_debug_bundle to be rejected — the gate
+// scans only the requesting conn's own queue. B is served (a fresh assembly, its
+// own queued bundle) while A is busy, and a repeat request on A IS rejected. Run
+// under -race.
+func TestV2Session_DebugBundle_PerConnIsolation(t *testing.T) {
+	t.Parallel()
+
+	archive := patternBlob(3 * bundleChunkBytes)
+	fake := &fakeBundler{archive: archive}
+	wantFrames := wantChunks(len(archive)) + 1
+
+	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+
+	const connA = "c-bundle-A"
+	const connB = "c-bundle-B"
+	sendA, recvA := openModalConn(t, mgr, frames, rec, respPub, connA, nil)
+	sendB, _ := openModalConn(t, mgr, frames, rec, respPub, connB, nil)
+
+	// Hold the drain down for both conns.
+	probeUp.Store(false)
+
+	// A requests a bundle → A's queue holds a full bundle (A is now busy).
+	requestBundle(t, frames, sendA, connA, 11)
+	waitQueueLen(t, mgr, connA, wantFrames)
+	if got := fake.callCount(); got != 1 {
+		t.Fatalf("callCount after A's request = %d, want 1", got)
+	}
+
+	// B requests a bundle while A is busy → B is SERVED, not rejected: the gate
+	// scans B's own (empty) queue. Proven by a fresh assembly (callCount 1→2) and
+	// B's queue filling to a full bundle.
+	requestBundle(t, frames, sendB, connB, 22)
+	waitQueueLen(t, mgr, connB, wantFrames)
+	if got := fake.callCount(); got != 2 {
+		t.Fatalf("callCount after B's request = %d, want 2 (B must be served, not rejected, while A is busy)", got)
+	}
+
+	// A repeat request on A IS rejected (A still busy): a deterministic reject
+	// reply, no fresh assembly, no growth of A's queue. B's queue is untouched.
+	requestBundle(t, frames, sendA, connA, 33)
+	msgs := waitNoiseMsgs(t, rec, connA, 1)
+	assertBusyReject(t, msgs[0], recvA, 33)
+
+	if got := fake.callCount(); got != 2 {
+		t.Fatalf("callCount after A's repeat = %d, want 2 (A's repeat must be rejected, not assembled)", got)
+	}
+	if got := queueLen(mgr, connA); got != wantFrames {
+		t.Fatalf("A queue depth after repeat = %d, want %d (no stacking on the busy conn)", got, wantFrames)
+	}
+	if got := queueLen(mgr, connB); got != wantFrames {
+		t.Fatalf("B queue depth = %d, want %d (an in-flight bundle on A must not disturb B)", got, wantFrames)
 	}
 }
