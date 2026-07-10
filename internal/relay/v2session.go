@@ -753,6 +753,23 @@ type V2SessionConfig struct {
 	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#877 / foreground /
 	// existing-test posture. Production wires modalbridge.Registry.Snapshot.
 	OutstandingModals func() []protocol.ModalShownPayload
+
+	// OutstandingQueues enumerates the daemon's current per-conversation queued
+	// backlogs as marshal-ready queue_state payloads (one per non-empty
+	// conversation) for connect-time reconcile (#878), the queue twin of
+	// OutstandingModals. Called on the Run goroutine from handleNoiseInit's
+	// interactive-open tail; the returned payloads are unicast to the just-opened
+	// conn only. queue_state is snapshot-shaped full state, so the re-send is
+	// idempotent by construction. A pure read: it mints no id and dequeues nothing.
+	//
+	// A closure returning []protocol.QueueStatePayload, not a *msgqueue.Queue:
+	// internal/relay does not import internal/msgqueue, and protocol is already
+	// imported, so the payload crosses the boundary with no new import and no cycle
+	// (matching OutstandingModals — define the dependency where it is consumed).
+	//
+	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#878 / foreground /
+	// existing-test posture. Production wires the cmd/pyry outstandingQueues adapter.
+	OutstandingQueues func() []protocol.QueueStatePayload
 }
 
 // V2SessionManager owns the per-conn_id v2 state machine. Construct with
@@ -1432,6 +1449,16 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// document intent — surface the time-sensitive prompt ahead of replayed
 	// history.
 	m.reconcileModals(ctx, s)
+
+	// Connect-time queue reconcile (#878): re-send the current queue_state for each
+	// non-empty conversation to this conn — the queue twin of the modal reconcile
+	// above — so a phone that connected/reconnected between backlog changes sees
+	// current queue truth instead of the stale/empty view #722's push-on-change
+	// leaves. No-op for a non-interactive conn or an unwired seam. Ordering relative
+	// to reconcileModals and replayMissed is immaterial (distinct payload types);
+	// placed after the modal reconcile to surface the time-sensitive permission
+	// prompt ahead of the backlog.
+	m.reconcileQueues(ctx, s)
 
 	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
 	// off, replay the conversation's missed tail (or emit a resync marker) on
@@ -2232,6 +2259,76 @@ func (m *V2SessionManager) reconcileModals(ctx context.Context, s *V2Session) {
 			// NEVER echo payload bytes.
 			m.cfg.Logger.Debug("relay: v2 modal_shown reconcile push dropped",
 				"event", "v2.modal.reconcile.push_err",
+				"conn_id", s.connID,
+				"err", err)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+	}
+}
+
+// reconcileQueues unicasts the current per-conversation queue_state set to a
+// freshly interactive-open conn (#878) — the queue twin of reconcileModals. #722
+// pushes queue_state only on change, so a phone that connected/reconnected
+// between backlog changes has no way to learn the current backlog; this re-send
+// brings it to current queue truth instead of a stale/empty view. queue_state is
+// snapshot-shaped full state, so the re-send is idempotent by construction — no
+// stale-replay risk and no special-casing of how long the client was away; an
+// absent snapshot after the handshake means an empty backlog (the
+// reset-on-reconnect client contract).
+//
+// Run-goroutine only (called from handleNoiseInit's success tail), so
+// s.interactive / s.connID are read lock-free under the package's single-owner
+// invariant. It reaches no cmd/pyry emitter state: the #722 producer's nextID is
+// producer-goroutine-owned and queue_state's envelope ID is non-load-bearing (the
+// phone correlates on conversation_id + queued_msg_id), so the re-send is entirely
+// relay-side with a fixed ID — no cross-goroutine coupling, no lock added.
+//
+// SECURITY: the queued text is untrusted, phone-originated content and is NEVER
+// logged; the two error branches carry only content-free discriminants (event,
+// conn_id, and conversation_id — a non-secret routing id). Matches the #722
+// producer's and reconcileModals's no-body-in-logs discipline.
+func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
+	// Capability gate (AC4) + the unwired/foreground opt-out. Mirrors
+	// reconcileModals: s.interactive is the negotiated flag, a nil seam is the
+	// nil-resolver posture the other optional control seams share.
+	if !s.interactive || m.cfg.OutstandingQueues == nil {
+		return
+	}
+	outstanding := m.cfg.OutstandingQueues()
+	if len(outstanding) == 0 {
+		return // nothing pending ⇒ nothing sent (AC3); the seam already omits empty conversations.
+	}
+	// One timestamp shared by the batch (matches reconcileModals).
+	ts := time.Now().UTC()
+	for _, p := range outstanding {
+		payload, err := json.Marshal(p)
+		if err != nil {
+			// QueueStatePayload is a closed struct of strings / ints / time; marshal
+			// cannot fail in practice. Defensive — NEVER echo err or the payload (it
+			// could quote the untrusted text). Skip this one, keep sending the rest.
+			m.cfg.Logger.Warn("relay: v2 queue_state reconcile marshal failed",
+				"event", "v2.queue.reconcile.marshal_err",
+				"conn_id", s.connID,
+				"conversation_id", p.ConversationID)
+			continue
+		}
+		env := protocol.Envelope{
+			ID:      1, // non-load-bearing; the phone correlates on conversation_id + queued_msg_id.
+			Type:    protocol.TypeQueueState,
+			TS:      ts,
+			Payload: payload,
+			// EventID left nil: a control event, never part of the turn-event
+			// replay ring (forwardEnvelope's dedup is inert for EventID == nil).
+		}
+		if err := m.Push(ctx, s.connID, env); err != nil {
+			// ctx teardown ⇒ stop (the session is going away); any other sentinel
+			// (ErrConnNotFound is unreachable — the queue was created two
+			// statements earlier on this same goroutine) ⇒ skip and continue.
+			// NEVER echo payload bytes.
+			m.cfg.Logger.Debug("relay: v2 queue_state reconcile push dropped",
+				"event", "v2.queue.reconcile.push_err",
 				"conn_id", s.connID,
 				"err", err)
 			if ctx.Err() != nil {
