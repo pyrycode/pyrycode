@@ -7,8 +7,23 @@
 #                   filled inboxes in late Apr 2026.
 #   make build    — build the pyry binary at ./pyry (gitignored)
 #   make test     — race-enabled tests only
+#   make e2e      — fake-daemon end-to-end suite (builds pyry, spawns real
+#                   daemons against fakeclaude/fakerelay/fakephone; hermetic,
+#                   no creds, ~4 min with -race). Not yet part of `check`;
+#                   gate wiring is ticketed and blocked on the suite going
+#                   green again.
+#   make preship  — the full pre-binary-swap gate: check + e2e +
+#                   e2e-realclaude. Run before every ~/.local/bin/pyry swap
+#                   so the operator is never the first real-stack execution.
+#                   Needs live claude creds (see
+#                   docs/knowledge/features/e2e-realclaude.md); spends real
+#                   tokens and shares the Max-plan usage window.
 #   make linux    — cross-compile for pyrybox (linux/amd64)
 #   make clean    — remove build artifacts
+#
+# e2e_install and e2e_update stay separate opt-in tags (they touch the real
+# launchd/systemd user domain and the full update flow) — deliberately not
+# part of preship.
 
 GO          ?= go
 STATICCHECK ?= $(shell which staticcheck 2>/dev/null || echo $(HOME)/go/bin/staticcheck)
@@ -26,9 +41,20 @@ vet:
 test:
 	$(GO) test -race ./...
 
+.PHONY: e2e
+e2e:
+	$(GO) test -tags e2e -race -count=1 ./internal/e2e/...
+
 .PHONY: e2e-realclaude
 e2e-realclaude:
 	$(GO) test -tags e2e_realclaude ./internal/e2e/realclaude/...
+
+# preship is the pre-binary-swap gate: everything hermetic plus the live-claude
+# suite. Deliberately runs the realclaude suite in FULL — the operator must
+# never be the first real-stack execution, and trimming for speed is a
+# fix-when-it-hurts decision, not a default.
+.PHONY: preship
+preship: check e2e e2e-realclaude
 
 .PHONY: staticcheck
 staticcheck:
