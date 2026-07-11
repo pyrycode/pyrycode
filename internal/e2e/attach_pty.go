@@ -148,15 +148,26 @@ func StartAttach(t *testing.T, sessionID string) *AttachHarness {
 	return a
 }
 
-// spawnAttachableDaemon mirrors harness.spawn but with a custom claude
-// (the e2e test binary running TestHelperProcess), helper-env injection
-// (GO_TEST_HELPER_PROCESS=1, GO_TEST_HELPER_MODE=echo), and no sleep
-// sentinel. The daemon's stdin is left at its default (/dev/null) so
-// IsTerminal returns false and pyry runs in bridge mode.
+// spawnAttachableDaemon spawns pyry in bridge mode supervising the
+// echo-claude shell wrapper (echoClaudeScript) as claude in echo mode.
+// The wrapper ignores its own argv, so Pool.Create's appended
+// `--session-id <uuid>` is dropped before it reaches the supervised Go
+// test binary's flag parser (which would otherwise reject `-session-id`
+// and exit 2 before TestHelperProcess runs). The daemon's stdin is left
+// at its default (/dev/null) so IsTerminal returns false and pyry runs
+// in bridge mode.
+//
+// The wrapper's exec target is the e2e test binary, passed via
+// E2E_HELPER_BIN so the script can locate it without embedded quoting.
+// supervisor.runOnce passes the daemon's env through to the supervised
+// process unchanged, so the helper-mode env vars and E2E_HELPER_BIN both
+// reach the supervised wrapper, then the wrapper's exec preserves them
+// for TestHelperProcess.
 func spawnAttachableDaemon(t *testing.T, home string) (string, *exec.Cmd, *bytes.Buffer, *bytes.Buffer, chan struct{}) {
 	t.Helper()
 	bin := ensurePyryBuilt(t)
 	socket := filepath.Join(home, "pyry.sock")
+	claudeBin := writeEchoClaude(t, home)
 
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
@@ -164,25 +175,27 @@ func spawnAttachableDaemon(t *testing.T, home string) (string, *exec.Cmd, *bytes
 	args := []string{
 		"-pyry-socket=" + socket,
 		"-pyry-name=test",
-		"-pyry-claude=" + os.Args[0],
+		"-pyry-claude=" + claudeBin,
 		"-pyry-idle-timeout=0",
 		// Workdir must resolve within $HOME (#670 confinement); the test
 		// process cwd is the repo dir, outside the isolated HOME.
 		"-pyry-workdir=" + home,
-		// Default ResumeLast prepends --continue on respawn; the test
-		// helper is a Go test binary that doesn't recognize that flag.
+		// Default ResumeLast prepends --continue on respawn; the wrapper
+		// ignores its argv anyway, but disable for parity with the
+		// pre-wrapper shape.
 		"-pyry-resume=false",
-		"--",
-		"-test.run=TestHelperProcess",
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	// supervisor.runOnce does cmd.Env = append(os.Environ(), helperEnv...),
-	// so env set on the daemon flows through to the supervised helper.
+	// so env set on the daemon flows through to the supervised wrapper,
+	// which forwards E2E_HELPER_BIN and the helper-mode vars to the
+	// re-exec'd test binary.
 	cmd.Env = append(childEnv(home),
 		"GO_TEST_HELPER_PROCESS=1",
 		"GO_TEST_HELPER_MODE=echo",
+		"E2E_HELPER_BIN="+os.Args[0],
 	)
 
 	if err := cmd.Start(); err != nil {
