@@ -1150,7 +1150,8 @@ and stderr, not `home`'s file listing.
 red e2e mechanisms found in the same sweep are disjoint and tracked
 separately, with no file overlap: `spawnAttachableDaemon`'s Go-test-binary
 stand-in (4 `TestE2E_Attach_*` tests, rejects `--session-id` via
-`flag.Parse()`) is #257; `TestRelayV2_InterruptStopsRunningTurn`'s
+`flag.Parse()`) was #257 (landed — see § Attach PTY Harness Pattern below,
+[codebase/257.md](../codebase/257.md)); `TestRelayV2_InterruptStopsRunningTurn`'s
 argv-immune-fakeclaude failure ("turn never started") is a daemon-side
 #839 regression, #929. A **ninth** red test outside the original
 enumeration, `TestTwoPhoneStructured_InteractiveReceivesStream`, fails
@@ -1172,8 +1173,10 @@ and needs a controlling terminal — pipes don't satisfy `term.IsTerminal`. #125
 adds a sibling **`AttachHarness`** in the same package (build tag `e2e ||
 e2e_install`) that owns:
 
-1. A `pyry` daemon in bridge mode whose supervised "claude" is the e2e test
-   binary running `TestHelperProcess` in echo mode.
+1. A `pyry` daemon in bridge mode whose supervised "claude" is the
+   `echoClaudeScript` shell wrapper (#257), which `exec`s the e2e test
+   binary running `TestHelperProcess` in echo mode while dropping its own
+   argv — see § Helper "claude" via `TestHelperProcess` re-exec below.
 2. A `creack/pty` master/slave pair.
 3. A `pyry attach` subprocess whose stdin/stdout/stderr are the slave fd.
 
@@ -1239,24 +1242,41 @@ The slave fd held by the harness and the slave fds dup'd into `attachCmd`'s
 stdin/stdout/stderr are independent — closing the harness's slave does not
 SIGHUP the attach client. The kill sequence does that explicitly.
 
-### Helper "claude" via `TestHelperProcess` re-exec
+### Helper "claude" via `TestHelperProcess` re-exec, through the `echoClaudeScript` wrapper (#257)
 
 ```
 spawnAttachableDaemon args:
-  -pyry-claude=os.Args[0]                    # the e2e test binary
-  --                                         # arg sentinel
-  -test.run=TestHelperProcess                # claude args (passed to helper)
+  -pyry-claude=<home>/echo-claude.sh         # writeEchoClaude(t, home)
+  -pyry-resume=false
 
 daemon env:
   GO_TEST_HELPER_PROCESS=1
   GO_TEST_HELPER_MODE=echo
+  E2E_HELPER_BIN=os.Args[0]                  # the e2e test binary
 ```
 
-`supervisor.runOnce` does `cmd.Env = append(os.Environ(), helperEnv...)`, so
-env vars set on the daemon's `cmd.Env` flow through to the supervised
-helper. The helper gates on `GO_TEST_HELPER_PROCESS=1` (no-op in normal `go
-test` runs), switches on `GO_TEST_HELPER_MODE`, calls `term.MakeRaw` on
-stdin, then `io.Copy(stdout, stdin)`.
+Through #257, `-pyry-claude` pointed directly at `os.Args[0]` with the
+trailing args `-- -test.run=TestHelperProcess`. That reached `Pool.Create`
+for any non-bootstrap session: `Pool.Create` appends `--session-id <uuid>`
+to the supervised claude's argv (`internal/sessions/pool.go`), which the Go
+test binary's `flag.Parse()` rejects with `flag provided but not defined:
+-session-id`, exiting 2 before `TestHelperProcess` ever runs. Every test
+routing through `spawnAttachableDaemon` was exposed to this — including the
+bootstrap session, since `Pool.Create` is unconditional, not
+non-bootstrap-only.
+
+#257 migrated `spawnAttachableDaemon` onto the same `echoClaudeScript` /
+`writeEchoClaude` shell wrapper `spawnAutoAttachDaemon` (#163) already used
+— see § Daemon variant below for the wrapper's shape. The wrapper ignores
+its own argv and `exec`s `$E2E_HELPER_BIN -test.run=TestHelperProcess`, so
+the appended `--session-id <uuid>` is dropped before the Go binary ever
+parses flags. `supervisor.runOnce` does `cmd.Env = append(os.Environ(),
+helperEnv...)`, so env vars set on the daemon's `cmd.Env` (including the new
+`E2E_HELPER_BIN`) flow through to the wrapper, which forwards them across
+its `exec` to the re-exec'd test binary. The helper itself is unchanged: it
+gates on `GO_TEST_HELPER_PROCESS=1` (no-op in normal `go test` runs),
+switches on `GO_TEST_HELPER_MODE`, calls `term.MakeRaw` on stdin, then
+`io.Copy(stdout, stdin)`.
 
 This pattern (#125) coexists with #122's separate `package main`
 fakeclaude binary (`internal/e2e/internal/fakeclaude`) — they target
@@ -1997,7 +2017,7 @@ type StdioAttachClient struct {
     SessionID  string         // returned by control.SessionsNew
     SocketPath string         // daemon's control socket
     HomeDir    string         // daemon's $HOME (fresh os.MkdirTemp)
-    Stderr     *bytes.Buffer  // attach client stderr (empty in steady state)
+    Stderr     *safeBuffer    // attach client stderr (empty in steady state; mutex-guarded since #257 AC#4)
     // ... unexported fields
 }
 
@@ -2085,11 +2105,13 @@ one wire call is pure cost; the wire-level contract is identical.
 ### Why supervised claude is helper-as-echo, not `/bin/sleep`
 
 The byte-flow proof needs a writer that echoes — `/bin/sleep` writes
-nothing back. `spawnAttachableDaemon` already wires the e2e test binary
-(`os.Args[0]`) as the supervised claude with `GO_TEST_HELPER_PROCESS=1`
-and `GO_TEST_HELPER_MODE=echo`. The two test files (`attach_pty_test.go`
-and `attach_stdio_test.go`) compile into the same test binary and share
-the helper — there is exactly one `TestHelperProcess` in the package.
+nothing back. `spawnAttachableDaemon` wires the e2e test binary as the
+supervised claude (via the `echoClaudeScript` wrapper as of #257 — see §
+Helper "claude" via `TestHelperProcess` re-exec above) with
+`GO_TEST_HELPER_PROCESS=1` and `GO_TEST_HELPER_MODE=echo`. The two test
+files (`attach_pty_test.go` and `attach_stdio_test.go`) compile into the
+same test binary and share the helper — there is exactly one
+`TestHelperProcess` in the package.
 
 ### Skip-on-no-pipe ordering
 
@@ -2099,22 +2121,24 @@ capability) — it exercises kernel fd allocation directly. Place the call
 spawning pyry and tearing it down. Never fires on the project's CI
 matrix; defensive against future restrictive environments.
 
-### Round-trip test currently `t.Skip`'d on #257
+### Round-trip test unskipped by #257
 
-`TestE2E_AttachStdio_BytesRoundTrip` was **skipped pending #167**, the
-`parseClientFlags` rejection of `--stdio` before `parseAttachArgs` ever
-saw the flag. Unit tests in `internal/control/attach_stdio_client_test.go`
-and `cmd/pyry/args_test.go` bypassed `parseClientFlags`, so the harness
-was the surface that surfaced the bug. #167 has now landed (CLI flag
-pass-through via `splitClientFlags`); removing the skip exposed a
-**different**, pre-existing harness bug: `spawnAttachableDaemon` wires
-the Go test binary directly as `claude`, so `Pool.Create`'s appended
-`--session-id <uuid>` reaches the test framework's `flag.Parse()` and
-is rejected before `TestHelperProcess` runs. `auto_attach.go` (#163)
-already works around this with a shell-wrapper (`echoClaudeScript`);
-the stdio harness needs the same pattern. The skip rotated from #167
-to #257 in the same commit that landed the #167 fix; the harness body
-itself is unchanged.
+`TestE2E_AttachStdio_BytesRoundTrip` was originally **skipped pending
+#167**, the `parseClientFlags` rejection of `--stdio` before
+`parseAttachArgs` ever saw the flag. Unit tests in
+`internal/control/attach_stdio_client_test.go` and
+`cmd/pyry/args_test.go` bypassed `parseClientFlags`, so the harness was
+the surface that surfaced the bug. #167 landed (CLI flag pass-through
+via `splitClientFlags`); removing that skip exposed a **different**,
+pre-existing harness bug: `spawnAttachableDaemon` wired the Go test
+binary directly as `claude`, so `Pool.Create`'s appended `--session-id
+<uuid>` reached the test framework's `flag.Parse()` and was rejected
+before `TestHelperProcess` ran. The skip rotated from #167 to #257 in
+the same commit that landed the #167 fix, with the harness body itself
+unchanged. #257 then migrated `spawnAttachableDaemon` onto the
+`echoClaudeScript` wrapper `auto_attach.go` (#163) already used — see §
+Helper "claude" via `TestHelperProcess` re-exec above — and removed the
+skip. The test now passes under `-race -tags e2e`.
 
 ### What this slice does not verify
 
@@ -2183,10 +2207,12 @@ matcher, extend `isPTYDevicePath` and re-run.
 stable PTY fd would not race a single-pass directory read, so the bias
 is toward false-negative on a closing fd — acceptable.
 
-**Carries the same `t.Skip("blocked on #257")` as the byte-flow test.**
+**Carried the same `t.Skip("blocked on #257")` as the byte-flow test.**
 Both skips originally tracked #167 (CLI flag rejection); rotated to
 #257 once #167 landed and exposed the underlying `--session-id`-vs-
-test-binary harness bug. Both lift in one commit when #257 lands.
+test-binary harness bug. #257 lifted both skips in the same commit —
+this test also self-skips gracefully if fd-inspection is unavailable
+(`openPTYDeviceTargets` err → `t.Skipf`), independent of the harness fix.
 
 **Production diff is zero. Test diff ~110 LOC, one new file.**
 `go test -tags e2e -race ./internal/e2e/...` clean.
@@ -2316,19 +2342,22 @@ pyry -pyry-socket=<sock> -- --session-id <uuid> --input-format stream-json --out
 The `pyry attach --stdio` CLI bug (#167, fixed) blocked #161/#162's
 `TestE2E_AttachStdio_*` tests because `parseClientFlags` rejected
 `--stdio` before `parseAttachArgs` ran. The follow-up harness bug
-(#257, the `--session-id`-vs-test-binary collision exposed when #167's
-fix lifted the skip) keeps those tests skipped today. **#163 is
-unaffected by both.** `tryAutoAttach` calls `control.AttachStdio`
+(#257, fixed — the `--session-id`-vs-test-binary collision exposed when
+#167's fix lifted the skip) kept those tests skipped until it migrated
+`spawnAttachableDaemon` onto the wrapper. **#163 was unaffected by
+both, from the start.** `tryAutoAttach` calls `control.AttachStdio`
 *directly* from inside the foreground binary's `runSupervisor` — no
 verb dispatch, no `parseClientFlags`, no `parseAttachArgs`; and #163's
-own daemon variant uses a shell-wrapper `claude` (`echoClaudeScript`)
-which dodges #257 by construction. Confirmed against `cmd/pyry/main.go`
-(the in-process `control.AttachStdio` call site in `tryAutoAttach`).
+own daemon variant used a shell-wrapper `claude` (`echoClaudeScript`)
+which dodged #257 by construction, ahead of #257 applying the same fix
+to `spawnAttachableDaemon`. Confirmed against `cmd/pyry/main.go` (the
+in-process `control.AttachStdio` call site in `tryAutoAttach`).
 
-This also means #163's test is the **first end-to-end proof** that the
+This also means #163's test was the **first end-to-end proof** that the
 `AttachStdio` byte path works against a real daemon — the stdio-attach
-test that was meant to be the first proof remains `t.Skip`'d (now on
-#257).
+test that was meant to be the first proof stayed `t.Skip`'d until #257
+landed and unskipped it (see § Round-trip test unskipped by #257
+above).
 
 ### Daemon variant: `spawnAutoAttachDaemon` + `echo-claude.sh` shell wrapper
 
@@ -2361,12 +2390,13 @@ are preserved across the shell `exec` automatically.
 
 `spawnAutoAttachDaemon` is otherwise structurally identical to
 `spawnAttachableDaemon`: bridge mode, helper-as-claude in echo mode,
-`waitDaemonReady` polls on the same protocol. The existing #161 stdio
-harness has the *same bug* (its daemon also drives `SessionsNew` and
-wires the test binary directly as `claude`); now that #167's CLI fix
-has landed and the skip lifted, the bug surfaces as a real harness
-failure tracked in #257. Folding `spawnAttachableDaemon` over to the
-shell-wrapper shape is the body of #257.
+`waitDaemonReady` polls on the same protocol. The #161 stdio harness had
+the *same bug* (its daemon also drives `SessionsNew` and, pre-#257,
+wired the test binary directly as `claude`); once #167's CLI fix landed
+and the skip lifted, the bug surfaced as a real harness failure tracked
+in #257. Folding `spawnAttachableDaemon` over to this shell-wrapper
+shape was the body of #257 (landed) — see § Helper "claude" via
+`TestHelperProcess` re-exec above.
 
 ### `Stderr` is a `safeBuffer`, not a bare `bytes.Buffer`
 
@@ -2377,10 +2407,12 @@ is empty in steady state. `safeBuffer` is a tiny mutex-wrapped
 `bytes.Buffer` (two methods: `Write` under lock, `String` snapshot
 under lock); see [lessons.md § `cmd.Stderr` reads race the os/exec
 copy goroutine](../../lessons.md#cmdstderr-reads-race-the-osexec-copy-goroutine).
-
-The stdio harness's `StdioAttachClient.Stderr` has the same latent
-race; not refactored here per scope discipline (its proof-of-life is
-`t.Skip`'d on #257; the race never fires).
+The stdio harness's `StdioAttachClient.Stderr` had the same latent race
+but was not refactored here (#163) — its proof-of-life test was still
+`t.Skip`'d on #257 at the time, so the race never fired under `-race`.
+#257 later applied the identical `safeBuffer` swap to
+`StdioAttachClient.Stderr` (AC#4, § Public API above) once unskipping
+the test made the race live.
 
 ### `pgrepChildren` — process-tree primitive
 
