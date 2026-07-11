@@ -713,6 +713,26 @@ func TestQueue_SnapshotAll_RaceWithEnqueueAndDrain(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- q.Run(ctx) }()
 
+	// #934: this test never reads f.entered / f.completed, and fakeDeliver's
+	// sends to them do not honour ctx. With 400 deliveries and cap-64 signal
+	// channels, an undrained buffer fills and a drain goroutine blocks forever
+	// on `f.entered <- text`; on cancel, Queue.Run's wg.Wait() then deadlocks
+	// waiting for that drain. Continuously drain both channels for the run's
+	// lifetime so no signal send can wedge shutdown.
+	stopDrain := make(chan struct{})
+	drainerDone := make(chan struct{})
+	go func() {
+		defer close(drainerDone)
+		for {
+			select {
+			case <-f.entered:
+			case <-f.completed:
+			case <-stopDrain:
+				return
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	for w := 0; w < 4; w++ {
 		wg.Add(1)
@@ -739,4 +759,8 @@ func TestQueue_SnapshotAll_RaceWithEnqueueAndDrain(t *testing.T) {
 	if err := <-runErr; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
+	// Run has returned, so every drain goroutine has exited and no further
+	// signal sends will occur; stop the drainer and join it.
+	close(stopDrain)
+	<-drainerDone
 }
