@@ -6,33 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/control"
 )
-
-// sleepClaudeScript is a tiny shell-script claude stand-in. Pool.Create
-// appends `--session-id <uuid>` to the configured ClaudeArgs; both BSD and
-// GNU sleep(1) reject that, so /bin/sleep can't drive multi-session tests.
-// The script ignores all positional args and exec()s sleep instead. The
-// bootstrap path also runs through this script (passes "99999" verbatim,
-// which the script also ignores).
-const sleepClaudeScript = `#!/bin/sh
-exec sleep 99999
-`
-
-// writeSleepClaude writes the sleep-claude stand-in to home and returns
-// its absolute path. See sleepClaudeScript for why the indirection.
-func writeSleepClaude(t *testing.T, home string) string {
-	t.Helper()
-	path := filepath.Join(home, "sleep-claude.sh")
-	if err := os.WriteFile(path, []byte(sleepClaudeScript), 0o755); err != nil {
-		t.Fatalf("write sleep-claude script: %v", err)
-	}
-	return path
-}
 
 // waitForBootstrap polls regPath until the bootstrap entry appears (Pool
 // writes it during init) and returns its ID. Tolerates the registry file

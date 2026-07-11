@@ -180,7 +180,27 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	// Override stdlib's default (SIGKILL) so claude gets a graceful
 	// SIGTERM first; WaitDelay handles the SIGKILL fallback after grace.
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	//
+	// The reap ahead of the SIGTERM SIGKILLs claude's detached descendant Bash
+	// process groups, sparing pyry's own group, claude's own group, and init.
+	// claude isolates every Bash command into its own process group two levels
+	// below pyry and does not reap it even on a graceful SIGTERM (#565 measured
+	// this exact SIGTERM+grace shape orphans the group 3/3), so pyry must reap
+	// it here — the streamrunner analogue of ptyrunner's teardown reap (#924).
+	//
+	// cmd.Cancel fires when childCtx is done, which happens via (a) operator
+	// SIGTERM/SIGINT propagating through the parent ctx and (b) the idle-stall
+	// watchdog's cancelChild — so this single hook covers both teardowns; no
+	// ctx.Err() discriminator (the watchdog-path reap is a harmless no-op: the
+	// watchdog fires only while claude owes an assistant turn, with no tool in
+	// flight, so the walk finds no live Bash group). It never fires on a clean
+	// exit: cancelChild there runs only after cmd.Wait returns, by which point
+	// os/exec has stopped its ctx watcher. At fire time claude and its whole
+	// descendant tree are alive and un-signalled, so the walk is race-free.
+	cmd.Cancel = func() error {
+		reapDescendantGroupsFn(cmd.Process.Pid, logger)
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
 	cmd.WaitDelay = killGrace
 
 	stdin, err := cmd.StdinPipe()
