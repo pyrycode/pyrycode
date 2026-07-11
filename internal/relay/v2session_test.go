@@ -4958,3 +4958,282 @@ func TestV2Session_Push_ReconnectWhileDownDoesNotSeal(t *testing.T) {
 	reconnect <- struct{}{}
 	assertHeldQueued(t, sess.mgr, gated.rec, v2TestConnID, 1)
 }
+
+// --- rekey-emit transport-down gate tests (#912) ---
+
+// TestV2Session_RekeyScheduled_DeferredWhileTransportDown_EmitsOnRecovery pins
+// AC1/AC2 and the AC5 scheduled-up regression: while the relay transport is
+// down the scheduled rekey wake seals nothing (no send-nonce burned) and
+// re-arms a short retry; once the transport recovers the retry fires and the
+// rekey_request is emitted normally. The nonce oracle is decryptAppFrame under
+// sess.initRecv — a burned nonce during the down window would gap the sequence
+// and MAC-fail here, so a clean decrypt after recovery proves zero seals
+// happened while down. Run under -race.
+func TestV2Session_RekeyScheduled_DeferredWhileTransportDown_EmitsOnRecovery(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekeyInterval / rekeyRetryInterval /
+	// rekeyReplyTimeout vars read by other tests' dispatch goroutines.
+	prevInterval := rekeyInterval
+	rekeyInterval = 60 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevRetry := rekeyRetryInterval
+	rekeyRetryInterval = 40 * time.Millisecond
+	t.Cleanup(func() { rekeyRetryInterval = prevRetry })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 2 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	// Handshake runs with the transport UP so the session reaches open and the
+	// scheduled rekeyTimer is armed.
+	gated := newGatedRecorder()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Flip the transport DOWN before the first scheduled fire, then let several
+	// scheduled + retry cycles elapse. Each must defer (seal nothing, arm no
+	// reply window) — so the session must NOT be torn down.
+	gated.up.Store(false)
+	time.Sleep(250 * time.Millisecond)
+
+	// Recover the transport. The pending retry timer fires and emits the
+	// deferred rekey_request normally.
+	gated.up.Store(true)
+	envs := waitForEnvelopes(t, gated.rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("recorded %d envelopes, want 2 (noise_resp + one emit on recovery; no blind emit while down)", len(envs))
+	}
+	emit := envs[1]
+	if emit.CloseCode != 0 {
+		t.Errorf("recovery emit CloseCode = %d, want 0", emit.CloseCode)
+	}
+	// Nonce oracle: a clean decrypt under initRecv (nonce 0) proves s.send's
+	// nonce never advanced during the down window.
+	inner := decryptAppFrame(t, emit, sess.initRecv)
+	if inner.Type != protocol.TypeRekeyRequest {
+		t.Errorf("recovery emit inner type = %q, want %q", inner.Type, protocol.TypeRekeyRequest)
+	}
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner.Payload, &payload); err != nil {
+		t.Fatalf("decode recovery emit payload: %v", err)
+	}
+	if payload.Reason != "scheduled" {
+		t.Errorf("recovery emit reason = %q, want %q", payload.Reason, "scheduled")
+	}
+
+	// After stop: the session survived the down window (still open) and the
+	// recovery emit set awaitingRekeyReply.
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing — it was torn down while transport was down", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state after recovery = %v, want V2StateOpen", got)
+	}
+	if !s.awaitingRekeyReply {
+		t.Errorf("awaitingRekeyReply = false after recovery emit, want true")
+	}
+}
+
+// TestV2Session_RekeyScheduled_TransportDown_NoRekeyFailed_NoClose pins AC3:
+// a transport-down rekey boundary produces no noise.rekey_failed warning and
+// does not close the session with StatusHandshakeFailure, even after more than
+// rekeyReplyTimeout has elapsed. It directly refutes the status-quo tear-down
+// (a blind emit would arm the reply window and, on its expiry, close 4426).
+func TestV2Session_RekeyScheduled_TransportDown_NoRekeyFailed_NoClose(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekey vars.
+	prevInterval := rekeyInterval
+	rekeyInterval = 30 * time.Millisecond
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevRetry := rekeyRetryInterval
+	rekeyRetryInterval = 30 * time.Millisecond
+	t.Cleanup(func() { rekeyRetryInterval = prevRetry })
+	// Short reply window: with the status-quo bug, the down-boundary blind emit
+	// would arm this and fire a 4426 close well within the settle sleep below.
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	logger, logBuf := bufferLogger()
+	gated := newGatedRecorder()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	// Down for well over rekeyReplyTimeout and several scheduled fires.
+	gated.up.Store(false)
+	time.Sleep(300 * time.Millisecond)
+
+	out := logBuf.String()
+	if strings.Contains(out, "noise.rekey_failed") {
+		t.Errorf("log contains noise.rekey_failed — a transport blip was mislabelled a rekey failure; got:\n%s", out)
+	}
+	// The defer path must have actually run (proves this is the fix, not just an
+	// unarmed timer).
+	if !strings.Contains(out, "event=v2.rekey.emit.deferred_transport_down") {
+		t.Errorf("log missing the deferred-transport-down line; got:\n%s", out)
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing — it was closed while transport was down (want it kept open)", v2TestConnID)
+	}
+	if got := s.State(); got != V2StateOpen {
+		t.Errorf("state = %v, want V2StateOpen (no StatusHandshakeFailure teardown)", got)
+	}
+}
+
+// TestV2Session_RekeyManual_TransportDown_ReturnsErrTransportDown pins AC4: a
+// manual rekey while the transport is down returns a distinct ErrTransportDown
+// (not collapsed into ErrSessionNotOpen), burns no nonce, arms no reply window,
+// and leaves the scheduled 1-hour timer untouched.
+func TestV2Session_RekeyManual_TransportDown_ReturnsErrTransportDown(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekey vars. Long intervals so the
+	// scheduled timer cannot fire during the test window.
+	prevInterval := rekeyInterval
+	rekeyInterval = 10 * time.Second
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 10 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	gated := newGatedRecorder()
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	gated.up.Store(false)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := sess.mgr.Rekey(ctx, v2TestConnID)
+	if !errors.Is(err, ErrTransportDown) {
+		t.Fatalf("Rekey while down: err = %v, want ErrTransportDown", err)
+	}
+	if errors.Is(err, ErrSessionNotOpen) {
+		t.Errorf("ErrTransportDown must be distinct from ErrSessionNotOpen; err = %v", err)
+	}
+
+	// After stop: no emit side-effect (awaitingRekeyReply stays false, no reply
+	// timer armed) and the scheduled cadence is preserved (rekeyTimer untouched).
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after a deferred manual rekey", v2TestConnID)
+	}
+	if s.awaitingRekeyReply {
+		t.Errorf("awaitingRekeyReply = true, want false (no emit while down)")
+	}
+	if s.rekeyReplyTimer != nil {
+		t.Errorf("rekeyReplyTimer armed, want nil (no reply window on a deferred manual rekey)")
+	}
+	if s.rekeyTimer == nil {
+		t.Errorf("rekeyTimer = nil, want the scheduled cadence preserved (it must not be stopped on the down path)")
+	}
+}
+
+// TestV2Session_RekeyManual_TransportUp_GateInert pins AC5 for the manual path
+// with the Connected seam explicitly wired but UP: the gate is inert and the
+// manual rekey emits exactly as before — rekey_request with reason "manual",
+// awaitingRekeyReply set, reply timer armed.
+func TestV2Session_RekeyManual_TransportUp_GateInert(t *testing.T) {
+	// Not t.Parallel: mutates package-level rekey vars. Long intervals so only
+	// the manual emit produces a second envelope.
+	prevInterval := rekeyInterval
+	rekeyInterval = 10 * time.Second
+	t.Cleanup(func() { rekeyInterval = prevInterval })
+	prevReply := rekeyReplyTimeout
+	rekeyReplyTimeout = 10 * time.Second
+	t.Cleanup(func() { rekeyReplyTimeout = prevReply })
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	gated := newGatedRecorder() // up by default
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   gated.outbound,
+		Connected:  gated.connected,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sess.mgr.Rekey(ctx, v2TestConnID); err != nil {
+		t.Fatalf("Rekey while up: %v", err)
+	}
+
+	envs := waitForEnvelopes(t, gated.rec, 2)
+	if len(envs) != 2 {
+		t.Fatalf("envs after manual rekey: got %d, want exactly 2 (noise_resp + manual emit)", len(envs))
+	}
+	inner := decryptAppFrame(t, envs[1], sess.initRecv)
+	if inner.Type != protocol.TypeRekeyRequest {
+		t.Errorf("manual emit inner type = %q, want %q", inner.Type, protocol.TypeRekeyRequest)
+	}
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(inner.Payload, &payload); err != nil {
+		t.Fatalf("decode manual emit payload: %v", err)
+	}
+	if payload.Reason != "manual" {
+		t.Errorf("manual emit reason = %q, want %q", payload.Reason, "manual")
+	}
+
+	sess.stop()
+	s := sess.mgr.sessions[v2TestConnID]
+	if s == nil {
+		t.Fatalf("session for %q missing after manual rekey", v2TestConnID)
+	}
+	if !s.awaitingRekeyReply {
+		t.Errorf("awaitingRekeyReply = false, want true (gate inert on transport-up path)")
+	}
+	if s.rekeyReplyTimer == nil {
+		t.Errorf("rekeyReplyTimer = nil, want armed (gate inert on transport-up path)")
+	}
+}
