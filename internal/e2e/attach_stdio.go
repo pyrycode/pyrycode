@@ -37,8 +37,10 @@ type StdioAttachClient struct {
 
 	// Stderr captures the attach client's stderr. Empty in steady
 	// state — `--stdio` mode suppresses pyry's own stderr noise — so
-	// any content here is a failure diagnostic.
-	Stderr *bytes.Buffer
+	// any content here is a failure diagnostic. Mutex-protected so the
+	// test goroutine can snapshot it via String() while os/exec's
+	// stderr-copy goroutine may still be writing.
+	Stderr *safeBuffer
 
 	inputW  *os.File // parent's write end of attach client's stdin
 	outputR *os.File // parent's read end of attach client's stdout
@@ -100,7 +102,7 @@ func startStdioAttach(t *testing.T, label string) *StdioAttachClient {
 	c := &StdioAttachClient{
 		SocketPath: socket,
 		HomeDir:    home,
-		Stderr:     &bytes.Buffer{},
+		Stderr:     &safeBuffer{},
 		inputW:     inputW,
 		outputR:    outputR,
 		daemonCmd:  daemonCmd,
