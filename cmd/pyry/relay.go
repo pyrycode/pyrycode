@@ -153,6 +153,86 @@ func resolveWorkspaceFolder(parent, name string) (string, error) {
 	return created, nil
 }
 
+// relayWiring carries every call-site-supplied wiring value for the relay leg.
+// It is populated with named fields at the single runSupervisor call site
+// (cmd/pyry/main.go) and threaded unchanged from startRelay into startRelayV2, so
+// each wiring argument is bound by field name rather than list position: a
+// transposition of two same-typed fields (the two directory-path strings, the
+// three bare-string identifiers, the two adjacent bools) becomes a visible
+// named-field edit in the diff rather than a clean-compiling positional swap
+// (#917). ctx/logger stay leading positional args on both functions (idiomatic
+// Go), and the startRelayV2-only values startRelay produces internally (conn,
+// registry, serverID) stay trailing positional args — they are not call-site
+// wiring. startRelayV2 reads the subset of fields it needs; the config values it
+// does not read (relayURL, version, allowInsecure, v2Enabled, shutdown) still
+// travel in the struct so they too are bound by name at the call site.
+type relayWiring struct {
+	// instanceName is the daemon instance name; it derives the per-instance
+	// server-id, device-registry, conversations-registry, and static-key paths.
+	instanceName string
+	// relayURL is the resolved binary↔relay WebSocket URL. Empty disables the
+	// relay leg entirely (startRelay returns a no-op cleanup).
+	relayURL string
+	// version is the binary version advertised to the relay on connect.
+	version string
+	// allowInsecure permits a ws:// (non-TLS) relay scheme
+	// (PYRY_ALLOW_INSECURE_RELAY=1).
+	allowInsecure bool
+	// v2Enabled selects the Mobile Protocol v2 (Noise_IK) leg over the legacy v1
+	// dispatch path (default true; PYRY_MOBILE_V2=0 forces v1).
+	v2Enabled bool
+	// shutdown unwinds the daemon; called on a 4409 server-id conflict so the
+	// relay leg does not reconnect-loop.
+	shutdown context.CancelFunc
+	// convReg is the conversations registry backing the list/create/rename/
+	// delete/archive/change-workspace/recent handlers.
+	convReg *conversations.Registry
+	// creator mints a new session for the create_conversation handler.
+	creator handlers.SessionCreator
+	// router resolves the bound session for the send_message handler.
+	router handlers.SessionRouter
+	// queue is the live inbound message queue: send_message enqueues, and the
+	// dequeue handler / queue_state reconcile read and mutate it.
+	queue *msgqueue.Queue
+	// active tracks the active-conversation cursor the interactive turn and modal
+	// streams follow.
+	active *activeConversation
+	// boundHost resolves the host bound to the active conversation for the
+	// interactive turn/modal streams.
+	boundHost boundHostFunc
+	// sup is the bootstrap session's supervisor — the keystroke/interrupt/
+	// new-session/snapshot surface and the source of the daemon's own claude
+	// child PID.
+	sup *supervisor.Supervisor
+	// bridge is the bootstrap session's PTY-output bridge. nil in foreground mode
+	// disables the PTY-dependent streams (assistant-turn bridge, structured turn
+	// stream, modal stream).
+	bridge *supervisor.Bridge
+	// claudeSessionsDir is the directory the rotation-following JSONL resolver
+	// scans to tail the daemon's own claude child's transcript (turn stream #633,
+	// snapshot-usage reader #857). Empty disables reconcile, the rotation watcher,
+	// and the interactive turn/modal streams.
+	claudeSessionsDir string
+	// defaultCwd is the default workspace directory stamped onto conversations
+	// created without an explicit cwd (the CreateConversation handler).
+	defaultCwd string
+	// transitions is the pool-side session-transition observer sink the
+	// session_transition producer (#657) installs on.
+	transitions transitionObserverSink
+	// qse is the pre-built queue_state emitter (#722) whose Run goroutine
+	// startRelayV2 starts over the v2 manager.
+	qse *queueStateEmitterV2
+	// debugBundler assembles the daemon-global debug bundle for the
+	// request_debug_bundle verb (#813). nil in foreground/v1 replies "unavailable".
+	debugBundler func() ([]byte, error)
+	// settings persists a per-session model/effort change for the
+	// set_session_settings verb (#845). nil in foreground/v1 replies "unavailable".
+	settings relay.SettingsUpdater
+	// snapshotSettings reports the bootstrap session's persisted model/effort/YOLO
+	// for the screen_snapshot reply (#848). nil reports defaults.
+	snapshotSettings func() (model, effort string, yolo bool)
+}
+
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
 // Returns a no-op cleanup and nil err when relayURL is empty (relay
 // disabled — see operator note below). Otherwise loads the server-id,
@@ -179,31 +259,14 @@ func resolveWorkspaceFolder(parent, name string) (string, error) {
 func startRelay(
 	ctx context.Context,
 	logger *slog.Logger,
-	instanceName, relayURL, version string,
-	allowInsecure, v2Enabled bool,
-	shutdown context.CancelFunc,
-	convReg *conversations.Registry,
-	creator handlers.SessionCreator,
-	router handlers.SessionRouter,
-	queue *msgqueue.Queue,
-	active *activeConversation,
-	boundHost boundHostFunc,
-	sup *supervisor.Supervisor,
-	bridge *supervisor.Bridge,
-	claudeSessionsDir string,
-	defaultCwd string,
-	transitions transitionObserverSink,
-	qse *queueStateEmitterV2,
-	debugBundler func() ([]byte, error),
-	settings relay.SettingsUpdater,
-	snapshotSettings func() (model, effort string, yolo bool),
+	w relayWiring,
 ) (cleanup func(), err error) {
-	if relayURL == "" {
+	if w.relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
 		return func() {}, nil
 	}
 
-	serverID, err := identity.LoadOrCreate(resolveServerIDPath(instanceName))
+	serverID, err := identity.LoadOrCreate(resolveServerIDPath(w.instanceName))
 	if err != nil {
 		return nil, fmt.Errorf("load server-id: %w", err)
 	}
@@ -211,22 +274,22 @@ func startRelay(
 	// Load the device registry once at daemon startup. A missing file
 	// (ENOENT) yields an empty registry — every phone rejects until
 	// `pyry pair` runs. Malformed JSON fails fast.
-	registry, err := devices.Load(resolveDevicesPath(instanceName))
+	registry, err := devices.Load(resolveDevicesPath(w.instanceName))
 	if err != nil {
 		return nil, fmt.Errorf("load device registry: %w", err)
 	}
 
-	if allowInsecure {
+	if w.allowInsecure {
 		logger.Info("relay: PYRY_ALLOW_INSECURE_RELAY=1 — accepting ws:// scheme")
 	}
-	logger.Info("relay: connecting", "url", relayURL, "server_id", string(serverID))
+	logger.Info("relay: connecting", "url", w.relayURL, "server_id", string(serverID))
 
 	conn, err := relay.Connect(ctx, relay.Config{
 		ServerID:            serverID,
-		RelayURL:            relayURL,
-		BinaryVersion:       version,
+		RelayURL:            w.relayURL,
+		BinaryVersion:       w.version,
 		Logger:              logger,
-		AllowInsecureScheme: allowInsecure,
+		AllowInsecureScheme: w.allowInsecure,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("relay connect: %w", err)
@@ -238,9 +301,9 @@ func startRelay(
 	// stream — there is no mixed-mode path (ADR 024: v2 is a hard cutover).
 	var legCleanup func()
 
-	if v2Enabled {
+	if w.v2Enabled {
 		logger.Info("relay: Mobile Protocol v2 (Noise_IK) enabled — default; set PYRY_MOBILE_V2=0 to force legacy v1")
-		drain, err := startRelayV2(ctx, logger, instanceName, conn, registry, serverID, convReg, creator, router, queue, active, boundHost, sup, bridge, claudeSessionsDir, defaultCwd, transitions, qse, debugBundler, settings, snapshotSettings)
+		drain, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -258,25 +321,25 @@ func startRelay(
 			Logger:     logger,
 			FirstFrame: authGate(registry, string(serverID), logger),
 		})
-		d.Register(protocol.TypeListConversations, handlers.ListConversations(convReg))
-		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger))
-		d.Register(protocol.TypeRenameConversation, handlers.RenameConversation(convReg, resolveConversationsRegistryPath(instanceName), logger))
-		d.Register(protocol.TypeDeleteConversation, handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger))
-		d.Register(protocol.TypeArchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true))
-		d.Register(protocol.TypeUnarchiveConversation, handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false))
-		d.Register(protocol.TypeChangeWorkspace, handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger))
+		d.Register(protocol.TypeListConversations, handlers.ListConversations(w.convReg))
+		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger))
+		d.Register(protocol.TypeRenameConversation, handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger))
+		d.Register(protocol.TypeDeleteConversation, handlers.DeleteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger))
+		d.Register(protocol.TypeArchiveConversation, handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true))
+		d.Register(protocol.TypeUnarchiveConversation, handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, false))
+		d.Register(protocol.TypeChangeWorkspace, handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger))
 		d.Register(protocol.TypeCreateWorkspaceFolder, handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger))
-		d.Register(protocol.TypeRecentWorkspaces, handlers.RecentWorkspaces(convReg))
-		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger))
-		d.Register(protocol.TypeSendMessage, handlers.SendMessage(router, queue, logger))
+		d.Register(protocol.TypeRecentWorkspaces, handlers.RecentWorkspaces(w.convReg))
+		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger))
+		d.Register(protocol.TypeSendMessage, handlers.SendMessage(w.router, w.queue, logger))
 
 		// The assistant-turn bridge taps Bridge.Write so PTY chunks fan out
 		// to every active phone conn as a `message` envelope (#311). Skip in
 		// foreground mode (bridge == nil) — there is no PTY-output observer
 		// surface in that path; inbound `send_message` still works.
 		var bridgeCleanup func()
-		if bridge != nil {
-			bridgeCleanup = startAssistantTurnBridge(ctx, sup, bridge, d, logger)
+		if w.bridge != nil {
+			bridgeCleanup = startAssistantTurnBridge(ctx, w.sup, w.bridge, d, logger)
 		}
 
 		dispatcherDone := make(chan struct{})
@@ -330,7 +393,7 @@ func startRelay(
 		case errors.Is(err, relay.ErrServerIDConflict):
 			logger.Error("relay: server-id conflict; shutting down daemon",
 				"server_id", string(serverID), "err", err)
-			shutdown()
+			w.shutdown()
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			logger.Debug("relay: lifecycle ended via ctx cancel", "err", err)
 		case err != nil:
@@ -374,27 +437,12 @@ func startRelay(
 func startRelayV2(
 	ctx context.Context,
 	logger *slog.Logger,
-	instanceName string,
+	w relayWiring,
 	conn *relay.Connection,
 	registry *devices.Registry,
 	serverID identity.ServerID,
-	convReg *conversations.Registry,
-	creator handlers.SessionCreator,
-	router handlers.SessionRouter,
-	queue *msgqueue.Queue,
-	active *activeConversation,
-	boundHost boundHostFunc,
-	sup *supervisor.Supervisor,
-	bridge *supervisor.Bridge,
-	claudeSessionsDir string,
-	defaultCwd string,
-	transitions transitionObserverSink,
-	qse *queueStateEmitterV2,
-	debugBundler func() ([]byte, error),
-	settings relay.SettingsUpdater,
-	snapshotSettings func() (model, effort string, yolo bool),
 ) (drain func(), err error) {
-	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(instanceName))
+	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(w.instanceName))
 	if err != nil {
 		return nil, fmt.Errorf("load static key: %w", err)
 	}
@@ -419,8 +467,8 @@ func startRelayV2(
 	// which makes the handler report zeros. Read-only reflection of two non-secret
 	// integers — no authz, no mutation.
 	var snapshotUsage func() (usedTokens, windowTokens int)
-	if claudeSessionsDir != "" {
-		usageResolve := resolveOwnBootstrapJSONL(claudeSessionsDir, newBootstrapProbe(logger), func() int { return sup.State().ChildPID })
+	if w.claudeSessionsDir != "" {
+		usageResolve := resolveOwnBootstrapJSONL(w.claudeSessionsDir, newBootstrapProbe(logger), func() int { return w.sup.State().ChildPID })
 		snapshotUsage = func() (int, int) {
 			// resolveOwnBootstrapJSONL returns an error (not "",0,nil) for the
 			// fresh / backoff / raced / confined-out cases; collapse it to the
@@ -449,30 +497,30 @@ func startRelayV2(
 		Reconnect:   conn.Reconnected(),
 		StaticPriv:  priv[:],
 		Devices:     registry,
-		DevicesPath: resolveDevicesPath(instanceName),
+		DevicesPath: resolveDevicesPath(w.instanceName),
 		ServerID:    string(serverID),
 		Logger:      logger,
 		Handlers: map[string]dispatch.Handler{
-			protocol.TypeListConversations:     handlers.ListConversations(convReg),
-			protocol.TypeCreateConversation:    handlers.CreateConversation(convReg, creator, resolveConversationsRegistryPath(instanceName), defaultCwd, logger),
-			protocol.TypeRenameConversation:    handlers.RenameConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
-			protocol.TypeDeleteConversation:    handlers.DeleteConversation(convReg, resolveConversationsRegistryPath(instanceName), logger),
-			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, true),
-			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(convReg, resolveConversationsRegistryPath(instanceName), logger, false),
-			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(instanceName), logger),
+			protocol.TypeListConversations:     handlers.ListConversations(w.convReg),
+			protocol.TypeCreateConversation:    handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
+			protocol.TypeRenameConversation:    handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
+			protocol.TypeDeleteConversation:    handlers.DeleteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
+			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true),
+			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, false),
+			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeCreateWorkspaceFolder: handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
-			protocol.TypeRecentWorkspaces:      handlers.RecentWorkspaces(convReg),
-			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(instanceName), logger),
-			protocol.TypeSendMessage:           handlers.SendMessage(router, queue, logger),
+			protocol.TypeRecentWorkspaces:      handlers.RecentWorkspaces(w.convReg),
+			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger),
+			protocol.TypeSendMessage:           handlers.SendMessage(w.router, w.queue, logger),
 		},
 		// Screen-snapshot seam (#618): the supervisor renders the live screen
 		// inside the tui-driver seal; KnownConversation gates request_snapshot
 		// on registry membership (AC #4), mirroring the established
 		// conversations-registry validation pattern but returning a bool so the
 		// relay needs no conversations import or errors.Is coupling.
-		Snapshotter: sup,
+		Snapshotter: w.sup,
 		KnownConversation: func(id string) bool {
-			_, ok := convReg.Get(conversations.ConversationID(id))
+			_, ok := w.convReg.Get(conversations.ConversationID(id))
 			return ok
 		},
 		// Screen-snapshot settings reader (#848): populates the screen_snapshot
@@ -485,7 +533,7 @@ func startRelayV2(
 		// type. Read-only reflection — no secret, no authz (contrast
 		// SettingsUpdater below, the write path). nil in foreground / v1 makes the
 		// handler report defaults (empty model/effort, yolo:false).
-		SnapshotSettings: snapshotSettings,
+		SnapshotSettings: w.snapshotSettings,
 		// Screen-snapshot usage reader (#857): populates the screen_snapshot
 		// reply's used_tokens / window_tokens from the bootstrap session's current
 		// context-window occupancy so the phone can render an "N% used (X of Y)"
@@ -510,35 +558,35 @@ func startRelayV2(
 		// same live daemon queue the #722 on-change producer snapshots and the
 		// dequeue handler (QueueRemover below) mutates, so enumerate-current-truth
 		// reflects live backlog state. A pure read: it mints no id and dequeues nothing.
-		OutstandingQueues: outstandingQueues(queue),
+		OutstandingQueues: outstandingQueues(w.queue),
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker
 		// (it has SendEsc). modal_cancel resolves here; modal_answer is a deferred
 		// no-op until #717 fills the gated arm.
-		ModalResolver: newModalResolverV2(modalReg, sup, logger),
+		ModalResolver: newModalResolverV2(modalReg, w.sup, logger),
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes
 		// one Esc through the sealed supervisor keystroke surface. sup
 		// (*supervisor.Supervisor) satisfies Interrupter via SendEsc (#726).
-		Interrupter: sup,
+		Interrupter: w.sup,
 		// Inbound new_session seam (#831): an interactive `new_session` frame
 		// routes a /clear through the sealed supervisor keystroke surface. sup
 		// (*supervisor.Supervisor) satisfies SessionStarter via StartNewSession
 		// (#830).
-		SessionStarter: sup,
+		SessionStarter: w.sup,
 		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
 		// frame removes a not-yet-drained queued message by id from the live
 		// daemon queue; the OnChange seam Remove fires drives the #722 producer to
 		// push an updated queue_state. The concrete *msgqueue.Queue (built at
 		// main.go) satisfies QueueRemover via Remove(string, uint64) bool.
-		QueueRemover: queue,
+		QueueRemover: w.queue,
 		// Inbound debug-bundle seam (#813): a paired `request_debug_bundle` frame
 		// assembles the daemon-global bundle (recent log ring + newest recording)
 		// and streams it back over the encrypted channel. The closure (built at
 		// main.go over debugbundle.Assemble + logRing.Snapshot) returns only
 		// (archive, err), so internal/relay never imports internal/debugbundle. nil
 		// in foreground / v1 makes the verb reply "unavailable" deterministically.
-		DebugBundler: debugBundler,
+		DebugBundler: w.debugBundler,
 		// Inbound set_session_settings seam (#845): a paired interactive
 		// `set_session_settings` frame validates the untrusted model/effort and
 		// persists the per-session change via *sessions.Pool.UpdateSettings (#840),
@@ -546,7 +594,7 @@ func startRelayV2(
 		// at main.go over the pool) maps sessions.ErrSessionNotFound → the relay
 		// sentinel, so internal/relay imports neither internal/sessions nor cmd/pyry.
 		// nil in foreground / v1 makes the verb reply "unavailable" deterministically.
-		SettingsUpdater: settings,
+		SettingsUpdater: w.settings,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build v2 session manager: %w", err)
@@ -575,17 +623,17 @@ func startRelayV2(
 		streamCleanup      func()
 		modalStreamCleanup func()
 	)
-	if bridge != nil && claudeSessionsDir != "" {
+	if w.bridge != nil && w.claudeSessionsDir != "" {
 		// The bootstrap-branch resolver tails the transcript the daemon's OWN
 		// claude child has open (probe over its PID) rather than the newest file by
 		// mtime, so a second claude in the shared sessions dir can't redirect the
 		// tail. pidFn re-reads State each resolve — the child respawns with a new
 		// PID and State() is mutex-guarded.
 		probe := newBootstrapProbe(logger)
-		pidFn := func() int { return sup.State().ChildPID }
-		streamCleanup = startInteractiveTurnStreamV2(ctx, sup, active, boundHost, mgr, claudeSessionsDir, probe, pidFn, logger)
-		modalStreamCleanup = startInteractiveModalStreamV2(ctx, sup, active, boundHost, mgr, modalReg, claudeSessionsDir, probe, pidFn, logger)
-	} else if bridge != nil {
+		pidFn := func() int { return w.sup.State().ChildPID }
+		streamCleanup = startInteractiveTurnStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, w.claudeSessionsDir, probe, pidFn, logger)
+		modalStreamCleanup = startInteractiveModalStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, modalReg, w.claudeSessionsDir, probe, pidFn, logger)
+	} else if w.bridge != nil {
 		logger.Info("relay: interactive turn + modal streams disabled; claude sessions dir unresolved",
 			"event", "interactive_turn_stream.no_sessions_dir")
 	}
@@ -600,11 +648,11 @@ func startRelayV2(
 	// delivery gate: with no interactive phone connected, the fan-out reaches
 	// nobody.
 	// The resolver closure (#741) stamps the owning conversation_id onto each
-	// emitted envelope. It captures convReg (in scope here, already a startRelayV2
-	// parameter) so session_transition_v2.go never imports internal/conversations
-	// — the same purity discipline that keeps toWirePayload registry-free.
-	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, transitions, mgr,
-		func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger)
+	// emitted envelope. It captures w.convReg (a relayWiring field in scope here)
+	// so session_transition_v2.go never imports internal/conversations — the same
+	// purity discipline that keeps toWirePayload registry-free.
+	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, w.transitions, mgr,
+		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, logger)
 
 	// Wire the queue_state producer (#722): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a queue_state envelope to capability-gated
@@ -614,7 +662,7 @@ func startRelayV2(
 	// unconditionally whenever the v2 manager exists. The capability filter
 	// (ActiveConns → Interactive) is the delivery gate: with no interactive phone
 	// connected, the fan-out reaches nobody.
-	streamQueueStateCleanup := startQueueStateStreamV2(ctx, qse, mgr)
+	streamQueueStateCleanup := startQueueStateStreamV2(ctx, w.qse, mgr)
 
 	return func() {
 		// Stop the producers — the structured turn stream, the modal stream, the
