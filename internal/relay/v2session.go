@@ -70,6 +70,18 @@ var rekeyInterval = 1 * time.Hour
 // the public API.
 var rekeyReplyTimeout = 30 * time.Second
 
+// rekeyRetryInterval is the short, bounded re-arm cadence used when a
+// scheduled rekey wake fires while transportDown() reports the relay leg
+// down (#912). Much shorter than the 1-hour rekeyInterval so a transient
+// relay blip at the rekey boundary is retried soon after the transport
+// recovers; comfortably longer than the relay reconnect backoff ceiling
+// (~30s) so a single retry usually lands on a recovered transport; well
+// under idleTimeout (15m) so a genuinely-gone phone is reaped by the idle
+// sweep rather than by an endless retry spin. Exposed as a package var
+// (lowercase) so tests can substitute a sub-second value; not part of the
+// public API.
+var rekeyRetryInterval = 1 * time.Minute
+
 // modalDenyTimeout is the bounded window between a surfaced modal and the
 // fail-closed safe-deny: if no modal_answer / modal_cancel resolves it first,
 // the daemon denies it (ESC) so a permission claude is waiting on can never
@@ -110,6 +122,16 @@ var ErrConnNotFound = fmt.Errorf("relay: conn not found: %w", control.ErrConnNot
 // dispatcher surfaces this verbatim through Response.Error with no
 // ErrorCode (slice A defines no wire code for this state yet).
 var ErrSessionNotOpen = errors.New("relay: session not open")
+
+// ErrTransportDown is returned by (*V2SessionManager).Rekey when the named
+// session is open and eligible but the relay transport is currently down, so
+// a manual rekey would seal a rekey_request that cannot reach the phone
+// (burning a Noise send-nonce and arming a doomed reply window). Distinct
+// from ErrSessionNotOpen so the operator sees "transport down, retry" rather
+// than "not open". Surfaced verbatim by the control dispatcher through
+// Response.Error with no ErrorCode, the same posture as ErrSessionNotOpen
+// (#912).
+var ErrTransportDown = errors.New("relay: transport down, rekey deferred - retry")
 
 // wakeKind enumerates the per-session timer events the manager's Run
 // goroutine handles on its wake channel. The values are internal and
@@ -984,6 +1006,25 @@ func (m *V2SessionManager) handleWake(ctx context.Context, w wakeSignal) {
 	}
 	switch w.kind {
 	case wakeRekeyEmit:
+		if m.transportDown() {
+			// #912: the relay leg is down, so a rekey_request sealed now
+			// would burn a Noise send-nonce on a frame m.send silently
+			// drops — gapping the phone's recv nonce and, one reply window
+			// later, tearing this healthy session down as a mislabelled
+			// noise.rekey_failed. Defer instead: seal nothing, arm no reply
+			// window, and re-arm a short retry so the emit lands once the
+			// transport recovers. The fired 1-hour timer that delivered
+			// this wake is one-shot and inert, so overwriting rekeyTimer
+			// needs no Stop(). A permanently-down phone is reaped by the
+			// idle sweep, so this retry loop cannot spin forever.
+			w.s.rekeyTimer = m.armRekeyRetryTimer(ctx, w.s)
+			m.cfg.Logger.Info("relay: v2 rekey emit deferred (transport down)",
+				"event", "v2.rekey.emit.deferred_transport_down",
+				"conn_id", w.s.connID,
+				"reason", "scheduled",
+				"retry_in", rekeyRetryInterval)
+			return
+		}
 		m.emitRekeyRequest(ctx, w.s, "scheduled")
 	case wakeRekeyReplyTimeout:
 		if !w.s.awaitingRekeyReply {
@@ -1040,6 +1081,24 @@ func (m *V2SessionManager) armRekeyReplyTimer(ctx context.Context, s *V2Session)
 	return time.AfterFunc(rekeyReplyTimeout, func() {
 		select {
 		case m.wake <- wakeSignal{s: s, kind: wakeRekeyReplyTimeout}:
+		case <-ctx.Done():
+		}
+	})
+}
+
+// armRekeyRetryTimer arms the short bounded re-arm used when a scheduled
+// rekey wake fires while the relay transport is down (#912). Same callback
+// shape as armRekeyTimer — it pushes a wakeRekeyEmit signal onto m.wake
+// under blocking-send + ctx.Done semantics — only the cadence differs
+// (rekeyRetryInterval, not rekeyInterval). Re-entering the same
+// wakeRekeyEmit arm makes the deferral a self-healing loop: each fire
+// re-checks transportDown() and either emits (recovered) or re-arms (still
+// down). A dedicated helper rather than a duration parameter on
+// armRekeyTimer keeps that function's two happy-path callers untouched.
+func (m *V2SessionManager) armRekeyRetryTimer(ctx context.Context, s *V2Session) *time.Timer {
+	return time.AfterFunc(rekeyRetryInterval, func() {
+		select {
+		case m.wake <- wakeSignal{s: s, kind: wakeRekeyEmit}:
 		case <-ctx.Done():
 		}
 	})
@@ -2970,6 +3029,15 @@ func (m *V2SessionManager) emitResync(ctx context.Context, s *V2Session, convID 
 // triggered via the control socket — docs/protocol-mobile.md § Re-key).
 // The "compromise" reason is reserved for a future caller.
 //
+// PRECONDITION (#912): callers MUST verify transportDown() is false before
+// calling. Sealing a rekey_request while the relay leg is down burns a Noise
+// send-nonce on a frame m.send silently drops and arms a doomed reply window;
+// both current callers (handleWake's wakeRekeyEmit arm and handleManualRekey)
+// gate on transportDown() first, and a future "compromise" caller must too.
+// The check is not enforced inside here: the two callers diverge after it
+// (scheduled re-arms a retry timer, manual returns ErrTransportDown), which a
+// guard in this primitive could not signal back.
+//
 // Envelope ID is fixed at 1: there is no rekey_ack response that would
 // correlate by InReplyTo (the spec is explicit — the next successful
 // AEAD round-trip under the new keys is the implicit ack).
@@ -3161,9 +3229,10 @@ func (m *V2SessionManager) send(env protocol.RoutingEnvelope) {
 // Returns ErrConnNotFound (wraps control.ErrConnNotFound, so the
 // dispatcher's errors.Is check maps to ErrCodeConnNotFound on the
 // wire), ErrSessionNotOpen for sessions not in V2StateOpen or already
-// awaiting a rekey reply, ctx.Err() on caller cancellation, or any
-// transport-layer error surfaced by the emit path (no such error is
-// returned today — seal failures are logged and dropped per
+// awaiting a rekey reply, ErrTransportDown when the session is eligible but
+// the relay transport is currently down (#912), ctx.Err() on caller
+// cancellation, or any transport-layer error surfaced by the emit path (no
+// such error is returned today — seal failures are logged and dropped per
 // emitRekeyRequest's documented posture).
 //
 // Production wire-up of *V2SessionManager into the cmd/pyry daemon
@@ -3208,6 +3277,16 @@ func (m *V2SessionManager) handleManualRekey(ctx context.Context, connID string)
 	}
 	if s.awaitingRekeyReply {
 		return ErrSessionNotOpen
+	}
+	// #912: gate the manual emit on the relay transport, AFTER the
+	// eligibility checks (so a missing or ineligible conn still gets its
+	// precise error) but BEFORE the scheduled-timer Stop below. A
+	// rekey_request sealed while the transport is down burns a Noise
+	// send-nonce on a frame that cannot reach the phone. Return a distinct
+	// ErrTransportDown so the operator sees "retry later", and leave the
+	// scheduled 1-hour timer untouched so the session keeps its cadence.
+	if m.transportDown() {
+		return ErrTransportDown
 	}
 	// Stop the scheduled 1-hour timer before emitting; rekeyComplete
 	// arms a fresh one on the responder reply. Stop()'s bool return is
