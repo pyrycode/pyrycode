@@ -631,6 +631,34 @@ type V2SessionConfig struct {
 	// decision.
 	Reconnect <-chan struct{}
 
+	// RekeyInterval overrides the scheduled re-key cadence — the timer that
+	// fires emitRekeyRequest("scheduled") on an open session. Optional: zero ⇒
+	// the rekeyInterval package default (1h). Read only by armRekeyTimer.
+	//
+	// Test-only seam (#920): the e2e suite lives in package e2e and cannot
+	// mutate internal/relay's unexported timing vars the way the in-package
+	// tests do, so the scheduled-rekey wire path is otherwise untriggerable
+	// from an e2e test. Production (cmd/pyry) leaves it zero; it is never
+	// sourced from the wire, a file, or operator input, so it widens no trust
+	// boundary. A smaller value only raises rotation frequency (strictly more
+	// forward secrecy) — no value weakens the shipped 1h posture or disables
+	// rotation, and it touches no key material, peer-static pin, or AEAD.
+	RekeyInterval time.Duration
+
+	// RekeyReplyTimeout overrides the bounded window between emitting a
+	// rekey_request and tearing the session down when the phone's fresh
+	// noise_init never arrives. Optional: zero ⇒ the rekeyReplyTimeout package
+	// default (30s). Read only by armRekeyReplyTimer. Same test-only population
+	// and security posture as RekeyInterval.
+	RekeyReplyTimeout time.Duration
+
+	// RekeyRetryInterval overrides the short re-arm cadence used when a
+	// scheduled re-key wake fires while the relay leg is down and the emit is
+	// deferred (#912). Optional: zero ⇒ the rekeyRetryInterval package default
+	// (1m). Read only by armRekeyRetryTimer. Same test-only population and
+	// security posture as RekeyInterval.
+	RekeyRetryInterval time.Duration
+
 	// StaticPriv is the binary's 32-byte X25519 static private key.
 	StaticPriv []byte
 
@@ -1066,7 +1094,11 @@ func (m *V2SessionManager) handleWake(ctx context.Context, w wakeSignal) {
 // ctx.Done semantics. ctx is the manager's Run-derived runCtx;
 // cancelled on Run exit, which unblocks any pending callback goroutine.
 func (m *V2SessionManager) armRekeyTimer(ctx context.Context, s *V2Session) *time.Timer {
-	return time.AfterFunc(rekeyInterval, func() {
+	interval := rekeyInterval
+	if m.cfg.RekeyInterval > 0 {
+		interval = m.cfg.RekeyInterval
+	}
+	return time.AfterFunc(interval, func() {
 		select {
 		case m.wake <- wakeSignal{s: s, kind: wakeRekeyEmit}:
 		case <-ctx.Done():
@@ -1078,7 +1110,11 @@ func (m *V2SessionManager) armRekeyTimer(ctx context.Context, s *V2Session) *tim
 // armRekeyTimer but with the wakeRekeyReplyTimeout kind and the
 // shorter cadence.
 func (m *V2SessionManager) armRekeyReplyTimer(ctx context.Context, s *V2Session) *time.Timer {
-	return time.AfterFunc(rekeyReplyTimeout, func() {
+	timeout := rekeyReplyTimeout
+	if m.cfg.RekeyReplyTimeout > 0 {
+		timeout = m.cfg.RekeyReplyTimeout
+	}
+	return time.AfterFunc(timeout, func() {
 		select {
 		case m.wake <- wakeSignal{s: s, kind: wakeRekeyReplyTimeout}:
 		case <-ctx.Done():
@@ -1096,7 +1132,11 @@ func (m *V2SessionManager) armRekeyReplyTimer(ctx context.Context, s *V2Session)
 // down). A dedicated helper rather than a duration parameter on
 // armRekeyTimer keeps that function's two happy-path callers untouched.
 func (m *V2SessionManager) armRekeyRetryTimer(ctx context.Context, s *V2Session) *time.Timer {
-	return time.AfterFunc(rekeyRetryInterval, func() {
+	interval := rekeyRetryInterval
+	if m.cfg.RekeyRetryInterval > 0 {
+		interval = m.cfg.RekeyRetryInterval
+	}
+	return time.AfterFunc(interval, func() {
 		select {
 		case m.wake <- wakeSignal{s: s, kind: wakeRekeyEmit}:
 		case <-ctx.Done():
