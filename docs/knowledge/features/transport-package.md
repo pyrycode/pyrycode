@@ -112,7 +112,7 @@ Shutdown sequence (either `Close()` or `ctx` cancellation):
 ## Configuration and usage
 
 - **`Config.Headers` is caller-owned.** The package does not construct the `X-Pyry-Server-Id`, `X-Pyry-Binary-Version`, or `X-Pyry-Protocol-Versions` headers; the relay layer (#248) builds them and passes them in. This package does NOT log `Config.Headers` — downstream consumers must not either.
-- **`Config.WriteTimeout`** bounds per-frame send I/O. It is NOT an inactivity timeout — the heartbeat is the inactivity contract.
+- **`Config.WriteTimeout`** bounds per-frame send I/O. It is NOT an inactivity timeout — the heartbeat is the inactivity contract. Left unset (non-positive), `New` substitutes `defaultWriteTimeout` (10s, matching the production `internal/relay` caller) — a zero value would otherwise make `sendPump`'s `context.WithTimeout(ctx, 0)` instantly deadline-exceed every write, reconnect-looping the client (#916).
 - **`Config.Logger`** is required; nil panics at `New` time. Per-CODING-STYLE injected, not global. Lifecycle events logged at Info (dial, connected, disconnected); pong timeout logged at Warn.
 - **`Config.URL`** is the full WSS URL (e.g. `wss://relay.pyrycode.dev/v1/server`). TLS verification uses Go's `crypto/tls` defaults (TLS 1.2 min, hostname-checked against URL host, system root CAs).
 

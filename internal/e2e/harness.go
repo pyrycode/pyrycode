@@ -175,13 +175,15 @@ func ensureFakeClaudeBuilt(t *testing.T) string {
 // dialable, and registers teardown via t.Cleanup. Fails the test on any
 // error before returning a usable Harness.
 //
-// The supervised "claude" is /bin/sleep 99999 — exists on Linux and
-// macOS, survives until SIGTERM, and the readiness gate doesn't depend on
-// the child being a real claude. A plain integer (seconds) is portable:
-// `infinity` is GNU coreutils only and was never accepted by macOS BSD
-// sleep. 99999 seconds is ~27h, longer than any test could run. Idle
-// eviction is disabled (-pyry-idle-timeout=0) so the smoke path isn't
-// racing the timer.
+// The supervised "claude" is the sleep-claude wrapper (see
+// sleepClaudeScript): a `#!/bin/sh` + `exec sleep 99999` script that
+// ignores its argv, so the daemon-appended `--session-id <uuid>` (#839)
+// can't crash-loop the child. It survives until SIGTERM, and the readiness
+// gate doesn't depend on the child being a real claude. A plain integer
+// (seconds) is portable: `infinity` is GNU coreutils only and was never
+// accepted by macOS BSD sleep. 99999 seconds is ~27h, longer than any test
+// could run. Idle eviction is disabled (-pyry-idle-timeout=0) so the smoke
+// path isn't racing the timer.
 func Start(t *testing.T) *Harness {
 	t.Helper()
 	return StartIn(t, t.TempDir())
@@ -455,12 +457,37 @@ func StartExpectingFailureIn(t *testing.T, home string, extraFlags ...string) Ru
 	return RunResult{}
 }
 
+// sleepClaudeScript is a tiny shell-script claude stand-in and the default
+// supervised child for every spawn on the zero-value spawnOpts path
+// (Start / StartIn / StartInWithEnv). The daemon appends `--session-id
+// <uuid>` to every bootstrap spawn (#839, buildClaudeArgs); both BSD and
+// GNU sleep(1) reject that unknown flag and exit, which would crash-loop a
+// bare /bin/sleep child under backoff. This script ignores all positional
+// args and exec()s sleep instead, so an appended --session-id — or any
+// future spawn-time flag — can't take the child down. The bootstrap path
+// also runs through this script (passes "99999" verbatim, likewise
+// ignored). Pool.Create-driven tests thread it explicitly via -pyry-claude.
+const sleepClaudeScript = `#!/bin/sh
+exec sleep 99999
+`
+
+// writeSleepClaude writes the sleep-claude stand-in to home and returns
+// its absolute path. See sleepClaudeScript for why the indirection.
+func writeSleepClaude(t *testing.T, home string) string {
+	t.Helper()
+	path := filepath.Join(home, "sleep-claude.sh")
+	if err := os.WriteFile(path, []byte(sleepClaudeScript), 0o755); err != nil {
+		t.Fatalf("write sleep-claude script: %v", err)
+	}
+	return path
+}
+
 // spawnOpts captures the per-test variations on top of pyry's standard e2e
-// flag set. Zero-value yields the existing /bin/sleep 99999 behaviour, so
-// spawn() stays a one-liner over spawnWith.
+// flag set. Zero-value yields the default sleep-claude stand-in (see
+// sleepClaudeScript), so spawn() stays a one-liner over spawnWith.
 type spawnOpts struct {
-	// claudeBin is the path passed via -pyry-claude. Empty defaults to
-	// /bin/sleep.
+	// claudeBin is the path passed via -pyry-claude. Empty defaults to the
+	// sleep-claude wrapper written by writeSleepClaude.
 	claudeBin string
 	// claudeArgs are the args appended after the `--` sentinel. Nil
 	// defaults to {"99999"} (the sleep-as-claude duration).
@@ -510,13 +537,13 @@ func spawn(t *testing.T, home string, extraFlags ...string) (string, *exec.Cmd, 
 }
 
 // spawnWith is the shared spawn core. Zero-value spawnOpts yields the
-// historical /bin/sleep 99999 behaviour. Callers needing fake-claude or
-// other supervised-child wiring populate spawnOpts and let the defaults
-// fill in the rest.
+// default sleep-claude wrapper (see sleepClaudeScript) as the supervised
+// child. Callers needing fake-claude or other supervised-child wiring
+// populate spawnOpts and let the defaults fill in the rest.
 func spawnWith(t *testing.T, home string, o spawnOpts) (string, *exec.Cmd, *safeBuffer, *safeBuffer, chan struct{}) {
 	t.Helper()
 	if o.claudeBin == "" {
-		o.claudeBin = "/bin/sleep"
+		o.claudeBin = writeSleepClaude(t, home)
 	}
 	if o.claudeArgs == nil {
 		o.claudeArgs = []string{"99999"}

@@ -49,8 +49,9 @@ split from #51.
 ## What It Does
 
 - Builds `pyry` once per test process (or reuses `$PYRY_E2E_BIN`).
-- Spawns it pointed at a `t.TempDir()` `$HOME`, with `/bin/sleep infinity` as the
-  supervised "claude" and idle eviction disabled.
+- Spawns it pointed at a `t.TempDir()` `$HOME`, with the sleep-claude wrapper
+  (see § Isolation Strategy) as the default supervised "claude" and idle
+  eviction disabled.
 - Polls the Unix socket until `net.Dial` succeeds (5s deadline), short-circuiting
   if pyry exits early.
 - On test cleanup: SIGTERM, escalate to SIGKILL after 3s, then `os.Remove` the
@@ -198,23 +199,30 @@ Spawn args:
 ```
 -pyry-socket=<HomeDir>/pyry.sock
 -pyry-name=test
--pyry-claude=/bin/sleep
+-pyry-claude=<home>/sleep-claude.sh
 -pyry-idle-timeout=0
 <extraFlags...>          # variadic, last-wins via Go's flag package
 -- 99999
 ```
 
-`/bin/sleep 99999` exists on Linux + macOS, survives ~27 hours (longer than
-any test runs), and the readiness gate doesn't depend on the child being a
-real claude. `99999` (a plain integer in seconds) is the only argv form
-portable across both: `infinity` is GNU coreutils only and macOS BSD sleep
-rejects it (see `lessons.md § Test helpers across packages`). #115 changed
-the harness from `infinity` to `99999` because the lazy-respawn test waits
-for `Phase: running` after a respawn — under `infinity`, macOS BSD sleep
-exits immediately, the supervisor enters perpetual backoff, and `Phase:
-running` is never observed. `IdleTimeout=0` defeats the eviction timer by
-default; tests that need eviction pass `-pyry-idle-timeout=<dur>` via the
-variadic on `StartIn`.
+`-pyry-claude` defaults (zero-value `spawnOpts.claudeBin`) to the
+sleep-claude wrapper — `writeSleepClaude(t, home)` writes `#!/bin/sh` +
+`exec sleep 99999` to `<home>/sleep-claude.sh` (0o755) and returns its path
+(#918; was a bare `/bin/sleep` before). The wrapper ignores all argv, so it
+tolerates both the bootstrap invocation's trailing `99999` and any
+daemon-appended spawn-time flag — see § Default Stand-In Argv Tolerance
+below for why a bare `/bin/sleep` stopped working. `exec sleep 99999`
+survives ~27 hours (longer than any test runs), and the readiness gate
+doesn't depend on the child being a real claude. `99999` (a plain integer in
+seconds) is the only argv form portable across BSD and GNU `sleep`:
+`infinity` is GNU coreutils only and macOS BSD sleep rejects it (see
+`lessons.md § Test helpers across packages`). #115 changed the harness from
+`infinity` to `99999` because the lazy-respawn test waits for `Phase:
+running` after a respawn — under `infinity`, macOS BSD sleep exits
+immediately, the supervisor enters perpetual backoff, and `Phase: running`
+is never observed. `IdleTimeout=0` defeats the eviction timer by default;
+tests that need eviction pass `-pyry-idle-timeout=<dur>` via the variadic on
+`StartIn`.
 
 ## Readiness Signal
 
@@ -1053,7 +1061,7 @@ Three production wirings the tests consume (all in `cmd/pyry/main.go`):
 
 ### Tiny shell-script claude stand-in
 
-`Pool.Create` constructs new-session args as `append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))`. With the harness default `claudeBin=/bin/sleep` and `claudeArgs=["99999"]`, the new-session exec is `/bin/sleep 99999 --session-id <uuid>` — both BSD and GNU `sleep(1)` reject the unknown arg and exit with the usage banner. The supervisor would crash-loop the child; lifecycle state would still flip to `stateActive` (Pool tracks lifecycle independently of supervisor health), so cap-evict logic is uncoupled from this — but it generates noisy stderr and risks racing the supervisor backoff window against assertions.
+`Pool.Create` constructs new-session args as `append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))`. With the harness default `claudeBin=/bin/sleep` (pre-#918) and `claudeArgs=["99999"]`, the new-session exec was `/bin/sleep 99999 --session-id <uuid>` — both BSD and GNU `sleep(1)` reject the unknown arg and exit with the usage banner. The supervisor would crash-loop the child; lifecycle state would still flip to `stateActive` (Pool tracks lifecycle independently of supervisor health), so cap-evict logic is uncoupled from this — but it generates noisy stderr and risks racing the supervisor backoff window against assertions.
 
 The fix: a two-line shell script written by the test as `<home>/sleep-claude.sh`, made executable, passed via `-pyry-claude=<path>` through `StartIn`'s variadic `extraFlags`:
 
@@ -1066,14 +1074,14 @@ Both bootstrap (`<script> 99999`) and new sessions (`<script> 99999 --session-id
 
 ### File-local helpers — three new, one polling vs. one-shot
 
-Four helpers in `cap_test.go`, all file-local:
+Three helpers introduced by #116, plus `writeSleepClaude` (moved to `harness.go` by #918 — see § Default Stand-In Argv Tolerance):
 
-- **`writeSleepClaude(t, home) string`** — writes the script and returns its absolute path.
+- **`writeSleepClaude(t, home) string`** — writes the script and returns its absolute path. Originally file-local to `cap_test.go`; relocated verbatim into `harness.go` by #918 so `spawnWith`'s default path can call it too. Every existing call site is unaffected — same package symbol.
 - **`waitForBootstrap(t, regPath, timeout) string`** — polls the registry for the entry with `Bootstrap == true`, returns its `ID`. Tolerates the registry file not yet existing (Pool's first save races the readiness gate). Distinct from `waitForBootstrapState` (#115) which polls a *known* id for a *specific* state — `waitForBootstrap` discovers the id.
 - **`waitForSessionState(t, regPath, id, want, timeout)`** — polls until the entry with `id` has `lifecycle_state` matching `want` (`"evicted"` or `"active"`). The `"active"` arm tolerates either an empty/missing field (today's `omitempty` default) or the literal `"active"` — same convention as `waitForBootstrapState`.
 - **`assertActive(t, regPath, id)`** — one-shot registry checkpoint; fails if the session is `"evicted"` *right now*. Distinct from `waitForSessionState(..., "active", ...)` which returns on first observation; `assertActive` is for "X must be true at this exact moment", not "X eventually becomes true". Used in the interleave test's Phase 1/Phase 2 gate to catch a session that flips to active then evicts before the next poll.
 
-Promoting to `harness.go` deferred — rule of three; only `cap_test.go` consumes them today.
+`waitForBootstrap`, `waitForSessionState`, and `assertActive` stay file-local to `cap_test.go` — rule of three, and none of them are needed from the default spawn path. Only `writeSleepClaude` (and its `sleepClaudeScript` const) moved.
 
 ### Why three `sessions.new` calls in `EvictsLRU`, not two
 
@@ -1093,6 +1101,70 @@ The 50ms inter-call sleep is for **timestamp distinguishability**, not race avoi
 
 `cmd/pyry/main.go` gains ~7 LOC: the new flag, its wire-in to `sessions.Config.ActiveCap`, the `pyryFlagValues` registration, and the `nil → pool` swap on `control.NewServer` with the comment block rewritten. Test diff ~204 LOC, single new file. Default `go test ./...` unaffected.
 
+## Default Stand-In Argv Tolerance (#918)
+
+The zero-value `spawnWith` path (used by `Start` / `StartIn` /
+`StartInWithEnv`, and by `StartExpectingFailureIn` via `spawn`) invoked
+`/bin/sleep` directly until #918. #839 wired `Config.ResolveSessionID` on
+**every** bootstrap spawn (`internal/supervisor/supervisor.go`'s
+`buildClaudeArgs` appends `--session-id <uuid>`, driven from
+`internal/sessions/pool.go`), not just `Pool.Create`'s new-session path
+that #116 already worked around. A bare `/bin/sleep 99999 --session-id
+<uuid>` gets rejected by both BSD and GNU `sleep(1)`, crash-looping the
+bootstrap child under backoff — three default-path tests that need the
+child to reach and hold `running` went red: `TestE2E_BootstrapWarmStart_
+IgnoresEvictedOnDisk`, `TestE2E_IdleEviction_LazyRespawn`, and
+`TestRelayV2_Daemon/v2_enabled_request_snapshot_round_trip`.
+
+Fix: point `spawnWith`'s default at the same argv-ignoring wrapper #116
+already proved (`writeSleepClaude` / `sleepClaudeScript`, see § Active-Cap
+Eviction Pattern), instead of introducing a second wrapper. The helper
+moved verbatim from `cap_test.go` (`//go:build e2e`) into `harness.go`
+(`//go:build e2e || e2e_install`) — `spawnWith` lives in `harness.go`, and
+referencing an `e2e`-only symbol from an `e2e || e2e_install` file would
+have broken the `e2e_install` build. Zero call-site changes: every
+existing `writeSleepClaude` caller resolves to the same package symbol.
+
+```go
+if o.claudeBin == "" {
+    o.claudeBin = writeSleepClaude(t, home)   // was: "/bin/sleep"
+}
+```
+
+`claudeArgs`'s `{"99999"}` default is unchanged — the wrapper ignores it
+identically to any appended flag, so no per-test argv reasoning is needed.
+
+**No-regression argument.** Tests that thread `-pyry-claude=` as an
+extraFlag (the `sessions_*` suite) still have `spawnOpts.claudeBin == ""`,
+so `spawnWith` now also writes `home/sleep-claude.sh` before their extra
+flag overrides it with the identical path and content — an idempotent
+double-write, last-flag-wins per Go's `flag` package, no behavioural
+change. Tests that set `claudeBin` directly (`StartRotation*` →
+fakeclaude) have `claudeBin != ""`, so the wrapper is never written.
+`StartExpectingFailureIn`: the daemon fails before ever exec'ing
+`-pyry-claude` (corrupt registry / workdir confinement), so the wrapper
+is written but never run; its assertions target `.pyry/test/sessions.json`
+and stderr, not `home`'s file listing.
+
+**Scope.** This fixes only the default `/bin/sleep` stand-in. Two other
+red e2e mechanisms found in the same sweep are disjoint and tracked
+separately, with no file overlap: `spawnAttachableDaemon`'s Go-test-binary
+stand-in (4 `TestE2E_Attach_*` tests, rejects `--session-id` via
+`flag.Parse()`) was #257 (landed — see § Attach PTY Harness Pattern below,
+[codebase/257.md](../codebase/257.md)); `TestRelayV2_InterruptStopsRunningTurn`'s
+argv-immune-fakeclaude failure ("turn never started") is a daemon-side
+#839 regression, #929. A **ninth** red test outside the original
+enumeration, `TestTwoPhoneStructured_InteractiveReceivesStream`, fails
+identically on `main` (not a regression) via yet another path
+(`StartRotationWithRelay` sets `claudeBin` directly, bypassing the
+default-stand-in fix entirely) — filed as #930, left red. See
+`docs/knowledge/codebase/918.md` for the full incident/lesson writeup.
+
+`bootstrap_warm_start_test.go:64`'s narrative comment ("Supervisor.Run
+spawns `/bin/sleep`") is now mildly stale (the default stand-in is a
+`#!/bin/sh` wrapper over `sleep`, not a bare `/bin/sleep`) — left
+untouched deliberately, since #918's AC required no test-body changes.
+
 ## Attach PTY Harness Pattern (`attach_pty.go`, `attach_pty_test.go`, #125)
 
 The non-interactive `Harness` drives daemon-only verbs over the control socket
@@ -1101,8 +1173,10 @@ and needs a controlling terminal — pipes don't satisfy `term.IsTerminal`. #125
 adds a sibling **`AttachHarness`** in the same package (build tag `e2e ||
 e2e_install`) that owns:
 
-1. A `pyry` daemon in bridge mode whose supervised "claude" is the e2e test
-   binary running `TestHelperProcess` in echo mode.
+1. A `pyry` daemon in bridge mode whose supervised "claude" is the
+   `echoClaudeScript` shell wrapper (#257), which `exec`s the e2e test
+   binary running `TestHelperProcess` in echo mode while dropping its own
+   argv — see § Helper "claude" via `TestHelperProcess` re-exec below.
 2. A `creack/pty` master/slave pair.
 3. A `pyry attach` subprocess whose stdin/stdout/stderr are the slave fd.
 
@@ -1168,24 +1242,41 @@ The slave fd held by the harness and the slave fds dup'd into `attachCmd`'s
 stdin/stdout/stderr are independent — closing the harness's slave does not
 SIGHUP the attach client. The kill sequence does that explicitly.
 
-### Helper "claude" via `TestHelperProcess` re-exec
+### Helper "claude" via `TestHelperProcess` re-exec, through the `echoClaudeScript` wrapper (#257)
 
 ```
 spawnAttachableDaemon args:
-  -pyry-claude=os.Args[0]                    # the e2e test binary
-  --                                         # arg sentinel
-  -test.run=TestHelperProcess                # claude args (passed to helper)
+  -pyry-claude=<home>/echo-claude.sh         # writeEchoClaude(t, home)
+  -pyry-resume=false
 
 daemon env:
   GO_TEST_HELPER_PROCESS=1
   GO_TEST_HELPER_MODE=echo
+  E2E_HELPER_BIN=os.Args[0]                  # the e2e test binary
 ```
 
-`supervisor.runOnce` does `cmd.Env = append(os.Environ(), helperEnv...)`, so
-env vars set on the daemon's `cmd.Env` flow through to the supervised
-helper. The helper gates on `GO_TEST_HELPER_PROCESS=1` (no-op in normal `go
-test` runs), switches on `GO_TEST_HELPER_MODE`, calls `term.MakeRaw` on
-stdin, then `io.Copy(stdout, stdin)`.
+Through #257, `-pyry-claude` pointed directly at `os.Args[0]` with the
+trailing args `-- -test.run=TestHelperProcess`. That reached `Pool.Create`
+for any non-bootstrap session: `Pool.Create` appends `--session-id <uuid>`
+to the supervised claude's argv (`internal/sessions/pool.go`), which the Go
+test binary's `flag.Parse()` rejects with `flag provided but not defined:
+-session-id`, exiting 2 before `TestHelperProcess` ever runs. Every test
+routing through `spawnAttachableDaemon` was exposed to this — including the
+bootstrap session, since `Pool.Create` is unconditional, not
+non-bootstrap-only.
+
+#257 migrated `spawnAttachableDaemon` onto the same `echoClaudeScript` /
+`writeEchoClaude` shell wrapper `spawnAutoAttachDaemon` (#163) already used
+— see § Daemon variant below for the wrapper's shape. The wrapper ignores
+its own argv and `exec`s `$E2E_HELPER_BIN -test.run=TestHelperProcess`, so
+the appended `--session-id <uuid>` is dropped before the Go binary ever
+parses flags. `supervisor.runOnce` does `cmd.Env = append(os.Environ(),
+helperEnv...)`, so env vars set on the daemon's `cmd.Env` (including the new
+`E2E_HELPER_BIN`) flow through to the wrapper, which forwards them across
+its `exec` to the re-exec'd test binary. The helper itself is unchanged: it
+gates on `GO_TEST_HELPER_PROCESS=1` (no-op in normal `go test` runs),
+switches on `GO_TEST_HELPER_MODE`, calls `term.MakeRaw` on stdin, then
+`io.Copy(stdout, stdin)`.
 
 This pattern (#125) coexists with #122's separate `package main`
 fakeclaude binary (`internal/e2e/internal/fakeclaude`) — they target
@@ -1926,7 +2017,7 @@ type StdioAttachClient struct {
     SessionID  string         // returned by control.SessionsNew
     SocketPath string         // daemon's control socket
     HomeDir    string         // daemon's $HOME (fresh os.MkdirTemp)
-    Stderr     *bytes.Buffer  // attach client stderr (empty in steady state)
+    Stderr     *safeBuffer    // attach client stderr (empty in steady state; mutex-guarded since #257 AC#4)
     // ... unexported fields
 }
 
@@ -2014,11 +2105,13 @@ one wire call is pure cost; the wire-level contract is identical.
 ### Why supervised claude is helper-as-echo, not `/bin/sleep`
 
 The byte-flow proof needs a writer that echoes — `/bin/sleep` writes
-nothing back. `spawnAttachableDaemon` already wires the e2e test binary
-(`os.Args[0]`) as the supervised claude with `GO_TEST_HELPER_PROCESS=1`
-and `GO_TEST_HELPER_MODE=echo`. The two test files (`attach_pty_test.go`
-and `attach_stdio_test.go`) compile into the same test binary and share
-the helper — there is exactly one `TestHelperProcess` in the package.
+nothing back. `spawnAttachableDaemon` wires the e2e test binary as the
+supervised claude (via the `echoClaudeScript` wrapper as of #257 — see §
+Helper "claude" via `TestHelperProcess` re-exec above) with
+`GO_TEST_HELPER_PROCESS=1` and `GO_TEST_HELPER_MODE=echo`. The two test
+files (`attach_pty_test.go` and `attach_stdio_test.go`) compile into the
+same test binary and share the helper — there is exactly one
+`TestHelperProcess` in the package.
 
 ### Skip-on-no-pipe ordering
 
@@ -2028,22 +2121,24 @@ capability) — it exercises kernel fd allocation directly. Place the call
 spawning pyry and tearing it down. Never fires on the project's CI
 matrix; defensive against future restrictive environments.
 
-### Round-trip test currently `t.Skip`'d on #257
+### Round-trip test unskipped by #257
 
-`TestE2E_AttachStdio_BytesRoundTrip` was **skipped pending #167**, the
-`parseClientFlags` rejection of `--stdio` before `parseAttachArgs` ever
-saw the flag. Unit tests in `internal/control/attach_stdio_client_test.go`
-and `cmd/pyry/args_test.go` bypassed `parseClientFlags`, so the harness
-was the surface that surfaced the bug. #167 has now landed (CLI flag
-pass-through via `splitClientFlags`); removing the skip exposed a
-**different**, pre-existing harness bug: `spawnAttachableDaemon` wires
-the Go test binary directly as `claude`, so `Pool.Create`'s appended
-`--session-id <uuid>` reaches the test framework's `flag.Parse()` and
-is rejected before `TestHelperProcess` runs. `auto_attach.go` (#163)
-already works around this with a shell-wrapper (`echoClaudeScript`);
-the stdio harness needs the same pattern. The skip rotated from #167
-to #257 in the same commit that landed the #167 fix; the harness body
-itself is unchanged.
+`TestE2E_AttachStdio_BytesRoundTrip` was originally **skipped pending
+#167**, the `parseClientFlags` rejection of `--stdio` before
+`parseAttachArgs` ever saw the flag. Unit tests in
+`internal/control/attach_stdio_client_test.go` and
+`cmd/pyry/args_test.go` bypassed `parseClientFlags`, so the harness was
+the surface that surfaced the bug. #167 landed (CLI flag pass-through
+via `splitClientFlags`); removing that skip exposed a **different**,
+pre-existing harness bug: `spawnAttachableDaemon` wired the Go test
+binary directly as `claude`, so `Pool.Create`'s appended `--session-id
+<uuid>` reached the test framework's `flag.Parse()` and was rejected
+before `TestHelperProcess` ran. The skip rotated from #167 to #257 in
+the same commit that landed the #167 fix, with the harness body itself
+unchanged. #257 then migrated `spawnAttachableDaemon` onto the
+`echoClaudeScript` wrapper `auto_attach.go` (#163) already used — see §
+Helper "claude" via `TestHelperProcess` re-exec above — and removed the
+skip. The test now passes under `-race -tags e2e`.
 
 ### What this slice does not verify
 
@@ -2112,10 +2207,12 @@ matcher, extend `isPTYDevicePath` and re-run.
 stable PTY fd would not race a single-pass directory read, so the bias
 is toward false-negative on a closing fd — acceptable.
 
-**Carries the same `t.Skip("blocked on #257")` as the byte-flow test.**
+**Carried the same `t.Skip("blocked on #257")` as the byte-flow test.**
 Both skips originally tracked #167 (CLI flag rejection); rotated to
 #257 once #167 landed and exposed the underlying `--session-id`-vs-
-test-binary harness bug. Both lift in one commit when #257 lands.
+test-binary harness bug. #257 lifted both skips in the same commit —
+this test also self-skips gracefully if fd-inspection is unavailable
+(`openPTYDeviceTargets` err → `t.Skipf`), independent of the harness fix.
 
 **Production diff is zero. Test diff ~110 LOC, one new file.**
 `go test -tags e2e -race ./internal/e2e/...` clean.
@@ -2245,19 +2342,22 @@ pyry -pyry-socket=<sock> -- --session-id <uuid> --input-format stream-json --out
 The `pyry attach --stdio` CLI bug (#167, fixed) blocked #161/#162's
 `TestE2E_AttachStdio_*` tests because `parseClientFlags` rejected
 `--stdio` before `parseAttachArgs` ran. The follow-up harness bug
-(#257, the `--session-id`-vs-test-binary collision exposed when #167's
-fix lifted the skip) keeps those tests skipped today. **#163 is
-unaffected by both.** `tryAutoAttach` calls `control.AttachStdio`
+(#257, fixed — the `--session-id`-vs-test-binary collision exposed when
+#167's fix lifted the skip) kept those tests skipped until it migrated
+`spawnAttachableDaemon` onto the wrapper. **#163 was unaffected by
+both, from the start.** `tryAutoAttach` calls `control.AttachStdio`
 *directly* from inside the foreground binary's `runSupervisor` — no
 verb dispatch, no `parseClientFlags`, no `parseAttachArgs`; and #163's
-own daemon variant uses a shell-wrapper `claude` (`echoClaudeScript`)
-which dodges #257 by construction. Confirmed against `cmd/pyry/main.go`
-(the in-process `control.AttachStdio` call site in `tryAutoAttach`).
+own daemon variant used a shell-wrapper `claude` (`echoClaudeScript`)
+which dodged #257 by construction, ahead of #257 applying the same fix
+to `spawnAttachableDaemon`. Confirmed against `cmd/pyry/main.go` (the
+in-process `control.AttachStdio` call site in `tryAutoAttach`).
 
-This also means #163's test is the **first end-to-end proof** that the
+This also means #163's test was the **first end-to-end proof** that the
 `AttachStdio` byte path works against a real daemon — the stdio-attach
-test that was meant to be the first proof remains `t.Skip`'d (now on
-#257).
+test that was meant to be the first proof stayed `t.Skip`'d until #257
+landed and unskipped it (see § Round-trip test unskipped by #257
+above).
 
 ### Daemon variant: `spawnAutoAttachDaemon` + `echo-claude.sh` shell wrapper
 
@@ -2273,7 +2373,8 @@ session is dead-on-arrival, no echo, the byte round-trip times out.
 
 Workaround: a `<home>/echo-claude.sh` shell wrapper that ignores its
 argv entirely and `exec`s the test binary with fixed args. Mirrors the
-`writeSleepClaude` pattern in `cap_test.go` (#116) — see
+`writeSleepClaude` pattern (#116, now the harness-wide default — see
+§ Default Stand-In Argv Tolerance) — see
 [lessons.md § `Pool.Create` appends `--session-id`, breaking naive
 claude stand-ins](../../lessons.md#poolcreate-appends---session-id-breaking-naive-claude-stand-ins).
 
@@ -2289,12 +2390,13 @@ are preserved across the shell `exec` automatically.
 
 `spawnAutoAttachDaemon` is otherwise structurally identical to
 `spawnAttachableDaemon`: bridge mode, helper-as-claude in echo mode,
-`waitDaemonReady` polls on the same protocol. The existing #161 stdio
-harness has the *same bug* (its daemon also drives `SessionsNew` and
-wires the test binary directly as `claude`); now that #167's CLI fix
-has landed and the skip lifted, the bug surfaces as a real harness
-failure tracked in #257. Folding `spawnAttachableDaemon` over to the
-shell-wrapper shape is the body of #257.
+`waitDaemonReady` polls on the same protocol. The #161 stdio harness had
+the *same bug* (its daemon also drives `SessionsNew` and, pre-#257,
+wired the test binary directly as `claude`); once #167's CLI fix landed
+and the skip lifted, the bug surfaced as a real harness failure tracked
+in #257. Folding `spawnAttachableDaemon` over to this shell-wrapper
+shape was the body of #257 (landed) — see § Helper "claude" via
+`TestHelperProcess` re-exec above.
 
 ### `Stderr` is a `safeBuffer`, not a bare `bytes.Buffer`
 
@@ -2305,10 +2407,12 @@ is empty in steady state. `safeBuffer` is a tiny mutex-wrapped
 `bytes.Buffer` (two methods: `Write` under lock, `String` snapshot
 under lock); see [lessons.md § `cmd.Stderr` reads race the os/exec
 copy goroutine](../../lessons.md#cmdstderr-reads-race-the-osexec-copy-goroutine).
-
-The stdio harness's `StdioAttachClient.Stderr` has the same latent
-race; not refactored here per scope discipline (its proof-of-life is
-`t.Skip`'d on #257; the race never fires).
+The stdio harness's `StdioAttachClient.Stderr` had the same latent race
+but was not refactored here (#163) — its proof-of-life test was still
+`t.Skip`'d on #257 at the time, so the race never fired under `-race`.
+#257 later applied the identical `safeBuffer` swap to
+`StdioAttachClient.Stderr` (AC#4, § Public API above) once unskipping
+the test made the race live.
 
 ### `pgrepChildren` — process-tree primitive
 
@@ -2537,8 +2641,9 @@ registry-unchanged assertion.
 
 ### Sleep-claude over echo-claude for the supervised child
 
-The fallback tests reuse `writeSleepClaude` from `cap_test.go` (#116) —
-the supervised child is `#!/bin/sh\nexec sleep 99999\n`, which ignores
+The fallback tests reuse `writeSleepClaude` (#116, relocated to
+`harness.go` by #918) — the supervised child is
+`#!/bin/sh\nexec sleep 99999\n`, which ignores
 the appended `--session-id <uuid>` from `Pool.Create` and stays alive
 indefinitely. The happy-path test (#163) needs an *echo-claude* helper
 because it round-trips bytes; the fallback tests don't, and `sleep` is

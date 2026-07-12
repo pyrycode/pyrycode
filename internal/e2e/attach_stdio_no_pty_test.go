@@ -26,10 +26,6 @@ import (
 // (negative). A regression that allocates a useless PTY but still
 // passes bytes would fail only here.
 func TestE2E_AttachStdio_NoPTYInProcessTree(t *testing.T) {
-	// Same #167 gate as the byte-flow test; remove together when #167
-	// lands.
-	t.Skip("blocked on #167 — pyry attach --stdio rejected by parseClientFlags")
-
 	c := startStdioAttach(t, "stdio-no-pty")
 
 	pid := c.attachCmd.Process.Pid
