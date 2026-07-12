@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,15 +182,41 @@ func TestRelayV2_InterruptStopsRunningTurn(t *testing.T) {
 		t.Errorf("ack InReplyTo = %v, want pointer to %d", ackEnv.InReplyTo, sendReqID)
 	}
 
-	// --- AC1: establish + observe the mid-turn window. Drop the JSONL trigger with
-	// a SINGLE assistant-text line (NOT an end-of-turn line): fakeclaude appends it →
+	// --- AC1: establish + observe the mid-turn window. Kick the turn with a SINGLE
+	// assistant-text line (NOT an end-of-turn line): fakeclaude appends it →
 	// producer → TextChunk → emitter emits turn_state{State:"responding"}. Draining
 	// to a non-idle turn_state proves the turn is running / had NOT already ended
 	// (vacuous-pass guard #1).
+	//
+	// The line is RE-DROPPED on a ticker rather than written once. Since #854 the
+	// structured-turn producer resolves the bootstrap transcript from the PID that
+	// has it open (resolveOwnBootstrapJSONL), so its subscription only settles once
+	// fakeclaude's child fd is probed — ~500 ms after startup (one subscribeRetryDelay
+	// after the first "no jsonl open yet"), and it tails from EOF. A single line
+	// dropped right after the send ack lands BELOW that EOF and is never tailed, so
+	// no turn_state ever reaches the phone (the failure this ticket fixes). A real
+	// running turn streams assistant output continuously until interrupted; the
+	// re-drop mirrors that, so whenever the subscription settles it catches a
+	// responding line. The kicker is stopped the instant AC1 observes the turn —
+	// strictly before the interrupt — so fakeclaude's bare-ESC handler stays the ONLY
+	// source of an end-of-turn line (vacuous-pass guard #1 intact). The line is
+	// assistant-text, never an end_turn, so re-dropping can never fabricate a
+	// turn_end (guard #2 intact).
 	midTurnLine := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Working on it."}]}}` + "\n"
-	if err := os.WriteFile(jsonlTrigger, []byte(midTurnLine), 0o600); err != nil {
-		t.Fatalf("write mid-turn jsonl trigger: %v", err)
-	}
+	stopKick := make(chan struct{})
+	var stopKickOnce sync.Once
+	stopKicking := func() { stopKickOnce.Do(func() { close(stopKick) }) }
+	t.Cleanup(stopKicking)
+	go func() {
+		for {
+			_ = os.WriteFile(jsonlTrigger, []byte(midTurnLine), 0o600)
+			select {
+			case <-stopKick:
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}()
 
 	sawMidTurn := false
 	ac1Deadline := time.Now().Add(20 * time.Second)
@@ -228,6 +255,7 @@ func TestRelayV2_InterruptStopsRunningTurn(t *testing.T) {
 			sawMidTurn = true
 		}
 	}
+	stopKicking()
 	t.Logf("AC1: interactive phone A observed a non-idle turn_state — the turn is running")
 
 	// --- Interrupt (AC2 setup). Seal an `interrupt` frame (no payload) with phone
