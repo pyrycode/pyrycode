@@ -21,20 +21,19 @@ import (
 
 // TestRelayV2_Daemon proves the #549 cutover at the daemon boundary: a real
 // spawned pyry binary, not the inline V2SessionManager harness from
-// relay_v2_handshake_test.go. The two subtests pin both sides of the
-// PYRY_MOBILE_V2 switch:
+// relay_v2_handshake_test.go. The subtests pin the daemon's v2 behavior:
 //
 //   - v2_enabled_list_conversations_round_trip — switch on, a paired phone
 //     completes the Noise_IK handshake against the daemon and round-trips
 //     list_conversations → conversations over the encrypted channel (AC#1,
 //     AC#4; the successful round-trip also exercises AC#3's handler table).
-//   - v2_disabled_does_not_engage_v2 — switch unset (default), the v1
-//     first-frame auth gate handles a noise_init exactly as today and replies
-//     hello_ack; no noise_resp is ever produced (AC#2).
+//   - v2_default_engages_v2 — switch unset (default), a noise_init is
+//     answered by the daemon's Noise manager with a noise_resp, proving v2
+//     is engaged by default (AC#2).
 func TestRelayV2_Daemon(t *testing.T) {
 	t.Run("v2_enabled_list_conversations_round_trip", testV2DaemonListConversationsRoundTrip)
 	t.Run("v2_enabled_request_snapshot_round_trip", testV2DaemonRequestSnapshotRoundTrip)
-	t.Run("v2_disabled_does_not_engage_v2", testV2DaemonDisabledDoesNotEngageV2)
+	t.Run("v2_default_engages_v2", testV2DaemonDefaultEngagesV2)
 }
 
 // driveHandshakeToOpenDaemon mirrors relay_v2_handshake_test.go's
@@ -309,15 +308,12 @@ func testV2DaemonRequestSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
-// testV2DaemonDisabledDoesNotEngageV2 starts the daemon with the switch
-// explicitly off (PYRY_MOBILE_V2=0). v2 is now the default, so v1 must be
-// opted into. A phone's noise_init is decoded by the v1 first-frame auth
-// gate as an ordinary envelope, the paired token is accepted, and the reply
-// is a v1 hello_ack — never a noise_resp, proving the v2 manager is not
-// engaged. (The unpaired-token 4401 reject is covered by
-// TestRelay_AuthReject_4401; this subtest's distinct value is the v2-off
-// signal.)
-func testV2DaemonDisabledDoesNotEngageV2(t *testing.T) {
+// testV2DaemonDefaultEngagesV2 starts the daemon with the switch unset (the
+// default) and proves v2 is engaged without opting in: a phone's noise_init
+// is answered by the daemon's Noise manager with a noise_resp — never a v1
+// hello_ack. Observing the noise_resp is sufficient; completing the full
+// handshake is not required.
+func testV2DaemonDefaultEngagesV2(t *testing.T) {
 	home := shortHome(t)
 
 	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-b")
@@ -333,10 +329,10 @@ func testV2DaemonDisabledDoesNotEngageV2(t *testing.T) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	// Switch off (PYRY_MOBILE_V2=0): legacy v1 path, /v1/server route.
+	// Switch unset (default): v2 Noise path, /v2/server route.
 	h := StartInWithEnv(t, home,
-		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
-		"-pyry-relay="+fr.URL()+"/v1/server",
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		"-pyry-relay="+fr.URL()+"/v2/server",
 	)
 	t.Cleanup(func() { h.Stop(t) })
 
@@ -351,9 +347,8 @@ func testV2DaemonDisabledDoesNotEngageV2(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 
-	// The phone attempts a v2 Noise handshake. With v2 disabled, the daemon's
-	// v1 dispatcher decodes the noise_init frame as an ordinary first-frame
-	// envelope and the auth gate replies hello_ack for the paired token.
+	// The phone sends a v2 Noise handshake init. With v2 the default, the
+	// daemon's Noise manager answers with a noise_resp inner frame.
 	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("phone keygen: %v", err)
@@ -368,15 +363,10 @@ func testV2DaemonDisabledDoesNotEngageV2(t *testing.T) {
 	}
 	sendNoiseInit(t, phone, initMsg)
 
-	got, err := phone.Receive(3 * time.Second)
-	if err != nil {
-		t.Fatalf("phone receive reply: %v", err)
-	}
-	if got.Type == protocol.TypeNoiseResp {
-		t.Fatal("got noise_resp: v2 manager engaged with PYRY_MOBILE_V2 unset")
-	}
-	if got.Type != protocol.TypeHelloAck {
-		t.Fatalf("reply Type = %q, want %q (v1 hello_ack)", got.Type, protocol.TypeHelloAck)
+	inner := readInnerFrame(t, phone, 3*time.Second)
+	if inner.Type != protocol.TypeNoiseResp {
+		t.Fatalf("reply inner type = %q, want %q (v2 not engaged by default)",
+			inner.Type, protocol.TypeNoiseResp)
 	}
 }
 

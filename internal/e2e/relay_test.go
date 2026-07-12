@@ -4,86 +4,24 @@ package e2e
 
 import (
 	"context"
-	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
-	"github.com/pyrycode/pyrycode/internal/protocol"
 )
-
-// shortHome allocates a short-pathed temp dir for the daemon's $HOME.
-// macOS caps Unix socket paths at 104 bytes, and t.TempDir() under a
-// long test name overruns that. The dispatcher's worktree path is
-// already long; keeping the test-side suffix tight avoids the bind
-// failure that the longer TestName-based path triggers.
-func shortHome(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "p-301-*")
-	if err != nil {
-		t.Fatalf("mkdir temp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
-
-func readPersistedServerID(t *testing.T, home string) string {
-	t.Helper()
-	path := filepath.Join(home, ".pyry", "test", "server-id")
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return strings.TrimSpace(string(data))
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("server-id file never appeared at %s", path)
-	return ""
-}
-
-func relayTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-}
-
-// recvEnvelope receives envelopes from phone until one of Type want arrives,
-// skipping any other type, bounded by timeout overall. It exists because
-// fakeclaude's TUI-mode thinking-spinner commit signal is forwarded as a
-// `message` envelope that races the synchronous ack on the same conn:
-// WriteUserTurn stamps the supervisor cursor before delivering, so the
-// assistant-turn emitter fans the spinner chunk out as a `message`. Tests that
-// want the ack drain through any such interleaved envelope. Fatals on timeout
-// or any receive error before want arrives. (v2 tests cannot use this — their
-// frames are Noise-encrypted; they drain via decryptInnerEnvelope.)
-func recvEnvelope(t *testing.T, phone *fakephone.Client, want string, timeout time.Duration) protocol.Envelope {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("did not receive %q envelope within %s", want, timeout)
-		}
-		env, err := phone.Receive(remaining)
-		if err != nil {
-			t.Fatalf("phone receive (awaiting %q): %v", want, err)
-		}
-		if env.Type == want {
-			return env
-		}
-		t.Logf("recvEnvelope: skipping %q envelope (id=%d) awaiting %q", env.Type, env.ID, want)
-	}
-}
 
 // TestRelay_4409 asserts that a WS close code 4409 from the relay
 // causes the daemon to log the conflict and exit cleanly (exit code 0
 // via ctx cancel; no reconnect loop). Does not go through the harness's
 // readiness gate because the daemon may exit before its control socket
 // is dialable — startup and shutdown both happen in ~1ms.
+//
+// This exercises the binary WebSocket close-code path, not the phone
+// handshake, so it runs over /v2/server (the surviving route) with the
+// v2 default; fakerelay routes /v2/server through the same handleBinary
+// and its 4409 hook keys on serverID, so the behavior is identical.
 func TestRelay_4409(t *testing.T) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
@@ -91,9 +29,9 @@ func TestRelay_4409(t *testing.T) {
 
 	home := shortHome(t)
 	_, cmd, _, stderr, doneCh := spawnWith(t, home, spawnOpts{
-		extraEnv: []string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
+		extraEnv: []string{"PYRY_ALLOW_INSECURE_RELAY=1"},
 		extraFlags: []string{
-			"-pyry-relay=" + fr.URL() + "/v1/server",
+			"-pyry-relay=" + fr.URL() + "/v2/server",
 		},
 	})
 	t.Cleanup(func() { killSpawned(t, cmd, doneCh) })
@@ -117,6 +55,10 @@ func TestRelay_4409(t *testing.T) {
 // TestRelay_1011 asserts that a non-fatal WS close (StatusInternalError,
 // 1011) is absorbed by the transport's reconnect loop: the daemon stays
 // alive and the control socket is still responsive.
+//
+// Like TestRelay_4409 this exercises the binary WebSocket close-code path
+// (not the phone handshake), so it runs over /v2/server with the v2
+// default; fakerelay's ForceCloseBinary hook keys on serverID.
 func TestRelay_1011(t *testing.T) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
@@ -124,8 +66,8 @@ func TestRelay_1011(t *testing.T) {
 	home := shortHome(t)
 	h := StartInWithEnv(t,
 		home,
-		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
-		"-pyry-relay="+fr.URL()+"/v1/server",
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		"-pyry-relay="+fr.URL()+"/v2/server",
 	)
 
 	serverID := readPersistedServerID(t, home)
