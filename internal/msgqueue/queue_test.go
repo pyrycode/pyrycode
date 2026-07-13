@@ -713,6 +713,24 @@ func TestQueue_SnapshotAll_RaceWithEnqueueAndDrain(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- q.Run(ctx) }()
 
+	// Continuously drain the fake's signal channels so deliveries never wedge on
+	// the bounded entered/completed buffers, 64 each. This race test fires 400
+	// enqueues but consumes no per-delivery signal; a full entered buffer would
+	// block deliver mid-send, and that send is not ctx-aware, so cancel() could
+	// not free it and Run's wg.Wait would hang. Kept alive until after Run
+	// returns so no final post-cancel delivery can block either.
+	drainStop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-f.entered:
+			case <-f.completed:
+			case <-drainStop:
+				return
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	for w := 0; w < 4; w++ {
 		wg.Add(1)
@@ -736,7 +754,9 @@ func TestQueue_SnapshotAll_RaceWithEnqueueAndDrain(t *testing.T) {
 	wg.Wait()
 
 	cancel()
-	if err := <-runErr; !errors.Is(err, context.Canceled) {
+	err = <-runErr
+	close(drainStop)
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
 }
