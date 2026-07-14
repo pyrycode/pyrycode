@@ -1455,10 +1455,15 @@ not pyry's rotation watcher:
    appears.
 4. `os.WriteFile(trigger, nil, 0o600)`.
 5. Poll until a *different* `<uuid>.jsonl` (matching `uuidV4Re`) appears
-   in `sessionsDir`.
-6. Assert `os.Stat(rotated).Size() > 0` — combined with #122's strict
-   close-OLD-before-open-NEW order, this implies the initial fd is no
-   longer being written.
+   in `sessionsDir` **and** is non-empty (`waitForRotatedJSONL`'s
+   `Size() > 0` gate, #956 — closes a create-before-content race: fake-claude's
+   `openSession` makes the rotated name visible via `os.OpenFile` before it
+   writes the `{}\n` payload, and the file is opened `O_APPEND`/never
+   truncated, so "size > 0" is a one-way latch once true).
+6. Assert `os.Stat(rotated).Size() > 0` — now deterministically true given
+   step 5's gate (previously racy: see [codebase/956.md](../codebase/956.md)).
+   Combined with #122's strict close-OLD-before-open-NEW order, this implies
+   the initial fd is no longer being written.
 
 Deliberately does **not** assert on pyry's session registry, run
 `/proc/<pid>/fd` probes, or drive `internal/sessions/rotation` — that's
@@ -2846,7 +2851,8 @@ push/PR yet — see the out-of-scope note above. Details: [codebase/919.md](../c
   `docs/specs/architecture/125-e2e-attach-pty-harness.md`,
   `docs/specs/architecture/123-e2e-startrotation-primitive.md`,
   `docs/specs/architecture/127-e2e-attach-detach-clean.md`,
-  `docs/specs/architecture/128-e2e-attach-survives-claude-restart.md`
+  `docs/specs/architecture/128-e2e-attach-survives-claude-restart.md`,
+  `docs/specs/architecture/956-fakeclaude-rotation-nonempty-gate.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude); lessons.md § Unix-socket sun_path limits and
   t.TempDir(); lessons.md § PTY master backpressure stalls slave-side
