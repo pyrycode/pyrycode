@@ -52,10 +52,13 @@ func helperPoolArgvRecorder(t *testing.T, registryPath, tplWorkDir string) *Pool
 	return pool
 }
 
-// waitArgv blocks until the recorder in dir has finished (the `done` sentinel
-// exists), then returns the recorded argv tokens. A nil slice means the child
-// appended nothing (byte-identical baseline).
-func waitArgv(t *testing.T, dir string) []string {
+// waitArgvRaw blocks until the recorder in dir has finished (the `done` sentinel
+// exists), then returns the recorded argv tokens verbatim, INCLUDING the #943
+// "--settings <path>" pair every interactive spawn now carries. Tests asserting
+// only the model/effort/session-id flags call waitArgv (which strips the pair);
+// the #943 tests that need to see the pair call waitArgvRaw directly. A nil slice
+// means the child appended nothing (byte-identical baseline).
+func waitArgvRaw(t *testing.T, dir string) []string {
 	t.Helper()
 	if !pollUntil(t, 5*time.Second, func() bool {
 		_, err := os.Stat(filepath.Join(dir, "done"))

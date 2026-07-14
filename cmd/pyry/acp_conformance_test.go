@@ -476,8 +476,9 @@ func TestACPConformance_FullSessionDrive(t *testing.T) {
 		t.Fatalf("session/new sessionId = %q, want a valid UUID", id)
 	}
 	assertPinnedModes(t, newRes.Modes)
-	// The interactive-path / one-claude proof, reused verbatim.
-	if got := waitOneClaudeArgv(t, h.argvFile); !slices.Equal(got, []string{"--session-id", id}) {
+	// The interactive-path / one-claude proof, reused verbatim (the #943 --settings
+	// pair stripped so this keeps asserting the --session-id shape).
+	if got := stripMCPSettingsPair(t, waitOneClaudeArgv(t, h.argvFile)); !slices.Equal(got, []string{"--session-id", id}) {
 		t.Fatalf("claude argv = %v, want [--session-id %s] (interactive path, one per session)", got, id)
 	}
 

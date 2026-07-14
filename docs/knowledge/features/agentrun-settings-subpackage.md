@@ -187,6 +187,7 @@ No other consumers. The helper is single-purpose and has no in-process API surfa
 
 ## Related
 
+- [sessions-package.md § `writeMCPSettings` + `Session.settingsPath`](sessions-package.md) (#943) — the interactive session-pool spawn's sibling fix for the same `enableAllProjectMcpServers` modal-wedge hazard, deliberately **not** built on this package: the interactive path needs only that one field, without this writer's always-stamped `defaultMode:"dontAsk"` deny-default posture or its non-empty-`allowedTools` requirement. See [codebase/943.md](../codebase/943.md).
 - [agentrun-package.md](agentrun-package.md) — surrounding parent package; the post-#392 surface and the table of sibling subpackages.
 - [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) — sibling slim-resurrection landed in #475; same template, complementary concern (workspace-trust pre-write).
 - [ptyrunner-package.md](ptyrunner-package.md) — the spawn primitive that consumes the path via `Config.SettingsPath`.

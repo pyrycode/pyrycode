@@ -391,13 +391,25 @@ func New(cfg Config) (*Pool, error) {
 		lcState = stateEvicted
 	}
 
-	// base is the settings-free bootstrap argv; bootstrapArgs appends the
-	// settings suffix. Clone before appending: today's code aliases
-	// cfg.Bootstrap.ClaudeArgs directly, and we must not mutate the caller's
-	// slice. With zero settings the appended slice has identical elements
-	// (byte-identical argv, AC #5). base is stored on the bootstrap Session so a
-	// live restart (#842) can recompose full argv from the persisted settings.
-	base := slices.Clone(cfg.Bootstrap.ClaudeArgs)
+	// The per-session --settings file pre-approves the project's MCP servers so
+	// claude's startup enablement modal never wedges the readiness check (#943).
+	// It joins spawnBase (below) rather than claudeSettingsArgs so it survives
+	// every recompose (backoff restart, #842 live restart). A write failure is
+	// fatal at startup: a daemon that started anyway would silently wedge every
+	// turn on the modal — a loud failure is strictly better. Removed when Pool.Run
+	// returns (see the defer in Run); the bootstrap is never Remove-d.
+	settingsPath, err := writeMCPSettings()
+	if err != nil {
+		return nil, fmt.Errorf("sessions: write mcp settings: %w", err)
+	}
+
+	// base is the settings-free bootstrap argv (template plus the immutable
+	// --settings pair); bootstrapArgs appends the model/effort/YOLO suffix. Clone
+	// before appending: today's code aliases cfg.Bootstrap.ClaudeArgs directly,
+	// and we must not mutate the caller's slice. base is stored on the bootstrap
+	// Session so a live restart (#842) can recompose full argv from the persisted
+	// settings.
+	base := append(slices.Clone(cfg.Bootstrap.ClaudeArgs), "--settings", settingsPath)
 	bootstrapArgs := append(slices.Clone(base), claudeSettingsArgs(settings)...)
 	// p is late-bound: the &Pool{} literal below assigns it, and the
 	// ResolveSessionID closure only reads it at spawn time (supervisor.Run),
@@ -482,6 +494,7 @@ func New(cfg Config) (*Pool, error) {
 		bootstrap:    true,
 		settings:     settings,
 		spawnBase:    base,
+		settingsPath: settingsPath,
 		idleTimeout:  idleTimeout,
 		removedCh:    make(chan struct{}), // never closed: bootstrap is ErrCannotRemoveBootstrap
 		lcState:      lcState,
@@ -774,6 +787,15 @@ func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) err
 	close(sess.removedCh)
 
 	evictErr := sess.Evict(ctx)
+
+	// Remove the per-session MCP-enable settings file (#943). Runs after Evict
+	// returns — the child is confirmed dead, so no backoff respawn can race the
+	// removal into re-reading a deleted path. Best-effort: a leaked tempfile in
+	// os.TempDir is harmless, and the session is going away regardless.
+	if sess.settingsPath != "" {
+		_ = os.Remove(sess.settingsPath)
+	}
+
 	if disposeErr != nil {
 		return disposeErr
 	}
@@ -1012,6 +1034,16 @@ func (p *Pool) Run(ctx context.Context) error {
 	dir := p.claudeSessionsDir
 	p.mu.RUnlock()
 
+	// The bootstrap is never Remove-d (ErrCannotRemoveBootstrap), so its
+	// MCP-enable settings file (#943) lives for the daemon-process lifetime and is
+	// removed here, when Run returns on ctx cancel / shutdown. Best-effort: a
+	// leaked tempfile in os.TempDir is harmless.
+	defer func() {
+		if bootstrap != nil && bootstrap.settingsPath != "" {
+			_ = os.Remove(bootstrap.settingsPath)
+		}
+	}()
+
 	g, gctx := errgroup.WithContext(ctx)
 
 	p.mu.Lock()
@@ -1201,11 +1233,22 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 // the zero value in this ticket; #826b plumbs real values through the mint path.
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	tpl := p.sessionTpl
-	// base is the settings-free argv (template + resume suffix); full appends the
-	// settings suffix. Storing base on the Session lets a live restart recompose
-	// full argv from the persisted settings (#842). Clone before the second
-	// append so base and full never share a backing array.
+	// The per-session --settings file pre-approves the project's MCP servers so
+	// claude's startup enablement modal never wedges the readiness check (#943).
+	// It joins spawnBase (below) rather than claudeSettingsArgs so it survives
+	// every recompose (backoff restart, #842 live restart). Removed in Pool.Remove
+	// after the child is confirmed dead.
+	settingsPath, err := writeMCPSettings()
+	if err != nil {
+		return nil, fmt.Errorf("sessions: write mcp settings: %w", err)
+	}
+	// base is the settings-free argv (template, resume suffix, and the immutable
+	// --settings pair); full appends the model/effort/YOLO suffix. Storing base on
+	// the Session lets a live restart recompose full argv from the persisted
+	// settings (#842). Clone before the second append so base and full never share
+	// a backing array.
 	base := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
+	base = append(base, "--settings", settingsPath)
 	args := append(slices.Clone(base), claudeSettingsArgs(settings)...)
 	var bridge *supervisor.Bridge
 	if tpl.Bridge != nil {
@@ -1258,6 +1301,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		bootstrap:    false,
 		settings:     settings,
 		spawnBase:    base,
+		settingsPath: settingsPath,
 		pool:         p,
 		idleTimeout:  idleTimeout,
 		removedCh:    make(chan struct{}),

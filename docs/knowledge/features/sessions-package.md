@@ -29,6 +29,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **EPIC #600 (#761):** `Config.BootstrapEvicted bool` + `Pool.Ready() <-chan struct{}` — two purely-additive primitives for **embedded pool hosts** (`pyry acp`) that must run exactly one interactive claude per caller session. `BootstrapEvicted` parks the bootstrap in `stateEvicted` so it spawns no eager claude (a single `Pool.Create` is then the only interactive claude — ACP divergence 6); `Ready()` is a `sync.Once`-closed channel gating the unrecoverable first-`Create → ErrPoolNotRunning` startup race. Both zero-value-safe, single-consumer, no call-site fan-out. See *`Config.BootstrapEvicted` + `Pool.Ready()`* below, [codebase/761.md](../codebase/761.md), and [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md).
 - **#838:** `newProbePreferredTranscriptResolver(dir, probe, pidFn)` in `reconcile.go` — replaces the `supervisor.Config.ResolveTranscript` wiring at `pool.go`'s bootstrap block with a probe-preferred resolver (mirrors #827's turn-stream fix, applied to the *other* live-child bootstrap-transcript consumer #827 deferred). Tails the daemon's own bootstrap child's open `<uuid>.jsonl` via `rotation.Probe.OpenJSONL` + a live child PID, instead of `newTranscriptResolver`'s newest-by-mtime scan, so a second claude in the same shared sessions dir can't redirect the delivery-confirm baseline onto its own newer transcript. `pool.go`'s `New` reads the live PID through a late-bound `bootstrapSup *supervisor.Supervisor` holder (assigned right after `supervisor.New` returns) because `supCfg` is copied by value into the supervisor before it exists. No-lsof, `pid <= 0`, empty/erroring probe, and the AC4 confidentiality guard (dir-equality + UUID stem) all collapse to `("", 0, nil)` — a nil error, never a non-nil one (which would divert `confirmViaTranscriptGrowth` to the #668 Committed-chip fallback) and never an mtime fallback. `newTranscriptResolver` / `mostRecentJSONL` are unchanged and still back the no-lsof delegation path and `reconcileBootstrapOnNew` (unrewired here — `ChildPID == 0` at that call site, sibling ticket). See *`newProbePreferredTranscriptResolver`* below and [codebase/838.md](../codebase/838.md).
 - **#833:** `SessionSettings{Model, Effort string; YOLO bool}` — a per-session model/reasoning-effort/bypass-permissions triple, persisted on `registryEntry` (`Model`/`Effort`/`YOLO`, all `omitempty`) and applied to the `claude` spawn argv via the pure `claudeSettingsArgs` helper at both spawn sites (`New`'s bootstrap warm-start, `buildSession`'s minted path). Zero value appends no flags — byte-identical argv for every session that doesn't opt in. `security-sensitive`: `YOLO`'s zero value is the fail-safe "permissions enforced" state; no custom decoder needed (see [ADR 030](../decisions/030-plain-bool-failsafe-persisted-flag.md)). Storage + spawn primitive only — no wire verb yet (setter: #826b, reader: #826c). See *`SessionSettings` + `claudeSettingsArgs`* below and [codebase/833.md](../codebase/833.md).
+- **#943:** `writeMCPSettings() (string, error)` (new `settings.go`) + `Session.settingsPath` — a per-session `--settings <path>` file carrying `{"enableAllProjectMcpServers":true}`, joined into `spawnBase` (not `claudeSettingsArgs`) at both construction sites so it survives every recompose (backoff restart, #842 live settings-restart) automatically. Fixes claude 2.1.199's "N new MCP servers found" startup modal wedging every interactive spawn's PTY readiness check; mirrors the un-gated agent-run compat fix (`d10ce87`) without importing its deny-default posture. Not `security-sensitive`. See *`writeMCPSettings` + `Session.settingsPath`* below and [codebase/943.md](../codebase/943.md).
 - **#839:** `Pool.BootstrapID() SessionID` — new RLock-and-resolve-fresh accessor mirroring `Default()`/`DefaultSettings()`, deliberately reading `p.bootstrap` rather than `Default().ID()`/`sess.id` so it introduces no new reader of the latter (`RotateID` mutates `sess.id` without `Session.lcMu` under a documented no-concurrent-reader invariant). Wired as `supervisor.Config.ResolveSessionID` on the bootstrap `supCfg` (`ResumeLast: false` alongside it) via a late-bound `var p *Pool` closure, so the daemon's own persisted id — never a foreign `<uuid>.jsonl` from the shared sessions dir — is what `--session-id` resolves to at every spawn. The startup `reconcileBootstrapOnNew` call is deleted; `/clear` reconciliation now falls out of `ResolveSessionID` re-reading `p.bootstrap` fresh at each spawn, since the watcher's existing `RotateID` call already persists the rotated id before the next restart. `security-sensitive`: closes a confused-deputy restart-resume gap. See *`Pool.BootstrapID`* below, [codebase/839.md](../codebase/839.md), and [jsonl-reconciliation.md](jsonl-reconciliation.md) (now marked retired).
 
 ## Package Layout
@@ -518,6 +519,72 @@ retires the startup `reconcileBootstrapOnNew` call (deleted from `New`): with
 `--session-id` deterministic from the first spawn, there is nothing left to
 adopt-by-mtime at startup. See [jsonl-reconciliation.md](jsonl-reconciliation.md)
 (marked retired) and [codebase/839.md](../codebase/839.md).
+
+### `writeMCPSettings` + `Session.settingsPath` (#943)
+
+```go
+func writeMCPSettings() (string, error)
+```
+
+Writes a per-session settings file to `os.TempDir()` containing exactly
+`{"enableAllProjectMcpServers":true}` — no `permissions` key at all — and
+returns its absolute path. Fixes the interactive session-pool spawn's version
+of the modal claude 2.1.199 renders when the operator has any MCP server
+configured (user-level `~/.mcp.json` or project `.mcp.json`): without
+`enableAllProjectMcpServers:true`, claude shows "N new MCP servers found in
+this project" at startup, the PTY readiness check reports `tuidriver:
+unexpected dialog at startup`, and every live turn wedges. Agent-run already
+carried this flag (`d10ce87`); the session-pool spawn — the path the phone and
+desktop remote heads drive — never did.
+
+**Deliberately not a reuse of `internal/agentrun/settings`**
+([agentrun-settings-subpackage.md](agentrun-settings-subpackage.md)). That
+writer always stamps `permissions.defaultMode:"dontAsk"` (a headless
+deny-default posture) and requires a non-empty `allowedTools` — both wrong for
+an interactive operator session, which must keep today's normal tool-prompt
+behaviour. `writeMCPSettings` is a ~15-line duplicate of the tempfile +
+best-effort-cleanup-on-error discipline, not an extraction — consistent with
+the project's "resist over-DRY on duplicated primitives" convention (see also
+[agentrun-trust-subpackage.md](agentrun-trust-subpackage.md) for the same
+pattern applied to workspace trust).
+
+**Wired into `spawnBase`, not `claudeSettingsArgs`.** The file's content is
+per-session immutable — it never varies with `Model`/`Effort`/`YOLO` — so it
+belongs in `spawnBase`, the settings-free argv base both `Pool.New`
+(bootstrap) and `Pool.buildSession` (minted) compose before appending
+`claudeSettingsArgs(settings)`. Because `Session.spawnArgs` (the #842
+live-restart recompose) and a backoff restart's re-exec both derive from
+`spawnBase`, placing `--settings <path>` there means it survives every
+respawn automatically — no additional wiring at either recompose site.
+
+**Error handling.** A `writeMCPSettings` failure at construction (`Pool.New`
+or `buildSession`) is a hard error, wrapped `sessions: write mcp settings:
+%w` — a daemon that started anyway would silently wedge every turn on the
+modal, so a loud startup failure is preferred. Cleanup is best-effort
+(`_ = os.Remove(...)`), and runs only after the child is confirmed dead so a
+backoff respawn can never race the removal: `Pool.Remove` calls it after
+`sess.Evict(ctx)` returns (minted sessions); the bootstrap is never
+`Remove`-d, so its file is removed by a `defer` in `Pool.Run` that fires on
+ctx cancel / shutdown. A handful of rare, harmless tempfile leaks are accepted
+rather than threaded through every caller error path (`buildSession` succeeds
+but the caller fails before registering the session; `Pool.New` succeeds but
+`Pool.Run` is never called) — see
+[docs/specs/architecture/943-interactive-spawn-mcp-settings.md](../../specs/architecture/943-interactive-spawn-mcp-settings.md)
+§ Error handling for the full enumeration.
+
+**Blast radius beyond `internal/sessions`.** The ACP-embedded pool
+(`cmd/pyry acp`, #761) spawns through the same `buildSession`, so three
+argv-equality tests there (`TestACP_SessionNew_SpawnsOneInteractiveClaude`,
+`TestACP_SessionLoad_ResumesExistingClaude`,
+`TestACPConformance_FullSessionDrive`) broke and needed a `stripMCPSettingsPair`
+test helper to strip the new `--settings <path>` pair before asserting the
+`--session-id`-only interactive-path shape. Any future change to the shared
+`spawnBase` composition should check `cmd/pyry` argv assertions too — the
+blast radius is not scoped to one package just because the change is.
+
+See [codebase/943.md](../codebase/943.md) and
+[docs/specs/architecture/943-interactive-spawn-mcp-settings.md](../../specs/architecture/943-interactive-spawn-mcp-settings.md)
+for the full design.
 
 ### Pool.Create (1.1a-A2)
 
