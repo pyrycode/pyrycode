@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -62,6 +64,10 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 			r.ExitCode, r.Stdout, r.Stderr)
 	}
 	pairPayload := decodePairPayload(t, r.Stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
 
 	// Align the sessions dir to the daemon's COMPUTED path (no env override —
 	// always <HOME>/.claude/projects/encode(workdir), HOME=home and
@@ -82,18 +88,18 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 
 	// idle=2s, uncapped: the only transitions are idle-driven, so a previously
 	// active per-conversation session evicts ~2s after its last activation.
-	startPerConvHarness(t, home, sessionsDir, initialUUID, fr.URL()+"/v1/server", "-pyry-idle-timeout=2s")
+	startPerConvHarness(t, home, sessionsDir, initialUUID, fr.URL()+"/v2/server", "-pyry-idle-timeout=2s")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
 
-	phone := dialHelloPhone(t, home, fr, pairPayload.Token)
+	phone, initSend, initRecv := dialHelloPhone(t, home, fr, pubKey, pairPayload.Token)
 
 	// AC#4 (binding distinctness): two discussions, two distinct dedicated
 	// sessions — neither the bootstrap, neither shared.
-	convA := createConversationViaPhone(t, phone, 2)
+	convA := createConversationViaPhone(t, phone, initSend, initRecv, 2)
 	boundA := boundSessionID(t, convPath, convA)
-	convB := createConversationViaPhone(t, phone, 3)
+	convB := createConversationViaPhone(t, phone, initSend, initRecv, 3)
 	boundB := boundSessionID(t, convPath, convB)
 	if boundA == boundB {
 		t.Fatalf("convA and convB share bound session %s — not distinct dedicated sessions", boundA)
@@ -120,12 +126,20 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 			Text:           "e2e-680-marker:wake up\n",
 		}),
 	}
-	if err := phone.Send(send); err != nil {
-		t.Fatalf("phone send send_message: %v", err)
+	sendRaw, err := json.Marshal(send)
+	if err != nil {
+		t.Fatalf("marshal send_message envelope: %v", err)
 	}
-	// Drain any spinner `message` racing the ack within the documented 15s
-	// respawn-latency bound.
-	ack := recvEnvelope(t, phone, protocol.TypeAck, 15*time.Second)
+	ct, err := initSend.Encrypt(sendRaw)
+	if err != nil {
+		t.Fatalf("seal send_message envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, ct)
+	// Non-interactive v2: the ack is the first and only sealed frame; no drain.
+	ack := decryptInnerEnvelope(t, readInnerFrame(t, phone, 15*time.Second), initRecv)
+	if ack.Type != protocol.TypeAck {
+		t.Fatalf("ack Type: got %q, want %q (payload=%s)", ack.Type, protocol.TypeAck, string(ack.Payload))
+	}
 	if ack.InReplyTo == nil || *ack.InReplyTo != reqID {
 		t.Fatalf("ack InReplyTo: got %v, want pointer to %d", ack.InReplyTo, reqID)
 	}
@@ -162,6 +176,10 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 			r.ExitCode, r.Stdout, r.Stderr)
 	}
 	pairPayload := decodePairPayload(t, r.Stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
 
 	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
@@ -175,23 +193,23 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	startPerConvHarness(t, home, sessionsDir, initialUUID, fr.URL()+"/v1/server", "-pyry-active-cap=2")
+	startPerConvHarness(t, home, sessionsDir, initialUUID, fr.URL()+"/v2/server", "-pyry-active-cap=2")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
 
 	bootstrapID := waitForBootstrap(t, regPath, 5*time.Second)
 
-	phone := dialHelloPhone(t, home, fr, pairPayload.Token)
+	phone, initSend, initRecv := dialHelloPhone(t, home, fr, pubKey, pairPayload.Token)
 
 	// Create A — active = {bootstrap, A} = 2, exactly at cap, no evict.
-	convA := createConversationViaPhone(t, phone, 2)
+	convA := createConversationViaPhone(t, phone, initSend, initRecv, 2)
 	boundA := boundSessionID(t, convPath, convA)
 	// 50ms gap so lastActiveAt timestamps are distinguishable for pickLRUVictim.
 	time.Sleep(50 * time.Millisecond)
 
 	// Create B — activating B = 3 > cap → cap-evicts LRU peer = bootstrap.
-	convB := createConversationViaPhone(t, phone, 3)
+	convB := createConversationViaPhone(t, phone, initSend, initRecv, 3)
 	boundB := boundSessionID(t, convPath, convB)
 	time.Sleep(50 * time.Millisecond)
 
@@ -202,7 +220,7 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 
 	// Create C — activating C = 3 > cap → cap-evicts LRU peer = boundA, a
 	// per-conversation session: discussion C's activity evicts discussion A.
-	convC := createConversationViaPhone(t, phone, 4)
+	convC := createConversationViaPhone(t, phone, initSend, initRecv, 4)
 	boundC := boundSessionID(t, convPath, convC)
 
 	// AC#3: boundA is the LRU victim; B and C stay active; count never > 2.
@@ -257,7 +275,7 @@ func startPerConvHarness(t *testing.T, home, sessionsDir, initialUUID, relayURL 
 		extraFlags: flags,
 		extraEnv: []string{
 			"PYRY_ALLOW_INSECURE_RELAY=1",
-			"PYRY_MOBILE_V2=0",
+			"PYRY_MOBILE_V2=1",
 			"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
 			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
 			"PYRY_FAKE_CLAUDE_TRIGGER=" + filepath.Join(tmp, "rotate.trigger.never-created"),
@@ -283,12 +301,13 @@ func startPerConvHarness(t *testing.T, home, sessionsDir, initialUUID, relayURL 
 	}
 }
 
-// dialHelloPhone dials a fakephone through fr, completes the hello/hello_ack
-// handshake, and returns the ready client. The daemon must already be running
-// (its binary leg registered with the relay) and paired (pairToken from a prior
-// `pyry pair`). Close is registered for cleanup. Mirrors the dial+hello block
-// in respawn_after_eviction_test.go.
-func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pairToken string) *fakephone.Client {
+// dialHelloPhone dials a fakephone through fr and completes the v2 Noise_IK
+// handshake (non-interactive; the hello is embedded in the init frame). Returns
+// the ready client plus the initiator CipherStates (initSend seals phone→daemon,
+// initRecv opens daemon→phone). The daemon must already be running (its binary
+// leg registered with the relay) and paired (pairToken + pubKey from a prior
+// `pyry pair`). Close is registered for cleanup.
+func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pubKey []byte, pairToken string) (*fakephone.Client, *noise.CipherState, *noise.CipherState) {
 	t.Helper()
 	serverID := readPersistedServerID(t, home)
 
@@ -306,28 +325,8 @@ func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pairToken s
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 
-	hello := protocol.Envelope{
-		ID:   1,
-		Type: protocol.TypeHello,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.HelloClientPayload{
-			Role:             "client",
-			DeviceName:       "phone-a",
-			ClientVersion:    "0.0.1-test",
-			ProtocolVersions: []string{"v1"},
-		}),
-	}
-	if err := phone.Send(hello); err != nil {
-		t.Fatalf("phone send hello: %v", err)
-	}
-	gotHello, err := phone.Receive(3 * time.Second)
-	if err != nil {
-		t.Fatalf("phone receive hello_ack: %v", err)
-	}
-	if gotHello.Type != protocol.TypeHelloAck {
-		t.Fatalf("hello_ack Type: got %q, want %q", gotHello.Type, protocol.TypeHelloAck)
-	}
-	return phone
+	initSend, initRecv := driveHandshakeToOpenDaemon(t, phone, pubKey, pairToken)
+	return phone, initSend, initRecv
 }
 
 // createConversationViaPhone sends an all-null create_conversation (server
@@ -336,7 +335,7 @@ func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pairToken s
 // id. Returns only after the daemon has minted + bound + eagerly persisted the
 // dedicated session (the reply is sent after the handler's reg.Save). The 15s
 // budget covers the mint+activate spawn (Pool.Activate waits on claude's PTY).
-func createConversationViaPhone(t *testing.T, phone *fakephone.Client, reqID uint64) string {
+func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend, initRecv *noise.CipherState, reqID uint64) string {
 	t.Helper()
 	req := protocol.Envelope{
 		ID:      reqID,
@@ -344,10 +343,22 @@ func createConversationViaPhone(t *testing.T, phone *fakephone.Client, reqID uin
 		TS:      time.Now().UTC(),
 		Payload: mustJSON(t, protocol.CreateConversationPayload{}), // all fields null
 	}
-	if err := phone.Send(req); err != nil {
-		t.Fatalf("phone send create_conversation (id=%d): %v", reqID, err)
+	reqRaw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal create_conversation (id=%d): %v", reqID, err)
 	}
-	env := recvEnvelope(t, phone, protocol.TypeConversationCreated, 15*time.Second)
+	ct, err := initSend.Encrypt(reqRaw)
+	if err != nil {
+		t.Fatalf("seal create_conversation (id=%d): %v", reqID, err)
+	}
+	sendNoiseMsg(t, phone, ct)
+	// Non-interactive v2 path: exactly one sealed reply per request, so no
+	// spinner/message drain is needed. The 15s budget covers the mint+activate
+	// spawn (Pool.Activate waits on claude's PTY).
+	env := decryptInnerEnvelope(t, readInnerFrame(t, phone, 15*time.Second), initRecv)
+	if env.Type != protocol.TypeConversationCreated {
+		t.Fatalf("reply Type: got %q, want %q (payload=%s)", env.Type, protocol.TypeConversationCreated, string(env.Payload))
+	}
 	if env.InReplyTo == nil || *env.InReplyTo != reqID {
 		t.Fatalf("conversation_created InReplyTo: got %v, want pointer to %d", env.InReplyTo, reqID)
 	}

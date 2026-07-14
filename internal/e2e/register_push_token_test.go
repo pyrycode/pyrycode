@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -34,14 +35,18 @@ func TestRelay_RegisterPushToken_AckAndPersists(t *testing.T) {
 			r.ExitCode, r.Stdout, r.Stderr)
 	}
 	pairPayload := decodePairPayload(t, r.Stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
 
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
 	h := StartInWithEnv(t,
 		home,
-		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=0"},
-		"-pyry-relay="+fr.URL()+"/v1/server",
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_MOBILE_V2=1"},
+		"-pyry-relay="+fr.URL()+"/v2/server",
 	)
 	t.Cleanup(func() { h.Stop(t) })
 
@@ -62,34 +67,11 @@ func TestRelay_RegisterPushToken_AckAndPersists(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 
-	// 1. hello → hello_ack
-	hello := protocol.Envelope{
-		ID:   1,
-		Type: protocol.TypeHello,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.HelloClientPayload{
-			Role:             "client",
-			DeviceName:       "phone-a",
-			ClientVersion:    "0.0.1-test",
-			ProtocolVersions: []string{"v1"},
-		}),
-	}
-	if err := phone.Send(hello); err != nil {
-		t.Fatalf("phone send hello: %v", err)
-	}
+	// 1. v2 Noise_IK handshake (the non-interactive hello is embedded in the
+	// init frame; no separate hello/hello_ack envelope on the sealed path).
+	initSend, initRecv := driveHandshakeToOpenDaemon(t, phone, pubKey, pairPayload.Token)
 
-	got, err := phone.Receive(3 * time.Second)
-	if err != nil {
-		t.Fatalf("phone receive hello_ack: %v", err)
-	}
-	if got.Type != protocol.TypeHelloAck {
-		t.Fatalf("got type %q, want %q", got.Type, protocol.TypeHelloAck)
-	}
-	if got.InReplyTo == nil || *got.InReplyTo != 1 {
-		t.Errorf("hello_ack InReplyTo: got %v, want pointer to 1", got.InReplyTo)
-	}
-
-	// 2. register_push_token → ack
+	// 2. register_push_token → ack (sealed)
 	const (
 		wantPlatform  = "fcm"
 		wantPushToken = "fcm-token-xyz"
@@ -105,22 +87,29 @@ func TestRelay_RegisterPushToken_AckAndPersists(t *testing.T) {
 			DeviceName: "phone-a",
 		}),
 	}
-	if err := phone.Send(req); err != nil {
-		t.Fatalf("phone send register_push_token: %v", err)
-	}
-
-	ack, err := phone.Receive(3 * time.Second)
+	reqRaw, err := json.Marshal(req)
 	if err != nil {
-		t.Fatalf("phone receive ack: %v", err)
+		t.Fatalf("marshal register_push_token envelope: %v", err)
 	}
+	ct, err := initSend.Encrypt(reqRaw)
+	if err != nil {
+		t.Fatalf("seal register_push_token envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, ct)
+
+	ack := decryptInnerEnvelope(t, readInnerFrame(t, phone, 3*time.Second), initRecv)
 	if ack.Type != protocol.TypeAck {
 		t.Fatalf("ack Type: got %q, want %q (payload=%s)", ack.Type, protocol.TypeAck, string(ack.Payload))
 	}
 	if ack.InReplyTo == nil || *ack.InReplyTo != reqID {
 		t.Errorf("ack InReplyTo: got %v, want pointer to %d", ack.InReplyTo, reqID)
 	}
-	if ack.ID < 2 {
-		t.Errorf("ack ID: got %d, want >= 2 (hello_ack consumed id=1)", ack.ID)
+	// v2: the hello is embedded in the Noise handshake, so no hello_ack envelope
+	// consumes an outbound id first — the register ack is the daemon's first
+	// stamped application reply (id 1). Assert it is stamped (non-zero); the v2
+	// daemon round-trip tests likewise assert InReplyTo, not the id magnitude.
+	if ack.ID < 1 {
+		t.Errorf("ack ID: got %d, want >= 1 (dispatcher-stamped)", ack.ID)
 	}
 	var ackPayload protocol.AckPayload
 	if err := json.Unmarshal(ack.Payload, &ackPayload); err != nil {
