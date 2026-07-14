@@ -70,8 +70,10 @@ var (
 Returns the WS close status code captured by the most recent
 `Receive` whose read failed with a `CloseError`; `ok=false` when no
 peer-side close has been observed (still open, or closed locally via
-`Close`). Used by the `TestRelay_AuthReject_4401` e2e to assert the
-auth-reject `4401` close code.
+`Close`). Originally exercised by the v1 `TestRelay_AuthReject_4401` e2e;
+that test retired with the v1 leg (#941) — the auth-reject `4401` close
+code is now asserted over Noise by `testV2BadToken` (`bad_token_4401`) in
+`relay_v2_handshake_test.go`.
 
 ### `Close`
 
