@@ -186,6 +186,7 @@ but appends to the session `*os.File` instead of stdout:
 | Step | Effect |
 |---|---|
 | trigger appears | `os.ReadFile(path)`, cap at `assistantMaxBytes` |
+| **empty read** | **zero-byte read → `return` WITHOUT removing the trigger (#958); the next ~50ms poll retries once the producer's write lands** |
 | append | `f.Write(data)` verbatim to the live `<uuid>.jsonl` (already `O_APPEND`) |
 | flush | **`f.Sync()`** — load-bearing for cross-process tail visibility |
 | consume | `os.Remove(path)` |
@@ -199,6 +200,15 @@ but appends to the session `*os.File` instead of stdout:
   macOS APFS otherwise defers cross-process visibility (the same reason the
   stdin reader fsyncs per write). Without it the producer may never see the
   appended bytes.
+- **A zero-byte read is the producer's `open(O_TRUNC)`-before-`write` window,
+  not a payload — it must not remove the trigger (#958).** Every producer drop
+  is `os.WriteFile` (`O_CREATE|O_TRUNC` then a single `write`), so the trigger
+  exists-but-empty for a brief window after truncation. A poll landing there
+  used to `os.Remove` the trigger anyway, unlinking it before the producer's
+  content was ever visible and losing the structured test's `sync.Once`
+  `dropFull` line — the intermittent full-suite-`-race` flake in
+  `TestTwoPhoneStructured_InteractiveReceivesStream` /
+  `TestRelayV2_InterruptStopsRunningTurn`. See [codebase/958.md](../codebase/958.md).
 - **Errors are silenced** (read/write/remove) — a missing trigger is the steady
   state, and the e2e asserts the outcome downstream (the interactive phone
   receives the structured envelopes).
