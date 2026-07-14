@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,15 +140,13 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}
 
-	// Pre-create <initialUUID>.jsonl BEFORE the daemon starts so the producer's
-	// first resolve succeeds immediately at a tiny offset (rotation_test.go
-	// pattern). Without it the first resolve finds an empty dir, Warn-logs "no
-	// session jsonl found", and retries ~500 ms later — a retry that can land
-	// AFTER the post-ack fixture append and capture an EOF offset past the
-	// fixture, so the producer would tail from beyond every event (the prior
-	// run's cold-start race). With the file present at startup the offset is
-	// captured seconds before the append, so every appended line lands inside
-	// the tailed range.
+	// Pre-create <initialUUID>.jsonl BEFORE the daemon starts so fakeclaude has a
+	// session file to open and the producer's transcript resolve + WaitForSessionJSONL
+	// find it (rotation_test.go pattern). NOTE: since #854 the bootstrap producer
+	// resolves via the child's open fd (resolveOwnBootstrapJSONL), not by recency,
+	// and its subscription settles ~500 ms later at EOF — so this pre-create no
+	// longer pins a tiny startup offset. The post-ack tail-offset race that leaves
+	// is handled by the re-drop kicker below (#930, sibling of #929), not here.
 	initialJSONL := filepath.Join(sessionsDir, initialUUID+".jsonl")
 	if err := os.WriteFile(initialJSONL, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("pre-create initial jsonl: %v", err)
@@ -246,11 +245,11 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 		t.Errorf("ack InReplyTo = %v, want pointer to %d", ackEnv.InReplyTo, sendReqID)
 	}
 
-	// After the ack, drop the JSONL trigger: its contents are a short sequence
+	// After the ack, feed the JSONL trigger. Its contents are a short sequence
 	// of claude-format JSONL lines that exercise every structured envelope type.
-	// fakeclaude appends them verbatim to its live session JSONL; the producer
-	// (subscribed at startup, offset just past the pre-created {}) tails them →
-	// turnbridge mapper → #632 emitter → sealed structured envelopes → A.
+	// fakeclaude appends the trigger's content to its live session JSONL; the
+	// producer tails it → turnbridge mapper → #632 emitter → sealed structured
+	// envelopes → A.
 	//
 	// Mapping (turnbridge/mapper_test.go is the oracle):
 	//   1. assistant text          → turn_state(responding) + buffered delta
@@ -264,8 +263,50 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 		`{"type":"assistant","message":{"id":"m3","stop_reason":"end_turn","content":[{"type":"text","text":"All done."}]}}`,
 	}
 	fixture := strings.Join(fixtureLines, "\n") + "\n"
-	if err := os.WriteFile(jsonlTrigger, []byte(fixture), 0o600); err != nil {
-		t.Fatalf("write structured jsonl trigger: %v", err)
+
+	// Tail-offset race (#930, sibling of #929): since #854 the structured-turn
+	// producer resolves the bootstrap transcript from the PID that has it open
+	// (resolveOwnBootstrapJSONL), so its subscription only settles ~500 ms after
+	// startup and tails from EOF. A single fixture write dropped right after the
+	// ack lands BELOW that EOF and is never tailed, so 0 structured envelopes reach
+	// A. Fix (test-only, mirroring #929): RE-DROP a lone assistant-text line on a
+	// ticker so the turn stays "responding" and, whenever the subscription settles,
+	// the tail catches a line → A observes turn_state. The kicker never drops an
+	// end_turn, so it cannot fabricate a turn_end. Once A has observed the live
+	// stream, stop the kicker and drop the FULL fixture exactly once — landing
+	// wholly inside the now-settled tail — so every required type (including the
+	// single turn_end) is delivered cleanly.
+	midTurnLine := fixtureLines[0] + "\n"
+	stopKick := make(chan struct{})
+	kickerDone := make(chan struct{})
+	var stopKickOnce sync.Once
+	stopKicking := func() { stopKickOnce.Do(func() { close(stopKick) }) }
+	t.Cleanup(stopKicking)
+	go func() {
+		defer close(kickerDone)
+		for {
+			select {
+			case <-stopKick:
+				return
+			default:
+			}
+			_ = os.WriteFile(jsonlTrigger, []byte(midTurnLine), 0o600)
+			select {
+			case <-stopKick:
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}()
+	var dropFullOnce sync.Once
+	dropFull := func() {
+		dropFullOnce.Do(func() {
+			stopKicking()
+			<-kickerDone // ensure no kicker write races the full-fixture write
+			if err := os.WriteFile(jsonlTrigger, []byte(fixture), 0o600); err != nil {
+				t.Errorf("write structured jsonl trigger: %v", err)
+			}
+		})
 	}
 
 	// --- AC1 + AC2/AC3 (A side) + vacuous-pass guard. Single decrypt-drain on A
@@ -311,6 +352,10 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 			continue
 		}
 		seenStructured++
+		// The first structured envelope proves the producer's tail has settled;
+		// drop the full fixture once so it lands wholly inside the tailed range and
+		// delivers the remaining required types incl. the single turn_end (#930).
+		dropFull()
 		var hdr struct {
 			ConversationID string `json:"conversation_id"`
 		}
