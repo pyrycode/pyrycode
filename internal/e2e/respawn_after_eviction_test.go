@@ -5,6 +5,8 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,6 +50,10 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 			r.ExitCode, r.Stdout, r.Stderr)
 	}
 	pairPayload := decodePairPayload(t, r.Stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(pairPayload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
 
 	tmp := t.TempDir()
 	// Align the sessions dir to the daemon's COMPUTED path (resolveClaudeSessionsDir
@@ -77,7 +83,7 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 	t.Cleanup(func() { _ = fr.Close() })
 
 	h := startEvictionHarness(t, home, sessionsDir, initialUUID, rotateTrigger,
-		stdinLog, fr.URL()+"/v1/server", "2s")
+		stdinLog, fr.URL()+"/v2/server", "2s")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 
@@ -146,27 +152,9 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 
-	hello := protocol.Envelope{
-		ID:   1,
-		Type: protocol.TypeHello,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.HelloClientPayload{
-			Role:             "client",
-			DeviceName:       "phone-a",
-			ClientVersion:    "0.0.1-test",
-			ProtocolVersions: []string{"v1"},
-		}),
-	}
-	if err := phone.Send(hello); err != nil {
-		t.Fatalf("phone send hello: %v", err)
-	}
-	gotHello, err := phone.Receive(3 * time.Second)
-	if err != nil {
-		t.Fatalf("phone receive hello_ack: %v", err)
-	}
-	if gotHello.Type != protocol.TypeHelloAck {
-		t.Fatalf("hello_ack Type: got %q, want %q", gotHello.Type, protocol.TypeHelloAck)
-	}
+	// v2 Noise_IK handshake (non-interactive; the hello is embedded in the init
+	// frame, so no separate hello/hello_ack envelope on the sealed path).
+	initSend, initRecv := driveHandshakeToOpenDaemon(t, phone, pubKey, pairPayload.Token)
 
 	// Phase 4 — send the inbound and assert the ack arrives within the
 	// documented 15s respawn-latency upper bound. The handler calls
@@ -185,32 +173,24 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 		}),
 	}
 	sentAt := time.Now()
-	if err := phone.Send(req); err != nil {
-		t.Fatalf("phone send send_message: %v", err)
+	reqRaw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal send_message envelope: %v", err)
 	}
-	// Drain until the ack within the documented 15s respawn-latency bound.
-	// After respawn the fresh fakeclaude re-seeds the idle glyph and emits the
-	// thinking-spinner on the prompt write; the supervisor forwards that
-	// spinner chunk as a `message` envelope racing the ack, so skip non-ack
-	// envelopes.
-	var ack protocol.Envelope
-	deadline = time.Now().Add(15 * time.Second)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("respawn did not complete within 15s after send_message\nstderr:\n%s",
-				h.Stderr.String())
-		}
-		env, err := phone.Receive(remaining)
-		if err != nil {
-			t.Fatalf("respawn did not complete within 15s after send_message: %v\nstderr:\n%s",
-				err, h.Stderr.String())
-		}
-		if env.Type == protocol.TypeAck {
-			ack = env
-			break
-		}
-		t.Logf("ignoring non-ack envelope type=%q id=%d awaiting ack", env.Type, env.ID)
+	ct, err := initSend.Encrypt(reqRaw)
+	if err != nil {
+		t.Fatalf("seal send_message envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, ct)
+	// On the non-interactive v2 path the daemon emits exactly one sealed frame
+	// per request: the v2 coarse `message` fan-out was removed in #699 and a
+	// non-interactive conn receives no structured stream, so the spinner-race
+	// drain the v1 path needed is gone — the ack is the first and only frame.
+	// Wait up to the documented 15s respawn-latency upper bound.
+	ack := decryptInnerEnvelope(t, readInnerFrame(t, phone, 15*time.Second), initRecv)
+	if ack.Type != protocol.TypeAck {
+		t.Fatalf("respawn ack Type: got %q, want %q (payload=%s)\nstderr:\n%s",
+			ack.Type, protocol.TypeAck, string(ack.Payload), h.Stderr.String())
 	}
 	respawnLatency := time.Since(sentAt)
 	if respawnLatency > 15*time.Second {
@@ -264,7 +244,7 @@ func startEvictionHarness(t *testing.T, home, sessionsDir, initialUUID, trigger,
 		},
 		extraEnv: []string{
 			"PYRY_ALLOW_INSECURE_RELAY=1",
-			"PYRY_MOBILE_V2=0",
+			"PYRY_MOBILE_V2=1",
 			"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
 			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
 			"PYRY_FAKE_CLAUDE_TRIGGER=" + trigger,
