@@ -760,16 +760,6 @@ func runSupervisor(args []string) error {
 
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
 	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
-	// Mobile Protocol v2 (Noise_IK E2E) is the DEFAULT relay protocol and the
-	// only one any shipping client speaks. The cutover is hard, no v1 on the
-	// wire (docs/protocol-mobile.md § Security model, ADR 024). Leaving the
-	// daemon on the legacy v1 dispatch path made mobile's handshake decode as
-	// a v1 envelope, answered with a plaintext v1 error the phone cannot parse,
-	// which it then closes and reconnects — an infinite connect-drop loop
-	// indistinguishable from a stale relay deploy. Default to v2; set
-	// PYRY_MOBILE_V2=0 to opt back into the deprecated v1 path (env-only, no
-	// config/flag, mirroring PYRY_ALLOW_INSECURE_RELAY).
-	v2Enabled := os.Getenv("PYRY_MOBILE_V2") != "0"
 	bootstrap := pool.Default()
 	// One activeConversation holder, shared two ways: the sessionRouter writes it
 	// on each successful route, and startRelay threads it (read-side) to the
@@ -874,7 +864,6 @@ func runSupervisor(args []string) error {
 		relayURL:          relayURL,
 		version:           Version,
 		allowInsecure:     allowInsecure,
-		v2Enabled:         v2Enabled,
 		shutdown:          cancel,
 		convReg:           convReg,
 		creator:           sessionMinter{pool},
@@ -1171,7 +1160,7 @@ func (a *activeConversation) set(id string) {
 }
 
 // CurrentConversation returns the stamped conversation id, "" before any route.
-// It satisfies the cursorReader interface (assistant_turn.go:24) verbatim, and
+// It satisfies the cursorReader interface (interactive_turn_v2.go) verbatim, and
 // its method value satisfies SetReplaySource's func() string.
 func (a *activeConversation) CurrentConversation() string {
 	a.mu.Lock()

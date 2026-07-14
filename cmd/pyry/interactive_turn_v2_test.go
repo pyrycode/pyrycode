@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -15,6 +17,34 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
+
+// testConvID is a fixed valid UUIDv4 conversation id shared across the cmd/pyry
+// turn-stream tests. Relocated here from the deleted assistant_turn_test.go
+// (#913 v1 retirement); its sibling coarse-bridge const testChunk deleted with
+// that file.
+const testConvID = "11111111-1111-4111-8111-111111111111"
+
+// stubCursor is a race-safe cursorReader test double: set() stores the current
+// conversation id, CurrentConversation() reads it. Shared by the v2 turn-emitter
+// and turn-stream tests. Relocated here from the deleted assistant_turn_test.go.
+type stubCursor struct{ id atomic.Value }
+
+func (s *stubCursor) CurrentConversation() string {
+	v := s.id.Load()
+	if v == nil {
+		return ""
+	}
+	return v.(string)
+}
+
+func (s *stubCursor) set(id string) { s.id.Store(id) }
+
+// discardLogger returns a slog logger that writes nowhere — the default logger
+// for cmd/pyry tests that need one but assert on nothing it emits. Relocated
+// here from the deleted assistant_turn_test.go.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // recordedPush captures one (*interactiveTurnEmitterV2).emit -> Push attempt:
 // the addressed conn and the envelope it carried. Captured in call order

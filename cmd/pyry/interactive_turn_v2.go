@@ -33,6 +33,15 @@ type interactiveBroadcaster interface {
 	Push(ctx context.Context, connID string, env protocol.Envelope) error
 }
 
+// cursorReader is the minimal conversation-cursor surface the interactive turn
+// emitter needs: CurrentConversation() — the cursor stamped by send_message via
+// Supervisor.WriteUserTurn (#312/#322). Declared as an interface so the emitter
+// unit tests can drive it without a real *supervisor.Supervisor;
+// activeConversation.CurrentConversation() (main.go) is the production implementer.
+type cursorReader interface {
+	CurrentConversation() string
+}
+
 // interactiveTurnEmitterV2 is the stateful structured turn-event emitter at the
 // heart of Phase 2 (ADR 025 § Phase 2). It consumes one neutral
 // turnevent.Event at a time via Handle, derives the turn_state lifecycle

@@ -23,31 +23,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
-// authGate builds the dispatcher's FirstFrame closure that bridges
-// dispatch.FirstFrameGate and relay.AuthenticateFirstFrame. The token
-// is read from env.Token (relay-prepended on the first phone→binary
-// frame); the gate never logs the token, never wraps it into an error,
-// and never echoes it.
-func authGate(registry *devices.Registry, serverID string, logger *slog.Logger) dispatch.FirstFrameGate {
-	return func(ctx context.Context, env protocol.RoutingEnvelope) dispatch.FirstFrameOutcome {
-		outcome, err := relay.AuthenticateFirstFrame(env, env.Token, registry, serverID, logger)
-		if err != nil {
-			// Today only ErrMalformedHelloFrame is reachable. Surface to
-			// the dispatcher's malformed-frame fall-through.
-			return dispatch.FirstFrameOutcome{Err: err}
-		}
-		out := dispatch.FirstFrameOutcome{
-			Response: outcome.Response,
-			Device:   outcome.Device, // nil on reject; populated on accept
-		}
-		if outcome.CloseConn {
-			out.CloseConn = true
-			out.Code = uint16(relay.StatusUnauthorized) // 4401
-		}
-		return out
-	}
-}
-
 // resolveRelayURL returns the first non-empty value among:
 //  1. flagValue (from -pyry-relay)
 //  2. envValue  (from PYRY_RELAY_URL)
@@ -164,7 +139,7 @@ func resolveWorkspaceFolder(parent, name string) (string, error) {
 // Go), and the startRelayV2-only values startRelay produces internally (conn,
 // registry, serverID) stay trailing positional args — they are not call-site
 // wiring. startRelayV2 reads the subset of fields it needs; the config values it
-// does not read (relayURL, version, allowInsecure, v2Enabled, shutdown) still
+// does not read (relayURL, version, allowInsecure, shutdown) still
 // travel in the struct so they too are bound by name at the call site.
 type relayWiring struct {
 	// instanceName is the daemon instance name; it derives the per-instance
@@ -178,9 +153,6 @@ type relayWiring struct {
 	// allowInsecure permits a ws:// (non-TLS) relay scheme
 	// (PYRY_ALLOW_INSECURE_RELAY=1).
 	allowInsecure bool
-	// v2Enabled selects the Mobile Protocol v2 (Noise_IK) leg over the legacy v1
-	// dispatch path (default true; PYRY_MOBILE_V2=0 forces v1).
-	v2Enabled bool
 	// shutdown unwinds the daemon; called on a 4409 server-id conflict so the
 	// relay leg does not reconnect-loop.
 	shutdown context.CancelFunc
@@ -238,7 +210,7 @@ type relayWiring struct {
 // disabled — see operator note below). Otherwise loads the server-id,
 // calls relay.Connect, and spawns one goroutine that:
 //
-//   - drains conn.Frames() (the dispatcher slice consumes them later)
+//   - drains conn.Frames() (the v2 Noise manager consumes them)
 //   - blocks on conn.Wait()
 //   - on relay.ErrServerIDConflict: logs the conflict and calls shutdown()
 //     to unwind the daemon (AC#3: no reconnect-loop on 4409)
@@ -295,96 +267,25 @@ func startRelay(
 		return nil, fmt.Errorf("relay connect: %w", err)
 	}
 
-	// legCleanup tears down the protocol-specific consumers of conn.Frames()
-	// (the v1 dispatcher path or the v2 Noise manager); the shared waitDone
-	// classifier below is appended to it. Exactly one leg consumes the frame
-	// stream — there is no mixed-mode path (ADR 024: v2 is a hard cutover).
-	var legCleanup func()
-
-	if w.v2Enabled {
-		logger.Info("relay: Mobile Protocol v2 (Noise_IK) enabled — default; set PYRY_MOBILE_V2=0 to force legacy v1")
-		drain, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
-		if err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-		legCleanup = func() {
-			// Close the connection first so Connection.run closes Frames,
-			// which unblocks the manager's Run; drain then waits for it.
-			_ = conn.Close()
-			drain()
-		}
-	} else {
-		logger.Warn("relay: PYRY_MOBILE_V2=0 — legacy v1 dispatch path (DEPRECATED; no shipping client speaks v1, mobile/desktop require v2)")
-		d := dispatch.New(dispatch.Config{
-			Frames:     conn.Frames(),
-			Logger:     logger,
-			FirstFrame: authGate(registry, string(serverID), logger),
-		})
-		d.Register(protocol.TypeListConversations, handlers.ListConversations(w.convReg))
-		d.Register(protocol.TypeCreateConversation, handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger))
-		d.Register(protocol.TypeRenameConversation, handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger))
-		d.Register(protocol.TypeDeleteConversation, handlers.DeleteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger))
-		d.Register(protocol.TypeArchiveConversation, handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true))
-		d.Register(protocol.TypeUnarchiveConversation, handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, false))
-		d.Register(protocol.TypeChangeWorkspace, handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger))
-		d.Register(protocol.TypeCreateWorkspaceFolder, handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger))
-		d.Register(protocol.TypeRecentWorkspaces, handlers.RecentWorkspaces(w.convReg))
-		d.Register(protocol.TypeRegisterPushToken, handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger))
-		d.Register(protocol.TypeSendMessage, handlers.SendMessage(w.router, w.queue, logger))
-
-		// The assistant-turn bridge taps Bridge.Write so PTY chunks fan out
-		// to every active phone conn as a `message` envelope (#311). Skip in
-		// foreground mode (bridge == nil) — there is no PTY-output observer
-		// surface in that path; inbound `send_message` still works.
-		var bridgeCleanup func()
-		if w.bridge != nil {
-			bridgeCleanup = startAssistantTurnBridge(ctx, w.sup, w.bridge, d, logger)
-		}
-
-		dispatcherDone := make(chan struct{})
-		go func() {
-			defer close(dispatcherDone)
-			if err := d.Run(ctx); err != nil {
-				logger.Debug("relay: dispatcher run returned", "err", err)
-			}
-		}()
-
-		forwarderDone := make(chan struct{})
-		go func() {
-			defer close(forwarderDone)
-			for env := range d.Outbound() {
-				if err := conn.Send(env); err != nil {
-					// Transport-internal reconnect handles transient drops;
-					// a Send error here means the conn is currently dropped
-					// or closed. We log and continue draining so the
-					// dispatcher's Outbound close still unblocks Run.
-					logger.Debug("relay: outbound forward dropped",
-						"conn_id", env.ConnID, "err", err)
-				}
-			}
-		}()
-
-		legCleanup = func() {
-			// Stop the assistant-turn observer first so no new PTY chunks
-			// queue while the dispatcher is winding down. The cleanup waits
-			// for the emitter goroutine on ctx-cancel.
-			if bridgeCleanup != nil {
-				bridgeCleanup()
-			}
-			_ = conn.Close()
-			// Order: Connection.run defers close(frames) → dispatcher.Run
-			// returns (Frames closed) → dispatcher closes Outbound → forwarder
-			// exits. Wait returns once Connection.run completes.
-			<-dispatcherDone
-			<-forwarderDone
-		}
+	// legCleanup tears down the v2 Noise manager — the sole consumer of
+	// conn.Frames() (ADR 024: v2 is a hard cutover, no mixed-mode path). The
+	// shared waitDone classifier below is appended to it in the returned cleanup.
+	logger.Info("relay: Mobile Protocol v2 (Noise_IK)")
+	drain, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	legCleanup := func() {
+		// Close the connection first so Connection.run closes Frames,
+		// which unblocks the manager's Run; drain then waits for it.
+		_ = conn.Close()
+		drain()
 	}
 
-	// The conn.Wait() classifier is identical for both legs — a 4409
-	// server-id conflict unwinds the daemon (no reconnect loop); ctx-cancel
-	// is the clean-shutdown path; any other terminal error is logged at warn.
-	// Shared after the branch so the v2 leg inherits the contract unchanged.
+	// The conn.Wait() classifier — a 4409 server-id conflict unwinds the daemon
+	// (no reconnect loop); ctx-cancel is the clean-shutdown path; any other
+	// terminal error is logged at warn.
 	waitDone := make(chan struct{})
 	go func() {
 		defer close(waitDone)

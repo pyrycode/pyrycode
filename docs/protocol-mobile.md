@@ -6,7 +6,7 @@ This document is the single source of truth. The pyry binary, the relay, and the
 
 ## Status
 
-`v2` — **shipped and the current default.** This wire is live: the mobile client ships against it, and the daemon defaults to v2. The daemon speaks v2 unless it is explicitly switched back to the deprecated v1 dispatch path with `PYRY_MOBILE_V2=0` (`cmd/pyry/main.go`). v1 is deprecated and kept only as that opt-out fallback. v2 supersedes the v1 draft via hard cutover; v1 envelope shapes are not supported on the wire at any point. The pre-flight gate (`pyry pair list` empty, see [Pre-flight](#pre-flight-pyry-pair-list-empty-check) and #436) MUST pass before enabling v2 on any deployment that still carries v1 pair records, since those records have no `server_static_pubkey` and cannot complete a v2 handshake.
+`v2` — **shipped and the only wire the daemon speaks.** The `PYRY_MOBILE_V2=0` v1 dispatch escape hatch was removed from `startRelay` in [#913](knowledge/codebase/913.md) — `cmd/pyry` now runs the v2 leg unconditionally, with no runtime switch back to v1. v2 supersedes the v1 draft via hard cutover; v1 envelope shapes are not supported on the wire at any point. The pre-flight gate (`pyry pair list` empty, see [Pre-flight](#pre-flight-pyry-pair-list-empty-check) and #436) MUST pass before enabling v2 on any deployment that still carries v1 pair records, since those records have no `server_static_pubkey` and cannot complete a v2 handshake.
 
 The v1 draft is preserved in git history (`git show HEAD~1:docs/protocol-mobile.md` at the point this rewrite landed) for archaeological reference only — it is not an implementation target.
 
