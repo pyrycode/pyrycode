@@ -899,15 +899,17 @@ func newRacingCloseRelay(t *testing.T, status websocket.StatusCode, reason strin
 		// Drain client writes until told to close. Without this, sendPump
 		// frames pile up in the OS TCP buffer and Writes don't actually
 		// block, shrinking the window for an in-flight Write at close.
-		echoDone := make(chan struct{})
+		//
+		// Read-and-discard, NOT echo-back: a concurrent conn.Write here would
+		// race conn.Close's close-frame write below (two writers on one conn,
+		// which coder/websocket forbids), corrupting the frame stream ~1% of
+		// the time and RST-ing before the client's recvPump surfaces the peer
+		// close — the deep #933 flake. Draining only needs the Read. See #933.
+		drainDone := make(chan struct{})
 		go func() {
-			defer close(echoDone)
+			defer close(drainDone)
 			for {
-				typ, data, err := conn.Read(ctx)
-				if err != nil {
-					return
-				}
-				if err := conn.Write(ctx, typ, data); err != nil {
+				if _, _, err := conn.Read(ctx); err != nil {
 					return
 				}
 			}
@@ -917,7 +919,7 @@ func newRacingCloseRelay(t *testing.T, status websocket.StatusCode, reason strin
 		case <-ctx.Done():
 		}
 		_ = conn.Close(status, reason)
-		<-echoDone
+		<-drainDone
 	}))
 	t.Cleanup(r.server.Close)
 	return r
