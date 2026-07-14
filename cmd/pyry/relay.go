@@ -405,6 +405,7 @@ func startRelayV2(
 			protocol.TypeListConversations:     handlers.ListConversations(w.convReg),
 			protocol.TypeCreateConversation:    handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
 			protocol.TypeRenameConversation:    handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
+			protocol.TypePromoteConversation:   handlers.PromoteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeDeleteConversation:    handlers.DeleteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true),
 			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, false),
