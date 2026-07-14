@@ -869,7 +869,29 @@ func runSupervisor(args []string) error {
 		return s.Model, s.Effort, s.YOLO
 	}
 
-	relayCleanup, err := startRelay(ctx, logger, *name, relayURL, Version, allowInsecure, v2Enabled, cancel, convReg, sessionMinter{pool}, router, queue, active, boundHost, bootstrap.Supervisor(), bootstrap.Bridge(), claudeSessionsDir, defaultCwd, pool, qse, debugBundler, settingsUpdaterAdapter{pool}, snapshotSettings)
+	relayCleanup, err := startRelay(ctx, logger, relayWiring{
+		instanceName:      *name,
+		relayURL:          relayURL,
+		version:           Version,
+		allowInsecure:     allowInsecure,
+		v2Enabled:         v2Enabled,
+		shutdown:          cancel,
+		convReg:           convReg,
+		creator:           sessionMinter{pool},
+		router:            router,
+		queue:             queue,
+		active:            active,
+		boundHost:         boundHost,
+		sup:               bootstrap.Supervisor(),
+		bridge:            bootstrap.Bridge(),
+		claudeSessionsDir: claudeSessionsDir,
+		defaultCwd:        defaultCwd,
+		transitions:       pool,
+		qse:               qse,
+		debugBundler:      debugBundler,
+		settings:          settingsUpdaterAdapter{pool},
+		snapshotSettings:  snapshotSettings,
+	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
