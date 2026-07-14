@@ -22,6 +22,13 @@
 # OS
 .DS_Store
 
+# Scratchpad artifacts (e.g. redirect targets of local e2e verification loops).
+# Kept out of the tree so the dispatcher's "auto-commit uncommitted changes"
+# sweep can't land them in a branch (it committed scratchpad_958_e2e_loop.log
+# into feature/958, commit f1736c4).
+scratchpad_*
+*.log
+
 # Local env
 .env
 .env.local
