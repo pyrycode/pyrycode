@@ -437,6 +437,17 @@ func emitStructuredJSONLIfTriggered(f *os.File, path string) {
 	if err != nil {
 		return
 	}
+	// Every producer drop is os.WriteFile = open(O_CREATE|O_TRUNC) then a single
+	// write; between the truncate and the write the trigger exists but is empty.
+	// A zero-byte read here is that mid-write window, not a payload — return
+	// WITHOUT removing the trigger so the producer's write lands and the next
+	// poll consumes the full content. Removing it (the pre-#958 behaviour)
+	// unlinked the fixture before its bytes were visible, losing the load-bearing
+	// dropFull line and leaving A a partial structured set. An empty append is a
+	// no-op regardless, so skip-and-retry can never drop real data or hang.
+	if len(data) == 0 {
+		return
+	}
 	if len(data) > assistantMaxBytes {
 		data = data[:assistantMaxBytes]
 	}
