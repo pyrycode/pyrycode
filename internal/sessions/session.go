@@ -160,6 +160,18 @@ type Session struct {
 	// recompose into a --dangerously-skip-permissions child.
 	spawnBase []string
 
+	// settingsPath is the absolute path to the per-session --settings file
+	// carrying {"enableAllProjectMcpServers":true}, which pre-approves the
+	// project's MCP servers so claude's startup enablement modal never wedges the
+	// PTY readiness check (#943). It is a member of spawnBase, so it survives
+	// every recompose — a backoff restart and the #842 live settings-restart both
+	// re-exec with the same path. Removed at session teardown: Pool.Remove for a
+	// minted session, Pool.Run shutdown for the bootstrap. Immutable
+	// post-construction, so it is read without a lock (same discipline as
+	// spawnBase). Empty only for a test-constructed Session that hand-builds a
+	// literal and never spawns.
+	settingsPath string
+
 	// pool is the back-pointer used to persist registry changes after a
 	// state transition. Set once, in Pool.New.
 	pool *Pool

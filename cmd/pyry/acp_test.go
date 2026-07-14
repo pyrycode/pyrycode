@@ -260,11 +260,12 @@ func TestACP_SessionNew_SpawnsOneInteractiveClaude(t *testing.T) {
 	if !ok {
 		t.Fatal("fake claude never recorded its argv")
 	}
-	// Exactly `--session-id <uuid>` — asserts the interactive path (a -p/--print
-	// argv would fail this equality) and the returned id round-trips to the spawn.
+	// Exactly `--session-id <uuid>` (once the #943 --settings pair is stripped) —
+	// asserts the interactive path (a -p/--print argv would fail this equality) and
+	// the returned id round-trips to the spawn.
 	want := []string{"--session-id", resp.Result.SessionID}
-	if !slices.Equal(fields, want) {
-		t.Fatalf("claude argv = %v, want %v (interactive path, no -p/--print)", fields, want)
+	if got := stripMCPSettingsPair(t, fields); !slices.Equal(got, want) {
+		t.Fatalf("claude argv = %v, want %v (interactive path, no -p/--print)", got, want)
 	}
 
 	// Shutdown: host EOF → clean return, pool tears the claude down.
@@ -420,6 +421,25 @@ func waitOneClaudeArgv(t *testing.T, argvFile string) []string {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("fake claude never recorded its argv")
+	return nil
+}
+
+// stripMCPSettingsPair removes the "--settings <path>" pair that #943 injects
+// into every interactive session-pool spawn (the ACP-embedded pool included) so
+// these tests keep asserting the --session-id interactive-path shape they own. It
+// fatals if the pair is absent, doubling as a guard that #943 reaches the ACP
+// spawn path; the file's MCP-enable content is asserted in internal/sessions.
+func stripMCPSettingsPair(t *testing.T, argv []string) []string {
+	t.Helper()
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "--settings" {
+			out := make([]string, 0, len(argv)-2)
+			out = append(out, argv[:i]...)
+			out = append(out, argv[i+2:]...)
+			return out
+		}
+	}
+	t.Fatalf("argv %v missing --settings <path> pair (#943)", argv)
 	return nil
 }
 
@@ -654,7 +674,7 @@ func TestACP_SessionLoad_ResumesExistingClaude(t *testing.T) {
 		t.Fatalf("second session/load result = %q, want sessionId %q", line, id)
 	}
 
-	fields := waitOneClaudeArgv(t, h.argvFile)
+	fields := stripMCPSettingsPair(t, waitOneClaudeArgv(t, h.argvFile))
 	want := []string{"--session-id", id}
 	if !slices.Equal(fields, want) {
 		t.Fatalf("claude argv = %v, want %v (one interactive claude for that id)", fields, want)
