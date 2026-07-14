@@ -2811,13 +2811,26 @@ takes /tmp eventually, and there's no `TestMain` hook this package owns).
 - Asserting on specific log line content (couples tests to supervisor
   wording) or specific dial-error wording (couples to platform/syscall
   library).
-- CI wiring (`make e2e`, GitHub Actions matrix). Build-tag isolation means
-  existing `go test ./...` keeps passing untouched.
+- GitHub Actions matrix running the suite on push/PR — no such workflow
+  exists (`release.yml` is tag-triggered, `self-check-daily.yml` is a daily
+  cron). `make e2e` (standalone target) and its wiring into the local
+  `make check` gate landed separately — see below.
 - Race-mode harness build (`go build -race` inside `ensurePyryBuilt` when the
   parent suite uses `-race`).
 - `t.Parallel` migration on the e2e tests — defer until wall-clock pressure
   surfaces. Each test owns its own `t.TempDir` HOME, so parallelism is safe
   in principle.
+
+## Build Gate
+
+`make e2e` (`go test -tags e2e -race -count=1 ./internal/e2e/...`) is part of
+`make check` as of #919 — a core-daemon regression now fails the standard
+local gate instead of sitting red on `main` unnoticed (the #918 incident: eight
+#839-era regressions accumulated because the suite ran nowhere by default).
+`make preship`'s prerequisite list dropped its own explicit `e2e` token in the
+same change since `check` now covers it; `preship` still runs `e2e-realclaude`
+(live claude, separate suite) on top. No GitHub Actions workflow runs this on
+push/PR yet — see the out-of-scope note above. Details: [codebase/919.md](../codebase/919.md).
 
 ## Related
 
