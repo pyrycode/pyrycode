@@ -173,19 +173,24 @@ const (
 // modalScreen is the compact plaintext permission-modal screen fakeclaude writes
 // on the modal trigger's first appearance (envModalTrigger). Its bottom region
 // carries the exact anchor tui-driver's DetectModalClass keys on for the
-// permission class and no higher-priority anchor (no "Manage MCP servers",
-// "Agents"+tab, "Enter to select", "Quick safety check", or /-prefixed picker
-// row), so a rendered snapshot of it classifies as ModalClassPermission — the
-// sole requirement, because the producer's permission option set is fixed and
-// screen-independent (only the Title is lifted from the screen). It carries no
-// numbered options, separator, or marker. Emitted after the startup idle glyph
-// so the class transitions Unknown->Permission. This file is on the
-// cmd/substrate-guard allowlist; note the "Do you want to proceed?" phrase is
-// not itself a guarded substrate token (only the TUI glyphs above are), so this
-// literal is benign — the allowlist covers the idle-glyph reuse.
+// permission class ("Do you want to proceed?") AND, directly below it, a
+// pointer-marked numbered option row (❯ 1. Yes). Both are required: tui-driver
+// #242 (v1.10.0) gated the permission class on the option-row dialog shape, not
+// the anchor phrase alone, so the anchor by itself now classifies as Unknown. No
+// higher-priority anchor is present (no "Manage MCP servers", "Agents"+tab,
+// "Enter to select", "Quick safety check", or /-prefixed picker row), so a
+// rendered snapshot classifies as ModalClassPermission. The producer's own
+// permission option set is fixed and screen-independent (only the Title is lifted
+// from the screen); the option row here exists solely to satisfy the dialog-shape
+// gate. Emitted after the startup idle glyph so the class transitions
+// Unknown->Permission. This file is on the cmd/substrate-guard allowlist (a
+// file-level exemption), so the ❯ glyph and the "Do you want to proceed?" phrase
+// are both covered.
 const modalScreen = "Tool request: run a shell command\r\n" +
 	"\r\n" +
-	"Do you want to proceed?\r\n"
+	"Do you want to proceed?\r\n" +
+	"❯ 1. Yes\r\n" +
+	"  2. No\r\n"
 
 // idleGlyph and spinnerGlyph are claude's TUI substrate runes that
 // tui-driver's IsIdle / IsThinking detect (U+276F at idle, U+273B while
@@ -200,12 +205,13 @@ var (
 )
 
 // modalClearScrollRows is how many blank lines clearModalScreen scrolls after the
-// permission modal so the "Do you want to proceed?" anchor leaves the bottom
-// permissionRegionRows (12) window DetectModalClass scans. After modalScreen the
-// anchor sits at rendered row 2 and the trailing idle glyph lands at row 3+N,
-// making an (N+4)-row grid whose bottom-12 window starts at row N-8 — so any N>10
-// excludes the anchor. 16 leaves comfortable margin and never scrolls the 40-row
-// (DefaultPtyRows) screen. Pinned by modal_detect_test.go.
+// permission modal so the "Do you want to proceed?" anchor and the ❯ option row
+// below it leave the bottom permissionRegionRows (12) window DetectModalClass
+// scans. modalScreen now renders 5 rows with the anchor at row 2 and the option
+// row at row 3; the trailing idle glyph then lands at row 5+N, making an
+// (N+6)-row grid whose bottom-12 window starts at row N-6, so any N>9 excludes
+// both the anchor and the option row. 16 leaves comfortable margin and never
+// scrolls the 40-row (DefaultPtyRows) screen. Pinned by modal_detect_test.go.
 const modalClearScrollRows = 16
 
 // modalClearScreen is what clearModalScreen writes (once, on the local answer
