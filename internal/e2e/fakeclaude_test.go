@@ -75,7 +75,8 @@ func waitForFile(t *testing.T, path string, deadline time.Duration, stderrFn fun
 }
 
 // waitForRotatedJSONL polls sessionsDir for a *.jsonl whose stem is a v4
-// UUID and is not initialUUID. Returns the absolute path on success.
+// UUID, is not initialUUID, and whose payload has already landed (size > 0).
+// Returns the absolute path on success.
 func waitForRotatedJSONL(t *testing.T, sessionsDir, initialUUID string, deadline time.Duration, stderrFn func() string) string {
 	t.Helper()
 	end := time.Now().Add(deadline)
@@ -91,8 +92,22 @@ func waitForRotatedJSONL(t *testing.T, sessionsDir, initialUUID string, deadline
 				if stem == initialUUID {
 					continue
 				}
-				if uuidV4Re.MatchString(stem) {
-					return filepath.Join(sessionsDir, name)
+				if !uuidV4Re.MatchString(stem) {
+					continue
+				}
+				// Gate the return on non-empty content. The fakeclaude
+				// producer's openSession makes the <uuid>.jsonl name visible
+				// (os.OpenFile) before it writes the "{}\n" payload, so a bare
+				// name match can race the file into view while it is still
+				// zero-byte. Because the file is opened O_APPEND and never
+				// truncated, "size > 0" is a one-way latch — once it holds it
+				// stays true, which makes the caller's later Size()==0 sanity
+				// check deterministic rather than racy. A not-yet-written (or
+				// transiently unstattable) candidate falls through to the next
+				// poll tick.
+				candidate := filepath.Join(sessionsDir, name)
+				if info, err := os.Stat(candidate); err == nil && info.Size() > 0 {
+					return candidate
 				}
 			}
 		}
