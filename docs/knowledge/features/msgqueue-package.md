@@ -10,7 +10,8 @@ live claude session in order, one at a time, paced by claude reaching idle /
 turn-end. Landed in #704 (EPIC #597 Phase 3 — interactive modals/permissions/
 queue, ADR 025); the introspection / remove-by-id / change-notification API was
 added additively in #719; the per-conversation backlog bound landed in
-[#869](../codebase/869.md).
+[#869](../codebase/869.md); the persistent-failure give-up bound landed in
+[#1000](../codebase/1000.md).
 
 The package shipped **engine only, unwired** in #704 — the same rhythm as the
 `turnbridge` producer (#606 shipped unwired, #616 wired it). [#721](../codebase/721.md)
@@ -59,6 +60,16 @@ type DeliverFunc func(ctx context.Context, convID string, payload []byte) error
 // consumer's choice). MUST NOT block, MUST be concurrency-safe. nil ⇒ disabled.
 type ChangeFunc func(convID string)
 
+// GiveUpFunc is the injected give-up-notification seam (#1000) — mirrors
+// ChangeFunc exactly (never under q.mu, MUST NOT block, concurrency-safe, nil ⇒
+// disabled). Fires once when the drain abandons a persistently-failing head,
+// carrying the convID and a daemon-generated reason (elapsed retry window + the
+// last delivery error) that NEVER contains the queued message text. Ships
+// unwired (nil) in production this ticket; a later ticket (#1001) routes it to
+// a client-visible error frame over the v2 wire, exactly as OnChange routes to
+// the queue_state producer.
+type GiveUpFunc func(convID, reason string)
+
 // QueuedMessage is the engine-side projection of ADR 025's {queued_msg_id, text,
 // ts} record (#719); the element Snapshot returns. Text is untrusted phone
 // transit content — never log it, only surface it to the authorized conversation.
@@ -73,6 +84,8 @@ type Config struct {
     RetryInterval            time.Duration // <= 0 ⇒ defaultRetryInterval (1s); poll cadence while claude is unavailable
     MaxQueuedPerConversation int           // #869: <= 0 ⇒ defaultMaxQueuedPerConversation (100); per-conv backlog cap
     OnChange                 ChangeFunc    // optional (#719); nil ⇒ change notification disabled
+    GiveUpAfter              time.Duration // #1000: <= 0 ⇒ defaultGiveUpAfter (2m); per-head persistent-failure bound
+    OnGiveUp                 GiveUpFunc    // optional (#1000); nil ⇒ give-up notification disabled (unwired in production)
     Logger                   *slog.Logger  // nil ⇒ slog.Default()
 }
 
@@ -207,17 +220,71 @@ semantics untouched.
   `queued` value — holding the untrusted `text` — beyond the new `len` until
   `shrinkLocked` compacts, exactly as `advanceLocked`/`items[1:]` already does;
   consistent precedent, deliberately not zeroed.)
-- **Change-notification fires after unlock, three sites.** A `notify(convID)`
+- **Change-notification fires after unlock, four sites.** A `notify(convID)`
   helper does the `onChange != nil` nil-check and is always called **after** `q.mu`
   is released, only on a real change: `Enqueue` (restructured from `defer
   q.mu.Unlock()` to explicit unlock + `notify`), the drain's delivery-advance
   (after `advanceLocked` drops a confirmed head — **not** on the empty-exit or
-  delivery-error/retry paths), and a successful `Remove` (no-ops fire nothing).
-  Firing strictly after unlock is what makes a re-entrant `OnChange` (a consumer
-  that calls back into `Snapshot`/`Remove`/`Enqueue`) re-acquire the lock cleanly
-  and not deadlock against the goroutine that fired it. `OnChange` carries only
-  `convID`; the seam is edge-triggered and the consumer coalesces by re-reading
-  `Snapshot` (matches how the #647 reconnect path treats `eventring`).
+  delivery-error/retry paths), a successful `Remove` (no-ops fire nothing), and
+  (#1000) `giveUp` — the abandoned head also leaves the backlog, so `notify`
+  fires there too, keeping the wired `queue_state` producer's view correct after
+  a give-up drop. Firing strictly after unlock is what makes a re-entrant
+  `OnChange` (a consumer that calls back into `Snapshot`/`Remove`/`Enqueue`)
+  re-acquire the lock cleanly and not deadlock against the goroutine that fired
+  it. `OnChange` carries only `convID`; the seam is edge-triggered and the
+  consumer coalesces by re-reading `Snapshot` (matches how the #647 reconnect
+  path treats `eventring`).
+
+## Bounded give-up on persistent delivery failure (#1000)
+
+The drain's retry loop is deliberately lossless: a `Deliver` error retries the
+**same** FIFO head after `RetryInterval`, forever, by design — that's what
+bridges a claude-**child** respawn. Before #1000 that loop had no upper bound,
+so a claude session parked at startup (an unanswerable dialog, a wedged
+readiness gate, a network stall) looped on a head that never drained and never
+failed, leaving the client with a message that neither ran nor errored. #1000
+adds a **bounded** give-up while preserving losslessness for the case it exists
+to bridge.
+
+- **The bound is elapsed-time, not attempt-count or error-identity.** `Deliver`'s
+  errors (`ErrNoLiveSession`, `ErrTurnNotCommitted`, PTY write errors) are
+  **indistinguishable by type** between an ordinary respawn and a persistent
+  wedge — the drain cannot tell "retry, this will clear" from "give up, this is
+  stuck" by inspecting `err`. `Config.GiveUpAfter` (`<= 0` ⇒
+  `defaultGiveUpAfter`, 2 minutes) is instead a per-head elapsed-wall-clock
+  deadline, measured from the head's **first** consecutive delivery failure via
+  a `drain`-local `firstFailedAt`. `defaultGiveUpAfter` is chosen to exceed
+  `internal/supervisor`'s max backoff window with margin (`BackoffMax=30s`,
+  `BackoffReset=60s`) — a transient failure spanning a full claude-child
+  respawn/backoff cycle clears well inside the bound and never trips give-up.
+- **Per-head, not per-session.** A successful delivery resets `firstFailedAt` to
+  zero for the next head, so a wedge that clears for one message doesn't poison
+  the bound for the next — each head gets a fresh give-up window.
+- **Give-up drops one head and exits the drain, it does not skip to the next
+  head.** Because a startup wedge would fail every subsequent head identically,
+  continuing would burn a full `GiveUpAfter` window per head and emit one
+  give-up event per queued message for a single wedge. Instead `giveUp` drops
+  only the abandoned head (`advanceLocked`), clears `draining`, fires both seams
+  off-lock (`notify(OnChange)` then `notifyGiveUp(OnGiveUp)`, in that order —
+  clearing `draining` first means an observer can safely re-`Enqueue` without
+  racing a still-`true` flag), and the drain goroutine **returns**. Any items
+  still behind the dropped head stay queued; `draining == false` with
+  `len(items) > 0` is exactly `maybeSpawnDrainLocked`'s respawn precondition, so
+  the next `Enqueue` respawns the drain — the same lifecycle the pre-existing
+  empty-exit path already uses.
+- **`GiveUpFunc` mirrors `ChangeFunc`'s seam contract** (never under `q.mu`, must
+  not block, concurrency-safe, nil ⇒ disabled) and carries a daemon-generated
+  `reason` (the elapsed window + `err.Error()`) that **never** contains
+  `head.text` — extending the package's `NEVER log head.text` discipline (see §
+  Error handling) to both the new give-up log line and the seam payload.
+- **Ships unwired.** `OnGiveUp` is `nil` in production this ticket — same
+  engine-first rhythm as the package's original #704 landing (mechanism first,
+  wired later). The bound, head-drop, and clean exit are still real even while
+  unobserved; a later ticket (#1001) routes `OnGiveUp` to a typed, client-visible
+  error frame over the v2 wire exactly as `OnChange` routes to the `queue_state`
+  producer today.
+
+See [codebase/1000.md](../codebase/1000.md).
 
 ## Concurrency model
 
@@ -255,18 +322,23 @@ semantics untouched.
   is **lossless**, and is exactly what makes "undelivered messages survive a claude
   **child** respawn and drain into the new child" — during the respawn window
   `WriteUserTurn` returns `ErrNoLiveSession` immediately; the retry bridges it.
-  **No per-message delivery deadline** — a message is retried until delivered or the
-  engine shuts down. (Contrast the synchronous handler's 30s
+  **No per-message delivery deadline** — a message is retried until delivered, the
+  engine shuts down, or (#1000) the per-head elapsed bound (`GiveUpAfter`,
+  default 2m — see § Bounded give-up) is exceeded, in which case the head is
+  abandoned rather than retried forever. (Contrast the synchronous handler's 30s
   `sendMessageDeliverTimeout`, which exists only because the phone is blocked
   awaiting an ack; here the enqueue-ack is immediate and delivery is async.)
 - **Long but healthy turn:** `WaitReady` *blocks* (it does not error), so this path
   does **not** hit the retry branch — the message simply waits, then delivers.
-- **`text` is never logged at any level.** The drain's only log (warn-on-delivery-
-  error) carries `conversation_id`, the queued message `id`, the enqueue timestamp,
-  and the error — **never** the text (mirrors `send_message.go`'s SECURITY
-  discipline; the text is untrusted phone content bound for claude's stdin verbatim).
-- **No silent drop.** Every message is either delivered (head advances) or still
-  queued (retry / awaiting drain).
+- **`text` is never logged at any level.** The drain's only logs (warn-on-delivery-
+  error, and #1000's warn-on-give-up) carry `conversation_id`, the queued message
+  `id`, the enqueue timestamp / elapsed window, and the error — **never** the text
+  (mirrors `send_message.go`'s SECURITY discipline; the text is untrusted phone
+  content bound for claude's stdin verbatim).
+- **No silent drop.** Every message is either delivered (head advances), still
+  queued (retry / awaiting drain), or (#1000) explicitly abandoned past the
+  bounded give-up window — logged and, once wired, surfaced to the client via
+  `OnGiveUp`, never dropped without a trace.
 
 ## Durability boundary (in scope vs out)
 
@@ -358,18 +430,21 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
 
 ```
 internal/msgqueue/
-├── queue.go                  DeliverFunc, ChangeFunc, QueuedMessage, Config, Queue, queued,
-│                             convQueue; New / Enqueue / Snapshot / SnapshotAll (#878) / Remove /
-│                             Run; notify, maybeSpawnDrainLocked, drain, advanceLocked,
+├── queue.go                  DeliverFunc, ChangeFunc, GiveUpFunc (#1000), QueuedMessage, Config,
+│                             Queue, queued, convQueue; New / Enqueue / Snapshot / SnapshotAll
+│                             (#878) / Remove / Run; notify, notifyGiveUp (#1000),
+│                             maybeSpawnDrainLocked, drain, giveUp (#1000), advanceLocked,
 │                             shrinkLocked, sleepCtx; defaultRetryInterval,
-│                             defaultMaxQueuedPerConversation (#869)
+│                             defaultMaxQueuedPerConversation (#869), defaultGiveUpAfter (#1000)
 ├── queue_test.go             #704: ordered one-at-a-time drain (in-flight counter fails >1),
 │                             empty no-op, per-conversation independence, idle-drains-promptly,
 │                             lossless-retry/respawn, stable independent ids,
 │                             clean-shutdown-no-leak, New(nil) rejects (unmodified by #719);
 │                             #878: SnapshotAll two-conversations, omits-drained-conversation,
 │                             empty-queue, includes-in-flight-head, returns-value-copies,
-│                             -race-with-enqueue-and-drain
+│                             -race-with-enqueue-and-drain; #1000: gives-up after persistent
+│                             failure, transient failure no give-up, default bound exceeds
+│                             backoff window, no untrusted-content leak, clean teardown + respawn
 └── queue_introspect_test.go  #719: snapshot-in-order, snapshot-is-a-copy, Remove drops
                               non-head / no-ops on in-flight-head|unknown|already-delivered,
                               OnChange fires on enqueue|advance|remove (no-op fires nothing),
@@ -377,9 +452,10 @@ internal/msgqueue/
                               preserves #704 invariants
 ```
 
-Stdlib-only (`context`, `errors`, `log/slog`, `sync`, `time`); imports **no**
+Stdlib-only (`context`, `errors`, `fmt`, `log/slog`, `sync`, `time`); imports **no**
 `internal/*` package — the delivery path arrives as the injected `DeliverFunc`,
-the change-notification path as the injected `ChangeFunc`.
+the change-notification path as the injected `ChangeFunc`, and (#1000) the
+give-up-notification path as the injected `GiveUpFunc`.
 
 ## Related
 
@@ -417,4 +493,10 @@ the change-notification path as the injected `ChangeFunc`.
   consumed by `cmd/pyry`'s `outstandingQueues` adapter and, through it,
   `internal/relay`'s `OutstandingQueues` seam — see
   [`v2-session-manager.md` § Connect-time queue reconcile](v2-session-manager.md#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues).
-  Nothing remains deferred on this engine.
+  **[#1000](../codebase/1000.md) landed the persistent-failure give-up bound**: a
+  per-head elapsed deadline (`GiveUpAfter`, default 2m) that abandons a
+  persistently-failing head instead of retrying it forever, plus an `OnGiveUp`
+  seam mirroring `OnChange` — split from #991 as the not-security-sensitive
+  engine-side half; ships unwired (nil) until the wire+producer sibling (#1001,
+  security-sensitive) lands. Nothing remains deferred on this engine except that
+  wiring.

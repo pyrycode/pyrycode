@@ -1,8 +1,11 @@
 package msgqueue
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,10 +23,11 @@ var errFake = errors.New("fake deliver failure")
 // without sleeps.
 type fakeDeliver struct {
 	mu          sync.Mutex
-	order       []string       // texts delivered successfully, in order
-	inflight    map[string]int // per-conv in-flight count
-	maxInflight int            // max in-flight observed across all conversations
-	failTimes   map[string]int // per-conv remaining forced failures
+	order       []string        // texts delivered successfully, in order
+	inflight    map[string]int  // per-conv in-flight count
+	maxInflight int             // max in-flight observed across all conversations
+	failTimes   map[string]int  // per-conv remaining forced failures
+	permaFail   map[string]bool // per-conv permanent forced-failure toggle
 	gates       map[string]chan struct{}
 
 	entered   chan string // text, sent at the top of every deliver call
@@ -34,10 +38,21 @@ func newFakeDeliver() *fakeDeliver {
 	return &fakeDeliver{
 		inflight:  map[string]int{},
 		failTimes: map[string]int{},
+		permaFail: map[string]bool{},
 		gates:     map[string]chan struct{}{},
 		entered:   make(chan string, 64),
 		completed: make(chan string, 64),
 	}
+}
+
+// setPermaFail toggles a conversation into (or out of) permanent delivery
+// failure — every deliver returns errFake while on. It models a claude session
+// wedged at startup that never commits a turn, letting a test drive the drain's
+// give-up path and then clear the wedge to prove a respawn drains.
+func (f *fakeDeliver) setPermaFail(convID string, on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.permaFail[convID] = on
 }
 
 func (f *fakeDeliver) deliver(ctx context.Context, convID string, payload []byte) error {
@@ -67,6 +82,9 @@ func (f *fakeDeliver) deliver(ctx context.Context, convID string, payload []byte
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.inflight[convID]--
+	if f.permaFail[convID] {
+		return errFake // wedged session: never commits, drives give-up.
+	}
 	if f.failTimes[convID] > 0 {
 		f.failTimes[convID]--
 		return errFake
@@ -299,6 +317,194 @@ func TestQueue_LosslessRetry_SurvivesRespawn(t *testing.T) {
 	}
 	if n := f.maxConcurrent(); n != 1 {
 		t.Fatalf("max in-flight = %d, want 1 (retries are serial)", n)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// #1000 AC1 + AC3: a head that fails delivery persistently is abandoned after
+// the give-up bound instead of retried forever — the drain drops the head and
+// fires OnGiveUp with the conversation id and a non-empty daemon-generated
+// reason. The message is never delivered.
+func TestQueue_GivesUpAfterPersistentFailure(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.setPermaFail("c", true) // claude wedged: every delivery fails
+
+	type giveUp struct{ convID, reason string }
+	gaveUp := make(chan giveUp, 4)
+	q, err := New(Config{
+		Deliver:       f.deliver,
+		RetryInterval: time.Millisecond,
+		GiveUpAfter:   20 * time.Millisecond, // well past a couple of retries
+		OnGiveUp:      func(convID, reason string) { gaveUp <- giveUp{convID, reason} },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("c", "wedged")
+
+	got := recvWithin(t, gaveUp, "give-up notification")
+	if got.convID != "c" {
+		t.Fatalf("give-up convID = %q, want c", got.convID)
+	}
+	if got.reason == "" {
+		t.Fatal("give-up reason is empty, want a non-empty daemon-generated reason")
+	}
+	// The abandoned head was dropped: the backlog is now empty and the message
+	// was never delivered.
+	waitSnapshotEmpty(t, q, "c")
+	if delivered := f.deliveredOrder(); len(delivered) != 0 {
+		t.Fatalf("deliveries = %v, want none (wedged head never delivered)", delivered)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// #1000 AC2: a transient failure that clears within the give-up bound (an
+// ordinary claude-child respawn window) does NOT trip give-up. This is the
+// lossless-retry survives-respawn scenario extended with the give-up seam wired
+// to a recorder that must never fire.
+func TestQueue_TransientFailure_NoGiveUp(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.failTimes["c"] = 3 // first 3 attempts fail, 4th succeeds — a respawn window
+
+	gaveUp := make(chan struct{}, 1)
+	q, err := New(Config{
+		Deliver:       f.deliver,
+		RetryInterval: time.Millisecond,
+		GiveUpAfter:   5 * time.Second, // comfortably wider than 3 retries
+		OnGiveUp:      func(convID, reason string) { gaveUp <- struct{}{} },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("c", "m")
+	if got := recvWithin(t, f.completed, "eventual delivery"); got != "m" {
+		t.Fatalf("delivered %q, want m", got)
+	}
+	// Delivery succeeded before the bound elapsed, so give-up must not have fired.
+	select {
+	case <-gaveUp:
+		t.Fatal("OnGiveUp fired on a transient failure that cleared — give-up bound too narrow")
+	default:
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// #1000 AC2 regression guard: the default give-up bound is wide enough to clear
+// a full claude-child respawn/backoff window. The supervisor's max backoff
+// window is 30s BackoffMax / 60s BackoffReset (internal/supervisor/supervisor.go);
+// those are unexported New() defaults, not exported consts, so this pins the
+// numeric floor directly and guards against a silent narrowing below it.
+func TestQueue_DefaultGiveUpAfter_ExceedsBackoffWindow(t *testing.T) {
+	t.Parallel()
+	if defaultGiveUpAfter < 2*time.Minute {
+		t.Fatalf("defaultGiveUpAfter = %v, want >= 2m (must exceed the 60s BackoffReset window)", defaultGiveUpAfter)
+	}
+}
+
+// #1000 AC4: the give-up path preserves the NEVER-log-head.text discipline. The
+// distinctive marker fails the assertion if the give-up log line or the reason
+// string ever interpolated the untrusted queued message text.
+func TestQueue_GiveUp_NoUntrustedContentLeak(t *testing.T) {
+	t.Parallel()
+	const secret = "SUPER_SECRET_PHONE_TEXT"
+	f := newFakeDeliver()
+	f.setPermaFail("c", true)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	reasons := make(chan string, 1)
+	q, err := New(Config{
+		Deliver:       f.deliver,
+		RetryInterval: time.Millisecond,
+		GiveUpAfter:   20 * time.Millisecond,
+		Logger:        logger,
+		OnGiveUp:      func(convID, reason string) { reasons <- reason },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("c", secret)
+
+	// Receiving the reason happens-after every give-up-path log write (same drain
+	// goroutine, then the channel send), so reading buf here is race-clean.
+	reason := recvWithin(t, reasons, "give-up notification")
+	if strings.Contains(reason, secret) {
+		t.Fatalf("give-up reason leaked untrusted message text: %q", reason)
+	}
+	if logs := buf.String(); strings.Contains(logs, secret) {
+		t.Fatalf("log output leaked untrusted message text: %q", logs)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// #1000 AC5: after give-up the drain exits clean — draining is cleared and the
+// head dropped — and a later Enqueue respawns the drain. Cancelling proves
+// wg.Wait unblocked (no leaked drain goroutine).
+func TestQueue_GiveUp_CleanTeardownAndRespawn(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.setPermaFail("c", true)
+
+	gaveUp := make(chan struct{}, 1)
+	q, err := New(Config{
+		Deliver:       f.deliver,
+		RetryInterval: time.Millisecond,
+		GiveUpAfter:   20 * time.Millisecond,
+		OnGiveUp:      func(convID, reason string) { gaveUp <- struct{}{} },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("c", "wedged")
+	recvWithin(t, gaveUp, "give-up notification")
+	// Give-up clears draining and drops the head before firing the seam, so by now
+	// the conversation is back to a clean idle state.
+	waitSnapshotEmpty(t, q, "c")
+
+	// Clear the wedge and enqueue again: the old drain exited, so this Enqueue must
+	// respawn a fresh drain and deliver.
+	f.setPermaFail("c", false)
+	q.Enqueue("c", "after")
+	if got := recvWithin(t, f.completed, "delivery after respawn"); got != "after" {
+		t.Fatalf("delivered %q, want after (drain must respawn after give-up)", got)
 	}
 
 	cancel()
@@ -687,7 +893,7 @@ func TestQueue_SnapshotAll_ReturnsValueCopies(t *testing.T) {
 	q.Enqueue("a", "original")
 
 	first := q.SnapshotAll()
-	first["a"][0].Text = "mutated"      // scribble on the returned copy
+	first["a"][0].Text = "mutated" // scribble on the returned copy
 	first["a"] = append(first["a"], QueuedMessage{ID: 99, Text: "injected"})
 
 	if again := q.Snapshot("a"); len(again) != 1 || again[0].Text != "original" {
