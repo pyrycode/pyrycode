@@ -124,6 +124,7 @@ var excludedTypes = map[string]string{
 	"TypeQueueState":        "push",
 	"TypeDebugBundleChunk":  "push",
 	"TypeDebugBundleDone":   "push",
+	"TypeSessionError":      "push",
 
 	// v1-legacy — a v1 dispatch verb with no v2 handler (retiring with #913); not
 	// a v2 gap. backfill_since is borderline (a v1 inbound verb) — excluded as

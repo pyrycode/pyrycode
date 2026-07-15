@@ -448,6 +448,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
 | **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
+| **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped terminal session-error frame — the daemon gave up delivering a conversation's queued backlog (`session.blocked`; #1007). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -877,6 +878,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | `noise.handshake_failed` | no | Reported only to local logs — wire-level handshake failure closes the WS with `4426` and no AEAD-sealed envelope can be sent. Included here for completeness. |
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
 | `session.not_found` | no | The `set_session_settings` target `session_id` names no live session. Returned by the handler (#845). |
+| `session.blocked` | no | Terminal — the daemon gave up delivering a conversation's queued backlog after repeated failures (msgqueue give-up, #1000). Carried in a `session_error` frame, not an `error` envelope; the emitting producer is #1008. A client attaches it to the `conversation_id` and MUST NOT retry (contrast the transient `server.binary_busy`). |
 
 WS close codes used at the transport layer:
 

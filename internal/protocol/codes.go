@@ -31,6 +31,7 @@ const (
 
 	// Session errors.
 	CodeSessionNotFound = "session.not_found"
+	CodeSessionBlocked  = "session.blocked" // terminal give-up; NOT a retry hint (contrast server.binary_busy)
 )
 
 // Envelope-type constants — wire values for Envelope.Type
@@ -451,4 +452,26 @@ const (
 const (
 	TypeSetSessionSettings     = "set_session_settings"     // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 	TypeSessionSettingsUpdated = "session_settings_updated" // binary → phone, outbound v2 reply confirming the change
+)
+
+// Mobile Protocol v2 session-error marker (#1007, split from #1001;
+// docs/protocol-mobile.md § Error codes). When the daemon's interactive
+// message queue (internal/msgqueue) bounds a persistent-failure drain and
+// gives up (the OnGiveUp seam, #1000), it can surface that terminal give-up to
+// a paired phone as this unsolicited, conversation-scoped frame — a typed error
+// the client attaches to the right session and never mistakes for a transient
+// retry. Unlike TypeError it is NOT in_reply_to-correlated to a client request
+// (there is no request to reply to), so the payload (SessionErrorPayload,
+// messaging.go) carries the conversation identity itself, plus the terminal
+// CodeSessionBlocked and a human-readable message.
+//
+// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: it is an
+// outbound binary → phone v2 event an old phone must never receive. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+//
+// This ticket (#1007) is wire vocabulary only — the producer that emits the
+// frame on msgqueue give-up is sibling #1008.
+const (
+	TypeSessionError = "session_error" // binary → phone, outbound v2 unsolicited terminal session-error frame
 )

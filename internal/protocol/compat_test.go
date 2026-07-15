@@ -89,6 +89,9 @@ func TestIsV1Compatible(t *testing.T) {
 		// never receives, so IsV1Compatible must reject both.
 		{"set_session_settings-rejected", TypeSetSessionSettings, false, ErrUnknownType},
 		{"session_settings_updated-rejected", TypeSessionSettingsUpdated, false, ErrUnknownType},
+		// the v2-only session-error frame is binary → phone; an old phone must
+		// never receive it, so IsV1Compatible must reject it.
+		{"session_error-rejected", TypeSessionError, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,6 +174,8 @@ var v2OnlyTypes = map[string]bool{
 	// v2 set-session-settings vocabulary.
 	TypeSetSessionSettings:     true,
 	TypeSessionSettingsUpdated: true,
+	// v2 session-error frame.
+	TypeSessionError: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -221,6 +226,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeNewSession,
 		// v2 set-session-settings vocabulary.
 		TypeSetSessionSettings, TypeSessionSettingsUpdated,
+		// v2 session-error frame.
+		TypeSessionError,
 	}
 	for _, ty := range all {
 		inV1 := v1TypeSet[ty]
@@ -254,6 +261,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeRelayNoServer":               CodeRelayNoServer,
 		"CodeRelayServerIDConflict":       CodeRelayServerIDConflict,
 		"CodeSessionNotFound":             CodeSessionNotFound,
+		"CodeSessionBlocked":              CodeSessionBlocked,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -269,6 +277,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeRelayNoServer":               "relay.no_server",
 		"CodeRelayServerIDConflict":       "relay.server_id_conflict",
 		"CodeSessionNotFound":             "session.not_found",
+		"CodeSessionBlocked":              "session.blocked",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))
