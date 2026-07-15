@@ -266,12 +266,24 @@ func NewTargetSubscriber(
 						cancel()
 						continue resubscribe // switch fired during the wait
 					default:
+						// Back off on subCtx, NOT the parent ctx, so a switch fired
+						// during the backoff aborts it and re-snapshots the now-active
+						// Target at once (#996). Sleeping on the parent kept the
+						// producer waiting up to subscribeRetryDelay after a route
+						// stamped `active`; in that window real claude
+						// opened-appended-closed the per-conversation transcript, so
+						// the re-subscription's first os.Stat found the file already
+						// present, classified it a warm resume, and tailed from EOF —
+						// past the whole in-flight reply (the silent no-reply).
 						log.Warn("turnbridge: resolve session jsonl, retrying", "error", err)
-						if !sleepCtx(ctx, subscribeRetryDelay) {
+						if !sleepCtx(subCtx, subscribeRetryDelay) {
 							cancel()
-							return nil, ctx.Err()
+							if ctx.Err() != nil {
+								return nil, ctx.Err()
+							}
+							continue resubscribe // switch fired during backoff — re-snapshot now
 						}
-						continue // transient — retry, reusing target.Resolve state
+						continue // full delay elapsed — retry, reusing target.Resolve state
 					}
 				}
 				// Open the unified event stream under the per-subscription ctx.
@@ -285,10 +297,16 @@ func NewTargetSubscriber(
 						cancel()
 						continue resubscribe // switch fired during the open
 					default:
+						// Switch-abortable backoff, same rule as the resolve arm
+						// above (#996): sleep on subCtx so a switch re-snapshots the
+						// now-active Target instead of waiting out the full delay.
 						log.Warn("turnbridge: open events stream, retrying", "error", err)
-						if !sleepCtx(ctx, subscribeRetryDelay) {
+						if !sleepCtx(subCtx, subscribeRetryDelay) {
 							cancel()
-							return nil, ctx.Err()
+							if ctx.Err() != nil {
+								return nil, ctx.Err()
+							}
+							continue resubscribe // switch fired during backoff — re-snapshot now
 						}
 						continue
 					}
