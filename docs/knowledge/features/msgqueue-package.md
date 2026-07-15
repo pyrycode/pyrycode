@@ -65,9 +65,10 @@ type ChangeFunc func(convID string)
 // disabled). Fires once when the drain abandons a persistently-failing head,
 // carrying the convID and a daemon-generated reason (elapsed retry window + the
 // last delivery error) that NEVER contains the queued message text. Ships
-// unwired (nil) in production this ticket; a later ticket (#1001) routes it to
-// a client-visible error frame over the v2 wire, exactly as OnChange routes to
-// the queue_state producer.
+// unwired (nil) in production this ticket; the wire vocabulary for the
+// client-visible frame is #1007 (TypeSessionError/CodeSessionBlocked/
+// SessionErrorPayload), and the blocked-by-#1007 sibling #1008 wires this seam
+// to it, exactly as OnChange routes to the queue_state producer.
 type GiveUpFunc func(convID, reason string)
 
 // QueuedMessage is the engine-side projection of ADR 025's {queued_msg_id, text,
@@ -280,11 +281,13 @@ to bridge.
 - **Ships unwired.** `OnGiveUp` is `nil` in production this ticket — same
   engine-first rhythm as the package's original #704 landing (mechanism first,
   wired later). The bound, head-drop, and clean exit are still real even while
-  unobserved; a later ticket (#1001) routes `OnGiveUp` to a typed, client-visible
-  error frame over the v2 wire exactly as `OnChange` routes to the `queue_state`
-  producer today.
+  unobserved; split from #1001 into wire vocabulary (#1007 — `TypeSessionError`/
+  `CodeSessionBlocked`/`SessionErrorPayload`, shipped unwired) and its
+  blocked-by-#1007 producer sibling (#1008, not yet shipped), which routes
+  `OnGiveUp` to a typed, client-visible `session_error` frame over the v2 wire
+  exactly as `OnChange` routes to the `queue_state` producer today.
 
-See [codebase/1000.md](../codebase/1000.md).
+See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007.md).
 
 ## Concurrency model
 
@@ -498,5 +501,6 @@ give-up-notification path as the injected `GiveUpFunc`.
   persistently-failing head instead of retrying it forever, plus an `OnGiveUp`
   seam mirroring `OnChange` — split from #991 as the not-security-sensitive
   engine-side half; ships unwired (nil) until the wire+producer sibling (#1001,
-  security-sensitive) lands. Nothing remains deferred on this engine except that
-  wiring.
+  itself re-split at its vocab seam into wire vocabulary #1007 — shipped,
+  unwired — and producer+wiring #1008, security-sensitive, blocked-by-#1007)
+  lands. Nothing remains deferred on this engine except that wiring.
