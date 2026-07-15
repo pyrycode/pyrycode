@@ -508,6 +508,36 @@ func TestQueueStatePayload_RoundTrip(t *testing.T) {
 	roundTripEnvelope(t, env, payload, raw)
 }
 
+func TestSessionErrorPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "session_error.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSessionError {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSessionError)
+	}
+
+	var payload SessionErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conv-1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conv-1")
+	}
+	if payload.Code != CodeSessionBlocked {
+		t.Errorf("Code: got %q, want %q", payload.Code, CodeSessionBlocked)
+	}
+	if payload.Message == "" {
+		t.Error("Message: got empty, want non-empty daemon-generated reason")
+	}
+
+	// Byte-equal round-trip pins the stable json field names (conversation_id
+	// routing key) and catches an accidental omitempty re-introduction.
+	roundTripEnvelope(t, env, payload, raw)
+}
+
 func TestDequeueMessagePayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "dequeue_message.json")
 
