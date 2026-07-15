@@ -118,7 +118,7 @@ func bringUpReconnectQueueHarness(t *testing.T) *reconnectQueueHarness {
 	// reconcileBootstrapOnNew rotates the bootstrap session id to initialUUID.
 	// Alignment is by construction (HOME=home, -pyry-workdir=home), the rotation-test
 	// pattern; do it BEFORE the daemon starts.
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}

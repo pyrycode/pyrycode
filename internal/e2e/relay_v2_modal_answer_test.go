@@ -87,7 +87,7 @@ func bringUpModalHarness(t *testing.T) *modalHarness {
 	// <initialUUID>.jsonl BEFORE the daemon starts so the bootstrap session id
 	// reconciles to initialUUID and the modal stream's Session resolves cleanly at
 	// startup (the #792 / rotation-test pattern; HOME=home, -pyry-workdir=home).
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}

@@ -97,7 +97,7 @@ func TestRelayV2_InterruptStopsRunningTurn(t *testing.T) {
 	// <initialUUID>.jsonl BEFORE the daemon starts so the first resolve succeeds at
 	// a tiny offset and every appended line lands in the tailed range (the #642
 	// cold-start recipe).
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}

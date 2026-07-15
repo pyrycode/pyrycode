@@ -874,6 +874,7 @@ func runSupervisor(args []string) error {
 		sup:               bootstrap.Supervisor(),
 		bridge:            bootstrap.Bridge(),
 		claudeSessionsDir: claudeSessionsDir,
+		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
 		defaultCwd:        defaultCwd,
 		transitions:       pool,
 		qse:               qse,

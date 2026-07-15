@@ -664,7 +664,7 @@ func TestResolveTarget_BootstrapWhenNoRoute(t *testing.T) {
 		return nil, "", "", false
 	}
 
-	target, err := resolveTarget(active, boundHost, bootstrap, dir, noopFakeProbe{}, dummyPidFn)(context.Background())
+	target, err := resolveTarget(active, boundHost, bootstrap, dir, noopFakeProbe{}, dummyPidFn, nil)(context.Background())
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
@@ -701,7 +701,7 @@ func TestResolveTarget_BootstrapUsesProbeResolver(t *testing.T) {
 	}
 	probe := &fakeProbe{results: []probeResult{{path: own}}}
 
-	target, err := resolveTarget(active, boundHost, bootstrap, dir, probe, func() int { return 4242 })(context.Background())
+	target, err := resolveTarget(active, boundHost, bootstrap, dir, probe, func() int { return 4242 }, nil)(context.Background())
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
@@ -744,7 +744,7 @@ func TestResolveTarget_BoundSessionWhenRouted(t *testing.T) {
 		return host, uuidA, convDir, true
 	}
 
-	target, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, bootstrapDir, noopFakeProbe{}, dummyPidFn)(context.Background())
+	target, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, bootstrapDir, noopFakeProbe{}, dummyPidFn, nil)(context.Background())
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
@@ -795,7 +795,7 @@ func TestResolveTarget_BootstrapBoundUsesProbeResolver(t *testing.T) {
 	}
 	probe := &fakeProbe{results: []probeResult{{path: own}}}
 
-	target, err := resolveTarget(active, boundHost, bootstrap, dir, probe, func() int { return 4242 })(context.Background())
+	target, err := resolveTarget(active, boundHost, bootstrap, dir, probe, func() int { return 4242 }, nil)(context.Background())
 	if err != nil {
 		t.Fatalf("resolveTarget: %v", err)
 	}
@@ -832,7 +832,7 @@ func TestResolveTarget_UnresolvableConversationErrors(t *testing.T) {
 	active.set("conv-gone")
 	boundHost := func(string) (turnbridge.SessionHost, string, string, bool) { return nil, "", "", false }
 
-	_, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir, noopFakeProbe{}, dummyPidFn)(context.Background())
+	_, err := resolveTarget(active, boundHost, &fakeSessionHost{name: "bootstrap"}, dir, noopFakeProbe{}, dummyPidFn, nil)(context.Background())
 	if err == nil {
 		t.Fatal("unresolvable bound conversation: got nil error, want a retry error (no bootstrap fallback under a non-empty cursor)")
 	}
@@ -1118,5 +1118,57 @@ func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	case <-ch:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("%s: did not complete within deadline", what)
+	}
+}
+
+// mustNotProbeFake fails the test if the bootstrap resolver consults the fd
+// probe despite a pinned session id (#989).
+type mustNotProbeFake struct{ t *testing.T }
+
+func (m mustNotProbeFake) OpenJSONL(int) (string, error) {
+	m.t.Error("fd probe consulted despite a pinned bootstrap session id")
+	return "", nil
+}
+
+// TestResolveBootstrapJSONL_PinnedIDPrefersByID (#989): with the bootstrap
+// session id pinned at spawn (#839), the resolver tails the deterministic
+// <id>.jsonl path via the by-id resolver and never consults the fd probe —
+// which real claude's open-append-close write pattern defeats. Present at the
+// first look is a warm resume → offset = size (resolveBoundSessionJSONL's
+// cold/warm rule).
+func TestResolveBootstrapJSONL_PinnedIDPrefersByID(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const id = "77777777-7777-4777-8777-777777777777"
+	path := filepath.Join(dir, id+".jsonl")
+	content := []byte(`{"type":"user"}` + "\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := resolveBootstrapJSONL(dir, func() string { return id }, mustNotProbeFake{t}, func() int { return 4242 })
+	got, off, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != path {
+		t.Errorf("path = %q, want %q", got, path)
+	}
+	if off != int64(len(content)) {
+		t.Errorf("offset = %d, want %d (warm resume tails from EOF)", off, len(content))
+	}
+}
+
+// TestResolveBootstrapJSONL_NoPinnedIDFallsBackToProbe (#989): an empty pinned
+// id (legacy unpinned spawn) preserves the #854 probe path byte-for-byte.
+func TestResolveBootstrapJSONL_NoPinnedIDFallsBackToProbe(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	resolve := resolveBootstrapJSONL(dir, func() string { return "" }, noopFakeProbe{}, func() int { return 4242 })
+	_, _, err := resolve(context.Background())
+	if err == nil {
+		t.Fatal("want the probe path's no-jsonl-yet retry error, got nil")
 	}
 }
