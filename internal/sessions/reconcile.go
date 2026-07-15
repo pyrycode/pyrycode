@@ -42,6 +42,17 @@ func encodeWorkdir(workdir string) string {
 // DefaultClaudeSessionsDir returns the directory where claude writes
 // <uuid>.jsonl files for the given workdir. Returns "" if workdir is empty
 // or $HOME is unresolvable; callers treat "" as "reconciliation disabled".
+//
+// The workdir is symlink-resolved before encoding (#989): claude encodes its
+// RESOLVED cwd into the projects folder name, so on macOS a workdir under
+// /var/folders/... (a symlink to /private/var/...) writes transcripts under
+// -private-var-folders-.... Encoding the literal form pointed every by-id
+// resolver at a folder claude never writes; the old fd-probe path masked this
+// because its confidentiality guard compared symlink-resolved paths on both
+// sides. Production paths under /Users carry no symlink, which is why only
+// tmpdir-based test environments ever saw the mismatch. Resolution failure
+// (workdir vanished, permission) falls back to the literal form — same
+// best-effort shape as the resolvers' own EvalSymlinks fallbacks.
 func DefaultClaudeSessionsDir(workdir string) string {
 	if workdir == "" {
 		return ""
@@ -50,7 +61,11 @@ func DefaultClaudeSessionsDir(workdir string) string {
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".claude", "projects", encodeWorkdir(workdir))
+	resolved, err := filepath.EvalSymlinks(workdir)
+	if err != nil {
+		resolved = workdir
+	}
+	return filepath.Join(home, ".claude", "projects", encodeWorkdir(resolved))
 }
 
 // mostRecentJSONL scans dir for files matching <uuid>.jsonl (canonical

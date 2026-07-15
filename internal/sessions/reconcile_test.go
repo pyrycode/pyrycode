@@ -474,3 +474,30 @@ func TestProbePreferredResolver_PinnedIDAbsentIsNoBaseline(t *testing.T) {
 		t.Errorf("got (%q, %d), want no-baseline (\"\", 0)", path, size)
 	}
 }
+
+// TestDefaultClaudeSessionsDir_ResolvesSymlinks (#989): claude encodes its
+// SYMLINK-RESOLVED cwd into the projects folder name (macOS: a workdir under
+// /var/folders/... writes transcripts under -private-var-folders-...), so the
+// daemon must encode the resolved form too or every by-id resolver stats a
+// folder claude never writes. Caught live: the pinned-id resolver looped
+// "no such file" on -var-folders-... while the transcript grew under
+// -private-var-folders-....
+func TestDefaultClaudeSessionsDir_ResolvesSymlinks(t *testing.T) {
+	t.Parallel()
+
+	real := t.TempDir()
+	realResolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realResolved, link); err != nil {
+		t.Fatal(err)
+	}
+
+	viaLink := DefaultClaudeSessionsDir(link)
+	viaReal := DefaultClaudeSessionsDir(realResolved)
+	if viaLink != viaReal {
+		t.Errorf("DefaultClaudeSessionsDir(symlink) = %q, want %q (the resolved form claude encodes)", viaLink, viaReal)
+	}
+}
