@@ -817,25 +817,52 @@ func recordingPath(dir string, now time.Time) string {
 	return filepath.Join(dir, now.UTC().Format("20060102T150405.000000000Z")+".cast")
 }
 
+// claudeChildCmd assembles the exec.Cmd for the supervisor's claude child:
+// workdir, base environment plus helperEnv, then tuidriver.EnsureClaudeEnv for
+// substrate hygiene. EnsureClaudeEnv does two load-bearing things here:
+//
+//   - It strips the Claude Code nesting markers (CLAUDECODE,
+//     CLAUDE_CODE_SESSION_ID, CLAUDE_CODE_CHILD_SESSION,
+//     CLAUDE_CODE_ENTRYPOINT). When the daemon itself was started from inside
+//     a Claude Code session — an operator terminal, a test harness, an e2e
+//     script — those markers leak through os.Environ() into the child, and a
+//     claude that inherits them treats itself as a nested child session and
+//     SILENTLY writes no session transcript while answering turns normally.
+//     The growth-confirm then never confirms, the drain re-sends the same
+//     turn forever, and the turn bridge has no JSONL to tail. Verified live
+//     on claude 2.1.199. The agent-run path (ptyrunner) has always scrubbed
+//     via the same helper; this closes the interactive-path gap.
+//
+//   - It pins TERM=xterm-256color, the rendering tui-driver's detection
+//     corpus is calibrated against. This REVERSES an earlier deliberate skip
+//     ("would change claude's TUI rendering versus today's inherited TERM"):
+//     the daemon's inherited TERM is absent under launchd and arbitrary under
+//     a terminal, and every screen this supervisor reads (WaitReady, modal
+//     classes, commit chips) is parsed by tui-driver, so the calibrated TERM
+//     is the correct one.
+//
+// The TUIDRIVER_* arg-appending sides of EnsureClaudeEnv are opt-in env vars,
+// unset in daemon contexts, so argv is unchanged.
+func claudeChildCmd(ctx context.Context, bin string, args []string, workDir string, helperEnv []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	cmd.Env = append(os.Environ(), helperEnv...)
+	return tuidriver.EnsureClaudeEnv(cmd)
+}
+
 // runOnce hosts claude through a tui-driver Session, bridges its I/O to the
 // controlling terminal (or the configured Bridge in service mode), and returns
 // when the child exits or ctx is cancelled. onSpawn, if non-nil, is called once
 // with the child PID after the Session has been spawned.
 func (s *Supervisor) runOnce(ctx context.Context, args []string, onSpawn func(pid int)) error {
-	cmd := exec.CommandContext(ctx, s.cfg.ClaudeBin, args...)
-	if s.cfg.WorkDir != "" {
-		cmd.Dir = s.cfg.WorkDir
-	}
-	cmd.Env = append(os.Environ(), s.cfg.helperEnv...)
+	cmd := claudeChildCmd(ctx, s.cfg.ClaudeBin, args, s.cfg.WorkDir, s.cfg.helperEnv)
 
 	// Host claude through a tui-driver Session. MirrorOutput is the only
 	// output path now — the Session seals the PTY *os.File privately, so both
 	// modes forward sess.MirrorOutput() to their output sink instead of
-	// io.Copy'ing a raw master. We deliberately do NOT call
-	// tuidriver.EnsureClaudeEnv: it force-overrides TERM=xterm-256color, which
-	// would change claude's TUI rendering versus today's inherited TERM. That
-	// override exists for downstream screen parsing (#596), which this swap
-	// does not do — behaviour-preservation decision.
+	// io.Copy'ing a raw master.
 	//
 	// Opt-in debug capture (#802): when cfg.RecordDir is set (operator flipped
 	// the persisted debug_capture flag), attach tui-driver's cast recorder to
