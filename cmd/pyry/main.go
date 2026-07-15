@@ -810,9 +810,17 @@ func runSupervisor(args []string) error {
 	// the chicken-and-egg (OnChange is a Config field set at New, before startRelay
 	// builds the broadcaster) without any late-bound field.
 	queueChanges := make(chan string, queueStateQueueSize)
+	// giveUps is the parallel hand-off channel from msgqueue's OnGiveUp seam
+	// (#1000) to the session_error producer (#1008), created BEFORE msgqueue.New
+	// for the same chicken-and-egg reason as queueChanges and shared with
+	// newSessionErrorEmitterV2 below. Setting OnGiveUp here flips #1000's seam from
+	// nil (disabled) to live: a persistent-delivery give-up now surfaces as a
+	// typed, client-visible session_error frame instead of a silently dropped head.
+	giveUps := make(chan giveUpNotice, sessionErrorQueueSize)
 	queue, err := msgqueue.New(msgqueue.Config{
 		Deliver:  newInboundDeliver(router.resolve),
 		OnChange: queueStateNotify(queueChanges, logger),
+		OnGiveUp: sessionErrorNotify(giveUps, logger),
 		Logger:   logger,
 	})
 	if err != nil {
@@ -826,6 +834,14 @@ func runSupervisor(args []string) error {
 	// Built here (so queue.Snapshot is bound) but its Run goroutine starts inside
 	// startRelayV2, where the broadcaster exists.
 	qse := newQueueStateEmitterV2(queueChanges, queue.Snapshot, logger)
+
+	// The session_error producer (#1008): on each msgqueue give-up it fans a typed
+	// session_error envelope (terminal CodeSessionBlocked) to interactive phones,
+	// so a wedged session surfaces instead of leaving a queued turn that silently
+	// never runs. Built here (channel shared with the OnGiveUp seam) but its Run
+	// goroutine starts inside startRelayV2, where the broadcaster exists — same
+	// shape as qse. It holds no queue reference, so it cannot reach queued text.
+	see := newSessionErrorEmitterV2(giveUps, logger)
 
 	// The debug-bundle producer (#813): a paired `request_debug_bundle` frame
 	// assembles the daemon-global bundle — the recent log ring plus the newest
@@ -878,6 +894,7 @@ func runSupervisor(args []string) error {
 		defaultCwd:        defaultCwd,
 		transitions:       pool,
 		qse:               qse,
+		sessionErr:        see,
 		debugBundler:      debugBundler,
 		settings:          settingsUpdaterAdapter{pool},
 		snapshotSettings:  snapshotSettings,
