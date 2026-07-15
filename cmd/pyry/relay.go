@@ -185,6 +185,12 @@ type relayWiring struct {
 	// snapshot-usage reader #857). Empty disables reconcile, the rotation watcher,
 	// and the interactive turn/modal streams.
 	claudeSessionsDir string
+	// bootstrapIDFn returns the bootstrap session's pinned claude session id —
+	// the SAME id source the bootstrap spawn's --session-id uses (#839) — so the
+	// turn/modal stream resolvers tail the deterministic <id>.jsonl path instead
+	// of the fd probe real claude defeats (#989). Nil or empty-returning falls
+	// back to the probe (legacy unpinned spawns).
+	bootstrapIDFn func() string
 	// defaultCwd is the default workspace directory stamped onto conversations
 	// created without an explicit cwd (the CreateConversation handler).
 	defaultCwd string
@@ -533,8 +539,8 @@ func startRelayV2(
 		// PID and State() is mutex-guarded.
 		probe := newBootstrapProbe(logger)
 		pidFn := func() int { return w.sup.State().ChildPID }
-		streamCleanup = startInteractiveTurnStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, w.claudeSessionsDir, probe, pidFn, logger)
-		modalStreamCleanup = startInteractiveModalStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, modalReg, w.claudeSessionsDir, probe, pidFn, logger)
+		streamCleanup = startInteractiveTurnStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, w.claudeSessionsDir, probe, pidFn, w.bootstrapIDFn, logger)
+		modalStreamCleanup = startInteractiveModalStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, modalReg, w.claudeSessionsDir, probe, pidFn, w.bootstrapIDFn, logger)
 	} else if w.bridge != nil {
 		logger.Info("relay: interactive turn + modal streams disabled; claude sessions dir unresolved",
 			"event", "interactive_turn_stream.no_sessions_dir")

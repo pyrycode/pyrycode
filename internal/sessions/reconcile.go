@@ -189,13 +189,29 @@ func probeUsable(probe rotation.Probe) bool {
 //     the daemon uses; the symlink-resolved form is guard-only). Raced away ->
 //     ("", 0, nil). Success -> (candidate, size, nil).
 //
+// Pinned-id preference (#989): pinnedID, when non-nil and returning a valid
+// UUID stem, short-circuits the probe entirely — the resolver stats
+// <dir>/<id>.jsonl and returns (path, size, nil), or the ("", 0, nil)
+// no-baseline sentinel while the file does not exist yet. The probe path below
+// is DEFEATED by real claude: it opens its transcript, appends one event, and
+// closes it within milliseconds, so probe.OpenJSONL practically never observes
+// an open fd (fakeclaude holds its file open continuously, which is why every
+// fake-tier test passes). With the session id pinned at spawn (#839 bootstrap,
+// per-conversation pool ids), the path is deterministic and can only ever be
+// our own child's file — we minted the uuid — so by-id resolution is strictly
+// safer than the probe. pinnedID is consulted per resolve so a /clear rotation
+// picked up by reconcile is honoured on the next call. An empty return falls
+// through to the probe path (legacy unpinned spawns).
+//
 // Concurrency: the closure holds no mutable state and takes no locks; pidFn reads
 // the live child PID (mutex-guarded via Supervisor.State), so a respawn across
 // backoff is observed as a consistent 0-or-live snapshot.
-func newProbePreferredTranscriptResolver(dir string, probe rotation.Probe, pidFn func() int) func(ctx context.Context) (string, int64, error) {
+func newProbePreferredTranscriptResolver(dir string, probe rotation.Probe, pidFn func() int, pinnedID func() string) func(ctx context.Context) (string, int64, error) {
 	if !probeUsable(probe) {
 		// No lsof (or an otherwise-unusable probe): keep today's newest-by-mtime
 		// baseline so the no-probe path is byte-identical to pre-fix behaviour.
+		// Deliberately unchanged even when pinnedID is set — this branch exists
+		// as the untouched legacy fallback.
 		return newTranscriptResolver(dir)
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
@@ -203,6 +219,18 @@ func newProbePreferredTranscriptResolver(dir string, probe rotation.Probe, pidFn
 		resolvedDir = filepath.Clean(dir)
 	}
 	return func(context.Context) (string, int64, error) {
+		if pinnedID != nil {
+			if id := pinnedID(); id != "" && uuidStemPattern.MatchString(id) {
+				path := filepath.Join(dir, id+jsonlExt)
+				info, err := os.Stat(path)
+				if err != nil {
+					// Not created yet (fresh session pre-first-turn) or raced
+					// away — no baseline, same sentinel as the probe path.
+					return "", 0, nil
+				}
+				return path, info.Size(), nil
+			}
+		}
 		pid := pidFn()
 		if pid <= 0 {
 			// Child in restart backoff or pre-spawn — no process to probe.

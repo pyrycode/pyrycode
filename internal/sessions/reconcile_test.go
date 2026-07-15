@@ -307,7 +307,7 @@ func TestProbePreferredResolver_TailsOwnChildNotNewestByMtime(t *testing.T) {
 	touchJSONL(t, dir, foreign, base.Add(30*time.Minute))
 
 	probe := &stubProbe{path: ownPath}
-	resolve := newProbePreferredTranscriptResolver(dir, probe, constPID(4321))
+	resolve := newProbePreferredTranscriptResolver(dir, probe, constPID(4321), nil)
 	path, size, err := resolve(context.Background())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -371,7 +371,7 @@ func TestProbePreferredResolver_NoBaseline(t *testing.T) {
 				path = c.probePath(t, dir)
 			}
 			probe := &stubProbe{path: path, err: c.probeErr}
-			resolve := newProbePreferredTranscriptResolver(dir, probe, constPID(c.pid))
+			resolve := newProbePreferredTranscriptResolver(dir, probe, constPID(c.pid), nil)
 			gotPath, gotSize, err := resolve(context.Background())
 			if gotPath != "" || gotSize != 0 || err != nil {
 				t.Errorf("resolve = (%q, %d, %v), want (\"\", 0, nil)", gotPath, gotSize, err)
@@ -402,7 +402,7 @@ func TestProbePreferredResolver_NoLsofMatchesMtimeBaseline(t *testing.T) {
 	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
 
 	for _, dir := range []string{newestDir, emptyDir, missingDir} {
-		got := newProbePreferredTranscriptResolver(dir, unavailableProbe{}, constPID(999))
+		got := newProbePreferredTranscriptResolver(dir, unavailableProbe{}, constPID(999), nil)
 		want := newTranscriptResolver(dir)
 		gp, gs, ge := got(context.Background())
 		wp, ws, we := want(context.Background())
@@ -410,5 +410,67 @@ func TestProbePreferredResolver_NoLsofMatchesMtimeBaseline(t *testing.T) {
 			t.Errorf("dir %s: probe-preferred = (%q,%d,%v), newTranscriptResolver = (%q,%d,%v)",
 				dir, gp, gs, ge, wp, ws, we)
 		}
+	}
+}
+
+// --- #989: pinned-id preference over the fd probe ------------------------------
+
+// mustNotProbe fails the test if the resolver consults the probe at all. With a
+// pinned session id the transcript path is deterministic, and the fd probe —
+// which real claude's open-append-close write pattern defeats (#989) — must not
+// be needed.
+type mustNotProbe struct{ t *testing.T }
+
+func (m mustNotProbe) OpenJSONL(int) (string, error) {
+	m.t.Error("probe consulted despite a pinned session id")
+	return "", nil
+}
+
+// TestProbePreferredResolver_PinnedIDResolvesWithoutProbe (#989): when the
+// spawn's session id is pinned (bootstrap #839 / pool per-conversation ids), the
+// resolver returns <dir>/<id>.jsonl by deterministic stat — no probe. Real
+// claude holds no persistent fd on its transcript, so the probe path never
+// resolves against it; the pinned path is also strictly safer (we minted the
+// uuid, so it can never be another session's file).
+func TestProbePreferredResolver_PinnedIDResolvesWithoutProbe(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const id = "77777777-7777-4777-8777-777777777777"
+	path := filepath.Join(dir, id+".jsonl")
+	content := []byte(`{"type":"user"}` + "\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := newProbePreferredTranscriptResolver(dir, mustNotProbe{t}, constPID(4321), func() string { return id })
+	got, size, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != path {
+		t.Errorf("path = %q, want %q", got, path)
+	}
+	if size != int64(len(content)) {
+		t.Errorf("size = %d, want %d", size, len(content))
+	}
+}
+
+// TestProbePreferredResolver_PinnedIDAbsentIsNoBaseline (#989): a pinned id
+// whose transcript has not been created yet yields the ("", 0, nil) no-baseline
+// sentinel — same convention as the probe path — and still never consults the
+// probe.
+func TestProbePreferredResolver_PinnedIDAbsentIsNoBaseline(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	resolve := newProbePreferredTranscriptResolver(dir, mustNotProbe{t}, constPID(4321),
+		func() string { return "88888888-8888-4888-8888-888888888888" })
+	path, size, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if path != "" || size != 0 {
+		t.Errorf("got (%q, %d), want no-baseline (\"\", 0)", path, size)
 	}
 }

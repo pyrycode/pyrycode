@@ -90,6 +90,7 @@ func startInteractiveTurnStreamV2(
 	claudeSessionsDir string,
 	probe rotation.Probe,
 	pidFn func() int,
+	bootstrapIDFn func() string,
 	logger *slog.Logger,
 ) func() {
 	emitter := newInteractiveTurnEmitterV2(active, mgr, logger)
@@ -110,7 +111,7 @@ func startInteractiveTurnStreamV2(
 	// tracker's stall_detected marker now maps through to a stall envelope
 	// (the mapper no longer discards it).
 	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
-	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn)
+	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn, bootstrapIDFn)
 	sub := turnbridge.NewTargetSubscriber(resolve, tr, logger)
 
 	prod, err := turnbridge.New(turnbridge.Config{
@@ -245,6 +246,33 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 		resolvedOnce = true
 		return filepath.Join(dir, bestName), off, nil
 	}
+}
+
+// resolveBootstrapJSONL picks the bootstrap transcript resolver (#989). When the
+// bootstrap spawn's session id is pinned (#839: --session-id <bootstrap pool
+// id>, the production path), the transcript path is deterministic and can only
+// ever be our own child's file — the daemon minted the uuid — so it resolves
+// by-id via resolveBoundSessionJSONL, with that resolver's cold/warm offset
+// rule. When no pinned id is available (legacy/unpinned spawn), it falls back to
+// the #854 PID-probe resolver below.
+//
+// Why the probe cannot stay preferred: real claude opens its transcript,
+// appends one event, and closes it within milliseconds, so probe.OpenJSONL
+// practically never observes an open fd — the subscription retries forever and
+// no reply ever streams (the residual fresh-daemon deadlock behind
+// pyrycode-mobile#528). fakeclaude holds its transcript open continuously,
+// which is why every fake-tier e2e passes over the probe.
+//
+// pinnedID is consulted once per subscription (this function runs per
+// resolveTarget invocation), so a /clear id rotation picked up by reconcile is
+// honoured on the next resubscribe.
+func resolveBootstrapJSONL(dir string, pinnedID func() string, probe rotation.Probe, pidFn func() int) func(ctx context.Context) (path string, startOffset int64, err error) {
+	if pinnedID != nil {
+		if id := pinnedID(); id != "" && jsonlStemPattern.MatchString(id) {
+			return resolveBoundSessionJSONL(dir, id)
+		}
+	}
+	return resolveOwnBootstrapJSONL(dir, probe, pidFn)
 }
 
 // resolveOwnBootstrapJSONL is the probe-preferred bootstrap resolver. Instead of
@@ -436,13 +464,13 @@ func perConversationSessionsDir(sessionWorkDir, bootstrapWorkDir, sharedDir stri
 // A fresh JSONL resolver closure is built per call so its cold/warm offset state
 // is per-subscription: a brand-new bound session cold-starts at offset 0; a
 // switch-back to a live session warm-tails from EOF.
-func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstrap turnbridge.SessionHost, dir string, probe rotation.Probe, pidFn func() int) turnbridge.TargetResolver {
+func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstrap turnbridge.SessionHost, dir string, probe rotation.Probe, pidFn func() int, bootstrapIDFn func() string) turnbridge.TargetResolver {
 	return func(ctx context.Context) (turnbridge.Target, error) {
 		convID, switchCh := active.watch()
 		if convID == "" {
 			return turnbridge.Target{
 				Host:    bootstrap,
-				Resolve: resolveOwnBootstrapJSONL(dir, probe, pidFn),
+				Resolve: resolveBootstrapJSONL(dir, bootstrapIDFn, probe, pidFn),
 				Switch:  switchCh,
 			}, nil
 		}
@@ -452,19 +480,19 @@ func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstra
 		}
 		if host == bootstrap {
 			// The conversation is bound to the bootstrap session — the daemon's
-			// own interactive claude, spawned WITHOUT --session-id (#854), so
-			// claude mints an on-disk transcript uuid that never equals the
-			// bootstrap POOL id (sessionID here). The by-id resolver would tail
-			// <poolID>.jsonl, which never appears, and loop forever (the
-			// fresh-daemon deadlock). Bind the reply by PID probe instead — the
-			// exact resolver the convID == "" branch uses — so the "no jsonl yet"
-			// wait converges once the first turn creates the transcript. dir is the
-			// shared claudeSessionsDir; boundHost also returns it as convDir for the
-			// bootstrap (perConversationSessionsDir maps the bootstrap workdir back
-			// to it), so the two agree — use dir to mirror the convID == "" branch.
+			// own interactive claude. Since #839 that spawn pins
+			// --session-id <bootstrap pool id>, so the transcript path is
+			// deterministic; resolveBootstrapJSONL prefers it and falls back to
+			// the PID probe only for an unpinned legacy spawn (#989 — the probe
+			// is defeated by real claude's open-append-close write pattern, so
+			// preferring it deadlocked every real bootstrap turn). dir is the
+			// shared claudeSessionsDir; boundHost also returns it as convDir for
+			// the bootstrap (perConversationSessionsDir maps the bootstrap
+			// workdir back to it), so the two agree — use dir to mirror the
+			// convID == "" branch.
 			return turnbridge.Target{
 				Host:    host,
-				Resolve: resolveOwnBootstrapJSONL(dir, probe, pidFn),
+				Resolve: resolveBootstrapJSONL(dir, bootstrapIDFn, probe, pidFn),
 				Switch:  switchCh,
 			}, nil
 		}
