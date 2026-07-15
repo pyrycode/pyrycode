@@ -32,13 +32,23 @@ func TestWriteMCPSettings_ShapeAndContent(t *testing.T) {
 
 	// AC #1: enableAllProjectMcpServers is present and true.
 	var got struct {
-		EnableAllProjectMcpServers bool `json:"enableAllProjectMcpServers"`
+		EnableAllProjectMcpServers        bool `json:"enableAllProjectMcpServers"`
+		SkipDangerousModePermissionPrompt bool `json:"skipDangerousModePermissionPrompt"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal %q: %v", raw, err)
 	}
 	if !got.EnableAllProjectMcpServers {
 		t.Errorf("enableAllProjectMcpServers = false, want true (JSON: %s)", raw)
+	}
+
+	// AC #1b: skipDangerousModePermissionPrompt is present and true, so a spawn
+	// that carries --dangerously-skip-permissions (operator-enabled YOLO) does not
+	// wedge on claude 2.1.199's Bypass Permissions warning dialog ("1. No, exit" /
+	// "2. Yes, I accept" selection). The field is inert when the spawn does not
+	// request bypass mode, so it is safe to write unconditionally.
+	if !got.SkipDangerousModePermissionPrompt {
+		t.Errorf("skipDangerousModePermissionPrompt = false, want true (JSON: %s)", raw)
 	}
 
 	// AC #2: no permission posture. The agent-run deny-default writer stamps a
