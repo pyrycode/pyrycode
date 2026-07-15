@@ -60,7 +60,7 @@ func TestE2E_IdleEviction_RespawnsOnSendMessage(t *testing.T) {
 	// has no env override — always <HOME>/.claude/projects/encode(workdir), with
 	// HOME=home and -pyry-workdir=home) so the #668 growth-confirm resolver scans
 	// exactly the file fakeclaude grows on the delivered turn. rotation_test pattern.
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}

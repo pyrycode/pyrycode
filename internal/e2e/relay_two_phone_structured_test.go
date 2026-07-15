@@ -135,7 +135,7 @@ func TestTwoPhoneStructured_InteractiveReceivesStream(t *testing.T) {
 	// what fakeclaude writes. resolveClaudeSessionsDir has no env override — it
 	// always computes <HOME>/.claude/projects/encode(workdir) — so alignment is
 	// by construction (HOME=home, -pyry-workdir=home), the rotation-test pattern.
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}

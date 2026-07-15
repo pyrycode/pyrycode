@@ -24,6 +24,23 @@ func encodeWorkdir(workdir string) string {
 	return r.Replace(workdir)
 }
 
+// claudeSessionsDir mirrors sessions.DefaultClaudeSessionsDir for a daemon whose
+// $HOME is home and whose workdir is also home (the harness default,
+// -pyry-workdir=home): the base is home, and the workdir is symlink-RESOLVED
+// before encoding. The resolution matches production (#989): claude writes its
+// transcript under its resolved cwd, so the daemon resolves too, and on macOS a
+// t.TempDir sits under /var/folders, a symlink to /private/var. Encoding the
+// unresolved home here would point the fake's transcript at a folder the daemon
+// never watches, and every interactive-stream test would time out. Resolution
+// failure falls back to the literal path, the same shape the daemon uses.
+func claudeSessionsDir(home string) string {
+	resolved, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		resolved = home
+	}
+	return filepath.Join(home, ".claude", "projects", encodeWorkdir(resolved))
+}
+
 // uuidStemPattern matches the canonical 36-char lowercase UUIDv4 stem.
 var uuidStemPattern = regexp.MustCompile(
 	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -41,7 +58,7 @@ var uuidStemPattern = regexp.MustCompile(
 func TestE2E_RotationWatcher_DetectsClear(t *testing.T) {
 	home, regPath := newRegistryHome(t)
 
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}

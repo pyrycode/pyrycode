@@ -74,7 +74,7 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	// -pyry-workdir=home) and pre-create <initialUUID>.jsonl so the bootstrap
 	// reconciliation has a stable stem. Per-conversation sessions take the
 	// nil-resolver delivery path and never read this file. rotation_test pattern.
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}
