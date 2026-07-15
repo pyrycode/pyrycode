@@ -50,6 +50,7 @@ package msgqueue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -71,6 +72,14 @@ const defaultRetryInterval = 1 * time.Second
 // same posture as defaultRetryInterval; not load-tested.
 const defaultMaxQueuedPerConversation = 100
 
+// defaultGiveUpAfter bounds how long the drain retries a persistently-failing
+// head before abandoning it. Chosen to exceed the supervisor's max backoff
+// window with margin: BackoffMax is 30s and BackoffReset 60s
+// (internal/supervisor/supervisor.go), so a transient failure spanning a full
+// claude-child respawn/backoff cycle clears well inside this bound and never
+// trips give-up. A tuning knob, not a contract.
+const defaultGiveUpAfter = 2 * time.Minute
+
 // DeliverFunc is the injected reliable-delivery seam — the shape of
 // supervisor.WriteUserTurn. It MUST block while claude is busy (the WaitReady
 // idle gate) and return nil ONLY on a confirmed commit; that blocking IS the
@@ -91,6 +100,19 @@ type DeliverFunc func(ctx context.Context, convID string, payload []byte) error
 // Remove caller's goroutine. The consumer owns its own synchronization.
 type ChangeFunc func(convID string)
 
+// GiveUpFunc is the injected give-up-notification seam. It mirrors ChangeFunc:
+// invoked NEVER while holding q.mu, with the conversation whose head the drain
+// abandoned after persistent delivery failure, plus a daemon-generated
+// human-readable reason (the elapsed retry window and the last delivery error)
+// that NEVER contains the queued message text. It MUST NOT block and MUST be
+// safe for concurrent invocation. nil disables notification.
+//
+// A later ticket routes this seam to a typed, client-visible error frame over
+// the v2 wire exactly as OnChange routes to the queue_state producer; until then
+// it ships disabled (nil), so the bound + head-drop + clean exit are the only
+// production-visible effect — the give-up is real even when unobserved.
+type GiveUpFunc func(convID, reason string)
+
 // Config configures a Queue.
 type Config struct {
 	// Deliver is the reliable-delivery seam; required. New errors if it is nil.
@@ -105,6 +127,14 @@ type Config struct {
 	MaxQueuedPerConversation int
 	// OnChange is the optional change-notification seam; nil ⇒ disabled.
 	OnChange ChangeFunc
+	// GiveUpAfter bounds how long the drain retries a persistently-failing head
+	// before abandoning it. <= 0 ⇒ defaultGiveUpAfter. Measured as elapsed
+	// wall-clock since the head's FIRST consecutive delivery failure; a
+	// successful delivery resets the clock for the next head (per-head, not
+	// per-session).
+	GiveUpAfter time.Duration
+	// OnGiveUp is the optional give-up-notification seam; nil ⇒ disabled.
+	OnGiveUp GiveUpFunc
 	// Logger; nil ⇒ slog.Default().
 	Logger *slog.Logger
 }
@@ -141,11 +171,13 @@ type convQueue struct {
 // drain goroutine per active conversation. The zero value is not usable —
 // construct with New. Enqueue is safe for concurrent use; Run is called once.
 type Queue struct {
-	deliver  DeliverFunc
-	retry    time.Duration
-	max      int        // per-conversation backlog cap; > 0 always in practice
-	onChange ChangeFunc // nil ⇒ change notification disabled
-	log      *slog.Logger
+	deliver     DeliverFunc
+	retry       time.Duration
+	giveUpAfter time.Duration // bounds persistent-failure retry before give-up
+	max         int           // per-conversation backlog cap; > 0 always in practice
+	onChange    ChangeFunc    // nil ⇒ change notification disabled
+	onGiveUp    GiveUpFunc    // nil ⇒ give-up notification disabled
+	log         *slog.Logger
 
 	mu      sync.Mutex
 	convs   map[string]*convQueue
@@ -167,6 +199,10 @@ func New(cfg Config) (*Queue, error) {
 	if retry <= 0 {
 		retry = defaultRetryInterval
 	}
+	giveUpAfter := cfg.GiveUpAfter
+	if giveUpAfter <= 0 {
+		giveUpAfter = defaultGiveUpAfter
+	}
 	max := cfg.MaxQueuedPerConversation
 	if max <= 0 {
 		max = defaultMaxQueuedPerConversation
@@ -176,12 +212,14 @@ func New(cfg Config) (*Queue, error) {
 		log = slog.Default()
 	}
 	return &Queue{
-		deliver:  cfg.Deliver,
-		retry:    retry,
-		max:      max,
-		onChange: cfg.OnChange,
-		log:      log,
-		convs:    make(map[string]*convQueue),
+		deliver:     cfg.Deliver,
+		retry:       retry,
+		giveUpAfter: giveUpAfter,
+		max:         max,
+		onChange:    cfg.OnChange,
+		onGiveUp:    cfg.OnGiveUp,
+		log:         log,
+		convs:       make(map[string]*convQueue),
 	}, nil
 }
 
@@ -335,6 +373,16 @@ func (q *Queue) notify(convID string) {
 	}
 }
 
+// notifyGiveUp fires the give-up seam for convID if one is configured. Like
+// notify, the caller MUST have released q.mu — OnGiveUp is a caller-supplied
+// seam that may block or re-enter, so it is never called under the lock. reason
+// is daemon-generated and never carries the queued message text.
+func (q *Queue) notifyGiveUp(convID, reason string) {
+	if q.onGiveUp != nil {
+		q.onGiveUp(convID, reason)
+	}
+}
+
 // Run binds the lifecycle ctx, starts a drain for any conversation that already
 // holds a backlog (covering Enqueue-before-Run, with no lost wakeup), then blocks
 // until ctx is done and joins every drain goroutine before returning ctx.Err().
@@ -386,6 +434,13 @@ func (q *Queue) maybeSpawnDrainLocked(convID string, c *convQueue) {
 // across deliver, which can block for a whole claude turn.
 func (q *Queue) drain(ctx context.Context, convID string) {
 	defer q.wg.Done()
+	// firstFailedAt is the start of the current head's consecutive-failure streak
+	// (zero ⇒ the head has not yet failed). It bounds persistent-failure retry
+	// per head: a successful delivery resets it, so each head gets a fresh
+	// give-up window and a transient failure that clears on a respawn never
+	// trips give-up. Drain-local: one goroutine per conversation owns it, so it
+	// needs no synchronization.
+	var firstFailedAt time.Time
 	for {
 		q.mu.Lock()
 		c := q.convs[convID]
@@ -410,11 +465,18 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			// Claude unavailable (child respawn / wedged turn / PTY write error).
 			// Retry the SAME head — lossless, and what makes a message survive a
 			// child respawn. NEVER log head.text: it is untrusted phone content.
+			if firstFailedAt.IsZero() {
+				firstFailedAt = time.Now()
+			}
 			q.log.Warn("msgqueue: delivery failed, will retry",
 				"conversation_id", convID,
 				"queued_msg_id", head.id,
 				"queued_at", head.ts,
 				"err", err)
+			if elapsed := time.Since(firstFailedAt); elapsed >= q.giveUpAfter {
+				q.giveUp(convID, c, head, elapsed, err)
+				return
+			}
 			if !sleepCtx(ctx, q.retry) {
 				q.mu.Lock()
 				c.draining = false
@@ -428,11 +490,45 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		c.advanceLocked()
 		q.mu.Unlock()
 
-		// A confirmed-delivered head left the backlog. Fire after unlock; do NOT
-		// fire on the empty-exit or delivery-error/retry paths — those aren't
-		// backlog changes.
+		// A confirmed-delivered head left the backlog. Reset the give-up clock so
+		// the next head starts with a fresh bound. Fire after unlock; do NOT fire
+		// on the empty-exit or delivery-error/retry paths — those aren't backlog
+		// changes.
+		firstFailedAt = time.Time{}
 		q.notify(convID)
 	}
+}
+
+// giveUp abandons a head that has failed delivery for at least q.giveUpAfter (a
+// claude session wedged at startup, not merely respawning): it drops the head,
+// clears draining, and fires both seams off-lock, then the caller exits the
+// drain. Any items behind the dropped head stay queued — draining == false with
+// a non-empty backlog is exactly maybeSpawnDrainLocked's respawn precondition,
+// so the next Enqueue respawns the drain, the same lifecycle as the empty-exit
+// path. The caller must hold NO lock. reason is built only from daemon-generated
+// values (the elapsed window and the delivery err); it NEVER carries head.text.
+func (q *Queue) giveUp(convID string, c *convQueue, head queued, elapsed time.Duration, err error) {
+	elapsed = elapsed.Round(time.Second)
+	reason := fmt.Sprintf("delivery failed persistently for %s; claude session may be wedged (last error: %v)", elapsed, err)
+	q.log.Warn("msgqueue: giving up on head after persistent delivery failure",
+		"conversation_id", convID,
+		"queued_msg_id", head.id,
+		"elapsed", elapsed,
+		"err", err)
+
+	// Drop the abandoned head and clear draining under q.mu. Clearing draining
+	// BEFORE firing the seams means a give-up observer can safely re-Enqueue
+	// without racing a still-true draining flag.
+	q.mu.Lock()
+	c.advanceLocked()
+	c.draining = false
+	q.mu.Unlock()
+
+	// notify fires because the backlog shrank (the dropped head), keeping the
+	// wired queue_state view correct; notifyGiveUp carries the give-up event to
+	// its (currently nil) consumer. Both fire strictly after q.mu is released.
+	q.notify(convID)
+	q.notifyGiveUp(convID, reason)
 }
 
 // advanceLocked drops the just-delivered head and runs the backing-array
