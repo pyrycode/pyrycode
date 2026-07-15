@@ -468,7 +468,14 @@ func New(cfg Config) (*Pool, error) {
 			}
 			return bootstrapSup.State().ChildPID
 		}
-		supCfg.ResolveTranscript = newProbePreferredTranscriptResolver(cfg.ClaudeSessionsDir, probe, pidFn)
+		// Pinned-id preference (#989): the bootstrap spawns with
+		// --session-id <BootstrapID()> (#839), so the transcript path is
+		// deterministic; pass the SAME id source the spawn uses so the
+		// growth-confirm resolves by path first and only falls back to the fd
+		// probe for a (never-expected) empty id. Real claude defeats the probe —
+		// it holds no persistent fd on its transcript — so without this the
+		// delivery confirm never observes growth.
+		supCfg.ResolveTranscript = newProbePreferredTranscriptResolver(cfg.ClaudeSessionsDir, probe, pidFn, supCfg.ResolveSessionID)
 	}
 	sup, err := supervisor.New(supCfg)
 	if err != nil {

@@ -53,6 +53,7 @@ func startInteractiveModalStreamV2(
 	claudeSessionsDir string,
 	probe rotation.Probe,
 	pidFn func() int,
+	bootstrapIDFn func() string,
 	logger *slog.Logger,
 ) func() {
 	// mgr is both the interactiveBroadcaster (ActiveConns/Push, already the turn
@@ -60,7 +61,7 @@ func startInteractiveModalStreamV2(
 	emitter := newInteractiveModalEmitterV2(modalReg, mgr, mgr, logger)
 
 	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
-	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn)
+	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn, bootstrapIDFn)
 	sub := turnbridge.NewTargetSubscriber(resolve, tr, logger)
 	screenText := boundScreenText(active, boundHost, sup)
 

@@ -88,7 +88,7 @@ func TestRelayV2_QueueDrainsInOrder_AfterBusyTurn(t *testing.T) {
 	// Alignment is by construction (HOME=home, -pyry-workdir=home), the
 	// rotation-test pattern. StartRotationWithRelay also MkdirAll's this dir; we
 	// do it first so the pre-created jsonl exists BEFORE the daemon starts.
-	sessionsDir := filepath.Join(home, ".claude", "projects", encodeWorkdir(home))
+	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)
 	}

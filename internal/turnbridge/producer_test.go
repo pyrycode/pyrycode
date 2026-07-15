@@ -3,8 +3,12 @@ package turnbridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -347,5 +351,206 @@ func TestRun_ReturnsOnSubscribeCtxCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// liveHost is a SessionHost that is already live: WaitForPTY returns immediately
+// (but honours ctx cancellation, so a switch that cancels the per-subscription
+// ctx aborts a subsequent wait), and Session() hands back a real (throwaway) PTY
+// session so the subscriber can open the real tui-driver Events tail.
+type liveHost struct{ sess *tuidriver.Session }
+
+func (h liveHost) WaitForPTY(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+func (h liveHost) Session() *tuidriver.Session { return h.sess }
+
+// perConversationTranscript is a minimal claude-style per-conversation JSONL: a
+// user turn (which the mapper drops) followed by one assistant end-of-turn text
+// entry (a TextChunk + a TurnEnd). Two lines so the warm-resume EOF offset sits
+// past the assistant reply — a warm tail streams nothing, a cold tail streams it.
+func perConversationTranscript(text string) string {
+	user := `{"type":"user","message":{"content":[{"type":"text","text":"hi"}]}}`
+	asst := `{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"` + text + `"}]}}`
+	return user + "\n" + asst + "\n"
+}
+
+// TestNewTargetSubscriber_SwitchDuringBackoffColdStartsBoundTail is the #996
+// regression. When the active conversation switches while the subscriber is
+// parked in the pre-stream retry backoff of the prior (bootstrap) target, the
+// switch must abort that backoff IMMEDIATELY, so the re-subscription's first
+// os.Stat of the newly-bound transcript sees the file ABSENT — a cold start at
+// offset 0 that streams the whole in-flight reply.
+//
+// Before the fix the backoff slept on the PARENT ctx, which a switch does not
+// cancel, so the producer kept waiting up to subscribeRetryDelay after a route
+// stamped `active`. In that window real claude opened-appended-closed the
+// per-conversation transcript, so the first os.Stat then found the file already
+// present, classified it a warm resume, and tailed from EOF — past the whole
+// reply. The subscription bound but streamed nothing: the phone stayed silent
+// with no error logged (the silent no-reply #996).
+//
+// Hermetic: no real claude, no tokens. A throwaway PTY session (sleep) satisfies
+// the SessionHost.Session() seam so the REAL tui-driver Events tail runs against
+// a hand-written transcript; the bound resolver mirrors cmd/pyry's
+// resolveBoundSessionJSONL cold/warm rule (absent -> retryable error + sawEmpty;
+// present after an absent look -> offset 0; present at the first look -> EOF).
+func TestNewTargetSubscriber_SwitchDuringBackoffColdStartsBoundTail(t *testing.T) {
+	// Not t.Parallel(): the reproduction relies on a wall-clock gap between the
+	// switch and the transcript write sitting inside the 500ms backoff window.
+
+	// Throwaway live PTY session for the Session() seam. Events tails the file by
+	// path; this session's own (empty) PTY only drives the dropped idle arm.
+	sess, err := tuidriver.Spawn(exec.Command("sleep", "60"), tuidriver.SpawnOpts{})
+	if err != nil {
+		t.Fatalf("spawn throwaway session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	host := liveHost{sess: sess}
+
+	dir := t.TempDir()
+	const convID = "11111111-1111-1111-1111-111111111111"
+	path := filepath.Join(dir, convID+".jsonl")
+
+	var (
+		offMu      sync.Mutex
+		lastOffset int64 = -1
+	)
+	recordOffset := func(off int64) {
+		offMu.Lock()
+		lastOffset = off
+		offMu.Unlock()
+	}
+
+	// newBoundResolve mirrors cmd/pyry resolveBoundSessionJSONL: an absent file is
+	// a retryable error that latches sawEmpty; a file that appears after an absent
+	// look cold-starts at offset 0; a file present at the first look warm-tails
+	// from EOF (size). Fresh per (re)subscription, matching the resolver factory.
+	newBoundResolve := func() func(context.Context) (string, int64, error) {
+		var resolvedOnce, sawEmpty bool
+		return func(context.Context) (string, int64, error) {
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				if !resolvedOnce {
+					sawEmpty = true
+				}
+				return "", 0, fmt.Errorf("stat bound session jsonl %s: %w", path, statErr)
+			}
+			off := info.Size()
+			if !resolvedOnce && sawEmpty {
+				off = 0
+			}
+			resolvedOnce = true
+			recordOffset(off)
+			return path, off, nil
+		}
+	}
+
+	sw := make(chan struct{})               // the follow-active switch
+	bootstrapErrored := make(chan struct{}) // closed once the bootstrap resolve has errored
+	var once sync.Once
+	bootstrapResolve := func(context.Context) (string, int64, error) {
+		once.Do(func() { close(bootstrapErrored) })
+		return "", 0, errors.New("bootstrap resolve always errors")
+	}
+
+	var mu sync.Mutex
+	calls := 0
+	resolve := func(ctx context.Context) (Target, error) {
+		mu.Lock()
+		n := calls
+		calls++
+		mu.Unlock()
+		if n == 0 {
+			return Target{Host: host, Resolve: bootstrapResolve, Switch: sw}, nil
+		}
+		return Target{Host: host, Resolve: newBoundResolve()}, nil
+	}
+
+	sub := NewTargetSubscriber(resolve, tuidriver.NewTracker(tuidriver.TrackerOpts{}), testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type subResult struct {
+		ch  <-chan tuidriver.Event
+		err error
+	}
+	subCh := make(chan subResult, 1)
+	go func() {
+		ch, err := sub(ctx)
+		subCh <- subResult{ch, err}
+	}()
+
+	// Wait until the producer is parked in the bootstrap resolve backoff.
+	select {
+	case <-bootstrapErrored:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bootstrap resolve was never consulted")
+	}
+
+	// Fire the switch (a send_message routed a turn and stamped `active`), then —
+	// modelling real claude — write the per-conversation transcript AFTER a delay
+	// that sits inside the 500ms backoff window. The fixed producer aborts the
+	// backoff on the switch and re-subscribes before this write, so its first
+	// os.Stat sees the file absent (cold, offset 0). The buggy producer sleeps the
+	// full delay and re-subscribes only after the write, so its first os.Stat sees
+	// the file present (warm, EOF).
+	close(sw)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = os.WriteFile(path, []byte(perConversationTranscript("hello from claude")), 0o600)
+	}()
+
+	// The subscriber returns once it binds the switched-to conversation.
+	var res subResult
+	select {
+	case res = <-subCh:
+	case <-time.After(4 * time.Second):
+		t.Fatal("subscriber never bound the switched-to conversation")
+	}
+	if res.err != nil {
+		t.Fatalf("subscriber returned error: %v", res.err)
+	}
+
+	// The crisp discriminator: cold start binds at offset 0; the #996 warm-skip
+	// binds at EOF (size > 0).
+	offMu.Lock()
+	gotOff := lastOffset
+	offMu.Unlock()
+	if gotOff != 0 {
+		t.Fatalf("bound tail landed at offset %d, want 0 (cold_start); a warm-skip to EOF is the #996 silent no-reply", gotOff)
+	}
+
+	// And the observable itself: the assistant reply must stream from the cold tail.
+	var gotText string
+	drain := time.After(2 * time.Second)
+drainLoop:
+	for {
+		select {
+		case ev, ok := <-res.ch:
+			if !ok {
+				break drainLoop
+			}
+			te, ok := mapEvent(ev)
+			if !ok {
+				continue
+			}
+			if tc, ok := te.(turnevent.TextChunk); ok {
+				gotText = tc.Text
+			}
+			if _, ok := te.(turnevent.TurnEnd); ok {
+				break drainLoop
+			}
+		case <-drain:
+			break drainLoop
+		}
+	}
+	if gotText != "hello from claude" {
+		t.Fatalf("streamed assistant text = %q, want %q; no reply bound is the #996 symptom", gotText, "hello from claude")
 	}
 }
