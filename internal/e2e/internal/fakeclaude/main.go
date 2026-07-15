@@ -420,42 +420,89 @@ func emitAssistantIfTriggered(path string) {
 	_ = os.Remove(path)
 }
 
-// emitStructuredJSONLIfTriggered checks for the structured-JSONL trigger
-// file. When present, reads its contents (capped at assistantMaxBytes) and
-// appends them verbatim to f — the live session JSONL the daemon's
-// structured-turn producer (cmd/pyry/interactive_turn_stream_v2.go) tails —
-// then fsyncs and removes the trigger. The trigger file's contents ARE the
-// claude-format JSONL lines to append (same "contents are the payload" shape
-// as emitAssistantIfTriggered). The f.Sync() is load-bearing: the daemon's
-// tail is a separate process and macOS APFS otherwise defers cross-process
-// visibility (mirrors the stdin reader's per-write fsync). Errors are
-// silenced — the e2e asserts downstream (the interactive phone receives the
-// structured envelopes), and a missing trigger is the steady state. Only the
-// main goroutine writes f, so this never races the stdin reader.
+// emitStructuredJSONLIfTriggered consumes the structured-JSONL trigger and
+// appends its contents verbatim to f — the live session JSONL the daemon's
+// structured-turn producer (cmd/pyry/interactive_turn_stream_v2.go) tails. The
+// trigger file's contents ARE the claude-format JSONL lines to append (same
+// "contents are the payload" shape as emitAssistantIfTriggered).
+//
+// It CLAIMS the trigger with an atomic os.Rename (claimTrigger) before reading,
+// so the removal that ends a consume targets only the inode it actually read —
+// never a value a producer wrote to the shared trigger name in between. This
+// closes the residual #984 read-then-remove TOCTOU that #958's empty-read gate
+// did not: the producer (relay_two_phone_structured_test.go) re-drops the kicker
+// line every 250 ms and, once A observes the live stream, drops the full fixture
+// exactly once via sync.Once. A plain read-by-name / remove-by-name consumer
+// could unlink that fixture if the drop landed in the shared name between the
+// consumer's read and its remove (a wide window — the load-bearing f.Sync() is a
+// real fsync, slow under -race + full-suite I/O contention), permanently losing
+// the only tool_use/turn_end and leaving A a partial structured set (the exact
+// observed failure). Claiming first makes the consume atomic against concurrent
+// producer writes, so the remove can never destroy a newer drop.
+//
+// Only the main poll goroutine calls this, serially, so the fixed claim sidecar
+// is always absent at a cycle's start. Errors are silenced — the e2e asserts
+// downstream (the interactive phone receives the structured envelopes), and a
+// missing trigger is the steady state.
 func emitStructuredJSONLIfTriggered(f *os.File, path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
+	claimed, ok := claimTrigger(path)
+	if !ok {
 		return
 	}
-	// Every producer drop is os.WriteFile = open(O_CREATE|O_TRUNC) then a single
-	// write; between the truncate and the write the trigger exists but is empty.
-	// A zero-byte read here is that mid-write window, not a payload — return
-	// WITHOUT removing the trigger so the producer's write lands and the next
-	// poll consumes the full content. Removing it (the pre-#958 behaviour)
-	// unlinked the fixture before its bytes were visible, losing the load-bearing
-	// dropFull line and leaving A a partial structured set. An empty append is a
-	// no-op regardless, so skip-and-retry can never drop real data or hang.
+	consumeStructuredClaim(f, path, claimed)
+}
+
+// claimTrigger atomically renames the trigger at path to a fixed sidecar
+// (path + ".consuming") so the consumer that follows operates only on the inode
+// it claimed — the shared name path is then free for producers, and the eventual
+// removal can never unlink a value a producer wrote afterward. Reports the
+// claimed path and true on success, or "" and false when no trigger is present
+// (os.Rename ENOENT — the steady state). fakeclaude runs a single poll goroutine
+// and every consume completes before the next claim, so the fixed sidecar name
+// needs no uniquification and is absent at each cycle's start.
+func claimTrigger(path string) (string, bool) {
+	claimed := path + ".consuming"
+	if err := os.Rename(path, claimed); err != nil {
+		return "", false
+	}
+	return claimed, true
+}
+
+// consumeStructuredClaim finishes a consume of a trigger already claimed by
+// claimTrigger: it reads the claimed inode, appends it to f (the session JSONL),
+// fsyncs, and removes the claim. The f.Sync() is load-bearing: the daemon's tail
+// is a separate process and macOS APFS otherwise defers cross-process visibility
+// (mirrors the stdin reader's per-write fsync).
+//
+// An empty claim is a producer mid-O_TRUNC write (os.WriteFile = open(O_CREATE|
+// O_TRUNC) then a single write; between the truncate and the write the file
+// exists but is empty). The claimed inode — which the producer still holds open
+// by fd — is handed back under the shared name via os.Rename so the pending write
+// stays reachable, and the next poll consumes the completed content. This is the
+// #958 "leave it for the next poll" behaviour, now expressed through the claim,
+// which is why the empty-is-skipped contract still holds. (A kicker line can be
+// orphaned only if two kicker writes straddle a rename-back; the kicker re-drops
+// every 250 ms and that loss never touches the sync.Once fixture, so it is
+// unobservable — not defended against, per evidence-based fix selection.)
+func consumeStructuredClaim(f *os.File, path, claimed string) {
+	data, err := os.ReadFile(claimed)
+	if err != nil {
+		_ = os.Remove(claimed)
+		return
+	}
 	if len(data) == 0 {
+		_ = os.Rename(claimed, path)
 		return
 	}
 	if len(data) > assistantMaxBytes {
 		data = data[:assistantMaxBytes]
 	}
 	if _, err := f.Write(data); err != nil {
+		_ = os.Remove(claimed)
 		return
 	}
 	_ = f.Sync()
-	_ = os.Remove(path)
+	_ = os.Remove(claimed)
 }
 
 // emitIdleIfTriggered checks for the idle-trigger file
