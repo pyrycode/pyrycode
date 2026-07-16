@@ -13,44 +13,34 @@ import (
 
 const listConvConnID = "conn-list-conv"
 
-func runListConvDispatcher(t *testing.T, d *dispatch.Dispatcher) func() {
+// newListConvConn returns a fresh *dispatch.Conn (NextID NOT pre-advanced, so
+// the first reply lands at id=1) plus a recv helper that reads one outbound
+// envelope. nil auth is fine: the list_conversations handler does not consult
+// c.Auth(). Mirrors newCreateConvConn in create_conversation_test.go.
+func newListConvConn(t *testing.T) (*dispatch.Conn, func() protocol.RoutingEnvelope) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- d.Run(ctx) }()
-	return func() {
-		cancel()
+	out := make(chan protocol.RoutingEnvelope, 4)
+	c := dispatch.NewTestConn(listConvConnID, out, nil)
+	recv := func() protocol.RoutingEnvelope {
+		t.Helper()
 		select {
-		case <-done:
+		case env := <-out:
+			return env
 		case <-time.After(2 * time.Second):
-			t.Fatalf("dispatcher Run did not return within 2s after cancel")
+			t.Fatalf("timed out waiting for outbound envelope")
+			return protocol.RoutingEnvelope{}
 		}
 	}
+	return c, recv
 }
 
-func makeListConversationsFrame(t *testing.T, id uint64) protocol.RoutingEnvelope {
+func makeListConversationsRequest(t *testing.T, id uint64) protocol.Envelope {
 	t.Helper()
-	env := protocol.Envelope{
+	return protocol.Envelope{
 		ID:      id,
 		Type:    protocol.TypeListConversations,
 		TS:      time.Now().UTC(),
 		Payload: json.RawMessage("{}"),
-	}
-	frame, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return protocol.RoutingEnvelope{ConnID: listConvConnID, Frame: frame}
-}
-
-func recvOutbound(t *testing.T, d *dispatch.Dispatcher) protocol.RoutingEnvelope {
-	t.Helper()
-	select {
-	case out := <-d.Outbound():
-		return out
-	case <-time.After(time.Second):
-		t.Fatal("no outbound frame within 1s")
-		return protocol.RoutingEnvelope{}
 	}
 }
 
@@ -73,16 +63,14 @@ func decodeConversationsResponse(t *testing.T, out protocol.RoutingEnvelope) (pr
 func TestListConversations_EmptyRegistry(t *testing.T) {
 	t.Parallel()
 	reg := &conversations.Registry{}
-	in := make(chan protocol.RoutingEnvelope, 1)
-	d := dispatch.New(dispatch.Config{Frames: in, Logger: testLogger(t)})
-	d.Register(protocol.TypeListConversations, ListConversations(reg))
-	stop := runListConvDispatcher(t, d)
-	defer stop()
+	c, recv := newListConvConn(t)
 
-	in <- makeListConversationsFrame(t, 11)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 11)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
 
-	out := recvOutbound(t, d)
-	inner, payload := decodeConversationsResponse(t, out)
+	inner, payload := decodeConversationsResponse(t, recv())
 
 	if inner.InReplyTo == nil || *inner.InReplyTo != 11 {
 		t.Errorf("InReplyTo: got %v, want pointer to 11", inner.InReplyTo)
@@ -119,16 +107,14 @@ func TestListConversations_SingleConversation(t *testing.T) {
 		LastUsedAt: ts,
 	})
 
-	in := make(chan protocol.RoutingEnvelope, 1)
-	d := dispatch.New(dispatch.Config{Frames: in, Logger: testLogger(t)})
-	d.Register(protocol.TypeListConversations, ListConversations(reg))
-	stop := runListConvDispatcher(t, d)
-	defer stop()
+	c, recv := newListConvConn(t)
 
-	in <- makeListConversationsFrame(t, 99)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 99)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
 
-	out := recvOutbound(t, d)
-	inner, payload := decodeConversationsResponse(t, out)
+	inner, payload := decodeConversationsResponse(t, recv())
 
 	if inner.InReplyTo == nil || *inner.InReplyTo != 99 {
 		t.Errorf("InReplyTo: got %v, want pointer to 99", inner.InReplyTo)
@@ -176,16 +162,14 @@ func TestListConversations_SurfacesArchivedFlag(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-active", Cwd: "/a", IsArchived: false, LastUsedAt: tActive})
 	reg.Create(conversations.Conversation{ID: "conv-archived", Cwd: "/b", IsArchived: true, LastUsedAt: tArchived})
 
-	in := make(chan protocol.RoutingEnvelope, 1)
-	d := dispatch.New(dispatch.Config{Frames: in, Logger: testLogger(t)})
-	d.Register(protocol.TypeListConversations, ListConversations(reg))
-	stop := runListConvDispatcher(t, d)
-	defer stop()
+	c, recv := newListConvConn(t)
 
-	in <- makeListConversationsFrame(t, 7)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 7)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
 
-	out := recvOutbound(t, d)
-	_, payload := decodeConversationsResponse(t, out)
+	_, payload := decodeConversationsResponse(t, recv())
 
 	if len(payload.Conversations) != 2 {
 		t.Fatalf("len(Conversations): got %d, want 2 (both active and archived surface)", len(payload.Conversations))
@@ -216,16 +200,14 @@ func TestListConversations_DeterministicOrdering(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-b", Cwd: "/c", LastUsedAt: tMid})
 	reg.Create(conversations.Conversation{ID: "conv-early", Cwd: "/d", LastUsedAt: tEarly})
 
-	in := make(chan protocol.RoutingEnvelope, 1)
-	d := dispatch.New(dispatch.Config{Frames: in, Logger: testLogger(t)})
-	d.Register(protocol.TypeListConversations, ListConversations(reg))
-	stop := runListConvDispatcher(t, d)
-	defer stop()
+	c, recv := newListConvConn(t)
 
-	in <- makeListConversationsFrame(t, 5)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 5)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
 
-	out := recvOutbound(t, d)
-	_, payload := decodeConversationsResponse(t, out)
+	_, payload := decodeConversationsResponse(t, recv())
 
 	gotIDs := make([]string, 0, len(payload.Conversations))
 	for _, c := range payload.Conversations {
@@ -245,15 +227,15 @@ func TestListConversations_DeterministicOrdering(t *testing.T) {
 func TestListConversations_InReplyToAndIDMonotonic(t *testing.T) {
 	t.Parallel()
 	reg := &conversations.Registry{}
-	in := make(chan protocol.RoutingEnvelope, 2)
-	d := dispatch.New(dispatch.Config{Frames: in, Logger: testLogger(t)})
-	d.Register(protocol.TypeListConversations, ListConversations(reg))
-	stop := runListConvDispatcher(t, d)
-	defer stop()
+	// Both replies land on the SAME conn, so NextID advances 1→2 across the
+	// two handler invocations (a fresh conn per call would reset it to 1).
+	c, recv := newListConvConn(t)
+	h := ListConversations(reg)
 
-	in <- makeListConversationsFrame(t, 100)
-	out1 := recvOutbound(t, d)
-	inner1, _ := decodeConversationsResponse(t, out1)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 100)); err != nil {
+		t.Fatalf("first handler: %v", err)
+	}
+	inner1, _ := decodeConversationsResponse(t, recv())
 	if inner1.InReplyTo == nil || *inner1.InReplyTo != 100 {
 		t.Errorf("first InReplyTo: got %v, want pointer to 100", inner1.InReplyTo)
 	}
@@ -261,9 +243,10 @@ func TestListConversations_InReplyToAndIDMonotonic(t *testing.T) {
 		t.Errorf("first inner.ID: got %d, want 1", inner1.ID)
 	}
 
-	in <- makeListConversationsFrame(t, 200)
-	out2 := recvOutbound(t, d)
-	inner2, _ := decodeConversationsResponse(t, out2)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 200)); err != nil {
+		t.Fatalf("second handler: %v", err)
+	}
+	inner2, _ := decodeConversationsResponse(t, recv())
 	if inner2.InReplyTo == nil || *inner2.InReplyTo != 200 {
 		t.Errorf("second InReplyTo: got %v, want pointer to 200", inner2.InReplyTo)
 	}
