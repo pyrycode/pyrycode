@@ -148,6 +148,36 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   [`codebase/854.md`](../codebase/854.md) for the production-fix half (which
   lives in `cmd/pyry`, not this package).
 
+- `interactive_per_conversation_liveness_test.go` (#997) — sibling of #854,
+  same interactive-relay shape but drives `create_conversation` over the wire
+  first (`startPerConversationHarness`, `createConversationViaPhone`) rather
+  than seeding a bound conversation, then proves liveness on the freshly
+  created conversation. Exports the harness (`startPerConversationHarness`,
+  `createConversationViaPhone`, `sealEnvelope`, `drainForReply`) that #1028
+  below reuses for its verb-drive spine.
+
+- `interactive_conversation_lifecycle_test.go` (#1028) — first real-`claude`
+  coverage of the **conversation-management verbs**, not just liveness.
+  `TestInteractiveConversationLifecycle` drives create → rename → archive →
+  unarchive → delete on ONE conversation over the same encrypted channel
+  against a freshly-spawned daemon on real `claude --model haiku`, with a
+  `send_message` liveness turn inserted **between unarchive and delete**
+  (deliberate: the metadata verbs then run on a quiescent wire, and proving
+  liveness after the archive round-trip is the stronger claim that the live
+  session survived it). Each verb's effect is asserted from an
+  operator-observable signal — the `conversation_updated` reply's
+  `Name`/`IsArchived` fields, and for delete both the `conversation_deleted`
+  reply id and the on-disk registry no longer holding the row (new
+  `readConversationIDsOnDisk` helper, ~25 lines). Test-only: reuses the #997
+  harness (`startPerConversationHarness`, `createConversationViaPhone`,
+  `sealEnvelope`, `drainForReply`) and the #854 turn drive/drain
+  (`sealSendMessage`, `drainForAssistantReply`) verbatim; zero production
+  files touched. The fake tier (`relay_v2_rename_test.go` #974,
+  `relay_v2_delete_test.go` #975, `relay_v2_archive_test.go` #976) owns the
+  verbs' detailed shape — this test is liveness/observable-state shaped only,
+  proving the real interactive stack executes the verbs at all. See
+  [`codebase/1028.md`](../codebase/1028.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -212,4 +242,7 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#423](https://github.com/pyrycode/pyrycode/issues/423) — large tool-output regression sensor, tenth consumer of the fixture trio (one named test drives a single Bash invocation producing ~80 KiB of stdout in one `tool_result` content block and pins four contracts: trailer `subtype="success"`+`stop_reason="end_turn"`, on-disk JSONL `tool_result` content >70 KiB, **byte-equal length** between disk and pyry-stdout twin, no `bufio.Scanner: token too long` in stderr); orthogonal to #421's long-session test — that test fires on many short lines, this one fires on a single line >64 KiB; codebase note at [`codebase/423.md`](../codebase/423.md).
 - Ticket [#487](https://github.com/pyrycode/pyrycode/issues/487) — `/doctor` prompt-injection regression sensor, eleventh consumer of the fixture trio (one named test guards that the per-spawn settings JSON is accepted by claude at startup — first `user` JSONL entry's content is the operator's prompt, not the `/doctor` repair template; defence-in-depth assertion on `assistant` event presence; reuses unchanged fixtures with zero new helper surface); codebase note at [`codebase/487.md`](../codebase/487.md).
 - Ticket [#491](https://github.com/pyrycode/pyrycode/issues/491) — consumer-side flip that pairs with #490's helper widening: 5 test files (`prompt_fidelity_test.go`, `prompt_fidelity_unicode_test.go`, `tool_loop_test.go`, `allowed_tools_enforcement_test.go`, `per_agent_test.go`'s shared `runRoleSmokeTest` helper) move from plain `WithWorktree(t)` to `WithWorktreeAuthenticated(t)`. With neither `ANTHROPIC_API_KEY` nor `CLAUDE_CODE_OAUTH_TOKEN` set the 9 affected tests (4 file-level + 5 `*_RoleLoop` subtests) skip in milliseconds with the named-variable diagnostic from #490, replacing prior 31 s ptyrunner timeouts / 5 s streamrunner exit-1 fails. `resilience_test.go:177` excluded (spawns claude directly with malformed stdin, asserts rejection before auth matters); codebase note at [`codebase/491.md`](../codebase/491.md).
+- Ticket [#854](https://github.com/pyrycode/pyrycode/issues/854) — interactive daemon-relay liveness harness (bootstrap-bound conversation); source of `sealSendMessage`/`drainForAssistantReply` reused by #997 and #1028; codebase note at [`codebase/854.md`](../codebase/854.md).
+- Ticket [#997](https://github.com/pyrycode/pyrycode/issues/997) — per-conversation liveness sibling of #854, drives `create_conversation` over the wire first; source of `startPerConversationHarness`/`createConversationViaPhone`/`sealEnvelope`/`drainForReply` reused by #1028.
+- Ticket [#1028](https://github.com/pyrycode/pyrycode/issues/1028) — conversation-lifecycle real-claude liveness gate (create → rename → archive → unarchive → delete, liveness turn between unarchive and delete); first real-claude coverage of the conversation-management verbs, split from #963; codebase note at [`codebase/1028.md`](../codebase/1028.md).
 - Ticket [#854](https://github.com/pyrycode/pyrycode/issues/854) — real-claude interactive two-turn liveness test, the RED/GREEN oracle for the fresh-daemon bootstrap-reply deadlock fix (`cmd/pyry/interactive_turn_stream_v2.go`'s `resolveTarget`); the only test in the suite that drives the daemon's interactive relay path directly rather than `pyry agent-run` — see [`codebase/854.md`](../codebase/854.md) and [`turnbridge-package.md`](turnbridge-package.md#which-jsonl-and-surviving-clear-rotation).
