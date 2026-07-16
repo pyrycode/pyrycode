@@ -1,3 +1,12 @@
+> **Historical — Phase-0 snapshot.** This documents the local **control-socket**
+> protocol as of Phase 0, covering only the original `status` / `stop` / `logs` /
+> `attach` verbs. The control socket is still live but has since grown session,
+> rekey, and relay verbs, so this doc is no longer current-state authority — and
+> it is **not** superseded by the mobile protocol, which is a separate wire
+> surface. For current control-plane authority see
+> [`knowledge/architecture/system-overview.md`](knowledge/architecture/system-overview.md);
+> for the mobile wire protocol see [`protocol-mobile.md`](protocol-mobile.md).
+
 # Control-socket protocol
 
 Wire-format reference for the Unix domain socket that pyry exposes. You only need this if you're writing an alternative client or scripting against pyry from outside Go.

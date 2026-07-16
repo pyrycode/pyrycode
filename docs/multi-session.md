@@ -1,3 +1,9 @@
+> **Historical — Phase-1 design record.** This records the original multi-session
+> pool design; it is a point-in-time snapshot, not current-state authority. For
+> how the session pool / registry works today see the "Session Registry" and
+> related sections of
+> [`knowledge/architecture/system-overview.md`](knowledge/architecture/system-overview.md).
+
 # Multi-session design
 
 Phase 1 of pyrycode replaces the single-session supervisor with a session pool: one pyry process supervising N claude children, each addressed by a session UUID. This document records the design decisions, the architecture, and the phasing.

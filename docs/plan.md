@@ -1,3 +1,9 @@
+> **Historical — Phase-0 release/roadmap record.** This is a point-in-time
+> snapshot; the authoritative working plan lives in the Obsidian vault (noted
+> below). For the current landed-work and roadmap summary see the "Beyond
+> Phase 0 — landed work and roadmap" section of
+> [`knowledge/architecture/system-overview.md`](knowledge/architecture/system-overview.md).
+
 # Pyrycode Plan
 
 This is a repo-local copy of the project plan. The authoritative working doc lives in the Obsidian vault at `📋 Projects/2026-04-10 - Pyrycode/Pyrycode.md`.
