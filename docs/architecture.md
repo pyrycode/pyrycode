@@ -1,3 +1,7 @@
+> **Historical — Phase-0 design record.** This is a point-in-time tour of the
+> early internal layout, not current-state authority. For how the system is
+> structured today see [`knowledge/architecture/system-overview.md`](knowledge/architecture/system-overview.md).
+
 # Pyrycode architecture
 
 A short tour of how the pieces fit together. For the user-facing surface see [`guide.md`](guide.md); this document covers the *why* and the internal layout.
