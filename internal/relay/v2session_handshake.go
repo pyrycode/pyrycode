@@ -312,6 +312,18 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	m.pushMu.Lock()
 	m.queues[s.connID] = &pushQueue{}
 	m.pushMu.Unlock()
+	// Spawn this conn's app-frame worker (#965) now that the session is open:
+	// s.device is set and s.state == V2StateOpen, so the `go` here is the
+	// happens-before edge past which the worker may safely read those
+	// immutable fields. dispatchAppFrame's non-blocking enqueue onto
+	// s.appFrames feeds it; the worker runs handlers off Run so a slow
+	// handler cannot stall the Run loop. ctx is runCtx; closeWith closes
+	// s.done to stop the worker on teardown. This tail runs once per session
+	// (V2StateOpen noise_init routes to handleRekeyInit above, not here), so
+	// exactly one worker is spawned per conn.
+	s.appFrames = make(chan []byte, appFrameQueueDepth)
+	s.done = make(chan struct{})
+	go m.appFrameWorker(ctx, s)
 	s.rekeyTimer = m.armRekeyTimer(ctx, s)
 	// Arm the idle sweep (#774) alongside the rekey timer. lastActivityAt
 	// was stamped by this noise_init's handleFrame, so the timer fires
