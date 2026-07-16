@@ -47,8 +47,9 @@ func NewConn(id string, outbound chan<- protocol.RoutingEnvelope,
 func NewTestConn(id string, outbound chan<- protocol.RoutingEnvelope,
                   auth *devices.Device) *Conn
 
-// Route decodes frame, refuses non-v1 frames via protocol.IsV1Compatible,
-// and dispatches to the handler registered for the envelope Type.
+// Route decodes frame, refuses frames whose type is not a known inbound
+// app-frame type via protocol.IsKnownAppType, and dispatches to the
+// handler registered for the envelope Type.
 // Synchronous — runs the handler on the caller's goroutine; the caller
 // drains conn's outbound channel afterwards.
 func Route(ctx context.Context, logger *slog.Logger, conn *Conn,
@@ -68,13 +69,13 @@ the live production reader is `internal/relay/handlers/register_push_token.go`'s
 |------------------------------------------ |----------------------- |---------------|
 | `frame` not JSON-decodable                | `protocol.malformed`   | absent        |
 | `PayloadEncrypted=true`                   | `protocol.unsupported` | `&req.ID`     |
-| `Type` empty / not in v1 set              | `protocol.unknown_type`| `&req.ID`     |
-| v1 `Type` with no handler registered      | `protocol.unsupported` | `&req.ID`     |
-| v1 `Type` with handler                    | handler invoked        | —             |
+| `Type` empty / not in `inboundAppTypeSet`  | `protocol.unknown_type`| `&req.ID`     |
+| known type with no handler registered     | `protocol.unsupported` | `&req.ID`     |
+| known type with handler                   | handler invoked        | —             |
 
 Sentinel-to-`Code*` mapping happens inside `Route` (consumer's job per
 `docs/PROJECT-MEMORY.md` § "Refusal-to-wire-code mapping is the
-consumer's job"). `protocol.IsV1Compatible`'s encrypted-wins-over-unknown
+consumer's job"). `protocol.IsKnownAppType`'s encrypted-wins-over-unknown
 check order is inherited verbatim — see the
 [lessons in `codebase/307.md`](../codebase/307.md#islv1compatible-check-order-pins-the-stricter-rejection).
 
@@ -106,7 +107,7 @@ testLogger(), conn, handlers, frame)` synchronously, read the reply off
   — the retained pair (predate #1039).
 - `TestMalformedInnerFrame`, `TestUnknownType`, `TestEncryptedRefusal` —
   re-homed off the deleted `Dispatcher` harness by #1039; cover the
-  malformed / `IsV1Compatible` unknown-type / `IsV1Compatible`
+  malformed / `IsKnownAppType` unknown-type / `IsKnownAppType`
   unsupported-feature branches respectively.
 - `TestIDCounter_MonotonicPerConn` — re-homed by #1039; two `NewConn`s,
   handler calls `NextID` four times, asserts per-conn independence.
@@ -121,7 +122,7 @@ helper.
 ## Dependencies
 
 - `internal/protocol` (#255 + #271) — `Envelope`, `RoutingEnvelope`,
-  `IsV1Compatible`, `Code*` constants, `ErrorPayload`, `TypeError`.
+  `IsKnownAppType`, `Code*` constants, `ErrorPayload`, `TypeError`.
 - `internal/devices` — `*devices.Device` carried on `Conn.auth`.
 
 ## Out of scope (deferred)
@@ -146,6 +147,6 @@ helper.
 - Upstream caller: [`features/relay-package.md`](relay-package.md) (v2
   session manager's `Route`/`NewConn` call sites).
 - Protocol primitives: [`features/protocol-package.md`](protocol-package.md)
-  (`IsV1Compatible`, `Code*` constants).
+  (`IsKnownAppType`, `Code*` constants).
 - Refusal-to-wire-code mapping convention: `docs/PROJECT-MEMORY.md` §
   "Refusal-to-wire-code mapping is the consumer's job"

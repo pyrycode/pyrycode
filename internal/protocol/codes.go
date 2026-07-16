@@ -58,27 +58,27 @@ const (
 	// TypeRenameConversation is a phone → binary dispatch.Route write verb
 	// (like create_conversation / promote_conversation): it renames an
 	// existing conversation and replies with the reused conversation_updated
-	// record. It is a v1TypeSet member, not a v2 control frame — see the
+	// record. It is a inboundAppTypeSet member, not a v2 control frame — see the
 	// v1/v2 partition in envelope.go / compat_test.go.
 	TypeRenameConversation = "rename_conversation"
 	// TypeDeleteConversation is a phone → binary dispatch.Route write verb
 	// (like rename_conversation / create_conversation): it PERMANENTLY removes
 	// an existing conversation from the registry (hard delete — the reversible
 	// path is archive/unarchive) and replies with a conversation_deleted
-	// acknowledgement. It is a v1TypeSet member, not a v2 control frame — see
+	// acknowledgement. It is a inboundAppTypeSet member, not a v2 control frame — see
 	// the v1/v2 partition in envelope.go / compat_test.go.
 	TypeDeleteConversation = "delete_conversation"
 	// TypeConversationDeleted is the binary → phone acknowledgement replied to
 	// a delete_conversation, correlated via in_reply_to. Unlike
 	// conversation_updated it carries only the deleted conversation's id — the
 	// record no longer exists, so no name/cwd/last_used_at can be projected.
-	// Also a v1TypeSet member.
+	// Also a inboundAppTypeSet member.
 	TypeConversationDeleted = "conversation_deleted"
 	// TypeArchiveConversation is a phone → binary dispatch.Route write verb
 	// (like rename_conversation / delete_conversation): it sets an existing
 	// conversation's durable archived flag (IsArchived = true) and replies with
 	// the reused conversation_updated record reflecting the new state. It is a
-	// v1TypeSet member, not a v2 control frame — see the v1/v2 partition in
+	// inboundAppTypeSet member, not a v2 control frame — see the v1/v2 partition in
 	// envelope.go / compat_test.go. Its symmetric restore is
 	// unarchive_conversation; both carry the shared ArchiveConversationPayload.
 	TypeArchiveConversation = "archive_conversation"
@@ -86,7 +86,7 @@ const (
 	// archive_conversation: a phone → binary dispatch.Route write verb that
 	// clears the durable archived flag (IsArchived = false) and replies with the
 	// reused conversation_updated record reflecting the restored (active) state.
-	// It is a v1TypeSet member, not a v2 control frame — see the v1/v2 partition
+	// It is a inboundAppTypeSet member, not a v2 control frame — see the v1/v2 partition
 	// in envelope.go / compat_test.go.
 	TypeUnarchiveConversation = "unarchive_conversation"
 	// TypeChangeWorkspace is a phone → binary dispatch.Route write verb (like
@@ -95,7 +95,7 @@ const (
 	// workspace (its Cwd) to a target filesystem path — confined to $HOME before
 	// it is stored — and replies with the reused conversation_updated record
 	// reflecting the new workspace. "Workspace" IS the conversation's Cwd (this
-	// codebase has no separate workspace-id concept). It is a v1TypeSet member,
+	// codebase has no separate workspace-id concept). It is a inboundAppTypeSet member,
 	// not a v2 control frame — see the v1/v2 partition in envelope.go /
 	// compat_test.go ("v2 wire message" in the ticket title names the encrypted
 	// v2 transport, not the v1/v2 type partition). The reply reuses
@@ -109,7 +109,7 @@ const (
 	// the daemon host under a client-supplied parent path, confined to $HOME, and
 	// replies with the new workspace_folder_created record carrying the created
 	// folder's canonical absolute path. It touches NO conversations registry — it
-	// only creates a directory. It is a v1TypeSet member, not a v2 control frame —
+	// only creates a directory. It is a inboundAppTypeSet member, not a v2 control frame —
 	// see the v1/v2 partition in envelope.go / compat_test.go ("v2 wire message"
 	// in the ticket title names the encrypted v2 transport, not the v1/v2 type
 	// partition). Unlike change_workspace (which reuses conversation_updated) the
@@ -119,7 +119,7 @@ const (
 	// create_workspace_folder, correlated via in_reply_to. It carries the
 	// canonical (symlink-resolved) absolute path of the created folder — no
 	// conversation is involved, so no conversation record is projected. Also a
-	// v1TypeSet member.
+	// inboundAppTypeSet member.
 	TypeWorkspaceFolderCreated = "workspace_folder_created"
 	// TypeRecentWorkspaces is a phone → binary dispatch.Route read verb (like
 	// list_conversations): it asks for the distinct set of recently-used
@@ -127,7 +127,7 @@ const (
 	// list is derived entirely from Cwd values the daemon already owns in the
 	// conversations registry — no untrusted input drives a filesystem operation,
 	// so it is NOT security-sensitive (contrast create_workspace_folder, which
-	// writes to disk from untrusted input). It is a v1TypeSet member, not a v2
+	// writes to disk from untrusted input). It is a inboundAppTypeSet member, not a v2
 	// control frame — see the v1/v2 partition in envelope.go / compat_test.go
 	// ("v2 wire message" in the ticket title names the encrypted v2 transport,
 	// not the v1/v2 type partition). Its request payload is empty by spec.
@@ -135,7 +135,7 @@ const (
 	// TypeRecentWorkspacesList is the binary → phone reply to a
 	// recent_workspaces, correlated via in_reply_to. It carries the distinct
 	// workspace paths ordered most-recent-first, each with its most-recent
-	// last_used_at. Also a v1TypeSet member.
+	// last_used_at. Also a inboundAppTypeSet member.
 	TypeRecentWorkspacesList = "recent_workspaces_list"
 
 	// Push.
@@ -143,7 +143,7 @@ const (
 )
 
 // Mobile Protocol v2 control-envelope types. These are NOT v1 application
-// types; they MUST NOT appear in v1TypeSet (internal/protocol/envelope.go).
+// types; they MUST NOT appear in inboundAppTypeSet (internal/protocol/envelope.go).
 // The v2 session manager intercepts them at the dispatch boundary
 // (internal/relay/v2session.go's dispatchAppFrame) before
 // internal/dispatch.Route is called, so handler-table lookup never sees
@@ -155,12 +155,12 @@ const (
 	// from the binary's perspective: the binary is the IK responder per
 	// ADR 024, so an inbound rekey_request takes no transport action.
 	//
-	// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a
+	// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a
 	// leak into that set would route the envelope to dispatch.Route's
 	// handler chain, violating the v2 control / v1 application boundary
 	// enforced by internal/relay's v2 session manager. The drift detector
 	// in internal/protocol/compat_test.go partitions Type* constants
-	// between v1TypeSet and v2OnlyTypes; this constant lives in the
+	// between inboundAppTypeSet and v2OnlyTypes; this constant lives in the
 	// latter.
 	TypeRekeyRequest = "rekey_request"
 )
@@ -173,10 +173,10 @@ const (
 // application events that are never dispatched inbound — but for the
 // v1/v2 partition's purpose they are equally "v2-only".
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: an old
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an old
 // phone receives the coarse v1 "message" fan-out, not these. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; these six live in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; these six live in the latter.
 const (
 	TypeTurnState      = "turn_state"
 	TypeAssistantDelta = "assistant_delta"
@@ -193,13 +193,13 @@ const (
 // renders it and pushes it back. The pair groups here so a reader greps
 // "snapshot" and finds both adjacent with their rationale.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go. Like
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go. Like
 // TypeRekeyRequest, TypeRequestSnapshot is an inbound v2 control envelope the
-// v2 session manager intercepts before dispatch.Route; a leak into v1TypeSet
+// v2 session manager intercepts before dispatch.Route; a leak into inboundAppTypeSet
 // would route it to the handler chain. TypeScreenSnapshot is an outbound
 // binary → phone event an old phone must never receive. The drift detector
 // in internal/protocol/compat_test.go partitions Type* constants between
-// v1TypeSet and v2OnlyTypes; these two live in the latter.
+// inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
 const (
 	TypeRequestSnapshot = "request_snapshot" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 	TypeScreenSnapshot  = "screen_snapshot"  // binary → phone, outbound v2 event (plain text only)
@@ -213,10 +213,10 @@ const (
 // conversation_id in an inline anonymous payload — no named payload struct,
 // mirroring TypeRekeyRequest's payload-less control precedent.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: it is an
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: it is an
 // outbound binary → phone v2 event an old phone must never receive. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
 const (
 	TypeResync = "resync" // binary → phone, outbound v2 mid-turn-reconnect resync marker
 )
@@ -229,10 +229,10 @@ const (
 // lives in SessionTransitionPayload (messaging.go): previous/new session id,
 // the transition reason, when it occurred, and the workspace cwd.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: it is an
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: it is an
 // outbound binary → phone v2 event an old phone must never receive. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
 //
 // This ticket (#656) is wire vocabulary only — the producer that emits the
 // marker on session transitions is sibling #657.
@@ -256,11 +256,11 @@ const (
 // internal/dispatch.Route (like TypeRekeyRequest / TypeRequestSnapshot); there
 // is NO dispatch.Route handler for them.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // either route an inbound control envelope to the handler chain or offer an
 // outbound modal event to an old phone, violating the v1/v2 boundary. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; these four live in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; these four live in the latter.
 //
 // This ticket (#701) is wire vocabulary only — the producer that mints modal_id
 // nonces, dedups answers by answer_token, validates inbound answers, and gates
@@ -293,11 +293,11 @@ const (
 // queued_msg_id is a plain per-conversation counter from internal/msgqueue, not
 // a security primitive.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // either route the inbound control envelope to the handler chain or offer the
 // outbound queue_state event to an old phone, violating the v1/v2 boundary. The
 // drift detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; these two live in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
 //
 // This ticket (#720) is wire vocabulary only — the producer that emits
 // queue_state is sibling #722 and the handler that applies dequeue_message is
@@ -327,10 +327,10 @@ const (
 // a normal paired-phone action (ADR 025 § Security model), not a privileged
 // tool-permission decision.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // route this inbound control envelope to the handler chain. The drift detector
 // in internal/protocol/compat_test.go partitions Type* constants between
-// v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+// inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
 const (
 	TypeInterrupt = "interrupt" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )
@@ -346,10 +346,10 @@ const (
 // channel.
 //
 // Both are outbound binary → phone v2 events an old phone must never receive.
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // offer the outbound event to an old phone, violating the v1/v2 boundary. The
 // drift detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; these two live in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
 //
 // This ticket (#812) delivers the streaming primitive unwired; the request verb
 // that drives it for the debug bundle is sibling #813.
@@ -378,10 +378,10 @@ const (
 // unpaired device is refused with 4401 and never reaches dispatchAppFrame, so no
 // new authorization gate lives on this verb.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // route this inbound control envelope to the handler chain. The drift detector
 // in internal/protocol/compat_test.go partitions Type* constants between
-// v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+// inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
 const (
 	TypeRequestDebugBundle = "request_debug_bundle" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )
@@ -409,10 +409,10 @@ const (
 // paired session is a normal paired-phone action (ADR 025 § Security model), not
 // a privileged tool-permission decision.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // route this inbound control envelope to the handler chain. The drift detector
 // in internal/protocol/compat_test.go partitions Type* constants between
-// v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+// inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
 const (
 	TypeNewSession = "new_session" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )
@@ -439,11 +439,11 @@ const (
 // for it. session_settings_updated is an outbound binary → phone reply an old
 // phone must never receive.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: a leak would
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // either route the inbound control envelope to the handler chain or offer the
 // outbound reply to an old phone, violating the v1/v2 boundary. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; these two live in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
 const (
 	TypeSetSessionSettings     = "set_session_settings"     // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 	TypeSessionSettingsUpdated = "session_settings_updated" // binary → phone, outbound v2 reply confirming the change
@@ -460,10 +460,10 @@ const (
 // messaging.go) carries the conversation identity itself, plus the terminal
 // CodeSessionBlocked and a human-readable message.
 //
-// MUST NOT be added to v1TypeSet in internal/protocol/envelope.go: it is an
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: it is an
 // outbound binary → phone v2 event an old phone must never receive. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between v1TypeSet and v2OnlyTypes; this constant lives in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
 //
 // This ticket (#1007) is wire vocabulary only — the producer that emits the
 // frame on msgqueue give-up is sibling #1008.
