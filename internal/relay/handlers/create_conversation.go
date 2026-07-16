@@ -53,8 +53,10 @@ var ErrSpawnDirRejected = errors.New("conversation spawn directory rejected")
 // createConversationMintTimeout caps the per-handler wait for creator.Create to
 // mint, supervise, and activate the conversation's dedicated session. Pool
 // activation blocks until claude's PTY is ready or ctx-cancel, so an unbounded
-// ctx would pin the per-conn goroutine on a wedged spawn; the bound turns that
-// into a retryable server.binary_offline. Matches sendMessageActivateTimeout and
+// ctx would pin the handler goroutine on a wedged spawn — in the v2 relay that
+// is the conn's app-frame worker (#965), so an unbounded wait would stall this
+// conn's subsequent frames; the bound turns it into a retryable
+// server.binary_offline. Matches sendMessageActivateTimeout and
 // internal/control's session-create budget. A tuning knob, not a contract.
 const createConversationMintTimeout = 30 * time.Second
 
@@ -160,7 +162,7 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 		// (a session↔conversation breadcrumb in the session registry); it never
 		// reaches claude's argv — buildSession uses only the SessionID for
 		// --session-id. The 30s budget turns a wedged spawn into a retryable reply
-		// rather than pinning the per-conn goroutine indefinitely.
+		// rather than pinning the conn's app-frame worker (#965) indefinitely.
 		mintCtx, cancel := context.WithTimeout(ctx, createConversationMintTimeout)
 		sessionID, err := creator.Create(mintCtx, string(id), spawnDir)
 		cancel()

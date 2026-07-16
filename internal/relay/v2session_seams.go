@@ -249,14 +249,20 @@ type V2SessionConfig struct {
 	// shape — production wires Handlers via the daemon, same handlers as
 	// v1.
 	//
-	// SECURITY: handlers run on the manager's single dispatch goroutine
-	// (same goroutine that mutates s.send / s.recv). Handlers MUST be
-	// synchronous and MUST NOT spawn long-lived background goroutines
-	// that retain a reference to the *dispatch.Conn passed in — the
-	// conn's outbound channel is per-frame and is drained before
-	// dispatchAppFrame returns; sends from a forked goroutine after that
-	// drain are silently lost (the channel is leaked but bounded by its
-	// capacity, and reclaimed by GC).
+	// SECURITY: handlers run on the addressed conn's app-frame worker
+	// goroutine (#965), NOT on the manager's Run goroutine — so a slow
+	// handler no longer stalls Run, but the worker processes one frame at a
+	// time, so a handler MUST still return in bounded time or it stalls that
+	// conn's subsequent frames (bound long waits with a ctx timeout, as
+	// create_conversation does). Handlers MUST NOT touch s.send / s.recv or
+	// any Noise/session state — the worker never holds them; every reply is
+	// sealed back on the Run goroutine (forwardAppReply), keeping the send
+	// CipherState single-owner. A handler MUST NOT spawn a long-lived
+	// background goroutine that retains the *dispatch.Conn passed in — the
+	// conn's outbound channel is per-frame and is drained only while
+	// routeAppFrame runs; sends from a forked goroutine after the handler
+	// returns are silently lost (the channel is leaked but capacity-bounded,
+	// and reclaimed by GC).
 	Handlers map[string]dispatch.Handler
 
 	// Snapshotter renders the live claude screen for an inbound

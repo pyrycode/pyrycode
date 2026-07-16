@@ -120,6 +120,18 @@ type snapshotReq struct {
 	reply chan []ActiveConn
 }
 
+// appReplyMsg carries one handler reply from a per-conn worker goroutine
+// (routeAppFrame) back to Run's dispatch goroutine for sealing (#965). The
+// worker never touches s.send — it posts the not-yet-sealed reply here and
+// Run's m.appReply arm calls forwardAppReply, keeping every s.send.Encrypt
+// on the single-owner Run goroutine. s pins which session's send
+// CipherState seals the reply; reply is the marshalled inner frame the
+// handler emitted via c.Send.
+type appReplyMsg struct {
+	s     *V2Session
+	reply protocol.RoutingEnvelope
+}
+
 // wakeBufferSize sizes the manager's wake channel. The 1-hour rekey
 // cadence makes concurrent fires across sessions vanishingly rare; 16
 // is a generous safety margin that absorbs the realistic worst case
@@ -129,12 +141,23 @@ type snapshotReq struct {
 const wakeBufferSize = 16
 
 // handlerOutboundBuf is the buffer size for the per-frame dispatch.Conn
-// outbound channel allocated by dispatchAppFrame. The three production
+// outbound channel allocated by routeAppFrame. The three production
 // handlers (send_message, list_conversations, register_push_token) emit
 // exactly one reply per invocation; Route emits at most one error reply.
 // 8 is a generous safety margin and is documented as the
 // synchronous-handler assumption in V2SessionConfig.Handlers.
 const handlerOutboundBuf = 8
+
+// appFrameQueueDepth bounds the per-conn V2Session.appFrames queue — the
+// number of decrypted application-frame plaintexts that may sit awaiting
+// the conn's worker goroutine at once (#965). Realistic request/response
+// pipelining depth on one conn is 1–2; 16 is a generous margin that never
+// trips a legitimate burst while still bounding inbound memory
+// deterministically. dispatchAppFrame's non-blocking enqueue tears the
+// conn down (4421) on overflow rather than block Run (which would
+// reintroduce the cross-conn head-of-line stall this ticket removes). A
+// package-level var, not a const, so the overflow test can shrink it.
+var appFrameQueueDepth = 16
 
 // V2SessionState is the externally-observable lifecycle state of a
 // per-conn V2Session. The handshakeComplete substate is distinct from
@@ -275,6 +298,28 @@ type V2Session struct {
 	// events come straight from ring.After's materialised copy, so there is no
 	// drop/gap risk a second cap would reintroduce (spec § Open questions).
 	replayQueue []eventring.Event
+
+	// appFrames is the per-conn FIFO queue of decrypted application-frame
+	// plaintexts handed off to this session's worker goroutine
+	// (appFrameWorker) so a slow handler cannot stall the Run loop (#965).
+	// Written ONLY on Run (dispatchAppFrame's non-blocking enqueue, after
+	// s.recv.Decrypt); read ONLY by the worker. Buffered
+	// (appFrameQueueDepth); NEVER closed (avoids a close-vs-send race — the
+	// worker terminates via s.done / ctx and the channel is GC'd with the
+	// session). Created alongside done in handleNoiseInit's open tail, so a
+	// pre-open or non-open session leaves it nil. The plaintext slices are
+	// freshly allocated by noise.CipherState.Decrypt, so enqueuing them for
+	// later off-Run processing aliases nothing.
+	appFrames chan []byte
+
+	// done is closed by closeWith to stop this session's worker goroutine
+	// without waiting for Run exit (no per-session goroutine leak under conn
+	// churn). Follows the timer-cleanup pattern: created alongside appFrames
+	// at open, closed exactly once (closeWith's V2StateClosed guard makes it
+	// close-once). Closed — never reassigned — so the worker's field read
+	// stays race-free (the channel value is stable; only its closed-state
+	// flips). Nil for a session that never reached open.
+	done chan struct{}
 }
 
 // State returns the externally-observable state. Called from the same
@@ -365,6 +410,19 @@ type V2SessionManager struct {
 	// exit; in-flight callers unblock via ctx.Done.
 	snapshot chan snapshotReq
 
+	// appReply funnels one handler reply from a per-conn worker goroutine
+	// (routeAppFrame) back to Run for sealing (#965), so s.send.Encrypt stays
+	// on the single-owner Run goroutine while the handler itself runs off-Run.
+	// Mirrors the drainCh/replayCh house style of "off-Run producers, Run
+	// consumes-and-seals", but carries data (appReplyMsg) rather than a bare
+	// wake — the reply's addressed session travels with it. Unbuffered:
+	// backpressure onto the worker is correct (a worker whose replies Run
+	// cannot keep up with should slow, not accumulate pending seals in a
+	// manager-global channel shared across every conn). Not closed by the
+	// manager on Run exit; in-flight workers unblock via runCtx / s.done in
+	// forwardToRun.
+	appReply chan appReplyMsg
+
 	// modalTimeout carries a surfaced modal's id from its time.AfterFunc
 	// callback goroutine (armed off-Run by ArmModalTimeout) to the Run goroutine
 	// for the deny-on-timeout safe-deny (#725). Daemon-global (a modal is not
@@ -420,6 +478,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		drainCh:      make(chan struct{}, 1),
 		replayCh:     make(chan struct{}, 1),
 		snapshot:     make(chan snapshotReq),
+		appReply:     make(chan appReplyMsg),
 		modalTimeout: make(chan string, wakeBufferSize),
 	}, nil
 }
@@ -468,6 +527,12 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.drainReplayOnce(runCtx)
 		case req := <-m.snapshot:
 			req.reply <- m.handleActiveConns()
+		case rep := <-m.appReply:
+			// A per-conn worker (routeAppFrame) produced a handler reply
+			// off-Run; seal it here so every s.send.Encrypt stays on the
+			// single-owner Run goroutine (#965). The worker never touches
+			// s.send — it only marshalled + pushed the reply through c.Send.
+			m.forwardAppReply(rep.s, rep.reply)
 		}
 	}
 }
@@ -620,23 +685,28 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 	}
 }
 
-// dispatchAppFrame runs dispatch.Route on a per-frame *dispatch.Conn and
-// forwards each reply envelope the handler emits: AEAD-sealed under
-// s.send, wrapped as noise_msg, and sent via m.send. Route runs on a
-// short-lived goroutine while this (the Run) goroutine drains the reply
-// channel concurrently, so a handler emitting more replies than the
-// per-frame outbound buffer (handlerOutboundBuf) holds cannot fill the
-// channel and deadlock Route inside c.Send (#909). Returns only after
-// Route has returned and every buffered reply has been drained.
+// dispatchAppFrame runs on the Run goroutine. It splits an open-state
+// plaintext two ways: a v2 control envelope (rekey/modal/interrupt/
+// new_session/dequeue/snapshot/debug_bundle/settings) is handled inline on
+// Run — those handlers touch s.send / session state / timers and are fast;
+// an application frame is handed OFF Run to this conn's worker goroutine
+// (appFrameWorker) via a non-blocking enqueue onto s.appFrames, then
+// dispatchAppFrame returns so the Run loop keeps servicing every other arm
+// (other conns' frames, m.wake, m.modalTimeout, m.manualRekey) while the
+// possibly-slow handler runs (#965). The worker routes the frame
+// (routeAppFrame → dispatch.Route → handler → c.Send: a marshal + channel
+// push, no AEAD) and posts each reply back to Run via m.appReply, where
+// forwardAppReply seals it under s.send — so every s.send.Encrypt stays on
+// the single-owner Run goroutine.
 //
-// The seal (s.send.Encrypt, via forwardAppReply) runs only on the Run
-// goroutine — the Noise send CipherState is single-owner; only Route →
-// handler → c.Send (a marshal + channel push, no AEAD) runs off-Run.
-//
-// The outbound channel is deliberately NOT closed — a misbehaving handler
-// that forks a sender after Route returns writes into a leaked but
-// capacity-bounded channel that the GC reclaims once the goroutine exits;
-// closing here would panic such a sender (#446).
+// The enqueue is non-blocking: on overflow (appFrameQueueDepth app frames
+// already in flight for this one conn — far beyond request/response norms)
+// the conn is torn down at 4421 rather than blocking Run, which would
+// reintroduce the cross-conn head-of-line stall this ticket removes.
+// Overflow is self-inflicted per conn: the plaintext was AEAD-decrypted
+// under s.recv (in handleNoiseMsg) before reaching here, so only the
+// authenticated phone can fill its own queue — no cross-conn or injection
+// vector.
 func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
 	// v2 control-envelope discriminator: a successful JSON decode whose
 	// type matches a v2 control type is routed away from the v1
@@ -679,24 +749,93 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		}
 	}
 
+	// Application frame: hand off to this conn's worker (off-Run) via a
+	// non-blocking enqueue. Blocking here would re-couple Run to the
+	// handler's duration — the exact cross-conn head-of-line stall #965
+	// removes. s.appFrames is non-nil for any V2StateOpen session (created
+	// in handleNoiseInit's open tail alongside the worker), and Run reaching
+	// this line means the session is open (handleNoiseMsg's V2StateOpen
+	// case).
+	select {
+	case s.appFrames <- plaintext:
+	default:
+		// Overflow: appFrameQueueDepth app frames already in flight for this
+		// one conn, far beyond request/response norms. Tear the conn down at
+		// 4421 (reusing the existing protocol-mismatch code — a pacing
+		// violation is protocol-adjacent) rather than block Run or silently
+		// drop a request/response. The WARN reason distinguishes it; the log
+		// carries only conn_id + a static count, never plaintext.
+		m.cfg.Logger.Warn("relay: v2 app frame queue overflow; closing conn",
+			"event", "v2.app_frame.queue_overflow",
+			"conn_id", s.connID,
+			"close_code", int(StatusProtocolMismatch),
+			"depth", appFrameQueueDepth)
+		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+	}
+}
+
+// appFrameWorker is the per-conn sub-actor that runs application handlers
+// off the Run goroutine (#965). Exactly one is spawned per session in
+// handleNoiseInit's open tail; it processes s.appFrames in strict FIFO
+// arrival order — one frame fully routed (Route returned, all its replies
+// forwarded to Run) before the next is dequeued — so no two handlers for
+// the same conn run concurrently and their sealed replies emit in arrival
+// order (AC-2). It terminates when s.done is closed (per-session teardown
+// in closeWith) or ctx (runCtx) is cancelled (Run exit) — leaving no
+// goroutine behind under conn churn or shutdown.
+//
+// The worker NEVER touches s.send / s.recv / keys / session state: it only
+// runs Route → handler → c.Send (a marshal + channel push, no AEAD) and
+// posts replies to m.appReply for Run to seal. That is the load-bearing
+// single-owner-cipher invariant (AC-3).
+func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.done:
+			return
+		case pt := <-s.appFrames:
+			// closeWith may have closed s.done while this frame sat in the
+			// buffer (select picks randomly when both are ready). Re-check and
+			// abandon queued-but-unstarted frames for a torn-down conn rather
+			// than spawn a handler/child for a conn being closed.
+			select {
+			case <-s.done:
+				return
+			default:
+			}
+			m.routeAppFrame(ctx, s, pt)
+		}
+	}
+}
+
+// routeAppFrame runs dispatch.Route for one application frame on the
+// worker goroutine and forwards each reply the handler emits back to Run
+// (via m.appReply) for sealing. Preserves #909's concurrent-drain shape:
+// Route runs on its own short-lived goroutine while this goroutine drains
+// the per-frame outbound channel, so a handler emitting more than
+// handlerOutboundBuf replies cannot fill outbound and deadlock Route inside
+// c.Send. A single sender (the handler) + this single receiver preserves
+// FIFO emission order, and forwardToRun's blocking send onto the FIFO
+// m.appReply channel preserves it across the seam.
+//
+// Only Route (→ handler → c.Send: a marshal + channel push, no AEAD) runs
+// here; the seal (forwardAppReply → s.send.Encrypt) happens on Run. The
+// outbound channel is deliberately NOT closed — a misbehaving handler that
+// forks a sender after Route returns writes into a leaked but
+// capacity-bounded channel the GC reclaims once the goroutine exits;
+// closing here would panic such a sender (#446).
+//
+// ctx.Done() is not an arm of the Route-drain select for the same reason
+// as #909: the handler observes cancellation through c.Send's own ctx arm
+// (ctx is runCtx), so a shutdown drives Route to return and fires routeDone
+// naturally. forwardToRun DOES honor ctx / s.done so a worker parked on a
+// reply send unblocks on teardown.
+func (m *V2SessionManager) routeAppFrame(ctx context.Context, s *V2Session, plaintext []byte) {
 	outbound := make(chan protocol.RoutingEnvelope, handlerOutboundBuf)
 	conn := dispatch.NewConn(s.connID, outbound, s.device)
 
-	// Run dispatch.Route on a short-lived goroutine and drain its reply
-	// envelopes here on the Run goroutine, so a handler emitting more than
-	// handlerOutboundBuf replies cannot fill outbound and deadlock Route
-	// inside c.Send — this loop empties outbound continuously while Route
-	// runs. Only Route (→ handler → c.Send: a marshal + channel push, no
-	// AEAD) runs off-Run; every seal (forwardAppReply → s.send.Encrypt)
-	// stays on the Run goroutine, keeping the Noise send CipherState
-	// single-owner. A single sender (the handler) plus this single
-	// receiver preserves FIFO emission order end to end.
-	//
-	// ctx.Done() is deliberately NOT a third select arm: the handler
-	// already observes cancellation through c.Send's ctx arm (ctx is
-	// runCtx), so a shutdown drives Route to return and fires routeDone
-	// naturally. Adding a ctx arm would risk orphaning the still-running
-	// Route goroutine and dropping ordered replies mid-stream.
 	routeDone := make(chan struct{})
 	go func() {
 		defer close(routeDone)
@@ -705,15 +844,18 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 	for {
 		select {
 		case reply := <-outbound:
-			m.forwardAppReply(s, reply)
+			if !m.forwardToRun(ctx, s, reply) {
+				return
+			}
 		case <-routeDone:
-			// Route returned (the handler has returned, so no further
-			// c.Send is in flight); drain any residual buffered replies in
-			// FIFO order, then return.
+			// Route returned (no further c.Send in flight); drain any residual
+			// buffered replies in FIFO order, then return.
 			for {
 				select {
 				case reply := <-outbound:
-					m.forwardAppReply(s, reply)
+					if !m.forwardToRun(ctx, s, reply) {
+						return
+					}
 				default:
 					return
 				}
@@ -722,14 +864,44 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 	}
 }
 
+// forwardToRun blocks until reply is handed to Run's m.appReply arm (which
+// seals it under s.send), or the session/manager tears down. Returns true
+// on a successful hand-off, false if ctx (runCtx, Run exiting) or s.done
+// (this conn's closeWith) fired first — in which case routeAppFrame
+// abandons the remaining drain (the Route goroutine still unwinds via
+// c.Send's own ctx arm, and any reply already past this point is dropped by
+// forwardAppReply's V2StateOpen gate). The blocking send is what applies
+// backpressure onto the worker so replies never accumulate unbounded.
+func (m *V2SessionManager) forwardToRun(ctx context.Context, s *V2Session, reply protocol.RoutingEnvelope) bool {
+	select {
+	case m.appReply <- appReplyMsg{s: s, reply: reply}:
+		return true
+	case <-s.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // forwardAppReply seals one handler reply under s.send and forwards it as
 // a noise_msg via m.send. MUST run only on the manager's Run goroutine —
 // s.send is the single-owner Noise send CipherState, and a concurrent
 // Encrypt would reuse a nonce / corrupt the send counter on the encrypted
-// wire. Drops the reply (WARN, no wire emission) on the
+// wire. Reached from Run's m.appReply arm, where a per-conn worker posts
+// the not-yet-sealed reply. Drops the reply (WARN, no wire emission) on the
 // realistically-unreachable seal/marshal error, exactly as #446: never
 // emit an unsealed frame.
 func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingEnvelope) {
+	if s.state != V2StateOpen {
+		// The worker was mid-handler when closeWith tore this session down
+		// (#965). Drop the reply — sealing under a dead session would burn a
+		// send-nonce for a frame no live peer awaits. Reading s.state is safe:
+		// forwardAppReply runs on Run, the sole writer of s.state. Mirrors
+		// forwardEnvelope's V2StateOpen gate.
+		m.cfg.Logger.Debug("relay: v2 app reply dropped; session not open",
+			"conn_id", s.connID)
+		return
+	}
 	ciphertext, err := s.send.Encrypt(reply.Frame)
 	if err != nil {
 		// Realistically unreachable under correct flynn/noise. Drop the
@@ -824,6 +996,15 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
 		s.idleTimer = nil
+	}
+	// Stop this conn's app-frame worker (#965), symmetric with the m.queues
+	// delete below: closing s.done makes the worker return (and abandon any
+	// queued-but-unstarted frames) without waiting for Run exit. The
+	// V2StateClosed guard at the top makes this close-once; s.done is left
+	// closed-but-non-nil (never reassigned) so the worker's field read stays
+	// race-free. nil for a session torn down before it ever reached open.
+	if s.done != nil {
+		close(s.done)
 	}
 	// Drop any in-flight reconnect-replay tail (#777). The session is deleted
 	// from m.sessions just below, so drainReplayOnce's scan can no longer find

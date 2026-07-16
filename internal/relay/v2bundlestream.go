@@ -73,9 +73,9 @@ func bundleEnvelopes(blob []byte) ([]protocol.Envelope, error) {
 // completion marker. It builds the envelopes with bundleEnvelopes, then enqueues
 // each in order via Push — the manager's own asynchronous send path (Push →
 // drainOnce → forwardEnvelope), the same path every unsolicited daemon → client
-// frame uses. It deliberately does NOT use the synchronous handler-reply channel
-// (handlerOutboundBuf = 8, drained only after the handler returns), so a bundle
-// of any size cannot deadlock.
+// frame uses. It deliberately does NOT use the per-frame handler-reply channel
+// (handlerOutboundBuf = 8, a small fixed buffer sized for the 1-few-reply
+// request/response case), so a bundle of any size cannot overrun it.
 //
 // Safe to call from any goroutine, including a future handler on the Run
 // goroutine: Push never blocks and never touches s.send, so this sidesteps both
