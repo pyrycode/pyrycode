@@ -186,7 +186,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 
 	// Build and AEAD-seal hello_ack via WriteResp's early-data slot. The
 	// hello_ack carries InReplyTo=hello.ID to mirror v1's request/response
-	// pairing convention (auth.go's buildResponse).
+	// pairing convention.
 	helloID := helloEnv.ID
 	ackPayload, err := json.Marshal(protocol.HelloAckPayload{
 		ProtocolVersion: "v2",
