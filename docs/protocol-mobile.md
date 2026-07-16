@@ -26,7 +26,7 @@ v2 layers end-to-end encryption over the v1 wire while preserving the relay topo
 | **Re-key** | None. | Time-based every **1 hour** + explicit `rekey_request` envelope. |
 | **Version negotiation** | `protocol_versions: ["v1"]` in `hello`. | **Hard cutover.** Field retained shape-compatibly with `["v2"]`; v2 implementations do not negotiate down to v1. |
 
-The application-level message types (`send_message`, `message`, `list_conversations`, `conversations`, `create_conversation`, `conversation_created`, `promote_conversation`, `conversation_updated`, `backfill_since`, `message_chunk`, `backfill_done`, `register_push_token`, `hello`, `hello_ack`, `error`, `ack`) are **unchanged** in v2. They simply live inside the AEAD-sealed payload of `noise_msg` frames.
+The application-level message types (`send_message`, `message`, `list_conversations`, `conversations`, `create_conversation`, `conversation_created`, `promote_conversation`, `conversation_updated`, `register_push_token`, `hello`, `hello_ack`, `error`, `ack`) are **unchanged** in v2. They simply live inside the AEAD-sealed payload of `noise_msg` frames.
 
 ## Scope
 
@@ -418,9 +418,6 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `conversation_created` | binary → phone | no | |
 | `promote_conversation` | phone → binary | no | |
 | `conversation_updated` | binary → phone | no | |
-| `backfill_since` | phone → binary | no | |
-| `message_chunk` | binary → phone | no | |
-| `backfill_done` | binary → phone | no | |
 | `register_push_token` | phone → binary | no | |
 | `ack` | either | no | |
 | `error` | either | no | |
@@ -599,7 +596,7 @@ Direction **binary → phone** (outbound v2 control marker; not in `v1TypeSet` �
 |---|---|---|
 | `conversation_id` | string | The conversation the phone must full-reload. The daemon's own resolved id; never attacker-derived. |
 
-The marker carries no `event_id` (it is not a structured event). On receipt the phone discards its `last_event_id` cursor for that conversation and performs a full reload (today via a fresh subscription; the dedicated `backfill_since` reload handler is a deferred follow-up — it needs a message-history store that does not exist yet).
+The marker carries no `event_id` (it is not a structured event). On receipt the phone discards its `last_event_id` cursor for that conversation and performs a full reload (today via a fresh subscription).
 
 > **Implementation status (2026-06-17).** The reconnect-replay daemon code shipped via PR #651 (merged 2026-06-08) with a code-review **MUST FIX** outstanding — the *caught-up* path set the per-connection dedup watermark from the untrusted `last_event_id`, which could silently suppress the live stream after a `/clear`-rotated reconnect or a hostile-large `last_event_id`. That defect is **resolved**: #663 clamps the caught-up watermark to the conversation's newest retained id (`min(afterID, NewestID(convID))`), so the wire contract above is now the shipped daemon guarantee. Fix record: [`docs/knowledge/codebase/663.md`](knowledge/codebase/663.md); defect history: [`docs/knowledge/codebase/647.md`](knowledge/codebase/647.md#️-known-issue--unresolved-code-review-must-fix-do-not-merge-as-is).
 
@@ -856,7 +853,7 @@ Every reconnect performs a fresh Noise_IK handshake (there is no session resumpt
 
 **Mode A — bulk transcript content → cursor backfill (replay of past events).** History and the mid-turn live stream reconnect by *replaying past events* from a cursor:
 
-- `last_seen_ts` drives the v1 bulk-history backfill (`backfill_since` → `message_chunk*` → `backfill_done`, unchanged from v1). All backfill frames ride inside `noise_msg`.
+- `last_seen_ts` drives the v1 bulk-history backfill (replay of past messages, unchanged from v1). All backfill frames ride inside `noise_msg`.
 - `hello.last_event_id` drives the #647 mid-turn event-ring replay, with the `resync` marker as the snapshot-fallback when the advertised cursor has aged off the bounded per-conversation ring — see [Reconnect replay & resync (consumer, #647)](#reconnect-replay--resync-consumer-647).
 
 **Mode B — control state → current-state snapshot (the reconcile-on-connect rule).** Control state reconnects by *re-asserting current truth*, replaying no past events. This is the single written contract every client builds against:

@@ -138,11 +138,6 @@ const (
 	// last_used_at. Also a v1TypeSet member.
 	TypeRecentWorkspacesList = "recent_workspaces_list"
 
-	// Backfill.
-	TypeBackfillSince = "backfill_since"
-	TypeMessageChunk  = "message_chunk"
-	TypeBackfillDone  = "backfill_done"
-
 	// Push.
 	TypeRegisterPushToken = "register_push_token"
 )

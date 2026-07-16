@@ -24,7 +24,7 @@ type HelloServerPayload struct {
 // HelloClientPayload is the body of a "hello" envelope sent by the phone
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
 // always "client". LastSeenTS is optional; when present it triggers a
-// backfill (docs/protocol-mobile.md § Backfill semantics).
+// backfill (docs/protocol-mobile.md § Reconnect / Backfill semantics).
 //
 // Token is the in-band carrier of the device-pairing token under v2
 // (docs/protocol-mobile.md § Authentication, line 420). Empty under v1
