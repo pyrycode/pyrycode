@@ -413,4 +413,13 @@ path is #791/#793 (EPIC #597 Phase 3).
   is pending is brought to current modal truth. See
   [`v2-session-manager.md` § Connect-time modal reconcile](v2-session-manager.md#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals)
   and [codebase/877.md](../codebase/877.md).
+- **Trust-class e2e capstone — #993** (landed, `security-sensitive`): the trust-class sibling of
+  the #791/#793 permission-modal e2e capstones — a live daemon + `fakeclaude`-simulated startup
+  trust dialog, driven from a gated interactive phone over the real v2 Noise wire, certifying the
+  untrusted-cwd flow end to end: `modal_shown{Class:"trust"}` forwards non-vacuously, the queued
+  turn is held (never typed into the consent gate) until an authorized `proceed` answer runs it,
+  and a `deny` yields the terminal `session_error{session.blocked, "folder not trusted"}` with the
+  turn genuinely never delivered. Rides [#1013](../codebase/1013.md) and [#1014](../codebase/1014.md)
+  wholesale; introduces no production behaviour beyond the test-only `fakeclaude` simulation. See
+  [codebase/993.md](../codebase/993.md).
 
