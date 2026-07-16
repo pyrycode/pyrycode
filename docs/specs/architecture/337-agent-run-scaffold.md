@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # 337 — `pyry agent-run` subcommand scaffold + flag parsing
 
 ## Files to read first

@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # Spec — agent-run: stream-json stdout emitter mirroring `claude -p` shape + result trailer (#354)
 
 **Size:** S — ~180 net LOC production across 2 files. Edit fan-out: zero (greenfield package + one caller). Branch-overlap: clean.

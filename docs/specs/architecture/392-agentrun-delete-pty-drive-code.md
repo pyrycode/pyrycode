@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # Ticket #392 — agentrun: delete PTY drive code (drive.go, trust.go, settings.go) after stream-json migration
 
 **Size:** XS. Mechanical deletion of seven files (–1375 LoC), one comment-hygiene edit (one production file), one new knowledge-base note. No new code, no behaviour change, no consumer cascade.
