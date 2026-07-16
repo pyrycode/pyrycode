@@ -125,13 +125,6 @@ var excludedTypes = map[string]string{
 	"TypeDebugBundleChunk":  "push",
 	"TypeDebugBundleDone":   "push",
 	"TypeSessionError":      "push",
-
-	// v1-legacy — a v1 dispatch verb with no v2 handler (retiring with #913); not
-	// a v2 gap. backfill_since is borderline (a v1 inbound verb) — excluded as
-	// v1-legacy, called out explicitly per AC #4, NOT flagged as a v2 gap.
-	"TypeBackfillSince": "v1-legacy",
-	"TypeMessageChunk":  "v1-legacy",
-	"TypeBackfillDone":  "v1-legacy",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

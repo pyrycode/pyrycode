@@ -138,8 +138,5 @@ var v1TypeSet = map[string]bool{
 	TypeWorkspaceFolderCreated: true,
 	TypeRecentWorkspaces:       true,
 	TypeRecentWorkspacesList:   true,
-	TypeBackfillSince:          true,
-	TypeMessageChunk:           true,
-	TypeBackfillDone:           true,
 	TypeRegisterPushToken:      true,
 }

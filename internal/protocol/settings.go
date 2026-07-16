@@ -20,8 +20,8 @@ package protocol
 // field flows straight through to "leave the stored value untouched".
 //
 // The omitempty on the three pointer fields is load-bearing and deliberately
-// UNLIKE the sibling *string-without-omitempty payloads (BackfillSincePayload,
-// SessionTransitionPayload) whose spec wire shows a literal null sentinel. Here
+// UNLIKE the sibling *string-without-omitempty payload (SessionTransitionPayload)
+// whose spec wire shows a literal null sentinel. Here
 // an unset field is *absent* from the wire (the minimal shape a client changing
 // one setting naturally produces), not null. Go's omitempty treats a non-nil
 // pointer as non-empty regardless of the pointee, so a non-nil *false / *""
