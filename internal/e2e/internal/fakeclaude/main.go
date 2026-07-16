@@ -165,6 +165,41 @@
 //	                               already carries "/clear". Default off — when
 //	                               unset, fakeclaude is byte-identical to its prior
 //	                               behaviour.
+//	PYRY_FAKE_CLAUDE_TRUST_TRIGGER optional path watched in parallel with the
+//	                               others. A sibling of the modal trigger for
+//	                               claude's STARTUP trust-folder dialog (the #988
+//	                               no-auto-trust gate). fakeclaude comes up idle
+//	                               (startup glyph); on the trigger's first appearance
+//	                               it writes trustScreen once — the "Quick safety
+//	                               check" dialog whose ❯-marked option row satisfies
+//	                               tui-driver's gridHasTrustDialog — so DetectModalClass
+//	                               transitions Unknown->TrustFolder (the daemon surfaces
+//	                               modal_shown{trust}) AND WaitReady returns
+//	                               Readiness{TrustModal:true} (the supervisor HOLDS the
+//	                               queued turn with ErrTrustModalPending, #1013). It
+//	                               then watches stdin to discriminate the two
+//	                               resolutions (the load-bearing part): the accept
+//	                               keystroke ("1\r" from Supervisor.AcceptTrust — the
+//	                               first post-trust stdin bytes that are NOT a bare
+//	                               ESC) clears the dialog once (trustClearScreen), so
+//	                               WaitReady returns clean and the held turn delivers;
+//	                               a bare ESC deny (Supervisor.SendEsc, via a trust
+//	                               modal_answer{exit}/timeout) is IGNORED — the dialog
+//	                               stays up, the turn stays held forever, and no reply
+//	                               is produced (the daemon's typed "folder not trusted"
+//	                               session_error is emitted at the resolver regardless
+//	                               of child behaviour, #1014). Reuses containsBareESC to
+//	                               distinguish; the stdin reader only signals
+//	                               (trustAcceptPending), the main goroutine is the sole
+//	                               writer of f/stdout (single-writer discipline). Raw
+//	                               mode required so "1\r" and the bare ESC reach the
+//	                               reader verbatim/unbuffered. One-shot show + one-shot
+//	                               clear. Used only by the untrusted-cwd trust e2e
+//	                               (#993). Mutually exclusive with PYRY_FAKE_CLAUDE_TUI /
+//	                               _IDLE_TRIGGER / _MODAL_TRIGGER, whose startup
+//	                               spinner / busy window / permission screen would
+//	                               perturb the baseline. Default off — when unset, no
+//	                               watch and startup behaviour is unchanged.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -200,6 +235,7 @@ const (
 	envEscEndsTurn      = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
 	envModalClearOnAns  = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
 	envClearRotates     = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
+	envTrustTrigger     = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
 	assistantMaxBytes   = 64 * 1024
 	pollInterval        = 50 * time.Millisecond
 )
@@ -260,6 +296,46 @@ const modalClearScrollRows = 16
 // cmd/substrate-guard allowlist entry.
 var modalClearScreen = strings.Repeat("\r\n", modalClearScrollRows) + string(idleGlyph)
 
+// trustScreen is claude's STARTUP trust-folder dialog (#988), a sibling of
+// modalScreen for the trust class. It is the single screen shape that makes BOTH
+// tui-driver entry points fire: DetectModalClass returns ModalClassTrustFolder
+// (the daemon's #708 producer surfaces modal_shown{class:"trust"}) AND
+// gridHasTrustDialog/Readiness.TrustModal is true (the supervisor holds the
+// queued turn with ErrTrustModalPending, #1013). gridHasTrustDialog (tui-driver
+// v1.10.0 #219) requires the "Quick safety check" header AND, within 3 rows
+// below, a ❯-marked numbered option row — so the header phrase alone (a source
+// quotation) no longer classifies. The ❯ on the option row also carries IsIdle
+// (WaitReady waits for idle before classifying), so the held turn hits the trust
+// gate rather than blocking. Emitted after the startup idle glyph so the class
+// transitions Unknown->TrustFolder. Both the ❯ glyph and the header phrase are
+// covered by this file's cmd/substrate-guard allowlist entry. Pinned by
+// trust_detect_test.go.
+const trustScreen = "Quick safety check: Is this a project you trust?\r\n" +
+	"❯ 1. Yes, I trust this folder\r\n" +
+	"  2. No, take me back\r\n"
+
+// trustClearScrollRows is how many blank lines clearTrustScreen scrolls to push
+// the "Quick safety check" header off the ENTIRE rendered grid. Unlike the
+// permission clear (modalClearScrollRows, which only clears the bottom-12
+// permissionRegionRows window), gridHasTrustDialog scans EVERY grid row, so the
+// header must scroll out of the whole DefaultPtyRows (40) screen: the header sits
+// at row 0, so any scroll count >= 37 (40 - 3, the trust screen's own rows)
+// evicts it. 40 clears the full grid with margin and never leaves the header in
+// scrollback-visible range. Pinned by trust_detect_test.go.
+const trustClearScrollRows = 40
+
+// trustClearScreen is what clearTrustScreen writes (once, on the accept
+// keystroke) to make the trust dialog vanish: trustClearScrollRows blank lines
+// that scroll the "Quick safety check" header off the whole grid, then the idle
+// glyph as a non-empty final row. The trailing glyph is load-bearing — without a
+// non-empty last row IsIdle would go false after the clear (no ❯ anywhere) and
+// WaitReady would block instead of delivering the held turn. Rendered after
+// trustScreen the combined screen must classify as NOT-TrustFolder AND
+// HasTrustModal==false (the trust_detect_test.go assertions). Reuses the idle
+// glyph, so it is covered by this file's existing cmd/substrate-guard allowlist
+// entry.
+var trustClearScreen = strings.Repeat("\r\n", trustClearScrollRows) + string(idleGlyph)
+
 // stdoutMu serializes every write to os.Stdout. In TUI mode the main goroutine
 // (startup idle glyph + emitAssistantIfTriggered) and the stdin goroutine
 // (thinking spinner) both write os.Stdout; without serialization a spinner
@@ -298,6 +374,18 @@ var clearPending atomic.Bool
 // never writes f (single-writer-of-f). Set only in clear-rotate mode; untouched
 // otherwise.
 var clearRotatePending atomic.Bool
+
+// trustAcceptPending signals — from the stdin-reader goroutine to the main poll
+// loop — that the trust-folder ACCEPT keystroke arrived in trust mode
+// (envTrustTrigger): the first post-trust stdin bytes that are NOT a bare ESC
+// (Supervisor.AcceptTrust writes "1\r"). The main goroutine then clears the trust
+// dialog (clearTrustScreen), so WaitReady returns clean and the held turn
+// delivers. A bare ESC deny (Supervisor.SendEsc) never sets it — the reader
+// distinguishes via containsBareESC, leaving the dialog up so the turn stays held
+// and no reply is produced. Signal only, exactly like clearPending / escPending:
+// the reader never writes stdout or f (single-writer discipline). Set only in
+// trust mode; untouched otherwise.
+var trustAcceptPending atomic.Bool
 
 // interruptEndTurnLine is the canned claude-format assistant end_turn JSONL line
 // appendTurnEnd writes when Esc-ends-turn mode (envEscEndsTurn) detects the remote
@@ -338,27 +426,35 @@ func main() {
 	// follows the fresh <uuid>.jsonl into the registry. Additive and off by
 	// default (byte-identical when unset), like escEndsTurn.
 	clearRotates := os.Getenv(envClearRotates) != ""
+	// trustTrig: the startup trust-folder dialog simulation (#993). A sibling of
+	// modalTrig — come up idle, raise trustScreen on the trigger, then clear it on
+	// the accept keystroke (and only the accept, never a bare ESC deny). Additive
+	// and off by default (byte-identical when unset), like modalTrig / escEndsTurn.
+	trustTrig := os.Getenv(envTrustTrigger)
 
-	// Modal mode and Esc-ends-turn mode both put stdin into raw mode (as the real
-	// claude TUI does) BEFORE the stdin reader starts, so a lone ESC keystroke — the
-	// modal deny-on-timeout actuation or the remote interrupt, a bare 0x1b with no
-	// line terminator — reaches read() verbatim and unbuffered. The default canonical
-	// line discipline would otherwise withhold a bare ESC indefinitely (it buffers
-	// input until a newline) and map a "2\r" answer to "2\n" (ICRNL). Scoped to these
-	// two modes so every other mode stays byte-identical to today.
-	if modalTrig != "" || escEndsTurn {
+	// Modal mode, Esc-ends-turn mode, and trust mode all put stdin into raw mode (as
+	// the real claude TUI does) BEFORE the stdin reader starts, so a lone ESC
+	// keystroke — the modal deny-on-timeout actuation, the remote interrupt, or the
+	// trust deny, a bare 0x1b with no line terminator — reaches read() verbatim and
+	// unbuffered, and so the trust accept "1\r" preserves its CR. The default
+	// canonical line discipline would otherwise withhold a bare ESC indefinitely (it
+	// buffers input until a newline) and map a "1\r" answer to "1\n" (ICRNL). Scoped
+	// to these modes so every other mode stays byte-identical to today.
+	if modalTrig != "" || escEndsTurn || trustTrig != "" {
 		enterRawMode()
 	}
 
 	// The stdin reader is the only stdin consumer (a second reader would race
 	// it for bytes). It runs when a stdin-log path is configured OR TUI mode is
-	// on OR Esc-ends-turn mode is on OR clear-rotate mode is on — TUI mode needs
-	// stdin read independently of logging so the spinner fires even if STDIN_LOG
-	// is unset, Esc-ends-turn mode needs it to scan for the bare interrupt ESC,
-	// and clear-rotate mode needs it to scan for the "/clear" slash command.
+	// on OR Esc-ends-turn mode is on OR clear-rotate mode is on OR trust mode is on
+	// — TUI mode needs stdin read independently of logging so the spinner fires even
+	// if STDIN_LOG is unset, Esc-ends-turn mode needs it to scan for the bare
+	// interrupt ESC, clear-rotate mode needs it to scan for the "/clear" slash
+	// command, and trust mode needs it to distinguish the accept "1\r" from a bare
+	// ESC deny.
 	logPath := os.Getenv(envStdinLog)
-	if logPath != "" || tui || escEndsTurn || clearOnAnswer || clearRotates {
-		startStdinReader(logPath, tui, escEndsTurn, clearOnAnswer, clearRotates)
+	if logPath != "" || tui || escEndsTurn || clearOnAnswer || clearRotates || trustTrig != "" {
+		startStdinReader(logPath, tui, escEndsTurn, clearOnAnswer, clearRotates, trustTrig != "")
 	}
 
 	asstTrig := os.Getenv(envAssistantTrigger)
@@ -367,14 +463,15 @@ func main() {
 
 	f := openSession(dir, initU)
 
-	// TUI mode and modal-trigger mode both seed the idle-prompt glyph once at
-	// startup. tui-driver's rolling snapshot buffer holds the single write, so
-	// IsIdle stays true (and the modal class stays Unknown) until a later write
-	// lands — no continuous redraw needed. For modal mode the baseline idle glyph
-	// is what makes the later modal-screen write a genuine Unknown->Permission
-	// class transition (envModalTrigger is mutually exclusive with envTUI, so this
-	// never double-emits).
-	if tui || modalTrig != "" {
+	// TUI mode, modal-trigger mode, and trust-trigger mode all seed the idle-prompt
+	// glyph once at startup. tui-driver's rolling snapshot buffer holds the single
+	// write, so IsIdle stays true (and the modal class stays Unknown) until a later
+	// write lands — no continuous redraw needed. For modal / trust mode the baseline
+	// idle glyph is what makes the later modal-screen / trustScreen write a genuine
+	// Unknown->Permission / Unknown->TrustFolder class transition (envModalTrigger and
+	// envTrustTrigger are each mutually exclusive with envTUI, so this never
+	// double-emits).
+	if tui || modalTrig != "" || trustTrig != "" {
 		writeStdout(idleGlyph)
 	}
 
@@ -383,6 +480,8 @@ func main() {
 	modalShown := false
 	modalCleared := false
 	escEnded := false
+	trustShown := false
+	trustCleared := false
 	for {
 		if !rotated {
 			if _, err := os.Stat(trig); err == nil {
@@ -408,6 +507,17 @@ func main() {
 		if modalTrig != "" && !modalShown {
 			if emitModalIfTriggered(modalTrig) {
 				modalShown = true
+			}
+		}
+		// Trust-trigger mode (envTrustTrigger): the child came up idle (startup idle
+		// glyph above); on the trigger's first appearance write the startup
+		// trust-folder dialog once so tui-driver detects an Unknown->TrustFolder
+		// transition — the daemon surfaces modal_shown{trust} AND WaitReady holds the
+		// queued turn (Readiness.TrustModal, #1013). One-shot, mirroring the modal
+		// gate above.
+		if trustTrig != "" && !trustShown {
+			if emitTrustIfTriggered(trustTrig) {
+				trustShown = true
 			}
 		}
 		// A delivered turn (stdin bytes, signalled by the reader) grows the live
@@ -448,6 +558,20 @@ func main() {
 		if clearOnAnswer && modalShown && !modalCleared && clearPending.Swap(false) {
 			clearModalScreen()
 			modalCleared = true
+		}
+		// Trust-trigger mode (envTrustTrigger): the stdin reader signalled the trust
+		// ACCEPT keystroke arrived (the first post-trust stdin bytes that were NOT a
+		// bare ESC — Supervisor.AcceptTrust's "1\r"). Gated on trustShown so a
+		// pre-trust keystroke cannot clear early (the && short-circuit leaves
+		// trustAcceptPending set until the dialog is up). Clear the trust dialog once
+		// so HasTrustModal goes false, WaitReady returns clean, and the held turn
+		// delivers. A bare ESC deny never sets trustAcceptPending (the reader
+		// distinguishes via containsBareESC), so the dialog stays up, the turn stays
+		// held, and no reply is produced. One-shot via trustCleared, mirroring the
+		// modal-clear gate above.
+		if trustTrig != "" && trustShown && !trustCleared && trustAcceptPending.Swap(false) {
+			clearTrustScreen()
+			trustCleared = true
 		}
 		if asstTrig != "" {
 			emitAssistantIfTriggered(asstTrig)
@@ -622,6 +746,42 @@ func clearModalScreen() {
 	writeStdout([]byte(modalClearScreen))
 }
 
+// emitTrustIfTriggered checks for the trust-trigger file
+// (PYRY_FAKE_CLAUDE_TRUST_TRIGGER). When present it writes the startup
+// trust-folder dialog (trustScreen) to os.Stdout once — flipping tui-driver's
+// detected class from Unknown to TrustFolder so the daemon's #708 producer
+// surfaces modal_shown{trust} AND the supervisor's WaitReady returns
+// Readiness{TrustModal:true} (the queued turn is held with ErrTrustModalPending,
+// #1013) — removes the trigger, and reports true. When absent it reports false.
+// Gated in main by a one-shot `trustShown` bool exactly like the `modalShown` /
+// `idled` / `rotated` gates, so the screen is written at most once. The fake does
+// NOT clear the dialog here; only the accept keystroke clears it (clearTrustScreen
+// via trustAcceptPending), and a bare ESC deny leaves it up. Runs only on the main
+// poll goroutine, so it never races the stdin reader for os.Stdout (in trust mode
+// — envTUI off — the reader emits no spinner, so the main goroutine is the sole
+// stdout writer). Errors are silenced, mirroring the sibling emit* helpers: the
+// e2e asserts downstream (the phone receives modal_shown), never on the write.
+func emitTrustIfTriggered(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	writeStdout([]byte(trustScreen))
+	_ = os.Remove(path)
+	return true
+}
+
+// clearTrustScreen writes trustClearScreen to os.Stdout once (fsync'd) so
+// tui-driver's detected class transitions TrustFolder->Unknown and
+// HasTrustModal/Readiness.TrustModal go false — the held turn then delivers on the
+// next WriteUserTurn retry. Runs ONLY on the main poll goroutine (like
+// emitTrustIfTriggered / clearModalScreen): the stdin reader only signals via
+// trustAcceptPending, never writes stdout, so the single-writer discipline holds.
+// Best-effort per writeStdout; the e2e asserts downstream (the turn delivers /
+// queue drains), never on the write itself.
+func clearTrustScreen() {
+	writeStdout([]byte(trustClearScreen))
+}
+
 // enterRawMode puts fakeclaude's stdin (the PTY slave) into raw mode, matching
 // what the real claude TUI does on startup. The tui-driver PTY leaves the slave
 // in the default canonical (cooked) discipline, which buffers input until a line
@@ -753,8 +913,11 @@ func openSession(dir, uuid string) *os.File {
 // permission modal — signal only, never writing stdout. When clearRotates is true
 // it accumulates stdin across reads and, on the first "/clear" match, signals the
 // main goroutine via clearRotatePending to rotate the session JSONL — signal only,
-// never writing f.
-func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer, clearRotates bool) {
+// never writing f. When trustTrig is true it scans each read for a bare ESC and,
+// on a read that is NOT a bare ESC (the trust ACCEPT keystroke "1\r"), signals the
+// main goroutine via trustAcceptPending to clear the trust dialog — signal only,
+// never writing stdout; a bare ESC deny is left unsignalled so the dialog stays up.
+func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer, clearRotates, trustTrig bool) {
 	var logF *os.File
 	if logPath != "" {
 		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -804,6 +967,18 @@ func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer, clearRota
 				// (single-writer discipline), like escPending.
 				if clearOnAnswer {
 					clearPending.Store(true)
+				}
+				// Trust mode: discriminate the trust ACCEPT keystroke from a bare ESC
+				// deny (the load-bearing part of #993). A read that is NOT a bare ESC
+				// is the accept "1\r" (Supervisor.AcceptTrust) — signal the main
+				// goroutine to clear the trust dialog (gated on trustShown there). A
+				// bare ESC (Supervisor.SendEsc deny) is left unsignalled, so the dialog
+				// stays up and the turn stays held. Signal only (single-writer
+				// discipline), like clearPending. The post-clear delivered prompt (a
+				// bracketed paste, ESC[…, not a BARE ESC) re-signals harmlessly — the
+				// main loop's one-shot trustCleared gate ignores it.
+				if trustTrig && !containsBareESC(buf[:n]) {
+					trustAcceptPending.Store(true)
 				}
 				if logF != nil {
 					if _, werr := logF.Write(buf[:n]); werr != nil {
