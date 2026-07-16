@@ -165,3 +165,11 @@ archive).
   `compress/gzip` precedent (`ExtractBinary`, reader side) this package mirrors on
   the writer side.
 - Sibling serving path: #812 (chunked transport), #813 (request verb + authorization).
+- [codebase/1006.md](../codebase/1006.md) — the fake-daemon e2e capstone proving
+  the whole producer→transport→request-verb chain end-to-end over the encrypted
+  v2 wire, including the load-bearing no-leak error path. Because
+  `Assemble`'s real inputs (the log ring, a timestamped recording) make the
+  daemon's `DebugBundler` closure non-byte-predictable out-of-process, the e2e
+  wires an env-gated fake bundler (`cmd/pyry/debug_bundle_fake.go`, inert
+  unless `PYRY_ALLOW_INSECURE_RELAY=1`) rather than driving this package's
+  real `Assemble` directly.
