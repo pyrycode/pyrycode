@@ -32,8 +32,14 @@ covers both platforms when intended.
 ## Invocation
 
 ```
-go test -tags=e2e_install ./internal/e2e/...
+make e2e-install                       # go test -tags e2e_install ./internal/e2e/...
 ```
+
+`make e2e-install` (#969) is the named entry point — run it on the release
+checklist and before touching install-service code. It is deliberately
+excluded from `make check`/`make preship`: it mutates the real user
+launchd/systemd domain. See [release-tooling.md § Install & update e2e
+suites](../../release-tooling.md#install--update-e2e-suites).
 
 Default `go test ./...` does not compile either file. The `e2e_install` tag
 is **separate from `e2e`** so default e2e CI runs (which use the `e2e` tag)
