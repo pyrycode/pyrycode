@@ -81,3 +81,44 @@ If the OpenSSL-produced signature does not verify against the baked-in key,
 the update fails closed with `update: verify signature: …` (never insecure).
 `openssl pkeyutl -sign -rawin` requires OpenSSL 3.0+, which `ubuntu-latest`
 provides; a pinned older image would surface here.
+
+## Live-relay smoke test
+
+`make e2e-liverelay` proves the daemon ↔ **real** `pyrycode-relay` pairing with
+one automated round-trip: device identity → WS connect → Noise_IK handshake →
+a `list_conversations` verb round-trip. It fails if any stage errors or the
+reply does not match the seeded conversation — not a no-panic smoke check. This
+closes the gap that every other relay e2e test leaves open by running against
+the in-process `fakerelay`: the deployed relay server is otherwise exercised by
+no automated test.
+
+```sh
+make e2e-liverelay
+```
+
+**What it requires — no credentials.** Unlike `e2e-realclaude`, this test spends
+**no** real resources and needs **no** secrets. It builds and spawns a
+`pyrycode-relay` binary hermetically on a loopback-bound (`127.0.0.1`) plaintext
+listener, mints an **ephemeral** device identity under a temp `HOME` (destroyed
+when the test ends), and tears the relay + daemon down on cleanup. Nothing is
+persisted, nothing reaches production.
+
+It resolves the relay binary in this order:
+
+1. `PYRY_LIVERELAY_BIN` — path to a prebuilt `pyrycode-relay` binary.
+2. `PYRY_RELAY_REPO` — path to a `pyrycode-relay` checkout to `go build` from.
+3. Default: the sibling `../pyrycode-relay` checkout (next to this repo).
+
+If none is present the test **skips loud** with a named diagnostic (it does not
+fail), so `make preship` stays green on a machine without the sibling. Get the
+sibling with:
+
+```sh
+git clone https://github.com/pyrycode/pyrycode-relay ../pyrycode-relay
+```
+
+**Where it sits in the release flow.** Because it is offline-capable and
+credential-free, it is wired into **`preship`** (`check → e2e-realclaude →
+e2e-liverelay`), run before every `~/.local/bin/pyry` swap. It is **not** part
+of `check` or the `e2e` target — the `e2e_liverelay` build tag keeps it out of
+`go build`/`go vet`/`make test`/`make e2e`.
