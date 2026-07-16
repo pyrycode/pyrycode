@@ -12,11 +12,18 @@
 #                   no creds, ~4 min with -race). Now part of `check`, so a
 #                   core-daemon regression fails the standard gate; still
 #                   runnable standalone for a focused e2e run.
-#   make preship  — the full pre-binary-swap gate: check + e2e-realclaude
-#                   (check now includes the fake-daemon e2e suite). Run before
-#                   every ~/.local/bin/pyry swap so the operator is never the
-#                   first real-stack execution. Needs live claude creds (see
-#                   docs/knowledge/features/e2e-realclaude.md); spends real
+#   make e2e-liverelay — live-relay smoke test: one round-trip against a REAL
+#                   pyrycode-relay binary (opt-in tag e2e_liverelay). Builds and
+#                   spawns the sibling ../pyrycode-relay checkout hermetically on
+#                   a loopback listener; spends NO real resources and needs no
+#                   credentials. Skips loud if the sibling checkout is absent
+#                   (set PYRY_LIVERELAY_BIN or PYRY_RELAY_REPO). See
+#                   docs/release-tooling.md § Live-relay smoke test.
+#   make preship  — the full pre-binary-swap gate: check + e2e-realclaude +
+#                   e2e-liverelay (check now includes the fake-daemon e2e suite).
+#                   Run before every ~/.local/bin/pyry swap so the operator is
+#                   never the first real-stack execution. Needs live claude creds
+#                   (see docs/knowledge/features/e2e-realclaude.md); spends real
 #                   tokens and shares the Max-plan usage window.
 #   make linux    — cross-compile for pyrybox (linux/amd64)
 #   make clean    — remove build artifacts
@@ -49,13 +56,21 @@ e2e:
 e2e-realclaude:
 	$(GO) test -tags e2e_realclaude ./internal/e2e/realclaude/...
 
+# e2e-liverelay proves the daemon ↔ real pyrycode-relay pairing with one
+# round-trip against a locally built relay binary. Offline-capable and
+# credential-free (hermetic loopback relay); skips loud without the sibling
+# ../pyrycode-relay checkout. See docs/release-tooling.md § Live-relay smoke test.
+.PHONY: e2e-liverelay
+e2e-liverelay:
+	$(GO) test -tags e2e_liverelay ./internal/e2e/liverelay/...
+
 # preship is the pre-binary-swap gate: everything hermetic (via check, which
-# now runs the fake-daemon e2e suite) plus the live-claude suite. Deliberately
-# runs the realclaude suite in FULL — the operator must never be the first
-# real-stack execution, and trimming for speed is a fix-when-it-hurts decision,
-# not a default.
+# now runs the fake-daemon e2e suite) plus the live-claude suite and the
+# live-relay round-trip. Deliberately runs the realclaude suite in FULL — the
+# operator must never be the first real-stack execution, and trimming for speed
+# is a fix-when-it-hurts decision, not a default.
 .PHONY: preship
-preship: check e2e-realclaude
+preship: check e2e-realclaude e2e-liverelay
 
 .PHONY: staticcheck
 staticcheck:
