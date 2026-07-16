@@ -122,3 +122,51 @@ credential-free, it is wired into **`preship`** (`check → e2e-realclaude →
 e2e-liverelay`), run before every `~/.local/bin/pyry` swap. It is **not** part
 of `check` or the `e2e` target — the `e2e_liverelay` build tag keeps it out of
 `go build`/`go vet`/`make test`/`make e2e`.
+
+## Install & update e2e suites
+
+Two real, maintained e2e suites are reachable only by opt-in build tags and are
+**deliberately excluded from `check` and `preship`** — run each on purpose, on
+the release checklist and before touching the code it exercises.
+
+### `make e2e-install`
+
+```sh
+make e2e-install   # go test -tags e2e_install ./internal/e2e/...
+```
+
+Drives a real install round-trip: writes the service file via `install.Install`,
+brings the daemon up through the OS service manager, exercises `pyry status`
+against it, then tears it down. The `darwin`/`linux` build tags mean only the
+host platform's install test compiles and runs under one `e2e_install`
+invocation — launchd (`launchctl bootstrap gui/<uid>`) on macOS, systemd
+(`systemctl --user`) on Linux.
+
+**Footprint: it mutates the real user launchd/systemd domain.** Run it only on a
+host you control, never where a live `pyry` daemon must stay untouched. On Linux
+it **skips loud** (does not fail) when `systemctl --user is-system-running`
+reports an unusable session; on macOS `gui/<uid>` needs a logged-in GUI session
+for the running uid.
+
+When: on the release checklist, and before touching install-service code
+(`internal/install`, `pyry install-service`).
+
+### `make e2e-update`
+
+```sh
+make e2e-update   # go test -tags e2e_update ./cmd/pyry/...
+```
+
+Drives the full `pyry update` flow — fetch → verify → atomic binary replace →
+daemon restart — against an **in-process fake release server**, then asserts the
+binary inode and daemon PID changed and the post-update daemon still answers
+`pyry status` / `pyry sessions list`. The suite lives in `package main`, so it
+is scoped to `./cmd/pyry/...` rather than `internal/e2e`.
+
+**Footprint: hermetic.** It spawns and restarts a real daemon, but everything —
+binary, HOME, socket — lives under a temp directory destroyed on cleanup. It
+spends no real resources, needs no credentials, and touches nothing outside the
+temp dir. Unlike `e2e-install`, it does **not** mutate the real user domain.
+
+When: on the release checklist, and before touching `pyry update` code
+(`cmd/pyry/update*.go`, `internal/update`).

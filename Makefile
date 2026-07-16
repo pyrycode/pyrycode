@@ -64,6 +64,27 @@ e2e-realclaude:
 e2e-liverelay:
 	$(GO) test -tags e2e_liverelay ./internal/e2e/liverelay/...
 
+# e2e-install runs the real install round-trip (opt-in tag e2e_install). The
+# darwin/linux build tags mean only the host platform's install test compiles
+# and runs. Run it on the release checklist and before touching install-service
+# code. WARNING: it mutates the real user launchd/systemd domain (launchctl
+# bootstrap / systemctl --user) — never run it where a live daemon must stay
+# untouched. See docs/release-tooling.md § Install & update e2e suites.
+.PHONY: e2e-install
+e2e-install:
+	$(GO) test -tags e2e_install ./internal/e2e/...
+
+# e2e-update runs the full `pyry update` flow (opt-in tag e2e_update): fetch →
+# verify → atomic binary replace → daemon restart, against an in-process fake
+# release server. Run it on the release checklist and before touching
+# `pyry update` code. It spawns and restarts a real daemon but is hermetic —
+# everything lives under a temp HOME destroyed on cleanup, so it touches nothing
+# outside the temp dir. Scoped to ./cmd/pyry/... (package main), not
+# internal/e2e. See docs/release-tooling.md § Install & update e2e suites.
+.PHONY: e2e-update
+e2e-update:
+	$(GO) test -tags e2e_update ./cmd/pyry/...
+
 # preship is the pre-binary-swap gate: everything hermetic (via check, which
 # now runs the fake-daemon e2e suite) plus the live-claude suite and the
 # live-relay round-trip. Deliberately runs the realclaude suite in FULL — the
