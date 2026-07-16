@@ -58,6 +58,14 @@ var ErrNoLiveSession = errors.New("supervisor: no live session")
 // ErrNoLiveSession it maps to a loud failure rather than a false ack.
 var ErrTurnNotCommitted = errors.New("supervisor: turn not committed")
 
+// ErrTrustModalPending is returned by the delivery path when claude's startup
+// trust-folder modal is up: the queued turn is deliberately NOT delivered into
+// the consent gate. Retryable — the caller (msgqueue) holds the head and
+// retries; a valid remote accept (Supervisor.AcceptTrust) clears the modal and a
+// later attempt delivers. #1014 keys its typed session error + give-up exemption
+// off it (errors.Is).
+var ErrTrustModalPending = errors.New("supervisor: trust modal pending")
+
 // Phase describes the supervisor's current lifecycle state.
 type Phase string
 
@@ -346,7 +354,7 @@ func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Sess
 	}
 
 	if s.cfg.ResolveTranscript == nil {
-		if _, err := sess.WaitReady(ctx); err != nil {
+		if err := readyForDelivery(ctx, sess.WaitReady); err != nil {
 			return fmt.Errorf("wait ready: %w", err)
 		}
 		committed, err := deliver(ctx)
@@ -361,8 +369,7 @@ func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Sess
 
 	return confirmViaTranscriptGrowth(ctx, deliverGrowthDeps{
 		waitReady: func(ctx context.Context) error {
-			_, err := sess.WaitReady(ctx)
-			return err
+			return readyForDelivery(ctx, sess.WaitReady)
 		},
 		deliver: deliver,
 		resolve: s.cfg.ResolveTranscript,
@@ -370,6 +377,30 @@ func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Sess
 		timeout: transcriptConfirmTimeout,
 		poll:    transcriptConfirmPoll,
 	})
+}
+
+// readyForDelivery classifies claude's readiness one level above the concrete
+// Session (so it is unit-testable with a fake waitReady) and decides whether a
+// queued turn may be delivered. It reads readiness only — it marks nothing
+// trusted and sends no keystroke:
+//
+//   - a waitReady error is returned unwrapped; the caller owns the "wait ready:
+//     %w" wrap (both delivery modes apply it);
+//   - a pending startup trust modal (Readiness.TrustModal) yields
+//     ErrTrustModalPending BEFORE any delivery, so the queued (untrusted) turn is
+//     never typed into claude's last consent gate (#988). The msgqueue retry loop
+//     holds the head; a valid remote accept via Supervisor.AcceptTrust clears the
+//     modal and a later attempt delivers;
+//   - otherwise (idle, no trust modal) it returns nil and delivery may proceed.
+func readyForDelivery(ctx context.Context, waitReady func(context.Context) (tuidriver.Readiness, error)) error {
+	readiness, err := waitReady(ctx)
+	if err != nil {
+		return err
+	}
+	if readiness.TrustModal {
+		return ErrTrustModalPending
+	}
+	return nil
 }
 
 // deliverGrowthDeps are the seams confirmViaTranscriptGrowth drives.

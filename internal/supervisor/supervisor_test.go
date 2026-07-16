@@ -862,6 +862,40 @@ func TestSupervisor_WriteUserTurn_NotReadyFailsLoud(t *testing.T) {
 	}
 }
 
+// TestSupervisor_WriteUserTurn_TrustModalPendingHolds proves the boundary
+// contract #1014 consumes: when the deliver seam reports a pending startup
+// trust modal, WriteUserTurn returns an error satisfying
+// errors.Is(_, ErrTrustModalPending) (the wrap chain preserves the sentinel) and
+// still stamps the conversation cursor (unchanged #312 behaviour). Because the
+// seam held before DeliverPrompt, the queued turn is retryable, not clobbered
+// into claude's consent gate (AC-2/AC-3).
+func TestSupervisor_WriteUserTurn_TrustModalPendingHolds(t *testing.T) {
+	t.Parallel()
+
+	cfg := helperConfig("exit0")
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sup.setSession(&tuidriver.Session{})
+	// Mirror the production wrap: readyForDelivery returns the bare sentinel and
+	// the call site applies the "wait ready: %w" wrap before WriteUserTurn's own.
+	sup.deliverFn = func(context.Context, *tuidriver.Session, []byte) error {
+		return fmt.Errorf("wait ready: %w", ErrTrustModalPending)
+	}
+
+	err = sup.WriteUserTurn(context.Background(), "c-1", []byte("queued turn"))
+	if !errors.Is(err, ErrTrustModalPending) {
+		t.Errorf("WriteUserTurn err = %v, want errors.Is(err, ErrTrustModalPending)", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "supervisor: write user turn:") {
+		t.Errorf("WriteUserTurn err = %v, want the wrap prefix", err)
+	}
+	if got := sup.CurrentConversation(); got != "c-1" {
+		t.Errorf("CurrentConversation = %q, want %q (cursor stamped even when delivery is held)", got, "c-1")
+	}
+}
+
 // TestSupervisor_WriteUserTurn_CursorReadBack confirms the cursor reflects the
 // most recent accepted WriteUserTurn id. No child is registered, so each call
 // now returns ErrNoLiveSession (the former silent-drop path is loud), but the
@@ -1309,6 +1343,115 @@ func TestSupervisor_ConfirmViaTranscriptGrowth_CtxCancelledMidPoll(t *testing.T)
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want errors.Is(err, context.Canceled)", err)
+	}
+}
+
+// TestReadyForDelivery is the core AC-2/AC-3 seam: the readiness classifier that
+// decides whether a queued turn may be delivered. A pending startup trust modal
+// yields ErrTrustModalPending BEFORE any delivery (so untrusted queued content
+// never reaches claude's consent gate); a plain idle screen yields nil (delivery
+// may proceed once trust clears); any WaitReady error passes straight through
+// unwrapped (the caller owns the "wait ready:" wrap) and is never reclassified
+// as the trust sentinel.
+func TestReadyForDelivery(t *testing.T) {
+	t.Parallel()
+
+	exited := &tuidriver.ProcessExitedError{}
+	cases := []struct {
+		name        string
+		waitReady   func(context.Context) (tuidriver.Readiness, error)
+		wantErr     error // errors.Is target; nil means expect a nil return
+		wantDeliver bool  // whether the call site would proceed to DeliverPrompt
+	}{
+		{
+			name: "trust modal pending holds delivery",
+			waitReady: func(context.Context) (tuidriver.Readiness, error) {
+				return tuidriver.Readiness{Idle: true, TrustModal: true}, nil
+			},
+			wantErr:     ErrTrustModalPending,
+			wantDeliver: false,
+		},
+		{
+			name:        "idle no modal delivers",
+			waitReady:   func(context.Context) (tuidriver.Readiness, error) { return tuidriver.Readiness{Idle: true}, nil },
+			wantErr:     nil,
+			wantDeliver: true,
+		},
+		{
+			name: "wait ready ctx error passes through unwrapped",
+			waitReady: func(context.Context) (tuidriver.Readiness, error) {
+				return tuidriver.Readiness{}, context.DeadlineExceeded
+			},
+			wantErr:     context.DeadlineExceeded,
+			wantDeliver: false,
+		},
+		{
+			name:        "process exited passes through",
+			waitReady:   func(context.Context) (tuidriver.Readiness, error) { return tuidriver.Readiness{}, exited },
+			wantErr:     exited,
+			wantDeliver: false,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			err := readyForDelivery(context.Background(), c.waitReady)
+
+			// The anti-clobber contract: the call site delivers iff readyForDelivery
+			// returns nil, so a pending trust modal (or any error) holds the turn.
+			delivered := err == nil
+			if delivered != c.wantDeliver {
+				t.Errorf("delivered = %v, want %v", delivered, c.wantDeliver)
+			}
+
+			if c.wantErr == nil {
+				if err != nil {
+					t.Errorf("readyForDelivery = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Errorf("readyForDelivery = %v, want errors.Is(%v)", err, c.wantErr)
+			}
+			// A non-trust readiness error must never masquerade as the trust sentinel.
+			if c.wantErr != ErrTrustModalPending && errors.Is(err, ErrTrustModalPending) {
+				t.Errorf("readyForDelivery = %v, must not match ErrTrustModalPending", err)
+			}
+		})
+	}
+}
+
+// TestSupervisor_ConfirmViaTranscriptGrowth_TrustModalHolds proves AC-2 on the
+// growth-confirm path (Config.ResolveTranscript != nil): when the readiness gate
+// reports a pending trust modal, confirmViaTranscriptGrowth returns an error
+// satisfying errors.Is(_, ErrTrustModalPending) and never calls deliver — the
+// pending prompt is not clobbered or dismissed by a delivery attempt.
+func TestSupervisor_ConfirmViaTranscriptGrowth_TrustModalHolds(t *testing.T) {
+	t.Parallel()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	deliverCalls := 0
+	err := confirmViaTranscriptGrowth(context.Background(), deliverGrowthDeps{
+		waitReady: func(context.Context) error { return ErrTrustModalPending },
+		deliver: func(context.Context) (bool, error) {
+			deliverCalls++
+			return true, nil
+		},
+		resolve: scriptedResolve(transcriptStep{"a.jsonl", 100, nil}),
+		log:     discard,
+		timeout: 200 * time.Millisecond,
+		poll:    2 * time.Millisecond,
+	})
+	if !errors.Is(err, ErrTrustModalPending) {
+		t.Errorf("confirmViaTranscriptGrowth err = %v, want errors.Is(ErrTrustModalPending)", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "wait ready:") {
+		t.Errorf("err = %v, want the %q wrap", err, "wait ready:")
+	}
+	if deliverCalls != 0 {
+		t.Errorf("deliver called %d times, want 0 (no clobber while trust modal pending)", deliverCalls)
 	}
 }
 
