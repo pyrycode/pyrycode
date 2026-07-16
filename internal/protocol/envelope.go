@@ -64,7 +64,8 @@ type RoutingEnvelope struct {
 	//
 	// SECURITY: the binary's dispatcher and gate closure MUST NOT log
 	// Token at any level. The token is plaintext credential material;
-	// AuthenticateFirstFrame is the only consumer.
+	// the field is retained on the wire type but currently has no live
+	// consumer (the v1 first-frame gate that read it was removed).
 	Token string `json:"token,omitempty"`
 
 	// CloseCode, when non-zero on a binary→relay routing envelope, asks
