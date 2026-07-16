@@ -418,6 +418,16 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `conversation_created` | binary → phone | no | |
 | `promote_conversation` | phone → binary | no | |
 | `conversation_updated` | binary → phone | no | |
+| `rename_conversation` | phone → binary | no | Renames an existing conversation; replies with the reused `conversation_updated` record. |
+| `delete_conversation` | phone → binary | no | Permanently removes a conversation (hard delete; the reversible path is `archive_conversation`); replies with `conversation_deleted`. |
+| `conversation_deleted` | binary → phone | no | Acknowledges a `delete_conversation`, correlated by `in_reply_to`; carries only the deleted conversation's `id` (the record no longer exists, so no name/cwd is projected). |
+| `archive_conversation` | phone → binary | no | Sets a conversation's durable archived flag (`IsArchived = true`); replies with the reused `conversation_updated` record. Symmetric restore is `unarchive_conversation` (shared payload). |
+| `unarchive_conversation` | phone → binary | no | Clears a conversation's durable archived flag (restore, `IsArchived = false`); replies with the reused `conversation_updated` record. |
+| `change_workspace` | phone → binary | no | Moves a conversation to a client-chosen workspace folder (updates its `cwd`, confined to `$HOME`); replies with the reused `conversation_updated` record. |
+| `create_workspace_folder` | phone → binary | no | Creates a new folder on the daemon host under a client-supplied parent path (confined to `$HOME`); touches no conversation registry. Replies with `workspace_folder_created`. |
+| `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
+| `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
+| `recent_workspaces_list` | binary → phone | no | Reply to `recent_workspaces`, correlated by `in_reply_to`; carries the distinct workspace paths, most-recent-first, each with its most-recent `last_used_at`. |
 | `register_push_token` | phone → binary | no | |
 | `ack` | either | no | |
 | `error` | either | no | |
