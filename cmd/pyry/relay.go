@@ -204,6 +204,12 @@ type relayWiring struct {
 	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
 	// the msgqueue OnGiveUp seam) for the same chicken-and-egg reason as qse.
 	sessionErr *sessionErrorEmitterV2
+	// blockedNotify routes a folder-not-trusted session_error (a trust deny /
+	// deny-on-timeout) into the same give-up → session_error frame path the
+	// msgqueue OnGiveUp seam uses (#1014). It is main.go's shared `blocked` closure
+	// (a non-blocking send into the giveUps channel). Set on the resolver's #1014
+	// emit seam below; nil in foreground/v1 leaves the resolver's emit inert.
+	blockedNotify func(convID, reason string)
 	// debugBundler assembles the daemon-global debug bundle for the
 	// request_debug_bundle verb (#813). nil in foreground/v1 replies "unavailable".
 	debugBundler func() ([]byte, error)
@@ -365,6 +371,16 @@ func startRelayV2(
 	// resolver (ModalResolver seam) / deny-on-timeout consume the same entries.
 	modalReg := modalbridge.New()
 
+	// Inbound modal-control resolver (#727). Constructed here (not inline in the
+	// config literal below) so its #1014 emit seams can be set: a trust deny /
+	// deny-on-timeout surfaces a folder-not-trusted session_error via the shared
+	// blockedNotify closure, stamped with the active conversation (the same
+	// follow-active cursor the modal producer resolves its target from). Both
+	// seams are nil in foreground/v1, leaving the pre-#1014 behaviour intact.
+	modalResolver := newModalResolverV2(modalReg, w.sup, logger)
+	modalResolver.activeConv = w.active.CurrentConversation
+	modalResolver.notifyBlocked = w.blockedNotify
+
 	// Screen-snapshot usage reader (#857): reports the bootstrap session's
 	// current context-window occupancy (used tokens + window size) for the
 	// screen_snapshot reply. A dedicated probe-preferred resolver follows the
@@ -474,9 +490,9 @@ func startRelayV2(
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker
-		// (it has SendEsc). modal_cancel resolves here; modal_answer is a deferred
-		// no-op until #717 fills the gated arm.
-		ModalResolver: newModalResolverV2(modalReg, w.sup, logger),
+		// (it has SendEsc). Constructed above so its #1014 folder-not-trusted emit
+		// seams are set before use.
+		ModalResolver: modalResolver,
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes
 		// one Esc through the sealed supervisor keystroke surface. sup
 		// (*supervisor.Supervisor) satisfies Interrupter via SendEsc (#726).

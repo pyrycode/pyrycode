@@ -113,6 +113,17 @@ type ChangeFunc func(convID string)
 // production-visible effect — the give-up is real even when unobserved.
 type GiveUpFunc func(convID, reason string)
 
+// PendingFunc classifies a delivery error as a legitimate hold — the head is
+// being deliberately withheld awaiting an external decision (e.g. claude's
+// startup trust-folder modal is up, so DeliverFunc declined before touching the
+// consent gate) — rather than a delivery failure. It is an injected predicate
+// because msgqueue is a leaf that must not import the delivery seam's package
+// (internal/supervisor); the composition root wires it as
+// errors.Is(err, supervisor.ErrTrustModalPending). It MUST be a pure, non-blocking
+// function (it is called on the drain path). nil ⇒ every non-nil delivery error
+// counts toward the give-up bound (pre-#1014 behaviour). #1014 AC-1.
+type PendingFunc func(error) bool
+
 // Config configures a Queue.
 type Config struct {
 	// Deliver is the reliable-delivery seam; required. New errors if it is nil.
@@ -135,6 +146,14 @@ type Config struct {
 	GiveUpAfter time.Duration
 	// OnGiveUp is the optional give-up-notification seam; nil ⇒ disabled.
 	OnGiveUp GiveUpFunc
+	// Pending classifies a delivery error as a legitimate hold rather than a
+	// failure. While it returns true the drain retries the head WITHOUT counting
+	// the elapsed window toward GiveUpAfter and RESETS the give-up streak, so a
+	// slow-but-valid remote decision (e.g. a folder-trust accept) never races a
+	// premature give-up, and a transient real failure preceding the hold cannot
+	// leak into the held window. nil ⇒ every non-nil delivery error counts
+	// (pre-#1014 behaviour). #1014 AC-1.
+	Pending PendingFunc
 	// Logger; nil ⇒ slog.Default().
 	Logger *slog.Logger
 }
@@ -177,6 +196,7 @@ type Queue struct {
 	max         int           // per-conversation backlog cap; > 0 always in practice
 	onChange    ChangeFunc    // nil ⇒ change notification disabled
 	onGiveUp    GiveUpFunc    // nil ⇒ give-up notification disabled
+	pending     PendingFunc   // nil ⇒ no delivery error is treated as a hold
 	log         *slog.Logger
 
 	mu      sync.Mutex
@@ -218,6 +238,7 @@ func New(cfg Config) (*Queue, error) {
 		max:         max,
 		onChange:    cfg.OnChange,
 		onGiveUp:    cfg.OnGiveUp,
+		pending:     cfg.Pending,
 		log:         log,
 		convs:       make(map[string]*convQueue),
 	}, nil
@@ -462,6 +483,29 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			return
 		}
 		if err != nil {
+			// A legitimate hold (#1014 AC-1): the head was deliberately withheld
+			// awaiting an external decision (claude's startup trust modal is up), not
+			// a delivery failure. Reset the give-up streak — identical to the
+			// confirmed-delivery reset below — so the pending window never counts
+			// toward the bound AND a prior real-failure streak cannot survive into
+			// it, then retry the same head after q.retry. Debug (not Warn) and
+			// content-free: a long legitimate wait must not spam the operator log,
+			// and NEVER log head.text (untrusted phone content). The ctx.Err() check
+			// above stays first, so shutdown always wins over a hold.
+			if q.pending != nil && q.pending(err) {
+				firstFailedAt = time.Time{}
+				q.log.Debug("msgqueue: delivery held (awaiting external decision), will retry",
+					"conversation_id", convID,
+					"queued_msg_id", head.id,
+					"queued_at", head.ts)
+				if !sleepCtx(ctx, q.retry) {
+					q.mu.Lock()
+					c.draining = false
+					q.mu.Unlock()
+					return
+				}
+				continue
+			}
 			// Claude unavailable (child respawn / wedged turn / PTY write error).
 			// Retry the SAME head — lossless, and what makes a message survive a
 			// child respawn. NEVER log head.text: it is untrusted phone content.
