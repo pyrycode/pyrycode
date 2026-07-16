@@ -133,6 +133,38 @@
 //	                               cannot clear early. Byte-identical to today when
 //	                               unset — #791 sets only MODAL_TRIGGER and its fake
 //	                               never clears, so its remote arm stays unaffected.
+//	PYRY_FAKE_CLAUDE_CLEAR_ROTATES optional; when set to any non-empty value,
+//	                               fakeclaude watches its stdin for the "/clear"
+//	                               slash-command bytes and, on the first match,
+//	                               rotates its live session JSONL once — closing
+//	                               the current <uuid>.jsonl and opening a fresh
+//	                               <uuid>.jsonl in the same dir, exactly as the
+//	                               file trigger does. That mirrors real claude:
+//	                               typing "/clear" starts a new session and
+//	                               rotates the on-disk session UUID, which pyry's
+//	                               rotation watcher follows into the registry.
+//	                               supervisor.StartNewSession types the "/clear"
+//	                               (ClearInputLine + TypePrompt) when a phone sends
+//	                               a new_session control frame, so the rotation the
+//	                               daemon observes is CAUSED by that frame (the
+//	                               new_session rotation e2e #1004 asserts a registry
+//	                               id change whose only source is this handler).
+//	                               Detection is discipline-agnostic: the reader
+//	                               accumulates stdin across reads, so a "/clear"
+//	                               split byte-by-byte under raw mode and the single
+//	                               "/clear\n" line the default canonical discipline
+//	                               delivers both match. Signal-only from the reader
+//	                               (it sets clearRotatePending; the main goroutine
+//	                               performs the rotation), preserving the single-
+//	                               writer-of-f invariant like envEscEndsTurn.
+//	                               One-shot via the shared `rotated` gate: a second
+//	                               "/clear" is inert, matching claude's own re-clear
+//	                               no-op, and the file trigger and this mode never
+//	                               both fire. Does NOT enter raw mode — the trailing
+//	                               "\r" commits the canonical line, so a single read
+//	                               already carries "/clear". Default off — when
+//	                               unset, fakeclaude is byte-identical to its prior
+//	                               behaviour.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -142,6 +174,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"os"
@@ -166,6 +199,7 @@ const (
 	envModalTrigger     = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
 	envEscEndsTurn      = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
 	envModalClearOnAns  = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
+	envClearRotates     = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
 	assistantMaxBytes   = 64 * 1024
 	pollInterval        = 50 * time.Millisecond
 )
@@ -257,6 +291,14 @@ var escPending atomic.Bool
 // only in clear-on-answer mode; untouched otherwise.
 var clearPending atomic.Bool
 
+// clearRotatePending signals — from the stdin-reader goroutine to the main poll
+// loop — that the "/clear" slash-command bytes were read in clear-rotate mode
+// (envClearRotates), so the main goroutine can rotate the live session JSONL
+// (rotateSession). Signal only, exactly like escPending / turnPending: the reader
+// never writes f (single-writer-of-f). Set only in clear-rotate mode; untouched
+// otherwise.
+var clearRotatePending atomic.Bool
+
 // interruptEndTurnLine is the canned claude-format assistant end_turn JSONL line
 // appendTurnEnd writes when Esc-ends-turn mode (envEscEndsTurn) detects the remote
 // interrupt keystroke. Its shape is exactly what turnbridge's mapper requires to
@@ -290,6 +332,12 @@ func main() {
 	// resolves it. Only meaningful with envModalTrigger; a no-op (byte-identical)
 	// otherwise, so setting it without modal mode changes nothing.
 	clearOnAnswer := modalTrig != "" && os.Getenv(envModalClearOnAns) != ""
+	// clearRotates: watch stdin for the "/clear" slash command (typed by
+	// supervisor.StartNewSession on a phone's new_session frame) and rotate the
+	// live session JSONL once on the first match, so pyry's rotation watcher
+	// follows the fresh <uuid>.jsonl into the registry. Additive and off by
+	// default (byte-identical when unset), like escEndsTurn.
+	clearRotates := os.Getenv(envClearRotates) != ""
 
 	// Modal mode and Esc-ends-turn mode both put stdin into raw mode (as the real
 	// claude TUI does) BEFORE the stdin reader starts, so a lone ESC keystroke — the
@@ -304,12 +352,13 @@ func main() {
 
 	// The stdin reader is the only stdin consumer (a second reader would race
 	// it for bytes). It runs when a stdin-log path is configured OR TUI mode is
-	// on OR Esc-ends-turn mode is on — TUI mode needs stdin read independently of
-	// logging so the spinner fires even if STDIN_LOG is unset, and Esc-ends-turn
-	// mode needs it to scan for the bare interrupt ESC.
+	// on OR Esc-ends-turn mode is on OR clear-rotate mode is on — TUI mode needs
+	// stdin read independently of logging so the spinner fires even if STDIN_LOG
+	// is unset, Esc-ends-turn mode needs it to scan for the bare interrupt ESC,
+	// and clear-rotate mode needs it to scan for the "/clear" slash command.
 	logPath := os.Getenv(envStdinLog)
-	if logPath != "" || tui || escEndsTurn || clearOnAnswer {
-		startStdinReader(logPath, tui, escEndsTurn, clearOnAnswer)
+	if logPath != "" || tui || escEndsTurn || clearOnAnswer || clearRotates {
+		startStdinReader(logPath, tui, escEndsTurn, clearOnAnswer, clearRotates)
 	}
 
 	asstTrig := os.Getenv(envAssistantTrigger)
@@ -337,9 +386,7 @@ func main() {
 	for {
 		if !rotated {
 			if _, err := os.Stat(trig); err == nil {
-				_ = f.Close()
-				newU := uuidV4()
-				f = openSession(dir, newU)
+				f = rotateSession(f, dir)
 				_ = os.Remove(trig)
 				rotated = true
 			}
@@ -379,6 +426,17 @@ func main() {
 		if escEndsTurn && !escEnded && escPending.Swap(false) {
 			appendTurnEnd(f)
 			escEnded = true
+		}
+		// Clear-rotate mode (envClearRotates): the stdin reader signalled the
+		// "/clear" slash command was read — supervisor.StartNewSession typed it in
+		// response to a phone's new_session frame. Rotate the live session JSONL
+		// once so pyry's rotation watcher follows the fresh <uuid>.jsonl into the
+		// registry, making the new_session frame the CAUSE of the on-disk rotation.
+		// One-shot via the shared `rotated` gate: a second /clear is inert, and the
+		// file trigger + this mode never both fire — mirroring the gates above.
+		if clearRotates && !rotated && clearRotatePending.Swap(false) {
+			f = rotateSession(f, dir)
+			rotated = true
 		}
 		// Modal-clear-on-answer mode (envModalClearOnAns): the stdin reader
 		// signalled the local head's answer keystroke arrived. Gated on modalShown
@@ -641,6 +699,29 @@ func containsBareESC(buf []byte) bool {
 	return false
 }
 
+// containsClearCommand reports whether buf contains the "/clear" slash-command
+// bytes — the remote new-session keystroke supervisor.StartNewSession types
+// (ClearInputLine's Ctrl-U, consumed by the canonical line discipline as VKILL,
+// then TypePrompt's "/clear" + trailing "\r"). In clear-rotate mode
+// (envClearRotates) the only stdin fakeclaude receives is that keystroke
+// sequence, so a substring match cannot false-positive. The caller accumulates
+// across reads before calling, so a "/clear" split byte-by-byte under raw
+// discipline still matches once the full command has arrived.
+func containsClearCommand(buf []byte) bool {
+	return bytes.Contains(buf, []byte("/clear"))
+}
+
+// rotateSession closes the current session JSONL f and opens a fresh
+// <uuid>.jsonl in the same dir — the /clear-driven UUID rotation both the file
+// trigger and clear-rotate mode (envClearRotates) perform. Returns the new
+// *os.File. Runs ONLY on the main goroutine, preserving the single-writer-of-f
+// invariant. The old-fd close is best-effort: each write is fsynced by
+// openSession / appendTurn*, so a failed close cannot lose committed data.
+func rotateSession(f *os.File, dir string) *os.File {
+	_ = f.Close()
+	return openSession(dir, uuidV4())
+}
+
 func openSession(dir, uuid string) *os.File {
 	path := filepath.Join(dir, uuid+".jsonl")
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -669,8 +750,11 @@ func openSession(dir, uuid string) *os.File {
 // the main goroutine via escPending — signal only, never writing f. When
 // clearOnAnswer is true it likewise signals the main goroutine via clearPending on
 // every read (the local head's answer keystroke), so the main loop can clear the
-// permission modal — signal only, never writing stdout.
-func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer bool) {
+// permission modal — signal only, never writing stdout. When clearRotates is true
+// it accumulates stdin across reads and, on the first "/clear" match, signals the
+// main goroutine via clearRotatePending to rotate the session JSONL — signal only,
+// never writing f.
+func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer, clearRotates bool) {
 	var logF *os.File
 	if logPath != "" {
 		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -682,6 +766,11 @@ func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer bool) {
 	go func() {
 		buf := make([]byte, 4096)
 		spinnerEmitted := false
+		// clearAcc accumulates stdin across reads for clear-rotate mode so a
+		// "/clear" split byte-by-byte (raw discipline) still matches once whole;
+		// clearDetected stops accumulating after the first match, bounding it.
+		var clearAcc []byte
+		clearDetected := false
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
@@ -694,6 +783,20 @@ func startStdinReader(logPath string, tui, escEndsTurn, clearOnAnswer bool) {
 				// end_turn line. Signal only (single-writer-of-f), like turnPending.
 				if escEndsTurn && containsBareESC(buf[:n]) {
 					escPending.Store(true)
+				}
+				// Clear-rotate mode: the "/clear" slash command may span reads when
+				// typed byte-by-byte under raw discipline and arrives as a single
+				// "/clear\n" line under the default canonical discipline. Accumulate
+				// across reads and, on the first complete match, signal the main
+				// goroutine to rotate the session JSONL. Signal only (single-writer-
+				// of-f), like escPending.
+				if clearRotates && !clearDetected {
+					clearAcc = append(clearAcc, buf[:n]...)
+					if containsClearCommand(clearAcc) {
+						clearRotatePending.Store(true)
+						clearDetected = true
+						clearAcc = nil
+					}
 				}
 				// Clear-on-answer mode: signal the main goroutine that stdin bytes
 				// arrived so it can clear the modal. The main loop's modalShown gate
