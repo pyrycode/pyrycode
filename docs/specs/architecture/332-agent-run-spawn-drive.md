@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # Spec — #332: agent-run: spawn interactive claude + PTY-drive single user-turn
 
 Status: draft (architect)

@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # Spec — Ticket #390: `internal/agentrun/streamrunner` stream-json subprocess primitive
 
 Status: ready for developer

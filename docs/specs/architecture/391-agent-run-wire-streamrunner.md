@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # Spec — Ticket #391: wire stream-json runner into `pyry agent-run` (replaces PTY drive)
 
 Status: ready for developer

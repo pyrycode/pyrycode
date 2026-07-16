@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # Spec — agent-run/jsonl: surface all line kinds + raw bytes + usage block on Event
 
 **Ticket:** #353

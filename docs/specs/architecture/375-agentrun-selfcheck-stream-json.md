@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # 375 — `agent-run --self-check`: rewrite for stream-json mode
 
 **Status:** draft

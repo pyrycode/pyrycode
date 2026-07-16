@@ -1,10 +1,7 @@
-# Specs
+# Architecture specs
 
-Per-ticket build artifacts. Created during the development pipeline.
-
-Subdirectories are created as needed:
-- `architecture/` — architect output
-- `code-reviews/` — code review reports
+Per-ticket architect output — one spec per ticket, produced during the
+development pipeline.
 
 ## These are point-in-time artifacts, not current-state authority
 

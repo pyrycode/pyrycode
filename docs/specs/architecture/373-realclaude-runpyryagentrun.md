@@ -1,3 +1,5 @@
+> **Superseded by #470/#473 — ptyrunner is the default runner.**
+
 # Spec: e2e/realclaude — `RunPyryAgentRun` fixture helper
 
 Ticket: [#373](https://github.com/pyrycode/pyrycode/issues/373)
