@@ -1,6 +1,6 @@
 # `internal/protocol` — wire-format envelope, routing, error codes, v1 predicate
 
-Pure-data leaf package. Declares the wire-format types for the mobile WebSocket protocol v1 — outer envelope, relay↔binary routing wrapper, error-code constants, type-name constants, and the `IsV1Compatible` predicate. No I/O, no goroutines, no `context`, no `slog`. Spec source-of-truth is `docs/protocol-mobile.md`.
+Pure-data leaf package. Declares the wire-format types for the mobile WebSocket protocol v1 — outer envelope, relay↔binary routing wrapper, error-code constants, type-name constants, and the `IsKnownAppType` predicate. No I/O, no goroutines, no `context`, no `slog`. Spec source-of-truth is `docs/protocol-mobile.md`.
 
 Landed in #255. Per-type payload structs (the catalog the 16 type discriminators select) are #256 sibling tickets and slot into `Envelope.Payload (json.RawMessage)` via a second-pass `json.Unmarshal` at the dispatcher; first slice (`RegisterPushTokenPayload`) landed in #275, second slice (messaging payloads) landed in #272 — it also shipped the v1 bulk-history backfill payloads (`backfill_since` / `message_chunk` / `backfill_done`), removed as dead code (zero emitters, zero handlers) in #967 — third slice (conversations-read payloads) landed in #273, fourth slice (conversations-write payloads) landed in #274, fifth slice (handshake/control: `HelloServerPayload` / `HelloClientPayload` / `HelloAckPayload` / `ErrorPayload` / `AckPayload`) landed in #271.
 
@@ -8,7 +8,7 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 
 ```
 internal/protocol/
-├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsV1Compatible, v1TypeSet
+├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsKnownAppType, inboundAppTypeSet
 ├── codes.go                     13 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656) + v2-modal Type* (modal_shown / modal_answer / modal_cancel / modal_dismissed, #701) + v2-queue Type* (queue_state / dequeue_message, #720) + v2-interrupt Type* (TypeInterrupt, #707, payload-less inbound control) + v2-debug-bundle Type* (debug_bundle_chunk / debug_bundle_done / request_debug_bundle, #812/#813) + v2-new_session Type* (TypeNewSession, #831, payload-less inbound control) + v2-session-settings Type* (set_session_settings / session_settings_updated, #844) + v2-session-error Type* (TypeSessionError, #1007, unwired vocabulary only) + Session errors group (CodeSessionNotFound, #844; CodeSessionBlocked, #1007)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies); QueuedItem + QueueStatePayload / DequeueMessagePayload (#720, v2 queue vocabulary); DebugBundleChunkPayload / DebugBundleDonePayload (#812, v2 debug-bundle streaming bodies); SessionErrorPayload (#1007, v2 unsolicited conversation-scoped terminal give-up body — unwired, producer is sibling #1008)
@@ -19,7 +19,7 @@ internal/protocol/
 ├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
 ├── settings.go                  SetSessionSettingsPayload, SessionSettingsUpdatedPayload (#844) — v2 set-session-settings request (phone→binary) / reply (binary→phone) bodies; wire vocabulary only, handler is #845
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
-├── compat_test.go               truth-table for IsV1Compatible + drift detectors
+├── compat_test.go               truth-table for IsKnownAppType + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
 ├── messaging_test.go            golden round-trip for each of the five #272 payloads via Envelope.Payload; + SessionTransitionPayload round-trip (#656); + four modal payload round-trips (#701); + SessionErrorPayload round-trip (#1007)
 ├── conversations_read_test.go   golden round-trip for ListConversationsPayload / ConversationsPayload via Envelope.Payload
@@ -328,7 +328,7 @@ type DebugBundleDonePayload struct {
   against `testdata/debug_bundle_chunk.json` / `debug_bundle_done.json`. Both
   `Type*` constants are registered in the `compat_test.go` drift detector
   (`v2OnlyTypes`, the partition `all` list, the `-rejected` cases) and are **not**
-  in `v1TypeSet` — an old phone must never receive these outbound events. See
+  in `inboundAppTypeSet` — an old phone must never receive these outbound events. See
   [codebase/812.md](../codebase/812.md).
 
 ### Session settings payloads (#844)
@@ -850,10 +850,10 @@ RFC3339Nano output trims trailing fractional zeros, so a `.120Z` value would re-
 as `.12Z` and break the compare (the same fixture-`ts` gotcha that governs the
 envelope's own timestamp).
 
-## Predicate: `IsV1Compatible`
+## Predicate: `IsKnownAppType`
 
 ```go
-func IsV1Compatible(env Envelope) error
+func IsKnownAppType(env Envelope) error
 ```
 
 Returns:
@@ -863,7 +863,7 @@ Returns:
 
 **Check order is pinned: `PayloadEncrypted` first, `Type` second.** A frame failing both checks reports as `ErrUnsupported` — the stricter rejection wins. The order is observable through `errors.Is` at the call site; the truth-table test row `encrypted-with-unknown-type` pins it.
 
-`v1TypeSet` is a package-private `map[string]bool` initialised at package init from the 16 `Type*` constants. The map is read-only after init; concurrent reads of an unmutated Go map are race-free per the Go memory model.
+`inboundAppTypeSet` is a package-private `map[string]bool` initialised at package init from the 16 `Type*` constants. The map is read-only after init; concurrent reads of an unmutated Go map are race-free per the Go memory model.
 
 ### What the predicate does NOT validate
 
@@ -886,10 +886,10 @@ var (
 
 The package returns Go sentinels; **the dotted-string wire codes live at the call site**, not here. This follows the convention pinned in `docs/PROJECT-MEMORY.md` § "Refusal-to-wire-code mapping is the consumer's job, NOT the primitive's." `internal/conversations` already exports `ErrConversationNotFound` / `ErrConversationAlreadyPromoted` and lets the consumer (CLI, wire layer) map them. `internal/protocol` follows the same idiom.
 
-Returning `string` from `IsV1Compatible` would couple this package to wire format. The cost of the convention is a single switch at the dispatcher (#248):
+Returning `string` from `IsKnownAppType` would couple this package to wire format. The cost of the convention is a single switch at the dispatcher (#248):
 
 ```go
-if err := protocol.IsV1Compatible(env); err != nil {
+if err := protocol.IsKnownAppType(env); err != nil {
     code := protocol.CodeProtocolMalformed
     switch {
     case errors.Is(err, protocol.ErrUnsupported):
@@ -928,7 +928,7 @@ Wire values for the `code` field of error payloads (spec § Error codes, lines 5
 
 ### Envelope types
 
-Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `v1TypeSet`; 13 from the original #256 catalog — its three v1 bulk-history backfill types were removed as dead code in #967, see [codebase/967.md](../codebase/967.md) — + `TypeRenameConversation` #820 + `TypeDeleteConversation` / `TypeConversationDeleted` #822) and the **v2-only** set whose members are **deliberately NOT** in `v1TypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454), `TypeRequestSnapshot` (#617), `TypeModalAnswer` / `TypeModalCancel` (#701), `TypeDequeueMessage` (#720), and `TypeInterrupt` (#707)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), `TypeScreenSnapshot` (#617), `TypeResync` (#647), `TypeSessionTransition` (#656), `TypeModalShown` / `TypeModalDismissed` (#701), `TypeQueueState` (#720), and `TypeSessionError` (#1007, unwired — no producer yet)). Adding either to `v1TypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
+Wire values for `Envelope.Type` (spec § Message types). Two architectural partitions: 16 v1 application types (closed; consumed by `dispatch.Route` via `inboundAppTypeSet`; 13 from the original #256 catalog — its three v1 bulk-history backfill types were removed as dead code in #967, see [codebase/967.md](../codebase/967.md) — + `TypeRenameConversation` #820 + `TypeDeleteConversation` / `TypeConversationDeleted` #822) and the **v2-only** set whose members are **deliberately NOT** in `inboundAppTypeSet`. The v2-only set itself spans two flavours: **inbound control envelopes** (`TypeRekeyRequest` (#454), `TypeRequestSnapshot` (#617), `TypeModalAnswer` / `TypeModalCancel` (#701), `TypeDequeueMessage` (#720), and `TypeInterrupt` (#707)), intercepted at the v2 dispatch boundary (`internal/relay/v2session.go`'s `dispatchAppFrame`) before `dispatch.Route` is called; and **outbound binary → phone events** never dispatched inbound (the five #607 interactive types, `TypeStall` (#638), `TypeScreenSnapshot` (#617), `TypeResync` (#647), `TypeSessionTransition` (#656), `TypeModalShown` / `TypeModalDismissed` (#701), `TypeQueueState` (#720), and `TypeSessionError` (#1007, unwired — no producer yet)). Adding either to `inboundAppTypeSet` would silently route the envelope to the v1 handler chain (or expose it to an old phone) — exactly the opposite of what's wanted.
 
 **v1 application types** (19; spec § v1 Message types):
 
@@ -959,7 +959,7 @@ These six live in their **own** const block (not merged into the `TypeRekeyReque
 |-------|-----------|
 | Screen snapshot | `TypeRequestSnapshot`, `TypeScreenSnapshot` |
 
-These two live in their **own** cohesive const block, grouping the request/response pair so a reader greps "snapshot" and finds both adjacent with their shared rationale. The pair straddles both v2-only flavours — `TypeRequestSnapshot` is an inbound control envelope intercepted before `dispatch.Route` (like `TypeRekeyRequest`), `TypeScreenSnapshot` is an outbound binary → phone event — but `TestTypeConstants_V1V2Partition` is grouping-independent, so which block a constant lives in is purely a readability choice. Both stay out of `v1TypeSet`. The interception, render (via tui-driver), and push are the consumer ticket's job (`security-sensitive`), not this package's.
+These two live in their **own** cohesive const block, grouping the request/response pair so a reader greps "snapshot" and finds both adjacent with their shared rationale. The pair straddles both v2-only flavours — `TypeRequestSnapshot` is an inbound control envelope intercepted before `dispatch.Route` (like `TypeRekeyRequest`), `TypeScreenSnapshot` is an outbound binary → phone event — but `TestTypeConstants_V1V2Partition` is grouping-independent, so which block a constant lives in is purely a readability choice. Both stay out of `inboundAppTypeSet`. The interception, render (via tui-driver), and push are the consumer ticket's job (`security-sensitive`), not this package's.
 
 **v2 reconnect-resync marker** (#647; spec `docs/protocol-mobile.md` § Interactive events / Reconnect replay & resync):
 
@@ -967,7 +967,7 @@ These two live in their **own** cohesive const block, grouping the request/respo
 |-------|-----------|
 | Resync | `TypeResync` |
 
-`TypeResync = "resync"` is an outbound binary → phone control marker the daemon emits when a reconnecting phone's advertised `last_event_id` aged out of the bounded event ring (it must full-reload). Its **own** const block; like `TypeRekeyRequest` it has **no named payload struct** — `internal/relay` marshals an inline `struct{ ConversationID string }` at emit time. Stays out of `v1TypeSet` (an old phone must never receive it; `{"resync-rejected", TypeResync, false, ErrUnknownType}` in `compat_test.go` pins that v1 `IsV1Compatible` rejects it).
+`TypeResync = "resync"` is an outbound binary → phone control marker the daemon emits when a reconnecting phone's advertised `last_event_id` aged out of the bounded event ring (it must full-reload). Its **own** const block; like `TypeRekeyRequest` it has **no named payload struct** — `internal/relay` marshals an inline `struct{ ConversationID string }` at emit time. Stays out of `inboundAppTypeSet` (an old phone must never receive it; `{"resync-rejected", TypeResync, false, ErrUnknownType}` in `compat_test.go` pins that v1 `IsKnownAppType` rejects it).
 
 **v2 session-boundary marker** (#656; spec `docs/protocol-mobile.md` § Interactive events / session_transition):
 
@@ -975,7 +975,7 @@ These two live in their **own** cohesive const block, grouping the request/respo
 |-------|-----------|
 | Session boundary | `TypeSessionTransition` |
 
-`TypeSessionTransition = "session_transition"` is an outbound binary → phone marker the daemon emits when its session rotates (a `/clear`, an idle eviction, or a workspace change), so a phone renders a `ThreadItem.SessionBoundary` marker (`pyrycode-mobile#336`). Its **own** const block; **unlike** `TypeResync` it carries a real multi-field named payload (`SessionTransitionPayload` in `messaging.go` — see [Session-transition payload](#session-transition-payload-656)) rather than an inline struct. A **session boundary is distinct from the six turn-stream events** and carries **no** `event_id`. Stays out of `v1TypeSet` (an old phone must never receive it; `{"session_transition-rejected", TypeSessionTransition, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). The producer is sibling #657 (`security-sensitive`); this slice is wire vocabulary only.
+`TypeSessionTransition = "session_transition"` is an outbound binary → phone marker the daemon emits when its session rotates (a `/clear`, an idle eviction, or a workspace change), so a phone renders a `ThreadItem.SessionBoundary` marker (`pyrycode-mobile#336`). Its **own** const block; **unlike** `TypeResync` it carries a real multi-field named payload (`SessionTransitionPayload` in `messaging.go` — see [Session-transition payload](#session-transition-payload-656)) rather than an inline struct. A **session boundary is distinct from the six turn-stream events** and carries **no** `event_id`. Stays out of `inboundAppTypeSet` (an old phone must never receive it; `{"session_transition-rejected", TypeSessionTransition, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). The producer is sibling #657 (`security-sensitive`); this slice is wire vocabulary only.
 
 **v2 modal vocabulary** (#701; spec `docs/protocol-mobile.md` § Modal):
 
@@ -983,7 +983,7 @@ These two live in their **own** cohesive const block, grouping the request/respo
 |-------|-----------|
 | Modal | `TypeModalShown`, `TypeModalAnswer`, `TypeModalCancel`, `TypeModalDismissed` |
 
-The four modal types share **one** const block with **one** rationale comment — the **mixed inbound+outbound** cluster precedent set by the `request_snapshot`/`screen_snapshot` pair. `TypeModalShown` / `TypeModalDismissed` are outbound binary → phone events; `TypeModalAnswer` / `TypeModalCancel` are inbound phone → binary **control** envelopes intercepted at `internal/relay/v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeRekeyRequest` / `TypeRequestSnapshot` precedent — **no `dispatch.Route` handler**). All four carry real named payload structs in `messaging.go` (`ModalShownPayload` / `ModalAnswerPayload` / `ModalCancelPayload` / `ModalDismissedPayload` — see [Modal v2 wire payloads](#modal-v2-wire-payloads-701)). All four stay out of `v1TypeSet` (four `{"modal_*-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producers are siblings #703 (control loop) / #706 (two-heads ownership) / #702 (per-device answer gate); this slice is wire vocabulary only, `security-sensitive` for the **shape** review (no handler ships).
+The four modal types share **one** const block with **one** rationale comment — the **mixed inbound+outbound** cluster precedent set by the `request_snapshot`/`screen_snapshot` pair. `TypeModalShown` / `TypeModalDismissed` are outbound binary → phone events; `TypeModalAnswer` / `TypeModalCancel` are inbound phone → binary **control** envelopes intercepted at `internal/relay/v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeRekeyRequest` / `TypeRequestSnapshot` precedent — **no `dispatch.Route` handler**). All four carry real named payload structs in `messaging.go` (`ModalShownPayload` / `ModalAnswerPayload` / `ModalCancelPayload` / `ModalDismissedPayload` — see [Modal v2 wire payloads](#modal-v2-wire-payloads-701)). All four stay out of `inboundAppTypeSet` (four `{"modal_*-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producers are siblings #703 (control loop) / #706 (two-heads ownership) / #702 (per-device answer gate); this slice is wire vocabulary only, `security-sensitive` for the **shape** review (no handler ships).
 
 **v2 queue vocabulary** (#720; spec `docs/protocol-mobile.md` § Queue):
 
@@ -991,7 +991,7 @@ The four modal types share **one** const block with **one** rationale comment �
 |-------|-----------|
 | Queue | `TypeQueueState`, `TypeDequeueMessage` |
 
-The two queue types share **one** const block with **one** rationale comment — the same **mixed inbound+outbound** cluster precedent as the modal block. `TypeQueueState` is an outbound binary → phone queued-backlog snapshot; `TypeDequeueMessage` is an inbound phone → binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalAnswer` / `TypeRequestSnapshot` precedent — **no `dispatch.Route` handler**). `TypeQueueState` carries the named `QueueStatePayload` / `QueuedItem` structs and `TypeDequeueMessage` the `DequeueMessagePayload` struct in `messaging.go` (see [Queue v2 wire payloads](#queue-v2-wire-payloads-720)). Both stay out of `v1TypeSet` (two `{"queue_state-rejected"/"dequeue_message-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producer is #722 / the handler is #723; this slice is wire vocabulary only — and **unlike** the modal block it is **not** `security-sensitive` (`queued_msg_id` is a plain per-conversation counter, not a nonce, and dequeuing is ungated — ADR 025 § Security model).
+The two queue types share **one** const block with **one** rationale comment — the same **mixed inbound+outbound** cluster precedent as the modal block. `TypeQueueState` is an outbound binary → phone queued-backlog snapshot; `TypeDequeueMessage` is an inbound phone → binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalAnswer` / `TypeRequestSnapshot` precedent — **no `dispatch.Route` handler**). `TypeQueueState` carries the named `QueueStatePayload` / `QueuedItem` structs and `TypeDequeueMessage` the `DequeueMessagePayload` struct in `messaging.go` (see [Queue v2 wire payloads](#queue-v2-wire-payloads-720)). Both stay out of `inboundAppTypeSet` (two `{"queue_state-rejected"/"dequeue_message-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producer is #722 / the handler is #723; this slice is wire vocabulary only — and **unlike** the modal block it is **not** `security-sensitive` (`queued_msg_id` is a plain per-conversation counter, not a nonce, and dequeuing is ungated — ADR 025 § Security model).
 
 **v2 interrupt control** (#707; spec `docs/protocol-mobile.md` § Interrupt):
 
@@ -999,7 +999,7 @@ The two queue types share **one** const block with **one** rationale comment —
 |-------|----------|
 | Interrupt | `TypeInterrupt` |
 
-`TypeInterrupt = "interrupt"` is an inbound phone → binary **control** envelope in its **own** new const block, intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalCancel` / `TypeDequeueMessage` precedent — **no `dispatch.Route` handler**). It is the **remote interrupt** — a paired phone stops the running turn, the wire form of pressing Esc locally; the daemon maps it to the neutral `turnevent.Cancel` command and routes it to claude as a single Esc keystroke (#600 maps ACP `session/cancel` onto the same neutral shape). **Unlike every other v2 control envelope it carries NO named payload struct** — no `conversation_id`, no `modal_id` nonce, no `answer_token`, no idempotency key: a bare control frame (`internal/relay` switches on `type` alone; a replayed `interrupt` just sends another Esc, idempotent in effect). Stays out of `v1TypeSet` (an `{"interrupt-rejected", TypeInterrupt, false, ErrUnknownType}` row in `compat_test.go` pins the v1 rejection). The interception, capability gate, and `SendEsc` routing are the consumer ticket's job in `internal/relay` (`security-sensitive` — the **first** inbound frame gated on the `interactive` capability itself); this leaf declaration makes no trust decision. See [codebase/707.md](codebase/707.md).
+`TypeInterrupt = "interrupt"` is an inbound phone → binary **control** envelope in its **own** new const block, intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalCancel` / `TypeDequeueMessage` precedent — **no `dispatch.Route` handler**). It is the **remote interrupt** — a paired phone stops the running turn, the wire form of pressing Esc locally; the daemon maps it to the neutral `turnevent.Cancel` command and routes it to claude as a single Esc keystroke (#600 maps ACP `session/cancel` onto the same neutral shape). **Unlike every other v2 control envelope it carries NO named payload struct** — no `conversation_id`, no `modal_id` nonce, no `answer_token`, no idempotency key: a bare control frame (`internal/relay` switches on `type` alone; a replayed `interrupt` just sends another Esc, idempotent in effect). Stays out of `inboundAppTypeSet` (an `{"interrupt-rejected", TypeInterrupt, false, ErrUnknownType}` row in `compat_test.go` pins the v1 rejection). The interception, capability gate, and `SendEsc` routing are the consumer ticket's job in `internal/relay` (`security-sensitive` — the **first** inbound frame gated on the `interactive` capability itself); this leaf declaration makes no trust decision. See [codebase/707.md](codebase/707.md).
 
 **v2 new_session control** (#831, split from #824; spec `docs/protocol-mobile.md` § New session):
 
@@ -1007,7 +1007,7 @@ The two queue types share **one** const block with **one** rationale comment —
 |-------|----------|
 | New session | `TypeNewSession` |
 
-`TypeNewSession = "new_session"` is an inbound phone → binary **control** envelope in its **own** new const block, intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeInterrupt` / `TypeRequestDebugBundle` precedent — **no `dispatch.Route` handler**). It is the **remote start-new-session** — a paired phone's equivalent of typing `/clear` at the local terminal; the daemon routes it directly to the supervised claude as a `/clear` via the sealed `supervisor.StartNewSession` seam (#830). **Unlike `interrupt` it maps to no neutral `turnevent` command** — there is no announced ACP counterpart requiring one, so it drives the relay seam directly (mirroring how `modal_cancel` routes to `ModalResolver.ResolveCancel` without constructing a `turnevent` value). Like `interrupt` / `request_debug_bundle` it carries **NO named payload struct** — no `conversation_id`, no nonce, no idempotency key: a bare control frame (a replayed `new_session` just drives another `/clear`, harmless and idempotent in effect). Stays out of `v1TypeSet` (a `{"new_session-rejected", TypeNewSession, false, ErrUnknownType}` row in `compat_test.go` pins the v1 rejection). The interception, capability gate, and `StartNewSession` routing are the consumer ticket's job in `internal/relay` (`security-sensitive` — reuses the `interactive`-capability-is-the-authorization posture `interrupt` established; exempt from the per-device permission gate #702, since starting a fresh session in one's own paired session is a normal paired-phone action, not a tool-permission decision); this leaf declaration makes no trust decision. See [codebase/831.md](codebase/831.md).
+`TypeNewSession = "new_session"` is an inbound phone → binary **control** envelope in its **own** new const block, intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeInterrupt` / `TypeRequestDebugBundle` precedent — **no `dispatch.Route` handler**). It is the **remote start-new-session** — a paired phone's equivalent of typing `/clear` at the local terminal; the daemon routes it directly to the supervised claude as a `/clear` via the sealed `supervisor.StartNewSession` seam (#830). **Unlike `interrupt` it maps to no neutral `turnevent` command** — there is no announced ACP counterpart requiring one, so it drives the relay seam directly (mirroring how `modal_cancel` routes to `ModalResolver.ResolveCancel` without constructing a `turnevent` value). Like `interrupt` / `request_debug_bundle` it carries **NO named payload struct** — no `conversation_id`, no nonce, no idempotency key: a bare control frame (a replayed `new_session` just drives another `/clear`, harmless and idempotent in effect). Stays out of `inboundAppTypeSet` (a `{"new_session-rejected", TypeNewSession, false, ErrUnknownType}` row in `compat_test.go` pins the v1 rejection). The interception, capability gate, and `StartNewSession` routing are the consumer ticket's job in `internal/relay` (`security-sensitive` — reuses the `interactive`-capability-is-the-authorization posture `interrupt` established; exempt from the per-device permission gate #702, since starting a fresh session in one's own paired session is a normal paired-phone action, not a tool-permission decision); this leaf declaration makes no trust decision. See [codebase/831.md](codebase/831.md).
 
 **v2 set-session-settings vocabulary** (#844, split from #841; spec `docs/protocol-mobile.md` § Session settings):
 
@@ -1015,7 +1015,7 @@ The two queue types share **one** const block with **one** rationale comment —
 |-------|-----------|
 | Session settings | `TypeSetSessionSettings`, `TypeSessionSettingsUpdated` |
 
-The two share **one** const block with **one** rationale comment — the same **mixed inbound+outbound** cluster precedent as the modal and queue blocks. `TypeSetSessionSettings` is an inbound phone → binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalAnswer` / `TypeNewSession` precedent — **no `dispatch.Route` handler**); `TypeSessionSettingsUpdated` is an outbound binary → phone reply confirming the change, correlated via `Envelope.InReplyTo`. Both carry real named payload structs in the new `settings.go` (`SetSessionSettingsPayload` / `SessionSettingsUpdatedPayload` — see [Session settings payloads](#session-settings-payloads-844)). Both stay out of `v1TypeSet` (two `{"set_session_settings-rejected"/"session_settings_updated-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producer is handler sibling #845 (shipped — decodes into `sessions.Pool.UpdateSettings` (#840), see [Inbound set_session_settings](v2-session-manager.md#inbound-set_session_settings-845--settingsupdater-seam-validate-persist-reply)); this slice is wire vocabulary only — **not** `security-sensitive` (per the wire-vocab → handler split precedent, this leaf defines shape only, no nonce/token/capability primitive; the YOLO fail-safe lives in `sessions.SettingsUpdate` (#840) and the capability gate in #845). See [codebase/844.md](../codebase/844.md).
+The two share **one** const block with **one** rationale comment — the same **mixed inbound+outbound** cluster precedent as the modal and queue blocks. `TypeSetSessionSettings` is an inbound phone → binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalAnswer` / `TypeNewSession` precedent — **no `dispatch.Route` handler**); `TypeSessionSettingsUpdated` is an outbound binary → phone reply confirming the change, correlated via `Envelope.InReplyTo`. Both carry real named payload structs in the new `settings.go` (`SetSessionSettingsPayload` / `SessionSettingsUpdatedPayload` — see [Session settings payloads](#session-settings-payloads-844)). Both stay out of `inboundAppTypeSet` (two `{"set_session_settings-rejected"/"session_settings_updated-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producer is handler sibling #845 (shipped — decodes into `sessions.Pool.UpdateSettings` (#840), see [Inbound set_session_settings](v2-session-manager.md#inbound-set_session_settings-845--settingsupdater-seam-validate-persist-reply)); this slice is wire vocabulary only — **not** `security-sensitive` (per the wire-vocab → handler split precedent, this leaf defines shape only, no nonce/token/capability primitive; the YOLO fail-safe lives in `sessions.SettingsUpdate` (#840) and the capability gate in #845). See [codebase/844.md](../codebase/844.md).
 
 **v2 session-error vocabulary** (#1007, split from #1001; spec `docs/protocol-mobile.md` § Error codes):
 
@@ -1023,24 +1023,24 @@ The two share **one** const block with **one** rationale comment — the same **
 |-------|----------|
 | Session error | `TypeSessionError` |
 
-`TypeSessionError = "session_error"` is an outbound binary → phone event in its **own** new const block — the same single-type-own-block precedent as `TypeResync` / `TypeSessionTransition`. Unlike every other outbound v2 event it is **unsolicited and not `InReplyTo`-correlated**: it surfaces a daemon-side give-up (`internal/msgqueue`'s bounded persistent-failure drain, `OnGiveUp` seam, #1000) that has no originating client request to reply to, so the payload (`SessionErrorPayload` in `messaging.go`) carries the conversation identity itself rather than relying on correlation. It also carries a **terminal** code (`CodeSessionBlocked = "session.blocked"`) distinct from the transient `CodeServerBinaryBusy`, and the payload has structurally **no** `Retryable` / `RetryAfterS` fields — a client cannot mistake it for a retry hint the way it might a v1 `TypeError` / `ErrorPayload` push. Stays out of `v1TypeSet` (an old phone must never receive it; `{"session_error-rejected", TypeSessionError, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). **Ships unwired this ticket** — declarations, the partition entry, and a golden fixture only; no producer, emission, or consumer. The producer that emits it on msgqueue give-up is blocked-by-this sibling #1008.
+`TypeSessionError = "session_error"` is an outbound binary → phone event in its **own** new const block — the same single-type-own-block precedent as `TypeResync` / `TypeSessionTransition`. Unlike every other outbound v2 event it is **unsolicited and not `InReplyTo`-correlated**: it surfaces a daemon-side give-up (`internal/msgqueue`'s bounded persistent-failure drain, `OnGiveUp` seam, #1000) that has no originating client request to reply to, so the payload (`SessionErrorPayload` in `messaging.go`) carries the conversation identity itself rather than relying on correlation. It also carries a **terminal** code (`CodeSessionBlocked = "session.blocked"`) distinct from the transient `CodeServerBinaryBusy`, and the payload has structurally **no** `Retryable` / `RetryAfterS` fields — a client cannot mistake it for a retry hint the way it might a v1 `TypeError` / `ErrorPayload` push. Stays out of `inboundAppTypeSet` (an old phone must never receive it; `{"session_error-rejected", TypeSessionError, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). **Ships unwired this ticket** — declarations, the partition entry, and a golden fixture only; no producer, emission, or consumer. The producer that emits it on msgqueue give-up is blocked-by-this sibling #1008.
 
-`TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `v1TypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `v1TypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out; the interactive block carries the same MUST-NOT instruction. The advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
+`TypeRekeyRequest` carries the doc-comment load-bearing instruction "MUST NOT be added to `inboundAppTypeSet` in `internal/protocol/envelope.go`"; a companion doc-comment **above** `inboundAppTypeSet` names `TypeRekeyRequest` as the canonical example of a v2-only type that must stay out; the interactive block carries the same MUST-NOT instruction. The advisory comments form the stochastic-rule rails; the deterministic rail is `TestTypeConstants_V1V2Partition` in `compat_test.go` (see drift detectors below).
 
 ## Drift detectors
 
-The v1 type list appears three times: in the `Type*` constants block (`codes.go`), in the `v1TypeSet` map literal (`envelope.go`), and in two test slices (`compat_test.go`). The triple-copy is **deliberate** — explicit drift detectors fail loudly in CI when a new constant lands without the corresponding map entry:
+The v1 type list appears three times: in the `Type*` constants block (`codes.go`), in the `inboundAppTypeSet` map literal (`envelope.go`), and in two test slices (`compat_test.go`). The triple-copy is **deliberate** — explicit drift detectors fail loudly in CI when a new constant lands without the corresponding map entry:
 
-- `TestIsV1Compatible` — runs every v1 `Type*` constant through `IsV1Compatible` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
-- `TestV1TypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `v1TypeSet`.
-- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656/#701/#720/#707/#812/#813/#831/#844/#1007) — every exported `Type*` constant must be in `v1TypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds twenty-five entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition` + the four modal types + the two queue types + `TypeInterrupt` + the two debug-bundle-stream types + `TypeRequestDebugBundle` + `TypeNewSession` + the two set-session-settings types + `TypeSessionError`), so the partition size assertion is `len(v1TypeSet) + len(v2OnlyTypes) == 16 + 25 == 41` (v1TypeSet's contribution reduced by the three backfill types removed in #967). Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
+- `TestIsKnownAppType` — runs every v1 `Type*` constant through `IsKnownAppType` and asserts `nil` (catches "added a v1 `Type*` const, forgot the map").
+- `TestInboundAppTypeSet_CoversAllExportedTypeConstants` — asserts every v1 application `Type*` constant is keyed in `inboundAppTypeSet`.
+- `TestTypeConstants_V1V2Partition` (#454, extended #607/#617/#638/#647/#656/#701/#720/#707/#812/#813/#831/#844/#1007) — every exported `Type*` constant must be in `inboundAppTypeSet` **OR** in the test-local `v2OnlyTypes` allowlist; never both, never neither. The allowlist now holds twenty-five entries (`TypeRekeyRequest` + the five interactive types + `TypeStall` + the two snapshot types + `TypeResync` + `TypeSessionTransition` + the four modal types + the two queue types + `TypeInterrupt` + the two debug-bundle-stream types + `TypeRequestDebugBundle` + `TypeNewSession` + the two set-session-settings types + `TypeSessionError`), so the partition size assertion is `len(inboundAppTypeSet) + len(v2OnlyTypes) == 16 + 25 == 41` (inboundAppTypeSet's contribution reduced by the three backfill types removed in #967). Forces a future contributor adding any v2-only type to amend the allowlist explicitly — adding a `Type*` constant without partitioning it fails the build. The `v2OnlyTypes` literal lives in the test rather than as an exported production symbol so production callers cannot accidentally import it for dispatch logic — v2 dispatch switches on individual constants, not on partition membership.
 - `TestErrorCode_Constants_MatchSpec` — exact-string match for each `Code*` constant against the spec's dotted string. Catches the "fat-fingered `protocol.unkown_type`" regression at the lowest possible cost.
 
 Reflection over `go/types` was considered and rejected — heavier than explicit assertions for a closed set. If the v1 type set ever grows past ~50 entries (no plausible path under the protocol's versioning policy), revisit.
 
 ## Concurrency
 
-Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compatible` is a pure function: same input, same output, allocation-free on the rejection path (returns one of three pre-existing values: `nil`, `ErrUnsupported`, `ErrUnknownType`). `v1TypeSet` is initialised at package init and never mutated.
+Pure-data package. No goroutines, no locks, no shared-mutable state. `IsKnownAppType` is a pure function: same input, same output, allocation-free on the rejection path (returns one of three pre-existing values: `nil`, `ErrUnsupported`, `ErrUnknownType`). `inboundAppTypeSet` is initialised at package init and never mutated.
 
 ## What's deliberately NOT in the package
 
@@ -1059,11 +1059,11 @@ Pure-data package. No goroutines, no locks, no shared-mutable state. `IsV1Compat
 
 ## Security posture
 
-Trust boundary is `json.Unmarshal` at the dispatcher. After the unmarshal succeeds, an `Envelope` value is "structurally well-formed JSON" but **not** "semantically validated." `IsV1Compatible` is the next gate after unmarshal, but it intentionally checks only the framing bits (`PayloadEncrypted`, `Type`).
+Trust boundary is `json.Unmarshal` at the dispatcher. After the unmarshal succeeds, an `Envelope` value is "structurally well-formed JSON" but **not** "semantically validated." `IsKnownAppType` is the next gate after unmarshal, but it intentionally checks only the framing bits (`PayloadEncrypted`, `Type`).
 
 Downstream obligations the dispatcher (#248) inherits:
 - Apply a max-frame-size cap at the WS read boundary BEFORE this package's types are constructed; unbounded `[]byte` reaching `json.Unmarshal` is a DoS vector.
-- Run `IsV1Compatible` on every decoded envelope.
+- Run `IsKnownAppType` on every decoded envelope.
 - Decode `Payload` against the per-type struct selected by `Type` (#256 catalog).
 - Enforce clock-skew caps on `TS`.
 - Track `ID` monotonicity per connection.
@@ -1075,7 +1075,7 @@ The `payload_encrypted: true` v2 reservation is rejected via `ErrUnsupported` be
 
 No production consumers in this slice. Future:
 - `internal/relay-client` (binary→relay WS connection) — marshals `Envelope`, wraps in `RoutingEnvelope` for the relay leg.
-- `internal/dispatch` (#248) — calls `IsV1Compatible`, maps sentinels to wire codes, decodes per-type payloads from #256's catalog.
+- `internal/dispatch` (#248) — calls `IsKnownAppType`, maps sentinels to wire codes, decodes per-type payloads from #256's catalog.
 - `cmd/pyry-relay` (future) — splices `RoutingEnvelope.Frame` byte-for-byte without parsing.
 - Mobile clients — consume the JSON wire format directly (no Go binding); the test fixtures under `testdata/` double as the cross-language schema reference.
 
@@ -1086,7 +1086,7 @@ No production consumers in this slice. Future:
 - Sentinel-pattern precedent: `internal/conversations` (`ErrConversationNotFound` etc.)
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Decision 2 (v2-additive + capability negotiation) and § Wire-protocol extension; the decision the #607 interactive payloads + `capabilities` field implement. § Safe degradation pins the parser-independent screen-snapshot floor the #617 `request_snapshot` / `screen_snapshot` pair backs.
 - [turnevent-package.md](turnevent-package.md) — the neutral internal turn-event model (#606) the interactive payloads are the wire representation of; `stop_reason` carries its `TurnEndReason` strings verbatim
-- [codebase/967.md](../codebase/967.md) — the #967 implementation note (removal of the dead v1 bulk-history backfill flow: `BackfillSincePayload` / `MessageChunkPayload` / `BackfillDonePayload`, the `TypeBackfillSince` / `TypeMessageChunk` / `TypeBackfillDone` constants, and their `v1TypeSet` entries)
+- [codebase/967.md](../codebase/967.md) — the #967 implementation note (removal of the dead v1 bulk-history backfill flow: `BackfillSincePayload` / `MessageChunkPayload` / `BackfillDonePayload`, the `TypeBackfillSince` / `TypeMessageChunk` / `TypeBackfillDone` constants, and their `inboundAppTypeSet` entries)
 - [codebase/607.md](../codebase/607.md) — the #607 implementation note (interactive payloads + capabilities negotiation)
 - [codebase/617.md](../codebase/617.md) — the #617 implementation note (screen-snapshot wire types + v2 partition)
 - [codebase/638.md](../codebase/638.md) — the #638 implementation note (the `stall` wire type + its internal-only `turnevent.Stall` peer; the sixth member of the v2 interactive partition)

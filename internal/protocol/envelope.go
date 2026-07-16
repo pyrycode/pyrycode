@@ -76,7 +76,7 @@ type RoutingEnvelope struct {
 	CloseCode uint16 `json:"close_code,omitempty"`
 }
 
-// Sentinel errors returned by IsV1Compatible. Callers (the future WS
+// Sentinel errors returned by IsKnownAppType. Callers (the future WS
 // dispatch layer) distinguish refusal cases via errors.Is and map each
 // sentinel to its dotted-string wire code at the call site:
 //
@@ -87,35 +87,36 @@ var (
 	ErrUnsupported = errors.New("protocol: unsupported envelope feature")
 )
 
-// IsV1Compatible reports whether env is acceptable under wire-protocol v1.
-// Returns nil when env.Type is in the v1 type set and env.PayloadEncrypted
-// is false. Returns ErrUnsupported when env.PayloadEncrypted is true
-// (reserved for v2; docs/protocol-mobile.md § Reserved for v2). Returns
-// ErrUnknownType when env.Type is empty or not in the v1 set.
+// IsKnownAppType reports whether a decrypted inbound app frame is
+// acceptable: its Type is a known inbound app-frame type (a member of
+// inboundAppTypeSet) and env.PayloadEncrypted is false. Returns
+// ErrUnsupported when env.PayloadEncrypted is true (an unsupported
+// inner-frame feature; docs/protocol-mobile.md § Reserved for v2). Returns
+// ErrUnknownType when env.Type is empty or not in inboundAppTypeSet.
 //
 // Check order: PayloadEncrypted first, Type second. A frame failing both
 // checks reports as ErrUnsupported — the stricter rejection wins.
 //
-// IsV1Compatible does not validate Payload contents, ID monotonicity, or
+// IsKnownAppType does not validate Payload contents, ID monotonicity, or
 // TS skew; those are dispatcher concerns.
-func IsV1Compatible(env Envelope) error {
+func IsKnownAppType(env Envelope) error {
 	if env.PayloadEncrypted {
 		return ErrUnsupported
 	}
-	if !v1TypeSet[env.Type] {
+	if !inboundAppTypeSet[env.Type] {
 		return ErrUnknownType
 	}
 	return nil
 }
 
-// v1TypeSet is the closed enumeration of envelope types accepted by
-// wire-protocol v1. Mobile Protocol v2 control types (e.g.
+// inboundAppTypeSet is the closed enumeration of inbound app-frame types
+// accepted after AEAD decrypt. Mobile Protocol v2 control types (e.g.
 // TypeRekeyRequest) MUST NOT be added here: the v2 session manager
 // (internal/relay/v2session.go) intercepts them at its dispatch boundary
 // before internal/dispatch.Route consults this set. Adding a v2-control
 // constant would silently route it to the handler chain — see
 // internal/protocol/compat_test.go for the partition enforcement.
-var v1TypeSet = map[string]bool{
+var inboundAppTypeSet = map[string]bool{
 	TypeHello:                  true,
 	TypeHelloAck:               true,
 	TypeError:                  true,

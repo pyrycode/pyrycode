@@ -1,6 +1,7 @@
 // Package dispatch routes a single inbound relay frame through a handler
-// table. Route decodes the inner protocol.Envelope, refuses non-v1 frames
-// via the protocol.IsV1Compatible check, and dispatches to the handler
+// table. Route decodes the inner protocol.Envelope, refuses frames whose
+// type is not a known inbound app-frame type via the
+// protocol.IsKnownAppType check, and dispatches to the handler
 // registered for the envelope Type. Conn is the per-conn_id state a
 // handler sees: it owns the monotonic outbound id counter and the conn's
 // outbound send seam. The package is carrier-agnostic — it imports
@@ -12,8 +13,8 @@
 //
 // The handler table is supplied by the caller. Frames whose Envelope.Type
 // has no registered handler fall through to a protocol.unsupported error
-// reply; encrypted or otherwise non-v1 frames are refused via the
-// protocol.IsV1Compatible check and map to protocol.unsupported /
+// reply; encrypted or otherwise unknown-type frames are refused via the
+// protocol.IsKnownAppType check and map to protocol.unsupported /
 // protocol.unknown_type. Malformed inner frames map to protocol.malformed.
 //
 // Security / operational notes (per the spec's Security review, #307):
@@ -135,7 +136,7 @@ func (c *Conn) Reply(ctx context.Context, req protocol.Envelope, respType string
 }
 
 // Route dispatches a single inbound envelope frame through handlers,
-// applying the malformed / IsV1Compatible / unknown-type error-envelope
+// applying the malformed / IsKnownAppType / unknown-type error-envelope
 // paths. Suitable for callers that own their own per-conn goroutine and
 // only need single-frame handler-table dispatch (e.g. the v2 session
 // manager's post-AEAD-decrypt dispatch).
@@ -159,7 +160,7 @@ func Route(ctx context.Context, logger *slog.Logger, conn *Conn, handlers map[st
 		return
 	}
 
-	if err := protocol.IsV1Compatible(env); err != nil {
+	if err := protocol.IsKnownAppType(env); err != nil {
 		switch {
 		case errors.Is(err, protocol.ErrUnsupported):
 			sendError(ctx, logger, conn, &env.ID, protocol.CodeProtocolUnsupported, "unsupported envelope feature")

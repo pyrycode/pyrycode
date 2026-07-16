@@ -329,8 +329,9 @@ func startRelay(
 
 // startRelayV2 wires the Mobile Protocol v2 (Noise_IK E2E) dispatch leg: it
 // loads the binary's persistent static keypair, builds a V2SessionManager
-// against conn.Frames() registering the same three relay handlers as the v1
-// path, and runs the manager in one goroutine. The returned drain func blocks
+// against conn.Frames() registering the conversation / messaging / workspace /
+// push-token handler set that dispatch.Route consults, and runs the manager in
+// one goroutine. The returned drain func blocks
 // until that goroutine has exited; the caller Close()s conn before calling
 // drain so the manager's Run unblocks on the closed Frames channel.
 //
