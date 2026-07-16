@@ -205,6 +205,50 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   modal surfacer (see [modalbridge-package.md § Live daemon wiring (#798)](modalbridge-package.md#live-daemon-wiring-798))
   needed zero production changes. See [`codebase/1030.md`](../codebase/1030.md).
 
+- `interactive_session_control_liveness_test.go` (#1031) — first real-`claude`
+  coverage of the **session-control respawn verbs**, and the last of the #963
+  families: `new_session` (rotate via `/clear`) and `set_session_settings`
+  (respawn via a live restart) both tear down and re-establish the live
+  claude child, so the operator-facing risk is the reply bridge failing to
+  rebind past the respawn — the same failure class #854 guards on a cold
+  bootstrap session. `TestInteractiveSessionControlLiveness` drives a
+  sequential spine (the #1028 shape) on one daemon / one seeded bound
+  conversation over one encrypted channel: turn 1 (binds the reply bridge +
+  gives claude a transcript) → `new_session` rotate → turn 2 (proves the
+  rebind past rotation) → `set_session_settings{Model:"haiku"}` respawn →
+  turn 3 (proves the rebind past the restart). Each control verb pairs its
+  liveness send with a deterministic on-disk `sessions.json` bootstrap-row
+  anchor so the assertion is non-vacuous — a silently no-op'd respawn would
+  answer from the un-rotated/un-restarted session and pass otherwise: the
+  `new_session` rotate is a bounded ~1 s-cadence re-send loop (mirrors
+  #1004) asserted against a pre-frame baseline id, and
+  `set_session_settings` is asserted against the persisted `Model` field
+  (mirrors #1005, matched by `Bootstrap==true` so it's robust to the
+  restart itself rotating the id). `Model: "haiku"` is the credential-safe
+  settings value — `claudeSettingsArgs` appends `--model haiku` after the
+  daemon's own base `--model haiku` (last-wins), so the respawn never risks
+  a different real model's credentials/rate limits in a pre-ship gate, while
+  `"" → "haiku"` is still a genuine on-disk change that triggers a real
+  restart. Real claude rotates its transcript on **every** `/clear` (unlike
+  fakeclaude's one-shot `PYRY_FAKE_CLAUDE_CLEAR_ROTATES`), so the new
+  `waitBootstrapIDSettled` helper waits for the bootstrap id to stop
+  changing before each post-control `send_message` — otherwise a straggler
+  rotation from a re-sent frame could tear down that turn's in-flight
+  claude mid-stream. Reuses the #854/#1028 harness
+  (`spawnBootstrapDaemon`, `driveHandshakeInteractive`, `sealSendMessage`,
+  `drainForAssistantReply`) and the #997 generalised control-frame helpers
+  (`sealEnvelope`, `drainForReply`) unchanged; zero production files
+  touched. The only new code is the `bootstrapRow`/`readBootstrapRow`/
+  `waitBootstrapID`/`waitBootstrapIDSettled`/`waitBootstrapModel` on-disk
+  `sessions.json` reader family (mirrors #1028's
+  `readConversationIDsOnDisk` and #1005's `settingsRow`/
+  `readBootstrapSettings`). The fake tier (`relay_v2_new_session_test.go`
+  #1004, `relay_v2_settings_test.go` #1005) owns the verbs' detailed shape
+  and the reject-invalid path (out of scope here) — this test is
+  liveness/observable-state shaped only, proving the real interactive stack
+  survives both respawns. Last child of #963. See
+  [`codebase/1031.md`](../codebase/1031.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
