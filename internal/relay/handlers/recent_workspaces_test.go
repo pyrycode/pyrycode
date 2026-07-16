@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -12,19 +13,14 @@ import (
 
 const recentWSConnID = "conn-recent-ws"
 
-func makeRecentWorkspacesFrame(t *testing.T, id uint64) protocol.RoutingEnvelope {
+func makeRecentWorkspacesRequest(t *testing.T, id uint64) protocol.Envelope {
 	t.Helper()
-	env := protocol.Envelope{
+	return protocol.Envelope{
 		ID:      id,
 		Type:    protocol.TypeRecentWorkspaces,
 		TS:      time.Now().UTC(),
 		Payload: json.RawMessage("{}"),
 	}
-	frame, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return protocol.RoutingEnvelope{ConnID: recentWSConnID, Frame: frame}
 }
 
 func decodeRecentWorkspacesResponse(t *testing.T, out protocol.RoutingEnvelope) (protocol.Envelope, protocol.RecentWorkspacesListPayload) {
@@ -43,20 +39,27 @@ func decodeRecentWorkspacesResponse(t *testing.T, out protocol.RoutingEnvelope) 
 	return inner, payload
 }
 
-// runRecentWorkspaces registers the handler on a fresh dispatcher, sends one
-// recent_workspaces frame with the given request id, and returns the decoded
-// reply. It centralizes the dispatcher plumbing shared by every scenario below.
+// runRecentWorkspaces invokes the handler directly on a fresh *dispatch.Conn
+// with one recent_workspaces request carrying the given id, then returns the
+// decoded reply. It centralizes the direct-call plumbing shared by every
+// scenario below (mirroring newCreateConvConn's shape in the sibling tests).
 func runRecentWorkspaces(t *testing.T, reg *conversations.Registry, reqID uint64) (protocol.Envelope, protocol.RecentWorkspacesListPayload) {
 	t.Helper()
-	in := make(chan protocol.RoutingEnvelope, 1)
-	d := dispatch.New(dispatch.Config{Frames: in, Logger: testLogger(t)})
-	d.Register(protocol.TypeRecentWorkspaces, RecentWorkspaces(reg))
-	stop := runListConvDispatcher(t, d)
-	defer stop()
+	out := make(chan protocol.RoutingEnvelope, 4)
+	c := dispatch.NewTestConn(recentWSConnID, out, nil)
 
-	in <- makeRecentWorkspacesFrame(t, reqID)
-	out := recvOutbound(t, d)
-	return decodeRecentWorkspacesResponse(t, out)
+	h := RecentWorkspaces(reg)
+	if err := h(context.Background(), c, makeRecentWorkspacesRequest(t, reqID)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	select {
+	case env := <-out:
+		return decodeRecentWorkspacesResponse(t, env)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for outbound envelope")
+		return protocol.Envelope{}, protocol.RecentWorkspacesListPayload{}
+	}
 }
 
 func TestRecentWorkspaces_EmptyRegistry(t *testing.T) {
