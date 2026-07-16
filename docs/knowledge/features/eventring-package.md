@@ -30,9 +30,11 @@ path:
   assigned **once per logical event**, and survive a reconnect. So the ring keeps
   its own per-conversation counter; `nextID` is **not** overloaded.
 - **The ring is the only replay source.** `internal/conversations` holds metadata
-  only (id, session history, archive state — no message content), and there is no
-  `backfill_since` handler. Replay can only come from an in-memory ring the daemon
-  maintains as it fans events out.
+  only (id, session history, archive state — no message content); there is no
+  message-history store, and the v1 `backfill_since` wire flow that could have read
+  from one was dead code (zero emitters, zero handlers) and was removed in #967 (see
+  [codebase/967.md](../codebase/967.md)). Replay can only come from an in-memory ring
+  the daemon maintains as it fans events out.
 
 ## Durability boundary (in scope vs out)
 
