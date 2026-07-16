@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestIsV1Compatible(t *testing.T) {
+func TestIsKnownAppType(t *testing.T) {
 	allTypes := []string{
 		TypeHello, TypeHelloAck, TypeError, TypeAck,
 		TypeSendMessage, TypeMessage,
@@ -23,7 +23,7 @@ func TestIsV1Compatible(t *testing.T) {
 
 	for _, ty := range allTypes {
 		t.Run("known/"+ty, func(t *testing.T) {
-			if err := IsV1Compatible(Envelope{Type: ty}); err != nil {
+			if err := IsKnownAppType(Envelope{Type: ty}); err != nil {
 				t.Errorf("got %v, want nil", err)
 			}
 		})
@@ -42,7 +42,7 @@ func TestIsV1Compatible(t *testing.T) {
 		{"encrypted-with-unknown-type", "frobnicate", true, ErrUnsupported},
 		{"encrypted-with-empty-type", "", true, ErrUnsupported},
 		// v2-only interactive events are not v1-compatible: an old phone
-		// never receives them, so IsV1Compatible must reject each.
+		// never receives them, so IsKnownAppType must reject each.
 		{"turn_state-rejected", TypeTurnState, false, ErrUnknownType},
 		{"assistant_delta-rejected", TypeAssistantDelta, false, ErrUnknownType},
 		{"tool_use-rejected", TypeToolUse, false, ErrUnknownType},
@@ -53,14 +53,14 @@ func TestIsV1Compatible(t *testing.T) {
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
 		// the v2-only reconnect resync marker is binary → phone; an old phone
-		// must never receive it, so IsV1Compatible must reject it.
+		// must never receive it, so IsKnownAppType must reject it.
 		{"resync-rejected", TypeResync, false, ErrUnknownType},
 		// the v2-only session-boundary marker is binary → phone; an old phone
-		// must never receive it, so IsV1Compatible must reject it.
+		// must never receive it, so IsKnownAppType must reject it.
 		{"session_transition-rejected", TypeSessionTransition, false, ErrUnknownType},
 		// the v2-only modal vocabulary: outbound modal events an old phone
 		// never receives, and inbound modal controls that are never v1 types —
-		// IsV1Compatible must reject all four.
+		// IsKnownAppType must reject all four.
 		{"modal_shown-rejected", TypeModalShown, false, ErrUnknownType},
 		{"modal_answer-rejected", TypeModalAnswer, false, ErrUnknownType},
 		{"modal_cancel-rejected", TypeModalCancel, false, ErrUnknownType},
@@ -70,31 +70,31 @@ func TestIsV1Compatible(t *testing.T) {
 		{"queue_state-rejected", TypeQueueState, false, ErrUnknownType},
 		{"dequeue_message-rejected", TypeDequeueMessage, false, ErrUnknownType},
 		// the v2-only interrupt control: an inbound control type an old phone
-		// never sees, so IsV1Compatible must reject it.
+		// never sees, so IsKnownAppType must reject it.
 		{"interrupt-rejected", TypeInterrupt, false, ErrUnknownType},
 		// the v2-only debug-bundle streaming vocabulary: outbound binary → phone
-		// chunk/completion events an old phone never receives, so IsV1Compatible
+		// chunk/completion events an old phone never receives, so IsKnownAppType
 		// must reject both.
 		{"debug_bundle_chunk-rejected", TypeDebugBundleChunk, false, ErrUnknownType},
 		{"debug_bundle_done-rejected", TypeDebugBundleDone, false, ErrUnknownType},
 		// the v2-only debug-bundle request verb: an inbound control type an old
-		// phone never sees, so IsV1Compatible must reject it.
+		// phone never sees, so IsKnownAppType must reject it.
 		{"request_debug_bundle-rejected", TypeRequestDebugBundle, false, ErrUnknownType},
 		// the v2-only new_session control: an inbound control type an old phone
-		// never sees, so IsV1Compatible must reject it.
+		// never sees, so IsKnownAppType must reject it.
 		{"new_session-rejected", TypeNewSession, false, ErrUnknownType},
 		// the v2-only set-session-settings vocabulary: an inbound control
 		// request an old phone never sends and an outbound reply an old phone
-		// never receives, so IsV1Compatible must reject both.
+		// never receives, so IsKnownAppType must reject both.
 		{"set_session_settings-rejected", TypeSetSessionSettings, false, ErrUnknownType},
 		{"session_settings_updated-rejected", TypeSessionSettingsUpdated, false, ErrUnknownType},
 		// the v2-only session-error frame is binary → phone; an old phone must
-		// never receive it, so IsV1Compatible must reject it.
+		// never receive it, so IsKnownAppType must reject it.
 		{"session_error-rejected", TypeSessionError, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := IsV1Compatible(Envelope{Type: tc.typ, PayloadEncrypted: tc.encrypted})
+			err := IsKnownAppType(Envelope{Type: tc.typ, PayloadEncrypted: tc.encrypted})
 			if !errors.Is(err, tc.want) {
 				t.Errorf("got %v, want %v", err, tc.want)
 			}
@@ -102,7 +102,7 @@ func TestIsV1Compatible(t *testing.T) {
 	}
 }
 
-func TestV1TypeSet_CoversAllExportedTypeConstants(t *testing.T) {
+func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 	all := []string{
 		TypeHello, TypeHelloAck, TypeError, TypeAck,
 		TypeSendMessage, TypeMessage,
@@ -120,24 +120,24 @@ func TestV1TypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 	if got, want := len(all), 23; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
-	if got, want := len(v1TypeSet), len(all); got != want {
-		t.Errorf("v1TypeSet size: got %d, want %d", got, want)
+	if got, want := len(inboundAppTypeSet), len(all); got != want {
+		t.Errorf("inboundAppTypeSet size: got %d, want %d", got, want)
 	}
 	for _, ty := range all {
-		if !v1TypeSet[ty] {
-			t.Errorf("v1TypeSet missing %q", ty)
+		if !inboundAppTypeSet[ty] {
+			t.Errorf("inboundAppTypeSet missing %q", ty)
 		}
 	}
 }
 
 // v2OnlyTypes is the test-local allowlist of Mobile Protocol v2 envelope
-// types that are deliberately excluded from v1TypeSet. Two flavours live
+// types that are deliberately excluded from inboundAppTypeSet. Two flavours live
 // here: v2 control types (e.g. TypeRekeyRequest), intercepted at
 // internal/relay/v2session.go's dispatch boundary before dispatch.Route;
 // and v2 additive interactive application events (turn_state and friends),
 // pushed outbound to capability-advertising phones and never dispatched
 // inbound. Both are "v2-only" for the partition's purpose — adding either
-// to v1TypeSet would let an old phone (or dispatch.Route) see a type it
+// to inboundAppTypeSet would let an old phone (or dispatch.Route) see a type it
 // must not, so the partition is the architectural seam between v1 traffic
 // and v2 traffic.
 var v2OnlyTypes = map[string]bool{
@@ -178,10 +178,10 @@ var v2OnlyTypes = map[string]bool{
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
 // every exported Type* constant must be classified either as a v1
-// application type (member of v1TypeSet) or a v2 control type (member of
+// application type (member of inboundAppTypeSet) or a v2 control type (member of
 // v2OnlyTypes), and never as both. A future contributor adding a v2
 // control type is forced to amend the v2OnlyTypes literal here; a
-// contributor accidentally adding a v2 control type to v1TypeSet is
+// contributor accidentally adding a v2 control type to inboundAppTypeSet is
 // caught by the "in both" branch.
 func TestTypeConstants_V1V2Partition(t *testing.T) {
 	all := []string{
@@ -227,19 +227,19 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeSessionError,
 	}
 	for _, ty := range all {
-		inV1 := v1TypeSet[ty]
+		inV1 := inboundAppTypeSet[ty]
 		inV2 := v2OnlyTypes[ty]
 		switch {
 		case inV1 && inV2:
-			t.Errorf("%q in BOTH v1TypeSet and v2OnlyTypes; the partition must be disjoint", ty)
+			t.Errorf("%q in BOTH inboundAppTypeSet and v2OnlyTypes; the partition must be disjoint", ty)
 		case !inV1 && !inV2:
-			t.Errorf("%q missing from both v1TypeSet and v2OnlyTypes; classify it as v1 application or v2 control", ty)
+			t.Errorf("%q missing from both inboundAppTypeSet and v2OnlyTypes; classify it as v1 application or v2 control", ty)
 		}
 	}
 	// And the union must equal the constant-count to catch the inverse:
-	// a v1TypeSet entry that has no exported Type* constant.
-	if got, want := len(v1TypeSet)+len(v2OnlyTypes), len(all); got != want {
-		t.Errorf("v1TypeSet + v2OnlyTypes size: got %d, want %d", got, want)
+	// a inboundAppTypeSet entry that has no exported Type* constant.
+	if got, want := len(inboundAppTypeSet)+len(v2OnlyTypes), len(all); got != want {
+		t.Errorf("inboundAppTypeSet + v2OnlyTypes size: got %d, want %d", got, want)
 	}
 }
 
