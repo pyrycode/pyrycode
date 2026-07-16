@@ -868,6 +868,13 @@ func runSupervisor(args []string) error {
 		archive, _, err := debugbundle.Assemble(bundleRecordingsDir, logRing.Snapshot())
 		return archive, err
 	}
+	// Test-only override: an env-gated fake bundler, inert unless insecure-relay
+	// is set (see fakeDebugBundler). Lets an out-of-process e2e round-trip a known
+	// archive and inject a path-quoting assemble error; production leaves this
+	// untouched and streams the real Assemble output.
+	if fake, ok := fakeDebugBundler(); ok {
+		debugBundler = fake
+	}
 
 	// The screen-snapshot settings reader (#848): reports the bootstrap session's
 	// persisted model / effort / YOLO so the screen_snapshot reply the phone
