@@ -178,6 +178,33 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   proving the real interactive stack executes the verbs at all. See
   [`codebase/1028.md`](../codebase/1028.md).
 
+- `interactive_modal_resolution_test.go` (#1030) — first real-`claude`
+  coverage of the **modal-resolution verbs**, and the hardest of the #963
+  families: the trigger is not a test env-var but real claude choosing to
+  call a gated tool under default permission mode. `TestInteractiveModalResolution`
+  drives one daemon spawned via the new `spawnPermissionDaemon` (byte-identical
+  to `spawnBootstrapDaemon` #854 minus `--dangerously-skip-permissions` — that
+  one omission is the entire trigger) through two sequential real-permission-modal
+  cycles over one encrypted channel: **Phase A (answer)** sends a Bash-triggering
+  prompt, drains to `modal_shown{Class:"permission"}` (asserted before
+  resolving — non-vacuity), sends `modal_answer{allow_once}`, then proves the
+  session proceeded via a subsequent non-empty `assistant_delta`; **Phase B
+  (cancel)** raises a second modal and sends `modal_cancel`, observing the
+  `modal_dismissed{cancelled,remote}` **broadcast** (`modal_cancel` is
+  fire-and-broadcast — no reply is correlated to the cancel request). The new
+  `drainForControlEvent` helper is a Type-only broadcast-drain sibling of
+  #1028's `InReplyTo`-correlated `drainForReply`. The phone pairs WITH
+  `--allow-remote-permissions` (the answer-side device gate). Reuses the
+  #854/#997/#1028 harness (`bootstrapDaemon` plumbing, `driveHandshakeInteractive`,
+  `sealSendMessage`, `sealEnvelope`, `drainForAssistantReply`) unchanged; zero
+  production files touched. The fake tier (`relay_v2_modal_answer_test.go`
+  #791, `relay_v2_modal_cancel_test.go` #1003, trust-class #993) owns the
+  verbs' detailed shape and keystroke fidelity — this test is
+  liveness/observable-state shaped only, proving the real interactive stack
+  raises and resolves an actual permission modal at all. The `#798` daemon
+  modal surfacer (see [modalbridge-package.md § Live daemon wiring (#798)](modalbridge-package.md#live-daemon-wiring-798))
+  needed zero production changes. See [`codebase/1030.md`](../codebase/1030.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
