@@ -278,16 +278,18 @@ to bridge.
   `reason` (the elapsed window + `err.Error()`) that **never** contains
   `head.text` — extending the package's `NEVER log head.text` discipline (see §
   Error handling) to both the new give-up log line and the seam payload.
-- **Ships unwired.** `OnGiveUp` is `nil` in production this ticket — same
-  engine-first rhythm as the package's original #704 landing (mechanism first,
-  wired later). The bound, head-drop, and clean exit are still real even while
-  unobserved; split from #1001 into wire vocabulary (#1007 — `TypeSessionError`/
-  `CodeSessionBlocked`/`SessionErrorPayload`, shipped unwired) and its
-  blocked-by-#1007 producer sibling (#1008, not yet shipped), which routes
-  `OnGiveUp` to a typed, client-visible `session_error` frame over the v2 wire
-  exactly as `OnChange` routes to the `queue_state` producer today.
+- **Shipped unwired, now live.** `OnGiveUp` was `nil` in production at this
+  ticket's landing — same engine-first rhythm as the package's original #704
+  landing (mechanism first, wired later). Split from #1001 into wire vocabulary
+  (#1007 — `TypeSessionError`/`CodeSessionBlocked`/`SessionErrorPayload`, shipped
+  unwired) and its blocked-by-#1007 producer sibling (#1008, shipped), which set
+  `OnGiveUp` to a live `session_error` producer (`cmd/pyry/session_error_v2.go`)
+  exactly as `OnChange` routes to the `queue_state` producer — a persistent
+  delivery failure now surfaces as a typed, client-visible frame instead of a
+  silently dropped head.
 
-See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007.md).
+See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007.md),
+[codebase/1008.md](../codebase/1008.md).
 
 ## Concurrency model
 

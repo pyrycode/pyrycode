@@ -200,6 +200,10 @@ type relayWiring struct {
 	// qse is the pre-built queue_state emitter (#722) whose Run goroutine
 	// startRelayV2 starts over the v2 manager.
 	qse *queueStateEmitterV2
+	// sessionErr is the pre-built session_error emitter (#1008) whose Run goroutine
+	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
+	// the msgqueue OnGiveUp seam) for the same chicken-and-egg reason as qse.
+	sessionErr *sessionErrorEmitterV2
 	// debugBundler assembles the daemon-global debug bundle for the
 	// request_debug_bundle verb (#813). nil in foreground/v1 replies "unavailable".
 	debugBundler func() ([]byte, error)
@@ -572,12 +576,21 @@ func startRelayV2(
 	// connected, the fan-out reaches nobody.
 	streamQueueStateCleanup := startQueueStateStreamV2(ctx, w.qse, mgr)
 
+	// Wire the session_error producer (#1008): start the pre-built emitter's Run
+	// goroutine over mgr, fanning a typed session_error frame to capability-gated
+	// interactive phones whenever the message queue gives up delivering a
+	// conversation's head (#1000's OnGiveUp seam). Like the queue_state producer it
+	// has NO PTY dependency — it consumes msgqueue give-ups — so it is wired
+	// unconditionally whenever the v2 manager exists.
+	streamSessionErrCleanup := startSessionErrorStreamV2(ctx, w.sessionErr, mgr)
+
 	return func() {
 		// Stop the producers — the structured turn stream, the modal stream, the
-		// session-transition producer, and the queue_state producer — before waiting
-		// on the manager so no fan-out races a winding-down manager. Each cleanup
-		// waits for its goroutine on ctx-cancel (already cancelled by the time drain
-		// runs). Then wait for the manager's Run to exit on the closed Frames channel.
+		// session-transition producer, the queue_state producer, and the session_error
+		// producer — before waiting on the manager so no fan-out races a winding-down
+		// manager. Each cleanup waits for its goroutine on ctx-cancel (already
+		// cancelled by the time drain runs). Then wait for the manager's Run to exit
+		// on the closed Frames channel.
 		if streamCleanup != nil {
 			streamCleanup()
 		}
@@ -586,6 +599,7 @@ func startRelayV2(
 		}
 		streamTransitionsCleanup()
 		streamQueueStateCleanup()
+		streamSessionErrCleanup()
 		<-mgrDone
 	}, nil
 }
