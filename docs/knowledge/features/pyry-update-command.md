@@ -190,9 +190,15 @@ Real `os.Stat` paths and the real `exec.CommandContext` wrapper are deliberately
 Run with:
 
 ```bash
-go test -tags=e2e_update ./cmd/pyry/...
+make e2e-update                                                    # go test -tags e2e_update ./cmd/pyry/...
 PYRY_E2E_BIN=$(pwd)/pyry go test -tags=e2e_update ./cmd/pyry/...   # CI prebuild short-circuit
 ```
+
+`make e2e-update` (#969) is the named entry point — run it on the release
+checklist and before touching `pyry update` code. Unlike `e2e-install`, it is
+hermetic (temp HOME only) but stays out of `make check`/`make preship`
+alongside it by convention. See [release-tooling.md § Install & update e2e
+suites](../../release-tooling.md#install--update-e2e-suites).
 
 | AC | Pinned by |
 |----|-----------|
