@@ -817,11 +817,23 @@ func runSupervisor(args []string) error {
 	// nil (disabled) to live: a persistent-delivery give-up now surfaces as a
 	// typed, client-visible session_error frame instead of a silently dropped head.
 	giveUps := make(chan giveUpNotice, sessionErrorQueueSize)
+	// blocked is the shared session_error notify closure (a non-blocking,
+	// drop-on-full send into giveUps): the msgqueue give-up path uses it as
+	// OnGiveUp, and the modal resolver uses it (via relayWiring.blockedNotify) to
+	// surface a folder-not-trusted session_error on a trust deny/timeout (#1014).
+	// One closure, two senders into the same #1008 frame path.
+	blocked := sessionErrorNotify(giveUps, logger)
 	queue, err := msgqueue.New(msgqueue.Config{
 		Deliver:  newInboundDeliver(router.resolve),
 		OnChange: queueStateNotify(queueChanges, logger),
-		OnGiveUp: sessionErrorNotify(giveUps, logger),
-		Logger:   logger,
+		OnGiveUp: blocked,
+		// Pending exempts a legitimately-held turn (claude's startup trust modal is
+		// up, so delivery declined with ErrTrustModalPending) from the give-up
+		// bound: while pending the drain retries without counting the window, so a
+		// slow-but-valid remote trust accept never races a premature give-up
+		// (#1014 AC-1).
+		Pending: func(err error) bool { return errors.Is(err, supervisor.ErrTrustModalPending) },
+		Logger:  logger,
 	})
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
@@ -895,6 +907,7 @@ func runSupervisor(args []string) error {
 		transitions:       pool,
 		qse:               qse,
 		sessionErr:        see,
+		blockedNotify:     blocked,
 		debugBundler:      debugBundler,
 		settings:          settingsUpdaterAdapter{pool},
 		snapshotSettings:  snapshotSettings,

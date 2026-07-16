@@ -834,3 +834,203 @@ func TestModalResolverV2_Answer_NoBodyLeak(t *testing.T) {
 		})
 	}
 }
+
+// blockedCall records one folder-not-trusted emission.
+type blockedCall struct{ convID, reason string }
+
+// blockedSpy captures the resolver's folder-not-trusted emissions (the #1008
+// give-up → session_error seam #1014 routes trust deny/timeout into). The
+// resolver is driven single-threaded in these tests, so no mutex is needed
+// (mirrors fakeKeystroker).
+type blockedSpy struct{ calls []blockedCall }
+
+func (s *blockedSpy) notify(convID, reason string) {
+	s.calls = append(s.calls, blockedCall{convID: convID, reason: reason})
+}
+
+// emittingResolver builds a resolver with the #1014 emit seams set: activeConv
+// returns knownConvID and notifyBlocked records into spy. This is the single
+// production construction (relay.go:479) — the 18 other test constructions leave
+// both fields nil (emit disabled).
+func emittingResolver(reg *modalbridge.Registry, kb modalKeystroker, logger *slog.Logger, knownConvID string) (*modalResolverV2, *blockedSpy) {
+	spy := &blockedSpy{}
+	r := newModalResolverV2(reg, kb, logger)
+	r.activeConv = func() string { return knownConvID }
+	r.notifyBlocked = spy.notify
+	return r, spy
+}
+
+// TestModalResolverV2_TrustTimeout_EmitsFolderNotTrusted proves a deny-on-timeout
+// on a TRUST modal surfaces a typed folder-not-trusted session_error: the spy is
+// called exactly once with the activeConv id and the static content-free reason,
+// after the pre-built ESC/audit. #1014 AC-2/3.
+func TestModalResolverV2_TrustTimeout_EmitsFolderNotTrusted(t *testing.T) {
+	t.Parallel()
+
+	reg := modalbridge.New()
+	modalID := recordTrustModal(t, reg, secretModalBody)
+	kb := &fakeKeystroker{}
+	logger, logBuf := auditLogger()
+
+	r, spy := emittingResolver(reg, kb, logger, "conv-abc")
+	d, ok := r.ResolveTimeout(modalID)
+
+	if !ok {
+		t.Fatal("ResolveTimeout ok = false, want true")
+	}
+	if d.Outcome != string(audit.OutcomeDeniedTimeout) || d.Source != string(audit.SourceTimeout) {
+		t.Errorf("dismissal = %+v, want {denied_timeout timeout}", d)
+	}
+	if len(spy.calls) != 1 {
+		t.Fatalf("blocked emissions = %d, want 1", len(spy.calls))
+	}
+	if spy.calls[0].convID != "conv-abc" {
+		t.Errorf("emitted convID = %q, want conv-abc (from activeConv)", spy.calls[0].convID)
+	}
+	if spy.calls[0].reason != "folder not trusted" {
+		t.Errorf("emitted reason = %q, want the static content-free constant", spy.calls[0].reason)
+	}
+	// SECURITY: the emitted reason never carries the modal body.
+	if strings.Contains(spy.calls[0].reason, secretModalBody) {
+		t.Error("modal body leaked into the emitted reason")
+	}
+	if strings.Contains(logBuf.String(), secretModalBody) {
+		t.Error("modal body leaked into a log field")
+	}
+}
+
+// TestModalResolverV2_PermissionTimeout_NoEmit proves the emit is scoped to the
+// trust class: a deny-on-timeout on a PERMISSION modal runs the pre-built path
+// and emits nothing. #1014 AC-2 (scoped).
+func TestModalResolverV2_PermissionTimeout_NoEmit(t *testing.T) {
+	t.Parallel()
+
+	reg := modalbridge.New()
+	modalID := recordPermissionModal(t, reg, secretModalBody)
+	kb := &fakeKeystroker{}
+	logger, _ := auditLogger()
+
+	r, spy := emittingResolver(reg, kb, logger, "conv-abc")
+	if _, ok := r.ResolveTimeout(modalID); !ok {
+		t.Fatal("ResolveTimeout ok = false, want true")
+	}
+	if len(spy.calls) != 0 {
+		t.Errorf("blocked emissions = %d, want 0 for a permission-class timeout", len(spy.calls))
+	}
+}
+
+// TestModalResolverV2_TrustTimeout_LoserNoEmit proves the loser path (an
+// answer/cancel already consumed the modal) emits nothing — the unknown-id no-op
+// returns before any emit. #1014 AC-2 (loser).
+func TestModalResolverV2_TrustTimeout_LoserNoEmit(t *testing.T) {
+	t.Parallel()
+
+	reg := modalbridge.New()
+	modalID := recordTrustModal(t, reg, secretModalBody)
+	kb := &fakeKeystroker{}
+	logger, _ := auditLogger()
+
+	// A racing answer/cancel already consumed the modal before the timer fired.
+	if _, ok := reg.Resolve(modalID); !ok {
+		t.Fatal("setup: reg.Resolve did not consume the modal")
+	}
+
+	r, spy := emittingResolver(reg, kb, logger, "conv-abc")
+	if _, ok := r.ResolveTimeout(modalID); ok {
+		t.Error("ResolveTimeout ok = true for an already-consumed id, want false")
+	}
+	if len(spy.calls) != 0 {
+		t.Errorf("blocked emissions = %d, want 0 on the loser path", len(spy.calls))
+	}
+}
+
+// TestModalResolverV2_TrustAnswer_EmitPolicy drives the answer arm's emit policy:
+// a trust DENY (exit) from a gated device emits once; a trust ALLOW (proceed)
+// does NOT (the turn runs once trust clears); a permission DENY does NOT (scoped
+// to trust). #1014 AC-2/3.
+func TestModalResolverV2_TrustAnswer_EmitPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		trust    bool
+		optionID string
+		wantEmit bool
+	}{
+		{"trust exit (deny) emits", true, "exit", true},
+		{"trust proceed (allow) does not emit", true, "proceed", false},
+		{"permission reject (deny) does not emit", false, "reject_once", false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			reg := modalbridge.New()
+			var modalID string
+			if tt.trust {
+				modalID = recordTrustModal(t, reg, secretModalBody)
+			} else {
+				modalID = recordPermissionModal(t, reg, secretModalBody)
+			}
+			kb := &fakeKeystroker{}
+			logger, _ := auditLogger()
+
+			r, spy := emittingResolver(reg, kb, logger, "conv-xyz")
+			if _, ok := r.ResolveAnswer(modalID, tt.optionID, "tok-1", eligibleDevice(t)); !ok {
+				t.Fatal("ResolveAnswer ok = false, want true")
+			}
+
+			if tt.wantEmit {
+				if len(spy.calls) != 1 {
+					t.Fatalf("blocked emissions = %d, want 1", len(spy.calls))
+				}
+				if spy.calls[0].convID != "conv-xyz" || spy.calls[0].reason != "folder not trusted" {
+					t.Errorf("emission = %+v, want {conv-xyz folder not trusted}", spy.calls[0])
+				}
+			} else if len(spy.calls) != 0 {
+				t.Errorf("blocked emissions = %d, want 0", len(spy.calls))
+			}
+		})
+	}
+}
+
+// TestModalResolverV2_NilEmitSeams_Safe proves the emit seams are nil-default: a
+// resolver built the pre-#1014 way (the 18 existing test constructions and
+// foreground/v1) runs a trust deny-on-timeout and a trust deny with no panic and
+// no emit — the pre-built consume/ESC/audit path is unchanged. #1014 (nil-default).
+func TestModalResolverV2_NilEmitSeams_Safe(t *testing.T) {
+	t.Parallel()
+
+	t.Run("trust timeout", func(t *testing.T) {
+		t.Parallel()
+		reg := modalbridge.New()
+		modalID := recordTrustModal(t, reg, secretModalBody)
+		kb := &fakeKeystroker{}
+		logger, _ := auditLogger()
+
+		r := newModalResolverV2(reg, kb, logger) // nil activeConv + notifyBlocked
+		if _, ok := r.ResolveTimeout(modalID); !ok {
+			t.Fatal("ResolveTimeout ok = false, want true")
+		}
+		if kb.escCalls != 1 {
+			t.Errorf("SendEsc calls = %d, want 1 (pre-built path intact)", kb.escCalls)
+		}
+	})
+
+	t.Run("trust deny answer", func(t *testing.T) {
+		t.Parallel()
+		reg := modalbridge.New()
+		modalID := recordTrustModal(t, reg, secretModalBody)
+		kb := &fakeKeystroker{}
+		logger, _ := auditLogger()
+
+		r := newModalResolverV2(reg, kb, logger) // nil activeConv + notifyBlocked
+		if _, ok := r.ResolveAnswer(modalID, "exit", "tok-1", eligibleDevice(t)); !ok {
+			t.Fatal("ResolveAnswer ok = false, want true")
+		}
+		if kb.escCalls != 1 {
+			t.Errorf("SendEsc calls = %d, want 1 (pre-built path intact)", kb.escCalls)
+		}
+	})
+}

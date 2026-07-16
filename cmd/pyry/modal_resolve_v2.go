@@ -44,13 +44,53 @@ type modalResolverV2 struct {
 	reg    *modalbridge.Registry
 	kb     modalKeystroker
 	logger *slog.Logger
+
+	// activeConv resolves the conversation id to stamp on a folder-not-trusted
+	// session_error when a trust modal is denied/timed out (#1014). It is the same
+	// follow-active cursor the modal producer resolves its target from
+	// (activeConversation.CurrentConversation). nil ⇒ emit disabled.
+	activeConv func() string
+	// notifyBlocked routes a folder-not-trusted session_error into the shared
+	// give-up → session_error frame path (#1008): it is main.go's `blocked`
+	// closure (a non-blocking, drop-on-full send into the giveUps channel the
+	// sessionErrorEmitterV2 drains). nil ⇒ emit disabled. Both fields are set only
+	// at the single production site (relay.go); the 18 test constructions leave
+	// them nil, keeping the pre-#1014 behaviour and foreground/v1 inert. #1014.
+	notifyBlocked func(convID, reason string)
 }
 
 // newModalResolverV2 wires the resolver to the daemon-singleton outstanding-modal
 // registry (the same instance #708 live-wires the producer/emitter into), the
-// supervisor keystroke seam, and the daemon logger.
+// supervisor keystroke seam, and the daemon logger. The #1014 emit seams
+// (activeConv/notifyBlocked) are nil-default fields set at the production site,
+// NOT constructor params — the constructor has 18 test call sites, and nil
+// disables the emit (the established "nil disables the optional seam" convention).
 func newModalResolverV2(reg *modalbridge.Registry, kb modalKeystroker, logger *slog.Logger) *modalResolverV2 {
 	return &modalResolverV2{reg: reg, kb: kb, logger: logger}
+}
+
+// Trust-modal wire class string (mirrors modalbridge's unexported classTrust,
+// duplicated because it is unexported there — like optProceed/optExit below).
+// Only a trust-class deny/timeout surfaces the folder-not-trusted session_error.
+const classTrust = "trust"
+
+// reasonFolderNotTrusted is the static, content-free reason carried on the
+// folder-not-trusted session_error (#1014 AC-3). Being a compile-time constant it
+// can never carry queued phone text, the modal body/prompt/title, or any secret —
+// it rides the wire as SessionErrorPayload.Message on the #1008 emitter.
+const reasonFolderNotTrusted = "folder not trusted"
+
+// emitFolderNotTrusted surfaces a typed folder-not-trusted session_error for the
+// active conversation when trust is refused (a remote deny or the deny-on-timeout),
+// reusing the #1008 give-up → session_error frame path so the client sees a
+// terminal CodeSessionBlocked instead of a silent retry loop (#1014 AC-2/3). It is
+// a no-op when either seam is unset (the 18 test constructions and foreground/v1),
+// and never touches the modal body — the reason is the static constant.
+func (r *modalResolverV2) emitFolderNotTrusted() {
+	if r.notifyBlocked == nil || r.activeConv == nil {
+		return
+	}
+	r.notifyBlocked(r.activeConv(), reasonFolderNotTrusted)
 }
 
 // ResolveCancel consumes the named modal and routes the fail-safe ESC dismiss.
@@ -142,6 +182,14 @@ func (r *modalResolverV2) ResolveTimeout(modalID string) (relay.ModalDismissal, 
 		Source:     audit.SourceTimeout,
 	})
 
+	// A denied-on-timeout TRUST folder surfaces a typed session_error so the
+	// client learns trust was refused instead of watching a silent retry loop
+	// (#1014 AC-2/3). Strictly after the pre-built consume/ESC/audit; only the
+	// trust class emits (a permission-class timeout does not).
+	if out.Class == classTrust {
+		r.emitFolderNotTrusted()
+	}
+
 	// One source vocabulary feeds both the wire dismissal and the audit entry.
 	return relay.ModalDismissal{
 		Outcome: string(audit.OutcomeDeniedTimeout),
@@ -228,6 +276,14 @@ func (r *modalResolverV2) ResolveAnswer(modalID, optionID, answerToken string, d
 		decision = audit.OutcomeAllowed
 	}
 	r.auditAnswer(dev, modalID, out.Class, decision)
+
+	// A remote DENY of the trust folder (exit → OutcomeDeny) surfaces the same
+	// typed session_error as the deny-on-timeout (#1014 AC-2/3). A trust proceed
+	// (OutcomeAllow) does NOT emit — the held turn runs once trust clears — and
+	// permission answers never emit (scoped to the trust class).
+	if out.Class == classTrust && outcome == devices.OutcomeDeny {
+		r.emitFolderNotTrusted()
+	}
 
 	// The WIRE dismissal Outcome is the answered option_id (ModalDismissedPayload
 	// contract), NOT the audit classification. Source is remote.
