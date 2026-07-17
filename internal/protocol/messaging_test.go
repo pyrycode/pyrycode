@@ -246,6 +246,11 @@ func TestModalShownPayload_RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
+	// ConversationID is the outbound scoping key (#1065): the golden pins it as
+	// the first field so json.Compact byte-equality also guards its placement.
+	if payload.ConversationID != "conv-7f3a" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conv-7f3a")
+	}
 	if payload.ModalID != "mdl-7f3a" {
 		t.Errorf("ModalID: got %q, want %q", payload.ModalID, "mdl-7f3a")
 	}

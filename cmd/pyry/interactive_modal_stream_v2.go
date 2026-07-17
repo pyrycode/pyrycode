@@ -63,51 +63,57 @@ func startInteractiveModalStreamV2(
 	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
 	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn, bootstrapIDFn)
 	sub := turnbridge.NewTargetSubscriber(resolve, tr, logger)
-	screenText := boundScreenText(active, boundHost, sup)
+	screenFor := boundScreenText(active, boundHost, sup)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runModalStream(ctx, sub, screenText, emitter)
+		runModalStream(ctx, sub, screenFor, emitter)
 	}()
 	return func() { <-done }
 }
 
-// boundScreenText yields the current active bound host's rendered screen text,
-// mirroring resolveTarget's host-selection branch so the paired screen (AC3)
-// comes from the SAME supervisor as the modal event:
+// boundScreenText yields the current active conversation id paired with that
+// bound host's rendered screen text — BOTH from a SINGLE active.CurrentConversation()
+// read (#1065). Pairing them is the security core: the screen the modal carries
+// and the conversation_id it is stamped for derive from one cursor value, so they
+// cannot diverge (a re-read could stamp conversation A's screen with B's id — the
+// exact leak). It mirrors resolveTarget's host-selection branch so the paired
+// screen (AC3) comes from the SAME supervisor as the modal event:
 //
-//   - convID == "" (no route yet) → the bootstrap screen, the pre-route path that
-//     matches resolveTarget's bootstrap branch (AC4 consistency).
-//   - convID != "" and boundHost ok → type-assert the returned SessionHost to
-//     screenSnapshotter (in production it is *supervisor.Supervisor, which
-//     satisfies it) and return its screen text.
+//   - convID == "" (no route yet) → ("", bootstrap screen), the pre-route path
+//     that matches resolveTarget's bootstrap branch (AC4 consistency). There are
+//     no concurrent per-conversation sessions to leak to yet.
+//   - convID != "" and boundHost ok → (convID, that host's screen text) via a
+//     type-assert of the returned SessionHost to screenSnapshotter (in production
+//     it is *supervisor.Supervisor, which satisfies it).
 //   - boundHost miss, or the host does not satisfy screenSnapshotter (defensive)
-//     → "". An empty screen is safe: the emitter surfaces a modal with an empty
-//     Title and the security-critical fields (modal_id, class, options) are
-//     screen-independent.
+//     → (convID, ""). An empty screen is safe: the emitter surfaces a modal with
+//     an empty Title and the security-critical fields (modal_id, class, options,
+//     conversation_id) are screen-independent.
 //
-// Only text is used; the live bool is ignored (an empty text is the natural
-// degrade). NEVER logs the returned text. active never resets to "" once a route
-// lands (activeConversation.set only advances to non-empty ids), so a modal on a
-// bound session always resolves that bound host's screen, never a stale bootstrap.
-func boundScreenText(active *activeConversation, boundHost boundHostFunc, bootstrap screenSnapshotter) func() string {
-	return func() string {
+// Only text is used from ScreenSnapshot; the live bool is ignored (an empty text
+// is the natural degrade). NEVER logs the returned text. active never resets to
+// "" once a route lands (activeConversation.set only advances to non-empty ids),
+// so a modal on a bound session always resolves that bound host's screen, never a
+// stale bootstrap.
+func boundScreenText(active *activeConversation, boundHost boundHostFunc, bootstrap screenSnapshotter) func() (string, string) {
+	return func() (string, string) {
 		convID := active.CurrentConversation()
 		if convID == "" {
 			text, _ := bootstrap.ScreenSnapshot()
-			return text
+			return "", text
 		}
 		host, _, _, ok := boundHost(convID)
 		if !ok {
-			return ""
+			return convID, ""
 		}
 		snap, ok := host.(screenSnapshotter)
 		if !ok {
-			return ""
+			return convID, ""
 		}
 		text, _ := snap.ScreenSnapshot()
-		return text
+		return convID, text
 	}
 }
 
@@ -123,11 +129,13 @@ func boundScreenText(active *activeConversation, boundHost boundHostFunc, bootst
 //   - Outer: sub(ctx) errors only on ctx cancel (Subscriber contract) → return.
 //     A closed channel (session restart) breaks back to re-subscribe onto the
 //     now-active target (follow-active).
-//   - Inner: on EventKindPtyModalShown evaluate the screen ONLY here — so no
+//   - Inner: on EventKindPtyModalShown evaluate screenFor ONLY here — so no
 //     ScreenSnapshot render happens on the 50 ms idle/thinking/JSONL ticks — and
-//     hand it to Handle. EventKindPtyModalHidden needs no screen (the body is
-//     already gone; interactive_modal_v2.go:85). Every other kind is ignored.
-func runModalStream(ctx context.Context, sub turnbridge.Subscriber, screenText func() string, emitter *interactiveModalEmitterV2) {
+//     hand its paired (convID, screen) to Handle from ONE cursor read (#1065), so
+//     the modal's content and its scope stamp cannot diverge.
+//     EventKindPtyModalHidden needs neither (the body is already gone;
+//     interactive_modal_v2.go). Every other kind is ignored.
+func runModalStream(ctx context.Context, sub turnbridge.Subscriber, screenFor func() (string, string), emitter *interactiveModalEmitterV2) {
 	for {
 		ch, err := sub(ctx)
 		if err != nil {
@@ -144,9 +152,10 @@ func runModalStream(ctx context.Context, sub turnbridge.Subscriber, screenText f
 				}
 				switch ev.Kind {
 				case tuidriver.EventKindPtyModalShown:
-					emitter.Handle(ctx, ev, screenText())
+					convID, screen := screenFor() // ONE active.CurrentConversation() read
+					emitter.Handle(ctx, ev, convID, screen)
 				case tuidriver.EventKindPtyModalHidden:
-					emitter.Handle(ctx, ev, "")
+					emitter.Handle(ctx, ev, "", "")
 				}
 			}
 		}

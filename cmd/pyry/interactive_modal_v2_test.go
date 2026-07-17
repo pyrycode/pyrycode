@@ -59,7 +59,7 @@ func TestModalEmitter_PermissionFanout(t *testing.T) {
 	reg, bcast, armer, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}
-	e.Handle(context.Background(), ev, "  a plain modal body  ")
+	e.Handle(context.Background(), ev, "", "  a plain modal body  ")
 
 	// Exactly one modal_shown per interactive conn; zero to the non-interactive.
 	if got := len(bcast.pushes); got != 2 {
@@ -123,7 +123,7 @@ func TestModalEmitter_Trust(t *testing.T) {
 	_, bcast, _, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassTrustFolder}
-	e.Handle(context.Background(), ev, "trust this folder body")
+	e.Handle(context.Background(), ev, "", "trust this folder body")
 
 	if len(bcast.pushes) != 1 {
 		t.Fatalf("push count: got %d, want 1", len(bcast.pushes))
@@ -151,7 +151,7 @@ func TestModalEmitter_NonPermissionClass_NoOp(t *testing.T) {
 	_, bcast, armer, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassSlashPicker}
-	e.Handle(context.Background(), ev, "/some picker")
+	e.Handle(context.Background(), ev, "", "/some picker")
 
 	if len(bcast.pushes) != 0 {
 		t.Errorf("non-permission/trust class produced %d pushes, want 0 (AC1)", len(bcast.pushes))
@@ -168,7 +168,7 @@ func TestModalEmitter_NonModalEvent_NoOp(t *testing.T) {
 	_, bcast, armer, e := newModalEmitterTestDeps(conns)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyIdle}
-	e.Handle(context.Background(), ev, "")
+	e.Handle(context.Background(), ev, "", "")
 
 	if len(bcast.pushes) != 0 {
 		t.Errorf("non-modal event produced %d pushes, want 0", len(bcast.pushes))
@@ -194,7 +194,7 @@ func TestModalEmitter_PushErrorContinues(t *testing.T) {
 	e := newInteractiveModalEmitterV2(reg, bcast, &fakeArmer{}, logger)
 
 	ev := tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}
-	e.Handle(context.Background(), ev, "body")
+	e.Handle(context.Background(), ev, "", "body")
 
 	// A failing conn does not stop the fan-out: both conns were attempted.
 	if len(pushesFor(bcast.pushes, "c1")) != 1 {
@@ -229,6 +229,88 @@ func dismissedPushes(pushes []recordedPush) []recordedPush {
 	return out
 }
 
+// shownPushes returns every recorded push that carried a modal_shown envelope, in
+// call order (the modal_shown sibling of dismissedPushes).
+func shownPushes(pushes []recordedPush) []recordedPush {
+	var out []recordedPush
+	for _, p := range pushes {
+		if p.env.Type == protocol.TypeModalShown {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestModalEmitter_ScopesModalToConversation is AC2 + AC4 (#1065): with
+// concurrent per-conversation sessions each able to raise a permission modal,
+// every modal_shown a bound session raises is stamped with THAT conversation's id
+// and never another's — so a conn viewing conversation B (which filters
+// client-side on conversation_id, exactly as it already does for turn_state) never
+// displays conversation A's tool title / input summary. The daemon still fans to
+// every interactive conn (ActiveConn has no per-conn "viewing conversation"
+// state); the stamp is what confines display.
+//
+// The emitter is single-goroutine (runModalStream's Run goroutine), so the
+// concurrent-conversation property is exercised by driving two conversations'
+// modals through the one emitter and asserting the stamp tracks the conversation
+// the modal was raised for — the two stamps never cross.
+//
+// RED/GREEN: this asserts conversation_id == "conv-A" / "conv-B". Before the fix
+// threads convID through Handle → Record (stamp ""), those assertions fail; they
+// go GREEN once § 2/§ 3 thread the value. The ConversationID field and the Handle
+// convID parameter are themselves part of the fix, so this test does not compile
+// against unfixed main — it cannot "run RED" there; the meaningful RED is the
+// unwired stamp.
+func TestModalEmitter_ScopesModalToConversation(t *testing.T) {
+	t.Parallel()
+	conns := []relay.ActiveConn{
+		{ConnID: "c1", Interactive: true},
+		{ConnID: "c2", Interactive: true},
+	}
+	_, bcast, _, e := newModalEmitterTestDeps(conns)
+	ctx := context.Background()
+
+	// Conversation A raises a permission modal: every fanned modal_shown carries
+	// conversation_id == "conv-A".
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "conv-A", "screen A")
+	shownA := shownPushes(bcast.pushes)
+	if len(shownA) != 2 {
+		t.Fatalf("conv-A modal_shown pushes: got %d, want 2 (one per interactive conn)", len(shownA))
+	}
+	idA := decodeModalShown(t, shownA[0].env).ModalID
+	for _, p := range shownA {
+		got := decodeModalShown(t, p.env)
+		if got.ConversationID != "conv-A" {
+			t.Errorf("conv-A modal_shown conversation_id = %q, want conv-A", got.ConversationID)
+		}
+	}
+
+	// Resolve A (local Hidden) so the emitter can surface B's modal next.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "", "")
+	nBeforeB := len(bcast.pushes)
+
+	// Conversation B raises its own permission modal: stamped conv-B only.
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "conv-B", "screen B")
+	shownB := shownPushes(bcast.pushes[nBeforeB:])
+	if len(shownB) != 2 {
+		t.Fatalf("conv-B modal_shown pushes: got %d, want 2 (one per interactive conn)", len(shownB))
+	}
+	idB := decodeModalShown(t, shownB[0].env).ModalID
+	for _, p := range shownB {
+		got := decodeModalShown(t, p.env)
+		if got.ConversationID != "conv-B" {
+			t.Errorf("conv-B modal_shown conversation_id = %q, want conv-B", got.ConversationID)
+		}
+	}
+
+	// Distinct modals, distinct stamps: no A-modal push carried conv-B and vice
+	// versa (covered by the per-group asserts above; this pins that A and B are
+	// genuinely separate modals, not one re-stamped).
+	if idA == idB {
+		t.Errorf("conv-A and conv-B minted the same modal_id %q; want distinct modals", idA)
+	}
+}
+
 // newModalEmitterWithLogger builds an emitter wired to a fresh registry, a bcast
 // scripted with conns, and a record-capturing JSON logger whose buffer is
 // returned (so a test can assert the local-arm audit record). It returns the
@@ -258,7 +340,7 @@ func TestModalEmitter_LocalFirst_WinsThenRemoteRejected(t *testing.T) {
 	ctx := context.Background()
 
 	// Surface a permission modal locally and capture the minted modal_id.
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "permission body")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "", "permission body")
 	if len(bcast.pushes) != 2 {
 		t.Fatalf("modal_shown push count: got %d, want 2 (one per interactive conn)", len(bcast.pushes))
 	}
@@ -269,7 +351,7 @@ func TestModalEmitter_LocalFirst_WinsThenRemoteRejected(t *testing.T) {
 
 	// Local Hidden for the outstanding modal -> exactly one modal_dismissed{local}
 	// per interactive conn, carrying the same modal_id.
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "", "")
 
 	dis := dismissedPushes(bcast.pushes)
 	if len(dis) != 2 {
@@ -344,7 +426,7 @@ func TestModalEmitter_RemoteFirst_LocalEmitsNothing(t *testing.T) {
 	reg, bcast, eBuf, e := newModalEmitterWithLogger(conns)
 	ctx := context.Background()
 
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "permission body")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "", "permission body")
 	modalID := decodeModalShown(t, bcast.pushes[0].env).ModalID
 
 	// Remote answer wins the race and consumes the modal.
@@ -356,7 +438,7 @@ func TestModalEmitter_RemoteFirst_LocalEmitsNothing(t *testing.T) {
 	}
 
 	// Local Hidden now finds the modal already consumed: emitter emits nothing.
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "", "")
 
 	if got := len(dismissedPushes(bcast.pushes)); got != 0 {
 		t.Errorf("emitter pushed %d modal_dismissed after a remote win, want 0", got)
@@ -373,7 +455,7 @@ func TestModalEmitter_Hidden_NothingOutstanding_NoOp(t *testing.T) {
 	conns := []relay.ActiveConn{{ConnID: "c1", Interactive: true}}
 	_, bcast, eBuf, e := newModalEmitterWithLogger(conns)
 
-	e.Handle(context.Background(), tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+	e.Handle(context.Background(), tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "", "")
 
 	if len(bcast.pushes) != 0 {
 		t.Errorf("Hidden with nothing outstanding produced %d pushes, want 0", len(bcast.pushes))
@@ -393,8 +475,8 @@ func TestModalEmitter_Hidden_NonPermissionNeverSurfaced_NoOp(t *testing.T) {
 	ctx := context.Background()
 
 	// A slash-picker Shown is a no-op (AC1) and records nothing to track.
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassSlashPicker}, "/picker")
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassSlashPicker}, "")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassSlashPicker}, "", "/picker")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassSlashPicker}, "", "")
 
 	if len(bcast.pushes) != 0 {
 		t.Errorf("non-permission Shown/Hidden produced %d pushes, want 0", len(bcast.pushes))
@@ -412,11 +494,11 @@ func TestModalEmitter_Hidden_ClassMismatch_KeepsTracking(t *testing.T) {
 	reg, bcast, _, e := newModalEmitterWithLogger(conns)
 	ctx := context.Background()
 
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "permission body")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}, "", "permission body")
 	modalID := decodeModalShown(t, bcast.pushes[0].env).ModalID
 
 	// A Hidden for a different class: no dismissal, modal still outstanding.
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassTrustFolder}, "")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassTrustFolder}, "", "")
 	if got := len(dismissedPushes(bcast.pushes)); got != 0 {
 		t.Errorf("class-mismatch Hidden pushed %d modal_dismissed, want 0", got)
 	}
@@ -425,7 +507,7 @@ func TestModalEmitter_Hidden_ClassMismatch_KeepsTracking(t *testing.T) {
 	}
 
 	// The correct Hidden still resolves it.
-	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "")
+	e.Handle(ctx, tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}, "", "")
 	if got := len(dismissedPushes(bcast.pushes)); got != 1 {
 		t.Errorf("matching Hidden after a mismatch pushed %d modal_dismissed, want 1", got)
 	}

@@ -57,7 +57,7 @@ func recordPermissionModal(t *testing.T, reg *modalbridge.Registry, body string)
 	if !ok {
 		t.Fatal("PermissionRequestForClass(permission) not ok")
 	}
-	payload, err := reg.Record(req, wireClass)
+	payload, err := reg.Record(req, wireClass, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -73,7 +73,7 @@ func recordTrustModal(t *testing.T, reg *modalbridge.Registry, body string) stri
 	if !ok {
 		t.Fatal("PermissionRequestForClass(trust) not ok")
 	}
-	payload, err := reg.Record(req, wireClass)
+	payload, err := reg.Record(req, wireClass, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}

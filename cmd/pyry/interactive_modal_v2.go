@@ -66,31 +66,36 @@ func newInteractiveModalEmitterV2(reg *modalbridge.Registry, bcast interactiveBr
 }
 
 // Handle drives the surfacer one tui-driver event at a time (the single-goroutine
-// entry, mirroring interactiveTurnEmitterV2.Handle). screenText is the active
-// session's screen already rendered to plain text (ANSI/OSC-free, ADR-025 seal;
-// the deferred live wiring feeds Supervisor.ScreenSnapshot). Not safe for
-// concurrent use.
+// entry, mirroring interactiveTurnEmitterV2.Handle). convID is the conversation
+// the modal belongs to — the outbound scoping key (#1065), sourced from the SAME
+// active.CurrentConversation() read that selected screenText, so the modal's
+// content and its scope label cannot diverge (interactive_modal_stream_v2.go
+// boundScreenText). screenText is the active session's screen already rendered to
+// plain text (ANSI/OSC-free, ADR-025 seal; the deferred live wiring feeds
+// Supervisor.ScreenSnapshot). Not safe for concurrent use.
 //
 // On an EventKindPtyModalShown carrying a permission/trust class it surfaces a
-// modal_shown to every interactive-capable conn (handleModalShown). On an
-// EventKindPtyModalHidden for the outstanding modal it resolves it through the
-// shared registry and — only if this head won the cross-head race — broadcasts a
-// modal_dismissed{local} (handleModalHidden, #706). Every other event — and
-// every non-permission/trust class — is a no-op (AC1).
-func (e *interactiveModalEmitterV2) Handle(ctx context.Context, ev tuidriver.Event, screenText string) {
+// modal_shown scoped to convID to every interactive-capable conn
+// (handleModalShown). On an EventKindPtyModalHidden for the outstanding modal it
+// resolves it through the shared registry and — only if this head won the
+// cross-head race — broadcasts a modal_dismissed{local} (handleModalHidden,
+// #706); modal_dismissed carries no conversation_id, so convID is unused there.
+// Every other event — and every non-permission/trust class — is a no-op (AC1).
+func (e *interactiveModalEmitterV2) Handle(ctx context.Context, ev tuidriver.Event, convID, screenText string) {
 	switch ev.Kind {
 	case tuidriver.EventKindPtyModalShown:
-		e.handleModalShown(ctx, ev, screenText)
+		e.handleModalShown(ctx, ev, convID, screenText)
 	case tuidriver.EventKindPtyModalHidden:
-		e.handleModalHidden(ctx, ev) // screenText unused: the body is already gone
+		e.handleModalHidden(ctx, ev) // convID/screenText unused: the body is already gone
 	}
 }
 
 // handleModalShown surfaces a permission/trust modal: build the PermissionRequest,
-// Record it (minting the one-time modal_id), arm the deny-on-timeout, track the
-// id+class for a later Hidden (#706), and fan a modal_shown to every interactive
-// conn. A non-permission/trust class is a no-op (AC1).
-func (e *interactiveModalEmitterV2) handleModalShown(ctx context.Context, ev tuidriver.Event, screenText string) {
+// Record it (minting the one-time modal_id and stamping the convID scoping key),
+// arm the deny-on-timeout, track the id+class for a later Hidden (#706), and fan a
+// modal_shown to every interactive conn. A non-permission/trust class is a no-op
+// (AC1).
+func (e *interactiveModalEmitterV2) handleModalShown(ctx context.Context, ev tuidriver.Event, convID, screenText string) {
 	req, class, ok := modalbridge.PermissionRequestForClass(ev.Modal, screenText)
 	if !ok {
 		// Non-permission/trust class (slash-picker, model-select, mcp, …): no
@@ -101,7 +106,7 @@ func (e *interactiveModalEmitterV2) handleModalShown(ctx context.Context, ev tui
 		return
 	}
 
-	payload, err := e.reg.Record(req, class)
+	payload, err := e.reg.Record(req, class, convID)
 	if err != nil {
 		// crypto/rand failure — drop the modal; never push an id-less payload.
 		// Never echo err detail beyond the sentinel; no payload/screen bytes.

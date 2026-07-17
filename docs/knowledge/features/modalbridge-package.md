@@ -18,6 +18,11 @@ the outstanding `modal_id`, and broadcasts `modal_dismissed{source: local}` — 
 resolution single-shot **across both heads** (local TTY + paired phone). See
 [§ The local resolution arm](#the-local-resolution-arm--handlemodalhidden-706-first-answer-wins).
 
+`ModalShownPayload` carries an outbound `conversation_id` scoping key (#1065): the daemon
+stamps the conversation whose bound session raised the modal so a client viewing a
+*different* conversation can filter it out — see
+[§ Cross-conversation confidentiality](#security).
+
 Two new files, in two packages:
 
 - `internal/modalbridge/modal.go` — the **relay-free modal domain**: the `Registry`
@@ -48,8 +53,11 @@ mirroring the existing `interactiveTurnEmitterV2`.
 ```go
 // One recorded surfaced modal. Holds at least the option list so #717 can map an
 // inbound option_id against it. Carries no secret (modal_id is an opaque
-// correlation nonce, not a credential).
+// correlation nonce, not a credential). ConversationID is the outbound scoping
+// key (#1065), stored so Snapshot re-emits it and a reconnect reconcile replays
+// the same scope as the initial broadcast.
 type Outstanding struct {
+    ConversationID                string
     ModalID, Class, Title, Prompt string
     Options                       []protocol.ModalOption
     DefaultOptionID               string
@@ -65,9 +73,10 @@ func New() *Registry
 func PermissionRequestForClass(class tuidriver.ModalClass, screenText string) (turnevent.PermissionRequest, string, bool)
 
 // Record is the SINGLE nonce-mint site. Builds the marshal-ready ModalShownPayload,
-// mints exactly one fresh modal_id, stamps it, records the Outstanding, returns the
-// id-stamped payload. The only error path is RNG failure.
-func (r *Registry) Record(req turnevent.PermissionRequest, wireClass string) (protocol.ModalShownPayload, error)
+// mints exactly one fresh modal_id, stamps it plus the #1065 conversation_id scoping
+// key (convID), records the Outstanding (with ConversationID) in the SAME critical
+// section, returns the stamped payload. The only error path is RNG failure.
+func (r *Registry) Record(req turnevent.PermissionRequest, wireClass, convID string) (protocol.ModalShownPayload, error)
 
 func (r *Registry) Lookup(modalID string) (Outstanding, bool)  // #717's read seam
 func (r *Registry) Resolve(modalID string) (Outstanding, bool) // #727's consume-and-retire one-shot
@@ -132,19 +141,26 @@ entry point dispatches on event kind to two arms (#706 added the `Hidden` arm; e
 other event is a no-op):
 
 ```go
-func (e *interactiveModalEmitterV2) Handle(ctx context.Context, ev tuidriver.Event, screenText string) {
+func (e *interactiveModalEmitterV2) Handle(ctx context.Context, ev tuidriver.Event, convID, screenText string) {
     switch ev.Kind {
-    case tuidriver.EventKindPtyModalShown:  e.handleModalShown(ctx, ev, screenText)
-    case tuidriver.EventKindPtyModalHidden: e.handleModalHidden(ctx, ev) // local resolution (#706)
+    case tuidriver.EventKindPtyModalShown:  e.handleModalShown(ctx, ev, convID, screenText)
+    case tuidriver.EventKindPtyModalHidden: e.handleModalHidden(ctx, ev) // local resolution (#706); convID unused — modal_dismissed carries no conversation_id
     }
 }
 ```
+
+`convID` (#1065) is sourced from the **same single** `active.CurrentConversation()`
+read that selected `screenText` (`cmd/pyry/interactive_modal_stream_v2.go`
+`boundScreenText`, now returning the paired `(convID, screen)`) — not read
+independently inside the emitter, so the modal's content and its scope stamp
+cannot diverge.
 
 ### `handleModalShown` — surface a modal to phones
 
 1. `PermissionRequestForClass(ev.Modal, screenText)`; `!ok` → no-op (non-permission/trust
    class; AC1).
-2. `reg.Record(...)` mints the `modal_id` + records the `Outstanding`. RNG failure →
+2. `reg.Record(req, class, convID)` mints the `modal_id`, stamps `conversation_id`,
+   and records the `Outstanding` (with its `ConversationID`). RNG failure →
    drop (never push an id-less payload), `Warn` with no payload bytes.
 3. `armer.ArmModalTimeout(ctx, modalID)` arms the deny-on-timeout (#725), then **track
    the just-surfaced modal** (`outstandingID = modalID; outstandingClass = ev.Modal`) so
@@ -267,9 +283,22 @@ exists**.
 - **The modal body (`title`/`prompt`/`screenText`) is application content and is NEVER
   logged** at any level. Logs carry only content-free discriminants (`event`, `class` (a
   closed set), `conn_id`, `env_id`) + the transport-sentinel `err`.
-- **Cross-conversation confidentiality** — *which* screen the [live wiring (#798)](#live-daemon-wiring-798)
-  resolves as `screenText` is the wiring slice's concern (the property #679/#686 protects).
-  The surfacer treats `screenText` as opaque and chooses no screen.
+- **Cross-conversation confidentiality — `conversation_id` outbound scoping stamp (#1065).**
+  `ModalShownPayload` carries a daemon-asserted `conversation_id`, joining the client-side
+  scoping model `TurnStatePayload`/`QueueStatePayload` already use — the daemon still fans
+  every `modal_shown` to every interactive conn; the stamp is what confines display to the
+  conn(s) following that conversation. `Record` stamps the payload and stores
+  `Outstanding.ConversationID` **atomically** in one critical section, so a stored modal is
+  never `Snapshot`-able without its scope key. The security-critical property is that the
+  screen content and its scope label **cannot diverge**: both derive from the *same single*
+  `active.CurrentConversation()` read in `boundScreenText`
+  (`cmd/pyry/interactive_modal_stream_v2.go`) — a re-read inside the emitter would open a
+  window where conversation A's screen is stamped conversation B, which is the exact leak
+  the ticket exists to close. `convID` is threaded into `Handle` as a parameter for this
+  reason, not read independently. **Inbound is unchanged**: `ModalAnswerPayload`/
+  `ModalCancelPayload` still carry no `conversation_id` — an answer is authorized by
+  resolving its `ModalID` server-side against the registry (§ `modal_id` above), never a
+  phone-asserted conversation. See [codebase/1065.md](../codebase/1065.md).
 
 ## Current-truth enumeration — `Registry.Snapshot()` (#876)
 
@@ -287,10 +316,14 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload
 - **Direct field copy, not a re-derivation.** `Outstanding` already *is* the flattened
   fields of the payload `Record` built (`Record` stores `p.Class`/`p.Title`/… from the
   already-built payload) — so `Snapshot` copies straight from `Outstanding`, restamping
-  the stored `o.ModalID`. It does **not** call `buildPayload`: that assembles a payload
-  *from* a `PermissionRequest`+class, which would require un-mapping `Outstanding` back
-  into a `PermissionRequest` — lossy and unnecessary re-derivation of data the registry
-  already stores verbatim.
+  the stored `o.ModalID` **and `o.ConversationID`** (#1065). It does **not** call
+  `buildPayload`: that assembles a payload *from* a `PermissionRequest`+class, which would
+  require un-mapping `Outstanding` back into a `PermissionRequest` — lossy and unnecessary
+  re-derivation of data the registry already stores verbatim. Because `reconcileModals`
+  (`internal/relay/v2session_modal.go`) marshals each `Snapshot()` payload **verbatim**
+  into the replay envelope, restamping `ConversationID` here is what makes a reconnecting
+  conn's replayed `modal_shown` scoped identically to the initial broadcast, at zero cost
+  to the replay path itself.
 - **Pure read.** Walks `r.outstanding` under the one leaf `r.mu` (same O(n)-map-walk,
   no-nested-locks discipline as `Lookup`/`Resolve`). Mints no id (`newModalID` untouched),
   retires nothing — a modal in a snapshot is still `Lookup`/`Resolve`-able afterward. A
@@ -366,6 +399,8 @@ path is #791/#793 (EPIC #597 Phase 3).
 - [codebase/716.md](../codebase/716.md) — ticket record (patterns + lessons);
   [codebase/706.md](../codebase/706.md) — the local resolution arm + cross-head
   first-answer-wins (this surfacer's `handleModalHidden`).
+- [codebase/1065.md](../codebase/1065.md) — adds the `conversation_id` outbound
+  scoping stamp (§ Security above); the `#1062`-shaped fix applied to this payload.
 - [turnevent-package.md](turnevent-package.md) — the internal `PermissionRequest` /
   `PermissionOption` / `PermissionOptionKind` this maps a modal class *into*.
 - [codebase/702.md](../codebase/702.md) — the per-device remote-permission **answer gate**
