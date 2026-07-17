@@ -81,6 +81,7 @@ type interactiveTurnEmitterV2 struct {
 	// Lifecycle state — read/written only on the single Handle goroutine.
 	inTurn       bool                 // whether a turn is currently open
 	turnID       string               // current turn's id, minted at turn start
+	turnConvID   string               // conversation that owns the open turn; set at turn open, compared each Handle (#1062)
 	seq          int                  // per-turn assistant-delta counter; 0 at each turn boundary
 	currentState turnbridge.TurnState // last-emitted turn_state, for transition de-dup
 
@@ -143,6 +144,19 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 			"event", "interactive_turn.no_cursor",
 			"kind", eventKind(ev))
 		return
+	}
+
+	if e.inTurn && convID != e.turnConvID {
+		// Follow-active switch (#1062): the prior conversation's subscription was
+		// torn down mid-turn, so its TurnEnd never arrived and inTurn/currentState
+		// are stale. Flush its buffered delta against its OWN conversation
+		// (deltaConvID is captured, not the live cursor), then mark the turn closed
+		// so startTurnIfNeeded re-mints a fresh turn — a new turnID, seq 0, and an
+		// opening turn_state — for the new conversation. flushDelta before endTurn:
+		// the abandoned text still carries the prior turn's turnID/seq, in place
+		// until the re-mint. No-op when nothing is buffered.
+		e.flushDelta(ctx)
+		e.endTurn()
 	}
 
 	switch v := ev.(type) {
@@ -239,6 +253,7 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(convID string) bool {
 	e.seq = 0
 	e.currentState = ""
 	e.inTurn = true
+	e.turnConvID = convID
 	return true
 }
 
