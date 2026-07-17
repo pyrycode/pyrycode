@@ -419,6 +419,20 @@ supervisor's own `Wait`/`Close`.
 (#639; before that it drove only the dropped stall arm). A default
 `tuidriver.NewTracker(tuidriver.TrackerOpts{})` suffices.
 
+**A switch is silent to the consumer — the consumer must track ownership itself
+(#1062).** The subscriber's switch teardown closes the stream so `Run`
+re-subscribes; it does not, and cannot, tell the consumer's stateful emitter
+(`cmd/pyry/interactive_turn_v2.go`, [codebase/632.md](../codebase/632.md)) that the
+*conversation* changed. Before #1062 the emitter's turn lifecycle
+(`inTurn`/`turnID`/`seq`/`currentState`) was implicitly scoped to "whichever
+conversation is active", which breaks exactly when a switch lands **mid-turn**
+(the prior conversation's `TurnEnd` never arrives): the next conversation's
+opening `turn_state` transition de-duped away against the stale `currentState`,
+while its `assistant_delta` still flushed. The fix adds an explicit `turnConvID`
+owner field and a guard at the top of `Handle` that abandons an orphaned turn
+(flush its buffered delta against its own conversation, then end it) when the
+live cursor no longer matches — see [codebase/1062.md](../codebase/1062.md).
+
 ## The `Session()` accessor (supervisor)
 
 ```go
@@ -570,4 +584,5 @@ design decision.
 - [codebase/639.md](../codebase/639.md) — the stall bridge wiring: un-drops `StallDetected` through all three stages to the capability-gated fan-out (#638's `turnevent.Stall` + `protocol.StallPayload`).
 - [codebase/609.md](../codebase/609.md) — delta coalescing: the additive `Config.FlushSignal`/`OnFlush` flush-arm seam + the emitter-owned ~250ms timer it serves.
 - [codebase/679.md](../codebase/679.md) — the follow-active producer lifecycle: generalises the subscriber to `Target`/`TargetResolver`/`NewTargetSubscriber` (removing `NewSessionSubscriber`) so the reply tails the active conversation's bound-session transcript by id, re-subscribing on a switch.
+- [codebase/1062.md](../codebase/1062.md) — the consumer-side fix for a switch landing **mid-turn**: the emitter now records which conversation owns its open turn (`turnConvID`) and abandons an orphaned turn on a mismatch, so the new conversation's opening `turn_state` is no longer de-duped away.
 - [codebase/686.md](../codebase/686.md) — re-points the by-id resolver's directory to the conversation's own per-`Cwd` JSONL dir (derived from the bound session's captured spawn `WorkDir`) once #685 spawns sessions in distinct directories; default sessions keep resolving from the shared dir.
