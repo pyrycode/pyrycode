@@ -523,8 +523,9 @@ func readPersistedServerID(t *testing.T, home string) string {
 
 // seedBootstrapRegistry writes sessions.json for the "test" instance with a
 // single bootstrap entry at bootstrapUUID, so Pool.New warm-starts the bootstrap
-// POOL id at that uuid deterministically (reconcileBootstrapOnNew is a no-op on
-// the empty fresh sessions dir). Transcribed from internal/e2e/harness.go (#861).
+// POOL id at that uuid deterministically (the daemon also spawns claude with
+// --session-id <bootstrapUUID>, #839; there is no startup adopt-by-mtime scan).
+// Transcribed from internal/e2e/harness.go (#861).
 func seedBootstrapRegistry(t *testing.T, home, bootstrapUUID string) {
 	t.Helper()
 	regDir := filepath.Join(home, ".pyry", "test")

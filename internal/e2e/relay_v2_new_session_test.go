@@ -63,8 +63,9 @@ func TestRelayV2_NewSessionRotatesOnDisk(t *testing.T) {
 	}
 
 	// Align the sessions dir to the daemon's COMPUTED path and pre-create
-	// <initialUUID>.jsonl BEFORE the daemon starts, so reconcileBootstrapOnNew
-	// adopts it and the bootstrap id starts at initialUUID (the #642 recipe).
+	// <initialUUID>.jsonl BEFORE the daemon starts. The bootstrap id starts at
+	// initialUUID deterministically — seedBootstrapRegistry warm-starts it and the
+	// daemon spawns claude with --session-id (#839), no startup scan (the #642 recipe).
 	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		t.Fatalf("mkdir sessions dir: %v", err)

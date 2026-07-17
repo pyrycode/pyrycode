@@ -371,9 +371,9 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 // Lookup, so an unbound row yields a retryable server.binary_offline instead of
 // reaching WriteUserTurn. The daemon loads conversations.json once at startup
 // (in-memory registry, no reload), so the row must exist BEFORE the daemon
-// starts; boundSessionID MUST equal the bootstrap session's pool id, which
-// reconcileBootstrapOnNew rotates to the most-recent <uuid>.jsonl in the computed
-// sessions dir — i.e. the caller's pre-created initialUUID.
+// starts; boundSessionID MUST equal the bootstrap session's pool id, which is
+// now pinned deterministically to the daemon's --session-id (#839), seeded via
+// seedBootstrapRegistry — i.e. the caller's initialUUID.
 func seedBoundConversation(t *testing.T, home, convID, boundSessionID string) {
 	t.Helper()
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
@@ -388,11 +388,11 @@ func seedBoundConversation(t *testing.T, home, convID, boundSessionID string) {
 
 // seedBootstrapRegistry writes sessions.json for the "test" instance with a
 // single bootstrap entry whose id is bootstrapUUID, so Pool.New warm-starts the
-// bootstrap session at that id WITHOUT depending on the startup adopt-by-mtime
-// scan (reconcileBootstrapOnNew). It converges on exactly the post-startup state
-// that adopt-by-mtime produces today (bootstrap id == bootstrapUUID), so the
-// suite stays green pre-#839 while no longer relying on the scan to establish
-// the id — the prep #861 exists to do.
+// bootstrap session at that id. This pins the bootstrap id deterministically: the
+// daemon spawns claude with --session-id <bootstrapUUID> (#839) and the pool
+// warm-starts from the seeded registry, so the id is established by construction
+// rather than by any startup scan. (The adopt-by-mtime scan that once derived the
+// id from the newest <uuid>.jsonl was removed by #839.)
 //
 // Mirrors seedBoundConversation: raw JSON string, fixed past timestamp,
 // os.WriteFile into <home>/.pyry/test/. The raw string (not restart_test.go's
