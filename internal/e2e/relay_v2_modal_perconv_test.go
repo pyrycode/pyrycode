@@ -24,14 +24,15 @@ package e2e
 //     transcript, so the subscription never opens and modal_shown never fans. Likely a
 //     tui-driver screen-only Events change.
 //
-// The fake claude also cannot produce a minted session's per-Cwd transcript (it derives
-// one shared stem from PYRY_FAKE_CLAUDE_INITIAL_UUID, not --session-id; see
-// per_conversation_eviction_test.go), so this test cannot be driven GREEN hermetically
-// today, and real-claude PTY-modal detection is toolchain-blocked (claude 2.x vs
-// tui-driver 1.10.0). Un-skip once #1069 + #1070 land AND the toolchain lock is resolved:
-// with #1070's decoupling the modal no longer needs the (absent) transcript, so this
-// becomes the RED->GREEN oracle. Substrate-clean: asserts only wire fields (class,
-// modal_id, conversation_id), never claude's rendered words.
+// The fake claude cannot produce a minted session's per-Cwd transcript (it derives one
+// shared stem from PYRY_FAKE_CLAUDE_INITIAL_UUID, not --session-id; see
+// per_conversation_eviction_test.go), so this HERMETIC test cannot be driven GREEN today.
+// That is a fake-harness limit, NOT a toolchain issue: claude 2.1.199 and tui-driver
+// v1.10.0 are version-matched (v1.10.0 is locked to 2.1.199, docs/knowledge/codebase/1030.md),
+// and real-claude permission-modal tests run on this pairing (#1030). The #1066 oracle is
+// therefore the real-claude AC4 test (a minted-session variant of #1030); this file is a
+// documented reproduction. Substrate-clean: asserts only wire fields (class, modal_id,
+// conversation_id), never claude's rendered words.
 
 import (
 	"context"
@@ -51,9 +52,11 @@ import (
 func TestRelayV2_PerConversationModalShown(t *testing.T) {
 	t.Skip("#1066: minted per-conversation modal fan-out is a two-layer daemon wedge; " +
 		"blocked on #1069 (readiness gate rejects the permission modal) and #1070 (modal stream " +
-		"coupled to the per-conversation transcript). Not faithfully driveable GREEN on the fake tier " +
-		"(fakeclaude cannot produce a minted per-Cwd transcript), and real-claude is toolchain-blocked " +
-		"(claude 2.x vs tui-driver 1.10.0). Un-skip once #1069+#1070 land and the toolchain lock clears.")
+		"coupled to the per-conversation transcript). This HERMETIC repro can't be driven GREEN " +
+		"because the fake tier can't produce a minted per-Cwd transcript — a fake-harness limit, " +
+		"NOT a toolchain one (claude 2.1.199 and tui-driver v1.10.0 are version-matched). The #1066 " +
+		"oracle is the real-claude AC4 test (a minted variant of #1030). Keep skipped unless the " +
+		"fake tier gains a minted transcript.")
 
 	const (
 		initialUUID = "44444444-4444-4444-8444-444444444444"
