@@ -36,12 +36,16 @@ func TestInteractiveModalStream_ShownReachesEmitterWithBoundScreen(t *testing.T)
 
 	ch := make(chan tuidriver.Event)
 	sub := &scriptedSubscriber{streams: []<-chan tuidriver.Event{ch}}
-	screenText := func() string { return "  a plain modal body  " }
+	// screenFor pairs the conversation id with the screen from ONE read (#1065);
+	// a real convID here proves runModalStream threads the scope stamp end-to-end
+	// (screenFor → Handle → Record → broadcast), which the direct-Handle emitter
+	// test cannot.
+	screenFor := func() (string, string) { return "conv-stream", "  a plain modal body  " }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenText, emitter) }()
+	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenFor, emitter) }()
 
 	// Blocking send is a sync point; close+cancel then wait so every Handle call
 	// (serial on the run goroutine) has completed before we assert.
@@ -56,6 +60,9 @@ func TestInteractiveModalStream_ShownReachesEmitterWithBoundScreen(t *testing.T)
 	payload := decodeModalShown(t, bcast.pushes[0].env)
 	if payload.Prompt != "a plain modal body" {
 		t.Errorf("Prompt: got %q, want the trimmed screen body", payload.Prompt)
+	}
+	if payload.ConversationID != "conv-stream" {
+		t.Errorf("ConversationID: got %q, want conv-stream (the paired scope stamp)", payload.ConversationID)
 	}
 	if len(armer.armed) != 1 || armer.armed[0] != payload.ModalID {
 		t.Errorf("ArmModalTimeout calls = %v, want exactly [%s]", armer.armed, payload.ModalID)
@@ -72,12 +79,12 @@ func TestInteractiveModalStream_LocalDismissal(t *testing.T) {
 
 	ch := make(chan tuidriver.Event)
 	sub := &scriptedSubscriber{streams: []<-chan tuidriver.Event{ch}}
-	screenText := func() string { return "permission body" }
+	screenFor := func() (string, string) { return "", "permission body" }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenText, emitter) }()
+	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenFor, emitter) }()
 
 	ch <- tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}
 	ch <- tuidriver.Event{Kind: tuidriver.EventKindPtyModalHidden, Modal: tuidriver.ModalClassPermission}
@@ -108,7 +115,7 @@ func TestInteractiveModalStream_NonModalEventsNoRenderNoPush(t *testing.T) {
 	_, bcast, armer, emitter := newModalEmitterTestDeps(conns)
 
 	var screenCalls int // written only on the run goroutine; read after <-done
-	screenText := func() string { screenCalls++; return "should never be rendered" }
+	screenFor := func() (string, string) { screenCalls++; return "", "should never be rendered" }
 
 	ch := make(chan tuidriver.Event)
 	sub := &scriptedSubscriber{streams: []<-chan tuidriver.Event{ch}}
@@ -116,7 +123,7 @@ func TestInteractiveModalStream_NonModalEventsNoRenderNoPush(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenText, emitter) }()
+	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenFor, emitter) }()
 
 	for _, ev := range []tuidriver.Event{
 		{Kind: tuidriver.EventKindPtyIdle},
@@ -142,10 +149,13 @@ func TestInteractiveModalStream_NonModalEventsNoRenderNoPush(t *testing.T) {
 	}
 }
 
-// TestBoundScreenText_HostSelection (AC3): the screen text follows the active
+// TestBoundScreenText_HostSelection (AC3 + #1065 single-read): boundScreenText
+// returns the active conversation id PAIRED with that host's screen text, both
+// from ONE active.CurrentConversation() read. The screen follows the active
 // conversation the way the turn stream's host does — a routed conversation's
-// bound host, the bootstrap before any route, and a safe "" degrade on a miss or
-// a host that carries no screen.
+// bound host, the bootstrap before any route, and a safe "" screen degrade on a
+// miss or a host that carries no screen — and the paired convID is the scope
+// stamp, so a "" screen never masks a non-empty convID (the degrade still scopes).
 func TestBoundScreenText_HostSelection(t *testing.T) {
 	t.Parallel()
 
@@ -153,13 +163,14 @@ func TestBoundScreenText_HostSelection(t *testing.T) {
 	plainHost := &fakeSessionHost{name: "no-screen"} // SessionHost but NOT a screenSnapshotter
 
 	tests := []struct {
-		name      string
-		convID    string
-		boundHost boundHostFunc
-		want      string
+		name       string
+		convID     string
+		boundHost  boundHostFunc
+		wantConv   string
+		wantScreen string
 	}{
 		{
-			name:   "routed conv, host carries a screen -> that host's text",
+			name:   "routed conv, host carries a screen -> that host's convID + text",
 			convID: "conv-1",
 			boundHost: func(id string) (turnbridge.SessionHost, string, string, bool) {
 				if id != "conv-1" {
@@ -167,32 +178,36 @@ func TestBoundScreenText_HostSelection(t *testing.T) {
 				}
 				return boundScreen, "sid", "dir", true
 			},
-			want: "bound host screen",
+			wantConv:   "conv-1",
+			wantScreen: "bound host screen",
 		},
 		{
-			name:   "no route yet -> bootstrap text",
+			name:   "no route yet -> empty convID + bootstrap text",
 			convID: "",
 			boundHost: func(string) (turnbridge.SessionHost, string, string, bool) {
 				t.Error("boundHost must not be consulted before any route")
 				return nil, "", "", false
 			},
-			want: "bootstrap screen",
+			wantConv:   "",
+			wantScreen: "bootstrap screen",
 		},
 		{
-			name:   "boundHost miss -> empty (never a foreign screen)",
+			name:   "boundHost miss -> convID kept, empty screen (never a foreign screen)",
 			convID: "conv-gone",
 			boundHost: func(string) (turnbridge.SessionHost, string, string, bool) {
 				return nil, "", "", false
 			},
-			want: "",
+			wantConv:   "conv-gone",
+			wantScreen: "",
 		},
 		{
-			name:   "host does not satisfy screenSnapshotter -> empty (defensive)",
+			name:   "host does not satisfy screenSnapshotter -> convID kept, empty screen (defensive)",
 			convID: "conv-2",
 			boundHost: func(string) (turnbridge.SessionHost, string, string, bool) {
 				return plainHost, "sid", "dir", true
 			},
-			want: "",
+			wantConv:   "conv-2",
+			wantScreen: "",
 		},
 	}
 	for _, tc := range tests {
@@ -203,9 +218,12 @@ func TestBoundScreenText_HostSelection(t *testing.T) {
 				active.set(tc.convID)
 			}
 			bootstrap := &fakeScreenHost{text: "bootstrap screen"}
-			got := boundScreenText(active, tc.boundHost, bootstrap)()
-			if got != tc.want {
-				t.Fatalf("boundScreenText() = %q, want %q", got, tc.want)
+			gotConv, gotScreen := boundScreenText(active, tc.boundHost, bootstrap)()
+			if gotConv != tc.wantConv {
+				t.Errorf("boundScreenText() convID = %q, want %q", gotConv, tc.wantConv)
+			}
+			if gotScreen != tc.wantScreen {
+				t.Errorf("boundScreenText() screen = %q, want %q", gotScreen, tc.wantScreen)
 			}
 		})
 	}
@@ -220,11 +238,11 @@ func TestInteractiveModalStream_TeardownUnblocks(t *testing.T) {
 	_, _, _, emitter := newModalEmitterTestDeps(conns)
 
 	sub := &scriptedSubscriber{} // never yields a stream: blocks in subscribe on ctx
-	screenText := func() string { return "" }
+	screenFor := func() (string, string) { return "", "" }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenText, emitter) }()
+	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenFor, emitter) }()
 	cleanup := func() { <-done }
 
 	cancel()
@@ -259,12 +277,12 @@ func TestInteractiveModalStream_NoScreenTextLogLeak(t *testing.T) {
 
 	ch := make(chan tuidriver.Event)
 	sub := &scriptedSubscriber{streams: []<-chan tuidriver.Event{ch}}
-	screenText := func() string { return secret }
+	screenFor := func() (string, string) { return "", secret }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenText, emitter) }()
+	go func() { defer close(done); runModalStream(ctx, sub.subscribe, screenFor, emitter) }()
 
 	ch <- tuidriver.Event{Kind: tuidriver.EventKindPtyModalShown, Modal: tuidriver.ModalClassPermission}
 	close(ch)

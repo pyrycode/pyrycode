@@ -79,16 +79,30 @@ type ModalOption struct {
 // to the phone. It rides the "interactive" capability (#607) — viewing a modal
 // is ungated; answering is gated separately, per-device (#702).
 //
+// ConversationID is an outbound routing/scoping key (#1065): the daemon asserts
+// it from active.CurrentConversation() so interactive clients filter display by
+// conversation — a modal carrying conversation A's tool title/input summary is
+// scoped to conns following A and never rendered by a conn viewing B. It is
+// daemon-derived, not attacker-derived, and joins the client-side scoping model
+// TurnStatePayload/QueueStatePayload already use. Declared first (leading, no
+// omitempty), mirroring those sibling payloads. The INBOUND anti-forgery model
+// is unchanged: ModalAnswerPayload/ModalCancelPayload carry NO conversation_id,
+// and an answer is authorized by resolving its ModalID server-side against the
+// registry (plus the per-device gate #702) — a phone still cannot assert which
+// conversation an answer targets. Adding this outbound key does not loosen that
+// inbound guarantee.
+//
 // ModalID is a one-time, opaque, unguessable nonce minted per surfaced modal
-// (by #703). It is the sole correlation key: there is no conversation_id, so
-// the daemon resolves ModalID against its own outstanding-modal state and never
-// trusts a phone-asserted conversation. Options is ordered — the JSON-array
+// (by #703). It is the correlation key an inbound answer is resolved against:
+// the daemon matches ModalID to its own outstanding-modal state and never trusts
+// a phone-asserted conversation. Options is ordered — the JSON-array
 // order is the canonical display/selection order. DefaultOptionID MUST equal
 // one of Options[].ID (documented invariant; the producer enforces it). Class
 // is a plain string over a closed wire set (e.g. "permission"), not a named
 // enum (leaf-data convention, matching MessagePayload.Role); the exhaustive
 // class vocabulary is #703's to finalize.
 type ModalShownPayload struct {
+	ConversationID  string        `json:"conversation_id"` // outbound routing/scoping key; daemon-asserted, client filters on it (#1065). Inbound answers carry no conversation_id — see doc.
 	ModalID         string        `json:"modal_id"`
 	Class           string        `json:"class"`
 	Title           string        `json:"title"`

@@ -72,7 +72,12 @@ var denyByClass = map[string]string{
 // Outstanding is one recorded surfaced modal. It holds at least the option list
 // so #717 can map an inbound option_id against it; it carries no secret (the
 // modal_id is an opaque correlation nonce, not a credential).
+//
+// ConversationID is the outbound scoping key (#1065): stored alongside the rest
+// of the entry so Snapshot re-emits it, scoping a reconnect reconcile replay
+// identically to the initial broadcast.
 type Outstanding struct {
+	ConversationID  string
 	ModalID         string
 	Class           string
 	Title           string
@@ -137,21 +142,26 @@ func PermissionRequestForClass(class tuidriver.ModalClass, screenText string) (t
 
 // Record is the single nonce mint site (AC2). It builds the marshal-ready
 // ModalShownPayload from req + wireClass, mints exactly one fresh modal_id,
-// stamps it onto the payload, records the Outstanding under that id, and returns
-// the id-stamped payload. The only error path is RNG failure (the caller drops
-// the modal — never push an id-less payload). The payload build and the registry
+// stamps the routing keys (modal_id and the #1065 conversation_id scoping key)
+// onto the payload, records the Outstanding under that id, and returns the
+// stamped payload. The only error path is RNG failure (the caller drops the
+// modal — never push an id-less payload). The payload build and the registry
 // write are the one place a final payload is produced, honouring single-writer-
-// nonce.
-func (r *Registry) Record(req turnevent.PermissionRequest, wireClass string) (protocol.ModalShownPayload, error) {
+// nonce; the conversation_id is written into the Outstanding in the SAME
+// critical section, so there is no window where a stored modal is Snapshot-able
+// without its scope key.
+func (r *Registry) Record(req turnevent.PermissionRequest, wireClass, convID string) (protocol.ModalShownPayload, error) {
 	id, err := newModalID()
 	if err != nil {
 		return protocol.ModalShownPayload{}, err
 	}
 	p := buildPayload(req, wireClass)
 	p.ModalID = id
+	p.ConversationID = convID
 
 	r.mu.Lock()
 	r.outstanding[id] = Outstanding{
+		ConversationID:  convID,
 		ModalID:         id,
 		Class:           p.Class,
 		Title:           p.Title,
@@ -202,6 +212,7 @@ func (r *Registry) Snapshot() []protocol.ModalShownPayload {
 	out := make([]protocol.ModalShownPayload, 0, len(r.outstanding))
 	for _, o := range r.outstanding {
 		out = append(out, protocol.ModalShownPayload{
+			ConversationID:  o.ConversationID,
 			ModalID:         o.ModalID,
 			Class:           o.Class,
 			Title:           o.Title,

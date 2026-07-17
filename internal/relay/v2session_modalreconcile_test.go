@@ -15,13 +15,16 @@ import (
 
 // sampleModalPayload builds a fully-populated ModalShownPayload for the given
 // modal_id, standing in for one entry the OutstandingModals seam enumerates. A
-// fresh Options slice per call mirrors Snapshot's clone-on-read.
+// fresh Options slice per call mirrors Snapshot's clone-on-read. It carries a
+// conversation_id (#1065) so the reconcile tests prove the outbound scoping key
+// survives replay to a reconnecting conn identically to initial delivery (AC3).
 func sampleModalPayload(modalID string) protocol.ModalShownPayload {
 	return protocol.ModalShownPayload{
-		ModalID: modalID,
-		Class:   "permission",
-		Title:   "Permission required",
-		Prompt:  "Allow bash(rm -rf /tmp/scratch)?",
+		ConversationID: "conv-scope",
+		ModalID:        modalID,
+		Class:          "permission",
+		Title:          "Permission required",
+		Prompt:         "Allow bash(rm -rf /tmp/scratch)?",
 		Options: []protocol.ModalOption{
 			{ID: "allow_once", Label: "Allow once"},
 			{ID: "reject_once", Label: "Reject once"},
@@ -95,6 +98,11 @@ func TestV2Session_ModalReconcile_InteractiveOpen(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got[modalID], want) {
 		t.Errorf("conn %q: modal_shown = %+v, want %+v", connA, got[modalID], want)
+	}
+	// AC3 (#1065): the replayed payload carries the same conversation_id scope key
+	// as initial delivery, so replay to a reconnecting conn is scoped identically.
+	if got[modalID].ConversationID != want.ConversationID {
+		t.Errorf("conn %q: reconciled conversation_id = %q, want %q (replay must carry the scope key)", connA, got[modalID].ConversationID, want.ConversationID)
 	}
 }
 
@@ -313,7 +321,7 @@ func recordModal(t *testing.T, reg *modalbridge.Registry, screenText string) str
 	if !ok {
 		t.Fatalf("PermissionRequestForClass(permission): not ok")
 	}
-	p, err := reg.Record(req, wireClass)
+	p, err := reg.Record(req, wireClass, "")
 	if err != nil {
 		t.Fatalf("Record modal: %v", err)
 	}

@@ -107,7 +107,7 @@ func TestRecord_MintsAndStores(t *testing.T) {
 	if !ok {
 		t.Fatal("permission class should map")
 	}
-	payload, err := reg.Record(req, class)
+	payload, err := reg.Record(req, class, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -138,6 +138,35 @@ func TestRecord_MintsAndStores(t *testing.T) {
 	}
 }
 
+// TestRecord_StampsAndStoresConversationID is AC3 (stored-payload scoping,
+// #1065): Record stamps conversation_id onto the returned payload AND stores it
+// in the Outstanding, so Snapshot — the reconcile replay source — re-emits the
+// same scoping key. This proves the STORED payload (not just the live one) is
+// scoped, so a reconnect replay is scoped identically to initial delivery.
+func TestRecord_StampsAndStoresConversationID(t *testing.T) {
+	t.Parallel()
+	reg := New()
+	req, class, ok := PermissionRequestForClass(tuidriver.ModalClassPermission, "do something")
+	if !ok {
+		t.Fatal("permission class should map")
+	}
+	payload, err := reg.Record(req, class, "conv-X")
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if payload.ConversationID != "conv-X" {
+		t.Errorf("returned payload ConversationID: got %q, want %q", payload.ConversationID, "conv-X")
+	}
+
+	snap := reg.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("Snapshot len: got %d, want 1", len(snap))
+	}
+	if snap[0].ConversationID != "conv-X" {
+		t.Errorf("stored (Snapshot) ConversationID: got %q, want %q — replay must carry the scope key", snap[0].ConversationID, "conv-X")
+	}
+}
+
 func TestRecord_NonceUniqueness(t *testing.T) {
 	t.Parallel()
 	reg := New()
@@ -146,7 +175,7 @@ func TestRecord_NonceUniqueness(t *testing.T) {
 	const n = 1000
 	seen := make(map[string]struct{}, n)
 	for i := 0; i < n; i++ {
-		payload, err := reg.Record(req, class)
+		payload, err := reg.Record(req, class, "")
 		if err != nil {
 			t.Fatalf("Record #%d: %v", i, err)
 		}
@@ -197,7 +226,7 @@ func TestRecord_PayloadInvariant(t *testing.T) {
 			if !ok {
 				t.Fatal("class should map")
 			}
-			payload, err := reg.Record(req, class)
+			payload, err := reg.Record(req, class, "")
 			if err != nil {
 				t.Fatalf("Record: %v", err)
 			}
@@ -239,7 +268,7 @@ func TestRecord_PromptTrimmedAndPlain(t *testing.T) {
 	t.Parallel()
 	reg := New()
 	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "\n  a plain prompt body  \n")
-	payload, err := reg.Record(req, class)
+	payload, err := reg.Record(req, class, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -259,7 +288,7 @@ func TestRecord_PromptBounded(t *testing.T) {
 	// boundary (valid UTF-8) and stay within maxPromptBytes.
 	body := strings.Repeat("é", maxPromptBytes) // 2 bytes each ⇒ 2*maxPromptBytes bytes
 	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, body)
-	payload, err := reg.Record(req, class)
+	payload, err := reg.Record(req, class, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -277,7 +306,7 @@ func TestResolve(t *testing.T) {
 	t.Parallel()
 	reg := New()
 	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassTrustFolder, "trust?")
-	payload, err := reg.Record(req, class)
+	payload, err := reg.Record(req, class, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -309,7 +338,7 @@ func TestSnapshot_ResolvedModalDoesNotResurface(t *testing.T) {
 	t.Parallel()
 	reg := New()
 	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "do something")
-	payload, err := reg.Record(req, class)
+	payload, err := reg.Record(req, class, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -325,7 +354,7 @@ func TestSnapshot_SingleOutstandingRoundTrips(t *testing.T) {
 	t.Parallel()
 	reg := New()
 	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "do something")
-	payload, err := reg.Record(req, class)
+	payload, err := reg.Record(req, class, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -360,12 +389,12 @@ func TestSnapshot_MultipleOutstandingKeyedByID(t *testing.T) {
 	t.Parallel()
 	reg := New()
 	permReq, permClass, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "perm")
-	perm, err := reg.Record(permReq, permClass)
+	perm, err := reg.Record(permReq, permClass, "")
 	if err != nil {
 		t.Fatalf("Record permission: %v", err)
 	}
 	trustReq, trustClass, _ := PermissionRequestForClass(tuidriver.ModalClassTrustFolder, "trust")
-	trust, err := reg.Record(trustReq, trustClass)
+	trust, err := reg.Record(trustReq, trustClass, "")
 	if err != nil {
 		t.Fatalf("Record trust: %v", err)
 	}
@@ -394,7 +423,7 @@ func TestSnapshot_PureReadLeavesStateUndisturbed(t *testing.T) {
 	t.Parallel()
 	reg := New()
 	req, class, _ := PermissionRequestForClass(tuidriver.ModalClassPermission, "do something")
-	payload, err := reg.Record(req, class)
+	payload, err := reg.Record(req, class, "")
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
