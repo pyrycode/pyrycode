@@ -72,8 +72,9 @@ func TestRelayV2_SetSessionSettings(t *testing.T) {
 	}
 
 	// Align the sessions dir to the daemon's COMPUTED path and pre-create
-	// <initialUUID>.jsonl BEFORE the daemon starts so reconcileBootstrapOnNew
-	// adopts it and the bootstrap id starts at initialUUID (the #642 recipe). This
+	// <initialUUID>.jsonl BEFORE the daemon starts. The bootstrap id starts at
+	// initialUUID deterministically — seedBootstrapRegistry warm-starts it and the
+	// daemon spawns claude with --session-id (#839), no startup scan (the #642 recipe). This
 	// makes the frame's SessionID known ahead of time and the persistence
 	// assertions non-vacuous. Unlike the new_session e2e this test does NOT rotate,
 	// so no PYRY_FAKE_CLAUDE_CLEAR_ROTATES / stdin-log machinery.

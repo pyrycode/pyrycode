@@ -17,9 +17,10 @@ import (
 
 // TestPool_New_DoesNotAdoptForeignSessionByMtime (AC-2/AC-3): a warm-started
 // pool keeps its persisted bootstrap id even when a second claude has written a
-// NEWER <uuid>.jsonl into the shared sessions dir. Pre-#839,
-// reconcileBootstrapOnNew would have rotated the bootstrap to the foreign uuid;
-// that startup adopt-by-mtime is gone.
+// NEWER <uuid>.jsonl into the shared sessions dir. The bootstrap id is now pinned
+// deterministically (from the persisted registry / --session-id, #839) and cannot
+// rotate to a foreign uuid; the old startup adopt-by-mtime scan that would have
+// done so is gone.
 func TestPool_New_DoesNotAdoptForeignSessionByMtime(t *testing.T) {
 	t.Parallel()
 	regDir := t.TempDir()

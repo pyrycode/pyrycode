@@ -65,10 +65,10 @@ func TestE2E_RotationWatcher_DetectsClear(t *testing.T) {
 
 	const initialUUID = "11111111-1111-4111-8111-111111111111"
 	initialJSONL := filepath.Join(sessionsDir, initialUUID+".jsonl")
-	// Pre-create the initial jsonl BEFORE pyry starts so reconcileBootstrapOnNew
-	// (synchronous inside Pool.New, before the control socket listens) sees it
-	// as the most-recent jsonl and rotates the bootstrap entry to initialUUID
-	// + persists. Without this, fakeclaude's first open races pyry startup.
+	// Pre-create the initial jsonl BEFORE pyry starts. The bootstrap id is pinned to
+	// initialUUID deterministically — StartRotation seeds it via seedBootstrapRegistry
+	// and the daemon spawns claude with --session-id (#839), so no startup scan is
+	// relied on. Without this, fakeclaude's first open races pyry startup.
 	if err := os.WriteFile(initialJSONL, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write initial jsonl: %v", err)
 	}

@@ -398,6 +398,8 @@ func extractSessionID(args []string) string {
 // the socket is absent, os.Stat's ENOENT branch returns before any
 // dial / context allocation / goroutine.
 func tryAutoAttach(socketPath string, claudeArgs []string) (handled bool, err error) {
+	// PYRY_NO_AUTO_ATTACH is a dev/test-only escape hatch (set via t.Setenv and the
+	// e2e harness extraEnv, never by production code) that suppresses auto-attach.
 	if os.Getenv("PYRY_NO_AUTO_ATTACH") == "1" {
 		return false, nil
 	}
@@ -759,6 +761,9 @@ func runSupervisor(args []string) error {
 	}
 
 	relayURL := resolveRelayURL(*relayFlag, os.Getenv("PYRY_RELAY_URL"), cfg)
+	// PYRY_ALLOW_INSECURE_RELAY is a dev/test-only flag (set only by the e2e harness,
+	// never by production code) that lets the relay client accept an insecure ws://
+	// URL; production leaves it unset and requires wss://.
 	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
 	bootstrap := pool.Default()
 	// One activeConversation holder, shared two ways: the sessionRouter writes it

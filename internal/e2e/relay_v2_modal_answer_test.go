@@ -57,8 +57,9 @@ type modalHarness struct {
 
 // bringUpModalHarness spawns the daemon + fakeclaude (modal-trigger mode) and
 // opens the gated interactive phone's Noise session, mirroring #792's recipe:
-// align the sessions dir, pre-create <initialUUID>.jsonl so reconcileBootstrapOnNew
-// rotates the bootstrap, wire the relay, pair the answering phone WITH
+// align the sessions dir, pre-create <initialUUID>.jsonl (the bootstrap id is
+// pinned to it deterministically via seedBootstrapRegistry + --session-id, #839),
+// wire the relay, pair the answering phone WITH
 // --allow-remote-permissions (the #702 device gate), dial, and complete the
 // interactive handshake. No bound conversation is seeded: the modal is raised on
 // the bootstrap session and the modal_shown/modal_dismissed broadcast is

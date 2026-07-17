@@ -28,10 +28,12 @@
 // same loss boundary as eventring; reconnect/resync covers it. There is no
 // on-disk persistence in this slice.
 //
-// This slice ships the engine unwired (#704): no package depends on it yet. The
-// live wiring into the send_message handler and the cmd/pyry constructor, plus
-// the queue_state / dequeue_message reporting types, are separate slices (#705 /
-// the wiring slice). Enqueue is the single insertion point for the
+// The package is wired into the daemon: cmd/pyry constructs the queue via
+// msgqueue.New (cmd/pyry/main.go), drives delivery through the DeliverFunc seam
+// (newInboundDeliver), reports backlog changes through the queue-state emitter
+// (newQueueStateEmitterV2), and the send_message handler
+// (internal/relay/handlers/send_message.go) is the enqueue caller (*msgqueue.Queue
+// satisfies its Enqueuer interface). Enqueue is the single insertion point for the
 // per-conversation backlog bound (#869): an Enqueue past the cap is rejected
 // (returns 0) — never dropped, never evicting the oldest.
 //

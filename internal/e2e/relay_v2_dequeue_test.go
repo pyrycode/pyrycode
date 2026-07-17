@@ -62,8 +62,10 @@ func TestRelayV2_DequeueMessage_RemovesQueuedBeforeDrain(t *testing.T) {
 	// enqueues instead of rejecting pre-enqueue (#678).
 	seedBoundConversation(t, home, knownConvID, initialUUID)
 
-	// Pre-create <initialUUID>.jsonl in the daemon's COMPUTED sessions dir so
-	// reconcileBootstrapOnNew rotates the bootstrap session id to initialUUID.
+	// Pre-create <initialUUID>.jsonl in the daemon's COMPUTED sessions dir. The
+	// bootstrap id is pinned to initialUUID deterministically — seedBootstrapRegistry
+	// warm-starts it and the daemon spawns claude with --session-id (#839), so no
+	// startup scan is relied on.
 	// resolveClaudeSessionsDir has no env override — it always computes
 	// <HOME>/.claude/projects/encode(workdir) — so alignment is by construction
 	// (HOME=home, -pyry-workdir=home), the rotation-test pattern.
