@@ -217,6 +217,14 @@ type Supervisor struct {
 	// post-New, so the modal methods read it lock-free.
 	keystrokeFn func(sess *tuidriver.Session, k modalKey, choice string) error
 
+	// settingsWarningFn reports whether claude's informational Settings Warning
+	// startup dialog is on the captured Session's screen. Set once in New to
+	// detectSettingsWarning; overridden only in tests — the same
+	// unexported-injection seam as keystrokeFn — because the real detector renders
+	// the live snapshot and nil-derefs a zero-value Session's PTY. Immutable
+	// post-New, so waitReadyAutoContinue reads it lock-free.
+	settingsWarningFn func(sess *tuidriver.Session) bool
+
 	// restartMu guards the live-restart state below (#842). Leaf-only: Restart
 	// releases it before calling the captured cancel, and Run's liveArgs/
 	// setIterCancel take only this lock. Never nested with mu/sessMu/convMu — so
@@ -354,7 +362,7 @@ func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Sess
 	}
 
 	if s.cfg.ResolveTranscript == nil {
-		if err := readyForDelivery(ctx, sess.WaitReady); err != nil {
+		if err := waitReadyAutoContinue(ctx, s.readyDeps(sess)); err != nil {
 			return fmt.Errorf("wait ready: %w", err)
 		}
 		committed, err := deliver(ctx)
@@ -369,7 +377,7 @@ func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Sess
 
 	return confirmViaTranscriptGrowth(ctx, deliverGrowthDeps{
 		waitReady: func(ctx context.Context) error {
-			return readyForDelivery(ctx, sess.WaitReady)
+			return waitReadyAutoContinue(ctx, s.readyDeps(sess))
 		},
 		deliver: deliver,
 		resolve: s.cfg.ResolveTranscript,
@@ -632,6 +640,7 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	s.deliverFn = s.deliverViaSession
 	s.keystrokeFn = sendModalKeystroke
+	s.settingsWarningFn = detectSettingsWarning
 	return s, nil
 }
 
