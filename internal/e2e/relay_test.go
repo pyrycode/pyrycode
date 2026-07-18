@@ -12,11 +12,18 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 )
 
-// TestRelay_4409 asserts that a WS close code 4409 from the relay
-// causes the daemon to log the conflict and exit cleanly (exit code 0
-// via ctx cancel; no reconnect loop). Does not go through the harness's
-// readiness gate because the daemon may exit before its control socket
-// is dialable — startup and shutdown both happen in ~1ms.
+// TestRelay_4409 asserts that a TRANSIENT WS close code 4409 from the
+// relay is survived: the daemon logs the below-threshold retry, backs
+// off (~1s first step), reconnects, and claims the slot on the next
+// accept. This is the #1072 incident regression — a daemon reconnecting
+// after a drop can race the relay's dead-conn detection and draw a
+// one-shot 4409 from its own stale claim, which must NOT shut it down.
+// Only a PERSISTENT conflict (serverIDConflictThreshold consecutive
+// closes with the backoff ladder between — a genuine duplicate binary)
+// is fatal; that path is pinned at the transport layer
+// (TestFatalCloseThreshold_PersistentConflictGoesFatal) where the
+// backoff cadence is test-compressed, and the daemon's shutdown wiring
+// on the fatal classification is unchanged by #1072.
 //
 // This exercises the binary WebSocket close-code path, not the phone
 // handshake, so it runs over /v2/server (the surviving route) with the
@@ -28,27 +35,49 @@ func TestRelay_4409(t *testing.T) {
 	fr.RejectNextBinaryWith4409()
 
 	home := shortHome(t)
-	_, cmd, _, stderr, doneCh := spawnWith(t, home, spawnOpts{
-		extraEnv: []string{"PYRY_ALLOW_INSECURE_RELAY=1"},
-		extraFlags: []string{
-			"-pyry-relay=" + fr.URL() + "/v2/server",
-		},
-	})
-	t.Cleanup(func() { killSpawned(t, cmd, doneCh) })
+	h := StartInWithEnv(t,
+		home,
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		"-pyry-relay="+fr.URL()+"/v2/server",
+	)
 
+	serverID := readPersistedServerID(t, home)
+
+	// The first connect draws the one-shot 4409; the transport retries on
+	// the ~1s first backoff step and the second connect must register.
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	if !fr.WaitBinary(ctx, serverID) {
+		t.Fatalf("binary connection not registered after transient 4409\nstderr:\n%s",
+			h.Stderr.String())
+	}
+
+	// Daemon must still be running — the transient conflict is not fatal.
 	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("daemon did not exit within 5s after 4409\nstderr:\n%s",
-			stderr.String())
+	case <-h.Done():
+		t.Fatalf("daemon exited after transient 4409 (exit=%d)\nstderr:\n%s",
+			h.ExitCode(), h.Stderr.String())
+	default:
+	}
+	if err := syscall.Kill(h.PID, 0); err != nil {
+		t.Fatalf("daemon pid %d not reachable: %v", h.PID, err)
 	}
 
-	if code := cmd.ProcessState.ExitCode(); code != 0 {
-		t.Errorf("exit code = %d, want 0\nstderr:\n%s",
-			code, stderr.String())
+	// The below-threshold retry must be observable in the daemon log, and
+	// the fatal conflict-shutdown path must NOT have fired.
+	stderr := h.Stderr.String()
+	if !strings.Contains(stderr, "fatal close code; retrying") {
+		t.Errorf("stderr missing transient-4409 retry log line:\n%s", stderr)
 	}
-	if !strings.Contains(stderr.String(), "server-id conflict") {
-		t.Errorf("stderr missing conflict log line:\n%s", stderr.String())
+	if strings.Contains(stderr, "shutting down daemon") {
+		t.Errorf("stderr shows the fatal conflict shutdown on a transient 4409:\n%s", stderr)
+	}
+
+	// Control socket still responsive.
+	r := h.Run(t, "status")
+	if r.ExitCode != 0 {
+		t.Errorf("status after transient 4409: exit=%d stderr=%s",
+			r.ExitCode, r.Stderr)
 	}
 }
 

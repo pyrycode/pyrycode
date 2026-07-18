@@ -153,8 +153,10 @@ type relayWiring struct {
 	// allowInsecure permits a ws:// (non-TLS) relay scheme
 	// (PYRY_ALLOW_INSECURE_RELAY=1).
 	allowInsecure bool
-	// shutdown unwinds the daemon; called on a 4409 server-id conflict so the
-	// relay leg does not reconnect-loop.
+	// shutdown unwinds the daemon; called on a PERSISTENT 4409 server-id
+	// conflict (the transport retries a transient conflict through its
+	// backoff ladder first, #1072) so the relay leg does not
+	// reconnect-loop forever against a genuine duplicate.
 	shutdown context.CancelFunc
 	// convReg is the conversations registry backing the list/create/rename/
 	// delete/archive/change-workspace/recent handlers.
@@ -229,7 +231,9 @@ type relayWiring struct {
 //   - drains conn.Frames() (the v2 Noise manager consumes them)
 //   - blocks on conn.Wait()
 //   - on relay.ErrServerIDConflict: logs the conflict and calls shutdown()
-//     to unwind the daemon (AC#3: no reconnect-loop on 4409)
+//     to unwind the daemon (AC#3: no endless reconnect-loop on 4409; the
+//     transport has already retried a bounded window per #1072, so the
+//     conflict is persistent — a genuine duplicate binary)
 //   - on any other terminal error: logs at warn (transport-internal
 //     reconnect already handled non-fatal closes; reaching this path
 //     means a genuinely unrecoverable transport error surfaced)
@@ -299,9 +303,10 @@ func startRelay(
 		drain()
 	}
 
-	// The conn.Wait() classifier — a 4409 server-id conflict unwinds the daemon
-	// (no reconnect loop); ctx-cancel is the clean-shutdown path; any other
-	// terminal error is logged at warn.
+	// The conn.Wait() classifier — a PERSISTENT 4409 server-id conflict
+	// (post-#1072: the transport has already retried the bounded backoff
+	// window, so this is a genuine duplicate) unwinds the daemon; ctx-cancel
+	// is the clean-shutdown path; any other terminal error is logged at warn.
 	waitDone := make(chan struct{})
 	go func() {
 		defer close(waitDone)

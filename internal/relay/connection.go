@@ -39,14 +39,27 @@ import (
 // for the value.
 const statusServerIDConflict websocket.StatusCode = 4409
 
+// serverIDConflictThreshold is the transport FatalCloseThreshold for the
+// binary↔relay leg: the number of CONSECUTIVE 4409 closes required before
+// the conflict is treated as terminal. A transient self-conflict — the
+// daemon reconnecting into the relay's dead-conn-detection blind window
+// after a drop (worst case ~60s: 30s ping interval + 30s pong wait relay
+// side) — clears as soon as the relay reaps the stale conn and the grace
+// reclaim path hands the slot over. Eight consecutive observations put
+// ≥ ~73s of backoff (minimum jitter) between the first conflict and the
+// fatal verdict, so only a genuinely persistent claim (another live
+// binary) unwinds the daemon. Incident + derivation: #1072 (2026-07-16).
+const serverIDConflictThreshold = 8
+
 // Sentinel errors. Callers distinguish fatal vs. retryable via errors.Is.
 var (
 	// ErrServerIDConflict is the terminal error returned by Wait when
-	// the relay refused our claim with WS close 4409. Another binary is
-	// currently holding the same server-id and the relay's 30-second
-	// grace window has not elapsed. Operator escalation: another pyry is
-	// already running for this server-id, or a stale connection on the
-	// relay side has not yet been reaped.
+	// the relay refused our claim with WS close 4409 persistently
+	// (serverIDConflictThreshold consecutive closes across the transport's
+	// backoff ladder — a transient self-reconnect race clears well inside
+	// that window, see #1072). Another binary is holding the same
+	// server-id. Operator escalation: another pyry is already running for
+	// this server-id.
 	ErrServerIDConflict = errors.New("relay: server-id conflict (close 4409)")
 
 	// ErrInvalidConfig is returned by Connect on missing required fields.
@@ -125,11 +138,12 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	headers.Set("user-agent", "pyry/"+cfg.BinaryVersion)
 
 	tcfg := transport.Config{
-		URL:             dialURL,
-		Headers:         headers,
-		WriteTimeout:    10 * time.Second,
-		Logger:          cfg.Logger,
-		FatalCloseCodes: []websocket.StatusCode{statusServerIDConflict},
+		URL:                 dialURL,
+		Headers:             headers,
+		WriteTimeout:        10 * time.Second,
+		Logger:              cfg.Logger,
+		FatalCloseCodes:     []websocket.StatusCode{statusServerIDConflict},
+		FatalCloseThreshold: serverIDConflictThreshold,
 	}
 	c := &Connection{
 		cfg:         cfg,

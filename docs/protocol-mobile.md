@@ -327,7 +327,7 @@ Unchanged from v1. The binary opens `wss://<relay>/v1/server` with these request
 | `x-pyrycode-version` | yes | Binary's pyry version, e.g. `0.11.0`. |
 | `user-agent` | yes | `pyry/<version>` for ops debugging. |
 
-First-claim-wins. Conflict → `4409` close. 30-second grace period on disconnect.
+First-claim-wins. Conflict → `4409` close. 30-second grace period on disconnect. The binary treats a `4409` as **fatal only when it persists**: it retries through the standard backoff ladder and unwinds only after 8 consecutive `4409` closes (≥ ~73s of backoff even at minimum jitter — longer than the relay's 60s worst-case dead-connection detection plus grace reclaim). A transient self-conflict — the binary reconnecting after a drop before the relay has noticed its old connection is dead — clears within that window; a genuine duplicate binary keeps conflicting and the loser shuts down (#1072).
 
 **The leg is established the moment the WS upgrade completes.** There is no relay-originated `hello`/`hello_ack` handshake on the binary↔relay leg — under v2 a `hello_ack` would be AEAD-sealed application data the relay holds no key for, and server-id registration is purely header-based via `x-pyrycode-server` (the slot is claimed on upgrade). The binary goes straight to forwarding frames once the upgrade fires; it does not send a `hello` and does not wait for an ack. (The phone↔binary `hello`/`hello_ack` is a different leg — it survives as Noise_IK early-data, E2E-encrypted and relay-blind; see § Handshake.)
 
@@ -400,7 +400,7 @@ Unchanged from v1: WS-native ping/pong every 30s idle; 60s worst-case dead-conne
 
 ### Reconnect
 
-Unchanged from v1: exponential backoff with ±20% jitter, capped at 30s, reset to attempt 1 after any successful connection lasting ≥ 60 seconds. This subsection covers reconnect **timing** only; the **application-layer** reconcile-on-connect contract — what control and transcript state the daemon re-asserts once the handshake completes — lives in [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics).
+Unchanged from v1: exponential backoff with ±20% jitter, capped at 30s, reset to attempt 1 after any successful connection lasting ≥ 60 seconds. A close code listed as fatal (`4409`) does not terminate the loop on first observation: it is retried on the same ladder and becomes terminal only after 8 consecutive fatal closes (see § Authentication → Binary → relay; #1072). This subsection covers reconnect **timing** only; the **application-layer** reconcile-on-connect contract — what control and transcript state the daemon re-asserts once the handshake completes — lives in [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics).
 
 ## Application message types
 
