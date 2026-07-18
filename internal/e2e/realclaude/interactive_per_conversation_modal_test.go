@@ -15,11 +15,14 @@ package realclaude
 // --model haiku), createConversationViaPhone (mint a dedicated session), then the
 // #1030 Bash trigger raising a real TUI permission modal on THAT minted session.
 //
-// This is the faithful reproduction the fake tier cannot produce (fakeclaude never
-// writes a minted session's per-Cwd transcript). RED on current main iff the
-// minted-session modal path is broken (#1069 readiness gate / #1070 transcript-coupled
-// modal stream); GREEN once fixed. Substrate-clean: asserts only wire fields (class,
-// modal_id, conversation_id), never claude's rendered words.
+// Like #1030 this is a standing real-claude LIVENESS gate, NOT the deterministic
+// RED->GREEN oracle: real claude sometimes answers without ever calling the gated Bash
+// tool, so no modal is raised and the gate flakes — an accepted trade for a real-tier
+// liveness check (#1030's own note). The deterministic proof of #1070's fix lives at the
+// hermetic tier (relay_v2_modal_perconv_test.go), which the fix itself unblocked: once
+// the modal stream stopped needing a transcript (tui-driver Session.ScreenEvents), the
+// fake — whose modal trigger is deterministic — could drive it GREEN. Substrate-clean:
+// asserts only wire fields (class, modal_id, conversation_id), never claude's words.
 
 import (
 	"context"

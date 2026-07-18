@@ -2,7 +2,7 @@
 
 package e2e
 
-// This file is the #1066 reproduction + regression oracle: a MINTED per-conversation
+// This file is the #1066 deterministic RED->GREEN oracle: a MINTED per-conversation
 // interactive session (a conversation created over the wire, so the daemon mints a
 // dedicated claude session for it), started WITHOUT --dangerously-skip-permissions,
 // must fan modal_shown for a permission-gated tool, scoped to its own conversation
@@ -11,28 +11,23 @@ package e2e
 // path, which the #791/#793 harnesses never exercise (they raise the modal on the
 // bootstrap session, convID=="").
 //
-// SKIP-GATED (2026-07-17). Hand-building #1066 reproduced this RED, but it is a
-// two-layer daemon wedge that the fake tier cannot drive GREEN faithfully, and both
-// layers are now their own tickets that BLOCK #1066:
+// RED before the #1070 fix, GREEN after it. The bug: the modal stream's event
+// subscription was gated on the per-conversation transcript (WaitForSessionJSONL,
+// turnbridge/producer.go), but a modal is PTY-screen-derived and a permission-blocked
+// minted claude writes no transcript — so the subscription never opened and modal_shown
+// never fanned (a deadlock). The fix decouples the modal stream from the transcript via
+// tui-driver's Session.ScreenEvents (v1.11.0) + turnbridge.NewScreenTargetSubscriber, so
+// the fakeclaude modal — painted deterministically off the PTY — now surfaces with no
+// transcript. That deterministic trigger makes THIS the reliable oracle; the real-claude
+// sibling (interactive_per_conversation_modal_test.go) is a flake-tolerant liveness gate,
+// since real claude sometimes answers without ever calling the gated tool.
 //
-//   - #1069 — the delivery readiness gate rejects the permission modal as an
-//     "unexpected modal at startup: permission" and msgqueue retries the turn forever
-//     (WriteUserTurn -> Session.WaitReady -> UnexpectedModalError).
-//   - #1070 — the modal stream's Session.Events() subscription is gated on the
-//     per-conversation transcript via WaitForSessionJSONL (turnbridge/producer.go), but
-//     a modal is PTY-screen-derived and a permission-blocked minted claude writes no
-//     transcript, so the subscription never opens and modal_shown never fans. Likely a
-//     tui-driver screen-only Events change.
+// (The readiness-gate error #1069 once seen in an earlier hermetic draft was a
+// fake-timing artifact — the fake raised the modal at startup, before the turn's
+// readiness check; the real flow raises it mid-turn, so #1069 was closed not-a-real-bug.)
 //
-// The fake claude cannot produce a minted session's per-Cwd transcript (it derives one
-// shared stem from PYRY_FAKE_CLAUDE_INITIAL_UUID, not --session-id; see
-// per_conversation_eviction_test.go), so this HERMETIC test cannot be driven GREEN today.
-// That is a fake-harness limit, NOT a toolchain issue: claude 2.1.199 and tui-driver
-// v1.10.0 are version-matched (v1.10.0 is locked to 2.1.199, docs/knowledge/codebase/1030.md),
-// and real-claude permission-modal tests run on this pairing (#1030). The #1066 oracle is
-// therefore the real-claude AC4 test (a minted-session variant of #1030); this file is a
-// documented reproduction. Substrate-clean: asserts only wire fields (class, modal_id,
-// conversation_id), never claude's rendered words.
+// Substrate-clean: asserts only wire fields (class, modal_id, conversation_id), never
+// claude's rendered words.
 
 import (
 	"context"
@@ -50,14 +45,11 @@ import (
 )
 
 func TestRelayV2_PerConversationModalShown(t *testing.T) {
-	t.Skip("#1066: minted per-conversation modal fan-out is a two-layer daemon wedge; " +
-		"blocked on #1069 (readiness gate rejects the permission modal) and #1070 (modal stream " +
-		"coupled to the per-conversation transcript). This HERMETIC repro can't be driven GREEN " +
-		"because the fake tier can't produce a minted per-Cwd transcript — a fake-harness limit, " +
-		"NOT a toolchain one (claude 2.1.199 and tui-driver v1.10.0 are version-matched). The #1066 " +
-		"oracle is the real-claude AC4 test (a minted variant of #1030). Keep skipped unless the " +
-		"fake tier gains a minted transcript.")
-
+	// Un-skipped once #1070's fix landed: the modal stream now subscribes via
+	// Session.ScreenEvents (no transcript), so it surfaces the fakeclaude modal off
+	// the PTY even though the fake never writes a minted per-Cwd transcript. The
+	// fakeclaude modal trigger is deterministic (unlike real claude's flaky
+	// permission behaviour), so this is the RED->GREEN oracle for #1070.
 	const (
 		initialUUID = "44444444-4444-4444-8444-444444444444"
 		createReqID = uint64(20)

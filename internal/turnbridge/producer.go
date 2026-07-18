@@ -193,6 +193,29 @@ func NewTargetSubscriber(
 	tr *tuidriver.Tracker,
 	log *slog.Logger,
 ) Subscriber {
+	return newTargetSubscriber(resolve, tr, log, false)
+}
+
+// NewScreenTargetSubscriber follows the active conversation identically to
+// NewTargetSubscriber but subscribes to the session's SCREEN events
+// (Session.ScreenEvents) instead of its JSONL-tailed events, so it never waits for
+// a transcript to exist. The modal stream uses it: a session blocked on a
+// permission prompt writes no JSONL, so a transcript-gated subscription would never
+// open and the very modal that would unblock it would never surface (pyrycode
+// #1070). It needs no Tracker — ScreenEvents emits no stall event.
+func NewScreenTargetSubscriber(
+	resolve TargetResolver,
+	log *slog.Logger,
+) Subscriber {
+	return newTargetSubscriber(resolve, nil, log, true)
+}
+
+func newTargetSubscriber(
+	resolve TargetResolver,
+	tr *tuidriver.Tracker,
+	log *slog.Logger,
+	screenOnly bool,
+) Subscriber {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -248,6 +271,20 @@ func NewTargetSubscriber(
 				sess := target.Host.Session()
 				if sess == nil {
 					continue
+				}
+				if screenOnly {
+					// Screen/modal events come off the PTY grid, not the JSONL, so
+					// subscribe without resolving/waiting for a transcript. A
+					// permission-blocked session writes no JSONL, so gating here would
+					// deadlock the modal that would unblock it (#1070). ScreenEvents
+					// opens no file and cannot fail.
+					ch := sess.ScreenEvents(subCtx)
+					go func() {
+						_ = sess.Wait()
+						cancel()
+					}()
+					log.Debug("turnbridge: subscribed to screen events (no transcript)")
+					return ch, nil
 				}
 				// Resolve which JSONL to tail and gate on the file existing.
 				path, off, err := target.Resolve(subCtx)
