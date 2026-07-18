@@ -60,9 +60,13 @@ func startInteractiveModalStreamV2(
 	// emitter's broadcaster) and the modalTimeoutArmer (ArmModalTimeout, #725).
 	emitter := newInteractiveModalEmitterV2(modalReg, mgr, mgr, logger)
 
-	tr := tuidriver.NewTracker(tuidriver.TrackerOpts{})
 	resolve := resolveTarget(active, boundHost, sup, claudeSessionsDir, probe, pidFn, bootstrapIDFn)
-	sub := turnbridge.NewTargetSubscriber(resolve, tr, logger)
+	// Screen-only subscription (#1070): a modal comes off the PTY grid, not the
+	// JSONL, so the modal stream must NOT wait for a session transcript. A minted
+	// per-conversation session blocked on a permission prompt writes no transcript,
+	// so a transcript-gated subscription would never open — deadlocking the very
+	// modal that would unblock it.
+	sub := turnbridge.NewScreenTargetSubscriber(resolve, logger)
 	screenFor := boundScreenText(active, boundHost, sup)
 
 	done := make(chan struct{})
