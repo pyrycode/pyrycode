@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/contextwindow"
@@ -156,8 +158,11 @@ type relayWiring struct {
 	// shutdown unwinds the daemon; called on a PERSISTENT 4409 server-id
 	// conflict (the transport retries a transient conflict through its
 	// backoff ladder first, #1072) so the relay leg does not
-	// reconnect-loop forever against a genuine duplicate.
-	shutdown context.CancelFunc
+	// reconnect-loop forever against a genuine duplicate. It carries a
+	// cause: this self-initiated fatal path passes the conflict error so
+	// runSupervisor exits non-zero and launchd restarts the daemon, unlike
+	// an operator stop which cancels with a nil cause and stays down.
+	shutdown context.CancelCauseFunc
 	// convReg is the conversations registry backing the list/create/rename/
 	// delete/archive/change-workspace/recent handlers.
 	convReg *conversations.Registry
@@ -277,11 +282,12 @@ func startRelay(
 	logger.Info("relay: connecting", "url", w.relayURL, "server_id", string(serverID))
 
 	conn, err := relay.Connect(ctx, relay.Config{
-		ServerID:            serverID,
-		RelayURL:            w.relayURL,
-		BinaryVersion:       w.version,
-		Logger:              logger,
-		AllowInsecureScheme: w.allowInsecure,
+		ServerID:                  serverID,
+		RelayURL:                  w.relayURL,
+		BinaryVersion:             w.version,
+		Logger:                    logger,
+		AllowInsecureScheme:       w.allowInsecure,
+		ServerIDConflictThreshold: relay4409Threshold(logger),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("relay connect: %w", err)
@@ -315,7 +321,12 @@ func startRelay(
 		case errors.Is(err, relay.ErrServerIDConflict):
 			logger.Error("relay: server-id conflict; shutting down daemon",
 				"server_id", string(serverID), "err", err)
-			w.shutdown()
+			// Cancel WITH the conflict as cause: a self-initiated fatal
+			// shutdown must exit non-zero so launchd (KeepAlive
+			// SuccessfulExit:false) restarts the daemon into a fresh
+			// window, rather than reading a clean exit 0 as intentional
+			// and stranding it (the 2026-07-16 outage's second half).
+			w.shutdown(err)
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			logger.Debug("relay: lifecycle ended via ctx cancel", "err", err)
 		case err != nil:
@@ -330,6 +341,28 @@ func startRelay(
 		<-waitDone
 	}
 	return cleanup, nil
+}
+
+// relay4409Threshold reads the PYRY_RELAY_4409_THRESHOLD test-only seam: a
+// positive integer overrides the production count of consecutive 4409 closes
+// required before the daemon treats a server-id conflict as fatal (see
+// relay.Config.ServerIDConflictThreshold). Unset, empty, zero, or unparseable
+// returns 0, which leaves the production default (8). The e2e suite sets it
+// small so the persistent-conflict → non-zero-exit path is reachable in a few
+// seconds of backoff. Mirrors the PYRY_ALLOW_INSECURE_RELAY seam: dev/test
+// only, never set by production.
+func relay4409Threshold(logger *slog.Logger) int {
+	raw := os.Getenv("PYRY_RELAY_4409_THRESHOLD")
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		logger.Warn("relay: ignoring invalid PYRY_RELAY_4409_THRESHOLD", "value", raw)
+		return 0
+	}
+	logger.Info("relay: PYRY_RELAY_4409_THRESHOLD override", "threshold", n)
+	return n
 }
 
 // startRelayV2 wires the Mobile Protocol v2 (Noise_IK E2E) dispatch leg: it

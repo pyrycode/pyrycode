@@ -723,8 +723,17 @@ func runSupervisor(args []string) error {
 		bridge = supervisor.NewBridge(logger)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	// Two-layer shutdown context so a shutdown's ORIGIN survives to the exit
+	// classification below. The signal layer handles SIGTERM/SIGINT (operator
+	// stop → nil cause → exit 0). The cause layer lets a self-initiated fatal
+	// path (a persistent 4409 server-id conflict) cancel WITH an error, which
+	// fatalCause turns into a non-zero exit so launchd restarts the daemon
+	// (the 2026-07-16 outage's second half). `pyry stop` cancels with a nil
+	// cause via the control server, so it stays down like a signal.
+	sigCtx, sigCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer sigCancel()
+	ctx, cancelCause := context.WithCancelCause(sigCtx)
+	defer cancelCause(nil)
 
 	cfg, err := config.Load(resolveConfigPath())
 	if err != nil {
@@ -904,7 +913,7 @@ func runSupervisor(args []string) error {
 		relayURL:          relayURL,
 		version:           Version,
 		allowInsecure:     allowInsecure,
-		shutdown:          cancel,
+		shutdown:          cancelCause,
 		convReg:           convReg,
 		creator:           sessionMinter{pool},
 		router:            router,
@@ -933,7 +942,10 @@ func runSupervisor(args []string) error {
 	// sessions.SessionID and Pool.Remove returns plain error, matching
 	// Sessioner.Create / Sessioner.Remove (via embedded Remover) signatures
 	// with no adapter (contrast with poolResolver for the read-side Lookup).
-	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, cancel, logger, pool)
+	// `pyry stop` is an OPERATOR-initiated shutdown: cancel with a nil cause
+	// so the daemon exits 0 and launchd leaves it down (unlike the relay's
+	// self-initiated fatal path, which passes an error cause).
+	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, func() { cancelCause(nil) }, logger, pool)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -964,8 +976,33 @@ func runSupervisor(args []string) error {
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("supervisor: %w", runErr)
 	}
+	// A clean ctx-cancel got us here. Distinguish WHY: a self-initiated fatal
+	// shutdown (persistent 4409) cancelled with an error cause, so exit
+	// non-zero and let launchd restart the daemon. An operator stop (SIGTERM,
+	// `pyry stop`) cancelled with a nil cause and stays down at exit 0.
+	if cause := fatalCause(ctx); cause != nil {
+		logger.Error("pyrycode fatal shutdown", "cause", cause)
+		return cause
+	}
 	logger.Info("pyrycode stopped")
 	return nil
+}
+
+// fatalCause reports the self-initiated fatal shutdown reason carried by the
+// daemon's cause context, or nil for an operator-initiated stop. A shutdown
+// via context.CancelCauseFunc records a cause: the operator paths (SIGTERM /
+// SIGINT / `pyry stop`) cancel with nil, which context.Cause reports as
+// context.Canceled, while a self-initiated fatal path (the relay's persistent
+// 4409 handler) cancels with a real error. Returning that error makes
+// runSupervisor exit non-zero so launchd (KeepAlive SuccessfulExit:false)
+// restarts the daemon; the operator paths return nil and stay down. Pure so it
+// can be unit-tested directly (nil cause / context.Canceled / real cause).
+func fatalCause(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if cause == nil || errors.Is(cause, context.Canceled) {
+		return nil
+	}
+	return cause
 }
 
 // poolResolver adapts *sessions.Pool to control.SessionResolver. The shapes
