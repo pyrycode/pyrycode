@@ -82,6 +82,15 @@ type Config struct {
 	// leave this false; cmd/pyry flips it only when the operator sets
 	// PYRY_ALLOW_INSECURE_RELAY=1.
 	AllowInsecureScheme bool
+
+	// ServerIDConflictThreshold overrides the number of CONSECUTIVE 4409
+	// closes required before Wait returns ErrServerIDConflict. Zero (the
+	// default) uses the production serverIDConflictThreshold (8). Test-only
+	// seam so the e2e suite can reach the persistent-conflict → fatal
+	// shutdown path in a few seconds of backoff instead of the ~91s the
+	// production threshold takes; cmd/pyry sets it only from
+	// PYRY_RELAY_4409_THRESHOLD, mirroring the AllowInsecureScheme seam.
+	ServerIDConflictThreshold int
 }
 
 // Connection runs the binary↔relay leg of the wire protocol. Lifecycle is
@@ -137,13 +146,20 @@ func Connect(ctx context.Context, cfg Config) (*Connection, error) {
 	headers.Set("x-pyrycode-version", cfg.BinaryVersion)
 	headers.Set("user-agent", "pyry/"+cfg.BinaryVersion)
 
+	// Default to the production threshold; a positive override (test-only,
+	// set from PYRY_RELAY_4409_THRESHOLD) shortens the persistent-conflict
+	// window so the fatal path is reachable in seconds.
+	fatalThreshold := serverIDConflictThreshold
+	if cfg.ServerIDConflictThreshold > 0 {
+		fatalThreshold = cfg.ServerIDConflictThreshold
+	}
 	tcfg := transport.Config{
 		URL:                 dialURL,
 		Headers:             headers,
 		WriteTimeout:        10 * time.Second,
 		Logger:              cfg.Logger,
 		FatalCloseCodes:     []websocket.StatusCode{statusServerIDConflict},
-		FatalCloseThreshold: serverIDConflictThreshold,
+		FatalCloseThreshold: fatalThreshold,
 	}
 	c := &Connection{
 		cfg:         cfg,

@@ -132,3 +132,100 @@ func TestRelay_1011(t *testing.T) {
 			r.ExitCode, r.Stderr)
 	}
 }
+
+// TestRelay_4409_PersistentExitsNonZero asserts the second half of the
+// 2026-07-16 outage fix: a PERSISTENT 4409 server-id conflict (a genuine
+// duplicate binary holding the slot) must make the daemon exit NON-ZERO, so
+// launchd's KeepAlive {SuccessfulExit:false} restarts it into a fresh window.
+// Before this change the self-initiated fatal shutdown collapsed into a clean
+// exit 0, which launchd read as intentional and never restarted — the two-day
+// silent outage. #1072 fixed the transient half (survive a one-shot 4409);
+// this is the fatal-exit-code half.
+//
+// The fakerelay rejects EVERY binary upgrade with 4409, and
+// PYRY_RELAY_4409_THRESHOLD=2 shrinks the consecutive-conflict count so the
+// transport reaches its fatal verdict after ~1s of backoff instead of the ~91s
+// the production threshold (8) would take. This is the RED test for the whole
+// change: at exit 0 today, non-zero after.
+func TestRelay_4409_PersistentExitsNonZero(t *testing.T) {
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+	fr.RejectBinaryWith4409Persistently()
+
+	home := shortHome(t)
+	h := StartInWithEnv(t,
+		home,
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1", "PYRY_RELAY_4409_THRESHOLD=2"},
+		"-pyry-relay="+fr.URL()+"/v2/server",
+	)
+
+	// The daemon draws a 4409 on every reconnect; after 2 consecutive it
+	// treats the conflict as fatal, cancels the daemon context WITH the
+	// conflict as cause, and runSupervisor exits non-zero. Give the backoff
+	// ladder (~1s at threshold 2) generous headroom.
+	select {
+	case <-h.Done():
+	case <-time.After(20 * time.Second):
+		t.Fatalf("daemon did not exit after persistent 4409\nstderr:\n%s",
+			h.Stderr.String())
+	}
+
+	if code := h.ExitCode(); code == 0 {
+		t.Errorf("daemon exited 0 after persistent 4409; want non-zero so launchd restarts it\nstderr:\n%s",
+			h.Stderr.String())
+	}
+
+	// The fatal conflict-shutdown log must be present, proving it was the
+	// self-initiated fatal path (not some unrelated crash) that exited.
+	stderr := h.Stderr.String()
+	if !strings.Contains(stderr, "server-id conflict; shutting down daemon") {
+		t.Errorf("stderr missing conflict-shutdown log:\n%s", stderr)
+	}
+}
+
+// TestRelay_OperatorStopExitsZero pins the other side of the exit-code split:
+// an OPERATOR-initiated stop (`pyry stop`, which the daemon treats like
+// SIGTERM / launchctl stop) must exit 0 and stay down — launchd's
+// SuccessfulExit:false leaves a clean exit alone. Nothing guarded this before,
+// and the cause-context change routes `pyry stop` through cancelCause(nil), so
+// this locks the exit-0 semantics against a regression that would make launchd
+// fight an intentional stop.
+func TestRelay_OperatorStopExitsZero(t *testing.T) {
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+
+	home := shortHome(t)
+	h := StartInWithEnv(t,
+		home,
+		[]string{"PYRY_ALLOW_INSECURE_RELAY=1"},
+		"-pyry-relay="+fr.URL()+"/v2/server",
+	)
+
+	// Wait until the daemon is connected to the relay, so the stop unwinds a
+	// live relay leg (the production shape), not a still-connecting one.
+	serverID := readPersistedServerID(t, home)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if !fr.WaitBinary(ctx, serverID) {
+		t.Fatalf("binary connection not registered within 4s\nstderr:\n%s",
+			h.Stderr.String())
+	}
+
+	// `pyry stop` itself must ack and exit 0.
+	r := h.Run(t, "stop")
+	if r.ExitCode != 0 {
+		t.Fatalf("pyry stop exit=%d stderr=%s", r.ExitCode, string(r.Stderr))
+	}
+
+	// The daemon must then exit 0 (operator stop stays down).
+	select {
+	case <-h.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("daemon did not exit after pyry stop\nstderr:\n%s",
+			h.Stderr.String())
+	}
+	if code := h.ExitCode(); code != 0 {
+		t.Errorf("daemon exit=%d after pyry stop; want 0 (operator stop stays down)\nstderr:\n%s",
+			code, h.Stderr.String())
+	}
+}

@@ -74,6 +74,13 @@ type Server struct {
 	// code 4409 ("server-id already claimed"). The flag clears after
 	// one use. Set via RejectNextBinaryWith4409.
 	rejectNextBinaryWith4409 bool
+
+	// rejectBinaryWith4409Persistently, when true, closes EVERY /v1/server
+	// upgrade with WS code 4409 and never clears — simulating a genuine
+	// duplicate binary holding the slot. Drives the daemon's persistent-
+	// conflict → non-zero-exit path (a transient one-shot self-heals; a
+	// persistent claim must not). Set via RejectBinaryWith4409Persistently.
+	rejectBinaryWith4409Persistently bool
 }
 
 type binaryConn struct {
@@ -187,13 +194,15 @@ func (s *Server) handleBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Opt-in: simulate the production WS-close-4409 path for the next
-	// binary upgrade. Accept the upgrade, then close with code 4409.
-	// Existing tests rely on the HTTP-409 first-claim-wins path; this
-	// branch is a second mode the e2e suite enables explicitly.
+	// Opt-in: simulate the production WS-close-4409 path for a binary
+	// upgrade. Accept the upgrade, then close with code 4409. Existing
+	// tests rely on the HTTP-409 first-claim-wins path; this branch is a
+	// second mode the e2e suite enables explicitly. The one-shot flag
+	// clears after use (transient conflict, self-heals); the persistent
+	// flag never clears (genuine duplicate, fatal after the threshold).
 	s.mu.Lock()
-	fail4409 := s.rejectNextBinaryWith4409
-	if fail4409 {
+	fail4409 := s.rejectNextBinaryWith4409 || s.rejectBinaryWith4409Persistently
+	if s.rejectNextBinaryWith4409 {
 		s.rejectNextBinaryWith4409 = false
 	}
 	s.mu.Unlock()
@@ -514,6 +523,20 @@ func (s *Server) phoneSendPump(ctx context.Context, pc *phoneConn) error {
 func (s *Server) RejectNextBinaryWith4409() {
 	s.mu.Lock()
 	s.rejectNextBinaryWith4409 = true
+	s.mu.Unlock()
+}
+
+// RejectBinaryWith4409Persistently arms a sticky mode: EVERY /v1/server
+// upgrade accepts the WS handshake and immediately closes with WS code 4409,
+// and the mode never clears. Simulates a genuine duplicate binary already
+// holding the server-id, so the daemon draws a 4409 on every reconnect and,
+// after ServerIDConflictThreshold consecutive closes, treats the conflict as
+// fatal. Used by the e2e suite to drive the "persistent conflict → daemon
+// exits non-zero" path; contrast RejectNextBinaryWith4409 (one-shot, the
+// transient self-heal case).
+func (s *Server) RejectBinaryWith4409Persistently() {
+	s.mu.Lock()
+	s.rejectBinaryWith4409Persistently = true
 	s.mu.Unlock()
 }
 
