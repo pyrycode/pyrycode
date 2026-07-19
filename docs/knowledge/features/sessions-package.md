@@ -71,7 +71,7 @@ type Session struct { /* id, sup, bridge, log, lifecycle fields */ }
 func (s *Session) ID() SessionID
 func (s *Session) State() supervisor.State
 func (s *Session) WriteUserTurn(conversationID string, payload []byte) error
-func (s *Session) Supervisor() *supervisor.Supervisor // #311
+func (s *Session) Supervisor() *supervisor.Supervisor // #311; type-asserted off Runner since #1077
 func (s *Session) Bridge() *supervisor.Bridge         // #311; nil in foreground
 func (s *Session) LifecycleState() lifecycleState
 func (s *Session) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
@@ -142,6 +142,7 @@ type Config struct {
                                     // no longer gates a startup reconcile — that's removed)
     IdleTimeout       time.Duration // default per-session eviction window; 0 disables
     BootstrapEvicted  bool          // true → bootstrap parks evicted, spawns no claude (#761)
+    RunnerFactory     RunnerFactory // nil → supervisor.New; injection seam, #1077
 }
 
 type SessionConfig struct {
@@ -162,6 +163,32 @@ type SessionConfig struct {
 `SessionConfig` mirrors the relevant fields of `supervisor.Config`; `New` translates one to the other. Defaults (claude bin lookup, backoff timings) are applied by `supervisor.New` — `sessions.New` does **not** duplicate them.
 
 `ResumeLast` maps to `--continue` on restart, as today. The locked-design `claude --session-id <uuid>` invocation is deliberately **not** plumbed in 1.0 — Phase 1.1+ adds it.
+
+### `Runner` interface + `RunnerFactory` (#1077)
+
+`Session.sup` is typed `Runner` (`internal/sessions/runner.go`), not `*supervisor.Supervisor`:
+
+```go
+type Runner interface {
+    State() supervisor.State
+    WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
+    WaitForPTY(ctx context.Context) error
+    Run(ctx context.Context) error
+    Restart(args []string)
+}
+
+type RunnerFactory func(cfg supervisor.Config) (Runner, error)
+
+var _ Runner = (*supervisor.Supervisor)(nil) // compile-time proof, zero supervisor.go edits
+```
+
+This is the injection seam for the Streamrunner Interactive work (T4/T7): a narrow, consumer-defined interface covering exactly the five methods `internal/sessions` dispatches through the `sup` field — nothing a consumer reaches only via the concrete `Supervisor()` accessor is on it. `*supervisor.Supervisor` satisfies it structurally.
+
+`Config.RunnerFactory` is normalized once in `Pool.New` into a never-nil `newRunner` (mirrors the `p.log` field: set once, read-only thereafter, no lock). Both construction sites route through it — the bootstrap in `New` and `Pool.buildSession` (the shared funnel for `Create`/`CreateIn`/`GetOrCreate`/`GetOrCreateIn`). `nil` selects a wrapper over `supervisor.New`, so the concrete supervisor still flows through and the PTY / interactive path is byte-identical to today — **that nil default is the rollback guarantee** for this Strangler-Fig slice. No consumer is migrated onto an alternative `Runner` by this ticket.
+
+`Supervisor()` (line above) keeps its concrete return type deliberately — only the *stored field* becomes the interface, not the read accessor — so all 7 external `Supervisor()` call sites (5 production in `cmd/pyry`, 2 test) and the `relayWiring.sup` → `interactive_*_v2` → `CurrentConversation()` subtree compile and behave unchanged. Under the nil-factory default the type assertion inside `Supervisor()` is total (`sup.(*supervisor.Supervisor)` always succeeds); it returns `nil` only once an alternative `Runner` is injected, a state no production caller reaches yet.
+
+See [codebase/1077.md](../codebase/1077.md) and spec [`1077-sessions-runner-seam.md`](../../specs/architecture/1077-sessions-runner-seam.md).
 
 ### Supervisor handle (1.1a-A1)
 
