@@ -1408,3 +1408,260 @@ func TestConnect_LoudOnFirstUpgradeReject(t *testing.T) {
 		t.Errorf("INFO backoff records = %d, want ≥1 (subsequent rejects demoted to INFO)", backoffInfos)
 	}
 }
+
+// --- FatalCloseThreshold (#1072) ---
+//
+// The 2026-07-16 incident: a pong timeout dropped a healthy conn, the loop
+// re-dialed within ~75ms, the relay had not yet noticed the old conn was
+// dead, and the resulting one-shot 4409 was treated as fatal — a transient
+// self-reconnect race became a multi-day outage. FatalCloseThreshold makes
+// a fatal close code terminal only when it persists across N consecutive
+// observations, with the standard backoff ladder between attempts.
+
+// scriptedCloseRelay runs a per-accept behavior script: "conflict" closes
+// the accepted conn with the configured status immediately; "serve" holds
+// the conn open (echoing frames) until force-closed. Accepts beyond the
+// script's end repeat the last entry.
+type scriptedCloseRelay struct {
+	mu        sync.Mutex
+	server    *httptest.Server
+	script    []string
+	conns     []*websocket.Conn
+	connCount atomic.Int64
+	servedCh  chan struct{}
+}
+
+func newScriptedCloseRelay(t *testing.T, status websocket.StatusCode, reason string, script []string) *scriptedCloseRelay {
+	t.Helper()
+	r := &scriptedCloseRelay{
+		script:   script,
+		servedCh: make(chan struct{}, 16),
+	}
+	r.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		conn, err := websocket.Accept(w, req, nil)
+		if err != nil {
+			return
+		}
+		n := int(r.connCount.Add(1)) - 1
+		r.mu.Lock()
+		step := r.script[len(r.script)-1]
+		if n < len(r.script) {
+			step = r.script[n]
+		}
+		r.mu.Unlock()
+		if step == "conflict" {
+			_ = conn.Close(status, reason)
+			return
+		}
+		r.mu.Lock()
+		r.conns = append(r.conns, conn)
+		r.mu.Unlock()
+		select {
+		case r.servedCh <- struct{}{}:
+		default:
+		}
+		ctx := req.Context()
+		for {
+			typ, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			if err := conn.Write(ctx, typ, data); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(r.server.Close)
+	return r
+}
+
+func (r *scriptedCloseRelay) URL() string {
+	return "ws" + strings.TrimPrefix(r.server.URL, "http")
+}
+
+func (r *scriptedCloseRelay) ForceClose() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.conns {
+		_ = c.CloseNow()
+	}
+	r.conns = nil
+}
+
+// TestFatalCloseThreshold_TransientConflictRecovers pins the incident
+// regression: two consecutive 4409 closes below the threshold must NOT
+// terminate Connect — the loop backs off, retries, and the third accept
+// serves. The client must reach a live conn.
+func TestFatalCloseThreshold_TransientConflictRecovers(t *testing.T) {
+	t.Parallel()
+	relay := newScriptedCloseRelay(t, websocket.StatusCode(4409), "server-id conflict",
+		[]string{"conflict", "conflict", "serve"})
+	cfg := Config{
+		URL:                 relay.URL(),
+		Logger:              testLogger(t),
+		WriteTimeout:        time.Second,
+		FatalCloseCodes:     []websocket.StatusCode{websocket.StatusCode(4409)},
+		FatalCloseThreshold: 3,
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = c.Close()
+	})
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-relay.servedCh:
+	case err := <-connectErr:
+		t.Fatalf("Connect terminated with %v before surviving the transient conflict", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("client never reached a served conn after transient 4409s")
+	}
+	if got := relay.connCount.Load(); got != 3 {
+		t.Errorf("connCount = %d, want 3 (two conflicts + one served)", got)
+	}
+	select {
+	case err := <-connectErr:
+		t.Fatalf("Connect terminated with %v after the served conn", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestFatalCloseThreshold_PersistentConflictGoesFatal pins the
+// genuine-duplicate case: when every accept 4409-closes, Connect must
+// return ErrFatalClose once the consecutive count reaches the threshold —
+// no earlier (transient races get their window) and no later (a real
+// duplicate still steps aside).
+func TestFatalCloseThreshold_PersistentConflictGoesFatal(t *testing.T) {
+	t.Parallel()
+	relay := newCloseCodeRelay(t, websocket.StatusCode(4409), "server-id conflict")
+	cfg := Config{
+		URL:                 relay.URL(),
+		Logger:              testLogger(t),
+		WriteTimeout:        time.Second,
+		FatalCloseCodes:     []websocket.StatusCode{websocket.StatusCode(4409)},
+		FatalCloseThreshold: 3,
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = c.Close() })
+
+	err := c.Connect(ctx)
+	if !errors.Is(err, ErrFatalClose) {
+		t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
+	}
+	if status := websocket.CloseStatus(err); status != websocket.StatusCode(4409) {
+		t.Errorf("CloseStatus(err) = %d, want 4409", status)
+	}
+	if got := relay.connCount.Load(); got != 3 {
+		t.Errorf("connCount = %d, want 3 (threshold consecutive conflicts)", got)
+	}
+}
+
+// TestFatalCloseThreshold_CounterResetsOnHealthyConn pins the CONSECUTIVE
+// semantics: a cycle that ends without a fatal close resets the counter,
+// so two separate transient conflict episodes (2 + 2 with a healthy served
+// conn between) never sum to the threshold of 3.
+func TestFatalCloseThreshold_CounterResetsOnHealthyConn(t *testing.T) {
+	t.Parallel()
+	relay := newScriptedCloseRelay(t, websocket.StatusCode(4409), "server-id conflict",
+		[]string{"conflict", "conflict", "serve", "conflict", "conflict", "serve"})
+	cfg := Config{
+		URL:                 relay.URL(),
+		Logger:              testLogger(t),
+		WriteTimeout:        time.Second,
+		FatalCloseCodes:     []websocket.StatusCode{websocket.StatusCode(4409)},
+		FatalCloseThreshold: 3,
+	}
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		pingInterval:     500 * time.Millisecond,
+		pongTimeout:      500 * time.Millisecond,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = c.Close()
+	})
+	connectErr := make(chan error, 1)
+	go func() { connectErr <- c.Connect(ctx) }()
+
+	select {
+	case <-relay.servedCh:
+	case err := <-connectErr:
+		t.Fatalf("Connect terminated with %v during first conflict episode", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("client never reached the first served conn")
+	}
+	relay.ForceClose()
+	select {
+	case <-relay.servedCh:
+	case err := <-connectErr:
+		t.Fatalf("Connect terminated with %v during second conflict episode (counter did not reset)", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("client never reached the second served conn")
+	}
+	if got := relay.connCount.Load(); got != 6 {
+		t.Errorf("connCount = %d, want 6", got)
+	}
+}
+
+// TestFatalCloseThreshold_DialPathCounts pins that fatal closes surfacing
+// from Dial itself (relay closes mid-upgrade) share the same consecutive
+// counter and backoff as the post-serve path.
+func TestFatalCloseThreshold_DialPathCounts(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		URL:                 "wss://example.invalid",
+		Logger:              testLogger(t),
+		WriteTimeout:        time.Second,
+		FatalCloseCodes:     []websocket.StatusCode{websocket.StatusCode(4409)},
+		FatalCloseThreshold: 3,
+	}
+	var dials atomic.Int64
+	c := newClientForTest(t, cfg, testOpts{
+		seed:             1,
+		reconnectInitial: 10 * time.Millisecond,
+		reconnectMax:     50 * time.Millisecond,
+		stabilityReset:   1 * time.Second,
+		dialFn: func(ctx context.Context) (*websocket.Conn, error) {
+			dials.Add(1)
+			ce := websocket.CloseError{
+				Code:   websocket.StatusCode(4409),
+				Reason: "server-id conflict",
+			}
+			return nil, fmt.Errorf("dial: %w", ce)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = c.Close() })
+
+	err := c.Connect(ctx)
+	if !errors.Is(err, ErrFatalClose) {
+		t.Fatalf("Connect returned %v, want wrapping ErrFatalClose", err)
+	}
+	if got := dials.Load(); got != 3 {
+		t.Errorf("dialFn invocations = %d, want 3 (threshold consecutive fatal dials)", got)
+	}
+}

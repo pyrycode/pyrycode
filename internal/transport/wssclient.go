@@ -69,8 +69,27 @@ type Config struct {
 	// reconnect loop with ErrFatalClose. Empty (default) preserves the
 	// generic "reconnect on every drop" behaviour. The relay layer (#248)
 	// passes []websocket.StatusCode{4409} so a server-id conflict halts
-	// immediately rather than spinning in backoff.
+	// rather than spinning in backoff forever.
 	FatalCloseCodes []websocket.StatusCode
+
+	// FatalCloseThreshold is the number of CONSECUTIVE fatal-close
+	// observations required before Connect returns ErrFatalClose. Below
+	// the threshold the loop logs a WARN and retries through the standard
+	// backoff ladder; any cycle that ends without a fatal close resets
+	// the consecutive counter. Zero or one means a single fatal close
+	// terminates immediately (the pre-#1072 behaviour).
+	//
+	// Rationale (#1072, incident 2026-07-16): after a drop the loop
+	// re-dials with no delay, but the relay releases a dead connection's
+	// server-id claim only once IT observes the disconnect — worst case
+	// ~60s on a silently dead path (30s ping interval + 30s pong wait).
+	// A reconnect inside that blind window collides with the daemon's own
+	// stale claim and draws a transient 4409. The relay layer passes 8:
+	// the intervening backoff sleeps (1+2+4+8+16+30+30s, ±20% jitter)
+	// span ≥ ~73s even at minimum jitter, so a self-race always clears
+	// before the threshold, while a genuine duplicate keeps conflicting,
+	// exhausts the window in ~90s, and still halts.
+	FatalCloseThreshold int
 }
 
 // Client maintains a single long-lived WSS connection with auto-reconnect.
@@ -202,6 +221,10 @@ func New(cfg Config) *Client {
 //   - ctx cancellation breaks out of any sleep, any dial, any pump.
 func (c *Client) Connect(ctx context.Context) error {
 	attempt := 1
+	// fatalCount tracks CONSECUTIVE fatal-close observations across both
+	// the dial and post-serve paths. Reset by any cycle that ends without
+	// a fatal close. See Config.FatalCloseThreshold (#1072).
+	fatalCount := 0
 	// warnedUpgrade gates the loud upgrade-rejection WARN to once per
 	// outage: set on the first non-101 dial, re-armed on the next
 	// successful connect so a fresh outage gets its own first-failure WARN.
@@ -227,13 +250,21 @@ func (c *Client) Connect(ctx context.Context) error {
 			// from Dial rather than from a subsequent Read. Apply the
 			// same check here as the post-serve path so 4409 halts the
 			// loop regardless of which path observed it.
-			if status := websocket.CloseStatus(err); status != -1 {
-				for _, fc := range c.cfg.FatalCloseCodes {
-					if status == fc {
-						return fmt.Errorf("%w (%d): %w", ErrFatalClose, status, err)
-					}
+			if status := c.matchFatalStatus(err); status != -1 {
+				fatalCount++
+				if fatalCount >= c.fatalThreshold() {
+					return fmt.Errorf("%w (%d): %w", ErrFatalClose, status, err)
 				}
+				if !c.retryFatalClose(ctx, status, fatalCount, attempt, err) {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return ErrClosed
+				}
+				attempt++
+				continue
 			}
+			fatalCount = 0
 			delay := c.backoff(attempt)
 			if errors.Is(err, ErrUpgradeRejected) && !warnedUpgrade {
 				warnedUpgrade = true
@@ -264,12 +295,19 @@ func (c *Client) Connect(ctx context.Context) error {
 			"uptime", uptime, "err", serveErr)
 		_ = conn.Close(websocket.StatusInternalError, "client reconnecting")
 
-		if status := websocket.CloseStatus(serveErr); status != -1 {
-			for _, fc := range c.cfg.FatalCloseCodes {
-				if status == fc {
-					return fmt.Errorf("%w (%d): %w", ErrFatalClose, status, serveErr)
-				}
+		if status := c.matchFatalStatus(serveErr); status != -1 {
+			fatalCount++
+			if fatalCount >= c.fatalThreshold() {
+				return fmt.Errorf("%w (%d): %w", ErrFatalClose, status, serveErr)
 			}
+			if !c.retryFatalClose(ctx, status, fatalCount, attempt, serveErr) {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return ErrClosed
+			}
+		} else {
+			fatalCount = 0
 		}
 
 		select {
@@ -286,6 +324,42 @@ func (c *Client) Connect(ctx context.Context) error {
 			attempt++
 		}
 	}
+}
+
+// matchFatalStatus returns err's WS close status when it is listed in
+// Config.FatalCloseCodes, or -1 otherwise.
+func (c *Client) matchFatalStatus(err error) websocket.StatusCode {
+	if status := websocket.CloseStatus(err); status != -1 {
+		for _, fc := range c.cfg.FatalCloseCodes {
+			if status == fc {
+				return status
+			}
+		}
+	}
+	return -1
+}
+
+// fatalThreshold normalizes Config.FatalCloseThreshold: zero or one means
+// a single fatal close terminates immediately.
+func (c *Client) fatalThreshold() int {
+	if c.cfg.FatalCloseThreshold < 1 {
+		return 1
+	}
+	return c.cfg.FatalCloseThreshold
+}
+
+// retryFatalClose logs the below-threshold fatal close and sleeps the
+// backoff for attempt. Returns false when the sleep was interrupted by
+// ctx cancellation or Close (caller returns the matching sentinel).
+func (c *Client) retryFatalClose(ctx context.Context, status websocket.StatusCode, count, attempt int, err error) bool {
+	delay := c.backoff(attempt)
+	c.cfg.Logger.Warn("transport: fatal close code; retrying",
+		"status", int(status),
+		"consecutive", count,
+		"threshold", c.fatalThreshold(),
+		"delay", delay,
+		"err", err)
+	return c.sleepCancellable(ctx, delay)
 }
 
 // Send writes a single frame to the relay. Returns ErrNotConnected if no
