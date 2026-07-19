@@ -199,7 +199,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
 
 		start := time.Now()
-		waitErr := r.spawnAndWait(ctx, args)
+		started, waitErr := r.spawnAndWait(ctx, args)
 		uptime := time.Since(start)
 
 		// Shutdown is a parent-ctx cancel, NOT the child-exit error: a clean
@@ -215,7 +215,13 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.log.Info("claude exited", "uptime", uptime)
 		}
 
-		firstRun = false
+		// Advance firstRun only once claude has actually launched. A
+		// spawn-SETUP failure (started == false) never ran --session-id, so the
+		// session is still unestablished on disk; the next attempt must retry
+		// with --session-id, not --resume against an id that was never created.
+		if started {
+			firstRun = false
+		}
 		delay := bo.next(uptime)
 		r.log.Info("restarting after backoff", "delay", delay)
 		select {
@@ -227,10 +233,15 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // spawnAndWait spawns one claude child, stores its held-open stdin, and blocks
-// until it exits. It returns the child's exit error (nil on clean exit, an
-// *exec.ExitError on a crash, or a wrapped spawn-setup failure) — the Run loop
-// distinguishes shutdown from crash via ctx.Err(), not this value.
-func (r *Runner) spawnAndWait(ctx context.Context, args []string) error {
+// until it exits. It reports started — whether cmd.Start actually launched
+// claude — alongside the child's exit error (nil on clean exit, an
+// *exec.ExitError on a crash, or a wrapped spawn-setup failure). started is
+// false when the spawn fails during setup (StdinPipe / cmd.Start): claude never
+// launched, so the session was never established and the caller must NOT advance
+// firstRun — the next attempt has to retry with --session-id, not --resume
+// against an id that --session-id never created. The Run loop distinguishes
+// shutdown from crash via ctx.Err(), not the error value.
+func (r *Runner) spawnAndWait(ctx context.Context, args []string) (started bool, waitErr error) {
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = r.workDir
 	cmd.Stdout = r.cfg.Stdout
@@ -259,12 +270,13 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string) error {
 	if err != nil {
 		// A spawn-setup failure is treated as a crashed iteration by the loop
 		// (backoff + retry), so a transient failure never kills the daemon.
-		return fmt.Errorf("streamsup: stdin pipe: %w", err)
+		// started stays false: claude never launched.
+		return false, fmt.Errorf("streamsup: stdin pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close() // best-effort: nothing consumed it, child never ran
-		return fmt.Errorf("streamsup: start: %w", err)
+		return false, fmt.Errorf("streamsup: start: %w", err)
 	}
 
 	r.setStdin(stdin)
@@ -272,7 +284,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string) error {
 		r.cfg.onSpawn(cmd.Process.Pid)
 	}
 
-	waitErr := cmd.Wait()
+	waitErr = cmd.Wait()
 
 	// The child has exited (crash) or been torn down (cancel). Drop the handle
 	// so Stdin() reports no live child, then close it best-effort — cmd.Wait
@@ -284,7 +296,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string) error {
 		}
 	}
 
-	return waitErr
+	return true, waitErr
 }
 
 // setStdin publishes the live child's stdin write end under the leaf mutex.

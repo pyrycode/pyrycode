@@ -393,6 +393,114 @@ func TestRunner_ResumeIDStableAcrossRestart(t *testing.T) {
 	}
 }
 
+// --- Spawn-setup failure retains --session-id: AC4 regression ---------------
+
+// spawnArgsRecorder is a slog.Handler that captures the argv of every
+// "spawning claude" log record the Run loop emits (runner.go logs args just
+// before each spawn attempt). It lets a test observe the argv of spawns that
+// never launch a child — the spawn-SETUP-failure path, where no fake child runs
+// to record its own os.Args. Mutex-guarded: os/exec forwarder goroutines are
+// irrelevant here, but Run and the test goroutine both touch it.
+type spawnArgsRecorder struct {
+	mu     sync.Mutex
+	spawns [][]string
+}
+
+func (h *spawnArgsRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *spawnArgsRecorder) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Message != "spawning claude" {
+		return nil
+	}
+	var args []string
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == "args" {
+			if v, ok := a.Value.Any().([]string); ok {
+				args = slices.Clone(v)
+			}
+			return false
+		}
+		return true
+	})
+	h.mu.Lock()
+	h.spawns = append(h.spawns, args)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *spawnArgsRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *spawnArgsRecorder) WithGroup(string) slog.Handler      { return h }
+
+func (h *spawnArgsRecorder) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.spawns)
+}
+
+func (h *spawnArgsRecorder) all() [][]string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([][]string(nil), h.spawns...)
+}
+
+// TestRunner_SpawnSetupFailureRetainsSessionID guards the fix for the #1090
+// review finding: a spawn-SETUP failure (cmd.Start never launches claude) must
+// NOT advance firstRun. With ClaudeBin pointing at a non-existent binary, every
+// spawn fails at Start, so the session is never established on disk — every
+// retry must keep using --session-id. If firstRun flipped on the setup failure,
+// the second attempt would switch to --resume against an id --session-id never
+// created (a permanent, unrecoverable crash-loop). Constructs the Runner
+// directly to bypass New's exec.LookPath check.
+func TestRunner_SpawnSetupFailureRetainsSessionID(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	rec := &spawnArgsRecorder{}
+	r := &Runner{
+		cfg: Config{
+			ClaudeBin:      filepath.Join(tmp, "no-such-claude-binary"),
+			SessionID:      testSessionID,
+			BackoffInitial: time.Millisecond,
+			BackoffMax:     5 * time.Millisecond,
+			BackoffReset:   time.Minute,
+		},
+		log:     slog.New(rec),
+		workDir: tmp,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	// Wait for ≥2 spawn attempts. The first fails at cmd.Start; if the runner
+	// wrongly flipped firstRun on that setup failure, the second would use
+	// --resume.
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.count() < 2 {
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("saw only %d spawn attempt(s), want ≥2", rec.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return within 10s of cancel")
+	}
+
+	for i, args := range rec.all() {
+		if !slices.Contains(args, "--session-id") || slices.Contains(args, "--resume") {
+			t.Errorf("spawn attempt %d argv = %v; after a spawn-setup failure the session is still "+
+				"unestablished, so every retry must use --session-id, never --resume", i+1, args)
+		}
+	}
+}
+
 // --- Teardown SIGTERM + grace: AC5 ------------------------------------------
 
 func TestRunner_TeardownSIGTERM(t *testing.T) {
