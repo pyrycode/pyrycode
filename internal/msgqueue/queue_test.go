@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/turncommit"
 )
 
 // errFake is the forced delivery failure the lossless-retry scenario injects.
@@ -29,19 +31,27 @@ type fakeDeliver struct {
 	failTimes   map[string]int  // per-conv remaining forced failures
 	permaFail   map[string]bool // per-conv permanent forced-failure toggle
 	gates       map[string]chan struct{}
+	// commitGates optionally holds the COMMITTING window open: when set for a conv,
+	// deliver claims the head via the ctx commit gate, signals on claimed, then
+	// blocks here until the test releases it — the window in which the head is
+	// un-droppable. Unset (the default) means claim-then-commit with no window.
+	commitGates map[string]chan struct{}
 
 	entered   chan string // text, sent at the top of every deliver call
+	claimed   chan string // text, sent after the commit gate claims the head
 	completed chan string // text, sent after every successful delivery
 }
 
 func newFakeDeliver() *fakeDeliver {
 	return &fakeDeliver{
-		inflight:  map[string]int{},
-		failTimes: map[string]int{},
-		permaFail: map[string]bool{},
-		gates:     map[string]chan struct{}{},
-		entered:   make(chan string, 64),
-		completed: make(chan string, 64),
+		inflight:    map[string]int{},
+		failTimes:   map[string]int{},
+		permaFail:   map[string]bool{},
+		gates:       map[string]chan struct{}{},
+		commitGates: map[string]chan struct{}{},
+		entered:     make(chan string, 64),
+		claimed:     make(chan string, 64),
+		completed:   make(chan string, 64),
 	}
 }
 
@@ -76,6 +86,33 @@ func (f *fakeDeliver) deliver(ctx context.Context, convID string, payload []byte
 			f.inflight[convID]--
 			f.mu.Unlock()
 			return ctx.Err()
+		}
+	}
+
+	// waitReady passed → claim the head via the commit gate the queue supplies on
+	// the delivery ctx (models the supervisor between waitReady and the write). A
+	// false claim means the head was dropped racing the commit, so abort without
+	// recording it. A nil gate means no queue gating (not exercised here).
+	if g := turncommit.From(ctx); g != nil {
+		if !g() {
+			f.mu.Lock()
+			f.inflight[convID]--
+			f.mu.Unlock()
+			return turncommit.ErrDropped
+		}
+		f.mu.Lock()
+		commitHold := f.commitGates[convID]
+		f.mu.Unlock()
+		if commitHold != nil {
+			f.claimed <- text
+			select {
+			case <-commitHold:
+			case <-ctx.Done():
+				f.mu.Lock()
+				f.inflight[convID]--
+				f.mu.Unlock()
+				return ctx.Err()
+			}
 		}
 	}
 
@@ -963,6 +1000,68 @@ func TestQueue_SnapshotAll_RaceWithEnqueueAndDrain(t *testing.T) {
 	err = <-runErr
 	close(drainStop)
 	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// TestQueue_RemoveHeadWaitingForIdle_Droppable proves the #487 fix: a message
+// queued BEHIND a running turn — the drain is parked inside deliver() waiting for
+// claude to go idle, so the message is the current head but has NOT been written
+// yet — must be droppable. Before the fix Remove refused ANY idx==0 head while a
+// drain goroutine was alive (draining), so dequeue_message silently no-oped for
+// exactly the queue-while-busy-then-drop case: the head is the message a user
+// queued precisely so they could still cancel it. The fix distinguishes "waiting
+// for idle" (droppable) from "actively committing the write" (un-droppable).
+func TestQueue_RemoveHeadWaitingForIdle_Droppable(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.gates["c"] = make(chan struct{}) // gate every delivery: models claude busy mid-turn
+
+	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("c", "m1")
+	q.Enqueue("c", "m2")
+
+	// m1 delivers (gated); release it so it commits and advances out of the FIFO.
+	if got := recvWithin(t, f.entered, "deliver(m1)"); got != "m1" {
+		t.Fatalf("first delivery = %q, want m1", got)
+	}
+	f.gates["c"] <- struct{}{}
+	recvWithin(t, f.completed, "m1 completion")
+
+	// m2 now delivers but blocks on the gate — the drain is parked waiting for
+	// claude to go idle. m2 is the head, but has not been written.
+	if got := recvWithin(t, f.entered, "deliver(m2)"); got != "m2" {
+		t.Fatalf("second delivery = %q, want m2", got)
+	}
+
+	// The whole point: dropping m2 while it waits must succeed.
+	if !q.Remove("c", 2) {
+		t.Fatalf("Remove(m2) = false; a message waiting behind a running turn must be droppable (#487)")
+	}
+
+	// m2 must leave the backlog and never be delivered: Remove cancels the pending
+	// delivery, the drain re-loops and finds the FIFO empty.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(q.Snapshot("c")) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("m2 still in backlog after drop: %v", q.Snapshot("c"))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if order := f.deliveredOrder(); !equalStrings(order, []string{"m1"}) {
+		t.Fatalf("delivered = %v, want [m1] only (m2 dropped before it ran)", order)
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
 }

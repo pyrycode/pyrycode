@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/turncommit"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 	"golang.org/x/term"
 )
@@ -354,6 +355,14 @@ func (s *Supervisor) WriteUserTurn(ctx context.Context, id string, payload []byt
 // errors, the Committed bool, and file sizes — never JSONL content.
 func (s *Supervisor) deliverViaSession(ctx context.Context, sess *tuidriver.Session, payload []byte) error {
 	deliver := func(ctx context.Context) (bool, error) {
+		// The queue-driven delivery path carries a commit gate on ctx (#487). It is
+		// called here — after WaitReady, before the write — to CLAIM the queued head
+		// for writing. A false claim means the head was dropped during the idle-gate
+		// wait, so abort without writing: a dropped message must never be typed into
+		// claude. A nil gate (the non-queue paths, e.g. ACP) writes unconditionally.
+		if gate := turncommit.From(ctx); gate != nil && !gate() {
+			return false, turncommit.ErrDropped
+		}
 		res, err := sess.DeliverPrompt(ctx, tuidriver.DeliverOpts{
 			Prompt: string(payload),
 			Logger: s.log,

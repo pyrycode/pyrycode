@@ -56,6 +56,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/turncommit"
 )
 
 // defaultRetryInterval is the poll cadence the drain uses to re-attempt a head
@@ -180,12 +182,25 @@ type queued struct {
 	ts   time.Time
 }
 
-// convQueue is one conversation's FIFO plus its id counter and a flag tracking
-// whether a drain goroutine is currently servicing it.
+// convQueue is one conversation's FIFO plus its id counter and the drain-state
+// flags that gate removal of the head.
+//
+// draining is true while a drain goroutine is servicing this conversation. It
+// does NOT mean the head is being written: the drain spends most of its time
+// blocked inside the delivery seam WAITING for claude to go idle. committing is
+// the finer flag that gates head removal (#487): it is set, via commitGate, only
+// once the seam is past that wait and is actually writing the head, and it is the
+// only state in which the head is un-droppable. A head that is merely waiting
+// (draining && !committing) IS droppable — that is the message a user queued
+// behind a running turn precisely so they could still cancel it. deliverCancel
+// cancels the in-flight delivery's context so dropping the waiting head unblocks
+// its idle-gate wait at once; it is nil whenever no delivery is in flight.
 type convQueue struct {
-	items    []queued
-	nextID   uint64 // next id to assign for this conversation; starts at 1
-	draining bool
+	items         []queued
+	nextID        uint64 // next id to assign for this conversation; starts at 1
+	draining      bool
+	committing    bool               // the head is past the idle-gate wait and is being written; un-droppable
+	deliverCancel context.CancelFunc // cancels the in-flight delivery ctx; nil when no delivery is in flight
 }
 
 // Queue is a per-conversation, in-memory inbound message backlog with one serial
@@ -349,12 +364,22 @@ func (q *Queue) SnapshotAll() map[string][]QueuedMessage {
 	return out
 }
 
-// Remove drops a queued, not-in-flight message by id from convID's FIFO,
-// preserving the surviving order, and returns true iff it removed one. An
-// unknown conversation, an unknown or already-delivered id, or the in-flight
-// (draining) head is a safe no-op that returns false — no panic, no reorder.
-// This is the engine op behind dequeue_message; the in-flight-head no-op is what
-// guarantees dequeue_message cannot cancel an in-flight delivery.
+// Remove drops a queued, not-yet-committing message by id from convID's FIFO,
+// preserving the surviving order, and returns true iff it removed one. An unknown
+// conversation, an unknown or already-delivered id, or the head while it is
+// committing (the write to claude has begun) is a safe no-op that returns false —
+// no panic, no reorder. This is the engine op behind dequeue_message.
+//
+// The head is removable while it is only WAITING for claude to go idle
+// (draining && !committing): that is the message a user queued behind a running
+// turn precisely so they could still cancel it (#487). Removing the waiting head
+// also cancels its in-flight delivery so the seam's idle-gate wait unblocks at
+// once and the drain advances without writing it. Only once the seam claims the
+// head via commitGate (committing) does the drop no-op, so dequeue_message can
+// never cancel a write already in progress. The committing flag is set/cleared
+// under q.mu, the same lock this method takes, so the claim-versus-drop decision
+// is atomic: either the claim wins and the drop no-ops, or the drop wins and the
+// claim reports the head dropped.
 func (q *Queue) Remove(convID string, id uint64) bool {
 	q.mu.Lock()
 	c := q.convs[convID]
@@ -369,22 +394,46 @@ func (q *Queue) Remove(convID string, id uint64) bool {
 			break
 		}
 	}
-	// Not found, or the in-flight head: a no-op. The draining flag is set/cleared
-	// under q.mu, the same lock the drain peeks and advances under, so the
-	// in-flight-head decision is atomic w.r.t. the drain — removing index 0 only
-	// when !draining (no goroutine owns items) can never make advanceLocked drop
-	// the wrong message. Non-head removal (idx >= 1) is always safe: the drain
-	// only ever touches index 0 and holds a value copy of the head.
-	if idx == -1 || (idx == 0 && c.draining) {
+	if idx == -1 || (idx == 0 && c.committing) {
 		q.mu.Unlock()
 		return false
 	}
+	// Dropping the current head must cancel its in-flight delivery so the seam's
+	// idle-gate wait returns at once and the drain re-loops without writing the
+	// dropped message. deliverCancel is nil when no delivery is in flight (the
+	// drain is between attempts), in which case the drain simply re-peeks and finds
+	// the head gone. A non-head removal (idx >= 1) never touches the in-flight head.
+	cancel := c.deliverCancel
+	isHead := idx == 0
 	c.items = append(c.items[:idx], c.items[idx+1:]...)
 	c.shrinkLocked()
 	q.mu.Unlock()
 
+	if isHead && cancel != nil {
+		cancel()
+	}
 	q.notify(convID)
 	return true
+}
+
+// commitGate returns the turncommit.Gate the drain passes down the delivery ctx
+// for the head identified by headID. The delivery seam calls it once, after the
+// idle-gate wait and before the write. Under q.mu it CLAIMS the head — marking it
+// committing so a concurrent Remove of it no-ops — and returns true so the write
+// proceeds, unless the head was already dropped during the wait (it is no longer
+// at the front of the FIFO), in which case it returns false so the seam aborts
+// without writing. Taking q.mu makes the claim atomic with Remove.
+func (q *Queue) commitGate(convID string, headID uint64) turncommit.Gate {
+	return func() bool {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		c := q.convs[convID]
+		if c == nil || len(c.items) == 0 || c.items[0].id != headID {
+			return false
+		}
+		c.committing = true
+		return true
+	}
 }
 
 // notify fires the change seam for convID if one is configured. The caller MUST
@@ -473,9 +522,27 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			return
 		}
 		head := c.items[0]
+		// Per-attempt cancelable ctx so dropping this head while it waits for claude
+		// to go idle unblocks the delivery at once (#487). committing starts false —
+		// the head is droppable until the seam claims it via commitGate — and
+		// deliverCancel lets Remove cancel this exact attempt.
+		deliverCtx, cancelDeliver := context.WithCancel(ctx)
+		c.committing = false
+		c.deliverCancel = cancelDeliver
 		q.mu.Unlock()
 
-		err := q.deliver(ctx, convID, []byte(head.text))
+		gate := q.commitGate(convID, head.id)
+		err := q.deliver(turncommit.With(deliverCtx, gate), convID, []byte(head.text))
+		cancelDeliver()
+
+		q.mu.Lock()
+		c.deliverCancel = nil
+		c.committing = false
+		// A drop during the idle-gate wait removed this head from the FIFO (and
+		// canceled the delivery above), so it is neither advanced nor retried.
+		dropped := len(c.items) == 0 || c.items[0].id != head.id
+		q.mu.Unlock()
+
 		if ctx.Err() != nil {
 			// Shutdown raced the delivery. Leave the head queued (the in-memory
 			// daemon-restart loss boundary) and exit so Run's wg.Wait unblocks.
@@ -484,45 +551,45 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			q.mu.Unlock()
 			return
 		}
-		if err != nil {
-			// A legitimate hold (#1014 AC-1): the head was deliberately withheld
-			// awaiting an external decision (claude's startup trust modal is up), not
-			// a delivery failure. Reset the give-up streak — identical to the
-			// confirmed-delivery reset below — so the pending window never counts
-			// toward the bound AND a prior real-failure streak cannot survive into
-			// it, then retry the same head after q.retry. Debug (not Warn) and
-			// content-free: a long legitimate wait must not spam the operator log,
-			// and NEVER log head.text (untrusted phone content). The ctx.Err() check
-			// above stays first, so shutdown always wins over a hold.
-			if q.pending != nil && q.pending(err) {
-				firstFailedAt = time.Time{}
-				q.log.Debug("msgqueue: delivery held (awaiting external decision), will retry",
-					"conversation_id", convID,
-					"queued_msg_id", head.id,
-					"queued_at", head.ts)
-				if !sleepCtx(ctx, q.retry) {
-					q.mu.Lock()
-					c.draining = false
-					q.mu.Unlock()
-					return
-				}
-				continue
-			}
-			// Claude unavailable (child respawn / wedged turn / PTY write error).
-			// Retry the SAME head — lossless, and what makes a message survive a
-			// child respawn. NEVER log head.text: it is untrusted phone content.
-			if firstFailedAt.IsZero() {
-				firstFailedAt = time.Now()
-			}
-			q.log.Warn("msgqueue: delivery failed, will retry",
+
+		if err == nil {
+			q.mu.Lock()
+			c.advanceLocked()
+			q.mu.Unlock()
+
+			// A confirmed-delivered head left the backlog. Reset the give-up clock so
+			// the next head starts with a fresh bound. Fire after unlock; do NOT fire
+			// on the empty-exit, drop, or delivery-error/retry paths — those aren't
+			// confirmed deliveries.
+			firstFailedAt = time.Time{}
+			q.notify(convID)
+			continue
+		}
+
+		if dropped {
+			// The head was dropped before it committed: a clean cancellation, not a
+			// delivery failure. It is already gone from the FIFO, so do not retry it
+			// or count it toward give-up — advance to the next head with a fresh clock.
+			firstFailedAt = time.Time{}
+			continue
+		}
+
+		// err != nil and the head is still queued: a real delivery outcome.
+		// A legitimate hold (#1014 AC-1): the head was deliberately withheld
+		// awaiting an external decision (claude's startup trust modal is up), not a
+		// delivery failure. Reset the give-up streak — identical to the
+		// confirmed-delivery reset above — so the pending window never counts toward
+		// the bound AND a prior real-failure streak cannot survive into it, then
+		// retry the same head after q.retry. Debug (not Warn) and content-free: a
+		// long legitimate wait must not spam the operator log, and NEVER log
+		// head.text (untrusted phone content). The ctx.Err() check above stays first,
+		// so shutdown always wins over a hold.
+		if q.pending != nil && q.pending(err) {
+			firstFailedAt = time.Time{}
+			q.log.Debug("msgqueue: delivery held (awaiting external decision), will retry",
 				"conversation_id", convID,
 				"queued_msg_id", head.id,
-				"queued_at", head.ts,
-				"err", err)
-			if elapsed := time.Since(firstFailedAt); elapsed >= q.giveUpAfter {
-				q.giveUp(convID, c, head, elapsed, err)
-				return
-			}
+				"queued_at", head.ts)
 			if !sleepCtx(ctx, q.retry) {
 				q.mu.Lock()
 				c.draining = false
@@ -531,17 +598,27 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			}
 			continue
 		}
-
-		q.mu.Lock()
-		c.advanceLocked()
-		q.mu.Unlock()
-
-		// A confirmed-delivered head left the backlog. Reset the give-up clock so
-		// the next head starts with a fresh bound. Fire after unlock; do NOT fire
-		// on the empty-exit or delivery-error/retry paths — those aren't backlog
-		// changes.
-		firstFailedAt = time.Time{}
-		q.notify(convID)
+		// Claude unavailable (child respawn / wedged turn / PTY write error).
+		// Retry the SAME head — lossless, and what makes a message survive a
+		// child respawn. NEVER log head.text: it is untrusted phone content.
+		if firstFailedAt.IsZero() {
+			firstFailedAt = time.Now()
+		}
+		q.log.Warn("msgqueue: delivery failed, will retry",
+			"conversation_id", convID,
+			"queued_msg_id", head.id,
+			"queued_at", head.ts,
+			"err", err)
+		if elapsed := time.Since(firstFailedAt); elapsed >= q.giveUpAfter {
+			q.giveUp(convID, c, head, elapsed, err)
+			return
+		}
+		if !sleepCtx(ctx, q.retry) {
+			q.mu.Lock()
+			c.draining = false
+			q.mu.Unlock()
+			return
+		}
 	}
 }
 

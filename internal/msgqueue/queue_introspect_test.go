@@ -119,12 +119,16 @@ func TestQueue_Remove_DropsNonHeadEntry_OrderPreserved(t *testing.T) {
 	}
 }
 
-// AC #2: the in-flight (draining) head is non-removable; the removal no-ops and
-// the head still delivers exactly once (advanceLocked is not corrupted).
-func TestQueue_Remove_NoOpsOnInFlightHead(t *testing.T) {
+// AC #2 (revised for #487): the COMMITTING head — past the idle-gate wait and
+// being written to claude — is non-removable; the drop no-ops and the head still
+// delivers exactly once (advanceLocked is not corrupted). A head that is only
+// WAITING for claude to go idle IS droppable; that case is
+// TestQueue_RemoveHeadWaitingForIdle_Droppable.
+func TestQueue_Remove_NoOpsOnCommittingHead(t *testing.T) {
 	t.Parallel()
 	f := newFakeDeliver()
-	f.gates["c"] = make(chan struct{})
+	f.gates["c"] = make(chan struct{})       // idle-gate wait
+	f.commitGates["c"] = make(chan struct{}) // hold the committing (un-droppable) window open
 
 	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond})
 	if err != nil {
@@ -135,24 +139,32 @@ func TestQueue_Remove_NoOpsOnInFlightHead(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- q.Run(ctx) }()
 
-	id1 := q.Enqueue("c", "m1") // in-flight head
+	id1 := q.Enqueue("c", "m1")
 	q.Enqueue("c", "m2")
 	recvWithin(t, f.entered, "m1 to enter deliver")
 
+	// Move m1 past the idle-gate wait so the seam claims it (committing). The write
+	// is now in progress, so the head must be un-droppable.
+	f.gates["c"] <- struct{}{}
+	if got := recvWithin(t, f.claimed, "m1 to be claimed"); got != "m1" {
+		t.Fatalf("claimed = %q, want m1", got)
+	}
 	if q.Remove("c", id1) {
-		t.Fatal("Remove(in-flight head) = true, want false (no-op)")
+		t.Fatal("Remove(committing head) = true, want false (no-op)")
 	}
 	if got := snapshotIDs(q.Snapshot("c")); !equalUint64s(got, []uint64{1, 2}) {
 		t.Fatalf("snapshot after no-op Remove = %v, want [1 2] (head still present)", got)
 	}
 
-	// Release the gate: m1 then m2 deliver, each exactly once, in order.
-	f.gates["c"] <- struct{}{}
+	// Release the committing window: m1 commits. Then m2 the same way.
+	f.commitGates["c"] <- struct{}{}
 	if got := recvWithin(t, f.completed, "m1 completion"); got != "m1" {
 		t.Fatalf("first completion = %q, want m1", got)
 	}
 	recvWithin(t, f.entered, "m2 to enter deliver")
 	f.gates["c"] <- struct{}{}
+	recvWithin(t, f.claimed, "m2 to be claimed")
+	f.commitGates["c"] <- struct{}{}
 	if got := recvWithin(t, f.completed, "m2 completion"); got != "m2" {
 		t.Fatalf("second completion = %q, want m2", got)
 	}
