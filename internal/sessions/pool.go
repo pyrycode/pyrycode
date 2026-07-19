@@ -135,6 +135,16 @@ type Config struct {
 	//
 	// Values <= 0 are treated as unset.
 	ActiveCap int
+
+	// RunnerFactory is the injection seam for the supervised child. nil selects
+	// the default supervisor.New, keeping the PTY / interactive path
+	// byte-identical to today — that nil default is the rollback guarantee. A
+	// non-nil factory is invoked at every construction site (bootstrap in New
+	// and per-session in buildSession); it lets the Streamrunner Interactive work
+	// (T4/T7) swap in an alternative Runner behind the same lifecycle. This
+	// ticket wires the seam only — no consumer is migrated onto an alternative
+	// runner yet.
+	RunnerFactory RunnerFactory
 }
 
 // SessionConfig is the per-session invocation shape. Phase 1.0 uses it only
@@ -243,6 +253,12 @@ type Pool struct {
 	// IdleTimeout is zero. Read-only after New.
 	idleTimeoutDefault time.Duration
 
+	// newRunner is the normalized (never-nil) runner factory: cfg.RunnerFactory
+	// when supplied, else a wrapper over supervisor.New. Set once in New and
+	// read by buildSession thereafter — read-only post-construction, same
+	// lifetime and lock-free discipline as log / convReg. See Config.RunnerFactory.
+	newRunner RunnerFactory
+
 	// transitionObserver is the optional, injectable signal surfaced on
 	// /clear rotations and evictions. Set once via SetTransitionObserver
 	// BEFORE Pool.Run; read-only thereafter, so the lifecycle + watcher
@@ -334,6 +350,16 @@ func (p *Pool) List() []SessionInfo {
 func New(cfg Config) (*Pool, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+
+	// Normalize the runner factory once: a nil cfg.RunnerFactory selects the
+	// default supervisor.New (adapted to the Runner return), so the concrete
+	// supervisor flows through and the PTY path is byte-identical — the rollback
+	// guarantee. newRunner is threaded through both construction sites (bootstrap
+	// below, per-session via Pool.newRunner in buildSession).
+	newRunner := cfg.RunnerFactory
+	if newRunner == nil {
+		newRunner = func(c supervisor.Config) (Runner, error) { return supervisor.New(c) }
 	}
 
 	var reg *registryFile
@@ -459,7 +485,7 @@ func New(cfg Config) (*Pool, error) {
 	// source) exists. So pidFn closes over a late-bound holder that we assign once
 	// New has built the supervisor; the resolve callers (WriteUserTurn) run long
 	// after New returns, so the read strictly follows the assignment.
-	var bootstrapSup *supervisor.Supervisor
+	var bootstrapSup Runner
 	if cfg.ClaudeSessionsDir != "" {
 		probe := newProbe(cfg.Logger)
 		pidFn := func() int {
@@ -477,7 +503,7 @@ func New(cfg Config) (*Pool, error) {
 		// delivery confirm never observes growth.
 		supCfg.ResolveTranscript = newProbePreferredTranscriptResolver(cfg.ClaudeSessionsDir, probe, pidFn, supCfg.ResolveSessionID)
 	}
-	sup, err := supervisor.New(supCfg)
+	sup, err := newRunner(supCfg)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: bootstrap supervisor: %w", err)
 	}
@@ -529,6 +555,7 @@ func New(cfg Config) (*Pool, error) {
 		activeCap:          cfg.ActiveCap,
 		sessionTpl:         cfg.Bootstrap,
 		idleTimeoutDefault: cfg.IdleTimeout,
+		newRunner:          newRunner,
 	}
 	sess.pool = p
 
@@ -1286,7 +1313,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 			return nil
 		}
 	}
-	sup, err := supervisor.New(supCfg)
+	sup, err := p.newRunner(supCfg)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: create supervisor: %w", err)
 	}

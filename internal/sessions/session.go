@@ -130,7 +130,7 @@ type Session struct {
 	// read off the lifecycle goroutine via currentID(), or directly by
 	// Pool.mu-holders (List, ResolveID, Snapshot, saveLocked, Activate).
 	id     SessionID
-	sup    *supervisor.Supervisor
+	sup    Runner
 	bridge *supervisor.Bridge // nil in foreground mode
 	log    *slog.Logger
 
@@ -235,7 +235,17 @@ func (s *Session) WriteUserTurn(ctx context.Context, conversationID string, payl
 // assistant-turn bridge in cmd/pyry to read CurrentConversation() at
 // broadcast time. Returned pointer is owned by the session; callers must
 // not retain it past the session's lifetime.
-func (s *Session) Supervisor() *supervisor.Supervisor { return s.sup }
+//
+// Under the nil-RunnerFactory default the sup field always holds a
+// *supervisor.Supervisor, so the assertion is total and this returns the live
+// handle — the rollback guarantee. It returns nil only when an alternative
+// Runner has been injected (T4/T7), which no production caller reaches this
+// ticket; those call sites migrate onto Runner then and retire the assertion.
+// The comma-ok's nil-on-miss is the intended contract, not an ignored error.
+func (s *Session) Supervisor() *supervisor.Supervisor {
+	sup, _ := s.sup.(*supervisor.Supervisor)
+	return sup
+}
 
 // Bridge exposes the underlying I/O bridge, or nil in foreground mode.
 // Consumed by the assistant-turn bridge in cmd/pyry to register an output
