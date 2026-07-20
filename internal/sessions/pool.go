@@ -453,13 +453,20 @@ func New(cfg Config) (*Pool, error) {
 		// bootstrap; the --continue paths (per-caller/foreground/tests) keep it.
 		ResumeLast:       false,
 		ResolveSessionID: func() string { return string(p.BootstrapID()) },
-		ClaudeArgs:       bootstrapArgs,
-		Bridge:           cfg.Bootstrap.Bridge,
-		Logger:           cfg.Logger,
-		BackoffInitial:   cfg.Bootstrap.BackoffInitial,
-		BackoffMax:       cfg.Bootstrap.BackoffMax,
-		BackoffReset:     cfg.Bootstrap.BackoffReset,
-		RecordDir:        cfg.Bootstrap.RecordDir,
+		// #1108 seam: expose the already-minted bootstrap id as a
+		// construction-safe value for a stream-json RunnerFactory (#1109). The
+		// PTY supervisor ignores SessionID and keeps rotating via
+		// ResolveSessionID above; this field is construction-fixed and does NOT
+		// mirror a /clear rotation. Set unconditionally — the seam always
+		// exposes the id; whether a factory consumes it is the factory's concern.
+		SessionID:      string(bootstrapID),
+		ClaudeArgs:     bootstrapArgs,
+		Bridge:         cfg.Bootstrap.Bridge,
+		Logger:         cfg.Logger,
+		BackoffInitial: cfg.Bootstrap.BackoffInitial,
+		BackoffMax:     cfg.Bootstrap.BackoffMax,
+		BackoffReset:   cfg.Bootstrap.BackoffReset,
+		RecordDir:      cfg.Bootstrap.RecordDir,
 	}
 	if reg := cfg.ConversationsRegistry; reg != nil {
 		supCfg.ValidateConversation = func(id string) error {
@@ -1295,8 +1302,12 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 	}
 
 	supCfg := supervisor.Config{
-		ClaudeBin:      tpl.ClaudeBin,
-		WorkDir:        workDir,
+		ClaudeBin: tpl.ClaudeBin,
+		WorkDir:   workDir,
+		// #1108 seam: the same id already baked into ClaudeArgs as
+		// "--session-id <id>" (for the PTY path) is also exposed here so a
+		// stream-json RunnerFactory (#1109) can read it at construction.
+		SessionID:      string(id),
 		ResumeLast:     false,
 		ClaudeArgs:     args,
 		Bridge:         bridge,
