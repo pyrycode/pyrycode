@@ -67,6 +67,62 @@ func marshalTurnEnvelope(prompt []byte) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
+// controlRequest is a stream-json control line written to claude's held-open
+// stdin. It is marshalled structured (never string-concatenated) so it is
+// exactly one physical line — the same injection-resistance invariant
+// marshalTurnEnvelope holds. The interrupt control line carries no free-text
+// field, so it has no injection surface of its own; the structured-encoding
+// discipline is kept for symmetry and future control subtypes.
+type controlRequest struct {
+	Type      string              `json:"type"`       // "control_request"
+	RequestID string              `json:"request_id"` // locally-minted correlation id
+	Request   controlRequestInner `json:"request"`
+}
+
+type controlRequestInner struct {
+	Subtype string `json:"subtype"` // "interrupt"
+}
+
+// marshalInterruptEnvelope returns the single newline-terminated interrupt
+// control line for requestID. The subtype/type are fixed literals, so the only
+// caller-influenced field is the locally-minted request_id; the appended '\n' is
+// the sole raw newline, making the envelope one physical line by construction.
+func marshalInterruptEnvelope(requestID string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request:   controlRequestInner{Subtype: "interrupt"},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteInterrupt writes one interrupt control_request line onto w, the child's
+// held-open stdin (from Runner.Stdin). It mirrors WriteTurn minus the turncommit
+// gate: an interrupt is not a queued turn, so there is nothing to claim or drop.
+//
+// A nil w means no live child: WriteInterrupt returns ErrNoLiveChild and writes
+// nothing (checked first, so no panic and no partial write — AC2). A marshal
+// failure (not reachable with fixed literals, defensive) and a write failure
+// (e.g. EPIPE when the pipe closed mid-teardown) are returned wrapped; it never
+// closes w — the io.Writer type structurally forbids a half-close/EOF forgery.
+func WriteInterrupt(w io.Writer, requestID string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalInterruptEnvelope(requestID)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal interrupt: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write interrupt: %w", err)
+	}
+	return nil
+}
+
 // WriteTurn writes one user-turn stream-json envelope for prompt onto w, the
 // child's held-open stdin (from Runner.Stdin). It writes exactly once and never
 // closes w — holding stdin open for the next turn is the whole point of this

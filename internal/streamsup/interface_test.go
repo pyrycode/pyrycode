@@ -2,6 +2,7 @@ package streamsup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -135,6 +136,104 @@ func TestRunner_WriteUserTurn_GateDropsWithoutWriting(t *testing.T) {
 	if strings.Contains(out.String(), dropped) {
 		t.Errorf("dropped turn reached the child — a false gate must write zero bytes\n%s", out.String())
 	}
+}
+
+// --- Interrupt: AC1 + AC2 ----------------------------------------------------
+
+// TestRunner_Interrupt_NoLiveChild: with no child spawned, Stdin() is nil and
+// Interrupt returns the retryable ErrNoLiveChild without writing and without
+// panicking — the safe no-op refusal (AC2). Mirrors WriteUserTurn's no-live-child
+// contract.
+func TestRunner_Interrupt_NoLiveChild(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := r.Interrupt(); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("Interrupt with no live child = %v, want ErrNoLiveChild", err)
+	}
+}
+
+// TestRunner_NextInterruptID_Monotonic: correlation ids are locally minted (not
+// caller-supplied) and strictly increasing within the runner's lifetime, so a
+// future ack-correlator can distinguish successive interrupts.
+func TestRunner_NextInterruptID_Monotonic(t *testing.T) {
+	t.Parallel()
+	r := &Runner{}
+	first, second := r.nextInterruptID(), r.nextInterruptID()
+	if first == second {
+		t.Fatalf("nextInterruptID returned the same id twice: %q", first)
+	}
+	if first != "1" || second != "2" {
+		t.Fatalf("nextInterruptID minted %q, %q, want 1, 2 (monotonic from zero value)", first, second)
+	}
+}
+
+// TestRunner_Interrupt_LiveChildDelivers: on a live child Interrupt writes a
+// single control_request line onto the held-open stdin (AC1); the echo_lines
+// fake child echoes it back as ECHO:<line>, proving the exact interrupt envelope
+// reached the child — type control_request, request.subtype interrupt, and a
+// non-empty locally-minted request_id.
+func TestRunner_Interrupt_LiveChildDelivers(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+
+	if err := r.Interrupt(); err != nil {
+		t.Fatalf("Interrupt on a live child: %v", err)
+	}
+	// The child echoes each stdin line as ECHO:<line>; locate the echoed
+	// interrupt line, strip the prefix, and decode it.
+	waitForContains(t, out, "ECHO:", 3*time.Second)
+	echoed := findEchoedLine(t, out.String())
+	var cr decodedControlRequest
+	if err := json.Unmarshal([]byte(echoed), &cr); err != nil {
+		t.Fatalf("echoed interrupt line did not decode: %v (%q)", err, echoed)
+	}
+	if cr.Type != "control_request" {
+		t.Errorf("echoed interrupt type = %q, want control_request", cr.Type)
+	}
+	if cr.Request.Subtype != "interrupt" {
+		t.Errorf("echoed interrupt request.subtype = %q, want interrupt", cr.Request.Subtype)
+	}
+	if cr.RequestID == "" {
+		t.Error("echoed interrupt request_id is empty, want a locally-minted id")
+	}
+}
+
+// findEchoedLine returns the first ECHO:-prefixed line's payload from the child's
+// captured stdout, failing the test if none is present.
+func findEchoedLine(t *testing.T, output string) string {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		if after, ok := strings.CutPrefix(line, "ECHO:"); ok {
+			return after
+		}
+	}
+	t.Fatalf("no ECHO: line in child output:\n%s", output)
+	return ""
 }
 
 // --- Live Restart: AC3 -------------------------------------------------------

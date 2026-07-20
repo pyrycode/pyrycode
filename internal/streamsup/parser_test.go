@@ -89,6 +89,27 @@ func TestParser_LineMapping(t *testing.T) {
 			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}},
 		},
 		{
+			// The interrupt-terminated turn (spike T1, #1075): claude ends the
+			// turn with subtype error_during_execution → cancelled, not end_turn.
+			name: "result error_during_execution ends the turn as cancelled",
+			line: `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"S"}`,
+			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonCancelled}},
+		},
+		{
+			// AC4: the mapping is scoped to error_during_execution only — a result
+			// with no subtype keeps today's end_turn default.
+			name: "result with no subtype defaults to end_turn",
+			line: `{"type":"result","session_id":"S"}`,
+			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}},
+		},
+		{
+			// AC4: an unknown/other subtype is NOT a general subtype→reason table —
+			// only error_during_execution maps to cancelled; everything else end_turn.
+			name: "result unknown subtype defaults to end_turn",
+			line: `{"type":"result","subtype":"max_tokens","session_id":"S"}`,
+			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}},
+		},
+		{
 			name: "system init is a no-op (per-turn marker, not session-open)",
 			line: `{"type":"system","subtype":"init","session_id":"S"}`,
 			want: nil,
@@ -146,6 +167,30 @@ func TestParser_LineMapping(t *testing.T) {
 			got := collectEvents(tt.line)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("mapping mismatch:\n got  %#v\n want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResultTurnEndReason pins the pure subtype→reason mapping (AC3/AC4):
+// error_during_execution → cancelled, every other subtype → end_turn.
+func TestResultTurnEndReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		subtype string
+		want    turnevent.TurnEndReason
+	}{
+		{"error_during_execution", turnevent.TurnEndReasonCancelled},
+		{"success", turnevent.TurnEndReasonEndTurn},
+		{"", turnevent.TurnEndReasonEndTurn},
+		{"max_tokens", turnevent.TurnEndReasonEndTurn},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.subtype, func(t *testing.T) {
+			t.Parallel()
+			if got := resultTurnEndReason(tt.subtype); got != tt.want {
+				t.Errorf("resultTurnEndReason(%q) = %q, want %q", tt.subtype, got, tt.want)
 			}
 		})
 	}

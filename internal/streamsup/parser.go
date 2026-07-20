@@ -96,6 +96,7 @@ func (p *Parser) Write(b []byte) (int, error) {
 // `{"type":"result"}` cannot forge a turn boundary.
 type streamLine struct {
 	Type    string         `json:"type"`
+	Subtype string         `json:"subtype"`
 	Message *streamMessage `json:"message"`
 }
 
@@ -149,17 +150,32 @@ func (p *Parser) consumeLine(line []byte) {
 	case "user":
 		p.emitUser(sl.Message)
 	case "result":
-		// The turn boundary. Every result → end_turn: correct for a clean turn
-		// and a safe default otherwise (mirrors mapper.go's always-end_turn).
-		// Richer reasons (max_tokens/refusal, interrupt→cancelled) need the
-		// gate/interrupt context of #1089 and land there.
-		p.emit(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+		// The turn boundary. The subtype selects the reason: an interrupted turn
+		// (subtype error_during_execution, spike T1 #1075) → cancelled; a clean
+		// turn and every other subtype → end_turn. Richer max_tokens/refusal
+		// classification remains future work (resultTurnEndReason's default).
+		p.emit(turnevent.TurnEnd{Reason: resultTurnEndReason(sl.Subtype)})
 	default:
 		// system (init / thinking_tokens / status), rate_limit_event, and any
 		// future type: tolerated and dropped. system/init is a per-turn marker
 		// (spike § 1), not a session-open event — dropping it is correct because
 		// the parser is turn-stateless (there is no session state to reset).
 		p.log.Debug("streamsup: dropping stdout line", "type", sl.Type)
+	}
+}
+
+// resultTurnEndReason maps a result line's subtype to its TurnEnd reason.
+// error_during_execution is claude's interrupt-terminated turn (spike T1,
+// #1075) → cancelled; every other subtype (success, and any unknown) keeps
+// end_turn — correct for a clean turn and a safe default otherwise. The change
+// is scoped to error_during_execution only: this is not a general subtype→reason
+// table (max_tokens/refusal classification remains future work).
+func resultTurnEndReason(subtype string) turnevent.TurnEndReason {
+	switch subtype {
+	case "error_during_execution":
+		return turnevent.TurnEndReasonCancelled
+	default:
+		return turnevent.TurnEndReasonEndTurn
 	}
 }
 

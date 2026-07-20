@@ -79,6 +79,87 @@ func TestMarshalTurnEnvelope_InjectionResistance(t *testing.T) {
 	}
 }
 
+// decodedControlRequest is the shape a marshalled interrupt line decodes into.
+type decodedControlRequest struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Request   struct {
+		Subtype string `json:"subtype"`
+	} `json:"request"`
+}
+
+// TestMarshalInterruptEnvelope asserts the interrupt control line is byte-exact,
+// a single physical line, and round-trips. A fixed request_id keeps the
+// assertion deterministic (the live-minted id is exercised by the runner tests).
+func TestMarshalInterruptEnvelope(t *testing.T) {
+	t.Parallel()
+	out, err := marshalInterruptEnvelope("fixed-id")
+	if err != nil {
+		t.Fatalf("marshalInterruptEnvelope: %v", err)
+	}
+	const want = `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"interrupt"}}` + "\n"
+	if string(out) != want {
+		t.Fatalf("marshalInterruptEnvelope =\n %q\nwant\n %q", out, want)
+	}
+	// Exactly one raw newline, and it is the trailing terminator.
+	if got := bytes.Count(out, []byte{'\n'}); got != 1 {
+		t.Fatalf("interrupt line has %d raw newlines, want exactly 1 (the terminator)", got)
+	}
+	if out[len(out)-1] != '\n' {
+		t.Fatalf("interrupt line not newline-terminated: %q", out)
+	}
+	// Byte-exact round-trip: decoding recovers the control-request shape.
+	var cr decodedControlRequest
+	if err := json.Unmarshal(out[:len(out)-1], &cr); err != nil {
+		t.Fatalf("interrupt line did not decode as a single JSON object: %v (%q)", err, out)
+	}
+	if cr.Type != "control_request" || cr.Request.Subtype != "interrupt" || cr.RequestID != "fixed-id" {
+		t.Fatalf("interrupt line shape = %+v, want control_request/interrupt/fixed-id", cr)
+	}
+}
+
+// TestWriteInterrupt_NilRefusal: a nil writer (no live child) yields
+// ErrNoLiveChild and writes nothing — never a panic, never a partial write (AC2).
+func TestWriteInterrupt_NilRefusal(t *testing.T) {
+	t.Parallel()
+	if err := WriteInterrupt(nil, "id"); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WriteInterrupt(nil, …) = %v, want ErrNoLiveChild", err)
+	}
+}
+
+// TestWriteInterrupt_WritesEnvelope: WriteInterrupt emits exactly the marshalled
+// interrupt line onto the writer and never closes it.
+func TestWriteInterrupt_WritesEnvelope(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := WriteInterrupt(&buf, "id"); err != nil {
+		t.Fatalf("WriteInterrupt: %v", err)
+	}
+	want, err := marshalInterruptEnvelope("id")
+	if err != nil {
+		t.Fatalf("marshalInterruptEnvelope: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("WriteInterrupt wrote %q, want %q", buf.Bytes(), want)
+	}
+}
+
+// TestWriteInterrupt_WriteError: a stdin write failure (e.g. EPIPE on a pipe
+// closed mid-teardown) is returned wrapped, never panics.
+func TestWriteInterrupt_WriteError(t *testing.T) {
+	t.Parallel()
+	err := WriteInterrupt(errWriter{}, "id")
+	if err == nil {
+		t.Fatal("WriteInterrupt on a failing writer: got nil error, want non-nil")
+	}
+	if errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WriteInterrupt write error mis-reported as ErrNoLiveChild: %v", err)
+	}
+	if !strings.Contains(err.Error(), "write interrupt") {
+		t.Fatalf("WriteInterrupt error = %v, want it to mention %q", err, "write interrupt")
+	}
+}
+
 // TestWriteTurn_NilRefusal: a nil writer (Runner.Stdin returns nil when no child
 // is live) must yield ErrNoLiveChild and write nothing.
 func TestWriteTurn_NilRefusal(t *testing.T) {
