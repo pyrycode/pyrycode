@@ -5,7 +5,8 @@ The daemon-side registry that lets a synchronous permission prompt from a non-YO
 This package shipped the registry **primitive only**, unwired and unit-tested in isolation (mirroring how `internal/modalbridge` shipped ahead of its own consumers). Consumers:
 
 - **#1104 (landed)** — the control-socket `mcp.approve` verb (`internal/control`) forwards claude's request into `Register` and serializes the `Await`ed verdict back to the `pyry mcp-approve` subcommand. See [control-plane.md § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104) and [codebase/1104.md](../codebase/1104.md). It is the first — and, until #1080 lands, only — production caller of `Register`/`Await`; there is still no resolver, so every requested approval times out to deny (`internal/control`'s `mcpApprovalTimeout`, 2 min).
-- the `pyry mcp-approve` stdio subcommand + spawn-arg injection (#1105/#1106, not yet landed)
+- **#1105 (landed)** — the `pyry mcp-approve` stdio subcommand forwards claude's `tools/call approve` through #1104's verb into this registry. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md).
+- **#1106 (landed)** — spawn-arg injection + mcp-config generation (`cmd/pyry/mcp_config.go`) that points a non-YOLO claude spawn at the #1105 subcommand in the first place (`--permission-prompt-tool mcp__pyry_approve__approve --mcp-config <path>`). Doesn't call the registry directly; completes the enforce-vs-skip switch that makes #1104/#1105 reachable at all. See [codebase/1106.md](../codebase/1106.md).
 - the `modal_shown ↔ modal_answer` wiring that calls `Resolve` from a human decision (#1080, not yet landed) — will thread the *same* `*Registry` instance #1104 created at the `cmd/pyry` composition root (`runSupervisor`), not a second one
 
 Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architecture/1103-permbridge-registry.md). Ticket record: [codebase/1103.md](../codebase/1103.md).
