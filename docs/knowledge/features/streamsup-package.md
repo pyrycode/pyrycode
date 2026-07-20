@@ -1,6 +1,6 @@
 # `internal/streamsup` — persistent stream-json child lifecycle
 
-Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087) and the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) — have shipped; it ships unwired — no pool, relay, or `cmd/pyry` consumer yet.
+Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) — and the send-side turncommit gate (#1093) have shipped; it ships unwired — no pool, relay, or `cmd/pyry` consumer yet.
 
 **No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
 
@@ -105,7 +105,7 @@ The turn I/O boundary fills `Stdin()`/`Config.Stdout` with two additive seams �
 ```go
 var ErrNoLiveChild = errors.New("streamsup: no live child")
 
-func WriteTurn(w io.Writer, prompt []byte) error
+func WriteTurn(ctx context.Context, w io.Writer, prompt []byte) error
 
 type Parser struct { /* sink, byte buffer, maxBuf, logger */ }
 func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser
@@ -127,6 +127,15 @@ returns `ErrNoLiveChild` and writes nothing; a write failure (e.g. `EPIPE` mid-t
 returned, never panics. `w`'s `io.Writer` type makes a half-close/EOF forgery structurally impossible.
 The caller writes turn N+1 by calling `WriteTurn` again on the *same* `Stdin()` handle — no re-open, no
 per-turn stdin lifecycle.
+
+**Turncommit gate on send (#1093).** `WriteTurn` claims the [`internal/turncommit`](../../internal/turncommit)
+gate carried on `ctx`, mirroring `supervisor.deliverViaSession` on the PTY path: after the `w == nil`
+check, before `marshalTurnEnvelope`. A false claim — the queued head was dropped during the wait for
+claude to go ready — returns `turncommit.ErrDropped` bare (unwrapped, so the queue can key drop-handling
+on `errors.Is`) and writes **zero bytes**; a nil gate (the non-queue paths, e.g. a direct single-turn
+send) delivers unconditionally. The `w == nil` check stays first and consumes no claim, so a
+no-live-child send keeps the retryable `ErrNoLiveChild` outcome rather than permanently burning the
+claim as a false drop. See [codebase/1093.md](../codebase/1093.md).
 
 **Receive half — `Parser`.** An `io.Writer` wired as `Config.Stdout`. Buffers bytes, splits on `'\n'`
 (mirroring `streamrunner/watchdog.go`'s `streamParser.feed` mechanics, but as the terminal sink, not a
@@ -179,7 +188,8 @@ for this unwired slice).
 
 ## Out of scope (follow-on slices)
 
-- **turncommit/idle/stall gates** (#1089) — build on the seams #1087/#1088 expose.
+- **Idle/stall watchdog** (#1094, receive-side; split from #1089 alongside the now-shipped #1093
+  send-side turncommit gate — no shared code, no blocked-by either direction).
 - **Pool/relay/`cmd/pyry` wiring** — this package ships unwired by design.
 
 ## Related
@@ -191,5 +201,7 @@ for this unwired slice).
 - `internal/supervisor`'s `backoffTimer`/`Run` (see [system-overview.md](../architecture/system-overview.md)) — the exponential-backoff-with-stability-reset ladder this package copies verbatim (cannot import across the PTY/stream-json boundary).
 - [`codebase/1087.md`](../codebase/1087.md) — the process-lifecycle slice.
 - [`codebase/1088.md`](../codebase/1088.md) — the turn I/O slice (this section).
+- [`codebase/1093.md`](../codebase/1093.md) — the send-side turncommit gate slice.
 - Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.
 - Spec [`docs/specs/architecture/1088-streamsup-turn-io.md`](../../specs/architecture/1088-streamsup-turn-io.md) — the turn I/O architect spec.
+- Spec [`docs/specs/architecture/1093-turncommit-gate-on-streamsup-send.md`](../../specs/architecture/1093-turncommit-gate-on-streamsup-send.md) — the turncommit gate architect spec.
