@@ -42,6 +42,11 @@ func TestMain(m *testing.M) {
 //                      (if set), then exit 1 after a short delay. Used by the
 //                      restart-on-crash and resume-id-stable tests to force the
 //                      supervise loop to respawn.
+//   - "record_block":  append this spawn's argv to GO_STREAMSUP_HELPER_ARGV_FILE
+//                      (like "crash"), then block until SIGTERM and exit 0 —
+//                      staying alive so a live Restart must KILL it (it never
+//                      self-exits). Used by the live-restart test to prove the
+//                      first child was terminated by Restart, not by its own exit.
 //   - "stream_json":   read newline-delimited user-turn envelopes from the
 //                      held-open stdin; for each one, decode its prompt text and
 //                      emit a canned stream-json turn (system/init → assistant
@@ -79,6 +84,23 @@ func helperChild() {
 		}
 		time.Sleep(20 * time.Millisecond)
 		os.Exit(1)
+	case "record_block":
+		if path := os.Getenv("GO_STREAMSUP_HELPER_ARGV_FILE"); path != "" {
+			if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+				fmt.Fprintln(f, strings.Join(os.Args, " "))
+				_ = f.Sync()
+				_ = f.Close()
+			}
+		}
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM)
+		go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
+		select {
+		case <-sigCh:
+			os.Exit(0)
+		case <-time.After(30 * time.Second):
+			os.Exit(0)
+		}
 	case "stream_json":
 		sc := bufio.NewScanner(os.Stdin)
 		sc.Buffer(make([]byte, 0, 64*1024), 8<<20)

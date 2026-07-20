@@ -124,6 +124,32 @@ type Runner struct {
 	// by Stdin() from #1088's writer goroutine, so every access is serialised.
 	mu    sync.Mutex
 	stdin io.WriteCloser
+
+	// stateMu is a leaf mutex guarding state, the control-plane snapshot. The
+	// Run goroutine writes it via updateState; State() reads it from any
+	// goroutine. Kept separate from mu (a different concern with a different
+	// access pattern: control-plane reader vs. Run-goroutine writer).
+	stateMu sync.Mutex
+	state   State
+
+	// restartMu is a leaf mutex guarding the live-restart seam (args +
+	// iterCancel), the streamsup analogue of supervisor's restartMu. args is the
+	// live spawn base argv, swapped by Restart and read by liveArgs at the top of
+	// each Run iteration; iterCancel is the current spawn's cancel, published each
+	// iteration so Restart can force the child to exit. Kept separate from mu and
+	// stateMu — Restart touches only this mutex + restartCh (never a Pool lock),
+	// so UpdateSettings can call it after releasing Pool.mu with no lock-order
+	// concern.
+	restartMu  sync.Mutex
+	args       []string
+	iterCancel context.CancelFunc
+
+	// restartCh (buffered 1) carries the "a deliberate restart was requested"
+	// hint. Restart sends on it non-blockingly; Run consumes it either in the
+	// post-spawn drain (skip backoff) or the backoff-wait select (interrupt the
+	// wait). Allocated once in New. Coalescing rapid restarts to one relaunch with
+	// the newest args is correct — see Restart.
+	restartCh chan struct{}
 }
 
 // New validates the required fields, applies defaults, resolves WorkDir, and
@@ -160,9 +186,12 @@ func New(cfg Config) (*Runner, error) {
 	}
 	cfg.Args = slices.Clone(cfg.Args)
 	return &Runner{
-		cfg:     cfg,
-		log:     cfg.Logger,
-		workDir: workDir,
+		cfg:       cfg,
+		log:       cfg.Logger,
+		workDir:   workDir,
+		state:     State{Phase: PhaseStarting},
+		args:      slices.Clone(cfg.Args),
+		restartCh: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -181,30 +210,136 @@ func (r *Runner) Stdin() io.Writer {
 	return r.stdin
 }
 
+// WriteUserTurn writes the user envelope to the live child's stdin and claims
+// the turncommit gate, wrapping the reviewed WriteTurn free function (#1088). It
+// is the delivery path the session pool dispatches through (send_message →
+// Session.WriteUserTurn → here). A nil Stdin() (no live child) yields
+// ErrNoLiveChild without writing — the retryable no-live-child refusal — and a
+// gate deny yields turncommit.ErrDropped with zero bytes written; both are
+// WriteTurn's verbatim contract, so no new envelope construction is introduced.
+//
+// conversationID is accepted for interface conformance (sessions.Runner) and
+// future outbound-cursor wiring (T4/T7); this slice does not yet track a cursor,
+// so it is intentionally unused here.
+func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
+	return WriteTurn(ctx, r.Stdin(), payload)
+}
+
+// WaitForPTY returns cleanly: the stream-json path has no PTY to await. The
+// session lifecycle calls it at the end of Activate so PTY-backed runners can
+// block until their master is bound; on the stream path there is no such
+// readiness gate, and the no-live-child window is handled per-turn by WriteTurn's
+// retryable ErrNoLiveChild. Mirrors the seam that supervisor.WaitForPTY fills.
+func (r *Runner) WaitForPTY(ctx context.Context) error { return nil }
+
+// Restart swaps the live spawn base argv and, if a child is currently running,
+// forces it to exit so the Run loop relaunches with the new args (resuming via
+// --resume, since firstRun is already false after the first spawn). When no child
+// is running it only swaps the args — they take effect on the next spawn.
+// Non-blocking, fire-and-forget: the forever-retry Run loop guarantees the
+// relaunch. Safe from any goroutine. Mirrors supervisor.Restart.
+//
+// It drives only Runner-internal state (restartMu, a ctx cancel, a buffered
+// channel); it never touches Pool.mu or Session.lcMu, so the sessions layer can
+// call it after releasing Pool.mu with no lock-order concern.
+//
+// The restartCh hint is always sent (non-blocking): a restart during a run makes
+// the post-spawn drain skip backoff, and a restart during backoff (no live child
+// to cancel) breaks the backoff wait. Coalescing is correct — two rapid restarts
+// overwrite args with the newest value and collapse to the single buffered token,
+// forcing one relaunch with the latest args.
+func (r *Runner) Restart(args []string) {
+	r.restartMu.Lock()
+	r.args = slices.Clone(args)
+	cancel := r.iterCancel
+	r.restartMu.Unlock()
+
+	// Hint first, then kill, so Run's post-spawn drain observes the token even if
+	// the child exits the instant it is cancelled.
+	select {
+	case r.restartCh <- struct{}{}:
+	default:
+	}
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// liveArgs returns a clone of the live spawn base argv under restartMu. Run reads
+// it (rather than cfg.Args) at the top of each iteration so a Restart-swapped
+// argv takes effect on the next spawn.
+func (r *Runner) liveArgs() []string {
+	r.restartMu.Lock()
+	defer r.restartMu.Unlock()
+	return slices.Clone(r.args)
+}
+
+// setIterCancel publishes (or clears, when c is nil) the current iteration's
+// cancel func under restartMu so Restart can interrupt the running child.
+func (r *Runner) setIterCancel(c context.CancelFunc) {
+	r.restartMu.Lock()
+	r.iterCancel = c
+	r.restartMu.Unlock()
+}
+
+// drainRestart non-blockingly consumes a pending deliberate-restart hint,
+// reporting whether one was present. Used post-spawn to decide whether to skip
+// the crash backoff (a restart is not a crash).
+func (r *Runner) drainRestart() bool {
+	select {
+	case <-r.restartCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // Run supervises the claude child until ctx is cancelled. Each iteration spawns
 // claude, holds its stdin open, and waits for exit. On a crash it applies the
 // exponential backoff before respawning with --resume; the backoff resets after
-// a child that stayed up longer than BackoffReset. Shutdown is a parent-ctx
-// cancel (not the child-exit error): Run returns ctx.Err() cleanly.
+// a child that stayed up longer than BackoffReset.
+//
+// Each iteration runs on a derived ctx (iterCtx) so a Restart can cancel a
+// single child without tearing Run down. Shutdown is therefore detected from the
+// parent ctx (ctx.Err()), not from the child-exit error: an iterCtx-only cancel
+// (a settings restart) falls through to relaunch with the swapped args, while a
+// parent cancel returns ctx.Err() cleanly. A deliberate restart skips backoff (it
+// is not a crash). Mirrors supervisor.Run.
 func (r *Runner) Run(ctx context.Context) error {
 	bo := newBackoffTimer(r.cfg.BackoffInitial, r.cfg.BackoffMax, r.cfg.BackoffReset)
 	firstRun := true
+
+	startedAt := time.Now()
+	r.updateState(func(st *State) {
+		st.Phase = PhaseStarting
+		st.StartedAt = startedAt
+	})
+	defer r.updateState(func(st *State) {
+		st.Phase = PhaseStopped
+		st.ChildPID = 0
+		st.NextBackoff = 0
+	})
 
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		args := buildArgs(r.cfg.Args, firstRun, r.cfg.SessionID)
+		args := buildArgs(r.liveArgs(), firstRun, r.cfg.SessionID)
 		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
 
 		start := time.Now()
-		started, waitErr := r.spawnAndWait(ctx, args)
+		iterCtx, cancel := context.WithCancel(ctx)
+		r.setIterCancel(cancel)
+		started, waitErr := r.spawnAndWait(iterCtx, args)
+		cancel()
+		r.setIterCancel(nil)
 		uptime := time.Since(start)
 
-		// Shutdown is a parent-ctx cancel, NOT the child-exit error: a clean
-		// graceful-shutdown return. (This slice has no live-restart seam like
-		// supervisor.Restart, so the child-exit error only ever means a crash.)
+		// Shutdown is a parent-ctx cancel, NOT any child-exit error: an
+		// iterCtx-only cancel (a Restart kill) leaves ctx.Err() nil and falls
+		// through to relaunch. Return value stays a context error for the
+		// graceful-shutdown contract.
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -222,12 +357,29 @@ func (r *Runner) Run(ctx context.Context) error {
 		if started {
 			firstRun = false
 		}
+
+		// A deliberate restart is not a crash: skip backoff and relaunch
+		// immediately with the swapped args.
+		if r.drainRestart() {
+			continue
+		}
+
 		delay := bo.next(uptime)
+		r.updateState(func(st *State) {
+			st.Phase = PhaseBackoff
+			st.ChildPID = 0
+			st.RestartCount++
+			st.LastUptime = uptime
+			st.NextBackoff = delay
+		})
 		r.log.Info("restarting after backoff", "delay", delay)
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-r.restartCh:
+			// A restart arrived while the child was already down and we were
+			// waiting out the backoff — relaunch now with the swapped args.
 		}
 	}
 }
@@ -280,6 +432,11 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string) (started bool,
 	}
 
 	r.setStdin(stdin)
+	r.updateState(func(st *State) {
+		st.Phase = PhaseRunning
+		st.ChildPID = cmd.Process.Pid
+		st.NextBackoff = 0
+	})
 	if r.cfg.onSpawn != nil {
 		r.cfg.onSpawn(cmd.Process.Pid)
 	}
