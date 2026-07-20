@@ -2,10 +2,13 @@ package streamsup
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/turncommit"
 )
 
 // decodedEnvelope is the shape a marshalled turn envelope decodes back into.
@@ -80,7 +83,7 @@ func TestMarshalTurnEnvelope_InjectionResistance(t *testing.T) {
 // is live) must yield ErrNoLiveChild and write nothing.
 func TestWriteTurn_NilRefusal(t *testing.T) {
 	t.Parallel()
-	if err := WriteTurn(nil, []byte("hello")); !errors.Is(err, ErrNoLiveChild) {
+	if err := WriteTurn(context.Background(), nil, []byte("hello")); !errors.Is(err, ErrNoLiveChild) {
 		t.Fatalf("WriteTurn(nil, …) = %v, want ErrNoLiveChild", err)
 	}
 }
@@ -90,7 +93,7 @@ func TestWriteTurn_NilRefusal(t *testing.T) {
 func TestWriteTurn_WritesEnvelope(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := WriteTurn(&buf, []byte("hello")); err != nil {
+	if err := WriteTurn(context.Background(), &buf, []byte("hello")); err != nil {
 		t.Fatalf("WriteTurn: %v", err)
 	}
 	want, err := marshalTurnEnvelope([]byte("hello"))
@@ -111,7 +114,7 @@ func (errWriter) Write([]byte) (int, error) { return 0, errors.New("boom") }
 // is returned wrapped, never panics.
 func TestWriteTurn_WriteError(t *testing.T) {
 	t.Parallel()
-	err := WriteTurn(errWriter{}, []byte("hi"))
+	err := WriteTurn(context.Background(), errWriter{}, []byte("hi"))
 	if err == nil {
 		t.Fatal("WriteTurn on a failing writer: got nil error, want non-nil")
 	}
@@ -120,5 +123,91 @@ func TestWriteTurn_WriteError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "write turn") {
 		t.Fatalf("WriteTurn error = %v, want it to mention %q", err, "write turn")
+	}
+}
+
+// TestWriteTurn_FalseGateDropsWithoutWriting: a false turncommit claim means the
+// queued head was dropped during the ready-wait, so WriteTurn surfaces
+// turncommit.ErrDropped and writes ZERO bytes to stdin (AC1 + AC3). Observing the
+// sink — not merely the returned error — is the point: a dropped message must
+// never reach claude. Two sinks prove it: a bytes.Buffer confirms nothing was
+// written, and errWriter (which fails on any Write) confirms the write path is
+// never even entered — its "boom" would surface instead of ErrDropped otherwise.
+func TestWriteTurn_FalseGateDropsWithoutWriting(t *testing.T) {
+	t.Parallel()
+	ctx := turncommit.With(context.Background(), func() bool { return false })
+
+	var buf bytes.Buffer
+	if err := WriteTurn(ctx, &buf, []byte("dropped")); !errors.Is(err, turncommit.ErrDropped) {
+		t.Fatalf("WriteTurn with a false gate = %v, want turncommit.ErrDropped", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("WriteTurn wrote %d bytes on a false claim, want 0 (a dropped head must never reach stdin): %q", buf.Len(), buf.Bytes())
+	}
+
+	if err := WriteTurn(ctx, errWriter{}, []byte("dropped")); !errors.Is(err, turncommit.ErrDropped) {
+		t.Fatalf("WriteTurn with a false gate over errWriter = %v, want turncommit.ErrDropped (write path must not be entered)", err)
+	}
+}
+
+// TestWriteTurn_NilGateDeliversUnconditionally: a nil gate (the non-queue paths,
+// e.g. a direct single-turn send) writes the full envelope with no gate consulted
+// (AC2). context.Background() carries no gate, so turncommit.From returns nil.
+func TestWriteTurn_NilGateDeliversUnconditionally(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := WriteTurn(context.Background(), &buf, []byte("hello")); err != nil {
+		t.Fatalf("WriteTurn: %v", err)
+	}
+	want, err := marshalTurnEnvelope([]byte("hello"))
+	if err != nil {
+		t.Fatalf("marshalTurnEnvelope: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("WriteTurn wrote %q, want %q", buf.Bytes(), want)
+	}
+}
+
+// TestWriteTurn_TrueGateDeliversOnce: a true claim (the head is still queued and
+// now marked un-droppable) writes the envelope, and the gate is consulted exactly
+// once per delivery attempt — mirroring deliverViaSession. The counter guards
+// against a double-claim or a skipped-claim regression.
+func TestWriteTurn_TrueGateDeliversOnce(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	ctx := turncommit.With(context.Background(), func() bool { calls++; return true })
+
+	var buf bytes.Buffer
+	if err := WriteTurn(ctx, &buf, []byte("hello")); err != nil {
+		t.Fatalf("WriteTurn: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("gate consulted %d times, want exactly 1 per delivery attempt", calls)
+	}
+	want, err := marshalTurnEnvelope([]byte("hello"))
+	if err != nil {
+		t.Fatalf("marshalTurnEnvelope: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("WriteTurn wrote %q, want %q", buf.Bytes(), want)
+	}
+}
+
+// TestWriteTurn_NilWriterWinsOverFalseGate pins the ordering contract from the
+// spec's § Design: the w == nil check precedes the gate claim, so a no-live-child
+// send returns the retryable ErrNoLiveChild WITHOUT consuming the claim. Claiming
+// the gate when there is no child to write into would prematurely lock a head we
+// cannot yet deliver; during the ErrNoLiveChild window the user must still be able
+// to drop it cleanly.
+func TestWriteTurn_NilWriterWinsOverFalseGate(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	ctx := turncommit.With(context.Background(), func() bool { calls++; return false })
+
+	if err := WriteTurn(ctx, nil, []byte("hello")); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WriteTurn(nil writer) = %v, want ErrNoLiveChild (nil-check precedes the claim)", err)
+	}
+	if calls != 0 {
+		t.Fatalf("gate consulted %d times on a nil writer, want 0 (claim must not be consumed with no live child)", calls)
 	}
 }
