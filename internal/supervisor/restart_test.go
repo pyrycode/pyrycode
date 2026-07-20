@@ -128,6 +128,40 @@ func TestSupervisor_Run_ArgsByteIdenticalWithoutRestart(t *testing.T) {
 	}
 }
 
+// TestSupervisor_Run_IgnoresSessionIDField is the AC-2 behaviour guard for #1108:
+// the PTY supervisor DELIBERATELY IGNORES supervisor.Config.SessionID. With
+// SessionID and ResolveSessionID set to DIFFERENT ids, the spawned child's argv
+// carries the id ResolveSessionID resolved (--session-id <resolved>) and never
+// the eager SessionID value — the byte-identical rollback guarantee, proven even
+// when the two disagree. This is the belt-and-suspenders against a future edit
+// accidentally wiring SessionID into the arg path; the structural half is
+// compile-enforced (buildClaudeArgs takes no SessionID parameter, so the field
+// cannot reach the arg builder).
+func TestSupervisor_Run_IgnoresSessionIDField(t *testing.T) {
+	t.Parallel()
+	const (
+		constructedID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc" // the ignored eager SessionID
+		resolvedID    = "11111111-1111-4111-8111-111111111111" // what ResolveSessionID returns
+	)
+	argsFile := filepath.Join(t.TempDir(), "args")
+	cfg := recorderConfig(argsFile, false)
+	cfg.SessionID = constructedID
+	cfg.ResolveSessionID = func() string { return resolvedID }
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runSupInBackground(t, sup)
+
+	got := waitForSpawns(t, argsFile, 1, 5*time.Second)
+	if want := []string{"--session-id " + resolvedID}; !reflect.DeepEqual(got, want) {
+		t.Errorf("recorded spawns = %v, want %v (PTY resolves via ResolveSessionID, ignores SessionID)", got, want)
+	}
+	if strings.Contains(got[0], constructedID) {
+		t.Errorf("child argv %q leaked the ignored SessionID %q", got[0], constructedID)
+	}
+}
+
 // TestSupervisor_Restart_SwapsArgvAndSkipsBackoff (core mechanism): Restart on a
 // running child swaps the spawn argv, kills the child, and relaunches promptly
 // with the new args — skipping the (deliberately long) crash backoff.

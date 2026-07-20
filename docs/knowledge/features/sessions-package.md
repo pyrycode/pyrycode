@@ -190,6 +190,16 @@ This is the injection seam for the Streamrunner Interactive work (T4/T7): a narr
 
 See [codebase/1077.md](../codebase/1077.md) and spec [`1077-sessions-runner-seam.md`](../../specs/architecture/1077-sessions-runner-seam.md).
 
+### `supervisor.Config.SessionID` — construction-safe id seam for a stream-json factory (#1108)
+
+`RunnerFactory` (above) hands a `supervisor.Config` to the factory before any runner exists. Until #1108, the only id a factory could read from that `Config` was `ResolveSessionID`, a spawn-time closure — useless to a `streamsup.New` caller, which requires a non-empty `SessionID` **eagerly at construction** (see [streamsup-package.md](streamsup-package.md) § Public API) and has no lazy-resolve path.
+
+`Config.SessionID string` is the fix: an additive, eager field set unconditionally at both pool construction sites — `Pool.New`'s bootstrap `supCfg` (`SessionID: string(bootstrapID)`, the same local `ResolveSessionID`'s closure reads via `p.BootstrapID()`) and `Pool.buildSession` (`SessionID: string(id)`, alongside the pre-existing `--session-id <id>` in `ClaudeArgs`). The PTY supervisor **never reads it** — `buildClaudeArgs` keeps its 4-parameter signature, so the field is structurally unable to reach argv, and `ResolveSessionID` remains the only spawn-time id source on that path. That inertness is the rollback guarantee: setting the field is a no-op until a non-nil `RunnerFactory` reads it.
+
+**Construction-fixed, not rotation-safe.** `ResolveSessionID` re-reads `p.bootstrap` every spawn, so a `/clear` rotation (`Pool.RotateID`) is picked up on the PTY path with no extra wiring (#839, above). `SessionID` is a snapshot taken once at construction — a future stream-json runner built from it will **not** see a later rotation. This is accepted, not deferred-as-a-gap: `streamsup.New` is itself structurally fixed-at-construction (`buildArgs` `--resume`s the same id forever, no on-disk-mtime adoption, no rotation mechanism by design), so a lazy resolver on the seam side couldn't grant rotation-safety without also rewriting `streamsup.New` — out of scope for a package with no production consumer yet (the `RunnerFactory` that reads `cfg.SessionID`, #1109, is not landed).
+
+See [codebase/1108.md](../codebase/1108.md) and spec [`1108-streamsup-construction-safe-session-id-seam.md`](../../specs/architecture/1108-streamsup-construction-safe-session-id-seam.md).
+
 ### Supervisor handle (1.1a-A1)
 
 Two unexported fields on `*Pool` hold the live errgroup while `Run` is in progress:
