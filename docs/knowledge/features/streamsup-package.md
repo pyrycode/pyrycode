@@ -1,6 +1,6 @@
 # `internal/streamsup` — persistent stream-json child lifecycle
 
-Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), and the `streamRunnerFactory` that constructs a `streamRunner` from a `supervisor.Config` (#1109) have shipped. It still ships with no *production* consumer — `send_message`/`set_session_settings` work for free once a `streamRunner` is constructed, but the `interactive_runner` selection that injects `streamRunnerFactory` onto `sessions.Config.RunnerFactory` is #1081's scope, not yet landed.
+Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), the `newStreamRunnerFactory` constructor that builds a `streamRunner` from a `supervisor.Config` (#1109), and the drain that fans its parsed turnevents into the unchanged `interactiveTurnEmitterV2` (#1098) have shipped. It still ships with no *production* consumer — `send_message`/`set_session_settings` work for free once a `streamRunner` is constructed, but the `interactive_runner` selection that injects `newStreamRunnerFactory`'s factory onto `sessions.Config.RunnerFactory` is #1081's scope, not yet landed.
 
 **No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
 
@@ -298,12 +298,16 @@ stream path has no PTY to wait for, and the no-live-child window is already hand
 Concurrency model: three **leaf** mutexes on `Runner` (`mu`, `stateMu`, `restartMu`), never nested, each
 owned by a different goroutine/concern. See [codebase/1097.md](../codebase/1097.md).
 
-## Constructing a `streamRunner` — `streamRunnerFactory` (#1109)
+## Constructing a `streamRunner` — `newStreamRunnerFactory` (#1109, extended #1098)
 
-`cmd/pyry/streamsup_runner.go` also holds `streamRunnerFactory(cfg supervisor.Config) (sessions.Runner,
-error)` — exactly the `sessions.RunnerFactory` signature (above) — the first `streamsup.New` caller
-tree-wide. Body: `streamsup.New(mapStreamsupConfig(cfg))`; on error, `fmt.Errorf("cmd/pyry: stream runner:
-%w", err)` and a genuine nil `sessions.Runner`; on success, `streamRunner{r: r}`.
+`cmd/pyry/streamsup_runner.go` also holds `newStreamRunnerFactory(sink *streamTurnSink)
+sessions.RunnerFactory` — returns exactly the `sessions.RunnerFactory` signature (above); #1109 delivered
+the constructor (as the bare `streamRunnerFactory` func, the first `streamsup.New` caller tree-wide),
+#1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere to send
+turnevents. Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Stdout =
+streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)`; `streamsup.New(scfg)`; on error,
+`fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
+`streamRunner{r: r}`.
 
 **No PTY fallback, structurally.** The function has no branch that calls `supervisor.New` — a
 `streamsup.New` failure (missing binary, absent work dir; an empty `SessionID` is impossible at the pool
@@ -311,12 +315,13 @@ sites per #1108) always surfaces as an error rather than silently degrading the 
 `pyry attach` drives) to the PTY path.
 
 **`mapStreamsupConfig(cfg supervisor.Config) streamsup.Config`** is the pure, fully-inspectable mapper and
-the primary tested surface. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/`Logger`/`BackoffInitial`/
-`BackoffMax`/`BackoffReset` copy verbatim; `ClaudeArgs → Args` (streamsup's argv field has a different
-name) through `stripSessionIDFlags`; `Stdout`/`Stderr`/`Env` stay nil (`Stdout` is #1098's scope; `Stderr`/
-`Env` have no `supervisor.Config` analogue). The seven PTY-only fields (`ResumeLast`, `ResolveSessionID`,
-`Bridge`, `ValidateConversation`, `ResolveTranscript`, `RecordDir`, `helperEnv`) are deliberately not
-mapped.
+the primary tested surface — **unchanged by #1098**. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/
+`Logger`/`BackoffInitial`/`BackoffMax`/`BackoffReset` copy verbatim; `ClaudeArgs → Args` (streamsup's argv
+field has a different name) through `stripSessionIDFlags`; `Stdout`/`Stderr`/`Env` stay nil **inside the
+mapper** (`Stdout` is filled one layer up, in `newStreamRunnerFactory`'s closure — keeping the mapper pure
+and its `Stdout == nil` assertion untouched; `Stderr`/`Env` have no `supervisor.Config` analogue). The
+seven PTY-only fields (`ResumeLast`, `ResolveSessionID`, `Bridge`, `ValidateConversation`,
+`ResolveTranscript`, `RecordDir`, `helperEnv`) are deliberately not mapped.
 
 **`stripSessionIDFlags(args []string) []string`** returns a fresh slice — never mutating the input, which
 is aliased into the pool's `spawnBase` — with every `--session-id`/`--resume` occurrence removed (two-token
@@ -326,18 +331,87 @@ itself, so an un-stripped id flag in `Args` would double-inject. Required at the
 (`Pool.buildSession` bakes `--session-id <id>` into `ClaudeArgs`); a harmless no-op at the bootstrap site
 (`Pool.New`'s `ClaudeArgs` carry no id flag).
 
-This ticket does **not** wire `streamRunnerFactory` into production — no production `sessions.New` call
-site assigns it. See [codebase/1109.md](../codebase/1109.md).
+Neither #1109 nor #1098 wires the factory into production — no production `sessions.New` call site
+assigns it. See [codebase/1109.md](../codebase/1109.md).
+
+## Draining turnevents into the interactive emitter (#1098)
+
+The turn I/O parser (#1088) emits neutral `turnevent.Event`s from its sink callback, but that sink is
+fixed where the runner is **constructed** (`newStreamRunnerFactory`, above), which sees only a
+`supervisor.Config` — no handle on `interactiveTurnEmitterV2`, which is built later and separately on the
+relay leg. `cmd/pyry/stream_turn_drain.go` lines the two lifetimes up with a late-bound, daemon-singleton
+fan-in, and reproduces the PTY path's `startInteractiveTurnStreamV2` `OnEvent`/`FlushSignal`/`OnFlush`
+triple **without `turnbridge`** — the Parser already emits `turnevent.Event`, so there is nothing to
+un-map back to a `tuidriver.Event` for `turnbridge` to re-map.
+
+```go
+type streamTurnEnvelope struct {
+    sessionID string
+    ev        turnevent.Event
+}
+
+type streamTurnSink struct { /* one buffered chan streamTurnEnvelope */ }
+
+func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink
+func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) // non-blocking send
+
+func startStreamTurnDrainV2(
+    ctx context.Context,
+    sink *streamTurnSink,
+    emitter *interactiveTurnEmitterV2,
+    activeSession func() (sessionID string, ok bool),
+    logger *slog.Logger,
+) (cleanup func())
+```
+
+**Fan-in, not fan-out.** N per-session Parsers (each fixed at runner construction, one per
+`newStreamRunnerFactory` invocation) push `{sessionID, ev}` onto the one buffered channel (256 slots, the
+`pushQueueCap` precedent); `startStreamTurnDrainV2` spawns the sole reader goroutine. There is no
+session-keyed registry and no subscribe/unsubscribe — the per-conn fan-out stays entirely inside the
+unchanged emitter, so this is deliberately *not* shared fan-out infrastructure.
+
+**Non-blocking send, drop-newest.** `sinkFor`'s closure runs on claude's stdout forwarder goroutine (the
+same one `os/exec` drives the Parser's `Write` from); a blocking send on a full channel would wedge the
+child. On a full channel it drops the newest event and Debug-logs content-free (`event`, `kind`,
+`session_id` only — never `ev`'s assistant/thought/tool content). The channel is **never closed** (a
+Parser may outlive the drain during shutdown; the drain stops on `ctx`, not on channel close, so a
+send-on-closed panic is structurally impossible).
+
+**The per-event session gate is AC2's scoping property.** The drain goroutine resolves `activeSession()`
+and forwards to `emitter.Handle` only when the producing session equals the active conversation's bound
+session; every other session's event is dropped **before** `Handle` is ever called, so a background
+conversation's connection never receives it. Gating happens at `Handle` time (in the drain goroutine),
+not inside the sink, so the drop decision stays consistent with the cursor `Handle` itself reads via
+`CurrentConversation()`. On an active-conversation switch the emitter's own #1062 `turnConvID` guard
+flushes the prior conversation's buffered delta and re-mints a fresh turn for the new one — the drain
+supplies session-level gating, the emitter's existing follow-active logic does the rest.
+
+**Single-writer invariant.** Only the drain goroutine ever calls `emitter.Handle`/`flushDelta` — same
+single-Run-goroutine assumption the PTY producer relies on, `-race`-tested by feeding two sessions'
+Parsers concurrently. The drain also selects `emitter.flushC()` (the emitter arms its own coalescing
+timer inside `Handle` but does not select it — a driver must) and calls `flushDelta` on the same
+goroutine, so there's no cross-goroutine timer race.
+
+**No transcript on this path (AC3).** `stream_turn_drain.go` imports no fsnotify, resolves no `<uuid>.jsonl`
+path — structural, asserted by the test file doing no filesystem setup.
+
+**The emitter is passed in, not built here** — the caller (the unit test in this ticket; #1081's
+production wiring later) owns its construction and replay wiring (`SetReplaySource`). This ticket's
+`activeSession` is a plain injected func; #1081 composes it from `active.CurrentConversation` +
+`boundHost`. See [codebase/1098.md](../codebase/1098.md).
 
 ## Out of scope (follow-on slices)
 
-- **The `interactive_runner` config toggle / selection** (#1081) — assigns `streamRunnerFactory` to
-  `sessions.Config.RunnerFactory` at the production `sessions.New` call sites (`cmd/pyry/main.go`,
-  `cmd/pyry/acp.go`) so a session can actually be created against this path. Until it lands,
-  `streamRunnerFactory`'s only callers are its own construction tests.
-- **Pool/relay/`cmd/pyry` turn-stream wiring** (drain, interrupt, new-session, snapshot; T4/T7) — the
-  #1094 watchdog's `Writer()` still needs composing into `Config.Stdout` alongside the #1088 `Parser`
-  with `OnStall`/`PendingPermission` supplied, and a decision on what a `stall(false)` does.
+- **The `interactive_runner` config toggle / selection** (#1081) — assigns `newStreamRunnerFactory`'s
+  factory to `sessions.Config.RunnerFactory` at the production `sessions.New` call sites
+  (`cmd/pyry/main.go`, `cmd/pyry/acp.go`) so a session can actually be created against this path, and
+  composes `startStreamTurnDrainV2`'s `activeSession` + `SetReplaySource` wiring at the relay leg. Until
+  it lands, `newStreamRunnerFactory`'s only callers are its own construction tests, and the drain's only
+  caller is its own unit test.
+- **Composing the #1094 watchdog's `Writer()` into `Config.Stdout` alongside the #1098 `Parser`** — still
+  not done; `newStreamRunnerFactory`'s closure sets `scfg.Stdout` to the `Parser` alone, with
+  `OnStall`/`PendingPermission` unsupplied. Needs an `io.MultiWriter(parser, wd.Writer())` composition
+  and a decision on what a `stall(false)` does downstream.
 - **The pending-permission signal producer** (#1079/#1080) — the approval flow that would report a
   pending permission to the #1094 hook.
 
@@ -354,10 +428,13 @@ site assigns it. See [codebase/1109.md](../codebase/1109.md).
 - [`codebase/1094.md`](../codebase/1094.md) — the receive-side idle/stall watchdog slice.
 - [`codebase/1097.md`](../codebase/1097.md) — the `sessions.Runner` satisfaction slice (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + `cmd/pyry` adapter).
 - [`codebase/1109.md`](../codebase/1109.md) — the `streamRunnerFactory`/`mapStreamsupConfig`/`stripSessionIDFlags` construction slice.
+- [`codebase/1098.md`](../codebase/1098.md) — the turnevent drain slice (`streamTurnSink`/`startStreamTurnDrainV2`).
+- `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
 - Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.
 - Spec [`docs/specs/architecture/1088-streamsup-turn-io.md`](../../specs/architecture/1088-streamsup-turn-io.md) — the turn I/O architect spec.
 - Spec [`docs/specs/architecture/1093-turncommit-gate-on-streamsup-send.md`](../../specs/architecture/1093-turncommit-gate-on-streamsup-send.md) — the turncommit gate architect spec.
 - Spec [`docs/specs/architecture/1094-streamsup-idle-stall-watchdog.md`](../../specs/architecture/1094-streamsup-idle-stall-watchdog.md) — the idle/stall watchdog architect spec.
 - Spec [`docs/specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md`](../../specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md) — the `sessions.Runner` satisfaction architect spec.
-- Spec [`docs/specs/architecture/1109-streamsup-runner-factory.md`](../../specs/architecture/1109-streamsup-runner-factory.md) — this slice's architect spec.
+- Spec [`docs/specs/architecture/1109-streamsup-runner-factory.md`](../../specs/architecture/1109-streamsup-runner-factory.md) — the `streamRunnerFactory` construction architect spec.
+- Spec [`docs/specs/architecture/1098-stream-turn-drain.md`](../../specs/architecture/1098-stream-turn-drain.md) — this slice's architect spec, including the scoping proof and security review.
