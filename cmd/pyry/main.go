@@ -234,6 +234,8 @@ func run() error {
 			return runAgentRun(os.Stdout, os.Args[2:])
 		case "acp":
 			return runACP(os.Args[2:])
+		case "mcp-approve":
+			return runMCPApprove(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -2076,6 +2078,11 @@ Usage:
   pyry acp                                       serve the ACP JSON-RPC transport
                                                   over stdio (spawned by an ACP
                                                   host; takes no flags or args)
+  pyry mcp-approve [flags]                       serve the MCP approve tool over
+                                                  stdio, forwarding each tool-use
+                                                  approval to the daemon
+                                                  (spawned by claude via
+                                                  --permission-prompt-tool)
   pyry version                                   print version
   pyry help                                      show this help
 

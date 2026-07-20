@@ -277,6 +277,39 @@ func Rekey(ctx context.Context, socketPath, connID string) error {
 	return nil
 }
 
+// Approve forwards a claude tool-approval request to the daemon over the
+// control socket (the mcp.approve verb, #1104) and returns the daemon's
+// allow/deny verdict. It is the client half consumed by the `pyry mcp-approve`
+// subcommand, which re-frames the verdict as the MCP tool result claude blocks
+// on.
+//
+// Callers MUST pass a ctx whose deadline is >= the daemon's approval window.
+// request installs that deadline as the conn read deadline, so the read stays
+// patient while the daemon holds the conn open for the (human) decision. An
+// undeadlined ctx falls back to DialTimeout (5s) and would prematurely time out
+// a live approval — a safe but premature deny. This patient-read requirement is
+// the sole behavioural difference from the other client helpers, which are all
+// sub-second round-trips. The dial itself still fails fast (<= dialRetryBudget,
+// ~1.5s) on an unreachable socket even under a long-deadline ctx (see dial.go),
+// so a missing daemon yields a bounded error rather than a hang.
+//
+// Any error (dial/transport/decode, a server-side Response.Error, or an empty
+// verdict) is returned verbatim: the subcommand fail-closes to a deny on any
+// error, so no typed-sentinel mapping is warranted.
+func Approve(ctx context.Context, socketPath string, req ApprovePayload) (*ApproveResult, error) {
+	resp, err := request(ctx, socketPath, Request{Verb: VerbMCPApprove, Approve: &req})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	if resp.Approve == nil {
+		return nil, errors.New("control: empty mcp.approve response")
+	}
+	return resp.Approve, nil
+}
+
 // request sends one Request and reads one Response over a fresh connection.
 // Used by all client verbs.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {
