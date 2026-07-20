@@ -2,11 +2,11 @@
 
 The daemon-side registry that lets a synchronous permission prompt from a non-YOLO headless `claude` be parked, surfaced for a human decision, and answered (or safely defaulted to deny) **without hanging the turn**. First slice (#1103, split from #1079) of the Streamrunner Interactive permission bridge; the T1 protocol spike (#1075) proved the mechanism this package backs: `claude` spawned with `--permission-prompt-tool mcp__<server>__<tool>` synchronously calls a registered MCP tool and blocks on its allow/deny JSON for the full duration of the pending approval (the spike measured an 11.5 s turn behind an 8 s-delayed approval). claude's own deny path does **not** hang the turn, so a lost caller or an elapsed deadline must resolve to deny — fail-closed / default-deny is the security-critical core of the whole mechanism.
 
-This package ships the registry **primitive only**, unwired and unit-tested in isolation (mirroring how `internal/modalbridge` shipped ahead of its own consumers). Consumers are siblings:
+This package shipped the registry **primitive only**, unwired and unit-tested in isolation (mirroring how `internal/modalbridge` shipped ahead of its own consumers). Consumers:
 
-- the control-socket verb that forwards claude's request into `Register` and serializes the `Await`ed verdict back (#1104, not yet landed)
+- **#1104 (landed)** — the control-socket `mcp.approve` verb (`internal/control`) forwards claude's request into `Register` and serializes the `Await`ed verdict back to the `pyry mcp-approve` subcommand. See [control-plane.md § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104) and [codebase/1104.md](../codebase/1104.md). It is the first — and, until #1080 lands, only — production caller of `Register`/`Await`; there is still no resolver, so every requested approval times out to deny (`internal/control`'s `mcpApprovalTimeout`, 2 min).
 - the `pyry mcp-approve` stdio subcommand + spawn-arg injection (#1105/#1106, not yet landed)
-- the `modal_shown ↔ modal_answer` wiring that calls `Resolve` from a human decision (#1080, not yet landed)
+- the `modal_shown ↔ modal_answer` wiring that calls `Resolve` from a human decision (#1080, not yet landed) — will thread the *same* `*Registry` instance #1104 created at the `cmd/pyry` composition root (`runSupervisor`), not a second one
 
 Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architecture/1103-permbridge-registry.md). Ticket record: [codebase/1103.md](../codebase/1103.md).
 
