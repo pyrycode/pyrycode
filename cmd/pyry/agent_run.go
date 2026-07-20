@@ -285,7 +285,7 @@ func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agent
 	return streamrunner.Run(ctx, streamrunner.Config{
 		ClaudeBin:   claudeBin,
 		WorkDir:     parsed.workdir,
-		Args:        buildStreamRunnerClaudeArgs(parsed),
+		Args:        buildStreamRunnerClaudeArgs(parsed, true, ""),
 		PromptBytes: promptBytes,
 		Stdout:      stdout,
 		Stderr:      os.Stderr,
@@ -334,6 +334,16 @@ func runAgentRunPty(ctx context.Context, stdout io.Writer, parsed agentRunArgs, 
 // PYRY_USE_STREAMJSON=1. The ptyrunner default path owns its own argv
 // inside internal/agentrun/ptyrunner; do not unify these shapes.
 //
+// The permission slot (after `--verbose`, before `--append-system-prompt-file`)
+// is the YOLO toggle, filled by permissionArgs(yolo, mcpConfigPath): yolo=true
+// emits `--dangerously-skip-permissions`; yolo=false emits the
+// permission-prompt-tool + mcp-config pair that routes every tool use through
+// the daemon approval registry (see mcp_config.go). The sole production caller
+// (runAgentRunStreamRunner) passes yolo=true — the legacy PYRY_USE_STREAMJSON=1
+// path is always YOLO — so the emitted argv is byte-for-byte unchanged from the
+// pre-toggle form. The non-YOLO branch is exercised by unit tests here and
+// wired to a live spawn downstream.
+//
 // Notes on individual flags:
 //
 //   - `--input-format stream-json` causes claude to read one user-turn
@@ -341,27 +351,29 @@ func runAgentRunPty(ctx context.Context, stdout io.Writer, parsed agentRunArgs, 
 //   - `--output-format stream-json --verbose` is the required pair to get
 //     assistant message events on stdout under stream-json mode (without
 //     `--verbose`, only the final `result` is emitted).
-//   - `--dangerously-skip-permissions` removes the workspace-trust dialog
-//     and the per-spawn settings file (replaced by `--allowed-tools` as the
-//     authoritative tool gate). Acceptable in this verb because the
-//     dispatcher is the sole caller and operates inside an isolated worktree;
-//     the spawn's blast radius is bounded by `--allowed-tools`, not by the
-//     trust dialog.
+//   - `--dangerously-skip-permissions` (YOLO branch) removes the
+//     workspace-trust dialog and the per-spawn settings file (replaced by
+//     `--allowed-tools` as the authoritative tool gate). Acceptable in this
+//     verb because the dispatcher is the sole caller and operates inside an
+//     isolated worktree; the spawn's blast radius is bounded by
+//     `--allowed-tools`, not by the trust dialog.
 //   - `--max-turns` is honoured in stream-json mode (interactive mode
 //     ignored it) and bounds runaway-agent turn budget.
 //   - `--allowed-tools` is comma-joined; `splitAllowedTools` already
 //     normalised operator input into a clean slice at parse time.
-func buildStreamRunnerClaudeArgs(parsed agentRunArgs) []string {
-	return []string{
+func buildStreamRunnerClaudeArgs(parsed agentRunArgs, yolo bool, mcpConfigPath string) []string {
+	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--dangerously-skip-permissions",
+	}
+	args = append(args, permissionArgs(yolo, mcpConfigPath)...)
+	return append(args,
 		"--append-system-prompt-file", parsed.systemPromptFile,
 		"--model", parsed.model,
 		"--effort", parsed.effort,
 		"--max-turns", strconv.Itoa(parsed.maxTurns),
 		"--allowed-tools", strings.Join(parsed.allowedTools, ","),
-	}
+	)
 }
 
