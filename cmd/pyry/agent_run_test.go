@@ -443,12 +443,14 @@ func TestParseAgentRunArgs_DisallowedToolsForms(t *testing.T) {
 // replaces the settings file's deny-default + workspace-trust mark.
 func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 	tests := []struct {
-		name   string
-		parsed agentRunArgs
-		want   []string
+		name          string
+		parsed        agentRunArgs
+		yolo          bool
+		mcpConfigPath string
+		want          []string
 	}{
 		{
-			name: "canonical happy path",
+			name: "canonical happy path (YOLO, legacy path)",
 			parsed: agentRunArgs{
 				model:            "sonnet-4-6",
 				systemPromptFile: "/tmp/sys.md",
@@ -456,6 +458,7 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 				maxTurns:         3,
 				allowedTools:     []string{"Read", "Bash"},
 			},
+			yolo: true,
 			want: []string{
 				"--input-format", "stream-json",
 				"--output-format", "stream-json",
@@ -469,7 +472,7 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 			},
 		},
 		{
-			name: "max effort, single tool, larger turn budget",
+			name: "max effort, single tool, larger turn budget (YOLO)",
 			parsed: agentRunArgs{
 				model:            "opus-4-7",
 				systemPromptFile: "/tmp/x.md",
@@ -477,6 +480,7 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 				maxTurns:         12,
 				allowedTools:     []string{"Read"},
 			},
+			yolo: true,
 			want: []string{
 				"--input-format", "stream-json",
 				"--output-format", "stream-json",
@@ -489,19 +493,60 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 				"--allowed-tools", "Read",
 			},
 		},
+		{
+			name: "non-YOLO carries the permission-prompt-tool + mcp-config pair",
+			parsed: agentRunArgs{
+				model:            "sonnet-4-6",
+				systemPromptFile: "/tmp/sys.md",
+				effort:           "medium",
+				maxTurns:         3,
+				allowedTools:     []string{"Read", "Bash"},
+			},
+			yolo:          false,
+			mcpConfigPath: "/tmp/cfg.json",
+			want: []string{
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--verbose",
+				"--permission-prompt-tool", "mcp__pyry_approve__approve",
+				"--mcp-config", "/tmp/cfg.json",
+				"--strict-mcp-config",
+				"--permission-mode", "default",
+				"--append-system-prompt-file", "/tmp/sys.md",
+				"--model", "sonnet-4-6",
+				"--effort", "medium",
+				"--max-turns", "3",
+				"--allowed-tools", "Read,Bash",
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildStreamRunnerClaudeArgs(tc.parsed)
+			got := buildStreamRunnerClaudeArgs(tc.parsed, tc.yolo, tc.mcpConfigPath)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("buildStreamRunnerClaudeArgs:\n got  = %v\n want = %v", got, tc.want)
 			}
 
 			// Named structural assertions so a re-ordering that happens to
 			// preserve slices.Equal against a stale `want` still trips a
-			// clear-named guard.
-			if !slices.Contains(got, "--dangerously-skip-permissions") {
-				t.Errorf("missing --dangerously-skip-permissions in %v", got)
+			// clear-named guard. The permission slot swaps on the YOLO toggle.
+			if tc.yolo {
+				if !slices.Contains(got, "--dangerously-skip-permissions") {
+					t.Errorf("YOLO: missing --dangerously-skip-permissions in %v", got)
+				}
+				if slices.Contains(got, "--permission-prompt-tool") {
+					t.Errorf("YOLO: unexpected --permission-prompt-tool in %v", got)
+				}
+			} else {
+				if slices.Contains(got, "--dangerously-skip-permissions") {
+					t.Errorf("non-YOLO: unexpected --dangerously-skip-permissions in %v", got)
+				}
+				if !nextValueEquals(got, "--permission-prompt-tool", approveToolRef) {
+					t.Errorf("non-YOLO: missing `--permission-prompt-tool %s` in %v", approveToolRef, got)
+				}
+				if !nextValueEquals(got, "--mcp-config", tc.mcpConfigPath) {
+					t.Errorf("non-YOLO: missing `--mcp-config %s` in %v", tc.mcpConfigPath, got)
+				}
 			}
 			if !nextValueEquals(got, "--input-format", "stream-json") {
 				t.Errorf("missing `--input-format stream-json` in %v", got)
@@ -522,8 +567,9 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 			}
 
 			// Negative pins: the load-bearing PTY/settings-mode flags must
-			// never reappear under the stream-json pipeline.
-			for _, banned := range []string{"--settings", "--permission-mode", "--session-id"} {
+			// never reappear under the stream-json pipeline. (--permission-mode
+			// is legal in the non-YOLO branch, so it is excluded from this set.)
+			for _, banned := range []string{"--settings", "--session-id"} {
 				if slices.Contains(got, banned) {
 					t.Errorf("banned flag %q present in %v", banned, got)
 				}

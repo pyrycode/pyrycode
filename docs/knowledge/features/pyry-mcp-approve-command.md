@@ -2,7 +2,7 @@
 
 The tool host for the Streamrunner Interactive permission bridge (T1 spike #1075). A non-YOLO headless claude spawned with `--permission-prompt-tool mcp__pyry_approve__approve` synchronously calls the registered `approve` MCP tool for every non-allowlisted tool use and blocks on its allow/deny JSON before running the tool. `pyry mcp-approve` is that MCP server: a short-lived stdio subprocess claude spawns (like `pyry status`/`pyry rekey`/`pyry acp`), which dials the daemon's control unix socket, forwards each approval request via the `mcp.approve` verb ([`control-plane.md` § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104), #1104), and returns the daemon's verdict as the MCP tool result.
 
-The sibling #1106 generates the mcp-config that registers this server as `pyry_approve` with tool `approve` and points claude's `--permission-prompt-tool` at it — that spawn-arg wiring is out of scope here. This subcommand ships the server the config names.
+The sibling [#1106](../codebase/1106.md) generates the mcp-config that registers this server as `pyry_approve` with tool `approve` and points claude's `--permission-prompt-tool` at it (`cmd/pyry/mcp_config.go`'s `permissionArgs`/`renderMCPApproveConfig`, deriving the tool reference from this subcommand's own `mcpServerName`/`approveToolName` constants so it can't drift) — that spawn-arg wiring is a separate unit, documented in [codebase/1106.md](../codebase/1106.md). This subcommand ships the server the config names.
 
 ## Role in the chain
 
@@ -48,7 +48,7 @@ Steps, each failure terminating in a deny result:
 6. Wrap as `{content:[{type:"text", text:<verdict>}], isError:false}`.
 7. Log `tool_use_id` + `behavior` only — never `input`, `tool_name`, or the raw `params`/`arguments` bytes, on any branch including the early parse-failure denies. Logger writes to **stderr only**; stdout is exclusively the JSON-RPC frame stream.
 
-`mcpApproveClientMargin = 30s` — added to `mcpApprovalTimeout` (2 min, #1104) so the daemon's own approval timer fires first (its informative timeout-deny message passes through) rather than the client's generic read-deadline error. Both outcomes are denies; the margin only changes which message reaches claude. Inert until #1106 wires `--permission-prompt-tool` in production.
+`mcpApproveClientMargin = 30s` — added to `mcpApprovalTimeout` (2 min, #1104) so the daemon's own approval timer fires first (its informative timeout-deny message passes through) rather than the client's generic read-deadline error. Both outcomes are denies; the margin only changes which message reaches claude. `--permission-prompt-tool` argv/config generation landed in [#1106](../codebase/1106.md); wiring either into a live spawn is still downstream (the `streamsup` runner-selection work).
 
 ## `internal/control.Approve` client helper
 
@@ -81,8 +81,7 @@ The verdict JSON is embedded as a *string* inside `content[].text`, and the whol
 
 ## Out of scope (deferred)
 
-- mcp-config generation + `--permission-prompt-tool`/spawn-arg injection — sibling **#1106**.
-- The daemon-side verb, wire types, registry wiring — **#1104** (merged).
+- Wiring `permissionArgs`/`writeMCPApproveConfig` (landed, [#1106](../codebase/1106.md)) into a live `streamsup` spawn — the source of the `yolo` boolean at a live spawn and the per-spawn config-file removal lifecycle are still downstream.
 - The in-process modal-resolve consumer producing the trusted allow — **#1080**.
 
 ## Related
@@ -91,3 +90,4 @@ The verdict JSON is embedded as a *string* inside `content[].text`, and the whol
 - [permbridge-package.md](permbridge-package.md) — the pending-approval registry underneath.
 - [acp-package.md](acp-package.md) — the transport (`acp.Transport`/`serveACP`) this subcommand reuses for a second, non-ACP JSON-RPC dialect.
 - [codebase/1105.md](../codebase/1105.md) — ticket implementation notes, patterns established, lessons learned.
+- [codebase/1106.md](../codebase/1106.md) — the spawn-arg injection (`permissionArgs`) and mcp-config generation (`renderMCPApproveConfig`/`writeMCPApproveConfig`) that point claude at this server.

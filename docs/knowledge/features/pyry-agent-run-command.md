@@ -74,16 +74,16 @@ Errors render via `main()`'s standard wrapper as `pyry: agent-run: --<flag>: <re
 
 - `cmd/pyry/agent_run.go` — `agentRunArgs` unexported struct (stable field names: `promptFile`, `systemPromptFile`, `allowedTools []string`, `disallowedTools []string` (#411), `maxTurns`, `effort`, `model`, `workdir`, `outputFormat`), `parseAgentRunArgs(args) (agentRunArgs, error)`, `splitAllowedTools(raw) []string` pure tokeniser (`strings.FieldsFunc` over `r == ',' || unicode.IsSpace(r)` plus trim + empty drop — **reused verbatim for `--disallowed-tools`**; name stays historical), `validEfforts` package-level set, `requireRegularFile` / `requireDir` helpers that surface `os.Stat` errors verbatim. `parseAgentRunArgs` tokenises the optional deny flag as `parsed.disallowedTools = splitAllowedTools(*disallowedTools)` with no required/non-empty check.
 - `runAgentRun(stdout io.Writer, args []string)` post-#470 body: `--self-check` short-circuit → parse → `os.ReadFile(promptFile)` → resolve `PYRY_CLAUDE_BIN` → `signal.NotifyContext(SIGTERM, SIGINT)` → branch on `os.Getenv("PYRY_USE_STREAMJSON") == "1"`: `runAgentRunStreamRunner` (legacy) vs `runAgentRunPty` (default) → return nil on nil or `context.Canceled`, else wrap `agent-run: %w`. Both helpers return wrapped-but-not-prefixed chains so the `agent-run:` prefix is added in exactly one place.
-- `runAgentRunStreamRunner(ctx, stdout, parsed, claudeBin, promptBytes)` — extracted from the pre-cutover body; byte-equivalent to the #391–#469 behaviour. Calls `streamrunner.Run` with `Config{ClaudeBin, WorkDir: parsed.workdir, Args: buildStreamRunnerClaudeArgs(parsed), PromptBytes, Stdout, Stderr: os.Stderr}`.
+- `runAgentRunStreamRunner(ctx, stdout, parsed, claudeBin, promptBytes)` — extracted from the pre-cutover body; byte-equivalent to the #391–#469 behaviour. Calls `streamrunner.Run` with `Config{ClaudeBin, WorkDir: parsed.workdir, Args: buildStreamRunnerClaudeArgs(parsed, true, ""), PromptBytes, Stdout, Stderr: os.Stderr}` — the `(true, "")` pair is [#1106](../codebase/1106.md)'s YOLO toggle, always-on here (see below).
 - `runAgentRunPty(ctx, stdout, parsed, claudeBin, promptBytes)` — flat sequence of three I/O calls plus one delegated `ptyRun`. Order: `trustMark(parsed.workdir)` → wrap as `"mark workdir trusted in ~/.claude.json: %w"` on error; `settingsWrite(parsed.allowedTools, parsed.disallowedTools)` → wrap as `"write per-spawn settings: %w"` on error, then `defer func() { _ = os.Remove(settingsPath) }()`; `newSessionID()` → wrap as `"mint session id: %w"` on error; `ptyRun(ctx, ptyrunner.Config{ClaudeBin, WorkDir: realpath, SessionID: string(sid), SettingsPath, SystemPrompt, Model, Effort, MaxTurns, PromptBytes, Stdout, Stderr: os.Stderr})`. **`ptyrunner.Config.WorkDir` is `trust.MarkWorkdirTrusted`'s symlink-resolved realpath, NOT `parsed.workdir`** — claude resolves the workdir before keying `projects[<realpath>]` in `~/.claude.json`, so the realpath-from-trust contract keeps pyry's trust-mark key aligned with claude's lookup key. Defer-LIFO fires on every exit path (sessionID error, ptyrun error, ctx-cancel, success) — settings tempfile cleanup is structural.
 - Four package-level **test-only seams** at the top of the file (`var trustMark = trust.MarkWorkdirTrusted` / `settingsWrite = settings.WriteSettingsWithDeny` (was `settings.WriteSettings` pre-#411; the additive sibling's `func([]string, []string) (string, error)` type is the sole driver of the six test-mock signature edits) / `ptyRun = ptyrunner.Run` / `newSessionID = sessions.NewID`). Production never assigns to these; `_test.go` files override via `t.Cleanup` restore-on-exit boilerplate. Documented in a block comment so a future contributor adding a fifth seam pauses to question the decomposition.
-- `buildStreamRunnerClaudeArgs(parsed) []string` (renamed from `buildClaudeArgs` in #470) — pure helper, emits exactly:
+- `buildStreamRunnerClaudeArgs(parsed agentRunArgs, yolo bool, mcpConfigPath string) []string` (renamed from `buildClaudeArgs` in #470; signature gained `yolo`/`mcpConfigPath` in [#1106](../codebase/1106.md)) — pure helper, emits:
 
   ```
   --input-format stream-json
   --output-format stream-json
   --verbose
-  --dangerously-skip-permissions
+  <permissionArgs(yolo, mcpConfigPath)...>
   --append-system-prompt-file <parsed.systemPromptFile>
   --model <parsed.model>
   --effort <parsed.effort>
@@ -91,11 +91,19 @@ Errors render via `main()`'s standard wrapper as `pyry: agent-run: --<flag>: <re
   --allowed-tools <strings.Join(parsed.allowedTools, ",")>
   ```
 
+  The permission slot is **no longer a hardcoded flag** — it's `permissionArgs(yolo, mcpConfigPath)` (`cmd/pyry/mcp_config.go`, [#1106](../codebase/1106.md)), the enforce-vs-skip switch shared with the (not-yet-wired) `streamsup` live-spawn path:
+
+  - `yolo=true` → exactly `--dangerously-skip-permissions`, same as the pre-#1106 unconditional behaviour.
+  - `yolo=false` → `--permission-prompt-tool mcp__pyry_approve__approve --mcp-config <mcpConfigPath> --strict-mcp-config --permission-mode default`, routing every tool use through [`pyry mcp-approve`](pyry-mcp-approve-command.md) and the daemon's [permbridge](permbridge-package.md) registry.
+
+  The sole production caller, `runAgentRunStreamRunner`, always passes `(parsed, true, "")` — the legacy `PYRY_USE_STREAMJSON=1` path stays YOLO, so the emitted argv is byte-for-byte unchanged from pre-#1106. The non-YOLO branch is unit-tested only; no production caller wires it yet.
+
   **Security invariants** pinned by `TestBuildStreamRunnerClaudeArgs_Shape`:
 
   - `--input-format stream-json` / `--output-format stream-json` / `--verbose` MUST all appear (verbose is required to get assistant message events on stdout under stream-json — without it, only `result` is emitted; spike-verified 2026-05-14).
-  - `--dangerously-skip-permissions` MUST appear. Acceptable here because the dispatcher is the sole caller and operates inside an isolated worktree; `--allowed-tools` is the authoritative tool gate under `-p`-style stream-json mode; the spawn's blast radius is bounded by that list, not by the trust dialog.
-  - `--settings`, `--permission-mode`, `--session-id` MUST NOT appear on the streamrunner branch (negative pins — these are load-bearing on the ptyrunner default path, where `ptyrunner.buildArgs` emits them, but they must never appear on the legacy `-p`-style argv).
+  - YOLO branch: `--dangerously-skip-permissions` MUST appear, and neither `--permission-prompt-tool` nor `--mcp-config` may appear. Acceptable here because the dispatcher is the sole caller and operates inside an isolated worktree; `--allowed-tools` is the authoritative tool gate under `-p`-style stream-json mode; the spawn's blast radius is bounded by that list, not by the trust dialog.
+  - Non-YOLO branch: the `--permission-prompt-tool`/`--mcp-config` pair plus `--strict-mcp-config` and `--permission-mode default` MUST appear, and `--dangerously-skip-permissions` MUST NOT.
+  - `--settings`, `--session-id` MUST NOT appear on the streamrunner branch (negative pins — these are load-bearing on the ptyrunner default path, where `ptyrunner.buildArgs` emits them, but they must never appear on the legacy `-p`-style argv). `--permission-mode` is now legitimately emitted on the non-YOLO arm; the negative pin narrowed to exclude only the YOLO arm.
 
   ptyrunner's argv shape (`--session-id` / `--settings` / `--permission-mode default` / `--append-system-prompt-file` / `--model` / `--effort`; no `--allowed-tools`, no `--dangerously-skip-permissions`, no `--max-turns`) is owned by `internal/agentrun/ptyrunner/runner.go`'s private `buildArgs` and is intentionally NOT exposed at the cmd layer.
 
@@ -107,7 +115,7 @@ Errors render via `main()`'s standard wrapper as `pyry: agent-run: --<flag>: <re
 ## Tests
 
 - `TestParseAgentRunArgs_HappyPath` / `_Errors` / `_EffortValidValues` / `_AllowedToolsForms` / `_DisallowedToolsForms` (#411 — comma/space/mixed → tokens; absent/empty → empty slice, no error) and `TestSplitAllowedTools` — pin the flag surface (`splitAllowedTools` covers both allow and deny tokenisation; unchanged across all cutovers).
-- `TestBuildStreamRunnerClaudeArgs_Shape` (renamed in #470 from `TestBuildClaudeArgs_Shape`) — two table rows (canonical + alternate effort). Asserts the exact argv via `slices.Equal` against an explicit `want`, plus named structural assertions and negative pins on the three banned legacy flags.
+- `TestBuildStreamRunnerClaudeArgs_Shape` (renamed in #470 from `TestBuildClaudeArgs_Shape`; extended in [#1106](../codebase/1106.md) with a non-YOLO row) — table rows covering the YOLO golden cases (canonical + alternate effort) plus a non-YOLO row. Asserts the exact argv via `slices.Equal` against an explicit `want`, plus named structural assertions and negative pins per branch (see security invariants above). `cmd/pyry/mcp_config_test.go` ([#1106](../codebase/1106.md)) separately pins `permissionArgs`'s two arms, the `approveToolRef` drift guard, and `renderMCPApproveConfig`/`writeMCPApproveConfig` content + fail-closed cases.
 - `TestAgentRunUsageDescription` — scaffold-only stale-disclaimer guard plus required-substring pins: `stream-json`, `--max-turns`, `--allowed-tools`, `PYRY_USE_STREAMJSON`, `PTY`.
 
 ### Streamrunner-branch tests (pinned via `configureFakeClaude`)
