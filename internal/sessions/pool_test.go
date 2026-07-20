@@ -78,6 +78,26 @@ func helperPoolWithSleepArgs(t *testing.T) *Pool {
 	return pool
 }
 
+// waitBootstrapReady blocks until the pool's bootstrap supervisor has a live
+// PTY, using the same deterministic readiness signal Session.Activate waits on
+// (supervisor.WaitForPTY, session.go:354). This replaces the wall-clock
+// ChildPID>0 poll that intermittently tripped under -race when pty.Start
+// stretched past a fixed 2s deadline (#1116). Readiness fires from setSession,
+// one step after onSpawn sets ChildPID, so it implies a live, non-zero PID.
+//
+// The context deadline is a safety backstop only: in the happy path the wait
+// completes via the readiness event, not by exhausting the timer. 30s is well
+// above the observed worst-case pty.Start under contention and well under Go's
+// default 10m test timeout.
+func waitBootstrapReady(t *testing.T, pool *Pool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := pool.Default().sup.WaitForPTY(ctx); err != nil {
+		t.Fatalf("bootstrap PTY never ready: %v", err)
+	}
+}
+
 // TestPool_New_BootstrapInstalled covers the constructor path: New must
 // install exactly one bootstrap entry, reachable via Default(), with a valid
 // canonical UUID id.
@@ -598,18 +618,10 @@ func TestPool_Run_StartsWatcher(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- pool.Run(ctx) }()
 
-	// Give the bootstrap supervisor a moment to spawn /bin/sleep so the
-	// snapshot has a non-zero PID.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if pool.Default().State().ChildPID > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if pool.Default().State().ChildPID == 0 {
-		t.Fatal("bootstrap child never started")
-	}
+	// Wait for the bootstrap supervisor's child to spawn (live, non-zero PID)
+	// via the deterministic PTY-readiness signal rather than a wall-clock poll
+	// (#1116). The rotation watcher below needs that live PID to probe.
+	waitBootstrapReady(t, pool)
 
 	newID := SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91")
 	if err := os.WriteFile(filepath.Join(dir, string(newID)+".jsonl"), []byte("x"), 0o600); err != nil {
@@ -619,7 +631,7 @@ func TestPool_Run_StartsWatcher(t *testing.T) {
 	// Poll the on-disk registry — RotateID's saveLocked is the
 	// synchronization point that makes the rotation observable from this
 	// goroutine without racing with Session.id.
-	deadline = time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	rotated := false
 	for time.Now().Before(deadline) {
 		reg, err := loadRegistry(regPath)
@@ -925,18 +937,7 @@ func TestPool_Supervise_AfterRunReturns_ReturnsErrPoolNotRunning(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- pool.Run(ctx) }()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if pool.Default().State().ChildPID > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if pool.Default().State().ChildPID == 0 {
-		cancel()
-		<-done
-		t.Fatal("bootstrap child never started")
-	}
+	waitBootstrapReady(t, pool)
 
 	cancel()
 	select {
@@ -961,18 +962,7 @@ func TestPool_Supervise_ConcurrentCalls_RaceClean(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- pool.Run(ctx) }()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if pool.Default().State().ChildPID > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if pool.Default().State().ChildPID == 0 {
-		cancel()
-		<-done
-		t.Fatal("bootstrap child never started")
-	}
+	waitBootstrapReady(t, pool)
 
 	const n = 32
 	dummies := make([]*Session, n)
