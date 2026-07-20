@@ -237,29 +237,9 @@ func TestACP_SessionNew_SpawnsOneInteractiveClaude(t *testing.T) {
 	assertPinnedModes(t, resp.Result.Modes)
 
 	// AC-3/AC-4: exactly one spawn, on the interactive path. The child records
-	// argv after exec, so poll until the line lands.
-	var fields []string
-	ok := func() bool {
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			data, err := os.ReadFile(argvFile)
-			if err == nil {
-				lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-				if len(lines) == 1 && lines[0] != "" {
-					fields = strings.Fields(lines[0])
-					return true
-				}
-				if len(lines) > 1 {
-					t.Fatalf("claude spawned %d times, want exactly 1 (divergence 6): %q", len(lines), lines)
-				}
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		return false
-	}()
-	if !ok {
-		t.Fatal("fake claude never recorded its argv")
-	}
+	// argv after exec, so poll until the line lands (shared with the other spawn
+	// tests so the wait budget can't drift between sites).
+	fields := waitOneClaudeArgv(t, argvFile)
 	// Exactly `--session-id <uuid>` (once the #943 --settings pair is stripped) —
 	// asserts the interactive path (a -p/--print argv would fail this equality) and
 	// the returned id round-trips to the spawn.
@@ -400,13 +380,20 @@ func (h *acpHarness) shutdown() {
 	}
 }
 
+// argvRecordTimeout is a generous budget for the fake child's post-exec argv
+// write under full-suite fork/exec contention. The failure it guards (child never
+// spawned) is real but rare, so a wide margin trades a slightly slower true-failure
+// signal for zero false-negatives under load — the observed worst-case near-miss
+// was ~3 s under `make check`, and pty.Start is non-interruptible under -race.
+const argvRecordTimeout = 15 * time.Second
+
 // waitOneClaudeArgv polls argvFile until the fake claude has recorded exactly one
 // spawn and returns that spawn's argv fields. It fails if the file ever shows more
 // than one line (a second claude — divergence-6 violation) or if nothing lands
 // within the deadline. Same argv-line-count proof as the session/new test.
 func waitOneClaudeArgv(t *testing.T, argvFile string) []string {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(argvRecordTimeout)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(argvFile)
 		if err == nil {
