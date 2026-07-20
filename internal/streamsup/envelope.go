@@ -1,10 +1,13 @@
 package streamsup
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/pyrycode/pyrycode/internal/turncommit"
 )
 
 // ErrNoLiveChild is returned by WriteTurn when the child's stdin handle is nil —
@@ -69,17 +72,38 @@ func marshalTurnEnvelope(prompt []byte) ([]byte, error) {
 // closes w — holding stdin open for the next turn is the whole point of this
 // path, and the io.Writer type structurally forbids a half-close/EOF forgery.
 //
+// ctx carries the turncommit gate on the queue-driven delivery path. WriteTurn
+// claims it after the nil-writer check and before marshalling — mirroring
+// supervisor.deliverViaSession on the PTY path. A false claim means the queued
+// head was dropped during the wait for claude to go ready, so WriteTurn returns
+// turncommit.ErrDropped and writes zero bytes: a dropped turn must never reach
+// the live session. A nil gate (the non-queue paths, e.g. a direct single-turn
+// send) delivers unconditionally.
+//
 // A nil w means no live child: WriteTurn returns ErrNoLiveChild and writes
-// nothing. A write failure (e.g. EPIPE when the pipe closed mid-teardown) is
+// nothing, and does so BEFORE the gate is claimed — a head that cannot yet be
+// written must stay droppable, so the retryable ErrNoLiveChild wins over a false
+// gate. A write failure (e.g. EPIPE when the pipe closed mid-teardown) is
 // returned wrapped; a closed-pipe write returns an error rather than panicking,
 // so the teardown race (Stdin() captures the handle, teardown closes it, then
 // WriteTurn writes) surfaces as the returned error, never a panic or false ack.
 //
-// The caller writes turn N+1 by calling WriteTurn(runner.Stdin(), next) again on
-// the same handle — no re-open, no per-turn stdin lifecycle.
-func WriteTurn(w io.Writer, prompt []byte) error {
+// The caller writes turn N+1 by calling WriteTurn(ctx, runner.Stdin(), next)
+// again on the same handle — no re-open, no per-turn stdin lifecycle.
+func WriteTurn(ctx context.Context, w io.Writer, prompt []byte) error {
 	if w == nil {
 		return ErrNoLiveChild
+	}
+	// The queue-driven delivery path carries a commit gate on ctx (#487, #1093).
+	// It is claimed here — after WaitReady in the caller, before the envelope is
+	// marshalled or written — to CLAIM the queued head for writing. A false claim
+	// means the head was dropped during the ready-wait, so abort without writing a
+	// single byte: a dropped message must never be injected into the live session.
+	// A nil gate (the non-queue paths) writes unconditionally. Mirrors
+	// supervisor.deliverViaSession's claim on the PTY path; ErrDropped is returned
+	// bare so the queue can key drop-handling on errors.Is.
+	if gate := turncommit.From(ctx); gate != nil && !gate() {
+		return turncommit.ErrDropped
 	}
 	env, err := marshalTurnEnvelope(prompt)
 	if err != nil {

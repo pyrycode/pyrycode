@@ -1,6 +1,7 @@
 package streamsup
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func TestParser_MultiTurnRoundTripZeroBleed(t *testing.T) {
 
 	markers := []string{"turn-alpha", "turn-bravo", "turn-charlie"}
 	for i, marker := range markers {
-		if err := WriteTurn(w, []byte(marker)); err != nil {
+		if err := WriteTurn(context.Background(), w, []byte(marker)); err != nil {
 			t.Fatalf("turn %d WriteTurn: %v", i+1, err)
 		}
 		seg := drainToTurnEnd(t, events)
