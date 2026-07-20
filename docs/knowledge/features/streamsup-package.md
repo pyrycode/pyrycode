@@ -1,6 +1,6 @@
 # `internal/streamsup` — persistent stream-json child lifecycle
 
-Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) — and the send-side turncommit gate (#1093) have shipped; it ships unwired — no pool, relay, or `cmd/pyry` consumer yet.
+Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), and the receive-side idle/stall watchdog (#1094) have shipped; it ships unwired — no pool, relay, or `cmd/pyry` consumer yet.
 
 **No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
 
@@ -186,11 +186,62 @@ path; whether the parser's line buffer needs resetting across a crash-restart (s
 [codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge case, non-blocking
 for this unwired slice).
 
+## Idle/stall watchdog — receive-side, emit-not-kill (#1094)
+
+Lifts the type-aware idle watchdog from `streamrunner` (`internal/agentrun/streamrunner/watchdog.go`)
+with one crucial divergence: the one-shot runner **kills** on idle stall; `streamsup`'s watchdog **emits
+and never kills**. The T1 spike (#1075, claude 2.1.199) measured a pending permission approval blocking
+claude synchronously until the approval tool answers — minutes of *owed* silence with `awaiting` true the
+whole time. A watchdog that killed on `awaiting && idle` would destroy a legitimately-blocked-on-approval
+turn.
+
+```go
+type WatchdogConfig struct {
+    Idle              time.Duration               // 0 → 240s
+    PendingPermission func() bool                 // the content-free timing hook; nil → always-false
+    OnStall           func(pendingPermission bool) // the stall signal; nil → no-op
+    Logger            *slog.Logger                 // nil → slog.Default
+}
+
+func NewWatchdog(cfg WatchdogConfig) *Watchdog
+func (w *Watchdog) Writer() io.Writer          // the tracker; compose into Config.Stdout
+func (w *Watchdog) Start(ctx context.Context)  // launches the one poll goroutine
+func (w *Watchdog) Wait()                       // blocks until the poll goroutine exits
+```
+
+**Two pieces, additive, zero `runner.go`/`parser.go` diff.** An unexported `stallTracker` (`io.Writer`)
+carries its own type-tracking state over the same stdout stream the #1088 `Parser` already reads —
+deliberately, since the `Parser` is turn-stateless by design and holds no `awaiting` flag. The caller fans
+stdout to both with `io.MultiWriter(parser, wd.Writer())` (deferred to the wiring slice). The tracker
+reads only each line's top-level `type` — never event content (AC3) — to track whether claude *owes an
+assistant turn*: `assistant`→not-awaiting (a tool run's silence that follows is expected and never trips
+the watchdog — the type-aware core), `user`/`tool_result`→awaiting, `result`→not-awaiting. A single poll
+goroutine (`Start`/`Wait`) ticks at `watchdogTickFor(Idle)` (`idle/8` clamped to `[5ms, 5s]`, lifted
+verbatim) and, on the edge of `awaiting && silent > Idle` (latched once per stall episode), evaluates
+`PendingPermission()` and calls `OnStall(pending)`.
+
+**The hook annotates the signal, it does not gate it.** Both a genuine wedge (`pending=false`) and an
+approval-wait (`pending=true`) call `OnStall` — the distinction lives in the argument, not in whether the
+callback fires; gating the emit off while pending was considered and rejected (the ticket says the
+watchdog *emits* while a permission is pending, it doesn't stay silent).
+
+**Emit-not-kill is enforced structurally.** `Watchdog` holds no `context.CancelFunc` and no process
+handle — `WatchdogConfig` has no field to wire one in — so a future edit cannot reintroduce a kill without
+changing the type's shape. The one-shot runner's KILL machinery (`idleStallResult`, `idleStallUsage`,
+`writeIdleStallResult`, the synthetic `result` trailer, `sawResult`) was deliberately not lifted. See
+[codebase/1094.md](../codebase/1094.md) for the full design writeup and code-review notes.
+
+Deferred: the pending-permission signal's **producer** (the approval flow — mcp-approve stdio tool,
+control-socket verb, spawn-arg injection) lands in #1079/#1080 with its own security review; this hook is
+a local, content-free `func() bool` only, which is why this slice is not `security-sensitive`.
+
 ## Out of scope (follow-on slices)
 
-- **Idle/stall watchdog** (#1094, receive-side; split from #1089 alongside the now-shipped #1093
-  send-side turncommit gate — no shared code, no blocked-by either direction).
-- **Pool/relay/`cmd/pyry` wiring** — this package ships unwired by design.
+- **Pool/relay/`cmd/pyry` wiring** — this package ships unwired by design. The wiring slice composes the
+  #1094 watchdog's `Writer()` into `Config.Stdout` alongside the #1088 `Parser`, supplies `OnStall`/
+  `PendingPermission`, and decides what a `stall(false)` does (restart? surface to operator?).
+- **The pending-permission signal producer** (#1079/#1080) — the approval flow that would report a
+  pending permission to the #1094 hook.
 
 ## Related
 
@@ -202,6 +253,8 @@ for this unwired slice).
 - [`codebase/1087.md`](../codebase/1087.md) — the process-lifecycle slice.
 - [`codebase/1088.md`](../codebase/1088.md) — the turn I/O slice (this section).
 - [`codebase/1093.md`](../codebase/1093.md) — the send-side turncommit gate slice.
+- [`codebase/1094.md`](../codebase/1094.md) — the receive-side idle/stall watchdog slice.
 - Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.
 - Spec [`docs/specs/architecture/1088-streamsup-turn-io.md`](../../specs/architecture/1088-streamsup-turn-io.md) — the turn I/O architect spec.
 - Spec [`docs/specs/architecture/1093-turncommit-gate-on-streamsup-send.md`](../../specs/architecture/1093-turncommit-gate-on-streamsup-send.md) — the turncommit gate architect spec.
+- Spec [`docs/specs/architecture/1094-streamsup-idle-stall-watchdog.md`](../../specs/architecture/1094-streamsup-idle-stall-watchdog.md) — the idle/stall watchdog architect spec.
