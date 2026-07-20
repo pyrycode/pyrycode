@@ -2,7 +2,7 @@
 
 `internal/control` exposes the on-disk control surface of `pyry`: a Unix domain socket (`~/.pyry/<name>.sock`, mode `0600`) speaking line-delimited JSON. Each connection is one request, one response — except `VerbAttach`, which hands the connection off to the supervisor's I/O bridge for the lifetime of the attachment.
 
-Verbs today: `status`, `stop`, `logs`, `attach`, `resize`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. Phase 1.3a (#154) introduced a no-PTY *client* — `control.AttachStdio` — that reuses `VerbAttach` unchanged, sending `Cols=0, Rows=0` (omitempty drops them off the wire) so a stdio handshake is byte-indistinguishable from a v0.5.x client; zero server-side change. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output. `VerbSessionsNew` (#75) extends the pattern: a new `Request.Sessions *SessionsPayload` field with `omitempty` keeps existing-verb wire output byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants.
+Verbs today: `status`, `stop`, `logs`, `attach`, `resize`, `sessions.new`, `sessions.rm`, `sessions.rename`, `sessions.list`, `sessions.has-id`, `rekey`, `mcp.approve`. The wire shape (`Request`/`Response` JSON) is held stable across phases — `AttachPayload.SessionID` (Phase 1.1e-C) was added additively with `omitempty` so empty-SessionID payloads marshal byte-identically to v0.5.x output, keeping v0.5.x clients round-tripping against a v0.7.x server during the rollover window. Phase 1.3a (#154) introduced a no-PTY *client* — `control.AttachStdio` — that reuses `VerbAttach` unchanged, sending `Cols=0, Rows=0` (omitempty drops them off the wire) so a stdio handshake is byte-indistinguishable from a v0.5.x client; zero server-side change. `VerbResize` (#137) was added in the same additive manner — a brand-new verb on a fresh connection, no impact on the other verbs' wire output. `VerbSessionsNew` (#75) extends the pattern: a new `Request.Sessions *SessionsPayload` field with `omitempty` keeps existing-verb wire output byte-identical (pinned by `TestProtocol_SessionsRoundTripBackCompat`). `VerbSessionsRm` (#98) extends `SessionsPayload` with `ID`/`JSONLPolicy` (both `omitempty`) and adds a `Response.ErrorCode` field (also `omitempty`) for typed-sentinel propagation — same back-compat guard, byte-identical existing-verb output. `VerbSessionsRename` (#90) extends `SessionsPayload` with one further `omitempty` field (`NewLabel`) and reuses the `Response.ErrorCode` envelope verbatim — no new wire constants.
 
 ## Server Construction
 
@@ -1184,6 +1184,70 @@ See [`codebase/463.md`](../codebase/463.md) for the per-ticket implementation su
 Operator-authenticated by filesystem perms (`0600` on the socket) — the same authentication boundary as `pyry stop` and `pyry sessions rm`. An attacker who can issue `VerbRekey` can also issue `VerbStop`; the rekey verb does not lower the bar. `RekeyPayload.ConnID` is a string forwarded verbatim to slice B's `Rekeyer` — slice B is responsible for validating the conn-id against its `sessions` map. Error strings never echo flynn-noise error text or AEAD bytes; the wrapped `ErrConnNotFound` message contains only the operator-supplied conn-id, same trust class as the input.
 
 See `docs/specs/architecture/459-control-rekey-wire.md` for the full ticket-time design; this section is the canonical evergreen reference.
+
+## Approve: mcp.approve verb — forward to permbridge, block, default-deny (#1104)
+
+`VerbMCPApprove` ("mcp.approve", dotted like `sessions.*`) forwards a claude tool-approval request from the `pyry mcp-approve` subcommand (sibling ticket) into `internal/permbridge`, blocks for the allow/deny verdict, and returns it. The human-facing decision is made in the daemon — where modal surfacing lives (#1080) — not in the ephemeral MCP child claude spawns for `--permission-prompt-tool`. Same structural cousin as `rekey`, not the relay-plane `request_debug_bundle`/`set_session_settings` phone frames: both are control-socket verbs with an optional dependency that replies "unavailable" when unwired.
+
+### `Approver` seam: optional dependency, setter-installed
+
+Mirrors `SetRekeyer` exactly — `NewServer`'s signature stays frozen, the dependency is installed post-construction:
+
+```go
+func (s *Server) SetApprovalRegistry(reg *permbridge.Registry, timeout time.Duration) {
+    s.mu.Lock()
+    s.approvals = reg
+    s.approvalTimeout = timeout
+    s.mu.Unlock()
+}
+```
+
+`s.approvals`/`s.approvalTimeout` are read once under `s.mu` at the top of `handleApprove`, then the lock is released before the (blocking) `Await` — same leaf-lock discipline as `Rekeyer`. Nil registry is the production state until the daemon composition wires it (AC-4, below), and stays nil in v1/foreground.
+
+### Wire shape
+
+```go
+type ApprovePayload struct {
+    ToolName  string          `json:"tool_name"`
+    Input     json.RawMessage `json:"input"`
+    ToolUseID string          `json:"tool_use_id"`
+}
+
+type ApproveResult struct {
+    Behavior     string          `json:"behavior"`
+    UpdatedInput json.RawMessage `json:"updatedInput,omitempty"` // allow only
+    Message      string          `json:"message,omitempty"`      // deny only
+}
+```
+
+Snake_case tags on `ApprovePayload` (unlike every other camelCase control-socket payload) deliberately match the T1 spike's approval contract (`fixture-p4-approval-contract.json`) so the `pyry mcp-approve` subcommand marshals straight from claude's tool call with no field renaming. `ApproveResult`'s field/tag layout is byte-identical to `permbridge.Verdict`'s wire shape (see [permbridge-package.md](permbridge-package.md)) so the subcommand can marshal it straight to claude as the MCP tool result — a deliberate mirror, same justification as `SessionInfo` vs `sessions.SessionInfo`.
+
+### `handleApprove`: guard order, then block
+
+Guard order mirrors `handleRekey` (nil-dependency check before payload validation):
+
+| Precondition | Server reply |
+| --- | --- |
+| `reg == nil` | `Response{Error: "mcp.approve: no approval registry configured"}` |
+| `payload == nil \|\| payload.ToolUseID == ""` | `Response{Error: "mcp.approve: missing tool_use_id"}` |
+| `reg.Register(...)` returns `ErrDuplicateID` | `Response{Approve: <deny, fixed message>}` — fail-closed, not a wire error |
+| verdict resolves (allow or deny) | `Response{Approve: <verdict>}` |
+
+Unlike `handleRekey`'s fire-and-ack shape, `handleApprove` **blocks** between decode and response: `conn.SetDeadline(time.Time{})` clears the 5s handshake deadline (mirrors `handleAttach`) before `pending.Await()`, which is guaranteed to return within `approvalTimeout` because permbridge's registry-owned timer always fires. A per-conn watcher goroutine (`watchApproveConn`) maps the two cancellation sources `Await` cannot see — caller disconnect (`conn.Read` on the client's silent conn hits EOF) and daemon shutdown (`s.closedCh`) — into `reg.Resolve(id, Deny(...))`, so a lost caller or a shutting-down daemon does not park an entry for the full timeout. The handler closes a `stop` channel after `Await` returns so the watcher does not also resolve a verdict on the normal path; the watcher's inner reader goroutine stays parked on `conn.Read` until `handle`'s deferred `conn.Close()` reaps it — bounded, not leaked (code review, PR #1112: flagged as untracked-on-`streamingWG` but judged NIT because conn-close bounds it, same shape as `handleAttach`'s detach watcher).
+
+Fail-closed is structural: `allow` is reachable **only** through an explicit `reg.Resolve(id, permbridge.Allow(...))` by the trusted in-process resolver (#1080's modal-answer wiring). The untrusted socket peer can only submit-and-await. Every other terminal path — timeout, disconnect, shutdown, duplicate/empty id, nil registry — yields deny or the "unavailable" error. All daemon-originated deny messages are fixed constants (`reasonApproveDisconnect`, `reasonApproveShutdown`, `reasonApproveDuplicate`) — no host-derived content. The decision log (`s.log.Info("control: approval resolved", "tool_use_id", ..., "behavior", ...)`) emits only the correlation key and outcome; `Input`/`ToolName` are never logged.
+
+### Wiring (AC-4): one shared registry at the composition root
+
+`cmd/pyry/main.go`'s `runSupervisor` creates `approvals := permbridge.New()` before `startRelay`, then calls `ctrl.SetApprovalRegistry(approvals, mcpApprovalTimeout)` between `control.NewServer(...)` and `ctrl.Listen()`. This is the one scope that sees both the control server and (once #1080 lands) the v2 modal-resolve composition — so #1080 threads this exact `*permbridge.Registry` instance into its `Resolve`/`Lookup` calls rather than constructing a second one. No `relayWiring.approvals` field was added: with no reader until #1080, a set-but-unread unexported field trips `staticcheck` U1000 (CI-gated) and fails the build — the shared instance living in `runSupervisor` scope is what lets #1080 be a thin threading change instead.
+
+`mcpApprovalTimeout` (`cmd/pyry/main.go`, 2 minutes) is the human-approval window handed to `permbridge.Register`. It is inert in production until the `pyry mcp-approve` sibling wires `--permission-prompt-tool` — until then nothing calls `VerbMCPApprove` — and until #1080 lands there is no resolver, so every approval that *is* requested times out to deny after this window. Documented as a tuning knob, not a contract; a future ticket may make it configurable.
+
+### Testing
+
+`internal/control/approve_test.go` uses a **real** `permbridge.New()` (stdlib leaf, no fake needed) and drives the resolver side directly via `reg.Resolve` to simulate #1080. Covers: allow, resolver-deny, timeout-deny (short timeout, never resolved), disconnect-before-resolution (raw dial, poll `reg.Lookup` present → `conn.Close()` → poll `reg.Lookup` absent, proving eager cleanup with no leaked entry), unavailable (nil registry), missing-`tool_use_id`, and shutdown-unblocks (server `Close()` mid-wait resolves promptly without waiting out `approvalTimeout`, so `Serve`'s `handleWG.Wait()` never stalls).
+
+See [permbridge-package.md](permbridge-package.md) for the registry primitive's own design and fail-closed proof, and [codebase/1104.md](../codebase/1104.md) for the ticket record.
 
 ## Foreground binary auto-attach (1.3c-2)
 

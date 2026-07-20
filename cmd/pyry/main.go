@@ -55,6 +55,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/debugbundle"
 	"github.com/pyrycode/pyrycode/internal/install"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -233,6 +234,8 @@ func run() error {
 			return runAgentRun(os.Stdout, os.Args[2:])
 		case "acp":
 			return runACP(os.Args[2:])
+		case "mcp-approve":
+			return runMCPApprove(os.Args[2:])
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
@@ -908,6 +911,15 @@ func runSupervisor(args []string) error {
 		return s.Model, s.Effort, s.YOLO
 	}
 
+	// One shared pending-approval registry for the whole daemon. Created at
+	// the composition root — the only scope that sees both the control
+	// server (which services VerbMCPApprove against it below) and, once
+	// #1080 lands, the v2 modal-resolve consumer that will Resolve/Lookup
+	// against this exact instance. No relayWiring field is threaded here:
+	// with no reader until #1080, a set-but-unread field would trip
+	// staticcheck U1000; #1080 is the thin change that adds the reader.
+	approvals := permbridge.New()
+
 	relayCleanup, err := startRelay(ctx, logger, relayWiring{
 		instanceName:      *name,
 		relayURL:          relayURL,
@@ -946,6 +958,10 @@ func runSupervisor(args []string) error {
 	// so the daemon exits 0 and launchd leaves it down (unlike the relay's
 	// self-initiated fatal path, which passes an error cause).
 	ctrl := control.NewServer(socketPath, poolResolver{pool}, logRing, func() { cancelCause(nil) }, logger, pool)
+	// Install the shared approval registry between NewServer and Serve so the
+	// mcp.approve verb reaches the same instance #1080's modal wiring will
+	// resolve against (AC-4). Nil until here — v1/foreground never calls this.
+	ctrl.SetApprovalRegistry(approvals, mcpApprovalTimeout)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -1154,6 +1170,17 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 // — that block is the drain's turn-end pacing and may run for a whole claude
 // turn. A tuning knob, not a contract.
 const inboundActivateTimeout = 30 * time.Second
+
+// mcpApprovalTimeout is the human-approval window handed to the
+// pending-approval registry (internal/permbridge) for every VerbMCPApprove
+// request: after it elapses with no resolver decision, the registry's
+// own timer denies the request. Until #1080 wires the modal-resolve
+// consumer there is no resolver, so every production approval times out to
+// deny after this window — inert for now because nothing invokes the verb
+// until the `pyry mcp-approve` sibling wires --permission-prompt-tool. A
+// tuning knob, not a contract; make it configurable when the full chain
+// lands.
+const mcpApprovalTimeout = 2 * time.Minute
 
 // newInboundDeliver builds the msgqueue.DeliverFunc seam over the stamp-free
 // resolve core. The engine (#704) calls it on a per-conversation drain
@@ -2051,6 +2078,11 @@ Usage:
   pyry acp                                       serve the ACP JSON-RPC transport
                                                   over stdio (spawned by an ACP
                                                   host; takes no flags or args)
+  pyry mcp-approve [flags]                       serve the MCP approve tool over
+                                                  stdio, forwarding each tool-use
+                                                  approval to the daemon
+                                                  (spawned by claude via
+                                                  --permission-prompt-tool)
   pyry version                                   print version
   pyry help                                      show this help
 
