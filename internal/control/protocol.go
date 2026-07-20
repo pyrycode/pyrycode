@@ -8,7 +8,10 @@
 // shape stays JSON for forward compatibility.
 package control
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Verb identifies a control request.
 type Verb string
@@ -91,6 +94,22 @@ const (
 	// then every production-path VerbRekey request returns
 	// "rekey: no rekeyer configured".
 	VerbRekey Verb = "rekey"
+
+	// VerbMCPApprove forwards a claude tool-approval request to the
+	// daemon, which registers it with internal/permbridge, blocks for the
+	// allow/deny verdict, and returns it. Request.Approve carries the
+	// forwarded request; Response.Approve carries the verdict. The daemon
+	// makes the human-facing decision (where modal surfacing lives, #1080)
+	// rather than the ephemeral `pyry mcp-approve` MCP child that dials
+	// this verb.
+	//
+	// Fail-closed: a socket disconnect, daemon shutdown, or approval
+	// timeout mid-wait yields a deny verdict; a nil registry (v1 /
+	// foreground, and production until #1080 wires a resolver) returns
+	// Response.Error "no approval registry configured". The dotted
+	// namespace matches sessions.* — the dot is a documentation
+	// convention, not a parser rule.
+	VerbMCPApprove Verb = "mcp.approve"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -142,6 +161,7 @@ type Request struct {
 	Resize   *ResizePayload   `json:"resize,omitempty"`   // populated for VerbResize
 	Sessions *SessionsPayload `json:"sessions,omitempty"` // populated for VerbSessionsNew (Phase 1.1+)
 	Rekey    *RekeyPayload    `json:"rekey,omitempty"`    // populated for VerbRekey
+	Approve  *ApprovePayload  `json:"approve,omitempty"`  // populated for VerbMCPApprove
 }
 
 // AttachPayload carries the client's terminal geometry at attach time and
@@ -209,6 +229,39 @@ type RekeyPayload struct {
 	ConnID string `json:"connID"`
 }
 
+// ApprovePayload is the forwarded tool-approval request the `pyry
+// mcp-approve` subcommand marshals from claude's --permission-prompt-tool
+// call and dials over the control socket. Fields mirror permbridge.Request
+// with the snake_case tags of the T1 spike contract
+// (fixture-p4-approval-contract.json) so the subcommand marshals straight
+// from claude's tool input.
+//
+// Input is opaque tool-input carried as json.RawMessage so it round-trips
+// byte-verbatim into the registry; the daemon never parses or dispatches on
+// it. ToolUseID is the registry correlation key (not a credential); the
+// server-side guard rejects an empty one. ToolName is echoed only in the
+// content-free decision log's absence — it is never logged.
+type ApprovePayload struct {
+	ToolName  string          `json:"tool_name"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
+}
+
+// ApproveResult is the allow/deny verdict returned to the socket caller.
+// Its field/tag layout is deliberately byte-identical to permbridge.Verdict's
+// wire shape so the `pyry mcp-approve` subcommand can marshal it straight to
+// claude as the MCP tool result without a second translation. A future drift
+// between the two must be caught here (same mirror justification as
+// SessionInfo vs sessions.SessionInfo):
+//
+//	allow → {"behavior":"allow","updatedInput":{…}}
+//	deny  → {"behavior":"deny","message":"…"}
+type ApproveResult struct {
+	Behavior     string          `json:"behavior"`
+	UpdatedInput json.RawMessage `json:"updatedInput,omitempty"` // allow only
+	Message      string          `json:"message,omitempty"`      // deny only
+}
+
 // ResizePayload carries a live window-size update for an attached session.
 // SessionID resolution mirrors AttachPayload — empty selects bootstrap, full
 // UUID or unique prefix selects a specific session. Cols/Rows are wire ints
@@ -228,6 +281,7 @@ type ResizePayload struct {
 //   - SessionsNew: payload for VerbSessionsNew
 //   - SessionsList: payload for VerbSessionsList
 //   - SessionsHasID: payload for VerbSessionsHasID
+//   - Approve: verdict for VerbMCPApprove (allow or deny)
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
@@ -237,6 +291,7 @@ type Response struct {
 	SessionsNew   *SessionsNewResult   `json:"sessionsNew,omitempty"`   // populated for VerbSessionsNew
 	SessionsList  *SessionsListPayload `json:"sessionsList,omitempty"`  // populated for VerbSessionsList (1.1b-B1)
 	SessionsHasID *SessionsHasIDResult `json:"sessionsHasID,omitempty"` // populated for VerbSessionsHasID (1.3c-1)
+	Approve       *ApproveResult       `json:"approve,omitempty"`       // populated for VerbMCPApprove
 	OK            bool                 `json:"ok,omitempty"`
 	Error         string               `json:"error,omitempty"`
 	ErrorCode     ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)
