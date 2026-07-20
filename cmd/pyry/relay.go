@@ -179,6 +179,10 @@ type relayWiring struct {
 	// boundHost resolves the host bound to the active conversation for the
 	// interactive turn/modal streams.
 	boundHost boundHostFunc
+	// activeInterrupter routes an inbound interrupt frame to the runner bound to
+	// the ACTIVE conversation, not the bootstrap supervisor — the #1121 isolation
+	// fix. Wired to V2SessionConfig.Interrupter below.
+	activeInterrupter relay.Interrupter
 	// sup is the bootstrap session's supervisor — the keystroke/interrupt/
 	// new-session/snapshot surface and the source of the daemon's own claude
 	// child PID.
@@ -532,10 +536,13 @@ func startRelayV2(
 		// (it has SendEsc). Constructed above so its #1014 folder-not-trusted emit
 		// seams are set before use.
 		ModalResolver: modalResolver,
-		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes
-		// one Esc through the sealed supervisor keystroke surface. sup
-		// (*supervisor.Supervisor) satisfies Interrupter via SendEsc (#726).
-		Interrupter: w.sup,
+		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
+		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
+		// supervisor. The activeInterrupter adapter (main.go) resolves active →
+		// CurrentSessionID → Pool.Lookup → runner, then dispatches SendEsc (PTY) or
+		// Interrupt (stream-json, #1120) by runner type; it satisfies Interrupter
+		// via SendEsc, the seam's abstract "claude's own interrupt" name.
+		Interrupter: w.activeInterrupter,
 		// Inbound new_session seam (#831): an interactive `new_session` frame
 		// routes a /clear through the sealed supervisor keystroke surface. sup
 		// (*supervisor.Supervisor) satisfies SessionStarter via StartNewSession

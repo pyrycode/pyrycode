@@ -921,17 +921,23 @@ func runSupervisor(args []string) error {
 	approvals := permbridge.New()
 
 	relayCleanup, err := startRelay(ctx, logger, relayWiring{
-		instanceName:      *name,
-		relayURL:          relayURL,
-		version:           Version,
-		allowInsecure:     allowInsecure,
-		shutdown:          cancelCause,
-		convReg:           convReg,
-		creator:           sessionMinter{pool},
-		router:            router,
-		queue:             queue,
-		active:            active,
-		boundHost:         boundHost,
+		instanceName:  *name,
+		relayURL:      relayURL,
+		version:       Version,
+		allowInsecure: allowInsecure,
+		shutdown:      cancelCause,
+		convReg:       convReg,
+		creator:       sessionMinter{pool},
+		router:        router,
+		queue:         queue,
+		active:        active,
+		boundHost:     boundHost,
+		activeInterrupter: activeInterrupter{
+			currentConv: active.CurrentConversation,
+			resolveRunner: func(convID string) (sessions.Runner, bool) {
+				return resolveBoundRunner(convReg, pool, convID)
+			},
+		},
 		sup:               bootstrap.Supervisor(),
 		bridge:            bootstrap.Bridge(),
 		claudeSessionsDir: claudeSessionsDir,
@@ -1160,6 +1166,79 @@ func (b boundSession) Activate(ctx context.Context) error {
 
 func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	return b.sess.WriteUserTurn(ctx, conversationID, payload)
+}
+
+// interruptRunner actuates a runner's interrupt through whichever concrete method
+// its runner type exposes — the SendEsc-vs-Interrupt dispatch #1121 places in
+// cmd/pyry, the only package that sees both concrete runner types (the streamRunner
+// adapter lives here, so internal/sessions cannot reach it). The two arms are
+// mutually exclusive: *supervisor.Supervisor has SendEsc but no Interrupt, and
+// streamRunner has Interrupt but no SendEsc, so the switch is unambiguous. Interrupt
+// is matched first so any future runner that grows both prefers the stream-json
+// control_request over a PTY Esc. An unknown runner is inert (nil) — no actuation
+// beats wrong actuation.
+func interruptRunner(r sessions.Runner) error {
+	switch v := r.(type) {
+	case interface{ Interrupt() error }:
+		return v.Interrupt()
+	case interface{ SendEsc() error }:
+		return v.SendEsc()
+	default:
+		return nil
+	}
+}
+
+// resolveBoundRunner resolves the active conversation's bound runner, mirroring
+// boundHost's lookup shape and sessionRouter.resolve's load-bearing guard:
+// convID → CurrentSessionID → Pool.Lookup → the bound session's runner. The
+// conv.CurrentSessionID == "" guard is the cross-conversation isolation
+// enforcement point — without it Pool.Lookup("") returns the BOOTSTRAP session
+// (see errNoBoundSession / sessionRouter.resolve), so an unbound conversation's
+// interrupt would actuate the shared bootstrap claude (the #678 isolation break).
+// Every non-resolvable state returns (nil, false) so the caller stays inert; this
+// NEVER falls through to bootstrap.
+func resolveBoundRunner(convReg *conversations.Registry, pool *sessions.Pool, convID string) (sessions.Runner, bool) {
+	conv, ok := convReg.Get(conversations.ConversationID(convID))
+	if !ok || conv.CurrentSessionID == "" {
+		return nil, false
+	}
+	sess, err := pool.Lookup(sessions.SessionID(conv.CurrentSessionID))
+	if err != nil {
+		return nil, false
+	}
+	return sess.Runner(), true
+}
+
+// activeInterrupter satisfies relay.Interrupter by routing an inbound interrupt to
+// the runner bound to the ACTIVE conversation — replacing the former
+// Interrupter: w.sup wiring that mis-delivered every interrupt to the bootstrap
+// supervisor regardless of which conversation's turn was running (#1121). The two
+// seams are injected (not raw *Pool/*Registry) so the AC2 test can drive the
+// composition with fakes; production wires currentConv: active.CurrentConversation
+// and resolveRunner over resolveBoundRunner(convReg, pool, …).
+type activeInterrupter struct {
+	currentConv   func() string
+	resolveRunner func(convID string) (sessions.Runner, bool)
+}
+
+// SendEsc interrupts the active conversation's bound runner. It keeps the relay
+// seam's method name (relay.Interrupter.SendEsc) even though the actuation is a
+// per-runner interrupt, not literally an Esc — the seam doc already abstracts
+// SendEsc as "claude's own interrupt" (#1121 seam decision), so the whole
+// internal/relay package (including its interrupt tests) stays untouched. Every
+// ambiguous state (no active conversation, unbound/dangling binding) is inert
+// (nil), never actuating the wrong child; a live runner's no-child error
+// propagates for handleInterrupt to Warn-log and tolerate (best-effort contract).
+func (a activeInterrupter) SendEsc() error {
+	convID := a.currentConv()
+	if convID == "" {
+		return nil
+	}
+	r, ok := a.resolveRunner(convID)
+	if !ok {
+		return nil
+	}
+	return interruptRunner(r)
 }
 
 // inboundActivateTimeout caps the drain's per-attempt wait for an idle-evicted

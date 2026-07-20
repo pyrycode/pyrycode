@@ -37,6 +37,13 @@ func (a streamRunner) Run(ctx context.Context) error { return a.r.Run(ctx) }
 
 func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 
+// Interrupt forwards to (*streamsup.Runner).Interrupt (#1120), ending the running
+// turn via a control_request line. It is OFF the sessions.Runner interface (which
+// stays un-widened, #1077) — a concrete method the #1121 interrupt dispatch
+// (interruptRunner in main.go) reaches by type assertion, exactly as
+// (*supervisor.Supervisor).SendEsc is reached for the PTY runner.
+func (a streamRunner) Interrupt() error { return a.r.Interrupt() }
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
