@@ -1,8 +1,8 @@
 # `internal/streamsup` — persistent stream-json child lifecycle
 
-Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. This is the process-lifecycle-only first slice (#1087); it ships unwired — no pool, relay, or `cmd/pyry` consumer yet.
+Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087) and the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) — have shipped; it ships unwired — no pool, relay, or `cmd/pyry` consumer yet.
 
-**No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere.
+**No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
 
 ## Public API
 
@@ -98,17 +98,98 @@ Table-driven stdlib `testing`, `go test -race`. Fake-child harness dispatches fr
 
 Scenarios: `buildArgs` shape (pure, table — fixed prefix present, `-p` absent, `--session-id` vs `--resume`, id byte-identical across first-spawn/respawn, `base` order preserved and not mutated); held-open stdin (echo round-trip + `GOT_EOF` absent while alive); backoff ladder (lifted `supervisor.backoff_test.go` verbatim against the copied `backoffTimer`); restart-on-crash (≥2 spawns observed via `onSpawn`); resume-id-stable-across-restart (captured argv: spawn 1 has `--session-id <id>`, spawn 2 has `--resume <id>`, same id); teardown SIGTERM+grace (`Run` returns within `< killGrace`, "got SIGTERM" on stderr); teardown reaps descendant groups (`reapDescendantGroupsFn` swap, non-parallel); the `firstRun`-gate regression test (non-existent binary, every retry keeps `--session-id`).
 
+## Turn I/O — envelope write + stdout parser (#1088)
+
+The turn I/O boundary fills `Stdin()`/`Config.Stdout` with two additive seams — no `runner.go` diff.
+
+```go
+var ErrNoLiveChild = errors.New("streamsup: no live child")
+
+func WriteTurn(w io.Writer, prompt []byte) error
+
+type Parser struct { /* sink, byte buffer, maxBuf, logger */ }
+func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser
+func (p *Parser) Write(b []byte) (int, error) // io.Writer; set as Config.Stdout
+```
+
+**Send half — `WriteTurn`.** Mirrors `streamrunner`'s `userTurn`/`userTurnMessage`/
+`userTurnContentText` envelope shape verbatim
+(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}`). The prompt is
+carried as a JSON string value and `json.Marshal`-escaped, so every embedded metacharacter — critically
+every newline — is escaped: the marshalled envelope is always exactly one physical line, and the
+trailing `'\n'` `WriteTurn` appends is the only raw newline. This is the injection-resistance property
+the ticket called out: a prompt from an untrusted party (mobile client, over the relay) cannot forge a
+second stream-json control line (a fake `result`, a `control_request` interrupt, or a permission
+approval) on claude's stdin — enforced by structured encoding, not string concatenation, and pinned by
+a table-driven test asserting exactly-one-newline + byte-exact round-trip across forged-`result`,
+`\r\n`, and control-byte payloads. `WriteTurn(nil, …)` (the shape `Stdin()` returns between spawns)
+returns `ErrNoLiveChild` and writes nothing; a write failure (e.g. `EPIPE` mid-teardown) is wrapped and
+returned, never panics. `w`'s `io.Writer` type makes a half-close/EOF forgery structurally impossible.
+The caller writes turn N+1 by calling `WriteTurn` again on the *same* `Stdin()` handle — no re-open, no
+per-turn stdin lifecycle.
+
+**Receive half — `Parser`.** An `io.Writer` wired as `Config.Stdout`. Buffers bytes, splits on `'\n'`
+(mirroring `streamrunner/watchdog.go`'s `streamParser.feed` mechanics, but as the terminal sink, not a
+tee — `Write` always reports `(len(b), nil)`), drops an oversized unterminated partial past `maxBuf`
+(4 MiB). Each complete line is decoded into a minimal local shape and switched on the line's **top-level
+`type` only** — nested content (assistant text, tool-result content) is opaque data and is never
+re-scanned for control types, so a tool result whose text literally contains `{"type":"result"}` cannot
+forge a turn boundary:
+
+| Line `type` | Emits |
+|---|---|
+| `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
+| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union) |
+| `result` | exactly one `TurnEnd{Reason: TurnEndReasonEndTurn}` — **the turn boundary** |
+| `system` (`init`/`thinking_tokens`/`status`), `rate_limit_event`, unknown/malformed | nothing (Debug-logged by type/reason only, never content) |
+
+Mapping logic mirrors (not imports — `mapper.go`'s helpers are unexported and keyed on tui-driver types)
+[`turnbridge/mapper.go`](turnbridge-package.md). Two deliberate divergences: (1) a stream-json
+`assistant` event carries a *whole message* that may hold several content blocks (`mapper.go` sees one
+block per JSONL line), so the parser iterates `message.content` and emits one event per block,
+preserving order; (2) `tool_use` input is carried through as claude's already-decoded
+`json.RawMessage` verbatim (`ToolStart.RawInput`) rather than `mapper.go`'s map-re-marshal — one fewer
+parse, and it preserves the original key order for what is an opaque pass-through field.
+
+**Turn-stateless by design.** The parser holds no turn counter, no `awaiting` flag, no per-session
+accumulator — only the partial-line byte buffer. The *only* turn boundary is a `result` line, and no
+other line type can create, reset, or leak state across one — this is what makes zero cross-turn bleed
+structural rather than tracked, proven by a headline round-trip test driving 3 turns with distinct
+per-turn markers over one held-open `Stdin()` handle. Per the T1 spike (#1075): `system/init` fires
+**once per turn**, not once per session (dropping it is correct precisely because there's no session
+state for a mistaken init to reset), and the session id is constant across turns of one process.
+
+**Concurrency — no mutex.** `os/exec` drives a non-`*os.File` `Config.Stdout` through exactly one
+internal `io.Copy` goroutine, so `Parser.Write` is only ever invoked serially from that goroutine.
+Unlike `streamrunner`'s `streamParser` (which locks because a separate watchdog goroutine reads its
+state), this parser has no second reader. `sink` runs on that same forwarder goroutine; the consumer
+owns any synchronization it needs beyond "called serially, in stream order." This slice spawns no
+goroutines of its own.
+
+**No transcript tailing on this path (AC4).** `envelope.go`/`parser.go` open, watch, or resolve no
+filesystem path — the parser's only input is the bytes handed to `Write`. Reinforced by the same
+`go list -deps` import-boundary invariant #1087 pins (no fsnotify, no `internal/supervisor`).
+
+Deferred to #1089 (needs the interrupt/gate context): richer `TurnEnd` reason classification
+(`max_tokens`/`refusal`, and mapping the interrupt `result` subtype `error_during_execution` →
+`TurnEndReasonCancelled`); authoring/routing the `control_request` interrupt control line on the send
+path; whether the parser's line buffer needs resetting across a crash-restart (see
+[codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge case, non-blocking
+for this unwired slice).
+
 ## Out of scope (follow-on slices)
 
-- **Turn I/O** (#1088) — the stdin envelope writer (marshals a turn onto `Stdin()`, treating nil as a "no live child" refusal) and the stdout→turnevent parser (the sink `Config.Stdout` plugs into).
-- **turncommit/idle/stall gates** (#1089) — build on the seams this slice exposes.
-- **Pool/relay/`cmd/pyry` wiring** — this slice ships unwired by design.
+- **turncommit/idle/stall gates** (#1089) — build on the seams #1087/#1088 expose.
+- **Pool/relay/`cmd/pyry` wiring** — this package ships unwired by design.
 
 ## Related
 
-- [streamrunner-package.md](streamrunner-package.md) — the single-turn stream-json sibling this package inverts (held-open vs. close-after-one-turn); shares the reap seam shape and `ExitErrIsBenign` discipline.
+- [streamrunner-package.md](streamrunner-package.md) — the single-turn stream-json sibling this package inverts (held-open vs. close-after-one-turn); shares the reap seam shape, `ExitErrIsBenign` discipline, and the envelope shape/line-buffering mechanics the turn I/O slice mirrors.
+- [turnbridge-package.md](turnbridge-package.md) — `mapper.go`, the content-extraction logic the #1088 parser mirrors (not imports) for assistant text/thinking/tool_use and tool_result mapping.
 - [agentrun-package.md](agentrun-package.md) — the shared parent supplying `ResolveWorkdir`, `ExitErrIsBenign`, `ReapDescendantGroups`.
 - [ptyrunner-package.md](ptyrunner-package.md) — the PTY-path analogue this package's spawn/teardown shape and #1087's "ptyrunner-skeleton analogue" framing both reference.
 - `internal/supervisor`'s `backoffTimer`/`Run` (see [system-overview.md](../architecture/system-overview.md)) — the exponential-backoff-with-stability-reset ladder this package copies verbatim (cannot import across the PTY/stream-json boundary).
-- [`codebase/1087.md`](../codebase/1087.md) — this ticket.
-- Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the build-time architect spec.
+- [`codebase/1087.md`](../codebase/1087.md) — the process-lifecycle slice.
+- [`codebase/1088.md`](../codebase/1088.md) — the turn I/O slice (this section).
+- Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.
+- Spec [`docs/specs/architecture/1088-streamsup-turn-io.md`](../../specs/architecture/1088-streamsup-turn-io.md) — the turn I/O architect spec.
