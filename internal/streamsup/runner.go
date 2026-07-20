@@ -39,7 +39,9 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -150,6 +152,11 @@ type Runner struct {
 	// wait). Allocated once in New. Coalescing rapid restarts to one relaunch with
 	// the newest args is correct — see Restart.
 	restartCh chan struct{}
+
+	// interruptSeq mints locally-unique correlation ids for interrupt control
+	// lines (Interrupt). atomic.Uint64 because Interrupt may be called from a
+	// goroutine other than Run; the zero value is ready, so New adds nothing.
+	interruptSeq atomic.Uint64
 }
 
 // New validates the required fields, applies defaults, resolves WorkDir, and
@@ -223,6 +230,30 @@ func (r *Runner) Stdin() io.Writer {
 // so it is intentionally unused here.
 func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	return WriteTurn(ctx, r.Stdin(), payload)
+}
+
+// Interrupt writes a single interrupt control_request line to the live child's
+// stdin, ending the running turn (claude acks and emits a result with subtype
+// error_during_execution, which the parser maps to a cancelled TurnEnd). The
+// request_id is locally minted (not caller-supplied). When no child is live
+// Stdin() is nil, so Interrupt returns the retryable ErrNoLiveChild without
+// writing and without panicking — the safe no-op refusal.
+//
+// Interrupt is a concrete method on *Runner, deliberately NOT on sessions.Runner
+// (the interface stays un-widened, #1077): #1121's interrupt routing reaches it
+// via its own narrow interface or a type assertion. It mirrors how
+// *supervisor.Supervisor encapsulates SendEsc (#726) without that method being on
+// the interface. Safe from any goroutine.
+func (r *Runner) Interrupt() error {
+	return WriteInterrupt(r.Stdin(), r.nextInterruptID())
+}
+
+// nextInterruptID mints the next locally-unique interrupt correlation id. The
+// atomic counter is unique within the runner's lifetime, which is all a future
+// ack-correlator needs since each runner drives exactly one child stream; this
+// slice does not read the control_response ack, so the id is write-only here.
+func (r *Runner) nextInterruptID() string {
+	return strconv.FormatUint(r.interruptSeq.Add(1), 10)
 }
 
 // WaitForPTY returns cleanly: the stream-json path has no PTY to await. The
