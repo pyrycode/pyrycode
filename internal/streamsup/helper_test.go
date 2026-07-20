@@ -2,6 +2,7 @@ package streamsup
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +42,12 @@ func TestMain(m *testing.M) {
 //                      (if set), then exit 1 after a short delay. Used by the
 //                      restart-on-crash and resume-id-stable tests to force the
 //                      supervise loop to respawn.
+//   - "stream_json":   read newline-delimited user-turn envelopes from the
+//                      held-open stdin; for each one, decode its prompt text and
+//                      emit a canned stream-json turn (system/init → assistant
+//                      text echoing the prompt → result/success). The session_id
+//                      stays constant across turns while init repeats per turn
+//                      (spike § 1). Used by the turn-I/O round-trip test.
 func helperChild() {
 	switch os.Getenv("GO_STREAMSUP_HELPER_MODE") {
 	case "echo_lines":
@@ -72,6 +79,38 @@ func helperChild() {
 		}
 		time.Sleep(20 * time.Millisecond)
 		os.Exit(1)
+	case "stream_json":
+		sc := bufio.NewScanner(os.Stdin)
+		sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
+		for sc.Scan() {
+			// Decode the prompt text out of the user-turn envelope so the
+			// emitted assistant text echoes it back — the round-trip test uses
+			// distinct per-turn markers to assert attribution.
+			var env struct {
+				Message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			}
+			marker := ""
+			if err := json.Unmarshal(sc.Bytes(), &env); err == nil && len(env.Message.Content) > 0 {
+				marker = env.Message.Content[0].Text
+			}
+			// init fires once per turn (spike § 1: NOT a session-open marker).
+			fmt.Fprintln(os.Stdout, `{"type":"system","subtype":"init","session_id":"S"}`)
+			asst, _ := json.Marshal(map[string]any{
+				"type": "assistant",
+				"message": map[string]any{
+					"id":      "msg",
+					"role":    "assistant",
+					"content": []map[string]any{{"type": "text", "text": marker}},
+				},
+			})
+			os.Stdout.Write(append(asst, '\n'))
+			fmt.Fprintln(os.Stdout, `{"type":"result","subtype":"success","session_id":"S"}`)
+		}
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown GO_STREAMSUP_HELPER_MODE: %q\n", os.Getenv("GO_STREAMSUP_HELPER_MODE"))
 		os.Exit(99)
