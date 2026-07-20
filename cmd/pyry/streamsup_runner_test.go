@@ -149,7 +149,7 @@ func TestMapStreamsupConfig_Bootstrap(t *testing.T) {
 		t.Errorf("Backoff = {%v,%v,%v}, want {1s,20s,40s}", got.BackoffInitial, got.BackoffMax, got.BackoffReset)
 	}
 	if got.Stdout != nil {
-		t.Errorf("Stdout = %v, want nil (turnevent sink is #1098)", got.Stdout)
+		t.Errorf("Stdout = %v, want nil (the #1098 Parser is installed in newStreamRunnerFactory, not the mapper)", got.Stdout)
 	}
 	if got.Stderr != nil || got.Env != nil {
 		t.Errorf("Stderr/Env = %v/%v, want nil (no supervisor.Config analogue)", got.Stderr, got.Env)
@@ -192,6 +192,7 @@ func TestMapStreamsupConfig_PerSession(t *testing.T) {
 func TestStreamRunnerFactory_Construct(t *testing.T) {
 	t.Parallel()
 
+	factory := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()))
 	shapes := []struct {
 		name string
 		args []string
@@ -208,9 +209,9 @@ func TestStreamRunnerFactory_Construct(t *testing.T) {
 				SessionID:  "id-" + s.name,
 				ClaudeArgs: s.args,
 			}
-			runner, err := streamRunnerFactory(cfg)
+			runner, err := factory(cfg)
 			if err != nil {
-				t.Fatalf("streamRunnerFactory(%s) error = %v, want nil", s.name, err)
+				t.Fatalf("newStreamRunnerFactory(...)(%s) error = %v, want nil", s.name, err)
 			}
 			sr, ok := runner.(streamRunner)
 			if !ok {
@@ -236,9 +237,9 @@ func TestStreamRunnerFactory_ErrorPropagation(t *testing.T) {
 		SessionID:  "sess-uuid",
 		ClaudeArgs: []string{"--settings", "p"},
 	}
-	runner, err := streamRunnerFactory(cfg)
+	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()))(cfg)
 	if err == nil {
-		t.Fatalf("streamRunnerFactory error = nil, want non-nil for a missing binary")
+		t.Fatalf("newStreamRunnerFactory error = nil, want non-nil for a missing binary")
 	}
 	if runner != nil {
 		t.Errorf("runner = %v, want nil (no silent PTY fallback)", runner)

@@ -20,8 +20,9 @@ import (
 // precedent for this covariant-return seam is poolResolver in main.go.
 //
 // The factory that constructs a streamRunner from a supervisor.Config —
-// streamRunnerFactory below — is delivered by #1109; the interactive_runner
-// selection that injects it on sessions.Config.RunnerFactory is #1081.
+// newStreamRunnerFactory below (#1109 delivered the constructor; #1098 gave it
+// the turnevent sink) — the interactive_runner selection that injects it on
+// sessions.Config.RunnerFactory is #1081.
 type streamRunner struct{ r *streamsup.Runner }
 
 func (a streamRunner) State() supervisor.State { return mapStreamState(a.r.State()) }
@@ -50,13 +51,20 @@ func mapStreamState(s streamsup.State) supervisor.State {
 	}
 }
 
-// streamRunnerFactory is a sessions.RunnerFactory (func(supervisor.Config)
-// (sessions.Runner, error)) that constructs a stream-json runner: it maps the
-// incoming supervisor.Config to a streamsup.Config, calls streamsup.New (the
-// first caller tree-wide, #1109), and wraps the *streamsup.Runner in the
-// streamRunner adapter. It is the arm the #1081 interactive_runner selection
-// assigns to sessions.Config.RunnerFactory; this ticket only delivers it, not the
-// wiring.
+// newStreamRunnerFactory returns a sessions.RunnerFactory (func(supervisor.Config)
+// (sessions.Runner, error)) that constructs a stream-json runner AND installs the
+// #1088 turnevent Parser as its Config.Stdout, with the Parser's sink bound to
+// sink for the runner's session (#1098). The factory captures the
+// daemon-singleton fan-in sink once; each per-session invocation binds a fresh
+// Parser to sink.sinkFor(cfg.SessionID), so every runner's turnevents fan into
+// the one drain tagged by their pool session id. The install lives HERE, not in
+// mapStreamsupConfig, so the mapper stays pure (its Stdout == nil assertion is
+// untouched) — the Parser is a runtime object, one layer up.
+//
+// #1109 constructed the runner via streamsup.New (the first caller tree-wide) and
+// deliberately left Config.Stdout nil for this ticket to fill. It is the arm the
+// #1081 interactive_runner selection assigns to sessions.Config.RunnerFactory;
+// this ticket delivers the factory + the drain it feeds, not the production wiring.
 //
 // There is NO silent PTY fallback: a streamsup.New error (empty SessionID —
 // impossible at the pool sites per #1108; missing binary via exec.LookPath;
@@ -65,12 +73,16 @@ func mapStreamState(s streamsup.State) supervisor.State {
 // interactive session (which `pyry attach` drives) from the operator's stated
 // stream-json intent. The error surfaces through the pool's existing
 // "sessions: … supervisor: %w" wraps at both construction sites.
-func streamRunnerFactory(cfg supervisor.Config) (sessions.Runner, error) {
-	r, err := streamsup.New(mapStreamsupConfig(cfg))
-	if err != nil {
-		return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
+func newStreamRunnerFactory(sink *streamTurnSink) sessions.RunnerFactory {
+	return func(cfg supervisor.Config) (sessions.Runner, error) {
+		scfg := mapStreamsupConfig(cfg)
+		scfg.Stdout = streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		r, err := streamsup.New(scfg)
+		if err != nil {
+			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
+		}
+		return streamRunner{r: r}, nil
 	}
-	return streamRunner{r: r}, nil
 }
 
 // mapStreamsupConfig maps a supervisor.Config to the streamsup.Config that
@@ -82,9 +94,9 @@ func streamRunnerFactory(cfg supervisor.Config) (sessions.Runner, error) {
 // streamsup owns its own id-flag inversion (buildArgs), has no PTY bridge, no
 // transcript binding, and no .cast recorder: ResumeLast, ResolveSessionID,
 // Bridge, ValidateConversation, ResolveTranscript, RecordDir, helperEnv. Stdout
-// stays nil (an unconsumed child stdout goes to /dev/null and never blocks the
-// child; the turnevent sink that plugs into Stdout is #1098); Stderr/Env have no
-// supervisor.Config analogue and stay nil.
+// stays nil HERE — the turnevent Parser that plugs into Stdout is a runtime
+// object installed one layer up in newStreamRunnerFactory (#1098), keeping this
+// mapper pure; Stderr/Env have no supervisor.Config analogue and stay nil.
 func mapStreamsupConfig(cfg supervisor.Config) streamsup.Config {
 	return streamsup.Config{
 		ClaudeBin: cfg.ClaudeBin,
