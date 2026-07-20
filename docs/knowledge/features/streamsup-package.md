@@ -1,6 +1,6 @@
 # `internal/streamsup` — persistent stream-json child lifecycle
 
-Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), and the receive-side idle/stall watchdog (#1094) have shipped; it ships unwired — no pool, relay, or `cmd/pyry` consumer yet.
+Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), and satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097) have shipped. It still ships with no *production* consumer — `send_message`/`set_session_settings` work for free once a `streamRunner` is constructed, but the factory arm that builds one from a `supervisor.Config` is #1081's scope, not yet landed.
 
 **No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
 
@@ -24,6 +24,12 @@ type Config struct {
 func New(cfg Config) (*Runner, error)
 func (r *Runner) Run(ctx context.Context) error // blocks until ctx cancel; supervise loop
 func (r *Runner) Stdin() io.Writer               // held-open stdin, or nil between spawns
+
+// sessions.Runner seam (#1097) — see "Satisfying sessions.Runner" below
+func (r *Runner) State() State
+func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
+func (r *Runner) WaitForPTY(ctx context.Context) error
+func (r *Runner) Restart(args []string)
 ```
 
 `New` validates `ClaudeBin`/`WorkDir`/`SessionID` non-empty, `exec.LookPath`s the binary, resolves `WorkDir` (a missing dir → wrapped `fs.ErrNotExist`), and applies backoff defaults. `Stdin()` returns `io.Writer`, not `io.WriteCloser` — deliberately, so a consumer (the #1088 turn writer) cannot close a handle the runner owns; it returns nil whenever no child is currently live (before first spawn, mid-restart, during teardown).
@@ -51,20 +57,23 @@ Passing the *same* `sessionID` to both flags is why the on-disk session id survi
 
 ## Supervise loop (`Run`)
 
-Mirrors `supervisor.Run`'s restart/backoff/resume shape, minus the live-restart (`restartCh`) seam — that's a `supervisor`-only concern this slice omits:
+Mirrors `supervisor.Run`'s restart/backoff/resume shape, including the live-restart (`restartCh`/`iterCtx`) seam since #1097 (see "Satisfying `sessions.Runner`" below):
 
 ```
 loop:
-  if ctx.Err() != nil → return ctx.Err()             // graceful shutdown, not a crash
-  args := buildArgs(Args, firstRun, SessionID)
-  started, waitErr := spawnAndWait(ctx, args)          // blocks until child exits
-  if ctx.Err() != nil → return ctx.Err()               // teardown, not a crash
-  if started → firstRun = false                        // see the firstRun gate below
+  if ctx.Err() != nil → return ctx.Err()               // graceful shutdown, not a crash
+  args := buildArgs(liveArgs(), firstRun, SessionID)    // liveArgs() picks up a Restart-swapped argv
+  iterCtx, cancel := context.WithCancel(ctx); setIterCancel(cancel)
+  started, waitErr := spawnAndWait(iterCtx, args)       // blocks until child exits or Restart cancels iterCtx
+  cancel(); setIterCancel(nil)
+  if ctx.Err() != nil → return ctx.Err()                // parent-ctx cancel = teardown, not a crash
+  if started → firstRun = false                         // see the firstRun gate below
+  if drainRestart() → continue                          // deliberate restart, not a crash: skip backoff
   delay := backoff.next(uptime)
-  select { <-time.After(delay) | <-ctx.Done() → return ctx.Err() }
+  select { <-time.After(delay) | <-ctx.Done() → return ctx.Err() | <-restartCh → relaunch now }
 ```
 
-Shutdown is detected via **parent-ctx cancellation**, never via the child-exit error value — `spawnAndWait`'s `waitErr` only ever means "crashed" once `ctx.Err()` has been checked and is nil. One goroutine total (the caller's `Run`); `cmd.Wait` blocks it, and os/exec runs its own internal ctx-watcher goroutine that invokes `cmd.Cancel` off-loop.
+Shutdown is detected via **parent-ctx cancellation**, never via the child-exit error value — `spawnAndWait`'s `waitErr` only ever means "crashed" once `ctx.Err()` has been checked and is nil. An `iterCtx`-only cancel (from `Restart`) leaves the parent `ctx.Err()` nil, so the loop falls through and relaunches instead of returning. One goroutine total (the caller's `Run`); `cmd.Wait` blocks it, and os/exec runs its own internal ctx-watcher goroutine that invokes `cmd.Cancel` off-loop — on either a parent-ctx cancel (shutdown) or an `iterCtx` cancel (restart).
 
 ### `firstRun` gate: only advances on a successful `cmd.Start` (fix 66cc50e)
 
@@ -235,11 +244,69 @@ Deferred: the pending-permission signal's **producer** (the approval flow — mc
 control-socket verb, spawn-arg injection) lands in #1079/#1080 with its own security review; this hook is
 a local, content-free `func() bool` only, which is why this slice is not `security-sensitive`.
 
+## Satisfying `sessions.Runner` (#1097)
+
+`*streamsup.Runner` gained the four methods [`internal/sessions.Runner`](sessions-package.md) requires
+beyond `Run`/`Stdin`, so a stream-json session can be driven through the exact seam `*supervisor.Supervisor`
+already satisfies (`internal/sessions/runner.go`, introduced by #1077). `send_message` (→
+`Session.WriteUserTurn` → `sup.WriteUserTurn`) and `set_session_settings` (→ `Pool.UpdateSettings` →
+`sup.Restart`) work unchanged the moment a `streamRunner` exists — no new dispatch wiring, because both
+paths already call through the interface rather than the concrete type.
+
+**The covariant snag.** `sessions.Runner.State()` returns `supervisor.State`, but this package's dependency
+direction (above) forbids importing `internal/supervisor`. Go has no covariant return on interface
+satisfaction, so `*streamsup.Runner` cannot declare that signature directly. Resolved at the seam, not by
+relaxing the interface: `*streamsup.Runner` gets a **native** `State() streamsup.State` (new `state.go`,
+mirroring `supervisor.State`/`Phase` field-for-field and string-for-string), and a thin adapter —
+`cmd/pyry/streamsup_runner.go`'s `streamRunner{ r *streamsup.Runner }` — maps `streamsup.State →
+supervisor.State` via `mapStreamState` (`Phase` converts by a plain string cast, the six other fields copy
+through) and forwards `WriteUserTurn`/`WaitForPTY`/`Run`/`Restart` unchanged. `streamRunner`, not the
+concrete `*streamsup.Runner`, is what satisfies `sessions.Runner`; `var _ sessions.Runner = streamRunner{}`
+is the compile-time proof. Same shape as `poolResolver` (`cmd/pyry/main.go`) and the pattern documented in
+`docs/lessons.md` § "Interface adapters for covariant returns". The factory arm that *constructs* a
+`streamRunner` from a `supervisor.Config` is #1081's scope — this ticket delivers only the adapter and the
+assertion.
+
+**`State`/`Phase` (`state.go`).** `Phase` is one of `starting`/`running`/`backoff`/`stopped`. `State{Phase,
+ChildPID, StartedAt, RestartCount, LastUptime, NextBackoff}` — all six fields are kept faithful because
+`cmd/pyry`'s status builder (`buildStatus(supervisor.State)`) reads all six, not just `Phase`. A leaf
+`stateMu` (separate from the existing `mu` guarding `stdin`) guards `state`; `updateState(fn)` is called
+only by the `Run` goroutine, `State()` is safe from any goroutine. The `Run` loop instruments it exactly
+where `supervisor.Run` does: `Starting` at top (once), `Running` + `ChildPID` on spawn, `Backoff` +
+`RestartCount++`/`LastUptime`/`NextBackoff` before the crash-path backoff wait (never on a deliberate
+restart), `Stopped` in a top-level `defer`.
+
+**Live-restart seam** (previously absent — the old `runner.go` doc explicitly called this out as a gap;
+`Run` now has it). A third leaf mutex `restartMu` guards `args` (the live spawn base argv, swapped by
+`Restart`, read via `liveArgs()`) and `iterCancel` (the current spawn iteration's `context.CancelFunc`,
+published via `setIterCancel` each iteration). `Restart(args []string)` swaps `args`, sends a non-blocking
+hint on a buffered(1) `restartCh` (coalesces rapid restarts to one relaunch with the newest args), and
+cancels the current `iterCancel` if a child is live — mirroring `supervisor.Restart` byte-for-byte in
+shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`, never a `Pool`/`Session` lock, so
+`Pool.UpdateSettings` can call it after releasing `Pool.mu` with no lock-order concern. Because `firstRun`
+is already `false` after the first successful spawn, a restart always respawns via `--resume <sessionID>`
+— the conversation resumes rather than forking.
+
+**`WriteUserTurn`/`WaitForPTY`.** `WriteUserTurn(ctx, conversationID, payload)` is a one-line wrap of the
+already-reviewed `WriteTurn` free function (#1088/#1093) — no new envelope construction, and it inherits
+`WriteTurn`'s exact contract (`ErrNoLiveChild` with no live child, `turncommit.ErrDropped` with zero bytes
+on a gate deny). `conversationID` is accepted only for interface conformance and future outbound-cursor
+wiring (T4/T7); this slice does not track a cursor. `WaitForPTY(ctx) error` is a bare `return nil` — the
+stream path has no PTY to wait for, and the no-live-child window is already handled per-turn by
+`WriteTurn`'s retryable `ErrNoLiveChild`.
+
+Concurrency model: three **leaf** mutexes on `Runner` (`mu`, `stateMu`, `restartMu`), never nested, each
+owned by a different goroutine/concern. See [codebase/1097.md](../codebase/1097.md).
+
 ## Out of scope (follow-on slices)
 
-- **Pool/relay/`cmd/pyry` wiring** — this package ships unwired by design. The wiring slice composes the
-  #1094 watchdog's `Writer()` into `Config.Stdout` alongside the #1088 `Parser`, supplies `OnStall`/
-  `PendingPermission`, and decides what a `stall(false)` does (restart? surface to operator?).
+- **The `stream-json` `RunnerFactory` arm** (#1081) — constructs a `streamRunner` from a
+  `supervisor.Config` and wires it into the config selector so a session can actually be created against
+  this path. Until it lands, `streamRunner`'s only caller is the `var _ sessions.Runner = streamRunner{}`
+  compile assertion.
+- **Pool/relay/`cmd/pyry` turn-stream wiring** (drain, interrupt, new-session, snapshot; T4/T7) — the
+  #1094 watchdog's `Writer()` still needs composing into `Config.Stdout` alongside the #1088 `Parser`
+  with `OnStall`/`PendingPermission` supplied, and a decision on what a `stall(false)` does.
 - **The pending-permission signal producer** (#1079/#1080) — the approval flow that would report a
   pending permission to the #1094 hook.
 
@@ -254,7 +321,10 @@ a local, content-free `func() bool` only, which is why this slice is not `securi
 - [`codebase/1088.md`](../codebase/1088.md) — the turn I/O slice (this section).
 - [`codebase/1093.md`](../codebase/1093.md) — the send-side turncommit gate slice.
 - [`codebase/1094.md`](../codebase/1094.md) — the receive-side idle/stall watchdog slice.
+- [`codebase/1097.md`](../codebase/1097.md) — the `sessions.Runner` satisfaction slice (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + `cmd/pyry` adapter).
+- [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies.
 - Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.
 - Spec [`docs/specs/architecture/1088-streamsup-turn-io.md`](../../specs/architecture/1088-streamsup-turn-io.md) — the turn I/O architect spec.
 - Spec [`docs/specs/architecture/1093-turncommit-gate-on-streamsup-send.md`](../../specs/architecture/1093-turncommit-gate-on-streamsup-send.md) — the turncommit gate architect spec.
 - Spec [`docs/specs/architecture/1094-streamsup-idle-stall-watchdog.md`](../../specs/architecture/1094-streamsup-idle-stall-watchdog.md) — the idle/stall watchdog architect spec.
+- Spec [`docs/specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md`](../../specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md) — this slice's architect spec.
