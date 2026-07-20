@@ -158,7 +158,7 @@ forge a turn boundary:
 |---|---|
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
 | `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union) |
-| `result` | exactly one `TurnEnd{Reason: TurnEndReasonEndTurn}` — **the turn boundary** |
+| `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
 | `system` (`init`/`thinking_tokens`/`status`), `rate_limit_event`, unknown/malformed | nothing (Debug-logged by type/reason only, never content) |
 
 Mapping logic mirrors (not imports — `mapper.go`'s helpers are unexported and keyed on tui-driver types)
@@ -188,10 +188,29 @@ goroutines of its own.
 filesystem path — the parser's only input is the bytes handed to `Write`. Reinforced by the same
 `go list -deps` import-boundary invariant #1087 pins (no fsnotify, no `internal/supervisor`).
 
-Deferred to #1089 (needs the interrupt/gate context): richer `TurnEnd` reason classification
-(`max_tokens`/`refusal`, and mapping the interrupt `result` subtype `error_during_execution` →
-`TurnEndReasonCancelled`); authoring/routing the `control_request` interrupt control line on the send
-path; whether the parser's line buffer needs resetting across a crash-restart (see
+**Interrupt send primitive (#1120).** `Runner.Interrupt() error` writes a single structured
+`control_request` line — `{"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}`
+— onto the live child's held-open stdin, ending the running turn (claude acks in ~40ms and closes out the
+turn with a `result` whose `subtype` is `error_during_execution`, which the receive-side table above maps
+to `TurnEndReasonCancelled` — spike T1, #1075, verified live 2026-07-19). `WriteInterrupt(w io.Writer,
+requestID string) error` (`envelope.go`) is the free-function marshal+write half, mirroring `WriteTurn`
+minus the turncommit gate — an interrupt is not a queued turn, so there is nothing to claim or drop.
+`request_id` is locally minted by a per-`Runner` `atomic.Uint64` (`nextInterruptID`, stringified,
+monotonic from 1), never caller-supplied; this ticket writes the id but never reads the
+`control_response` ack, so uniqueness-within-the-runner's-lifetime is sufficient — no `crypto/rand`/UUID
+dependency. `w == nil` (no live child) is checked first and returns `ErrNoLiveChild` with zero bytes
+written — the same safe-no-op contract `WriteTurn` holds — so `Interrupt()` can't panic or partial-write
+when called against an idle runner. Small enough (`<PIPE_BUF`) that one `write(2)` can't interleave with
+a concurrent `WriteTurn` line on the same fd — the package's existing single-writer-per-syscall
+discipline, not a new one. `Interrupt` is a **concrete method on `*Runner`, deliberately not added to
+`sessions.Runner`** (kept un-widened per #1077) — mirrors how `*supervisor.Supervisor` encapsulates
+`SendEsc` (#726) off the interface; the interrupt *routing* sibling (#1121) reaches it via its own
+narrow interface or a type assertion. See [codebase/1120.md](../codebase/1120.md).
+
+Still deferred (needs richer context than this slice): `max_tokens`/`refusal` `TurnEnd` reason
+classification (`resultTurnEndReason`'s `default` branch is the safe placeholder until one is observed);
+routing an inbound remote interrupt frame to the correct per-conversation runner (#1121, blocked-by
+#1120); whether the parser's line buffer needs resetting across a crash-restart (see
 [codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge case, non-blocking
 for this unwired slice).
 
