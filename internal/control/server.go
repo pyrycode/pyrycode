@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
@@ -222,6 +223,18 @@ type Server struct {
 	// production state until slice B (#460) lands a V2SessionManager.
 	rekeyer Rekeyer
 
+	// approvals is the optional pending-approval registry servicing
+	// VerbMCPApprove, installed Rekeyer-style via SetApprovalRegistry so
+	// NewServer's signature stays frozen. approvalTimeout is the
+	// human-approval window handed to permbridge.Register (the registry's
+	// own timer denies after it). Both are read once per request under
+	// s.mu, before the lock is released for the (blocking) Await. Nil
+	// registry is the production state until the daemon composition wires
+	// it, and stays nil in v1/foreground — handleApprove then replies
+	// "unavailable" rather than panicking.
+	approvals       *permbridge.Registry
+	approvalTimeout time.Duration
+
 	// streamingWG tracks streaming-handler goroutines (currently: the
 	// per-attach detach watcher). Serve waits on it before returning so a
 	// caller blocked on Serve can be sure no per-conn goroutines are left.
@@ -302,6 +315,25 @@ func (s *Server) SocketPath() string {
 func (s *Server) SetRekeyer(r Rekeyer) {
 	s.mu.Lock()
 	s.rekeyer = r
+	s.mu.Unlock()
+}
+
+// SetApprovalRegistry installs the pending-approval registry and the
+// human-approval timeout used to service VerbMCPApprove requests. Safe to
+// call from any goroutine; canonically called once between NewServer and
+// Serve as part of daemon startup. A nil registry (never calling this, or
+// v1/foreground) leaves handleApprove replying "no approval registry
+// configured" — the same nil-dependency-degrades-cleanly shape as
+// SetRekeyer.
+//
+// timeout bounds every pending approval: permbridge's registry-owned timer
+// denies the request after it elapses, so a wait never outlives timeout.
+// Threading it through NewServer would cascade across every call site, so
+// it rides the setter like the Rekeyer (see #451 split rationale).
+func (s *Server) SetApprovalRegistry(reg *permbridge.Registry, timeout time.Duration) {
+	s.mu.Lock()
+	s.approvals = reg
+	s.approvalTimeout = timeout
 	s.mu.Unlock()
 }
 
@@ -534,6 +566,12 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleSessionsHasID(enc, req.Sessions)
 	case VerbRekey:
 		s.handleRekey(enc, req.Rekey)
+	case VerbMCPApprove:
+		// Blocking verb: handleApprove owns conn for the wait (it clears the
+		// handshake deadline and runs a disconnect/shutdown watcher) but,
+		// unlike VerbAttach, does not hand off ownership — handle's deferred
+		// conn.Close still runs on return and reaps the watcher's reader.
+		s.handleApprove(conn, enc, req.Approve)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -800,6 +838,118 @@ func (s *Server) handleRekey(enc *json.Encoder, payload *RekeyPayload) {
 		return
 	}
 	_ = enc.Encode(Response{OK: true})
+}
+
+// Fixed deny reasons for the daemon-originated fail-closed paths. Constants,
+// never host-derived content, so a deny leaks nothing about the request (the
+// timeout path's reason comes from permbridge itself). claude's deny path
+// does not hang the turn, so a deny is always the safe default.
+const (
+	reasonApproveDisconnect = "approval caller disconnected"
+	reasonApproveShutdown   = "daemon shutting down"
+	reasonApproveDuplicate  = "duplicate approval request"
+)
+
+// handleApprove serves a VerbMCPApprove request: register the forwarded
+// approval with the pending-approval registry, block until a verdict is
+// available (resolver, timeout, disconnect, or shutdown), and return it.
+//
+// Guard order mirrors handleRekey — nil registry, then malformed payload,
+// both before any registry work. Every terminal path other than an explicit
+// resolver Allow yields deny (see the package's fail-closed contract): the
+// untrusted socket peer can only submit-and-await, never inject an allow.
+//
+// The conn is owned but NOT handed off: handle's deferred conn.Close runs on
+// return and reaps the watcher's parked reader. Input/ToolName are never
+// logged — only the correlation key (tool_use_id) and the behavior.
+func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *ApprovePayload) {
+	s.mu.Lock()
+	reg := s.approvals
+	timeout := s.approvalTimeout
+	s.mu.Unlock()
+
+	if reg == nil {
+		_ = enc.Encode(Response{Error: "mcp.approve: no approval registry configured"})
+		return
+	}
+	if payload == nil || payload.ToolUseID == "" {
+		_ = enc.Encode(Response{Error: "mcp.approve: missing tool_use_id"})
+		return
+	}
+
+	pending, err := reg.Register(payload.ToolUseID, permbridge.Request{
+		ToolName:  payload.ToolName,
+		Input:     payload.Input,
+		ToolUseID: payload.ToolUseID,
+	}, timeout)
+	if err != nil {
+		// Duplicate live id (empty id already rejected by the guard above).
+		// Fail-closed with a fixed message rather than a wire error.
+		_ = enc.Encode(Response{Approve: denyResult(reasonApproveDuplicate)})
+		return
+	}
+
+	// Clear the handshake deadline: the wait is bounded by permbridge's
+	// registry-owned timer, not the conn (mirrors handleAttach).
+	_ = conn.SetDeadline(time.Time{})
+
+	// Watch for caller disconnect / daemon shutdown while we block. stop is
+	// closed once the verdict lands so the watcher does not resolve a
+	// verdict of its own on the normal path.
+	stop := make(chan struct{})
+	go s.watchApproveConn(conn, reg, payload.ToolUseID, stop)
+
+	verdict := pending.Await() // guaranteed to return within timeout
+	close(stop)
+
+	_ = enc.Encode(Response{Approve: verdictToResult(verdict)})
+	s.log.Info("control: approval resolved",
+		"tool_use_id", payload.ToolUseID, "behavior", verdict.Behavior)
+}
+
+// watchApproveConn maps the two cancellation sources permbridge's ctx-free
+// Await cannot observe — caller disconnect and daemon shutdown — into a
+// fail-closed deny Resolve, so a lost caller or a shutting-down daemon does
+// not park a pending entry for the full approval timeout. Started before the
+// Await; the handler closes stop after Await returns.
+//
+// The inner reader blocks on conn.Read (the client sends nothing after its
+// request) until EOF/error on disconnect or handle's deferred conn.Close on
+// the normal path; either way it is reaped. permbridge's delete-under-lock
+// one-shot makes a late Resolve here (racing the timer or a real resolver) a
+// harmless no-op.
+func (s *Server) watchApproveConn(conn net.Conn, reg *permbridge.Registry, id string, stop <-chan struct{}) {
+	readCh := make(chan struct{})
+	go func() {
+		var one [1]byte
+		_, _ = conn.Read(one[:])
+		close(readCh)
+	}()
+
+	select {
+	case <-stop:
+		// Verdict already landed; the handler is encoding the response.
+	case <-s.closedCh:
+		reg.Resolve(id, permbridge.Deny(reasonApproveShutdown))
+	case <-readCh:
+		reg.Resolve(id, permbridge.Deny(reasonApproveDisconnect))
+	}
+}
+
+// verdictToResult maps a permbridge.Verdict to the wire ApproveResult — a
+// straight field copy across the two byte-identical shapes.
+func verdictToResult(v permbridge.Verdict) *ApproveResult {
+	return &ApproveResult{
+		Behavior:     v.Behavior,
+		UpdatedInput: v.UpdatedInput,
+		Message:      v.Message,
+	}
+}
+
+// denyResult builds a deny ApproveResult for the handler's fail-closed
+// branches, reusing permbridge.Deny so the wire shape stays in lockstep.
+func denyResult(msg string) *ApproveResult {
+	return verdictToResult(permbridge.Deny(msg))
 }
 
 // toSessionsPolicy maps the wire-level JSONLPolicy enum (string) to the
