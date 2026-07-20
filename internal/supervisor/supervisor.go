@@ -119,6 +119,17 @@ type Config struct {
 	// shared sessions dir.
 	ResolveSessionID func() string
 
+	// SessionID is the caller-minted session id, set eagerly at construction.
+	// The PTY supervisor DELIBERATELY IGNORES it — it resolves its own id lazily
+	// via ResolveSessionID every spawn (so a /clear rotation is picked up). This
+	// field exists only so an alternative RunnerFactory (the stream-json path,
+	// #1109) can read a construction-safe, non-empty id from the same
+	// supervisor.Config it is handed; streamsup requires its id at construction.
+	// Because the supervisor never reads it, the PTY spawn path stays
+	// byte-identical whether or not it is set — that is the rollback guarantee.
+	// Construction-fixed: it does NOT mirror a /clear rotation (see spec #1108).
+	SessionID string
+
 	// ClaudeArgs are forwarded to the claude binary as positional arguments.
 	ClaudeArgs []string
 

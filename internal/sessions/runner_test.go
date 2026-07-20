@@ -35,7 +35,9 @@ func (fakeRunner) Restart(args []string) {}
 // Config.RunnerFactory is invoked in place of supervisor.New at BOTH construction
 // sites — the bootstrap (Pool.New) and the per-session create (Pool.buildSession,
 // shared by CreateIn and GetOrCreateIn) — proving the seam is genuinely threaded
-// and not merely declared.
+// and not merely declared. It also proves (#1108) that each site exposes a
+// construction-safe, non-empty supervisor.Config.SessionID equal to the id that
+// site mints — the value a stream-json factory reads at construction.
 //
 // ClaudeBin points at a path that does not exist: supervisor.New does an
 // exec.LookPath at construction, so if the factory were NOT wired the fallback to
@@ -43,8 +45,10 @@ func (fakeRunner) Restart(args []string) {}
 // count together prove the factory replaced supervisor.New at each site.
 func TestRunnerFactory_InvokedAtEveryConstructionSite(t *testing.T) {
 	var calls int
+	var seenSessionID []string // cfg.SessionID captured at each factory invocation
 	factory := func(cfg supervisor.Config) (Runner, error) {
 		calls++
+		seenSessionID = append(seenSessionID, cfg.SessionID)
 		return fakeRunner{}, nil
 	}
 
@@ -62,6 +66,11 @@ func TestRunnerFactory_InvokedAtEveryConstructionSite(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("after New: factory invoked %d times, want 1 (bootstrap site)", calls)
 	}
+	// AC-4: the bootstrap site exposes the already-minted bootstrap id, non-empty
+	// and equal to what BootstrapID() reports (nothing rotates it in this test).
+	if got, want := seenSessionID[0], string(p.BootstrapID()); got == "" || got != want {
+		t.Fatalf("bootstrap site cfg.SessionID = %q, want non-empty %q (== BootstrapID)", got, want)
+	}
 
 	// Create construction site. buildSession is the shared funnel for CreateIn
 	// and GetOrCreateIn; calling it directly targets the second newRunner site
@@ -75,5 +84,9 @@ func TestRunnerFactory_InvokedAtEveryConstructionSite(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("after buildSession: factory invoked %d times, want 2 (bootstrap + create sites)", calls)
+	}
+	// AC-4: the per-session site exposes the id parameter it was handed, non-empty.
+	if got, want := seenSessionID[1], string(id); got == "" || got != want {
+		t.Fatalf("per-session site cfg.SessionID = %q, want non-empty %q (== buildSession id)", got, want)
 	}
 }
