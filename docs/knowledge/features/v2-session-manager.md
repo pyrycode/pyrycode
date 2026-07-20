@@ -804,11 +804,24 @@ no-op in claude), so no nonce / dedup is needed.
 - **`Interrupter` consumer seam.** The relay declares the one-method interface
   `Interrupter interface{ SendEsc() error }` (beside `ScreenSnapshotter` /
   `ModalResolver`) and reaches the keystroke surface through it, so `internal/relay`
-  imports neither `internal/supervisor` nor tui-driver. `*supervisor.Supervisor`
-  satisfies it via the **sealed `SendEsc`** (#726, already consumed by `modal_cancel`
-  since #727) — **zero new supervisor code**. The optional nil-safe
-  `V2SessionConfig.Interrupter` field is wired in `cmd/pyry/relay.go`'s `startRelayV2`
-  with one line, `Interrupter: sup` (`sup` already in scope as `Snapshotter`).
+  imports neither `internal/supervisor` nor `internal/streamsup` nor tui-driver.
+  **Since #1121** the `V2SessionConfig.Interrupter` field is wired not to the
+  bootstrap supervisor directly but to a `cmd/pyry`-side adapter,
+  `activeInterrupter`, that resolves the **active conversation's bound runner**
+  (`active.CurrentConversation()` → `CurrentSessionID` → `Pool.Lookup` →
+  `sess.Runner()`, mirroring the follow-active `boundHost` resolution used by the
+  turn/modal streams — see [conversation-session-binding.md](conversation-session-binding.md))
+  and dispatches by concrete runner type: `*supervisor.Supervisor` via the sealed
+  `SendEsc` (#726), `streamRunner` (the stream-json adapter) via `Interrupt`
+  (#1120). `activeInterrupter.SendEsc()` keeps the seam's original method name even
+  though the actuation is a per-runner interrupt, not literally an Esc — this
+  interface doc already abstracted `SendEsc` as "claude's own interrupt," so
+  `internal/relay` and this seam's own tests needed zero changes. Before #1121 the
+  field was wired with one line, `Interrupter: sup` (the bootstrap supervisor) —
+  a latent mis-routing bug: since #678 routed turns to per-conversation bound
+  runners, an interrupt from a phone actuated the idle bootstrap child instead of
+  the runner actually running the active conversation's turn. See
+  [codebase/1121.md](../codebase/1121.md).
 - **`handleInterrupt(s)`** — the only new logic. Runs on the manager's **single Run
   dispatch goroutine**, so the `s.interactive` read is lock-free under the package's
   single-owner invariant. The signature takes **only `s`** (no `ctx`, no `env`) — a
@@ -834,10 +847,17 @@ no-op in claude), so no nonce / dedup is needed.
 precedent): the mobile `interrupt` routes to Esc directly via this seam, it does
 **not** construct a `turnevent.Cancel` value — that mobile-wire → neutral-`Cancel`
 translation is the future ACP adapter's job (#600). **Multi-phone:** any interactive
-paired phone can interrupt the single live claude — no per-conversation /
-per-connection binding, consistent with the broadcast fan-out model (a user's paired
-devices are one trust domain). Per-conversation interrupt scoping in a multi-session
-world is a future ticket.
+paired phone can send `interrupt`, and (since #1121) it actuates the **active
+conversation's** bound runner rather than whichever child happens to be the
+bootstrap supervisor — consistent with the broadcast fan-out model (a user's paired
+devices are one trust domain, and there is one daemon-global `active` conversation).
+**Residual scope:** the isolation boundary is still "active conversation," not
+"sending conn's own conversation" — routing conn A's interrupt strictly to A's
+conversation regardless of the global active is a larger per-connection isolation
+design, not built here (#1121's spec flags this explicitly and rules it a
+non-regression: today's pre-#1121 code routed every interrupt to bootstrap
+regardless of conn, so #1121 strictly improves isolation without introducing a new
+cross-conversation leak).
 
 ### Inbound new_session (#831) — `SessionStarter` seam + `/clear` routing
 
