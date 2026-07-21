@@ -265,6 +265,7 @@ const (
 	envTrustTrigger     = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
 	envStreamJSON       = "PYRY_FAKE_CLAUDE_STREAM_JSON"
 	envStreamInterrupt  = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
+	envStreamHold       = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
 	assistantMaxBytes   = 64 * 1024
 	pollInterval        = 50 * time.Millisecond
 )
@@ -465,6 +466,15 @@ func main() {
 				fatalf("open stream stdin log %s: %v", logPath, err)
 			}
 			stdin = io.TeeReader(os.Stdin, syncWriter{f})
+		}
+		// Startup hold (envStreamHold, default-off): block BEFORE consuming any
+		// stdin until the trigger file appears (#1138). The daemon's queued user
+		// turns buffer in this child's stdin pipe during the hold — WriteTurn
+		// returns on write, not on the child reading — so on release they drain in
+		// FIFO order and the client observes their turns in submission order. Unset
+		// ⟹ byte-identical (the tee above and runStreamJSON are untouched).
+		if hold := os.Getenv(envStreamHold); hold != "" {
+			waitForTriggerFile(hold)
 		}
 		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
 		return
@@ -770,6 +780,22 @@ func emitIdleIfTriggered(path string) bool {
 	writeStdout(idleGlyph)
 	_ = os.Remove(path)
 	return true
+}
+
+// waitForTriggerFile blocks until path exists, polling os.Stat every pollInterval.
+// It backs the stream-mode startup hold (envStreamHold, #1138): the child is parked
+// here BEFORE it reads any stdin, so the daemon's queued user turns accumulate in the
+// child's stdin pipe during the hold and drain in FIFO order once the trigger drops.
+// Mirrors the emit*IfTriggered poll shape (os.Stat + time.Sleep(pollInterval)); any
+// stat error is treated as "not yet" and re-polls (the test's writer creates the
+// trigger exactly once), and the trigger is left in place — nothing re-reads it.
+func waitForTriggerFile(path string) {
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // emitModalIfTriggered checks for the modal-trigger file

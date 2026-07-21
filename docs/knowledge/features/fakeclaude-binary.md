@@ -139,6 +139,11 @@ PYRY_FAKE_CLAUDE_STREAM_JSON        when non-empty, skip the PTY/TUI surface
                                     structurally mutually exclusive with every mode
                                     above (if both are set, stream wins) and binds no
                                     sessions dir / transcript.
+PYRY_FAKE_CLAUDE_STREAM_HOLD        path to a trigger file; when set, the stream-mode
+                                    child blocks BEFORE consuming any stdin until the
+                                    path appears, then proceeds normally (#1138; see
+                                    § Stream-path startup hold). A no-op outside stream
+                                    mode. Default-off; unset ⟹ byte-identical.
 ```
 
 No flags, no positional args — env is the entire configuration surface,
@@ -641,6 +646,52 @@ to the child: on the stream path `new_session` is a process re-spawn
 contain a user-turn marker (non-vacuity) but never the substring `/clear`. See
 [codebase/1137.md](../codebase/1137.md).
 
+### Stream-path startup hold (`PYRY_FAKE_CLAUDE_STREAM_HOLD`, #1138)
+
+The stream path does not pace on commit: `streamsup.WriteTurn` writes the user-turn
+envelope to the child's held-open stdin and returns on **write**, not on the child
+reading it or replying — unlike the PTY path's `WaitReady`-gated delivery, there is
+no way to hold a queue backlog open by making a *response* slow. `PYRY_FAKE_CLAUDE_STREAM_HOLD`
+gives the stream path the same "come up busy, release on trigger" shape idle-trigger
+mode (#792) gives the PTY path, but at **startup**, before any stdin is read at all —
+so that queued turns buffer in the daemon-to-child pipe rather than needing a
+per-turn hold that would coalesce turns at the emitter.
+
+Placement is the call site in `main()`'s stream branch, immediately before
+`runStreamJSON`, guarding a small poll helper:
+
+```go
+if hold := os.Getenv(envStreamHold); hold != "" {
+    waitForTriggerFile(hold) // os.Stat poll, mirrors the emit*IfTriggered pattern
+}
+runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
+```
+
+- **`waitForTriggerFile(path string)`** loops `os.Stat(path)` every `pollInterval`
+  until it succeeds, then returns. It never removes the trigger — nothing re-reads
+  it, unlike the rotation/idle triggers.
+- **`runStreamJSON`'s signature and body are unchanged.** The hold sits above the
+  call, the same discipline #1137's stdin tee uses ("the tee/hold lives at the call
+  site so `runStreamJSON` keeps its pure I/O signature") — so `stream_detect_test.go`'s
+  7 call sites and the #1136/#1137/#1140/#1141 stream specs are unaffected.
+- **Composes with the #1137 tee.** The hold check runs after the tee is wrapped
+  around `os.Stdin` (`stdin` may already be a `TeeReader`), so a test combining both
+  envs still logs bytes written during and after the hold.
+- **Why a startup hold and not an in-turn hold.** Holding a turn's *response* open
+  (rather than the child's stdin-read loop) cannot create an observable backlog on
+  this path — `WriteTurn` returns regardless of whether the child is reading — and
+  holding multiple in-flight turns open at once would coalesce into one turn at the
+  emitter (no `turn_end` between echoes). Parking the child before its read loop
+  starts lets the daemon's pipe writes buffer normally (they always buffer; `WriteTurn`
+  returns `nil` either way) and produces one clean `responding→delta→turn_end→idle`
+  cycle per queued turn, in FIFO order, on release.
+- **When unset, byte-identical to today.** No allowlist change (pure `os.Stat` poll,
+  no stdout write).
+
+See [codebase/1138.md](../codebase/1138.md) for the live queue-drain e2e this mode
+feeds — the all-three-acks-before-release vacuity gate, and why submission order is
+proven via the FIFO stdin-pipe chain rather than `queue_state` depth.
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -703,10 +754,11 @@ the five tests aligned by #673.
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~830 LOC, package main, no build tag (grew from the #122
+  main.go        ~850 LOC, package main, no build tag (grew from the #122
                  rotation core with the #311/#323/#603/#642/#791/#792/#793/#794/#1004
                  optional modes, the #673 on-turn transcript growth, the #1140
-                 stream-json mode, and the #1136 interrupt rider)
+                 stream-json mode, the #1136 interrupt rider, the #1137 stdin tee,
+                 and the #1138 startup hold)
   main_test.go   ~125 LOC, //go:build e2e
   modal_detect_test.go  untagged unit test for the modal-class detector
   esc_detect_test.go    ~60 LOC untagged unit test — TestContainsBareESC pins the
@@ -810,7 +862,8 @@ affect correctness.
   clear-rotate mode: `docs/specs/architecture/1004-new-session-e2e.md`;
   stream-json mode: `docs/specs/architecture/1140-fakeclaude-stream-json-mode.md`;
   interrupt rider: `docs/specs/architecture/1136-stream-e2e-interrupt.md`;
-  new_session rider: `docs/specs/architecture/1137-stream-new-session-rotation-e2e.md`
+  new_session rider: `docs/specs/architecture/1137-stream-new-session-rotation-e2e.md`;
+  startup-hold rider: `docs/specs/architecture/1138-stream-e2e-queue-drain-in-order.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
 - JSONL-trigger per-ticket notes: [codebase/642.md](../codebase/642.md) (the
@@ -843,6 +896,9 @@ affect correctness.
 - New_session rider per-ticket notes: [codebase/1137.md](../codebase/1137.md) (the
   stream-path stdin tee, the on-disk-rotation-implies-`RestartFresh` reasoning, the
   post-rotation drain divergence it confirms live and defers to #1133)
+- Startup-hold rider per-ticket notes: [codebase/1138.md](../codebase/1138.md) (the
+  live queue-drain-in-order e2e this mode feeds — why a msgqueue backlog isn't
+  observable on the stream path, and the FIFO stdin-pipe chain proof instead)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)
