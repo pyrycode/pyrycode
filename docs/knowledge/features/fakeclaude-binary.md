@@ -499,7 +499,7 @@ When `PYRY_FAKE_CLAUDE_STREAM_JSON` is set, `main()`'s **very first** statement 
 
 ```go
 if os.Getenv(envStreamJSON) != "" {
-    runStreamJSON(os.Stdin, os.Stdout)
+    runStreamJSON(os.Stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
     return
 }
 ```
@@ -513,9 +513,12 @@ properties fall out structurally rather than by a validation branch:
 | Mutually exclusive with every PTY/TUI mode | The `return` fires before any other mode's env var is even read; if both are set, stream wins and the other is inert |
 | Binds no sessions dir / transcript | The `return` short-circuits before the three `mustEnv` calls and the JSONL open — stream mode never touches sessions-dir machinery |
 
-`runStreamJSON(r io.Reader, w io.Writer)` is the testable read→emit loop — the
-`io.Reader`/`io.Writer` seam (rather than hard-wiring `os.Stdin`/`os.Stdout`) is what
-lets the unit test drive it against in-memory buffers:
+`runStreamJSON(r io.Reader, w io.Writer, honorInterrupt bool)` is the testable
+read→emit loop — the `io.Reader`/`io.Writer` seam (rather than hard-wiring
+`os.Stdin`/`os.Stdout`) is what lets the unit test drive it against in-memory
+buffers. `honorInterrupt` (default `false`, wired from `envStreamInterrupt`, #1136)
+selects the interrupt rider — see § Interrupt mode below; this table describes the
+default path:
 
 | Step | Effect |
 |---|---|
@@ -559,11 +562,10 @@ TurnEndReasonEndTurn}` — see [streamsup-package.md § Turn I/O](streamsup-pack
   `atomic.Bool` signals are reached. Stream-json travels over a **pipe**, not a PTY,
   so canonical line discipline / CR mapping don't apply — `enterRawMode()` is never
   called in this mode.
-- **Interrupt / new_session / queue / modal are out of scope.** The read loop reads
-  and ignores any non-`"user"` line, including a `control_request` — that's the
-  clean extension point a future interrupt e2e sibling would add a `case
-  "control_request"` branch to. This mode responds only to user turns with
-  `assistant`+`result(success)`.
+- **Default mode still ignores every non-`"user"` line**, including a
+  `control_request` — responding only to user turns with `assistant`+`result(success)`.
+  new_session / queue / modal remain out of scope for the fake. Interrupt is now
+  handled by the `honorInterrupt` rider, below (#1136).
 - **No new glyph, no allowlist change.** Stream mode emits pure JSON — no TUI
   substrate glyphs — so `cmd/substrate-guard`'s allowlist for this file is
   unaffected.
@@ -577,6 +579,43 @@ a non-user-lines-ignored test asserts zero output bytes for a `control_request` 
 blank / unparsable line; a distinct-message-ids test guards the per-turn counter; a
 direct `writeStreamResponse` shape test checks the two line shapes without going
 through the parser at all. See [codebase/1140.md](../codebase/1140.md).
+
+### Interrupt mode (`honorInterrupt`, #1136)
+
+`PYRY_FAKE_CLAUDE_STREAM_INTERRUPT` (default-off) is a rider on stream mode:
+`envStreamJSON` still gates entry to `runStreamJSON`; `envStreamInterrupt` is read
+once, at the same call site, and passed through as the `honorInterrupt bool` param
+so the function itself stays a pure I/O seam with no env reads inside. It exists to
+give the stream path a fake that can stay **mid-turn** long enough for a live
+interrupt e2e (#1136) to land one — the default mode always answers a user turn
+immediately, so there is no window to interrupt.
+
+| Inbound line | `honorInterrupt == false` (default) | `honorInterrupt == true` |
+|---|---|---|
+| `{"type":"user",…}` | `writeAssistantEcho` + `result{success}` (unchanged) | `writeAssistantEcho` **only** — the result is withheld, so the turn stays in flight |
+| `{"type":"control_request",…"subtype":"interrupt"}` | ignored | `writeInterruptedResult` — `result{subtype:"error_during_execution"}` |
+
+`writeStreamResponse` was split so the assistant-echo half is independently
+reusable: `writeAssistantEcho(w, msgID, text)` writes just the assistant line;
+`writeStreamResponse` is now `writeAssistantEcho` + the `result{success}` line,
+byte-identical to its pre-#1136 output. `interruptControlRequest(line []byte) bool`
+decodes a minimal `{type, request.subtype}` mirror of
+`streamsup.controlRequest`/`marshalInterruptEnvelope` (`internal/streamsup/envelope.go`)
+— the exact shape the daemon writes to the child's stdin on a phone interrupt — and
+returns `false` (line ignored) on anything that isn't
+`type=="control_request" && request.subtype=="interrupt"`, preserving the same
+per-line decode resilience as `userTurnText`.
+
+The mode is **stateless**: it emits `result{error_during_execution}` on *every*
+interrupt `control_request` it sees, with no in-flight-turn tracking. A caller that
+drives exactly one interrupt per in-flight turn (the only shape #1136's e2e needs)
+gets the right behaviour for free; nothing polices "interrupt with no turn open".
+
+`error_during_execution` is not an arbitrary error subtype — `streamsup.Parser`'s
+`resultTurnEndReason` (`internal/streamsup/parser.go`) maps that one subtype to
+`turnevent.TurnEndReasonCancelled` and every other subtype to `end_turn`, so this is
+the specific value that makes the daemon report the turn as interrupted rather than
+merely errored. See [codebase/1136.md](../codebase/1136.md).
 
 ## On-turn transcript growth (#673)
 
@@ -640,10 +679,10 @@ the five tests aligned by #673.
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~740 LOC, package main, no build tag (grew from the #122
+  main.go        ~830 LOC, package main, no build tag (grew from the #122
                  rotation core with the #311/#323/#603/#642/#791/#792/#793/#794/#1004
-                 optional modes, the #673 on-turn transcript growth, and the #1140
-                 stream-json mode)
+                 optional modes, the #673 on-turn transcript growth, the #1140
+                 stream-json mode, and the #1136 interrupt rider)
   main_test.go   ~125 LOC, //go:build e2e
   modal_detect_test.go  untagged unit test for the modal-class detector
   esc_detect_test.go    ~60 LOC untagged unit test — TestContainsBareESC pins the
@@ -745,7 +784,8 @@ affect correctness.
   modal-clear-on-answer mode: `docs/specs/architecture/793-two-head-first-answer-wins-e2e-capstone.md`;
   on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`;
   clear-rotate mode: `docs/specs/architecture/1004-new-session-e2e.md`;
-  stream-json mode: `docs/specs/architecture/1140-fakeclaude-stream-json-mode.md`
+  stream-json mode: `docs/specs/architecture/1140-fakeclaude-stream-json-mode.md`;
+  interrupt rider: `docs/specs/architecture/1136-stream-e2e-interrupt.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
 - JSONL-trigger per-ticket notes: [codebase/642.md](../codebase/642.md) (the
@@ -771,6 +811,10 @@ affect correctness.
   gate-above-mustEnv structural AC satisfier, the echo-the-prompt response, the
   different-fabric real-`streamsup.Parser` verification); feeds the sibling #1135
   harness + `send_message` e2e spec (blocked-by this ticket)
+- Interrupt rider per-ticket notes: [codebase/1136.md](../codebase/1136.md) (the
+  withheld-result in-flight-turn trick, the `error_during_execution` →
+  `TurnEndReasonCancelled` mapping, the minted-conversation live routing-target
+  proof it feeds)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)

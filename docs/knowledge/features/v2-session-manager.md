@@ -899,7 +899,12 @@ no-op in claude), so no nonce / dedup is needed.
   a latent mis-routing bug: since #678 routed turns to per-conversation bound
   runners, an interrupt from a phone actuated the idle bootstrap child instead of
   the runner actually running the active conversation's turn. See
-  [codebase/1121.md](../codebase/1121.md).
+  [codebase/1121.md](../codebase/1121.md). The stream-json arm of this dispatch
+  (`streamRunner.Interrupt`, #1120) was unit-proven at #1121 but had never run live
+  against a **minted, non-bootstrap** conversation until the #1136 e2e
+  (`relay_v2_stream_interrupt_test.go`), which confirms the interrupt reaches that
+  conversation's own runner and not the bootstrap — see
+  [codebase/1136.md](../codebase/1136.md).
 - **`handleInterrupt(s)`** — the only new logic. Runs on the manager's **single Run
   dispatch goroutine**, so the `s.interactive` read is lock-free under the package's
   single-owner invariant. The signature takes **only `s`** (no `ctx`, no `env`) — a
