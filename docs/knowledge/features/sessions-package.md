@@ -28,6 +28,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **EPIC #672 (#684):** `Pool.CreateIn(ctx, label, spawnDir)` / `Pool.GetOrCreateIn(ctx, id, label, spawnDir)` — sibling methods carrying an explicit per-session spawn working directory through the shared `buildSession` seam into `supervisor.Config.WorkDir`. Empty `spawnDir` falls back to `tpl.WorkDir`, so `Create` / `GetOrCreate` become thin delegators (`=> CreateIn(ctx, label, "")` / `=> GetOrCreateIn(ctx, id, label, "")`) with byte-identical behaviour for every existing caller. The pool treats the path as **opaque** (no validation / canonicalisation / trust) — that is the consumer slice #685's job. See *Per-session spawn workdir* below and [codebase/684.md](../codebase/684.md).
 - **EPIC #600 (#761):** `Config.BootstrapEvicted bool` + `Pool.Ready() <-chan struct{}` — two purely-additive primitives for **embedded pool hosts** (`pyry acp`) that must run exactly one interactive claude per caller session. `BootstrapEvicted` parks the bootstrap in `stateEvicted` so it spawns no eager claude (a single `Pool.Create` is then the only interactive claude — ACP divergence 6); `Ready()` is a `sync.Once`-closed channel gating the unrecoverable first-`Create → ErrPoolNotRunning` startup race. Both zero-value-safe, single-consumer, no call-site fan-out. See *`Config.BootstrapEvicted` + `Pool.Ready()`* below, [codebase/761.md](../codebase/761.md), and [ADR 026](../decisions/026-embedded-acp-pool-exact-one-claude.md).
 - **#838:** `newProbePreferredTranscriptResolver(dir, probe, pidFn)` in `reconcile.go` — replaces the `supervisor.Config.ResolveTranscript` wiring at `pool.go`'s bootstrap block with a probe-preferred resolver (mirrors #827's turn-stream fix, applied to the *other* live-child bootstrap-transcript consumer #827 deferred). Tails the daemon's own bootstrap child's open `<uuid>.jsonl` via `rotation.Probe.OpenJSONL` + a live child PID, instead of `newTranscriptResolver`'s newest-by-mtime scan, so a second claude in the same shared sessions dir can't redirect the delivery-confirm baseline onto its own newer transcript. `pool.go`'s `New` reads the live PID through a late-bound `bootstrapSup *supervisor.Supervisor` holder (assigned right after `supervisor.New` returns) because `supCfg` is copied by value into the supervisor before it exists. No-lsof, `pid <= 0`, empty/erroring probe, and the AC4 confidentiality guard (dir-equality + UUID stem) all collapse to `("", 0, nil)` — a nil error, never a non-nil one (which would divert `confirmViaTranscriptGrowth` to the #668 Committed-chip fallback) and never an mtime fallback. `newTranscriptResolver` / `mostRecentJSONL` are unchanged and still back the no-lsof delegation path and `reconcileBootstrapOnNew` (unrewired here — `ChildPID == 0` at that call site, sibling ticket). See *`newProbePreferredTranscriptResolver`* below and [codebase/838.md](../codebase/838.md).
+- **#1149:** `newProbePreferredTranscriptResolver` and `newTranscriptResolver` are rewritten as thin adapters over `internal/transcript` (#1148) — the local `jsonlExt` const, `uuidStemPattern` regexp, and `mostRecentJSONL` scan are deleted, replaced by `transcript.Ext` / `transcript.ValidStem` / `transcript.Newest` / `transcript.CanonicalDir` / `transcript.StatByID` / `transcript.Probed`. Pure adapter swap: the `("", 0, nil)` no-baseline convention and the AC4 confidentiality guard are preserved verbatim (the adapter swallows `transcript.Probed`'s one surfaced error to keep the convention), the no-lsof AC5 delegation to `newTranscriptResolver` is unchanged, and `probeUsable`/`availabilityReporter` stay local (probe-capability detection, not shared core). No signature change, no consumer cascade. See the rewritten *`newProbePreferredTranscriptResolver`* below and [codebase/1149.md](../codebase/1149.md).
 - **#833:** `SessionSettings{Model, Effort string; YOLO bool}` — a per-session model/reasoning-effort/bypass-permissions triple, persisted on `registryEntry` (`Model`/`Effort`/`YOLO`, all `omitempty`) and applied to the `claude` spawn argv via the pure `claudeSettingsArgs` helper at both spawn sites (`New`'s bootstrap warm-start, `buildSession`'s minted path). Zero value appends no flags — byte-identical argv for every session that doesn't opt in. `security-sensitive`: `YOLO`'s zero value is the fail-safe "permissions enforced" state; no custom decoder needed (see [ADR 030](../decisions/030-plain-bool-failsafe-persisted-flag.md)). Storage + spawn primitive only — no wire verb yet (setter: #826b, reader: #826c). See *`SessionSettings` + `claudeSettingsArgs`* below and [codebase/833.md](../codebase/833.md).
 - **#943:** `writeMCPSettings() (string, error)` (new `settings.go`) + `Session.settingsPath` — a per-session `--settings <path>` file carrying `{"enableAllProjectMcpServers":true}`, joined into `spawnBase` (not `claudeSettingsArgs`) at both construction sites so it survives every recompose (backoff restart, #842 live settings-restart) automatically. Fixes claude 2.1.199's "N new MCP servers found" startup modal wedging every interactive spawn's PTY readiness check; mirrors the un-gated agent-run compat fix (`d10ce87`) without importing its deny-default posture. Not `security-sensitive`. See *`writeMCPSettings` + `Session.settingsPath`* below and [codebase/943.md](../codebase/943.md).
 - **#839:** `Pool.BootstrapID() SessionID` — new RLock-and-resolve-fresh accessor mirroring `Default()`/`DefaultSettings()`, deliberately reading `p.bootstrap` rather than `Default().ID()`/`sess.id` so it introduces no new reader of the latter (`RotateID` mutates `sess.id` without `Session.lcMu` under a documented no-concurrent-reader invariant). Wired as `supervisor.Config.ResolveSessionID` on the bootstrap `supCfg` (`ResumeLast: false` alongside it) via a late-bound `var p *Pool` closure, so the daemon's own persisted id — never a foreign `<uuid>.jsonl` from the shared sessions dir — is what `--session-id` resolves to at every spawn. The startup `reconcileBootstrapOnNew` call is deleted; `/clear` reconciliation now falls out of `ResolveSessionID` re-reading `p.bootstrap` fresh at each spawn, since the watcher's existing `RotateID` call already persists the rotated id before the next restart. `security-sensitive`: closes a confused-deputy restart-resume gap. See *`Pool.BootstrapID`* below, [codebase/839.md](../codebase/839.md), and [jsonl-reconciliation.md](jsonl-reconciliation.md) (now marked retired).
@@ -40,10 +41,11 @@ internal/sessions/
   session.go    Session: wraps one supervisor + optional bridge
   pool.go       Pool: registry, lifecycle, Config, SessionConfig, RotateID
   registry.go   On-disk sessions.json (loadRegistry, saveRegistryLocked)
-  reconcile.go  encodeWorkdir, mostRecentJSONL (AC5 no-lsof fallback source only —
-                the startup adopt-by-mtime caller reconcileBootstrapOnNew was
-                removed in #839); probe-preferred delivery-confirm baseline
-                (newProbePreferredTranscriptResolver, #838)
+  reconcile.go  encodeWorkdir; newTranscriptResolver (AC5 no-lsof fallback
+                source only — the startup adopt-by-mtime caller
+                reconcileBootstrapOnNew was removed in #839) and
+                newProbePreferredTranscriptResolver (#838) — both thin
+                adapters over internal/transcript as of #1149
 ```
 
 ## Key Types
@@ -465,11 +467,11 @@ Deliberately has no conversation-keyed variant: the snapshot source is always
 the bootstrap session, so settings-source == snapshot-source by construction.
 See [codebase/847.md](../codebase/847.md) and [codebase/848.md](../codebase/848.md).
 
-### `newProbePreferredTranscriptResolver` (#838)
+### `newProbePreferredTranscriptResolver` (#838, migrated onto `internal/transcript` in #1149)
 
 ```go
 func newProbePreferredTranscriptResolver(
-    dir string, probe rotation.Probe, pidFn func() int,
+    dir string, probe rotation.Probe, pidFn func() int, pinnedID func() string,
 ) func(ctx context.Context) (string, int64, error)
 ```
 
@@ -479,29 +481,44 @@ the AC5 no-lsof fallback — its other caller, `reconcileBootstrapOnNew`, was
 removed in #839; see [jsonl-reconciliation.md](jsonl-reconciliation.md), now
 marked retired). Follow-up to #827's turn-stream fix, applied to the *other*
 live-child bootstrap consumer of the shared sessions dir: the delivery-confirm
-growth baseline.
+growth baseline. As of #1149 both this resolver and `newTranscriptResolver`
+are thin adapters over the `internal/transcript` leaf (#1148) — the dir
+canonicalisation, confidentiality guard, by-id/probe selection, and UUID-stem
+matcher all live there now; this function composes those primitives in
+Family A's own dispatch order and maps every no-result to Family A's
+`("", 0, nil)` convention. See [transcript-package.md](transcript-package.md).
 
 - **`!probeUsable(probe)`** (the no-lsof `noopProbe`, detected via the local
   `availabilityReporter{ Available() bool }` interface — a probe that omits
   the method is treated as usable) → delegates to `newTranscriptResolver(dir)`
-  wholesale. This is the *only* returned closure that may emit a non-nil
-  error, because it *is* today's newest-by-mtime behaviour (AC5).
-- Otherwise every resolve: `pid := pidFn()`; `pid <= 0` (restart backoff / not
-  yet spawned) → `("", 0, nil)`, probe not called. `probe.OpenJSONL(pid)`
-  error or empty path → `("", 0, nil)`. Confidentiality guard (AC4): the
-  probed path, symlink-resolved, must sit directly inside the (once-resolved)
-  sessions dir with a `uuidStemPattern`-matching `.jsonl` stem — reject →
-  `("", 0, nil)`; guards the untrusted probe→path crossing (PID reuse handing
-  back an unrelated process's fd). `os.Stat` race → `("", 0, nil)`. Success →
-  `(candidate, size, nil)`, `candidate` rebuilt under the original `dir`.
+  wholesale (which itself now calls `transcript.Newest(dir)`). This is the
+  *only* returned closure that may emit a non-nil error, because it *is*
+  today's newest-by-mtime behaviour (AC5).
+- Otherwise, `canonicalDir := transcript.CanonicalDir(dir)` is computed once
+  at construction. Per resolve:
+  - **Pinned-id path** (#989): `pinnedID()` non-empty and
+    `transcript.ValidStem`-valid → `transcript.StatByID(dir, id)`; its error
+    maps to `("", 0, nil)` **without falling through to the probe** — the
+    `ValidStem` pre-check is the branch selector (a miss on a *valid* stem is
+    no-baseline-no-probe; an *empty/invalid* stem is what falls through).
+  - **Probe path** (pinned id nil/empty/invalid): `pid := pidFn()`;
+    `res, _ := transcript.Probed(dir, canonicalDir, probe, pid)` — the
+    confidentiality guard (AC4: probed path must canonicalise to a
+    `<uuid>.jsonl` directly inside `canonicalDir`) and every benign no-result
+    (`pid <= 0`, empty open, guard reject, vanished-before-stat) all collapse
+    inside `transcript.Probed` to `(Result{}, nil)`. The adapter additionally
+    **swallows** the one error `Probed` *can* surface (a failing
+    `probe.OpenJSONL`) via `res, _ :=` — never propagated, never an mtime
+    fallback.
 - **The nil-error no-baseline convention is load-bearing** and is the inverse
-  of the sibling `resolveOwnBootstrapJSONL` in `cmd/pyry` (which returns
-  errors for the same conditions because its turn-stream subscriber retries
-  on error): a non-nil error here would divert `confirmViaTranscriptGrowth`
-  to the #668 stochastic Committed-chip fallback — the very heuristic the
-  growth-confirm exists to replace. `("", 0, nil)` instead keeps the caller on
-  the growth path (deliver, then poll for the daemon's own child's file to
-  appear/grow, else loud `ErrTurnNotCommitted`).
+  of the sibling resolvers in `cmd/pyry` (Family B, #1150 — which *wrap* that
+  same `Probed` error because their turn-stream subscriber retries on error):
+  a non-nil error here would divert `confirmViaTranscriptGrowth` to the #668
+  stochastic Committed-chip fallback — the very heuristic the growth-confirm
+  exists to replace. `("", 0, nil)` instead keeps the caller on the growth
+  path (deliver, then poll for the daemon's own child's file to appear/grow,
+  else loud `ErrTurnNotCommitted`). The neutral `transcript` core surfaces one
+  error signal; each adapter maps it to its own convention.
 - Drops the sibling's `resolvedOnce`/`sawEmpty` cold/warm tail-offset state —
   this consumer needs the true current byte size every call as a `grew()`
   baseline, never a rewound stream offset.
@@ -517,11 +534,13 @@ reached from a goroutine created long after `New` returns, so the read
 strictly follows the assignment — race-free by goroutine-creation
 happens-before, no mutex needed. `probe := newProbe(cfg.Logger)` reuses the
 existing factory (the rotation watcher builds its own separate instance;
-the probe is a stateless lsof/`/proc` wrapper).
+the probe is a stateless lsof/`/proc` wrapper). Unchanged by #1149 — the
+4-arg signature and this wiring are untouched by the adapter migration.
 
-See [codebase/838.md](../codebase/838.md) for the full implementation writeup
-and [rotation-watcher.md](rotation-watcher.md) for the `rotation.Probe`
-interface this resolver shares with the watcher and #827.
+See [codebase/838.md](../codebase/838.md) for the original implementation
+writeup, [codebase/1149.md](../codebase/1149.md) for the `internal/transcript`
+migration, and [rotation-watcher.md](rotation-watcher.md) for the
+`rotation.Probe` interface this resolver shares with the watcher and #827.
 
 ---
 ### `Pool.BootstrapID` + `supervisor.Config.ResolveSessionID` (#839)
