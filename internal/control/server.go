@@ -235,6 +235,16 @@ type Server struct {
 	approvals       *permbridge.Registry
 	approvalTimeout time.Duration
 
+	// approvalSurfacer, when set, raises a parked approval to interactive clients
+	// as a modal_shown (the #1080 stream modal wiring) and returns a retire
+	// closure handleApprove defers to guarantee client-side cleanup + dismissal on
+	// EVERY terminal Await path (answer, timeout, disconnect, shutdown). Installed
+	// Rekeyer-style via SetApprovalSurfacer so NewServer's signature stays frozen;
+	// read once per request under s.mu alongside approvals. Nil (v1/foreground/
+	// pre-#1080) leaves handleApprove parking-and-awaiting with no client modal —
+	// the completer still resolves, just without a phone prompt.
+	approvalSurfacer func(permbridge.Request) func()
+
 	// streamingWG tracks streaming-handler goroutines (currently: the
 	// per-attach detach watcher). Serve waits on it before returning so a
 	// caller blocked on Serve can be sure no per-conn goroutines are left.
@@ -334,6 +344,21 @@ func (s *Server) SetApprovalRegistry(reg *permbridge.Registry, timeout time.Dura
 	s.mu.Lock()
 	s.approvals = reg
 	s.approvalTimeout = timeout
+	s.mu.Unlock()
+}
+
+// SetApprovalSurfacer installs the optional surfacer that raises a parked
+// approval to interactive clients as a modal_shown and returns a retire closure
+// handleApprove defers to guarantee client-side cleanup + dismissal on every
+// terminal Await path (#1080). Safe to call from any goroutine; canonically
+// called once between NewServer and Serve, after SetApprovalRegistry, as part of
+// daemon startup. A nil surfacer (never calling this, or v1/foreground/relay
+// disabled) leaves handleApprove parking-and-awaiting with no client-facing modal
+// — the pre-#1080 behaviour. Mirrors SetApprovalRegistry so NewServer's signature
+// stays frozen across its call-site fan-out.
+func (s *Server) SetApprovalSurfacer(surface func(permbridge.Request) func()) {
+	s.mu.Lock()
+	s.approvalSurfacer = surface
 	s.mu.Unlock()
 }
 
@@ -866,6 +891,7 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 	s.mu.Lock()
 	reg := s.approvals
 	timeout := s.approvalTimeout
+	surface := s.approvalSurfacer
 	s.mu.Unlock()
 
 	if reg == nil {
@@ -877,14 +903,17 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 		return
 	}
 
-	pending, err := reg.Register(payload.ToolUseID, permbridge.Request{
+	req := permbridge.Request{
 		ToolName:  payload.ToolName,
 		Input:     payload.Input,
 		ToolUseID: payload.ToolUseID,
-	}, timeout)
+	}
+	pending, err := reg.Register(payload.ToolUseID, req, timeout)
 	if err != nil {
 		// Duplicate live id (empty id already rejected by the guard above).
-		// Fail-closed with a fixed message rather than a wire error.
+		// Fail-closed with a fixed message rather than a wire error. The surfacer
+		// is NOT invoked on this early return, so no client modal is raised for a
+		// request that never parked (and nothing to retire).
 		_ = enc.Encode(Response{Approve: denyResult(reasonApproveDuplicate)})
 		return
 	}
@@ -892,6 +921,18 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 	// Clear the handshake deadline: the wait is bounded by permbridge's
 	// registry-owned timer, not the conn (mirrors handleAttach).
 	_ = conn.SetDeadline(time.Time{})
+
+	// Surface the parked approval to interactive clients as a modal_shown, if a
+	// surfacer is wired (#1080). The deferred retire is the guaranteed cleanup +
+	// client-dismissal backstop: it fires on the post-Await return, covering
+	// resolver-answer / timeout / disconnect / shutdown uniformly. A nil surfacer
+	// (v1/foreground/relay disabled) makes this a no-op — the completer still
+	// resolves, just without a phone prompt.
+	retire := func() {}
+	if surface != nil {
+		retire = surface(req)
+	}
+	defer retire()
 
 	// Watch for caller disconnect / daemon shutdown while we block. stop is
 	// closed once the verdict lands so the watcher does not resolve a

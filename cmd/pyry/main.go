@@ -920,7 +920,7 @@ func runSupervisor(args []string) error {
 	// staticcheck U1000; #1080 is the thin change that adds the reader.
 	approvals := permbridge.New()
 
-	relayCleanup, err := startRelay(ctx, logger, relayWiring{
+	relayCleanup, approvalSurface, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
 		relayURL:      relayURL,
 		version:       Version,
@@ -950,6 +950,7 @@ func runSupervisor(args []string) error {
 		debugBundler:      debugBundler,
 		settings:          settingsUpdaterAdapter{pool},
 		snapshotSettings:  snapshotSettings,
+		approvals:         approvals,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
@@ -968,6 +969,12 @@ func runSupervisor(args []string) error {
 	// mcp.approve verb reaches the same instance #1080's modal wiring will
 	// resolve against (AC-4). Nil until here — v1/foreground never calls this.
 	ctrl.SetApprovalRegistry(approvals, mcpApprovalTimeout)
+	// Install the stream-approval surfacer (#1080) so a parked mcp.approve raises
+	// the SAME permission modal_shown clients already answer and a client's
+	// modal_answer resolves claude's blocked tool. nil when the relay leg is
+	// disabled (no URL) — SetApprovalSurfacer(nil) leaves mcp.approve modal-less,
+	// the pre-#1080 behaviour.
+	ctrl.SetApprovalSurfacer(approvalSurface)
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}

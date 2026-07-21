@@ -1,18 +1,24 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strconv"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/audit"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
+	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
 // modalKeystroker routes one abstract modal-resolution keystroke to the live
@@ -57,7 +63,31 @@ type modalResolverV2 struct {
 	// at the single production site (relay.go); the 18 test constructions leave
 	// them nil, keeping the pre-#1014 behaviour and foreground/v1 inert. #1014.
 	notifyBlocked func(convID, reason string)
+
+	// streamApprovals resolves a stream-json permission approval (a
+	// permbridge-parked completer, #1103) by modalID: the parallel VERDICT arm to
+	// the keystroke arm below. ResolveAnswer dispatches to it when the answered
+	// modalID is a stream approval, otherwise routes the tui keystroke. nil ⇒ no
+	// stream approvals wired (foreground / v1 / pre-#1080), so ResolveAnswer always
+	// routes the keystroke arm. Set at the production site (relay.go) like
+	// activeConv/notifyBlocked; the 18 test constructions leave it nil. #1080.
+	streamApprovals streamApprovalResolver
 }
+
+// streamApprovalResolver resolves a stream-json approval identified by modalID to
+// an allow/deny verdict on claude's parked completer (#1080). handled=false ⇒
+// modalID is not a stream approval → ResolveAnswer routes the tui keystroke arm.
+// *streamApprovalBridge is the production implementer; declared at the consumer
+// (CODING-STYLE) so ResolveAnswer's unit tests drive it without the real bridge.
+type streamApprovalResolver interface {
+	ResolveStream(modalID string, allow bool, denyReason string) (handled bool)
+}
+
+// reasonRemoteDeny is the fixed, content-free deny message a remote reject answer
+// returns to claude on the stream-json path (#1080). A compile-time constant —
+// never host-derived — so it leaks nothing back to claude, mirroring
+// reasonFolderNotTrusted here and permbridge's own reasonTimeout.
+const reasonRemoteDeny = "permission denied"
 
 // newModalResolverV2 wires the resolver to the daemon-singleton outstanding-modal
 // registry (the same instance #708 live-wires the producer/emitter into), the
@@ -255,24 +285,35 @@ func (r *modalResolverV2) ResolveAnswer(modalID, optionID, answerToken string, d
 		return relay.ModalDismissal{}, false
 	}
 
-	// Keystroke is best-effort exactly like ResolveCancel: the modal is already
-	// consumed and moot, so a keystroke error (no live session / teardown) is
-	// Warn-logged with the supervisor sentinel and tolerated — the dismissal
-	// must still broadcast and the audit must still be written. Aborting would
-	// orphan a consumed modal.
-	if err := r.routeAnswerKeystroke(verb, choice); err != nil {
-		r.logger.Warn("relay: modal answer keystroke failed",
-			"event", "modal_answer.keystroke_err",
-			"modal_id", modalID,
-			"err", err)
-	}
-
 	// AuthorizeRemotePermission (#702) splits allowed (true) from denied (false).
 	// For an eligible device this reduces to outcome==OutcomeAllow, but calling
 	// the primitive keeps the fail-closed conjunction in its single unit-tested
-	// place (it re-checks eligibility — defense in depth).
+	// place (it re-checks eligibility — defense in depth). Computed once here: it
+	// drives BOTH the stream verdict dispatch and the audit classification below.
+	allow := devices.AuthorizeRemotePermission(dev, outcome)
+
+	// Actuate the answer, best-effort exactly like ResolveCancel: the modal is
+	// already consumed and moot, so an error is Warn-logged and tolerated — the
+	// dismissal must still broadcast and the audit must still be written; aborting
+	// would orphan a consumed modal. Two parallel arms:
+	//   - STREAM (#1080): a permbridge-parked approval keyed by modalID resolves
+	//     its completer to allow/deny (echoing the parked tool input on allow).
+	//     ResolveStream reports handled=true only when modalID is a stream approval.
+	//   - KEYSTROKE (tui): every other modalID — and every modal when no stream
+	//     bridge is wired (foreground/v1, streamApprovals==nil) — routes the
+	//     safe-answer keystroke into the on-screen modal (unchanged pre-#1080 path).
+	handled := r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow, reasonRemoteDeny)
+	if !handled {
+		if err := r.routeAnswerKeystroke(verb, choice); err != nil {
+			r.logger.Warn("relay: modal answer keystroke failed",
+				"event", "modal_answer.keystroke_err",
+				"modal_id", modalID,
+				"err", err)
+		}
+	}
+
 	decision := audit.OutcomeDenied
-	if devices.AuthorizeRemotePermission(dev, outcome) {
+	if allow {
 		decision = audit.OutcomeAllowed
 	}
 	r.auditAnswer(dev, modalID, out.Class, decision)
@@ -388,4 +429,219 @@ func truncateForLog(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// streamApprovalBridge joins the two composition scopes a stream-json permission
+// prompt straddles (#1080): the claude-facing permbridge parked-approval store
+// (keyed by claude's tool_use_id, #1103) and the client-facing modalbridge
+// outstanding-modal store (keyed by a minted modal_id nonce, #716). It owns the
+// modal_id ⇄ tool_use_id correlation neither registry holds and joins both
+// directions:
+//
+//   - Surface (control-server handler goroutine): a parked approval becomes the
+//     SAME permission modal_shown clients already answer, minted via modalbridge
+//     so the 4-option / reject-once-default payload is byte-compatible by
+//     construction (AC-1). Returns a retire closure the control server defers.
+//   - ResolveStream (relay Run goroutine, via modalResolverV2.ResolveAnswer): a
+//     client's modal_answer resolves the parked completer to allow/deny (AC-2).
+//   - retire (control-server handler goroutine, post-Await): the guaranteed
+//     cleanup + client-dismissal backstop for every terminal path (AC-3).
+//
+// SECURITY: the bridge NEVER logs req.Input, the tool_name, the modal
+// prompt/title, or a deny message beyond the fixed reasonRemoteDeny constant.
+// Only content-free discriminants (event, modal_id, conn_id, env_id, class) and
+// the transport-sentinel Push err reach any log field — the same discipline the
+// modal emitter and control server hold.
+type streamApprovalBridge struct {
+	perm       *permbridge.Registry   // claude-facing completer store (#1103)
+	modal      *modalbridge.Registry  // client-facing modal store (#716)
+	bcast      interactiveBroadcaster // *relay.V2SessionManager (ActiveConns/Push)
+	activeConv func() string          // follow-active convID scoping (#1065)
+	ctx        context.Context        // daemon ctx captured at construction, for broadcasts
+	logger     *slog.Logger
+
+	// mu is a leaf lock guarding byModal + nextID ONLY: held around O(1) map ops
+	// and the counter bump, never across modal.Record, perm.Lookup/perm.Resolve,
+	// modal.Resolve, or a Push — so bridge.mu → registry.mu never nests and there
+	// is no deadlock order to reason about.
+	mu      sync.Mutex
+	byModal map[string]string // modalID → toolUseID
+	nextID  uint64            // per-bridge control-envelope counter
+}
+
+// newStreamApprovalBridge constructs the bridge over the daemon-singleton
+// permbridge registry (approvals), the daemon-singleton modalbridge registry (the
+// same instance the modal emitter Records into and modalResolverV2 consumes), the
+// v2 manager's interactive broadcaster, the follow-active conversation cursor, and
+// the daemon ctx (captured for the broadcasts Surface/retire fire off the
+// control-server handler goroutine, which carries no ctx of its own).
+func newStreamApprovalBridge(perm *permbridge.Registry, modal *modalbridge.Registry, bcast interactiveBroadcaster, activeConv func() string, ctx context.Context, logger *slog.Logger) *streamApprovalBridge {
+	return &streamApprovalBridge{
+		perm:       perm,
+		modal:      modal,
+		bcast:      bcast,
+		activeConv: activeConv,
+		ctx:        ctx,
+		logger:     logger,
+		byModal:    make(map[string]string),
+	}
+}
+
+// Surface raises a permbridge-parked approval to interactive clients as the same
+// permission modal_shown they already answer, and returns a retire closure the
+// control server defers for guaranteed cleanup + dismissal (AC-1). The prompt body
+// is req.ToolName (bounded by modalbridge.boundPrompt; non-secret — it names the
+// tool being approved); the 4 permission options and the reject-once deny-default
+// are class-fixed by PermissionRequestForClass, so the payload is byte-compatible
+// with today's clients by construction. On modal.Record RNG failure it stores
+// nothing, broadcasts nothing, and returns a no-op retire — claude then times out
+// to deny via permbridge (fail-closed degrade, mirroring handleModalShown). Runs
+// on the control-server handler goroutine (concurrent across approve requests).
+func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
+	permReq, wireClass, ok := modalbridge.PermissionRequestForClass(tuidriver.ModalClassPermission, req.ToolName)
+	if !ok {
+		// Unreachable: ModalClassPermission always maps. Defensive — never surface
+		// an unbuilt modal; claude times out to deny (fail-closed).
+		return func() {}
+	}
+
+	payload, err := b.modal.Record(permReq, wireClass, b.activeConv())
+	if err != nil {
+		// crypto/rand failure — drop the modal (no modal_shown, no correlation);
+		// claude times out to deny. Never echo err detail; no payload/screen bytes.
+		b.logger.Warn("relay: stream approval surface drop; id mint",
+			"event", "stream_approval.rand_err")
+		return func() {}
+	}
+	modalID := payload.ModalID
+
+	b.mu.Lock()
+	b.byModal[modalID] = req.ToolUseID
+	b.mu.Unlock()
+
+	b.broadcast(protocol.TypeModalShown, payload, "stream_approval.push_err")
+
+	return func() { b.retire(modalID) }
+}
+
+// ResolveStream is modalResolverV2.ResolveAnswer's stream (verdict) arm: resolve a
+// stream-json approval identified by modalID to allow/deny on claude's parked
+// completer (AC-2). handled=false ⇒ modalID is not a stream approval (absent from
+// byModal) → the caller routes the tui keystroke arm. An allow echoes the parked
+// tool Input byte-verbatim; a perm.Lookup miss on allow means permbridge already
+// resolved (a raced timeout) — nothing to do, still fail-closed (claude denied).
+// denyReason is the fixed content-free reasonRemoteDeny, never host-derived.
+//
+// It does NOT delete the correlation (retire is the sole, unconditional deleter)
+// and does NOT consume the modalbridge entry (ResolveAnswer already consumed it
+// before calling here, which gates a second ResolveStream for the same modalID).
+// Runs on the relay manager's single Run goroutine.
+func (b *streamApprovalBridge) ResolveStream(modalID string, allow bool, denyReason string) (handled bool) {
+	b.mu.Lock()
+	toolUseID, ok := b.byModal[modalID]
+	b.mu.Unlock()
+	if !ok {
+		return false // not a stream approval — caller routes the keystroke arm
+	}
+
+	if allow {
+		if req, ok := b.perm.Lookup(toolUseID); ok {
+			b.perm.Resolve(toolUseID, permbridge.Allow(req.Input))
+		}
+	} else {
+		b.perm.Resolve(toolUseID, permbridge.Deny(denyReason))
+	}
+	return true
+}
+
+// retire is the guaranteed cleanup + dismissal backstop the control server defers
+// for a surfaced stream approval. It runs on EVERY Await return (answer, timeout,
+// disconnect, shutdown) in two steps with separate arbiters:
+//
+//  1. Unconditionally delete the modalID→toolUseID correlation under mu. This is
+//     the SOLE correlation deleter and it runs on every terminal path — including
+//     the answer path, where step 2 no-ops — so byModal never leaks (the MUST-FIX
+//     the no-correlation-leak test guards). Delete of an absent key is a safe
+//     no-op, so racing a concurrent delete is irrelevant.
+//  2. modal.Resolve(modalID): a miss ⇒ a modal_answer already consumed + dismissed
+//     the modal → no second dismissal. A hit ⇒ the timeout/disconnect/shutdown
+//     path (permbridge already denied claude via its own timer or watchApproveConn)
+//     → write one content-free fail-closed audit record and broadcast one
+//     modal_dismissed so no stale modal lingers (AC-3). The modalbridge one-shot is
+//     the SINGLE arbiter of the dismissal broadcast: exactly one of {ResolveAnswer,
+//     retire} broadcasts.
+//
+// Runs on the control-server handler goroutine after Await.
+func (b *streamApprovalBridge) retire(modalID string) {
+	b.mu.Lock()
+	delete(b.byModal, modalID)
+	b.mu.Unlock()
+
+	out, ok := b.modal.Resolve(modalID)
+	if !ok {
+		return // a modal_answer already consumed + broadcast this modal's dismissal
+	}
+
+	// Timeout / disconnect / shutdown: no answering device, fail-closed deny — the
+	// no-device deny-on-timeout vocabulary ResolveTimeout uses. Audit identity is
+	// empty by construction; the reason is the modal class, never the modal body.
+	audit.Log(b.logger, audit.Entry{
+		ModalID:    modalID,
+		ModalClass: out.Class,
+		Outcome:    audit.OutcomeDeniedTimeout,
+		Source:     audit.SourceTimeout,
+	})
+	b.broadcast(protocol.TypeModalDismissed, protocol.ModalDismissedPayload{
+		ModalID: modalID,
+		Outcome: string(audit.OutcomeDeniedTimeout),
+		Source:  string(audit.SourceTimeout),
+	}, "stream_approval.dismissed_push_err")
+}
+
+// broadcast marshals payload and fans one control envelope of envType to every
+// interactive-capable conn — the shape modal_shown and modal_dismissed share:
+// one shared timestamp, the #607 capability gate, a per-bridge monotonic nextID
+// (mu-guarded so concurrent Surface/retire number race-free), and a
+// Push-error-tolerant loop (a torn-down conn re-syncs on reconnect via
+// modalbridge.Snapshot). On daemon ctx teardown it returns early. Runs on the
+// control-server handler goroutine, mirroring interactiveModalEmitterV2's
+// producer-goroutine fan-out. SECURITY: only the marshal-ready payload (opaque
+// ids + the class-fixed option set) and content-free discriminants are emitted;
+// a marshal/Push error is logged with the transport sentinel only, never bytes.
+func (b *streamApprovalBridge) broadcast(envType string, payload any, pushErrEvent string) {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		// Defensive: ModalShownPayload / ModalDismissedPayload are closed
+		// string/[]struct types and cannot fail to marshal in practice. Never echo
+		// payload bytes or err.Error().
+		b.logger.Warn("relay: stream approval broadcast marshal failed",
+			"event", "stream_approval.marshal_err")
+		return
+	}
+	ctx := b.ctx
+	ts := time.Now().UTC()
+	for _, c := range b.bcast.ActiveConns(ctx) {
+		if !c.Interactive {
+			continue // the #607 capability gate — v2 modal events ride interactive
+		}
+		b.mu.Lock()
+		b.nextID++
+		id := b.nextID
+		b.mu.Unlock()
+		env := protocol.Envelope{
+			ID:      id,
+			Type:    envType,
+			TS:      ts,
+			Payload: payloadJSON,
+		}
+		if err := b.bcast.Push(ctx, c.ConnID, env); err != nil {
+			if ctx.Err() != nil {
+				return // teardown
+			}
+			b.logger.Debug("relay: stream approval broadcast push dropped",
+				"event", pushErrEvent,
+				"conn_id", c.ConnID,
+				"env_id", id)
+		}
+	}
 }
