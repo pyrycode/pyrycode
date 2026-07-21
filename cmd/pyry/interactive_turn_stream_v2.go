@@ -139,10 +139,11 @@ func startInteractiveTurnStreamV2(
 // calls resolve fresh on every (re)subscription, returning the newest file each
 // time still lets a pre-route bootstrap rotation pick up the new JSONL.
 //
-// startOffset = size means the tail starts at EOF, so a (re)subscription streams
-// only NEW events and never replays the historical transcript to the phone.
-// This is the right default for a warm resume (a --continue transcript already
-// on disk) and for a /clear rotation.
+// startOffset = TailFromEnd (own-fd EOF) means the tail seeks to the end of its
+// OWN fd — no caller os.Stat of a size a rotation could stale between resolve and
+// tail-open — so a (re)subscription streams only NEW events and never replays the
+// historical transcript to the phone. This is the right default for a warm resume
+// (a --continue transcript already on disk) and for a /clear rotation.
 //
 // Cold start (#671) is the one exception. On a fresh relay session there is no
 // transcript on disk when the producer first subscribes (claude under --continue
@@ -157,10 +158,10 @@ func startInteractiveTurnStreamV2(
 // The discrimination is stateful across calls: the FIRST file returned after one
 // or more not-found results (and before any file has been returned) is a
 // cold-start file -> offset 0. A file present at the first look (warm resume) or
-// any file after one has already been returned (a rotation) -> size. Offset 0 is
-// confined to a brand-new session file — there is no prior transcript to leak,
-// because a resumed transcript would already exist on disk and take the warm
-// path (see TestResolveLatestSessionJSONL_WarmStartTailsFromSize).
+// any file after one has already been returned (a rotation) -> TailFromEnd.
+// Offset 0 is confined to a brand-new session file — there is no prior transcript
+// to leak, because a resumed transcript would already exist on disk and take the
+// warm path (see TestResolveLatestSessionJSONL_WarmStartTailsFromEnd).
 //
 // Concurrency: resolvedOnce / sawEmpty are read and written only inside the
 // returned closure, which NewTargetSubscriber invokes from the single
@@ -197,7 +198,7 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 			}
 			return "", 0, fmt.Errorf("no session jsonl found in %s", dir)
 		}
-		off := res.Size
+		off := int64(tuidriver.TailFromEnd)
 		if !resolvedOnce && sawEmpty {
 			// Cold start: this fresh file appeared only after an earlier
 			// not-found, so the whole file is the current turn — tail from 0.
@@ -269,9 +270,11 @@ func resolveBootstrapJSONL(dir string, pinnedID func() string, probe rotation.Pr
 //     canonicalDir with a <uuid>.jsonl base (the confidentiality guard — never tail
 //     a file outside the trusted sessions dir, e.g. if PID reuse hands back an
 //     unrelated process's fd). A reject returns a not-found error, no sawEmpty.
-//  4. os.Stat (the path may vanish between probe and stat → retry). Offset = size,
-//     or 0 when the file first appears after an earlier empty look (cold start, so
-//     the whole file is the current turn). Set resolvedOnce.
+//  4. os.Stat (the path may vanish between probe and stat → retry — the stat is
+//     the vanish-race existence gate; its size is no longer read). Offset =
+//     TailFromEnd (own-fd EOF), or 0 when the file first appears after an earlier
+//     empty look (cold start, so the whole file is the current turn). Set
+//     resolvedOnce.
 //
 // The returned path is rebuilt under the original dir (filepath.Join(dir, base)),
 // the same form the sibling resolvers and the rest of the daemon use over
@@ -330,15 +333,17 @@ func resolveOwnBootstrapJSONL(dir string, probe rotation.Probe, pidFn func() int
 		// Return the path under the original dir — the same form the sibling
 		// resolvers use — rather than the guard-only symlink-resolved form.
 		candidate := filepath.Join(dir, base)
-		info, err := os.Stat(candidate)
-		if err != nil {
+		// The stat is the vanish-race existence gate (the path may disappear between
+		// the probe and here → retry); its size is no longer read — the tail owns its
+		// fd end via TailFromEnd below.
+		if _, err := os.Stat(candidate); err != nil {
 			// Raced away between probe and stat — retry.
 			if !resolvedOnce {
 				sawEmpty = true
 			}
 			return "", 0, fmt.Errorf("stat probed jsonl %s: %w", candidate, err)
 		}
-		off := info.Size()
+		off := int64(tuidriver.TailFromEnd)
 		if !resolvedOnce && sawEmpty {
 			// Cold start: this fresh file appeared only after an earlier empty
 			// look, so the whole file is the current turn — tail from 0.
@@ -475,8 +480,9 @@ func resolveTarget(active *activeConversation, boundHost boundHostFunc, bootstra
 // Offset (mtime-independent): the file absent at the first look then appearing is
 // a cold start (a brand-new bound session whose whole file is the current turn)
 // → offset 0 so the in-flight reply streams (#671, per bound session). Present at
-// the first look is a warm resume / switch-back → offset = size (tail from EOF,
-// never replay the conversation's history to the internet-exposed phone).
+// the first look is a warm resume / switch-back → TailFromEnd (own-fd EOF, the
+// tail owns its fd — never replay the conversation's history to the
+// internet-exposed phone).
 //
 // Concurrency: resolvedOnce / sawEmpty are read and written only inside the
 // returned closure, which NewTargetSubscriber invokes from the single
@@ -509,7 +515,7 @@ func resolveBoundSessionJSONL(dir, sessionID string) func(ctx context.Context) (
 			}
 			return "", 0, fmt.Errorf("stat bound session jsonl %s: %w", filepath.Join(dir, sessionID+transcript.Ext), err)
 		}
-		off := res.Size
+		off := int64(tuidriver.TailFromEnd)
 		if !resolvedOnce && sawEmpty {
 			// Cold start: this fresh file appeared only after an earlier absent
 			// look, so the whole file is the current turn — tail from 0.

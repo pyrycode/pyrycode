@@ -69,13 +69,56 @@ func writeJSONL(t *testing.T, dir, uuid string, n int, mtime time.Time) string {
 	return path
 }
 
+// appendJSONL appends one real JSONL line — {"type":"<typ>"} — to path, creating
+// the file if absent and closing the fd before returning. Unlike writeJSONL (which
+// writes opaque "x" bytes for the mtime/size-scan resolvers), this writes a line
+// TailJSONL will parse into a JSONLEntry, so the AC3 behavioral tests can assert on
+// which entries the tail actually delivers.
+func appendJSONL(t *testing.T, path, typ string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	if _, err := f.Write([]byte(`{"type":"` + typ + `"}` + "\n")); err != nil {
+		_ = f.Close()
+		t.Fatalf("append %q to %s: %v", typ, path, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close %s: %v", path, err)
+	}
+}
+
+// drainEntryTypes collects the Type of every JSONLEntry the tail delivers, ending
+// when no entry arrives for idle or a 2s hard cap elapses (the tail polls every
+// ~50ms, so idle=300ms comfortably distinguishes "nothing more coming" from "next
+// poll pending"). Order is preserved so callers assert the exact delivered set.
+func drainEntryTypes(t *testing.T, ch <-chan tuidriver.JSONLEntry, idle time.Duration) []string {
+	t.Helper()
+	var got []string
+	hard := time.After(2 * time.Second)
+	for {
+		select {
+		case e, ok := <-ch:
+			if !ok {
+				return got
+			}
+			got = append(got, e.Type)
+		case <-time.After(idle):
+			return got
+		case <-hard:
+			return got
+		}
+	}
+}
+
 const (
 	uuidA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	uuidB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	uuidC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 )
 
-func TestResolveLatestSessionJSONL_NewestWinsWithSizeOffset(t *testing.T) {
+func TestResolveLatestSessionJSONL_NewestWinsWithTailFromEnd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	base := time.Now().Add(-time.Hour)
@@ -90,8 +133,8 @@ func TestResolveLatestSessionJSONL_NewestWinsWithSizeOffset(t *testing.T) {
 	if want := filepath.Join(dir, uuidB+".jsonl"); path != want {
 		t.Fatalf("path: got %q, want %q (most-recently-modified)", path, want)
 	}
-	if off != 20 {
-		t.Fatalf("startOffset: got %d, want 20 (newest file's current size)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("startOffset: got %d, want %d (TailFromEnd — own-fd EOF, no caller os.Stat)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -120,8 +163,8 @@ func TestResolveLatestSessionJSONL_ReEvaluatesPerCall(t *testing.T) {
 	if want := filepath.Join(dir, uuidB+".jsonl"); path2 != want {
 		t.Fatalf("resolve#2 path: got %q, want %q (rotated file)", path2, want)
 	}
-	if off2 != 7 {
-		t.Fatalf("resolve#2 offset: got %d, want 7", off2)
+	if off2 != tuidriver.TailFromEnd {
+		t.Fatalf("resolve#2 offset: got %d, want %d (TailFromEnd — own-fd EOF)", off2, tuidriver.TailFromEnd)
 	}
 }
 
@@ -165,8 +208,8 @@ func TestResolveLatestSessionJSONL_IgnoresNonSessionEntries(t *testing.T) {
 	if want := filepath.Join(dir, uuidA+".jsonl"); path != want {
 		t.Fatalf("path: got %q, want %q (only the <uuid>.jsonl)", path, want)
 	}
-	if off != 9 {
-		t.Fatalf("offset: got %d, want 9", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("offset: got %d, want %d (TailFromEnd)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -229,8 +272,8 @@ func TestResolveLatestSessionJSONL_ColdStartTailsFromZero(t *testing.T) {
 	}
 
 	// After the first file is returned, a later /clear rotation is no longer a
-	// cold start: a newer file returns its size (EOF), not 0, so a prior
-	// transcript is never replayed. (The post-/clear first-reply race is a
+	// cold start: a newer file tails from its own-fd EOF (TailFromEnd), not 0, so
+	// a prior transcript is never replayed. (The post-/clear first-reply race is a
 	// separate, unobserved mode — out of scope for #671.)
 	rotated := writeJSONL(t, dir, uuidB, 17, time.Now().Add(time.Minute))
 	path, off, err = resolve(context.Background())
@@ -240,17 +283,18 @@ func TestResolveLatestSessionJSONL_ColdStartTailsFromZero(t *testing.T) {
 	if path != rotated {
 		t.Fatalf("rotation path: got %q, want %q (most-recently-modified)", path, rotated)
 	}
-	if off != 17 {
-		t.Fatalf("post-cold-start rotation startOffset: got %d, want 17 (EOF, not a cold start)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("post-cold-start rotation startOffset: got %d, want %d (TailFromEnd, not a cold start)", off, tuidriver.TailFromEnd)
 	}
 }
 
-// TestResolveLatestSessionJSONL_WarmStartTailsFromSize is the mandatory security
+// TestResolveLatestSessionJSONL_WarmStartTailsFromEnd is the mandatory security
 // guard (spec § Security review). A --continue resume transcript already on disk
 // when the resolver first looks is a warm start, NOT a cold start: it must tail
-// from the file size so the historical transcript is never replayed to the
-// internet-exposed phone. Offset 0 here would leak prior-session content.
-func TestResolveLatestSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
+// from the file's own-fd EOF (TailFromEnd) so the historical transcript is never
+// replayed to the internet-exposed phone. Offset 0 here would leak prior-session
+// content.
+func TestResolveLatestSessionJSONL_WarmStartTailsFromEnd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	// A prior transcript is present at the first (and only) resolve.
@@ -263,8 +307,91 @@ func TestResolveLatestSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
 	if path != want {
 		t.Fatalf("warm-start path: got %q, want %q", path, want)
 	}
-	if off != 128 {
-		t.Fatalf("warm-start startOffset: got %d, want 128 (do not replay the prior transcript to the phone)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("warm-start startOffset: got %d, want %d (TailFromEnd — do not replay the prior transcript to the phone)", off, tuidriver.TailFromEnd)
+	}
+}
+
+// TestResolveLatestSessionJSONL_WarmTailSkipsMidResolveGrowth is the AC3 end-to-end
+// proof that the own-fd TailFromEnd offset closes the resolve→tail-open replay
+// window. A warm transcript [a, b] is present when the resolver runs, so it returns
+// tuidriver.TailFromEnd — no caller os.Stat of the size. A third entry c is then
+// appended BEFORE the tail opens (the cross-fd growth window the old caller-stat
+// offset left open: it would have seeked the resolve-time size and replayed c),
+// and d after. Because TailJSONL resolves TailFromEnd against its OWN fd at open
+// time, the tail seeks past [a, b] AND c, so the stream yields only d.
+func TestResolveLatestSessionJSONL_WarmTailSkipsMidResolveGrowth(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, uuidA+".jsonl")
+	appendJSONL(t, path, "a")
+	appendJSONL(t, path, "b")
+
+	gotPath, off, err := resolveLatestSessionJSONL(dir)(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if gotPath != path {
+		t.Fatalf("path: got %q, want %q", gotPath, path)
+	}
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("offset: got %d, want %d (TailFromEnd — no caller-computed offset)", off, tuidriver.TailFromEnd)
+	}
+
+	// Growth between resolve and tail-open: the old caller-stat offset would replay c.
+	appendJSONL(t, path, "c")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := tuidriver.TailJSONL(ctx, path, off)
+	if err != nil {
+		t.Fatalf("TailJSONL: %v", err)
+	}
+	appendJSONL(t, path, "d")
+
+	if got := drainEntryTypes(t, ch, 300*time.Millisecond); !slices.Equal(got, []string{"d"}) {
+		t.Fatalf("tail entries: got %v, want [d] (history [a b] and mid-resolve growth c must not replay)", got)
+	}
+}
+
+// TestResolveLatestSessionJSONL_ColdTailStreamsFromTop is the cold-start counterpart
+// to the warm AC3 proof: the cold-start offset-0 rule is preserved. A fresh file
+// appears only after an earlier not-found, so the resolver returns offset 0, and
+// TailJSONL(ctx, path, 0) streams the whole file from the top — the in-flight reply
+// [a, b] is delivered, never skipped.
+func TestResolveLatestSessionJSONL_ColdTailStreamsFromTop(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	resolve := resolveLatestSessionJSONL(dir)
+
+	if _, _, err := resolve(context.Background()); err == nil {
+		t.Fatal("cold resolve#1 over empty dir: got nil error, want not-found")
+	}
+
+	// The cold-start file appears; its whole content IS the current turn.
+	path := filepath.Join(dir, uuidA+".jsonl")
+	appendJSONL(t, path, "a")
+	appendJSONL(t, path, "b")
+
+	gotPath, off, err := resolve(context.Background())
+	if err != nil {
+		t.Fatalf("cold resolve#2: %v", err)
+	}
+	if gotPath != path {
+		t.Fatalf("path: got %q, want %q", gotPath, path)
+	}
+	if off != 0 {
+		t.Fatalf("cold offset: got %d, want 0 (stream from the top)", off)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := tuidriver.TailJSONL(ctx, path, off)
+	if err != nil {
+		t.Fatalf("TailJSONL: %v", err)
+	}
+	if got := drainEntryTypes(t, ch, 300*time.Millisecond); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("cold tail entries: got %v, want [a b] (the in-flight reply streams from the top)", got)
 	}
 }
 
@@ -330,8 +457,8 @@ func TestResolveOwnBootstrapJSONL_ProbeWinsOverNewerSibling(t *testing.T) {
 	if path != own {
 		t.Fatalf("path: got %q, want %q (the file the daemon's own child holds, not the newer sibling)", path, own)
 	}
-	if off != 30 {
-		t.Fatalf("offset: got %d, want 30 (own file size — warm tail)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("offset: got %d, want %d (TailFromEnd — own-fd EOF, warm tail)", off, tuidriver.TailFromEnd)
 	}
 	if len(probe.pids) == 0 || probe.pids[0] != 4242 {
 		t.Fatalf("probe pids: got %v, want first == 4242 (the child PID)", probe.pids)
@@ -403,10 +530,11 @@ func TestResolveOwnBootstrapJSONL_ColdStartTailsFromZero(t *testing.T) {
 	}
 }
 
-// TestResolveOwnBootstrapJSONL_WarmStartTailsFromSize: a transcript already open at
-// the first look (a --continue resume) is a warm start — it tails from the file
-// size so the history is never replayed to the internet-exposed phone.
-func TestResolveOwnBootstrapJSONL_WarmStartTailsFromSize(t *testing.T) {
+// TestResolveOwnBootstrapJSONL_WarmStartTailsFromEnd: a transcript already open at
+// the first look (a --continue resume) is a warm start — it tails from the file's
+// own-fd EOF (TailFromEnd) so the history is never replayed to the internet-exposed
+// phone.
+func TestResolveOwnBootstrapJSONL_WarmStartTailsFromEnd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	want := writeJSONL(t, dir, uuidA, 128, time.Now())
@@ -419,8 +547,8 @@ func TestResolveOwnBootstrapJSONL_WarmStartTailsFromSize(t *testing.T) {
 	if path != want {
 		t.Fatalf("warm-start path: got %q, want %q", path, want)
 	}
-	if off != 128 {
-		t.Fatalf("warm-start offset: got %d, want 128 (do not replay the prior transcript)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("warm-start offset: got %d, want %d (TailFromEnd — do not replay the prior transcript)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -473,8 +601,8 @@ func TestResolveOwnBootstrapJSONL_NoopProbeFallsBackToMtime(t *testing.T) {
 	if path != want {
 		t.Fatalf("noop fallback path: got %q, want %q (newest by mtime)", path, want)
 	}
-	if off != 20 {
-		t.Fatalf("noop fallback offset: got %d, want 20", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("noop fallback offset: got %d, want %d (TailFromEnd)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -500,8 +628,8 @@ func TestResolveBoundSessionJSONL_KeysOffIDNotMtime(t *testing.T) {
 	if path != bound {
 		t.Fatalf("path: got %q, want %q (the bound session's transcript, not the newer one)", path, bound)
 	}
-	if off != 40 {
-		t.Fatalf("startOffset: got %d, want 40 (bound file size — warm tail, mtime-independent)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("startOffset: got %d, want %d (TailFromEnd — own-fd EOF, mtime-independent)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -534,12 +662,12 @@ func TestResolveBoundSessionJSONL_ColdStartTailsFromZero(t *testing.T) {
 	}
 }
 
-// TestResolveBoundSessionJSONL_WarmStartTailsFromSize: a bound transcript already
+// TestResolveBoundSessionJSONL_WarmStartTailsFromEnd: a bound transcript already
 // on disk at the first look (a --continue resume, or a switch-back to a live
-// session) is a warm start — it tails from the file size so the conversation's
-// history is never replayed to the internet-exposed phone. Offset 0 here would
-// leak prior turns.
-func TestResolveBoundSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
+// session) is a warm start — it tails from the file's own-fd EOF (TailFromEnd) so
+// the conversation's history is never replayed to the internet-exposed phone.
+// Offset 0 here would leak prior turns.
+func TestResolveBoundSessionJSONL_WarmStartTailsFromEnd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	want := writeJSONL(t, dir, uuidA, 128, time.Now())
@@ -551,8 +679,8 @@ func TestResolveBoundSessionJSONL_WarmStartTailsFromSize(t *testing.T) {
 	if path != want {
 		t.Fatalf("warm-start path: got %q, want %q", path, want)
 	}
-	if off != 128 {
-		t.Fatalf("warm-start startOffset: got %d, want 128 (do not replay the bound transcript)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("warm-start startOffset: got %d, want %d (TailFromEnd — do not replay the bound transcript)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -858,8 +986,8 @@ func TestResolveTarget_BoundSessionWhenRouted(t *testing.T) {
 	if path != boundFile {
 		t.Fatalf("bound resolve path: got %q, want %q (by bound id under the per-conv dir, not the dir param's same-stem decoy nor the newer sibling)", path, boundFile)
 	}
-	if off != 30 {
-		t.Fatalf("bound resolve offset: got %d, want 30 (bound file size)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("bound resolve offset: got %d, want %d (TailFromEnd — own-fd EOF)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -909,8 +1037,8 @@ func TestResolveTarget_BootstrapBoundUsesProbeResolver(t *testing.T) {
 	if path != own {
 		t.Fatalf("bootstrap-bound resolve path: got %q, want %q (the probe's own-child file, keyed by PID not the pool id)", path, own)
 	}
-	if off != 30 {
-		t.Fatalf("bootstrap-bound resolve offset: got %d, want 30 (own file size — warm tail)", off)
+	if off != tuidriver.TailFromEnd {
+		t.Fatalf("bootstrap-bound resolve offset: got %d, want %d (TailFromEnd — own-fd EOF, warm tail)", off, tuidriver.TailFromEnd)
 	}
 }
 
@@ -1231,7 +1359,7 @@ func (m mustNotProbeFake) OpenJSONL(int) (string, error) {
 // session id pinned at spawn (#839), the resolver tails the deterministic
 // <id>.jsonl path via the by-id resolver and never consults the fd probe —
 // which real claude's open-append-close write pattern defeats. Present at the
-// first look is a warm resume → offset = size (resolveBoundSessionJSONL's
+// first look is a warm resume → TailFromEnd (resolveBoundSessionJSONL's
 // cold/warm rule).
 func TestResolveBootstrapJSONL_PinnedIDPrefersByID(t *testing.T) {
 	t.Parallel()
@@ -1252,8 +1380,8 @@ func TestResolveBootstrapJSONL_PinnedIDPrefersByID(t *testing.T) {
 	if got != path {
 		t.Errorf("path = %q, want %q", got, path)
 	}
-	if off != int64(len(content)) {
-		t.Errorf("offset = %d, want %d (warm resume tails from EOF)", off, len(content))
+	if off != tuidriver.TailFromEnd {
+		t.Errorf("offset = %d, want %d (TailFromEnd — warm resume tails from own-fd EOF)", off, tuidriver.TailFromEnd)
 	}
 }
 
