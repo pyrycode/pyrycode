@@ -1,6 +1,6 @@
 # `internal/streamsup` — persistent stream-json child lifecycle
 
-Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), the `newStreamRunnerFactory` constructor that builds a `streamRunner` from a `supervisor.Config` (#1109), and the drain that fans its parsed turnevents into the unchanged `interactiveTurnEmitterV2` (#1098) have shipped. It still ships with no *production* consumer — `send_message`/`set_session_settings` work for free once a `streamRunner` is constructed, but the `interactive_runner` selection that injects `newStreamRunnerFactory`'s factory onto `sessions.Config.RunnerFactory` is #1081's scope, not yet landed.
+Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), the `newStreamRunnerFactory` constructor that builds a `streamRunner` from a `supervisor.Config` (#1109), the drain that fans its parsed turnevents into the unchanged `interactiveTurnEmitterV2` (#1098), the interrupt send primitive (#1120), and the fresh-restart-under-a-new-id mechanism (`RestartFresh`, #1124) have shipped. It still ships with no *production* consumer — `send_message`/`set_session_settings` work for free once a `streamRunner` is constructed, but the `interactive_runner` selection that injects `newStreamRunnerFactory`'s factory onto `sessions.Config.RunnerFactory` is #1081's scope, not yet landed.
 
 **No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
 
@@ -30,6 +30,10 @@ func (r *Runner) State() State
 func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
 func (r *Runner) WaitForPTY(ctx context.Context) error
 func (r *Runner) Restart(args []string)
+
+// concrete, off sessions.Runner (#1077) — see "Fresh-restart under a new id" below
+func (r *Runner) Interrupt() error
+func (r *Runner) RestartFresh(newID string)
 ```
 
 `New` validates `ClaudeBin`/`WorkDir`/`SessionID` non-empty, `exec.LookPath`s the binary, resolves `WorkDir` (a missing dir → wrapped `fs.ErrNotExist`), and applies backoff defaults. `Stdin()` returns `io.Writer`, not `io.WriteCloser` — deliberately, so a consumer (the #1088 turn writer) cannot close a handle the runner owns; it returns nil whenever no child is currently live (before first spawn, mid-restart, during teardown).
@@ -207,12 +211,35 @@ discipline, not a new one. `Interrupt` is a **concrete method on `*Runner`, deli
 `SendEsc` (#726) off the interface; the interrupt *routing* sibling (#1121) reaches it via its own
 narrow interface or a type assertion. See [codebase/1120.md](../codebase/1120.md).
 
+**Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
+session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
+and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
+seam above, but rotates the **session id**, not the argv: a new `restartMu`-guarded pair,
+`sessionID` (the mutable analogue of the construction-time, immutable `cfg.SessionID`; seeded from it in
+`New`) and `rotatePending` (a one-shot flag), sit alongside `args`/`iterCancel` in the same field group.
+`Run`'s spawn loop reads `nextSpawnID()` — a `restartMu`-guarded accessor that snapshots
+`(sessionID, rotatePending)` and clears `rotatePending` in one critical section — instead of
+`r.cfg.SessionID` directly; when `rotatePending` is true it re-arms the Run-goroutine-private `firstRun`
+local to `true` before calling `buildArgs` (itself untouched). The existing `started`-gated `firstRun`
+flip (see the gate above) then does the rest for free: a successful fresh spawn flips `firstRun` back to
+`false` so the next respawn `--resume`s the rotated id; a setup failure on the fresh spawn leaves
+`firstRun` `true` so the retry keeps trying `--session-id <newID>` rather than `--resume`-ing a session
+that was never established. `RestartFresh` mirrors `Restart`'s hint-before-cancel ordering and
+newest-wins coalescing exactly, but **leaves `r.args` untouched** — `new_session` rotates identity, not
+flags, so args stay `Restart`/`UpdateSettings`'s concern. An empty `newID` is a `Warn`-logged no-op (the
+runner never spawns `--session-id ""`); this is a deterministic last-resort guard, not the primary
+validation — that's the pool/routing layer's job (#1125), per the "caller-supplied id validation at the
+primitive boundary" convention. Concrete method, off `sessions.Runner` (#1077), same discipline as
+`Interrupt` above — the routing sibling (#1125) reaches it via a narrow interface or type assertion. See
+[codebase/1124.md](../codebase/1124.md).
+
 Still deferred (needs richer context than this slice): `max_tokens`/`refusal` `TurnEnd` reason
 classification (`resultTurnEndReason`'s `default` branch is the safe placeholder until one is observed);
 routing an inbound remote interrupt frame to the correct per-conversation runner (#1121, blocked-by
-#1120); whether the parser's line buffer needs resetting across a crash-restart (see
-[codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge case, non-blocking
-for this unwired slice).
+#1120); routing an inbound `new_session` frame to the correct per-conversation runner and the pool-side
+`Pool.RotateID` (#1125, blocked-by #1124); whether the parser's line buffer needs resetting across a
+crash-restart (see [codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge
+case, non-blocking for this unwired slice).
 
 ## Idle/stall watchdog — receive-side, emit-not-kill (#1094)
 
@@ -297,14 +324,16 @@ restart), `Stopped` in a top-level `defer`.
 
 **Live-restart seam** (previously absent — the old `runner.go` doc explicitly called this out as a gap;
 `Run` now has it). A third leaf mutex `restartMu` guards `args` (the live spawn base argv, swapped by
-`Restart`, read via `liveArgs()`) and `iterCancel` (the current spawn iteration's `context.CancelFunc`,
-published via `setIterCancel` each iteration). `Restart(args []string)` swaps `args`, sends a non-blocking
-hint on a buffered(1) `restartCh` (coalesces rapid restarts to one relaunch with the newest args), and
-cancels the current `iterCancel` if a child is live — mirroring `supervisor.Restart` byte-for-byte in
-shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`, never a `Pool`/`Session` lock, so
-`Pool.UpdateSettings` can call it after releasing `Pool.mu` with no lock-order concern. Because `firstRun`
-is already `false` after the first successful spawn, a restart always respawns via `--resume <sessionID>`
-— the conversation resumes rather than forking.
+`Restart`, read via `liveArgs()`), `iterCancel` (the current spawn iteration's `context.CancelFunc`,
+published via `setIterCancel` each iteration), and — since #1124 — the `sessionID`/`rotatePending` pair
+`RestartFresh` rotates (see "Fresh-restart under a new id" below). `Restart(args []string)` swaps `args`,
+sends a non-blocking hint on a buffered(1) `restartCh` (coalesces rapid restarts to one relaunch with the
+newest args), and cancels the current `iterCancel` if a child is live — mirroring `supervisor.Restart`
+byte-for-byte in shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`, never a
+`Pool`/`Session` lock, so `Pool.UpdateSettings` can call it after releasing `Pool.mu` with no lock-order
+concern. Because `firstRun` is already `false` after the first successful spawn, a plain restart always
+respawns via `--resume <sessionID>` — the conversation resumes rather than forking; `RestartFresh` is the
+one path that re-arms `firstRun` to force a fresh `--session-id` spawn instead.
 
 **`WriteUserTurn`/`WaitForPTY`.** `WriteUserTurn(ctx, conversationID, payload)` is a one-line wrap of the
 already-reviewed `WriteTurn` free function (#1088/#1093) — no new envelope construction, and it inherits
@@ -448,6 +477,8 @@ production wiring later) owns its construction and replay wiring (`SetReplaySour
 - [`codebase/1097.md`](../codebase/1097.md) — the `sessions.Runner` satisfaction slice (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + `cmd/pyry` adapter).
 - [`codebase/1109.md`](../codebase/1109.md) — the `streamRunnerFactory`/`mapStreamsupConfig`/`stripSessionIDFlags` construction slice.
 - [`codebase/1098.md`](../codebase/1098.md) — the turnevent drain slice (`streamTurnSink`/`startStreamTurnDrainV2`).
+- [`codebase/1120.md`](../codebase/1120.md) — the interrupt send primitive + `result` subtype mapping slice.
+- [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`nextSpawnID`).
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
 - Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.
