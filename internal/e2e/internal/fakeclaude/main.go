@@ -15,8 +15,11 @@
 //	                               every byte read from os.Stdin is
 //	                               appended (with fsync per write) so the
 //	                               e2e harness can observe what the
-//	                               supervisor wrote to the PTY. Default
-//	                               off — when unset, stdin is not read.
+//	                               supervisor wrote to the PTY. In
+//	                               stream-json mode the same var tees the
+//	                               stream child's stdin to the file (#1137).
+//	                               Default off — when unset, stdin is not
+//	                               read.
 //	PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER  optional path watched in parallel
 //	                               with PYRY_FAKE_CLAUDE_TRIGGER. When the
 //	                               file appears, its contents are written
@@ -444,8 +447,26 @@ func main() {
 	// it withholds the per-turn result (the turn stays in flight) and honours an
 	// interrupt control_request. Passed as a value so runStreamJSON stays a pure I/O
 	// seam; unset keeps every other stream rider on the untouched default.
+	//
+	// PYRY_FAKE_CLAUDE_STDIN_LOG (default-off) tees every stdin byte the daemon
+	// writes to this stream child — user-turn envelopes, interrupt control_requests —
+	// to the log so the e2e can assert what reached the child (e.g. #1137: a stream
+	// new_session is a fresh SPAWN, so the child NEVER receives a typed "/clear"). The
+	// tee lives at the call site so runStreamJSON keeps its pure I/O signature (the
+	// #1140 unit test and #1136 interrupt rider are untouched). Append-mode + per-write
+	// Sync mirror the PTY reader's log (startStdinReader) so the bootstrap child and
+	// the fresh post-rotation child both accumulate into one file; unset is
+	// byte-identical to prior behaviour (#1141/#1136 set no such env).
 	if os.Getenv(envStreamJSON) != "" {
-		runStreamJSON(os.Stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
+		stdin := io.Reader(os.Stdin)
+		if logPath := os.Getenv(envStdinLog); logPath != "" {
+			f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+			if err != nil {
+				fatalf("open stream stdin log %s: %v", logPath, err)
+			}
+			stdin = io.TeeReader(os.Stdin, syncWriter{f})
+		}
+		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
 		return
 	}
 
@@ -1128,6 +1149,21 @@ type outResult struct {
 	Type      string `json:"type"`
 	Subtype   string `json:"subtype"`
 	SessionID string `json:"session_id"`
+}
+
+// syncWriter is an io.Writer that fsyncs after every Write, mirroring the PTY
+// stdin reader's per-write Sync (startStdinReader): a cross-process reader (the
+// e2e polling PYRY_FAKE_CLAUDE_STDIN_LOG) then sees each turn's bytes promptly. It
+// wraps the stream-mode stdin tee (main()); nothing else writes f, so no lock is
+// needed.
+type syncWriter struct{ f *os.File }
+
+func (w syncWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	if err != nil {
+		return n, err
+	}
+	return n, w.f.Sync()
 }
 
 // runStreamJSON reads line-delimited stream-json user-turn envelopes from r and,
