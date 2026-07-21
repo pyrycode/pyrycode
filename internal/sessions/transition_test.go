@@ -88,6 +88,119 @@ func TestPool_TransitionObserver_ClearFiresOnRotate(t *testing.T) {
 	}
 }
 
+// TestRotateForNewSession covers the DIRECT (daemon-driven) new_session
+// rotation: it mints a fresh id, re-keys the pool entry, registers the new id in
+// the allocated skip-set (so the fresh --session-id spawn's <newID>.jsonl CREATE
+// does not double-rotate the watcher), rebinds the owning conversation, and fires
+// exactly one ReasonClear transition — the same observable a /clear produces, but
+// minted and driven directly rather than observed. An unknown oldID is inert.
+func TestRotateForNewSession(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bound conversation rotates to a fresh minted id", func(t *testing.T) {
+		pool := helperPool(t, false)
+		orig := pool.Default()
+		oldID := orig.ID()
+
+		const convID conversations.ConversationID = "11111111-2222-4333-8444-555555555555"
+		reg, _ := seedBoundConvRegistry(t, pool, convID, oldID)
+
+		rec := &transitionRecorder{}
+		pool.SetTransitionObserver(rec.observe)
+
+		newID, err := pool.RotateForNewSession(oldID)
+		if err != nil {
+			t.Fatalf("RotateForNewSession: %v", err)
+		}
+		if newID == "" || !ValidID(string(newID)) {
+			t.Fatalf("newID = %q, want a fresh valid UUID", newID)
+		}
+		if newID == oldID {
+			t.Fatalf("newID == oldID (%q); want a distinct minted id", newID)
+		}
+
+		// Re-key: oldID gone, newID resolves to the SAME session pointer.
+		if _, err := pool.Lookup(oldID); !errors.Is(err, ErrSessionNotFound) {
+			t.Errorf("Lookup(oldID) err = %v, want ErrSessionNotFound (entry should have moved)", err)
+		}
+		got, err := pool.Lookup(newID)
+		if err != nil {
+			t.Fatalf("Lookup(newID): %v", err)
+		}
+		if got != orig {
+			t.Errorf("Lookup(newID) returned a different session; want the same rotated entry")
+		}
+
+		// Owning conversation rebound to the new id.
+		conv, ok := reg.Get(convID)
+		if !ok {
+			t.Fatal("Get(conv): not found")
+		}
+		if conv.CurrentSessionID != string(newID) {
+			t.Errorf("CurrentSessionID = %q, want %q (rebound)", conv.CurrentSessionID, newID)
+		}
+
+		// Skip-set primed before the fresh spawn. IsAllocated consumes on hit, so
+		// assert exactly once.
+		if !pool.IsAllocated(newID) {
+			t.Errorf("IsAllocated(newID) = false, want true — the minted id must be registered before the --session-id spawn or the watcher double-rotates")
+		}
+
+		// Exactly one ReasonClear transition carrying old→new.
+		signals := rec.snapshot()
+		if len(signals) != 1 {
+			t.Fatalf("observer fired %d times, want 1: %+v", len(signals), signals)
+		}
+		if tr := signals[0]; tr.Reason != ReasonClear || tr.PreviousID != oldID || tr.NewID != newID {
+			t.Errorf("signal = %+v, want {ReasonClear, %q, %q}", tr, oldID, newID)
+		}
+	})
+
+	t.Run("unknown oldID is inert", func(t *testing.T) {
+		pool := helperPool(t, false)
+		oldID := pool.Default().ID()
+
+		const convID conversations.ConversationID = "11111111-2222-4333-8444-555555555555"
+		reg, path := seedBoundConvRegistry(t, pool, convID, oldID)
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read pre-rotate file: %v", err)
+		}
+
+		rec := &transitionRecorder{}
+		pool.SetTransitionObserver(rec.observe)
+
+		unknown := SessionID("ffffffff-ffff-4fff-8fff-ffffffffffff")
+		newID, err := pool.RotateForNewSession(unknown)
+		if !errors.Is(err, ErrSessionNotFound) {
+			t.Fatalf("RotateForNewSession(unknown) err = %v, want ErrSessionNotFound", err)
+		}
+		if newID != "" {
+			t.Errorf("newID = %q, want empty on the not-found path", newID)
+		}
+
+		// No mutation: entry still at oldID, binding intact, no signal, file
+		// byte-identical.
+		if _, err := pool.Lookup(oldID); err != nil {
+			t.Errorf("Lookup(oldID) err = %v, want nil (unchanged)", err)
+		}
+		conv, _ := reg.Get(convID)
+		if conv.CurrentSessionID != string(oldID) {
+			t.Errorf("CurrentSessionID = %q, want %q (unchanged)", conv.CurrentSessionID, oldID)
+		}
+		if n := rec.len(); n != 0 {
+			t.Errorf("observer fired %d times on unknown-id rotation, want 0", n)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read post-rotate file: %v", err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Error("conversations.json rewritten on an unknown-id rotation; want untouched")
+		}
+	})
+}
+
 // TestPool_OnRotate_UnknownIDNoSignal: onRotate against an unknown id returns
 // ErrSessionNotFound and fires no signal (a failed rotation emits nothing).
 func TestPool_OnRotate_UnknownIDNoSignal(t *testing.T) {
