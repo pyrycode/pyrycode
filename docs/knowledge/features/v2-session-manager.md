@@ -784,6 +784,75 @@ safe-denied on the window even if it reached zero phones (net-positive availabil
 #798 nothing armed it in production). `TestV2Session_ModalTimeout_FanOut` proves the
 off-`Run`-arm → on-`Run`-fire crossing under `-race`.
 
+#### Stream-json approval bridge — the verdict arm (#1080)
+
+`ResolveAnswer` gained a **second** actuation arm alongside the tui keystroke arm
+above: a `modal_answer` for a **stream-json** permission request (a
+[`permbridge`](permbridge-package.md)-parked completer, #1103) resolves that
+completer to allow/deny instead of routing a keystroke — no on-screen modal exists
+on the stream-json path, so there is nothing to press Esc/Enter into. Everything
+up through the gate → classify → modalbridge-consume steps in `ResolveAnswer` is
+**unchanged and runs first**, regardless of which arm actuates.
+
+- **`streamApprovalBridge`** (`cmd/pyry/modal_resolve_v2.go`, co-located with
+  `modalResolverV2`) is the join: it owns the `modal_id ⇄ tool_use_id`
+  correlation neither `permbridge.Registry` nor `modalbridge.Registry` holds.
+  `Surface(req permbridge.Request) (retire func())` — called from
+  `internal/control/server.go`'s `handleApprove` via the new
+  `SetApprovalSurfacer` seam (mirrors `SetRekeyer`/`SetApprovalRegistry`) —
+  raises a parked approval as the **same** permission `modal_shown` clients
+  already answer (via `modalbridge.PermissionRequestForClass` +
+  `modal.Record`, so the 4-option/reject-once-default payload is
+  byte-compatible by construction) and stores `byModal[modalID] = toolUseID`.
+  `handleApprove` `defer`s the returned `retire` immediately after `Surface`
+  returns, so it fires on **every** terminal `Await` path uniformly (answer,
+  timeout, disconnect, shutdown).
+- **`modalResolverV2.streamApprovals streamApprovalResolver`** — an optional
+  nil-default field (the #1014 pattern; 18 test call sites stay untouched). At
+  the actuate step, `ResolveAnswer` computes `allow :=
+  devices.AuthorizeRemotePermission(dev, outcome)` **once** and dispatches:
+  `r.streamApprovals != nil && r.streamApprovals.ResolveStream(modalID, allow,
+  reasonRemoteDeny)`; only when that returns `false` (nil bridge, or `modalID`
+  absent from `byModal` — not a stream approval) does the tui keystroke arm
+  run. `ResolveStream` resolves `perm.Resolve(toolUseID, ...)` — `Allow`
+  echoing the parked `Input` byte-verbatim, or the fixed content-free
+  `reasonRemoteDeny` constant — and does **not** delete the correlation or
+  consume modalbridge (both already handled elsewhere).
+- **Single-arbiter dismissal, unconditional-delete correlation.** `retire`
+  deletes `byModal[modalID]` **unconditionally** on every call, then
+  `modal.Resolve(modalID)` — the modalbridge one-shot — decides whether *it*
+  (not `retire`) already broadcast the dismissal: a miss means `ResolveAnswer`
+  already consumed it (answer path, no second broadcast); a hit means
+  timeout/disconnect/shutdown, so `retire` audits `denied_timeout` and
+  broadcasts `modal_dismissed` itself (AC-3, no stale modal). The
+  architect's spec originally gated the delete behind the `modal.Resolve`
+  `ok` branch, which leaked `byModal` forever on every *answered* approval
+  (that branch always misses on the answer path) — caught as a MUST FIX in
+  the spec's own security review and fixed before code landed; a
+  no-correlation-leak test on both the answer and timeout paths is the
+  regression guard.
+- **No new timer.** The stream modal deliberately does **not** call
+  `ArmModalTimeout` — `permbridge`'s own registry-owned timer is the sole
+  timeout authority (two timers would drift), and `ResolveTimeout` routes an
+  Esc keystroke, which has no target on the stream-json path. `retire`
+  (invoked promptly on `Await`'s return) is the client-dismissal backstop
+  instead.
+- **Wiring.** `startRelayV2` constructs the bridge over the **same**
+  `*permbridge.Registry` `runSupervisor` created and the **same**
+  `*modalbridge.Registry` the emitter/resolver already share, sets
+  `modalResolver.streamApprovals = bridge` **before** `mgr.Run` starts (so no
+  data race on the resolver field from an in-flight `modal_answer`), and
+  returns `bridge.Surface` outward through `startRelay` to `main.go`, which
+  calls `ctrl.SetApprovalSurfacer(surface)`. A nil `w.approvals`
+  (foreground/v1/relay disabled) leaves `streamApprovals` nil and
+  `SetApprovalSurfacer(nil)` — `handleApprove` still parks and blocks, just
+  with no client-facing modal, the pre-#1080 behaviour.
+
+See [permbridge-package.md](permbridge-package.md) for the registry primitive
+this bridges, [control-plane.md § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104)
+for the `handleApprove`/`SetApprovalSurfacer` side, and
+[codebase/1080.md](../codebase/1080.md) for the ticket record.
+
 ### Inbound interrupt (#707) — `Interrupter` seam + Esc routing
 
 `interrupt` is a v2 **control** envelope (phone → binary), intercepted in

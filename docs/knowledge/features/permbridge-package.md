@@ -4,10 +4,10 @@ The daemon-side registry that lets a synchronous permission prompt from a non-YO
 
 This package shipped the registry **primitive only**, unwired and unit-tested in isolation (mirroring how `internal/modalbridge` shipped ahead of its own consumers). Consumers:
 
-- **#1104 (landed)** — the control-socket `mcp.approve` verb (`internal/control`) forwards claude's request into `Register` and serializes the `Await`ed verdict back to the `pyry mcp-approve` subcommand. See [control-plane.md § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104) and [codebase/1104.md](../codebase/1104.md). It is the first — and, until #1080 lands, only — production caller of `Register`/`Await`; there is still no resolver, so every requested approval times out to deny (`internal/control`'s `mcpApprovalTimeout`, 2 min).
+- **#1104 (landed)** — the control-socket `mcp.approve` verb (`internal/control`) forwards claude's request into `Register` and serializes the `Await`ed verdict back to the `pyry mcp-approve` subcommand. See [control-plane.md § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104) and [codebase/1104.md](../codebase/1104.md). It was the first production caller of `Register`/`Await`; until #1080 landed there was no resolver, so every requested approval timed out to deny.
 - **#1105 (landed)** — the `pyry mcp-approve` stdio subcommand forwards claude's `tools/call approve` through #1104's verb into this registry. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md).
 - **#1106 (landed)** — spawn-arg injection + mcp-config generation (`cmd/pyry/mcp_config.go`) that points a non-YOLO claude spawn at the #1105 subcommand in the first place (`--permission-prompt-tool mcp__pyry_approve__approve --mcp-config <path>`). Doesn't call the registry directly; completes the enforce-vs-skip switch that makes #1104/#1105 reachable at all. See [codebase/1106.md](../codebase/1106.md).
-- the `modal_shown ↔ modal_answer` wiring that calls `Resolve` from a human decision (#1080, not yet landed) — will thread the *same* `*Registry` instance #1104 created at the `cmd/pyry` composition root (`runSupervisor`), not a second one
+- **#1080 (landed)** — the `modal_shown ↔ modal_answer` wiring: `cmd/pyry`'s `streamApprovalBridge` calls `Lookup`/`Resolve` from a client's decision, threading the *same* `*Registry` instance #1104 created at the `cmd/pyry` composition root (`runSupervisor`), not a second one. See [v2-session-manager.md § Stream-json approval bridge](v2-session-manager.md#stream-json-approval-bridge--the-verdict-arm-1080) and [codebase/1080.md](../codebase/1080.md).
 
 Spec: [`specs/architecture/1103-permbridge-registry.md`](../../specs/architecture/1103-permbridge-registry.md). Ticket record: [codebase/1103.md](../codebase/1103.md).
 
@@ -42,7 +42,7 @@ func Allow(updatedInput json.RawMessage) Verdict // {BehaviorAllow, updatedInput
 func Deny(message string) Verdict                // {BehaviorDeny, nil, message}
 ```
 
-`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — an allow typically echoes the request's `Input` back as `UpdatedInput` (whether an allow ever *modifies* it is a #1080 resolver decision; the primitive only carries the bytes). `omitempty` gives the two disjoint wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
+`Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. `omitempty` gives the two disjoint wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
 
 ## Registry surface
 
@@ -60,7 +60,7 @@ func (p *Pending) Await() Verdict
 
 - **`Register`** parks `req` under `id`, arms the fail-closed deadline (`time.AfterFunc(timeout, …)`), and returns the caller's handle. Rejects an empty `id` or a duplicate live `id` with `ErrDuplicateID` (`errors.Is`-matchable; caller default-denies).
 - **`Resolve`** satisfies the pending request `id` with `v`; returns `true` if it resolved a live entry, `false` if the id is unknown or already resolved — a safe no-op.
-- **`Lookup`** returns the parked `Request` for `id` without resolving it — the read seam #1080 uses to build `Allow(req.Input)`. Unknown id → `(Request{}, false)`, also a safe no-op.
+- **`Lookup`** returns the parked `Request` for `id` without resolving it — the read seam `streamApprovalBridge.ResolveStream` (#1080) uses to build `Allow(req.Input)`. Unknown id → `(Request{}, false)`, also a safe no-op.
 - **`Pending.Await`** blocks until resolved and returns the verdict; guaranteed to return within the `Register` timeout because the registry-owned timer always delivers a deny if nothing else resolves the entry first.
 
 Exported surface: 4 types (`Request`, `Verdict`, `Registry`, `Pending`), funcs `New`/`Allow`/`Deny`, sentinel `ErrDuplicateID`.
@@ -87,7 +87,7 @@ This mirrors `cmd/pyry/acp_permission.go`'s existing default-deny idiom (every n
 
 ## Concurrency model
 
-Four goroutine roles touch the registry: (1) the caller/verb goroutine — `Register` then `Await`, one per parked request; (2) the resolver goroutine (#1080's `modal_answer` handler calling `Resolve`); (3) the per-entry timer goroutine (`time.AfterFunc`, `Stop()`ped when `Resolve` wins so it never fires in the resolved-in-time case); (4) a concurrent `Lookup` reader. All shared state is `Registry.pending`, guarded by the **leaf** `Registry.mu` — held only around O(1) map ops, never nested with another lock, never held across the channel send. Each `pending.ch` is buffered(1), written exactly once by the one-shot winner, read at most once by `Await`.
+Four goroutine roles touch the registry: (1) the caller/verb goroutine — `Register` then `Await`, one per parked request; (2) the resolver goroutine (`streamApprovalBridge.ResolveStream`/`retire`, #1080, calling `Resolve` from the relay `Run` goroutine and the control-server handler goroutine respectively); (3) the per-entry timer goroutine (`time.AfterFunc`, `Stop()`ped when `Resolve` wins so it never fires in the resolved-in-time case); (4) a concurrent `Lookup` reader. All shared state is `Registry.pending`, guarded by the **leaf** `Registry.mu` — held only around O(1) map ops, never nested with another lock, never held across the channel send. Each `pending.ch` is buffered(1), written exactly once by the one-shot winner, read at most once by `Await`.
 
 No daemon-lifecycle goroutine exists in this primitive — shutdown (a bulk "deny all pending on daemon stop" drain) is deferred; every entry is self-bounded by its own `timeout`, so no entry outlives its deadline regardless of process shutdown timing.
 

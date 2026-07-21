@@ -19,6 +19,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/keys"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
+	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
@@ -230,6 +231,12 @@ type relayWiring struct {
 	// snapshotSettings reports the bootstrap session's persisted model/effort/YOLO
 	// for the screen_snapshot reply (#848). nil reports defaults.
 	snapshotSettings func() (model, effort string, yolo bool)
+	// approvals is the daemon-singleton pending-approval registry (#1103). The
+	// stream-approval bridge (#1080) constructed in startRelayV2 Lookups/Resolves
+	// parked completers against this SAME instance the control server parks into,
+	// and startRelayV2 returns the bridge's Surface for the control server to call.
+	// nil (foreground/v1) leaves the resolver's stream arm unwired ⇒ keystroke-only.
+	approvals *permbridge.Registry
 }
 
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
@@ -261,15 +268,17 @@ func startRelay(
 	ctx context.Context,
 	logger *slog.Logger,
 	w relayWiring,
-) (cleanup func(), err error) {
+) (cleanup func(), surface func(permbridge.Request) func(), err error) {
 	if w.relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
-		return func() {}, nil
+		// No relay leg ⇒ no stream-approval bridge; surface stays nil, so the
+		// control server's SetApprovalSurfacer(nil) leaves mcp.approve modal-less.
+		return func() {}, nil, nil
 	}
 
 	serverID, err := identity.LoadOrCreate(resolveServerIDPath(w.instanceName))
 	if err != nil {
-		return nil, fmt.Errorf("load server-id: %w", err)
+		return nil, nil, fmt.Errorf("load server-id: %w", err)
 	}
 
 	// Load the device registry once at daemon startup. A missing file
@@ -277,7 +286,7 @@ func startRelay(
 	// `pyry pair` runs. Malformed JSON fails fast.
 	registry, err := devices.Load(resolveDevicesPath(w.instanceName))
 	if err != nil {
-		return nil, fmt.Errorf("load device registry: %w", err)
+		return nil, nil, fmt.Errorf("load device registry: %w", err)
 	}
 
 	if w.allowInsecure {
@@ -294,17 +303,17 @@ func startRelay(
 		ServerIDConflictThreshold: relay4409Threshold(logger),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("relay connect: %w", err)
+		return nil, nil, fmt.Errorf("relay connect: %w", err)
 	}
 
 	// legCleanup tears down the v2 Noise manager — the sole consumer of
 	// conn.Frames() (ADR 024: v2 is a hard cutover, no mixed-mode path). The
 	// shared waitDone classifier below is appended to it in the returned cleanup.
 	logger.Info("relay: Mobile Protocol v2 (Noise_IK)")
-	drain, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
+	drain, surface, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
 	if err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	legCleanup := func() {
 		// Close the connection first so Connection.run closes Frames,
@@ -344,7 +353,7 @@ func startRelay(
 		legCleanup()
 		<-waitDone
 	}
-	return cleanup, nil
+	return cleanup, surface, nil
 }
 
 // relay4409Threshold reads the PYRY_RELAY_4409_THRESHOLD test-only seam: a
@@ -418,10 +427,10 @@ func startRelayV2(
 	conn *relay.Connection,
 	registry *devices.Registry,
 	serverID identity.ServerID,
-) (drain func(), err error) {
+) (drain func(), surface func(permbridge.Request) func(), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(w.instanceName))
 	if err != nil {
-		return nil, fmt.Errorf("load static key: %w", err)
+		return nil, nil, fmt.Errorf("load static key: %w", err)
 	}
 	priv := staticKey.PrivateKey()
 
@@ -588,7 +597,23 @@ func startRelayV2(
 		SettingsUpdater: w.settings,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("build v2 session manager: %w", err)
+		return nil, nil, fmt.Errorf("build v2 session manager: %w", err)
+	}
+
+	// Stream-json approval bridge (#1080): joins the daemon-singleton permbridge
+	// parked-approval store (claude-facing completers, keyed by tool_use_id) to
+	// modalReg (client-facing modal_shown, keyed by modal_id), owning the
+	// modal_id ⇄ tool_use_id correlation. Surface (returned to the control server)
+	// raises a parked approval as the SAME permission modal_shown clients already
+	// answer; the resolver's stream arm resolves the parked completer on a
+	// modal_answer. Constructed AFTER mgr (its interactive broadcaster) and BEFORE
+	// mgr.Run starts below, so streamApprovals is set before any modal_answer can
+	// dispatch on the Run goroutine — no data race on the resolver field. nil
+	// approvals (foreground/v1) leaves streamApprovals nil ⇒ keystroke-only.
+	if w.approvals != nil {
+		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
+		modalResolver.streamApprovals = bridge
+		surface = bridge.Surface
 	}
 
 	mgrDone := make(chan struct{})
@@ -680,7 +705,7 @@ func startRelayV2(
 		streamQueueStateCleanup()
 		streamSessionErrCleanup()
 		<-mgrDone
-	}, nil
+	}, surface, nil
 }
 
 // conversationForSession resolves a claude session id to the id of the
