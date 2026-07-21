@@ -365,6 +365,82 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 	return h
 }
 
+// StartStreamInteractiveWithRelay starts a daemon under
+// interactive_runner:"stream-json" (the production toggle selectInteractiveRunner,
+// driven via <home>/.pyry/config.json) with the stream-json fakeclaude as the
+// supervised child plus relay wiring, so a spec can drive phone → relay → daemon →
+// stream-runner → fakeclaude and observe the turn drain.
+//
+// initialUUID pins the bootstrap pool id; the caller binds its conversation to it
+// via seedBoundConversation so the drain gate (startStreamTurnDrainV2) sees the
+// event's sink tag (the runner's construction-time cfg.SessionID = the bootstrap
+// pool id) equal to activeSession() (the bound session id). relayURL is the
+// /v2/server endpoint. extraEnv is appended verbatim for the rider specs
+// (#1136–#1139).
+//
+// Unlike StartRotationWithRelay this sets NONE of the SESSIONS_DIR / INITIAL_UUID /
+// TRIGGER / STDIN_LOG child envs: stream-mode fakeclaude short-circuits above its
+// mustEnv calls (#1140), so it binds no sessions dir and needs none of them. In
+// that mode fakeclaude reads {"type":"user",…} turn envelopes on stdin and, per
+// turn, writes one assistant text line (echoing the prompt) + one result line — the
+// wire the daemon's stream drain parses into the assistant_delta + turn_state the
+// client observes. ClaudeSessionsDir is left unset (stream mode opens no transcript).
+func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
+	t.Helper()
+
+	// Opt the daemon into the stream-json interactive runner via the production
+	// config toggle. resolveConfigPath reads <home>/.pyry/config.json once at
+	// startup, so this must land BEFORE spawn. A raw JSON literal (not an
+	// internal/config import) keeps harness.go import-lean under e2e || e2e_install,
+	// mirroring seedBootstrapRegistry. A partial config keeps every other field at
+	// its default (config.Load overlay); -pyry-relay overrides relay_url, so only
+	// interactive_runner is written here.
+	pyryDir := filepath.Join(home, ".pyry")
+	if err := os.MkdirAll(pyryDir, 0o700); err != nil {
+		t.Fatalf("e2e: mkdir .pyry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pyryDir, "config.json"),
+		[]byte(`{"interactive_runner":"stream-json"}`), 0o600); err != nil {
+		t.Fatalf("e2e: write config.json: %v", err)
+	}
+
+	fakeBin := ensureFakeClaudeBuilt(t)
+	seedBootstrapRegistry(t, home, initialUUID)
+
+	envSet := []string{
+		"PYRY_ALLOW_INSECURE_RELAY=1",
+		"PYRY_MOBILE_V2=1",
+		"PYRY_FAKE_CLAUDE_STREAM_JSON=1",
+	}
+	envSet = append(envSet, extraEnv...)
+	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
+		claudeBin:  fakeBin,
+		claudeArgs: []string{},
+		extraFlags: []string{
+			"-pyry-workdir=" + home,
+			"-pyry-relay=" + relayURL,
+		},
+		extraEnv: envSet,
+	})
+
+	h := &Harness{
+		SocketPath: socket,
+		HomeDir:    home,
+		PID:        cmd.Process.Pid,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		cmd:        cmd,
+		doneCh:     doneCh,
+	}
+
+	t.Cleanup(func() { h.teardown(t) })
+
+	if err := h.waitForReady(); err != nil {
+		t.Fatalf("e2e: %v", err)
+	}
+	return h
+}
+
 // seedBoundConversation writes conversations.json for the "test" instance with a
 // single conversation row bound to boundSessionID. Binding is load-bearing under
 // #678: sessionRouter.Route rejects an empty current_session_id before any pool

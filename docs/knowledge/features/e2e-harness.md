@@ -59,10 +59,10 @@ split from #51.
 
 ## Public API
 
-Eleven exported names — `Harness`, `Start`, `StartIn`, `StartInWithEnv`,
-`StartRotation`, `StartRotationWithRelay`, `StartExpectingFailureIn`,
-`(*Harness).Stop`, `RunResult`, `(*Harness).Run`, `RunBare`, `RunBareIn`,
-plus the struct fields:
+Twelve exported names — `Harness`, `Start`, `StartIn`, `StartInWithEnv`,
+`StartRotation`, `StartRotationWithRelay`, `StartStreamInteractiveWithRelay`,
+`StartExpectingFailureIn`, `(*Harness).Stop`, `RunResult`, `(*Harness).Run`,
+`RunBare`, `RunBareIn`, plus the struct fields:
 
 ```go
 type Harness struct {
@@ -132,6 +132,19 @@ func StartRotation(t *testing.T, home, sessionsDir, initialUUID, trigger string)
 // StartRotation's fakeclaude env shape with StartInWithEnv's relay-flag
 // shape via a single spawnWith call.
 func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigger, stdinLog, relayURL string) *Harness
+
+// StartStreamInteractiveWithRelay starts a daemon under interactive_runner:
+// "stream-json" (the production toggle selectInteractiveRunner, driven via
+// <home>/.pyry/config.json) with the stream-json fakeclaude (#1140) as the
+// supervised child plus relay wiring, so a spec can drive phone → relay →
+// daemon → stream-runner → fakeclaude and observe the turn drain. Unlike
+// StartRotationWithRelay this sets NONE of the SESSIONS_DIR / INITIAL_UUID /
+// TRIGGER / STDIN_LOG child envs — stream-mode fakeclaude short-circuits
+// above its mustEnv calls and binds no sessions dir. initialUUID pins the
+// bootstrap pool id; see § Stream Interactive Harness Pattern below for the
+// id-alignment invariant the drain gate depends on. relayURL is the
+// /v2/server endpoint; extraEnv is appended verbatim for rider specs.
+func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness
 
 type RunResult struct {
     ExitCode int
@@ -2708,6 +2721,63 @@ Two files: `internal/e2e/auto_attach.go` (+199 LOC, additive) and
 to existing tests, no new exported package types. Default `go test
 ./...` unaffected. `go test -tags e2e -race ./internal/e2e/...` clean.
 
+## Stream Interactive Harness Pattern (`StartStreamInteractiveWithRelay`, #1141)
+
+First e2e opt-in to the stream-json `interactive_runner` (#1081 shipped the
+production toggle; #1140 shipped the stream-json fakeclaude mode this helper
+drives). `StartStreamInteractiveWithRelay` establishes a pattern this file's
+existing helpers didn't need: **config-file injection**, not a flag. The
+production toggle (`selectInteractiveRunner`, `cmd/pyry/main.go`) reads
+`config.Config.InteractiveRunner` off `<home>/.pyry/config.json`
+(`resolveConfigPath`), so the helper `os.MkdirAll`s `<home>/.pyry` and writes
+`{"interactive_runner":"stream-json"}` as a raw JSON string literal —
+*before* spawn, since the daemon reads config once at startup. A raw literal
+(not an `internal/config` import) keeps `harness.go` import-lean under its
+`e2e || e2e_install` build tag, mirroring `seedBootstrapRegistry`'s existing
+raw-JSON convention. A partial config leaves every other field at its
+`config.Load` overlay default; `-pyry-relay` still overrides `relay_url`.
+
+Otherwise the helper is `StartRotationWithRelay` minus the sessions-dir /
+trigger / stdin-log machinery: `ensureFakeClaudeBuilt` + `seedBootstrapRegistry`
++ `spawnWith` with `PYRY_ALLOW_INSECURE_RELAY=1`, `PYRY_MOBILE_V2=1`,
+`PYRY_FAKE_CLAUDE_STREAM_JSON=1`. `ClaudeSessionsDir` is left unset — stream
+mode opens no transcript, and the daemon's rotation watcher was confirmed
+(empirically, on first green) to tolerate the dir's absence, so the spec's
+defensive `os.MkdirAll(claudeSessionsDir(home))` was dropped rather than kept
+as a belt line.
+
+### Why the bootstrap pool id and the bound conversation id must be equal
+
+The one non-obvious invariant a caller must get right. The stream turn drain
+(`startStreamTurnDrainV2`, #1098) forwards an event only when the event's sink
+tag equals `activeSession()`:
+
+- The **sink tag** is the runner's construction-time `cfg.SessionID` — the
+  bootstrap **pool id**, pinned by `seedBootstrapRegistry(t, home, initialUUID)`.
+- `activeSession()` resolves the active conversation → its bound session id —
+  set by `seedBoundConversation(t, home, knownConvID, initialUUID)`.
+
+Both must be seeded with the *same* `initialUUID` before
+`StartStreamInteractiveWithRelay` is called. A mismatch drops every event at
+the gate: the drain hangs, and the first observable symptom is a timeout
+waiting for `assistant_delta` — not a clean failure at the seed call. This is
+the single most likely mistake for a new caller (the rider specs #1136–#1139
+and the real-claude capstone #1083 all repeat this pairing).
+
+### `relay_v2_stream_send_test.go` — `TestRelayV2_StreamSendMessageDrainsTurn`
+
+The first live, integrated proof of the stream-interactive path: every leg
+(config toggle, runner factory, turn drain, fakeclaude stream mode) had been
+proven in isolation, but never run together against a real spawned
+fakeclaude. The spec pairs, handshakes an interactive phone, drives one
+`send_message`, awaits the sealed ack (accept-into-backlog — not delivery:
+`streamRunner.WriteUserTurn` can return the retryable `ErrNoLiveChild` while
+the child is between spawn and stdin-ready), then drains two ordered
+milestones mirroring `relay_v2_interrupt_test.go`'s shape: `assistant_delta`
+carrying the **echoed** prompt (the non-vacuity guard — proves the full
+round-trip, not just "some text"), then a terminal `turn_state{idle}`. Details
+and the full wire diagram: [codebase/1141.md](../codebase/1141.md).
+
 ## Concurrency Model
 
 | Goroutine | Owns | Lifetime |
@@ -2852,7 +2922,8 @@ push/PR yet — see the out-of-scope note above. Details: [codebase/919.md](../c
   `docs/specs/architecture/123-e2e-startrotation-primitive.md`,
   `docs/specs/architecture/127-e2e-attach-detach-clean.md`,
   `docs/specs/architecture/128-e2e-attach-survives-claude-restart.md`,
-  `docs/specs/architecture/956-fakeclaude-rotation-nonempty-gate.md`
+  `docs/specs/architecture/956-fakeclaude-rotation-nonempty-gate.md`,
+  `docs/specs/architecture/1141-stream-e2e-harness-send-message.md`
 - Pattern: lessons.md § Test helpers across packages (`/bin/sleep` as the
   benign fake claude); lessons.md § Unix-socket sun_path limits and
   t.TempDir(); lessons.md § PTY master backpressure stalls slave-side
@@ -2878,4 +2949,8 @@ push/PR yet — see the out-of-scope note above. Details: [codebase/919.md](../c
   the bridge input-pump leak; see
   [ADR 007](../decisions/007-bridge-iteration-boundaries.md)),
   Phase 1.1 session-verb tickets (#54, #55, #56),
-  install-service round-trip ([install-e2e.md](install-e2e.md))
+  install-service round-trip ([install-e2e.md](install-e2e.md)),
+  stream-interactive turn-drain proof (#1141:
+  `TestRelayV2_StreamSendMessageDrainsTurn` via
+  `StartStreamInteractiveWithRelay` + [fakeclaude-binary.md § Stream-json mode](fakeclaude-binary.md#stream-json-mode-1140);
+  the harness the rider specs #1136–#1139 and the real-claude capstone #1083 ride)
