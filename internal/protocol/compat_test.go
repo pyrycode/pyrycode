@@ -49,6 +49,10 @@ func TestIsKnownAppType(t *testing.T) {
 		{"tool_result-rejected", TypeToolResult, false, ErrUnknownType},
 		{"turn_end-rejected", TypeTurnEnd, false, ErrUnknownType},
 		{"stall-rejected", TypeStall, false, ErrUnknownType},
+		// the v2-only PTY-derived status peers of stall: outbound binary → phone
+		// events an old phone never receives, so IsKnownAppType must reject both.
+		{"api_retry-rejected", TypeApiRetry, false, ErrUnknownType},
+		{"compacting-rejected", TypeCompacting, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -148,6 +152,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeToolResult:        true,
 	TypeTurnEnd:           true,
 	TypeStall:             true,
+	TypeApiRetry:          true,
+	TypeCompacting:        true,
 	TypeRequestSnapshot:   true,
 	TypeScreenSnapshot:    true,
 	TypeResync:            true,
@@ -203,6 +209,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 interactive application events.
 		TypeTurnState, TypeAssistantDelta, TypeToolUse,
 		TypeToolResult, TypeTurnEnd, TypeStall,
+		// v2 PTY-derived status peers of stall.
+		TypeApiRetry, TypeCompacting,
 		// v2 screen-snapshot types.
 		TypeRequestSnapshot, TypeScreenSnapshot,
 		// v2 reconnect resync marker.

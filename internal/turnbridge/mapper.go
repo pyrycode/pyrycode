@@ -13,10 +13,11 @@ import (
 // debug-logs those. Pure; safe on a zero-value Event.
 //
 // The robust JSONL-sourced kinds (assistant text, tool use/result, end-of-turn)
-// map, as does the stall marker (the screen-derived onset signal #373 surfaces);
-// every PTY-state kind (idle/thinking/modal/mcp/network) and Unknown drop,
-// because the internal model (#606) has no type for them — not because the
-// screen signals are worthless (ADR 025 § brittleness split).
+// map, as do the screen-derived status peers: the stall onset marker (#373) and
+// the api-retry / compacting show/hide edges (#1074). The remaining PTY-state
+// kinds (idle/thinking/modal/mcp/network) and Unknown drop, because the internal
+// model (#606) has no type for them — not because the screen signals are
+// worthless (ADR 025 § brittleness split).
 func mapEvent(ev tuidriver.Event) (turnevent.Event, bool) {
 	switch ev.Kind {
 	case tuidriver.EventKindJsonlEntry:
@@ -32,6 +33,21 @@ func mapEvent(ev tuidriver.Event) (turnevent.Event, bool) {
 		// the zero-field Stall signal (no field extraction). The bridge injects
 		// conversation identity when shaping the wire payload.
 		return turnevent.Stall{}, true
+	case tuidriver.EventKindPtyApiRetryShown:
+		// Rising edge of claude's API-error retry: read only the two parsed
+		// counter ints (never screen bytes; the Event exposes no string field
+		// for this kind). {0,0} passes through as a legitimate "count unknown".
+		return turnevent.ApiRetry{Active: true, Current: ev.Retry.Current, Total: ev.Retry.Total}, true
+	case tuidriver.EventKindPtyApiRetryHidden:
+		// Falling edge: tui-driver carries the last-known counter so the final
+		// render stays coherent; copy it verbatim (the phone ignores it when
+		// active is false).
+		return turnevent.ApiRetry{Active: false, Current: ev.Retry.Current, Total: ev.Retry.Total}, true
+	case tuidriver.EventKindPtyCompactingShown:
+		// Banner-only rising edge: no counter payload (contrast api-retry).
+		return turnevent.Compacting{Active: true}, true
+	case tuidriver.EventKindPtyCompactingHidden:
+		return turnevent.Compacting{Active: false}, true
 	default:
 		return nil, false
 	}

@@ -117,6 +117,8 @@ var excludedTypes = map[string]string{
 	"TypeToolResult":        "push",
 	"TypeTurnEnd":           "push",
 	"TypeStall":             "push",
+	"TypeApiRetry":          "push",
+	"TypeCompacting":        "push",
 	"TypeScreenSnapshot":    "push",
 	"TypeResync":            "push",
 	"TypeSessionTransition": "push",

@@ -206,3 +206,59 @@ func TestStallPayload_RoundTrip(t *testing.T) {
 
 	roundTripEnvelope(t, env, payload, raw)
 }
+
+func TestApiRetryPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "api_retry.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeApiRetry {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeApiRetry)
+	}
+
+	var payload ApiRetryPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if !payload.Active {
+		t.Errorf("Active: got %v, want true", payload.Active)
+	}
+	if payload.Current != 3 {
+		t.Errorf("Current: got %d, want %d", payload.Current, 3)
+	}
+	if payload.Total != 10 {
+		t.Errorf("Total: got %d, want %d", payload.Total, 10)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+func TestCompactingPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "compacting.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeCompacting {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeCompacting)
+	}
+
+	var payload CompactingPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if !payload.Active {
+		t.Errorf("Active: got %v, want true", payload.Active)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}

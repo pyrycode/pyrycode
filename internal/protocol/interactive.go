@@ -87,3 +87,29 @@ type TurnEndPayload struct {
 type StallPayload struct {
 	ConversationID string `json:"conversation_id"`
 }
+
+// ApiRetryPayload is the body of an Envelope whose Type == TypeApiRetry
+// (docs/protocol-mobile.md § api_retry). Binary → phone direction; the wire
+// form of the internal-only turnevent.ApiRetry status peer. Like turn_state it
+// is a coarse conversation-level signal, not turn-scoped, so there is no
+// turn_id. Active is the show (true) / clear (false) edge; Current/Total are the
+// parsed `attempt N/M` counter ({0,0} when claude's counter did not parse). No
+// field carries raw banner or screen text. The bridge (#608) supplies
+// ConversationID because the internal ApiRetry marker carries none.
+type ApiRetryPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Active         bool   `json:"active"`
+	Current        int    `json:"current"`
+	Total          int    `json:"total"`
+}
+
+// CompactingPayload is the body of an Envelope whose Type == TypeCompacting
+// (docs/protocol-mobile.md § compacting). Binary → phone direction; the wire
+// form of the internal-only turnevent.Compacting status peer. Banner-only
+// (tui-driver streams no compaction progress), so beyond the bridge-supplied
+// ConversationID the only field is Active — the show (true) / clear (false)
+// edge. Not turn-scoped, so there is no turn_id.
+type CompactingPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Active         bool   `json:"active"`
+}

@@ -146,6 +146,36 @@ func TestMapEvent(t *testing.T) {
 			want:   turnevent.Stall{},
 			wantOK: true,
 		},
+		{
+			name:   "pty api-retry shown -> ApiRetry active with counter",
+			in:     tuidriver.Event{Kind: tuidriver.EventKindPtyApiRetryShown, Retry: tuidriver.ApiRetryAttempt{Current: 3, Total: 10}},
+			want:   turnevent.ApiRetry{Active: true, Current: 3, Total: 10},
+			wantOK: true,
+		},
+		{
+			name:   "pty api-retry hidden -> ApiRetry cleared, last-known counter forwarded",
+			in:     tuidriver.Event{Kind: tuidriver.EventKindPtyApiRetryHidden, Retry: tuidriver.ApiRetryAttempt{Current: 4, Total: 10}},
+			want:   turnevent.ApiRetry{Active: false, Current: 4, Total: 10},
+			wantOK: true,
+		},
+		{
+			name:   "pty api-retry shown, unparsed counter -> ApiRetry active {0,0} passthrough",
+			in:     kindEvent(tuidriver.EventKindPtyApiRetryShown),
+			want:   turnevent.ApiRetry{Active: true, Current: 0, Total: 0},
+			wantOK: true,
+		},
+		{
+			name:   "pty compacting shown -> Compacting active",
+			in:     kindEvent(tuidriver.EventKindPtyCompactingShown),
+			want:   turnevent.Compacting{Active: true},
+			wantOK: true,
+		},
+		{
+			name:   "pty compacting hidden -> Compacting cleared",
+			in:     kindEvent(tuidriver.EventKindPtyCompactingHidden),
+			want:   turnevent.Compacting{Active: false},
+			wantOK: true,
+		},
 		// Drop cases: every PTY-state kind, unknown, and JSONL entries with no
 		// representable content.
 		{name: "drop unknown", in: kindEvent(tuidriver.EventKindUnknown)},

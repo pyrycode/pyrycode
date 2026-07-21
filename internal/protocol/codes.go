@@ -186,6 +186,22 @@ const (
 	TypeStall          = "stall"
 )
 
+// Mobile Protocol v2 PTY-derived status peers of TypeStall. Like stall, these
+// are additive, capability-gated status frames the binary pushes to a phone
+// that advertised the "interactive" capability — they surface claude's
+// API-error retry and auto-compaction sub-states (docs/protocol-mobile.md
+// § api_retry / § compacting). They are outbound binary → phone status events,
+// never a turn-lifecycle event and never dispatched inbound.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an old
+// phone never receives them. The drift detector in
+// internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
+const (
+	TypeApiRetry   = "api_retry"  // binary → phone, outbound v2 api-retry status
+	TypeCompacting = "compacting" // binary → phone, outbound v2 compaction status
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the
