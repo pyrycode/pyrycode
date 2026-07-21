@@ -1,6 +1,6 @@
 # `internal/transcript` — probe-preferred resolver core + shared UUID-stem constant
 
-**Status (2026-07-21): one of three consumers migrated.** Family B (`cmd/pyry/interactive_turn_stream_v2.go`) migrated onto this package in #1150 (PR #1158) — its local `jsonlStreamExt` const and `jsonlStemPattern` regexp are gone, replaced by `transcript.Ext` / `transcript.ValidStem` / `transcript.Newest` / `transcript.CanonicalDir` / `transcript.GuardProbedPath` / `transcript.StatByID`. Family A (`internal/sessions/reconcile.go`, #1149) has a merged spec but its implementation is still on `feature/1149`, not yet on `main` — it carries its own inline logic and duplicate `uuidStemPattern` regexp until that branch merges. `internal/sessions/rotation/watcher.go`'s local `uuidStemPattern` is out of scope for both migrations and remains untouched.
+**Status (2026-07-21): two of three consumers migrated.** Family B (`cmd/pyry/interactive_turn_stream_v2.go`) migrated onto this package in #1150 (PR #1158) — its local `jsonlStreamExt` const and `jsonlStemPattern` regexp are gone, replaced by `transcript.Ext` / `transcript.ValidStem` / `transcript.Newest` / `transcript.CanonicalDir` / `transcript.GuardProbedPath` / `transcript.StatByID`. `internal/sessions/rotation/watcher.go` migrated in #1151 (PR #1159) — its local `uuidStemPattern` is gone, replaced by `transcript.ValidStem` alone (it sheds only `regexp`; unlike the other two families it keeps `strings` for an unrelated `.jsonl`-suffix check). Family A (`internal/sessions/reconcile.go`, #1149) has a merged spec but its implementation is still on `feature/1149`, not yet on `main` — it carries its own inline logic and duplicate `uuidStemPattern` regexp until that branch merges.
 
 ## Why
 
@@ -8,7 +8,7 @@ Transcript resolution (finding the `<uuid>.jsonl` claude is currently writing un
 
 - **Family A** (`internal/sessions/reconcile.go`) — inbound delivery-confirm growth baseline. Returns `(path, size, err)`; not-found = `("", 0, nil)`. See [codebase/838.md](../codebase/838.md), [sessions-package.md](sessions-package.md).
 - **Family B** (`cmd/pyry/interactive_turn_stream_v2.go`) — outbound turn-stream tail. Returns `(path, offset, err)`; not-found = a wrapped error (retried by the caller). Has a `resolvedOnce`/`sawEmpty` cold/warm offset rule Family A lacks. Migrated onto this package in [codebase/1150.md](../codebase/1150.md).
-- Both, plus `internal/sessions/rotation/watcher.go`, carried an identical UUID-stem regexp.
+- Both, plus `internal/sessions/rotation/watcher.go`, carried an identical UUID-stem regexp. The rotation watcher's copy migrated to `transcript.ValidStem` in [codebase/1151.md](../codebase/1151.md) — it only ever needed the matcher, not the fuller resolver shape Family A/B use.
 
 Both families share the same core mechanics — dir canonicalisation, the AC4 confidentiality guard (a second claude process writing into the same shared dir must not be able to redirect a resolver onto its own newer transcript — the #827/#838 threat), by-id/pinned stat, and newest-by-mtime selection. This package extracts that core **once**. The families' *divergent* concerns — the inverted not-found convention, the cold/warm offset rule, and the two different pinned-vs-probe dispatch orders — deliberately stay in the call-site adapters; folding any of them into the core would change one family's behaviour.
 
@@ -60,7 +60,7 @@ The single untrusted→trusted crossing: `probe.OpenJSONL(pid)` returns a path d
 
 ## Not in scope here (as of #1148; superseded per-consumer as migrations land — see Status above)
 
-- **Wiring any consumer.** At #1148 ship time, Family A, Family B, and the rotation watcher were all untouched. Family B has since migrated (#1150); Family A's implementation is pending on `feature/1149`; the rotation watcher's duplicate regexp remains out of scope for both.
+- **Wiring any consumer.** At #1148 ship time, Family A, Family B, and the rotation watcher were all untouched. Family B (#1150) and the rotation watcher (#1151) have since migrated; Family A's implementation is pending on `feature/1149`.
 - **The `availabilityReporter`/`probeUsable` dispatch helper.** The no-lsof→mtime dispatch *decision* both families make locally is not extracted — it's part of each family's divergent dispatch order, not one of the core's owned mechanics. A later consolidation ticket may DRY it once both adapters sit on this core.
 - **`context.Context`.** The core is context-free; the `func(ctx) (path, X, err)` closure shape belongs to the adapters (`supervisor.Config.ResolveTranscript`, the turn-stream resolver) that wrap these primitives.
 
@@ -78,4 +78,5 @@ Architect self-review verdict: **PASS** (security-sensitive label, `docs/specs/a
 - **Spec:** [`docs/specs/architecture/1148-*.md`](../../specs/architecture/) — full design, error-handling table, security review.
 - **Per-ticket note:** [codebase/1148.md](../codebase/1148.md).
 - **Family B migration:** [#1150](https://github.com/pyrycode/pyrycode/issues/1150) — [codebase/1150.md](../codebase/1150.md), PR #1158.
+- **Rotation watcher migration:** [#1151](https://github.com/pyrycode/pyrycode/issues/1151) — [codebase/1151.md](../codebase/1151.md), PR #1159.
 - **Prior art:** [codebase/838.md](../codebase/838.md) — the probe-prefer resolver and AC4 guard this package generalises; [sessions-package.md](sessions-package.md) — Family A's current home; [rotation-watcher.md](rotation-watcher.md) — `rotation.Probe`, the interface `transcript.Probe` mirrors structurally.
