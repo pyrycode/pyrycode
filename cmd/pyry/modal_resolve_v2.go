@@ -17,6 +17,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
@@ -30,6 +31,41 @@ type modalKeystroker interface {
 	SendEsc() error
 	Answer(choice string) error
 	AcceptTrust() error
+}
+
+// noopKeystroker is the stream-json bootstrap's modal keystroker: there is no PTY
+// to dismiss a modal on, so every actuation is a tolerated no-op. In stream mode a
+// permission approval is a permbridge-parked completer resolved through the verdict
+// arm (streamApprovalBridge.ResolveStream, #1080), not an on-screen PTY modal; its
+// fail-closed deny is the permbridge completer's own deny-on-timeout (#1103). This
+// type routes NO keystroke and NEVER touches the permbridge, so it cannot resolve
+// an approval to allow. It is modalKeystroker's second implementer, alongside
+// *supervisor.Supervisor (#726). #1131.
+type noopKeystroker struct{}
+
+func (noopKeystroker) SendEsc() error      { return nil }
+func (noopKeystroker) Answer(string) error { return nil }
+func (noopKeystroker) AcceptTrust() error  { return nil }
+
+// modalKeystrokerOrNoop returns sup as the modal keystroker when it is a live
+// *supervisor.Supervisor (the PTY path), and a noopKeystroker when sup is nil — the
+// stream-json bootstrap path, where Session.Supervisor() returns a typed-nil pointer
+// (#1077). It is the fourth and final typed-nil w.sup reader guarded, mirroring the
+// sibling screenSnapshotterOrNil (#1101).
+//
+// It takes the CONCRETE *supervisor.Supervisor (not modalKeystroker) so the == nil
+// test runs BEFORE boxing: assigning the typed-nil straight into the interface would
+// leave a non-nil interface holding a nil pointer, and ResolveCancel / ResolveTimeout
+// call kb.SendEsc() UNCONDITIONALLY, so that nil pointer would be dereferenced inside
+// sendModalKey → daemon panic. Unlike screenSnapshotterOrNil we must return a NON-NIL
+// no-op, not a genuine nil interface: the resolver has no nil-kb arm, and a nil-
+// interface method call panics just the same. No-op on the PTY path: a non-nil sup
+// passes straight through. #1131.
+func modalKeystrokerOrNoop(sup *supervisor.Supervisor) modalKeystroker {
+	if sup == nil {
+		return noopKeystroker{}
+	}
+	return sup
 }
 
 // modalResolverV2 is the cmd/pyry implementation of relay.ModalResolver: it

@@ -685,12 +685,21 @@ the caller, so no decode error or attacker-controlled byte is ever echoed back.
   through it, so `internal/relay` imports neither `internal/supervisor`,
   `internal/modalbridge`, `internal/audit`, nor `cmd/pyry`. The `cmd/pyry`
   `modalResolverV2` (`cmd/pyry/modal_resolve_v2.go`) implements it: `ResolveCancel`
-  does registry `Resolve` → supervisor `SendEsc` → `audit.Log({cancelled, remote})`;
+  does registry `Resolve` → keystroker `SendEsc` → `audit.Log({cancelled, remote})`;
   `ResolveAnswer` is the gated answer arm (#717 — `Lookup` → fail-closed gate →
   `option_id` classification → `Resolve` consume → safe-answer keystroke → audit).
   Wired in `cmd/pyry/relay.go`'s `startRelayV2`
   over the **daemon-singleton** `modalbridge.New()` registry (the same instance
-  [#798](../codebase/798.md) live-wires the producer into).
+  [#798](../codebase/798.md) live-wires the producer into). The keystroker argument
+  is nil-safe-wrapped via `modalKeystrokerOrNoop` (#1131, the fourth and final
+  typed-nil `w.sup` guard): PTY mode passes `w.sup` straight through (it satisfies
+  `modalKeystroker`), while the stream-json bootstrap path (typed-nil `w.sup`,
+  #1077) gets a non-nil `noopKeystroker` — `ResolveCancel`/`ResolveTimeout` call
+  `SendEsc()` **unconditionally**, so (unlike `screenSnapshotterOrNil`'s genuine-nil
+  return) the guard must return something callable, not nil. A stream-json approval
+  has no PTY modal to dismiss; it denies fail-closed via the permbridge completer's
+  own deny-on-timeout (#1103), never through this keystroker. See
+  [codebase/1131.md](../codebase/1131.md).
 - **`handleModalCancel`** — nil-resolver ⇒ debug-log + return (inert). Else decode
   `ModalCancelPayload` (a decode failure is tolerated → empty `modal_id` → the
   resolver's unknown-id no-op, never echoed), `ResolveCancel(modal_id, s.device)`;

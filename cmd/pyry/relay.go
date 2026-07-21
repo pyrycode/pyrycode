@@ -451,7 +451,14 @@ func startRelayV2(
 	// blockedNotify closure, stamped with the active conversation (the same
 	// follow-active cursor the modal producer resolves its target from). Both
 	// seams are nil in foreground/v1, leaving the pre-#1014 behaviour intact.
-	modalResolver := newModalResolverV2(modalReg, w.sup, logger)
+	//
+	// The keystroker is nil-safe-wrapped (#1131): PTY mode passes w.sup straight
+	// through, but on the stream-json bootstrap path w.sup is a typed-nil
+	// *supervisor.Supervisor (#1077) — modalKeystrokerOrNoop maps it to a no-op
+	// keystroker so ResolveCancel/ResolveTimeout's unconditional SendEsc does not
+	// nil-deref → panic. A stream-json approval has no PTY modal to dismiss; it
+	// denies fail-closed via the permbridge deny-on-timeout (#1103), never here.
+	modalResolver := newModalResolverV2(modalReg, modalKeystrokerOrNoop(w.sup), logger)
 	modalResolver.activeConv = w.active.CurrentConversation
 	modalResolver.notifyBlocked = w.blockedNotify
 
@@ -563,9 +570,12 @@ func startRelayV2(
 		OutstandingQueues: outstandingQueues(w.queue),
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
-		// seam, and audits. sup (*supervisor.Supervisor) satisfies modalKeystroker
-		// (it has SendEsc). Constructed above so its #1014 folder-not-trusted emit
-		// seams are set before use.
+		// seam, and audits. The keystroker is nil-safe-wrapped (#1131): PTY mode
+		// passes w.sup (*supervisor.Supervisor, satisfies modalKeystroker) straight
+		// through; the stream-json bootstrap path (typed-nil w.sup, #1077) gets a
+		// no-op keystroker whose ESC is moot — a stream-json approval has no PTY
+		// modal to dismiss and denies fail-closed via the permbridge timeout (#1103).
+		// Constructed above so its #1014 folder-not-trusted emit seams are set first.
 		ModalResolver: modalResolver,
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
 		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
