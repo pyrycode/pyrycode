@@ -510,7 +510,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These six envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These eight envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
 
 **Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable, per-conversation id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in emit order per conversation. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
@@ -568,9 +568,46 @@ ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` i
 
 `stall` is the wire form of an internal-only daemon signal (a one-shot stall-onset marker; no ACP equivalent). Like `turn_state`, it is a coarse conversation-level signal and carries no `turn_id`. It is onset-only — there is no clearing event; the phone self-clears on the next turn activity.
 
+#### `api_retry`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation currently in claude's API-error retry state. |
+| `active` | bool | Rising edge (`true`, claude entered retry) or falling edge (`false`, claude recovered — clear the indicator). |
+| `current` | int | Parsed `attempt N/M` counter's `N`. `0` when claude's on-screen counter did not parse (a legitimate "retrying, count unknown" state, not an error). |
+| `total` | int | Parsed `attempt N/M` counter's `M`. `0` alongside `current: 0` for the same unparsed case. |
+
+`api_retry` (#1074) is a **PTY-derived status peer of `stall`** — like `stall` it
+is a coarse conversation-level signal, not turn-scoped (no `turn_id`), and
+emitting it never opens, closes, or alters a turn. Unlike `stall` it is **not**
+onset-only: it has an explicit falling edge (`active: false`) so a remote head
+can dismiss the indicator once claude recovers. tui-driver re-fires the rising
+edge whenever the parsed count climbs (e.g. `3/10` → `4/10`); each re-fire is
+just another `active: true` frame with an updated counter — there is no dedup
+and no per-tick flood (tui-driver only re-fires on an actual count change). The
+falling edge carries the last-known counter (copied verbatim from the rising
+edge's last value) so the final render stays coherent; a phone ignores
+`current`/`total` when `active` is `false`. No field ever carries raw banner or
+screen text — `current`/`total` are the only screen-derived data, and both are
+bounded, pre-sanitized ints.
+
+#### `compacting`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation currently in claude's auto-compaction pass. |
+| `active` | bool | Rising edge (`true`, compaction started) or falling edge (`false`, compaction finished — clear the indicator). |
+
+`compacting` (#1074) is the same PTY-derived status-peer shape as `api_retry`,
+but **banner-only**: tui-driver streams no compaction progress payload, so
+beyond the conversation id and the edge bool there is nothing to carry. Without
+this event a remote head sees a frozen screen for the tens of seconds
+compaction can take; the `active: true` frame is the daemon's only signal that
+something is happening, not stalled.
+
 #### `session_transition`
 
-Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the six turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
+Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the eight turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
 
 | Field | Type | Meaning |
 |---|---|---|

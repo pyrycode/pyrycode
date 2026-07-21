@@ -226,6 +226,17 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// assistant_delta only (#610), so a stall is never silently discarded.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ApiRetry, turnevent.Compacting:
+		// PTY-derived status peers of turn_state (claude's API-retry and
+		// auto-compaction sub-states). Like Stall, they carry NO turn-lifecycle
+		// mutation: a status peer is orthogonal to thinking/responding/idle and
+		// not turn-scoped (no startTurnIfNeeded / transitionTo / endTurn; inTurn,
+		// turnID, currentState untouched). Flush any pending delta first so
+		// buffered text keeps its wire position ahead of the status frame, then
+		// emit. The counter/active fields are bounded (see the SECURITY note); no
+		// banner or screen text is ever held or forwarded.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -306,8 +317,8 @@ func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
 
 // emitMapped maps a content event to its wire envelope via the pure #627
 // adapter and emits it. ok==false is defensive — unreachable for
-// TextChunk/ToolStart/ToolUpdate/TurnEnd/Stall (only ThoughtChunk and nil drop,
-// and neither reaches here).
+// TextChunk/ToolStart/ToolUpdate/TurnEnd/Stall/ApiRetry/Compacting (only
+// ThoughtChunk and nil drop, and neither reaches here).
 func (e *interactiveTurnEmitterV2) emitMapped(ctx context.Context, convID string, ev turnevent.Event) {
 	typ, payload, ok := turnbridge.MapEvent(ev, turnbridge.TurnContext{
 		ConversationID: convID,
@@ -401,6 +412,10 @@ func eventKind(ev turnevent.Event) string {
 		return "turn_end"
 	case turnevent.Stall:
 		return "stall"
+	case turnevent.ApiRetry:
+		return "api_retry"
+	case turnevent.Compacting:
+		return "compacting"
 	default:
 		return "unknown"
 	}

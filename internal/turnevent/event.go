@@ -21,10 +21,11 @@ package turnevent
 import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
-// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, and the internal-only Stall.
-// The unexported marker keeps the variant set closed to this package, so
-// external ACP-spec churn cannot inject a variant. The bridge (#608) ranges a
-// stream of Event and the wire adapter (#607) type-switches to map each kind.
+// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, and the internal-only status
+// peers Stall, ApiRetry, and Compacting. The unexported marker keeps the
+// variant set closed to this package, so external ACP-spec churn cannot inject
+// a variant. The bridge (#608) ranges a stream of Event and the wire adapter
+// (#607) type-switches to map each kind.
 type Event interface{ isTurnEvent() }
 
 // TextChunk is incremental assistant text, grouped by message.
@@ -77,6 +78,23 @@ type TurnEnd struct {
 // (#600) drops it (no ACP equivalent).
 type Stall struct{}
 
+// ApiRetry is a PTY-derived status peer of Stall carrying claude's live
+// API-error retry state. Active is the rising (true) / falling (false) edge;
+// Current/Total are the parsed `attempt N/M` counter ({0,0} when the counter
+// did not parse). Like every variant here it carries no conversation identity —
+// the bridge injects it when mapping to the wire.
+type ApiRetry struct {
+	Active  bool
+	Current int
+	Total   int
+}
+
+// Compacting is a PTY-derived status peer of Stall: claude's auto-compaction
+// banner. Banner-only (tui-driver streams no progress payload), so Active — the
+// rising (true) / falling (false) edge — is the only field beyond the
+// bridge-injected conversation id.
+type Compacting struct{ Active bool }
+
 // Location is a file a tool call touches (ACP tool-call location). Line is
 // 1-based; 0 means unspecified.
 type Location struct {
@@ -92,6 +110,8 @@ func (ToolStart) isTurnEvent()    {}
 func (ToolUpdate) isTurnEvent()   {}
 func (TurnEnd) isTurnEvent()      {}
 func (Stall) isTurnEvent()        {}
+func (ApiRetry) isTurnEvent()     {}
+func (Compacting) isTurnEvent()   {}
 
 var (
 	_ Event = TextChunk{}
@@ -100,4 +120,6 @@ var (
 	_ Event = ToolUpdate{}
 	_ Event = TurnEnd{}
 	_ Event = Stall{}
+	_ Event = ApiRetry{}
+	_ Event = Compacting{}
 )

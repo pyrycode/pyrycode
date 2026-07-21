@@ -152,6 +152,30 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			// ApiRetry carries conversation_id + active + the parsed counter only;
+			// tc's non-empty TurnID and non-zero Seq are ignored (a status peer is
+			// not turn-scoped, not a delta). ApiRetryPayload has no turn_id field,
+			// so none can leak.
+			name:    "ApiRetry shown -> api_retry, conversation_id + counter, no turn_id",
+			ev:      turnevent.ApiRetry{Active: true, Current: 3, Total: 10},
+			tc:      tc,
+			wantTyp: protocol.TypeApiRetry,
+			wantPayload: protocol.ApiRetryPayload{
+				ConversationID: "c1", Active: true, Current: 3, Total: 10,
+			},
+			wantOK: true,
+		},
+		{
+			name:    "Compacting cleared -> compacting, conversation_id + active only",
+			ev:      turnevent.Compacting{Active: false},
+			tc:      tc,
+			wantTyp: protocol.TypeCompacting,
+			wantPayload: protocol.CompactingPayload{
+				ConversationID: "c1", Active: false,
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{

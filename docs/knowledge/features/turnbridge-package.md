@@ -20,6 +20,14 @@ envelope outbound) and the consumer's `Handle` fan-out — un-dropping a signal 
 formerly died at the daemon, so a stalled turn reaches interactive phones (#373).
 See [codebase/639.md](../codebase/639.md).
 
+**#1074** repeats the same pattern for two more PTY-derived status peers of
+`stall`: claude's API-error retry (`EventKindPtyApiRetry{Shown,Hidden}`) and
+auto-compaction (`EventKindPtyCompacting{Shown,Hidden}`), previously dropped by
+`mapEvent`'s `default` arm. Four new inbound-mapper arms, two new outbound-adapter
+arms, and one merged `Handle` case (`turnevent.ApiRetry, turnevent.Compacting`)
+land the two new wire types `api_retry` / `compacting` — see
+[codebase/1074.md](../codebase/1074.md).
+
 The **consumer half** — the turn-lifecycle state machine, envelope ID minting /
 sealing, and the capability-gated fan-out to phones — was originally one slice
 (#616) but shipped as a chain: capability negotiation (#626, the per-conn
@@ -187,18 +195,26 @@ internal model has no representation for the event; the caller drops + debug-log
 | `EventKindJsonlEntry`, other `e.Type` | — | drop |
 | `EventKindJsonlEndOfTurn` | — | `TurnEnd{Reason: TurnEndReasonEndTurn}` |
 | `EventKindStallDetected` (#639) | — | `Stall{}` |
-| `EventKindPty*` / `EventKindUnknown` | — | drop |
+| `EventKindPtyApiRetryShown` (#1074) | — | `ApiRetry{Active: true, Current: ev.Retry.Current, Total: ev.Retry.Total}` |
+| `EventKindPtyApiRetryHidden` (#1074) | — | `ApiRetry{Active: false, Current: ev.Retry.Current, Total: ev.Retry.Total}` (last-known counter forwarded) |
+| `EventKindPtyCompactingShown` (#1074) | — | `Compacting{Active: true}` |
+| `EventKindPtyCompactingHidden` (#1074) | — | `Compacting{Active: false}` |
+| remaining `EventKindPty*` / `EventKindUnknown` | — | drop |
 
 - **The brittleness split (ADR 025).** JSONL-sourced kinds (assistant text, tool
   use/result, end-of-turn) are robust and map; the screen-derived `StallDetected`
   marker **also maps now** that #638 gave it an internal type (`turnevent.Stall`)
-  and #639 wired it through — it surfaces the stall onset #373 consumes. Every
-  **PTY-state** kind (`PtyIdle`, `PtyThinking`, `PtyModal*`, `PtyMcpFailure*`,
+  and #639 wired it through — it surfaces the stall onset #373 consumes. **#1074**
+  extends the same split to two more screen-derived PTY-state kinds: the
+  api-retry and compacting show/hide edges now map because tui-driver hands them
+  as **bounded parsed ints** (`ev.Retry.Current`/`.Total`), never raw screen
+  bytes — the mapper never touches banner text, so the substrate seal stays
+  intact even though the signal originates on-screen. The remaining
+  **PTY-state** kinds (`PtyIdle`, `PtyThinking`, `PtyModal*`, `PtyMcpFailure*`,
   `PtyNetworkFailure*`) and `Unknown` are still **dropped** — not because the
   screen signals are worthless, but because the internal model (#606) has **no
   type** for them (no idle/modal variant; that is deliberate). Idle/modal
-  surfacing are later #596/#597 children. All 11 v1.3.0 `EventKind` variants are
-  handled: three mapped, the eight others dropped.
+  surfacing are later #596/#597 children.
 - **Tool activity rides JSONL, not a dedicated kind.** There is no `tool-use` /
   `tool-result` event *kind*. `tuidriver.ParseToolUse(e.RawLine)` extracts a
   `tool_use` block (assistant envelope) → `ToolStart`; `ParseToolResult` extracts
@@ -285,12 +301,14 @@ idiom. Every field is carried verbatim from `tc` + the event:
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content)}` | true |
 | `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason)}` | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
+| `ApiRetry` (#1074) | `TypeApiRetry` | `ApiRetryPayload{tc.ConversationID, ev.Active, ev.Current, ev.Total}` (`tc.TurnID`/`tc.Seq` ignored) | true |
+| `Compacting` (#1074) | `TypeCompacting` | `CompactingPayload{tc.ConversationID, ev.Active}` (`tc.TurnID`/`tc.Seq` ignored) | true |
 | `ThoughtChunk` | `""` | `nil` | **false** (drop) |
 | nil / unknown | `""` | `nil` | false (drop) |
 
-- `payload` is `any` because the four payload structs share no marker interface; the
+- `payload` is `any` because the payload structs share no marker interface; the
   consumer `json.Marshal`s it directly (same path as `MessagePayload`). It is always
-  one of the four concrete `protocol.*Payload` value structs, or `nil` when `!ok`.
+  one of the concrete `protocol.*Payload` value structs, or `nil` when `!ok`.
 - **Zero-value-safe.** A nil `ev` falls to the default → drop, exactly like
   `mapEvent`. Because #607's payloads carry no `omitempty`, boundary zero-values
   (`seq:0`, `is_error:false`) are always serialized — they reach the wire rather than
@@ -582,6 +600,7 @@ design decision.
 - [codebase/615.md](../codebase/615.md) — producer ticket record (patterns + lessons).
 - [codebase/627.md](../codebase/627.md) — outbound-adapter ticket record (patterns + lessons).
 - [codebase/639.md](../codebase/639.md) — the stall bridge wiring: un-drops `StallDetected` through all three stages to the capability-gated fan-out (#638's `turnevent.Stall` + `protocol.StallPayload`).
+- [codebase/1074.md](../codebase/1074.md) — repeats the #639 pattern for two more PTY-derived status peers of `stall` (api-retry, compaction): four new `mapEvent` arms, two new `MapEvent` arms, one merged `Handle` case; `security-sensitive` (forwards a screen-derived attempt counter across the tui-driver substrate seal, bounded to two ints).
 - [codebase/609.md](../codebase/609.md) — delta coalescing: the additive `Config.FlushSignal`/`OnFlush` flush-arm seam + the emitter-owned ~250ms timer it serves.
 - [codebase/679.md](../codebase/679.md) — the follow-active producer lifecycle: generalises the subscriber to `Target`/`TargetResolver`/`NewTargetSubscriber` (removing `NewSessionSubscriber`) so the reply tails the active conversation's bound-session transcript by id, re-subscribing on a switch.
 - [codebase/1062.md](../codebase/1062.md) — the consumer-side fix for a switch landing **mid-turn**: the emitter now records which conversation owns its open turn (`turnConvID`) and abandons an orphaned turn on a mismatch, so the new conversation's opening `turn_state` is no longer de-duped away.

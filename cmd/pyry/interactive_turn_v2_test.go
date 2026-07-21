@@ -620,6 +620,159 @@ func TestInteractiveTurnEmitterV2_StallDroppedWhenCursorEmpty(t *testing.T) {
 	}
 }
 
+// AC#1/#4: an ApiRetry fans out as an api_retry envelope to interactive-capable
+// conns only (the capability gate), carrying the cursor's conversation_id, the
+// active edge, and the parsed attempt counter.
+func TestInteractiveTurnEmitterV2_ApiRetryFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.ApiRetry{Active: true, Current: 3, Total: 10})
+
+	if got := len(bcast.pushes); got != 1 {
+		t.Fatalf("api_retry pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	}
+	p := bcast.pushes[0]
+	if p.connID != "a" {
+		t.Fatalf("api_retry pushed to conn %q; want interactive conn %q", p.connID, "a")
+	}
+	if p.env.Type != protocol.TypeApiRetry {
+		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeApiRetry)
+	}
+	var ap protocol.ApiRetryPayload
+	if err := json.Unmarshal(p.env.Payload, &ap); err != nil {
+		t.Fatalf("decode api_retry payload: %v", err)
+	}
+	if ap.ConversationID != testConvID {
+		t.Fatalf("api_retry conversation_id: got %q, want %q", ap.ConversationID, testConvID)
+	}
+	if !ap.Active || ap.Current != 3 || ap.Total != 10 {
+		t.Fatalf("api_retry payload: got %+v, want {active:true current:3 total:10}", ap)
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatal("non-interactive conn b received the api_retry")
+	}
+}
+
+// AC#2/#4: a Compacting fans out as a compacting envelope to interactive-capable
+// conns only, carrying conversation_id + the active edge (banner-only, no counter).
+func TestInteractiveTurnEmitterV2_CompactingFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.Compacting{Active: true})
+
+	if got := len(bcast.pushes); got != 1 {
+		t.Fatalf("compacting pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	}
+	p := bcast.pushes[0]
+	if p.connID != "a" {
+		t.Fatalf("compacting pushed to conn %q; want interactive conn %q", p.connID, "a")
+	}
+	if p.env.Type != protocol.TypeCompacting {
+		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeCompacting)
+	}
+	var cp protocol.CompactingPayload
+	if err := json.Unmarshal(p.env.Payload, &cp); err != nil {
+		t.Fatalf("decode compacting payload: %v", err)
+	}
+	if cp.ConversationID != testConvID {
+		t.Fatalf("compacting conversation_id: got %q, want %q", cp.ConversationID, testConvID)
+	}
+	if !cp.Active {
+		t.Fatalf("compacting active: got %v, want true", cp.Active)
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatal("non-interactive conn b received the compacting")
+	}
+}
+
+// AC#4: the status peers mutate no turn lifecycle — a bare ApiRetry then
+// Compacting before any turn emit only their own frames (no turn_state / delta),
+// and the next content still opens a fresh turn as if they never happened.
+func TestInteractiveTurnEmitterV2_StatusPeersNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	// Bare status peers before any turn: only their own frames, no turn_state / delta.
+	e.Handle(context.Background(), turnevent.ApiRetry{Active: true, Current: 3, Total: 10})
+	e.Handle(context.Background(), turnevent.Compacting{Active: true})
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeApiRetry, protocol.TypeCompacting}) {
+		t.Fatalf("bare status-peer envelopes: got %v, want [%s %s]", got, protocol.TypeApiRetry, protocol.TypeCompacting)
+	}
+
+	// The next content opens a fresh turn: first subsequent envelope is
+	// turn_state: responding (the status peers left inTurn/currentState untouched).
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background()) // emit the coalesced delta (models a flush)
+	wantTypes := []string{
+		protocol.TypeApiRetry,
+		protocol.TypeCompacting,
+		protocol.TypeTurnState,      // responding — fresh turn opens after the status peers
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-status-peer envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after status peers: got %v, want [responding]", got)
+	}
+}
+
+// AC#1/#3: the api-retry count re-fire and the clear edge both reach the wire.
+// A shown-3 → shown-4 → hidden sequence produces three api_retry frames carrying
+// current 3, 4, 4 and active true, true, false.
+func TestInteractiveTurnEmitterV2_ApiRetryClearAndRefire(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.ApiRetry{Active: true, Current: 3, Total: 10},
+		turnevent.ApiRetry{Active: true, Current: 4, Total: 10},
+		turnevent.ApiRetry{Active: false, Current: 4, Total: 10},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeApiRetry, protocol.TypeApiRetry, protocol.TypeApiRetry}) {
+		t.Fatalf("api_retry frame types: got %v, want three api_retry", got)
+	}
+	var gotCurrent []int
+	var gotActive []bool
+	for _, p := range bcast.pushes {
+		var ap protocol.ApiRetryPayload
+		if err := json.Unmarshal(p.env.Payload, &ap); err != nil {
+			t.Fatalf("decode api_retry payload: %v", err)
+		}
+		gotCurrent = append(gotCurrent, ap.Current)
+		gotActive = append(gotActive, ap.Active)
+	}
+	if !slices.Equal(gotCurrent, []int{3, 4, 4}) {
+		t.Fatalf("api_retry current sequence: got %v, want [3 4 4]", gotCurrent)
+	}
+	if !slices.Equal(gotActive, []bool{true, true, false}) {
+		t.Fatalf("api_retry active sequence: got %v, want [true true false]", gotActive)
+	}
+}
+
 // A TurnEnd observed while no turn is open is dropped (no turn_end, no idle).
 func TestInteractiveTurnEmitterV2_TurnEndOutsideTurnDropped(t *testing.T) {
 	t.Parallel()

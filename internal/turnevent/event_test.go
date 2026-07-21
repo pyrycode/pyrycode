@@ -23,6 +23,12 @@ func TestEvents_FieldRoundTrip(t *testing.T) {
 	if got := (ToolUpdate{ToolCallID: "tc", Status: ToolStatusFailed, Content: TextContent{Text: "boom"}}); got.ToolCallID != "tc" || got.Status != ToolStatusFailed || got.Content != (TextContent{Text: "boom"}) {
 		t.Errorf("ToolUpdate: got %+v", got)
 	}
+	if got := (ApiRetry{Active: true, Current: 3, Total: 10}); !got.Active || got.Current != 3 || got.Total != 10 {
+		t.Errorf("ApiRetry: got %+v", got)
+	}
+	if got := (Compacting{Active: true}); !got.Active {
+		t.Errorf("Compacting: got %+v", got)
+	}
 
 	ts := ToolStart{
 		ToolCallID: "tc",
@@ -55,8 +61,10 @@ func TestEvent_StreamTypeSwitch(t *testing.T) {
 		ToolUpdate{ToolCallID: "tc1", Status: ToolStatusCompleted},
 		TurnEnd{Reason: TurnEndReasonEndTurn},
 		Stall{},
+		ApiRetry{Active: true, Current: 3, Total: 10},
+		Compacting{Active: true},
 	}
-	want := []string{"text", "thought", "tool_start", "tool_update", "turn_end", "stall"}
+	want := []string{"text", "thought", "tool_start", "tool_update", "turn_end", "stall", "api_retry", "compacting"}
 	for i, ev := range stream {
 		if got := eventKind(ev); got != want[i] {
 			t.Errorf("stream[%d] (%T): got %q, want %q", i, ev, got, want[i])
@@ -78,6 +86,10 @@ func eventKind(e Event) string {
 		return "turn_end"
 	case Stall:
 		return "stall"
+	case ApiRetry:
+		return "api_retry"
+	case Compacting:
+		return "compacting"
 	default:
 		return "unknown"
 	}

@@ -55,8 +55,8 @@ const maxSummaryLen = 200
 // NOT forwarded) and any nil/unknown Event. The consumer drops + debug-logs
 // those. Pure; safe on a zero-value Event.
 //
-// payload is one of the four protocol.*Payload value structs, or nil when ok is
-// false. It is any because the four payloads share no marker interface; the
+// payload is one of the protocol.*Payload value structs, or nil when ok is
+// false. It is any because the payloads share no marker interface; the
 // consumer json.Marshals it directly (same path as protocol.MessagePayload).
 // The consumer owns the envelope ID, TS, marshal, and seal — none happen here.
 func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok bool) {
@@ -96,6 +96,21 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// ignores them).
 		return protocol.TypeStall, protocol.StallPayload{
 			ConversationID: tc.ConversationID,
+		}, true
+	case turnevent.ApiRetry:
+		// Like Stall, a status peer carries conversation identity only —
+		// tc.TurnID and tc.Seq are ignored (not turn-scoped, not a delta). The
+		// counter rides across only as the two bounded ints.
+		return protocol.TypeApiRetry, protocol.ApiRetryPayload{
+			ConversationID: tc.ConversationID,
+			Active:         e.Active,
+			Current:        e.Current,
+			Total:          e.Total,
+		}, true
+	case turnevent.Compacting:
+		return protocol.TypeCompacting, protocol.CompactingPayload{
+			ConversationID: tc.ConversationID,
+			Active:         e.Active,
 		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
