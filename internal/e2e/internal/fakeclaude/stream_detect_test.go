@@ -47,7 +47,7 @@ func TestRunStreamJSON_SingleTurn(t *testing.T) {
 
 	const prompt = "hello over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf)
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -85,7 +85,7 @@ func TestRunStreamJSON_MultipleTurns(t *testing.T) {
 		in.WriteString(userTurnLine(p) + "\n")
 	}
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf)
+	runStreamJSON(strings.NewReader(in.String()), &buf, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2*len(prompts) {
@@ -119,10 +119,99 @@ func TestRunStreamJSON_NonUserLinesIgnored(t *testing.T) {
 	const ctrl = `{"type":"control_request","request_id":"r1","request":{"subtype":"interrupt"}}`
 	input := ctrl + "\n" + "\n" + "not json at all\n"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(input), &buf)
+	runStreamJSON(strings.NewReader(input), &buf, false)
 
 	if buf.Len() != 0 {
 		t.Fatalf("non-user lines produced %d bytes of output, want 0: %q", buf.Len(), buf.String())
+	}
+}
+
+// interruptControlRequestLine hand-mirrors the inbound interrupt control_request the
+// daemon (internal/streamsup/envelope.go marshalInterruptEnvelope) writes to
+// claude's stdin on a phone interrupt. Hand-written (not imported —
+// streamsup.controlRequest is unexported), same discipline as userTurnLine; the
+// OUTPUT side is checked below through the real streamsup.Parser (different fabric).
+func interruptControlRequestLine(requestID string) string {
+	return fmt.Sprintf(`{"type":"control_request","request_id":%q,"request":{"subtype":"interrupt"}}`, requestID)
+}
+
+// TestRunStreamJSON_InterruptMode_UserTurnStaysInFlight proves the interrupt mode
+// (runStreamJSON honorInterrupt=true) withholds the result on a user turn: the real
+// parser maps the emitted stdout to exactly ONE TextChunk (the echo) and NO TurnEnd,
+// so the turn stays open until an interrupt arrives.
+func TestRunStreamJSON_InterruptMode_UserTurnStaysInFlight(t *testing.T) {
+	t.Parallel()
+
+	const prompt = "in-flight over stream-json"
+	var buf bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true)
+
+	events := parseEmitted(t, buf.Bytes())
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1 (result withheld, no TurnEnd): %+v", len(events), events)
+	}
+	tc, ok := events[0].(turnevent.TextChunk)
+	if !ok {
+		t.Fatalf("event[0] = %T, want turnevent.TextChunk", events[0])
+	}
+	if tc.Text != prompt {
+		t.Errorf("TextChunk.Text = %q, want %q (echo)", tc.Text, prompt)
+	}
+}
+
+// TestRunStreamJSON_InterruptMode_InterruptEndsTurnCancelled proves an interrupt
+// control_request in interrupt mode emits a result{error_during_execution} that the
+// real parser maps to exactly ONE TurnEnd{Cancelled} — the interrupt→cancelled
+// classification end-to-end at the seam.
+func TestRunStreamJSON_InterruptMode_InterruptEndsTurnCancelled(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true)
+
+	events := parseEmitted(t, buf.Bytes())
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1 (TurnEnd only): %+v", len(events), events)
+	}
+	te, ok := events[0].(turnevent.TurnEnd)
+	if !ok {
+		t.Fatalf("event[0] = %T, want turnevent.TurnEnd", events[0])
+	}
+	if te.Reason != turnevent.TurnEndReasonCancelled {
+		t.Errorf("TurnEnd.Reason = %v, want %v", te.Reason, turnevent.TurnEndReasonCancelled)
+	}
+}
+
+// TestRunStreamJSON_InterruptMode_InFlightThenInterrupt is the unit analogue of the
+// e2e: a user line then an interrupt control_request yield TextChunk (echo) then
+// TurnEnd{Cancelled}, in order, through the real parser.
+func TestRunStreamJSON_InterruptMode_InFlightThenInterrupt(t *testing.T) {
+	t.Parallel()
+
+	const prompt = "e2e-1136 in-flight"
+	var in strings.Builder
+	in.WriteString(userTurnLine(prompt) + "\n")
+	in.WriteString(interruptControlRequestLine("r1") + "\n")
+	var buf bytes.Buffer
+	runStreamJSON(strings.NewReader(in.String()), &buf, true)
+
+	events := parseEmitted(t, buf.Bytes())
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2 (TextChunk then TurnEnd{Cancelled}): %+v", len(events), events)
+	}
+	tc, ok := events[0].(turnevent.TextChunk)
+	if !ok {
+		t.Fatalf("event[0] = %T, want turnevent.TextChunk", events[0])
+	}
+	if tc.Text != prompt {
+		t.Errorf("TextChunk.Text = %q, want %q (echo)", tc.Text, prompt)
+	}
+	te, ok := events[1].(turnevent.TurnEnd)
+	if !ok {
+		t.Fatalf("event[1] = %T, want turnevent.TurnEnd", events[1])
+	}
+	if te.Reason != turnevent.TurnEndReasonCancelled {
+		t.Errorf("TurnEnd.Reason = %v, want %v", te.Reason, turnevent.TurnEndReasonCancelled)
 	}
 }
 

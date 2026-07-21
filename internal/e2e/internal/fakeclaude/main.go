@@ -261,6 +261,7 @@ const (
 	envClearRotates     = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
 	envTrustTrigger     = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
 	envStreamJSON       = "PYRY_FAKE_CLAUDE_STREAM_JSON"
+	envStreamInterrupt  = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
 	assistantMaxBytes   = 64 * 1024
 	pollInterval        = 50 * time.Millisecond
 )
@@ -438,8 +439,13 @@ func main() {
 	// and short-circuits before every PTY/TUI mode below, making stream mode
 	// mutually exclusive with all of them by construction. When unset, control falls
 	// straight through and fakeclaude is byte-identical to its prior behaviour.
+	//
+	// The interrupt mode (envStreamInterrupt, default-off) is a rider on stream mode:
+	// it withholds the per-turn result (the turn stays in flight) and honours an
+	// interrupt control_request. Passed as a value so runStreamJSON stays a pure I/O
+	// seam; unset keeps every other stream rider on the untouched default.
 	if os.Getenv(envStreamJSON) != "" {
-		runStreamJSON(os.Stdin, os.Stdout)
+		runStreamJSON(os.Stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
 		return
 	}
 
@@ -1088,6 +1094,16 @@ type inUserTurn struct {
 	} `json:"message"`
 }
 
+// inControlRequest is the minimal decode of one inbound control_request line — only
+// the fields the interrupt mode reads (the top-level type and the request subtype).
+// It mirrors streamsup.controlRequest (envelope.go), which is unexported there.
+type inControlRequest struct {
+	Type    string `json:"type"`
+	Request struct {
+		Subtype string `json:"subtype"`
+	} `json:"request"`
+}
+
 // outAssistant / outResult are the two outbound stdout lines fakeclaude writes per
 // user turn. Field order/tags produce shapes byte-compatible with
 // stream_turn_drain_test.go's assistantTextLine / resultLine, so streamsup.Parser
@@ -1117,14 +1133,21 @@ type outResult struct {
 // runStreamJSON reads line-delimited stream-json user-turn envelopes from r and,
 // for each {"type":"user",…} line, writes one assistant text line (echoing the
 // prompt) followed by one result line to w — one response per received user turn.
-// Non-user lines (a control_request interrupt, a blank line, an unparsable line)
-// are read and ignored, mirroring streamsup.Parser's per-line resilience. Returns
-// on r EOF (the daemon closed the child's stdin during teardown) or the first
-// write error (the daemon's read end is gone — treat like EOF). Runs entirely on
-// main()'s goroutine — a single reader, no shared state — so -race is clean by
-// construction. The io.Reader/io.Writer seam is what lets the package unit test
-// drive read→emit against in-memory buffers.
-func runStreamJSON(r io.Reader, w io.Writer) {
+// Non-user lines (a blank line, an unparsable line) are read and ignored, mirroring
+// streamsup.Parser's per-line resilience. Returns on r EOF (the daemon closed the
+// child's stdin during teardown) or the first write error (the daemon's read end is
+// gone — treat like EOF). Runs entirely on main()'s goroutine — a single reader, no
+// shared state — so -race is clean by construction. The io.Reader/io.Writer seam is
+// what lets the package unit test drive read→emit against in-memory buffers.
+//
+// honorInterrupt selects the interrupt mode (#1136, default-off): a user turn emits
+// the assistant echo line ONLY (the result is withheld, so the turn stays in flight),
+// and an interrupt control_request emits a result{error_during_execution} — which the
+// daemon's parser maps to TurnEnd{cancelled}, ending the in-flight turn interrupted.
+// With honorInterrupt false the control_request is ignored (the default the send /
+// new_session / queue riders depend on staying byte-identical). The mode is stateless:
+// it emits an interrupted result on each interrupt control_request.
+func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt bool) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1133,9 +1156,25 @@ func runStreamJSON(r io.Reader, w io.Writer) {
 	for {
 		line, err := br.ReadString('\n')
 		if len(line) > 0 {
-			if text, ok := userTurnText([]byte(line)); ok {
+			b := []byte(line)
+			if text, ok := userTurnText(b); ok {
 				turn++
-				if werr := writeStreamResponse(w, fmt.Sprintf("m%d", turn), text); werr != nil {
+				msgID := fmt.Sprintf("m%d", turn)
+				// Default mode ends the turn (echo + result{success}); interrupt mode
+				// echoes ONLY, withholding the result so the turn stays in flight.
+				var werr error
+				if honorInterrupt {
+					werr = writeAssistantEcho(w, msgID, text)
+				} else {
+					werr = writeStreamResponse(w, msgID, text)
+				}
+				if werr != nil {
+					return
+				}
+			} else if honorInterrupt && interruptControlRequest(b) {
+				// The daemon routed a phone interrupt to this child as a control_request:
+				// end the in-flight turn with result{error_during_execution}.
+				if werr := writeInterruptedResult(w); werr != nil {
 					return
 				}
 			}
@@ -1166,6 +1205,21 @@ func userTurnText(line []byte) (string, bool) {
 	return "", true
 }
 
+// interruptControlRequest reports whether line is the interrupt control_request the
+// daemon writes to the child's stdin on a phone interrupt
+// (streamsup.marshalInterruptEnvelope:
+// {"type":"control_request",…"request":{"subtype":"interrupt"}}). It mirrors
+// userTurnText's decode discipline: a minimal struct, and a line that fails to
+// decode or is not an interrupt control_request returns false — the caller ignores
+// it, preserving the parser's per-line resilience.
+func interruptControlRequest(line []byte) bool {
+	var in inControlRequest
+	if err := json.Unmarshal(line, &in); err != nil {
+		return false
+	}
+	return in.Type == "control_request" && in.Request.Subtype == "interrupt"
+}
+
 // writeStreamResponse writes fakeclaude's canned reply to one user turn: one
 // assistant text line carrying text (the echoed prompt), then one
 // result{subtype:"success"} line. Both are json.Marshal-encoded from local structs
@@ -1173,20 +1227,41 @@ func userTurnText(line []byte) (string, bool) {
 // each object is exactly one physical line regardless of prompt content. Returns
 // the first marshal/write error.
 func writeStreamResponse(w io.Writer, msgID, text string) error {
-	asst := outAssistant{
+	if err := writeAssistantEcho(w, msgID, text); err != nil {
+		return err
+	}
+	return writeJSONLine(w, outResult{
+		Type:      "result",
+		Subtype:   "success",
+		SessionID: streamSessionID,
+	})
+}
+
+// writeAssistantEcho writes the single assistant text line echoing text (the
+// prompt) as message msgID — the assistant half of writeStreamResponse. It is split
+// out so the interrupt mode (#1136) can emit the assistant line WITHOUT the trailing
+// result, keeping the turn in flight; the line is byte-identical to the assistant
+// line writeStreamResponse emits, so the default path is unchanged.
+func writeAssistantEcho(w io.Writer, msgID, text string) error {
+	return writeJSONLine(w, outAssistant{
 		Type: "assistant",
 		Message: outAsstMessage{
 			ID:      msgID,
 			Role:    "assistant",
 			Content: []outTextBlock{{Type: "text", Text: text}},
 		},
-	}
-	if err := writeJSONLine(w, asst); err != nil {
-		return err
-	}
+	})
+}
+
+// writeInterruptedResult writes a single result{subtype:"error_during_execution"}
+// line — the stream-json shape claude emits for an interrupt-terminated turn.
+// streamsup.Parser maps this subtype to turnevent.TurnEnd{TurnEndReasonCancelled}
+// (parser.go resultTurnEndReason), so the daemon reports the in-flight turn ended
+// cancelled. Used only by the interrupt mode (#1136).
+func writeInterruptedResult(w io.Writer) error {
 	return writeJSONLine(w, outResult{
 		Type:      "result",
-		Subtype:   "success",
+		Subtype:   "error_during_execution",
 		SessionID: streamSessionID,
 	})
 }
