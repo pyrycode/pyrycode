@@ -21,6 +21,17 @@ type Config struct {
 	// with no DefaultConfig entry. SECURITY: a recording holds every PTY byte
 	// — prompt, output, tool output — so this is strictly opt-in.
 	DebugCapture bool `json:"debug_capture"`
+
+	// InteractiveRunner selects which interactive runner the daemon builds:
+	// "" or "pty" → the terminal-driven PTY supervisor (byte-identical to
+	// today's daemon startup, the #1077 rollback guarantee); "stream-json" →
+	// the streamsup-backed runner (#1081). Absent/empty is the default via the
+	// JSON zero value — NO DefaultConfig entry, so a config that omits the field
+	// keeps the PTY path. Any other value aborts startup (validated at the
+	// composition root, not here — the accepted set maps to factories the leaf
+	// config package cannot import). Rollback: set back to "pty" (or remove the
+	// field) and restart the daemon.
+	InteractiveRunner string `json:"interactive_runner"`
 }
 
 // DefaultConfig returns the built-in defaults. Used directly when no config

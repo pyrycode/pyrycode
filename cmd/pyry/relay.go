@@ -242,6 +242,15 @@ type relayWiring struct {
 	// and startRelayV2 returns the bridge's Surface for the control server to call.
 	// nil (foreground/v1) leaves the resolver's stream arm unwired ⇒ keystroke-only.
 	approvals *permbridge.Registry
+	// streamSink is the stream-json runner's turn-event fan-in (#1081). Non-nil
+	// selects stream mode — main.go sets it iff interactive_runner == "stream-json",
+	// over the SAME newStreamTurnSink instance the runner factory feeds; nil keeps
+	// the PTY interactive path. Its presence IS the relay leg's stream-mode
+	// discriminant (equivalent to w.sup == nil, since bootstrap.Supervisor() returns
+	// a genuine nil *supervisor.Supervisor for a stream runner, #1077): it gates the
+	// three raw w.sup.State() readers off and feeds the stream turn drain in their
+	// place. See the branch at the interactive-streams gate below.
+	streamSink *streamTurnSink
 }
 
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
@@ -400,6 +409,33 @@ func screenSnapshotterOrNil(sup *supervisor.Supervisor) relay.ScreenSnapshotter 
 	return sup
 }
 
+// boundSessionIDForActive resolves the pool session id bound to the ACTIVE
+// conversation, for the stream turn drain's AC2 scoping gate (#1081). It mirrors
+// the follow-active cursor the PTY emitter reads (active.CurrentConversation) and
+// the conv.CurrentSessionID == "" isolation guard resolveBoundRunner /
+// resolveBoundSession enforce (#678): Pool.Lookup("") would return the BOOTSTRAP
+// session, so an unbound conversation must be rejected here, not fall through to a
+// bootstrap default.
+//
+// Returns ("", false) when there is no active conversation, it is unknown, or it
+// is unbound — the drain then drops every event (fail-closed), exactly as the
+// emitter drops on an empty cursor. It deliberately SKIPS pool.Lookup (unlike
+// boundHost): the drain compares this id against the producing runner's
+// construction-time tag, so a stale id simply matches no live producer and
+// forwarding nothing is the fail-closed outcome — no cross-session leak, and no
+// *sessions.Pool dependency dragged into this resolver.
+func boundSessionIDForActive(active *activeConversation, convReg *conversations.Registry) (sessionID string, ok bool) {
+	convID := active.CurrentConversation()
+	if convID == "" {
+		return "", false
+	}
+	conv, found := convReg.Get(conversations.ConversationID(convID))
+	if !found || conv.CurrentSessionID == "" {
+		return "", false
+	}
+	return conv.CurrentSessionID, true
+}
+
 // startRelayV2 wires the Mobile Protocol v2 (Noise_IK E2E) dispatch leg: it
 // loads the binary's persistent static keypair, builds a V2SessionManager
 // against conn.Frames() registering the conversation / messaging / workspace /
@@ -475,7 +511,12 @@ func startRelayV2(
 	// which makes the handler report zeros. Read-only reflection of two non-secret
 	// integers — no authz, no mutation.
 	var snapshotUsage func() (usedTokens, windowTokens int)
-	if w.claudeSessionsDir != "" {
+	if w.streamSink == nil && w.claudeSessionsDir != "" {
+		// Stream mode (w.streamSink != nil) leaves snapshotUsage nil: its pidFn reads
+		// the typed-nil bootstrap w.sup.State() (#1077 nil-deref → panic), and there
+		// is no live PTY child to report usage for. A nil reader makes the
+		// screen_snapshot handler report zero usage, coherent with
+		// screenSnapshotterOrNil(w.sup) already returning nil (no live PTY screen).
 		usageResolve := resolveOwnBootstrapJSONL(w.claudeSessionsDir, newBootstrapProbe(logger), func() int { return w.sup.State().ChildPID })
 		snapshotUsage = func() (int, int) {
 			// resolveOwnBootstrapJSONL returns an error (not "",0,nil) for the
@@ -656,13 +697,39 @@ func startRelayV2(
 	var (
 		streamCleanup      func()
 		modalStreamCleanup func()
+		streamDrainCleanup func()
 	)
-	if w.bridge != nil && w.claudeSessionsDir != "" {
-		// The bootstrap-branch resolver tails the transcript the daemon's OWN
-		// claude child has open (probe over its PID) rather than the newest file by
-		// mtime, so a second claude in the shared sessions dir can't redirect the
-		// tail. pidFn re-reads State each resolve — the child respawns with a new
-		// PID and State() is mutex-guarded.
+	if w.streamSink != nil {
+		// STREAM MODE (#1081): both PTY interactive streams are gated OFF — neither
+		// startInteractiveTurnStreamV2 nor startInteractiveModalStreamV2 may build,
+		// as both dereference the typed-nil bootstrap w.sup (its pidFn / Session
+		// host, #1077 nil-deref → panic). In their place the turn stream is fed from
+		// the stream-json runner's turnevent drain; the PTY modal stream's stream-mode
+		// analogue — the #1080 approval bridge — is already wired unconditionally
+		// above (modalResolver.streamApprovals), so only the turn stream needs a
+		// replacement here. This branch does NOT gate on w.bridge / claudeSessionsDir:
+		// the drain consumes parsed turnevent.Events from the sink, not a PTY bridge
+		// or an on-disk transcript, so it runs whenever stream mode is selected.
+		//
+		// The emitter + SetReplaySource construction is byte-identical to the PTY
+		// path (interactive_turn_stream_v2.go): same active-conversation cursor, same
+		// session-scoped reconnect-replay source — only the feeder differs
+		// (startStreamTurnDrainV2 vs startInteractiveTurnStreamV2). The branches are
+		// mutually exclusive, so SetReplaySource runs at most once.
+		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
+		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
+		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
+		// session — the same follow-active cursor the PTY emitter reads, with the
+		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession
+		// enforces. An unmatched/empty id forwards nothing (fail-closed).
+		activeSession := func() (string, bool) { return boundSessionIDForActive(w.active, w.convReg) }
+		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, logger)
+	} else if w.bridge != nil && w.claudeSessionsDir != "" {
+		// PTY MODE (unchanged): the bootstrap-branch resolver tails the transcript
+		// the daemon's OWN claude child has open (probe over its PID) rather than the
+		// newest file by mtime, so a second claude in the shared sessions dir can't
+		// redirect the tail. pidFn re-reads State each resolve — the child respawns
+		// with a new PID and State() is mutex-guarded.
 		probe := newBootstrapProbe(logger)
 		pidFn := func() int { return w.sup.State().ChildPID }
 		streamCleanup = startInteractiveTurnStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, w.claudeSessionsDir, probe, pidFn, w.bootstrapIDFn, logger)
@@ -718,6 +785,9 @@ func startRelayV2(
 		}
 		if modalStreamCleanup != nil {
 			modalStreamCleanup()
+		}
+		if streamDrainCleanup != nil {
+			streamDrainCleanup()
 		}
 		streamTransitionsCleanup()
 		streamQueueStateCleanup()

@@ -63,6 +63,31 @@ func TestLoad(t *testing.T) {
 			want:     Config{RelayURL: "wss://my-relay.example/", DebugCapture: true},
 		},
 		{
+			// #1081 AC1: an absent interactive_runner field decodes to "" (Go zero
+			// value) — the PTY default — with relay_url still defaulted.
+			name:     "absent interactive_runner is empty",
+			fileBody: ptr(`{"relay_url": "wss://my-relay.example/"}`),
+			want:     Config{RelayURL: "wss://my-relay.example/", InteractiveRunner: ""},
+		},
+		{
+			name:     "interactive_runner pty decodes verbatim",
+			fileBody: ptr(`{"interactive_runner": "pty"}`),
+			want:     Config{RelayURL: "wss://relay.pyrycode.dev", InteractiveRunner: "pty"},
+		},
+		{
+			name:     "interactive_runner stream-json decodes verbatim",
+			fileBody: ptr(`{"interactive_runner": "stream-json"}`),
+			want:     Config{RelayURL: "wss://relay.pyrycode.dev", InteractiveRunner: "stream-json"},
+		},
+		{
+			// Load is parse-only: an unrecognised value decodes verbatim without
+			// error. Enum validation is the composition-root selector's job (#1081),
+			// mirroring how Load leaves DebugCapture unvalidated.
+			name:     "unknown interactive_runner decodes verbatim (Load does not validate)",
+			fileBody: ptr(`{"interactive_runner": "garbage"}`),
+			want:     Config{RelayURL: "wss://relay.pyrycode.dev", InteractiveRunner: "garbage"},
+		},
+		{
 			name:      "malformed JSON returns wrapped error",
 			fileBody:  ptr(`{not json`),
 			want:      Config{},
