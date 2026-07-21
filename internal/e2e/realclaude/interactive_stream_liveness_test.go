@@ -1,0 +1,254 @@
+//go:build e2e_realclaude
+
+package realclaude
+
+// TestInteractiveStreamLiveness is the #1153 deliverable: the real-claude
+// counterpart of the fake-side stream liveness proof
+// (TestRelayV2_StreamSendMessageDrainsTurn, #1141). It stands up the interactive
+// daemon under the production stream-json interactive runner
+// (interactive_runner: "stream-json") against a live claude and asserts one real
+// turn streams end-to-end — a non-empty assistant_delta FOLLOWED BY the terminal
+// turn_state{idle}, never a canned or fake response.
+//
+// Per the always-a-real-claude-gate policy (2026-07-08) every operator-facing
+// happy-path flow needs a real-claude e2e that actually RUNS in the pre-ship gate
+// before the Mac daemon binary is swapped — the operator must never be the first
+// real-stack execution. The stream-json interactive runner (#1081) is green
+// against fakeclaude (#1141 liveness + the #1136/#1137/#1138/#1139 riders) but had
+// never run the interactive relay path against REAL claude. This adds that rung.
+//
+// The daemon body is TRANSCRIBED from #854's TestInteractiveBootstrapLiveness
+// (interactive_bootstrap_liveness_test.go) with three deltas: (1) the stream-json
+// toggle is flipped via writeStreamInteractiveConfig before spawn, (2) it drives
+// ONE turn (AC #2, #1141 parity) instead of two, and (3) the drain continues past
+// the first delta to the terminal turn_state{idle} (drainForCompletedTurn) rather
+// than stopping at the first delta (#854's drainForAssistantReply). Every Noise-
+// wire / spawn / seed helper is reused verbatim from #854's file (same package,
+// same build tag).
+//
+// The two seeds still gate the drain, exactly as they do on the fake side (#1141):
+// the stream runner tags turnevents by its construction-time bootstrap pool id
+// (pinned to streamBootstrapUUID by seedBootstrapRegistry); the drain gate forwards
+// to the emitter only when the tag == activeSession(), which resolves streamConvID's
+// binding = streamBootstrapUUID via seedBoundConversation. A UUID mismatch drops
+// every event and hangs the drain, surfacing as the M1 timeout — never a silent
+// pass. Unlike the PTY path (#854) the stream runner reads claude's stdout directly,
+// so there is no transcript-resolution deadlock here; only the gate matters.
+//
+// The config-writer (writeStreamInteractiveConfig) is a standalone helper — not a
+// spawn wrapper — so the permission-flow rider #1154 can compose it with
+// spawnPermissionDaemon (no --dangerously-skip-permissions) instead of
+// spawnBootstrapDaemon.
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/noise"
+	"github.com/pyrycode/pyrycode/internal/protocol"
+)
+
+// Fixed identifiers for the seeded state, distinct from #854's liveBootstrapUUID /
+// liveConvID (same package — the two files must not redeclare). streamBootstrapUUID
+// is the bootstrap session's POOL id (pinned via seedBootstrapRegistry); streamConvID
+// is the driving conversation, bound to it via seedBoundConversation. The two tests
+// never share on-disk state (each gets its own authenticated tempdir HOME), but the
+// distinct literals keep any cross-test confusion impossible.
+const (
+	streamBootstrapUUID = "88888888-8888-4888-8888-888888888888"
+	streamConvID        = "66666666-6666-4666-8666-666666666666"
+)
+
+func TestInteractiveStreamLiveness(t *testing.T) {
+	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skipf("realclaude: claude not on PATH: %v", err)
+	}
+	home := WithWorktreeAuthenticated(t) // skips cleanly when no creds
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		t.Fatalf("realclaude: resolve claude: %v", err)
+	}
+
+	// Isolated workdir under the authenticated HOME. Load-bearing twice: it
+	// guarantees the fresh-daemon state (empty claude sessions dir) AND sidesteps
+	// the shared-session-folder collision (#828) by construction.
+	workdir := filepath.Join(home, "work")
+	if err := os.MkdirAll(workdir, 0o700); err != nil {
+		t.Fatalf("realclaude: mkdir workdir: %v", err)
+	}
+
+	// Flip the production toggle to the stream-json interactive runner BEFORE the
+	// daemon spawns — resolveConfigPath reads <home>/.pyry/config.json once at
+	// startup. This is the seam this test exists to prove end-to-end.
+	writeStreamInteractiveConfig(t, home)
+
+	// Pair a device BEFORE the daemon starts (mints the bearer token + the
+	// responder static pubkey the phone pins; writes server-id + devices registry
+	// the daemon loads at startup).
+	exit, stdout, stderr := runPyry(t, "pair", "-pyry-name=test", "--name=phone-a")
+	if exit != 0 {
+		t.Fatalf("pyry pair exit=%d\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+	}
+	payload := decodePairPayload(t, stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(payload.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
+
+	// Seed the deterministic bootstrap id + the driving conversation binding
+	// BEFORE the daemon starts (the registry is loaded once at startup, no reload).
+	seedBootstrapRegistry(t, home, streamBootstrapUUID)
+	seedBoundConversation(t, home, streamConvID, streamBootstrapUUID, workdir)
+
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+
+	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server")
+	t.Cleanup(func() { d.stop(t) })
+
+	serverID := readPersistedServerID(t, home)
+	waitBinaryHello(t, fr, serverID)
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	phone, err := fakephone.Dial(dialCtx, fr.URL(), serverID, payload.Token, "phone-a")
+	if err != nil {
+		t.Fatalf("phone dial: %v", err)
+	}
+	t.Cleanup(func() { _ = phone.Close() })
+
+	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+
+	// Drive ONE real turn (AC #2; the fake counterpart #1141 drives one). A short
+	// deterministic instruction with a per-run nonce defeats accidental caching
+	// without asserting on content. Generous budget: real claude on a cold stream
+	// session (spawn + model load + first-turn reply), not fakeclaude milliseconds.
+	nonce := time.Now().UnixNano()
+	sealSendMessage(t, phone, initSend, 2, streamConvID, "m-1",
+		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
+	drainForCompletedTurn(t, phone, initRecv, streamConvID, 120*time.Second)
+}
+
+// --- stream-json toggle + turn drain ----------------------------------------
+
+// writeStreamInteractiveConfig opts the daemon into the stream-json interactive
+// runner via the production config toggle. resolveConfigPath reads
+// <home>/.pyry/config.json once at startup (per-user, NOT per-instance), so this
+// must land BEFORE the daemon spawns. A raw JSON literal (no internal/config
+// import) keeps the realclaude package import-lean, mirroring seedBootstrapRegistry;
+// a partial config leaves every other field at its default. Transcribed from the
+// fake harness StartStreamInteractiveWithRelay (internal/e2e/harness.go). This is
+// the reusable seam the permission-flow rider #1154 composes with
+// spawnPermissionDaemon.
+func writeStreamInteractiveConfig(t *testing.T, home string) {
+	t.Helper()
+	pyryDir := filepath.Join(home, ".pyry")
+	if err := os.MkdirAll(pyryDir, 0o700); err != nil {
+		t.Fatalf("realclaude: mkdir .pyry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pyryDir, "config.json"),
+		[]byte(`{"interactive_runner":"stream-json"}`), 0o600); err != nil {
+		t.Fatalf("realclaude: write config.json: %v", err)
+	}
+}
+
+// drainForCompletedTurn reads binary→phone noise_msg frames in receive order —
+// the receive nonce is sequential, so every frame MUST be decrypted in order to
+// keep the CipherState in sync — and returns once it observes a full turn: a
+// non-empty assistant_delta for convID (M1) FOLLOWED BY the terminal
+// turn_state{idle} for convID (M2). This is the stronger drain AC #2 requires;
+// #854's drainForAssistantReply stops at M1.
+//
+// It mirrors the fake-side two-milestone drain (#1141,
+// relay_v2_stream_send_test.go:149-217) with the real-claude adaptation: NO
+// content/echo assertion — real claude's words are non-deterministic, so M1
+// asserts only non-empty text. A leading turn_state{responding} precedes the
+// delta; turn_states are ignored until sawDelta. On the deadline, a milestone-
+// specific t.Fatalf names the likely cause (a UUID mismatch between the two seeds
+// drops every event and hangs the drain).
+func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) {
+	t.Helper()
+	sawDelta := false
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if !sawDelta {
+				t.Fatalf("M1: never observed a non-empty assistant_delta for %q within %s — the turn never drained "+
+					"end-to-end (delivery never reached the child, or the parser / drain gate / emitter dropped it — "+
+					"most likely a UUID mismatch between seedBootstrapRegistry and seedBoundConversation)", convID, timeout)
+			}
+			t.Fatalf("M2: observed the assistant_delta for %q but never a terminal turn_state{idle} within %s — "+
+				"the turn opened but never closed", convID, timeout)
+		}
+		raw, err := phone.ReceiveBytes(remaining)
+		if err != nil {
+			if errors.Is(err, fakephone.ErrReceiveTimeout) {
+				continue // deadline reached — re-loop into the milestone-specific t.Fatalf above
+			}
+			t.Fatalf("phone receive (drain): %v", err)
+		}
+		var inner protocol.InnerFrameV2
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			t.Fatalf("decode inner frame (drain): %v", err)
+		}
+		if inner.Type != protocol.TypeNoiseMsg {
+			// A non-noise_msg control frame (e.g. rekey) does not advance the
+			// receive nonce — skip without decrypting.
+			continue
+		}
+		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
+		if err != nil {
+			t.Fatalf("decode inner data (drain): %v", err)
+		}
+		plain, err := cs.Decrypt(cipher)
+		if err != nil {
+			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
+		}
+		var env protocol.Envelope
+		if err := json.Unmarshal(plain, &env); err != nil {
+			t.Fatalf("decode envelope (drain): %v", err)
+		}
+		switch env.Type {
+		case protocol.TypeAssistantDelta:
+			if sawDelta {
+				continue
+			}
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			// M1: liveness — a non-empty streamed delta for the driving conv. No
+			// content/echo assertion (real claude's words are non-deterministic).
+			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
+				sawDelta = true
+				t.Logf("M1: non-empty assistant_delta (seq=%d, %d bytes) for %q", p.Seq, len(p.Text), convID)
+			}
+		case protocol.TypeTurnState:
+			if !sawDelta {
+				continue // the leading responding state precedes the delta
+			}
+			var st protocol.TurnStatePayload
+			if err := json.Unmarshal(env.Payload, &st); err != nil {
+				t.Fatalf("decode turn_state payload: %v", err)
+			}
+			// M2: after the delta, the terminal idle state closes the turn.
+			if st.State == "idle" && st.ConversationID == convID {
+				t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
+				return
+			}
+		}
+	}
+}
