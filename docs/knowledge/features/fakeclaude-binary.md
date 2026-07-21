@@ -617,6 +617,30 @@ gets the right behaviour for free; nothing polices "interrupt with no turn open"
 the specific value that makes the daemon report the turn as interrupted rather than
 merely errored. See [codebase/1136.md](../codebase/1136.md).
 
+### Stream-path stdin tee (`PYRY_FAKE_CLAUDE_STDIN_LOG`, #1137)
+
+`PYRY_FAKE_CLAUDE_STDIN_LOG` already existed for the PTY path (`startStdinReader`,
+above). #1137 extends the *same* env var to the stream-json branch: when set, the
+stream dispatch wraps `os.Stdin` in `io.TeeReader(os.Stdin, syncWriter{f})` before
+calling `runStreamJSON`, so every byte the daemon writes to the child's stdin — user-
+turn envelopes, interrupt `control_request`s — is appended to the log. `syncWriter`
+is a tiny `io.Writer` (`Write` → `f.Write` → `f.Sync`) mirroring the PTY reader's
+per-write `Sync`; the file is opened with the same flags
+(`O_WRONLY|O_APPEND|O_CREATE, 0o600`) so a bootstrap child and a later fresh
+post-rotation child (after a stream `new_session`) both accumulate into one log.
+
+The tee lives at the `main()` call site, not inside `runStreamJSON` — the function
+keeps its pure `(io.Reader, io.Writer, bool) ` I/O seam, so the #1140 unit test and
+the #1136 interrupt rider are byte-identical whether or not this ticket's change
+exists. With the env unset (every caller except #1137's own test) the branch is
+exactly `runStreamJSON(os.Stdin, os.Stdout, honorInterrupt)` — unchanged.
+
+This is the runtime oracle for proving a stream `new_session` never types `/clear`
+to the child: on the stream path `new_session` is a process re-spawn
+(`(*streamsup.Runner).RestartFresh`, #1124), never a keystroke, so the log should
+contain a user-turn marker (non-vacuity) but never the substring `/clear`. See
+[codebase/1137.md](../codebase/1137.md).
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -785,7 +809,8 @@ affect correctness.
   on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`;
   clear-rotate mode: `docs/specs/architecture/1004-new-session-e2e.md`;
   stream-json mode: `docs/specs/architecture/1140-fakeclaude-stream-json-mode.md`;
-  interrupt rider: `docs/specs/architecture/1136-stream-e2e-interrupt.md`
+  interrupt rider: `docs/specs/architecture/1136-stream-e2e-interrupt.md`;
+  new_session rider: `docs/specs/architecture/1137-stream-new-session-rotation-e2e.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
 - JSONL-trigger per-ticket notes: [codebase/642.md](../codebase/642.md) (the
@@ -815,6 +840,9 @@ affect correctness.
   withheld-result in-flight-turn trick, the `error_during_execution` →
   `TurnEndReasonCancelled` mapping, the minted-conversation live routing-target
   proof it feeds)
+- New_session rider per-ticket notes: [codebase/1137.md](../codebase/1137.md) (the
+  stream-path stdin tee, the on-disk-rotation-implies-`RestartFresh` reasoning, the
+  post-rotation drain divergence it confirms live and defers to #1133)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)

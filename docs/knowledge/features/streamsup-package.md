@@ -477,7 +477,10 @@ event with the runner's *construction-time* `SessionID`; `RestartFresh` (a strea
 rebinds `conv.CurrentSessionID` to a fresh id but doesn't retag the Parser, so `boundSessionIDForActive`
 and the event tag diverge and the drain's scoping gate drops everything for that conversation until the
 daemon restarts. No cross-session disclosure (unmatched tag ⇒ dropped, not misdelivered). Follow-up:
-#1133.
+#1133. Confirmed live (not just by inspection) by the #1137 `new_session` e2e: after a stream rotation, a
+subsequent turn's `assistant_delta` never reaches the phone, so that spec's post-rotation "serving a turn"
+milestone asserts delivery at the fakeclaude stdin boundary instead — see
+[codebase/1137.md § The post-rotation drain divergence](../codebase/1137.md).
 
 ## Test fake for this wire — fakeclaude stream-json mode (#1140)
 
