@@ -8,7 +8,9 @@ This package is leaf-level: stdlib only, no consumers wired in this slice. Daemo
 
 ```go
 type Config struct {
-    RelayURL string `json:"relay_url"`
+    RelayURL          string `json:"relay_url"`
+    DebugCapture      bool   `json:"debug_capture"`
+    InteractiveRunner string `json:"interactive_runner"`
 }
 
 func DefaultConfig() Config        // built-in defaults
@@ -16,6 +18,20 @@ func Load(path string) (Config, error)
 ```
 
 Three exports total. No `Save`, no `Watch`, no `ErrConfigMissing` sentinel — read-only this slice. If a future ticket needs writes, it lands then (compare `internal/sessions/registry.go`, where `loadRegistry` shipped without `saveRegistry`).
+
+## `interactive_runner` — PTY vs. stream-json selection (#1081)
+
+Selects which interactive runner the daemon builds. `Load` decodes it verbatim and does **not** validate it — same posture as `DebugCapture`, no `DefaultConfig` entry, so an absent field decodes to `""`. Enum validation happens at the composition root (`cmd/pyry/main.go`'s `selectInteractiveRunner`), not here, because the accepted set maps to runner factories the leaf `config` package cannot import (`internal/supervisor`/`cmd/pyry`'s `streamsup` wiring).
+
+| Value | Effect |
+|-------|--------|
+| absent / `"pty"` | The terminal-driven PTY supervisor (`supervisor.New`) — today's daemon startup, byte-identical (the `RunnerFactory` nil-default rollback guarantee, #1077). |
+| `"stream-json"` | The streamsup-backed runner (`internal/streamsup`), wired live end-to-end: `newStreamRunnerFactory` (#1109) selected as `sessions.Config.RunnerFactory`, and its turn events drained through the interactive turn stream (`startStreamTurnDrainV2`, #1098) so a relay client following the active conversation receives `turn_state`/`assistant_delta`/tool events. |
+| anything else | Daemon startup **aborts** with an error naming the offending value and the accepted set (`interactive_runner %q not recognized (accepted: "pty", "stream-json")`) — no silent fallback to PTY. |
+
+**Rollback:** set `interactive_runner` back to `"pty"` (or remove the field) in `~/.pyry/config.json` and restart the daemon.
+
+See [streamsup-package.md](streamsup-package.md) for the runner itself and [`codebase/1081.md`](../codebase/1081.md) for the composition-root and relay-leg wiring this field drives.
 
 The default is built into the function body (not a package-level `const`) so callers don't reach for "the current value" through a separate symbol; when more fields land, the constructor grows naturally to a multi-line struct literal.
 
@@ -72,3 +88,5 @@ Each row writes its fixture to `t.TempDir()` (no checked-in golden files). `Conf
 - [ADR 018](../decisions/018-config-overlay-decode.md) — overlay-decode over two-pass merge or pointer-field distinguishing absent-vs-empty
 - [`sessions-registry.md`](sessions-registry.md) — sibling on-disk JSON file (pyry-owned, atomic-rename writes)
 - `internal/sessions/registry.go:31-51` — `loadRegistry`, the reference implementation for the missing-file / wrap shape
+- [`streamsup-package.md`](streamsup-package.md) — the `"stream-json"` runner `interactive_runner` selects
+- [`codebase/1081.md`](../codebase/1081.md) — the composition-root selector + relay-leg stream-mode wiring this field drives
