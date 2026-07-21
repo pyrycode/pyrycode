@@ -140,7 +140,7 @@ func (p *Pool) IsAllocated(id SessionID) bool         // consume-on-first-hit
 - `allocatedTTL = 30 * time.Second` (package `var`, tests shrink it). Pruned opportunistically on every read/write, so never-materialized entries don't accumulate.
 - `Pool.mu` is held (write) for both Register and IsAllocated — same lock contract as `RotateID` and `saveLocked`.
 
-**Phase 1.2b-B has no live caller.** Pyry currently launches claude with `--continue`, so claude picks the UUID and the on-disk JSONL is what the registry follows. The scaffolding lands now so Phase 1.1's `pyry sessions new` + `claude --session-id` is a one-liner: register the UUID before spawn, and the inevitable subsequent CREATE no-ops through the rotation path.
+**Phase 1.2b-B shipped ahead of its live caller**, which arrived with `Pool.Create` (register-before-spawn for a caller-minted `--session-id`, see [sessions-package.md](sessions-package.md)) and, since #1125, a second one: `Pool.RotateForNewSession` registers the freshly-minted id in this same skip-set — under the same `Pool.mu` critical section as the re-key — **before** its caller (`cmd/pyry`'s `startFreshRunner`) spawns `claude --session-id <newID>` via `(*streamsup.Runner).RestartFresh`. This is the mirror image of this file's live-detection path: where the watcher above detects a *self*-rotation precisely because the new id is **not** in the skip-set, `RotateForNewSession` primes the skip-set first because the daemon itself is about to cause the CREATE — without the registration, this watcher would observe that CREATE and double-rotate the pool entry the daemon already rotated. See [codebase/1125.md](../codebase/1125.md).
 
 ## `Pool.Run` errgroup wrap
 
