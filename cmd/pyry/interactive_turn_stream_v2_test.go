@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -573,6 +574,102 @@ func TestResolveBoundSessionJSONL_InvalidIDErrors(t *testing.T) {
 		if path != "" || off != 0 {
 			t.Fatalf("sessionID %q: got (%q, %d), want (\"\", 0) — no path constructed", id, path, off)
 		}
+	}
+}
+
+// TestResolvers_NoResultReturnsNonNilError pins Family B's load-bearing
+// error-on-not-found convention (AC3), which is inverted from Family A on
+// purpose (docs/specs/architecture/838-probe-prefer-transcript-resolver.md
+// § "Error handling"): the outbound-stream subscriber RETRIES on error, so
+// every no-result branch must return a non-nil error — never ("", 0, nil). A
+// nil error would redirect the subscriber off its retry loop, so a cold-start
+// file would never be picked up and a bound session would never materialise.
+// This enumerates every no-result branch across the three stateful resolvers;
+// it fails loudly if a future edit flips any branch to the nil-error sentinel.
+func TestResolvers_NoResultReturnsNonNilError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		build func(t *testing.T) func(ctx context.Context) (string, int64, error)
+	}{
+		{
+			name: "latest: unreadable/missing dir",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				missing := filepath.Join(t.TempDir(), "does-not-exist")
+				return resolveLatestSessionJSONL(missing)
+			},
+		},
+		{
+			name: "latest: dir with only non-uuid files (no match)",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "scratch.jsonl"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return resolveLatestSessionJSONL(dir)
+			},
+		},
+		{
+			name: "own-bootstrap: pid <= 0",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				dir := t.TempDir()
+				own := writeJSONL(t, dir, uuidA, 10, time.Now())
+				probe := &fakeProbe{results: []probeResult{{path: own}}}
+				return resolveOwnBootstrapJSONL(dir, probe, func() int { return 0 })
+			},
+		},
+		{
+			name: "own-bootstrap: probe error",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				dir := t.TempDir()
+				probe := &fakeProbe{results: []probeResult{{err: errors.New("lsof hiccup")}}}
+				return resolveOwnBootstrapJSONL(dir, probe, func() int { return 4242 })
+			},
+		},
+		{
+			name: "own-bootstrap: probe empty path",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				dir := t.TempDir()
+				probe := &fakeProbe{results: []probeResult{{path: ""}}}
+				return resolveOwnBootstrapJSONL(dir, probe, func() int { return 4242 })
+			},
+		},
+		{
+			name: "own-bootstrap: probe path outside dir (guard reject)",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				dir := t.TempDir()
+				other := t.TempDir()
+				outside := writeJSONL(t, other, uuidA, 20, time.Now()) // valid UUID, wrong dir
+				probe := &fakeProbe{results: []probeResult{{path: outside}}}
+				return resolveOwnBootstrapJSONL(dir, probe, func() int { return 4242 })
+			},
+		},
+		{
+			name: "bound: valid-but-absent <id>.jsonl",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				return resolveBoundSessionJSONL(t.TempDir(), uuidA)
+			},
+		},
+		{
+			name: "bound: invalid (non-uuid) session id",
+			build: func(t *testing.T) func(ctx context.Context) (string, int64, error) {
+				return resolveBoundSessionJSONL(t.TempDir(), "not-a-uuid")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path, off, err := tc.build(t)(context.Background())
+			if err == nil {
+				t.Fatalf("%s: got nil error, want non-nil (Family B retries on error; a nil error breaks the retry loop)", tc.name)
+			}
+			if path != "" || off != 0 {
+				t.Fatalf("%s: got (%q, %d), want (\"\", 0)", tc.name, path, off)
+			}
+		})
 	}
 }
 
