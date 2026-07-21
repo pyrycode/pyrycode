@@ -648,6 +648,34 @@ func resolveSpawnDir(requested string) (string, error) {
 	return trusted, nil
 }
 
+// selectInteractiveRunner maps cfg.InteractiveRunner to the runner factory and
+// its turn-event sink at the composition root (#1081, AC4's loud-error path):
+//
+//   - "" / "pty" → (nil, nil, nil): a nil RunnerFactory keeps the PTY path
+//     byte-identical (supervisor.New, the #1077 rollback guarantee), and a nil
+//     sink leaves the relay leg on the PTY interactive streams.
+//   - "stream-json" → (factory, sink, nil): ONE newStreamTurnSink backs both the
+//     factory (which binds sinkFor per runner) and the single relay-leg drain, so
+//     the two ends of the wire share that one instance (#1098 late-bound
+//     singleton). The caller threads the returned sink into relayWiring.streamSink.
+//   - any other value → (nil, nil, error) naming the offending value and the
+//     accepted set. No silent PTY fallback (AC4).
+//
+// Validation lives here, not in config.Load, because the accepted set is defined
+// by the factory mapping — which the leaf config package cannot import
+// (supervisor/streamsup). config.Load stays parse-only, matching DebugCapture.
+func selectInteractiveRunner(cfg config.Config, logger *slog.Logger) (sessions.RunnerFactory, *streamTurnSink, error) {
+	switch cfg.InteractiveRunner {
+	case "", "pty":
+		return nil, nil, nil
+	case "stream-json":
+		sink := newStreamTurnSink(0, logger)
+		return newStreamRunnerFactory(sink), sink, nil
+	default:
+		return nil, nil, fmt.Errorf("interactive_runner %q not recognized (accepted: \"pty\", \"stream-json\")", cfg.InteractiveRunner)
+	}
+}
+
 // runSupervisor starts the supervisor and the control server together, blocks
 // until the context is cancelled by SIGINT/SIGTERM, then drains both.
 func runSupervisor(args []string) error {
@@ -750,6 +778,16 @@ func runSupervisor(args []string) error {
 	if cfg.DebugCapture {
 		recordDir = resolveRecordingsDir()
 	}
+	// Interactive-runner selection (#1081): pick the runner factory + its shared
+	// turn-event sink from config BEFORE the pool is built, so an invalid value
+	// fails fast (AC4, no silent PTY fallback). Both are nil on the "" / "pty"
+	// rollback path, leaving the sessions.Config and relayWiring literals below
+	// byte-identical to today. On "stream-json" the same sink instance is threaded
+	// two ways: RunnerFactory (below) and relayWiring.streamSink (the drain).
+	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("interactive runner: %w", err)
+	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
 		RegistryPath:              registryPath,
@@ -759,6 +797,7 @@ func runSupervisor(args []string) error {
 		ConversationsRegistry:     convReg,
 		ConversationsRegistryPath: convRegistryPath,
 		SweepInterval:             *convSweepInterval,
+		RunnerFactory:             runnerFactory,
 		Bootstrap: sessions.SessionConfig{
 			ClaudeBin:  *claudeBin,
 			WorkDir:    trustedWorkdir,
@@ -962,6 +1001,7 @@ func runSupervisor(args []string) error {
 		settings:          settingsUpdaterAdapter{pool},
 		snapshotSettings:  snapshotSettings,
 		approvals:         approvals,
+		streamSink:        streamSink,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
