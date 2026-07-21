@@ -3,8 +3,9 @@
 Pure-data leaf package. Declares the daemon-owned, neutral set of event types
 for Phase 2/3 structured streaming (EPIC #596 / #597). Predominantly **outbound**:
 six ACP-shaped outbound event structs (`TextChunk`, `ThoughtChunk`, `ToolStart`,
-`ToolUpdate`, `TurnEnd`, and `PermissionRequest`, #700) plus one internal-only
-event (`Stall`, #638) behind a sealed `Event` sum type. It also seals the
+`ToolUpdate`, `TurnEnd`, and `PermissionRequest`, #700) plus three internal-only,
+PTY-derived status-peer events (`Stall` #638, `ApiRetry` / `Compacting` #1074)
+behind a sealed `Event` sum type. It also seals the
 **inbound** members behind a sealed `Inbound` sum type — `PermissionResponse`
 (#700, first) and `Cancel` (#707, the neutral remote-Esc / ACP `session/cancel`
 command). Four string-backed ACP enums and a sealed `ToolContent` sum type round
@@ -37,7 +38,7 @@ the first inbound member `PermissionResponse`, see [codebase/700.md](../codebase
 
 ```
 internal/turnevent/
-├── event.go         Event sealed sum type; the 5 ACP-shaped event structs + the internal-only Stall (#638); Location; value-receiver markers; var _ Event = … assertions
+├── event.go         Event sealed sum type; the 5 ACP-shaped event structs + the internal-only status peers Stall (#638), ApiRetry / Compacting (#1074); Location; value-receiver markers; var _ Event = … assertions
 ├── permission.go    (#700) PermissionRequest (outbound Event variant) + PermissionOption + NewPermissionRequest; Inbound sealed sum type + PermissionResponse (first member) + Cancel (#707, fieldless inbound command); markers + assertions. Zero imports.
 ├── taxonomy.go      ToolKind / ToolStatus / TurnEndReason / PermissionOptionKind (#700) enums + const blocks + unexported canonical slices + Valid() methods
 ├── content.go       ToolContent sealed sum type; TextContent / DiffContent / TerminalContent; markers; var _ ToolContent = … assertions
@@ -82,7 +83,8 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
 
 ## The outbound `Event` variants (`event.go`, `permission.go`)
 
-Six ACP-shaped outbound turn events plus one internal-only event (`Stall`):
+Six ACP-shaped outbound turn events plus three internal-only, PTY-derived status
+peers (`Stall`, `ApiRetry`, `Compacting`):
 
 | Type | Fields | Notes |
 |---|---|---|
@@ -92,6 +94,8 @@ Six ACP-shaped outbound turn events plus one internal-only event (`Stall`):
 | `ToolUpdate` | `ToolCallID string`, `Status ToolStatus`, `Content ToolContent` | changed fields of an existing tool call; `Content` may be `nil` (status-only update) |
 | `TurnEnd` | `Reason TurnEndReason` | end of a claude turn; carries the reason only |
 | `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
+| `ApiRetry` (#1074) | `Active bool`, `Current, Total int` | **internal-only** status peer of `Stall`: claude's live API-error retry state. `Active` is the rising/falling edge; `Current`/`Total` are the parsed `attempt N/M` counter (`{0,0}` when unparsed) |
+| `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
 
 - **`Stall` is an internal-only, onset-only empty marker (#638).** It mirrors
@@ -104,6 +108,18 @@ Six ACP-shaped outbound turn events plus one internal-only event (`Stall`):
   § Stall), the future ACP adapter (#600) drops it. This is exactly the
   internal-only asymmetry the package was always designed to host (see *What's
   deliberately NOT in the package* — `Stall` graduated out of that list in #638).
+- **`ApiRetry` / `Compacting` are internal-only status peers of `Stall`, but
+  unlike `Stall` they are not onset-only (#1074).** Each carries an explicit
+  `Active` bool: the rising edge (tui-driver's `*Shown` kind) is `true`, the
+  falling edge (`*Hidden`) is `false` — the falling edge is the deliberate "clear
+  the indicator" signal a remote head needs (`Stall` instead relies on the phone
+  self-clearing on next turn activity, since tui-driver's stall marker has no
+  clearing edge). Like `Stall`, neither carries `conversation_id` — the bridge
+  injects it at wire-mapping time — and both are dropped by the ACP adapter
+  (#600, `acpbridge.MapUpdate`) the same way `Stall` is: no ACP equivalent. The
+  mapper copies `Current`/`Total` verbatim on both edges (tui-driver hands the
+  last-known counter on `Hidden` "so the final render stays coherent"); a `{0,0}`
+  value is a legitimate "retrying, count unknown" state, not an error.
 
 - **`RawInput` is opaque.** Typed `json.RawMessage` (undecoded pass-through
   bytes). The package **never inspects, parses, or mutates it** — consumers decode
@@ -283,10 +299,11 @@ imposes nothing.
   optional churn #707 declined; the marker stays in `permission.go`.)
 - **Non-turn / internal-only events** — `BusyState`, `QueueState`,
   `ScreenSnapshot`. Out of scope for #606; a later ticket gives them a home.
-  (Two types have already **graduated off** this list: `Stall` as an
-  internal-only `Event` variant in #638, and `PermissionRequest` as an outbound
-  `Event` variant in #700 — see *The outbound `Event` variants* / *The permission
-  seam* above.)
+  (Four types have already **graduated off** this list: `Stall` as an
+  internal-only `Event` variant in #638, `PermissionRequest` as an outbound
+  `Event` variant in #700, and `ApiRetry` / `Compacting` as `Stall`'s
+  PTY-derived status-peer siblings in #1074 — see *The outbound `Event`
+  variants* / *The permission seam* above.)
 - **Any transport / wire / envelope mapping.** `Events()` draining is #608; v2
   wire types are #607; the ACP `stopReason` return conversion is the #600 adapter.
   Parsing the inbound `PermissionResponse` frame + the gate / nonce / deny-on-
@@ -308,10 +325,12 @@ imposes nothing.
 - `pyry acp` adapter (#600) — near pass-through. Its **outbound `session/update`
   half is now built** ([acpbridge-package.md](acpbridge-package.md), #769): the
   pure `acpbridge.MapUpdate` maps `TextChunk`/`ThoughtChunk`/`ToolStart`/`ToolUpdate`
-  out to ACP `session/update` payloads, drops `Stall`, and reports "no
-  notification" for `TurnEnd` (whose `stopReason` return the consumer re-derives
-  from `TurnEnd.Reason`). Still deferred to later slices: the streaming consumer
-  (#750), and mapping ACP's `session/request_permission` onto `PermissionRequest`.
+  out to ACP `session/update` payloads, drops `Stall` (and, since #1074, `ApiRetry`
+  / `Compacting` the same way — no ACP equivalent for any of the three status
+  peers), and reports "no notification" for `TurnEnd` (whose `stopReason` return
+  the consumer re-derives from `TurnEnd.Reason`). Still deferred to later slices:
+  the streaming consumer (#750), and mapping ACP's `session/request_permission`
+  onto `PermissionRequest`.
 
 ## Related
 
@@ -320,6 +339,10 @@ imposes nothing.
 - [codebase/606.md](../codebase/606.md) — ticket record (patterns + lessons).
 - [codebase/638.md](../codebase/638.md) — the `Stall` internal-only variant +
   its v2 `stall` wire peer (data vocabulary; bridge is #624-B / #608).
+- [codebase/1074.md](../codebase/1074.md) — `ApiRetry` / `Compacting`, `Stall`'s
+  PTY-derived status-peer siblings, threaded through all five bridge layers
+  (mapper, outbound adapter, `cmd/pyry` fan-out) in one ticket; unlike `Stall`
+  each carries an explicit `Active` falling edge.
 - [codebase/700.md](../codebase/700.md) — the permission request/response seam:
   `PermissionRequest` outbound, the `Inbound` sum type + `PermissionResponse`, and
   the fourth `PermissionOptionKind` enum.
