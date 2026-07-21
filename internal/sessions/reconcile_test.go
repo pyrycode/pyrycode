@@ -51,128 +51,15 @@ func touchJSONL(t *testing.T, dir string, id string, mtime time.Time) {
 	}
 }
 
-func TestMostRecentJSONL_PicksLatestMtime(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	older := SessionID("00000000-0000-4000-8000-000000000001")
-	middle := SessionID("00000000-0000-4000-8000-000000000002")
-	newest := SessionID("00000000-0000-4000-8000-000000000003")
-
-	base := time.Now().Add(-1 * time.Hour)
-	touchJSONL(t, dir, string(older), base)
-	touchJSONL(t, dir, string(middle), base.Add(10*time.Minute))
-	touchJSONL(t, dir, string(newest), base.Add(20*time.Minute))
-
-	got, err := mostRecentJSONL(dir)
-	if err != nil {
-		t.Fatalf("mostRecentJSONL: %v", err)
-	}
-	if got != newest {
-		t.Errorf("got %q, want %q", got, newest)
-	}
-}
-
-func TestMostRecentJSONL_IgnoresNonJSONL(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-
-	valid := SessionID("11111111-1111-4111-8111-111111111111")
-	now := time.Now()
-	touchJSONL(t, dir, string(valid), now.Add(-time.Hour))
-
-	// noise: non-jsonl extensions, malformed UUID stems, wrong-length stems,
-	// uppercase (non-canonical), backup files, and a subdirectory.
-	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "session.jsonl.bak"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "not-a-uuid.jsonl"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.jsonl"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Stamp the noise files with a much-newer mtime so they would win if
-	// they were not filtered out.
-	for _, name := range []string{"notes.txt", "session.jsonl.bak", "not-a-uuid.jsonl", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.jsonl"} {
-		if err := os.Chtimes(filepath.Join(dir, name), now, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Mkdir(filepath.Join(dir, "subdir"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := mostRecentJSONL(dir)
-	if err != nil {
-		t.Fatalf("mostRecentJSONL: %v", err)
-	}
-	if got != valid {
-		t.Errorf("got %q, want %q (noise files should be ignored)", got, valid)
-	}
-}
-
-func TestMostRecentJSONL_EmptyDir(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	got, err := mostRecentJSONL(dir)
-	if err != nil {
-		t.Fatalf("mostRecentJSONL: %v", err)
-	}
-	if got != "" {
-		t.Errorf("got %q, want empty", got)
-	}
-}
-
-func TestMostRecentJSONL_SingleEntry(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	id := SessionID("22222222-2222-4222-8222-222222222222")
-	touchJSONL(t, dir, string(id), time.Now())
-	got, err := mostRecentJSONL(dir)
-	if err != nil {
-		t.Fatalf("mostRecentJSONL: %v", err)
-	}
-	if got != id {
-		t.Errorf("got %q, want %q", got, id)
-	}
-}
-
-func TestMostRecentJSONL_TieBreakDeterministic(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	// Same mtime; lex-larger ID should win deterministically.
-	a := SessionID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-	b := SessionID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-	when := time.Now()
-	touchJSONL(t, dir, string(a), when)
-	touchJSONL(t, dir, string(b), when)
-	for i := 0; i < 5; i++ {
-		got, err := mostRecentJSONL(dir)
-		if err != nil {
-			t.Fatalf("mostRecentJSONL: %v", err)
-		}
-		if got != b {
-			t.Errorf("iter %d: got %q, want %q (lex-larger on tie)", i, got, b)
-		}
-	}
-}
-
-func TestMostRecentJSONL_MissingDir(t *testing.T) {
-	t.Parallel()
-	got, err := mostRecentJSONL(filepath.Join(t.TempDir(), "does-not-exist"))
-	if err == nil {
-		t.Errorf("got %q nil err, want a read error", got)
-	}
-}
-
 // --- #668: newTranscriptResolver ----------------------------------------------
+//
+// The newest-by-mtime scan itself (tie-break, non-uuid / wrong-ext / subdir skip,
+// empty-dir, missing-dir) now lives in internal/transcript and is exercised by
+// transcript_test.go's TestNewest — a strict superset of the retired
+// TestMostRecentJSONL_* cases. These tests cover only the Family A adapter over it.
 
 // TestNewTranscriptResolver_PicksNewestWithSize confirms the resolver returns
-// the newest <uuid>.jsonl path (the same file mostRecentJSONL selects) and its
+// the newest <uuid>.jsonl path (the same file transcript.Newest selects) and its
 // real current byte size — the baseline/growth signal the commit-confirm reads.
 func TestNewTranscriptResolver_PicksNewestWithSize(t *testing.T) {
 	t.Parallel()
@@ -225,7 +112,7 @@ func TestNewTranscriptResolver_MissingDir(t *testing.T) {
 }
 
 // TestNewTranscriptResolver_IgnoresNonMatching: non-UUID / non-.jsonl noise is
-// skipped (inherited from mostRecentJSONL), even when newer than the real one.
+// skipped (inherited from transcript.Newest), even when newer than the real one.
 func TestNewTranscriptResolver_IgnoresNonMatching(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -324,10 +211,21 @@ func TestProbePreferredResolver_TailsOwnChildNotNewestByMtime(t *testing.T) {
 // must yield the ("", 0, nil) no-baseline sentinel — a NIL error, never a non-nil
 // error and never an mtime fallback (AC3, the load-bearing convention inversion
 // vs the cmd/pyry sibling) — plus the AC4 confidentiality-guard rejections.
+//
+// AC3, no-mtime-fallback pin: each sub-test seeds one foreign, valid,
+// mtime-winning <uuid>.jsonl into dir before resolving. That seeded file is
+// EXACTLY what a newest-by-mtime fallback would return, so the ("", 0, nil)
+// assertion doubles as proof the probe path never falls back to it; the err==nil
+// half is the "no non-nil error" pin. The foreign stem is distinct from `valid`,
+// so the "vanished before stat" case (which probes for dir/<valid>.jsonl, kept
+// absent) does not collide with it.
 func TestProbePreferredResolver_NoBaseline(t *testing.T) {
 	t.Parallel()
 
 	const valid = "22222222-2222-4222-8222-222222222222"
+	// foreign is a valid UUID stem distinct from `valid`; seeded with a recent
+	// mtime so it would win newest-by-mtime if any branch wrongly fell back.
+	const foreign = "99999999-9999-4999-8999-999999999999"
 
 	cases := []struct {
 		name      string
@@ -366,6 +264,10 @@ func TestProbePreferredResolver_NoBaseline(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			dir := resolvedTempDir(t)
+			// AC3: a foreign, mtime-winning transcript that a newest-by-mtime
+			// fallback would latch onto. The no-baseline assertion below proves
+			// the probe path never returns it.
+			touchJSONL(t, dir, foreign, time.Now())
 			var path string
 			if c.probePath != nil {
 				path = c.probePath(t, dir)

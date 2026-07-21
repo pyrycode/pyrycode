@@ -578,8 +578,8 @@ func New(cfg Config) (*Pool, error) {
 	// #839: no startup adopt-by-mtime. The bootstrap id is authoritative from
 	// the persisted registry (warm start) or a freshly-minted id (cold start);
 	// it is never rotated to a foreign <uuid>.jsonl found in the shared sessions
-	// dir. mostRecentJSONL and the transcript resolvers stay — they still back
-	// the #838 growth-confirm baseline.
+	// dir. The transcript resolvers stay — they still back the #838
+	// growth-confirm baseline.
 	return p, nil
 }
 
