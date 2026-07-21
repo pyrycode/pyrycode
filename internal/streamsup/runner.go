@@ -134,17 +134,31 @@ type Runner struct {
 	stateMu sync.Mutex
 	state   State
 
-	// restartMu is a leaf mutex guarding the live-restart seam (args +
-	// iterCancel), the streamsup analogue of supervisor's restartMu. args is the
-	// live spawn base argv, swapped by Restart and read by liveArgs at the top of
-	// each Run iteration; iterCancel is the current spawn's cancel, published each
-	// iteration so Restart can force the child to exit. Kept separate from mu and
-	// stateMu — Restart touches only this mutex + restartCh (never a Pool lock),
-	// so UpdateSettings can call it after releasing Pool.mu with no lock-order
-	// concern.
+	// restartMu is a leaf mutex guarding the live-restart seam: args, iterCancel,
+	// and the RestartFresh id-rotation pair (sessionID + rotatePending). The
+	// streamsup analogue of supervisor's restartMu. args is the live spawn base
+	// argv, swapped by Restart and read by liveArgs at the top of each Run
+	// iteration; iterCancel is the current spawn's cancel, published each iteration
+	// so Restart/RestartFresh can force the child to exit. Kept separate from mu
+	// and stateMu — Restart/RestartFresh touch only this mutex + restartCh (never a
+	// Pool lock), so the sessions layer can call them after releasing Pool.mu with
+	// no lock-order concern.
 	restartMu  sync.Mutex
 	args       []string
 	iterCancel context.CancelFunc
+
+	// sessionID is the live claude session id read by each spawn's buildArgs (via
+	// nextSpawnID). Seeded from cfg.SessionID in New; rotated to a new id by
+	// RestartFresh. The mutable analogue of the immutable cfg.SessionID — that
+	// field stays the construction-time input and New's non-empty validation
+	// source; after construction the live id is r.sessionID.
+	sessionID string
+
+	// rotatePending is set by RestartFresh and consumed once by nextSpawnID: it
+	// re-arms first-run form so the next spawn uses --session-id <newID> (a fresh
+	// transcript), not --resume <newID>. firstRun stays Run-goroutine-private;
+	// rotatePending is the only cross-goroutine signal that re-arms it.
+	rotatePending bool
 
 	// restartCh (buffered 1) carries the "a deliberate restart was requested"
 	// hint. Restart sends on it non-blockingly; Run consumes it either in the
@@ -198,6 +212,7 @@ func New(cfg Config) (*Runner, error) {
 		workDir:   workDir,
 		state:     State{Phase: PhaseStarting},
 		args:      slices.Clone(cfg.Args),
+		sessionID: cfg.SessionID,
 		restartCh: make(chan struct{}, 1),
 	}, nil
 }
@@ -296,6 +311,45 @@ func (r *Runner) Restart(args []string) {
 	}
 }
 
+// RestartFresh rotates the runner's persistent session id to newID and forces the
+// next spawn to use --session-id <newID> (a fresh transcript, no fork),
+// re-establishing first-run semantics. A subsequent crash-respawn then --resumes
+// newID — never the pre-rotation id. If a child is live it is cancelled so Run
+// relaunches immediately (skipping backoff, exactly like Restart); with no live
+// child the rotation takes effect on the next spawn. Non-blocking,
+// fire-and-forget, safe from any goroutine.
+//
+// An empty newID is a no-op (logged at Warn): the runner never emits
+// --session-id "". This is a deterministic last-resort guard upholding New's
+// non-empty contract — the validating boundary is the pool/routing layer (#1125),
+// per the "caller-supplied id validation at the primitive boundary" convention.
+//
+// Unlike Restart it leaves r.args untouched: new_session rotates the id, not the
+// model/flags — args stay owned by Restart/UpdateSettings. Like Restart it drives
+// only Runner-internal state (restartMu, a ctx cancel, restartCh) and never a
+// Pool lock, so the sessions layer can call it after releasing Pool.mu.
+func (r *Runner) RestartFresh(newID string) {
+	if newID == "" {
+		r.log.Warn("streamsup: RestartFresh called with empty id; ignoring")
+		return
+	}
+	r.restartMu.Lock()
+	r.sessionID = newID
+	r.rotatePending = true
+	cancel := r.iterCancel
+	r.restartMu.Unlock()
+
+	// Hint first, then kill, so Run's post-spawn drain observes the token even if
+	// the child exits the instant it is cancelled (identical ordering to Restart).
+	select {
+	case r.restartCh <- struct{}{}:
+	default:
+	}
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // liveArgs returns a clone of the live spawn base argv under restartMu. Run reads
 // it (rather than cfg.Args) at the top of each iteration so a Restart-swapped
 // argv takes effect on the next spawn.
@@ -303,6 +357,19 @@ func (r *Runner) liveArgs() []string {
 	r.restartMu.Lock()
 	defer r.restartMu.Unlock()
 	return slices.Clone(r.args)
+}
+
+// nextSpawnID snapshots the live session id and whether this spawn must use
+// first-run form, consuming the fresh-restart request in the same critical
+// section (no TOCTOU between reading the id and the flag). Run calls it at the top
+// of each iteration in place of the plain cfg.SessionID read, so a RestartFresh
+// rotation takes effect on the next spawn.
+func (r *Runner) nextSpawnID() (sessionID string, forceFirst bool) {
+	r.restartMu.Lock()
+	defer r.restartMu.Unlock()
+	sessionID, forceFirst = r.sessionID, r.rotatePending
+	r.rotatePending = false
+	return sessionID, forceFirst
 }
 
 // setIterCancel publishes (or clears, when c is nil) the current iteration's
@@ -356,7 +423,16 @@ func (r *Runner) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		args := buildArgs(r.liveArgs(), firstRun, r.cfg.SessionID)
+		// nextSpawnID reads the live (possibly rotated) id and consumes any pending
+		// RestartFresh request; forceFirst re-arms first-run form so the rotated id
+		// spawns with --session-id (a fresh transcript). firstRun's flip-back to
+		// false on a successful spawn (below) then makes the next respawn --resume
+		// the new id — see the started-gated flip.
+		sessionID, forceFirst := r.nextSpawnID()
+		if forceFirst {
+			firstRun = true
+		}
+		args := buildArgs(r.liveArgs(), firstRun, sessionID)
 		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
 
 		start := time.Now()

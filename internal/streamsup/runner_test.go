@@ -625,3 +625,195 @@ func TestRunner_TeardownReapsDescendantGroups(t *testing.T) {
 	}
 	assertReapedLivePid(t, rec)
 }
+
+// --- RestartFresh: rotate into a fresh session under a new id: AC1/AC2/AC4/AC5 --
+
+// rotatedSessionID is the caller-supplied new session id a RestartFresh rotates
+// to; distinct from testSessionID so the argv assertions can tell the fresh
+// transcript apart from the pre-rotation session.
+const rotatedSessionID = "99999999-8888-7777-6666-555555555555"
+
+// idFlagCount returns how many id flags (--session-id / --resume) appear in args.
+// Exactly one per spawn is the single-id-flag invariant (AC4/AC5(3)).
+func idFlagCount(args []string) int {
+	n := 0
+	for _, a := range args {
+		if a == "--session-id" || a == "--resume" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRunner_RestartFresh_RotatesThenResumesNewID proves the full fresh-restart
+// sequence in one deterministic run: after RestartFresh the next spawn uses
+// --session-id <newID> (a fresh transcript, AC1), and a subsequent crash-respawn
+// --resumes the NEW id — never the old one (AC2 + the load-bearing subtlety the
+// ticket warns about). Also asserts no double id-flag injection (AC5(3)).
+//
+// A sync.Once-guarded onSpawn rotates on exactly the first spawn. onSpawn fires
+// on the Run goroutine before cmd.Wait, so the rotation is published before spawn
+// 1 exits regardless of whether the crash or the RestartFresh cancel wins — the
+// argv sequence is stable:
+//
+//	spawn 1: --session-id <old>   (establish the original id)
+//	spawn 2: --session-id <new>   (fresh establish of the rotated id)
+//	spawn 3: --resume     <new>   (crash-respawn resumes the rotated id)
+func TestRunner_RestartFresh_RotatesThenResumesNewID(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "crash", out, stderr)
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+	rec := &spawnArgsRecorder{}
+	cfg.Logger = slog.New(rec)
+	var (
+		r    *Runner
+		once sync.Once
+	)
+	cfg.onSpawn = func(int) {
+		once.Do(func() { r.RestartFresh(rotatedSessionID) })
+	}
+
+	var err error
+	r, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	// Wait for spawn 1 (old id), spawn 2 (rotated establish), spawn 3 (rotated
+	// resume). Tiny backoff + a 20ms crash child reaches 3 spawns in well under a
+	// second.
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.count() < 3 {
+		if time.Now().After(deadline) {
+			cancel()
+			join()
+			t.Fatalf("saw only %d spawn(s), want ≥3", rec.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	join()
+
+	spawns := rec.all()
+
+	// spawn 1 establishes the original id with --session-id, no --resume.
+	if got := idFlagValue(spawns[0], "--session-id"); got != testSessionID {
+		t.Errorf("spawn 1 --session-id = %q, want %q:\n%v", got, testSessionID, spawns[0])
+	}
+	if slices.Contains(spawns[0], "--resume") {
+		t.Errorf("spawn 1 unexpectedly carries --resume:\n%v", spawns[0])
+	}
+
+	// spawn 2 is the fresh establish of the rotated id: --session-id <new>, no
+	// --resume — a fresh restart re-arms first-run form, it is not a resume.
+	if got := idFlagValue(spawns[1], "--session-id"); got != rotatedSessionID {
+		t.Errorf("spawn 2 --session-id = %q, want rotated %q (RestartFresh did not re-arm first-run form):\n%v",
+			got, rotatedSessionID, spawns[1])
+	}
+	if slices.Contains(spawns[1], "--resume") {
+		t.Errorf("spawn 2 unexpectedly carries --resume — a fresh restart is not a resume:\n%v", spawns[1])
+	}
+
+	// spawn 3 crash-respawns and resumes the ROTATED id — never the pre-rotation
+	// id (the silent regression the ticket warns about).
+	if got := idFlagValue(spawns[2], "--resume"); got != rotatedSessionID {
+		t.Errorf("spawn 3 --resume = %q, want rotated %q (respawn regressed to the pre-rotation id):\n%v",
+			got, rotatedSessionID, spawns[2])
+	}
+
+	for i, args := range spawns {
+		// No double-inject: never both id flags on one spawn.
+		if idFlagCount(args) != 1 {
+			t.Errorf("spawn %d carries %d id flags, want exactly 1 (double-inject / missing flag):\n%v",
+				i+1, idFlagCount(args), args)
+		}
+		// After the rotation (spawn 2 onward) the pre-rotation id must not resurface
+		// anywhere in the argv — not as --resume <old>, not at all.
+		if i >= 1 && slices.Contains(args, testSessionID) {
+			t.Errorf("spawn %d references the pre-rotation id %q after the rotation:\n%v", i+1, testSessionID, args)
+		}
+	}
+}
+
+// TestRunner_RestartFresh_NoLiveChildIsSafe covers AC4: RestartFresh called
+// before Run starts (no child to cancel, iterCancel is nil) must not panic and
+// must land the rotated id on the very first spawn with exactly one id flag. The
+// test completing is the no-panic proof.
+func TestRunner_RestartFresh_NoLiveChildIsSafe(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	rec := &spawnArgsRecorder{}
+	cfg.Logger = slog.New(rec)
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Rotate with no child running: iterCancel is nil, so this is a publish-only
+	// path (no cancel to fire, no panic).
+	r.RestartFresh(rotatedSessionID)
+
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+
+	spawns := rec.all()
+	if len(spawns) == 0 {
+		t.Fatal("no spawn recorded")
+	}
+	first := spawns[0]
+	if got := idFlagValue(first, "--session-id"); got != rotatedSessionID {
+		t.Errorf("first spawn --session-id = %q, want pre-Run rotated %q:\n%v", got, rotatedSessionID, first)
+	}
+	if slices.Contains(first, "--resume") {
+		t.Errorf("first spawn unexpectedly carries --resume:\n%v", first)
+	}
+	if n := idFlagCount(first); n != 1 {
+		t.Errorf("first spawn carries %d id flags, want exactly 1 (no partial or duplicated injection):\n%v", n, first)
+	}
+}
+
+// TestRunner_RestartFresh_EmptyIDIsNoOp keeps the deterministic empty-id guard
+// from silently rotting: RestartFresh("") must not rotate the id and must not arm
+// first-run form, so nextSpawnID still returns the original id with forceFirst
+// false. The runner never spawns --session-id "".
+func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		ClaudeBin: os.Args[0],
+		WorkDir:   t.TempDir(),
+		SessionID: testSessionID,
+		Logger:    slog.New(&spawnArgsRecorder{}), // swallows the Warn record
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	r.RestartFresh("")
+
+	id, forceFirst := r.nextSpawnID()
+	if id != testSessionID {
+		t.Errorf("nextSpawnID id = %q after RestartFresh(%q), want unchanged %q", id, "", testSessionID)
+	}
+	if forceFirst {
+		t.Errorf("nextSpawnID forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
+	}
+}
