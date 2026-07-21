@@ -692,6 +692,65 @@ See [codebase/1138.md](../codebase/1138.md) for the live queue-drain e2e this mo
 feeds — the all-three-acks-before-release vacuity gate, and why submission order is
 proven via the FIFO stdin-pipe chain rather than `queue_state` depth.
 
+### Approve rider (`PYRY_FAKE_CLAUDE_STREAM_APPROVE`, #1139)
+
+`PYRY_FAKE_CLAUDE_STREAM_APPROVE` (default-off) is a rider on stream mode, mutually
+exclusive with the interrupt rider — a turn either does the approval dance or the
+plain echo. Where every other mode/rider *reacts* to stdin, this one *originates* a
+request: on each `{"type":"user",…}` turn it calls `control.Approve` — the same
+client `pyry mcp-approve` calls — directly against the daemon's control socket,
+blocking until the daemon answers allow/deny, then reflects the verdict into its
+assistant echo instead of parroting the prompt.
+
+```go
+if os.Getenv(envStreamApprove) != "" {
+    runStreamJSONApprove(stdin, os.Stdout, os.Getenv(envApproveSocketFile))
+    return
+}
+runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
+```
+
+`runStreamJSONApprove` duplicates `runStreamJSON`'s ~15-line read loop rather than
+widening its signature — same discipline as the stdin tee and startup hold: the
+tested seam (`runStreamJSON`) stays byte-identical for the send/interrupt/queue
+siblings.
+
+**Socket-in-a-file.** The daemon's control socket is a random per-spawn path
+(`shortSocketPath`), unknown before spawn and not derivable from the child's env or
+cwd. `PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE` carries a *file path* instead (known
+pre-spawn, chosen by the test); the test writes the real socket path into that file
+after `StartStreamInteractiveWithRelay` returns, and `dialApproval` reads it lazily,
+at dial time — mirroring the existing `PYRY_FAKE_CLAUDE_*_TRIGGER` file idiom.
+
+**Verdict reflection oracle.** `dialApproval` maps the `control.Approve` outcome to
+one of three needles `writeVerdictResponse` writes into the assistant text (which the
+daemon's stream parser turns into an `assistant_delta` the client observes):
+
+| Outcome | Needle |
+|---|---|
+| daemon verdict `allow` | `approve-allow` |
+| daemon verdict `deny` | `approve-deny` |
+| `control.Approve` error (unreachable socket, ctx expiry, unrecognised `Behavior`) | `approve-error` (fail-closed, mirrors `mcp_approve.go`'s error→deny) |
+
+`approve-error` is tagged **distinctly** from `approve-deny` so an e2e can tell a
+genuine daemon deny (the fail-closed proof) from a client-side failure — the two
+must never be confused, since a masked client error could otherwise false-pass a
+timeout assertion. `approveDialTimeout` (30s, fixed) is deliberately far above the
+daemon's approval window in the e2e's timeout case (`PYRY_APPROVAL_TIMEOUT=2s`), so a
+no-answer turn's deny is always the **daemon's** `permbridge` timer firing, never a
+fake self-timeout that would mask the daemon's verdict.
+
+This rider is what a live `interactive_runner:"stream-json"` claude would do if the
+runner wired `--permission-prompt-tool`/`--mcp-config` into the child spawn — which
+it currently does not (`internal/streamsup.buildArgs` omits that pair; only the
+`pyry agent-run` batch verb wires it, see [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md)).
+So fakeclaude calls `control.Approve` directly rather than spawning its own
+`pyry mcp-approve`, exercising the identical daemon-side surface
+(`mcp.approve` → `permbridge` → `streamApprovalBridge` → `modal_shown` → answer →
+verdict) without depending on that still-open wiring gap. See
+[codebase/1139.md](../codebase/1139.md) for the live e2e this feeds and the
+production follow-up this gap is tracked under.
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -863,7 +922,8 @@ affect correctness.
   stream-json mode: `docs/specs/architecture/1140-fakeclaude-stream-json-mode.md`;
   interrupt rider: `docs/specs/architecture/1136-stream-e2e-interrupt.md`;
   new_session rider: `docs/specs/architecture/1137-stream-new-session-rotation-e2e.md`;
-  startup-hold rider: `docs/specs/architecture/1138-stream-e2e-queue-drain-in-order.md`
+  startup-hold rider: `docs/specs/architecture/1138-stream-e2e-queue-drain-in-order.md`;
+  approve rider: `docs/specs/architecture/1139-stream-e2e-permission-round-trip.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
 - JSONL-trigger per-ticket notes: [codebase/642.md](../codebase/642.md) (the

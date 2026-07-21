@@ -1019,7 +1019,7 @@ func runSupervisor(args []string) error {
 	// Install the shared approval registry between NewServer and Serve so the
 	// mcp.approve verb reaches the same instance #1080's modal wiring will
 	// resolve against (AC-4). Nil until here — v1/foreground never calls this.
-	ctrl.SetApprovalRegistry(approvals, mcpApprovalTimeout)
+	ctrl.SetApprovalRegistry(approvals, approvalTimeout())
 	// Install the stream-approval surfacer (#1080) so a parked mcp.approve raises
 	// the SAME permission modal_shown clients already answer and a client's
 	// modal_answer resolves claude's blocked tool. nil when the relay leg is
@@ -1409,6 +1409,27 @@ const inboundActivateTimeout = 30 * time.Second
 // tuning knob, not a contract; make it configurable when the full chain
 // lands.
 const mcpApprovalTimeout = 2 * time.Minute
+
+// envApprovalTimeout overrides the human-approval window (mcpApprovalTimeout). A
+// plausibly-operational knob for tuning the window — the e2e (#1139) shrinks it to
+// ~2s to prove the daemon's fail-closed timer denies a no-answer approval within a
+// bounded deadline.
+const envApprovalTimeout = "PYRY_APPROVAL_TIMEOUT"
+
+// approvalTimeout is the approval window handed to the pending-approval registry:
+// mcpApprovalTimeout by default, overridable via PYRY_APPROVAL_TIMEOUT. An unset or
+// unparseable value falls back to the default, so production behaviour is
+// byte-identical when the env is absent. Only the timer's DURATION is tunable —
+// permbridge's deterministic deny-on-deadline logic (the fail-closed core) is
+// untouched.
+func approvalTimeout() time.Duration {
+	if v := os.Getenv(envApprovalTimeout); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return mcpApprovalTimeout
+}
 
 // newInboundDeliver builds the msgqueue.DeliverFunc seam over the stamp-free
 // resolve core. The engine (#704) calls it on a per-conversation drain
