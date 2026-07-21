@@ -249,6 +249,30 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   survives both respawns. Last child of #963. See
   [`codebase/1031.md`](../codebase/1031.md).
 
+- `interactive_stream_liveness_test.go` (#1153) — first real-`claude` coverage
+  of the **stream-json interactive runner** (`interactive_runner:
+  "stream-json"`, #1081); every prior interactive-relay real-claude test
+  (#854/#997/#1028/#1030/#1031) runs under the default PTY runner.
+  `TestInteractiveStreamLiveness` transcribes #854's daemon body (pair → seed
+  bootstrap registry + bound conversation → spawn → handshake) with three
+  deltas: the new `writeStreamInteractiveConfig(t, home)` helper flips the
+  production config toggle (writes `<home>/.pyry/config.json =
+  {"interactive_runner":"stream-json"}` before spawn — `resolveConfigPath`
+  reads it once at startup) before `spawnBootstrapDaemon`; it drives **one**
+  turn (AC parity with #1141) instead of #854's two; and it drains to
+  completion via the new `drainForCompletedTurn` helper — the two-milestone
+  drain #1141's fake-side spec requires (non-empty `assistant_delta` **then**
+  terminal `turn_state{idle}`), where #854's `drainForAssistantReply` stops
+  at the first delta. No content/echo assertion on M1 (real claude's words
+  are non-deterministic, unlike #1141's fakeclaude echo). The config-writer
+  is deliberately a standalone helper, not folded into a spawn wrapper, so
+  the permission-flow rider #1154 (blocked-by this ticket) can compose it
+  with `spawnPermissionDaemon` instead. Fresh package-private seed constants
+  (`streamBootstrapUUID`/`streamConvID`) — #854's `liveBootstrapUUID`/
+  `liveConvID` are file-private and would redeclare in the same package/tag
+  namespace. Zero production files touched. See
+  [`codebase/1153.md`](../codebase/1153.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -317,3 +341,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#997](https://github.com/pyrycode/pyrycode/issues/997) — per-conversation liveness sibling of #854, drives `create_conversation` over the wire first; source of `startPerConversationHarness`/`createConversationViaPhone`/`sealEnvelope`/`drainForReply` reused by #1028.
 - Ticket [#1028](https://github.com/pyrycode/pyrycode/issues/1028) — conversation-lifecycle real-claude liveness gate (create → rename → archive → unarchive → delete, liveness turn between unarchive and delete); first real-claude coverage of the conversation-management verbs, split from #963; codebase note at [`codebase/1028.md`](../codebase/1028.md).
 - Ticket [#854](https://github.com/pyrycode/pyrycode/issues/854) — real-claude interactive two-turn liveness test, the RED/GREEN oracle for the fresh-daemon bootstrap-reply deadlock fix (`cmd/pyry/interactive_turn_stream_v2.go`'s `resolveTarget`); the only test in the suite that drives the daemon's interactive relay path directly rather than `pyry agent-run` — see [`codebase/854.md`](../codebase/854.md) and [`turnbridge-package.md`](turnbridge-package.md#which-jsonl-and-surviving-clear-rotation).
+- Ticket [#1153](https://github.com/pyrycode/pyrycode/issues/1153) — real-claude counterpart of #1141's stream-json liveness proof; first real-claude test to flip `interactive_runner: "stream-json"`; introduces the reusable `writeStreamInteractiveConfig` config-toggle helper (composed with `spawnPermissionDaemon` by the blocked-by rider #1154) and the two-milestone `drainForCompletedTurn` drain; codebase note at [`codebase/1153.md`](../codebase/1153.md).
