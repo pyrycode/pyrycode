@@ -200,6 +200,27 @@
 //	                               spinner / busy window / permission screen would
 //	                               perturb the baseline. Default off — when unset, no
 //	                               watch and startup behaviour is unchanged.
+//	PYRY_FAKE_CLAUDE_STREAM_JSON   optional; when set to any non-empty value,
+//	                               fakeclaude speaks line-delimited stream-json
+//	                               instead of the PTY/TUI surface: it reads
+//	                               {"type":"user",…} turn envelopes on stdin and,
+//	                               for each, writes one assistant text line (echoing
+//	                               the prompt) followed by one result{subtype:
+//	                               "success"} line to stdout — one response per
+//	                               received user turn. Non-user lines (a
+//	                               control_request interrupt, a blank line) are read
+//	                               and ignored. This is the fake the daemon's
+//	                               interactive_runner stream path drives: claude
+//	                               spawned headless over a pipe, no PTY and no
+//	                               transcript. Checked FIRST in main(), above the
+//	                               mustEnv(SESSIONS_DIR/…) calls, so it binds no
+//	                               sessions dir and opens no <uuid>.jsonl, and it
+//	                               short-circuits before every other mode — making it
+//	                               mutually exclusive with all of them by
+//	                               construction (if both this and a PTY mode are set,
+//	                               stream wins and the other is inert). Default off —
+//	                               when unset, fakeclaude is byte-identical to its
+//	                               prior behaviour.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -209,9 +230,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,6 +260,7 @@ const (
 	envModalClearOnAns  = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
 	envClearRotates     = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
 	envTrustTrigger     = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
+	envStreamJSON       = "PYRY_FAKE_CLAUDE_STREAM_JSON"
 	assistantMaxBytes   = 64 * 1024
 	pollInterval        = 50 * time.Millisecond
 )
@@ -407,6 +432,17 @@ func writeStdout(p []byte) {
 }
 
 func main() {
+	// Stream-json mode (envStreamJSON) is checked FIRST — above the
+	// mustEnv(envSessionsDir/…) calls — so it binds no sessions dir and opens no
+	// transcript (the daemon's streamsup path deliberately watches no <uuid>.jsonl),
+	// and short-circuits before every PTY/TUI mode below, making stream mode
+	// mutually exclusive with all of them by construction. When unset, control falls
+	// straight through and fakeclaude is byte-identical to its prior behaviour.
+	if os.Getenv(envStreamJSON) != "" {
+		runStreamJSON(os.Stdin, os.Stdout)
+		return
+	}
+
 	dir := mustEnv(envSessionsDir)
 	initU := mustEnv(envInitialUUID)
 	trig := mustEnv(envTrigger)
@@ -1021,4 +1057,149 @@ func mustEnv(k string) string {
 func fatalf(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "fakeclaude: "+format+"\n", a...)
 	os.Exit(1)
+}
+
+// --- stream-json mode ------------------------------------------------------
+//
+// The types and functions below implement PYRY_FAKE_CLAUDE_STREAM_JSON: the
+// line-delimited stream-json I/O the daemon's interactive_runner path drives. The
+// wire shapes are hand-mirrored (not imported from internal/streamsup) to keep
+// this stand-in zero-dependency, exactly like interruptEndTurnLine. The inbound
+// decode mirrors streamsup.userTurn (envelope.go); the outbound lines are
+// byte-compatible with what streamsup.Parser (parser.go) maps to
+// turnevent.TextChunk + turnevent.TurnEnd.
+
+// streamSessionID is the fixed session_id fakeclaude stamps on every result line.
+// streamsup.Parser.streamLine never decodes session_id, so the value is cosmetic —
+// a literal avoids threading the daemon's injected --session-id through the argv
+// the fake deliberately ignores.
+const streamSessionID = "fake-stream"
+
+// inUserTurn is the minimal decode of one inbound stdin line — only the fields the
+// fake reads (the top-level type and the message's text content). It mirrors
+// streamsup.userTurn (envelope.go), which is unexported there.
+type inUserTurn struct {
+	Type    string `json:"type"`
+	Message struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
+// outAssistant / outResult are the two outbound stdout lines fakeclaude writes per
+// user turn. Field order/tags produce shapes byte-compatible with
+// stream_turn_drain_test.go's assistantTextLine / resultLine, so streamsup.Parser
+// maps them to turnevent.TextChunk then turnevent.TurnEnd{end_turn}.
+type outAssistant struct {
+	Type    string         `json:"type"`
+	Message outAsstMessage `json:"message"`
+}
+
+type outAsstMessage struct {
+	ID      string         `json:"id"`
+	Role    string         `json:"role"`
+	Content []outTextBlock `json:"content"`
+}
+
+type outTextBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type outResult struct {
+	Type      string `json:"type"`
+	Subtype   string `json:"subtype"`
+	SessionID string `json:"session_id"`
+}
+
+// runStreamJSON reads line-delimited stream-json user-turn envelopes from r and,
+// for each {"type":"user",…} line, writes one assistant text line (echoing the
+// prompt) followed by one result line to w — one response per received user turn.
+// Non-user lines (a control_request interrupt, a blank line, an unparsable line)
+// are read and ignored, mirroring streamsup.Parser's per-line resilience. Returns
+// on r EOF (the daemon closed the child's stdin during teardown) or the first
+// write error (the daemon's read end is gone — treat like EOF). Runs entirely on
+// main()'s goroutine — a single reader, no shared state — so -race is clean by
+// construction. The io.Reader/io.Writer seam is what lets the package unit test
+// drive read→emit against in-memory buffers.
+func runStreamJSON(r io.Reader, w io.Writer) {
+	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
+	// stream-json envelope carries a whole prompt — is never truncated by a token
+	// cap, and the final non-newline-terminated bytes at EOF are still processed.
+	br := bufio.NewReader(r)
+	turn := 0
+	for {
+		line, err := br.ReadString('\n')
+		if len(line) > 0 {
+			if text, ok := userTurnText([]byte(line)); ok {
+				turn++
+				if werr := writeStreamResponse(w, fmt.Sprintf("m%d", turn), text); werr != nil {
+					return
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// userTurnText decodes one inbound line and, when it is a {"type":"user",…}
+// envelope, returns the first text block's text (empty string if the turn carries
+// no text block) and true. A line that fails to decode or is not a user turn
+// returns ("", false) — the caller skips it, producing no response.
+func userTurnText(line []byte) (string, bool) {
+	var in inUserTurn
+	if err := json.Unmarshal(line, &in); err != nil {
+		return "", false
+	}
+	if in.Type != "user" {
+		return "", false
+	}
+	for _, block := range in.Message.Content {
+		if block.Type == "text" {
+			return block.Text, true
+		}
+	}
+	return "", true
+}
+
+// writeStreamResponse writes fakeclaude's canned reply to one user turn: one
+// assistant text line carrying text (the echoed prompt), then one
+// result{subtype:"success"} line. Both are json.Marshal-encoded from local structs
+// (never string-concatenated) so text — caller-controlled bytes — is escaped and
+// each object is exactly one physical line regardless of prompt content. Returns
+// the first marshal/write error.
+func writeStreamResponse(w io.Writer, msgID, text string) error {
+	asst := outAssistant{
+		Type: "assistant",
+		Message: outAsstMessage{
+			ID:      msgID,
+			Role:    "assistant",
+			Content: []outTextBlock{{Type: "text", Text: text}},
+		},
+	}
+	if err := writeJSONLine(w, asst); err != nil {
+		return err
+	}
+	return writeJSONLine(w, outResult{
+		Type:      "result",
+		Subtype:   "success",
+		SessionID: streamSessionID,
+	})
+}
+
+// writeJSONLine marshals v and writes it to w followed by a single '\n', so the
+// emitted object is exactly one stream-json physical line.
+func writeJSONLine(w io.Writer, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return nil
 }
