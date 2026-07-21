@@ -184,6 +184,11 @@ type relayWiring struct {
 	// the ACTIVE conversation, not the bootstrap supervisor — the #1121 isolation
 	// fix. Wired to V2SessionConfig.Interrupter below.
 	activeInterrupter relay.Interrupter
+	// activeSessionStarter routes an inbound new_session frame to the runner bound
+	// to the ACTIVE conversation, not the bootstrap supervisor — the #1125
+	// isolation fix (the new_session twin of activeInterrupter). Wired to
+	// V2SessionConfig.SessionStarter below.
+	activeSessionStarter relay.SessionStarter
 	// sup is the bootstrap session's supervisor — the keystroke/interrupt/
 	// new-session/snapshot surface and the source of the daemon's own claude
 	// child PID.
@@ -570,10 +575,13 @@ func startRelayV2(
 		// via SendEsc, the seam's abstract "claude's own interrupt" name.
 		Interrupter: w.activeInterrupter,
 		// Inbound new_session seam (#831): an interactive `new_session` frame
-		// routes a /clear through the sealed supervisor keystroke surface. sup
-		// (*supervisor.Supervisor) satisfies SessionStarter via StartNewSession
-		// (#830).
-		SessionStarter: w.sup,
+		// routes to the runner bound to the ACTIVE conversation (#1125) — not the
+		// bootstrap supervisor. The activeSessionStarter adapter (main.go) resolves
+		// active → CurrentSessionID → Pool.Lookup → runner, then for a
+		// *streamsup.Runner rotates the pool-side id (Pool.RotateForNewSession) and
+		// RestartFreshes into --session-id <newID> with NO /clear, while a
+		// *supervisor.Supervisor keeps the /clear path the watcher rotates (#830).
+		SessionStarter: w.activeSessionStarter,
 		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
 		// frame removes a not-yet-drained queued message by id from the live
 		// daemon queue; the OnChange seam Remove fires drives the #722 producer to

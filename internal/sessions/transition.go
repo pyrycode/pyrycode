@@ -87,6 +87,60 @@ func (p *Pool) rebindConversation(oldID, newID SessionID) {
 	}
 }
 
+// RotateForNewSession rotates the session keyed by oldID to a fresh
+// daemon-minted id and returns the new id for the caller to feed to
+// (*streamsup.Runner).RestartFresh. It is the DIRECT (new_session) analog of
+// onRotate: it re-keys the pool entry, registers the new id in the allocated
+// skip-set, rebinds the owning conversation, and fires a ReasonClear transition
+// so the client sees the fresh-session break — but it MINTS the id and drives
+// the rotation itself rather than observing claude's self-rotation.
+//
+// The skip-set registration is the key asymmetry vs onRotate. In onRotate claude
+// already created <newID>.jsonl and the id is deliberately UN-allocated (that is
+// how the watcher detects a real self-rotation). Here WE are about to spawn
+// claude --session-id <newID> via RestartFresh, so <newID>.jsonl will CREATE-fire
+// the watcher; the id MUST be in the skip-set or the watcher double-rotates.
+// Registering upholds the RegisterAllocatedUUID invariant that GetOrCreate
+// already obeys for caller-supplied --session-id mints.
+//
+// Errors: a crypto/rand mint failure, or an absent oldID (TOCTOU: the binding may
+// vanish between the caller's resolve and this call), returns ("", err) with no
+// mutation and no transition. A saveLocked failure is logged at Warn and
+// swallowed — the in-memory rotation + rebind are already authoritative, matching
+// rebindConversation's / RotateID's best-effort-durability posture. The
+// notifyTransition fan-out runs off Pool.mu, the established leaf-callback
+// discipline.
+func (p *Pool) RotateForNewSession(oldID SessionID) (SessionID, error) {
+	newID, err := NewID()
+	if err != nil {
+		return "", err
+	}
+
+	p.mu.Lock()
+	if _, ok := p.sessions[oldID]; !ok {
+		p.mu.Unlock()
+		return "", ErrSessionNotFound
+	}
+	p.rekeyLocked(oldID, newID)
+	p.registerAllocatedUUIDLocked(newID)
+	if err := p.saveLocked(); err != nil {
+		p.log.Warn("sessions: new_session rotate persist failed",
+			"event", "rotate_new_session.persist_failed",
+			"session_id", string(newID),
+			"previous_session_id", string(oldID),
+			"err", err)
+	}
+	p.mu.Unlock()
+
+	p.notifyTransition(SessionTransition{
+		PreviousID: oldID,
+		NewID:      newID,
+		Reason:     ReasonClear,
+		OccurredAt: time.Now().UTC(),
+	})
+	return newID, nil
+}
+
 // onRotate performs a /clear rotation and, on success, fires a ReasonClear
 // transition. It is the clear surfacing seam wired into Pool.Run's rotation
 // watcher (the OnRotate callback). The RotateID error is returned verbatim and

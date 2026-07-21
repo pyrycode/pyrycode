@@ -955,9 +955,35 @@ add that translation additively, out of scope here.
   `internal/relay` imports neither `internal/supervisor` nor tui-driver.
   `*supervisor.Supervisor` satisfies it via the **sealed `StartNewSession`**
   (#830, shipped unwired for exactly this consumer) — **zero new supervisor
-  code**. The optional nil-safe `V2SessionConfig.SessionStarter` field is wired
-  in `cmd/pyry/relay.go`'s `startRelayV2` with one line, `SessionStarter: sup`
-  (`sup` already in scope as `Interrupter` / `Snapshotter`).
+  code**. **Since #1125** the `V2SessionConfig.SessionStarter` field is wired not
+  to the bootstrap supervisor directly but to a `cmd/pyry`-side adapter,
+  `activeSessionStarter` — the `new_session` routing twin of `activeInterrupter`
+  (#1121, above). It resolves the **active conversation's bound runner**
+  (`active.CurrentConversation()` → `CurrentSessionID` → `Pool.Lookup` →
+  `sess.Runner()`, via the new sibling helper `resolveBoundSession`) and
+  dispatches by concrete runner type through `startFreshRunner`, matched
+  `RestartFresh` first:
+  - **`streamRunner` (bound to a `*streamsup.Runner`)** — the new **direct**
+    path. `Pool.RotateForNewSession(oldID)` mints a fresh daemon-minted id,
+    re-keys the pool entry, and registers it in the allocated skip-set *before*
+    `runner.RestartFresh(newID)` spawns `claude --session-id <newID>` (§
+    [sessions-package.md](sessions-package.md), § [rotation-watcher.md](rotation-watcher.md)
+    — ordering is load-bearing, else the fsnotify watcher double-rotates).
+    **No `/clear` keystroke is sent.**
+  - **`*supervisor.Supervisor` (PTY-bound)** — unchanged: `StartNewSession()`
+    types `/clear` and the rotation watcher drives `Pool.RotateID` on the
+    resulting self-rotation, exactly as before #1125. Kept for zero-regression
+    parity with a PTY-bound conversation (today's only reachable case is a
+    remote conversation bound to a stream-json runner; the PTY arm is a
+    documented open question, not yet retired).
+  - **default (unknown runner)** — inert, no actuation.
+
+  Before #1125 the field was wired with one line, `SessionStarter: sup` (the
+  bootstrap supervisor) regardless of which conversation the client was
+  actually in — the same latent bootstrap mis-route #1121 fixed for
+  `interrupt`, plus an **indirect** rotation (the pool-side id flip happened
+  only when the watcher later observed claude's self-rotation). See
+  [codebase/1125.md](../codebase/1125.md).
 - **`handleNewSession(s)`** — the only new logic, a line-for-line mirror of
   `handleInterrupt`. Runs on the manager's **single Run dispatch goroutine**, so
   the `s.interactive` read is lock-free under the package's single-owner
@@ -985,11 +1011,20 @@ through the **pre-existing** `session_transition` marker: when `/clear` rotates
 claude's session UUID, the rotation watcher fires `notifyTransition(ReasonClear)`
 and the existing #656/#657 emitter fans `reason: "clear"` to every interactive
 conn — this ticket builds neither, exactly as `interrupt` is fire-and-forget.
-**Multi-phone:** any interactive paired phone can start a new session on the
-single live claude — no per-conversation / per-connection binding, consistent
-with the broadcast fan-out model (a user's paired devices are one trust
-domain). Per-conversation `new_session` scoping in a multi-session world is a
-future ticket.
+**Since #1125**, on the stream arm the same `ReasonClear` fire instead comes
+**directly** from `Pool.RotateForNewSession` (no watcher round-trip) — the wire
+observable is unchanged, only the trigger moved from indirect (observe claude's
+self-rotation) to direct (daemon drives the rotation itself).
+**Multi-phone / scoping:** any interactive paired phone can trigger
+`new_session`, and (since #1125) it actuates the runner bound to the **active
+conversation** rather than unconditionally the bootstrap supervisor — the same
+scoping `interrupt` gained under #1121, and the same **residual** scope: routed
+to "active conversation," not "the sending conn's own conversation." This is
+consistent with the broadcast fan-out model (a user's paired devices are one
+trust domain, one daemon-global `active` conversation) and is a strict
+isolation improvement over pre-#1125 (which routed every `new_session` to the
+shared bootstrap regardless of conn). Per-connection isolation, if ever needed,
+is a larger design not built here.
 
 ### Inbound dequeue_message (#723) — `QueueRemover` seam → `msgqueue.Remove`
 

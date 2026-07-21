@@ -19,18 +19,30 @@ import (
 )
 
 // TestRelayV2_NewSessionRotatesOnDisk is the fake-daemon e2e for the phone-driven
-// `new_session` v2 control verb (#831, split from #962). It confirms the wired
-// path live: a paired interactive phone handshakes to one daemon over a real
-// Noise session, sends a sealed `new_session` frame, and the supervised claude's
-// session UUID rotation is observable on disk (the registry's bootstrap id follows
-// the fresh JSONL) — the only observable, since new_session has no reply and no
-// broadcast:
+// `new_session` v2 control verb (#831, split from #962; rerouted by #1125). It
+// confirms the wired path live: a paired interactive phone handshakes to one
+// daemon over a real Noise session, ESTABLISHES an active conversation (#1125),
+// sends a sealed `new_session` frame, and the supervised claude's session UUID
+// rotation is observable on disk (the registry's bootstrap id follows the fresh
+// JSONL) — the only observable, since new_session has no reply and no broadcast:
 //
+//	phone send_message → sessionRouter.Route stamps the active-conversation cursor →
 //	phone new_session frame → Noise decrypt → dispatchAppFrame intercept →
 //	  handleNewSession (interactive ✓) → SessionStarter.StartNewSession() →
+//	    activeSessionStarter: currentConv → resolveBoundSession → the bootstrap
+//	    *supervisor.Supervisor (startFreshRunner's PTY /clear arm, NOT RestartFresh) →
 //	    ClearInputLine (Ctrl-U) + TypePrompt("/clear") + "\r" → fakeclaude stdin →
 //	  clear-rotate mode: close old <initialUUID>.jsonl, open fresh <uuid>.jsonl →
 //	  rotation watcher follows the most-recent JSONL → registry id := <uuid>.
+//
+// #1125 REROUTE. new_session no longer mis-routes to the bootstrap supervisor
+// directly; it routes to the runner bound to the ACTIVE conversation. That runner
+// is inert until a turn stamps the active-conversation cursor, so this test now
+// sends a send_message first (whose ack proves the cursor is stamped) before the
+// new_session frame. In this fake-daemon harness the bootstrap runner is a PTY
+// *supervisor.Supervisor, so the resolved bound runner IS the bootstrap supervisor
+// and the /clear-rotate observable is unchanged — only the routing prerequisite
+// (an active conversation) is new.
 //
 // STRUCTURAL-CAUSALITY GUARD (mirrors the interrupt test's "only source of a
 // turn_end"). The file trigger points at a path that is never created, so the
@@ -47,7 +59,12 @@ import (
 // processed. fakeclaude's clear-rotate is one-shot, so once the session is live
 // the first /clear rotates and every later frame is inert.
 func TestRelayV2_NewSessionRotatesOnDisk(t *testing.T) {
-	const initialUUID = "55555555-5555-4555-8555-555555555555"
+	const (
+		initialUUID   = "55555555-5555-4555-8555-555555555555"
+		knownConvID   = "33333333-3333-4333-8333-333333333333"
+		knownUserText = "e2e-1125-user:hi\n"
+		sendReqID     = uint64(51)
+	)
 
 	home := shortHome(t)
 
@@ -61,6 +78,14 @@ func TestRelayV2_NewSessionRotatesOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
+
+	// Bind knownConvID to the bootstrap session so new_session's #1125
+	// active-conversation routing resolves to it: the seam now reaches the runner
+	// bound to the ACTIVE conversation (here the bootstrap *supervisor.Supervisor),
+	// not the bootstrap supervisor unconditionally. The daemon loads
+	// conversations.json once at startup, so the row must exist BEFORE it starts;
+	// boundSessionID MUST equal the bootstrap id (initialUUID, #839).
+	seedBoundConversation(t, home, knownConvID, initialUUID)
 
 	// Align the sessions dir to the daemon's COMPUTED path and pre-create
 	// <initialUUID>.jsonl BEFORE the daemon starts. The bootstrap id starts at
@@ -104,13 +129,55 @@ func TestRelayV2_NewSessionRotatesOnDisk(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phoneA.Close() })
 	// Interactive — the capability handleNewSession requires. new_session has no
-	// reply, so the recv CipherState is unused.
-	sendA, _ := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
+	// reply, but the send_message that establishes the active conversation (below)
+	// is acked, so the recv CipherState IS used here (unlike pre-#1125).
+	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
 	// Baseline (precondition / AC-2 non-vacuity): the daemon reconciled the
 	// bootstrap id to initialUUID BEFORE any rotation, so the "id changed"
 	// assertion below is non-vacuous.
 	pre := waitForBootstrapID(t, regPath, initialUUID, 5*time.Second)
+
+	// Establish the ACTIVE conversation (#1125). new_session now routes to the
+	// runner bound to the active conversation, which is inert until a turn stamps
+	// the active-conversation cursor (activeConversation.set, fired by
+	// sessionRouter.Route). Send ONE send_message for knownConvID and await its
+	// sealed ack: the send_message handler stamps the cursor via Route and then
+	// acks BEFORE any WaitReady/delivery ("accepted into the backlog"), so once the
+	// ack lands the cursor is knownConvID — whose bound runner is the bootstrap
+	// *supervisor.Supervisor, taking startFreshRunner's PTY /clear arm. The text is
+	// plain (no "/clear") so it can never false-positive the stdin-log oracle below.
+	reqEnv, err := json.Marshal(protocol.Envelope{
+		ID:   sendReqID,
+		Type: protocol.TypeSendMessage,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{
+			ConversationID: knownConvID,
+			MessageID:      "u-1",
+			Text:           knownUserText,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal send_message envelope: %v", err)
+	}
+	sendCipher, err := sendA.Encrypt(reqEnv)
+	if err != nil {
+		t.Fatalf("seal send_message envelope: %v", err)
+	}
+	sendNoiseMsg(t, phoneA, sendCipher)
+
+	ackDeadline := time.Now().Add(15 * time.Second)
+	for {
+		remaining := time.Until(ackDeadline)
+		if remaining <= 0 {
+			t.Fatal("interactive phone A never received the send_message ack; the active-conversation " +
+				"cursor was never stamped, so new_session cannot resolve to the bound runner")
+		}
+		env := decryptInnerEnvelope(t, readInnerFrame(t, phoneA, remaining), recvA)
+		if env.Type == protocol.TypeAck {
+			break
+		}
+	}
 
 	// Drive new_session until it rotates (AC-1). Re-send every ~250 ms until the
 	// registry id rotates away from initialUUID or a ~10 s deadline elapses. Fresh
@@ -182,15 +249,25 @@ func TestRelayV2_NewSessionRotatesOnDisk(t *testing.T) {
 // conn's new_session is inert (handleNewSession's capability gate short-circuits
 // before StartNewSession, so no /clear is typed and no rotation happens).
 //
-// Non-vacuity of the negative comes from TestRelayV2_NewSessionRotatesOnDisk
-// proving the SAME harness + clear-rotate mode DOES rotate for an interactive
-// conn. A broken interactive gate (non-interactive also rotates) would surface
-// within this test's bounded window as a /clear in the stdin log AND a registry id
-// change — so the window catches a real regression, not just idle time. The
-// stdin-log absence is the direct proof the gate short-circuited before the
-// keystroke; the registry-unchanged is the downstream proof.
+// #1125 non-vacuity. After the reroute, new_session is inert on a runner with NO
+// active conversation regardless of the gate, so this negative would pass vacuously
+// if it left the cursor unstamped — the gate would no longer be the variable under
+// test. To keep it isolating the GATE, it mirrors the positive test's setup: seed a
+// bound conversation and send a send_message (accepted + acked on a non-interactive
+// conn — send_message is NOT interactive-gated, only new_session/interrupt are) to
+// stamp the active-conversation cursor to knownConvID, which is bound to the
+// bootstrap supervisor. With an active conversation established, the ONLY thing left
+// to prevent a rotation is s.interactive being false. A broken gate (non-interactive
+// also rotates) would now surface within the bounded window as a /clear in the stdin
+// log AND a registry id change. The stdin-log absence is the direct proof the gate
+// short-circuited before the keystroke; the registry-unchanged is the downstream proof.
 func TestRelayV2_NewSessionNonInteractiveInert(t *testing.T) {
-	const initialUUID = "44444444-4444-4444-8444-444444444444"
+	const (
+		initialUUID   = "44444444-4444-4444-8444-444444444444"
+		knownConvID   = "22222222-2222-4222-8222-222222222222"
+		knownUserText = "e2e-1125-user:hi\n"
+		sendReqID     = uint64(41)
+	)
 
 	home := shortHome(t)
 
@@ -203,6 +280,10 @@ func TestRelayV2_NewSessionNonInteractiveInert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
+
+	// Bind knownConvID to the bootstrap session and stamp it active below, so the
+	// interactive gate is the SOLE reason new_session is inert (#1125 non-vacuity).
+	seedBoundConversation(t, home, knownConvID, initialUUID)
 
 	sessionsDir := claudeSessionsDir(home)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
@@ -241,10 +322,45 @@ func TestRelayV2_NewSessionNonInteractiveInert(t *testing.T) {
 	t.Cleanup(func() { _ = phone.Close() })
 	// NON-interactive handshake: the capability gate in handleNewSession must
 	// short-circuit before StartNewSession.
-	sendA, _ := driveHandshakeToOpenDaemon(t, phone, pubKey, payloadA.Token)
+	sendA, recvA := driveHandshakeToOpenDaemon(t, phone, pubKey, payloadA.Token)
 
 	// Baseline: id == initialUUID before the frame.
 	waitForBootstrapID(t, regPath, initialUUID, 5*time.Second)
+
+	// Stamp the active-conversation cursor via send_message (accepted + acked on a
+	// non-interactive conn), so new_session's inertness below is attributable to the
+	// interactive gate ALONE, not to an unstamped cursor (#1125 non-vacuity).
+	reqEnv, err := json.Marshal(protocol.Envelope{
+		ID:   sendReqID,
+		Type: protocol.TypeSendMessage,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{
+			ConversationID: knownConvID,
+			MessageID:      "u-1",
+			Text:           knownUserText,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal send_message envelope: %v", err)
+	}
+	sendCipher, err := sendA.Encrypt(reqEnv)
+	if err != nil {
+		t.Fatalf("seal send_message envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, sendCipher)
+
+	ackDeadline := time.Now().Add(15 * time.Second)
+	for {
+		remaining := time.Until(ackDeadline)
+		if remaining <= 0 {
+			t.Fatal("non-interactive phone never received the send_message ack; the active-conversation " +
+				"cursor was never stamped, so the inert assertion below would be over-determined")
+		}
+		env := decryptInnerEnvelope(t, readInnerFrame(t, phone, remaining), recvA)
+		if env.Type == protocol.TypeAck {
+			break
+		}
+	}
 
 	// One new_session frame on the non-interactive conn.
 	sendNewSessionFrame(t, phone, sendA, 1)

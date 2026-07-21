@@ -607,13 +607,25 @@ func New(cfg Config) (*Pool, error) {
 func (p *Pool) RotateID(oldID, newID SessionID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	sess, ok := p.sessions[oldID]
-	if !ok {
+	if _, ok := p.sessions[oldID]; !ok {
 		return ErrSessionNotFound
 	}
 	if oldID == newID {
 		return nil
 	}
+	p.rekeyLocked(oldID, newID)
+	return p.saveLocked()
+}
+
+// rekeyLocked moves the in-memory session entry from oldID to newID: it stamps
+// the new id + lastActiveAt under Session.lcMu, moves the map entry, and flips
+// the bootstrap pointer if oldID was the bootstrap. Caller MUST hold p.mu (write)
+// and MUST have already verified oldID is present and oldID != newID; it does not
+// persist (the caller invokes saveLocked). Shared by RotateID (watcher-observed
+// self-rotation) and RotateForNewSession (daemon-driven new_session) so the
+// re-key invariant lives in one place. Lock order remains Pool.mu → Session.lcMu.
+func (p *Pool) rekeyLocked(oldID, newID SessionID) {
+	sess := p.sessions[oldID]
 	sess.lcMu.Lock()
 	sess.id = newID
 	sess.lastActiveAt = time.Now().UTC()
@@ -623,7 +635,6 @@ func (p *Pool) RotateID(oldID, newID SessionID) error {
 	if p.bootstrap == oldID {
 		p.bootstrap = newID
 	}
-	return p.saveLocked()
 }
 
 // Rename updates the named session's label and persists the change to the

@@ -938,6 +938,17 @@ func runSupervisor(args []string) error {
 				return resolveBoundRunner(convReg, pool, convID)
 			},
 		},
+		activeSessionStarter: activeSessionStarter{
+			currentConv: active.CurrentConversation,
+			resolveBound: func(convID string) (sessions.Runner, sessions.SessionID, bool) {
+				sess, id, ok := resolveBoundSession(convReg, pool, convID)
+				if !ok {
+					return nil, "", false
+				}
+				return sess.Runner(), id, true
+			},
+			rotate: pool.RotateForNewSession,
+		},
 		sup:               bootstrap.Supervisor(),
 		bridge:            bootstrap.Bridge(),
 		claudeSessionsDir: claudeSessionsDir,
@@ -1246,6 +1257,97 @@ func (a activeInterrupter) SendEsc() error {
 		return nil
 	}
 	return interruptRunner(r)
+}
+
+// resolveBoundSession is the new_session twin of resolveBoundRunner: it resolves
+// the active conversation's bound *Session AND its bound id, so the caller can
+// both reach the runner (sess.Runner()) and hand the id to the pool's rotation
+// (Pool.RotateForNewSession). Same convID → CurrentSessionID == "" guard →
+// Pool.Lookup body; the CurrentSessionID == "" guard is the same #678 isolation
+// enforcement point resolveBoundRunner documents — Pool.Lookup("") returns the
+// BOOTSTRAP session, so an unbound conversation must be rejected BEFORE Lookup or
+// its new_session would rotate the shared bootstrap child. Every non-resolvable
+// state returns (nil, "", false) so the caller stays inert; this NEVER falls
+// through to bootstrap. The small Get→guard→Lookup duplication with
+// resolveBoundRunner is accepted: keeping interrupt's resolveBoundRunner
+// byte-stable is worth more than folding the two (the same tolerance #1121 was
+// granted for its isolation-guard duplication).
+func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, convID string) (*sessions.Session, sessions.SessionID, bool) {
+	conv, ok := convReg.Get(conversations.ConversationID(convID))
+	if !ok || conv.CurrentSessionID == "" {
+		return nil, "", false
+	}
+	sess, err := pool.Lookup(sessions.SessionID(conv.CurrentSessionID))
+	if err != nil {
+		return nil, "", false
+	}
+	return sess, sessions.SessionID(conv.CurrentSessionID), true
+}
+
+// startFreshRunner is the new_session twin of interruptRunner: it dispatches a
+// fresh-session start to the active conversation's bound runner by concrete type.
+// The streamRunner arm (*streamsup.Runner, exposing RestartFresh) is the DIRECT
+// path — rotate the pool-side id then RestartFresh so the next spawn uses
+// --session-id <newID>, with NO /clear keystroke. The *supervisor.Supervisor arm
+// keeps today's PTY behavior: type /clear and let the fsnotify watcher drive the
+// pool-side rotation (we do NOT pre-mint an id there — /clear makes claude pick
+// its own, so a pre-minted id would mismatch). RestartFresh is matched first so
+// any future runner that grows both prefers the direct stream-json path; an
+// unknown runner is inert (nil) — no actuation beats wrong actuation (#1121).
+//
+// Ordering is load-bearing: rotate() completes — including the allocated-skip-set
+// register published under Pool.mu — BEFORE RestartFresh spawns <newID>.jsonl, so
+// the watcher's CREATE observation is guaranteed to see the registration and skip
+// the id. Reversing it reopens the double-rotation race (spec §Concurrency).
+func startFreshRunner(r sessions.Runner, oldID sessions.SessionID,
+	rotate func(sessions.SessionID) (sessions.SessionID, error)) error {
+	switch v := r.(type) {
+	case interface{ RestartFresh(string) }:
+		newID, err := rotate(oldID)
+		if err != nil {
+			return err
+		}
+		v.RestartFresh(string(newID))
+		return nil
+	case interface{ StartNewSession() error }:
+		return v.StartNewSession()
+	default:
+		return nil
+	}
+}
+
+// activeSessionStarter satisfies relay.SessionStarter by routing an inbound
+// new_session frame to the runner bound to the ACTIVE conversation — replacing
+// the former SessionStarter: w.sup wiring that mis-delivered every new_session to
+// the bootstrap supervisor regardless of which conversation the remote client was
+// in (the #1121 interrupt shape, applied to new_session). The seams are injected
+// (not raw *Pool/*Registry) so the AC2 test can drive the composition with fakes;
+// production wires currentConv: active.CurrentConversation, resolveBound over
+// resolveBoundSession, and rotate: pool.RotateForNewSession.
+type activeSessionStarter struct {
+	currentConv  func() string
+	resolveBound func(convID string) (runner sessions.Runner, oldID sessions.SessionID, ok bool)
+	rotate       func(oldID sessions.SessionID) (sessions.SessionID, error)
+}
+
+// StartNewSession starts a fresh session in the active conversation's bound
+// runner. Order mirrors activeInterrupter.SendEsc and is load-bearing: no active
+// conversation → inert; unbound/dangling binding → inert (resolveBound's
+// CurrentSessionID == "" guard is the #678 isolation enforcement — an unbound
+// conversation NEVER resolves to the bootstrap session Pool.Lookup("") returns).
+// Otherwise dispatch by runner type. Every ambiguous state is inert (nil); a live
+// runner or rotate error propagates for handleNewSession to Warn-log and tolerate
+// (best-effort contract). No /clear keystroke is sent on the stream arm.
+func (a activeSessionStarter) StartNewSession() error {
+	convID := a.currentConv()
+	if convID == "" {
+		return nil
+	}
+	runner, oldID, ok := a.resolveBound(convID)
+	if !ok {
+		return nil
+	}
+	return startFreshRunner(runner, oldID, a.rotate)
 }
 
 // inboundActivateTimeout caps the drain's per-attempt wait for an idle-evicted

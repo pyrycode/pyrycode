@@ -44,6 +44,14 @@ func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 // (*supervisor.Supervisor).SendEsc is reached for the PTY runner.
 func (a streamRunner) Interrupt() error { return a.r.Interrupt() }
 
+// RestartFresh forwards to (*streamsup.Runner).RestartFresh (#1124), rotating the
+// runner's persistent id to newID so the next spawn uses --session-id <newID> (a
+// fresh transcript, no fork). Like Interrupt it is OFF the sessions.Runner
+// interface (un-widened, #1077) — a concrete method the #1125 new_session dispatch
+// (startFreshRunner in main.go) reaches by type assertion, mirroring how the PTY
+// runner's (*supervisor.Supervisor).StartNewSession is reached for /clear.
+func (a streamRunner) RestartFresh(newID string) { a.r.RestartFresh(newID) }
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
