@@ -235,8 +235,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -247,27 +249,31 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/pyrycode/pyrycode/internal/control"
 )
 
 const (
-	envSessionsDir      = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
-	envInitialUUID      = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
-	envTrigger          = "PYRY_FAKE_CLAUDE_TRIGGER"
-	envStdinLog         = "PYRY_FAKE_CLAUDE_STDIN_LOG"
-	envAssistantTrigger = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
-	envJSONLTrigger     = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
-	envTUI              = "PYRY_FAKE_CLAUDE_TUI"
-	envIdleTrigger      = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
-	envModalTrigger     = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
-	envEscEndsTurn      = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
-	envModalClearOnAns  = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
-	envClearRotates     = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
-	envTrustTrigger     = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
-	envStreamJSON       = "PYRY_FAKE_CLAUDE_STREAM_JSON"
-	envStreamInterrupt  = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
-	envStreamHold       = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
-	assistantMaxBytes   = 64 * 1024
-	pollInterval        = 50 * time.Millisecond
+	envSessionsDir       = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
+	envInitialUUID       = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
+	envTrigger           = "PYRY_FAKE_CLAUDE_TRIGGER"
+	envStdinLog          = "PYRY_FAKE_CLAUDE_STDIN_LOG"
+	envAssistantTrigger  = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
+	envJSONLTrigger      = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
+	envTUI               = "PYRY_FAKE_CLAUDE_TUI"
+	envIdleTrigger       = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
+	envModalTrigger      = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
+	envEscEndsTurn       = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
+	envModalClearOnAns   = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
+	envClearRotates      = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
+	envTrustTrigger      = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
+	envStreamJSON        = "PYRY_FAKE_CLAUDE_STREAM_JSON"
+	envStreamInterrupt   = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
+	envStreamHold        = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
+	envStreamApprove     = "PYRY_FAKE_CLAUDE_STREAM_APPROVE"
+	envApproveSocketFile = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
+	assistantMaxBytes    = 64 * 1024
+	pollInterval         = 50 * time.Millisecond
 )
 
 // modalScreen is the compact plaintext permission-modal screen fakeclaude writes
@@ -475,6 +481,21 @@ func main() {
 		// ⟹ byte-identical (the tee above and runStreamJSON are untouched).
 		if hold := os.Getenv(envStreamHold); hold != "" {
 			waitForTriggerFile(hold)
+		}
+		// Approve rider (envStreamApprove, default-off): a rider on stream mode for
+		// the permission round-trip e2e (#1139). Instead of echoing the prompt, the
+		// fake ORIGINATES one permission request per user turn via control.Approve —
+		// blocking until the daemon answers allow/deny — and reflects the daemon's
+		// verdict into its assistant echo, so the e2e observes modal_shown /
+		// modal_answer / verdict / deny-on-timeout end-to-end. Mutually exclusive with
+		// the interrupt rider (a turn either does the approval dance or the plain
+		// echo); single-consumer, so it lives here, not in the shared harness. The
+		// socket path rides in via a file (envApproveSocketFile) the test writes after
+		// startup (the socket is a random per-spawn path). Unset ⟹ byte-identical
+		// (runStreamJSON untouched).
+		if os.Getenv(envStreamApprove) != "" {
+			runStreamJSONApprove(stdin, os.Stdout, os.Getenv(envApproveSocketFile))
+			return
 		}
 		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
 		return
@@ -1339,4 +1360,157 @@ func writeJSONLine(w io.Writer, v any) error {
 		return err
 	}
 	return nil
+}
+
+// --- stream-json approve rider (#1139) -------------------------------------
+//
+// The approve rider (envStreamApprove) makes fakeclaude ORIGINATE a permission
+// request per user turn — the final leg of the stream permission round-trip. On the
+// interactive stream runner claude would ask a daemon-hosted MCP approval tool and
+// block until allow/deny; the fake drives the IDENTICAL daemon surface (mcp.approve →
+// permbridge park → modal_shown → answer → verdict → deny-on-timeout) by calling
+// control.Approve directly — the same client `pyry mcp-approve` calls — then reflects
+// the daemon's verdict into its assistant echo so the e2e observes the loop
+// end-to-end. Single-consumer to #1139, so it lives here, not in the shared harness.
+
+// approveVerdict is the tri-state fakeclaude reflects from one control.Approve round
+// trip. verdictError is the fail-closed client-side failure (socket unreachable / ctx
+// expiry / unrecognised behavior) — tagged DISTINCTLY from verdictDeny so the e2e can
+// tell a genuine daemon deny (the fail-closed proof) from a client error, which must
+// never appear in a green run.
+type approveVerdict int
+
+const (
+	verdictAllow approveVerdict = iota
+	verdictDeny
+	verdictError
+)
+
+// The needles fakeclaude writes into its assistant echo, one per verdict. The
+// daemon's stream parser turns the assistant text into an assistant_delta the phone
+// observes, so these ARE the e2e's verdict oracle. approveErrorNeedle must never
+// appear in a green run — its distinctness is what makes the fail-closed proof
+// airtight (a client-side error can never masquerade as a daemon deny).
+const (
+	approveAllowNeedle = "approve-allow"
+	approveDenyNeedle  = "approve-deny"
+	approveErrorNeedle = "approve-error"
+)
+
+// approveDialTimeout bounds fakeclaude's control.Approve wait. It is deliberately far
+// ABOVE the daemon's approval window (PYRY_APPROVAL_TIMEOUT, ~2s in the timeout case),
+// so the deny fakeclaude receives on a no-answer turn is the DAEMON's permbridge timer
+// firing — not a fakeclaude self-timeout that would mask the daemon verdict. This
+// margin is load-bearing for the fail-closed proof; control.Approve also requires a ctx
+// deadline >= the daemon window (client.go), so it doubles as that patient-read line.
+const approveDialTimeout = 30 * time.Second
+
+// runStreamJSONApprove is the approve-rider counterpart of runStreamJSON: per
+// {"type":"user",…} turn it originates ONE permission request via control.Approve
+// (blocking until the daemon answers) and writes one assistant echo carrying the
+// verdict needle + one result{success} line. runStreamJSON stays byte-identical (the
+// send / interrupt / queue siblings depend on it), so the ~15-line read loop is
+// duplicated rather than widening its signature — the cheaper trade. Non-user lines
+// are ignored, and the loop returns on EOF or the first write error, exactly like
+// runStreamJSON. Runs on main()'s single goroutine — control.Approve blocks it until
+// the verdict lands, so no assistant output is written mid-approval; -race clean by
+// construction.
+func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
+	br := bufio.NewReader(r)
+	turn := 0
+	for {
+		line, err := br.ReadString('\n')
+		if len(line) > 0 {
+			if _, ok := userTurnText([]byte(line)); ok {
+				turn++
+				msgID := fmt.Sprintf("m%d", turn)
+				// A unique tool_use_id per turn (the registry correlation key).
+				toolUseID := fmt.Sprintf("tu-1139-%d", turn)
+				verdict := dialApproval(socketFile, toolUseID)
+				if werr := writeVerdictResponse(w, msgID, verdict); werr != nil {
+					return
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// dialApproval originates one approval against the daemon control socket and maps the
+// outcome to an approveVerdict. The socket path is read LAZILY from socketFile (the
+// test writes h.SocketPath there after startup — the socket is a random per-spawn path
+// unknown before spawn, so it cannot ride an env VALUE directly). Any failure — no /
+// empty socket file, unreachable socket, ctx expiry, or an unrecognised behavior — maps
+// to verdictError: fail-closed (never verdictAllow), mirroring `pyry mcp-approve`'s
+// error→deny, but tagged distinctly so the e2e surfaces a misconfiguration loudly
+// instead of false-passing.
+func dialApproval(socketFile, toolUseID string) approveVerdict {
+	socket, err := readApproveSocket(socketFile)
+	if err != nil {
+		return verdictError
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), approveDialTimeout)
+	defer cancel()
+	res, err := control.Approve(ctx, socket, control.ApprovePayload{
+		ToolName:  "Bash",
+		Input:     json.RawMessage(`{"cmd":"ls"}`),
+		ToolUseID: toolUseID,
+	})
+	if err != nil {
+		return verdictError
+	}
+	// ApproveResult.Behavior is the fixed wire vocabulary ("allow"/"deny",
+	// control/protocol.go); anything else is contract drift → fail-closed error.
+	switch res.Behavior {
+	case "allow":
+		return verdictAllow
+	case "deny":
+		return verdictDeny
+	default:
+		return verdictError
+	}
+}
+
+// readApproveSocket reads the one-line socket-path file the test wrote and returns the
+// trimmed path. A missing/empty file is an error (→ verdictError, fail-closed) —
+// unreachable in a correct run (the test writes the file before sending the triggering
+// turn), but it degrades to a loud approve-error, never a hang or an allow.
+func readApproveSocket(socketFile string) (string, error) {
+	if socketFile == "" {
+		return "", errors.New("no approve socket file configured")
+	}
+	data, err := os.ReadFile(socketFile)
+	if err != nil {
+		return "", err
+	}
+	socket := strings.TrimSpace(string(data))
+	if socket == "" {
+		return "", errors.New("approve socket file is empty")
+	}
+	return socket, nil
+}
+
+// writeVerdictResponse writes fakeclaude's canned reply for one originated approval:
+// one assistant text line carrying the verdict needle, then one result{success} line
+// (the same shape writeStreamResponse emits, so the daemon's parser maps them to
+// TextChunk + TurnEnd). The needle is the e2e's verdict oracle. verdictError maps to
+// the distinct approveErrorNeedle (the default). Returns the first marshal/write error.
+func writeVerdictResponse(w io.Writer, msgID string, verdict approveVerdict) error {
+	needle := approveErrorNeedle
+	switch verdict {
+	case verdictAllow:
+		needle = approveAllowNeedle
+	case verdictDeny:
+		needle = approveDenyNeedle
+	}
+	if err := writeAssistantEcho(w, msgID, needle); err != nil {
+		return err
+	}
+	return writeJSONLine(w, outResult{
+		Type:      "result",
+		Subtype:   "success",
+		SessionID: streamSessionID,
+	})
 }
