@@ -550,20 +550,26 @@ ships the mechanism; #633 supplies the original production resolver + the wiring
   primary bootstrap resolver by #827/#854** (see the corrected callout above) —
   `resolveLatestSessionJSONL` now survives only as `resolveOwnBootstrapJSONL`'s
   no-probe-available fallback, not the resolver `resolveTarget` picks directly.
-- **Cold start tails from offset 0 (#671).** `startOffset = size` (EOF) is the
-  right default for a warm `--continue` resume (don't replay the prior transcript
-  to the internet-exposed phone) and a `/clear` rotation, but it dropped the live
-  reply on a **fresh** session: claude under `--continue` defers JSONL creation
-  until first input, so the producer's first resolve finds nothing and retries; the
-  phone's prompt then lands and claude writes the user turn + reply together, so the
-  next resolve finds a brand-new file already sized *past* the in-flight reply and
-  tails from EOF. The resolver closure is now stateful (`resolvedOnce`/`sawEmpty`,
-  read/written only on the single `Producer.Run` goroutine): the **first** file
-  returned after one or more not-found results is a cold-start file → `startOffset =
-  0` so its whole content (the current turn) streams; warm-present and post-cold-start
-  files keep `size`. Offset 0 is structurally confined to brand-new files (a resumed
+- **Cold start tails from offset 0 (#671).** `startOffset = size` (EOF) was the
+  original warm default (don't replay the prior transcript to the internet-exposed
+  phone) and a `/clear` rotation, but it dropped the live reply on a **fresh**
+  session: claude under `--continue` defers JSONL creation until first input, so
+  the producer's first resolve finds nothing and retries; the phone's prompt then
+  lands and claude writes the user turn + reply together, so the next resolve
+  finds a brand-new file already sized *past* the in-flight reply and tails from
+  EOF. The resolver closure is stateful (`resolvedOnce`/`sawEmpty`, read/written
+  only on the single `Producer.Run` goroutine): the **first** file returned after
+  one or more not-found results is a cold-start file → `startOffset = 0` so its
+  whole content (the current turn) streams; warm-present and post-cold-start files
+  tail from EOF. Offset 0 is structurally confined to brand-new files (a resumed
   transcript would already exist → warm path), so no prior session leaks. See
-  [codebase/671.md](../codebase/671.md).
+  [codebase/671.md](../codebase/671.md). **#1152** replaced the warm value: instead
+  of a caller-`os.Stat`ted `size` (a cross-fd TOCTOU — the caller stats file A, the
+  tail may open a rotated file B, and the stat-time offset lands wrong), the warm
+  branch now passes `tuidriver.TailFromEnd` (`-1`) so `TailJSONL` (tui-driver
+  v1.12.0) resolves the seek against its **own** fd. `startOffset` is still
+  forwarded unchanged through `producer.go:327` → `Session.Events` → `TailJSONL`;
+  only the value the resolvers compute changed. See [codebase/1152.md](../codebase/1152.md).
 - **`/clear` survival is restart-driven (#633).** A `/clear` rotates claude's on-disk
   session UUID **without** restarting the supervised process, so the Events channel
   does not close on the `/clear` itself. On the **next supervisor restart**, `Run`
