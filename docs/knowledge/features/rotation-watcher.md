@@ -106,7 +106,7 @@ inotify (Linux) / kqueue (Darwin) → fsnotify CREATE
   ▼
 watcher event loop:
   - filter Op.Has(Create) and ".jsonl" suffix
-  - validate uuidStemPattern (36-char canonical UUIDv4)
+  - validate via transcript.ValidStem (36-char canonical UUIDv4, #1151)
   - if cfg.IsAllocated(<new>): consume + skip (fresh session, not a rotation)
   - cfg.Snapshot() → [{id, pid}, ...]
   - for each ref with pid > 0:

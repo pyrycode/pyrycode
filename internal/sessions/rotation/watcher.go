@@ -7,16 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/pyrycode/pyrycode/internal/transcript"
 )
-
-// uuidStemPattern matches the canonical 36-char lowercase UUIDv4 stem claude
-// uses for its <uuid>.jsonl filenames. Same shape as sessions.NewID's output.
-var uuidStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // probeRetryDelays is the bounded retry schedule the watcher walks when a
 // CREATE arrives before claude has the file open. Total worst-case wait is
@@ -147,7 +143,7 @@ func (w *Watcher) handleCreate(ctx context.Context, fullPath string) {
 		return
 	}
 	stem := base[:len(base)-len(".jsonl")]
-	if !uuidStemPattern.MatchString(stem) {
+	if !transcript.ValidStem(stem) {
 		return
 	}
 	if w.cfg.IsAllocated(stem) {
