@@ -247,6 +247,16 @@ func (s *Session) Supervisor() *supervisor.Supervisor {
 	return sup
 }
 
+// Runner exposes the underlying runner as the Runner interface, so a consumer can
+// reach runner-type-specific methods (SendEsc / Interrupt) that are deliberately
+// NOT on the narrow Runner interface (#1077). Unlike Supervisor(), which returns
+// the concrete *supervisor.Supervisor (nil for a stream-json runner), Runner()
+// returns whatever backs sess.sup — total for both runner types. Consumed by
+// cmd/pyry's #1121 interrupt routing, which type-switches the returned runner to
+// its concrete interrupt method. No lock: sup is set once at construction, the
+// same discipline as Supervisor().
+func (s *Session) Runner() Runner { return s.sup }
+
 // Bridge exposes the underlying I/O bridge, or nil in foreground mode.
 // Consumed by the assistant-turn bridge in cmd/pyry to register an output
 // observer on the PTY-drain path.

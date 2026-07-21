@@ -251,6 +251,7 @@ When the binding is unresolvable (race: the session was torn down before `Run` d
 - [conversations-registry.md](conversations-registry.md) — atomic Save/Load that round-trips the binding (AC#3); the `RebindSession` write primitive (#739).
 - [rotation-watcher.md](rotation-watcher.md) — live `/clear` detection → `Pool.RotateID`, the re-key that precedes the #739 rebind.
 - [sessions-package.md](sessions-package.md) — `Pool.Create` mint primitive (§ *Pool.Create*) and `buildSession` (the `tpl.WorkDir` / `--session-id`-only spawn point).
+- [v2-session-manager.md § Inbound interrupt](v2-session-manager.md#inbound-interrupt-707--interrupter-seam--esc-routing) — since [#1121](../codebase/1121.md), the inbound `interrupt` control frame resolves the active conversation's bound runner via the same `CurrentSessionID → Pool.Lookup` shape this doc's `SessionRouter` seam uses for `send_message`, instead of the bootstrap supervisor.
 - [idle-eviction.md](idle-eviction.md) — "evicted is a state, not removal"; lazy respawn on next `send_message`, now per-conversation via `Pool.Activate`.
 - [relay-package.md](relay-package.md) — the `create_conversation` / `send_message` handlers and the `SessionCreator` / `SessionRouter` seams alongside `TurnWriter`.
 - [codebase/677.md](../codebase/677.md), [codebase/678.md](../codebase/678.md) — per-ticket implementation notes (create + routing halves).
