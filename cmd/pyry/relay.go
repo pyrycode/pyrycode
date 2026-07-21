@@ -369,6 +369,23 @@ func relay4409Threshold(logger *slog.Logger) int {
 	return n
 }
 
+// screenSnapshotterOrNil returns a genuine nil relay.ScreenSnapshotter when sup
+// is a nil *supervisor.Supervisor — the stream-json bootstrap path, where
+// Session.Supervisor() returns nil (#1077). Assigning the typed-nil pointer
+// straight to the Snapshotter interface field would leave a non-nil interface
+// holding a nil pointer, so handleRequestSnapshot would skip its nil-Snapshotter
+// arm and call ScreenSnapshot on a nil receiver → panic. Routing to nil instead
+// lands the request in the handler's existing post-gate offline arm — after the
+// KnownConversation gate, so a foreign conversation_id still returns not-found
+// rather than leaking an existence oracle (#1101). No-op on the PTY path: a
+// non-nil sup passes straight through as a non-nil interface.
+func screenSnapshotterOrNil(sup *supervisor.Supervisor) relay.ScreenSnapshotter {
+	if sup == nil {
+		return nil
+	}
+	return sup
+}
+
 // startRelayV2 wires the Mobile Protocol v2 (Noise_IK E2E) dispatch leg: it
 // loads the binary's persistent static keypair, builds a V2SessionManager
 // against conn.Frames() registering the conversation / messaging / workspace /
@@ -489,7 +506,7 @@ func startRelayV2(
 		// on registry membership (AC #4), mirroring the established
 		// conversations-registry validation pattern but returning a bool so the
 		// relay needs no conversations import or errors.Is coupling.
-		Snapshotter: w.sup,
+		Snapshotter: screenSnapshotterOrNil(w.sup),
 		KnownConversation: func(id string) bool {
 			_, ok := w.convReg.Get(conversations.ConversationID(id))
 			return ok
