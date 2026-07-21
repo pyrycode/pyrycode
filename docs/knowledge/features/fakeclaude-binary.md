@@ -132,13 +132,22 @@ PYRY_FAKE_CLAUDE_CLEAR_ROTATES      when non-empty, watch stdin for the "/clear"
                                     path. Shares the `rotated` one-shot gate with the
                                     file trigger, so the two rotation sources are
                                     mutually exclusive in practice.
+PYRY_FAKE_CLAUDE_STREAM_JSON        when non-empty, skip the PTY/TUI surface
+                                    entirely and speak line-delimited stream-json
+                                    instead (#1140; see § Stream-json mode). Checked
+                                    FIRST in main(), above every other env var read —
+                                    structurally mutually exclusive with every mode
+                                    above (if both are set, stream wins) and binds no
+                                    sessions dir / transcript.
 ```
 
 No flags, no positional args — env is the entire configuration surface,
 matching how the harness consumer configures the child via `cmd.Env`.
 fakeclaude reads stdin only when `STDIN_LOG`, `TUI`, `MODAL_TRIGGER`,
-`ESC_ENDS_TURN`, `MODAL_CLEAR_ON_ANSWER`, or `CLEAR_ROTATES` is set; otherwise it
-ignores stdin entirely.
+`ESC_ENDS_TURN`, `MODAL_CLEAR_ON_ANSWER`, `CLEAR_ROTATES`, or `STREAM_JSON` is set;
+otherwise it ignores stdin entirely. `STREAM_JSON` never inspects `os.Args` either —
+the daemon's injected `--input-format`/`--output-format`/`--verbose`/`--session-id`/
+`--resume` flags are silently tolerated by construction, not parsed.
 
 ## TUI mode (#603)
 
@@ -475,6 +484,100 @@ feeds (the structural-causality guard — the file trigger points at a never-cre
 path so `/clear` is the only rotation source — and the bounded re-send loop that
 makes the fire-and-forget verb deterministic against session-attach timing).
 
+## Stream-json mode (#1140)
+
+Every mode above models claude's **PTY/TUI** surface — a screen to read, a
+`<uuid>.jsonl` transcript to grow. The daemon's `internal/streamsup` runner (the
+`interactive_runner: "stream-json"` toggle, #1081, shipped) instead spawns claude
+**headless over a pipe**: line-delimited stream-json envelopes on stdin, `assistant`/
+`result` lines on stdout, no PTY and no transcript file at all. `PYRY_FAKE_CLAUDE_STREAM_JSON`
+teaches fakeclaude that wire, so the stream path has a fake to drive it end-to-end —
+the harness piece the sibling #1135 (blocked-by this ticket) rides for its first
+`send_message` e2e spec.
+
+When `PYRY_FAKE_CLAUDE_STREAM_JSON` is set, `main()`'s **very first** statement is:
+
+```go
+if os.Getenv(envStreamJSON) != "" {
+    runStreamJSON(os.Stdin, os.Stdout)
+    return
+}
+```
+
+This one gate — checked above every `mustEnv(envSessionsDir/…)` call — makes three
+properties fall out structurally rather than by a validation branch:
+
+| Property | Why it holds |
+|---|---|
+| Byte-identical when unset | An unset env var falls straight through; nothing below the `if` changes |
+| Mutually exclusive with every PTY/TUI mode | The `return` fires before any other mode's env var is even read; if both are set, stream wins and the other is inert |
+| Binds no sessions dir / transcript | The `return` short-circuits before the three `mustEnv` calls and the JSONL open — stream mode never touches sessions-dir machinery |
+
+`runStreamJSON(r io.Reader, w io.Writer)` is the testable read→emit loop — the
+`io.Reader`/`io.Writer` seam (rather than hard-wiring `os.Stdin`/`os.Stdout`) is what
+lets the unit test drive it against in-memory buffers:
+
+| Step | Effect |
+|---|---|
+| Read one line | `bufio.NewReader(r).ReadString('\n')` — not `bufio.Scanner`, whose token cap would truncate a long prompt; also correctly processes a final non-newline-terminated read at EOF |
+| Decode | `userTurnText(line)` — unmarshal into a local `inUserTurn` mirror of `streamsup.userTurn` (unexported there); a decode error or `Type != "user"` returns `("", false)` and the line is skipped (a `control_request` interrupt line, a blank line) |
+| Respond | on a user line, mint `m<N>` (a local monotonic `int` counter, one per received turn) and call `writeStreamResponse(w, id, text)`, where `text` is the first `text` content block, verbatim |
+| Stop | on `ReadString` error (EOF — the daemon closed stdin — or a read error) or the first write error (daemon's read end gone); both treated like teardown, never `os.Exit` mid-turn |
+
+`writeStreamResponse(w io.Writer, msgID, text string) error` writes fakeclaude's
+canned reply to one turn — one `assistant` line, one `result` line — each
+`json.Marshal`-encoded from a local struct (`outAssistant`/`outResult`), never
+string-concatenated, so the echoed `text` (caller-controlled bytes) is escaped and
+each object lands as exactly one physical line regardless of content:
+
+```
+{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"<echoed prompt>"}]}}
+{"type":"result","subtype":"success","session_id":"fake-stream"}
+```
+
+These are byte-compatible with `cmd/pyry/stream_turn_drain_test.go`'s
+`assistantTextLine`/`resultLine` fixtures, so the daemon's real
+`streamsup.Parser` (`internal/streamsup/parser.go`) maps them to
+`turnevent.TextChunk{Text: <echoed prompt>}` then `turnevent.TurnEnd{Reason:
+TurnEndReasonEndTurn}` — see [streamsup-package.md § Turn I/O](streamsup-package.md#turn-io--envelope-write--stdout-parser-1088).
+
+- **`text` is echoed, not canned.** The response text is the inbound prompt itself
+  — free downstream value for the #1135 `send_message` e2e, which can assert
+  delta text == sent prompt, at the cost of one extra field-read on the
+  already-decoded struct.
+- **`session_id` is a fixed literal (`"fake-stream"`).** `Parser.streamLine` never
+  decodes `session_id`, so the value is cosmetic; threading the daemon's injected
+  `--session-id` through would force argv parsing the fake deliberately never does.
+- **Wire shapes are hand-mirrored, not imported.** `internal/streamsup`'s envelope/
+  parser types are unexported, and importing them would also pull a dependency into
+  the fakeclaude **binary** — the same zero-dependency posture that keeps
+  `interruptEndTurnLine` (Esc-ends-turn mode, above) a hand-written literal. Only the
+  **test** links `internal/streamsup`/`internal/turnevent`; `main.go` stays
+  stdlib-only.
+- **Single goroutine, no raw mode.** `runStreamJSON` runs entirely on `main()`'s
+  goroutine — no stdin-reader goroutine, no poll loop, none of the other modes'
+  `atomic.Bool` signals are reached. Stream-json travels over a **pipe**, not a PTY,
+  so canonical line discipline / CR mapping don't apply — `enterRawMode()` is never
+  called in this mode.
+- **Interrupt / new_session / queue / modal are out of scope.** The read loop reads
+  and ignores any non-`"user"` line, including a `control_request` — that's the
+  clean extension point a future interrupt e2e sibling would add a `case
+  "control_request"` branch to. This mode responds only to user turns with
+  `assistant`+`result(success)`.
+- **No new glyph, no allowlist change.** Stream mode emits pure JSON — no TUI
+  substrate glyphs — so `cmd/substrate-guard`'s allowlist for this file is
+  unaffected.
+
+Pinned by `stream_detect_test.go` (untagged, package-level `go test`, no e2e build
+tag): a single-turn round-trip and a multi-turn round-trip both feed
+`runStreamJSON`'s output through the **real** `streamsup.Parser` (belt-and-suspenders,
+different fabric — a shape bug the fake and a hand-written test-decoder would share
+is still caught on the emit side) and assert the exact `TextChunk`/`TurnEnd` sequence;
+a non-user-lines-ignored test asserts zero output bytes for a `control_request` /
+blank / unparsable line; a distinct-message-ids test guards the per-turn counter; a
+direct `writeStreamResponse` shape test checks the two line shapes without going
+through the parser at all. See [codebase/1140.md](../codebase/1140.md).
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -537,15 +640,18 @@ the five tests aligned by #673.
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~560 LOC, package main, no build tag (grew from the #122
+  main.go        ~740 LOC, package main, no build tag (grew from the #122
                  rotation core with the #311/#323/#603/#642/#791/#792/#793/#794/#1004
-                 optional modes and the #673 on-turn transcript growth)
+                 optional modes, the #673 on-turn transcript growth, and the #1140
+                 stream-json mode)
   main_test.go   ~125 LOC, //go:build e2e
   modal_detect_test.go  untagged unit test for the modal-class detector
   esc_detect_test.go    ~60 LOC untagged unit test — TestContainsBareESC pins the
                         bare-ESC discriminator the #794 Esc-ends-turn mode relies on
   clear_detect_test.go  untagged unit test — TestContainsClearCommand pins the
                         /clear discriminator the #1004 clear-rotate mode relies on
+  stream_detect_test.go  untagged unit test — drives runStreamJSON against
+                        in-memory buffers and the real streamsup.Parser (#1140)
 ```
 
 The `internal/e2e/internal/` nesting visibility-fences the binary so
@@ -638,7 +744,8 @@ affect correctness.
   Esc-ends-turn mode: `docs/specs/architecture/794-interrupt-stops-turn-two-phone-e2e-capstone.md`;
   modal-clear-on-answer mode: `docs/specs/architecture/793-two-head-first-answer-wins-e2e-capstone.md`;
   on-turn growth: `docs/specs/architecture/673-fakeclaude-transcript-growth.md`;
-  clear-rotate mode: `docs/specs/architecture/1004-new-session-e2e.md`
+  clear-rotate mode: `docs/specs/architecture/1004-new-session-e2e.md`;
+  stream-json mode: `docs/specs/architecture/1140-fakeclaude-stream-json-mode.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
 - JSONL-trigger per-ticket notes: [codebase/642.md](../codebase/642.md) (the
@@ -660,6 +767,10 @@ affect correctness.
 - Clear-rotate per-ticket notes: [codebase/1004.md](../codebase/1004.md) (the live
   `new_session` e2e this mode feeds — the never-created file-trigger structural-causality
   guard, and the bounded re-send loop that makes the fire-and-forget verb deterministic)
+- Stream-json mode per-ticket notes: [codebase/1140.md](../codebase/1140.md) (the
+  gate-above-mustEnv structural AC satisfier, the echo-the-prompt response, the
+  different-fabric real-`streamsup.Parser` verification); feeds the sibling #1135
+  harness + `send_message` e2e spec (blocked-by this ticket)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)

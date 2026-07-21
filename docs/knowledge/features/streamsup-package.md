@@ -479,6 +479,17 @@ and the event tag diverge and the drain's scoping gate drops everything for that
 daemon restarts. No cross-session disclosure (unmatched tag ⇒ dropped, not misdelivered). Follow-up:
 #1133.
 
+## Test fake for this wire — fakeclaude stream-json mode (#1140)
+
+`internal/e2e/internal/fakeclaude`'s `PYRY_FAKE_CLAUDE_STREAM_JSON` mode
+hand-mirrors this package's wire (not imports — the types here are unexported)
+so the stream `interactive_runner` path has a fake `claude` child to drive
+end-to-end without a real binary: it reads `{"type":"user",…}` envelopes shaped
+like `envelope.go`'s `userTurn` and emits `assistant`/`result` lines this
+package's own `Parser` maps to `TextChunk`/`TurnEnd`. See
+[fakeclaude-binary.md § Stream-json mode](fakeclaude-binary.md#stream-json-mode-1140)
+and [codebase/1140.md](../codebase/1140.md).
+
 ## Out of scope (follow-on slices)
 
 - **Composing the #1094 watchdog's `Writer()` into `Config.Stdout` alongside the #1098 `Parser`** — still
