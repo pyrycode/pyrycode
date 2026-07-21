@@ -6,20 +6,16 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
+	"github.com/pyrycode/pyrycode/internal/transcript"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
-
-// jsonlStreamExt is the suffix claude writes for session transcripts.
-const jsonlStreamExt = ".jsonl"
 
 // newBootstrapProbe builds the rotation.Probe the bootstrap resolver uses to ask
 // "which <uuid>.jsonl does the daemon's OWN claude child have open?". Indirected
@@ -44,15 +40,6 @@ func bootstrapProbeUsable(probe rotation.Probe) bool {
 	}
 	return true
 }
-
-// jsonlStemPattern matches the canonical 36-char lowercase UUIDv4 stem claude
-// uses for its <uuid>.jsonl filenames. Duplicated (not reused) from
-// internal/sessions.uuidStemPattern: the resolver lives in package main and the
-// sessions helper is private. Filtering to the same stem shape means the
-// resolver selects the SAME file mostRecentJSONL (reconcile + the fsnotify
-// rotation watcher) would for the same dir — coherent-by-construction with the
-// rest of the daemon over claudeSessionsDir.
-var jsonlStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // startInteractiveTurnStreamV2 wires the #615 structured-event producer to the
 // #632 capability-gated emitter so the active conversation's turn events flow to
@@ -192,59 +179,32 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 		sawEmpty     bool // an earlier call found no file (empty/absent dir)
 	)
 	return func(ctx context.Context) (string, int64, error) {
-		entries, err := os.ReadDir(dir)
+		res, err := transcript.Newest(dir)
 		if err != nil {
-			// A not-yet-created project dir is a cold-start signal too (claude
-			// creates it lazily on first input), so count it as "no file yet".
+			// The os.ReadDir error: a not-yet-created project dir is a cold-start
+			// signal too (claude creates it lazily on first input), so count it as
+			// "no file yet". Wrap with the path (a path/errno, never file bytes).
 			if !resolvedOnce {
 				sawEmpty = true
 			}
-			// Wrap with the path (an os. error — a path/errno, never file bytes).
 			return "", 0, fmt.Errorf("read claude sessions dir %s: %w", dir, err)
 		}
-		var (
-			bestName string
-			bestSize int64
-			bestTime = int64(-1)
-		)
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if !strings.HasSuffix(name, jsonlStreamExt) {
-				continue
-			}
-			if !jsonlStemPattern.MatchString(name[:len(name)-len(jsonlStreamExt)]) {
-				continue
-			}
-			info, err := os.Stat(filepath.Join(dir, name))
-			if err != nil {
-				continue // vanished/raced between ReadDir and Stat — skip, not fatal
-			}
-			// Tie-break on the lexicographically-larger name (deterministic for
-			// tests; matches mostRecentJSONL). Stable across map-free iteration.
-			mt := info.ModTime().UnixNano()
-			if mt > bestTime || (mt == bestTime && name > bestName) {
-				bestTime = mt
-				bestName = name
-				bestSize = info.Size()
-			}
-		}
-		if bestName == "" {
+		if !res.Found() {
+			// No matching <uuid>.jsonl in the dir. Family B returns an error so the
+			// subscriber retries (error-on-not-found convention).
 			if !resolvedOnce {
 				sawEmpty = true
 			}
 			return "", 0, fmt.Errorf("no session jsonl found in %s", dir)
 		}
-		off := bestSize
+		off := res.Size
 		if !resolvedOnce && sawEmpty {
 			// Cold start: this fresh file appeared only after an earlier
 			// not-found, so the whole file is the current turn — tail from 0.
 			off = 0
 		}
 		resolvedOnce = true
-		return filepath.Join(dir, bestName), off, nil
+		return res.Path, off, nil
 	}
 }
 
@@ -268,7 +228,7 @@ func resolveLatestSessionJSONL(dir string) func(ctx context.Context) (path strin
 // honoured on the next resubscribe.
 func resolveBootstrapJSONL(dir string, pinnedID func() string, probe rotation.Probe, pidFn func() int) func(ctx context.Context) (path string, startOffset int64, err error) {
 	if pinnedID != nil {
-		if id := pinnedID(); id != "" && jsonlStemPattern.MatchString(id) {
+		if id := pinnedID(); id != "" && transcript.ValidStem(id) {
 			return resolveBoundSessionJSONL(dir, id)
 		}
 	}
@@ -288,9 +248,9 @@ func resolveBootstrapJSONL(dir string, pinnedID func() string, probe rotation.Pr
 //
 // Construction time: if the probe cannot answer (the no-lsof noop), delegate to
 // resolveLatestSessionJSONL(dir) so the no-lsof path stays byte-identical to the
-// pre-fix behaviour. Otherwise precompute resolvedDir once (EvalSymlinks, falling
-// back to Clean on error) for the confidentiality guard below, mirroring the
-// rotation watcher's dir canonicalisation.
+// pre-fix behaviour. Otherwise precompute canonicalDir once via
+// transcript.CanonicalDir (symlink-resolved, Clean on error) for the
+// confidentiality guard below, mirroring the rotation watcher's dir canonicalisation.
 //
 // Per call (the returned closure keeps resolvedOnce / sawEmpty, the same
 // per-subscription cold/warm offset rule as resolveBoundSessionJSONL):
@@ -304,10 +264,11 @@ func resolveBootstrapJSONL(dir string, pinnedID func() string, probe rotation.Pr
 //     input lands, so the child holds no .jsonl fd yet) → mark sawEmpty, return
 //     not-found. It NEVER falls back to the newest-by-mtime file — that is exactly
 //     the colliding heuristic this resolver exists to avoid.
-//  3. Validate the reported path: canonicalise it, require its directory to equal
-//     resolvedDir (the confidentiality guard — never tail a file outside the
-//     trusted sessions dir, e.g. if PID reuse hands back an unrelated process's
-//     fd), and require its stem to match the UUID pattern.
+//  3. Validate the reported path via transcript.GuardProbedPath(open, canonicalDir):
+//     it canonicalises the probed path and accepts it only if it lives directly in
+//     canonicalDir with a <uuid>.jsonl base (the confidentiality guard — never tail
+//     a file outside the trusted sessions dir, e.g. if PID reuse hands back an
+//     unrelated process's fd). A reject returns a not-found error, no sawEmpty.
 //  4. os.Stat (the path may vanish between probe and stat → retry). Offset = size,
 //     or 0 when the file first appears after an earlier empty look (cold start, so
 //     the whole file is the current turn). Set resolvedOnce.
@@ -326,10 +287,9 @@ func resolveOwnBootstrapJSONL(dir string, probe rotation.Probe, pidFn func() int
 		// newest-by-mtime behaviour so the no-probe path is unchanged.
 		return resolveLatestSessionJSONL(dir)
 	}
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		resolvedDir = filepath.Clean(dir)
-	}
+	// Precompute the canonical (symlink-resolved) dir once for the confidentiality
+	// guard below, mirroring the rotation watcher's dir canonicalisation.
+	canonicalDir := transcript.CanonicalDir(dir)
 	var (
 		resolvedOnce bool // a session file has been returned at least once
 		sawEmpty     bool // an earlier call found no file (pid down / no fd yet)
@@ -356,21 +316,16 @@ func resolveOwnBootstrapJSONL(dir string, probe rotation.Probe, pidFn func() int
 			}
 			return "", 0, fmt.Errorf("bootstrap child pid %d has no jsonl open yet", pid)
 		}
-		// Confidentiality guard: canonicalise the probed path and require it to
-		// live directly in the trusted dir with a UUID stem. A file outside dir
-		// (PID reuse handing back some unrelated process's fd) is rejected, not
-		// tailed.
-		openResolved, resolveErr := filepath.EvalSymlinks(open)
-		if resolveErr != nil {
-			openResolved = filepath.Clean(open)
-		}
-		if filepath.Dir(openResolved) != resolvedDir {
-			return "", 0, fmt.Errorf("probed jsonl outside sessions dir %s", resolvedDir)
-		}
-		base := filepath.Base(openResolved)
-		if !strings.HasSuffix(base, jsonlStreamExt) ||
-			!jsonlStemPattern.MatchString(base[:len(base)-len(jsonlStreamExt)]) {
-			return "", 0, fmt.Errorf("probed file %s is not a session jsonl", base)
+		// Confidentiality guard: GuardProbedPath canonicalises the probed path and
+		// accepts it only if it lives directly in the trusted dir (canonicalDir)
+		// with a <uuid>.jsonl base. A file outside dir (PID reuse handing back some
+		// unrelated process's fd) is rejected, not tailed. No sawEmpty here — a
+		// guard reject is a security decision, not a cold-start "no file yet".
+		// (The two pre-migration reject strings collapse to one; the raw probed
+		// path was never named in either message and is not named here.)
+		base, ok := transcript.GuardProbedPath(open, canonicalDir)
+		if !ok {
+			return "", 0, fmt.Errorf("probed jsonl outside sessions dir %s or not a session jsonl", canonicalDir)
 		}
 		// Return the path under the original dir — the same form the sibling
 		// resolvers use — rather than the guard-only symlink-resolved form.
@@ -534,30 +489,33 @@ func resolveBoundSessionJSONL(dir, sessionID string) func(ctx context.Context) (
 		sawEmpty     bool
 	)
 	return func(ctx context.Context) (string, int64, error) {
-		// Path-safety guard (defense-in-depth): sessionID is already a
-		// server-minted UUID from the trusted registry/pool, but validate the
-		// stem before the Join so a malformed id can never escape dir. A clean
-		// UUID stem contains no '/' or '.', so filepath.Join(dir, stem+ext)
-		// cannot traverse out.
-		if !jsonlStemPattern.MatchString(sessionID) {
+		// Path-safety branch-selector (defense-in-depth): sessionID is already a
+		// server-minted UUID from the trusted registry/pool, but validate the stem
+		// HERE so a malformed id never reaches the sawEmpty-setting stat-error
+		// branch below. A clean UUID stem contains no '/' or '.', so the join in
+		// StatByID cannot traverse out. This pre-check is NOT redundant with
+		// StatByID's own internal ValidStem: it is the branch selector that keeps
+		// an invalid stem out of the cold/warm state (no sawEmpty on an invalid
+		// id), matching the pre-migration behaviour AC3 pins.
+		if !transcript.ValidStem(sessionID) {
 			return "", 0, fmt.Errorf("invalid bound session id %q", sessionID)
 		}
-		path := filepath.Join(dir, sessionID+jsonlStreamExt)
-		info, err := os.Stat(path)
+		res, err := transcript.StatByID(dir, sessionID)
 		if err != nil {
+			// File absent / raced away. Family B returns an error so the subscriber
+			// retries. Wrap with the path (a path/errno, never file bytes).
 			if !resolvedOnce {
 				sawEmpty = true
 			}
-			// Wrap with the path (a path/errno, never file bytes).
-			return "", 0, fmt.Errorf("stat bound session jsonl %s: %w", path, err)
+			return "", 0, fmt.Errorf("stat bound session jsonl %s: %w", filepath.Join(dir, sessionID+transcript.Ext), err)
 		}
-		off := info.Size()
+		off := res.Size
 		if !resolvedOnce && sawEmpty {
 			// Cold start: this fresh file appeared only after an earlier absent
 			// look, so the whole file is the current turn — tail from 0.
 			off = 0
 		}
 		resolvedOnce = true
-		return path, off, nil
+		return res.Path, off, nil
 	}
 }
