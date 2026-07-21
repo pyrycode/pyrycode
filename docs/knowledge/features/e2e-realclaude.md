@@ -273,6 +273,29 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   namespace. Zero production files touched. See
   [`codebase/1153.md`](../codebase/1153.md).
 
+- `interactive_stream_modal_resolution_test.go` (#1154) — the stream-json
+  **sibling** of #1030's `TestInteractiveModalResolution`, not a replacement:
+  #1030 proves the same answer round-trip under the default PTY runner; this
+  is the desktop#483 scenario on the real stream stack (PTY-red vs.
+  stream-green). `TestInteractiveStreamModalResolution` is #1030 Phase A
+  (answer-only — Phase B cancel is out of scope) composed with #1153's
+  stream-json seams: `startStreamModalResolutionHarness` is an inline copy of
+  #1030's `startModalResolutionHarness` with exactly one inserted line,
+  `writeStreamInteractiveConfig(t, home)` before `spawnPermissionDaemon` (the
+  stream-vs-PTY differentiator), plus fresh distinct seed constants
+  (`streamModalBootstrapUUID`/`streamModalConvID`, valid UUIDv4 shape, no
+  redeclaration vs. #1030's or #1153's names). `raiseRealPermissionModal`
+  (#1030, reused verbatim) still owns the AC1/AC2 non-vacuity gate —
+  `modal_shown{Class:"permission"}` + non-empty `ModalID` asserted before the
+  answer is sealed — and the turn-completion assertion upgrades from #1030's
+  `drainForAssistantReply` (M1 only) to #1153's `drainForCompletedTurn` (M1
+  non-empty `assistant_delta` **then** M2 terminal `turn_state{idle}`), so
+  "modal answered but the turn never resumed" fails loud rather than greening
+  vacuously. Zero production files touched; inlining over parameterizing
+  #1030's shipped harness follows the #1153 precedent (avoids a file-overlap
+  edit to another ticket's test file). Split from #1083, blocked-by #1153.
+  See [`codebase/1154.md`](../codebase/1154.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -342,3 +365,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1028](https://github.com/pyrycode/pyrycode/issues/1028) — conversation-lifecycle real-claude liveness gate (create → rename → archive → unarchive → delete, liveness turn between unarchive and delete); first real-claude coverage of the conversation-management verbs, split from #963; codebase note at [`codebase/1028.md`](../codebase/1028.md).
 - Ticket [#854](https://github.com/pyrycode/pyrycode/issues/854) — real-claude interactive two-turn liveness test, the RED/GREEN oracle for the fresh-daemon bootstrap-reply deadlock fix (`cmd/pyry/interactive_turn_stream_v2.go`'s `resolveTarget`); the only test in the suite that drives the daemon's interactive relay path directly rather than `pyry agent-run` — see [`codebase/854.md`](../codebase/854.md) and [`turnbridge-package.md`](turnbridge-package.md#which-jsonl-and-surviving-clear-rotation).
 - Ticket [#1153](https://github.com/pyrycode/pyrycode/issues/1153) — real-claude counterpart of #1141's stream-json liveness proof; first real-claude test to flip `interactive_runner: "stream-json"`; introduces the reusable `writeStreamInteractiveConfig` config-toggle helper (composed with `spawnPermissionDaemon` by the blocked-by rider #1154) and the two-milestone `drainForCompletedTurn` drain; codebase note at [`codebase/1153.md`](../codebase/1153.md).
+- Ticket [#1154](https://github.com/pyrycode/pyrycode/issues/1154) — stream-json sibling of #1030's real permission round-trip (desktop#483 scenario, real stream stack); composes #1030's harness/trigger scaffold with #1153's `writeStreamInteractiveConfig`/`drainForCompletedTurn` seams, zero production files; answer-only (approve), PTY-path cancel stays owned by #1030 Phase B; split from #1083; codebase note at [`codebase/1154.md`](../codebase/1154.md).
