@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -88,9 +89,19 @@ func mapStreamState(s streamsup.State) supervisor.State {
 // interactive session (which `pyry attach` drives) from the operator's stated
 // stream-json intent. The error surfaces through the pool's existing
 // "sessions: … supervisor: %w" wraps at both construction sites.
-func newStreamRunnerFactory(sink *streamTurnSink) sessions.RunnerFactory {
+//
+// mcpApprovePath is the daemon-global --mcp-config file written once at startup
+// (runSupervisor, gated on stream-json). withApprovalArgs injects the #1106
+// permission-approval flags onto every non-yolo spawn's args (#1168) — this is
+// the sole stream-path-specific spawn-construction site and covers both the
+// bootstrap runner and per-conversation runners, so a per-conversation stream
+// session cannot silently bypass the approval gate. On the "" / "pty" path the
+// factory is never built, so mcpApprovePath is "" and unused there. The live
+// wire is exercised end-to-end by TestInteractiveStreamModalResolution (#1154).
+func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) sessions.RunnerFactory {
 	return func(cfg supervisor.Config) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
+		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath)
 		scfg.Stdout = streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
 		r, err := streamsup.New(scfg)
 		if err != nil {
@@ -98,6 +109,37 @@ func newStreamRunnerFactory(sink *streamTurnSink) sessions.RunnerFactory {
 		}
 		return streamRunner{r: r}, nil
 	}
+}
+
+// withApprovalArgs injects claude's permission-approval flags onto a stream
+// spawn's args unless the spawn is already in yolo / skip-permissions mode
+// (#1168). It is the interactive-stream twin of agent_run.go's non-yolo
+// permissionArgs wiring — the first live consumer of permissionArgs on the
+// interactive path.
+//
+// Yolo is expressed to claude as exactly one flag, --dangerously-skip-permissions,
+// and both yolo entry points funnel through it: the operator's bootstrap
+// pass-through claude args (main.go) and internal/sessions.claudeSettingsArgs
+// (which appends it when the per-session YOLO bit is set). So the flag's presence
+// in the spawn's args is the single deterministic yolo signal, robust to both
+// entry points and evaluated per-spawn here:
+//
+//   - yolo (flag present) → return args UNCHANGED. The flag is already in base;
+//     injecting nothing keeps AC2 byte-identical to today and avoids a duplicate
+//     --dangerously-skip-permissions. Do NOT call permissionArgs(true, …) here —
+//     that would re-emit the flag already present.
+//   - non-yolo → append permissionArgs(false, mcpApprovePath): the
+//     --permission-prompt-tool / --mcp-config / --strict-mcp-config /
+//     --permission-mode default set that routes every non-allowlisted tool use
+//     through the daemon approval registry.
+//
+// The append runs on a clone so the caller's args (scfg.Args, freshly owned by
+// mapStreamsupConfig) is never aliased or mutated.
+func withApprovalArgs(args []string, mcpApprovePath string) []string {
+	if slices.Contains(args, "--dangerously-skip-permissions") {
+		return args
+	}
+	return append(slices.Clone(args), permissionArgs(false, mcpApprovePath)...)
 }
 
 // mapStreamsupConfig maps a supervisor.Config to the streamsup.Config that

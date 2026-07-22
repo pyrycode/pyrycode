@@ -185,20 +185,111 @@ func TestMapStreamsupConfig_PerSession(t *testing.T) {
 	}
 }
 
-// TestStreamRunnerFactory_Construct drives the factory with both pool shapes and
+// TestWithApprovalArgs pins the per-spawn yolo probe that gates claude's
+// permission-approval flags onto a stream spawn (#1168). The presence of
+// --dangerously-skip-permissions is the single deterministic yolo signal — both
+// the operator bootstrap pass-through and internal/sessions.claudeSettingsArgs
+// funnel their yolo intent through that one flag — so the injection is:
+//
+//   - non-yolo → args followed by exactly permissionArgs(false, path) (AC1: the
+//     enforcement set reaches claude),
+//   - yolo (flag present) → args UNCHANGED (AC2: byte-identical to today, and no
+//     duplicate --dangerously-skip-permissions).
+//
+// It also pins that the input is never aliased or mutated — scfg.Args is freshly
+// owned by mapStreamsupConfig and the append runs on a clone.
+func TestWithApprovalArgs(t *testing.T) {
+	t.Parallel()
+
+	const path = "/tmp/pyry-mcp-approve-xyz.json"
+
+	countSkip := func(args []string) int {
+		n := 0
+		for _, a := range args {
+			if a == "--dangerously-skip-permissions" {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("non-yolo appends exactly permissionArgs(false, path)", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--model", "haiku", "--settings", "p"}
+		got := withApprovalArgs(in, path)
+
+		want := append(slices.Clone(in), permissionArgs(false, path)...)
+		if !slices.Equal(got, want) {
+			t.Fatalf("withApprovalArgs non-yolo = %q, want %q", got, want)
+		}
+		// The four enforcement flags land, carrying the daemon's config path.
+		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config", "--permission-mode"} {
+			if !slices.Contains(got, f) {
+				t.Errorf("non-yolo args %q missing %q", got, f)
+			}
+		}
+		if !slices.Contains(got, path) {
+			t.Errorf("non-yolo args %q missing the mcp-config path %q", got, path)
+		}
+		if countSkip(got) != 0 {
+			t.Errorf("non-yolo args %q must not carry --dangerously-skip-permissions", got)
+		}
+	})
+
+	t.Run("yolo returns args unchanged, no duplicate skip flag", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--model", "haiku", "--dangerously-skip-permissions", "--settings", "p"}
+		got := withApprovalArgs(in, path)
+
+		if !slices.Equal(got, in) {
+			t.Fatalf("withApprovalArgs yolo = %q, want unchanged %q", got, in)
+		}
+		if n := countSkip(got); n != 1 {
+			t.Errorf("yolo args carry %d --dangerously-skip-permissions, want exactly 1", n)
+		}
+		// None of the approval flags are injected in yolo mode.
+		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
+			if slices.Contains(got, f) {
+				t.Errorf("yolo args %q must not carry approval flag %q", got, f)
+			}
+		}
+	})
+
+	t.Run("does not mutate or alias the input on the non-yolo path", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--model", "haiku"}
+		saved := slices.Clone(in)
+		got := withApprovalArgs(in, path)
+
+		if !slices.Equal(in, saved) {
+			t.Errorf("withApprovalArgs mutated its input: got %q, want %q", in, saved)
+		}
+		// The append runs on a clone, so the returned slice must not share the
+		// input's backing array.
+		if len(got) > 0 && len(in) > 0 && &got[0] == &in[0] {
+			t.Errorf("withApprovalArgs returned a slice aliasing the input backing array")
+		}
+	})
+}
+
+// TestStreamRunnerFactory_Construct drives the factory with the pool shapes and
 // asserts a live *streamsup.Runner comes back wrapped in the streamRunner adapter
-// (AC-1, AC-2 "constructs successfully at both sites"). os.Args[0] is an absolute,
-// resolvable path so exec.LookPath accepts it; t.TempDir() is a real work dir.
+// (AC-1, AC-2 "constructs successfully at both sites"). A non-empty mcpApprovePath
+// exercises the #1168 approval-arg injection seam; construction must succeed on
+// every shape — non-yolo (flags injected) and yolo (nothing injected) alike.
+// os.Args[0] is an absolute, resolvable path so exec.LookPath accepts it;
+// t.TempDir() is a real work dir.
 func TestStreamRunnerFactory_Construct(t *testing.T) {
 	t.Parallel()
 
-	factory := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()))
+	factory := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "/tmp/pyry-mcp-approve-test.json")
 	shapes := []struct {
 		name string
 		args []string
 	}{
 		{"bootstrap", []string{"--settings", "p"}},
 		{"per-session", []string{"--session-id", "sess-uuid", "--settings", "p"}},
+		{"yolo", []string{"--dangerously-skip-permissions", "--settings", "p"}},
 	}
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {
@@ -237,7 +328,7 @@ func TestStreamRunnerFactory_ErrorPropagation(t *testing.T) {
 		SessionID:  "sess-uuid",
 		ClaudeArgs: []string{"--settings", "p"},
 	}
-	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()))(cfg)
+	runner, err := newStreamRunnerFactory(newStreamTurnSink(0, slog.Default()), "")(cfg)
 	if err == nil {
 		t.Fatalf("newStreamRunnerFactory error = nil, want non-nil for a missing binary")
 	}

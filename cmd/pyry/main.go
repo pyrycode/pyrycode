@@ -664,13 +664,13 @@ func resolveSpawnDir(requested string) (string, error) {
 // Validation lives here, not in config.Load, because the accepted set is defined
 // by the factory mapping — which the leaf config package cannot import
 // (supervisor/streamsup). config.Load stays parse-only, matching DebugCapture.
-func selectInteractiveRunner(cfg config.Config, logger *slog.Logger) (sessions.RunnerFactory, *streamTurnSink, error) {
+func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpApprovePath string) (sessions.RunnerFactory, *streamTurnSink, error) {
 	switch cfg.InteractiveRunner {
 	case "", "pty":
 		return nil, nil, nil
 	case "stream-json":
 		sink := newStreamTurnSink(0, logger)
-		return newStreamRunnerFactory(sink), sink, nil
+		return newStreamRunnerFactory(sink, mcpApprovePath), sink, nil
 	default:
 		return nil, nil, fmt.Errorf("interactive_runner %q not recognized (accepted: \"pty\", \"stream-json\")", cfg.InteractiveRunner)
 	}
@@ -778,13 +778,35 @@ func runSupervisor(args []string) error {
 	if cfg.DebugCapture {
 		recordDir = resolveRecordingsDir()
 	}
+	// Approval-tool wiring (#1168): on the stream-json interactive path, write the
+	// per-daemon --mcp-config file that points claude's approval-prompt tool at
+	// THIS daemon's control socket, so a non-yolo permission-bearing turn surfaces
+	// an answerable modal (the #1154 gate). Its content — (pyry binary, socketPath)
+	// — is daemon-global and identical across every session and respawn, so it is
+	// written ONCE here and removed at shutdown (the file lives the daemon's whole
+	// lifetime; per-spawn removal is out of scope). Fail-closed: a write error
+	// aborts startup rather than spawning a non-yolo session with an empty
+	// --mcp-config. Written unconditionally in stream mode (not gated on
+	// bootstrap-yolo): a yolo daemon can still mint non-yolo per-conversation
+	// sessions, so the config must exist; it is harmless and unreferenced when
+	// every spawn is yolo. The "" / "pty" path never builds the factory, so
+	// mcpApprovePath stays "".
+	var mcpApprovePath string
+	if cfg.InteractiveRunner == "stream-json" {
+		mcpApprovePath, err = writeMCPApproveConfig(resolveExecutable(), socketPath)
+		if err != nil {
+			return fmt.Errorf("write mcp-approve config: %w", err)
+		}
+		defer func() { _ = os.Remove(mcpApprovePath) }()
+	}
 	// Interactive-runner selection (#1081): pick the runner factory + its shared
 	// turn-event sink from config BEFORE the pool is built, so an invalid value
 	// fails fast (AC4, no silent PTY fallback). Both are nil on the "" / "pty"
 	// rollback path, leaving the sessions.Config and relayWiring literals below
 	// byte-identical to today. On "stream-json" the same sink instance is threaded
-	// two ways: RunnerFactory (below) and relayWiring.streamSink (the drain).
-	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger)
+	// two ways: RunnerFactory (below) and relayWiring.streamSink (the drain); the
+	// factory also carries mcpApprovePath to inject the approval-tool flags (#1168).
+	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpApprovePath)
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
 	}
