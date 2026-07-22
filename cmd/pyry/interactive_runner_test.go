@@ -21,7 +21,7 @@ func TestSelectInteractiveRunner(t *testing.T) {
 
 	t.Run("empty selects PTY: nil factory and nil sink", func(t *testing.T) {
 		t.Parallel()
-		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: ""}, logger)
+		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: ""}, logger, "")
 		if err != nil {
 			t.Fatalf("selectInteractiveRunner(\"\") err = %v, want nil", err)
 		}
@@ -35,7 +35,7 @@ func TestSelectInteractiveRunner(t *testing.T) {
 
 	t.Run("pty selects PTY: nil factory and nil sink", func(t *testing.T) {
 		t.Parallel()
-		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "pty"}, logger)
+		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "pty"}, logger, "")
 		if err != nil {
 			t.Fatalf("selectInteractiveRunner(\"pty\") err = %v, want nil", err)
 		}
@@ -49,7 +49,7 @@ func TestSelectInteractiveRunner(t *testing.T) {
 
 	t.Run("stream-json selects the streamsup factory + a live sink", func(t *testing.T) {
 		t.Parallel()
-		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "stream-json"}, logger)
+		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "stream-json"}, logger, "")
 		if err != nil {
 			t.Fatalf("selectInteractiveRunner(\"stream-json\") err = %v, want nil", err)
 		}
@@ -76,7 +76,7 @@ func TestSelectInteractiveRunner(t *testing.T) {
 
 	t.Run("unrecognised value aborts with an AC4 error, no fallback", func(t *testing.T) {
 		t.Parallel()
-		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "garbage"}, logger)
+		factory, sink, err := selectInteractiveRunner(config.Config{InteractiveRunner: "garbage"}, logger, "")
 		if err == nil {
 			t.Fatalf("selectInteractiveRunner(\"garbage\") err = nil, want an error (no silent PTY fallback)")
 		}

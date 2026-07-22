@@ -1,6 +1,6 @@
 # `internal/streamsup` — persistent stream-json child lifecycle
 
-Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), the `newStreamRunnerFactory` constructor that builds a `streamRunner` from a `supervisor.Config` (#1109), the drain that fans its parsed turnevents into the unchanged `interactiveTurnEmitterV2` (#1098), the interrupt send primitive (#1120), and the fresh-restart-under-a-new-id mechanism (`RestartFresh`, #1124) have shipped. **It is now live in production**: the `interactive_runner: "stream-json"` config toggle (#1081) selects `newStreamRunnerFactory` as `sessions.Config.RunnerFactory` and wires its drain at the relay leg — see [config-package.md](config-package.md) and [codebase/1081.md](../codebase/1081.md).
+Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), the `newStreamRunnerFactory` constructor that builds a `streamRunner` from a `supervisor.Config` (#1109), the drain that fans its parsed turnevents into the unchanged `interactiveTurnEmitterV2` (#1098), the interrupt send primitive (#1120), the fresh-restart-under-a-new-id mechanism (`RestartFresh`, #1124), and the live permission-approval-flag injection onto the factory's spawn (`withApprovalArgs`, #1168) have shipped. **It is now live in production**: the `interactive_runner: "stream-json"` config toggle (#1081) selects `newStreamRunnerFactory` as `sessions.Config.RunnerFactory` and wires its drain at the relay leg — see [config-package.md](config-package.md) and [codebase/1081.md](../codebase/1081.md).
 
 **No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
 
@@ -347,16 +347,32 @@ stream path has no PTY to wait for, and the no-live-child window is already hand
 Concurrency model: three **leaf** mutexes on `Runner` (`mu`, `stateMu`, `restartMu`), never nested, each
 owned by a different goroutine/concern. See [codebase/1097.md](../codebase/1097.md).
 
-## Constructing a `streamRunner` — `newStreamRunnerFactory` (#1109, extended #1098)
+## Constructing a `streamRunner` — `newStreamRunnerFactory` (#1109, extended #1098, #1168)
 
-`cmd/pyry/streamsup_runner.go` also holds `newStreamRunnerFactory(sink *streamTurnSink)
-sessions.RunnerFactory` — returns exactly the `sessions.RunnerFactory` signature (above); #1109 delivered
-the constructor (as the bare `streamRunnerFactory` func, the first `streamsup.New` caller tree-wide),
-#1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere to send
-turnevents. Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Stdout =
+`cmd/pyry/streamsup_runner.go` also holds `newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath
+string) sessions.RunnerFactory` — returns exactly the `sessions.RunnerFactory` signature (above); #1109
+delivered the constructor (as the bare `streamRunnerFactory` func, the first `streamsup.New` caller
+tree-wide), #1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere
+to send turnevents, and #1168 added the `mcpApprovePath` param to inject the permission-approval flags.
+Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Args =
+withApprovalArgs(scfg.Args, mcpApprovePath)`; `scfg.Stdout =
 streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)`; `streamsup.New(scfg)`; on error,
 `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
 `streamRunner{r: r}`.
+
+**`withApprovalArgs(args []string, mcpApprovePath string) []string` (#1168)** is the interactive-stream
+twin of `agent_run.go`'s non-yolo `permissionArgs` wiring (#1106) — the first live consumer of
+`permissionArgs`/`writeMCPApproveConfig` on the interactive path. Reads `--dangerously-skip-permissions`
+off `args` as the single deterministic per-spawn yolo signal (both the bootstrap operator pass-through and
+`sessions.claudeSettingsArgs`'s per-session YOLO funnel through that one flag): present → return `args`
+unchanged (byte-identical to pre-#1168, no duplicate flag); absent → `append(slices.Clone(args),
+permissionArgs(false, mcpApprovePath)...)`. Runs inside the shared factory closure, so it covers **both**
+the bootstrap runner and per-conversation runners — a per-conversation stream session cannot silently
+bypass the approval gate. `mcpApprovePath` is the daemon-global `--mcp-config` file `runSupervisor` writes
+once at startup via `writeMCPApproveConfig` (gated on `cfg.InteractiveRunner == "stream-json"`,
+fail-closed on write error, removed at shutdown); on the `""`/`"pty"` path the factory is never built, so
+the PTY interactive argv is untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) and
+[codebase/1168.md](../codebase/1168.md).
 
 **No PTY fallback, structurally.** The function has no branch that calls `supervisor.New` — a
 `streamsup.New` failure (missing binary, absent work dir; an empty `SessionID` is impossible at the pool
@@ -518,6 +534,8 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1098.md`](../codebase/1098.md) — the turnevent drain slice (`streamTurnSink`/`startStreamTurnDrainV2`).
 - [`codebase/1120.md`](../codebase/1120.md) — the interrupt send primitive + `result` subtype mapping slice.
 - [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`nextSpawnID`).
+- [`codebase/1168.md`](../codebase/1168.md) — `withApprovalArgs`, wiring the #1106 permission-approval flags onto the live interactive spawn.
+- [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
 - Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.

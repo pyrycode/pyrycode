@@ -48,7 +48,7 @@ Steps, each failure terminating in a deny result:
 6. Wrap as `{content:[{type:"text", text:<verdict>}], isError:false}`.
 7. Log `tool_use_id` + `behavior` only — never `input`, `tool_name`, or the raw `params`/`arguments` bytes, on any branch including the early parse-failure denies. Logger writes to **stderr only**; stdout is exclusively the JSON-RPC frame stream.
 
-`mcpApproveClientMargin = 30s` — added to `mcpApprovalTimeout` (2 min, #1104) so the daemon's own approval timer fires first (its informative timeout-deny message passes through) rather than the client's generic read-deadline error. Both outcomes are denies; the margin only changes which message reaches claude. `--permission-prompt-tool` argv/config generation landed in [#1106](../codebase/1106.md); wiring either into a live spawn is still downstream (the `streamsup` runner-selection work).
+`mcpApproveClientMargin = 30s` — added to `mcpApprovalTimeout` (2 min, #1104) so the daemon's own approval timer fires first (its informative timeout-deny message passes through) rather than the client's generic read-deadline error. Both outcomes are denies; the margin only changes which message reaches claude. `--permission-prompt-tool` argv/config generation landed in [#1106](../codebase/1106.md); the live `streamsup` interactive-spawn wiring landed in [#1168](../codebase/1168.md) — `newStreamRunnerFactory`'s closure injects `permissionArgs(false, mcpApprovePath)` on every non-yolo spawn, so this server now has a live production caller beyond `pyry agent-run`.
 
 ## `internal/control.Approve` client helper
 
@@ -81,8 +81,9 @@ The verdict JSON is embedded as a *string* inside `content[].text`, and the whol
 
 ## Out of scope (deferred)
 
-- Wiring `permissionArgs`/`writeMCPApproveConfig` (landed, [#1106](../codebase/1106.md)) into a live `streamsup` spawn — the source of the `yolo` boolean at a live spawn and the per-spawn config-file removal lifecycle are still downstream.
 - The in-process modal-resolve consumer producing the trusted allow — **#1080**.
+
+Resolved since the sections above were written: wiring `permissionArgs`/`writeMCPApproveConfig` (#1106) into a live `streamsup` spawn — the source of the `yolo` boolean at a live spawn and the per-spawn config-file removal lifecycle — landed in [#1168](../codebase/1168.md).
 
 ## Related
 
@@ -91,3 +92,4 @@ The verdict JSON is embedded as a *string* inside `content[].text`, and the whol
 - [acp-package.md](acp-package.md) — the transport (`acp.Transport`/`serveACP`) this subcommand reuses for a second, non-ACP JSON-RPC dialect.
 - [codebase/1105.md](../codebase/1105.md) — ticket implementation notes, patterns established, lessons learned.
 - [codebase/1106.md](../codebase/1106.md) — the spawn-arg injection (`permissionArgs`) and mcp-config generation (`renderMCPApproveConfig`/`writeMCPApproveConfig`) that point claude at this server.
+- [codebase/1168.md](../codebase/1168.md) — the live wiring of both #1106 primitives onto the interactive `streamsup` spawn.
