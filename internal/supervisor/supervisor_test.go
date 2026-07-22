@@ -176,6 +176,9 @@ func TestSupervisor_StateAcrossPhases(t *testing.T) {
 //   - "exit1":       exit immediately with code 1
 //   - "sleep":       sleep for GO_TEST_HELPER_SLEEP duration, then exit 0
 //   - "crash":       exit immediately with code 2 (simulates crash)
+//   - "fast_crash_until_healed": exit 1 immediately while GO_TEST_HELPER_MARKER
+//     is absent (a fast crash); once the marker exists, block until killed (a
+//     healthy run). Drives the #1165 self-heal detection tests.
 //   - "emit_marker": write GO_TEST_HELPER_MARKER to stdout, then block
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_TEST_HELPER_PROCESS") != "1" {
@@ -190,6 +193,24 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(1)
 	case "crash":
 		os.Exit(2)
+	case "fast_crash_until_healed":
+		// Self-heal detection harness (#1165). While GO_TEST_HELPER_MARKER is
+		// absent the child fast-crashes (exit 1 immediately); once the injected
+		// SelfHeal writes the marker, subsequent spawns come up healthy and
+		// block until killed. GO_TEST_HELPER_COUNT_FILE, when set, records the
+		// spawn count (used by the SelfHeal==nil retry-forever test).
+		marker := os.Getenv("GO_TEST_HELPER_MARKER")
+		if marker == "" {
+			fmt.Fprintln(os.Stderr, "fast_crash_until_healed: GO_TEST_HELPER_MARKER unset")
+			os.Exit(99)
+		}
+		if cf := os.Getenv("GO_TEST_HELPER_COUNT_FILE"); cf != "" {
+			writeCount(cf, readCount(cf)+1)
+		}
+		if _, err := os.Stat(marker); err != nil {
+			os.Exit(1) // marker absent → deterministic fast crash
+		}
+		time.Sleep(24 * time.Hour) // marker present → healthy, block until killed
 	case "sleep":
 		dur, err := time.ParseDuration(os.Getenv("GO_TEST_HELPER_SLEEP"))
 		if err != nil {
