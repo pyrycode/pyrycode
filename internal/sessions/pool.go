@@ -471,6 +471,17 @@ func New(cfg Config) (*Pool, error) {
 			_, err := transcript.StatByID(cfg.ClaudeSessionsDir, id)
 			return id, err == nil
 		},
+		// #1165 self-heal safety net: after N consecutive fast non-zero crashes
+		// on the same pinned id (a deterministic wedge the resume fix #1164 does
+		// not cover for a *future* trigger), the supervisor calls this to mint a
+		// fresh pinned id. The ResolveSessionID pull above then resolves the
+		// rotated id on the very next spawn — no separate wiring. Only mutates
+		// p.bootstrap + the registry; no skip-set entry, no client transition
+		// (see RotateBootstrapForSelfHeal). p is late-bound like resolveID above.
+		SelfHeal: func() error {
+			_, err := p.RotateBootstrapForSelfHeal()
+			return err
+		},
 		// #1108 seam: expose the already-minted bootstrap id as a
 		// construction-safe value for a stream-json RunnerFactory (#1109). The
 		// PTY supervisor ignores SessionID and keeps rotating via
@@ -633,6 +644,54 @@ func (p *Pool) RotateID(oldID, newID SessionID) error {
 	}
 	p.rekeyLocked(oldID, newID)
 	return p.saveLocked()
+}
+
+// RotateBootstrapForSelfHeal mints a fresh daemon id, re-keys the CURRENT
+// bootstrap entry to it, and persists — all under a single p.mu (write) hold, so
+// a (practically impossible during a crash-loop) concurrent /clear cannot skew
+// old vs new. It is the supervisor's crash-loop self-heal seam (#1165): when the
+// bootstrap child fast-crashes non-zero N times in a row on the same pinned id (a
+// deterministic wedge no backoff clears), the supervisor calls this via its
+// Config.SelfHeal closure to get the daemon off the wedged id. The next spawn's
+// ResolveSessionID pull (BootstrapID()) resolves the rotated id automatically —
+// no push into the spawn path, matching the #839 pull-not-push decoupling.
+//
+// Unlike RotateForNewSession it does NOT register the new id in the allocated
+// skip-set and does NOT fire a client transition. The absent skip-set entry is
+// deliberate and load-bearing: the rekey commits p.bootstrap → newID BEFORE the
+// next spawn creates <newID>.jsonl, so when the rotation watcher's handleCreate
+// fires, Snapshot() already reports {ID: newID} and the ref.ID==stem guard
+// (watcher.go) returns early — structurally identical to cold start, which
+// likewise leaves the bootstrap id un-allocated. A ReasonClear transition would
+// mislead clients into thinking the user ran /clear (client notification of a
+// self-heal is out of scope).
+//
+// Returns the minted id. ErrSessionNotFound if the bootstrap entry is somehow
+// absent (TOCTOU). A saveLocked failure is logged at Warn and swallowed — the
+// in-memory rotation is authoritative for the running daemon (which is what
+// self-heal needs: get this process onto the fresh id now); persistence is
+// best-effort, matching RotateID / RotateForNewSession.
+func (p *Pool) RotateBootstrapForSelfHeal() (SessionID, error) {
+	newID, err := NewID()
+	if err != nil {
+		return "", err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	old := p.bootstrap
+	if _, ok := p.sessions[old]; !ok {
+		return "", ErrSessionNotFound
+	}
+	p.rekeyLocked(old, newID)
+	if err := p.saveLocked(); err != nil {
+		p.log.Warn("sessions: self-heal rotate persist failed",
+			"event", "rotate_self_heal.persist_failed",
+			"session_id", string(newID),
+			"previous_session_id", string(old),
+			"err", err)
+	}
+	return newID, nil
 }
 
 // rekeyLocked moves the in-memory session entry from oldID to newID: it stamps

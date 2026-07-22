@@ -153,6 +153,28 @@ type Config struct {
 	BackoffMax     time.Duration
 	BackoffReset   time.Duration
 
+	// FastCrashWindow is the child-uptime threshold below which a non-zero exit
+	// counts as a "fast crash" for self-heal accounting (#1165). Zero uses
+	// defaultFastCrashWindow. Only consulted when SelfHeal != nil.
+	FastCrashWindow time.Duration
+
+	// FastCrashThreshold is the number of consecutive fast crashes that trips
+	// SelfHeal. Zero uses defaultFastCrashThreshold. Only consulted when
+	// SelfHeal != nil.
+	FastCrashThreshold int
+
+	// SelfHeal, when non-nil, is invoked after FastCrashThreshold consecutive
+	// fast crashes (each a non-zero child exit within FastCrashWindow of spawn).
+	// It signals the owner to mint a fresh pinned session id and persist the
+	// registry; the supervisor never learns the id — same pull-not-push
+	// decoupling as ResolveSessionID (#839), which resolves the rotated id on
+	// the next spawn. A non-nil return is logged and the fast-crash streak
+	// resets, so the loop falls back to retry-forever on the same id (no
+	// regression). Nil disables self-heal entirely: the supervisor retries
+	// forever, byte-identical to the pre-#1165 loop. Only the daemon's bootstrap
+	// session sets this; per-caller sessions, foreground, and tests leave it nil.
+	SelfHeal func() error
+
 	// ValidateConversation, if non-nil, is invoked by WriteUserTurn before
 	// any state mutation or PTY write. A non-nil return is propagated
 	// verbatim — production wiring returns conversations.ErrConversationNotFound
@@ -634,6 +656,22 @@ func (s *Supervisor) WaitForPTY(ctx context.Context) error {
 	}
 }
 
+const (
+	// defaultFastCrashWindow is the child-uptime threshold below which a
+	// non-zero exit is treated as a "fast crash" for self-heal accounting
+	// (#1165). The #1163 "id already in use" collision exited in ~220ms; 2s
+	// comfortably covers a deterministic startup crash (including the ~200ms
+	// re-exec / runtime-init overhead a real child pays) yet stays far below any
+	// genuine interactive session, which lasts minutes.
+	defaultFastCrashWindow = 2 * time.Second
+	// defaultFastCrashThreshold is the number of consecutive fast crashes that
+	// trips self-heal (#1165). Chosen in the ticket's 3–5 band: with the
+	// 0.5/1/2/4s backoff ladder, four fast crashes elapse in ~7.5s — long enough
+	// to rule out a one-off transient, short enough to self-heal within seconds
+	// rather than wedging the daemon indefinitely.
+	defaultFastCrashThreshold = 4
+)
+
 // New constructs a Supervisor from a Config, applying defaults.
 func New(cfg Config) (*Supervisor, error) {
 	if cfg.ClaudeBin == "" {
@@ -653,6 +691,12 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	if cfg.BackoffReset == 0 {
 		cfg.BackoffReset = 60 * time.Second
+	}
+	if cfg.FastCrashWindow == 0 {
+		cfg.FastCrashWindow = defaultFastCrashWindow
+	}
+	if cfg.FastCrashThreshold == 0 {
+		cfg.FastCrashThreshold = defaultFastCrashThreshold
 	}
 	s := &Supervisor{
 		cfg:         cfg,
@@ -731,6 +775,9 @@ func (s *Supervisor) setIterCancel(c context.CancelFunc) {
 func (s *Supervisor) Run(ctx context.Context) error {
 	bo := newBackoffTimer(s.cfg.BackoffInitial, s.cfg.BackoffMax, s.cfg.BackoffReset)
 	firstRun := true
+	// fastCrashes counts consecutive fast crashes for #1165 self-heal. Run-goroutine
+	// local (single writer), reset by a healthy/clean run — no lock needed.
+	fastCrashes := 0
 
 	startedAt := time.Now()
 	s.updateState(func(st *State) {
@@ -790,6 +837,35 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		// immediately with the swapped args.
 		if s.drainRestart() {
 			continue
+		}
+
+		// #1165 self-heal: a deterministic fast crash — a non-zero exit within
+		// FastCrashWindow of spawn — repeated FastCrashThreshold times in a row
+		// is a wedge no backoff clears (the child never stays up long enough for
+		// the backoff timer to reset). Count consecutive fast crashes; a healthy
+		// run (uptime past the window) or a clean exit (err == nil) resets the
+		// streak, so a normal restart and a transient outage that recovers are
+		// both unaffected. At the threshold, signal the owner to rotate to a
+		// fresh pinned id (SelfHeal); the next spawn's ResolveSessionID pull
+		// picks it up. Inert when SelfHeal == nil — retry-forever, byte-identical
+		// to the pre-#1165 loop. Placed after the drainRestart guard so a
+		// deliberate restart is never miscounted as a crash.
+		if err != nil && uptime < s.cfg.FastCrashWindow {
+			fastCrashes++
+		} else {
+			fastCrashes = 0
+		}
+		if s.cfg.SelfHeal != nil && fastCrashes >= s.cfg.FastCrashThreshold {
+			if healErr := s.cfg.SelfHeal(); healErr != nil {
+				s.log.Warn("self-heal failed; retrying on same id",
+					"err", healErr, "fast_crashes", fastCrashes)
+			} else {
+				s.log.Warn("self-heal: rotated bootstrap id after consecutive fast crashes",
+					"fast_crashes", fastCrashes, "window", s.cfg.FastCrashWindow)
+			}
+			// Reset either way: on success, give the fresh id a full N-window; on
+			// failure, avoid re-firing every iteration.
+			fastCrashes = 0
 		}
 
 		delay := bo.next(uptime)
