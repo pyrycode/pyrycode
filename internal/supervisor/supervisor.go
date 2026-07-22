@@ -109,15 +109,19 @@ type Config struct {
 	// supervisor restart.
 	ResumeLast bool
 
-	// ResolveSessionID, when non-nil, is called at the start of every spawn.
-	// A non-empty return appends "--session-id <id>" to the claude args and
-	// suppresses --continue (the two are mutually exclusive). Resolved fresh
-	// each spawn so a /clear id rotation is picked up on the next restart.
-	// Nil preserves the ResumeLast/--continue behaviour (per-caller sessions,
-	// foreground tests). Used by the daemon's bootstrap session (#839) to
-	// resume its OWN deterministic id rather than the most-recent session in a
-	// shared sessions dir.
-	ResolveSessionID func() string
+	// ResolveSessionID, when non-nil, is called at the start of every spawn and
+	// returns (id, resume). A non-empty id emits "--resume <id>" when resume is
+	// true (the transcript already exists on disk — reattach; #1164) and
+	// "--session-id <id>" when false (create the deterministic transcript; #839).
+	// Either form suppresses --continue (all three are mutually exclusive).
+	// Resolved fresh each spawn so a /clear id rotation and a just-created
+	// transcript are both picked up on the next spawn. Nil preserves the
+	// ResumeLast/--continue behaviour (per-caller sessions, foreground tests).
+	// Used by the daemon's bootstrap session to resume its OWN deterministic id
+	// rather than the most-recent session in a shared sessions dir. The two
+	// results come from one call so the resume decision always targets the id
+	// that will be spawned (no id/decision skew across a mid-loop /clear).
+	ResolveSessionID func() (id string, resume bool)
 
 	// SessionID is the caller-minted session id, set eagerly at construction.
 	// The PTY supervisor DELIBERATELY IGNORES it — it resolves its own id lazily
@@ -744,11 +748,11 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		sessionID := ""
+		sessionID, resume := "", false
 		if s.cfg.ResolveSessionID != nil {
-			sessionID = s.cfg.ResolveSessionID()
+			sessionID, resume = s.cfg.ResolveSessionID()
 		}
-		args := buildClaudeArgs(s.liveArgs(), firstRun, s.cfg.ResumeLast, sessionID)
+		args := buildClaudeArgs(s.liveArgs(), firstRun, s.cfg.ResumeLast, sessionID, resume)
 
 		start := time.Now()
 		s.log.Info("spawning claude", "args", args, "workdir", s.cfg.WorkDir)
@@ -823,14 +827,19 @@ func (s *Supervisor) drainRestart() bool {
 }
 
 // buildClaudeArgs builds claude's argument list for one spawn. When sessionID
-// is non-empty it appends "--session-id <sessionID>" and does NOT prepend
-// --continue (the two are mutually exclusive) — the deterministic resume the
-// bootstrap session uses (#839). When sessionID is empty it prepends --continue
-// on every spawn after the first, when continueLast is enabled. Pure function —
-// no Supervisor state, easy to unit-test. Never mutates claudeArgs.
-func buildClaudeArgs(claudeArgs []string, firstRun, continueLast bool, sessionID string) []string {
+// is non-empty it appends the session flag and does NOT prepend --continue (all
+// three are mutually exclusive): "--resume <sessionID>" when resume is true (the
+// transcript already exists on disk — reattach; #1164), else
+// "--session-id <sessionID>" (create the deterministic transcript; #839). When
+// sessionID is empty it prepends --continue on every spawn after the first, when
+// continueLast is enabled, and resume is ignored. Pure function — no Supervisor
+// state, easy to unit-test. Never mutates claudeArgs.
+func buildClaudeArgs(claudeArgs []string, firstRun, continueLast bool, sessionID string, resume bool) []string {
 	args := append([]string(nil), claudeArgs...)
 	if sessionID != "" {
+		if resume {
+			return append(args, "--resume", sessionID)
+		}
 		return append(args, "--session-id", sessionID)
 	}
 	if !firstRun && continueLast {

@@ -146,7 +146,7 @@ func TestSupervisor_Run_IgnoresSessionIDField(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args")
 	cfg := recorderConfig(argsFile, false)
 	cfg.SessionID = constructedID
-	cfg.ResolveSessionID = func() string { return resolvedID }
+	cfg.ResolveSessionID = func() (string, bool) { return resolvedID, false }
 	sup, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -159,6 +159,33 @@ func TestSupervisor_Run_IgnoresSessionIDField(t *testing.T) {
 	}
 	if strings.Contains(got[0], constructedID) {
 		t.Errorf("child argv %q leaked the ignored SessionID %q", got[0], constructedID)
+	}
+}
+
+// TestSupervisor_Run_ResumeBitEmitsResumeFlag (#1164): a ResolveSessionID that
+// reports resume=true makes the supervisor spawn "--resume <id>" (reattach to an
+// existing transcript) and never "--session-id". This is the daemon-restart path
+// that previously crash-looped — claude refuses --session-id when the pinned id's
+// transcript already exists on disk, and the PTY buildClaudeArgs had no --resume
+// branch to escape to. Proves the supervisor honours the resume bit end-to-end.
+func TestSupervisor_Run_ResumeBitEmitsResumeFlag(t *testing.T) {
+	t.Parallel()
+	const resolvedID = "11111111-1111-4111-8111-111111111111"
+	argsFile := filepath.Join(t.TempDir(), "args")
+	cfg := recorderConfig(argsFile, false)
+	cfg.ResolveSessionID = func() (string, bool) { return resolvedID, true }
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runSupInBackground(t, sup)
+
+	got := waitForSpawns(t, argsFile, 1, 5*time.Second)
+	if want := []string{"--resume " + resolvedID}; !reflect.DeepEqual(got, want) {
+		t.Errorf("recorded spawns = %v, want %v (resume bit → --resume)", got, want)
+	}
+	if strings.Contains(got[0], "--session-id") {
+		t.Errorf("child argv %q used --session-id despite resume=true", got[0])
 	}
 }
 
