@@ -17,6 +17,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"github.com/pyrycode/pyrycode/internal/supervisor"
+	"github.com/pyrycode/pyrycode/internal/transcript"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -441,18 +442,35 @@ func New(cfg Config) (*Pool, error) {
 	// ResolveSessionID closure only reads it at spawn time (supervisor.Run),
 	// long after New returns — identical timing to the pidFn holder above.
 	var p *Pool
+	// resolveID reads the current pinned bootstrap id at spawn time (p is
+	// late-bound below). Named once so both the ResolveSessionID provider and the
+	// growth-confirm resolver (line ~511) share the same id source.
+	resolveID := func() string { return string(p.BootstrapID()) }
 	supCfg := supervisor.Config{
 		ClaudeBin: cfg.Bootstrap.ClaudeBin,
 		WorkDir:   cfg.Bootstrap.WorkDir,
-		// #839: the bootstrap resumes its OWN deterministic id via
-		// --session-id (ResolveSessionID below), never --continue, so a
-		// supervisor restart in a shared sessions dir cannot latch onto a
-		// second claude's newer transcript. Resolved fresh each spawn so a
-		// /clear rotation (RotateID flips p.bootstrap) is picked up on the
-		// next restart. cfg.Bootstrap.ResumeLast is now vestigial for the
-		// bootstrap; the --continue paths (per-caller/foreground/tests) keep it.
-		ResumeLast:       false,
-		ResolveSessionID: func() string { return string(p.BootstrapID()) },
+		// #839: the bootstrap resumes its OWN deterministic id (never --continue),
+		// so a supervisor restart in a shared sessions dir cannot latch onto a
+		// second claude's newer transcript. #1164: resolve (id, resume) fresh each
+		// spawn. When the pinned id's transcript already exists on disk — a hard
+		// daemon restart left <id>.jsonl behind, or an in-process respawn after
+		// the first spawn created it — claude 2.1.199 refuses --session-id ("id is
+		// already in use") and crash-loops; spawn --resume <id> to reattach
+		// instead. An absent transcript keeps #839's --session-id create semantics
+		// byte-identical. StatByID stats exactly <id>.jsonl (no dir scan), so a
+		// second claude writing into the same shared dir cannot redirect the
+		// decision (#839 isolation holds). cfg.ClaudeSessionsDir=="" (unresolvable
+		// $HOME) and an absent/unreadable transcript both fall to resume=false; the
+		// probe is spawn-time, adding no new startup-fatal condition.
+		ResumeLast: false,
+		ResolveSessionID: func() (string, bool) {
+			id := resolveID()
+			if id == "" || cfg.ClaudeSessionsDir == "" {
+				return id, false
+			}
+			_, err := transcript.StatByID(cfg.ClaudeSessionsDir, id)
+			return id, err == nil
+		},
 		// #1108 seam: expose the already-minted bootstrap id as a
 		// construction-safe value for a stream-json RunnerFactory (#1109). The
 		// PTY supervisor ignores SessionID and keeps rotating via
@@ -508,7 +526,7 @@ func New(cfg Config) (*Pool, error) {
 		// probe for a (never-expected) empty id. Real claude defeats the probe —
 		// it holds no persistent fd on its transcript — so without this the
 		// delivery confirm never observes growth.
-		supCfg.ResolveTranscript = newProbePreferredTranscriptResolver(cfg.ClaudeSessionsDir, probe, pidFn, supCfg.ResolveSessionID)
+		supCfg.ResolveTranscript = newProbePreferredTranscriptResolver(cfg.ClaudeSessionsDir, probe, pidFn, resolveID)
 	}
 	sup, err := newRunner(supCfg)
 	if err != nil {

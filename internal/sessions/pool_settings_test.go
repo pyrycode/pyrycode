@@ -25,11 +25,19 @@ const argvRecorderScript = `printf '%s\n' "$@" > argv.txt; : > done; exec sleep 
 
 // helperPoolArgvRecorder builds a Pool whose template child records its own
 // appended argv via argvRecorderScript. tplWorkDir is the bootstrap child's cwd
-// (and every minted child's cwd when no per-session spawnDir is supplied).
-func helperPoolArgvRecorder(t *testing.T, registryPath, tplWorkDir string) *Pool {
+// (and every minted child's cwd when no per-session spawnDir is supplied). An
+// optional claudeSessionsDir wires Config.ClaudeSessionsDir so the #1164
+// resume-vs-create probe fires against transcripts placed there; omit it (the
+// common case) to leave the dir unset, keeping the byte-identical --session-id
+// create path (resume=false).
+func helperPoolArgvRecorder(t *testing.T, registryPath, tplWorkDir string, claudeSessionsDir ...string) *Pool {
 	t.Helper()
 	if _, err := exec.LookPath("/bin/sh"); err != nil {
 		t.Skipf("benign binary not available: %v", err)
+	}
+	sessionsDir := ""
+	if len(claudeSessionsDir) > 0 {
+		sessionsDir = claudeSessionsDir[0]
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
@@ -42,8 +50,9 @@ func helperPoolArgvRecorder(t *testing.T, registryPath, tplWorkDir string) *Pool
 			BackoffReset:   1 * time.Second,
 			Bridge:         supervisor.NewBridge(logger),
 		},
-		Logger:       logger,
-		RegistryPath: registryPath,
+		Logger:            logger,
+		RegistryPath:      registryPath,
+		ClaudeSessionsDir: sessionsDir,
 	}
 	pool, err := New(cfg)
 	if err != nil {
