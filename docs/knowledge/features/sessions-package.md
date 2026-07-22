@@ -32,6 +32,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **#833:** `SessionSettings{Model, Effort string; YOLO bool}` — a per-session model/reasoning-effort/bypass-permissions triple, persisted on `registryEntry` (`Model`/`Effort`/`YOLO`, all `omitempty`) and applied to the `claude` spawn argv via the pure `claudeSettingsArgs` helper at both spawn sites (`New`'s bootstrap warm-start, `buildSession`'s minted path). Zero value appends no flags — byte-identical argv for every session that doesn't opt in. `security-sensitive`: `YOLO`'s zero value is the fail-safe "permissions enforced" state; no custom decoder needed (see [ADR 030](../decisions/030-plain-bool-failsafe-persisted-flag.md)). Storage + spawn primitive only — no wire verb yet (setter: #826b, reader: #826c). See *`SessionSettings` + `claudeSettingsArgs`* below and [codebase/833.md](../codebase/833.md).
 - **#943:** `writeMCPSettings() (string, error)` (new `settings.go`) + `Session.settingsPath` — a per-session `--settings <path>` file carrying `{"enableAllProjectMcpServers":true}`, joined into `spawnBase` (not `claudeSettingsArgs`) at both construction sites so it survives every recompose (backoff restart, #842 live settings-restart) automatically. Fixes claude 2.1.199's "N new MCP servers found" startup modal wedging every interactive spawn's PTY readiness check; mirrors the un-gated agent-run compat fix (`d10ce87`) without importing its deny-default posture. Not `security-sensitive`. See *`writeMCPSettings` + `Session.settingsPath`* below and [codebase/943.md](../codebase/943.md).
 - **#839:** `Pool.BootstrapID() SessionID` — new RLock-and-resolve-fresh accessor mirroring `Default()`/`DefaultSettings()`, deliberately reading `p.bootstrap` rather than `Default().ID()`/`sess.id` so it introduces no new reader of the latter (`RotateID` mutates `sess.id` without `Session.lcMu` under a documented no-concurrent-reader invariant). Wired as `supervisor.Config.ResolveSessionID` on the bootstrap `supCfg` (`ResumeLast: false` alongside it) via a late-bound `var p *Pool` closure, so the daemon's own persisted id — never a foreign `<uuid>.jsonl` from the shared sessions dir — is what `--session-id` resolves to at every spawn. The startup `reconcileBootstrapOnNew` call is deleted; `/clear` reconciliation now falls out of `ResolveSessionID` re-reading `p.bootstrap` fresh at each spawn, since the watcher's existing `RotateID` call already persists the rotated id before the next restart. `security-sensitive`: closes a confused-deputy restart-resume gap. See *`Pool.BootstrapID`* below, [codebase/839.md](../codebase/839.md), and [jsonl-reconciliation.md](jsonl-reconciliation.md) (now marked retired).
+- **#1164:** `ResolveSessionID` widened `func() string` → `func() (id string, resume bool)`. claude 2.1.199 refuses `--session-id <uuid>` when `<uuid>.jsonl` already exists (a hard daemon restart survives the pinned id's transcript), so the closure now probes `transcript.StatByID(cfg.ClaudeSessionsDir, id)` fresh every spawn — exists → `(id, true)` → `buildClaudeArgs` emits `--resume <id>` (reattach, preserves the idle conversation); absent, empty id, or `ClaudeSessionsDir == ""` → `(id, false)` → `--session-id <id>` (byte-identical #839 create path). Decided per-spawn (not `firstRun`-gated like `streamsup`, not a one-shot decision at `New()`) so cold start, in-process respawn, and daemon restart are all handled by one rule with no bookkeeping. `resume` never rotates the id — that stays #1165's independent, different-fabric safety net. Not `security-sensitive` (by-id probe, no dir scan — narrows the surface). See *`Pool.BootstrapID`* below, [codebase/1164.md](../codebase/1164.md), and [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md).
 
 ## Package Layout
 
@@ -543,7 +544,7 @@ migration, and [rotation-watcher.md](rotation-watcher.md) for the
 `rotation.Probe` interface this resolver shares with the watcher and #827.
 
 ---
-### `Pool.BootstrapID` + `supervisor.Config.ResolveSessionID` (#839)
+### `Pool.BootstrapID` + `supervisor.Config.ResolveSessionID` (#839, resume branch #1164)
 
 ```go
 func (p *Pool) BootstrapID() SessionID
@@ -558,7 +559,8 @@ but there is no reason for this call to take `lcMu` when `Pool.mu` already
 gives it a race-clean answer).
 
 **Wiring (`pool.go`, `New`):** the bootstrap `supCfg` sets `ResumeLast: false`
-and `ResolveSessionID: func() string { return string(p.BootstrapID()) }`.
+and (as of #1164) a named `resolveID := func() string { return string(p.BootstrapID()) }`
+closure feeding `ResolveSessionID: func() (string, bool) { ... }` — see below.
 Same late-bind problem as the `bootstrapSup` pattern above — the closure
 needs to reference `p`, but `supCfg` is built (and copied by value into
 `supervisor.New`) before the `&Pool{...}` literal exists. `New` forward-declares
@@ -569,17 +571,35 @@ long after `New` returns, so the read is race-free by the same
 goroutine-creation happens-before argument as `bootstrapSup`.
 
 `supervisor.Run` calls the resolver at the start of every spawn (first run
-and every restart) and passes the result into `buildClaudeArgs`: non-empty →
-`--session-id <id>` appended, `--continue` suppressed; empty (defensive only,
-never hit on the bootstrap path) → falls through to the existing
-`ResumeLast`/`--continue` logic. Because the resolver re-reads `p.bootstrap`
-on every call, a `/clear` rotation the watcher already persisted via
-`RotateID` is picked up automatically on the *next* spawn — no push
-notification, no supervisor argv-swap method, no `onRotate` wiring. This also
-retires the startup `reconcileBootstrapOnNew` call (deleted from `New`): with
-`--session-id` deterministic from the first spawn, there is nothing left to
-adopt-by-mtime at startup. See [jsonl-reconciliation.md](jsonl-reconciliation.md)
-(marked retired) and [codebase/839.md](../codebase/839.md).
+and every restart) and passes both return values into `buildClaudeArgs`.
+Since #1164, `ResolveSessionID` returns `(id string, resume bool)`, resolved
+in one call so the resume decision always targets the id about to be
+spawned: non-empty id with `resume=false` → `--session-id <id>` appended,
+`--continue` suppressed (#839's original create path, byte-identical when no
+transcript exists yet); non-empty id with `resume=true` → `--resume <id>`
+instead (claude 2.1.199 refuses `--session-id` for a transcript that already
+exists — a hard daemon restart, or the in-process respawn after the first
+spawn created `<id>.jsonl` — so this reattaches instead of crash-looping);
+empty id (defensive only, never hit on the bootstrap path) → falls through
+to the existing `ResumeLast`/`--continue` logic. `pool.go`'s closure decides
+`resume` by probing `transcript.StatByID(cfg.ClaudeSessionsDir, id)` fresh on
+every call — exists → `resume=true`; absent, empty id, or
+`ClaudeSessionsDir == ""` → `resume=false`. Because the resolver re-reads
+`p.bootstrap` on every call, a `/clear` rotation the watcher already
+persisted via `RotateID` is picked up automatically on the *next* spawn — no
+push notification, no supervisor argv-swap method, no `onRotate` wiring.
+This also retires the startup `reconcileBootstrapOnNew` call (deleted from
+`New` by #839): with the session flag deterministic from the first spawn,
+there is nothing left to adopt-by-mtime at startup. See
+[jsonl-reconciliation.md](jsonl-reconciliation.md) (marked retired),
+[codebase/839.md](../codebase/839.md), [codebase/1164.md](../codebase/1164.md),
+and [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md).
+
+**Growth-confirm resolver re-sourced (#1164).** `newProbePreferredTranscriptResolver`'s
+4th argument (a `func() string` — the pinned id) used to be fed
+`supCfg.ResolveSessionID` directly; now that the field returns a 2-tuple, the
+growth-confirm resolver is re-sourced to the named `resolveID` closure
+instead (id-only, unchanged behaviour for that consumer).
 
 ### `writeMCPSettings` + `Session.settingsPath` (#943)
 
