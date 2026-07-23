@@ -94,7 +94,7 @@ func TestInteractiveStreamModalResolution(t *testing.T) {
 	// deadlines the drain and fails rather than passing silently. Answering
 	// requires the phone be paired --allow-remote-permissions (the device gate);
 	// startStreamModalResolutionHarness pairs with it.
-	modalID := raiseRealPermissionModal(t, h, 2, convID, nonce)
+	modalID := raiseRealPermissionModal(t, h, 2, convID, writeFileTrigger(nonce))
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   3,
 		Type: protocol.TypeModalAnswer,

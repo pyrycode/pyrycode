@@ -117,7 +117,7 @@ func TestInteractiveModalResolution(t *testing.T) {
 	// the session proceeded via a subsequent non-empty assistant_delta. Answering
 	// requires the phone be paired --allow-remote-permissions (the device gate);
 	// startModalResolutionHarness pairs with it.
-	modalID := raiseRealPermissionModal(t, h, 2, convID, nonce)
+	modalID := raiseRealPermissionModal(t, h, 2, convID, bashEchoTrigger(nonce))
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   3,
 		Type: protocol.TypeModalAnswer,
@@ -138,7 +138,7 @@ func TestInteractiveModalResolution(t *testing.T) {
 	// observable the ticket mandates. modal_cancel is fire-and-broadcast: no reply
 	// is correlated to the request, so the request ID is cosmetic and the drain
 	// matches on the broadcast Type, never on InReplyTo.
-	modalID2 := raiseRealPermissionModal(t, h, 4, convID, nonce+1)
+	modalID2 := raiseRealPermissionModal(t, h, 4, convID, bashEchoTrigger(nonce+1))
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:      5,
 		Type:    protocol.TypeModalCancel,
@@ -161,25 +161,43 @@ func TestInteractiveModalResolution(t *testing.T) {
 	}
 }
 
-// raiseRealPermissionModal sends a prompt that forces real claude to call the
-// gated Bash tool (default permission mode — no --dangerously-skip-permissions),
+// bashEchoTrigger is the PTY-runner trigger: an echo Bash command. On the PTY
+// runner a real terminal prompts for every tool use, so even a trivial echo
+// surfaces a permission dialog tui-driver detects. It does NOT gate on the
+// stream-json runner (claude auto-approves a bare echo), so stream specs use
+// writeFileTrigger instead. The <nonce> keeps each phase's command distinct.
+func bashEchoTrigger(nonce int64) string {
+	return fmt.Sprintf("Use the Bash tool to run the command: echo pyrycode-%d. After it completes, reply with a single short word.", nonce)
+}
+
+// writeFileTrigger is the stream-runner trigger: a Write of a fresh file. The
+// stream-json runner consults the --permission-prompt-tool only for actions that
+// genuinely need approval, and a bare echo is auto-approved — so the old echo
+// trigger never raised a modal on the stream path and
+// TestInteractiveStreamModalResolution timed out (#1170). A Write of a new file is
+// gated there. It is NOT used on the PTY runner: a Write "create file?" dialog
+// does not surface on the PTY live buffer the way echo does, so PTY specs keep
+// bashEchoTrigger. The <nonce> keeps each file distinct.
+func writeFileTrigger(nonce int64) string {
+	return fmt.Sprintf("Use the Write tool to create a file named pyrycode-%d.txt containing the single word hello. After it completes, reply with a single short word.", nonce)
+}
+
+// raiseRealPermissionModal sends triggerPrompt (forcing real claude to call a
+// permission-gated tool in default permission mode — no --dangerously-skip-permissions),
 // drains the wire to the resulting modal_shown broadcast, asserts it is a
 // permission modal with a non-empty modal_id, and returns that modal_id. This is
-// the shared trigger scaffold both phases call.
-//
-// "Use the Bash tool to run …" reliably makes haiku call Bash rather than
-// answering from knowledge; Bash is gated → a real permission modal. The <nonce>
-// keeps each phase's command distinct. "After it completes, reply with a single
-// short word" guarantees a non-empty continuation assistant_delta once the answer
-// routes (Phase A's liveness signal) — claude's actual word is never asserted.
+// the shared trigger scaffold both phases call; the caller supplies the trigger
+// (bashEchoTrigger for PTY specs, writeFileTrigger for stream specs) because the
+// two runners gate different actions. Every trigger ends with "reply with a single
+// short word", which guarantees a non-empty continuation assistant_delta once the
+// answer routes (Phase A's liveness signal) — claude's actual word is never asserted.
 //
 // The Class == "permission" assertion AFTER the drain is the non-vacuity gate:
 // neither the caller's answer nor its cancel can pass over a modal that never
 // surfaced (the drain deadlines) or a non-permission modal (this fails).
-func raiseRealPermissionModal(t *testing.T, h *perConvHarness, reqID uint64, convID string, nonce int64) string {
+func raiseRealPermissionModal(t *testing.T, h *perConvHarness, reqID uint64, convID string, triggerPrompt string) string {
 	t.Helper()
-	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID),
-		fmt.Sprintf("Use the Bash tool to run the command: echo pyrycode-%d. After it completes, reply with a single short word.", nonce))
+	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), triggerPrompt)
 	env := drainForControlEvent(t, h.phone, h.initRecv, protocol.TypeModalShown, modalSurfaceBudget)
 	var shown protocol.ModalShownPayload
 	if err := json.Unmarshal(env.Payload, &shown); err != nil {
