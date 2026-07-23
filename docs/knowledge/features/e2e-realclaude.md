@@ -346,6 +346,28 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   rotation) and #1175 (permission DENY) are out of scope here. See
   [`codebase/1173.md`](../codebase/1173.md).
 
+- `interactive_stream_interrupt_test.go` (#1176) — the real-`claude`
+  counterpart of the fakeclaude interrupt proof
+  (`TestRelayV2_StreamInterruptStopsRunningTurn`, #1136), closing the
+  fake-green/real-red gap (#949) on the interrupt path.
+  `TestInteractiveStreamInterruptStopsRunningTurn` composes #1172's seam
+  verbatim (`startStreamRunningTurnHarness` + `driveRunningTurn` +
+  `drainForResponding`) to put a genuinely-running live turn in flight, sends
+  a payload-less `TypeInterrupt` envelope (routes via the active cursor →
+  `resolveBoundRunner` → the running turn's bound runner), and asserts the
+  turn stops **cancelled** via a new drain, `drainForCancelledTurnEnd` — its
+  vacuous-pass guard is the reason it exists as its own helper rather than a
+  generic type-targeted drain: the first `turn_end` for the conversation must
+  carry `StopReason == "cancelled"`, since the 40s running-turn loop *will*
+  complete naturally (`"end_turn"`) if the interrupt no-ops. A trivial fourth
+  turn drained via #1153's `drainForCompletedTurn` proves the session stays
+  usable afterwards. Deliberately bootstrap-bound rather than minting a
+  second conversation — AC only requires the interrupt reach the *running
+  turn's* bound runner (proven here), not cross-conversation isolation
+  (unit-owned deterministically by #1121). No new package-level constants,
+  zero production files touched. Split from #1083. See
+  [`codebase/1176.md`](../codebase/1176.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -416,4 +438,5 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#854](https://github.com/pyrycode/pyrycode/issues/854) — real-claude interactive two-turn liveness test, the RED/GREEN oracle for the fresh-daemon bootstrap-reply deadlock fix (`cmd/pyry/interactive_turn_stream_v2.go`'s `resolveTarget`); the only test in the suite that drives the daemon's interactive relay path directly rather than `pyry agent-run` — see [`codebase/854.md`](../codebase/854.md) and [`turnbridge-package.md`](turnbridge-package.md#which-jsonl-and-surviving-clear-rotation).
 - Ticket [#1153](https://github.com/pyrycode/pyrycode/issues/1153) — real-claude counterpart of #1141's stream-json liveness proof; first real-claude test to flip `interactive_runner: "stream-json"`; introduces the reusable `writeStreamInteractiveConfig` config-toggle helper (composed with `spawnPermissionDaemon` by the blocked-by rider #1154) and the two-milestone `drainForCompletedTurn` drain; codebase note at [`codebase/1153.md`](../codebase/1153.md).
 - Ticket [#1154](https://github.com/pyrycode/pyrycode/issues/1154) — stream-json sibling of #1030's real permission round-trip (desktop#483 scenario, real stream stack); composes #1030's harness/trigger scaffold with #1153's `writeStreamInteractiveConfig`/`drainForCompletedTurn` seams, zero production files; answer-only (approve), PTY-path cancel stays owned by #1030 Phase B; split from #1083; codebase note at [`codebase/1154.md`](../codebase/1154.md).
-- Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by (blocks) #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
+- Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
+- Ticket [#1176](https://github.com/pyrycode/pyrycode/issues/1176) — real-claude interrupt-stops-a-running-turn gate, composing #1172's running-turn trigger with the shipped interrupt primitives (#1120/#1121); new `drainForCancelledTurnEnd` drain guards against the spontaneous-`end_turn` vacuous pass; closes the fake-green/real-red gap (#949) on the interrupt path; split from #1083, zero production files; codebase note at [`codebase/1176.md`](../codebase/1176.md).
