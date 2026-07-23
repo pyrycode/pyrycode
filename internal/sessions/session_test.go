@@ -336,13 +336,30 @@ func TestSession_ActivateCtxCancellation(t *testing.T) {
 // send_message handler running immediately after Activate could observe
 // the silent-drop-on-nil branch in supervisor.WriteUserTurn.
 //
-// We assert indirectly via supervisor.WaitForPTY with an
-// already-cancelled ctx — if the PTY were not bound, the ctx-cancel
-// branch would fire and return context.Canceled. A nil result confirms
-// the chan is already closed.
+// We assert indirectly via supervisor.WaitForPTY with a brief deadline.
+// Activate's own final statement is WaitForPTY(ctx), so a nil result here
+// confirms sessReadyCh is already closed — i.e. the PTY was bound at the
+// instant Activate returned.
+//
+// #1181 — root cause of the prior flake was test-timing fragility, not a
+// production race. The old fixture armed an 80ms idle timeout with no client
+// attached and reached the evicted state by waiting for that timer to fire.
+// On re-activation runActive re-armed a fresh 80ms idle timer; with no client
+// to defer it, the timer could fire again in the gap between Activate
+// returning and the 10ms re-check. That eviction calls setSession(nil), which
+// freshens sessReadyCh to a new unclosed channel, so the re-check then waited
+// on an open channel and hit its deadline — matching the observed
+// "deadline exceeded" signature. The bind itself never failed.
+//
+// The fix is structural, not a widened deadline: helperPoolIdle(t, 0)
+// disables idle eviction entirely (timerCh stays nil), so no timer can ever
+// fire to freshen sessReadyCh after Activate. The evicted->active cycle is
+// driven deterministically via Evict/Activate. Once re-activation runs
+// setSession, sessReadyCh stays closed permanently, so the re-check reads an
+// already-closed channel with no timing dependence.
 func TestSession_Activate_GuaranteesPTYBound(t *testing.T) {
 	t.Parallel()
-	pool := helperPoolIdle(t, 80*time.Millisecond)
+	pool := helperPoolIdle(t, 0) // idle eviction disabled — see #1181 note above
 	sess := pool.Default()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -350,9 +367,19 @@ func TestSession_Activate_GuaranteesPTYBound(t *testing.T) {
 	go func() { _ = sess.Run(ctx) }()
 
 	if !pollUntil(t, 2*time.Second, func() bool {
-		return sess.LifecycleState() == stateEvicted
+		return sess.LifecycleState() == stateActive
 	}) {
-		t.Fatal("session did not evict")
+		t.Fatalf("session never reached stateActive; state=%v", sess.LifecycleState())
+	}
+
+	// Drive to evicted deterministically. Evict force-evicts via evictCh and
+	// is independent of the (disabled) idle timer; it blocks until the evict
+	// persist completes, so no poll is needed.
+	if err := sess.Evict(ctx); err != nil {
+		t.Fatalf("Evict: %v", err)
+	}
+	if got := sess.LifecycleState(); got != stateEvicted {
+		t.Fatalf("post-Evict lcState = %v, want stateEvicted", got)
 	}
 
 	activateCtx, activateCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -361,11 +388,15 @@ func TestSession_Activate_GuaranteesPTYBound(t *testing.T) {
 		t.Fatalf("Activate: %v", err)
 	}
 
-	// Immediately after Activate, the supervisor's PTY readiness chan
-	// must already be closed: a brief-deadline WaitForPTY returns nil.
-	// A non-cancelled ctx avoids the select-randomization that an
-	// already-cancelled ctx would introduce (select picks randomly when
-	// both branches are ready).
+	// Immediately after Activate, the supervisor's PTY readiness chan must
+	// already be closed: a brief-deadline WaitForPTY returns nil. With idle
+	// eviction disabled the channel is permanently closed once re-activation
+	// runs setSession, so this read is deterministic — no timer can freshen it
+	// back to an unclosed channel (#1181). A non-cancelled short-deadline ctx
+	// (not an already-cancelled one) avoids select-randomization: select picks
+	// randomly when both branches are ready. Keep the deadline short — it
+	// preserves "bound at return, not eventually"; a wide window would wait for
+	// a late bind and mask a returns-before-bound regression.
 	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer checkCancel()
 	if err := sess.sup.WaitForPTY(checkCtx); err != nil {
