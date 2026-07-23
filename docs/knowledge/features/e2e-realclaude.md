@@ -296,6 +296,56 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   edit to another ticket's test file). Split from #1083, blocked-by #1153.
   See [`codebase/1154.md`](../codebase/1154.md).
 
+- `interactive_stream_running_turn_test.go` (#1172) — reusable trigger infra
+  that holds a live claude turn in `turn_state{responding}` for a bounded
+  window, plus the smoke (`TestInteractiveStreamRunningTurn`) that proves it.
+  Ports the desktop `e1fe219` fix (2026-07-17): a silent `sleep` gets
+  backgrounded by claude (turn ends early), a chatty per-iteration loop
+  floods the frame stream (delays `turn_state` delivery) — the working
+  approach drives the turn with a bounded, silent, foreground shell loop
+  inside one Bash-tool call. Load-bearing mechanism: the turn emitter
+  (`cmd/pyry/interactive_turn_v2.go`) fires `responding` at `ToolStart`
+  (before the command runs) and `idle` only once at `TurnEnd`, so a turn
+  running an `L`-second loop holds `responding` for all of `L` — observing
+  `responding` then verifying no `idle` for `hold < L` is the running-turn
+  proof, and it fails loud on an early `idle` rather than passing silently.
+  `startStreamRunningTurnHarness` transcribes #1153's setup verbatim (pairs
+  **without** `--allow-remote-permissions`, spawns via `spawnBootstrapDaemon`
+  so no permission modal blocks the Bash call — opposite posture from the
+  modal specs #1030/#1154). No content/echo assertion — real claude's output
+  is non-deterministic; only `turn_state` transitions and elapsed time are
+  asserted. `startStreamRunningTurnHarness` + `driveRunningTurn` +
+  `drainForResponding` are the reusable seam #1176 (interrupt, already
+  natively `blocked-by` this ticket) composes. Zero production files
+  touched. See [`codebase/1172.md`](../codebase/1172.md).
+
+- `interactive_stream_multiturn_continuity_test.go` (#1173) — the first
+  real-`claude` coverage of **multi-turn continuity** on the stream-json
+  runner; every prior stream spec (#1153/#1154/#1172) drives exactly one
+  turn, so none proves the runner's core purpose — holding one live
+  `claude` child's stdin open across many turns with context intact.
+  `TestInteractiveStreamMultiTurnContinuity` transcribes #1153's setup
+  verbatim, then drives a **3-entry turn plan** strictly sequentially over
+  one held-open session instead of a single send: (1) **plant** — claude is
+  told to remember a per-run-unique `PYRY<hex nonce>` token; (2)
+  **filler** — an intervening turn with no bearing on the token, load-bearing
+  because a bare 2-turn plant→recall wouldn't prove a turn ran *between* them
+  without respawn; (3) **recall** — asks for the token back. Continuity is
+  asserted by content — `strings.Contains(strings.ToUpper(recallText),
+  token)` — rather than pid inspection (the harness exposes no child pid, and
+  a memory-less respawned child cannot produce the token, so content memory
+  is the stronger "no respawn" observable). New helper
+  `drainForCompletedTurnText` is a text-capturing superset of #1153's
+  `drainForCompletedTurn`: byte-identical M1/M2 milestone semantics, plus
+  accumulating every matching `assistant_delta.Text` into the return value
+  instead of stopping at the first delta — kept as a separate helper rather
+  than parameterizing the shared drain, since editing the shared one would
+  touch the two already-merged sibling call sites (#1153, #1154). Fresh seed
+  constants (`streamMultiTurnBootstrapUUID`/`streamMultiTurnConvID`). Zero
+  production files touched. Split from #1083; siblings #1174 (new-session
+  rotation) and #1175 (permission DENY) are out of scope here. See
+  [`codebase/1173.md`](../codebase/1173.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -366,3 +416,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#854](https://github.com/pyrycode/pyrycode/issues/854) — real-claude interactive two-turn liveness test, the RED/GREEN oracle for the fresh-daemon bootstrap-reply deadlock fix (`cmd/pyry/interactive_turn_stream_v2.go`'s `resolveTarget`); the only test in the suite that drives the daemon's interactive relay path directly rather than `pyry agent-run` — see [`codebase/854.md`](../codebase/854.md) and [`turnbridge-package.md`](turnbridge-package.md#which-jsonl-and-surviving-clear-rotation).
 - Ticket [#1153](https://github.com/pyrycode/pyrycode/issues/1153) — real-claude counterpart of #1141's stream-json liveness proof; first real-claude test to flip `interactive_runner: "stream-json"`; introduces the reusable `writeStreamInteractiveConfig` config-toggle helper (composed with `spawnPermissionDaemon` by the blocked-by rider #1154) and the two-milestone `drainForCompletedTurn` drain; codebase note at [`codebase/1153.md`](../codebase/1153.md).
 - Ticket [#1154](https://github.com/pyrycode/pyrycode/issues/1154) — stream-json sibling of #1030's real permission round-trip (desktop#483 scenario, real stream stack); composes #1030's harness/trigger scaffold with #1153's `writeStreamInteractiveConfig`/`drainForCompletedTurn` seams, zero production files; answer-only (approve), PTY-path cancel stays owned by #1030 Phase B; split from #1083; codebase note at [`codebase/1154.md`](../codebase/1154.md).
+- Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by (blocks) #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
