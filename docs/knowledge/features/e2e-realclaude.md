@@ -319,6 +319,23 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   natively `blocked-by` this ticket) composes. Zero production files
   touched. See [`codebase/1172.md`](../codebase/1172.md).
 
+- `interactive_stream_new_session_test.go` (#1174) — real-claude cross of
+  the fakeclaude sibling #1137: on the stream-json runner, `new_session`
+  rotates the bootstrap session id AND `streamsup.Runner.RestartFresh`
+  spawns a genuinely fresh live `claude` child under the rotated id, not a
+  `--resume`. Five milestones: M1 turn-1 liveness (#1153's
+  `drainForCompletedTurn`), M2 on-disk id rotation (#1031's actuation
+  loop), M3 client-observed `session_transition{clear}` (#1154's
+  `drainForControlEvent`), M4 turn-2 accepted (**ack only** —  a
+  phone-side delta would hang, the drain gate's sink tag is fixed at
+  runner construction and drops post-rotation deltas, #1081 out of
+  scope), M5 a fresh `<idAfter>.jsonl` transcript appears alongside the
+  untouched `<idBefore>.jsonl` (the word-independent, fake-unregressable
+  fresh-spawn proof; transcript dir located empirically to sidestep the
+  #989 `canonicalCase` hazard). Zero production files touched. Split from
+  #1083; sibling leaves #1173 (multi-turn continuity), #1175 (permission
+  DENY). See [`codebase/1174.md`](../codebase/1174.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -390,3 +407,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1153](https://github.com/pyrycode/pyrycode/issues/1153) — real-claude counterpart of #1141's stream-json liveness proof; first real-claude test to flip `interactive_runner: "stream-json"`; introduces the reusable `writeStreamInteractiveConfig` config-toggle helper (composed with `spawnPermissionDaemon` by the blocked-by rider #1154) and the two-milestone `drainForCompletedTurn` drain; codebase note at [`codebase/1153.md`](../codebase/1153.md).
 - Ticket [#1154](https://github.com/pyrycode/pyrycode/issues/1154) — stream-json sibling of #1030's real permission round-trip (desktop#483 scenario, real stream stack); composes #1030's harness/trigger scaffold with #1153's `writeStreamInteractiveConfig`/`drainForCompletedTurn` seams, zero production files; answer-only (approve), PTY-path cancel stays owned by #1030 Phase B; split from #1083; codebase note at [`codebase/1154.md`](../codebase/1154.md).
 - Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by (blocks) #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
+- Ticket [#1174](https://github.com/pyrycode/pyrycode/issues/1174) — real-claude cross of fakeclaude sibling #1137: on the stream-json runner, `new_session` rotates the bootstrap session id and `RestartFresh` spawns a genuinely fresh live claude child under the rotated id (not `--resume`), proven by a fresh `<idAfter>.jsonl` transcript appearing on disk; transcribes #1031's spine + #1153's/#1154's drain helpers, zero production files; split from #1083, sibling of #1173/#1175; codebase note at [`codebase/1174.md`](../codebase/1174.md).
