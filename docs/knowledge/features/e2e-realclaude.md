@@ -319,6 +319,33 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   natively `blocked-by` this ticket) composes. Zero production files
   touched. See [`codebase/1172.md`](../codebase/1172.md).
 
+- `interactive_stream_multiturn_continuity_test.go` (#1173) — the first
+  real-`claude` coverage of **multi-turn continuity** on the stream-json
+  runner; every prior stream spec (#1153/#1154/#1172) drives exactly one
+  turn, so none proves the runner's core purpose — holding one live
+  `claude` child's stdin open across many turns with context intact.
+  `TestInteractiveStreamMultiTurnContinuity` transcribes #1153's setup
+  verbatim, then drives a **3-entry turn plan** strictly sequentially over
+  one held-open session instead of a single send: (1) **plant** — claude is
+  told to remember a per-run-unique `PYRY<hex nonce>` token; (2)
+  **filler** — an intervening turn with no bearing on the token, load-bearing
+  because a bare 2-turn plant→recall wouldn't prove a turn ran *between* them
+  without respawn; (3) **recall** — asks for the token back. Continuity is
+  asserted by content — `strings.Contains(strings.ToUpper(recallText),
+  token)` — rather than pid inspection (the harness exposes no child pid, and
+  a memory-less respawned child cannot produce the token, so content memory
+  is the stronger "no respawn" observable). New helper
+  `drainForCompletedTurnText` is a text-capturing superset of #1153's
+  `drainForCompletedTurn`: byte-identical M1/M2 milestone semantics, plus
+  accumulating every matching `assistant_delta.Text` into the return value
+  instead of stopping at the first delta — kept as a separate helper rather
+  than parameterizing the shared drain, since editing the shared one would
+  touch the two already-merged sibling call sites (#1153, #1154). Fresh seed
+  constants (`streamMultiTurnBootstrapUUID`/`streamMultiTurnConvID`). Zero
+  production files touched. Split from #1083; siblings #1174 (new-session
+  rotation) and #1175 (permission DENY) are out of scope here. See
+  [`codebase/1173.md`](../codebase/1173.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
