@@ -15,12 +15,16 @@ package realclaude
 // fake-green/real-red class, e.g. #949).
 //
 // It is a near-clone of #1154's file with three deltas: (1) the answer option
-// kind flips allow_once → reject_once; (2) the post-answer drain proves the turn
-// RESOLVES (reaches terminal turn_state{idle}) without requiring a continuation
-// delta — real claude's post-denial continuation is non-deterministic, so the
-// hard AC is terminal idle, not a delta (drainForTurnIdle, below); (3) a
-// filesystem walk proves the gated Write did not execute
-// (requireTriggerFileAbsent, below).
+// kind flips allow_once → reject_once; (2) real claude RETRIES a denied tool at
+// least once (observed in the #1175 operator run: haiku reissues the Write as a
+// second, distinct tool_use after the first reject), so the post-answer drain
+// denies EVERY modal the turn raises until it reaches terminal turn_state{idle} —
+// a single reject leaves the retry modal unanswered and the turn hangs on it (the
+// #1175 operator-run failure). The hard AC is terminal idle reached by our
+// explicit rejects, not a continuation delta, and it is bounded so a
+// non-terminating turn fails loud rather than hanging the suite
+// (denyModalsUntilIdle, below); (3) a filesystem walk proves the gated Write did
+// not execute (requireTriggerFileAbsent, below).
 //
 // The load-bearing check unique to a deny test: "file absent + turn idle" is
 // ALSO the outcome of several NON-deny paths — a timeout-deny (the #725 approval
@@ -50,12 +54,10 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
-	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -111,9 +113,20 @@ func TestInteractiveStreamPermissionDeny(t *testing.T) {
 	}
 
 	// AC #3: the turn resolves (aware it was denied) rather than hanging on the
-	// denied modal. drainForTurnIdle tolerates zero or more continuation deltas
-	// and returns on terminal turn_state{idle}; a hang deadlines it.
-	drainForTurnIdle(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	// denied modal. Real claude retries a denied tool at least once (the #1175
+	// operator run: haiku reissued the Write as a second, distinct tool_use), so a
+	// single reject does not resolve the turn — the retry modal sits unanswered and
+	// the turn hangs on it. denyModalsUntilIdle answers EVERY retry modal with a
+	// fresh reject_once until terminal turn_state{idle}, bounded on two axes so a
+	// non-terminating turn fails loud: at most maxRetryDenies retry modals (proven:
+	// claude retries once; NOT proven it gives up after N — the cap keeps the loop
+	// finite and its diagnostic distinct from the wall-clock's), and within
+	// perTurnReplyBudget.
+	const (
+		firstRetryReqID uint64 = 4 // the trigger used reqID 2, the first answer reqID 3
+		maxRetryDenies         = 4 // observed one retry; cap well above that, still bounded
+	)
+	denyModalsUntilIdle(t, h, convID, firstRetryReqID, maxRetryDenies, perTurnReplyBudget)
 
 	// AC #2, fail-closed observable: the gated Write did NOT execute — its file is
 	// absent under the daemon workdir. Checked AFTER idle so the tool phase is
@@ -121,40 +134,61 @@ func TestInteractiveStreamPermissionDeny(t *testing.T) {
 	requireTriggerFileAbsent(t, h.workdir, nonce)
 }
 
-// drainForTurnIdle reads binary→phone noise_msg frames in receive order — the
-// receive nonce is sequential, so every frame MUST be decrypted in order to keep
-// the CipherState in sync — and returns once it observes the terminal
-// turn_state{idle} for convID. It is drainForCompletedTurn (#1153) MINUS the
-// mandatory M1 assistant_delta gate: under DENY the Write is refused and real
-// claude's post-denial continuation is non-deterministic (it may emit an
-// acknowledgement delta, or go straight to idle), so requiring a delta first
-// would risk a flaky false-RED. The hard AC-3 requirement is terminal idle (the
-// turn doesn't hang), not a continuation delta — deltas for convID are tolerated
-// (logged) and never required.
+// denyModalsUntilIdle drives a fully-denied turn to terminal turn_state{idle} for
+// convID by rejecting EVERY permission modal claude raises along the way. Real
+// claude retries a denied tool at least once (observed in the #1175 operator run:
+// haiku reissued the Write as a second, distinct tool_use after the first reject),
+// so a single reject does not resolve the turn — the retry modal sits unanswered
+// and the turn hangs on it until the daemon's own approval timeout fires. This
+// loop answers each retry with a fresh reject_once so the turn reaches idle by OUR
+// explicit denials, not by the daemon's fail-closed timeout.
 //
-// It is sound to accept the first idle-for-conv as terminal because this drain is
-// sequenced AFTER raiseRealPermissionModal (leading turn_state{responding} and
-// any pre-turn resting idle already consumed in order) and AFTER the
-// modal_dismissed drain (the modal is proven resolved-by-us) — so no earlier idle
-// is left on the wire. On timeout: t.Fatalf naming the fail-closed hang.
-func drainForTurnIdle(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) {
+// It reads binary→phone noise_msg frames in receive order (the receive nonce is
+// sequential, so every noise_msg MUST be decrypted in order to keep h.initRecv in
+// sync; non-noise_msg control frames are skipped without decrypting) and:
+//   - on modal_shown{permission}: asserts class + non-empty modal_id (a retry
+//     modal is as non-vacuous as the first), then seals a reject_once answer with
+//     a FRESH AnswerToken and a unique request id;
+//   - on modal_dismissed: asserts Source == "remote" — every dismissal here must be
+//     OUR reject, never a daemon timeout-deny (Source == "timeout"); a timeout
+//     dismissal means our answer was dropped and the turn fell closed on its own,
+//     which the deny attribution must not silently accept;
+//   - on turn_state{idle} for convID: returns — the turn resolved without hanging.
+//
+// It is bounded on two axes so a pathologically non-terminating turn fails LOUD
+// rather than hanging the suite: maxRetryDenies (a cap on retry modals answered)
+// and the wall-clock timeout. It is proven claude retries once; it is NOT proven
+// it gives up after a bounded number of denies, so the two bounds produce distinct
+// diagnostics — the cap ("claude keeps reissuing past the cap", a product question
+// about whether a fully-denied turn ever terminates) vs. the wall-clock ("no idle
+// after the final deny", the daemon stalled).
+//
+// Accepting the first idle-for-conv as terminal is sound: this drain is sequenced
+// AFTER raiseRealPermissionModal (leading turn_state{responding} and any pre-turn
+// resting idle already consumed in order) and AFTER the modal_dismissed drain (the
+// first modal proven resolved-by-us), so no earlier idle is left on the wire.
+// startReqID is the first request id for a retry answer (the trigger used 2, the
+// first answer 3, so retries start at 4); each answer increments it.
+func denyModalsUntilIdle(t *testing.T, h *perConvHarness, convID string, startReqID uint64, maxRetryDenies int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	reqID := startReqID
+	retryDenies := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			t.Fatalf("never observed a terminal turn_state{idle} for %q within %s — the turn hung on the denied modal and never reached terminal idle", convID, timeout)
+			t.Fatalf("turn for %q never reached terminal turn_state{idle} within %s after %d retry reject(s) — the turn hung on a denied modal our reject never resolved", convID, timeout, retryDenies)
 		}
-		raw, err := phone.ReceiveBytes(remaining)
+		raw, err := h.phone.ReceiveBytes(remaining)
 		if err != nil {
 			if errors.Is(err, fakephone.ErrReceiveTimeout) {
 				continue // deadline reached — re-loop into the t.Fatalf above
 			}
-			t.Fatalf("phone receive (idle drain): %v", err)
+			t.Fatalf("phone receive (deny-until-idle): %v", err)
 		}
 		var inner protocol.InnerFrameV2
 		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (idle drain): %v", err)
+			t.Fatalf("decode inner frame (deny-until-idle): %v", err)
 		}
 		if inner.Type != protocol.TypeNoiseMsg {
 			// A non-noise_msg control frame (e.g. rekey) does not advance the
@@ -163,28 +197,53 @@ func drainForTurnIdle(t *testing.T, phone *fakephone.Client, cs *noise.CipherSta
 		}
 		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
 		if err != nil {
-			t.Fatalf("decode inner data (idle drain): %v", err)
+			t.Fatalf("decode inner data (deny-until-idle): %v", err)
 		}
-		plain, err := cs.Decrypt(cipher)
+		plain, err := h.initRecv.Decrypt(cipher)
 		if err != nil {
 			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
 		}
 		var env protocol.Envelope
 		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (idle drain): %v", err)
+			t.Fatalf("decode envelope (deny-until-idle): %v", err)
 		}
 		switch env.Type {
 		case protocol.TypeError:
-			t.Fatalf("unexpected error envelope while awaiting terminal idle: %s", string(env.Payload))
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
+			t.Fatalf("unexpected error envelope while denying to idle: %s", string(env.Payload))
+		case protocol.TypeModalShown:
+			var shown protocol.ModalShownPayload
+			if err := json.Unmarshal(env.Payload, &shown); err != nil {
+				t.Fatalf("decode retry modal_shown payload: %v", err)
 			}
-			// Tolerated, never required: real claude may or may not acknowledge the
-			// denial with text before idling.
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				t.Logf("post-denial assistant_delta (seq=%d, %d bytes) for %q — tolerated", p.Seq, len(p.Text), convID)
+			if shown.Class != "permission" {
+				t.Fatalf("retry modal_shown Class = %q, want %q", shown.Class, "permission")
+			}
+			if shown.ModalID == "" {
+				t.Fatal("retry modal_shown carried an empty modal_id")
+			}
+			if retryDenies >= maxRetryDenies {
+				t.Fatalf("claude raised more than %d retry permission modals for %q without reaching idle — it keeps reissuing the denied tool past the cap; whether a fully-denied turn ever terminates is a product question to raise separately, not a test flake to widen the cap for", maxRetryDenies, convID)
+			}
+			retryDenies++
+			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
+				ID:   reqID,
+				Type: protocol.TypeModalAnswer,
+				TS:   time.Now().UTC(),
+				Payload: mustJSON(t, protocol.ModalAnswerPayload{
+					ModalID:     shown.ModalID,
+					OptionID:    string(turnevent.PermissionOptionKindRejectOnce),
+					AnswerToken: fmt.Sprintf("e2e-1175-retry-token-%d", reqID),
+				}),
+			})
+			t.Logf("denied retry permission modal %q (reject #%d) for %q", shown.ModalID, retryDenies, convID)
+			reqID++
+		case protocol.TypeModalDismissed:
+			var dis protocol.ModalDismissedPayload
+			if err := json.Unmarshal(env.Payload, &dis); err != nil {
+				t.Fatalf("decode retry modal_dismissed payload: %v", err)
+			}
+			if dis.Source != "remote" {
+				t.Fatalf("retry modal_dismissed Source = %q, want %q — a modal resolved by the daemon's approval timeout (or any non-remote source) means the turn fell closed on its own, not by our explicit reject; the deny attribution must hold for every modal, not only the first", dis.Source, "remote")
 			}
 		case protocol.TypeTurnState:
 			var st protocol.TurnStatePayload
@@ -192,10 +251,12 @@ func drainForTurnIdle(t *testing.T, phone *fakephone.Client, cs *noise.CipherSta
 				t.Fatalf("decode turn_state payload: %v", err)
 			}
 			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("terminal turn_state{idle} for %q — the turn resolved without hanging", convID)
+				t.Logf("terminal turn_state{idle} for %q after %d retry reject(s) — the turn resolved without hanging", convID, retryDenies)
 				return
 			}
 		}
+		// assistant_delta / tool_use / turn_end / ack — decrypted above (the receive
+		// nonce stays in sync) and drained in order.
 	}
 }
 
