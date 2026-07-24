@@ -368,6 +368,39 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   zero production files touched. Split from #1083. See
   [`codebase/1176.md`](../codebase/1176.md).
 
+- `interactive_stream_resume_after_eviction_test.go` (#1177) — the
+  real-`claude` proof that an idle-evicted **stream** session resumes via
+  `--resume` with prior context intact, closing the last uncovered rung of
+  the streamrunner plan's "restart after eviction" risk. Idle-evict +
+  respawn was covered only against fakeclaude and only on the PTY/bootstrap
+  runner (`TestE2E_IdleEviction_RespawnsOnSendMessage`, #396); the stream
+  path's `TestE2E_PerConversation_IdleEvictsAndReactivates` (#680)
+  explicitly deferred content-recall to "realclaude's domain" — this is that
+  deferred work (see [idle-eviction.md § Testing](idle-eviction.md#testing)).
+  `TestInteractiveStreamResumeAfterEviction` transcribes #1153's setup, then:
+  plants a per-run-unique token in a turn drained via #1153's
+  `drainForCompletedTurn` (the sync point guaranteeing the token committed
+  before eviction); polls the daemon's stderr for the
+  `session.idle_eviction` WARN via the new `waitForIdleEvictionWARN` — the
+  non-vacuity gate proving eviction happened *before* the resume turn is
+  sent; drives a second turn via the new `drainForResumedTurnText` (a fork
+  of `drainForCompletedTurn` that accumulates delta text instead of stopping
+  at the first); and asserts the reply recalls the token
+  (`strings.Contains(strings.ToUpper(...))`) — a forked fresh spawn has no
+  memory of it, so this is the discriminator. First stream spec to *enable*
+  the idle timer (`-pyry-idle-timeout=30s` via the new
+  `spawnBootstrapDaemonWithIdle`, a self-contained near-copy of
+  `spawnBootstrapDaemon` keeping zero shared-file merge surface with
+  siblings #1173–#1176); every prior spec disables it. Standing coupling
+  constraint documented in-file: the idle timer arms once at activation and
+  never resets per-turn, so the 30s window must exceed plant-turn
+  completion or the plant drain REDs loudly. `waitForIdleEvictionWARN` pins
+  the WARN's `session_id` **value** (stronger than #396's key-only pin),
+  sound because the stream path's `--session-id`-first `buildArgs` never
+  forks, so the pool id equals the on-disk transcript stem across
+  `--resume`. Ticket-encoded fixed UUIDs (single-char-repeat stems
+  exhausted by prior siblings). Zero production files touched. Split from
+  #1083. See [`codebase/1177.md`](../codebase/1177.md).
 - `interactive_stream_permission_deny_test.go` (#1175) — the security-relevant
   **deny** half of the remote permission round-trip on the stream-json runner
   (security-sensitive; architect security-review verdict PASS). #1154 proved
