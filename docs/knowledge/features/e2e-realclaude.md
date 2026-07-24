@@ -368,6 +368,28 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   zero production files touched. Split from #1083. See
   [`codebase/1176.md`](../codebase/1176.md).
 
+- `interactive_stream_permission_deny_test.go` (#1175) — the security-relevant
+  **deny** half of the remote permission round-trip on the stream-json runner
+  (security-sensitive; architect security-review verdict PASS). #1154 proved
+  allow on this stack; a fail-open regression (denied tool executes anyway)
+  or a hang on the denied modal is exactly the real-claude-specific failure
+  the fake tier (#1139) cannot surface.
+  `TestInteractiveStreamPermissionDeny` reuses #1154's
+  `startStreamModalResolutionHarness` verbatim (no new harness, no new seeded
+  UUIDs) and `raiseRealPermissionModal`/`writeFileTrigger` (#1030), swaps the
+  answer to `reject_once`, and adds two checks: a `modal_dismissed` drain
+  asserting `Source == "remote"` + `Outcome == "reject_once"` (attribution —
+  closed vocabulary rules out a timeout-deny or dropped answer masquerading
+  as the explicit reject) and a workdir walk,
+  `requireTriggerFileAbsent`, proving the gated `Write`'s target file never
+  materialised. The retry-answering helper `denyModalsUntilIdle` (rework
+  after an operator live-gate FAIL surfaced that real haiku retries a denied
+  tool at least once) rejects every permission modal the turn raises until
+  terminal `turn_state{idle}`, bounded by a retry-count cap
+  (`maxRetryDenies`) and `perTurnReplyBudget` wall-clock, each with a distinct
+  diagnostic. No content/echo assertion. Zero production files touched. Split
+  from #1083. See [`codebase/1175.md`](../codebase/1175.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -440,3 +462,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1154](https://github.com/pyrycode/pyrycode/issues/1154) — stream-json sibling of #1030's real permission round-trip (desktop#483 scenario, real stream stack); composes #1030's harness/trigger scaffold with #1153's `writeStreamInteractiveConfig`/`drainForCompletedTurn` seams, zero production files; answer-only (approve), PTY-path cancel stays owned by #1030 Phase B; split from #1083; codebase note at [`codebase/1154.md`](../codebase/1154.md).
 - Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
 - Ticket [#1176](https://github.com/pyrycode/pyrycode/issues/1176) — real-claude interrupt-stops-a-running-turn gate, composing #1172's running-turn trigger with the shipped interrupt primitives (#1120/#1121); new `drainForCancelledTurnEnd` drain guards against the spontaneous-`end_turn` vacuous pass; closes the fake-green/real-red gap (#949) on the interrupt path; split from #1083, zero production files; codebase note at [`codebase/1176.md`](../codebase/1176.md).
+- Ticket [#1175](https://github.com/pyrycode/pyrycode/issues/1175) — real-claude permission **deny** round-trip on the stream-json runner (security-sensitive, architect security review PASS); reuses #1154's harness/trigger scaffold, swaps the answer to `reject_once`, and adds a `Source == "remote"`/`Outcome == "reject_once"` attribution assertion so a timeout-deny can't masquerade as the explicit reject, plus a workdir walk proving the gated `Write` never executed; rework `denyModalsUntilIdle` answers every retry modal (real haiku retries a denied tool at least once) bounded by a retry-count cap and wall-clock budget; zero production files; codebase note at [`codebase/1175.md`](../codebase/1175.md).
