@@ -1,6 +1,6 @@
 # ADR 013: `Session.Evict` / `Session.Activate` wait for registry persist
 
-**Status:** Accepted (2026-05-07, ticket [#169](https://github.com/pyrycode/pyrycode/issues/169))
+**Status:** Accepted (2026-05-07, ticket [#169](https://github.com/pyrycode/pyrycode/issues/169)). Partially superseded for the evicted direction by [ADR 034](034-two-phase-eviction-commit-signal-before-teardown.md) (#1186): `transitionTo(stateEvicted)` no longer exists — the flip+signal now happen *before* child teardown (`beginEvict`) and persist+close happen *after* (`endEvict`). The `stateActive` (reactivation) direction described below is unaffected and still uses `transitionTo` exactly as written here.
 **Phase:** 1.3b (race fix surfaced by [#155](https://github.com/pyrycode/pyrycode/issues/155))
 **Refines:** [ADR 005](005-idle-eviction-state-machine.md) (idle eviction state machine), [ADR 006](006-concurrent-active-cap-lru.md) (concurrent active cap)
 
