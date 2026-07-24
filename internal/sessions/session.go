@@ -428,26 +428,16 @@ func (s *Session) Run(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if err := s.transitionTo(stateEvicted); err != nil {
-				// A registry-persist failure on a lifecycle transition is
-				// NON-FATAL. transitionTo already advanced the in-memory state
-				// and woke waiters before persisting, so memory is
-				// authoritative and the next transition re-persists the whole
-				// registry (self-healing). Returning here would propagate
-				// through the pool's shared error group and tear down EVERY
-				// live session and the relay leg over one disk hiccup during a
-				// routine idle eviction — a blast radius grossly out of
-				// proportion to the trigger.
-				s.log.Warn("session: registry persist failed on evict; keeping in-memory state, retrying next transition",
-					"event", "session.persist_failed",
-					"transition", "evicted",
-					"err", err)
-			}
-			// Fire the eviction signal AFTER transitionTo (post-persist, no
-			// lcMu held — the leaf, off-lock callback point). reason == ""
-			// is the defensive spontaneous-exit path (<-runErr): the wire has
-			// no "crashed" reason, so it signals nothing. s.pool != nil
-			// mirrors transitionTo's guard for test-constructed sessions.
+			// runActive has already committed the eviction on every non-error
+			// return: beginEvict flipped the session to stateEvicted BEFORE the
+			// child was torn down, so a send_message delivery racing the teardown
+			// window drives a real respawn instead of no-oping against the dying
+			// child (#1186); endEvict then persisted the registry and closed
+			// evictedCh after the child stopped. Only the transition signal
+			// remains to fire — post-persist, off-lock, the leaf callback point.
+			// reason == "" is the defensive spontaneous-exit path (<-runErr): the
+			// wire has no "crashed" reason, so it signals nothing. s.pool != nil
+			// mirrors endEvict's guard for test-constructed sessions.
 			if reason != "" && s.pool != nil {
 				s.pool.notifyTransition(SessionTransition{
 					PreviousID: s.currentID(),
@@ -547,6 +537,12 @@ func (s *Session) runActive(ctx context.Context) (TransitionReason, error) {
 			// loop consistent if that contract ever loosens. No reason
 			// is surfaced: the wire has no "crashed" transition, so Run
 			// fires no signal on this path.
+			//
+			// The child is already gone (runErr fired), so there is nothing to
+			// tear down: commit the eviction and close it out back-to-back so
+			// the session still lands in stateEvicted and persists (#1186).
+			s.beginEvict()
+			s.endEvict()
 			return "", nil
 		case <-timerCh:
 			s.lcMu.Lock()
@@ -567,13 +563,23 @@ func (s *Session) runActive(ctx context.Context) (TransitionReason, error) {
 				"session_id", string(s.currentID()),
 				"idle_timeout", s.idleTimeout,
 				"bootstrap", s.bootstrap)
+			// Commit the eviction BEFORE tearing down the child so a delivery
+			// racing this teardown window sees a non-active session and drives a
+			// real respawn instead of no-oping against the dying child (#1186).
+			// endEvict persists and closes evictedCh only after the child stops.
+			s.beginEvict()
 			cancelSup()
 			drainSup()
+			s.endEvict()
 			return ReasonEviction, nil
 		case <-s.evictCh:
-			// Cap-policy eviction: forced, regardless of attached count.
+			// Cap-policy eviction: forced, regardless of attached count. Same
+			// two-phase commit as the idle path (#1186): flip to evicted before
+			// teardown so a racing Activate is never lost, close out after.
+			s.beginEvict()
 			cancelSup()
 			drainSup()
+			s.endEvict()
 			return ReasonEviction, nil
 		}
 	}
@@ -648,4 +654,56 @@ func (s *Session) transitionTo(newState lifecycleState) error {
 	s.lcMu.Unlock()
 
 	return persistErr
+}
+
+// beginEvict commits the session to stateEvicted at the instant eviction is
+// decided — BEFORE the child is torn down. Under lcMu it flips lcState, stamps
+// lastActiveAt, and swaps activeCh for a fresh open channel. A delivery that now
+// races the teardown window (idle-timer fire, cap evict, or spontaneous exit)
+// observes a non-active session: Activate signals activateCh and blocks on the
+// fresh activeCh until a real respawn, instead of the pre-#1186 no-op against the
+// dying child (the "acked but silently dropped" send). It deliberately does NOT
+// close evictedCh and does NOT persist — endEvict does both, after the child has
+// actually stopped, so the cap-policy Evict "blocks until the supervisor has
+// stopped" contract still holds (closing evictedCh here would release Evict
+// before the child was reaped → a transient active-cap overshoot).
+//
+// It splits the old transitionTo(stateEvicted): beginEvict is transitionTo's
+// pre-persist half (flip + reset the opposite channel), run before teardown;
+// endEvict is the persist + close-wake half, run after. transitionTo is retained
+// unchanged for the stateActive (reactivation) direction.
+func (s *Session) beginEvict() {
+	s.lcMu.Lock()
+	s.lcState = stateEvicted
+	s.lastActiveAt = time.Now().UTC()
+	s.activeCh = make(chan struct{})
+	s.lcMu.Unlock()
+}
+
+// endEvict finishes the eviction begun by beginEvict, after cancelSup/drainSup
+// have stopped the child: it persists the registry (now consistent with
+// stateEvicted) and then closes evictedCh to release any cap-policy Evict waiter.
+// Persisting before the close preserves transitionTo's invariant that a waiter
+// observing the wake also sees a registry on disk consistent with the new state.
+// A registry-persist failure is NON-FATAL — memory is authoritative and the next
+// transition re-persists the whole registry (self-healing) — so it is logged, not
+// returned, exactly as the pre-#1186 transitionTo(stateEvicted) path did; the
+// alternative would tear down every live session over one disk hiccup during a
+// routine eviction.
+func (s *Session) endEvict() {
+	var persistErr error
+	if s.pool != nil {
+		persistErr = s.pool.persist()
+	}
+
+	s.lcMu.Lock()
+	close(s.evictedCh)
+	s.lcMu.Unlock()
+
+	if persistErr != nil {
+		s.log.Warn("session: registry persist failed on evict; keeping in-memory state, retrying next transition",
+			"event", "session.persist_failed",
+			"transition", "evicted",
+			"err", persistErr)
+	}
 }
