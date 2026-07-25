@@ -946,26 +946,47 @@ non-regression: today's pre-#1121 code routed every interrupt to bootstrap
 regardless of conn, so #1121 strictly improves isolation without introducing a new
 cross-conversation leak).
 
-**Observability (#1192).** Before #1192 the whole route was silent on success and
-on almost every failure, so a live daemon log showing nothing after an inbound
-`interrupt` frame could not distinguish "the frame never arrived" from "the conn
-was not interactive," "the route went inert," or "the keystroke actuated and
-claude ignored it" — a real live-daemon incident (`real-claude-interrupt`,
-pyrycode-desktop#483) burned 2m10s on exactly this ambiguity. #1192 instruments
-the three arms reachable without a signature change, each at `Info` (the daemon's
-default level) so the record is visible without `-pyry-verbose`: `handleInterrupt`
-step 1 above (`v2.interrupt.non_interactive`, `conn_id`), and two arms inside
+**Observability (#1192, #1193).** Before #1192 the whole route was silent on
+success and on almost every failure, so a live daemon log showing nothing after
+an inbound `interrupt` frame could not distinguish "the frame never arrived"
+from "the conn was not interactive," "the route went inert," or "the keystroke
+actuated and claude ignored it" — a real live-daemon incident
+(`real-claude-interrupt`, pyrycode-desktop#483) burned 2m10s on exactly this
+ambiguity. #1192 instruments the three arms reachable without a signature
+change, each at `Info` (the daemon's default level) so the record is visible
+without `-pyry-verbose`: `handleInterrupt` step 1 above
+(`v2.interrupt.non_interactive`, `conn_id`), and two arms inside
 `activeInterrupter.SendEsc()` — `v2.interrupt.no_active_conv` (no fields; its
 existence is the information) when `currentConv()` is `""`, and
 `v2.interrupt.no_bound_runner` (`conversation_id`) when `resolveRunner` returns
 `!ok`. The records identify the **conversation**, not the session:
 `resolveBoundRunner` never surfaces the bound `CurrentSessionID` to its caller,
 and widening that signature to do so was ruled out as disproportionate to the
-diagnostic gained. **Interim gap:** the successful actuation and the
-`interruptRunner` inert arm (resolved runner exposes neither interrupt method)
-both stay silent until #1193, which needs `interruptRunner`'s signature to
-change — an empty `v2.interrupt.*` log does **not** yet prove the frame never
-arrived. See [`codebase/1192.md`](../codebase/1192.md).
+diagnostic gained.
+
+**#1193 closes the invariant.** The remaining two arms lived behind
+`interruptRunner` (`cmd/pyry/main.go`), the type switch that dispatches to
+`streamRunner.Interrupt()` or `*supervisor.Supervisor.SendEsc()` — reaching them
+needed a signature change, which is why they were split into their own ticket.
+`interruptRunner` now returns the `interruptArm` it dispatched to
+(`armInterrupt` / `armSendEsc` / `armNone`) alongside the chosen method's error,
+and `activeInterrupter.SendEsc()` — the only scope holding the conversation id —
+emits from it: `v2.interrupt.dispatched` (`conversation_id`, `arm`) on a
+successful dispatch, unconditionally including when the dispatched arm's own
+call returned an error (it records *which arm ran*, not that the child
+quiesced — the actuation failure itself is `handleInterrupt`'s
+`v2.interrupt.keystroke_err` `Warn`, which carries the error but not the arm);
+`v2.interrupt.no_actuator` (`conversation_id`) when the resolved runner exposes
+neither method. Every path through the route now emits, so **an empty
+`v2.interrupt.*` log on a wired daemon means the frame never arrived** — no
+separate "frame arrived" record was needed to get that. Two doc comments that
+carried this as an explicit interim caveat (`activeInterrupter.SendEsc`,
+`cmd/pyry/main.go`; `handleInterrupt`, `internal/relay/v2session_modal.go`) were
+flipped from caveat to invariant. "Wired" is load-bearing: `handleInterrupt`'s
+step-2 nil-`Interrupter` arm still records at `Debug` (invisible at the
+daemon's default `LevelInfo`, raised only by `-pyry-verbose`), but production
+always wires the `Interrupter`. See [`codebase/1192.md`](../codebase/1192.md),
+[`codebase/1193.md`](../codebase/1193.md).
 
 ### Inbound new_session (#831) — `SessionStarter` seam + `/clear` routing
 
