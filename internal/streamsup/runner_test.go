@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -815,5 +816,234 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 	}
 	if forceFirst {
 		t.Errorf("nextSpawnID forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
+	}
+}
+
+// --- OnChildExit: the per-child-exit seam ------------------------------------
+
+// newExitRecorder returns an OnChildExit callback plus an exact count reader and
+// a buffered fire channel. The callback runs on the Run goroutine while the test
+// goroutine reads the total, so the counter is atomic; the channel (non-blocking
+// send, like the onSpawn counters above) lets a test wait for the Nth fire
+// without polling.
+func newExitRecorder() (fire func(), count func() int, fired <-chan struct{}) {
+	var n atomic.Int64
+	ch := make(chan struct{}, 32)
+	return func() {
+			n.Add(1)
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		},
+		func() int { return int(n.Load()) },
+		ch
+}
+
+// TestRunner_OnChildExit_FiresOnCrashRespawn covers the per-child cardinality: a
+// crash followed by a backoff respawn fires OnChildExit again. PhaseStopped
+// cannot express this — it fires once, on permanent shutdown (state.go) — so the
+// seam is the only per-child signal. Mirrors TestRunner_RestartsOnCrash.
+func TestRunner_OnChildExit_FiresOnCrashRespawn(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "crash", out, stderr)
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+	spawns := make(chan struct{}, 32)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawns <- struct{}{}:
+		default:
+		}
+	}
+	fire, _, exits := newExitRecorder()
+	cfg.OnChildExit = fire
+
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	// ≥2 spawns proves the loop respawned after the crash; ≥2 exits proves the
+	// seam fired for each of those children, not once for the whole Run.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-spawns:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("saw only %d spawn(s), want ≥2 — loop did not restart on crash", i)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-exits:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("saw only %d child-exit fire(s), want ≥2 — the seam is not per-child", i)
+		}
+	}
+	cancel()
+
+	if err := join(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled after teardown", err)
+	}
+}
+
+// TestRunner_OnChildExit_FiresOnShutdown covers the load-bearing exit path: a
+// parent-ctx cancel fires the seam exactly once. Run's post-spawn shutdown
+// return sits ABOVE the "claude exited" log, so a fire anchored on that log
+// never runs here (count 0); a fire additionally placed at the top-of-loop guard
+// or inside the backoff select double-counts (count 2). echo_lines blocks on the
+// held-open stdin and never self-exits, so exactly one supervision iteration
+// runs and the expected count is exact, not a floor.
+//
+// Deterministic, not a poll: the fire and Run's return are both on the Run
+// goroutine with no wait between them, so join() returning is proof the fire has
+// already happened.
+func TestRunner_OnChildExit_FiresOnShutdown(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	fire, exitCount, _ := newExitRecorder()
+	cfg.OnChildExit = fire
+
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	// Sync on the spawn before cancelling: cancelling first would leave Run at
+	// the top-of-loop guard with no child ever spawned, making the count vacuous.
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	cancel()
+
+	if err := join(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+	if got := exitCount(); got != 1 {
+		t.Errorf("OnChildExit fired %d time(s) on the shutdown path, want exactly 1 "+
+			"(0 = the fire sits below Run's post-spawn ctx.Err() return; 2 = it also fires at a second site)", got)
+	}
+}
+
+// TestRunner_OnChildExit_FiresOnDeliberateRestart covers the restart exit path,
+// which leaves the loop at the drainRestart continue — above the backoff ladder —
+// so a fire placed below that branch would be skipped here. record_block never
+// self-exits, so every exit in this test is caller-caused: one child killed by
+// Restart, one by the shutdown cancel — exactly 2.
+func TestRunner_OnChildExit_FiresOnDeliberateRestart(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "record_block", out, stderr)
+	spawns := make(chan struct{}, 32)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawns <- struct{}{}:
+		default:
+		}
+	}
+	fire, exitCount, _ := newExitRecorder()
+	cfg.OnChildExit = fire
+
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	select {
+	case <-spawns:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first child never spawned")
+	}
+	r.Restart(nil)
+	select {
+	case <-spawns:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Restart did not respawn the child")
+	}
+	cancel()
+
+	if err := join(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled after teardown", err)
+	}
+	if got := exitCount(); got != 2 {
+		t.Errorf("OnChildExit fired %d time(s), want exactly 2 "+
+			"(one Restart-killed child, one shutdown-killed child)", got)
+	}
+}
+
+// TestRunner_OnChildExit_FiresOnSpawnSetupFailure pins the arm the seam takes on
+// the spawn-SETUP-failure case: the fire is UNCONDITIONAL, so it also fires when
+// cmd.Start never launched claude (spawnAndWait reports started == false) and no
+// child ever existed. That is the contract stated on Config.OnChildExit — "once
+// per completed supervision iteration", not once per child. Mirrors
+// TestRunner_SpawnSetupFailureRetainsSessionID's direct construction, which
+// bypasses New's exec.LookPath so every spawn fails at Start.
+//
+// The equality is exact at join() time, not a race: the "spawning claude" log
+// and the fire are both on the Run goroutine with no return point between them,
+// and every Run exit path either fired already or has not logged yet. A fire
+// wrongly gated on started reads 0 here.
+func TestRunner_OnChildExit_FiresOnSpawnSetupFailure(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	rec := &spawnArgsRecorder{}
+	fire, exitCount, _ := newExitRecorder()
+	r := &Runner{
+		cfg: Config{
+			ClaudeBin:      filepath.Join(tmp, "no-such-claude-binary"),
+			SessionID:      testSessionID,
+			BackoffInitial: time.Millisecond,
+			BackoffMax:     5 * time.Millisecond,
+			BackoffReset:   time.Minute,
+			OnChildExit:    fire,
+		},
+		log:     slog.New(rec),
+		workDir: tmp,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.count() < 2 {
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("saw only %d spawn attempt(s), want ≥2", rec.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return within 10s of cancel")
+	}
+
+	attempts, fires := rec.count(), exitCount()
+	if fires < 2 {
+		t.Errorf("OnChildExit fired %d time(s) across %d spawn attempt(s), want ≥2", fires, attempts)
+	}
+	if fires != attempts {
+		t.Errorf("OnChildExit fired %d time(s) across %d spawn attempt(s), want one fire per attempted "+
+			"iteration — the seam is unconditional and fires even when no claude process launched", fires, attempts)
 	}
 }

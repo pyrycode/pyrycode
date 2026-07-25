@@ -514,7 +514,9 @@ read — the `screenSnapshotterOrNil` hazard, `relay.go:395-410`).
 **Known gap, recorded in the tracker's own doc comment, not just here:** #1201 shipped with the clear
 event-driven only (`TurnEnd` on the fan-in). #1202 (below) closed the session-teardown half of that gap.
 One path remains open: a child that dies mid-turn and respawns, firing no pool transition and no `result`
-line for the abandoned turn — #1203. See [codebase/1201.md](../codebase/1201.md).
+line for the abandoned turn. #1206 (below) added the runner-side seam that makes that exit observable;
+#1207 (open, blocked-by #1206) wires it into this tracker's clear — the gap stays open until #1207 lands.
+See [codebase/1201.md](../codebase/1201.md).
 
 ### Session-teardown clear (#1202)
 
@@ -577,6 +579,51 @@ clears — the correct answer for that conversation, and idempotent with the tea
 
 **Ships unwired**, same as #1201: nothing reads `Busy`/`WaitIdle` yet, no v2 frame changes, no delivery
 behaviour changes. See [codebase/1202.md](../codebase/1202.md).
+
+### Per-child-exit seam (#1206)
+
+Split from #1203, alongside #1207 (open, blocked-by this ticket). #1201/#1202 can clear the turn-busy
+tracker on a `TurnEnd` or a pool transition, but neither fires when a child simply crashes and the runner
+respawns it: no `result` line for the abandoned turn, no pool transition (`RotateBootstrapForSelfHeal`
+deliberately fires none). Nothing outside `internal/streamsup` could observe that exit at all — the only
+escaping lifecycle state, `PhaseStopped`, means "`Run` has returned" and fires once, on permanent
+shutdown, never on a crash-respawn.
+
+```go
+// exported, unlike onSpawn, because #1207's consumer lives outside this package
+OnChildExit func()
+```
+
+One new field on `Config`, called once per **completed supervision iteration** — after the spawn attempt
+finishes, before `Run` decides whether to shut down, relaunch immediately, or back off. The single call
+site sits between `uptime := time.Since(start)` and `Run`'s post-spawn `if ctx.Err() != nil { return
+ctx.Err() }`, i.e. above both the shutdown return *and* the `claude exited` log — `spawnAndWait` returns
+from exactly one point and the loop only then branches on why the child is gone, so one unconditional call
+there covers the crash, deliberate-restart, and shutdown paths without enumerating them. The two anchors
+that look obvious instead — the `claude exited` log, or a `return ctx.Err()` site (there are three; only
+one sits in the actual fire window) — each satisfy two of the three exit paths and silently miss the
+third, which is why the shutdown-path test is the load-bearing one.
+
+**Cardinality is per iteration, not per live child.** The call is unconditional, so it also fires when
+`spawnAndWait` reports `started == false` — a pre-launch setup failure where no claude process ever
+existed. Deliberate: no child existed, so no turn of this runner's can be open, and #1207's intended clear
+is idempotent either way. A caller that needs "a real child died" cannot get that from this seam.
+
+**Runs synchronously on the `Run` goroutine with no Runner lock held**, so a callback may call any Runner
+method without deadlocking — but the state some of those methods return has not caught up yet at this
+exact line: `State()` still reports `PhaseRunning` plus the dead child's PID (cleared only below the fire,
+and never cleared on the shutdown path), and `Restart()` called from inside the callback skips the backoff
+ladder entirely, since the fire precedes `drainRestart()`. Not a bug in this slice (no consumer yet), but a
+sharp edge any future caller of this seam — #1207 included — has to read past the "no lock held" framing
+to see. The callback must not block (it stalls the restart ladder) or panic (no `recover`, matching
+`onSpawn`), and it is not a drain barrier: bytes the dead child already wrote may still be in flight in a
+downstream sink when it fires, so a consumer needing ordering against those events must get it from that
+sink, not from this callback.
+
+**Ships unwired, with zero `cmd/pyry` diff.** Every `streamsup.Config` literal tree-wide is named-field, so
+the new field is nil on the sole production construction path (`streamsup_runner.go`'s
+`mapStreamsupConfig`) with no edit required. #1207 is the first consumer — the mid-turn crash clear the
+#1201/#1202 pair couldn't reach. See [codebase/1206.md](../codebase/1206.md).
 
 ## Production wiring — the `interactive_runner` toggle (#1081)
 
@@ -647,8 +694,9 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1120.md`](../codebase/1120.md) — the interrupt send primitive + `result` subtype mapping slice.
 - [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`nextSpawnID`).
 - [`codebase/1168.md`](../codebase/1168.md) — `withApprovalArgs`, wiring the #1106 permission-approval flags onto the live interactive spawn.
-- [`codebase/1201.md`](../codebase/1201.md) — the per-conversation turn-busy tracker (`turnBusyTracker`), fed from the drain before its active-session gate; ships unwired, blocked-on-by #1202 (session teardown clear) and #1203 (mid-turn respawn clear) before any consumer reads it.
-- [`codebase/1202.md`](../codebase/1202.md) — `clearForSession`, the session-teardown half of the tracker's clear (`/clear` rotation + eviction), composed onto the pool's `TransitionObserver` slot; #1203 (mid-turn respawn) is the one clear still outstanding before any consumer reads the signal.
+- [`codebase/1201.md`](../codebase/1201.md) — the per-conversation turn-busy tracker (`turnBusyTracker`), fed from the drain before its active-session gate; ships unwired, blocked-on-by #1202 (session teardown clear) and #1206/#1207 (mid-turn respawn clear) before any consumer reads it.
+- [`codebase/1202.md`](../codebase/1202.md) — `clearForSession`, the session-teardown half of the tracker's clear (`/clear` rotation + eviction), composed onto the pool's `TransitionObserver` slot; #1206/#1207 (mid-turn respawn) is the one clear still outstanding before any consumer reads the signal.
+- [`codebase/1206.md`](../codebase/1206.md) — `Config.OnChildExit`, the unwired per-child-exit seam on the streamsup `Run` loop (one field, one unconditional call above the shutdown return); #1207 (open, blocked-by this ticket) wires the first consumer.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
@@ -659,3 +707,4 @@ and [codebase/1140.md](../codebase/1140.md).
 - Spec [`docs/specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md`](../../specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md) — the `sessions.Runner` satisfaction architect spec.
 - Spec [`docs/specs/architecture/1109-streamsup-runner-factory.md`](../../specs/architecture/1109-streamsup-runner-factory.md) — the `streamRunnerFactory` construction architect spec.
 - Spec [`docs/specs/architecture/1098-stream-turn-drain.md`](../../specs/architecture/1098-stream-turn-drain.md) — this slice's architect spec, including the scoping proof and security review.
+- Spec [`docs/specs/architecture/1206-streamsup-child-exit-seam.md`](../../specs/architecture/1206-streamsup-child-exit-seam.md) — the per-child-exit seam architect spec, including the two-wrong-anchors proof and the fire-window security review.
