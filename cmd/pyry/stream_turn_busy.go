@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -17,11 +18,19 @@ import (
 // than per-conversation, and populated only for the conversation the cursor points
 // at (interactive_turn_v2.go:81-86, :141).
 //
+// That inbound-delivery consumer now EXISTS: newInboundDeliver (main.go) waits on
+// waitIdleForDelivery and then marks with openForDelivery, both between Activate
+// and the write, so a message sent mid-turn parks in the msgqueue backlog for the
+// duration of the running turn instead of racing it into the child's stdin pipe
+// (#1199). That is what makes the queued-backlog UI and the drop-before-drain
+// control work on the stream path, and it is why the signal is a guarantee rather
+// than a hint — see waitIdleForDelivery for the ordering argument.
+//
 // It stores membership only: a conversation key and the fact that it is mid-turn.
 // Never the event, its content, a turn id, a timestamp, or a count. Absent key ≡
 // idle ≡ unknown ≡ unbound ≡ never seen, all through one map lookup, which is what
 // keeps Busy from becoming a "does conversation X exist" oracle (#1101, the posture
-// screenSnapshotterOrNil records at relay.go:395-410). The map is bounded by the
+// screenSnapshotterOrNil records at relay.go:406-421). The map is bounded by the
 // conversations currently mid-turn, not by every conversation ever seen.
 //
 // THREE FEEDS close a turn here, and between them no reachable sequence leaves a
@@ -31,6 +40,18 @@ import (
 // which fires no pool transition and emits no result line for the abandoned turn,
 // reaching clearForSession through the drain's exit arm (the #1209 lane, fired in
 // production by the producer newStreamRunnerFactory installs, #1210).
+//
+// ONE FEED BESIDES observe OPENS one: openForDelivery, called by the delivery seam
+// (#1199) inside the same statement sequence that immediately performs the write.
+// It does not weaken the analysis above, feed by feed. An open is placed only
+// immediately before a write; a failed write is undone in that same sequence; and a
+// successful write starts a turn that closes through one of the three feeds already
+// listed — its TurnEnd, a pool teardown, or the child dying. The one residual is a
+// child that is alive, has consumed the envelope, and whose turn simply never ends.
+// That is a LEGITIMATELY RUNNING turn, not the wedge class below: it is bounded by
+// streamTurnHoldTimeout on each delivery attempt and by msgqueue's give-up across
+// them, surfacing as a typed session_error rather than being defended with a guard
+// here (#1199 AC3).
 //
 // That third feed was this file's KNOWN GAP, and closing it was the stated
 // precondition for any consumer reading this signal: while the tracker was unwired
@@ -52,10 +73,24 @@ import (
 //
 // SECURITY: content-free. The only fields ever logged are the event discriminant
 // (eventKind) and the producing session id, matching the drain's existing drop
-// diagnostics (stream_turn_drain.go:74-79, :143-149). The key is never taken from
-// the wire or the stream bytes — it is resolved daemon-side from the registry
-// against the runner's construction-time session tag, so a hostile or confused
-// child can only ever mark its OWN conversation busy.
+// diagnostics (stream_turn_drain.go:74-79, :143-149).
+//
+// For the two SESSION-keyed feeds — observe and clearForSession — the key is never
+// taken from the wire or the stream bytes: it is resolved daemon-side from the
+// registry against the runner's construction-time session tag, so a hostile or
+// confused child can only ever mark its OWN conversation busy. openForDelivery is
+// the one feed whose key does arrive in a send_message payload, and the honest
+// statement for it is narrower rather than the same: that conversation id has
+// already passed two independent daemon-side gates before it can reach the mark —
+// router.Route at enqueue (registry hit → non-empty CurrentSessionID → pool.Lookup
+// hit, rejected synchronously otherwise; the routing target is read from the
+// server-stored registry row, never phone-writable, send_message.go) and
+// sessionRouter.resolve again as the first statement of the delivery seam
+// (main.go). An unknown, unbound or forged id returns before the mark, so the mark
+// only ever names the conversation the daemon is about to write to — one the caller
+// was already authorized to write to, which is why inserting that key reveals
+// nothing: no read is added, and Busy still collapses unknown / unbound / idle to
+// one answer through one map lookup.
 type turnBusyTracker struct {
 	// resolve maps a producing session id to the conversation that owns it.
 	// Injected (conversationForSession(w.convReg, sid) in production) so this file
@@ -229,19 +264,28 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 }
 
 // setBusy applies one membership change for conversationID under a SINGLE t.mu
-// acquisition, broadcasting on t.changed only when the set actually moved.
+// acquisition, broadcasting on t.changed only when the set actually moved, and
+// reports whether it moved.
 //
-// Shared by both feeds rather than hand-duplicated in each: the close-and-replace
+// Shared by every feed rather than hand-duplicated in each: the close-and-replace
 // protocol below is the invariant WaitIdle's check-and-subscribe atomicity
 // depends on, and a second, independently-written copy of it is precisely the
 // lost-wakeup bug this extraction forecloses.
-func (t *turnBusyTracker) setBusy(conversationID string, open bool) {
+//
+// The changed return exists for openForDelivery's undo, and it is reported out of
+// the ONE lock acquisition the mutation already takes. Deriving the same answer
+// from a separate Busy read would be a TOCTOU: a competing feed's opener landing
+// between the read and the mark would make the undo clear a turn this delivery
+// never opened, reporting a live turn idle and letting the next message through
+// unheld. The two event-driven callers discard it, which Go permits with no edit
+// at their call sites.
+func (t *turnBusyTracker) setBusy(conversationID string, open bool) (changed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	_, was := t.busy[conversationID]
 	if open == was {
-		return // membership unchanged: no mutation, and no broadcast
+		return false // membership unchanged: no mutation, and no broadcast
 	}
 	if open {
 		t.busy[conversationID] = struct{}{}
@@ -254,6 +298,7 @@ func (t *turnBusyTracker) setBusy(conversationID string, open bool) {
 	// holding mu across it is safe.
 	close(t.changed)
 	t.changed = make(chan struct{})
+	return true
 }
 
 // Busy reports whether conversationID currently has an open turn. Unknown,
@@ -295,4 +340,85 @@ func (t *turnBusyTracker) WaitIdle(ctx context.Context, conversationID string) e
 			return ctx.Err()
 		}
 	}
+}
+
+// --- #1199: the delivery feed -------------------------------------------------
+
+// waitIdleForDelivery blocks until conversationID has no open turn, bounded by
+// timeout. It is the delivery seam's half of the mid-turn hold (#1199), which is
+// what makes msgqueue's DeliverFunc contract — "MUST block while claude is busy …
+// that blocking IS the drain's turn-end pacing" (msgqueue/queue.go) — true on the
+// stream path, where the write itself returns as soon as the envelope is in the
+// child's stdin pipe.
+//
+// A nil receiver (PTY mode, where the tracker is never constructed) and an empty
+// conversation id both return nil at once, leaving the seam semantically unchanged.
+// Busy and WaitIdle keep their own non-nil-safe contracts, so the wiring hands the
+// nil to this method, to openForDelivery and to clearForSession, and to no other.
+// Refusing the empty key preserves the absent ≡ idle ≡ unknown ≡ unbound collapse
+// the type is built on.
+//
+// It returns nil once the conversation is idle — the ordinary case, and the point
+// at which the seam writes; context.DeadlineExceeded when timeout elapses with the
+// turn still open, having written NOTHING, so the retry is a clean re-attempt and
+// never a duplicate turn; or context.Canceled when ctx is cancelled, which is both
+// daemon shutdown AND the queued head being dropped — msgqueue.Remove cancels the
+// in-flight delivery precisely so this wait unblocks at once and the drain advances
+// without writing.
+//
+// WHY THE HOLD IS DETERMINISTIC and not merely likelier. The tracker's ordinary
+// opener feed is asynchronous (child → parser → sink → drain → observe), so a
+// waiter relying on it alone would let a back-to-back second message through before
+// any event for the first had been parsed. This does not rely on it. The serial
+// per-conversation drain calls openForDelivery on its OWN goroutine inside the same
+// deliver call that then writes, so for messages A then B on one conversation the
+// mark for A happens-before deliver(A) returns, which happens-before deliver(B)
+// starts, which happens-before B reads membership here. That is program order on
+// one goroutine: B parks however fast or slow the child is, including a child that
+// has not yet started reading its stdin.
+//
+// timeout bounds ONE delivery attempt, not the message; see streamTurnHoldTimeout
+// (main.go) for the arithmetic against msgqueue's give-up bound.
+func (t *turnBusyTracker) waitIdleForDelivery(ctx context.Context, conversationID string, timeout time.Duration) error {
+	if t == nil || conversationID == "" {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return t.WaitIdle(waitCtx, conversationID)
+}
+
+// openForDelivery marks conversationID mid-turn for a delivery that is about to
+// write, and returns the undo that closes that turn again. A nil receiver or an
+// empty conversation id marks nothing and returns an inert undo, so the seam needs
+// no branch of its own and PTY mode runs the identical statement sequence.
+//
+// THE MARK PRECEDES THE WRITE, and that ordering is load-bearing rather than
+// stylistic. A mark placed after a successful write races the asynchronous opener
+// feed: on a fast child the turn's own TurnEnd can land and clear before the
+// marking statement runs, leaving a stale mark that no later event will ever clear.
+// Marking first makes the ordering unconditional — no byte has reached the child,
+// so no event for this turn can precede the mark. The cost is one undo on the
+// write-error path.
+//
+// The undo is LIVE ONLY IF THIS CALL ACTUALLY OPENED THE TURN, which setBusy
+// reports out of the single lock acquisition it already takes. When the
+// conversation was already busy — another feed's opener landing between the wait
+// returning nil and this mark, a --resume respawn replaying events being the
+// plausible route — the undo is a no-op, so a failed write can never report
+// somebody else's live turn idle and release the next message into it.
+//
+// Handing the clear back as a closure rather than exposing a second
+// clear-by-conversation method is deliberate: the only way to obtain a clear is to
+// have placed the matching open, so no later caller can reach "mark this
+// conversation idle" by name. clearForSession stays the session-keyed door, for the
+// reason its own doc gives.
+func (t *turnBusyTracker) openForDelivery(conversationID string) (undo func()) {
+	if t == nil || conversationID == "" {
+		return func() {}
+	}
+	if !t.setBusy(conversationID, true) {
+		return func() {}
+	}
+	return func() { t.setBusy(conversationID, false) }
 }

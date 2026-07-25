@@ -135,7 +135,7 @@ func (s *streamTurnSink) exitFor(sessionID string) func() {
 			// SECURITY: content-free, and no "kind" — there is no event to name.
 			// The resolved conversation id is absent because this closure holds no
 			// resolver and structurally cannot name one; the conversation-id
-			// discipline lives on the clear path (stream_turn_busy.go:213-219).
+			// discipline lives on the clear path (stream_turn_busy.go:248-254).
 			s.logger.Warn("relay: stream-turn exit drop; sink full",
 				"event", "stream_turn.exit_sink_full",
 				"session_id", sessionID)
@@ -210,7 +210,7 @@ func startStreamTurnDrainV2(
 					// a deferred clear could land after a turn opened by the RESPAWNED
 					// child and report a live turn idle. clearForSession is reused as-is
 					// — no second session→conversation resolution and no second copy of
-					// the membership-mutation protocol (stream_turn_busy.go:229-232) —
+					// the membership-mutation protocol (stream_turn_busy.go:266-302) —
 					// and it is a nil-receiver no-op, so a drain with no tracker is
 					// unaffected.
 					busy.clearForSession(env.sessionID)
