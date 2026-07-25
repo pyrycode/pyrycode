@@ -698,6 +698,11 @@ func startRelayV2(
 		streamCleanup      func()
 		modalStreamCleanup func()
 		streamDrainCleanup func()
+		// busy is the #1201 turn-busy tracker, declared out here because the
+		// session-transition wiring below is UNCONDITIONAL while the tracker is
+		// constructed only inside the stream branch. In PTY mode it stays nil and the
+		// #1202 clear composed onto that observer is a nil-receiver no-op.
+		busy *turnBusyTracker
 	)
 	if w.streamSink != nil {
 		// STREAM MODE (#1081): both PTY interactive streams are gated OFF — neither
@@ -726,16 +731,18 @@ func startRelayV2(
 		// The #1201 per-conversation turn-busy tracker, fed from the same fan-in
 		// BEFORE the gate above, so a turn on a non-active conversation still reports
 		// busy. Its key is resolved on the write side by the same session→conversation
-		// closure the session_transition producer uses below (:756), which inherits
+		// closure the session_transition producer uses below (:780), which inherits
 		// conversationForSession's SessionHistory match — a just-rotated session still
 		// resolves — and keeps internal/conversations out of the tracker's file.
 		//
-		// Deliberately a local, not a relayWiring field: this slice ships UNWIRED —
-		// nothing reads the signal, no v2 frame changes, no delivery behaviour
-		// changes. The consumer slice that reads it hoists it, with the reader in the
-		// same diff. Until then #1202 and #1203 are the two clears that must land
-		// before the signal is safe to consult (see stream_turn_busy.go's KNOWN GAP).
-		busy := newTurnBusyTracker(
+		// Deliberately still a local, not a relayWiring field: no DELIVERY path reads
+		// the signal, no v2 frame changes, no delivery behaviour changes. Its only
+		// reader is the #1202 teardown clear composed onto the session-transition
+		// observer below (:779), which is why the declaration is hoisted above the
+		// branch. The consumer slice that consults it for delivery promotes it to a
+		// field, with the reader in the same diff. Until then #1203 is the last clear
+		// that must land (see stream_turn_busy.go's KNOWN GAP).
+		busy = newTurnBusyTracker(
 			func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, logger)
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, busy, logger)
 	} else if w.bridge != nil && w.claudeSessionsDir != "" {
@@ -766,8 +773,11 @@ func startRelayV2(
 	// emitted envelope. It captures w.convReg (a relayWiring field in scope here)
 	// so session_transition_v2.go never imports internal/conversations — the same
 	// purity discipline that keeps toWirePayload registry-free.
+	// The pool's observer slot is single-valued, so #1202's turn-busy clear is
+	// COMPOSED onto the emitter in there rather than installed separately. busy is
+	// nil in PTY mode (the branch above never ran) and the clear is nil-safe.
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, w.transitions, mgr,
-		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, logger)
+		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, busy, logger)
 
 	// Wire the queue_state producer (#722): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a queue_state envelope to capability-gated
