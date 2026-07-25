@@ -672,12 +672,15 @@ barriers on a *third*, later envelope rather than on the absence of an effect, s
 first a goroutine-dispatched clear is a harmless no-op regardless of scheduling (see
 [codebase/1209.md](../codebase/1209.md) for the mutation-testing writeup).
 
-**Ships unfired.** Nothing in production calls `exitFor` yet (`grep -rn 'OnChildExit' cmd/pyry/
---include='*.go' | grep -v '_test.go'` → 0), the tracker stays unread by any delivery path, and no v2 frame
-changed. #1210 (open, blocked-by this ticket) is the wiring slice: it assigns
-`streamsup.Config.OnChildExit = sink.exitFor(cfg.SessionID)` at the same construction point `sinkFor` is
-bound (`streamsup_runner.go:105`), which is what keeps the two lanes' session tags identical by
-construction. See [codebase/1209.md](../codebase/1209.md).
+**Fired in production since #1210.** `newStreamRunnerFactory` assigns
+`streamsup.Config.OnChildExit = sink.exitFor(cfg.SessionID)` one line below the `sinkFor` install
+(`streamsup_runner.go`), bound from the same `cfg.SessionID` — which is what keeps the two lanes' session
+tags identical by construction. A conversation whose claude child dies mid-turn now returns to idle: no
+`TurnEnd` for the abandoned turn and no pool transition are involved, the two feeds that are structurally
+silent on that path. The tracker itself stays unread by any delivery path and no v2 frame changed — the
+lane closes the crash-clear gap, it does not open a consumer. See [codebase/1210.md](../codebase/1210.md)
+for the wiring and its structural (no-runtime-check) ordering argument; [codebase/1209.md](../codebase/1209.md)
+for the lane itself.
 
 ## Production wiring — the `interactive_runner` toggle (#1081)
 
