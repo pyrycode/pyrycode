@@ -459,13 +459,21 @@ func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
 //  3. SendEsc is best-effort: an error (no live session / mid-teardown) is
 //     Warn-logged with the supervisor sentinel + conn_id and tolerated — there is
 //     nothing to roll back and no reply is owed. NEVER log payload bytes (there
-//     are none) or the rendered screen.
+//     are none) or the rendered screen. The actuation records which arm it
+//     dispatched to on the cmd/pyry side (v2.interrupt.dispatched, or
+//     v2.interrupt.no_actuator for a bound runner exposing no interrupt method),
+//     keyed by conversation id where this handler's records are keyed by conn_id
+//     (#1193).
 //
 // The step-1 record is Info, not Debug like the step-2 one: it reports a
 // live-daemon runtime state an operator needs at the daemon's default level
-// (#1192), where step 2 reports a foreground/pre-wire configuration. Note the
-// route is still silent on SUCCESS until #1193 lands, so an empty
-// v2.interrupt.* log does NOT prove the frame never arrived.
+// (#1192), where step 2 reports a foreground/pre-wire configuration. Since #1193
+// every path THROUGH the route records, which buys a second diagnostic: an
+// interrupt reaching handleInterrupt always leaves at least one v2.interrupt.*
+// record, so on a WIRED daemon an empty log means the frame never arrived. Wired
+// is load-bearing rather than weaselly — the step-2 arm records at Debug, which is
+// invisible at the daemon's default LevelInfo (raised only by -pyry-verbose), but
+// production always wires the Interrupter.
 func (m *V2SessionManager) handleInterrupt(s *V2Session) {
 	if !s.interactive {
 		// Inert, no Esc (the AC-2 negative path). conn_id is the only identifier

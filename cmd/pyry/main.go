@@ -1249,6 +1249,17 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 	return b.sess.WriteUserTurn(ctx, conversationID, payload)
 }
 
+// interruptArm names which actuation interruptRunner dispatched to. The constant
+// VALUES are operator-facing: SendEsc logs them verbatim as a record's arm field
+// (#1193), so they are part of the record contract, not an internal detail.
+type interruptArm string
+
+const (
+	armInterrupt interruptArm = "interrupt" // streamRunner.Interrupt()
+	armSendEsc   interruptArm = "send_esc"  // *supervisor.Supervisor.SendEsc()
+	armNone      interruptArm = "none"      // neither method — inert
+)
+
 // interruptRunner actuates a runner's interrupt through whichever concrete method
 // its runner type exposes — the SendEsc-vs-Interrupt dispatch #1121 places in
 // cmd/pyry, the only package that sees both concrete runner types (the streamRunner
@@ -1258,14 +1269,23 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 // is matched first so any future runner that grows both prefers the stream-json
 // control_request over a PTY Esc. An unknown runner is inert (nil) — no actuation
 // beats wrong actuation.
-func interruptRunner(r sessions.Runner) error {
+//
+// It returns the arm it dispatched to alongside the chosen method's error, so the
+// caller — the only scope holding the conversation id — can record which arm ran
+// (#1193); armNone always pairs with a nil error. The dispatcher itself stays pure:
+// no logger, no ambient state. The arm is an OBSERVABILITY value and nothing may
+// branch on it beyond selecting a record — in particular armNone must NOT trigger a
+// fallback actuation, since the only other runner to try is the bootstrap
+// supervisor, the #678 cross-conversation isolation break resolveBoundRunner's
+// guard exists to prevent.
+func interruptRunner(r sessions.Runner) (interruptArm, error) {
 	switch v := r.(type) {
 	case interface{ Interrupt() error }:
-		return v.Interrupt()
+		return armInterrupt, v.Interrupt()
 	case interface{ SendEsc() error }:
-		return v.SendEsc()
+		return armSendEsc, v.SendEsc()
 	default:
-		return nil
+		return armNone, nil
 	}
 }
 
@@ -1327,11 +1347,17 @@ func (a activeInterrupter) logger() *slog.Logger {
 // ambiguous state (no active conversation, unbound/dangling binding) is inert
 // (nil), never actuating the wrong child; a live runner's no-child error
 // propagates for handleInterrupt to Warn-log and tolerate (best-effort contract).
-// Each inert arm records which one it took, at Info so the records are visible at
-// the daemon's default level (#1192). The successful actuation is still silent
-// until #1193, so an empty v2.interrupt.* log does NOT prove the frame never
-// arrived. The records identify the CONVERSATION: resolveBoundRunner never
-// surfaces the bound session id to this caller.
+// EVERY arm records which one it took, at Info so the records are visible at the
+// daemon's default level (#1192, #1193) — the inert ones, the actuation, and a
+// bound runner exposing no interrupt method at all. Combined with handleInterrupt's
+// own records that closes the route: an interrupt reaching it always leaves at
+// least one v2.interrupt.* record, so on a wired daemon an empty log means the
+// frame never arrived. The dispatched record is written when the arm RETURNS —
+// under #1193's direction choice the arm identity IS interruptRunner's return
+// value — so an actuation that blocked forever would leave none; both actuations
+// are single small writes and no such hang has been observed. The records identify
+// the CONVERSATION: resolveBoundRunner never surfaces the bound session id to this
+// caller.
 func (a activeInterrupter) SendEsc() error {
 	convID := a.currentConv()
 	if convID == "" {
@@ -1348,7 +1374,29 @@ func (a activeInterrupter) SendEsc() error {
 			"conversation_id", convID)
 		return nil
 	}
-	return interruptRunner(r)
+	arm, err := interruptRunner(r)
+	if arm == armNone {
+		a.logger().Info("relay: v2 interrupt inert; bound runner exposes no interrupt method",
+			"event", "v2.interrupt.no_actuator",
+			"conversation_id", convID)
+		return err
+	}
+	// Emitted even when the arm returned an error: this records WHICH arm was
+	// dispatched to, not that the child quiesced (hence dispatched, not actuated).
+	// handleInterrupt's v2.interrupt.keystroke_err carries the error but not the
+	// arm, so on a failed actuation the PAIR is what names the failing actuation —
+	// suppressing this record on error would delete that. The error itself is NOT
+	// repeated here: keystroke_err already carries it, and logging a wrapped
+	// supervisor/streamsup sentinel twice under two correlation keys widens the
+	// record surface for no diagnostic gain. arm is logged as a plain string, never
+	// the named
+	// type: slog renders a named string type through the Any path, and relay's
+	// TextHandler and cmd/pyry's JSONHandler do not agree on how that renders.
+	a.logger().Info("relay: v2 interrupt dispatched",
+		"event", "v2.interrupt.dispatched",
+		"conversation_id", convID,
+		"arm", string(arm))
+	return err
 }
 
 // resolveBoundSession is the new_session twin of resolveBoundRunner: it resolves
