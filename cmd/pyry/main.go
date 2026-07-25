@@ -998,6 +998,7 @@ func runSupervisor(args []string) error {
 			resolveRunner: func(convID string) (sessions.Runner, bool) {
 				return resolveBoundRunner(convReg, pool, convID)
 			},
+			log: logger,
 		},
 		activeSessionStarter: activeSessionStarter{
 			currentConv: active.CurrentConversation,
@@ -1299,6 +1300,23 @@ func resolveBoundRunner(convReg *conversations.Registry, pool *sessions.Pool, co
 type activeInterrupter struct {
 	currentConv   func() string
 	resolveRunner func(convID string) (sessions.Runner, bool)
+
+	// log records which arm an inbound interrupt took (#1192). Optional: nil
+	// falls back to slog.Default() via logger().
+	log *slog.Logger
+}
+
+// logger returns a's logger, falling back to slog.Default() when unset.
+// activeInterrupter is a constructor-less bag of injected seams built as a
+// named-field literal, so an omitted field is a reachable state — and a nil
+// *slog.Logger panics on first use, which on this remotely-driven relay path
+// would be a latent crash on a rarely-hit inert arm. Falling back to the default
+// logger (not a discard handler) keeps an unwired literal's record visible.
+func (a activeInterrupter) logger() *slog.Logger {
+	if a.log == nil {
+		return slog.Default()
+	}
+	return a.log
 }
 
 // SendEsc interrupts the active conversation's bound runner. It keeps the relay
@@ -1309,13 +1327,25 @@ type activeInterrupter struct {
 // ambiguous state (no active conversation, unbound/dangling binding) is inert
 // (nil), never actuating the wrong child; a live runner's no-child error
 // propagates for handleInterrupt to Warn-log and tolerate (best-effort contract).
+// Each inert arm records which one it took, at Info so the records are visible at
+// the daemon's default level (#1192). The successful actuation is still silent
+// until #1193, so an empty v2.interrupt.* log does NOT prove the frame never
+// arrived. The records identify the CONVERSATION: resolveBoundRunner never
+// surfaces the bound session id to this caller.
 func (a activeInterrupter) SendEsc() error {
 	convID := a.currentConv()
 	if convID == "" {
+		// No conversation id to carry — the record's information is its existence:
+		// the frame reached SendEsc and nothing was active.
+		a.logger().Info("relay: v2 interrupt inert; no active conversation",
+			"event", "v2.interrupt.no_active_conv")
 		return nil
 	}
 	r, ok := a.resolveRunner(convID)
 	if !ok {
+		a.logger().Info("relay: v2 interrupt inert; active conversation has no bound runner",
+			"event", "v2.interrupt.no_bound_runner",
+			"conversation_id", convID)
 		return nil
 	}
 	return interruptRunner(r)

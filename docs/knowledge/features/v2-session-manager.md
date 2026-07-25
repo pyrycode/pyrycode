@@ -918,7 +918,11 @@ no-op in claude), so no nonce / dedup is needed.
      shared gate would be a one-consumer abstraction (YAGNI). The `s.interactive`
      flag is server-authoritative (#626) — set fail-closed from the daemon's
      `negotiateCapabilities`, never from the phone's raw advertisement, so a spoofed
-     `capabilities` advertisement can never flip it.
+     `capabilities` advertisement can never flip it. **Since #1192** this arm also
+     `Info`-logs `v2.interrupt.non_interactive` (`conn_id` only — never
+     `s.peerStatic` or `s.device`), because it was previously indistinguishable in
+     the daemon log from three other silent faults (frame never arrived, route
+     inert, keystroke ignored) — see below.
   2. **`if m.cfg.Interrupter == nil`** → debug-log `v2.interrupt.inert`, return
      (foreground / pre-wire; mirrors `handleModalCancel`'s nil-resolver guard).
   3. **`m.cfg.Interrupter.SendEsc()`** — best-effort. An error (no live session /
@@ -941,6 +945,27 @@ design, not built here (#1121's spec flags this explicitly and rules it a
 non-regression: today's pre-#1121 code routed every interrupt to bootstrap
 regardless of conn, so #1121 strictly improves isolation without introducing a new
 cross-conversation leak).
+
+**Observability (#1192).** Before #1192 the whole route was silent on success and
+on almost every failure, so a live daemon log showing nothing after an inbound
+`interrupt` frame could not distinguish "the frame never arrived" from "the conn
+was not interactive," "the route went inert," or "the keystroke actuated and
+claude ignored it" — a real live-daemon incident (`real-claude-interrupt`,
+pyrycode-desktop#483) burned 2m10s on exactly this ambiguity. #1192 instruments
+the three arms reachable without a signature change, each at `Info` (the daemon's
+default level) so the record is visible without `-pyry-verbose`: `handleInterrupt`
+step 1 above (`v2.interrupt.non_interactive`, `conn_id`), and two arms inside
+`activeInterrupter.SendEsc()` — `v2.interrupt.no_active_conv` (no fields; its
+existence is the information) when `currentConv()` is `""`, and
+`v2.interrupt.no_bound_runner` (`conversation_id`) when `resolveRunner` returns
+`!ok`. The records identify the **conversation**, not the session:
+`resolveBoundRunner` never surfaces the bound `CurrentSessionID` to its caller,
+and widening that signature to do so was ruled out as disproportionate to the
+diagnostic gained. **Interim gap:** the successful actuation and the
+`interruptRunner` inert arm (resolved runner exposes neither interrupt method)
+both stay silent until #1193, which needs `interruptRunner`'s signature to
+change — an empty `v2.interrupt.*` log does **not** yet prove the frame never
+arrived. See [`codebase/1192.md`](../codebase/1192.md).
 
 ### Inbound new_session (#831) — `SessionStarter` seam + `/clear` routing
 
