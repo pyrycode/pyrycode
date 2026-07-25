@@ -24,25 +24,31 @@ import (
 // screenSnapshotterOrNil records at relay.go:395-410). The map is bounded by the
 // conversations currently mid-turn, not by every conversation ever seen.
 //
-// KNOWN GAP — the clear is event-driven only. A turn is closed here solely by its
-// TurnEnd arriving on the fan-in. Two paths reach a permanently-busy conversation
-// without any TurnEnd ever arriving, and each is its own slice:
+// KNOWN GAP — ONE path remains open. A turn is closed here by two feeds: its
+// TurnEnd arriving on the fan-in (observe), and a pool teardown transition — a
+// /clear rotation or an idle/cap eviction — reaching clearForSession (#1202).
+// What is still missing is a child that dies mid-turn and is respawned: it fires
+// no pool transition and emits no result line for the abandoned turn — #1203.
 //
-//   - a session torn down under the conversation (/clear rotation, idle/cap
-//     eviction) — #1202. That slice also owns the narrower rotation edge: because
-//     conversationForSession matches SessionHistory, a retired session's late
-//     TurnEnd can clear a turn its successor opened (fails open, reports idle when
-//     busy — the same direction as a daemon restart, which starts all-idle).
-//   - a child that dies mid-turn and is respawned, which fires no pool transition
-//     and emits no result line for the abandoned turn — #1203.
-//
-// Both must land before any consumer reads this signal. While the tracker is
+// #1203 must land before any consumer reads this signal. While the tracker is
 // unwired a wedge is harmless; once consulted it becomes a conversation that can
 // never be delivered to again.
 //
+// The narrower rotation edge #1202 was expected to own is UNREACHABLE, and is
+// recorded here rather than defended with a guard. It would need two distinct
+// producer tags resolving to one conversation at the same time: a /clear re-keys
+// ONE pool entry in place, and the Parser's sink tag is fixed at runner
+// construction (streamsup_runner.go:105) while RestartFresh rotates only the
+// runner's internal spawn id — so every id reachable through
+// conversationForSession's SessionHistory match belongs to the SAME runner that
+// continues under the successor id, tagging its events identically either way.
+// Eviction cannot supply a second producer either: being binding-neutral, an
+// evicted id never enters SessionHistory (conversations/registry.go:241 is its
+// only production writer, reached solely from sessions/transition.go:59).
+//
 // SECURITY: content-free. The only fields ever logged are the event discriminant
 // (eventKind) and the producing session id, matching the drain's existing drop
-// diagnostics (stream_turn_drain.go:74-79, :129-133). The key is never taken from
+// diagnostics (stream_turn_drain.go:74-79, :143-149). The key is never taken from
 // the wire or the stream bytes — it is resolved daemon-side from the registry
 // against the runner's construction-time session tag, so a hostile or confused
 // child can only ever mark its OWN conversation busy.
@@ -142,17 +148,87 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 		return
 	}
 
+	t.setBusy(convID, opens)
+}
+
+// clearForSession closes any open turn on the conversation that owns sessionID —
+// the teardown feed (#1202), driven from the pool's TransitionObserver on a
+// /clear rotation or an idle/cap eviction. Those are exactly the turns whose
+// TurnEnd never arrives, so observe alone would leave the conversation busy
+// forever.
+//
+// A nil receiver is a no-op, mirroring observe. This is not defensive padding:
+// the transition observer is wired UNCONDITIONALLY (relay.go) while the tracker
+// is constructed only on the stream path, so in the daemon's default PTY mode
+// this method IS called on a nil tracker at the first /clear or eviction, on the
+// pool's own lifecycle goroutine. Busy and WaitIdle carry no such guard — they
+// take t.mu immediately — which is why the wiring hands the nil to THIS method
+// and to no other. The caller's parameter is likewise the concrete
+// *turnBusyTracker and never an interface, for the reason observe documents.
+//
+// It runs SYNCHRONOUSLY on the goroutine that fired the transition, which #659's
+// observer contract requires not to block. That holds: the work is one resolve (a
+// slice-header copy under the conversations registry's mutex — Save releases that
+// mutex BEFORE any file I/O, conversations/registry.go:79-90), one map delete and
+// one close, all bounded with no channel receive, no I/O and no callback out. The
+// same goroutine already pays a full atomic write including fsync one line
+// earlier on the /clear path (sessions/transition.go:57-64 → rebindConversation →
+// Save), so a leaf-mutex membership delete is orders of magnitude cheaper than
+// what it has already spent before the observer is even called.
+//
+// The key is a SESSION id, never a conversation id. The only production producer
+// of the value is internal/sessions' own record of a lifecycle event it
+// performed, and the conversation is then resolved daemon-side by the same
+// closure observe uses — which is what keeps the SECURITY note above ("the key is
+// never taken from the wire") true for this feed as well. A clearConversation
+// variant would be a shorter call chain and would quietly retire that invariant.
+//
+// Idempotent: an already-idle conversation is neither mutated nor re-broadcast.
+func (t *turnBusyTracker) clearForSession(sessionID string) {
+	if t == nil {
+		return
+	}
+
+	// Resolved OUTSIDE t.mu — the identical lock-order reason observe documents.
+	convID, ok := t.resolve(sessionID)
+	if !ok || convID == "" {
+		// Expected rather than exceptional: a bootstrap session evicted before any
+		// binding, or an evicted id whose conversation has since re-bound elsewhere.
+		// Skipping is the fail-closed answer; a wildcard or empty-key clear would
+		// report a LIVE turn on some other conversation as idle.
+		//
+		// SECURITY: content-free, and session_id ONLY. The resolved conversation_id
+		// is deliberately withheld — it is a routing key treated as sensitive
+		// alongside session ids and workspace_cwd (session_transition_v2.go:38-47):
+		// resolved daemon-side, stamped on the wire, never logged.
+		t.logger.Debug("relay: stream-turn clear skip; session resolves to no conversation",
+			"event", "stream_turn.clear_unresolved",
+			"session_id", sessionID)
+		return
+	}
+
+	t.setBusy(convID, false)
+}
+
+// setBusy applies one membership change for conversationID under a SINGLE t.mu
+// acquisition, broadcasting on t.changed only when the set actually moved.
+//
+// Shared by both feeds rather than hand-duplicated in each: the close-and-replace
+// protocol below is the invariant WaitIdle's check-and-subscribe atomicity
+// depends on, and a second, independently-written copy of it is precisely the
+// lost-wakeup bug this extraction forecloses.
+func (t *turnBusyTracker) setBusy(conversationID string, open bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	_, was := t.busy[convID]
-	if opens == was {
+	_, was := t.busy[conversationID]
+	if open == was {
 		return // membership unchanged: no mutation, and no broadcast
 	}
-	if opens {
-		t.busy[convID] = struct{}{}
+	if open {
+		t.busy[conversationID] = struct{}{}
 	} else {
-		delete(t.busy, convID)
+		delete(t.busy, conversationID)
 	}
 
 	// Close-and-replace under the same lock acquisition as the mutation: that is

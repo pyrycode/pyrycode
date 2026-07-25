@@ -211,12 +211,42 @@ func toWirePayload(t sessions.SessionTransition) (protocol.SessionTransitionPayl
 	}
 }
 
-// startSessionTransitionStreamV2 installs the emitter as the pool's transition
-// observer and starts its Run goroutine. Returns a cleanup that waits for Run to
+// transitionClearsTurn reports whether t tears a session down under its
+// conversation and, if so, the session id that is that conversation's LIVE
+// binding at observer time — the key #1202's turn-busy clear resolves on.
+//
+// It delegates to toWirePayload so this file carries ONE closed reason switch
+// rather than two: an unknown or future reason returns ok=false and clears
+// nothing, inheriting the whitelist drop toWirePayload already forces on the wire
+// path. Today the two questions ("does this reach the wire" / "does this close a
+// turn") have the same answer for every reason the pool produces; a future reason
+// that needs one without the other is a SPLIT of this switch, not a special case
+// inside it.
+//
+// NewSessionID rather than PreviousID is deliberate. It is the conversation's
+// CurrentSessionID for both reasons (the rotated id post-#739-rebind for clear;
+// the mirrored evicted id for the binding-neutral eviction), which is
+// conversationForSession's PRIMARY match (relay.go:845). PreviousID would also
+// resolve today — via RebindSession's SessionHistory append — but only for as
+// long as notifyTransition keeps driving the rebind ahead of the observer fan-out.
+func transitionClearsTurn(t sessions.SessionTransition) (sessionID string, ok bool) {
+	p, ok := toWirePayload(t)
+	if !ok {
+		return "", false
+	}
+	return p.NewSessionID, true
+}
+
+// startSessionTransitionStreamV2 installs the pool's transition observer and
+// starts the emitter's Run goroutine. Returns a cleanup that waits for Run to
 // exit on ctx-cancel. Mirrors startAssistantTurnBridgeV2.
 //
+// The observer slot is single-valued (SetTransitionObserver is a plain
+// assignment), so the two consumers are COMPOSED here rather than each installing
+// their own: the wire emitter, and #1202's turn-busy clear.
+//
 // SetTransitionObserver MUST run before Pool.Run; the call site (startRelayV2 ←
-// startRelay at main.go:489) is strictly before pool.Run (main.go:514), so the
+// startRelay at main.go:984) is strictly before pool.Run (main.go:1066), so the
 // observer field is installed once and read-only thereafter (#659's
 // install-before-Run contract, race-free).
 //
@@ -230,10 +260,26 @@ func startSessionTransitionStreamV2(
 	sink transitionObserverSink,
 	bcast interactiveBroadcaster,
 	resolveConv func(string) (string, bool),
+	busy *turnBusyTracker,
 	logger *slog.Logger,
 ) func() {
 	emitter := newSessionTransitionEmitterV2(bcast, resolveConv, logger)
-	sink.SetTransitionObserver(emitter.Enqueue)
+	sink.SetTransitionObserver(func(t sessions.SessionTransition) {
+		// The incumbent runs FIRST and unconditionally. Enqueue is a documented
+		// non-blocking buffered send that nothing downstream can delay, so keeping it
+		// ahead of the clear leaves every transition that reaches the emitter today
+		// still reaching it, timed identically relative to this goroutine's progress
+		// — including its own drop-on-full decision.
+		emitter.Enqueue(t)
+		if sid, ok := transitionClearsTurn(t); ok {
+			// busy may be nil: the tracker is constructed only on the stream path
+			// (relay.go) while this install is unconditional, so PTY mode reaches here
+			// with nothing. clearForSession is a nil-receiver no-op. Concrete pointer,
+			// never an interface — a typed-nil inside an interface is non-nil at the
+			// interface level and would route straight past that guard.
+			busy.clearForSession(sid)
+		}
+	})
 
 	done := make(chan struct{})
 	go func() {

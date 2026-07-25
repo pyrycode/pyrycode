@@ -257,6 +257,104 @@ func TestTurnBusyTracker_WaitIdleHonoursCancel(t *testing.T) {
 	}
 }
 
+// --- #1202: the teardown feed ------------------------------------------------
+
+// #1202 AC1/AC2: clearForSession closes an open turn when the conversation's
+// session is torn down. NO turn event of any kind is fed after the opener in any
+// sub-case, and that absence is the point: the failure mode this feed exists to
+// close is precisely the one where the stream has gone SILENT (the abandoned
+// turn's result line never comes), so a TurnEnd anywhere here would be exercising
+// the OTHER feed and would stay green with clearForSession deleted.
+//
+// The "unrelated" and "unresolvable" sub-cases are the spurious-clear direction,
+// which is the costly one. A missed clear wedges a conversation busy (fails
+// closed); a clear on the wrong conversation reports a LIVE turn as idle and,
+// under the consuming slice, releases a mid-turn send into it.
+func TestTurnBusyTracker_ClearForSession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		openFor   string // session id fed one opener; "" opens nothing
+		clear     string // session id handed to clearForSession
+		wantBusyA bool
+		wantBusyB bool
+	}{
+		{"teardown of the owning session closes the turn", "sess-a", "sess-a", false, false},
+		{"teardown of an unrelated session leaves the turn open", "sess-a", "sess-b", true, false},
+		{"teardown of an unresolvable session clears nothing", "sess-a", "sess-gone", true, false},
+		{"teardown of an already-idle conversation is a no-op", "", "sess-a", false, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTurnBusyTracker(stubBusyResolve(map[string]string{
+				"sess-a": testConvID,
+				"sess-b": testConvIDB,
+			}), discardLogger())
+
+			if tc.openFor != "" {
+				tr.observe(tc.openFor, turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+			}
+			tr.clearForSession(tc.clear)
+
+			if got := tr.Busy(testConvID); got != tc.wantBusyA {
+				t.Errorf("Busy(A) after clearForSession(%q) = %v, want %v", tc.clear, got, tc.wantBusyA)
+			}
+			if got := tr.Busy(testConvIDB); got != tc.wantBusyB {
+				t.Errorf("Busy(B) after clearForSession(%q) = %v, want %v", tc.clear, got, tc.wantBusyB)
+			}
+		})
+	}
+}
+
+// #1202 AC4 (tracker tier): a nil receiver is a no-op. The pool's transition
+// observer is wired UNCONDITIONALLY (relay.go) while the tracker is constructed
+// only on the stream path, so in the daemon's default PTY mode this method IS
+// called on a nil tracker at the first /clear or eviction — on the pool's own
+// lifecycle goroutine. Busy and WaitIdle deliberately do NOT carry this guard
+// (they take t.mu immediately), which is why it has to live on the method the
+// unconditional wiring actually calls.
+func TestTurnBusyTracker_ClearForSessionNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var tr *turnBusyTracker
+	tr.clearForSession("sess-a") // must not panic
+}
+
+// #1202 AC1: a blocked WaitIdle is woken by the teardown clear, not only by a
+// TurnEnd. This is the test that fails if clearForSession mutates the map without
+// the close-and-replace broadcast: Busy would already read idle while every
+// waiter stayed parked on a generation channel that is never closed.
+func TestTurnBusyTracker_ClearForSessionWakesWaitIdle(t *testing.T) {
+	t.Parallel()
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+
+	done := make(chan error, 1)
+	go func() { done <- tr.WaitIdle(context.Background(), testConvID) }()
+
+	// The wait must still be outstanding while the turn is open. The grace window
+	// can never fail a correct WaitIdle; it only fires when WaitIdle returned early.
+	select {
+	case err := <-done:
+		t.Fatalf("WaitIdle returned (%v) while a turn was open", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	tr.clearForSession("sess-a")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("WaitIdle = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitIdle never returned after the conversation's session was torn down")
+	}
+}
+
 // AC2 (-race): concurrent readers on arbitrary goroutines against a single
 // goroutine driving transitions. The assertion is race cleanliness plus
 // termination — every reader exits and both conversations end idle — not any
