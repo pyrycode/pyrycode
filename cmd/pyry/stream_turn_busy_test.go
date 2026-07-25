@@ -487,6 +487,149 @@ func TestStreamTurnDrainV2_BusyFedBeforeActiveGate(t *testing.T) {
 	assertNoPush(t, bcast.pushed)
 }
 
+// --- #1209: the exit lane on the fan-in ---------------------------------------
+
+// exitLaneDrain wires the drain for the two ordering tests below: the cursor and
+// the gate both on conversation B, while the exits and openers under test are all
+// for session A. That fixture is what makes the exit arm's PLACEMENT load-bearing
+// — an exit handled after the active-session gate would be dropped there and never
+// clear a BACKGROUND conversation, which is the common case for a crash (the
+// crashed runner need not be the one the user is looking at). A test run entirely
+// on the active session cannot tell the two placements apart.
+func exitLaneDrain(t *testing.T) (sink *streamTurnSink, busy *turnBusyTracker, drops chan string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cur := &stubCursor{}
+	cur.set(testConvIDB) // cursor on conversation B...
+	active := &stubActiveSession{}
+	active.set("sess-b") // ...and B's bound session is what the gate admits
+	bcast := newChanBcast("conn-b")
+	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	busy = newTurnBusyTracker(stubBusyResolve(map[string]string{
+		"sess-a": testConvID,
+		"sess-b": testConvIDB,
+	}), discardLogger())
+
+	drops = make(chan string, 8)
+	sink = newStreamTurnSink(0, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, busy,
+		slog.New(dropWatcher{kinds: drops}))
+	t.Cleanup(func() { cancel(); cleanup() }) // cancel-then-join; joining first deadlocks
+	return sink, busy, drops
+}
+
+// #1209 AC2: [opener for S, exit for S] pushed in that order leaves S idle.
+//
+// NO result line is fed, so no TurnEnd is ever parsed for this turn, and no
+// transition observer exists anywhere in this test. Those are exactly the two
+// feeds that are structurally silent when a child crashes mid-turn, so the clear
+// asserted here can only have come from the exit lane.
+func TestStreamTurnDrainV2_ExitClearsOpenTurn(t *testing.T) {
+	t.Parallel()
+
+	sink, busy, drops := exitLaneDrain(t)
+
+	feedLines(sink, "sess-a", assistantTextLine("ma", "for-A"))
+
+	// Barrier: the not-active drop is logged AFTER observe on the same goroutine.
+	waitDropKind(t, drops, "text_chunk")
+
+	// NOT decoration. WaitIdle returns nil IMMEDIATELY on an already-idle
+	// conversation, so without establishing busy first the wait below would pass
+	// even with the exit lane doing nothing at all — the drain simply might not
+	// have reached the opener yet, leaving A idle for the wrong reason.
+	if !busy.Busy(testConvID) {
+		t.Fatalf("Busy(A) = false after an opener; the WaitIdle below would then pass vacuously")
+	}
+
+	sink.exitFor("sess-a")()
+
+	// Barrier: the clear's setBusy closes t.changed, which is what wakes WaitIdle
+	// — the one barrier an exit envelope offers, since its arm continues before
+	// the gate's drop log and before any push.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	if err := busy.WaitIdle(waitCtx, testConvID); err != nil {
+		t.Fatalf("WaitIdle(A) = %v after a child-exit signal for A's session, want nil", err)
+	}
+	if busy.Busy(testConvID) {
+		t.Errorf("Busy(A) = true after the exit closed A's abandoned turn, want false")
+	}
+}
+
+// #1209 AC3: [exit for S, opener for S] pushed in that order leaves S busy — the
+// exit does not clear a turn opened after it. This is the criterion that forbids a
+// deferred or asynchronous clear: a clear handed to a goroutine would satisfy AC2
+// and fail here.
+func TestStreamTurnDrainV2_ExitDoesNotClearALaterTurn(t *testing.T) {
+	t.Parallel()
+
+	sink, busy, drops := exitLaneDrain(t)
+
+	sink.exitFor("sess-a")() // ...before any turn on A exists
+	feedLines(sink, "sess-a", assistantTextLine("ma", "for-A"))
+
+	// Barrier: the trailing opener's own not-active drop. The drain is serial and
+	// FIFO, so this proves the exit was processed first.
+	waitDropKind(t, drops, "text_chunk")
+
+	if !busy.Busy(testConvID) {
+		t.Fatalf("Busy(A) = false; an exit that precedes the opener must not clear it")
+	}
+
+	// The Busy check alone catches a GOROUTINE-dispatched clear only sometimes —
+	// it could land either side of the FIFO barrier. A bounded wait wanting a
+	// deadline is the assertion that fails deterministically for that design. The
+	// flake direction is safe: a correct implementation always times out, so
+	// machine slowness makes this more likely to pass, never to fail spuriously.
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer shortCancel()
+	if err := busy.WaitIdle(shortCtx, testConvID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WaitIdle(A) = %v, want %v; the exit was dispatched asynchronously and landed late",
+			err, context.DeadlineExceeded)
+	}
+}
+
+// #1209 AC3 (the teeth): the clear runs INLINE on the drain goroutine, before the
+// next envelope on the fan-in is processed.
+//
+// The test above states AC3's criterion, but it catches a goroutine-dispatched
+// clear only by luck: with [exit, opener] the deferred clear fires while the
+// conversation is still idle, so it is a harmless no-op unless the goroutine is
+// delayed past the opener. Here the exit lands on a BUSY conversation and the
+// barrier is a LATER envelope's drop, so the ordering is what is asserted: at the
+// moment the drain logs C's drop it has already returned from the exit arm, and a
+// synchronous clear has provably taken effect. `go busy.clearForSession(…)` fails
+// this unless the fresh goroutine outruns the drain's very next loop iteration.
+// The flake direction is safe — a correct inline clear has ALWAYS taken effect at
+// this barrier, so there is no timing under which this fails spuriously.
+func TestStreamTurnDrainV2_ExitClearsInlineBeforeTheNextEnvelope(t *testing.T) {
+	t.Parallel()
+
+	sink, busy, drops := exitLaneDrain(t)
+
+	feedLines(sink, "sess-a", assistantTextLine("ma", "for-A"))
+	waitDropKind(t, drops, "text_chunk")
+	if !busy.Busy(testConvID) {
+		t.Fatalf("Busy(A) = false after an opener; the clear below would have nothing to do")
+	}
+
+	sink.exitFor("sess-a")()
+
+	// A trailing event for a third, unresolvable session: it is tracked nowhere and
+	// dropped at the gate, so its only role is to make the drain log one more time
+	// AFTER it has finished with the exit.
+	feedLines(sink, "sess-c", assistantTextLine("mc", "for-C"))
+	waitDropKind(t, drops, "text_chunk")
+
+	if busy.Busy(testConvID) {
+		t.Errorf("Busy(A) = true once a later envelope had already been processed; the clear did not run inline on the drain goroutine")
+	}
+}
+
 // The full open→close cycle through the real parser: the four variants that reach
 // the sink are produced by streamsup.Parser alone, so this is the reachable-input
 // counterpart to the unit-tier whitelist table.

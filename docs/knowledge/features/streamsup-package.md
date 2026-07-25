@@ -515,8 +515,10 @@ read — the `screenSnapshotterOrNil` hazard, `relay.go:395-410`).
 event-driven only (`TurnEnd` on the fan-in). #1202 (below) closed the session-teardown half of that gap.
 One path remains open: a child that dies mid-turn and respawns, firing no pool transition and no `result`
 line for the abandoned turn. #1206 (below) added the runner-side seam that makes that exit observable;
-#1207 (open, blocked-by #1206) wires it into this tracker's clear — the gap stays open until #1207 lands.
-See [codebase/1201.md](../codebase/1201.md).
+#1209 (below) added the fan-in lane that turns such an exit into a clear, correctly ordered against the
+dead child's already-pushed events — still shipped **unfired**. #1210 (open, blocked-by #1209) is the
+wiring slice that assigns `streamsup.Config.OnChildExit` in production; the gap stays open until #1210
+lands. See [codebase/1201.md](../codebase/1201.md).
 
 ### Session-teardown clear (#1202)
 
@@ -622,8 +624,60 @@ sink, not from this callback.
 
 **Ships unwired, with zero `cmd/pyry` diff.** Every `streamsup.Config` literal tree-wide is named-field, so
 the new field is nil on the sole production construction path (`streamsup_runner.go`'s
-`mapStreamsupConfig`) with no edit required. #1207 is the first consumer — the mid-turn crash clear the
-#1201/#1202 pair couldn't reach. See [codebase/1206.md](../codebase/1206.md).
+`mapStreamsupConfig`) with no edit required. #1209/#1210 are the consumers — the exit lane (#1209, below)
+and its production wiring (#1210, open) that together close the mid-turn crash clear the #1201/#1202 pair
+couldn't reach. See [codebase/1206.md](../codebase/1206.md).
+
+### Exit lane on the turn-busy fan-in (#1209)
+
+Split from #1207 (itself the last child of the #1203/#1198 crash-clear lineage), alongside open sibling
+#1210. #1206's `Config.OnChildExit` is explicitly *not* a drain barrier: `cmd.Wait` joins the stdout
+copier goroutine and `Parser.emit` calls its sink synchronously (`parser.go:231-235`), so by the time the
+callback fires, every event the dead child produced has been **pushed** onto `streamTurnSink.ch` — but not
+necessarily **drained** by the separate drain goroutine reading that 256-slot buffer. A clear delivered on
+any lane other than that channel could land before the drain processes buffered openers the crashed child
+already emitted, re-marking the conversation busy with the clear already spent and no further exit coming.
+This slice closes that ordering hole by putting the clear signal **on the fan-in itself**: FIFO with a
+single reader, so it cannot be overtaken.
+
+`streamTurnEnvelope` gains an explicit `exit bool` field — never a nil `turnevent.Event` used as a
+sentinel, since `eventKind(nil)` returns `"unknown"` rather than failing (`interactive_turn_v2.go:419-421`),
+which would make a missed nil-check silent rather than loud, and would make the exit signal a value of the
+same type `Handle` accepts, retiring "Handle cannot receive a non-event" as a type-level fact.
+`streamTurnSink.exitFor(sessionID string) func()` mirrors `sinkFor`'s non-blocking `select`/`default` send
+— same drop-newest-on-full behaviour — but is a deliberately separate closure with its own diagnostic: the
+drop is logged at **`Warn`** (`sinkFor`'s is `Debug`) with exactly `event: "stream_turn.exit_sink_full"` and
+`session_id` — no `kind`, mirroring the existing content-free `clear_unresolved` shape. The asymmetry is
+the point: a dropped ordinary event is a lost delta, invisible at the default `LevelInfo` on purpose; a
+dropped exit is a conversation that (once #1210 wires a producer) stays busy forever, which is degraded
+operation and must be visible by default.
+
+The drain's `sink.ch` arm handles `env.exit` as its **first** statement —
+`busy.clearForSession(env.sessionID); continue` — ahead of `observe`, the active-session gate, and
+`emitter.Handle`. Each position is load-bearing: before `observe`, because an exit carries no event to
+route through the event path; before the gate, for the same reason the tracker itself is fed before it —
+the gate would otherwise drop a background conversation's exit, and background is the common case for a
+crash; before `Handle`, which (combined with the explicit field) keeps `Handle` structurally unable to
+receive a non-event. `clearForSession` (`stream_turn_busy.go:187`, extended in #1202) is called **as-is** —
+no second session→conversation resolution, no second copy of the membership-mutation protocol — so it
+inherits the nil-receiver no-op and the fail-closed `clear_unresolved` skip on an unresolvable session for
+free; that is why this slice's own drop diagnostic withholds the conversation id (the sink closure holds no
+resolver and structurally cannot name one).
+
+**No new goroutine.** The clear runs inline on the drain goroutine — the same single reader/writer
+`observe` already uses — so this feed is serialised against the event feed by construction rather than by
+the tracker's mutex. A deferred or goroutine-dispatched clear would satisfy the positive ordering test
+(`[opener, exit]` → idle) but fail the negative one (`[exit, opener]` → busy): the test that catches it
+barriers on a *third*, later envelope rather than on the absence of an effect, since with the exit arriving
+first a goroutine-dispatched clear is a harmless no-op regardless of scheduling (see
+[codebase/1209.md](../codebase/1209.md) for the mutation-testing writeup).
+
+**Ships unfired.** Nothing in production calls `exitFor` yet (`grep -rn 'OnChildExit' cmd/pyry/
+--include='*.go' | grep -v '_test.go'` → 0), the tracker stays unread by any delivery path, and no v2 frame
+changed. #1210 (open, blocked-by this ticket) is the wiring slice: it assigns
+`streamsup.Config.OnChildExit = sink.exitFor(cfg.SessionID)` at the same construction point `sinkFor` is
+bound (`streamsup_runner.go:105`), which is what keeps the two lanes' session tags identical by
+construction. See [codebase/1209.md](../codebase/1209.md).
 
 ## Production wiring — the `interactive_runner` toggle (#1081)
 
@@ -694,9 +748,10 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1120.md`](../codebase/1120.md) — the interrupt send primitive + `result` subtype mapping slice.
 - [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`nextSpawnID`).
 - [`codebase/1168.md`](../codebase/1168.md) — `withApprovalArgs`, wiring the #1106 permission-approval flags onto the live interactive spawn.
-- [`codebase/1201.md`](../codebase/1201.md) — the per-conversation turn-busy tracker (`turnBusyTracker`), fed from the drain before its active-session gate; ships unwired, blocked-on-by #1202 (session teardown clear) and #1206/#1207 (mid-turn respawn clear) before any consumer reads it.
-- [`codebase/1202.md`](../codebase/1202.md) — `clearForSession`, the session-teardown half of the tracker's clear (`/clear` rotation + eviction), composed onto the pool's `TransitionObserver` slot; #1206/#1207 (mid-turn respawn) is the one clear still outstanding before any consumer reads the signal.
-- [`codebase/1206.md`](../codebase/1206.md) — `Config.OnChildExit`, the unwired per-child-exit seam on the streamsup `Run` loop (one field, one unconditional call above the shutdown return); #1207 (open, blocked-by this ticket) wires the first consumer.
+- [`codebase/1201.md`](../codebase/1201.md) — the per-conversation turn-busy tracker (`turnBusyTracker`), fed from the drain before its active-session gate; ships unwired, blocked-on-by #1202 (session teardown clear) and #1206/#1209/#1210 (mid-turn respawn clear) before any consumer reads it.
+- [`codebase/1202.md`](../codebase/1202.md) — `clearForSession`, the session-teardown half of the tracker's clear (`/clear` rotation + eviction), composed onto the pool's `TransitionObserver` slot; #1206/#1209/#1210 (mid-turn respawn) is the one clear still outstanding before any consumer reads the signal.
+- [`codebase/1206.md`](../codebase/1206.md) — `Config.OnChildExit`, the unwired per-child-exit seam on the streamsup `Run` loop (one field, one unconditional call above the shutdown return); split from #1203 alongside #1207, which itself later split into #1209 (the fan-in exit lane) and #1210 (open, the production wiring).
+- [`codebase/1209.md`](../codebase/1209.md) — `streamTurnEnvelope.exit` / `streamTurnSink.exitFor`, the fan-in lane that carries a child-exit signal ordered correctly against the dead child's already-pushed events; ships unfired, blocked-on-by #1210 for a production caller.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.

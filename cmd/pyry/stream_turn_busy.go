@@ -151,11 +151,15 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 	t.setBusy(convID, opens)
 }
 
-// clearForSession closes any open turn on the conversation that owns sessionID —
-// the teardown feed (#1202), driven from the pool's TransitionObserver on a
-// /clear rotation or an idle/cap eviction. Those are exactly the turns whose
-// TurnEnd never arrives, so observe alone would leave the conversation busy
-// forever.
+// clearForSession closes any open turn on the conversation that owns sessionID.
+// Those are exactly the turns whose TurnEnd never arrives, so observe alone would
+// leave the conversation busy forever. It has TWO callers:
+//
+//   - the teardown feed (#1202), driven from the pool's TransitionObserver on a
+//     /clear rotation or an idle/cap eviction (session_transition_v2.go:274-281);
+//   - the drain's exit arm (#1209), reached when a child-exit signal rides the
+//     fan-in ahead of the tracker feed (stream_turn_drain.go). That lane exists
+//     but nothing in production fires it until #1210 supplies a producer.
 //
 // A nil receiver is a no-op, mirroring observe. This is not defensive padding:
 // the transition observer is wired UNCONDITIONALLY (relay.go) while the tracker
@@ -166,15 +170,24 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 // and to no other. The caller's parameter is likewise the concrete
 // *turnBusyTracker and never an interface, for the reason observe documents.
 //
-// It runs SYNCHRONOUSLY on the goroutine that fired the transition, which #659's
-// observer contract requires not to block. That holds: the work is one resolve (a
-// slice-header copy under the conversations registry's mutex — Save releases that
-// mutex BEFORE any file I/O, conversations/registry.go:79-90), one map delete and
-// one close, all bounded with no channel receive, no I/O and no callback out. The
-// same goroutine already pays a full atomic write including fsync one line
+// It runs SYNCHRONOUSLY on its caller's goroutine — the one that fired the
+// transition, or the drain goroutine for the exit arm — and must not block on
+// either. #659's observer contract requires it of the first; for the second the
+// requirement is the drain's own, since a stalled clear would wedge the whole
+// fan-in, the coalescing flush timer included. That holds: the work is one resolve
+// (a slice-header copy under the conversations registry's mutex — Save releases
+// that mutex BEFORE any file I/O, conversations/registry.go:79-90), one map delete
+// and one close, all bounded with no channel receive, no I/O and no callback out.
+// The transition caller already pays a full atomic write including fsync one line
 // earlier on the /clear path (sessions/transition.go:57-64 → rebindConversation →
 // Save), so a leaf-mutex membership delete is orders of magnitude cheaper than
 // what it has already spent before the observer is even called.
+//
+// On the drain goroutine this feed is additionally serialised against observe by
+// CONSTRUCTION — same single reader, one envelope at a time — rather than by t.mu.
+// The two callers still run concurrently with each other, which is what setBusy's
+// single lock acquisition covers; both clears are idempotent and same-direction,
+// so no interleaving of them can produce a spurious open.
 //
 // The key is a SESSION id, never a conversation id. The only production producer
 // of the value is internal/sessions' own record of a lifecycle event it
