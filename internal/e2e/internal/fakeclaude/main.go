@@ -224,6 +224,72 @@
 //	                               stream wins and the other is inert). Default off —
 //	                               when unset, fakeclaude is byte-identical to its
 //	                               prior behaviour.
+//	PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV  optional; when set to any non-empty
+//	                               value, fakeclaude takes the stem for its INITIAL
+//	                               <uuid>.jsonl from its own argv — the value after
+//	                               the last "--session-id" or "--resume"
+//	                               (argvSessionID) — instead of
+//	                               PYRY_FAKE_CLAUDE_INITIAL_UUID. That env is
+//	                               process-wide, so every child of one daemon
+//	                               inherits it identically; a MINTED
+//	                               per-conversation session therefore wrote
+//	                               <sharedDir>/<INITIAL_UUID>.jsonl while the daemon
+//	                               tailed <convDir>/<mintedSessionID>.jsonl
+//	                               (resolveBoundSessionJSONL) — the two could never
+//	                               agree, so conversation-scoped turn lifecycle was
+//	                               observable on ZERO PTY-tier tests (#1195). The
+//	                               spawn argv is the one per-child channel that
+//	                               already carries the id the daemon tails
+//	                               (sessions.buildSession bakes in
+//	                               "--session-id <pool id>"), which is what real
+//	                               claude honours too. The value is adopted only if
+//	                               it is a safe filename stem (see argvSessionID);
+//	                               no flag, or an unsafe value, falls back to
+//	                               PYRY_FAKE_CLAUDE_INITIAL_UUID rather than exiting,
+//	                               so a legacy unpinned spawn still works and the
+//	                               e2e fails on its assertion rather than on a dead
+//	                               child. A later /clear rotation still mints a fresh
+//	                               random uuid (rotateSession), as real claude does.
+//	                               NOTE the flag's presence is NOT a minted/bootstrap
+//	                               discriminator — since #839 every bootstrap spawn is
+//	                               pinned too — so this must stay explicitly selected:
+//	                               keying the behaviour on argv alone would re-point
+//	                               every existing bootstrap child's transcript.
+//	                               Default off — when unset, fakeclaude is
+//	                               byte-identical to its prior behaviour, including
+//	                               for a child whose argv carries --session-id or
+//	                               --resume.
+//	PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR  optional directory watched in parallel with
+//	                               the others. When set, fakeclaude watches
+//	                               <dir>/<its own initial stem>.jsonl.trig and, on
+//	                               each appearance, appends its contents verbatim to
+//	                               the live session JSONL and fsyncs — the same
+//	                               consume as PYRY_FAKE_CLAUDE_JSONL_TRIGGER, on a
+//	                               PER-CHILD path. The shared-path trigger cannot
+//	                               serve a multi-child process tree: its claim
+//	                               protocol is sound only because each fakeclaude
+//	                               runs a single poll goroutine, so with a bootstrap
+//	                               child polling the same path whichever child claims
+//	                               first appends the line to ITS OWN transcript — a
+//	                               coin flip. Keying the path on the child's own stem
+//	                               makes ownership structural: a test drops
+//	                               <dir>/<mintedID>.jsonl.trig and only the minted
+//	                               child can ever claim it, while the bootstrap child
+//	                               polls <dir>/<initialUUID>.jsonl.trig, which the
+//	                               test never creates. The path is computed once from
+//	                               the stem openSession used, so per-child isolation
+//	                               is exactly as good as the stem divergence
+//	                               PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV provides
+//	                               (the two are typically set together, but neither
+//	                               requires the other). Independent of, and not
+//	                               disabled by, PYRY_FAKE_CLAUDE_JSONL_TRIGGER; a
+//	                               test may set both. Not one-shot — the consume
+//	                               re-fires on every re-drop, which is what the #929
+//	                               subscription-offset kicker needs. Used by the
+//	                               minted per-conversation turn-lifecycle e2e
+//	                               (#1195). Default off — when unset, no watch and
+//	                               fakeclaude is byte-identical to its prior
+//	                               behaviour.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -267,6 +333,8 @@ const (
 	envModalClearOnAns   = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
 	envClearRotates      = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
 	envTrustTrigger      = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
+	envSessionIDFromArgv = "PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV"
+	envJSONLTriggerDir   = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR"
 	envStreamJSON        = "PYRY_FAKE_CLAUDE_STREAM_JSON"
 	envStreamInterrupt   = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
 	envStreamHold        = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
@@ -505,6 +573,20 @@ func main() {
 	initU := mustEnv(envInitialUUID)
 	trig := mustEnv(envTrigger)
 
+	// Stem-from-argv mode (envSessionIDFromArgv): envInitialUUID is process-wide,
+	// so every child of one daemon opens the SAME <uuid>.jsonl — but the daemon
+	// tails a minted per-conversation session at <mintedSessionID>.jsonl. Take the
+	// stem from this spawn's own argv instead, which is the one per-child channel
+	// already carrying that id (#1195). mustEnv above is deliberately unchanged:
+	// the knob picks which value is USED, never whether the env is required, so a
+	// harness that forgets INITIAL_UUID still fails loudly. No flag, or a value
+	// that fails the stem guard, falls back to initU.
+	if os.Getenv(envSessionIDFromArgv) != "" {
+		if id, ok := argvSessionID(os.Args[1:]); ok {
+			initU = id
+		}
+	}
+
 	tui := os.Getenv(envTUI) != ""
 	modalTrig := os.Getenv(envModalTrigger)
 	escEndsTurn := os.Getenv(envEscEndsTurn) != ""
@@ -556,6 +638,17 @@ func main() {
 	idleTrig := os.Getenv(envIdleTrigger)
 
 	f := openSession(dir, initU)
+
+	// Per-child JSONL trigger (envJSONLTriggerDir): built from the SAME stem
+	// openSession just used, so each child of one daemon watches a distinct path
+	// (and a distinct claimTrigger sidecar) and only the child a test names can
+	// claim its drop. Computed once, before the loop — a later /clear rotation
+	// mints a fresh random uuid but leaves this path on the initial stem, which is
+	// the stem every test that sets this knob addresses.
+	perChildJSONLTrig := ""
+	if trigDir := os.Getenv(envJSONLTriggerDir); trigDir != "" {
+		perChildJSONLTrig = filepath.Join(trigDir, initU+".jsonl.trig")
+	}
 
 	// TUI mode, modal-trigger mode, and trust-trigger mode all seed the idle-prompt
 	// glyph once at startup. tui-driver's rolling snapshot buffer holds the single
@@ -672,6 +765,12 @@ func main() {
 		}
 		if jsonlTrig != "" {
 			emitStructuredJSONLIfTriggered(f, jsonlTrig)
+		}
+		// Per-child JSONL trigger (envJSONLTriggerDir): the same consume as the
+		// shared trigger above, on this child's own path. Watched independently —
+		// neither knob disables the other, so a test may set both.
+		if perChildJSONLTrig != "" {
+			emitStructuredJSONLIfTriggered(f, perChildJSONLTrig)
 		}
 		time.Sleep(pollInterval)
 	}
@@ -990,6 +1089,46 @@ func containsClearCommand(buf []byte) bool {
 func rotateSession(f *os.File, dir string) *os.File {
 	_ = f.Close()
 	return openSession(dir, uuidV4())
+}
+
+// argvSessionID returns the session id the daemon pinned this spawn to — the
+// value following the LAST "--session-id" or "--resume" in args — and whether
+// one was found and is safe to use as a filename stem. Pure; never reads the
+// environment. args excludes the program name (callers pass os.Args[1:]).
+//
+// Both flags are accepted because both name the same transcript stem: a create
+// spawn gets "--session-id <id>" and a warm reattach gets "--resume <id>"
+// (supervisor.buildClaudeArgs, #1164), so handling only one would leave the
+// stem knob silently blind on warm starts. The LAST occurrence wins:
+// buildClaudeArgs appends the flag at the end of argv, so the spawn-time value
+// is authoritative over anything a template contributed. Only the two-token
+// form is parsed — neither call site emits "--flag=value", so an = parser would
+// be dead code.
+//
+// The stem guard is the security-relevant part: the returned value reaches
+// filepath.Join in openSession and in the per-child JSONL trigger path, so a
+// value carrying a separator or a dot could steer a write out of the sessions
+// dir. This is the fake-side mirror of internal/transcript.ValidStem, which the
+// daemon applies to the symmetric join (cmd/pyry/interactive_turn_stream_v2.go's
+// resolveBoundSessionJSONL) and documents as a defense-in-depth branch selector
+// for a value that is already trusted; a test fake that could be steered outside
+// its sandbox is a worse place to skip it, not a better one. Inlined rather than
+// importing internal/transcript to keep this stand-in near-zero-dependency —
+// revisit if a second stem-validating site ever appears here. A rejected value
+// reports not-found so the caller falls back to PYRY_FAKE_CLAUDE_INITIAL_UUID;
+// it never falls back to an earlier occurrence, so the resolved stem is always
+// either the spawn-time id or the env's.
+func argvSessionID(args []string) (string, bool) {
+	id := ""
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--session-id" || args[i] == "--resume" {
+			id = args[i+1]
+		}
+	}
+	if id == "" || strings.ContainsAny(id, `/\.`) {
+		return "", false
+	}
+	return id, true
 }
 
 func openSession(dir, uuid string) *os.File {
