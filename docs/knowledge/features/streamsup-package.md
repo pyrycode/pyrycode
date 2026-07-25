@@ -425,6 +425,7 @@ func startStreamTurnDrainV2(
     sink *streamTurnSink,
     emitter *interactiveTurnEmitterV2,
     activeSession func() (sessionID string, ok bool),
+    busy *turnBusyTracker,
     logger *slog.Logger,
 ) (cleanup func())
 ```
@@ -465,6 +466,59 @@ production wiring, below) owns its construction and replay wiring (`SetReplaySou
 `activeSession` is a plain injected func; #1081 composes it as `boundSessionIDForActive(w.active,
 w.convReg)` — the relay leg's own follow-active resolver, not `boundHost`. See
 [codebase/1098.md](../codebase/1098.md).
+
+## Per-conversation turn-busy tracking (#1201)
+
+`cmd/pyry/stream_turn_busy.go`'s `turnBusyTracker` (`newTurnBusyTracker(resolve, logger) *turnBusyTracker`,
+`Busy(conversationID string) bool`, `WaitIdle(ctx, conversationID) error`) is a self-synchronised,
+per-conversation set of conversations with an open turn on the stream-json path — the answer the delivery
+path will need ("is a turn running for conversation X?") that the emitter's own lifecycle fields
+structurally cannot give: those are unguarded (single-Handle-goroutine only), scalar rather than
+per-conversation, and populated only for the conversation the cursor points at.
+
+**Fed from `startStreamTurnDrainV2`'s `sink.ch` arm, one line before the `activeSession()` gate** — a
+`busy.observe(env.sessionID, env.ev)` call, unconditional, ahead of the existing drop-if-not-active check.
+Ordering is the entire contract: the gate gets its identity from a *different* place than `emitter.Handle`
+does (`env.sessionID`, tagged at parser construction, vs. the cursor `Handle` reads internally), so feeding
+before the gate is what lets a turn on a *non-active* conversation still report busy — feeding after it
+would make the tracker just as cursor-blind as the emitter it's replacing. `observe` resolves
+`sessionID → conversationID` via an injected closure (production passes `conversationForSession(w.convReg,
+sid)` — the same resolver `session_transition` frames use, `relay.go:756`), keyed by conversation (not
+session) so a `/clear`-rotated session's late events still land under `SessionHistory`'s match. An
+unresolvable or empty-string conversation id is simply not tracked (never under an empty key — that would
+both wedge and collide with the "unknown conversation" answer).
+
+The opener set is a **whitelist**: `ThoughtChunk`/`TextChunk`/`ToolStart`/`ToolUpdate` add the conversation,
+`TurnEnd` (either stop reason — `resultTurnEndReason` sends both through one parser arm) deletes it,
+everything else (`Stall`/`ApiRetry`/`Compacting`, and any future variant) is a no-op. The evidence is the
+parser's own tolerate-and-drop `default:` arm (`parser.go:158-163`) — `rate_limit_event` is the line that
+becomes a wired `ApiRetry` the day someone adds it, and a blacklist ("anything that isn't `TurnEnd` opens a
+turn") would wedge a conversation on it. `Stall` cannot reach this tracker through the real sink today (the
+parser emits only the five variants in the table above) — it's asserted only at the unit tier, fed directly.
+
+Concurrency: one mutex guards one `map[string]struct{}` plus a `chan struct{}` "generation" broadcast,
+closed-and-replaced under the same lock as any membership mutation. `WaitIdle` captures that channel and
+re-checks membership under one lock acquisition (splitting the two reintroduces a lost-wakeup race), then
+selects on it against `ctx.Done()`. `Busy`/`WaitIdle` are callable from any goroutine; `observe` is called
+only from the drain goroutine and inherits its single-writer invariant, though the type is self-synchronised
+regardless. Existence-oracle discipline (#1101 posture): `Busy`'s signature is `bool`-only — no error, no
+second `found` bool — so a foreign conversation id is indistinguishable from an idle one in both value and
+code path.
+
+**Ships unwired.** No production caller reads `Busy`/`WaitIdle` yet — `observe`'s `nil`-receiver no-op is
+what let the 7 pre-existing drain-test call sites take a bare `nil` for the new parameter instead of each
+constructing a tracker. The parameter stays the concrete `*turnBusyTracker`, never an interface (a typed-nil
+in an interface field would be non-nil at the interface level and route past the nil guard into a nil-map
+read — the `screenSnapshotterOrNil` hazard, `relay.go:395-410`).
+
+**Known gap, recorded in the tracker's own doc comment, not just here:** the clear is event-driven only —
+a turn closes solely on its `TurnEnd` arriving. Two paths reach a permanently-busy conversation with no
+`TurnEnd` ever arriving, and each is its own slice landing before any consumer reads the signal: a session
+torn down under the conversation (`/clear` rotation, idle/cap eviction) — #1202; a child that dies mid-turn
+and respawns, firing no pool transition and no `result` line for the abandoned turn — #1203. A narrower
+rotation edge is folded into #1202 too: because the resolver matches `SessionHistory`, a retired session's
+late `TurnEnd` can clear a turn its successor opened — fails open (reports idle when busy), same direction
+as a daemon restart (starts all-idle). See [codebase/1201.md](../codebase/1201.md).
 
 ## Production wiring — the `interactive_runner` toggle (#1081)
 
@@ -535,6 +589,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1120.md`](../codebase/1120.md) — the interrupt send primitive + `result` subtype mapping slice.
 - [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`nextSpawnID`).
 - [`codebase/1168.md`](../codebase/1168.md) — `withApprovalArgs`, wiring the #1106 permission-approval flags onto the live interactive spawn.
+- [`codebase/1201.md`](../codebase/1201.md) — the per-conversation turn-busy tracker (`turnBusyTracker`), fed from the drain before its active-session gate; ships unwired, blocked-on-by #1202 (session teardown clear) and #1203 (mid-turn respawn clear) before any consumer reads it.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.

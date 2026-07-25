@@ -193,7 +193,7 @@ func TestStreamTurnDrainV2_FullSingleTurn(t *testing.T) {
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
 	feedLines(sink, "sess-a", assistantTextLine("m1", "hello"), resultLine)
@@ -233,7 +233,7 @@ func TestStreamTurnDrainV2_ScopingDropsBackground(t *testing.T) {
 
 	drops := make(chan string, 8)
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get,
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil,
 		slog.New(dropWatcher{kinds: drops}))
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
@@ -261,7 +261,7 @@ func TestStreamTurnDrainV2_ScopingForwardsActiveStamped(t *testing.T) {
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
 	feedLines(sink, "sess-b", assistantTextLine("mb", "for-B"), resultLine)
@@ -306,7 +306,7 @@ func TestStreamTurnDrainV2_ConcurrentFeedSingleWriter(t *testing.T) {
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
 	var wg sync.WaitGroup
@@ -346,7 +346,7 @@ func TestStreamTurnDrainV2_NoActiveSessionDrops(t *testing.T) {
 
 	drops := make(chan string, 8)
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get,
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil,
 		slog.New(dropWatcher{kinds: drops}))
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
@@ -372,7 +372,7 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
 	feedLines(sink, "sess-a", assistantTextLine("m1", "streamed"))
@@ -406,7 +406,7 @@ func TestStreamTurnDrainV2_ToolEvents(t *testing.T) {
 	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	sink := newStreamTurnSink(0, discardLogger())
-	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
 	feedLines(sink, "sess-a", toolUseLine, toolRsltLine, resultLine)
