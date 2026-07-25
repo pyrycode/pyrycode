@@ -107,6 +107,41 @@ type Config struct {
 	BackoffMax     time.Duration
 	BackoffReset   time.Duration
 
+	// OnChildExit is called once per COMPLETED SUPERVISION ITERATION: after the
+	// spawn attempt finishes and before Run decides what to do next (shut down,
+	// relaunch immediately, or back off). Optional; nil on every production
+	// construction path today — this is the unwired seam, #1207 wires the first
+	// consumer (a turn-busy clear). Exported, unlike onSpawn, because that
+	// consumer lives outside this package.
+	//
+	// The cardinality is per iteration, NOT per live child: it also fires when
+	// the spawn failed during setup and no claude process ever launched
+	// (spawnAndWait's started == false). Deliberate — no child existed, so no
+	// turn of this runner's can be open, and the intended consumer's clear is
+	// idempotent. A caller that needs "a real child died" cannot get it here.
+	//
+	// It fires on every exit path: a crash (which falls through to the backoff
+	// ladder), a deliberate restart (which relaunches immediately), and a
+	// shutdown. The shutdown case works because the call sits ABOVE Run's
+	// post-spawn ctx.Err() return, which itself sits above the "claude exited"
+	// log — a parent cancel fires the callback before Run returns.
+	//
+	// It runs synchronously on the Run goroutine with NO Runner lock held, so it
+	// may call any Runner method (Restart, RestartFresh, Interrupt, Stdin,
+	// State), but it must NOT block: the restart ladder is stalled until it
+	// returns, delaying the respawn. Slow work belongs on a channel or a
+	// goroutine. It must not panic either — there is no recover here (matching
+	// onSpawn), so a panic takes the supervise loop down with it.
+	//
+	// It fires strictly AFTER the child has exited: spawnAndWait returns only
+	// past cmd.Wait or a pre-launch error, never while claude is still running,
+	// and Stdin() already reports no live child by then. It is NOT a drain
+	// barrier, though — it carries no data out of the child, and bytes the dead
+	// child already wrote may still be in flight in a downstream sink when it
+	// fires. A consumer needing ordering against those events must get it from
+	// that sink, not from this callback.
+	OnChildExit func()
+
 	// onSpawn is an unexported test seam, called once per spawn after cmd.Start
 	// and after the stdin handle is stored, with the child's pid. Nil in
 	// production. Lets a test observe "child N is up, Stdin() is live" without
@@ -442,6 +477,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		cancel()
 		r.setIterCancel(nil)
 		uptime := time.Since(start)
+
+		// The child is gone and the loop has not yet branched on why, so this one
+		// unconditional call covers every exit path — crash, deliberate restart,
+		// and shutdown alike. It must stay ABOVE the ctx.Err() return below: that
+		// return (and the "claude exited" log under it) is skipped on shutdown, so
+		// a fire anchored there would be silent on exactly the path that most needs
+		// it. See Config.OnChildExit for the full contract.
+		if r.cfg.OnChildExit != nil {
+			r.cfg.OnChildExit()
+		}
 
 		// Shutdown is a parent-ctx cancel, NOT any child-exit error: an
 		// iterCtx-only cancel (a Restart kill) leaves ctx.Err() nil and falls
