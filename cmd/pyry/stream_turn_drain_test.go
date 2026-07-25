@@ -68,7 +68,16 @@ func (b *chanBcast) Push(ctx context.Context, connID string, env protocol.Envelo
 // drops, carrying the event's "kind", so a negative test can barrier on the last
 // fed event's drop (guaranteeing every earlier event was processed first — the
 // drain is serial) before asserting nothing was pushed.
-type dropWatcher struct{ kinds chan string }
+//
+// recs is the second, optional forward: the WHOLE record, for assertions on a
+// diagnostic that carries no "kind" at all — the exit-lane drop (#1209), whose
+// level and exact field set are the assertion. Both channels are optional; a nil
+// channel inside a select with a default simply takes the default, so every
+// existing dropWatcher{kinds: …} construction keeps behaving identically.
+type dropWatcher struct {
+	kinds chan string
+	recs  chan slog.Record
+}
 
 func (dropWatcher) Enabled(context.Context, slog.Level) bool { return true }
 
@@ -88,6 +97,13 @@ func (h dropWatcher) Handle(_ context.Context, r slog.Record) error {
 		case h.kinds <- kind:
 		default:
 		}
+	}
+	// Cloned: a slog.Record must not be retained past Handle without it. The
+	// event-name filtering is left to the test, which is what keeps this forward
+	// usable for any record shape.
+	select {
+	case h.recs <- r.Clone():
+	default:
 	}
 	return nil
 }
@@ -387,6 +403,93 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	}
 	if d := decodeDelta(t, got[1]); d.Text != "streamed" {
 		t.Errorf("coalesced assistant_delta text = %q, want %q", d.Text, "streamed")
+	}
+}
+
+// --- #1209: the exit lane ----------------------------------------------------
+
+// #1209 AC4: an exit envelope produces NO emitter traffic — its arm continues
+// before observe, before the active-session gate and before Handle — and a nil
+// tracker stays a no-op, which is what lets the drain's pre-#1201 wiring (busy =
+// nil) keep working.
+//
+// The barrier is the TRAILING event's own drop, not the exit's: an exit envelope
+// is barrier-less by construction (no push, no not-active drop, nothing). The
+// drain is serial and FIFO, so seeing the later event's drop proves the exit was
+// already fully processed — the trick this file's dropWatcher doc records above,
+// and the only option for proving a no-op exit was processed at all.
+func TestStreamTurnDrainV2_ExitProducesNoEmitterTraffic(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	active := &stubActiveSession{} // never set → ok=false, so the trailing event drops at the gate
+	bcast := newChanBcast("conn-a")
+	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	drops := make(chan string, 8)
+	sink := newStreamTurnSink(0, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil,
+		slog.New(dropWatcher{kinds: drops}))
+	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
+
+	sink.exitFor("sess-a")() // an exit against a nil tracker: must not panic
+	feedLines(sink, "sess-a", assistantTextLine("ma", "hello"))
+
+	waitDropKind(t, drops, "text_chunk")
+	assertNoPush(t, bcast.pushed)
+}
+
+// #1209 AC1: the exit drop's LEVEL and exact field set. A dropped exit is a
+// permanently wedged conversation once a producer is wired, where a dropped event
+// is a lost delta — so this one is Warn (visible at the daemon's default
+// LevelInfo) while the siblings stay Debug. The record carries the discriminant
+// and the session id and nothing else: no event content, and no "kind", there
+// being no event to name.
+//
+// No drain is started: with no reader the buffer-of-1 fill is deterministic and
+// timing-free. Note the watcher goes on the SINK's logger — the exit drop is
+// emitted from the sink closure, never from the drain.
+func TestStreamTurnSink_ExitDropWhenFull(t *testing.T) {
+	t.Parallel()
+
+	recs := make(chan slog.Record, 8)
+	// newStreamTurnSink only replaces buf when it is <= 0, so 1 survives.
+	sink := newStreamTurnSink(1, slog.New(dropWatcher{recs: recs}))
+
+	sink.exitFor("sess-a")() // occupies the single slot, silently
+	sink.exitFor("sess-a")() // no room: dropped and logged
+
+	var rec slog.Record
+	select {
+	case rec = <-recs:
+	default:
+		t.Fatal("no record logged for an exit dropped on a full sink")
+	}
+
+	if rec.Level != slog.LevelWarn {
+		t.Errorf("exit drop level = %v, want %v (a wedged conversation is degraded operation, not a lost delta)",
+			rec.Level, slog.LevelWarn)
+	}
+
+	attrs := map[string]string{}
+	rec.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	if got := attrs["event"]; got != "stream_turn.exit_sink_full" {
+		t.Errorf("exit drop event = %q, want %q", got, "stream_turn.exit_sink_full")
+	}
+	if got := attrs["session_id"]; got != "sess-a" {
+		t.Errorf("exit drop session_id = %q, want %q", got, "sess-a")
+	}
+	if _, ok := attrs["kind"]; ok {
+		t.Errorf("exit drop carries a %q attr; there is no event to name", "kind")
+	}
+	if len(attrs) != 2 {
+		t.Errorf("exit drop attrs = %v, want exactly event + session_id", attrs)
 	}
 }
 
