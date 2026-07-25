@@ -88,12 +88,13 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 // turnevent.Event, so there is nothing to un-map back to a tuidriver.Event.
 //
 // The goroutine selects over three cases:
-//   - sink.ch: resolve activeSession(); forward the event to emitter.Handle only
-//     when the producing session is the active conversation's bound session
-//     (AC2). Any other session's event is dropped here, BEFORE Handle, so a
-//     background conversation's conn never receives it. Gating at Handle time
-//     (not in the sink) keeps the stamp consistent with the cursor the emitter
-//     reads inside Handle.
+//   - sink.ch: feed the per-conversation turn-busy tracker, then resolve
+//     activeSession() and forward the event to emitter.Handle only when the
+//     producing session is the active conversation's bound session (AC2). Any
+//     other session's event is dropped here, BEFORE Handle, so a background
+//     conversation's conn never receives it. Gating at Handle time (not in the
+//     sink) keeps the stamp consistent with the cursor the emitter reads inside
+//     Handle.
 //   - emitter.flushC(): the ~250ms coalescing timer fired — route it back into
 //     flushDelta on THIS goroutine. The emitter arms the timer inside Handle and
 //     needs a driver to select it; the drain is that driver, so both Handle and
@@ -109,11 +110,18 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 // and replay wiring; #1081 composes activeSession from the active-conversation
 // cursor + the bound-session lookup and wires SetReplaySource. This ticket's
 // caller is the unit test.
+//
+// busy is the #1201 per-conversation turn-busy tracker, fed from this same fan-in
+// and keyed by the producing session's conversation. It may be nil (observe is a
+// nil-receiver no-op), which is what lets the pre-#1201 drain tests keep their
+// exact wiring. It stays the concrete pointer rather than an interface so a
+// typed-nil can never slip past that guard.
 func startStreamTurnDrainV2(
 	ctx context.Context,
 	sink *streamTurnSink,
 	emitter *interactiveTurnEmitterV2,
 	activeSession func() (sessionID string, ok bool),
+	busy *turnBusyTracker,
 	logger *slog.Logger,
 ) (cleanup func()) {
 	done := make(chan struct{})
@@ -124,6 +132,12 @@ func startStreamTurnDrainV2(
 			case <-ctx.Done():
 				return
 			case env := <-sink.ch:
+				// BEFORE the gate, and the ordering IS the contract: the gate drops
+				// every event whose producing session is not the ACTIVE conversation's,
+				// so a tracker fed after it would report a background conversation idle
+				// because it never heard about it, not because it is idle.
+				busy.observe(env.sessionID, env.ev)
+
 				active, ok := activeSession()
 				if !ok || env.sessionID != active {
 					// SECURITY: content-free — discriminant + session id only.

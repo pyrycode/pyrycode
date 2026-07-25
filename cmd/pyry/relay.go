@@ -723,7 +723,21 @@ func startRelayV2(
 		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession
 		// enforces. An unmatched/empty id forwards nothing (fail-closed).
 		activeSession := func() (string, bool) { return boundSessionIDForActive(w.active, w.convReg) }
-		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, logger)
+		// The #1201 per-conversation turn-busy tracker, fed from the same fan-in
+		// BEFORE the gate above, so a turn on a non-active conversation still reports
+		// busy. Its key is resolved on the write side by the same session→conversation
+		// closure the session_transition producer uses below (:756), which inherits
+		// conversationForSession's SessionHistory match — a just-rotated session still
+		// resolves — and keeps internal/conversations out of the tracker's file.
+		//
+		// Deliberately a local, not a relayWiring field: this slice ships UNWIRED —
+		// nothing reads the signal, no v2 frame changes, no delivery behaviour
+		// changes. The consumer slice that reads it hoists it, with the reader in the
+		// same diff. Until then #1202 and #1203 are the two clears that must land
+		// before the signal is safe to consult (see stream_turn_busy.go's KNOWN GAP).
+		busy := newTurnBusyTracker(
+			func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, logger)
+		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, busy, logger)
 	} else if w.bridge != nil && w.claudeSessionsDir != "" {
 		// PTY MODE (unchanged): the bootstrap-branch resolver tails the transcript
 		// the daemon's OWN claude child has open (probe over its PID) rather than the
