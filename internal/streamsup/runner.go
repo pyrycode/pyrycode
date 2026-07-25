@@ -109,10 +109,12 @@ type Config struct {
 
 	// OnChildExit is called once per COMPLETED SUPERVISION ITERATION: after the
 	// spawn attempt finishes and before Run decides what to do next (shut down,
-	// relaunch immediately, or back off). Optional; nil on every production
-	// construction path today — this is the unwired seam, #1207 wires the first
-	// consumer (a turn-busy clear). Exported, unlike onSpawn, because that
-	// consumer lives outside this package.
+	// relaunch immediately, or back off). Optional — nil-checked at the fire site
+	// and left nil by tests that omit it — but NON-NIL on every production
+	// construction path since #1210: the sole tree-wide caller of New installs a
+	// per-runner turn-busy clear here, so a conversation whose child dies mid-turn
+	// stops being reported busy. Exported, unlike onSpawn, because that consumer
+	// lives outside this package.
 	//
 	// The cardinality is per iteration, NOT per live child: it also fires when
 	// the spawn failed during setup and no claude process ever launched

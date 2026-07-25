@@ -77,6 +77,18 @@ func mapStreamState(s streamsup.State) supervisor.State {
 // mapStreamsupConfig, so the mapper stays pure (its Stdout == nil assertion is
 // untouched) — the Parser is a runtime object, one layer up.
 //
+// #1210 installs the SECOND lane onto the same fan-in: sink.exitFor(cfg.SessionID)
+// as the runner's child-exit callback, which closes the turn of a conversation
+// whose child died mid-turn (no result line for the abandoned turn, and no pool
+// transition — the two feeds that are structurally silent on that path). The two
+// installs bind from the ONE cfg.SessionID and sit adjacent on purpose: identical
+// session tags on both lanes are what let the drain's exit arm clear exactly the
+// conversation whose events it is ordered behind, and reading them as a pair is
+// the evidence, not a derivation. exitFor is INSTALLED rather than re-derived —
+// it owns the non-blocking send and the Warn drop diagnostic the seam's
+// must-not-block / must-not-panic contract requires, so a hand-rolled func() here
+// would duplicate that contract instead of consuming it.
+//
 // #1109 constructed the runner via streamsup.New (the first caller tree-wide) and
 // deliberately left Config.Stdout nil for this ticket to fill. It is the arm the
 // #1081 interactive_runner selection assigns to sessions.Config.RunnerFactory;
@@ -103,6 +115,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 		scfg := mapStreamsupConfig(cfg)
 		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath)
 		scfg.Stdout = streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
 		r, err := streamsup.New(scfg)
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)

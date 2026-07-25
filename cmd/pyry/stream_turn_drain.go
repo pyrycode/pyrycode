@@ -101,10 +101,11 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 
 // exitFor returns the per-runner child-exit closure for the runner constructed
 // with sessionID. Its func() type is exactly that of streamsup's child-exit seam
-// (internal/streamsup/runner.go:105-143), so the eventual wiring binds it at the
-// same construction point as sinkFor and the two lanes carry identical session
-// tags by construction. Nothing in production installs it yet — #1210 is the
-// wiring slice; this slice's caller is the unit test, the precedent
+// (internal/streamsup/runner.go:105-143), so the wiring binds it at the same
+// construction point as sinkFor — newStreamRunnerFactory (streamsup_runner.go,
+// #1210), one line below the sinkFor install — and the two lanes carry identical
+// session tags by construction. Production installs it on every stream runner
+// built there; the unit tests call it directly as well, the precedent
 // startStreamTurnDrainV2 itself set in #1098.
 //
 // The seam is named here by location rather than by symbol on purpose: the

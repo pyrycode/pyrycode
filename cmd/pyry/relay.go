@@ -740,8 +740,10 @@ func startRelayV2(
 		// reader is the #1202 teardown clear composed onto the session-transition
 		// observer below (:779), which is why the declaration is hoisted above the
 		// branch. The consumer slice that consults it for delivery promotes it to a
-		// field, with the reader in the same diff. Until then #1203 is the last clear
-		// that must land (see stream_turn_busy.go's KNOWN GAP).
+		// field, with the reader in the same diff. Every clear that must land now
+		// does: TurnEnd on the fan-in, the #1202 teardown transition below, and the
+		// #1210 child-exit lane through the drain (see stream_turn_busy.go's
+		// three-feeds note).
 		busy = newTurnBusyTracker(
 			func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, logger)
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, busy, logger)
