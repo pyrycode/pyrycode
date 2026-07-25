@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,13 +158,24 @@ func TestResolveBoundRunner(t *testing.T) {
 // bound to the active conversation and NOT the bootstrap supervisor. The bound
 // fake records exactly one interrupt; a separate bootstrap fake wired nowhere
 // records zero. It also covers AC3's inert states (no active conversation, and an
-// unbound/dangling resolution).
+// unbound/dangling resolution), each of which records which arm it took (#1192).
+//
+// SendEsc runs synchronously on the test goroutine here, so auditLogger's plain
+// buffer needs no synchronisation. Every log assertion names its event exactly and
+// never the shared v2.interrupt. prefix — #1193 adds a record to the success path,
+// which must not turn these negative assertions red.
 func TestActiveInterrupter(t *testing.T) {
 	t.Parallel()
+
+	const (
+		noActiveConvEvent  = `"event":"v2.interrupt.no_active_conv"`
+		noBoundRunnerEvent = `"event":"v2.interrupt.no_bound_runner"`
+	)
 
 	t.Run("interrupt reaches the bound runner, not the bootstrap", func(t *testing.T) {
 		bound := &interruptRunnerStub{}
 		bootstrap := &interruptRunnerStub{} // wired nowhere: must never be touched
+		logger, logBuf := auditLogger()
 		ai := activeInterrupter{
 			currentConv: func() string { return "A" },
 			resolveRunner: func(convID string) (sessions.Runner, bool) {
@@ -172,6 +184,7 @@ func TestActiveInterrupter(t *testing.T) {
 				}
 				return nil, false
 			},
+			log: logger,
 		}
 		if err := ai.SendEsc(); err != nil {
 			t.Fatalf("SendEsc: unexpected err %v", err)
@@ -182,13 +195,21 @@ func TestActiveInterrupter(t *testing.T) {
 		if bootstrap.calls != 0 {
 			t.Errorf("bootstrap runner interrupted %d times, want 0 — interrupt must NOT reach the bootstrap", bootstrap.calls)
 		}
+		// Arm exclusivity: an emission placed above either guard would show up here.
+		for _, unwanted := range []string{noActiveConvEvent, noBoundRunnerEvent} {
+			if strings.Contains(logBuf.String(), unwanted) {
+				t.Errorf("a resolved interrupt emitted %s; that record belongs to an inert arm\nlog:\n%s", unwanted, logBuf.String())
+			}
+		}
 	})
 
 	t.Run("no active conversation is inert (AC3)", func(t *testing.T) {
 		resolved := false
+		logger, logBuf := auditLogger()
 		ai := activeInterrupter{
 			currentConv:   func() string { return "" },
 			resolveRunner: func(string) (sessions.Runner, bool) { resolved = true; return nil, false },
+			log:           logger,
 		}
 		if err := ai.SendEsc(); err != nil {
 			t.Errorf("SendEsc = %v, want nil", err)
@@ -196,15 +217,32 @@ func TestActiveInterrupter(t *testing.T) {
 		if resolved {
 			t.Errorf("resolveRunner called with no active conversation, want short-circuit")
 		}
+		if !strings.Contains(logBuf.String(), noActiveConvEvent) {
+			t.Errorf("no %s record; the arm must say which one it took\nlog:\n%s", noActiveConvEvent, logBuf.String())
+		}
+		if strings.Contains(logBuf.String(), noBoundRunnerEvent) {
+			t.Errorf("emitted %s from the no-active-conversation arm\nlog:\n%s", noBoundRunnerEvent, logBuf.String())
+		}
 	})
 
 	t.Run("unbound/dangling resolution is inert (AC3)", func(t *testing.T) {
+		logger, logBuf := auditLogger()
 		ai := activeInterrupter{
 			currentConv:   func() string { return "A" },
 			resolveRunner: func(string) (sessions.Runner, bool) { return nil, false },
+			log:           logger,
 		}
 		if err := ai.SendEsc(); err != nil {
 			t.Errorf("SendEsc = %v, want nil", err)
+		}
+		if !strings.Contains(logBuf.String(), noBoundRunnerEvent) {
+			t.Errorf("no %s record; the arm must say which one it took\nlog:\n%s", noBoundRunnerEvent, logBuf.String())
+		}
+		if !strings.Contains(logBuf.String(), `"conversation_id":"A"`) {
+			t.Errorf("record does not identify the conversation\nlog:\n%s", logBuf.String())
+		}
+		if strings.Contains(logBuf.String(), noActiveConvEvent) {
+			t.Errorf("emitted %s from the unresolvable-binding arm\nlog:\n%s", noActiveConvEvent, logBuf.String())
 		}
 	})
 

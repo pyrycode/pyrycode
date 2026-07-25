@@ -444,7 +444,8 @@ func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
 // (ctx, s, env) sibling handlers.
 //
 // Order is load-bearing — the capability gate comes first:
-//  1. A non-interactive conn's interrupt is inert (no Esc). This is the new
+//  1. A non-interactive conn's interrupt is inert (no Esc) and records
+//     v2.interrupt.non_interactive. This is the new
 //     inbound capability gate (#707): existing inbound controls gate outbound
 //     emission on s.interactive, but interrupt is the first whose authorization
 //     IS the interactive capability. A one-line check, NOT a reusable inbound-gate
@@ -459,9 +460,22 @@ func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
 //     Warn-logged with the supervisor sentinel + conn_id and tolerated — there is
 //     nothing to roll back and no reply is owed. NEVER log payload bytes (there
 //     are none) or the rendered screen.
+//
+// The step-1 record is Info, not Debug like the step-2 one: it reports a
+// live-daemon runtime state an operator needs at the daemon's default level
+// (#1192), where step 2 reports a foreground/pre-wire configuration. Note the
+// route is still silent on SUCCESS until #1193 lands, so an empty
+// v2.interrupt.* log does NOT prove the frame never arrived.
 func (m *V2SessionManager) handleInterrupt(s *V2Session) {
 	if !s.interactive {
-		return // non-interactive conn: inert, no Esc (the AC-2 negative path)
+		// Inert, no Esc (the AC-2 negative path). conn_id is the only identifier
+		// this record carries: s.peerStatic is identity-bearing and MUST NOT be
+		// logged, and s.device is the matched device snapshot — both are in scope
+		// here, neither belongs in an interrupt record.
+		m.cfg.Logger.Info("relay: v2 interrupt inert; conn not interactive",
+			"event", "v2.interrupt.non_interactive",
+			"conn_id", s.connID)
+		return
 	}
 	if m.cfg.Interrupter == nil {
 		m.cfg.Logger.Debug("relay: v2 interrupt inert; no interrupter wired",
