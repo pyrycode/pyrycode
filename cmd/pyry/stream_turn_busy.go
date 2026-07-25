@@ -24,15 +24,19 @@ import (
 // screenSnapshotterOrNil records at relay.go:395-410). The map is bounded by the
 // conversations currently mid-turn, not by every conversation ever seen.
 //
-// KNOWN GAP — ONE path remains open. A turn is closed here by two feeds: its
-// TurnEnd arriving on the fan-in (observe), and a pool teardown transition — a
-// /clear rotation or an idle/cap eviction — reaching clearForSession (#1202).
-// What is still missing is a child that dies mid-turn and is respawned: it fires
-// no pool transition and emits no result line for the abandoned turn — #1203.
+// THREE FEEDS close a turn here, and between them no reachable sequence leaves a
+// conversation reported busy forever: its TurnEnd arriving on the fan-in
+// (observe); a pool teardown transition — a /clear rotation or an idle/cap
+// eviction — reaching clearForSession (#1202); and a child that dies mid-turn,
+// which fires no pool transition and emits no result line for the abandoned turn,
+// reaching clearForSession through the drain's exit arm (the #1209 lane, fired in
+// production by the producer newStreamRunnerFactory installs, #1210).
 //
-// #1203 must land before any consumer reads this signal. While the tracker is
-// unwired a wedge is harmless; once consulted it becomes a conversation that can
-// never be delivered to again.
+// That third feed was this file's KNOWN GAP, and closing it was the stated
+// precondition for any consumer reading this signal: while the tracker was unwired
+// a wedge was harmless, but once consulted it becomes a conversation that can never
+// be delivered to again. The precondition is now SATISFIED — recorded rather than
+// deleted, because that hazard is what shaped the design.
 //
 // The narrower rotation edge #1202 was expected to own is UNREACHABLE, and is
 // recorded here rather than defended with a guard. It would need two distinct
@@ -158,8 +162,9 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 //   - the teardown feed (#1202), driven from the pool's TransitionObserver on a
 //     /clear rotation or an idle/cap eviction (session_transition_v2.go:274-281);
 //   - the drain's exit arm (#1209), reached when a child-exit signal rides the
-//     fan-in ahead of the tracker feed (stream_turn_drain.go). That lane exists
-//     but nothing in production fires it until #1210 supplies a producer.
+//     fan-in ahead of the tracker feed (stream_turn_drain.go). That lane is fired
+//     in production by the per-runner producer newStreamRunnerFactory installs
+//     (streamsup_runner.go, #1210), so a child that dies mid-turn clears here.
 //
 // A nil receiver is a no-op, mirroring observe. This is not defensive padding:
 // the transition observer is wired UNCONDITIONALLY (relay.go) while the tracker
