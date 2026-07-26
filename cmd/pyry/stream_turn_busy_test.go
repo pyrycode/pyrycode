@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
 	goparser "go/parser"
 	"go/token"
 	"log/slog"
@@ -120,7 +121,7 @@ func TestTurnBusyTracker_ClearsOnBothStopReasons(t *testing.T) {
 // ids all report idle, and WaitIdle returns promptly for each. A foreign id
 // traverses the identical map lookup as an idle one, so the two are
 // indistinguishable in value and in code path — the #1101 posture
-// screenSnapshotterOrNil records (relay.go:395-410).
+// screenSnapshotterOrNil records (relay.go:406-421).
 func TestTurnBusyTracker_UnknownConversationReportsIdle(t *testing.T) {
 	t.Parallel()
 
@@ -411,13 +412,25 @@ func TestTurnBusyTracker_ConcurrentReadersAndDriver(t *testing.T) {
 
 // AC1, structurally: the tracker derives its signal from the fan-in events alone.
 // The import block is the machine-checkable form of "no second parse of claude's
-// stdout, no inference from stdin writes, no timer" — a time / os / io / transcript
+// stdout, no inference from stdin writes, no timer" — an os / io / transcript
 // import would be the first symptom of any of those, and this test fails on it
 // before a reviewer has to notice.
+//
+// "time" is admitted for #1199's waitIdleForDelivery, whose bound arrives as a
+// time.Duration parameter — so the import list alone no longer carries the
+// no-timer half of the guard, and the second assertion below carries it instead:
+// every time.X reference in the file must be time.Duration. A clock READ
+// (time.Now / After / Tick / NewTimer / Sleep) is what "no timer" always meant —
+// membership must move only on an event, never on the passage of time — and that
+// is now asserted directly rather than inferred from the import set. Deriving the
+// bound from a duration the CALLER supplies is not a clock read: it becomes a ctx
+// deadline, and a deadline expiring reports that this waiter gave up, never that
+// the conversation went idle.
 func TestTurnBusyTracker_ImportsStayMinimal(t *testing.T) {
 	t.Parallel()
 
-	f, err := goparser.ParseFile(token.NewFileSet(), "stream_turn_busy.go", nil, goparser.ImportsOnly)
+	fset := token.NewFileSet()
+	f, err := goparser.ParseFile(fset, "stream_turn_busy.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse stream_turn_busy.go: %v", err)
 	}
@@ -432,9 +445,257 @@ func TestTurnBusyTracker_ImportsStayMinimal(t *testing.T) {
 		"github.com/pyrycode/pyrycode/internal/turnevent",
 		"log/slog",
 		"sync",
+		"time",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("stream_turn_busy.go imports:\n got %v\nwant %v", got, want)
+	}
+
+	ast.Inspect(f, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "time" {
+			return true
+		}
+		if sel.Sel.Name != "Duration" {
+			t.Errorf("%s: stream_turn_busy.go references time.%s; the tracker must read no clock — "+
+				"membership moves on an event, never on the passage of time",
+				fset.Position(sel.Pos()), sel.Sel.Name)
+		}
+		return true
+	})
+}
+
+// --- #1199: the delivery feed -------------------------------------------------
+
+// busyGeneration reads the tracker's current generation channel. Channel IDENTITY
+// is the only observable for "did a broadcast happen?": setBusy closes and
+// REPLACES this channel exactly when membership moves, and a spurious wakeup is
+// behaviourally invisible to a waiter (it re-checks its key and re-parks), so a
+// test asserting "no spurious broadcast" has to compare the channel itself.
+func busyGeneration(tr *turnBusyTracker) chan struct{} {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.changed
+}
+
+// #1199 AC1: the two nil-safety contracts the wiring depends on. In PTY mode the
+// tracker is never constructed, so the delivery seam calls BOTH new methods on a
+// nil receiver on every single delivery — that is the path that must stay
+// semantically identical to the pre-#1199 body, not a defensive nicety. The empty
+// conversation id is the second half: refusing it preserves the
+// absent ≡ idle ≡ unknown ≡ unbound collapse (a tracked empty key would both wedge
+// that key and collide with the unknown-conversation answer).
+func TestTurnBusyTracker_DeliveryFeedNilAndEmptyAreNoOps(t *testing.T) {
+	t.Parallel()
+
+	// The two sub-cases are written out rather than tabled because their assertions
+	// genuinely differ: Busy and WaitIdle carry NO nil guard (they take t.mu
+	// immediately, as their docs record), so the nil case can only assert "returns,
+	// and does not panic" — reading back through Busy is exactly the mistake the
+	// wiring must not make.
+	t.Run("nil receiver", func(t *testing.T) {
+		t.Parallel()
+		var tr *turnBusyTracker
+
+		if err := tr.waitIdleForDelivery(context.Background(), testConvID, time.Nanosecond); err != nil {
+			t.Errorf("waitIdleForDelivery = %v, want nil (immediate, not even a deadline)", err)
+		}
+		undo := tr.openForDelivery(testConvID)
+		if undo == nil {
+			t.Fatal("openForDelivery returned a nil undo; the seam calls it unconditionally on the write-error path")
+		}
+		undo() // must not panic
+	})
+
+	t.Run("empty conversation id", func(t *testing.T) {
+		t.Parallel()
+		tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+
+		if err := tr.waitIdleForDelivery(context.Background(), "", time.Nanosecond); err != nil {
+			t.Errorf("waitIdleForDelivery = %v, want nil (immediate, not even a deadline)", err)
+		}
+		undo := tr.openForDelivery("")
+		if undo == nil {
+			t.Fatal("openForDelivery returned a nil undo")
+		}
+		undo() // must not panic
+		if tr.Busy("") {
+			t.Error(`Busy("") = true; the empty key must never be tracked`)
+		}
+	})
+}
+
+// #1199 AC1: openForDelivery marks the conversation mid-turn, and its undo both
+// clears the mark and WAKES a parked waiter. The wake half is what fails if the
+// undo mutates the map without going through setBusy's close-and-replace
+// broadcast: Busy would already read idle while every waiter stayed parked on a
+// generation channel nobody closed — the lost-wakeup bug, reached here through the
+// write-error path rather than through a teardown.
+func TestTurnBusyTracker_OpenForDeliveryMarksAndUndoWakesWaiter(t *testing.T) {
+	t.Parallel()
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+
+	undo := tr.openForDelivery(testConvID)
+	if !tr.Busy(testConvID) {
+		t.Fatal("Busy = false after openForDelivery, want true")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- tr.WaitIdle(context.Background(), testConvID) }()
+
+	// The wait must still be outstanding while the delivery's turn is open. This
+	// grace window can never fail a correct WaitIdle; it only fires on an early
+	// return.
+	select {
+	case err := <-done:
+		t.Fatalf("WaitIdle returned (%v) while the delivery's mark was live", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	undo()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("WaitIdle = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitIdle never returned after the delivery's undo; the undo skipped setBusy's broadcast")
+	}
+	if tr.Busy(testConvID) {
+		t.Error("Busy = true after the undo, want false")
+	}
+}
+
+// #1199 AC1 (the teeth): the undo is scoped to the open THIS call made.
+//
+// Two sub-cases, and only a setBusy-reported `changed` satisfies both. An undo
+// that unconditionally clears passes neither: in "already busy" it would report a
+// turn some other feed owns as idle — the TOCTOU the design closes, whose
+// consequence is the next message going through unheld, i.e. a transient
+// recurrence of the very bug this ticket fixes. In "already cleared" it would
+// re-broadcast on an idle conversation.
+//
+// "already busy" is reachable in production: an opener event landing in the gap
+// between waitIdleForDelivery returning nil and the mark (a --resume respawn
+// replaying events is the plausible route).
+func TestTurnBusyTracker_UndoScopedToItsOwnOpen(t *testing.T) {
+	t.Parallel()
+
+	t.Run("already busy: the undo does not clear another feed's turn", func(t *testing.T) {
+		t.Parallel()
+		tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+
+		tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+		if !tr.Busy(testConvID) {
+			t.Fatal("Busy = false after an opener; the sub-case would be vacuous")
+		}
+
+		undo := tr.openForDelivery(testConvID) // opened nothing — already busy
+		undo()
+
+		if !tr.Busy(testConvID) {
+			t.Error("Busy = false; the undo cleared a turn this delivery never opened")
+		}
+	})
+
+	t.Run("already cleared: the undo neither mutates nor re-broadcasts", func(t *testing.T) {
+		t.Parallel()
+		tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+
+		undo := tr.openForDelivery(testConvID)
+		tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+		if tr.Busy(testConvID) {
+			t.Fatal("Busy = true after TurnEnd; the sub-case would be vacuous")
+		}
+
+		gen := busyGeneration(tr)
+		undo() // must not panic, must not broadcast
+		if tr.Busy(testConvID) {
+			t.Error("Busy = true after an undo on an already-idle conversation")
+		}
+		if busyGeneration(tr) != gen {
+			t.Error("the undo replaced the generation channel on an already-idle conversation; a no-op must not broadcast")
+		}
+	})
+}
+
+// #1199 AC1: waitIdleForDelivery returns as soon as the conversation clears. The
+// clear arrives here through observe — the ordinary production feed — so this is
+// the mid-turn hold's happy path end to end at the tracker tier.
+func TestTurnBusyTracker_WaitIdleForDeliveryReturnsOnClear(t *testing.T) {
+	t.Parallel()
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+
+	done := make(chan error, 1)
+	go func() { done <- tr.waitIdleForDelivery(context.Background(), testConvID, 5*time.Second) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("waitIdleForDelivery returned (%v) while the turn was open", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("waitIdleForDelivery = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitIdleForDelivery never returned after the conversation's TurnEnd")
+	}
+}
+
+// #1199 AC3 (tracker tier): a turn that never ends bounds the wait rather than
+// holding it forever, and reports DeadlineExceeded — the classification the
+// delivery seam wraps and msgqueue's give-up path then counts. The conversation is
+// still busy afterwards: the deadline reports that THIS waiter gave up, never that
+// the turn ended.
+func TestTurnBusyTracker_WaitIdleForDeliveryTimesOut(t *testing.T) {
+	t.Parallel()
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+
+	err := tr.waitIdleForDelivery(context.Background(), testConvID, 50*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("waitIdleForDelivery on a never-ending turn = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if !tr.Busy(testConvID) {
+		t.Error("Busy = false after the bounded wait expired; a deadline must not clear the turn")
+	}
+}
+
+// #1199 AC2's mechanism at the tracker tier: a cancelled parent ctx returns
+// context.Canceled promptly, which is how BOTH a dropped head (msgqueue.Remove
+// cancels the in-flight delivery so this wait unblocks at once) and daemon
+// shutdown escape the hold. The timeout here is deliberately far larger than the
+// test's patience, so passing requires the cancel path, not the deadline.
+func TestTurnBusyTracker_WaitIdleForDeliveryHonoursCancel(t *testing.T) {
+	t.Parallel()
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- tr.waitIdleForDelivery(ctx, testConvID, time.Hour) }()
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("waitIdleForDelivery after cancel = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitIdleForDelivery never returned after its context was cancelled")
 	}
 }
 
