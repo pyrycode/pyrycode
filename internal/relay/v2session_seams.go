@@ -311,6 +311,26 @@ type V2SessionConfig struct {
 	// above; the transcript content itself never crosses the wire).
 	SnapshotUsage func() (usedTokens, windowTokens int)
 
+	// BootstrapSessionID reports the id of the session SnapshotSettings and
+	// SnapshotUsage describe, so handleRequestSessionSettings can tell a client
+	// which session to address a set_session_settings to (#491). Optional: nil ⇒
+	// the handler reports "", which the wire contract defines as "no session to
+	// address, treat the controls as read-only" — never a crash, never a silent
+	// drop. Primitive-typed (one string) so internal/relay imports neither
+	// internal/sessions nor its SessionID type; production wires a closure over
+	// *sessions.Pool.BootstrapID.
+	//
+	// It MUST report the same session the two seams above describe, or a client
+	// would read one session's values and write to another. That is why all three
+	// are bootstrap-scoped together rather than one being conversation-keyed
+	// (#848's "do not pre-carve a conversation-keyed settings seam"); when that
+	// decision is revisited, all three move together.
+	//
+	// A session id is a routing key, not a secret: it already crosses the wire
+	// outbound on session_transition and inbound on set_session_settings. Read-only
+	// reflection, no authz decision, no mutation, no input parsing.
+	BootstrapSessionID func() string
+
 	// ModalResolver resolves inbound modal_answer / modal_cancel control
 	// frames. Optional: when nil, both are inert no-ops (the modal bridge is
 	// simply unwired — foreground, or pre-#708 before the producer is live).
