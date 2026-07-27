@@ -171,6 +171,10 @@ func writeStreamInteractiveConfig(t *testing.T, home string) {
 // turn_state{idle} for convID (M2). This is the stronger drain AC #2 requires;
 // #854's drainForAssistantReply stops at M1.
 //
+// It also asserts a THIRD thing, a negative: that the turn produces no
+// unrecognized_message frame. See that arm for why it is the most valuable
+// assertion in this file.
+//
 // It mirrors the fake-side two-milestone drain (#1141,
 // relay_v2_stream_send_test.go:149-217) with the real-claude adaptation: NO
 // content/echo assertion — real claude's words are non-deterministic, so M1
@@ -222,6 +226,36 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 			t.Fatalf("decode envelope (drain): %v", err)
 		}
 		switch env.Type {
+		case protocol.TypeUnrecognizedMessage:
+			// THE REGRESSION ALARM on the parser's known-ignored list.
+			//
+			// A normal turn against live claude must produce ZERO of these. The
+			// parser splits claude's output two ways: types we knowingly ignore
+			// stay silent, anything else surfaces as this frame. That split rests
+			// on a MEASUREMENT (streamsup/parser.go ignoredLineTypes, taken
+			// 2026-07-27), and a measurement goes stale the day claude ships a new
+			// message type or content block.
+			//
+			// So this assertion is the alarm the whole unrecognized-message feature
+			// exists to provide, and it fires HERE — in the pre-ship gate, before a
+			// binary swap — rather than in front of a user afterwards. It sits in
+			// the shared drain deliberately: every stream spec that drives a real
+			// turn becomes a sentinel for free.
+			//
+			// Going red does NOT necessarily mean something is broken. It means
+			// claude's output grew a shape we do not map. Read the payload, decide
+			// whether it deserves a mapping or an entry on the known-ignored list,
+			// and re-run the slice 0 measurement.
+			var p protocol.UnrecognizedMessagePayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatalf("decode unrecognized_message payload: %v", err)
+			}
+			t.Fatalf("a NORMAL turn produced an unrecognized_message: site=%q type=%q truncated=%v\n"+
+				"raw: %s\n\n"+
+				"claude emitted output the stream parser has no mapping for. Either it needs a "+
+				"mapping, or it belongs on streamsup.ignoredLineTypes — re-run the line-inventory "+
+				"measurement before deciding.",
+				p.Site, p.MessageType, p.Truncated, p.Raw)
 		case protocol.TypeAssistantDelta:
 			if sawDelta {
 				continue

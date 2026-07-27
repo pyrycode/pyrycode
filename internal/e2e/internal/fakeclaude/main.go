@@ -339,6 +339,7 @@ const (
 	envStreamInterrupt   = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
 	envStreamHold        = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
 	envStreamApprove     = "PYRY_FAKE_CLAUDE_STREAM_APPROVE"
+	envStreamBogus       = "PYRY_FAKE_CLAUDE_STREAM_BOGUS"
 	envApproveSocketFile = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	assistantMaxBytes    = 64 * 1024
 	pollInterval         = 50 * time.Millisecond
@@ -565,7 +566,14 @@ func main() {
 			runStreamJSONApprove(stdin, os.Stdout, os.Getenv(envApproveSocketFile))
 			return
 		}
-		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
+		// Bogus rider (envStreamBogus, default-off): prepend one line of a
+		// top-level type the parser has never seen, and one assistant message
+		// carrying a block type it has never seen, ahead of the normal per-turn
+		// reply. Both are the two drop sites the unrecognized-message diagnostic
+		// exists to surface, so the e2e can assert they reach a client instead of
+		// vanishing. Passed as a value so runStreamJSON stays a pure I/O seam;
+		// unset ⟹ byte-identical to prior behaviour.
+		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "")
 		return
 	}
 
@@ -1369,7 +1377,7 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // With honorInterrupt false the control_request is ignored (the default the send /
 // new_session / queue riders depend on staying byte-identical). The mode is stateless:
 // it emits an interrupted result on each interrupt control_request.
-func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt bool) {
+func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1382,6 +1390,14 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt bool) {
 			if text, ok := userTurnText(b); ok {
 				turn++
 				msgID := fmt.Sprintf("m%d", turn)
+				// The bogus rider emits its two unmappable shapes BEFORE the real
+				// reply, so a test that waits on the reply has necessarily already
+				// seen them — no ordering race to tune.
+				if emitBogus {
+					if werr := writeBogusLines(w, msgID); werr != nil {
+						return
+					}
+				}
 				// Default mode ends the turn (echo + result{success}); interrupt mode
 				// echoes ONLY, withholding the result so the turn stays in flight.
 				var werr error
@@ -1474,6 +1490,44 @@ func writeAssistantEcho(w io.Writer, msgID, text string) error {
 		},
 	})
 }
+
+// writeBogusLines writes the two shapes the daemon's stream parser has no
+// mapping for: one top-level line of an invented type, and one assistant message
+// whose single content block is of an invented type. They exercise the two drop
+// sites that used to vanish into a debug log the production daemon never prints,
+// so an e2e can assert both now reach a client as unrecognized_message frames.
+//
+// The needles are deliberately distinctive strings so the assertion cannot pass
+// on some other frame's content.
+func writeBogusLines(w io.Writer, msgID string) error {
+	if err := writeJSONLine(w, map[string]any{
+		"type":   bogusLineType,
+		"detail": bogusLineNeedle,
+	}); err != nil {
+		return err
+	}
+	return writeJSONLine(w, map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"id":   msgID + "-bogus",
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type":   bogusBlockType,
+				"detail": bogusBlockNeedle,
+			}},
+		},
+	})
+}
+
+// The invented type names and needles the bogus rider emits. Exported-in-spirit
+// constants rather than inline literals so the e2e asserts against the same
+// strings the fake writes.
+const (
+	bogusLineType    = "fake_future_event"
+	bogusLineNeedle  = "bogus-line-needle"
+	bogusBlockType   = "fake_future_block"
+	bogusBlockNeedle = "bogus-block-needle"
+)
 
 // writeInterruptedResult writes a single result{subtype:"error_during_execution"}
 // line — the stream-json shape claude emits for an interrupt-terminated turn.

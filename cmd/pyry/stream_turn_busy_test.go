@@ -49,17 +49,19 @@ func requireWaitIdle(t *testing.T, tr *turnBusyTracker, convID string) {
 // AC4: the opener set is a WHITELIST — exactly the four variants that open a turn
 // today, with everything else leaving the conversation idle.
 //
-// This unit tier is the ONLY tier where the whitelist is observable. Stall,
-// ApiRetry and Compacting are tui-driver signals (turnevent/event.go:73-96) and
-// the stream-json sink has exactly one producer — streamsup.Parser, which emits
-// five variants only (parser.go:157-220). None of the three can reach the tracker
-// through a parser or a live runner, so feeding them here by hand is not a
-// simulation of a reachable input: it pins the type switch against the parser's
-// documented growth path (its default: arm tolerates rate_limit_event today,
-// parser.go:158-163, which is precisely the line that becomes an ApiRetry the day
-// someone wires it). A blacklist ("anything that isn't TurnEnd opens a turn") is
-// behaviourally identical through today's sink and would wedge a conversation on
-// that first new variant.
+// Stall, ApiRetry and Compacting are tui-driver signals
+// (turnevent/event.go:73-96) that the stream-json sink's only producer —
+// streamsup.Parser — never emits, so feeding them here by hand pins the type
+// switch rather than simulating a reachable input.
+//
+// Unrecognized is the case that proves the whitelist was worth having. It IS
+// reachable: the parser emits it for any claude output outside the measured
+// known-ignored list, and it reached this tracker without one line of change
+// here, because the opener set is a whitelist and a new variant falls to the
+// default. A blacklist ("anything that isn't TurnEnd opens a turn") is
+// behaviourally identical through the older sink, and would have wedged every
+// conversation that met an unknown message — the turn would open and no turn end
+// would ever follow, because we could not understand the message that opened it.
 func TestTurnBusyTracker_OpenerWhitelist(t *testing.T) {
 	t.Parallel()
 
@@ -75,6 +77,11 @@ func TestTurnBusyTracker_OpenerWhitelist(t *testing.T) {
 		{"stall does not open", turnevent.Stall{}, false},
 		{"api_retry does not open", turnevent.ApiRetry{Active: true, Current: 1, Total: 3}, false},
 		{"compacting does not open", turnevent.Compacting{Active: true}, false},
+		{"unrecognized does not open", turnevent.Unrecognized{
+			Site: turnevent.UnrecognizedLineType,
+			Kind: "some_future_event",
+			Raw:  `{"type":"some_future_event"}`,
+		}, false},
 		{"lone turn_end does not open", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, false},
 	}
 
