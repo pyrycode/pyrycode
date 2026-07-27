@@ -129,9 +129,10 @@ type CompactingPayload struct {
 //
 // SECURITY: Raw is the ONLY interactive payload field carrying unbounded
 // model-adjacent JSON, so two properties are load-bearing. The producer
-// truncates at construction, so an oversized payload never reaches this struct
-// (the transport frame ceiling is 1 MiB; the cap leaves roughly eight times
-// headroom after worst-case escaping). And Raw is a plain string, not
+// truncates at construction to 16 KiB, so an oversized payload never reaches
+// this struct; that is roughly a quarter of the v2 application-envelope cap of
+// 65519 bytes (NOT v1's 1 MiB, which v2 superseded), leaving room for the other
+// fields plus JSON escaping. And Raw is a plain string, not
 // json.RawMessage, because a truncated blob is no longer valid JSON — typing it
 // as raw JSON would be a lie and would break marshalling. A consumer must render
 // it as inert text and never feed it to an HTML sink, an attribute, or a URL.

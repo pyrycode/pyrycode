@@ -21,9 +21,18 @@ const defaultMaxParseBuf = 4 << 20
 // maxUnrecognizedRaw caps the raw JSON carried on a turnevent.Unrecognized.
 // Applied at CONSTRUCTION, so an oversized payload never enters the event
 // stream, the push queue, or any log — the cap is the only thing standing
-// between a pathological line and the 1 MiB transport frame ceiling. 16 KiB
-// survives worst-case JSON escaping and base64 with roughly eight times
-// headroom, and is far more than a human reads off a timeline row.
+// between a pathological line and the wire's size limit.
+//
+// The binding limit is the v2 application-envelope cap of 65519 bytes, NOT v1's
+// 1 MiB, which v2 superseded (docs/protocol-mobile.md § Application-envelope
+// size cap). 16 KiB is roughly a quarter of it, which leaves room for the
+// envelope's other fields plus the JSON escaping this blob picks up on the way
+// out. Escaping is mild in practice because the payload is already JSON text:
+// its control characters arrive pre-escaped as printable pairs, so the growth is
+// quotes and backslashes rather than a \u00XX expansion of every byte.
+//
+// It is also far more than a human reads off a timeline row, which is the other
+// reason not to raise it.
 const maxUnrecognizedRaw = 16 << 10
 
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
