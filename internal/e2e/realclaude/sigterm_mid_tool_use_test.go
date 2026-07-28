@@ -8,7 +8,7 @@ package realclaude
 //
 //  1. Full-subtree cleanup. pyry reaps the claude process it spawned AND
 //     claude's in-flight Bash subprocess group — no leftover claude and no
-//     orphaned `tail` after pyry exits. claude runs every Bash command in a
+//     orphaned `cat` after pyry exits. claude runs every Bash command in a
 //     detached descendant process group two levels below pyry; on SIGTERM
 //     pyry walks claude's descendant groups and SIGKILLs them (#565), so the
 //     whole subtree is gone, not just the direct child.
@@ -20,29 +20,81 @@ package realclaude
 //  4. SIGTERM landed mid-tool_use. A Bash tool_use envelope is on disk but
 //     no matching tool_result was written before SIGTERM tore claude down.
 //
-// In-flight command (claude 2.1.158). The fixture runs `tail -f /dev/null`,
-// a command that blocks forever as a single, pgrep-able process. An earlier
-// `sleep 30` no longer works: claude 2.1.158's Bash tool refuses a standalone
-// sleep ("Blocked: standalone sleep 30 ...") so no subprocess ever spawns
-// (#563). run_in_background is also wrong — it returns immediately, so a
-// tool_result lands and invariant 4 cannot hold. `tail -f /dev/null` keeps
-// the tool_use open until SIGTERM, guaranteeing no tool_result with no
-// timing race.
+// Fragility history — invariant 4 is the one that keeps breaking. Twice the
+// fixture lost its ability to keep a command in flight, and both times the
+// root cause was the same: the open window belonged to claude.
+//
+//   - `sleep 30`, defeated by claude 2.1.158. The Bash tool began refusing a
+//     standalone sleep ("Blocked: standalone sleep 30 ..."), so no subprocess
+//     ever spawned. Fixed by swapping the command to `tail -f /dev/null`
+//     (#563).
+//   - `tail -f /dev/null`, defeated by claude 2.1.220. claude now attaches its
+//     own timeout to a Bash call and, on expiry, backgrounds the command and
+//     returns a tool_result immediately ("Command did not complete within its
+//     5s timeout and was moved to the background (ID: ...)"). In the
+//     2026-07-27 probe the `"timeout":5000` sat inside the tool_use PARAMS,
+//     with a matching description — so the bound was the MODEL's choice on a
+//     command whose shape advertises "blocks forever", not a fixed client
+//     policy. Note the irony this header used to record: it rejected
+//     run_in_background because "it returns immediately, so a tool_result
+//     lands and invariant 4 cannot hold". That is now claude's automatic
+//     behaviour once its own timeout fires (#1219).
+//
+// Why this shape is structurally different, not a third command guess. The
+// blocking artifact is created and held by the TEST; claude only waits on it:
+//
+//	test:   mkfifo <workdir>/sigterm-hold
+//	test:   goroutine → open(fifo, O_WRONLY)  [blocks: no reader yet]
+//	claude: Bash → cat <workdir>/sigterm-hold [blocks: no writer yet]
+//	        ↓ both opens complete at the same instant — a rendezvous
+//	test:   holds the write end, never writes → cat blocks in read() forever
+//	test:   Close() (t.Cleanup only)          → cat sees EOF and exits
+//
+// Two properties fall out. Both are pure test-side mechanics that no
+// claude-side policy change can take away:
+//
+//  1. The window's END is the test's. `cat` cannot complete while the test
+//     holds the write end open, and the only release is holdFIFO's t.Cleanup.
+//  2. The window's START is race-free. The blocking open(O_WRONLY) returns at
+//     the instant `cat` starts — no 100 ms poll lag. That lag is precisely
+//     what lost the race against a 5 s model-chosen timeout.
+//
+// NOT load-bearing: the neutral command (`cat <path>` reads as an
+// instantaneous file read, not an open-ended block) and the neutral FIFO name
+// (`sigterm-hold`, no `.fifo` suffix). Those only reduce the cue that might
+// prompt the model to attach a defensive timeout; if claude bounds every Bash
+// call regardless, they buy nothing while (1) and (2) still hold. Do NOT read
+// them as "the fix is picking a command claude won't bound" — that is the
+// treadmill this shape exists to end. For the same reason the prompt carries
+// no "do not set a timeout" nudge: steering the model is the treadmill by
+// another name.
+//
+// On defeat #3. If invariant 4b trips, the fixture command cannot have
+// completed on its own — the test still held the write end when the assertion
+// ran — so claude ended the call. That is a claude-side policy change, not a
+// pyry regression. Check claude's verbatim tool_use envelope first (the
+// failure message dumps it): an `input.timeout` field means claude bounded the
+// call itself. Then the tool_result envelope's prose. The escape hatch is
+// `needs-rework:po` on #1219 with the probe transcript attached, NOT a fourth
+// command.
 //
 // Event-driven SIGTERM timing. The test does not guess when to signal. It
-// waits for two real events: (a) the `tail` subprocess appears as a
-// descendant of pyry, confirming the command is genuinely executing; (b) the
-// Bash tool_use envelope is flushed to claude's on-disk session file (it lags
-// the subprocess by a couple of seconds). Only then does it SIGTERM, so
-// invariant 4's "tool_use present" precondition holds regardless of how fast
-// or slow a given claude version is.
+// waits for three real events: (a) the FIFO rendezvous, which fires the
+// instant claude's `cat` opens the FIFO for reading; (b) the `cat` subprocess
+// appears as a descendant of pyry, which is where its process group is
+// captured; (c) the Bash tool_use envelope is flushed to claude's on-disk
+// session file (it lags the subprocess by a couple of seconds). Only then does
+// it SIGTERM, so invariant 4's "tool_use present" precondition holds
+// regardless of how fast or slow a given claude version is.
 //
 // Subprocess detection (claude 2.1.158). claude runs every Bash command in
 // its own process group two levels below pyry, so `pgrep -g <pyry-pgid>`
 // cannot see it. waitForBashSubprocess walks the process tree by parent
 // instead, and returns the subprocess's process group — the group invariant 1
 // now asserts pyry reaped (#565), no longer merely the group the test reaps in
-// cleanup.
+// cleanup. Since the rendezvous already proves the command is executing, a
+// timeout in that walk now means "could not read the pgid", not "claude never
+// ran the command".
 //
 // Terminal-shape branch: the architect picked branch B (clean stream
 // truncation at a complete envelope boundary). The on-disk JSONL is the
@@ -57,6 +109,7 @@ package realclaude
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,14 +131,21 @@ const sigtermSystemPrompt = "You are an e2e regression-guard test. " +
 
 // sigtermProcessName is the leaf process the fixture command spawns. The
 // process-tree walk matches a descendant of pyry by this base name.
-const sigtermProcessName = "tail"
+//
+// Accepted risk: a stray `cat` among pyry's descendants would match. The walk
+// only ever sees pyry's own subtree and the prompt runs exactly one command,
+// so this is not worth defending with a full-command-line match — and matching
+// the command line would find the `zsh -c` wrapper first (same pgid, but it
+// exists before `cat` does).
+const sigtermProcessName = "cat"
 
-// sigtermPrompt forces a single Bash call running `tail -f /dev/null`, a
-// command that blocks forever as one `tail` process. It stays in flight (no
-// tool_result) until SIGTERM lands, however long detection takes, so
-// invariant 4 holds with no timing race. See the file header for why neither
-// `sleep 30` nor run_in_background works on claude 2.1.158.
-const sigtermPrompt = "Use the Bash tool to run `tail -f /dev/null`. Do nothing else."
+// sigtermPromptFormat forces a single Bash call running `cat <fifo>`, where
+// <fifo> is a FIFO the test created and holds open for writing (see holdFIFO).
+// The command stays in flight — blocked in read(), no tool_result — until
+// SIGTERM lands, however long detection takes, because only the test can close
+// the window. See the file header for why the command name itself is not
+// load-bearing, and why there is deliberately no "do not set a timeout" nudge.
+const sigtermPromptFormat = "Use the Bash tool to run `cat %s`. Do nothing else."
 
 // syncBuffer is a goroutine-safe bytes.Buffer. os/exec writes the child's
 // stdout/stderr from a copier goroutine, and this test reads them while the
@@ -118,8 +178,15 @@ func (s *syncBuffer) Bytes() []byte {
 func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 	workdir := WithWorktreeAuthenticated(t)
 
+	// The in-flight command blocks on this FIFO, which the test creates and
+	// holds open for writing until t.Cleanup. That is the ownership inversion
+	// the file header describes: the window's end is the test's, not claude's.
+	// Created before prompt.txt because the prompt has to name the path.
+	fifoPath := filepath.Join(workdir, "sigterm-hold")
+	fifoOpened := holdFIFO(t, fifoPath)
+
 	promptPath := filepath.Join(workdir, "prompt.txt")
-	if err := os.WriteFile(promptPath, []byte(sigtermPrompt), 0o600); err != nil {
+	if err := os.WriteFile(promptPath, []byte(fmt.Sprintf(sigtermPromptFormat, fifoPath)), 0o600); err != nil {
 		t.Fatalf("write %s: %v", promptPath, err)
 	}
 	systemPath := filepath.Join(workdir, "system.txt")
@@ -152,16 +219,32 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 			truncate(stderr.Bytes()))
 	}
 
-	// Event (a): wait for the `tail -f /dev/null` subprocess to appear as a
-	// descendant of pyry. claude 2.1.158 runs the command in its own
-	// descendant process group, so the test walks the process tree (not
-	// pyry's group) to find it, and records that group so the #565 orphan
-	// can be reaped.
+	// Event (a): the FIFO rendezvous. holdFIFO's blocking open(O_WRONLY)
+	// returns at the instant claude's `cat` opens the FIFO for reading, so
+	// this fires exactly when the command starts executing — no poll lag.
+	// 25s matches the budget the process-tree walk below uses for "claude got
+	// as far as the Bash call".
+	select {
+	case <-fifoOpened:
+	case <-time.After(25 * time.Second):
+		_ = syscall.Kill(-pyryPid, syscall.SIGKILL)
+		t.Fatalf("claude never opened the fixture FIFO %s within 25s — it did not "+
+			"reach the Bash call, or it ran a different command\nstderr:\n%s",
+			fifoPath, truncate(stderr.Bytes()))
+	}
+
+	// Event (b): find the `cat` subprocess in pyry's descendants and record
+	// its process group so the #565 orphan can be reaped. claude runs the
+	// command in its own descendant process group, so the test walks the
+	// process tree (not pyry's group) to find it. The rendezvous above
+	// already proved the command is executing, so a timeout here means "could
+	// not read the pgid", not "claude never ran the command".
 	bashPGID, found := waitForBashSubprocess(t, pyryPid, sigtermProcessName, 25*time.Second)
 	if !found {
 		_ = syscall.Kill(-pyryPid, syscall.SIGKILL)
-		t.Fatalf("claude never started the `tail -f /dev/null` subprocess within 25s, "+
-			"cannot exercise SIGTERM mid-tool_use\nstderr:\n%s", truncate(stderr.Bytes()))
+		t.Fatalf("claude opened %s (so `%s` is running) but no `%s` descendant of "+
+			"pyry could be resolved to a process group within 25s\nstderr:\n%s",
+			fifoPath, sigtermProcessName, sigtermProcessName, truncate(stderr.Bytes()))
 	}
 	// Defense-in-depth: pyry reaps this Bash subprocess group on SIGTERM
 	// (#565), and invariant 1 below asserts it is gone after pyry exits. This
@@ -172,12 +255,12 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 		_ = syscall.Kill(-bashPGID, syscall.SIGKILL)
 	})
 
-	// Event (b): wait until claude has flushed the Bash tool_use to its
+	// Event (c): wait until claude has flushed the Bash tool_use to its
 	// on-disk session file. It lands a couple of seconds after the subprocess
 	// starts; SIGTERM before the flush truncates the session file without it,
-	// and invariant 4's "tool_use present" check needs it. `tail -f /dev/null`
-	// never returns, so no tool_result is ever written, however long this
-	// wait takes.
+	// and invariant 4's "tool_use present" check needs it. The test still
+	// holds the FIFO's write end, so `cat` cannot return and no tool_result is
+	// ever written, however long this wait takes.
 	sessionID := waitForSessionID(&stdout, 10*time.Second)
 	if sessionID == "" {
 		_ = syscall.Kill(-pyryPid, syscall.SIGKILL)
@@ -223,8 +306,8 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 	// Invariant 1: pyry reaps the full claude subtree — the direct child AND
 	// claude's detached Bash subprocess group (#565). On SIGTERM pyry walks
 	// claude's descendant process groups and SIGKILLs them, then SIGTERMs
-	// claude, so neither the claude process nor the `tail -f /dev/null` group
-	// is alive once pyry has exited.
+	// claude, so neither the claude process nor the `cat <fifo>` group is
+	// alive once pyry has exited.
 	if !waitForProcessGone(claudePid, 2*time.Second) {
 		t.Fatalf("claude (pid=%d, pyry's direct child) still alive after pyry exit — "+
 			"pyry did not reap the process it spawned\nstderr:\n%s",
@@ -269,9 +352,16 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 	}
 
 	// Invariant 4b: matching tool_result absent (branch B). Failure here means
-	// the Bash subprocess produced a result before SIGTERM tore claude down —
-	// impossible for `tail -f /dev/null`, a command that never returns. If it
-	// ever trips, the fixture command stopped blocking.
+	// claude ended the Bash call before SIGTERM tore it down.
+	//
+	// The discrimination in the message below is STRUCTURAL, not textual. It
+	// deliberately does not branch on claude's prose ("moved to the
+	// background") — matching on a string that goes stale every release would
+	// rebuild the treadmill inside the failure path. The structural fact is
+	// permanent: the fixture command blocks on a FIFO this test created and
+	// still holds open (holdFIFO closes the write end only in t.Cleanup, which
+	// by construction runs after this assertion), so the command CANNOT have
+	// completed on its own.
 	for _, e := range events[bashIdx+1:] {
 		if e.Kind != "user" {
 			continue
@@ -283,12 +373,194 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 		for _, b := range blocks {
 			if b.Type == "tool_result" && b.ToolUseID == bashToolUseID {
 				t.Fatalf("matching tool_result on disk for Bash tool_use_id=%s in %s — "+
-					"Bash returned before SIGTERM landed; the fixture command "+
-					"(`tail -f /dev/null`) is supposed to block forever",
-					bashToolUseID, jsonlPath)
+					"claude ended the Bash call before SIGTERM landed.\n\n"+
+					"The fixture command blocks on the FIFO %s, which this test created "+
+					"and still held open for writing when this assertion ran, so it "+
+					"cannot have completed on its own. Check, in this order:\n"+
+					"  1. claude's tool_use envelope below. An `input.timeout` field "+
+					"means claude bounded the call itself — fixture defeat #3, a "+
+					"claude-side policy change, NOT a pyry regression.\n"+
+					"  2. claude's tool_result envelope below. Prose like \"did not "+
+					"complete within its Ns timeout and was moved to the background\" is "+
+					"the claude 2.1.220 shape #1219 fixed for; a refusal (\"Blocked: "+
+					"...\") is the #563 shape.\n"+
+					"  3. Only if neither: the FIFO write end was released early (a "+
+					"holdFIFO lifetime bug), or pyry's SIGTERM path regressed.\n"+
+					"See this file's header for the fragility history. On a claude-side "+
+					"defeat the escape hatch is `needs-rework:po` on #1219 with the probe "+
+					"transcript attached, not a fourth command guess.\n\n"+
+					"tool_use:\n%s\n\ntool_result:\n%s",
+					bashToolUseID, jsonlPath, fifoPath,
+					truncate(events[bashIdx].Raw), truncate(e.Raw))
 			}
 		}
 	}
+}
+
+// holdFIFO creates a FIFO at path and blocks a goroutine on open(O_WRONLY).
+// The returned channel is closed exactly once, at the instant a reader opens
+// the FIFO — i.e. the instant claude's `cat` starts executing. Until the write
+// end is closed, that reader stays blocked in read(): this is the open window
+// the test owns, per the file header.
+//
+// HAZARD — why the caller never gets the *os.File. Closing the write end makes
+// `cat` exit on its own, so a release before invariant 1 has been asserted
+// would make "pyry reaped the Bash process group" pass VACUOUSLY. The only
+// release lives in the t.Cleanup registered here, which by construction runs
+// after the test body — the assertion order is safe by structure, not by
+// discipline. Do not add a caller-facing release().
+//
+// Per #422's precedent (reaffirmed in #1219's Technical Notes), this helper is
+// file-local; promote to fixtures.go only when a second test needs it.
+func holdFIFO(t *testing.T, path string) <-chan struct{} {
+	t.Helper()
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("holdFIFO: mkfifo %s: %v (a pre-existing file at that path is "+
+			"the realistic cause)", path, err)
+	}
+
+	opened := make(chan struct{})
+	done := make(chan struct{})
+	// writeEnd and openErr are written by the goroutine and read by the
+	// cleanup only after <-done, so the channel close carries the
+	// happens-before. The timeout arm below deliberately reads neither.
+	var (
+		writeEnd *os.File
+		openErr  error
+	)
+	go func() {
+		defer close(done)
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			openErr = err
+			return
+		}
+		writeEnd = f
+		close(opened)
+	}()
+
+	t.Cleanup(func() {
+		// Release, in this order:
+		//  1. Open the read end non-blocking. POSIX guarantees O_RDONLY|
+		//     O_NONBLOCK on a FIFO never blocks, and it completes the writer
+		//     goroutine's rendezvous on the path where claude never ran the
+		//     command. It stays open across the wait below so a goroutine
+		//     that has not yet reached open(2) still finds a reader.
+		//  2. Wait (bounded) for the goroutine to leave open(2), which is
+		//     also what makes the reads below race-free.
+		//  3. Close the write end — the only release of the hold.
+		r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Errorf("holdFIFO: cleanup read-open %s: %v", path, err)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			// Leave the read end open on purpose: closing it would re-park a
+			// writer goroutine that has not yet reached open(2).
+			t.Errorf("holdFIFO: writer goroutine still parked in open(%s) 5s "+
+				"after the read end was opened", path)
+			return
+		}
+		if r != nil {
+			_ = r.Close()
+		}
+		if openErr != nil {
+			t.Errorf("holdFIFO: open %s for writing: %v", path, openErr)
+		}
+		if writeEnd != nil {
+			_ = writeEnd.Close()
+		}
+	})
+
+	return opened
+}
+
+// TestHoldFIFO_RendezvousAndRelease proves the mechanism TestRealClaude_
+// SigtermMidToolUse rests on, without claude and without credentials: the
+// rendezvous fires when (and only when) a reader arrives, the reader stays
+// blocked for as long as the test holds the write end, only the test's
+// cleanup ends it, and a never-read FIFO leaks no goroutine. It carries the
+// e2e_realclaude build tag so it lives beside the test it underpins, but it
+// runs on every `make e2e-realclaude` regardless of auth.
+func TestHoldFIFO_RendezvousAndRelease(t *testing.T) {
+	t.Run("rendezvous_hold_release", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "sigterm-hold")
+
+		// Registered BEFORE holdFIFO so it runs AFTER holdFIFO's release
+		// (t.Cleanup is LIFO). That ordering is the only way to observe the
+		// post-release state from inside the subtest — and it is the same
+		// ordering property invariant 1 relies on. It doubles as the reaper
+		// for the spawned `cat` so the package leaves no strays.
+		// readerDone is CLOSED rather than sent on, so both the assertion in
+		// the body and this cleanup can wait on it. A buffered send would let
+		// whichever ran first drain the value and hang the other.
+		var (
+			reader     *exec.Cmd
+			readerErr  error
+			readerDone = make(chan struct{})
+		)
+		t.Cleanup(func() {
+			if reader == nil {
+				return
+			}
+			select {
+			case <-readerDone:
+			case <-time.After(5 * time.Second):
+				t.Errorf("`cat %s` still running 5s after holdFIFO closed the write "+
+					"end — the test does not own the window's end", path)
+				_ = reader.Process.Kill()
+				<-readerDone
+			}
+		})
+
+		opened := holdFIFO(t, path)
+
+		select {
+		case <-opened:
+			t.Fatalf("holdFIFO signalled a rendezvous on %s before any reader opened it", path)
+		default:
+		}
+
+		cmd := exec.Command("cat", path)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start `cat %s`: %v", path, err)
+		}
+		reader = cmd
+		go func() {
+			readerErr = cmd.Wait()
+			close(readerDone)
+		}()
+
+		select {
+		case <-opened:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("holdFIFO did not signal a rendezvous within 10s of `cat %s` starting", path)
+		}
+
+		// The window stays open while the test holds the write end. readerErr
+		// is race-free here: the close of readerDone carries the
+		// happens-before from the cmd.Wait goroutine.
+		select {
+		case <-readerDone:
+			t.Fatalf("`cat %s` exited (%v) while holdFIFO still held the write end — "+
+				"the window closed without the test releasing it", path, readerErr)
+		case <-time.After(500 * time.Millisecond):
+		}
+	})
+
+	t.Run("no_reader_no_leak", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "sigterm-hold")
+		opened := holdFIFO(t, path)
+		select {
+		case <-opened:
+			t.Fatalf("holdFIFO signalled a rendezvous on %s with no reader", path)
+		case <-time.After(200 * time.Millisecond):
+		}
+		// Returning here runs holdFIFO's cleanup, which must release the
+		// parked writer goroutine rather than hang the suite. holdFIFO's own
+		// bounded wait t.Errorf's if it does not.
+	})
 }
 
 // spawnPyryAgentRun constructs and starts the same argv as RunPyryAgentRun
