@@ -17,8 +17,9 @@ package realclaude
 //     --continue would choke on.
 //  3. Bounded exit window. pyry exits within 5s of SIGTERM. A hang IS the
 //     regression being guarded against.
-//  4. SIGTERM landed mid-tool_use. A Bash tool_use envelope is on disk but
-//     no matching tool_result was written before SIGTERM tore claude down.
+//  4. SIGTERM landed mid-tool_use. A Bash tool_use envelope is on disk, and
+//     any matching tool_result is a shutdown-interruption artifact — never a
+//     completion of the command, and never claude bounding the call itself.
 //
 // Fragility history — invariant 4 is the one that keeps breaking. Twice the
 // fixture lost its ability to keep a command in flight, and both times the
@@ -39,6 +40,22 @@ package realclaude
 //     run_in_background because "it returns immediately, so a tool_result
 //     lands and invariant 4 cannot hold". That is now claude's automatic
 //     behaviour once its own timeout fires (#1219).
+//
+// The third entry is NOT a fixture defeat, and reading it as one is the
+// mistake to avoid:
+//
+//   - 2026-07-28, claude 2.1.220, with the window already inverted (below).
+//     claude attached NO timeout to the `cat <fifo>` call — the inversion
+//     held, and the command stayed in flight until the signal. But claude
+//     writes a synthetic tool_result into the session JSONL during its own
+//     teardown: `is_error: true` with rejection prose, carrying the
+//     envelope-level flags `interruptedByShutdown: true` and
+//     `toolDenialKind: "user-rejected"` (mislabelled — no user rejected
+//     anything; it is a teardown artifact). That flag is claude RECORDING the
+//     very fact invariant 4 exists to prove, but it lands on the surface the
+//     old "no matching tool_result" assertion forbade. So the assertion
+//     flipped sign — accept an interruption artifact, reject a completion —
+//     rather than the fixture changing shape a third time (#1219).
 //
 // Why this shape is structurally different, not a third command guess. The
 // blocking artifact is created and held by the TEST; claude only waits on it:
@@ -69,14 +86,26 @@ package realclaude
 // no "do not set a timeout" nudge: steering the model is the treadmill by
 // another name.
 //
-// On defeat #3. If invariant 4b trips, the fixture command cannot have
+// On defeat #4. If invariant 4b trips, the fixture command cannot have
 // completed on its own — the test still held the write end when the assertion
-// ran — so claude ended the call. That is a claude-side policy change, not a
-// pyry regression. Check claude's verbatim tool_use envelope first (the
-// failure message dumps it): an `input.timeout` field means claude bounded the
-// call itself. Then the tool_result envelope's prose. The escape hatch is
-// `needs-rework:po` on #1219 with the probe transcript attached, NOT a fourth
-// command.
+// ran, because holdFIFO releases only in t.Cleanup, which by construction runs
+// after the test body. Three outcomes, each settled by an artifact the run
+// already produced. Check in this order:
+//
+//  1. Was TestHoldFIFO_RendezvousAndRelease (this file) also RED in this run?
+//     Yes → a holdFIFO lifetime bug: the window mechanism itself is broken.
+//     Fix that first and treat this failure as downstream noise. No → the
+//     write end was held; continue.
+//  2. Does the dumped tool_use envelope carry an `input.timeout` field? Yes →
+//     claude bounded the call itself. Defeat #4, a claude-side policy change,
+//     NOT a pyry regression. No → claude ended the call without bounding it,
+//     or the interruption marker changed shape: compare the dumped
+//     tool_result envelope against the 2026-07-28 shape above.
+//  3. Only if neither: pyry's SIGTERM path regressed — it let claude finish
+//     the tool call instead of tearing it down.
+//
+// On a claude-side defeat the escape hatch is `needs-rework:po` on #1219 with
+// the probe transcript attached, NOT a fourth command.
 //
 // Event-driven SIGTERM timing. The test does not guess when to signal. It
 // waits for three real events: (a) the FIFO rendezvous, which fires the
@@ -96,20 +125,45 @@ package realclaude
 // timeout in that walk now means "could not read the pgid", not "claude never
 // ran the command".
 //
-// Terminal-shape branch: the architect picked branch B (clean stream
-// truncation at a complete envelope boundary). The on-disk JSONL is the
-// session-state file claude uses for --continue, not a stream-json result
-// stream — there is no evidence claude flushes a structured trailer line
-// to this file on signal. Invariant 4 pins that shape: a Bash tool_use
-// envelope is present but no matching tool_result envelope is written before
-// SIGTERM tears claude down. If a future probe reveals branch A (a structured
-// trailer line IS present), flip the tool_result assertion to "find a result
-// envelope with subtype != success" — same surface, opposite sign — and
-// record the observation in this comment.
+// Terminal-shape branch: branch A is now OBSERVED, not hypothetical. #422
+// picked branch B (clean stream truncation at a complete envelope boundary,
+// nothing written on signal) and invariant 4 pinned it as "no matching
+// tool_result". The 2026-07-28 live runs falsified that — claude does write on
+// teardown, see the third fragility entry above. The flip instruction this
+// paragraph used to carry was directionally right (same surface, opposite
+// sign) but named a field that does not exist on this surface: it said
+// `subtype != success`, and Subtype belongs to resultTrailer
+// (tool_loop_test.go:194-203), the stream-json result trailer, not to
+// contentBlock (tool_loop_test.go:160-168), which is the tool_result surface
+// here. Do not chase it.
+//
+// Where defeat #4 would land. The discriminator is the envelope-level
+// `interruptedByShutdown` flag on the line carrying the matching tool_result
+// (see classifyBashToolResult). Its cost, recorded so the next contributor
+// knows where to look first: the flag is claude-internal, undocumented, and
+// had ZERO occurrences repo-wide before #1219. It is chosen anyway for the
+// direction in which it fails. The rule is "accept only on positive evidence
+// of shutdown interruption; every unknown resolves to REJECT" — so if claude
+// renames or drops the flag, the line decodes to Go's zero value (false), the
+// test goes RED, and someone looks. Fail-closed costs no extra code.
+//
+// `is_error` was rejected despite being the more durable, public wire
+// vocabulary already present on contentBlock: resilience_test.go:126 asserts
+// is_error == true on a Bash tool_result for a command that RAN TO COMPLETION
+// and exited non-zero, so accepting on it would accept the exact outcome
+// invariant 4 exists to reject. (This package already reads is_error with
+// three different meanings across three surfaces.) `toolDenialKind` was
+// rejected as semantically mislabelled — exactly the kind of field a later
+// release corrects. claude's prose is rejected outright: matching a string
+// that goes stale every release rebuilds the treadmill inside the failure
+// path.
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,6 +173,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 )
 
 // sigtermSystemPrompt steers haiku toward a single Bash invocation so a
@@ -141,9 +197,11 @@ const sigtermProcessName = "cat"
 
 // sigtermPromptFormat forces a single Bash call running `cat <fifo>`, where
 // <fifo> is a FIFO the test created and holds open for writing (see holdFIFO).
-// The command stays in flight — blocked in read(), no tool_result — until
-// SIGTERM lands, however long detection takes, because only the test can close
-// the window. See the file header for why the command name itself is not
+// The command stays in flight — blocked in read() — until SIGTERM lands,
+// however long detection takes, because only the test can close the window.
+// claude then writes a tool_result during its OWN teardown, after the signal;
+// that is the interruption artifact invariant 4b accepts, not a completion of
+// the command. See the file header for why the command name itself is not
 // load-bearing, and why there is deliberately no "do not set a timeout" nudge.
 const sigtermPromptFormat = "Use the Bash tool to run `cat %s`. Do nothing else."
 
@@ -274,6 +332,35 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 			sessionID, truncate(stderr.Bytes()))
 	}
 
+	// Pre-signal snapshot: belt-and-suspenders for invariant 4, with different
+	// fabric. The post-exit check below reads a claude-internal field; this one
+	// reads a pure TIMING fact and depends on no claude field at all. ANY
+	// matching tool_result already on disk here means claude ended the Bash
+	// call before the test signalled, so the scenario was never staged — and
+	// it cannot be a pyry regression, because pyry has not been signalled yet.
+	//
+	// Not sufficient alone (a tool_result written just before the signal but
+	// flushed just after is missed), which is why the post-exit check stays
+	// primary. Its second contribution is diagnostic: it fails at the moment of
+	// truth instead of surfacing 40s later as an ambiguous 4b.
+	//
+	// A miss from findBashToolUse SKIPS rather than fails: waitForBashToolUseOnDisk
+	// just returned true, so an empty read here is transient, and invariant 4a
+	// below catches a genuine absence.
+	preEvents := ReadJSONL(t, workdir, sessionID)
+	if preID, preIdx := findBashToolUse(preEvents); preID != "" {
+		if kind, entry := classifyBashToolResult(preEvents, preID, preIdx); kind != toolResultAbsent {
+			_ = syscall.Kill(-pyryPid, syscall.SIGKILL)
+			t.Fatalf("a matching tool_result (%s) for Bash tool_use_id=%s was already on "+
+				"disk when SIGTERM was about to be sent — claude ended the Bash call "+
+				"before the test signalled, so the mid-tool_use scenario was never "+
+				"staged. This is a fixture defeat by definition: pyry has not been "+
+				"signalled yet, so it cannot be a production regression. See this "+
+				"file's fragility history.\n\ntool_use:\n%s\n\ntool_result:\n%s",
+				kind, preID, truncate(preEvents[preIdx].Raw), truncate(entry.Raw))
+		}
+	}
+
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("send SIGTERM to pyry (pid=%d): %v", pyryPid, err)
 	}
@@ -351,8 +438,11 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 			"teardown", jsonlPath)
 	}
 
-	// Invariant 4b: matching tool_result absent (branch B). Failure here means
-	// claude ended the Bash call before SIGTERM tore it down.
+	// Invariant 4b: any matching tool_result is a shutdown-interruption
+	// artifact, never a completion. toolResultAbsent also passes — it is the
+	// pre-2.1.220 shape, claude torn down before it wrote anything, which is
+	// still valid evidence that the signal landed mid-call. Only
+	// toolResultEnded fails: claude closed the Bash call itself.
 	//
 	// The discrimination in the message below is STRUCTURAL, not textual. It
 	// deliberately does not branch on claude's prose ("moved to the
@@ -362,7 +452,95 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 	// still holds open (holdFIFO closes the write end only in t.Cleanup, which
 	// by construction runs after this assertion), so the command CANNOT have
 	// completed on its own.
-	for _, e := range events[bashIdx+1:] {
+	kind, entry := classifyBashToolResult(events, bashToolUseID, bashIdx)
+	// Recorded on every run, pass or fail: which of the two passing shapes a
+	// given claude version produced. `interrupted-by-shutdown` is the 2.1.220
+	// shape; `absent` is the pre-2.1.220 one and is also valid. If the accept
+	// branch ever drifts from one to the other, this line in the -v log is what
+	// dates the change.
+	t.Logf("invariant 4b: matching tool_result for Bash tool_use_id=%s classified as %q",
+		bashToolUseID, kind)
+	if kind == toolResultEnded {
+		t.Fatalf("matching tool_result on disk for Bash tool_use_id=%s in %s carries no "+
+			"shutdown-interruption marker — claude ended the Bash call itself.\n\n"+
+			"The fixture command blocks on the FIFO %s, which this test created "+
+			"and still held open for writing when this assertion ran (holdFIFO "+
+			"releases only in t.Cleanup, structurally after the test body), so it "+
+			"cannot have completed on its own. Check, in this order:\n"+
+			"  1. Did TestHoldFIFO_RendezvousAndRelease (this file) also fail in "+
+			"this run? If yes, this is a holdFIFO lifetime bug — the window "+
+			"mechanism is broken; fix that first and treat this failure as "+
+			"downstream noise.\n"+
+			"  2. Does the tool_use envelope below carry an `input.timeout` field? "+
+			"If yes, claude bounded the call itself — fixture defeat #4, a "+
+			"claude-side policy change, NOT a pyry regression.\n"+
+			"     If no, claude ended the call without bounding it, or the "+
+			"interruption marker changed shape: compare the tool_result envelope "+
+			"below against the 2026-07-28 shape in this file's header. The "+
+			"discriminator is the envelope-level `interruptedByShutdown` flag; a "+
+			"rename or removal is defeat #4 landing on the FIELD rather than on "+
+			"the command.\n"+
+			"  3. Only if neither: pyry's SIGTERM path regressed — it let claude "+
+			"finish the tool call instead of tearing it down.\n"+
+			"See this file's header for the fragility history. On a claude-side "+
+			"defeat the escape hatch is `needs-rework:po` on #1219 with the probe "+
+			"transcript attached, not a fourth command guess.\n\n"+
+			"tool_use:\n%s\n\ntool_result:\n%s",
+			bashToolUseID, jsonlPath, fifoPath,
+			truncate(events[bashIdx].Raw), truncate(entry.Raw))
+	}
+}
+
+// toolResultKind classifies the matching Bash tool_result for invariant 4.
+//
+// The whole design rests on one rule: accept only on POSITIVE evidence of
+// shutdown interruption; every unknown resolves to reject. That is what makes
+// a vacuous pass structurally impossible rather than merely unlikely — see the
+// file header for why the discriminator is `interruptedByShutdown` and not
+// `is_error`.
+type toolResultKind int
+
+const (
+	// toolResultAbsent — no matching tool_result on disk. Pre-2.1.220 shape:
+	// claude was torn down before it wrote anything.
+	toolResultAbsent toolResultKind = iota
+	// toolResultInterrupted — matching tool_result carrying claude's
+	// envelope-level interruptedByShutdown flag. The 2026-07-28 shape.
+	toolResultInterrupted
+	// toolResultEnded — matching tool_result with NO interruption marker.
+	// claude ended the call on its own; the scenario was never staged.
+	toolResultEnded
+)
+
+func (k toolResultKind) String() string {
+	switch k {
+	case toolResultAbsent:
+		return "absent"
+	case toolResultInterrupted:
+		return "interrupted-by-shutdown"
+	case toolResultEnded:
+		return "ended-by-claude"
+	default:
+		return "unknown"
+	}
+}
+
+// classifyBashToolResult scans events after index from for a tool_result whose
+// tool_use_id is toolUseID, and classifies it. from is the index of the Bash
+// tool_use envelope, as returned by findBashToolUse; a negative from (no
+// tool_use) yields toolResultAbsent.
+//
+// The second return is the matching entry — zero-valued when absent — so
+// callers can quote it verbatim in a failure message.
+//
+// First match wins, deliberately. If claude ever wrote a completion result and
+// then an interruption marker for the same call, the completion is what proves
+// the call ended before the signal, and reporting it is the fail-closed answer.
+func classifyBashToolResult(events []JSONLEntry, toolUseID string, from int) (toolResultKind, JSONLEntry) {
+	if from < 0 || from+1 >= len(events) {
+		return toolResultAbsent, JSONLEntry{}
+	}
+	for _, e := range events[from+1:] {
 		if e.Kind != "user" {
 			continue
 		}
@@ -371,29 +549,194 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 			continue
 		}
 		for _, b := range blocks {
-			if b.Type == "tool_result" && b.ToolUseID == bashToolUseID {
-				t.Fatalf("matching tool_result on disk for Bash tool_use_id=%s in %s — "+
-					"claude ended the Bash call before SIGTERM landed.\n\n"+
-					"The fixture command blocks on the FIFO %s, which this test created "+
-					"and still held open for writing when this assertion ran, so it "+
-					"cannot have completed on its own. Check, in this order:\n"+
-					"  1. claude's tool_use envelope below. An `input.timeout` field "+
-					"means claude bounded the call itself — fixture defeat #3, a "+
-					"claude-side policy change, NOT a pyry regression.\n"+
-					"  2. claude's tool_result envelope below. Prose like \"did not "+
-					"complete within its Ns timeout and was moved to the background\" is "+
-					"the claude 2.1.220 shape #1219 fixed for; a refusal (\"Blocked: "+
-					"...\") is the #563 shape.\n"+
-					"  3. Only if neither: the FIFO write end was released early (a "+
-					"holdFIFO lifetime bug), or pyry's SIGTERM path regressed.\n"+
-					"See this file's header for the fragility history. On a claude-side "+
-					"defeat the escape hatch is `needs-rework:po` on #1219 with the probe "+
-					"transcript attached, not a fourth command guess.\n\n"+
-					"tool_use:\n%s\n\ntool_result:\n%s",
-					bashToolUseID, jsonlPath, fifoPath,
-					truncate(events[bashIdx].Raw), truncate(e.Raw))
+			if b.Type != "tool_result" || b.ToolUseID != toolUseID {
+				continue
 			}
+			if interruptedByShutdown(e.Raw) {
+				return toolResultInterrupted, e
+			}
+			return toolResultEnded, e
 		}
+	}
+	return toolResultAbsent, JSONLEntry{}
+}
+
+// interruptedByShutdown reports whether a JSONL line carries claude's
+// envelope-level `interruptedByShutdown` flag set to true.
+//
+// The flag is a TOP-LEVEL field of the line, a sibling of `type` and
+// `message` — not a field of the content block. It is decoded into a local
+// anonymous struct on purpose: contentBlock is shared across this package, and
+// this flag does not belong on it.
+//
+// Fail-closed by construction. An absent field decodes to Go's zero value
+// (false) and a malformed line returns false, so "no evidence" is never
+// mistaken for "interrupted". If claude renames or drops the flag the test
+// goes RED rather than silently green.
+func interruptedByShutdown(raw json.RawMessage) bool {
+	var envelope struct {
+		InterruptedByShutdown bool `json:"interruptedByShutdown"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return false
+	}
+	return envelope.InterruptedByShutdown
+}
+
+// Probe envelopes for TestClassifyBashToolResult_ProbeEnvelopes.
+//
+// PROVENANCE — read before editing. These are the two shapes the discriminator
+// has to separate, taken from the 2026-07-27 and 2026-07-28 probe transcripts
+// recorded in #1219. Every reconstruction is called out per line; do not
+// mistake a reconstruction for a capture, and do not "tidy" a verbatim string.
+const (
+	// (A) 2026-07-27, claude 2.1.220 backgrounding `tail -f /dev/null`.
+	// VERBATIM: the command, and `"timeout":5000` sitting inside the tool_use
+	// PARAMS (that placement is the evidence the bound was the MODEL's choice).
+	// RECONSTRUCTED: the tool_use id, and the description, which the transcript
+	// elided to "…with 5 second timeout".
+	probeToolUseBackgrounded = `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01ReconstructedProbeA","name":"Bash","input":{"command":"tail -f /dev/null","description":"Run tail -f /dev/null with 5 second timeout","timeout":5000}}]}}`
+
+	// (A)'s result. VERBATIM: the prose. RECONSTRUCTED: the background ID and
+	// log path (the transcript elided both), the tool_use_id, the `user` line
+	// wrapper — and `"is_error":true`, which the transcript did NOT retain.
+	// That value is AC2's worst-case rule, not an observation: the flag is
+	// assumed to take whichever value makes the discriminator's job hardest.
+	// The next case pins that the verdict does not depend on it.
+	probeToolResultBackgroundedIsError = `{"type":"user","message":{"content":[{"type":"tool_result","content":"Command did not complete within its 5s timeout and was moved to the background (ID: bash_1). Output is being written to: /tmp/claude-bash-1.log","is_error":true,"tool_use_id":"toolu_01ReconstructedProbeA"}]}}`
+
+	// (A)'s result with `is_error` absent — the other side of the worst-case
+	// rule. Same line, that one key removed.
+	probeToolResultBackgroundedNoIsError = `{"type":"user","message":{"content":[{"type":"tool_result","content":"Command did not complete within its 5s timeout and was moved to the background (ID: bash_1). Output is being written to: /tmp/claude-bash-1.log","tool_use_id":"toolu_01ReconstructedProbeA"}]}}`
+
+	// (B) 2026-07-28, the correctly-staged run. VERBATIM: the command shape
+	// (`cat <fifo>`) and the ABSENCE of any timeout field — the observation
+	// that falsified the escape hatch's trigger. RECONSTRUCTED: the workdir
+	// path and the tool_use id, which is set to the one the transcript
+	// retained for the matching tool_result below.
+	probeToolUseInterrupted = `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01WHRACfWECW8GRys7Wy1szz","name":"Bash","input":{"command":"cat /tmp/pyry-e2e/sigterm-hold"}}]}}`
+
+	// (B)'s result. VERBATIM: the content prose, `is_error`, `tool_use_id`, and
+	// the three envelope-level fields `toolDenialKind`, `interruptedByShutdown`
+	// and `version`. RECONSTRUCTED: only the `user` line wrapper — the
+	// transcript showed the content block and the envelope fields separately.
+	//
+	// Note `is_error:true` here AND on (A) above: that is why `is_error` cannot
+	// be the discriminator. See the file header.
+	probeToolResultInterrupted = `{"type":"user","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected...","is_error":true,"tool_use_id":"toolu_01WHRACfWECW8GRys7Wy1szz"}]},"toolDenialKind":"user-rejected","interruptedByShutdown":true,"version":"2.1.220"}`
+
+	// (B)'s envelope with the interruption flag written explicitly false.
+	// Synthetic — pins fail-closed on the explicit-false shape, not only the
+	// absent one.
+	probeToolResultInterruptedFalse = `{"type":"user","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected...","is_error":true,"tool_use_id":"toolu_01WHRACfWECW8GRys7Wy1szz"}]},"toolDenialKind":"user-rejected","interruptedByShutdown":false,"version":"2.1.220"}`
+
+	// An interruption marker for an UNRELATED tool call. Synthetic — stops a
+	// stray marker elsewhere in the session from laundering a defeat.
+	probeToolResultInterruptedOtherID = `{"type":"user","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected...","is_error":true,"tool_use_id":"toolu_01SomeOtherToolCall"}]},"toolDenialKind":"user-rejected","interruptedByShutdown":true,"version":"2.1.220"}`
+)
+
+// TestClassifyBashToolResult_ProbeEnvelopes pins invariant 4b's discriminator
+// against both probe shapes without claude and without credentials, so it runs
+// on every `make e2e-realclaude` regardless of auth: the 2026-07-27
+// background-on-timeout envelope must be REJECTED (toolResultEnded) and the
+// 2026-07-28 shutdown-interruption envelope ACCEPTED (toolResultInterrupted).
+//
+// Each case is built as a JSONL string and pushed through the real parser
+// rather than hand-built as entries. That is the point, not ceremony:
+// jsonl.Event.Kind is DERIVED from the line's `type` field, so a hand-set Kind
+// would let this fixture agree with a live path that skips the line. It also
+// exercises the same two entry points the live test uses — findBashToolUse
+// then classifyBashToolResult.
+func TestClassifyBashToolResult_ProbeEnvelopes(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+		want  toolResultKind
+	}{
+		{
+			name:  "background_on_timeout_is_error_true",
+			lines: []string{probeToolUseBackgrounded, probeToolResultBackgroundedIsError},
+			want:  toolResultEnded,
+		},
+		{
+			// Same verdict as the row above with the flag absent: the
+			// rejection of (A) is INVARIANT to `is_error`, so no re-probe of
+			// the 2026-07-27 transcript can change it.
+			name:  "background_on_timeout_is_error_absent",
+			lines: []string{probeToolUseBackgrounded, probeToolResultBackgroundedNoIsError},
+			want:  toolResultEnded,
+		},
+		{
+			name:  "shutdown_interruption",
+			lines: []string{probeToolUseInterrupted, probeToolResultInterrupted},
+			want:  toolResultInterrupted,
+		},
+		{
+			name:  "tool_use_only",
+			lines: []string{probeToolUseInterrupted},
+			want:  toolResultAbsent,
+		},
+		{
+			name:  "interruption_marker_for_a_different_tool_use",
+			lines: []string{probeToolUseInterrupted, probeToolResultInterruptedOtherID},
+			want:  toolResultAbsent,
+		},
+		{
+			name:  "interruption_flag_explicitly_false",
+			lines: []string{probeToolUseInterrupted, probeToolResultInterruptedFalse},
+			want:  toolResultEnded,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			events := parseJSONLFixture(t, tc.lines)
+			if len(events) != len(tc.lines) {
+				t.Fatalf("parsed %d events from %d fixture lines — a fixture line is "+
+					"malformed JSON and the reader skipped it", len(events), len(tc.lines))
+			}
+
+			toolUseID, idx := findBashToolUse(events)
+			if toolUseID == "" {
+				t.Fatalf("findBashToolUse found no Bash tool_use in the fixture — the "+
+					"fixture is wrong, not the classifier\n%s", strings.Join(tc.lines, "\n"))
+			}
+
+			got, entry := classifyBashToolResult(events, toolUseID, idx)
+			if got != tc.want {
+				t.Fatalf("classifyBashToolResult(tool_use_id=%s) = %s, want %s\nmatched entry:\n%s",
+					toolUseID, got, tc.want, truncate(entry.Raw))
+			}
+			if got == toolResultAbsent && len(entry.Raw) != 0 {
+				t.Errorf("toolResultAbsent must come with a zero-valued entry, got:\n%s",
+					truncate(entry.Raw))
+			}
+			if got != toolResultAbsent && len(entry.Raw) == 0 {
+				t.Errorf("%s must come with the matching entry so the failure message can "+
+					"quote it verbatim, got a zero value", got)
+			}
+		})
+	}
+}
+
+// parseJSONLFixture pushes fixture lines through the same parser ReadJSONL
+// uses, so Event.Kind is derived from each line's `type` field rather than
+// supplied by the test. The trailing newline is required: the reader retains a
+// line without one as pending partial bytes and never surfaces it.
+func parseJSONLFixture(t *testing.T, lines []string) []JSONLEntry {
+	t.Helper()
+	src := strings.Join(lines, "\n") + "\n"
+	r := jsonl.NewReader(strings.NewReader(src), jsonl.Config{})
+	var events []JSONLEntry
+	for {
+		ev, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			return events
+		}
+		if err != nil {
+			t.Fatalf("parseJSONLFixture: %v", err)
+		}
+		events = append(events, ev)
 	}
 }
 
