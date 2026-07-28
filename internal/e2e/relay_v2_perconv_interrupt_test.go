@@ -40,7 +40,7 @@ const perConvMidTurnLine = `{"type":"assistant","message":{"id":"m-1191","conten
 
 // endTurnNeedle is the wire-shape fragment of the canned end-of-turn line
 // fakeclaude's bare-ESC handler appends (interruptEndTurnLine,
-// internal/e2e/internal/fakeclaude/main.go:501). The fake is `package main` under
+// internal/e2e/internal/fakeclaude/main.go:502). The fake is `package main` under
 // an internal/ dir, so the const cannot be imported; this needles its protocol
 // shape instead. If that line ever stops containing this fragment, the on-disk
 // assertions below go silently vacuous — keep the two in step.
@@ -109,7 +109,7 @@ const endTurnNeedle = `"stop_reason":"end_turn"`
 //     child. Under the pre-#1121 wiring that count would be 1. Phase 0 exercises
 //     the no_active_conv guard rather than no_bound_runner because that is the
 //     unresolvable state reachable OVER THE WIRE — the cursor is stamped only on
-//     sessionRouter.Route's success path (cmd/pyry/main.go:1228), so a conversation
+//     sessionRouter.Route's success path (cmd/pyry/main.go:1248), so a conversation
 //     cannot become active without a resolvable binding. Both guards return
 //     (nil, false) into the same inert path; the property under test — inert, and
 //     never the bootstrap — is identical.
