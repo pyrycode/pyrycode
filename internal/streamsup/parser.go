@@ -18,6 +18,60 @@ import (
 // (maxBuf) so a test can shrink it without racing a shared global.
 const defaultMaxParseBuf = 4 << 20
 
+// maxUnrecognizedRaw caps the raw JSON carried on a turnevent.Unrecognized.
+// Applied at CONSTRUCTION, so an oversized payload never enters the event
+// stream, the push queue, or any log — the cap is the only thing standing
+// between a pathological line and the wire's size limit.
+//
+// The binding limit is the v2 application-envelope cap of 65519 bytes, NOT v1's
+// 1 MiB, which v2 superseded (docs/protocol-mobile.md § Application-envelope
+// size cap). 16 KiB is roughly a quarter of it, which leaves room for the
+// envelope's other fields plus the JSON escaping this blob picks up on the way
+// out. Escaping is mild in practice because the payload is already JSON text:
+// its control characters arrive pre-escaped as printable pairs, so the growth is
+// quotes and backslashes rather than a \u00XX expansion of every byte.
+//
+// It is also far more than a human reads off a timeline row, which is the other
+// reason not to raise it.
+const maxUnrecognizedRaw = 16 << 10
+
+// ignoredLineTypes is the MEASURED set of top-level stream-json types the
+// parser deliberately drops in silence. Membership is what separates "known and
+// deliberately ignored" from "genuinely unrecognized"; getting it wrong in
+// either direction is the whole risk of the unrecognized-message feature. Too
+// narrow and every turn grows a noise row; too wide and a real new message type
+// stays invisible.
+//
+// Measured 2026-07-27 by driving claude directly on this exact bare stream-json
+// surface (the fixed --input-format/--output-format/--verbose prefix
+// buildArgs emits), three turns each on haiku and on the default model, one turn
+// per run calling tools. Observed top-level types across both runs:
+//
+//	assistant, user, result   — mapped below
+//	system                    — subtypes init, thinking_tokens (and status, per
+//	                            the #1088 spike); init fires ONCE PER TURN, and
+//	                            thinking_tokens fired ~10 times per turn
+//	rate_limit_event          — once per run
+//
+// system is ignored WHOLESALE rather than per-subtype on purpose. It is
+// claude's catch-all namespace and its highest-rate emitter, so subtype-grained
+// matching would turn every new subtype into a per-turn noise row — the exact
+// failure the two-tier design exists to prevent. A genuinely new MESSAGE TYPE is
+// the alarm worth raising, and that is what the top-level key catches.
+//
+// The measurement also settled the open question of whether claude echoes the
+// delivered prompt back as a `user` message holding a `text` block, as it does
+// on the agent-run surface: it does NOT here. Every `user` line in both runs
+// carried tool_result blocks only. So user/text needs no ignore entry, and a
+// user/text block appearing in future is a real change worth surfacing.
+//
+// A real-claude test asserts a normal turn produces zero unrecognized events, so
+// this list going stale fails the pre-ship gate rather than reaching a client.
+var ignoredLineTypes = map[string]bool{
+	"system":           true,
+	"rate_limit_event": true,
+}
+
 // Parser turns the child's stdout stream-json line stream into neutral
 // turnevent.Event values. It is an io.Writer wired as streamsup Config.Stdout;
 // each Write consumes every complete '\n'-delimited line and emits zero-or-more
@@ -100,13 +154,22 @@ type streamLine struct {
 	Message *streamMessage `json:"message"`
 }
 
+// Content is held as raw bytes, not []streamBlock, and each element is decoded
+// on demand in emitAssistant / emitUser. streamBlock declares only the fields
+// the mapping reads, so decoding straight into it would DISCARD every unknown
+// field — and re-marshalling the struct afterwards would lose exactly the
+// content an unrecognized block exists to show. Keeping the bytes costs one
+// deferred Unmarshal per block and makes the block's original JSON available
+// verbatim; it also turns a block that fails to decode into a surfaced event
+// rather than a silent skip.
 type streamMessage struct {
-	ID      string        `json:"id"`
-	Role    string        `json:"role"`
-	Content []streamBlock `json:"content"`
+	ID      string            `json:"id"`
+	Role    string            `json:"role"`
+	Content []json.RawMessage `json:"content"`
 }
 
-// streamBlock is one content block of an assistant/user message. The fields are
+// streamBlock is one content block of an assistant/user message, decoded from
+// the raw bytes streamMessage.Content holds. The fields are
 // a union across the block types we map: text (assistant text), thinking
 // (assistant thinking), id/name/input (tool_use), tool_use_id/content/is_error
 // (tool_result). Content is decoded as `any` so a tool_result's content — a JSON
@@ -131,9 +194,12 @@ type streamBlock struct {
 }
 
 // consumeLine decodes one complete line and emits the events it maps to. A blank
-// line, a line that fails to decode, and a line of an unknown/tolerated top-level
-// type all emit nothing (Debug-logged by type/reason only — never content), so
-// one bad line never poisons later lines.
+// line emits nothing. A line on the measured known-ignored list emits nothing and
+// is Debug-logged by type only — never content. A line that fails to decode, and
+// a line of a type outside both the mapped set and the ignored list, emits a
+// turnevent.Unrecognized so the drop is VISIBLE to a client instead of dying in a
+// debug log the production daemon does not print. Either way one bad line never
+// poisons later lines.
 func (p *Parser) consumeLine(line []byte) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
@@ -141,7 +207,9 @@ func (p *Parser) consumeLine(line []byte) {
 	}
 	var sl streamLine
 	if err := json.Unmarshal(line, &sl); err != nil {
-		p.log.Debug("streamsup: unparsable stdout line")
+		// Not even the type is known here, so Kind stays empty. Previously this
+		// dropped without recording anything at all.
+		p.emitUnrecognized(turnevent.UnrecognizedUndecodable, "", line)
 		return
 	}
 	switch sl.Type {
@@ -156,12 +224,53 @@ func (p *Parser) consumeLine(line []byte) {
 		// classification remains future work (resultTurnEndReason's default).
 		p.emit(turnevent.TurnEnd{Reason: resultTurnEndReason(sl.Subtype)})
 	default:
-		// system (init / thinking_tokens / status), rate_limit_event, and any
-		// future type: tolerated and dropped. system/init is a per-turn marker
-		// (spike § 1), not a session-open event — dropping it is correct because
-		// the parser is turn-stateless (there is no session state to reset).
-		p.log.Debug("streamsup: dropping stdout line", "type", sl.Type)
+		if ignoredLineTypes[sl.Type] {
+			// system (init / thinking_tokens / status) and rate_limit_event:
+			// tolerated and dropped, silently, exactly as before. system/init is a
+			// per-turn marker (spike § 1), not a session-open event — dropping it is
+			// correct because the parser is turn-stateless (there is no session
+			// state to reset). See ignoredLineTypes for the measurement behind the
+			// list.
+			p.log.Debug("streamsup: dropping stdout line", "type", sl.Type)
+			return
+		}
+		// A type we have never seen. Surface it: this is the one arm that tells
+		// anyone claude started emitting something new.
+		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
 	}
+}
+
+// emitUnrecognized builds and emits one turnevent.Unrecognized, truncating raw to
+// maxUnrecognizedRaw first so an oversized payload never enters the event stream.
+// The log records site, type, and byte count only — never the content itself,
+// which is the package's standing rule; the content crosses the wire, not the log.
+func (p *Parser) emitUnrecognized(site turnevent.UnrecognizedSite, kind string, raw []byte) {
+	text, truncated := truncateRaw(raw)
+	p.log.Debug("streamsup: unrecognized payload",
+		"site", string(site),
+		"type", kind,
+		"bytes", len(raw),
+		"truncated", truncated)
+	p.emit(turnevent.Unrecognized{
+		Site:      site,
+		Kind:      kind,
+		Raw:       text,
+		Truncated: truncated,
+	})
+}
+
+// truncateRaw cuts raw to maxUnrecognizedRaw bytes, reporting whether it cut.
+// Byte-sliced, then scrubbed of any invalid UTF-8 the cut may have produced:
+// slicing can land mid-rune, and the result rides a JSON string field, where an
+// invalid sequence would be silently replaced downstream anyway. Doing it here
+// keeps the payload well-formed at the point of construction. The value is a
+// diagnostic blob, not text to read to the end of, so cutting mid-structure is
+// fine; Truncated is what tells the reader the JSON is incomplete.
+func truncateRaw(raw []byte) (string, bool) {
+	if len(raw) <= maxUnrecognizedRaw {
+		return strings.ToValidUTF8(string(raw), ""), false
+	}
+	return strings.ToValidUTF8(string(raw[:maxUnrecognizedRaw]), ""), true
 }
 
 // resultTurnEndReason maps a result line's subtype to its TurnEnd reason.
@@ -187,7 +296,11 @@ func (p *Parser) emitAssistant(msg *streamMessage) {
 	if msg == nil {
 		return
 	}
-	for _, block := range msg.Content {
+	for _, raw := range msg.Content {
+		block, ok := p.decodeBlock(raw)
+		if !ok {
+			continue
+		}
 		switch block.Type {
 		case "text":
 			p.emit(turnevent.TextChunk{MessageID: msg.ID, Text: block.Text})
@@ -201,20 +314,44 @@ func (p *Parser) emitAssistant(msg *streamMessage) {
 				RawInput:   rawInput(block.Input),
 			})
 		default:
-			p.log.Debug("streamsup: dropping assistant block", "type", block.Type)
+			// No known-ignored list at block level: the measurement found exactly
+			// these three assistant block types and nothing else, so there is no
+			// per-turn noise to suppress. Any fourth is news.
+			p.emitUnrecognized(turnevent.UnrecognizedAssistantBlock, block.Type, raw)
 		}
 	}
 }
 
+// decodeBlock unmarshals one content block's raw bytes into streamBlock. A block
+// that fails to decode is surfaced as an undecodable Unrecognized rather than
+// skipped in silence, and reports ok == false so the caller moves on to the next
+// block — one malformed block never costs the rest of the message.
+func (p *Parser) decodeBlock(raw json.RawMessage) (streamBlock, bool) {
+	var block streamBlock
+	if err := json.Unmarshal(raw, &block); err != nil {
+		p.emitUnrecognized(turnevent.UnrecognizedUndecodable, "", raw)
+		return streamBlock{}, false
+	}
+	return block, true
+}
+
 // emitUser maps one user message's tool_result blocks to ToolUpdate. A nil
-// message, and any non-tool_result block, emits nothing.
+// message emits nothing; any non-tool_result block emits an Unrecognized.
 func (p *Parser) emitUser(msg *streamMessage) {
 	if msg == nil {
 		return
 	}
-	for _, block := range msg.Content {
+	for _, raw := range msg.Content {
+		block, ok := p.decodeBlock(raw)
+		if !ok {
+			continue
+		}
 		if block.Type != "tool_result" {
-			p.log.Debug("streamsup: dropping user block", "type", block.Type)
+			// The measurement found user messages carry tool_result blocks and
+			// nothing else — notably NOT a text echo of the delivered prompt, which
+			// the agent-run surface does emit. So a user/text block here would be a
+			// genuine change, and gets surfaced rather than dropped.
+			p.emitUnrecognized(turnevent.UnrecognizedUserBlock, block.Type, raw)
 			continue
 		}
 		p.emit(turnevent.ToolUpdate{

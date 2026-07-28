@@ -262,3 +262,41 @@ func TestCompactingPayload_RoundTrip(t *testing.T) {
 
 	roundTripEnvelope(t, env, payload, raw)
 }
+
+func TestUnrecognizedMessagePayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "unrecognized_message.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeUnrecognizedMessage {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeUnrecognizedMessage)
+	}
+
+	var payload UnrecognizedMessagePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if payload.Site != "line_type" {
+		t.Errorf("Site: got %q, want %q", payload.Site, "line_type")
+	}
+	if payload.MessageType != "mystery_event" {
+		t.Errorf("MessageType: got %q, want %q", payload.MessageType, "mystery_event")
+	}
+	// Raw is carried as an opaque JSON *string*, so the fixture's escaping is
+	// part of the pinned shape: the inner braces and quotes must survive the
+	// trip without being re-interpreted as structure.
+	wantRaw := `{"type":"mystery_event","detail":"something new"}`
+	if payload.Raw != wantRaw {
+		t.Errorf("Raw: got %q, want %q", payload.Raw, wantRaw)
+	}
+	if payload.Truncated {
+		t.Errorf("Truncated: got %v, want false", payload.Truncated)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}

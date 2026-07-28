@@ -176,6 +176,47 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			name: "Unrecognized -> unrecognized_message, conversation identity only",
+			ev: turnevent.Unrecognized{
+				Site:      turnevent.UnrecognizedLineType,
+				Kind:      "some_future_event",
+				Raw:       `{"type":"some_future_event"}`,
+				Truncated: false,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeUnrecognizedMessage,
+			// No turn_id and no seq: an unrecognized message has no turn we can
+			// honestly attribute it to, so tc.TurnID/tc.Seq are ignored exactly as
+			// they are for Stall and Compacting above.
+			wantPayload: protocol.UnrecognizedMessagePayload{
+				ConversationID: "c1",
+				Site:           "line_type",
+				MessageType:    "some_future_event",
+				Raw:            `{"type":"some_future_event"}`,
+				Truncated:      false,
+			},
+			wantOK: true,
+		},
+		{
+			name: "Unrecognized undecodable carries empty message_type and the truncated flag",
+			ev: turnevent.Unrecognized{
+				Site:      turnevent.UnrecognizedUndecodable,
+				Kind:      "",
+				Raw:       `{"type":"assist`,
+				Truncated: true,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeUnrecognizedMessage,
+			wantPayload: protocol.UnrecognizedMessagePayload{
+				ConversationID: "c1",
+				Site:           "undecodable",
+				MessageType:    "",
+				Raw:            `{"type":"assist`,
+				Truncated:      true,
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{

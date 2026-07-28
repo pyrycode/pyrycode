@@ -53,6 +53,7 @@ func TestIsKnownAppType(t *testing.T) {
 		// events an old phone never receives, so IsKnownAppType must reject both.
 		{"api_retry-rejected", TypeApiRetry, false, ErrUnknownType},
 		{"compacting-rejected", TypeCompacting, false, ErrUnknownType},
+		{"unrecognized_message-rejected", TypeUnrecognizedMessage, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -145,19 +146,20 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 // must not, so the partition is the architectural seam between v1 traffic
 // and v2 traffic.
 var v2OnlyTypes = map[string]bool{
-	TypeRekeyRequest:      true,
-	TypeTurnState:         true,
-	TypeAssistantDelta:    true,
-	TypeToolUse:           true,
-	TypeToolResult:        true,
-	TypeTurnEnd:           true,
-	TypeStall:             true,
-	TypeApiRetry:          true,
-	TypeCompacting:        true,
-	TypeRequestSnapshot:   true,
-	TypeScreenSnapshot:    true,
-	TypeResync:            true,
-	TypeSessionTransition: true,
+	TypeRekeyRequest:        true,
+	TypeTurnState:           true,
+	TypeAssistantDelta:      true,
+	TypeToolUse:             true,
+	TypeToolResult:          true,
+	TypeTurnEnd:             true,
+	TypeStall:               true,
+	TypeApiRetry:            true,
+	TypeCompacting:          true,
+	TypeUnrecognizedMessage: true,
+	TypeRequestSnapshot:     true,
+	TypeScreenSnapshot:      true,
+	TypeResync:              true,
+	TypeSessionTransition:   true,
 	// v2 modal vocabulary.
 	TypeModalShown:     true,
 	TypeModalAnswer:    true,
@@ -211,6 +213,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeToolResult, TypeTurnEnd, TypeStall,
 		// v2 PTY-derived status peers of stall.
 		TypeApiRetry, TypeCompacting,
+		// v2 parser-gap diagnostic.
+		TypeUnrecognizedMessage,
 		// v2 screen-snapshot types.
 		TypeRequestSnapshot, TypeScreenSnapshot,
 		// v2 reconnect resync marker.

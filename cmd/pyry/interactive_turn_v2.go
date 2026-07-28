@@ -237,6 +237,22 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// banner or screen text is ever held or forwarded.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.Unrecognized:
+		// A parser-gap diagnostic, not a claude sub-state, but it takes the same
+		// shape as the status peers above: NO turn-lifecycle mutation (no
+		// startTurnIfNeeded / transitionTo / endTurn; inTurn, turnID, currentState
+		// untouched). That is the deliberate choice, not an oversight — we do not
+		// know what the message is, so it must neither open nor close a turn.
+		// Opening one would wedge the conversation, because no turn end follows a
+		// message we could not understand.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position
+		// ahead of the diagnostic. Like turn_state it flows through emit() and is
+		// NOT a droppable delta — the droppable set is assistant_delta only
+		// (#610). A burst therefore holds queue slots, which is accepted: a burst
+		// means something is genuinely wrong and you want to see it.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -416,6 +432,11 @@ func eventKind(ev turnevent.Event) string {
 		return "api_retry"
 	case turnevent.Compacting:
 		return "compacting"
+	case turnevent.Unrecognized:
+		// The variant NAME only. The event's Kind field holds claude's offending
+		// type string, which is not returned here: this feeds log fields, and the
+		// package rule is that nothing derived from claude's output reaches a log.
+		return "unrecognized"
 	default:
 		return "unknown"
 	}

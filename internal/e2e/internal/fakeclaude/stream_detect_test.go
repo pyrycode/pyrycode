@@ -47,7 +47,7 @@ func TestRunStreamJSON_SingleTurn(t *testing.T) {
 
 	const prompt = "hello over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false)
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -85,7 +85,7 @@ func TestRunStreamJSON_MultipleTurns(t *testing.T) {
 		in.WriteString(userTurnLine(p) + "\n")
 	}
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, false)
+	runStreamJSON(strings.NewReader(in.String()), &buf, false, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2*len(prompts) {
@@ -119,7 +119,7 @@ func TestRunStreamJSON_NonUserLinesIgnored(t *testing.T) {
 	const ctrl = `{"type":"control_request","request_id":"r1","request":{"subtype":"interrupt"}}`
 	input := ctrl + "\n" + "\n" + "not json at all\n"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(input), &buf, false)
+	runStreamJSON(strings.NewReader(input), &buf, false, false)
 
 	if buf.Len() != 0 {
 		t.Fatalf("non-user lines produced %d bytes of output, want 0: %q", buf.Len(), buf.String())
@@ -144,7 +144,7 @@ func TestRunStreamJSON_InterruptMode_UserTurnStaysInFlight(t *testing.T) {
 
 	const prompt = "in-flight over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true)
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -167,7 +167,7 @@ func TestRunStreamJSON_InterruptMode_InterruptEndsTurnCancelled(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true)
+	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -193,7 +193,7 @@ func TestRunStreamJSON_InterruptMode_InFlightThenInterrupt(t *testing.T) {
 	in.WriteString(userTurnLine(prompt) + "\n")
 	in.WriteString(interruptControlRequestLine("r1") + "\n")
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, true)
+	runStreamJSON(strings.NewReader(in.String()), &buf, true, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -263,5 +263,62 @@ func TestWriteStreamResponse_Shape(t *testing.T) {
 	}
 	if res.Type != "result" || res.Subtype != "success" {
 		t.Errorf("result line = {type:%q, subtype:%q}, want {result, success}", res.Type, res.Subtype)
+	}
+}
+
+// TestRunStreamJSON_BogusRider pins the bogus rider: with it on, one turn emits
+// the two shapes the daemon's parser has no mapping for — an invented top-level
+// type and an invented assistant block type — ahead of the normal reply, and the
+// normal reply still arrives intact.
+func TestRunStreamJSON_BogusRider(t *testing.T) {
+	var buf bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, true)
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("line count: got %d, want 4 (bogus line, bogus block, echo, result)\n%s",
+			len(lines), buf.String())
+	}
+
+	var first map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("unmarshal bogus line: %v", err)
+	}
+	if first["type"] != bogusLineType {
+		t.Errorf("bogus line type: got %v, want %q", first["type"], bogusLineType)
+	}
+	if first["detail"] != bogusLineNeedle {
+		t.Errorf("bogus line needle: got %v, want %q", first["detail"], bogusLineNeedle)
+	}
+
+	if !strings.Contains(lines[1], bogusBlockType) || !strings.Contains(lines[1], bogusBlockNeedle) {
+		t.Errorf("bogus block line missing type/needle: %s", lines[1])
+	}
+
+	// The real reply must survive the rider untouched.
+	if !strings.Contains(lines[2], `"text":"hello"`) {
+		t.Errorf("assistant echo: got %s, want the prompt echoed", lines[2])
+	}
+	if !strings.Contains(lines[3], `"subtype":"success"`) {
+		t.Errorf("result line: got %s, want subtype success", lines[3])
+	}
+}
+
+// TestRunStreamJSON_BogusRiderOffIsByteIdentical pins that the rider is
+// default-off and additive: with it off, output is exactly the two lines the
+// untouched path always wrote.
+func TestRunStreamJSON_BogusRiderOffIsByteIdentical(t *testing.T) {
+	var on, off bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, true)
+
+	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
+	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
+	if len(offLines) != 2 {
+		t.Fatalf("rider-off line count: got %d, want 2", len(offLines))
+	}
+	// The rider only PREPENDS; the tail must match the untouched output.
+	if got, want := strings.Join(onLines[2:], "\n"), strings.Join(offLines, "\n"); got != want {
+		t.Errorf("rider changed the normal reply:\n got %s\nwant %s", got, want)
 	}
 }
