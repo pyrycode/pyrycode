@@ -904,7 +904,13 @@ no-op in claude), so no nonce / dedup is needed.
   against a **minted, non-bootstrap** conversation until the #1136 e2e
   (`relay_v2_stream_interrupt_test.go`), which confirms the interrupt reaches that
   conversation's own runner and not the bootstrap — see
-  [codebase/1136.md](../codebase/1136.md).
+  [codebase/1136.md](../codebase/1136.md). The PTY arm (`*supervisor.Supervisor.SendEsc`,
+  #726) had the same gap: every green PTY-tier interrupt test drove the bootstrap
+  session until the #1191 e2e (`relay_v2_perconv_interrupt_test.go`), which closes it the
+  same way — minted topology, on-disk transcript pair as the mis-route detector — and
+  additionally proves non-vacuity by mutating the production wiring closure
+  (`cmd/pyry/main.go:1017`) back to its pre-#1121 form. See
+  [codebase/1191.md](../codebase/1191.md).
 - **`handleInterrupt(s)`** — the only new logic. Runs on the manager's **single Run
   dispatch goroutine**, so the `s.interactive` read is lock-free under the package's
   single-owner invariant. The signature takes **only `s`** (no `ctx`, no `env`) — a
