@@ -438,6 +438,9 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`compacting`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's auto-compaction banner (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`unrecognized_message`** | binary → phone | no | **New in v2** (interactive, capability-gated). The stream parser met claude output it has no mapping for — a gap in our mapping, not a claude sub-state. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -604,6 +607,72 @@ beyond the conversation id and the edge bool there is nothing to carry. Without
 this event a remote head sees a frozen screen for the tens of seconds
 compaction can take; the `active: true` frame is the daemon's only signal that
 something is happening, not stalled.
+
+#### `unrecognized_message`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose stream carried the unmappable output. |
+| `site` | string | Where the parser met it. Closed set: `line_type`, `assistant_block`, `user_block`, `undecodable`. |
+| `message_type` | string | The offending message or content-block `type`. **Empty** when `site` is `undecodable` — nothing decoded, so no type was ever read. |
+| `raw` | string | The offending JSON, verbatim, truncated by the daemon to a fixed byte cap. A **string**, not nested JSON: a truncated blob is no longer valid JSON. |
+| `truncated` | bool | Whether the daemon cut `raw` to fit the cap. |
+
+`unrecognized_message` is **not a claude sub-state** — the one way it differs
+from its `stall` / `api_retry` / `compacting` neighbours above, which all report
+what claude is doing. This reports a gap in **our own** mapping.
+
+The stream-json line parser recognises three top-level message types from claude
+(`assistant`, `user`, `result`) and a fixed set of content blocks. Everything
+else used to be dropped with a debug log, and because the production daemon runs
+at info level, that drop left no trace anywhere and no client was told. Fine for
+the types we ignore on purpose. Not fine for a type we have never seen: a claude
+version that moved something meaningful into a new message type would show
+nothing, everywhere, with nothing saying why.
+
+So the parser has **two tiers**, and the split is the whole design:
+
+- **Known and deliberately ignored** — `system` (every subtype) and
+  `rate_limit_event`. Silent, as before. `system` is ignored wholesale rather
+  than per-subtype because it is claude's catch-all namespace and its
+  highest-rate emitter; `system/init` fires **once per turn** and
+  `system/thinking_tokens` roughly ten times per turn, so a subtype-grained rule
+  would put a row on every turn and make the frame worthless noise.
+- **Genuinely unrecognized** — everything else. Surfaces as this frame.
+
+The ignored list is **measured, not guessed**: claude was driven directly on the
+bare stream-json surface, three turns each on two models, one turn per run
+calling tools. The same measurement settled whether claude echoes the delivered
+prompt back as a `user` message holding a `text` block, as it does on the
+agent-run surface. **It does not**, so a `user`/`text` block appearing in future
+is a real change and surfaces.
+
+It carries **no `turn_id`** — unlike every turn-stream event above. That is not
+an oversight: the daemon could not parse the message well enough to attribute a
+turn to it honestly. It also **opens and closes no turn**. Opening one would
+wedge the conversation, because no turn end follows a message we could not
+understand.
+
+`raw` is capped at **16 KiB at construction**, so an oversized payload never
+enters the event stream or any log. That is roughly a quarter of the 65519-byte
+application-envelope cap above — note this is the v2 cap, not v1's superseded
+1 MiB — leaving room for the envelope's other fields plus the JSON escaping the
+blob picks up. Escaping is mild in practice because the payload is already JSON
+text, so its control characters arrive pre-escaped as printable pairs.
+
+**Repeats are never coalesced.** A repeat is a real repeat, and how often this
+fires is exactly the number that tells an operator to go fix something.
+
+**Consumer safety.** `raw` and `message_type` are the least trustworthy strings
+on this wire: unbounded, model-adjacent output the daemon could not interpret. A
+client MUST render them as plain text only — never through an HTML sink, an
+attribute, or a URL.
+
+**Regression alarm.** The daemon's real-claude test suite asserts that a normal
+turn produces **zero** of these frames. It goes red the day claude adds a
+message type, in the pre-ship gate rather than in front of a user. Red there
+does not mean something broke; it means the measured ignore list needs
+re-deciding.
 
 #### `session_transition`
 
@@ -1217,6 +1286,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-07-27`: Added `unrecognized_message` (binary → phone, interactive-capability-gated). The stream-json parser used to drop any claude output it had no mapping for into a debug log the production daemon does not print, so an unknown message type left no trace anywhere and no client was told. It now splits two ways: a **measured** known-ignored list (`system/*`, `rate_limit_event`) stays silent, and everything else surfaces as this frame carrying the drop site, the offending type, and the raw JSON capped at 16 KiB. Carries no `turn_id` and drives no turn lifecycle. Also **fixed a #1074 omission**: `api_retry` and `compacting` shipped without rows in the application-message-types table above; both are now listed.
 - `2026-07-03`: Docs-only drift correction against the deployed code. Marked v2 as shipped and the daemon's current default (v1 is the deprecated `PYRY_MOBILE_V2=0` fallback). Normalised every endpoint reference to `/v1/server` / `/v1/client` — the relay routes only those, and the version lives in the `v` frame field, not the route. Added WS close code `4429` (per-server phone cap). Corrected the envelope `id` row: `id` is a per-connection counter that resets on reconnect and is not a durable dedup key; durable ordering/dedup is via `event_id`. Corrected the token contract: the `x-pyrycode-token` header is still required today and passes through the relay opaquely, so the "header removed / relay never sees the token" end-state is marked not yet implemented.
 - `2026-06-07`: Retired the binary↔relay `hello`/`hello_ack` ceremony (#582). That leg is established on WS upgrade with header-based server-id registration; the relay sends no `hello_ack`. Endpoints stay `/v1/server`, `/v1/client` (route path carries no protocol meaning; `/v2` rename not performed).
 - `2026-05-16`: v2 draft (this document). Adds end-to-end encryption via Noise_IK. Hard cutover from v1; v1 doc preserved in git history only.

@@ -160,7 +160,14 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 	default:
 		// Stall / ApiRetry / Compacting — tui-driver status peers with no turn
 		// lifecycle meaning (the emitter treats them the same way,
-		// interactive_turn_v2.go:218-239) — and any future variant.
+		// interactive_turn_v2.go:218-239) — plus Unrecognized, and any future
+		// variant.
+		//
+		// The opener set above is a whitelist, so Unrecognized needs no code
+		// change to land here, and landing here is the CORRECT answer rather than
+		// an omission: we do not know what the message is, so it must neither open
+		// nor close a turn. Opening one would wedge the conversation, since no turn
+		// end follows a message we could not understand.
 		return
 	}
 

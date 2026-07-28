@@ -113,3 +113,33 @@ type CompactingPayload struct {
 	ConversationID string `json:"conversation_id"`
 	Active         bool   `json:"active"`
 }
+
+// UnrecognizedMessagePayload is the body of an Envelope whose Type ==
+// TypeUnrecognizedMessage (docs/protocol-mobile.md § unrecognized_message).
+// Binary → phone direction; the wire form of the internal-only
+// turnevent.Unrecognized diagnostic marker. Like turn_state it is a coarse
+// conversation-level signal, not turn-scoped, so there is no turn_id — an
+// unrecognized message has no turn we can honestly attribute it to.
+//
+// Site is where the parser dropped the payload ("line_type", "assistant_block",
+// "user_block", "undecodable"). MessageType is the offending message or block
+// `type`, empty when Site is "undecodable" (nothing decoded, so no type was
+// read). Raw is the offending JSON, truncated by the producer to a fixed byte
+// cap; Truncated says whether that happened.
+//
+// SECURITY: Raw is the ONLY interactive payload field carrying unbounded
+// model-adjacent JSON, so two properties are load-bearing. The producer
+// truncates at construction to 16 KiB, so an oversized payload never reaches
+// this struct; that is roughly a quarter of the v2 application-envelope cap of
+// 65519 bytes (NOT v1's 1 MiB, which v2 superseded), leaving room for the other
+// fields plus JSON escaping. And Raw is a plain string, not
+// json.RawMessage, because a truncated blob is no longer valid JSON — typing it
+// as raw JSON would be a lie and would break marshalling. A consumer must render
+// it as inert text and never feed it to an HTML sink, an attribute, or a URL.
+type UnrecognizedMessagePayload struct {
+	ConversationID string `json:"conversation_id"`
+	Site           string `json:"site"`
+	MessageType    string `json:"message_type"`
+	Raw            string `json:"raw"`
+	Truncated      bool   `json:"truncated"`
+}

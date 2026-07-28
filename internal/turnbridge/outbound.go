@@ -112,6 +112,20 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			ConversationID: tc.ConversationID,
 			Active:         e.Active,
 		}, true
+	case turnevent.Unrecognized:
+		// Conversation identity only, like Stall and Compacting above: tc.TurnID
+		// and tc.Seq are ignored. This one is not merely "not turn-scoped" — an
+		// unrecognized message has no turn we can HONESTLY attribute it to, since
+		// we could not parse it well enough to know what it belongs to. Raw is
+		// already truncated by the producer; this adapter is pure and re-caps
+		// nothing.
+		return protocol.TypeUnrecognizedMessage, protocol.UnrecognizedMessagePayload{
+			ConversationID: tc.ConversationID,
+			Site:           string(e.Site),
+			MessageType:    e.Kind,
+			Raw:            e.Raw,
+			Truncated:      e.Truncated,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false

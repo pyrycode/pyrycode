@@ -163,7 +163,40 @@ forge a turn boundary:
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
 | `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union) |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
-| `system` (`init`/`thinking_tokens`/`status`), `rate_limit_event`, unknown/malformed | nothing (Debug-logged by type/reason only, never content) |
+| `system` (every subtype), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
+| any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
+
+**Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
+types was dropped with a `Debug` log. The production daemon runs at info level, so that drop left **no
+trace anywhere and no client was told** — fine for the types we ignore on purpose, useless for a type we
+have never seen. Now the parser distinguishes *known and deliberately ignored* (silent, as before) from
+*genuinely unrecognized* (surfaced as `turnevent.Unrecognized`, which reaches desktop clients as an
+`unrecognized_message` frame and renders as an expandable timeline row).
+
+`ignoredLineTypes` holds the first tier. It is **measured, not guessed** — claude driven directly on the
+bare stream-json surface on 2026-07-27, three turns each on two models, one calling tools:
+
+- `system` is ignored **wholesale**, not per-subtype. It is claude's catch-all namespace and its
+  highest-rate emitter: `system/init` fires **once per turn** and `system/thinking_tokens` roughly ten
+  times per turn. Subtype-grained matching would turn every new subtype into a per-turn noise row, which
+  is exactly the failure the two tiers exist to prevent.
+- `rate_limit_event` is ignored, ~1 per run.
+- The measurement also settled a standing question: claude does **not** echo the delivered prompt back
+  as a `user`/`text` message on this surface, though it does on the agent-run surface. So `user`/`text`
+  needs no ignore entry, and one appearing in future is a real change that surfaces.
+
+`TestParser_IgnoredLineTypesIsTheMeasuredSet` pins the list, so growing it is a deliberate edit with a
+measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fails on **any**
+unrecognized frame, so every stream spec is a sentinel: it goes red the day claude adds a message type,
+in the pre-ship gate rather than in front of a user.
+
+**Content blocks are held as `[]json.RawMessage`, decoded per block.** This is load-bearing rather than
+tidying: `streamBlock` declares only the fields the mapping reads, so decoding straight into it would
+discard exactly the unknown fields an unrecognized block exists to show, and re-marshalling afterwards
+would lose them. It also turns a block that fails to decode into a surfaced event rather than a silent
+skip. `Unrecognized.Raw` is truncated to `maxUnrecognizedRaw` (16 KiB) **at construction**, so an
+oversized payload never enters the event stream or any log; it is a `string` rather than
+`json.RawMessage` because a truncated blob is no longer valid JSON.
 
 Mapping logic mirrors (not imports — `mapper.go`'s helpers are unexported and keyed on tui-driver types)
 [`turnbridge/mapper.go`](turnbridge-package.md). Two deliberate divergences: (1) a stream-json
@@ -490,11 +523,16 @@ both wedge and collide with the "unknown conversation" answer).
 
 The opener set is a **whitelist**: `ThoughtChunk`/`TextChunk`/`ToolStart`/`ToolUpdate` add the conversation,
 `TurnEnd` (either stop reason — `resultTurnEndReason` sends both through one parser arm) deletes it,
-everything else (`Stall`/`ApiRetry`/`Compacting`, and any future variant) is a no-op. The evidence is the
-parser's own tolerate-and-drop `default:` arm (`parser.go:158-163`) — `rate_limit_event` is the line that
-becomes a wired `ApiRetry` the day someone adds it, and a blacklist ("anything that isn't `TurnEnd` opens a
-turn") would wedge a conversation on it. `Stall` cannot reach this tracker through the real sink today (the
-parser emits only the five variants in the table above) — it's asserted only at the unit tier, fed directly.
+everything else (`Stall`/`ApiRetry`/`Compacting`/`Unrecognized`, and any future variant) is a no-op.
+
+**The whitelist has now been vindicated by a real case.** `Stall`/`ApiRetry`/`Compacting` are tui-driver
+signals this sink's only producer never emits, so they are asserted at the unit tier only, fed directly.
+`Unrecognized` is different: it **is** reachable — the parser emits it for any claude output outside the
+measured known-ignored list — and it reached this tracker correctly **without one line of change here**,
+because a new variant falls to the default. A blacklist ("anything that isn't `TurnEnd` opens a turn")
+would be behaviourally identical through the older sink and would have wedged every conversation that met
+an unknown message: the turn would open, and no turn end would ever follow, because we could not
+understand the message that opened it.
 
 Concurrency: one mutex guards one `map[string]struct{}` plus a `chan struct{}` "generation" broadcast,
 closed-and-replaced under the same lock as any membership mutation. `WaitIdle` captures that channel and
