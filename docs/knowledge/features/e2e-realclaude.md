@@ -422,6 +422,39 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (`maxRetryDenies`) and `perTurnReplyBudget` wall-clock, each with a distinct
   diagnostic. No content/echo assertion. Zero production files touched. Split
   from #1083. See [`codebase/1175.md`](../codebase/1175.md).
+- `background_trigger_probe_test.go` (#1223) — **evidence probe, not a
+  regression gate**; opt-in behind `PYRY_PROBE_BACKGROUND_TRIGGER=1` on top of
+  the package's normal auth skip (an ungated probe would burn ~9 live claude
+  turns on every `make preship`). Settles which environment lever
+  deterministically makes claude return a background handle under `pyry
+  agent-run`, so #1224–#1227 can be specified against a known trigger instead
+  of the model's discretion. Mechanism: the test `mkfifo`s a FIFO and holds
+  the write end open in a goroutine (`holdProbeFIFO`, release only in
+  `t.Cleanup`, never exposing the `*os.File`); claude's `cat <fifo>` Bash call
+  blocks on the read end and cannot complete on its own, so a matching
+  `tool_result` observed while the write end is held is a **structural**
+  signal that claude ended the call itself — not a match against claude's
+  result prose (the treadmill #563 and #1219 each paid for once). The same
+  property removes the timing race from the `ps -axo pid=,ppid=,pgid=`
+  snapshot: it is taken synchronously at the observation point, with liveness
+  self-evidenced via a `cmd.Wait` channel rather than `Signal(0)` (which
+  reports an unreaped zombie as alive). Row-table design over
+  `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` /
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` / model-set `run_in_background`, each
+  a `t.Run` subtest with its own `t.TempDir()`/`t.Setenv`/FIFO. **Result:**
+  `BASH_DEFAULT_TIMEOUT_MS` set low is the deterministic trigger (7/7 firing
+  reps across all rows that carry it); `BASH_MAX_TIMEOUT_MS` alone does not
+  fire (it caps what the model may set, and the model set no `timeout` in any
+  rep); `toolUseResult.timedOutAfterMs` is the only surface that discriminates
+  the timeout-expiry path from the model-set `run_in_background` path — the
+  process tree is byte-identical between them. Four credential-free
+  self-checks (FIFO hold/release, `ps`-parse, `input.timeout` projection) run
+  ungated. Zero production files touched. Kept (not deleted) because
+  #1224–#1227 all have to stage this same scenario. See
+  [`codebase/1223.md`](../codebase/1223.md) for the full lever table, the
+  live-run evidence, and two known gaps flagged by code review (SHOULD FIX,
+  not blocking) in the Bash-call selection and the env-arrival control's
+  absent/unread collapse.
 
 ## Test infrastructure
 
