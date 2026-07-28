@@ -1,14 +1,30 @@
 # Spec #1191 — A minted per-conversation PTY interrupt oracle
 
-**Ticket:** [#1191](https://github.com/pyrycode/pyrycode/issues/1191) · **Size:** S · **Labels:** `bug`, `size:s`, `security-sensitive`, `needs-real-claude`
+**Ticket:** [#1191](https://github.com/pyrycode/pyrycode/issues/1191) · **Size:** S · **Labels:** `size:s`, `security-sensitive`
 
 One new hermetic e2e file. It drives an interrupt against a **minted** (non-bootstrap)
 per-conversation PTY session and asserts the turn stops — the fake-tier coverage gap
 the ticket names, now reachable because #1195 landed the transcript substrate.
 
-**Expected production diff: zero.** The routing is very likely already correct at this
-tier (see § Predicted outcome); if the test goes red on `main`, § AC3 decision
-procedure bounds what the developer does about it.
+**Production diff: zero.** Delivered in PR #1200: green on unmodified `main`, proven
+non-vacuous by mutation.
+
+> **Revised 2026-07-29 (rework 1).** The ticket was rewritten after this spec shipped.
+> The **design is unchanged** and PR #1200 still implements it exactly. What changed is
+> that the open fork this spec reasoned under is now **closed by measurement**, and one
+> of the two conclusions it pre-committed to was **falsified** — so the correction is
+> recorded here rather than left for a future reader to inherit.
+>
+> Rewritten: § Measured outcome (was § Predicted outcome — the falsified inference is
+> corrected there), § AC5 (removed; the live scenario is now
+> [#1229](https://github.com/pyrycode/pyrycode/issues/1229)'s AC4), § AC3 decision
+> procedure (retained, branch not taken), § Open questions (all resolved), § Security
+> review (re-run), and every `cmd/pyry/main.go` citation — re-verified line by line on
+> `dec28ce`, where **all six were stale**. Labels `bug` and `needs-real-claude` were
+> dropped by PO for the same reason.
+>
+> **No code change follows from this revision** beyond two stale citations in comments.
+> See § What remains after the rework.
 
 ---
 
@@ -22,15 +38,15 @@ Turn-1 data load. Read these before writing any code; every decision below cites
 | `internal/e2e/relay_v2_interrupt_test.go` (whole file, 363 lines) | **The behavioural sibling** (bootstrap PTY interrupt, #794). Lift: the mid-turn re-drop kicker (`:205-219`), the ordered `t.Fatal` guards (`:221-259`, `:285-321`), the sealed `interrupt` envelope (`:265-277`), the StopReason-fidelity note (`:56-61`), and `hasBareESC` (`:352-362`). Its doc comment is the voice to match. |
 | `internal/e2e/relay_v2_stream_interrupt_test.go:19-66` | The stream sibling's header — **why minting is what makes the test exercise #1121's routing at all** (`:47-56`), and the PTY-vs-stream StopReason asymmetry stated from the other side (`:64-66`). Do not copy its `StopReason == "cancelled"` assertion. |
 | `internal/e2e/internal/fakeclaude/main.go:94-118` | The `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` doc block: raw mode, bare-ESC scan, **one-shot**, coexists with `PYRY_FAKE_CLAUDE_TUI`. |
-| `internal/e2e/internal/fakeclaude/main.go:494-501` | `interruptEndTurnLine` — the canned `stop_reason:"end_turn"` line the ESC handler appends. **`package main` in an `internal/` dir: not importable. The e2e needles the wire-shape fragment, never this const.** |
+| `internal/e2e/internal/fakeclaude/main.go:495-502` | `interruptEndTurnLine` (const at `:502`) — the canned `stop_reason:"end_turn"` line the ESC handler appends. **`package main` in an `internal/` dir: not importable. The e2e needles the wire-shape fragment, never this const.** |
 | `internal/e2e/internal/fakeclaude/main.go:717-726`, `:1022-1041` | The poll-loop ESC branch (`escEndsTurn && !escEnded && escPending.Swap(false)`) and `appendTurnGrowth` / `appendTurnEnd`. **`appendTurnGrowth` writes `{}\n`** — inert to the mapper, which is why a delivered turn cannot fabricate a turn_end. |
 | `internal/e2e/internal/fakeclaude/main.go:575-588` | Knob 1's wiring: `argvSessionID(os.Args[1:])` overrides `initU`, so the minted child's `f` **is** `<sharedDir>/<mintedID>.jsonl`. This is what makes `appendTurnEnd` land where the daemon tails. |
 | `internal/e2e/internal/fakeclaude/main.go:1186-1200` | `startStdinReader`: any stdin bytes set `turnPending`; a `containsBareESC` read additionally sets `escPending`. Confirms a bracketed-paste prompt (`0x1b 0x5b …`) contributes no bare ESC. |
 | `internal/turnbridge/mapper.go:21-31`, `:61-78` | `EventKindJsonlEndOfTurn → TurnEnd{end_turn}` (the only turn_end source, always `end_turn`), and `assistant` + non-empty text → `TextChunk` (what the mid-turn line becomes). |
-| `cmd/pyry/main.go:1301-1311` | `resolveBoundRunner` + the `conv.CurrentSessionID == ""` guard. **Read the doc comment. This guard is a hard no-touch (AC4, #678).** |
-| `cmd/pyry/main.go:1281-1290`, `:1361-1400` | `interruptRunner`'s arm switch and `activeInterrupter.SendEsc`'s four records (`no_active_conv`, `no_bound_runner`, `no_actuator`, `dispatched`). These are the diagnosis vocabulary for a red run and for AC5. |
-| `cmd/pyry/main.go:995-1002` | Production wiring: `currentConv: active.CurrentConversation`, `resolveRunner` over `resolveBoundRunner(convReg, pool, …)`. The composition Phase 0 proves end-to-end. |
-| `cmd/pyry/main.go:1601-1625` | `activeConversation.set` is called **only from `sessionRouter.Route`'s success path**; `CurrentConversation()` is `""` before any route. This is why Phase 0 must precede the first `send_message` — and why it lands on the `no_active_conv` arm. |
+| `cmd/pyry/main.go:1312-1331` | `resolveBoundRunner` (func at `:1321`) + the `conv.CurrentSessionID == ""` guard (`:1323`). **Read the doc comment. This guard is a hard no-touch (AC4, #678).** |
+| `cmd/pyry/main.go:1277-1281`, `:1283-1311`, `:1381-1420` | The `interruptArm` constants; `interruptRunner`'s doc + arm switch (`:1301`, cases at `:1305-1306`); and `activeInterrupter.SendEsc`'s four records — `no_active_conv` (`:1385`), `no_bound_runner` (`:1393`), `no_actuator` (`:1399`), `dispatched` (`:1416`). The diagnosis vocabulary for a red run. |
+| `cmd/pyry/main.go:1015-1021` | Production wiring: `currentConv: active.CurrentConversation`, `resolveRunner` over `resolveBoundRunner(convReg, pool, …)`. The composition Phase 0 proves end-to-end, and **the closure at `:1017` is PR #1200's mutation site**. |
+| `cmd/pyry/main.go:1243-1250`, `:1691` | `sessionRouter.Route` — `r.active.set(conversationID)` at `:1248` fires on the success path **only**, so `CurrentConversation()` is `""` before any route. This is why Phase 0 must precede the first `send_message` — and why it lands on the `no_active_conv` arm. (`activeConversation.set` itself is at `:1691`.) |
 | `cmd/pyry/interrupt_routing_test.go:135-185`, `:292-311` | `TestResolveBoundRunner`/"empty CurrentSessionID is inert, never the bootstrap runner" and `TestActiveInterrupter`/"unbound/dangling resolution is inert". **Pre-existing AC4 arm-level coverage — cite by name in the PR, do not duplicate.** |
 | `internal/supervisor/modal.go:69-108` | `SendEsc` → `sendModalKey`: `ErrNoLiveSession` (wrapped) when `s.sess == nil`, otherwise one tui-driver `Session.SendEsc()`. The `keystroke_err` failure mode. |
 | `internal/sessions/pool.go:1379`, `:1414-1418` (`p.newRunner(supCfg)`), `internal/sessions/session.go:250-258` | A minted PTY session's `Runner()` is the `*supervisor.Supervisor` — it has `SendEsc`, so `interruptRunner` takes `armSendEsc`. The premise the whole test rests on. |
@@ -44,11 +60,12 @@ Turn-1 data load. Read these before writing any code; every decision below cites
 
 ## Context
 
-The interrupt route is `handleInterrupt` (`internal/relay/v2session_modal.go:477`) →
-`relay.Interrupter` → `activeInterrupter.SendEsc` (`cmd/pyry/main.go:1361`) →
-`resolveBoundRunner` (`:1301`) → `interruptRunner` (`:1281`) →
-`(*supervisor.Supervisor).SendEsc` (`internal/supervisor/modal.go:69`) → a lone `0x1b`
-on the child's PTY.
+The interrupt route, re-verified hop by hop on `dec28ce`, is `handleInterrupt`
+(`internal/relay/v2session_modal.go:477`) → `relay.Interrupter`
+(`internal/relay/v2session_seams.go:42`, called at `v2session_modal.go:494`) →
+`activeInterrupter.SendEsc` (`cmd/pyry/main.go:1381`) → `resolveBoundRunner` (`:1321`)
+→ `interruptRunner` (`:1301`) → `(*supervisor.Supervisor).SendEsc`
+(`internal/supervisor/modal.go:69`) → a lone `0x1b` on the child's PTY.
 
 Every green fake-tier interrupt test on the PTY tier drives the **bootstrap** session
 (`TestRelayV2_InterruptStopsRunningTurn`). The minted per-conversation path — the code
@@ -70,18 +87,54 @@ Two properties of the landed substrate make this test small:
    The shared `PYRY_FAKE_CLAUDE_JSONL_TRIGGER` would have been a coin flip between
    the two children.
 
-### Predicted outcome, and why the spec says so up front
+### Measured outcome (was "Predicted outcome"; the fork is closed)
 
-This test is expected to be **GREEN on unmodified `main`**. The premises are all
-verified above: a minted PTY session's `Runner()` is `*supervisor.Supervisor`, so
-`interruptRunner` takes `armSendEsc`; the cursor is stamped by the `send_message` that
-precedes the interrupt; and #1195's test already proves the minted supervisor has a
-live tui-driver session (its `send_message` was acked, which requires
-`deliverViaSession`). A green here is a **real result** — it exonerates the daemon-side
-routing and localizes the live failure to claude's own PTY-side Esc handling, which the
-fake defines by fiat and cannot model. Write that conclusion into the PR body; do not
-treat it as a failure to reproduce (the ticket's Technical Notes say this in as many
-words).
+Written as a prediction, resolved as a measurement. The prediction held and the
+inference drawn from it did not. Both halves are recorded, because the wrong half is
+the one a future reader would otherwise inherit.
+
+**What held.** The test is **GREEN on unmodified `main`**, for the predicted reasons: a
+minted PTY session's `Runner()` is `*supervisor.Supervisor`, so `interruptRunner` takes
+`armSendEsc`; the cursor is stamped by the `send_message` that precedes the interrupt;
+and the minted supervisor has a live tui-driver session. PR #1200 additionally proves
+it non-vacuous by mutation — rewriting the production wiring closure at
+`cmd/pyry/main.go:1017` to the pre-#1121 `pool.Lookup("")` takes it red at the
+scoped-`turn_end` phase. A pass on `main` is a real result, not a failure to reproduce.
+
+**What was falsified.** This section previously concluded that a green *"localizes the
+live failure to claude's own PTY-side Esc handling, which the fake defines by fiat and
+cannot model."* **That is false.** The operator ran the live gate on 2026-07-29 against
+claude 2.1.220 and both halves of the route came back clean:
+
+- **claude honours Esc.** It cancels the tool call **65 ms** after dispatch, identically
+  on both runs, and writes the cancellation into the transcript
+  (`"The user doesn't want to proceed with this tool use…"` + `[Request interrupted by
+  user for tool use]`).
+- **The daemon routes correctly.** One `v2.interrupt.dispatched` record, `arm=send_esc`,
+  scoped to the minted conversation, no inert arm, on both runs.
+
+The live failure is in **reporting**. `turn_end` maps from one event kind
+(`internal/turnbridge/mapper.go:25`), which fires only once `stop_reason == "end_turn"`
+holds; an interrupted turn's last assistant entry carries `stop_reason: "tool_use"` and
+is followed by two `user` entries, so no `turn_end` is ever emitted and the Stop
+affordance stays mounted until the client times out. That defect is
+[#1229](https://github.com/pyrycode/pyrycode/issues/1229), and it is not this ticket's.
+
+**Why the inference failed — the part worth carrying forward.** The spec treated the
+disjunction as exhaustive: *the daemon mis-routes* **XOR** *claude ignores Esc*. It had
+a third arm that was never enumerated — **both work, and the result is not reported** —
+and that arm was invisible from this tier for a structural reason, not an accidental
+one. The fake defines ESC→end_turn *by fiat*, and in modelling the actuation as an
+end-of-turn it also models away the reporting step where the real defect lives. Stating
+it as a rule: **a hermetic oracle that stubs the mechanism whose failure you are trying
+to localize cannot narrow the field to two.** The stub is exactly the region the
+remaining hypothesis hides in. Where a spec pre-commits to what a green *means*, the
+claim should be bounded to what the test actuates — here, "the daemon put a bare ESC on
+the right child's PTY" — and stop there.
+
+Note that this costs the ticket nothing. The coverage gap was never contingent on the
+diagnosis being right, which is why it kept its own ticket rather than collapsing into
+#1229.
 
 ---
 
@@ -190,8 +243,10 @@ branch and puts a shipped exit-gate test at risk for a cosmetic win. Say so in
 - `endTurnNeedle` — the literal `"stop_reason":"end_turn"`. This is the wire-shape
   fragment of `fakeclaude`'s `interruptEndTurnLine`, needled rather than imported
   (`package main` under `internal/` is unimportable). Comment it as protocol shape,
-  and point at `internal/e2e/internal/fakeclaude/main.go:501` as the line that must
-  keep containing it.
+  and point at `internal/e2e/internal/fakeclaude/main.go:502` as the line that must
+  keep containing it. (This spec said `:501` — the last line of that const's doc
+  comment — and the test copied the error faithfully. Root cause of the citation fix in
+  § What remains.)
 
 ### Env passed to `StartRotationWithRelay`
 
@@ -211,9 +266,8 @@ precedent tests do. Create `<trigDir>` and pre-create `<sharedDir>/<initialUUID>
 |---|---|
 | AC1 (minted, not bootstrap) | Phases 1–4. Minted topology per the stream sibling's argument (`relay_v2_stream_interrupt_test.go:47-56`): had the target been bootstrap-bound, a correct route and the pre-#1121 bug would be indistinguishable. |
 | AC2 (non-vacuous, structural) | Phase 3's ordered pre-guard + Phase 5's transcript pair + the "only the ESC can end a turn here" invariant. **No `StopReason` assertion** — see below. |
-| AC3 (behaviour on `main` stated) | PR body. § AC3 decision procedure. |
+| AC3 (behaviour on `main` stated) | PR body — **green, with the mutation that proves it non-vacuous**. The AC's conditional clause ("if it reproduces the live failure, the fix lands in the same change") resolved to its false branch; § AC3 decision procedure is retained, not taken. |
 | AC4 (unresolvable interrupt inert) | **Pair.** Arm-level: the pre-existing `TestResolveBoundRunner`/"empty CurrentSessionID is inert, never the bootstrap runner" and `TestActiveInterrupter`/"unbound/dangling resolution is inert" — cite both by name, add nothing. Wiring-level (**new**): Phase 0 + Phase 5's count. See § AC4, precisely. |
-| AC5 (live PTY scenario) | Operator-run (`needs-real-claude`). Not a developer deliverable — see § AC5. |
 
 ### Do not assert `StopReason`
 
@@ -239,28 +293,42 @@ child**. Under the pre-#1121 `Interrupter: w.sup` wiring the count would be 1, a
 test would be red. Phase 0 exercises the `no_active_conv` guard rather than
 `no_bound_runner`, because that is the unresolvable state reachable over the wire — the
 cursor is only ever stamped on `sessionRouter.Route`'s success path
-(`cmd/pyry/main.go:1601-1616`), so a conversation cannot become active without a
+(`r.active.set` at `cmd/pyry/main.go:1248`), so a conversation cannot become active without a
 resolvable binding. Both guards return `(nil, false)` into the same inert path; the
 property under test — *inert, and never the bootstrap* — is identical.
 
 State this mapping in the PR body. A reviewer checking AC4 against its literal wording
 should not have to re-derive it.
 
-### AC5
+### AC5 — removed from this ticket (rework 1)
 
-Operator-run under the `needs-real-claude` label already on the ticket. The developer's
-deliverable for AC5 is one paragraph in the PR body telling the operator what to look
-for, now that #1192/#1193 put records on every arm of this route:
+The live PTY scenario was AC5 here. It is now **[#1229](https://github.com/pyrycode/pyrycode/issues/1229)'s
+AC4**, where it is measured (failing twice out of two) and matched to the defect that
+actually causes it. It cannot pass here — nothing this ticket ships touches reporting —
+so `needs-real-claude` no longer applies and PO stripped it. Every remaining criterion
+is fakes-only.
 
-- `v2.interrupt.dispatched` with `arm=send_esc` and `conversation_id=<the minted
-  conversation>` ⇒ the daemon dispatched correctly and the failure is downstream, in
-  claude's own Esc handling. That is the finding that decides the ticket's open fork
-  (fix vs. retire the PTY interrupt path).
-- `v2.interrupt.no_bound_runner` / `no_actuator` / `no_active_conv` ⇒ a daemon-side
-  routing defect after all, which this fake-tier test did not model.
-- No `v2.interrupt.*` record at all on a wired daemon ⇒ the frame never arrived
-  (`internal/relay/v2session_modal.go:468-476` states the invariant; note its "wired"
-  caveat — the `v2.interrupt.inert` arm records at Debug).
+**The move was a delete, not a transfer:** #1229 already carried the scenario as its own
+AC4 with the measurement attached, so re-filing it would have created two owners for one
+live gate.
+
+**Nothing was orphaned.** Checked before deleting, because a removal silently takes out
+whatever the removed section was the *sole* carrier of:
+
+- The operator's arm vocabulary (which `v2.interrupt.*` record means what) is **not**
+  sole-carried here — § AC3 decision procedure holds it in richer form, record →
+  diagnosis → shape of the fix. It has also already done its job: the live gate read
+  `dispatched arm=send_esc` off exactly that vocabulary.
+- The one row that *was* sole-carried — *no record at all on a wired daemon ⇒ the frame
+  never arrived* — has been folded into § AC3's table rather than deleted with the
+  section.
+- What is genuinely gone is the fork's framing ("the finding that decides fix vs. retire
+  the PTY interrupt path"), and that is correct: the fork is closed, nothing is retired,
+  and the answer is #1229.
+
+**Stale artifact this leaves behind:** PR #1200's body still maps AC5 and carries the
+operator paragraph for it. PO writes issue comments and labels only and could not touch
+it. See § What remains after the rework.
 
 ### Rejected alternatives
 
@@ -374,19 +442,24 @@ without a running turn, "an interrupt stopped it" means nothing. Stop the kicker
 sibling `hasBareESC` ships untested for the same reason. Adding a table for a 6-line
 byte scan would be ceremony.
 
-### RED-before check
+### RED-before check — done (rework 1)
 
-Unlike #1195 there is no known red state to stage: this test is expected green on
-`main` (§ Predicted outcome). What the developer **must** do instead is confirm the
-test is not green for the wrong reason — that it would fail if the interrupt were
-mis-routed. Do that with one throwaway mutation, run, revert, and record in the PR:
+Unlike #1195 there was no known red state to stage: the test is green on `main`
+(§ Measured outcome). So the requirement was to confirm it is not green for the *wrong*
+reason — that it would fail if the interrupt were mis-routed — via one throwaway
+mutation, run, revert, recorded in the PR.
 
-> Temporarily change `activeInterrupter.SendEsc` to actuate the bootstrap runner
-> instead of the resolved one (the pre-#1121 behaviour), run the new test, confirm it
-> goes red at Phase 4 or Phase 5, revert.
+**Performed, and it is the mutation of record.** The developer rewrote the production
+wiring closure at `cmd/pyry/main.go:1017` to the pre-#1121 `pool.Lookup("")`, which
+took the test **red at the scoped-`turn_end` phase**, then reverted. That is a cleaner
+cut than this spec's original suggestion (mutate `activeInterrupter.SendEsc` to actuate
+the bootstrap runner): it changes the *composition* rather than the unit, so it
+reproduces the historical wiring defect end-to-end instead of simulating its effect —
+which is exactly what Phase 0 and AC4 claim to detect. Recorded here so a reviewer reads
+the deviation as the improvement it is.
 
-That is the non-vacuity evidence a reviewer needs, and it costs one edit-run-revert
-cycle. **Revert it — the mutation must not appear in the diff.**
+**The mutation must not appear in the diff.** It does not: the branch's production diff
+is zero files.
 
 ### Suite verification
 
@@ -406,7 +479,12 @@ Note for whoever runs this: `ok … 1.1s` on an e2e package can mean every test
 
 ---
 
-## AC3 decision procedure (only if the test is RED on `main`)
+## AC3 decision procedure — RED branch, **not taken**
+
+**Not taken.** The test is green on `main` and the production diff is zero, so nothing
+in this section was executed. It is retained for two reasons: it is now the sole carrier
+of the interrupt route's arm vocabulary (see § AC5), and it is the procedure to re-run
+if this test ever goes red.
 
 The ticket puts the production fix in scope *if the test reproduces the live failure*.
 It is in scope; it is not unbounded. Diagnose first — the arm records make this cheap.
@@ -419,7 +497,8 @@ interrupt produced:
 | `no_bound_runner` | `convReg.Get(convID).CurrentSessionID` empty or the pool lookup failed at interrupt time | In the binding's persistence/timing. **Never** by relaxing the `CurrentSessionID == ""` guard or adding a bootstrap fallback |
 | `no_actuator` | The minted `Runner()` is not `*supervisor.Supervisor` | In `interruptRunner`'s switch or the runner factory |
 | `dispatched` + `keystroke_err` | `ErrNoLiveSession`: the minted supervisor has no live tui-driver session | In the minted spawn's session attach |
-| `dispatched` (clean) but no `turn_end` | The ESC landed; the transcript/subscription did not carry the end | #1195 substrate territory — check `<sharedDir>/<mintedID>.jsonl` on disk first |
+| `dispatched` (clean) but no `turn_end` | The ESC landed; the transcript/subscription did not carry the end | #1195 substrate territory — check `<sharedDir>/<mintedID>.jsonl` on disk first. **On the LIVE tier this same row is #1229**: the ESC lands, claude cancels, and the mapper has no event kind to emit `turn_end` from |
+| **No `v2.interrupt.*` record at all** | The frame never arrived. Since #1193 every path through the route records, so on a **wired** daemon an empty log is itself the finding (`internal/relay/v2session_modal.go:470-476` states the invariant) | Upstream of the route — transport, sealing, or the interactive gate. Note the "wired" caveat: the `v2.interrupt.inert` arm records at Debug, invisible below `-pyry-verbose` |
 
 Hard constraints on any fix:
 
@@ -428,7 +507,8 @@ Hard constraints on any fix:
   bootstrap session. No fallback, no relaxation, no "just for the unbound case". The
   ticket forbids it and so does this spec.
 - **No bootstrap fallback anywhere on the route.** `armNone` is inert on purpose — no
-  actuation beats wrong actuation (`cmd/pyry/main.go:1276-1280`).
+  actuation beats wrong actuation (const at `cmd/pyry/main.go:1280`; the doctrine, and
+  the reason it must not trigger a fallback, at `:1296-1300`).
 - If the fix would touch more than **two** production files or exceed ~**80**
   production lines, stop. Write the diagnosis and the proposed fix into the PR body and
   leave the (red, skipped or `t.Skip`-free but clearly-failing) test out of the merge
@@ -447,12 +527,32 @@ log/output hygiene, blast radius.
 **Verdict: PASS.** One MUST FIX folded into the design (MF-1, § AC3 decision
 procedure), one SHOULD (S-1, § Design), one verification note.
 
+**Re-run for rework 1 (2026-07-29): PASS, one new SHOULD (S-2).** The label is the
+gate, so the pass is re-run on the revised spec rather than inherited — no transitive
+trust from the first PASS. The design is unchanged and the production diff is still
+zero, so the trust-boundary table below stands as written. Three things did change:
+
+- **The route's isolation property now has live corroboration.** S-1's concern is a
+  false green from the wire oracle alone. The live gate independently observed one
+  `v2.interrupt.dispatched arm=send_esc` scoped to the *minted* conversation with no
+  inert arm — the same cross-conversation isolation property the hermetic test asserts,
+  measured on a different fabric. This strengthens S-1's answer; it does not replace it.
+  The on-disk transcript pair remains load-bearing.
+- **MF-1 stands and its audience widens.** The red branch was not taken, so nothing came
+  near the guard on this ticket. But #1229 works on this same route, so the "check
+  `git diff cmd/pyry/main.go`" instruction below is now aimed at that ticket's reviewer
+  as much as this one's.
+- **The new deliverable is prose.** Editing PR #1200's body and two comment citations
+  crosses no trust boundary and touches no executable line. The control against it
+  drifting into behaviour is the zero-executable-lines check in § What remains — a
+  deterministic grep, not a promise.
+
 ### Trust boundaries crossed
 
 | Boundary | Data | Provenance | Guard |
 |---|---|---|---|
-| phone → `handleInterrupt` | an `interrupt` envelope, **no payload** | Remote, but Noise-sealed and device-authenticated | The interactive capability gate (`v2session_modal.go:480`), unchanged |
-| active cursor → `resolveBoundRunner` | conversation id | Stamped only on `sessionRouter.Route`'s success path | `conv.CurrentSessionID == ""` (#678) — **no-touch** |
+| phone → `handleInterrupt` | an `interrupt` envelope, **no payload** | Remote, but Noise-sealed and device-authenticated | The interactive capability gate (`v2session_modal.go:478`), unchanged |
+| active cursor → `resolveBoundRunner` | conversation id | Stamped only on `sessionRouter.Route`'s success path (`main.go:1248`) | `conv.CurrentSessionID == ""` (`main.go:1323`, #678) — **no-touch** |
 | resolved runner → child PTY | one `0x1b` byte | Fixed in code; nothing remote reaches the byte stream | n/a — the payload is a constant |
 | test → fake's transcript | one assistant-text JSONL line | Test-authored const in a `//go:build e2e` file | n/a |
 | env → trigger dir | a path | Harness/test-authored | n/a |
@@ -469,8 +569,9 @@ resolution fails. Either is the #678 cross-conversation isolation break: an unbo
 conversation's interrupt would actuate the shared bootstrap claude, and `armNone`'s
 inertness exists to prevent exactly that. The ticket names this; § AC3 carries it as a
 hard constraint; `interruptRunner`'s doc comment already pins it. A reviewer should
-check `git diff cmd/pyry/main.go` for any change to lines 1276–1311 and fail the PR on
-one.
+check `git diff cmd/pyry/main.go` for any change to lines **1272–1331** (the arm
+constants, `interruptRunner`, and `resolveBoundRunner` with its guard) and fail the PR
+on one.
 
 **S-1 — false-green, the category that matters here.** The wire `turn_end` alone is a
 weak oracle: `ConversationID` is stamped from the active cursor, not from the transcript
@@ -485,6 +586,27 @@ A second false-green shape, also handled: the Phase-0 negative. A settle-timer n
 ("we waited 2 s and saw no ESC") is vacuous if the oracle simply cannot see ESCs. The
 design defers the count read until Phase 4 and pairs it with Phase 5's `== 1`, so the
 same oracle demonstrably reports a real ESC in the same run.
+
+**S-2 (new in rework 1) — #1229 inherits this file, and its fix moves the ground the
+causality invariant stands on.** #1229 is `blockedBy` #1191 and its AC3 names this test
+file *"the substrate to extend, not to duplicate."* Its fix is in the mapper: emit a
+`turn_end` for an interrupted turn, which today has no event kind to come from.
+
+Whoever extends this file must re-derive, not inherit, the invariant the whole design
+rests on — *the bare ESC is the only thing that can produce an end-of-turn line in the
+minted transcript.* Today that holds because `EventKindJsonlEndOfTurn` is the mapper's
+**only** `turn_end` source. After #1229 there will be at least two, and the invariant
+will instead rest on *the kicker's line triggers neither* — a strictly weaker argument
+that happens to still hold: `perConvMidTurnLine` carries no `stop_reason` and is not an
+interruption marker, and `appendTurnGrowth` writes `{}\n`.
+
+The concrete hazard is a #1229 developer reusing this file's kicker to **stage** an
+interrupted turn, by dropping an interruption marker or a `stop_reason: "tool_use"`
+entry down the same trigger path. That would make the minted transcript carry a second
+end-of-turn source and silently falsify this test's causality claim — the test would
+keep passing while proving less. If #1229 needs a staged interruption, it needs its own
+injection path, not this one. Flagged here because the coupling is invisible from
+#1229's side: nothing in the mapper change looks like it touches an e2e invariant.
 
 ### Considered and dismissed
 
@@ -512,7 +634,27 @@ same oracle demonstrably reports a real ESC in the same run.
 
 ---
 
-## Open questions
+## Open questions — all resolved (rework 1)
+
+Resolved by the implementation and the live gate. Kept with their answers rather than
+deleted: each one records a place the design could have been wrong and was not.
+
+1. **Is the pre-interrupt bare-ESC baseline really zero?** → **Yes, measured.** The
+   shipped test asserts `before == 0` at Phase 4 and `== 1` at Phase 5, and both hold.
+   The reasoning below was sound and no fallback to the delta form was needed.
+2. **Does a minted PTY session emit `turn_state` as well as `turn_end`?** → **Yes.**
+   Phase 3 drains to a non-idle `turn_state` scoped to the minted conversation; the
+   `TypeAssistantDelta` fallback was not needed. This was the one step with no exact
+   minted precedent, and the shared producer/emitter argument held.
+3. **Should `no_bound_runner` get an e2e of its own?** → **Still deferred, deliberately.**
+   The arm stays unit-proved and the wiring stays covered by Phase 0. Nothing in the
+   live result changes the trade-off; the `delete_conversation` route remains recorded
+   in § Rejected alternatives if a future ticket wants it.
+4. **New, and open: does #1229 disturb this file's causality invariant?** → See § S-2.
+   The invariant survives the mapper change on today's reading, but its *proof* changes
+   shape and must be re-derived by whoever extends the file.
+
+The original reasoning, retained:
 
 1. **Is the pre-interrupt bare-ESC baseline really zero?** Reasoned, not measured: the
    only production `SendEsc` call sites are this interrupt route, the modal
@@ -536,20 +678,74 @@ same oracle demonstrably reports a real ESC in the same run.
 
 ---
 
+## What remains after the rework
+
+The rework was **prose only**: AC1–AC4 are byte-identical and PR #1200 already satisfies
+all four, green and mutation-proved. **Do not rebuild the test.** Two artifacts are
+stale, and they are the whole developer deliverable.
+
+**1. PR #1200's body still maps AC5.** It carries an AC5 row and an operator paragraph
+for a criterion that no longer exists on this ticket. Replace both with a pointer to
+#1229's AC4, and state that the live result came in and is recorded on #1229. While
+there: the PR summary gives the mutation site as `cmd/pyry/main.go:998`; the closure it
+actually rewrote is at `:1017`.
+
+**2. Two stale `file:line` citations in the shipped test's comments.** Both are
+comment-only. Both were accurate when written and drifted under #1192/#1193.
+
+| Site | Cites | Should cite |
+|---|---|---|
+| `relay_v2_perconv_interrupt_test.go:112` | `cmd/pyry/main.go:1228` for *"the cursor is stamped only on `sessionRouter.Route`'s success path"* | **`:1248`** — the `r.active.set` call itself, inside `Route` at `:1243-1250`. `:1228` lands on `sessionRouter.resolve`'s own `CurrentSessionID == ""` check: a *different* guard, related enough to survive a skim, which is what makes the drift worth fixing rather than tolerating. |
+| `relay_v2_perconv_interrupt_test.go:43` | `internal/e2e/internal/fakeclaude/main.go:501` for `interruptEndTurnLine` | **`:502`** — `:501` is the last line of that const's doc comment. |
+
+The other six `*.go:NNN` cites in that file were re-verified line by line on `dec28ce`
+and are **accurate**, so the sweep is complete rather than sampled:
+`fakeclaude/main.go:112-116`, `harness.go:336`, `internal/turnbridge/mapper.go:25-30`,
+`relay_v2_interrupt_test.go:331-339` and `:352`,
+`relay_v2_stream_interrupt_test.go:47-56`.
+
+**Verification property.** This change touches **zero executable lines**. Prove that
+rather than assert it — it is the strongest claim available here, and it is what carries
+code review's prior verdict forward:
+
+```bash
+git diff -U0 -- internal/e2e/relay_v2_perconv_interrupt_test.go \
+  | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -vE '^[+-][[:space:]]*//'
+```
+
+must print nothing — the test is bit-identical to the commit code review already passed.
+Re-run the suite anyway (§ Suite verification), and remember that `ok … 1.1s` on an e2e
+package can mean every test skipped.
+
+---
+
 ## Scope
 
 | File | Kind | Est. |
 |---|---|---|
-| `internal/e2e/relay_v2_perconv_interrupt_test.go` | new, e2e test | ~340 lines incl. a ~50-line doc comment and `countBareESC` |
+| `internal/e2e/relay_v2_perconv_interrupt_test.go` | new, e2e test | ~340 lines est. — **actual 519** |
+| `internal/e2e/relay_v2_perconv_interrupt_test.go` | rework 1: 2 comment lines | citation fixes; zero executable lines |
+| `docs/specs/architecture/1191-minted-perconv-interrupt-oracle.md` | rework 1: this revision | prose |
+
+**Sizing calibration, worth recording.** The estimate said ~340 lines; the file shipped
+at **519**, 1.5× over. The overrun is entirely doc comment and `t.Fatal` prose — the
+~50-line header estimate became ~130, because a design whose whole value is *structural
+causality* has to explain the structure at every assertion or the next reader weakens
+it. The estimate counted the assertions and not the prose the rigour requires. Still
+comfortably inside `s`; the lesson is that on evidence-shaped tickets the doc-comment
+line is a first-class cost, not rounding.
 
 **One new file. Zero production source files. Zero new exported types. Zero consumer
-call sites** — nothing existing is edited, so there is no cascade. Total written work
-~340 lines plus the PR body. Size `s` confirmed against the red lines: 1 new file
-(≤3), ~340 lines (≤600), 0 exported types (≤5), 0 call sites (≤10), 0 reject branches
-(≤10), 4 developer-facing AC (≤5; AC5 is operator-run).
+call sites** — nothing existing is edited, so there is no cascade. Size `s` confirmed
+against the red lines: 1 new file (≤3), 519 lines (≤600), 0 exported types (≤5), 0 call
+sites (≤10), 0 reject branches (≤10), **4 AC, all developer-facing** (≤5).
+
+**Rework 1 is XS on its own:** 2 comment lines, 1 spec revision, 1 PR body. No red line
+is within reach of it.
 
 **Not in scope:** any change to `resolveBoundRunner`'s isolation guard,
 `interruptRunner`'s inert default, or any resolver in
 `cmd/pyry/interactive_turn_stream_v2.go`; the `stream-json` interrupt path (it works,
 production is cut over to it); `docs/knowledge/codebase/1191.md` (documentation phase);
-any edit to `relay_v2_interrupt_test.go`; the live AC5 run (operator).
+any edit to `relay_v2_interrupt_test.go`; **#1229's reporting defect and its live gate**
+— a separate ticket, and the reason this one ships no production code.
