@@ -123,6 +123,34 @@ Three properties, two of them load-bearing:
 
 # Part II — re-spec: invariant 4's operationalisation
 
+> **SUPERSEDED 2026-07-29 — the polarity below is inverted from what shipped.**
+> Read this Part as history, not as specification.
+>
+> Part II's founding principle — *"Every unknown resolves to REJECT. Absence of
+> evidence is never acceptance"* — was falsified by eight consecutive live
+> operator runs the night it was written. The `interruptedByShutdown` marker it
+> selects as the discriminator appeared in **none** of them, and one run that
+> staged the scenario perfectly was failed for recording an ordinary
+> `"Exit code 1"` — the check accused pyry of the one thing it did right. The
+> defeat came from pyry's own teardown race, not from a claude release.
+>
+> What shipped rejects on **positive evidence that claude's own bound ended the
+> call**, read from two surfaces (`toolUseResult.backgroundTaskId` /
+> `timedOutAfterMs`, and `input.timeout` / `run_in_background`), and **accepts
+> every other shape** — including the absent and ordinary-failed-result shapes
+> this Part rejects. `interruptedByShutdown` survives only as an *accepting*
+> signal. Consequently the classification set is four, not three
+> (`toolResultUnbounded` is new), and the six-row fixture table below is eleven
+> rows in the shipped test.
+>
+> **The authoritative record is the file header of
+> `internal/e2e/realclaude/sigterm_mid_tool_use_test.go`**, which carries the
+> fragility history, the two-surface rationale and the known blind spot. Part I
+> above is unaffected and still holds.
+>
+> This is a status marker, not a re-spec: the rework was routed straight to
+> developer by design, with no architect round-trip.
+
 ## Context
 
 claude writes this into the session JSONL during its own teardown, after the

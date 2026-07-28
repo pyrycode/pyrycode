@@ -19,9 +19,12 @@ package realclaude
 //     regression being guarded against.
 //  4. SIGTERM landed mid-tool_use. A Bash tool_use envelope is on disk, and no
 //     matching tool_result shows claude's OWN bound ending the call — no
-//     background handle, no timeout-expiry record, no bound in the call params.
-//     A result claude wrote while being torn down is expected and accepted; a
-//     result claude wrote because its own clock ran out is the defeat.
+//     background handle, no timeout-expiry record, and no bound in the call
+//     params that claude has not itself overruled by recording the shutdown as
+//     what interrupted the call. A result claude wrote while being torn down is
+//     expected and accepted; a result claude wrote because its own clock ran out
+//     is the defeat. The signals are ranked, not merely counted — the precedence
+//     rule lives on classifyBashToolResult; this enumeration is its summary.
 //
 // Fragility history — invariant 4 is the one that keeps breaking. Twice the
 // fixture lost its ability to keep a command in flight, and both times the
@@ -179,10 +182,13 @@ package realclaude
 //
 // Two surfaces because neither covers both branches. The 2026-07-27 defeat was
 // a bound the MODEL chose, visible only as `input.timeout` in the call params.
-// #1223 then established the other branch: claude's own client default
-// (BASH_DEFAULT_TIMEOUT_MS, 120000 unless set) produces the identical
-// backgrounding with NO timeout field on the tool_use at all — 10 live reps,
-// absent in every one. A check reading only the params would pass that branch
+// #1223 then established the other branch: a client-side bound claude applies
+// itself produces the identical backgrounding with NO timeout field on the
+// tool_use at all — 10 live reps, absent in every one. Read precisely, because
+// the margin note below depends on the distinction: #1223 exercised that
+// mechanism by SETTING BASH_DEFAULT_TIMEOUT_MS to 5000, so what is established
+// is the mechanism, not the shipped 120000 default firing — no run has yet
+// observed that. A check reading only the params would pass that branch
 // vacuously; a check reading only the sidecar would rest on fields the
 // 2026-07-27 transcript never captured. Each surface covers what the other
 // misses, and TestClassifyBashToolResult_ProbeEnvelopes has a row per branch.
@@ -193,7 +199,10 @@ package realclaude
 // nothing — the call was still in flight when the signal landed — so every
 // bounding defeat writes its tool_result BEFORE the signal, where a pure timing
 // check catches it with no claude field in the loop. Different fabric, on
-// purpose, and it is why the on-disk check can afford to fail open.
+// purpose, and it is why the on-disk check can afford to fail open. Neither
+// check is sufficient alone — the snapshot misses a result flushed just after
+// the signal, and that is precisely the case the post-exit handle catches. See
+// classifyBashToolResult for how the two holes fail to overlap.
 //
 // The known blind spot, recorded rather than closed. With
 // CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude kills the command on expiry
@@ -202,12 +211,30 @@ package realclaude
 // control). That is a bounding defeat this check cannot see: only claude's
 // prose separates it from the ordinary teardown abort of 2026-07-29, and prose
 // is excluded. It needs an env var this test does not set, and the pre-SIGTERM
-// snapshot covers it. If it ever lands here, that is where to look first.
+// snapshot is what would catch it — the expiry precedes the signal — subject to
+// the same flush caveat as above. If it ever lands here, look there first.
 //
-// Also worth knowing: the client default is 120s and this test's worst case to
-// SIGTERM is ~75s (25+25+10+15). Those numbers are closer than they look. A
-// claude release that lowers the default, or a slower gate, puts the fixture
-// back on the treadmill — and the failure will read as `backgroundTaskId` plus
+// Also worth knowing: the client default bound is 120s, and the number to hold
+// against it is rendezvous→SIGTERM, not elapsed-since-pyry-started. claude's
+// clock starts when the COMMAND starts, which is the instant the rendezvous
+// fires. State the frame whenever this margin is quoted — the two readings point
+// opposite ways:
+//
+//	rendezvous → SIGTERM   50s   waitForBashSubprocess 25s + waitForSessionID
+//	                             10s + waitForBashToolUseOnDisk 15s
+//	pyry start → SIGTERM  100s   the above plus waitForDirectChild 25s and the
+//	                             rendezvous wait itself 25s
+//
+// 50s against a 120s default is a 70s margin; 100s against it is 20s. The first
+// is the real one, because a bound that has not started running cannot expire.
+// The code already measures it that way: heldBeforeSignal starts at
+// rendezvousAt, and invariant 4b's failure message compares any bound claude
+// attached against exactly that quantity.
+//
+// 70s is margin, not comfort — every one of those three budgets is a worst case
+// a healthy run spends a fraction of, but a claude release that halves the
+// default, or a gate slow enough to actually spend them, puts the fixture back
+// on the treadmill. That failure will read as `backgroundTaskId` plus
 // `timedOutAfterMs` on the tool_result.
 //
 // `is_error` was rejected despite being the more durable, public wire
@@ -391,9 +418,16 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 	// Event (c): wait until claude has flushed the Bash tool_use to its
 	// on-disk session file. It lands a couple of seconds after the subprocess
 	// starts; SIGTERM before the flush truncates the session file without it,
-	// and invariant 4's "tool_use present" check needs it. The test still
-	// holds the FIFO's write end, so `cat` cannot return and no tool_result is
-	// ever written, however long this wait takes.
+	// and invariant 4's "tool_use present" check needs it. The test still holds
+	// the FIFO's write end, so `cat` cannot return ON ITS OWN, however long this
+	// wait takes.
+	//
+	// What does NOT follow is that no tool_result can appear during this wait.
+	// Holding the write end constrains the COMMAND, not claude: if claude's own
+	// bound expires it writes a result and backgrounds the still-running `cat`
+	// (the 2026-07-27 defeat), and on teardown it writes one regardless. That is
+	// exactly why the snapshot below reads the disk instead of assuming it is
+	// clean.
 	sessionID := waitForSessionID(&stdout, 10*time.Second)
 	if sessionID == "" {
 		_ = syscall.Kill(-pyryPid, syscall.SIGKILL)
@@ -643,6 +677,13 @@ func (k toolResultKind) String() string {
 // tool_result BEFORE the signal, where the live test's pre-SIGTERM snapshot
 // catches it on a pure timing fact with no claude field in the loop. Different
 // fabric, on purpose.
+//
+// The snapshot does not carry that alone, and claiming it does would overstate
+// the cover: a result written just before the signal but FLUSHED just after is
+// on neither side of the read. What closes it is that the two mechanisms miss
+// different things — a backgrounding defeat always carries a handle, so the
+// post-exit check catches exactly the case whose late flush defeats the
+// snapshot. Neither is sufficient; the pair is.
 //
 // Evidence precedence, asymmetric on purpose:
 //
@@ -910,8 +951,10 @@ const (
 	// claude records as having ended the call outranks the marker.
 	probeToolResultInterruptedWithHandle = `{"type":"user","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected...","is_error":true,"tool_use_id":"toolu_01WHRACfWECW8GRys7Wy1szz"}]},"toolUseResult":{"backgroundTaskId":"bjh1j6tle","timedOutAfterMs":5000},"toolDenialKind":"user-rejected","interruptedByShutdown":true,"version":"2.1.220"}`
 
-	// A bound too generous to have fired within this test's worst-case ~75s to
-	// SIGTERM (600000 is the documented BASH_MAX_TIMEOUT_MS ceiling). Synthetic
+	// A bound too generous to have fired within this test's worst-case 50s from
+	// rendezvous to SIGTERM — the frame that matters, since claude's clock starts
+	// when the command starts; see the file header's margin note. (600000 is the
+	// documented BASH_MAX_TIMEOUT_MS ceiling.) Synthetic
 	// — pins the second half of the precedence rule: a params-side bound must
 	// not override claude's own statement that the shutdown interrupted the
 	// call. Reading it the other way round is how a correctly staged run gets
