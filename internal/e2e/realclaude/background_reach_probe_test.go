@@ -168,6 +168,12 @@ type reachProc struct {
 }
 
 // reachHeld is one matched row's reachability reading, both ways.
+//
+// Row's three INTEGERS are the integer snapshot's — the same frame as every
+// other operand in the exclusion arithmetic, and the frame AC4 publishes
+// verbatim — while its Command and Needles are the argv scan's. matched_rows
+// keeps the argv scan's own integers unaltered, and any divergence between the
+// two frames is recorded in notes.
 type reachHeld struct {
 	Row       reachProc   `json:"row"`
 	Hops      []reachProc `json:"hops_up_to_claude"`
@@ -211,10 +217,13 @@ type reachRecord struct {
 	PyryPGID          int  `json:"pyry_pgid"`
 	PyryIsGroupLeader bool `json:"pyry_is_own_group_leader"`
 
-	ClaudePIDPositional int       `json:"claude_pid_positional"`
-	ClaudePIDContent    int       `json:"claude_pid_content"`
-	ClaudePIDAgree      bool      `json:"claude_pid_identifications_agree"`
-	ClaudeRow           reachProc `json:"claude_row,omitempty"`
+	ClaudePIDPositional int  `json:"claude_pid_positional"`
+	ClaudePIDContent    int  `json:"claude_pid_content"`
+	ClaudePIDAgree      bool `json:"claude_pid_identifications_agree"`
+	// ClaudeRow carries no omitempty: encoding/json does not honour it for
+	// struct types, so an all-zero row would be emitted anyway. It is emitted
+	// unconditionally and reads as zeroes when the root was never pinned.
+	ClaudeRow           reachProc `json:"claude_row"`
 	ClaudePGID          int       `json:"claude_pgid"`
 	ClaudeIsGroupLeader bool      `json:"claude_pgid_equals_pid"`
 
@@ -329,6 +338,15 @@ func runReachProbe(t *testing.T, artifactDir string) {
 		DispositionDetail: "the probe did not reach its classification point; no " +
 			"reachability claim is made",
 	}
+	// Stated in the record, not just in a comment, so a reader of the pasted
+	// artifact is not misled into counting two agreeing reads. The
+	// PYRY_USE_STREAMJSON gate above returns before this record exists, so
+	// runner_path_from_env can only ever read "ptyrunner" in any record that
+	// gets written. Only runner_path_from_argv carries evidential signal.
+	rec.note("runner_path_from_env is documentation, NOT independent corroboration " +
+		"of runner_path_from_argv: the PYRY_USE_STREAMJSON gate returns before this " +
+		"record exists, so it can only read ptyrunner. The argv read is the one that " +
+		"evidences the runner from the process table")
 
 	// Registered FIRST so LIFO runs it LAST: the record is complete by then,
 	// and a structural t.Fatalf below still leaves partial evidence on disk.
@@ -430,7 +448,7 @@ func runReachProbe(t *testing.T, artifactDir string) {
 	}
 
 	resultRaw := probeWaitForToolResult(t, workdir, sessionID, toolUseID, probeToolResultDeadline)
-	reachMeasure(t, rec, resultRaw, pyryExited)
+	reachMeasure(rec, resultRaw, pyryExited)
 	reachFinish(t, rec)
 }
 
@@ -438,13 +456,20 @@ func runReachProbe(t *testing.T, artifactDir string) {
 // landed, the FIFO write end is STILL held (holdProbeFIFO's t.Cleanup runs
 // after this returns), and pyry is still running. The four steps are ordered
 // and the order is load-bearing.
-func reachMeasure(t *testing.T, rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}) {
-	t.Helper()
-
+func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}) {
 	// (1) The integer snapshot. Every number in AC2 and AC3 comes out of these
 	// bytes, and it is the one readout pasted into the comment. Only snap.raw
 	// is used: snap.descendants is #1223's subtree-first, base-name-annotated
 	// view, which is precisely the read this ticket exists to replace.
+	//
+	// Discarding it is not free: on success probeProcessSnapshot also runs a
+	// second, narrow `ps -o pid=,command= -p <pids>` internally to annotate
+	// those descendants (background_trigger_probe_test.go:930), so one extra
+	// exec lands between the two load-bearing snapshots. "Immediately
+	// following" in step (2) therefore means the next statement, not the next
+	// syscall. Harmless — the held process cannot exit while the FIFO write end
+	// is held, and step (4) nets any skew — but a reader should not have to
+	// open the shared rig to discover it.
 	snap := probeProcessSnapshot(rec.PyryPID)
 	rec.rawPS = snap.raw
 	rec.PSError = snap.err
@@ -524,6 +549,31 @@ func reachMeasure(t *testing.T, rec *reachRecord, resultRaw []byte, pyryExited <
 		rec.MatchOutcome = reachMatched
 	}
 
+	// The integer snapshot's own error is a GATE, not a footnote — everything
+	// from here down reads off snap.raw. probeProcessSnapshot returns
+	// exec.Cmd.Output()'s partial stdout ALONGSIDE the error
+	// (background_trigger_probe_test.go:871-873), so on a 5 s context timeout —
+	// a loaded machine is this probe's expected condition, not the exotic one —
+	// snap.raw is a CUT process table. A cut that drops an intermediate hop
+	// while keeping the held row makes the up-walk and the down-BFS agree on
+	// "not reachable" and sails past the skew check, publishing
+	// reachNotReachable: a public claim that pyry leaks processes, filed off an
+	// instrument that half-ran. That is exactly what AC1 and AC5 forbid.
+	//
+	// The gate sits AFTER the match-outcome switch rather than inside it. The
+	// match question is answered by the argv ps alone, so a failed integer
+	// snapshot must neither relabel a true `matched` nor suppress a true
+	// `fired-no-row-matched` finding — both stand on an instrument that did
+	// run. What a failed integer snapshot disqualifies is the reachability
+	// half, which is all of what follows.
+	if rec.PSError != "" {
+		rec.decide(reachInconclusive, "instrument fault: the integer ps snapshot failed "+
+			"(%s), so every hop, membership and exclusion integer below would be read "+
+			"off a partial process table. NO reachability verdict is stated — a cut "+
+			"table can make both reads agree on 'not reachable' and both be wrong",
+			rec.PSError)
+		return
+	}
 	if !rec.SnapshotDuringTurn {
 		rec.decide(reachInconclusive, "pyry had already returned when the snapshot was "+
 			"taken, so this is not a during-turn reading")
@@ -570,6 +620,25 @@ func reachMeasure(t *testing.T, rec *reachRecord, resultRaw []byte, pyryExited <
 	rec.UpDownAgree = true
 	allReachable := true
 	for _, row := range heldRows {
+		// AC3's PRIMARY operand must come from the same frame as every other
+		// integer it is compared against. ReaperSelfPGID is read from the
+		// integer snapshot, ClaudePGID likewise (reachPinRoot), and the integer
+		// snapshot is the readout AC4 pastes into the comment — so a held pgid
+		// taken from the argv ps would leave a reader redoing the arithmetic by
+		// eye checking against a number the record did not use. Reading one
+		// pid's pgid out of two snapshots can disagree, so the published row
+		// carries the INTEGER snapshot's three integers and the argv scan's
+		// Command/Needles, and any divergence is noted rather than silently
+		// resolved. Presence in `index` is guaranteed here: the skew gate above
+		// returned if any matched pid was absent from the integer table.
+		intRow := index[row.PID]
+		if intRow.PPID != row.PPID || intRow.PGID != row.PGID {
+			rec.note("held pid %d differs between the two snapshots (integer ppid=%d "+
+				"pgid=%d, argv ppid=%d pgid=%d); the integer snapshot is authoritative",
+				row.PID, intRow.PPID, intRow.PGID, row.PPID, row.PGID)
+		}
+		row.PPID, row.PGID = intRow.PPID, intRow.PGID
+
 		hops, reached := reachChainUp(index, row.PID, claudePID)
 		held := reachHeld{
 			Row:       row,
@@ -758,9 +827,20 @@ func writeReachArtifacts(t *testing.T, dir string, rec *reachRecord) {
 		t.Errorf("marshal reach record: %v", err)
 		return
 	}
+	// AC4's verbatim snapshot is a deliverable, so its ABSENCE has to be
+	// explained in place. Writing nothing when the ps returned nothing leaves an
+	// empty artifact directory that reads as "the probe never got that far",
+	// which is a different claim from "the process table read failed".
+	psContent := rec.rawPS
+	if len(psContent) == 0 {
+		psContent = []byte(fmt.Sprintf(
+			"# no rows: the integer `ps -axo pid=,ppid=,pgid=` snapshot returned no "+
+				"bytes.\n# ps_error: %s\n# disposition: %s\n",
+			reachOrNone(rec.PSError), reachOrNone(rec.Disposition)))
+	}
 	files := map[string][]byte{
 		filepath.Join(dir, "reach.json"):   append(blob, '\n'),
-		filepath.Join(dir, "reach.ps.txt"): rec.rawPS,
+		filepath.Join(dir, "reach.ps.txt"): psContent,
 	}
 	for path, content := range files {
 		if len(content) == 0 {
@@ -1013,6 +1093,12 @@ func reachToolUseCommand(input json.RawMessage) string {
 // in the operator's shell (it was, on 2026-07-25, and that silently invalidated
 // a #1223 gate). Only the exact string "1" is truthy, matching
 // cmd/pyry/agent_run.go:266.
+//
+// Its streamrunner branch is unreachable in any run that produces a record: the
+// PYRY_USE_STREAMJSON gate in TestRealClaude_BackgroundReachability returns
+// first. Kept because it encodes the truthiness rule and the effective-env read
+// for the next reader, but it is documentation, not evidence — see the standing
+// note the record carries. reachRunnerPathFromArgv is the corroborating read.
 func reachRunnerPathFromEnv(delta []string) string {
 	streamJSON := os.Getenv("PYRY_USE_STREAMJSON") == "1"
 	for _, kv := range delta {
@@ -1041,6 +1127,15 @@ func reachRunnerPathFromArgv(command string) string {
 // cannot use struct equality.
 func reachSameRow(a, b reachProc) bool {
 	return a.PID == b.PID && a.PPID == b.PPID && a.PGID == b.PGID && a.Command == b.Command
+}
+
+// reachOrNone keeps an empty field from reading as a missing one in a
+// plain-text artifact, where "" and "absent" look identical.
+func reachOrNone(s string) string {
+	if s == "" {
+		return "<none recorded>"
+	}
+	return s
 }
 
 func reachFormatHops(hops []reachProc) string {
