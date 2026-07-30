@@ -52,13 +52,19 @@ import (
 // bare ESC is present — belt-and-suspenders with different fabric (fakeclaude's
 // byte record vs. the daemon's wire report).
 //
-// StopReason fidelity: the turn_end carries StopReason=="end_turn", not
-// "cancelled" — tui-driver v1.3.0's EventKindJsonlEndOfTurn cannot distinguish an
-// interrupt-stop from a normal end (turnbridge/mapper.go:25-28). This test proves
-// CAUSALITY (the turn_end exists only because the Esc was received), not
-// stop-reason semantics, so it asserts a turn_end is received and does NOT assert
-// StopReason (that would fail on a tui-driver limitation, not a real defect). A
-// distinct interrupt reason is an epic-#597 follow-up.
+// StopReason fidelity: the turn_end carries StopReason=="cancelled". #1243 taught
+// the mapper to recognise claude's interruption marker (turnbridge/mapper.go:95)
+// and #1244 restaged fakeclaude's ESC handler to write that marker rather than a
+// canned assistant end_turn line, so the tui-driver limitation this paragraph used
+// to record — EventKindJsonlEndOfTurn cannot distinguish an interrupt-stop from a
+// normal end — no longer decides the reason on this path.
+//
+// This test still does NOT assert StopReason, now by choice rather than by
+// impossibility: it proves CAUSALITY (the turn_end exists only because the Esc was
+// received) on the BOOTSTRAP session, and the reason assertion belongs one tier up
+// on the minted path, where TestRelayV2_PerConversationInterruptStopsRunningTurn
+// (relay_v2_perconv_interrupt_test.go) owns it. Duplicating it here would add a
+// second maintenance site for #1243's mapping and nothing else.
 //
 // AC4 (flight-recorder audit) is NOT asserted here: the flight recorder
 // (internal/agentrun/ptyrunner, PYRY_RECORD_DIR) is reached only from the
