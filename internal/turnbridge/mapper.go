@@ -84,10 +84,105 @@ func mapEntry(e tuidriver.JSONLEntry) (turnevent.Event, bool) {
 				Content:    toolResultContent(tr.Content),
 			}, true
 		}
+		// Deliberately after the tool_result branch: tool output is the most
+		// attacker-controllable text on this path (a fetched page, a catted
+		// file), and any entry carrying a tool_result block is matched and
+		// returned above — including one that also carries a text block quoting
+		// the marker, which is the only shape where this order is what stands
+		// between tool output and the prose matcher. Only a user-envelope entry
+		// with no tool_result block gets here.
+		if isInterruptMarker(e) {
+			return turnevent.TurnEnd{Reason: turnevent.TurnEndReasonCancelled}, true
+		}
 		return nil, false
 	default:
 		return nil, false
 	}
+}
+
+// interruptMarkerSentinel is the prefix of the user-role entry claude records
+// when a turn is interrupted. A prefix, not an exact string: claude 2.1.128
+// writes "[Request interrupted by user]" and 2.1.220 writes "[Request
+// interrupted by user for tool use]" (#1243), and a further suffix costs no
+// code change. This one line is the entire prose-treadmill surface.
+const interruptMarkerSentinel = "[Request interrupted by user"
+
+// isInterruptMarker reports whether e is claude's record that the turn was
+// interrupted — the sole signal this path has for a cancelled turn, since
+// EventKindJsonlEndOfTurn fires only on a clean end_turn.
+//
+// Two independent questions, answered by two deliberately different signals:
+//
+//   - "did an interruption happen?" — only the marker prose says so. claude
+//     emits no structural field for it: toolUseResult.interrupted rides the
+//     tool_result entry, so it cannot see the no-tool-in-flight shape at all,
+//     and all 33 tracked occurrences are false.
+//   - "who wrote this entry?" — structural, via userAuthored. Phone-sent
+//     prompt text round-trips into this same transcript as a type:"user"
+//     entry, so the prose alone would let a client end its own turn by
+//     quoting the marker (docs/protocol-mobile.md threat #1).
+//
+// The authorship gate is evaluated first because it is a map lookup: a genuine
+// prompt, whose body can run to tens of KB, is never concatenated.
+//
+// Failure direction: if claude renames the prose this stops matching and the
+// turn simply never ends — degrading to the bug this fixed, never to a
+// spurious turn end. (The opposite direction is userAuthored's; see there.)
+func isInterruptMarker(e tuidriver.JSONLEntry) bool {
+	if userAuthored(e) {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(userText(e)), interruptMarkerSentinel)
+}
+
+// userAuthored reports whether a user-envelope entry was written by the human
+// (a prompt) rather than by claude (a tool_result, a skill injection, the
+// interruption marker). Presence of the top-level "permissionMode" key is the
+// signal and its value is never read — the JSONLEntry doc names checking Raw
+// directly as the idiom for presence-vs-absence semantics, and Raw costs no
+// second parse of a line that may be 34 KB.
+//
+// The invariant this rests on, measured at #1243 spec time: claude writes
+// permissionMode on user-authored prompt entries and on nothing else. In-repo,
+// 3/3 prompts carry it and 34/34 claude-authored user entries (33 tool_result,
+// 1 marker) do not; a 60-session scan of live transcripts added 60 prompts
+// carrying it and 8 isMeta skill injections without, with no counterexample in
+// either direction.
+//
+// This is the one part of the design that fails OPEN: if a future claude stops
+// writing the field, every entry reads as claude-authored and a prompt quoting
+// the marker can forge its own turn end again. That is the first thing to check
+// if the "a prompt cannot forge a turn end" row ever goes red after a claude
+// upgrade.
+//
+// A caller-constructed entry may carry a nil Raw — population is the TailJSONL
+// contract, not a struct invariant. A nil-map lookup yields ok == false, so such
+// an entry reads as claude-authored and is then held out by the prose gate
+// alone; that is already the behaviour of every synthetic entry in this
+// package's tests.
+func userAuthored(e tuidriver.JSONLEntry) bool {
+	_, ok := e.Raw["permissionMode"]
+	return ok
+}
+
+// userText concatenates the "text" field of every type=="text" content block on
+// e. Mirrors thinkingText's shape above; tuidriver.AssistantText cannot be
+// reused because it gates on e.Type == "assistant". Returns "" on a nil message
+// or no text content. Kept separate from thinkingText rather than folded into a
+// shared block-text helper until a third caller earns the refactor.
+func userText(e tuidriver.JSONLEntry) string {
+	if e.Message == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range e.Message.Content {
+		if c.Type != "text" {
+			continue
+		}
+		t, _ := c.Raw["text"].(string)
+		b.WriteString(t)
+	}
+	return b.String()
 }
 
 // messageID reads e.Message.ID, guarding a nil message. Reached only after a
