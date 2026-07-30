@@ -548,6 +548,45 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   patterns this ticket's measured traps establish, and a code-review SHOULD FIX
   (not blocking, deferred to #1236) on a self-check whose comment overclaims
   what its assertion pins.
+- `teardown_liveness_test.go` (#1250) — **offline instrument, not a probe**; no
+  auth skip, no env gate, no live claude, no verdict about pyry — depended on
+  as code by the live rig #1251. Two additive parts over #1235's `pin*` and
+  #1239's `fifoLive*` surfaces, both unedited. **Reaper-log classifier
+  (`tdn*` prefix)**: `tdnClassifyReapLog(stderr, heldPGID)` is pure over bytes
+  and answers `held-pgid-in-reap-line` / `reap-line-without-held-pgid` /
+  `no-reap-line` (ambiguous by construction — `reap.go:64` guards the emit on
+  `len(reaped) > 0`, so silence means "reaped nothing" or "never fired," and
+  the `Detail` names both) / `instrument-failed`. Anchored on the reap
+  message's bare text as a string literal, never `msg="..."` — `runAgentRunPty`
+  passes no `Logger`, so `ptyrunner` falls back to `slog.Default()`, not the
+  `slog.NewTextHandler` the ticket body cited, and an anchor built against the
+  wrong handler would silently read "no line" on the only path that matters.
+  Membership decided over parsed integers via a key-boundary attribute match
+  (`tdnAttrIndex`), never a substring — closes both a false negative (`slog`
+  quotes `pgids=` the moment a second pgid appears) and its dual false
+  positive (held `77` inside the text of `pgids=[7788]`). **Real-`ps`
+  fail-safe premise (AC2)**: four mis-invocation arms assert
+  `len(exitErr.Stderr) > 0` read from `.Output()`'s own `*exec.ExitError`
+  (the exact channel `pinReadState` consumes) before requiring
+  `pinClassifyState` to return `instrument-failed` — proving, against real
+  bytes rather than #1235's hand-built errors, that branch 1 keeps every
+  broken invocation off the `no-such-process` verdict. The bad-column arm
+  uses four requested columns (not three) because `ps` silently drops the
+  unknown one and prints the rest, producing a row `pinStateRow` parses
+  *successfully* as a live pid; the out-of-range arm escalates a candidate
+  ladder until `ps` actually rejects one, rather than assuming a hard-coded
+  constant is out of range (macOS caps at 99999, Linux's default `pid_max` is
+  4194304). **Record + writer (AC3)**: `tdnRecord` composes
+  `pinStateOutcome`/`fifoLiveOutcome`/`tdnReapOutcome` with no new liveness
+  type and no verdict synthesized across them; `writeTdnArtifacts` emits
+  exactly one file (`teardown.json`, `0o600`) — "exactly one file" is itself
+  the redaction assertion, since the sibling writer's second file (a verbatim
+  `ps` snapshot) has no analog here. 22 credential-free self-checks, zero
+  SKIP. Zero production files touched. See [`codebase/1250.md`](../codebase/1250.md)
+  for the full implementation, the subprocess-boundary citation-swap pattern,
+  and a code-review SHOULD FIX (not blocking, deferred to #1251) on a
+  first-match self-check row that doesn't discriminate its own claimed
+  mutation.
 
 ## Test infrastructure
 
