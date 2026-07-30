@@ -587,6 +587,36 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   and a code-review SHOULD FIX (not blocking, deferred to #1251) on a
   first-match self-check row that doesn't discriminate its own claimed
   mutation.
+- `teardown_reap_capture_test.go` (#1253) — **offline instrument, not a
+  probe**; no auth skip, no env gate, no live claude. Drives #1250's
+  `tdnClassifyReapLog` with bytes captured from a *real*
+  `agentrun.ReapDescendantGroups` call, replacing that classifier's
+  hand-written string-constant fixtures with a live capture so a future
+  `slog` rendering change fails a test instead of silently making every
+  liveness answer read `no-reap-line`. Builds real two-level process trees
+  (test → re-exec'd parent → leaves, the parent required because
+  `setpgid` on a child rules out a shell) and captures whatever
+  `slog.Default()` emits during the reap via `log.SetOutput` — no `t.Parallel`
+  in the file, since that redirect is process-global and not reentrant. Proves
+  the capture *flips* within one harness: a killed group classifies
+  `held-pgid-in-reap-line`, a childless walk root emits no line at all and
+  classifies `no-reap-line`. A same-group sibling spared by `reap.go:52` is
+  asserted *still alive* at the instant its pgid reads absent from the line —
+  the unearned negative the instrument exists to refuse. Both renderings
+  (`pgids=[N]` unquoted, `pgids="[N M]"` quoted) come from real reaps and are
+  asserted to differ; the substring hazard is closed in the previously-untested
+  suffix direction (`88` vs `[7788]`). One new file rather than an edit to
+  `teardown_liveness_test.go`, both because that file's header declares itself
+  "pure over bytes" (this harness spawns real trees and issues real SIGKILLs)
+  and because #1251 had an in-flight +259/−40 diff to it at filing time. Every
+  pid a real reap produces is treated as a trust boundary: `tdnKillTree`
+  refuses `pid <= 1`/the test's own pid/pgid before any `syscall.Kill`, and the
+  multi-line report-file parse is all-or-nothing rather than treating a short
+  read as "not ready yet." 32 credential-free subtests, zero SKIP. Zero
+  production files touched; calls `tdnClassifyReapLog` and does not edit it.
+  See [`codebase/1253.md`](../codebase/1253.md) for the full implementation and
+  two non-blocking code-review NITs (a misleadingly-named loop variable, one
+  reasoned-not-measured comment).
 
 ## Test infrastructure
 
