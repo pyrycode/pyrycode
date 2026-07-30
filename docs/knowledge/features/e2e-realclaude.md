@@ -513,6 +513,41 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   live-run evidence, and lessons from two rounds of code review (a MUST FIX
   gating the reachability verdict on the integer snapshot's own read error,
   plus a still-open SHOULD FIX on two record fields' finding-semantics).
+- `process_pin_liveness_test.go` (#1235) — **offline instrument, not a probe**;
+  no auth skip, no env gate, no live claude, no verdict about pyry — it is
+  depended on as code, not as evidence, by the live probes #1236 → #1237. Two
+  parts, both additive over #1230's `reach*` surface. **Exclusion-aware argv
+  scan (`pin*` prefix)**: `pinPartition` is a pure post-filter over
+  `reachMatchArgvRows`' own `(matches, total)`, splitting by a caller-supplied
+  `exclude map[int]string` so an instrument-owned pid is withheld with its
+  reason recorded rather than relying on a needle that happens not to collide
+  with it; every matched row is retained (`MatchCount` visible as `> 1` rather
+  than resolved to the first), and `reachMatchArgvRows`/`TestReachMatchArgvRows`
+  are untouched. **Four-valued per-pid liveness read**: `pinReadState(pid)`
+  execs a narrow `ps -p <pid> -o pid=,ppid=,stat=` (no descendant requirement —
+  a target re-parented to pid 1 reads like any other) and classifies into
+  `running` / `exited-but-not-yet-reaped` / `no-such-process` /
+  `instrument-failed`, never collapsing two of them. Branch order is the
+  contract: stderr, a `CommandContext` timeout's non-`ExitError` type, and
+  stdout arriving alongside an error are all checked before the
+  `no-such-process` default is reachable — closing the measured trap where a
+  bad `ps` column prints a keyword list on stdout next to a non-zero exit, and
+  the measured trap where a timeout-killed `ps` is byte-identical to a dead pid
+  on every field but the sign of its exit status. Zombie detection is
+  first-rune (`state[0] == 'Z'`), not equality — darwin emits `ZN`/`Z`, Linux
+  `Z+`, and an equality miss falls through to `running` silently, the one
+  direction this instrument must never fail in. Five credential-free
+  self-checks, including a one-subject one-lifetime flip
+  (`running` → kill-without-wait → `exited-but-not-yet-reaped` → wait →
+  `no-such-process`) that proves the exec wiring rather than only the
+  classifier. `security-sensitive`, earned by the column set's environment-read
+  prohibition (`pid=,ppid=,stat=`, no `-E`/`-e`-env/`eww`) backed by a
+  deterministic tripwire test, not just a doc comment. Zero production files
+  touched; blocked by, and reuses rather than rebuilds, #1230's argv scan. See
+  [`codebase/1235.md`](../codebase/1235.md) for the branch-order table, the
+  patterns this ticket's measured traps establish, and a code-review SHOULD FIX
+  (not blocking, deferred to #1236) on a self-check whose comment overclaims
+  what its assertion pins.
 
 ## Test infrastructure
 
