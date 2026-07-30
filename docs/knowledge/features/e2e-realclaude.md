@@ -455,6 +455,29 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   live-run evidence, and two known gaps flagged by code review (SHOULD FIX,
   not blocking) in the Bash-call selection and the env-arrival control's
   absent/unread collapse.
+- `fifo_reader_liveness_test.go` (#1239) — **offline instrument, not a probe**;
+  no auth skip, no env gate, no live claude. Answers "is some process
+  currently holding this FIFO's read end?" with no pid and no `ps`, closing a
+  gap `holdProbeFIFO` alone leaves open: holding the write end proves a
+  command could not have *finished*, not that it is still *alive* — a killed
+  command leaves the same held write end. `fifoLiveRead(path)` returns a
+  three-valued `fifoLiveOutcome` (`reader-present` / `no-reader` /
+  `instrument-failed`, never a bare boolean) via `Lstat` → positive
+  `os.ModeNamedPipe` allowlist gate → `open(path, O_WRONLY|O_NONBLOCK)`
+  (success = reader present, `ENXIO` = no reader, everything else =
+  instrument failure). The allowlist gate is what closes the inverting
+  failure on the success arm: a bare open on `/dev/null` or a regular file
+  succeeds with no reader anywhere, which a regular-file blacklist would
+  misread as "reader present." Four offline self-checks prove: the read
+  flips on one FIFO across one reader's lifetime (`Kill()` alone does not
+  flip it — `Wait()`/reap does), the mode gate rejects every non-FIFO path
+  including `/dev/null`, every open errno except `ENXIO` yields
+  instrument-failed, and repeated reads don't perturb a blocked reader.
+  Zero production files touched. #1240 is natively blocked on this file and
+  calls `fifoLiveRead` at the instant it records `turn_state{idle}`. See
+  [`codebase/1239.md`](../codebase/1239.md) for the implementation detail and
+  two known gaps flagged by code review (SHOULD FIX, not blocking) in the
+  `Lstat`-arm errno assertion coverage and a stuttering `Detail` string.
 
 ## Test infrastructure
 
