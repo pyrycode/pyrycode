@@ -478,6 +478,41 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   [`codebase/1239.md`](../codebase/1239.md) for the implementation detail and
   two known gaps flagged by code review (SHOULD FIX, not blocking) in the
   `Lstat`-arm errno assertion coverage and a stuttering `Detail` string.
+- `background_reach_probe_test.go` (#1230) — **evidence probe, not a regression
+  gate**; opt-in behind `PYRY_PROBE_BACKGROUND_REACH=1`, reusing #1223's staging
+  rig verbatim (`background_trigger_probe_test.go` not edited; every new symbol
+  `reach`-prefixed against the concurrent `feature/1219` branch and sibling
+  #1231). Answers the predictive half of "does a backgrounded Bash command
+  outlive pyry": is it still a transitive child of claude's pid inside
+  `agentrun.ReapDescendantGroups`'s descendant-BFS reach, and would its process
+  group survive the reaper's three exclusions (`reap.go:52`) — one during-turn
+  snapshot, no teardown. **Content-first identification, not subtree-first**:
+  one full-table `ps -axww -o pid=,ppid=,pgid=,command=` matched in Go against
+  the run's FIFO path and session UUID across the whole process table — the
+  read #1223's subtree-first, base-name-only `probeAnnotateCommands` cannot
+  perform, and the one that could actually catch a re-parented survivor. Root
+  pinned content-first via `--session-id <uuid>` in claude's argv (the ptyrunner
+  path only), checked for agreement against the rig's positional
+  `probeWaitForDirectChild` guess rather than trusted on its own. Two
+  reachability reads off one integer snapshot — `reachChainUp` walking ppid
+  links up, `probeDescendantsFromPS` (#1223's, unedited) BFS-ing down —
+  disagreement recorded as an instrument fault, never a finding. Three-valued
+  match outcome (`matched` / `trigger-never-fired` / `fired-no-row-matched`),
+  established before any reachability claim is made. **Result (live run,
+  2026-07-30, claude 2.1.220):** the backgrounded `cat`/`zsh -c` pair IS
+  reachable from claude's pid, two hops down, and the zsh wrapper's process
+  group survives all three exclusions — the reaper *would* target it; whether
+  it actually dies is #1231's question. Redaction is structural
+  (`security-sensitive`, earned by this ticket): the raw argv table never
+  leaves one stack frame, no `-E`/`-e`-with-environment/`eww` anywhere,
+  commands capped at 512 bytes after matching, only the integer-column
+  snapshot is persisted verbatim. Three credential-free self-checks
+  (`TestReachMatchArgvRows`, `TestReachChainUp`, `TestReachBackgroundHandle`)
+  run ungated. Zero production files touched. See
+  [`codebase/1230.md`](../codebase/1230.md) for the full arithmetic, the
+  live-run evidence, and lessons from two rounds of code review (a MUST FIX
+  gating the reachability verdict on the integer snapshot's own read error,
+  plus a still-open SHOULD FIX on two record fields' finding-semantics).
 
 ## Test infrastructure
 
