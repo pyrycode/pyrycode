@@ -67,10 +67,311 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+// --- the reaper-log classifier -----------------------------------------------
+
+// tdnTicket is this instrument's provenance, carried into every record.
+const tdnTicket = "1250"
+
+// tdnReapMessage is reap.go:65's message text as a STRING LITERAL, deliberately
+// not a reference to anything reap.go defines: a renamed message must break the
+// self-checks below rather than silently follow the rename into a live run
+// where "no line" reads as "the reaper never fired".
+//
+// The anchor is the bare text. It carries no `msg="`, no level token and no
+// timestamp, because the two handlers render all three differently and the one
+// the live path uses is slog.Default() (file header).
+const tdnReapMessage = "agentrun: reaped claude descendant process groups"
+
+// The reap-line verdicts. Three answers, plus the package-standard
+// instrument-failed arm, which is never an answer: without it a line whose
+// pgids= attribute cannot be parsed collapses into reap-line-without-held-pgid,
+// which a consumer reads as "the reaper ran and did not kill our group" — a
+// leak finding manufactured out of the instrument's own breakage.
+const (
+	// tdnReapHeldPGIDKilled: the reaper reported killing the held pgid.
+	tdnReapHeldPGIDKilled = "held-pgid-in-reap-line"
+	// tdnReapHeldPGIDAbsent: the reaper emitted its line and the held pgid was
+	// not among the groups it reported killing.
+	tdnReapHeldPGIDAbsent = "reap-line-without-held-pgid"
+	// tdnReapNoLine: no such line. AMBIGUOUS by construction — reap.go:64
+	// guards the emit on len(reaped) > 0, so silence means the reaper ran and
+	// reaped nothing OR it never fired. The name says "no line", never "no
+	// reap", and the ambiguity is spelled out in the Detail.
+	tdnReapNoLine = "no-reap-line"
+	// tdnReapInstrumentFailed: the line could not be read. Never a statement
+	// about the reaper.
+	tdnReapInstrumentFailed = "instrument-failed"
+)
+
+// tdnReapOutcome is one classification. Consumers record it verbatim into
+// published evidence, so every field is self-describing: PGIDs carries the
+// parsed set membership was decided against, and Count carries reap.go's own
+// count= attribute so a reader sees the two frames agreeing.
+type tdnReapOutcome struct {
+	Verdict  string `json:"verdict"`
+	Detail   string `json:"detail"`
+	HeldPGID int    `json:"held_pgid"`
+	PGIDs    []int  `json:"pgids_in_line,omitempty"`
+	// Count is the SUM of the count= attributes across every anchored line. It
+	// can legitimately differ from len(PGIDs) when two lines report the same
+	// group, so a disagreement is recorded in Detail and never escalated.
+	Count     int    `json:"count_attr,omitempty"`
+	LineCount int    `json:"reap_lines_seen"`
+	Line      string `json:"reap_line,omitempty"`
+}
+
+// tdnClassifyReapLog answers "did the reaper report killing heldPGID?" over
+// pyry's captured stderr.
+//
+// Pure over its bytes: no exec, no file read, no clock. That is what lets every
+// arm be driven with no live turn and no credentials, and it is the property
+// the live consumer depends on.
+//
+// It takes no *testing.T and never fails a test: an instrument failure observed
+// mid-turn is a datum to publish, not a reason to abort the turn — the same
+// contract as fifoLiveRead and pinReadState.
+//
+// EVERY anchored line is scanned and their pgids unioned, rather than the first
+// one winning. This is #1235's own anti-first-match discipline (pinScan.Matches
+// is a slice precisely because nothing here resolves to "the" one) applied to
+// lines: a second reap line is a datum in the record, not a failure.
+func tdnClassifyReapLog(stderr []byte, heldPGID int) tdnReapOutcome {
+	out := tdnReapOutcome{HeldPGID: heldPGID}
+
+	if heldPGID <= 1 {
+		// reap.go:52 skips pgid <= 1 before it kills anything, so no line can
+		// ever carry one. Answering "absent" here would publish a leak finding
+		// manufactured out of a consumer that failed to capture its pgid — the
+		// same shape as pinReadState's pid <= 0 guard, and the same reason.
+		out.Verdict = tdnReapInstrumentFailed
+		out.Detail = tdnDetail("held pgid %d is not one the reaper can ever report: reap.go:52 "+
+			"skips pgid <= 1 before it kills anything, so no answer about it could be read "+
+			"out of the line", heldPGID)
+		return out
+	}
+
+	seen := make(map[int]bool)
+	for _, line := range strings.Split(string(stderr), "\n") {
+		if !strings.Contains(line, tdnReapMessage) {
+			continue
+		}
+		out.LineCount++
+		if out.Line == "" {
+			out.Line = reachCapCommand(strings.TrimSpace(line))
+		}
+
+		pgids, err := tdnParsePGIDs(line)
+		if err != nil {
+			out.Verdict = tdnReapInstrumentFailed
+			out.Line = reachCapCommand(strings.TrimSpace(line))
+			out.Detail = tdnDetail("the reaped-groups line could not be read: %v. Recorded as "+
+				"%s rather than as an answer, because a line whose list cannot be parsed would "+
+				"otherwise read as %q — a leak finding produced by this instrument's own "+
+				"breakage", err, tdnReapInstrumentFailed, tdnReapHeldPGIDAbsent)
+			return out
+		}
+		for _, pgid := range pgids {
+			if seen[pgid] {
+				continue
+			}
+			seen[pgid] = true
+			out.PGIDs = append(out.PGIDs, pgid)
+		}
+		if n, ok := tdnCountAttr(line); ok {
+			out.Count += n
+		}
+	}
+
+	if out.LineCount == 0 {
+		out.Verdict = tdnReapNoLine
+		out.Detail = tdnDetail("no line carrying %q appears in %d bytes of stderr. This is "+
+			"AMBIGUOUS and collapsing it into either reading is a defect: reap.go:64 guards the "+
+			"emit on len(reaped) > 0, so silence means the reaper ran and reaped nothing, or "+
+			"that it never fired at all", tdnReapMessage, len(stderr))
+		return out
+	}
+
+	crossCheck := ""
+	if out.Count != len(out.PGIDs) {
+		crossCheck = fmt.Sprintf(". reap.go's own count= totals %d across %d line(s) while %d "+
+			"distinct pgid(s) parsed out; the two frames disagree, which is recorded rather "+
+			"than escalated because a union across lines can legitimately differ from any "+
+			"single count=", out.Count, out.LineCount, len(out.PGIDs))
+	}
+
+	if seen[heldPGID] {
+		out.Verdict = tdnReapHeldPGIDKilled
+		out.Detail = tdnDetail("the reaper reported killing pgid %d: it is a member of %v, read "+
+			"off %d anchored line(s)%s", heldPGID, out.PGIDs, out.LineCount, crossCheck)
+		return out
+	}
+	out.Verdict = tdnReapHeldPGIDAbsent
+	out.Detail = tdnDetail("the reaper emitted its line but pgid %d is not among the %d group(s) "+
+		"it reported killing (%v), read off %d anchored line(s)%s",
+		heldPGID, len(out.PGIDs), out.PGIDs, out.LineCount, crossCheck)
+	return out
+}
+
+// tdnParsePGIDs extracts the reaped pgid set from one anchored line.
+//
+// Membership is decided over PARSED INTEGERS, never a substring of the bracket
+// text, because a substring matcher inverts in both directions (file header).
+// The value is bounded by its terminator — the closing ], then the closing
+// quote when quoted — rather than by end-of-line: pgids is last in reap.go's
+// call today, but a handler's WithAttrs could append more.
+//
+// Any parse failure is an error and therefore instrument-failed: an unreadable
+// list is never reported as a list the held pgid was absent from.
+func tdnParsePGIDs(line string) ([]int, error) {
+	at := tdnAttrIndex(line, "pgids=")
+	if at < 0 {
+		return nil, errors.New("the line carries no pgids= attribute")
+	}
+	value := line[at+len("pgids="):]
+
+	quoted := strings.HasPrefix(value, `"`)
+	if quoted {
+		value = value[1:]
+	}
+	if !strings.HasPrefix(value, "[") {
+		return nil, fmt.Errorf("the pgids= value does not open with a bracket: %q",
+			reachCapCommand(value))
+	}
+	end := strings.IndexByte(value, ']')
+	if end < 0 {
+		return nil, fmt.Errorf("the pgids= list is unterminated, with no closing bracket in %q",
+			reachCapCommand(value))
+	}
+	if quoted && !strings.HasPrefix(value[end+1:], `"`) {
+		return nil, fmt.Errorf("the quoted pgids= value is unterminated, with no closing quote "+
+			"after the bracket in %q", reachCapCommand(value))
+	}
+
+	var pgids []int
+	for _, field := range strings.Fields(value[1:end]) {
+		pgid, err := strconv.Atoi(field)
+		if err != nil {
+			return nil, fmt.Errorf("the pgids= list holds a non-integer element %q", field)
+		}
+		pgids = append(pgids, pgid)
+	}
+	return pgids, nil
+}
+
+// tdnCountAttr reads reap.go's own count= attribute for cross-check. Its
+// absence is not a failure — the answer is decided by the parsed pgid list, and
+// count= only lets a reader see the two frames agreeing.
+func tdnCountAttr(line string) (int, bool) {
+	at := tdnAttrIndex(line, "count=")
+	if at < 0 {
+		return 0, false
+	}
+	value := line[at+len("count="):]
+	if end := strings.IndexByte(value, ' '); end >= 0 {
+		value = value[:end]
+	}
+	count, err := strconv.Atoi(strings.Trim(value, `"`))
+	if err != nil {
+		return 0, false
+	}
+	return count, true
+}
+
+// tdnAttrIndex finds an slog attribute key at a position where it genuinely
+// starts an attribute — the beginning of the line, or after a space.
+//
+// Without that bound, a key is matched anywhere it appears as a tail: a
+// handler's WithAttrs adding `reap_pgids=` would otherwise be read as this
+// line's `pgids=`. Anchoring on the message first and then on the attribute
+// boundary is also what keeps reap.go:59's Warn — whose attribute is `pgid=`,
+// singular — out of the answer entirely.
+func tdnAttrIndex(line, attr string) int {
+	for i := 0; i+len(attr) <= len(line); {
+		next := strings.Index(line[i:], attr)
+		if next < 0 {
+			return -1
+		}
+		at := i + next
+		if at == 0 || line[at-1] == ' ' {
+			return at
+		}
+		i = at + 1
+	}
+	return -1
+}
+
+// tdnDetail formats a Detail line and caps it with #1230's existing helper. The
+// cap is not cosmetic: these strings land in an artifact an operator pastes
+// into a public issue, and a reap line can carry an unbounded pgid list.
+func tdnDetail(format string, args ...any) string {
+	return reachCapCommand(fmt.Sprintf(format, args...))
+}
+
+// --- the record and its redaction-safe writer --------------------------------
+
+// tdnArtifactName is the ONE file this writer emits.
+const tdnArtifactName = "teardown.json"
+
+// tdnRecord composes the three readings a teardown measurement rests on. It
+// COMPOSES; it does not conclude — no verdict is synthesised across the
+// members, and no pid/content join is performed here, because both live
+// consumers own their own join at the rig level (#1236 AC2, #1251 AC3).
+//
+// No new liveness type: Liveness and FIFO are #1235's and #1239's outcomes
+// verbatim.
+type tdnRecord struct {
+	Ticket string   `json:"ticket"`
+	Notes  []string `json:"notes,omitempty"`
+
+	HeldPGID int `json:"held_pgid"`
+	HeldPID  int `json:"held_pid"`
+
+	// ArgvScan is the ONLY member that can carry a command string, and that is
+	// the design rather than an accident: `command` reaches the record from the
+	// content-first argv scan that already publishes matched rows, never from
+	// the narrow per-pid read whose column set
+	// TestPinStateColumns_ReadsNoEnvironment pins.
+	ArgvScan pinScan         `json:"argv_scan"`
+	Liveness pinStateOutcome `json:"liveness"`
+	FIFO     fifoLiveOutcome `json:"fifo"`
+	Reap     tdnReapOutcome  `json:"reap"`
+}
+
+func (r *tdnRecord) note(format string, args ...any) {
+	r.Notes = append(r.Notes, fmt.Sprintf(format, args...))
+}
+
+// writeTdnArtifacts persists the record as ONE JSON file, mode 0600, in dir.
+//
+// It follows writeReachArtifacts (background_reach_probe_test.go:823) and
+// diverges in exactly one way: that writer emits a second file holding a
+// verbatim three-integer ps snapshot, and this one emits nothing besides the
+// record. This ticket takes no wide integer snapshot, and its one wide read
+// (pinScanArgv → reachScanArgv) never lets its raw table out of that frame — so
+// "the writer writes exactly one file" is a checkable statement of "no verbatim
+// ps output is persisted", and TestTdnRecordWriter asserts it by reading the
+// directory.
+//
+// t.Errorf rather than t.Fatalf: the evidence is the deliverable, so a lost
+// artifact is loud, but it must not abort the caller's remaining cleanups.
+func writeTdnArtifacts(t *testing.T, dir string, rec *tdnRecord) {
+	t.Helper()
+	blob, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		t.Errorf("marshal teardown record: %v", err)
+		return
+	}
+	path := filepath.Join(dir, tdnArtifactName)
+	if err := os.WriteFile(path, append(blob, '\n'), 0o600); err != nil {
+		t.Errorf("write teardown artifact %s: %v", path, err)
+	}
+}
 
 // --- self-checks: the reaper-log classifier ----------------------------------
 
