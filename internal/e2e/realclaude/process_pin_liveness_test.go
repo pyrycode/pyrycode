@@ -87,14 +87,365 @@ package realclaude
 // is unchanged by construction rather than by promise.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// --- the exclusion-aware argv scan -------------------------------------------
+
+// pinExclusionReasonUnstated stands in when a caller supplies an empty reason.
+// A blank reason in a published record is the same defect as an unexplained
+// verdict: a reader can see that something was withheld but not why, which is
+// indistinguishable from a lost finding.
+const pinExclusionReasonUnstated = "(caller gave no reason)"
+
+// pinExclusion is one row the caller asked to be kept out of the matches. It
+// carries the reason AND the row's own command and needles, so the record shows
+// the withheld row was genuinely the instrument's own rather than a finding that
+// quietly went missing.
+type pinExclusion struct {
+	PID     int      `json:"pid"`
+	Reason  string   `json:"reason"`
+	Command string   `json:"command,omitempty"`
+	Needles []string `json:"matched_needles,omitempty"`
+}
+
+// pinScan is the whole outcome of one content-first scan.
+//
+// Matches is a SLICE and MatchCount an int: nothing here ever resolves to "the"
+// pid, so a run that matched more than one row is visible as such in the record
+// rather than silently resolved to the first — the defect
+// probeWaitForBashToolUse (:762) still carries.
+//
+// RowsScanned is reachMatchArgvRows' total, carried through unaltered. It is
+// what separates "the scan ran and nothing matched" from "the scan parsed no
+// well-formed rows at all"; an empty Matches says neither.
+type pinScan struct {
+	Matches     []reachProc    `json:"matches"`
+	Exclusions  []pinExclusion `json:"exclusions,omitempty"`
+	RowsScanned int            `json:"rows_scanned"`
+	MatchCount  int            `json:"match_count"`
+}
+
+// pinPartition splits already-matched rows by the caller's exclusion set.
+//
+// It is a PURE post-filter over reachMatchArgvRows' output: it parses nothing,
+// execs nothing and matches nothing. That is the design, not an accident.
+// reachMatchArgvRows is this package's one full-argv matcher and #1235 must not
+// grow a second, so exclusion is applied strictly downstream of it — which is
+// also why the existing caller's behaviour is unchanged by construction rather
+// than by promise.
+//
+// A pid in exclude that matched nothing produces no entry: an exclusion is
+// recorded only when it actually fired, so the record never claims a
+// withholding that never happened.
+func pinPartition(matches []reachProc, total int, exclude map[int]string) pinScan {
+	out := pinScan{RowsScanned: total}
+	for _, m := range matches {
+		reason, excluded := exclude[m.PID]
+		if !excluded {
+			out.Matches = append(out.Matches, m)
+			continue
+		}
+		if strings.TrimSpace(reason) == "" {
+			reason = pinExclusionReasonUnstated
+		}
+		out.Exclusions = append(out.Exclusions, pinExclusion{
+			PID:     m.PID,
+			Reason:  reason,
+			Command: m.Command,
+			Needles: m.Needles,
+		})
+	}
+	out.MatchCount = len(out.Matches)
+	return out
+}
+
+// pinMatchArgvExcluding is the byte-pure surface: #1230's matcher, then the
+// exclusion partition. This is the whole of the new matching logic.
+func pinMatchArgvExcluding(table []byte, needles []string, exclude map[int]string) pinScan {
+	matches, total := reachMatchArgvRows(table, needles)
+	return pinPartition(matches, total, exclude)
+}
+
+// pinScanArgv is the live wrapper: reachScanArgv for the exec — the same
+// `ps -axww -o pid=,ppid=,pgid=,command=` read, with the same -ww and no-`-E`
+// disciplines — then the exclusion partition.
+//
+// It returns the ZERO pinScan on error, mirroring reachScanArgv's
+// discard-on-error contract (probeProcessSnapshot returns partial output
+// alongside its error; these two ps call sites genuinely warrant different
+// error gates — #1230 round-1 MUST FIX). A consumer's gate belongs AFTER its
+// match outcome is decided, so a failed lookup neither relabels a genuine match
+// nor suppresses a genuine "scan fired, no row matched"; this file ships no
+// consumer, so the obligation is discharged by keeping the two reads
+// independent — this error and pinStateOutcome's verdict are separate values
+// with no cross-assignment.
+func pinScanArgv(needles []string, exclude map[int]string) (pinScan, error) {
+	matches, total, err := reachScanArgv(needles)
+	if err != nil {
+		return pinScan{}, fmt.Errorf("pin argv scan: %w", err)
+	}
+	return pinPartition(matches, total, exclude), nil
+}
+
+// --- the four-valued per-pid state read --------------------------------------
+
+// The four values. Mutually exclusive, and never collapsed: the last two are
+// the pair this family has twice collapsed at review time, and the first two
+// are the pair `ps` itself collapses by listing zombies as rows.
+const (
+	// pinStateRunning: a row was read and its state column does not mark a
+	// zombie.
+	pinStateRunning = "running"
+	// pinStateExitedNotReaped: a row was read and its state column marks a
+	// zombie. `ps` LISTS a SIGKILLed-but-unreaped process (measured in #1224),
+	// so without this value every zombie reads as running.
+	pinStateExitedNotReaped = "exited-but-not-yet-reaped"
+	// pinStateNoSuchProcess: exit 1 with empty stdout AND empty stderr. This is
+	// the ONLY input in the whole instrument that produces this verdict.
+	pinStateNoSuchProcess = "no-such-process"
+	// pinStateInstrumentFailed: the read could not be taken. Never a statement
+	// about the process — a half-run instrument publishing an absence is the
+	// measured defect this value exists to prevent (#1230 PR #1232, MUST FIX).
+	pinStateInstrumentFailed = "instrument-failed"
+)
+
+// pinStateColumns is the ENTIRE column set of the per-pid lookup, named as a
+// constant so TestPinStateColumns_ReadsNoEnvironment can assert on the thing a
+// future edit changes.
+//
+// NEVER add `command`, `args`, `comm`, or any environment column, and never
+// reach this ps through `-E`, `-e` with an environment column, or the
+// BSD-syntax `eww`. Those print each process's full ENVIRONMENT, which here
+// means the operator's CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY, into an
+// artifact destined for a public issue. This read needs no environment and no
+// argv at all — pinScanArgv already owns the content match — so the safe design
+// is to not have the capability (file header, § Redaction).
+const pinStateColumns = "pid=,ppid=,stat="
+
+// pinExitStatusUnknown marks an outcome whose ps never exited normally, or ran
+// at all. Distinct from 0, which is a real successful exit.
+const pinExitStatusUnknown = -1
+
+// pinStateOutcome is one per-pid read. Consumers record it verbatim into
+// published evidence, so every field is self-describing: Detail says which arm
+// fired and why, and StateColumn carries the classifier's own input so a reader
+// of the evidence sees what was classified, not merely the verdict.
+//
+// PID is the pid the read was ABOUT — the operand handed to ps — not a value
+// parsed back out of its output.
+type pinStateOutcome struct {
+	Verdict     string `json:"verdict"`
+	Detail      string `json:"detail"`
+	PID         int    `json:"pid"`
+	PPID        int    `json:"ppid,omitempty"`
+	StateColumn string `json:"state_column,omitempty"`
+	ExitStatus  int    `json:"exit_status"`
+	ToolStderr  string `json:"tool_stderr,omitempty"`
+}
+
+// pinStateArgs is the exact argument list of the per-pid lookup. A function
+// rather than a literal at the call site so the redaction tripwire asserts on
+// the real list rather than on a copy of it.
+//
+// `-p <pid>` and nothing wider: the re-check is a lookup for ONE known pid and
+// is not a reason to read, let alone persist, a second full process table.
+func pinStateArgs(pid int) []string {
+	return []string{"-p", strconv.Itoa(pid), "-o", pinStateColumns}
+}
+
+// pinReadState reads the state of one pid.
+//
+// It is a DIRECT lookup: no root, no walk, no requirement that the pid still be
+// a descendant of anything. That is the whole point — probeDescendantsFromPS
+// (:891) is a subtree walk rooted at pyry's pid, so a command whose group has
+// re-parented to init reads as ABSENT there, which is indistinguishable from the
+// consuming probes' negative verdict.
+//
+// It takes no *testing.T and never fails a test: an instrument failure observed
+// mid-turn is a datum to publish, not a reason to abort the turn.
+func pinReadState(pid int) pinStateOutcome {
+	if pid <= 0 {
+		// Not a reading — the instrument being called wrongly. It matters
+		// because strconv.Itoa(-1) renders as `-1`, which ps would consume as a
+		// FLAG rather than as an operand: the one shape in this instrument where
+		// an integer reaches an exec argument position and could be read as
+		// something other than the pid. Rejecting before the exec removes the
+		// question.
+		return pinStateOutcome{
+			Verdict: pinStateInstrumentFailed,
+			Detail: fmt.Sprintf("non-positive pid %d: no lookup was attempted, because ps "+
+				"would read that operand as a flag rather than as a process id", pid),
+			PID:        pid,
+			ExitStatus: pinExitStatusUnknown,
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reachPSTimeout)
+	defer cancel()
+	stdout, err := exec.CommandContext(ctx, "ps", pinStateArgs(pid)...).Output()
+	return pinClassifyState(pid, stdout, err)
+}
+
+// pinClassifyState maps one ps result onto exactly one of the four values. It
+// is pure over (pid, stdout, err) and is the entire testable surface: splitting
+// it from the exec is what lets the keyword-not-found and illegal-option arms be
+// covered without provoking a genuinely broken ps, whose text differs across
+// platforms.
+//
+// The BRANCH ORDER is the contract, not an implementation detail — it is what
+// keeps the stdout-alongside-error trap unreachable:
+//
+//  0. pid <= 0                                  -> instrument-failed (in pinReadState, before any exec)
+//  1. err != nil, stderr non-empty              -> instrument-failed, naming exit status + stderr
+//  2. err != nil, not an *exec.ExitError        -> instrument-failed (exec never ran, or no status)
+//  3. err != nil, exit status is not a normal exit -> instrument-failed (killed by a signal)
+//  4. err != nil, stderr empty, stdout non-empty   -> instrument-failed; stdout is NEVER parsed
+//  5. err != nil, stderr empty, stdout empty, normal exit -> no-such-process
+//  6. err == nil, no usable row                 -> instrument-failed; an absence is not a reading
+//  7. err == nil, row is about a different pid  -> instrument-failed
+//  8. err == nil, row parsed, zombie state      -> exited-but-not-yet-reaped
+//  9. err == nil, row parsed, otherwise         -> running
+//
+// Branches 1, 3 and 4 all precede branch 5: stderr, the exit status's sign, and
+// stdout are each checked before the no-such-process arm is reachable at all,
+// which makes branch 5 the only input in the instrument that can produce it.
+//
+// Branch 3 is not in #1235's measured table and was added from a measurement
+// taken during implementation: exec.CommandContext kills its child on timeout
+// and Output() then returns an *exec.ExitError carrying `signal: killed`,
+// ExitCode() == -1, empty stdout and empty stderr — identical to the dead-pid
+// signature on every other field. A loaded machine is this family's expected
+// condition, not its exotic one, so without branch 3 a timed-out ps publishes
+// "the command had already exited".
+//
+// Every ambiguous input lands on instrument-failed and never on
+// no-such-process: the classifier fails SAFE in the one direction that matters,
+// because no-such-process is the verdict a consumer would read as a finding.
+func pinClassifyState(pid int, stdout []byte, err error) pinStateOutcome {
+	out := pinStateOutcome{PID: pid, ExitStatus: pinExitStatusUnknown}
+	hasStdout := strings.TrimSpace(string(stdout)) != ""
+
+	if err != nil {
+		var exitErr *exec.ExitError
+		normalExit := false
+		if errors.As(err, &exitErr) {
+			out.ExitStatus = exitErr.ExitCode()
+			out.ToolStderr = reachCapCommand(strings.TrimSpace(string(exitErr.Stderr)))
+			normalExit = out.ExitStatus >= 0
+		}
+
+		out.Verdict = pinStateInstrumentFailed
+		switch {
+		case out.ToolStderr != "":
+			out.Detail = pinDetail("ps exited %d and wrote to stderr, so it never reported on "+
+				"pid %d: %s", out.ExitStatus, pid, out.ToolStderr)
+		case exitErr == nil:
+			out.Detail = pinDetail("ps for pid %d did not exit with a status (%T), so no "+
+				"reading was taken: %v", pid, err, err)
+		case !normalExit:
+			out.Detail = pinDetail("ps for pid %d ended on a signal rather than a normal exit "+
+				"(%v), so no reading was taken; this is what a CommandContext timeout looks "+
+				"like and it is otherwise identical to a dead pid", pid, err)
+		case hasStdout:
+			out.Detail = pinDetail("ps exited %d for pid %d with silent stderr but %d bytes on "+
+				"stdout; stdout alongside an error is NEVER parsed as process rows, because a "+
+				"bad column name prints the valid-keyword list there",
+				out.ExitStatus, pid, len(stdout))
+		default:
+			out.Verdict = pinStateNoSuchProcess
+			out.Detail = pinDetail("ps exited %d with empty stdout and empty stderr: pid %d is "+
+				"not in the process table", out.ExitStatus, pid)
+		}
+		return out
+	}
+
+	out.ExitStatus = 0
+	rowPID, ppid, state, ok := pinStateRow(stdout)
+	if !ok {
+		out.Verdict = pinStateInstrumentFailed
+		out.Detail = pinDetail("ps exited 0 for pid %d but no well-formed `%s` row could be "+
+			"parsed out of %d bytes of stdout; an absence is not a reading",
+			pid, pinStateColumns, len(stdout))
+		return out
+	}
+	if rowPID != pid {
+		// The lookup names one pid on its command line, so a row about another
+		// one is not an answer to the question that was asked. Attribution is
+		// this instrument's whole job.
+		out.Verdict = pinStateInstrumentFailed
+		out.Detail = pinDetail("ps exited 0 for pid %d but returned a row about pid %d; the "+
+			"read is not about the process it was asked for", pid, rowPID)
+		return out
+	}
+
+	out.PPID = ppid
+	out.StateColumn = state
+	if pinIsZombie(state) {
+		out.Verdict = pinStateExitedNotReaped
+		out.Detail = pinDetail("pid %d is in the table with state column %q: it has exited and "+
+			"has not yet been reaped, so a row here is NOT evidence that it is running",
+			pid, state)
+		return out
+	}
+	out.Verdict = pinStateRunning
+	out.Detail = pinDetail("pid %d is in the table with state column %q and ppid %d",
+		pid, state, ppid)
+	return out
+}
+
+// pinStateRow parses the first well-formed row out of the lookup's stdout,
+// using this package's Fields / exactly-three-fields / Atoi discipline
+// (probeDescendantsFromPS:894-903, reachIndexFromPS:970-980).
+//
+// Exactly three fields, not "at least three": the state column is a short flag
+// string from a small kernel-generated alphabet (S, Ss, Us, Z, ZN, Z+) and never
+// contains a space, so a line with a fourth field is not this lookup's output
+// and must not be read as one.
+func pinStateRow(stdout []byte) (pid, ppid int, state string, ok bool) {
+	for _, line := range strings.Split(string(stdout), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			continue
+		}
+		p, perr := strconv.Atoi(fields[0])
+		pp, pperr := strconv.Atoi(fields[1])
+		if perr != nil || pperr != nil {
+			continue
+		}
+		return p, pp, fields[2], true
+	}
+	return 0, 0, "", false
+}
+
+// pinIsZombie reports whether a state column marks a process that has exited
+// and has not yet been reaped.
+//
+// FIRST RUNE, never equality. Measured on darwin 25.5 (2026-07-30): a `sleep`
+// killed and not waited for reads `Z`, and a nice-adjusted one reads `ZN`;
+// Linux emits `Z` and `Z+`. `state == "Z"` misses two of those three shapes,
+// and the miss is silent — it falls through to `running`, which is the one
+// direction this instrument must never fail in.
+func pinIsZombie(state string) bool {
+	return len(state) > 0 && state[0] == 'Z'
+}
+
+// pinDetail formats a Detail line and caps it with #1230's existing helper. The
+// cap is not cosmetic: Go's exec caps captured stderr at 32 KB, and the measured
+// illegal-option case emits multi-line usage text, which is far too much to
+// carry into an artifact an operator pastes into a public issue. The truncation
+// marker names #1230 because the cap IS #1230's, deliberately not duplicated
+// under a second name.
+func pinDetail(format string, args ...any) string {
+	return reachCapCommand(fmt.Sprintf(format, args...))
+}
 
 // --- self-checks: the exclusion-aware argv scan ------------------------------
 
@@ -218,6 +569,21 @@ func TestPinMatchArgvExcluding(t *testing.T) {
 					"the recorded list, never by re-scanning the capped Command",
 					i, pinFixtureNeedle, got.Matches[i].Needles)
 			}
+		}
+	})
+
+	t.Run("an exclusion with no reason is still recorded with something a reader can act on", func(t *testing.T) {
+		// A blank reason field is the same defect as an unexplained verdict: the
+		// record shows a row was withheld and gives no way to tell an
+		// instrument-owned process from a lost finding.
+		got := pinMatchArgvExcluding([]byte(pinArgvFixture), []string{pinFixtureNeedle},
+			map[int]string{pinFixtureOwnPID: "   "})
+		if len(got.Exclusions) != 1 {
+			t.Fatalf("exclusions: got %+v, want exactly pid %d", got.Exclusions, pinFixtureOwnPID)
+		}
+		if got.Exclusions[0].Reason != pinExclusionReasonUnstated {
+			t.Errorf("exclusion reason: got %q, want %q", got.Exclusions[0].Reason,
+				pinExclusionReasonUnstated)
 		}
 	})
 
