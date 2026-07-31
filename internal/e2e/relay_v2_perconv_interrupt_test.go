@@ -29,22 +29,33 @@ const perConvMidTurnMarker = "e2e-1191:mid-turn"
 // assistant + non-empty text into a TextChunk, which the emitter reports as
 // turn_state{responding} (internal/turnbridge/mapper.go).
 //
-// It carries NO stop_reason, and that absence is load-bearing, not formatting.
-// The whole test rests on the bare ESC being the ONLY thing that can produce an
-// end-of-turn line in the minted transcript; a stop_reason here would be a second
-// source and the interrupt's causality would be unprovable. fakeclaude's other
-// write on this path, appendTurnGrowth, writes "{}\n" — inert to the mapper — so
-// a delivered turn cannot fabricate a turn_end either.
+// It carries NO stop_reason and is NOT an interruption marker, and both absences
+// are load-bearing, not formatting: they are two of the four line kinds the
+// causality re-derivation on the test function below enumerates. The whole test
+// rests on the bare ESC being the ONLY thing that can produce an end-of-turn line
+// in the minted transcript; a stop_reason here would satisfy IsEndTurn and marker
+// prose here would satisfy isInterruptMarker — either way a second source, and the
+// interrupt's causality would be unprovable. fakeclaude's other write on this path,
+// appendTurnGrowth, writes "{}\n" — inert to the mapper on both readings — so a
+// delivered turn cannot fabricate a turn_end either.
 const perConvMidTurnLine = `{"type":"assistant","message":{"id":"m-1191","content":[{"type":"text","text":"` +
 	perConvMidTurnMarker + `"}]}}` + "\n"
 
-// endTurnNeedle is the wire-shape fragment of the canned end-of-turn line
-// fakeclaude's bare-ESC handler appends (interruptEndTurnLine,
-// internal/e2e/internal/fakeclaude/main.go:502). The fake is `package main` under
-// an internal/ dir, so the const cannot be imported; this needles its protocol
-// shape instead. If that line ever stops containing this fragment, the on-disk
-// assertions below go silently vacuous — keep the two in step.
-const endTurnNeedle = `"stop_reason":"end_turn"`
+// interruptMarkerNeedle is the fragment of the interruption marker fakeclaude's
+// bare-ESC handler appends (interruptMarkerLine,
+// internal/e2e/internal/fakeclaude/main.go). The fake is `package main` under an
+// internal/ dir, so the const cannot be imported; this needles its shape instead.
+//
+// It is deliberately the EXACT string the mapper keys on
+// (interruptMarkerSentinel, internal/turnbridge/mapper.go:108), which is what
+// keeps needle-drift and mapper-drift from diverging: if the fake's line ever
+// stops carrying it, the mapper stops matching, no turn_end arrives, and the run
+// dies loudly at the AC1 fatal IN THE SAME RUN. So the Phase-5 absence check
+// below cannot go silently vacuous — the only condition that would empty it is
+// itself a hard red. That is strictly stronger than the old
+// `"stop_reason":"end_turn"` needle, which sat in JSON KEY position and would
+// have missed on a whitespace change while IsEndTurn still held.
+const interruptMarkerNeedle = `[Request interrupted by user`
 
 // TestRelayV2_PerConversationInterruptStopsRunningTurn is the #1191 oracle: a
 // phone-originated interrupt must stop the running turn of a MINTED
@@ -73,9 +84,9 @@ const endTurnNeedle = `"stop_reason":"end_turn"`
 //     CURSOR, not from the file, so alone it would also pass while the daemon
 //     tailed the wrong one.
 //   - The on-disk transcript pair (Phase 5) closes that. ESC_ENDS_TURN is set on
-//     the DAEMON, so BOTH children carry an ESC→end_turn handler — which turns the
+//     the DAEMON, so BOTH children carry an ESC→marker handler — which turns the
 //     bootstrap transcript from a blind spot into a mis-route DETECTOR. A
-//     mis-routed ESC would append the canned end-turn line to
+//     mis-routed ESC would append the interruption marker to
 //     <sharedDir>/<initialUUID>.jsonl and the negative assertion catches it. This
 //     is the answer to "the stdin log is not a discriminator": the TRANSCRIPTS
 //     are, because they are per-child where the shared log is not.
@@ -85,16 +96,38 @@ const endTurnNeedle = `"stop_reason":"end_turn"`
 //
 // STRUCTURAL CAUSALITY is what ties them together, and it is the attribution shape
 // this tier requires: in this test the bare ESC is the ONLY thing that can produce
-// an end-of-turn line in the minted transcript (see perConvMidTurnLine). So a
-// turn_end for the minted conversation ⟺ the minted child's ESC handler fired.
+// an end-of-turn line in the minted transcript. So a turn_end for the minted
+// conversation ⟺ the minted child's ESC handler fired.
 //
-// StopReason is NOT asserted, deliberately. EventKindJsonlEndOfTurn fires only
-// after IsEndTurn held, so the mapper always reports end_turn
-// (internal/turnbridge/mapper.go:25-30) — tui-driver cannot distinguish an
-// interrupt-stop from a clean end. The stream sibling CAN assert "cancelled"; that
-// asymmetry is the stream path's distinguishing rigour, and copying the assertion
-// here would produce a false red on a tui-driver limitation, not a real defect
-// (the #794 sibling records the same at :56-61).
+// THAT INVARIANT IS RE-DERIVED HERE, NOT INHERITED. It used to hold for a reason
+// that no longer exists: EventKindJsonlEndOfTurn was the mapper's ONLY turn_end
+// source. #1243 added a second (the interruption marker), which is exactly the
+// hazard S-2 of docs/specs/architecture/1191-minted-perconv-interrupt-oracle.md
+// (:590-609) flagged for whoever extended this file. The set of turn_end sources is
+// closed and countable, so the re-derivation is checkable rather than rhetorical.
+// turnevent.TurnEnd{ is constructed at three sites in the repo; two are reachable
+// from a PTY session:
+//
+//   - internal/turnbridge/mapper.go:30 (EventKindJsonlEndOfTurn) is now UNREACHABLE
+//     in this test. tuidriver.IsEndTurn requires all three of assistant,
+//     stop_reason=="end_turn", non-empty text; and the minted transcript's line set
+//     is closed: "{}" from the pre-created file, "{}" per turn from appendTurnGrowth,
+//     the kicker's perConvMidTurnLine (assistant text, NO stop_reason — see there),
+//     and the ESC handler's marker (type:"user"). None satisfies IsEndTurn.
+//   - internal/turnbridge/mapper.go:95 (the interruption marker) is reachable ONLY
+//     from the ESC handler's line. It needs type:"user", no top-level
+//     "permissionMode" key, and text prefixed interruptMarkerNeedle. Of the four
+//     line kinds above only the marker is a user entry at all — the fake never
+//     writes the delivered prompt into the transcript.
+//   - internal/streamsup/parser.go:267 is the stream-json path, which a PTY session
+//     never enters.
+//
+// So the invariant holds in the same shape by the MIRROR of its old argument: the
+// design has exactly one reachable turn_end source and it is the ESC handler's own
+// write. That is also why the staged marker goes down the ESC handler's own path and
+// NOT the mid-turn kicker's trigger path — staging it through the kicker would give
+// the minted transcript a second end-of-turn source and silently falsify all of the
+// above, leaving this test passing while proving less.
 //
 // AC4 ("an interrupt for a conversation with no resolvable bound session stays
 // inert and never actuates the bootstrap claude") is proved as a PAIR:
@@ -339,6 +372,18 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	// --- Phase 3 (AC2 pre-guard): the turn must be genuinely RUNNING before the
 	// interrupt, or "an interrupt stopped it" means nothing.
 	//
+	// Since #1244 the kicker is MORE than a vacuous-pass guard — it is a
+	// PRECONDITION for the turn_end below to reach the wire at all. The emitter drops
+	// a TurnEnd when no turn is open (cmd/pyry/interactive_turn_v2.go:208-213, debug
+	// event interactive_turn.turn_end_no_turn, nothing on the wire). The fake's old
+	// canned line was self-sufficient — an assistant end_turn entry produced BOTH a
+	// TextChunk (which opened the turn via startTurnIfNeeded) and a TurnEnd. The
+	// interruption marker produces ONE event and cannot open its own turn, so the
+	// kicker's TextChunk is what opens it. The turn then stays open until the
+	// interrupt: endTurn() has exactly two call sites (:159, the follow-active
+	// conversation switch — impossible here, one conversation, cursor stamped once;
+	// and :217, the TurnEnd arm itself), and nothing closes a turn on inactivity.
+	//
 	// Re-drop rather than write once (#929): the producer waits one
 	// subscribeRetryDelay before subscribing and then tails from EOF, so a
 	// single-shot append lands BELOW the tailed range and is never emitted. A real
@@ -421,8 +466,14 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 		if !ok {
 			t.Fatalf("AC1: never received a turn_end for the minted conversation %s after the interrupt. "+
 				"fakeclaude's bare-ESC handler is the ONLY source of an end-of-turn line in this test "+
-				"(the kicker's line carries no stop_reason), so a timeout means the ESC never reached "+
-				"the minted child %s — the interrupt did not stop the turn", convID, mintedID)
+				"(see the causality re-derivation on this test's doc comment), but a timeout no longer "+
+				"has a single reading — DISCRIMINATE on the minted transcript %s: if it contains %q the "+
+				"ESC arrived and the failure is downstream of the fake (the marker was held out by the "+
+				"authorship gate — check for a stray top-level permissionMode key — or the TurnEnd was "+
+				"dropped outside a turn; grep the daemon log for interactive_turn.turn_end_no_turn). If "+
+				"it does not, the ESC never reached the minted child %s and the interrupt did not stop "+
+				"the turn. Phase 5 would answer this but sits after this fatal",
+				convID, filepath.Join(sessionsDir, mintedID+".jsonl"), interruptMarkerNeedle, mintedID)
 		}
 		if env.Type == protocol.TypeError {
 			t.Fatalf("AC1: unexpected error envelope while awaiting turn_end: %s", string(env.Payload))
@@ -440,7 +491,22 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 			"(the interrupt must stop the turn of the conversation it was routed for)",
 			end.ConversationID, convID)
 	}
-	t.Logf("AC1: the interrupt stopped the minted conversation's turn (turn_id=%s, conversation=%s)", end.TurnID, convID)
+	// AC2: the turn_end must REPORT the stop as an interrupt, not just report it.
+	// Asserted against the literal wire string, not turnevent.TurnEndReasonCancelled:
+	// protocol.TurnEndPayload.StopReason is a plain string by decision
+	// (docs/knowledge/features/protocol-package.md:740) and this tier asserts wire
+	// bytes. This is the first thing to run claude's interruption marker through the
+	// REAL tailer, producer and emitter — #1243's unit table covers the
+	// discriminator's truth table, never this span.
+	if end.StopReason != "cancelled" {
+		t.Fatalf("AC2: turn_end StopReason = %q, want %q. %q here means the marker reached the wire "+
+			"path but internal/turnbridge/mapper.go:95 did not classify it as an interruption — a live "+
+			"regression of #1243, not a staging fault (a staging fault produces NO turn_end at all and "+
+			"fails at the AC1 fatal above)",
+			end.StopReason, "cancelled", "end_turn")
+	}
+	t.Logf("AC1+AC2: the interrupt stopped the minted conversation's turn and reported it cancelled "+
+		"(turn_id=%s, conversation=%s, stop_reason=%s)", end.TurnID, convID, end.StopReason)
 
 	// --- Phase 5 (AC2 on disk + AC4 teeth). turn_end.ConversationID is stamped from
 	// the ACTIVE CURSOR, not from the transcript the event came out of, so Phase 4
@@ -455,21 +521,25 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Phase 5: read minted transcript %s: %v (the minted child must write the file the daemon tails)", mintedPath, err)
 	}
-	if !strings.Contains(string(mintedBody), endTurnNeedle) {
-		t.Errorf("Phase 5: minted transcript %s does not contain %s; the turn_end above did not come from the "+
-			"minted child's own ESC handler", mintedPath, endTurnNeedle)
+	if !strings.Contains(string(mintedBody), interruptMarkerNeedle) {
+		t.Errorf("Phase 5: minted transcript %s does not contain %q; the turn_end above did not come from the "+
+			"minted child's own ESC handler", mintedPath, interruptMarkerNeedle)
 	}
 	// The mis-route detector. ESC_ENDS_TURN is set daemon-wide, so the bootstrap
 	// child has the same handler: had the interrupt actuated it (the pre-#1121
-	// Interrupter: w.sup wiring, the #678 isolation break), the canned end-turn line
+	// Interrupter: w.sup wiring, the #678 isolation break), the interruption marker
 	// would be HERE.
+	//
+	// This absence check is non-vacuous BY THE POSITIVE ABOVE, in this same run: the
+	// same needle over the same handler's output is found in the minted file. See
+	// interruptMarkerNeedle for why the needle cannot silently stop appearing.
 	bootstrapBody, err := os.ReadFile(bootstrapPath)
 	if err != nil {
 		t.Fatalf("Phase 5: read bootstrap transcript %s: %v", bootstrapPath, err)
 	}
-	if strings.Contains(string(bootstrapBody), endTurnNeedle) {
-		t.Errorf("Phase 5: bootstrap transcript %s contains %s; the interrupt actuated the SHARED BOOTSTRAP claude "+
-			"instead of the minted per-conversation child (#678/#1121 mis-route)", bootstrapPath, endTurnNeedle)
+	if strings.Contains(string(bootstrapBody), interruptMarkerNeedle) {
+		t.Errorf("Phase 5: bootstrap transcript %s contains %q; the interrupt actuated the SHARED BOOTSTRAP claude "+
+			"instead of the minted per-conversation child (#678/#1121 mis-route)", bootstrapPath, interruptMarkerNeedle)
 	}
 
 	// AC4's teeth, and what makes the Phase-4 zero non-vacuous: the same oracle must
