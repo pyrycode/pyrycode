@@ -161,7 +161,7 @@ forge a turn boundary:
 | Line `type` | Emits |
 |---|---|
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
-| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union) |
+| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other block surfaces as `Unrecognized{Site: user_block}` **except one exact 100-byte payload** (#1247, below), dropped in silence |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
 | `system` (every subtype), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
@@ -184,6 +184,19 @@ bare stream-json surface on 2026-07-27, three turns each on two models, one call
 - The measurement also settled a standing question: claude does **not** echo the delivered prompt back
   as a `user`/`text` message on this surface, though it does on the agent-run surface. So `user`/`text`
   needs no ignore entry, and one appearing in future is a real change that surfaces.
+
+**AMENDED 2026-07-30 (#1247).** That measurement never drove a *backgrounded* command. Backgrounding
+produces a turn with no visible model output, and claude's harness then injects a `user`/`text` message
+prodding the model to speak — reproduced 3 of 3 on the #1240 probe, claude 2.1.220. Exactly one such
+string, `harnessNoOutputNudge`, is now dropped in silence by byte-exact equality, guarded on block type
+`text` so a `tool_result` (whose payload decodes into `Content`, never `Text`) can't reach it — this is
+the parser's **first block-level suppression**, a new tier sitting below `ignoredLineTypes` rather than
+an entry on it (that map stays top-level types only, and its own comment now carries this amendment
+in place). `continue`, not `return`, scopes the drop to the one block, so a sibling `tool_result` in the
+same message still maps. Every *other* `user`/`text` block is still a real change and still surfaces —
+matched by exact string, not prefix or substring, because the wording is attested on one claude version
+and drift must bring the row back rather than stay silently swallowed. See
+[codebase/1247.md](../codebase/1247.md).
 
 `TestParser_IgnoredLineTypesIsTheMeasuredSet` pins the list, so growing it is a deliberate edit with a
 measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fails on **any**

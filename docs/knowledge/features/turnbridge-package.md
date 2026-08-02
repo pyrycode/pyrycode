@@ -191,6 +191,7 @@ internal model has no representation for the event; the caller drops + debug-log
 | ″ | else `thinkingText(e) != ""` | `ThoughtChunk{MessageID, Text}` |
 | ″ | else | drop |
 | `EventKindJsonlEntry`, `e.Type=="user"` | `ParseToolResult(e.RawLine) != nil` | `ToolUpdate` |
+| ″ | else `isInterruptMarker(e)` (#1243) | `TurnEnd{Reason: TurnEndReasonCancelled}` |
 | ″ | else | drop |
 | `EventKindJsonlEntry`, other `e.Type` | — | drop |
 | `EventKindJsonlEndOfTurn` | — | `TurnEnd{Reason: TurnEndReasonEndTurn}` |
@@ -231,6 +232,28 @@ internal model has no representation for the event; the caller drops + debug-log
   `EventKindJsonlEndOfTurn` fires only after `IsEndTurn` (`stop_reason=="end_turn"`)
   held, so `TurnEndReasonEndTurn` is the only correct reason; other stop reasons
   are not distinguishable from this event kind in v1.3.0.
+- **An interrupted turn ends via a second, independent signal (#1243), not via
+  `EventKindJsonlEndOfTurn`.** claude records an interruption as a plain
+  `user`-role text entry (`"[Request interrupted by user…]"`), which never
+  satisfies `IsEndTurn`, so the only way to report it is to read that entry
+  directly in `mapEntry`'s `case "user"` — after the `ParseToolResult` branch,
+  so a `tool_result` (including one whose payload happens to quote the marker)
+  is always matched and returned first. The check is a **conjunction** of two
+  independently-evidenced signals, not the prose alone: `isInterruptMarker(e)`
+  requires both `!userAuthored(e)` (claude-, not client-, authored — a
+  presence-only check on the top-level `permissionMode` key, never its value)
+  **and** `userText(e)` starting with the `interruptMarkerSentinel` prefix
+  (`"[Request interrupted by user"`, covering both observed claude-version
+  variants with no code change for a new suffix). The authorship gate runs
+  first — a map lookup — so a genuine prompt's body (which can run to tens of
+  KB) is never concatenated by `userText`. Without the authorship half, a
+  client could end its own turn by echoing the marker text in a prompt
+  (`docs/protocol-mobile.md` § Threats #1, prompt injection — this is the
+  reflected variant). See [codebase/1243.md](../codebase/1243.md) for the
+  transcript census backing the authorship gate and the fixture-provenance
+  discipline (every marker/forgery test row is either quoted verbatim from
+  `internal/agentrun/jsonl/testdata/no_end_turn.jsonl` or labelled derived,
+  naming its base line).
 
 ### Field mapping & helpers
 
@@ -586,11 +609,24 @@ ships the mechanism; #633 supplies the original production resolver + the wiring
 Neither direction of this package carries the label. The **producer** reads the
 supervised claude session's structured events — **trusted local input** — and maps
 them to an internal model. The **outbound adapter** (#627) is a pure value-to-value
-mapper: no untrusted-party input, no capability decision, no dispatch. No trust
-decision or capability enforcement lives here in either direction — all of that
-lives in the consumer slice (#616), which carries the `security-sensitive` label.
-Labelling this package would track data lineage rather than the security-relevant
-design decision.
+mapper: no untrusted-party input, no capability decision, no dispatch. No
+capability enforcement lives here in either direction — all of that lives in the
+consumer slice (#616), which carries the `security-sensitive` label. Labelling
+this package would track data lineage rather than the security-relevant design
+decision.
+
+**One narrow carve-out since #1243.** `mapEntry`'s `case "user"` now makes an
+actual authorship trust decision — `userAuthored(e)`, gating whether a
+transcript entry can be treated as claude's own record rather than a client's
+echoed-back prompt text — because a `user`-role entry is the shape **both**
+parties write to the same JSONL. It stays out of `security-sensitive` scope
+deliberately: the decision is a single presence-only map lookup (no value read,
+no external call), it grants no capability, and what it gates is narrow (can
+this entry's prose end the turn), not what the consumer slice's label is for
+(who gets to see/drive a conversation at all). See
+[codebase/1243.md](../codebase/1243.md) § Security note and the architecture
+spec's § Security review for the full analysis, including the one accepted
+fail-open direction (claude ceasing to write `permissionMode` on prompts).
 
 ## Related
 
@@ -612,3 +648,4 @@ design decision.
 - [codebase/679.md](../codebase/679.md) — the follow-active producer lifecycle: generalises the subscriber to `Target`/`TargetResolver`/`NewTargetSubscriber` (removing `NewSessionSubscriber`) so the reply tails the active conversation's bound-session transcript by id, re-subscribing on a switch.
 - [codebase/1062.md](../codebase/1062.md) — the consumer-side fix for a switch landing **mid-turn**: the emitter now records which conversation owns its open turn (`turnConvID`) and abandons an orphaned turn on a mismatch, so the new conversation's opening `turn_state` is no longer de-duped away.
 - [codebase/686.md](../codebase/686.md) — re-points the by-id resolver's directory to the conversation's own per-`Cwd` JSONL dir (derived from the bound session's captured spawn `WorkDir`) once #685 spawns sessions in distinct directories; default sessions keep resolving from the shared dir.
+- [codebase/1243.md](../codebase/1243.md) — an interrupted PTY turn now reports `turn_end{cancelled}`: a second, independent `mapEntry` signal (the interrupt-marker text entry, gated by a claude-vs-client authorship check) alongside `EventKindJsonlEndOfTurn`, agreeing with [streamsup-package.md](streamsup-package.md)'s `error_during_execution → cancelled` mapping on the stream-json path. Resolves the reporting gap [codebase/1191.md](../codebase/1191.md)'s live gate found.

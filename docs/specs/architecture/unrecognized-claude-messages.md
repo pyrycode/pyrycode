@@ -78,6 +78,16 @@ only, and there were zero `user`/`text` lines. So `user`/`text` needs no ignore
 entry, and a `user`/`text` block appearing in future is a real change worth
 surfacing.
 
+**AMENDED 2026-07-30 (#1247):** that measurement never drove a *backgrounded*
+command. Backgrounding produces a turn with no visible model output, and
+claude's harness then injects a `user`/`text` message prodding the model to
+speak — one exact 100-byte string, reproduced 3 of 3 on the #1240 probe,
+claude 2.1.220. That one payload is now dropped in silence (byte-exact match,
+block-level — the parser's first suppression below the top-level
+`ignoredLineTypes` tier). Every *other* `user`/`text` block is still a real
+change and still surfaces. See `internal/streamsup/parser.go`'s
+`harnessNoOutputNudge` and [`codebase/1247.md`](../../knowledge/codebase/1247.md).
+
 ### Why `system` is ignored wholesale
 
 Keyed on the top-level `type`, not on `type/subtype`. `system` is claude's
@@ -114,7 +124,7 @@ The four drop sites now map as:
 |---|---|---|
 | unknown top-level type | silent debug drop | `Unrecognized{Site: line_type}` — unless on the ignored list |
 | unknown assistant block | silent debug drop | `Unrecognized{Site: assistant_block}` |
-| unknown user block | silent debug drop | `Unrecognized{Site: user_block}` |
+| unknown user block | silent debug drop | `Unrecognized{Site: user_block}` — except one exact harness payload (#1247), dropped in silence |
 | undecodable line or block | silent drop, no type recorded | `Unrecognized{Site: undecodable, Kind: ""}` |
 
 `truncateRaw` byte-slices then scrubs invalid UTF-8: the cut can land mid-rune,

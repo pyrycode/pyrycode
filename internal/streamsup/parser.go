@@ -62,8 +62,18 @@ const maxUnrecognizedRaw = 16 << 10
 // The measurement also settled the open question of whether claude echoes the
 // delivered prompt back as a `user` message holding a `text` block, as it does
 // on the agent-run surface: it does NOT here. Every `user` line in both runs
-// carried tool_result blocks only. So user/text needs no ignore entry, and a
-// user/text block appearing in future is a real change worth surfacing.
+// carried tool_result blocks only.
+//
+// AMENDED 2026-07-30 (#1247): that measurement never drove a BACKGROUNDED
+// command. Backgrounding produces a turn with no visible model output, and
+// claude's harness then injects a `user` message holding a `text` block prodding
+// the model to say something. So exactly one user/text string is now dropped —
+// see harnessNoOutputNudge for the capture, the claude version, and why the
+// author being the harness (neither the user nor the model) makes it a
+// suppression rather than a mapping. That is a block-level constant, NOT an
+// entry in this list, which stays top-level types only and is unchanged. Every
+// OTHER user/text block still surfaces, and that remains the real change worth
+// seeing.
 //
 // A real-claude test asserts a normal turn produces zero unrecognized events, so
 // this list going stale fails the pre-ship gate rather than reaching a client.
@@ -71,6 +81,38 @@ var ignoredLineTypes = map[string]bool{
 	"system":           true,
 	"rate_limit_event": true,
 }
+
+// harnessNoOutputNudge is the ONE user/text block the parser drops in silence.
+//
+// It is claude's harness prodding the model after a turn produced no visible
+// output; backgrounding a command is the observed way to get there. The author
+// is neither the user nor the model, and that is what makes this a SUPPRESSION
+// rather than a mapping: rendering it as a user/text block would put the
+// harness's self-talk into the person's own message history, and the same would
+// go for any future harness-injected prose. The narrowest possible match is the
+// only safe shape here.
+//
+// This is the parser's FIRST block-level suppression — a new tier, not an entry
+// on an existing list. ignoredLineTypes is top-level types only, and
+// emitAssistant states the block-level position explicitly ("No known-ignored
+// list at block level … Any fourth is news"). Scope is emitUser: an assistant
+// text block carrying these bytes is model speech and still maps to TextChunk.
+//
+// Provenance, which is thinner than the string's confident tone suggests:
+// transcribed byte-exact from the #1247 capture — claude 2.1.220, the #1240
+// probe, 3 of 3 occurrences in one session. The string exists in no tracked
+// file and the local ~/.claude/projects corpus corroborates nothing, so
+// cross-version stability is UNMEASURED. 100 bytes, ASCII only, single-spaced,
+// ASCII hyphen in "user-visible".
+//
+// Matched by byte-exact equality — no trim, no fold, no prefix, no substring —
+// because that is the tolerance one observation earns, and because its failure
+// direction is the safe one: drift means the Unrecognized row comes back and a
+// human looks. A loose match would instead swallow the next harness payload, or
+// a prompt echo should claude ever start echoing on this surface, in silence. A
+// SECOND confirmed payload, with a measurement behind it, is what promotes this
+// constant to a set with a pin test — not before.
+const harnessNoOutputNudge = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
 
 // Parser turns the child's stdout stream-json line stream into neutral
 // turnevent.Event values. It is an io.Writer wired as streamsup Config.Stdout;
@@ -336,7 +378,8 @@ func (p *Parser) decodeBlock(raw json.RawMessage) (streamBlock, bool) {
 }
 
 // emitUser maps one user message's tool_result blocks to ToolUpdate. A nil
-// message emits nothing; any non-tool_result block emits an Unrecognized.
+// message emits nothing; any non-tool_result block emits an Unrecognized, with
+// the single exception of the harness nudge, which is dropped in silence.
 func (p *Parser) emitUser(msg *streamMessage) {
 	if msg == nil {
 		return
@@ -346,11 +389,26 @@ func (p *Parser) emitUser(msg *streamMessage) {
 		if !ok {
 			continue
 		}
+		if block.Type == "text" && block.Text == harnessNoOutputNudge {
+			// The one known harness payload (see harnessNoOutputNudge for the
+			// capture and why it is suppressed rather than mapped). `continue`, not
+			// `return`: the suppression is scoped to this BLOCK, so a tool_result
+			// sharing the message still maps. Requiring type "text" is what keeps
+			// the guard unreachable from tool output — a tool_result's payload
+			// decodes into Content, never into Text — so tripping it takes control
+			// of the block's type, not just of a string. Logged content-free: site
+			// and type only, exactly like the known-ignored line drop above.
+			p.log.Debug("streamsup: dropping known harness user block",
+				"site", string(turnevent.UnrecognizedUserBlock),
+				"type", block.Type)
+			continue
+		}
 		if block.Type != "tool_result" {
 			// The measurement found user messages carry tool_result blocks and
 			// nothing else — notably NOT a text echo of the delivered prompt, which
-			// the agent-run surface does emit. So a user/text block here would be a
-			// genuine change, and gets surfaced rather than dropped.
+			// the agent-run surface does emit. So a user/text block reaching here
+			// (i.e. every one but the harness nudge caught above) would be a genuine
+			// change, and gets surfaced rather than dropped.
 			p.emitUnrecognized(turnevent.UnrecognizedUserBlock, block.Type, raw)
 			continue
 		}
