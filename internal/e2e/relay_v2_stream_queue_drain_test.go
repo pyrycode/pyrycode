@@ -2,9 +2,9 @@
 
 package e2e
 
-// Note: msg1Marker / msg2Marker / msg3Marker below are test-only ASCII markers.
-// Do NOT paste real secrets into them — they round-trip through the assistant_delta
-// text the test decodes and echoes in failure messages.
+// Note: msg1Marker … msg4Marker below are test-only ASCII markers. Do NOT paste
+// real secrets into them — they round-trip through the assistant_delta text and the
+// queue_state entries the test decodes and echoes in failure messages.
 
 import (
 	"context"
@@ -22,39 +22,51 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// TestRelayV2_StreamQueueDrainsInOrder is the stream-json analog of the PTY sibling
-// TestRelayV2_QueueDrainsInOrder_AfterBusyTurn (relay_v2_queue_drain_test.go): it
-// proves LIVE — over one daemon started under interactive_runner:"stream-json", plus
-// a real spawned fakeclaude — that multiple sends submitted while a turn is in flight
-// drain to the client in submission order. It extends the first live stream send
-// (#1141's TestRelayV2_StreamSendMessageDrainsTurn) from one send to three ordered
-// sends behind a startup hold.
+// TestRelayV2_StreamMidTurnHoldDropAndDrainInOrder is the stream-json analog of the
+// PTY sibling TestRelayV2_QueueDrainsInOrder_AfterBusyTurn
+// (relay_v2_queue_drain_test.go): it proves LIVE — over one daemon started under
+// interactive_runner:"stream-json", plus a real spawned fakeclaude — that sends
+// submitted while a turn is in flight are HELD in the queue as a client-visible
+// backlog, that a held one can still be dropped before it runs, and that the rest
+// drain to the client in submission order.
 //
-// WHY A STARTUP HOLD, NOT A msgqueue BACKLOG. On the stream path streamsup.WriteTurn
-// (envelope.go) writes the user-turn envelope to the child's held-open stdin and
-// returns nil on WRITE — no WaitReady, no commit confirm (contrast the PTY path's
-// supervisor.WriteUserTurn). So newInboundDeliver's WriteUserTurn returns on write,
-// the msgqueue's serial per-conversation drain empties as fast as it can write bytes
-// into the pipe, and a queue_state depth of N is NOT reliably observable here (unlike
-// the PTY sibling, whose idle-trigger parks the drain). Submission order is instead
-// preserved by a chain of FIFO/serial stages: FIFO drain → FIFO held-open stdin pipe
-// → serial claude reader → FIFO stdout → serial parser → serial emitter. To make that
-// chain observable, the fakeclaude is held (PYRY_FAKE_CLAUDE_STREAM_HOLD) BEFORE it
-// consumes stdin: the child "comes up busy", the daemon buffers all three turns into
-// the stdin pipe during the hold, and dropping the trigger lets the child drain them
-// FIFO — one clean responding→delta→idle turn cycle per turn, in order. This is the
-// faithful stream analog of the PTY sibling's come-up-busy → accumulate → release →
-// drain, and it matches real claude (a child slow to start its read loop leaves later
-// turns queued in its stdin pipe).
+// WHAT CHANGED, AND WHY THIS FILE'S OLD RATIONALE IS GONE (#1199). Until this
+// ticket, the paragraph here recorded that "a queue_state depth of N is NOT reliably
+// observable" on the stream path, because streamsup.WriteTurn (envelope.go) writes
+// the user-turn envelope to the child's held-open stdin and returns nil on WRITE —
+// no WaitReady, no commit confirm (contrast the PTY path's
+// supervisor.WriteUserTurn). The msgqueue drain therefore emptied as fast as it
+// could write bytes into the pipe, and the queued-backlog UI and the
+// drop-before-drain control were both regressed on the runner the Mac daemon runs in
+// production. That record is now FALSE and is rewritten rather than left beside a
+// contradicting test: newInboundDeliver holds each delivery on the turn-busy tracker
+// (waitIdleForDelivery) and marks the conversation (openForDelivery) before the
+// write, so the backlog holds for the whole running turn and the head stays
+// droppable throughout it.
+//
+// WHY THE STARTUP HOLD IS STILL THE FIXTURE. fakeclaude is held
+// (PYRY_FAKE_CLAUDE_STREAM_HOLD) BEFORE it consumes stdin, so the child "comes up
+// busy". That is what makes the FIRST send's turn a long one with no live claude
+// needed — msg1 is written into the stdin pipe and marks the conversation mid-turn,
+// and msg2..msg4 then park in the backlog by program order on the drain goroutine,
+// not by luck. Dropping the trigger lets the child consume msg1, and from there each
+// turn's result line closes the turn and releases exactly one held send. Note the
+// consequence for timing: after this ticket the three turns run SEQUENTIALLY (each
+// released by the previous turn's TurnEnd) instead of being buffered together in the
+// stdin pipe. With fakeclaude that is milliseconds, well inside the existing drain
+// deadline.
 //
 // VACUITY GUARD (the headline discipline, per the PTY sibling). The positive gates
-// the ordering assertion. (1) All three sends must be ACKED while the child is held
-// (in flight) before the trigger drops — a missing ack is the harness-produced-no-
-// queue failure mode (enqueue rejected — check the binding, #678), fatal, since the
-// ordering assertion would be vacuous without a real backlog. (2) Exactly three
-// assistant_deltas must then be observed; fewer is fatal naming the count (the drain
-// never completed end-to-end). Only over three real deltas is the submission-order
-// assertion non-vacuous.
+// every assertion. (1) All four sends must be ACKED while the child is held — a
+// missing ack is the harness-produced-no-queue failure mode (enqueue rejected —
+// check the binding, #678), fatal, since everything below would be vacuous without a
+// real backlog. (2) A single queue_state must carry msg2, msg3 AND msg4
+// simultaneously; that frame is the mid-turn hold itself, and before this ticket it
+// did not reliably exist, since each was written into the pipe microseconds after
+// the one before. (3) Exactly three assistant_deltas must then be observed; fewer is
+// fatal naming the count (the drain never completed end-to-end), and a fourth — or
+// msg4's marker in any of them — is the sharpest failure available: the dropped
+// message reached claude.
 //
 // WHY DELTA ORDER SATISFIES "observes their turn_state transitions in that order".
 // Each assistant_delta is emitted strictly inside its own responding→…→turn_end→idle
@@ -70,16 +82,19 @@ import (
 // initialUUID by seedBootstrapRegistry; activeSession() resolves the active
 // conversation → knownConvID's binding = initialUUID via seedBoundConversation. A
 // mismatched UUID drops every event at the gate and hangs the drain.
-func TestRelayV2_StreamQueueDrainsInOrder(t *testing.T) {
+func TestRelayV2_StreamMidTurnHoldDropAndDrainInOrder(t *testing.T) {
 	const (
-		initialUUID = "11111111-1111-4111-8111-111111111111"
-		knownConvID = "33333333-3333-4333-8333-333333333333"
-		msg1Marker  = "e2e-1138-msg1"
-		msg2Marker  = "e2e-1138-msg2"
-		msg3Marker  = "e2e-1138-msg3"
-		reqID1      = uint64(11381)
-		reqID2      = uint64(11382)
-		reqID3      = uint64(11383)
+		initialUUID  = "11111111-1111-4111-8111-111111111111"
+		knownConvID  = "33333333-3333-4333-8333-333333333333"
+		msg1Marker   = "e2e-1138-msg1"
+		msg2Marker   = "e2e-1138-msg2"
+		msg3Marker   = "e2e-1138-msg3"
+		msg4Marker   = "e2e-1199-msg4" // the one dropped before it drains
+		reqID1       = uint64(11381)
+		reqID2       = uint64(11382)
+		reqID3       = uint64(11383)
+		reqID4       = uint64(11384)
+		dequeueReqID = uint64(11991)
 	)
 
 	home := shortHome(t)
@@ -104,10 +119,11 @@ func TestRelayV2_StreamQueueDrainsInOrder(t *testing.T) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	// The child holds at startup until holdPath appears (not created yet). All three
-	// sends buffer in its stdin pipe during the hold; dropping the trigger releases
-	// the FIFO drain. No SESSIONS_DIR / STDIN_LOG env — stream mode opens no
-	// transcript and this test's oracle is the assistant_delta stream, not a stdin log.
+	// The child holds at startup until holdPath appears (not created yet), so the
+	// first send's turn is a long one and the rest are held in the daemon's backlog;
+	// dropping the trigger lets the child start consuming. No SESSIONS_DIR /
+	// STDIN_LOG env — stream mode opens no transcript and this test's oracles are the
+	// queue_state and assistant_delta streams, not a stdin log.
 	holdPath := filepath.Join(home, "stream-hold.trig")
 	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
 		"PYRY_FAKE_CLAUDE_STREAM_HOLD="+holdPath)
@@ -167,8 +183,9 @@ func TestRelayV2_StreamQueueDrainsInOrder(t *testing.T) {
 		}
 	}
 
-	// 1. Submit three sends to the SAME conversation, back-to-back, while the child is
-	//    held. Same conversation ⟹ one serial per-conversation drain orders them.
+	// 1. Submit four sends to the SAME conversation, back-to-back, while the child is
+	//    held. Same conversation ⟹ one serial per-conversation drain orders them, and
+	//    is what makes the hold a per-conversation guarantee rather than a race.
 	sends := []struct {
 		reqID uint64
 		msgID string
@@ -177,6 +194,7 @@ func TestRelayV2_StreamQueueDrainsInOrder(t *testing.T) {
 		{reqID1, "u-1", msg1Marker},
 		{reqID2, "u-2", msg2Marker},
 		{reqID3, "u-3", msg3Marker},
+		{reqID4, "u-4", msg4Marker},
 	}
 	for _, s := range sends {
 		sealSend(protocol.Envelope{
@@ -187,52 +205,121 @@ func TestRelayV2_StreamQueueDrainsInOrder(t *testing.T) {
 		})
 	}
 
-	// 2. [Vacuity positive — gate before release] Collect all three acks before
-	//    touching the trigger. The child is still held, so no assistant_delta /
-	//    turn_state frames arrive yet; only acks (and any queue_state) do. A missing
-	//    ack is the harness-produced-no-queue mode — fatal, the ordering assertion
-	//    below would be vacuous.
+	// 2. [Vacuity positive + AC1 — both gated before release] Collect all four acks
+	//    AND the queue_state that carries msg2, msg3 and msg4 together, in ONE loop:
+	//    the acks and that frame interleave freely, and a separate ack-first loop
+	//    would consume the very frame the hold assertion needs. The child is still
+	//    held, so no assistant_delta / turn_state frames arrive yet.
+	//
+	//    msg1 is the running turn (written into the pipe, conversation marked
+	//    mid-turn); the other three can only still be in the backlog because their
+	//    deliveries are parked behind it. That is the regression this ticket closes,
+	//    and observing it here is what makes every later assertion non-vacuous.
 	acked := map[uint64]bool{}
-	ackDeadline := time.Now().Add(15 * time.Second)
-	for len(acked) < len(sends) {
-		env, ok := nextEnv(ackDeadline)
+	var msg4QueuedID uint64
+	holdDeadline := time.Now().Add(20 * time.Second)
+	for len(acked) < len(sends) || msg4QueuedID == 0 {
+		env, ok := nextEnv(holdDeadline)
 		if !ok {
-			t.Fatalf("observed only %d/%d send acks before the release deadline; enqueue was rejected "+
-				"(check the binding — #678). The queue never populated, so the ordering assertion would be vacuous.",
-				len(acked), len(sends))
+			if len(acked) < len(sends) {
+				t.Fatalf("observed only %d/%d send acks before the release deadline; enqueue was rejected "+
+					"(check the binding — #678). The queue never populated, so every assertion below would be vacuous.",
+					len(acked), len(sends))
+			}
+			t.Fatal("all sends acked, but never a queue_state carrying msg2+msg3+msg4 together; the mid-turn hold " +
+				"did not engage — the backlog drained on write, so there was never a queued row to render or drop (#1199)")
 		}
 		if env.Type == protocol.TypeError {
 			t.Fatalf("unexpected error envelope while enqueueing sends: %s", string(env.Payload))
 		}
-		if env.Type != protocol.TypeAck || env.InReplyTo == nil {
+		switch env.Type {
+		case protocol.TypeAck:
+			if env.InReplyTo != nil {
+				acked[*env.InReplyTo] = true
+			}
+		case protocol.TypeQueueState:
+			var qs protocol.QueueStatePayload
+			if err := json.Unmarshal(env.Payload, &qs); err != nil {
+				t.Fatalf("decode queue_state payload: %v", err)
+			}
+			if qs.ConversationID != knownConvID {
+				t.Errorf("queue_state ConversationID = %q, want %q", qs.ConversationID, knownConvID)
+				continue
+			}
+			held := queuedIDsByText(qs)
+			if held[msg2Marker] == 0 || held[msg3Marker] == 0 || held[msg4Marker] == 0 {
+				continue // an earlier, partial snapshot — the backlog is still filling
+			}
+			msg4QueuedID = held[msg4Marker]
+		}
+	}
+	t.Logf("observed the mid-turn backlog holding msg2, msg3 and msg4 while msg1's turn runs")
+
+	// 3. [AC2] Drop the LAST held message before it drains. It is not the head, but
+	//    the head (msg2) is itself only waiting — the whole point of the hold is that
+	//    a queued row stays droppable for the length of the running turn.
+	sealSend(protocol.Envelope{
+		ID:      dequeueReqID,
+		Type:    protocol.TypeDequeueMessage,
+		TS:      time.Now().UTC(),
+		Payload: mustJSON(t, protocol.DequeueMessagePayload{ConversationID: knownConvID, QueuedMsgID: msg4QueuedID}),
+	})
+
+	dropDeadline := time.Now().Add(15 * time.Second)
+	for {
+		env, ok := nextEnv(dropDeadline)
+		if !ok {
+			t.Fatal("did not observe a post-dequeue queue_state losing msg4 before the deadline")
+		}
+		if env.Type == protocol.TypeError {
+			t.Fatalf("dequeue_message produced an error envelope: %s", string(env.Payload))
+		}
+		if env.Type != protocol.TypeQueueState {
 			continue
 		}
-		acked[*env.InReplyTo] = true
+		var qs protocol.QueueStatePayload
+		if err := json.Unmarshal(env.Payload, &qs); err != nil {
+			t.Fatalf("decode queue_state payload: %v", err)
+		}
+		if qs.ConversationID != knownConvID {
+			continue
+		}
+		held := queuedIDsByText(qs)
+		if held[msg4Marker] != 0 {
+			continue // a lingering pre-dequeue snapshot
+		}
+		if held[msg2Marker] == 0 || held[msg3Marker] == 0 {
+			t.Fatalf("the post-dequeue backlog lost more than msg4: %v", qs.Queued)
+		}
+		break
 	}
 
-	// 3. Release: the child begins consuming stdin and drains the three buffered turns
-	//    in FIFO order.
+	// 4. Release: the child begins consuming stdin. From here each turn's result line
+	//    closes the turn and releases exactly one held send, so the remaining turns
+	//    run sequentially rather than from a pre-filled pipe.
 	if err := os.WriteFile(holdPath, []byte("go\n"), 0o600); err != nil {
 		t.Fatalf("write stream hold trigger: %v", err)
 	}
 
-	// 4. [Ordering assertion → terminal close] Drain the phone stream; collect
-	//    assistant_delta texts in arrival order (ignore turn_state / queue_state /
-	//    stall). Each delta is emitted inside its own turn cycle, so arrival order IS
-	//    submission order. After the third delta, the next turn_state{idle} is the last
-	//    turn closing.
+	// 5. [Ordering + drop terminal] Drain the phone stream; collect assistant_delta
+	//    texts in arrival order (ignore turn_state / queue_state / stall). Each delta
+	//    is emitted inside its own turn cycle, so arrival order IS submission order.
+	//    After the third delta, the next turn_state{idle} is the last turn closing.
+	//    msg4 must appear in NO delta and there must be no fourth: that is the
+	//    sharpest statement of "the dropped message never reached claude".
+	wantDeltas := []string{msg1Marker, msg2Marker, msg3Marker}
 	var deltas []string
 	drainDeadline := time.Now().Add(20 * time.Second)
 	for {
 		env, ok := nextEnv(drainDeadline)
 		if !ok {
-			if len(deltas) < len(sends) {
+			if len(deltas) < len(wantDeltas) {
 				t.Fatalf("observed only %d/%d assistant_deltas before the drain deadline; the queued sends never "+
 					"drained end-to-end (delivery never reached the child, a UUID mismatch dropped events at the "+
-					"drain gate, or the hold never released). deltas so far: %q", len(deltas), len(sends), deltas)
+					"drain gate, or the hold never released). deltas so far: %q", len(deltas), len(wantDeltas), deltas)
 			}
 			t.Fatalf("observed all %d assistant_deltas but never a terminal turn_state{idle}; the last turn opened "+
-				"but never closed", len(sends))
+				"but never closed", len(wantDeltas))
 		}
 		switch env.Type {
 		case protocol.TypeAssistantDelta:
@@ -243,21 +330,29 @@ func TestRelayV2_StreamQueueDrainsInOrder(t *testing.T) {
 			if d.ConversationID != knownConvID {
 				t.Errorf("assistant_delta ConversationID = %q, want %q", d.ConversationID, knownConvID)
 			}
+			if strings.Contains(d.Text, msg4Marker) {
+				t.Fatalf("an assistant_delta carries the DROPPED message's marker: %q — dequeue_message did not "+
+					"stop it reaching claude", d.Text)
+			}
+			if len(deltas) == len(wantDeltas) {
+				t.Fatalf("a fourth assistant_delta arrived (%q) after the three expected turns; the dropped "+
+					"message reached claude", d.Text)
+			}
 			deltas = append(deltas, d.Text)
-			if len(deltas) == len(sends) {
-				// The ordering assertion: the three deltas carry msg1, msg2, msg3 in
-				// submission order. Out-of-order is the real failure this test guards
-				// (a reordering drain / pipe / emitter).
-				for i, want := range []string{msg1Marker, msg2Marker, msg3Marker} {
+			if len(deltas) == len(wantDeltas) {
+				// The ordering assertion: the three surviving deltas carry msg1, msg2,
+				// msg3 in submission order. Out-of-order is the real failure this test
+				// guards (a reordering drain / pipe / emitter).
+				for i, want := range wantDeltas {
 					if !strings.Contains(deltas[i], want) {
 						t.Fatalf("assistant_deltas drained out of submission order: delta[%d]=%q does not contain %q "+
 							"(all deltas, in arrival order: %q)", i, deltas[i], want, deltas)
 					}
 				}
-				t.Logf("observed 3 assistant_deltas in submission order: %q", deltas)
+				t.Logf("observed 3 assistant_deltas in submission order, with the dropped msg4 absent: %q", deltas)
 			}
 		case protocol.TypeTurnState:
-			if len(deltas) < len(sends) {
+			if len(deltas) < len(wantDeltas) {
 				continue // interleaved responding/idle states precede the final close
 			}
 			var st protocol.TurnStatePayload
@@ -274,4 +369,17 @@ func TestRelayV2_StreamQueueDrainsInOrder(t *testing.T) {
 			return
 		}
 	}
+}
+
+// queuedIDsByText indexes a queue_state's backlog by message text, so the test can
+// ask "is msg4 still queued, and under which queued_msg_id?" without depending on
+// the backlog's length or on any entry's position — both of which shift as the
+// drain advances. A zero id means absent; the engine assigns ids from 1
+// (msgqueue.convQueue.nextID), so zero is unambiguous.
+func queuedIDsByText(qs protocol.QueueStatePayload) map[string]uint64 {
+	out := make(map[string]uint64, len(qs.Queued))
+	for _, item := range qs.Queued {
+		out[item.Text] = item.QueuedMsgID
+	}
+	return out
 }

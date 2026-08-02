@@ -18,7 +18,9 @@ The package shipped **engine only, unwired** in #704 — the same rhythm as the
 **wired it live**: the daemon constructs one `Queue` in `cmd/pyry/runSupervisor`,
 runs `Queue.Run(ctx)` under the daemon lifecycle, and `send_message` now
 **enqueues-and-acks** instead of delivering synchronously (delivery seam =
-`newInboundDeliver(router.resolve)`, the reliable `WriteUserTurn` path). The
+`newInboundDeliver(router.resolve)`, the reliable `WriteUserTurn` path — extended in
+[#1199](../codebase/1199.md) to `newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout)`,
+see § Related). The
 `queue_state` / `dequeue_message` reporting/removal wire types (#720) + their
 handlers landed as #722/#723 (see § Related); the previously-deferred inbound
 bound/backpressure policy landed as [#869](../codebase/869.md) once that live
@@ -506,3 +508,16 @@ give-up-notification path as the injected `GiveUpFunc`.
   itself re-split at its vocab seam into wire vocabulary #1007 — shipped,
   unwired — and producer+wiring #1008, security-sensitive, blocked-by-#1007)
   lands. Nothing remains deferred on this engine except that wiring.
+- **[#1199](../codebase/1199.md) closed a `DeliverFunc`-contract gap on the stream-json runner,
+  engine-side unchanged.** The package's contract — `DeliverFunc` "MUST block while claude is busy …
+  that blocking IS the drain's turn-end pacing" (`queue.go:87-92`) — held for the PTY delivery seam
+  (`supervisor.WriteUserTurn` gates on `waitReadyAutoContinue`) but not for stream-json:
+  `streamsup.Runner.WriteUserTurn` returns as soon as the envelope is in the child's stdin pipe, so the
+  drain emptied as fast as it could write and the queued-backlog UI / drop-before-drain control never
+  appeared on that runner. `newInboundDeliver` now waits on `cmd/pyry`'s per-conversation
+  `turnBusyTracker` (`waitIdleForDelivery`, bounded by `streamTurnHoldTimeout`) and marks the
+  conversation busy (`openForDelivery`) both between `Activate` and the write — placed *before*
+  `WriteTurn`'s `turncommit` claim, which is what keeps the head `draining && !committing`, i.e.
+  droppable, for the whole wait. `Remove`, `commitGate`, and the give-up bound above are consumed
+  exactly as they stand; nothing in this package changed. On PTY the tracker is nil and both calls are
+  no-ops — `newInboundDeliver`'s body is semantically unchanged there.

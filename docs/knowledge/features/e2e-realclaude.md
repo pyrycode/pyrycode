@@ -118,7 +118,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 - `resilience_test.go` (#382) — fifth consumer of the trio. **Protocol-resilience suite.** Four named top-level tests — one per production failure mode that pyry's supervisor must interpret as a structured signal: `TestRealClaude_BashTool_NonZeroExit` (Bash exits non-zero → tool_result with `is_error=true` + trailer `subtype="success"`), `TestRealClaude_PrematureStdinClose` (write user-turn envelope, close stdin, assert claude exits 0 within 60 s — the exact streamrunner production pattern), `TestRealClaude_MalformedStreamJSON` (garbage stdin → non-zero exit + parse-shaped stderr keyword), `TestRealClaude_LargePromptNearContextWindow` (~52 KB prompt → success-without-overflow-shaped-stop-reason OR non-success trailer with `ExitCode != 0`; "neither" is the failure mode). Each test pins a **structured exit signal** (exit code, JSONL event, or stderr substring) under a bounded timeout — a hang IS the failure mode being guarded against, so deadline expiry is itself an assertion target. **Two tests bypass pyry** (PrematureStdinClose, MalformedStreamJSON) and exercise `claude` directly via `exec.CommandContext` so the test can control raw stdin bytes and observe claude's untransformed exit shape; file-local helpers `resolveClaudeBin` (with the 2026-05-16 fork-bomb defense: refuse `PYRY_CLAUDE_BIN == os.Args[0]`), `directClaudeArgs`, `runClaudeDirect`, and `buildUserTurnEnvelope` own that surface — promoted to `fixtures.go` only if a third raw-exec test materialises. **Stderr predicate is OR-of-keywords** (`{"json","parse","input","format","envelope"}` case-insensitive), not a hard-coded phrase — pinning specific prose would couple the test to claude's diagnostic copy. Test 4's disjunction is structured as a single `if !branchA && !branchB { t.Fatalf(...) }` so the failure message lists both branches' requirements on "neither". Two-field extension to the `contentBlock` struct in `tool_loop_test.go` adds `Content json.RawMessage` (tool_result body lives in `content`, not `text`; can be string OR array of nested blocks per stream-json contract — `RawMessage` holds either shape) and `IsError bool` (`is_error` field on `tool_result` blocks, verified against 19 occurrences in `internal/agentrun/jsonl/testdata/*.jsonl`). Three real haiku calls per run (Test 3 rejects before reaching the model and incurs zero API cost), ~$0.08 total with cache warm. **`t.Parallel()` is NOT called** — matches the existing realclaude convention. See [`codebase/382.md`](../codebase/382.md) for the design rationale.
 - `per_agent_test.go` (#381) — fourth consumer of the trio. **Per-dispatcher-role smoke suite.** Five named top-level tests (`TestRealClaude_PO_RoleLoop`, `TestRealClaude_Architect_RoleLoop`, `TestRealClaude_Developer_RoleLoop`, `TestRealClaude_CodeReview_RoleLoop`, `TestRealClaude_Documentation_RoleLoop`) — one per dispatcher role — exercising each role's `(allowedTools, system-prompt shape)` combination end-to-end. Motivated by the failure mode the prior tests don't cover: per-role drift (the 2026-05-14 `/doctor` bug failed all five roles together; the next failure of this class will likely hit one role only). Five separate top-level functions give five independent pass/fail signals on the nightly board; do NOT factor into a table loop. File-private `dispatcherBaseTools []string` mirrors `agents/dispatcher/src/dispatch.ts:1183` from the sibling `agent-dispatcher` repo (21 entries: Bash/Read/Write/Edit/Glob/Grep/TodoWrite + 4 qmd + 2 context7 + 7 codegraph; **no figma entries** — the dispatcher source-of-truth literal has none, despite the ticket-body parenthetical, see #381's lessons-learned). `dispatcherAllowedToolsForRole(role)` returns `dispatcherBaseTools` for po/developer/documentation and `dispatcherBaseTools + "Agent"` for architect/code-review, mirroring `dispatch.ts:1184-1186`'s `needsAgent` membership check; cite comments above both are the renumber-detection breadcrumbs. **Defensive `make+copy` on both branches** so a caller's slice mutation cannot corrupt the package-level constant. Unknown role panics (programmer error at the 5 call sites, not a runtime condition). System prompts are deliberate 1-2 line stand-ins (e.g. PO: "You are a Pyrycode product-owner agent. You refine issue bodies. Use Read/Edit/qmd/codegraph for research."), NOT verbatim copies of `agents/<role>/CLAUDE.md` — the goal is to exercise pyry's agent-run wiring with dispatcher-shaped inputs, not to validate operator prompts (which are large, frequently revised, and would make the suite both expensive and falsely sensitive to prompt-edit churn). User prompts are role-appropriate one-shot tasks ("Rewrite this one-line ticket title…", "Implement a Go function `Add(a, b int) int`…", "Summarize this one-line commit message…") that resolve in ≤4 turns with haiku/low and produce a single end-of-turn assistant text block (no tool_use); each explicitly constrains reply shape so haiku doesn't drift into exploratory tool-use. Shared `runRoleSmokeTest(t, role, systemPrompt, userPrompt)` body consolidates the six identical assertions: `ExitCode == 0`, `SessionID != ""`, `parseResultTrailer(result.Stdout)` succeeds, `PermissionDenials` empty (nil-or-zero-length, pointer-vs-empty distinction from #376 preserved), `NumTurns >= 1` (single-shot no-tool minimum; #376's `>= 2` is tool-loop specific), and the LAST `assistant`-kinded JSONL event has `EndOfTurn == true && TextChars > 0`. Shared helper is NOT a table loop — each `Test…_RoleLoop` is its own top-level function, so per-role failure attribution surfaces on the nightly board. Reuses the package-private `parseResultTrailer` + `resultTrailer` from #376 directly (second consumer; no fixture-export widening) and `jsonlPathFor` from #364 (fourth consumer). File-local `truncate([]byte) string` (1 KiB cap, suffixed `... (truncated)`) used in failure messages — matches the inline pattern from #376/#365 but is extracted file-locally because the five assertion blocks invoke it 2-3 times each. `RunOpts: MaxTurns=4, Effort="low", Model="claude-haiku-4-5"`, no `Timeout` override (5-minute default is the runaway guard, not the SLO). Production dispatch uses opus/high; this deliberate haiku/low downgrade is the cost/coverage trade — a future nightly opus suite is a separate file, not an additive flag. `t.Parallel()` is NOT called — matches the existing realclaude convention, keeps cost predictable, avoids API rate-limit interactions. ~$0.10 total per run (5 calls, cache warm); ~30 s per test, ~150 s aggregate wall time. See [`codebase/381.md`](../codebase/381.md) for the design rationale.
 - `large_tool_output_test.go` (#423) — tenth consumer of the trio. **Large tool-output regression sensor (>64 KiB on one line).** One named test (`TestRealClaude_LargeToolOutput_ExceedsDefaultScannerBuffer`) drives a real claude session through a single Bash invocation producing ~80 KiB of stdout in one `tool_result` content block and pins four contracts: trailer reports `subtype="success"` + `stop_reason="end_turn"`, the on-disk JSONL `tool_result` content block exceeds 70 KiB (headroom under the ~80 KiB target), pyry's stdout-forwarded `tool_result` content block has **byte-equal length** to the on-disk twin (the regression sensor — the emitter is contracted to re-emit `ev.Raw` verbatim per `internal/agentrun/streamjson/emitter.go:149-150`, so any non-zero delta means a scanner truncated the forwarding path), and stderr does NOT contain `bufio.Scanner: token too long`. **Orthogonal to #421's long-session test**: that test fires when many short lines accumulate; this one fires when a single line on pyry's stream-json stdout exceeds the 64 KiB stdlib `bufio.Scanner` cap. Today only `permission_protocol_spike_test.go:133` extends a Scanner past the default; if that buffer extension is ever dropped — or if a similarly truncating scanner is wired into pyry's stream-json forwarding path — large tool output gets silently corrupted; this test fails. **Deterministic prompt** (`printf '%80000s' '' | tr ' ' 'A'` — exactly 80,000 literal `A` characters on a single line) preferred over `/dev/urandom` per the AC so any future fixture-snapshot work doesn't churn; the `"exactly as given"` wording in the system prompt is load-bearing because paraphrasing risks fewer bytes. `RunOpts: MaxTurns=2, Effort="low", Model="claude-haiku-4-5", AllowedTools=["Bash"]`. **Why a local scanner — not a call to `parseResultTrailer`**: the shared `parseResultTrailer` (`tool_loop_test.go:211`) uses the stdlib's 64 KiB default; with an 80 KiB `user`/`tool_result` line on stdout **before** the trailer line, the default scanner returns `Scan() == false` (no error) on the long line, exits the loop, and returns `"no type:result line in stdout"` — a false negative that would mask the very regression this test exists to catch. The new file's `findResultTrailer` walks pre-scanned 1 MiB-capped lines from `scanLargeStdoutLines` instead (canonical extension pattern: `scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)`, mirrors `permission_protocol_spike_test.go:133`). `scanner.Err()` is propagated so a future buffer-exhaustion regression (a line above 1 MiB) fails loudly rather than silently truncating. **Exact byte-length match, not a tolerance band** — the emitter writes `ev.Raw + '\n'` verbatim, so the disk-side and stdout-side bytes are byte-identical; comparing `len(stdoutContent) == len(jsonlContent)` is the strongest possible assertion and any non-zero delta IS the regression. **Invariant to `Content` shape**: claude may emit `tool_result.content` as either a bare JSON string OR a nested `[{type:"text",text:"..."}]` array; both shapes are byte-equal through `Emit`, so comparing raw `json.RawMessage` byte lengths between disk and stdout is shape-invariant — the test does NOT decode `Content` further. Four file-local helpers (`scanLargeStdoutLines`, `findResultTrailer`, `findBashToolResultBlock`, `findToolResultContentByID`, ~70 LoC combined) and two file-scope prompt constants (`largeToolOutputSystemPrompt`, `largeToolOutputUserPrompt`); helpers stay file-local until a second test needs the same shape, mirroring `resilience_test.go`'s precedent and #422's `spawnPyryAgentRun`/`processesInProcessGroup`. **Reuses unchanged** (no new fixture-package surface, no struct extensions): `WithWorktreeAuthenticated` (tenth consumer), `RunPyryAgentRun`/`RunOpts`/`RunResult`, `ReadJSONL`+`JSONLEntry`, `parseContentBlocks`+`contentBlock` (sixth consumer — `Content json.RawMessage` extended in #382 is the load-bearing field that makes the byte-length comparison work), `resultTrailer` (the local `findResultTrailer` decodes into it directly; the `parseResultTrailer` function itself is bypassed for the 64 KiB-cap reason above), `jsonlPathFor` (tenth consumer), `truncate` (sixth consumer). Failure-message discipline distinguishes "test setup wrong" (model paraphrased / refused — sharpen the system prompt, bump MaxTurns to 3) from "production broken" (the regression sensor named explicitly, with the emitter line cited so a future PR has to update both the assertion and the contract together). Forward-defensive stderr substring tripwire (`!bytes.Contains(result.Stderr, []byte("bufio.Scanner: token too long"))`) mirrors `long_session_test.go:135-139` — pins the literal stdlib error text verbatim (paraphrasing would silently disable it). One real haiku call per run, ~$0.02 (large `tool_result` inflates token count above peer haiku-low tests but is bounded). `t.Parallel()` is NOT called — matches the existing realclaude convention. ~252 LoC including the package-level comment block, two prompt constants, and inline rationale, zero edits to `fixtures.go` or any peer test file, zero production-source changes. See [`codebase/423.md`](../codebase/423.md) for the design rationale.
-- `sigterm_mid_tool_use_test.go` (#422) — ninth consumer of the trio. **SIGTERM-mid-tool_use cleanup regression guard.** One named test (`TestRealClaude_SigtermMidToolUse`) pins three production invariants together when pyry receives SIGTERM with a Bash subprocess in flight: (a) no orphan subprocess survives pyry's exit, (b) the on-disk session JSONL ends at a complete envelope boundary, and (c) pyry exits within 5 s of SIGTERM. Drives `pyry agent-run --allowed-tools Bash --max-turns=2` with a prompt that forces a single `sleep 30` Bash invocation, sleeps 3 s (long enough for claude to write the `tool_use` envelope to disk and fork Bash), sends SIGTERM, and runs `cmd.Wait` in a goroutine raced against `time.After(5 * time.Second)`. The 5 s deadline is the production contract — `internal/agentrun/streamrunner/runner.go:40`'s `killGrace = 5 * time.Second` — not an arbitrary budget; deadline expiry IS the regression being guarded against. On timeout, `cmd.Process.Kill` is called and the wait channel is drained under a 2 s ceiling before `t.Fatalf` reads the stderr buffer (happens-before via the drained `Wait`). **Process-group orphan check, not direct-children**: `cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}` makes pyry its own process-group leader (`pgid == pid`); after `cmd.Wait` returns, `pgrep -g <pgid>` catches reparented orphans that `pgrep -P <pyry-pid>` would miss (claude and its Bash descendant are reparented to init/launchd at the moment pyry exits, so the parent-pid linkage is gone before the test can observe it). Architect-picked shape "most reliable on macOS + Linux"; the test filters out `pgid` itself from the result list (defense against transient zombie visibility) and salvage-kills the group via `syscall.Kill(-pgid, SIGKILL)` on a positive hit + via `t.Cleanup` as defense-in-depth from spawn time. **JSONL terminal-shape pin: branch B** (clean stream truncation at a complete envelope boundary), chosen over branch A (structured trailer with non-success subtype) because the on-disk JSONL is claude's session-state file for `--continue`, NOT a stream-json result stream — there is no evidence claude flushes a structured trailer line to disk on signal. Assertions: byte-tail check (`jsonlBytes[len-1] == '\n'` — the ONLY way to surface a half-written line; `ReadJSONL` silently retains trailing partial bytes per `jsonl/reader.go:188-262`), Bash `tool_use` envelope present (assistant entry with `{Type:"tool_use", Name:"Bash", ID:!=""}` content block), matching `tool_result` absent in subsequent user entries. Each failure message distinguishes "test setup wrong" (raise/lower pre-SIGTERM sleep) from "production broken" (real hang, real append-discipline drift). If a future probe reveals branch A holds, flip the tool_result assertion to "find a result envelope with `subtype != success`" — same surface, opposite sign; the contract that the shape is **pinned** is unchanged. Two file-local helpers (`spawnPyryAgentRun`, `processesInProcessGroup`, ~35 LoC combined) and two file-scope prompt constants (`sigtermSystemPrompt` mirrors the anti-chain wording from `longSessionSystemPrompt`; `sigtermPrompt` is `"Use the Bash tool to run \`sleep 30\`. Do nothing else."`). `RunPyryAgentRun` is unusable here because it runs to completion synchronously and provides no PID access during the run; `spawnPyryAgentRun` constructs the same eight-flag argv but does not wait — per the ticket's "Technical Notes" guidance and `resilience_test.go`'s `resolveClaudeBin`/`runClaudeDirect` precedent, the helpers stay file-local until a second test needs the same shape. **Reuses unchanged** (no new fixture-package surface, no struct extensions): `WithWorktreeAuthenticated` (ninth consumer), `ReadJSONL`, `ensurePyryBuilt`, `parseInitSessionID`, `parseContentBlocks`+`contentBlock` (fifth consumer of the post-#382 struct — `Name`/`ID`/`ToolUseID` cover exactly what assertions need), `jsonlPathFor` (ninth consumer), `truncate` (fifth consumer). Same family as the 2026-05-16 fork-bomb incident (`ca8b688`, different shape, same cleanup-paths-leaking class) and the SIGTERM-mid-tool_use cell of the same resilience matrix `resilience_test.go` (#382) opened. One real haiku call per run, ~$0.005 with cache warm (lower than peer haiku-low tests because the run is truncated at SIGTERM before claude generates the final response turn — only the `tool_use` envelope is billed). `t.Parallel()` is NOT called — matches the existing realclaude convention. ~280 LoC including the package-level comment block and inline rationale, zero edits to `fixtures.go` or any peer test file, zero production-source changes. See [`codebase/422.md`](../codebase/422.md) for the design rationale.
+- `sigterm_mid_tool_use_test.go` (#422, re-specified twice by #1219) — ninth consumer of the trio. **SIGTERM-mid-tool_use cleanup regression guard.** One named test (`TestRealClaude_SigtermMidToolUse`) pins four production invariants when pyry receives SIGTERM with a Bash subprocess in flight: (1) full-subtree cleanup — no orphan claude or Bash descendant survives pyry's exit; (2) the on-disk session JSONL ends at a complete envelope boundary; (3) pyry exits within 5 s of SIGTERM (`internal/agentrun/streamrunner/runner.go:40`'s `killGrace` — the production contract, not a test-tuning budget: deadline expiry IS the regression); (4) the signal genuinely landed mid-tool_use — the precondition that makes 1–3 mean anything. **#1219 replaced the fixture command and invariant 4's discriminator twice** after claude's Bash-tool policy changed out from under both; see [`codebase/1219.md`](../codebase/1219.md) for the fragility history (`sleep 30` → refused by claude 2.1.158 → `tail -f /dev/null` → backgrounded-on-timeout by claude 2.1.220 → the current FIFO-owned shape) and the file's own header, which is the authoritative running record for any future defeat. **Current mechanics**: `holdFIFO` inverts ownership of the open window — the test `mkfifo`s a FIFO and blocks a goroutine on `open(O_WRONLY)`; claude's Bash call is `cat <fifo>`, which blocks in `read()` the instant the rendezvous with the test's open completes, and can only unblock via the test's own `t.Cleanup` release (the `*os.File` is never exposed to the test body). An event-driven wait (FIFO rendezvous → subprocess appears as a pyry descendant → Bash `tool_use` flushed to the on-disk JSONL) times the SIGTERM instead of a fixed sleep, so invariant 4's precondition holds regardless of claude version speed. Invariant 1's orphan check now walks claude's descendant process groups (claude runs Bash two levels below pyry, so `pgrep -g <pyry-pgid>` alone can't see it); invariant 4b's terminal-shape check is `classifyBashToolResult`, a four-way classifier (`toolResultAbsent` / `toolResultInterrupted` / `toolResultUnbounded` / `toolResultBounded`) that **rejects only on positive evidence claude's own bound ended the call**, read from two surfaces — `toolUseResult.backgroundTaskId`/`timedOutAfterMs` (claude's client-default timeout branch, #1223) and `input.timeout`/`run_in_background` (the model-chosen-bound branch, 2026-07-27) — because neither surface alone covers both of claude's bounding mechanisms. Every other shape accepts, including claude's teardown-interruption marker (`interruptedByShutdown: true`) and an ordinary non-zero-exit result claude writes when pyry's own reaper wins a teardown race against claude's signal handling (the 2026-07-29 defeat that flipped the polarity a second time — keying acceptance on the *absence* of a claude-internal flag accused pyry of doing its job correctly). A pre-SIGTERM JSONL snapshot backs the post-exit check with different fabric — a pure timing fact, no claude field — since a bounding defeat's `tool_result` is always written before the signal. `TestClassifyBashToolResult_ProbeEnvelopes` (credential-free, 11 fixture rows including verbatim probe captures from both the 2026-07-27 and 2026-07-29 live defeats) is the classifier's oracle and the AC2 gate. **Reuses unchanged**: `WithWorktreeAuthenticated` (ninth consumer), `ReadJSONL`, `ensurePyryBuilt`, `parseInitSessionID`, `parseContentBlocks`+`contentBlock`, `jsonlPathFor`, `truncate`. Same family as the 2026-05-16 fork-bomb incident (`ca8b688`, different shape, same cleanup-paths-leaking class). One real haiku call per run, ~$0.005 with cache warm. `t.Parallel()` is NOT called — matches the existing realclaude convention. Grew ~280 LoC → ~1500 LoC across the two reworks; zero production-source changes in any of the three. See [`codebase/422.md`](../codebase/422.md) for the original design and [`codebase/1219.md`](../codebase/1219.md) for the rework.
 - `long_session_test.go` (#421) — eighth consumer of the trio. **Long-running session JSONL append integrity (≥10 turns).** Closes the long-turn-count gap left by the prior suite (peer tests cap at `MaxTurns ∈ {1,2,3,4}`): a regression in the multi-turn append path — Scanner buffer downgrade, off-by-one trailer write, trailing-newline drift, scanner reset across turn boundaries, buffer flush gap swallowing the last event — would not have been caught by any test that runs today. Single `TestRealClaude_LongSessionJSONLIntegrity` seeds the worktree with a 10-line `numbers.txt` (`"1\n2\n…\n10\n"`, `0o600`) and drives a real `claude` session through ten distinct single-command Bash operations against it (`wc -l`, `head -n 3`, `tail -n 3`, `sort`, `uniq`, `cat`, `grep 5`, `wc -c`, `awk '{s+=$1} END {print s}'`, `ls -l`) with an anti-chain steering paragraph reused from `budget_test.go`'s `maxTurnsSystemPrompt` shape (count bumped from 5 to 10, `error_max_turns` assertions removed). `RunOpts: MaxTurns=12, Effort="low", Model="claude-haiku-4-5", AllowedTools=["Bash"], Timeout=10 * time.Minute` — `MaxTurns=12` is deliberate 2-turn headroom above the ≥10 floor, `Timeout` bumped from the 5-minute `RunPyryAgentRun` default to absorb cold-network/queue tail latency without inflating the success-path budget on short tests. Six sequential assertions: `ExitCode == 0`, `SessionID != ""`, `parseResultTrailer` succeeds, `trailer.NumTurns >= 10` (failure message names the prompt-design recourse — "expand the prompt or strengthen anti-chain steering — do NOT lower the threshold" — at the point of failure so the next maintainer doesn't paper over the regression by lowering the constant), single-pass JSONL walk asserting `endOfTurnCount >= 10` on `e.Kind == "assistant"` entries AND that the last `assistant` entry satisfies `EndOfTurn && TextChars > 0`, and the **forward-defensive negative tripwire** `!bytes.Contains(result.Stderr, []byte("bufio.Scanner: token too long"))`. The Scanner tripwire pins the literal stdlib error text verbatim (paraphrasing would silently disable it) and is expected to pass trivially today — its job is to fire the day someone wires a stdlib `bufio.Scanner` into pyry's production stdout/stderr path WITHOUT bumping its buffer, hits a long claude line in this multi-turn run, and the regression would otherwise land silently; the failure message points the maintainer at the fix (`tool_loop_test.go:210` precedent: bump to 1 MiB). `ReadJSONL`'s underlying `jsonl.NewReader` has a 16 MiB cap (`internal/agentrun/jsonl/reader.go:27-30`), so the read path is structurally safe — the tripwire targets the OTHER stdout/stderr Scanner surface, not the read path. The user prompt ends with an explicit "After all ten results, summarize what you saw in one short sentence" — the summary tail nudges the model to emit one more `assistant`-kinded `end_turn` text block, giving the last-event-EndOfTurn assertion something to land on without depending on the model spontaneously producing a closing turn (without it, the run still completes successfully but the LAST assistant entry can be a `tool_use`-only message with `TextChars == 0`, failing the assertion on a non-regression). Reuses `WithWorktreeAuthenticated` + `RunPyryAgentRun` + `ReadJSONL` + `parseResultTrailer` + `jsonlPathFor` + `truncate` unchanged — zero new helpers, zero exported types, zero edits to `fixtures.go` or any peer test file. **Eighth consumer of `WithWorktreeAuthenticated`/fixture trio**, **sixth consumer of `parseResultTrailer`**, **eighth consumer of `jsonlPathFor`**, **fourth consumer of `truncate`**. One real haiku call per run, ~$0.05–$0.10 (higher per-test than peers because of the turn count, but bounded — same order of magnitude as `budget_test.go`'s cache-hit + max-turns pair). `t.Parallel()` is NOT called — matches the existing realclaude convention. The seeded-Bash variant was chosen over the text-only fallback ("list 10 facts about Helsinki, one per turn") because ten distinct shell commands give the model ten concrete, separable tasks (`wc -l` ≠ `head -n 3` ≠ `tail -n 3`) that resist collapsing into a single combined turn even under brevity pressure; the fallback stays documented as recourse if a future haiku revision collapses the Bash prompt. ~140 LoC including the two prompt constants and inline comments, zero production-source changes. See [`codebase/421.md`](../codebase/421.md) for the design rationale.
 - `doctor_poisoning_regression_test.go` (#487) — eleventh consumer of the trio. **`/doctor` prompt-injection regression sensor.** One named test (`TestRealClaude_DoctorPoisoningRegression`) guards the contract that the per-spawn settings JSON pyry writes is one claude accepts at startup. A regression means claude rejected the JSON, prepopulated its `/doctor` repair template into the user input buffer, and processed THAT instead of pyry's prompt — the #487 failure mode that was alive across the [`ptyrunner`](ptyrunner-package.md) cutover (#470) because [`settings.WriteSettings`](agentrun-settings-subpackage.md) was emitting the invalid `permissions.defaultMode:"deny"` literal. Detector: walk JSONL events for the first `Kind == "user"` entry, decode its `Raw` into a content string (coercing both observed claude shapes via the file-local `decodeUserContent` helper: string literal AND `[{type:"text", text:"..."}]` array), assert the content does NOT contain the verbatim `/doctor` template opening substring `"Help me fix the issues reported by /doctor below."` (observed in the ticket's reproduction `out.jsonl`). Defence-in-depth: requires at least one `assistant` event in the JSONL (empty assistant set under a non-poisoned session indicates a different upstream failure that masks the regression-guard's signal — `t.Fatalf` with diagnostic context, not silent pass). **Malformed-line policy mirrors `bashInvokedInRaw`** at `allowed_tools_enforcement_test.go:74-76` — a JSONL line that fails to parse into the minimal `{Message: {Content: ...}}` shape is skipped silently; one malformed line must not turn a PASS into an inconclusive. `RunOpts: AllowedTools=["Read"], MaxTurns=1, Effort="low", Model="claude-haiku-4-5"`. Failure diagnostic includes the verbatim user-entry content (truncated to ~512 bytes with `"... (truncated)"` suffix), the JSONL path, and the operator-visible direction `"claude is rejecting the per-spawn settings JSON at startup — see #487"` — content is operator-supplied test data under a tempdir-pinned HOME so the dump is safe to print. Does NOT assert on `stop_reason: end_turn` (that AC item is satisfied by the manual reproduction in the ticket Context, not by the automated test — pinning it would couple the test to upstream model-behaviour detail beyond the contract being guarded). One real haiku call per run (~$0.01). **Reuses unchanged** (zero fixture-package surface changes): `WithWorktreeAuthenticated` (eleventh consumer), `RunPyryAgentRun`/`RunOpts`/`RunResult`, `ReadJSONL`+`JSONLEntry`, `jsonlPathFor` (eleventh consumer). Imports `encoding/json`, `strings`, `testing` — no internal package imports beyond the realclaude fixture surface. `t.Parallel()` is NOT called — matches the existing realclaude convention. **Post-mortem note**: `ptyrunner_byte_equivalence_test.go` (#482) should have caught the invalid literal but didn't — its `WithWorktreeAuthenticated` gate silently skipped on Max-only environments (no `ANTHROPIC_API_KEY`); the fixture-wide auth-skip cleanup to recognise Max-plan credentials is the architectural follow-up. ~149 LoC including the package-level comment block, zero edits to `fixtures.go` or any peer test file, zero production-source changes (the production fix is the single-literal flip in `internal/agentrun/settings/settings.go:72`). See [`codebase/487.md`](../codebase/487.md) for the design rationale.
 - `budget_test.go` (#385) — seventh consumer of the trio. **Budget guardrails.** Two top-level tests pinning cost-relevant guarantees the suite did not previously exercise end-to-end. `TestRealClaude_CacheHitWarmsAcrossRuns` runs the same `RunOpts` skeleton twice through `RunPyryAgentRun` against `WithWorktreeAuthenticated(t)` and asserts the second invocation's trailer reports `Usage.CacheReadInputTokens > 0` (primary, `t.Fatalf`) — pinning Anthropic prompt-cache alignment within the 1-hour TTL when (system-prompt, allowed-tools, model, effort) are identical. A regression that breaks cache-key alignment (dynamic content in the system prompt, per-invocation tool-list churn) will show `== 0` here. A diagnostic-only check on the first run's `CacheCreationInputTokens > 0` uses `t.Errorf` (not `t.Fatalf`) so a sub-threshold system prompt surfaces as a soft signal rather than masking the primary on a passing run; the interpretation matrix (0+pass vs. 0+0) is documented in a comment above the check. `cacheHitSystemPrompt` is a deterministic 5-sentence string concatenation (~300 tokens) sized to clear Haiku 4.5's ~2048-token implicit-cache minimum by margin; the doc comment names the "no dynamic content" constraint (date, run id) explicitly because that is the regression class the test catches. `TestRealClaude_MaxTurnsHonored` runs `pyry agent-run --max-turns=2` against a prompt that natural-completion would require ≥5 turns (numbered 5-line Bash sequence with explicit "do NOT combine" guidance) and asserts five fields on the trailer: `Subtype == "error_max_turns"`, `TerminalReason == "max_turns"`, `NumTurns == 2` (exact — off-by-one fires here), `StopReason != "end_turn"`, `IsError == true`. **`ExitCode == 0` is correct** — `pyry agent-run` exits 0 on a successfully-emitted result trailer regardless of trailer `is_error`; the budget-exhaustion signal lives in the trailer fields, not the subprocess exit code, and a code comment pins this so a future maintainer doesn't "fix" the assertion to `!= 0`. Tool-call-collapse risk pinned in a comment above `maxTurnsPrompt`: if a future haiku revision is smart enough to fire all five `echo`s in one tool_use block (or otherwise complete in ≤2 turns naturally), the assertions fail loudly and the right fix is to bump the prompt to force more turns (e.g. 8 sequential `read X.txt` calls), not to weaken the assertion. Three-field extension to the `resultTrailer` struct in `tool_loop_test.go` adds `IsError bool`, `TerminalReason string`, and `Usage resultTrailerUsage` (plus the new `resultTrailerUsage` sub-struct emitting all four token-count fields); all `omitempty`-tagged so pre-#385 consumers (#376/#381/#382/#384) decode unchanged. **Fifth consumer of `parseResultTrailer`**. File-local `truncateStdout([]byte) string` mirrors the inline pattern from `tool_loop_test.go:127` (the existing file-local `truncate` from #381 stays untouched because the spec forbids touching `fixtures.go` and the existing helper is its own file's private). `RunOpts`: cache-hit uses `MaxTurns=1, AllowedTools=["Read"]`; max-turns uses `MaxTurns=2, AllowedTools=["Bash"]`; both `Effort="low", Model="claude-haiku-4-5"`. Three real haiku calls per run (2+1), ~$0.04 total with cache warm, matching the AC estimate. `t.Parallel()` is NOT called — matches the existing realclaude convention; also load-bearing on the cache-hit test where concurrent runs would muddy the "cache warmed by run 1 specifically" diagnostic. ~199 LoC, zero edits to `fixtures.go`, zero production-source changes. See [`codebase/385.md`](../codebase/385.md) for the design rationale.
@@ -319,6 +319,109 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   natively `blocked-by` this ticket) composes. Zero production files
   touched. See [`codebase/1172.md`](../codebase/1172.md).
 
+- `interactive_stream_multiturn_continuity_test.go` (#1173) — the first
+  real-`claude` coverage of **multi-turn continuity** on the stream-json
+  runner; every prior stream spec (#1153/#1154/#1172) drives exactly one
+  turn, so none proves the runner's core purpose — holding one live
+  `claude` child's stdin open across many turns with context intact.
+  `TestInteractiveStreamMultiTurnContinuity` transcribes #1153's setup
+  verbatim, then drives a **3-entry turn plan** strictly sequentially over
+  one held-open session instead of a single send: (1) **plant** — claude is
+  told to remember a per-run-unique `PYRY<hex nonce>` token; (2)
+  **filler** — an intervening turn with no bearing on the token, load-bearing
+  because a bare 2-turn plant→recall wouldn't prove a turn ran *between* them
+  without respawn; (3) **recall** — asks for the token back. Continuity is
+  asserted by content — `strings.Contains(strings.ToUpper(recallText),
+  token)` — rather than pid inspection (the harness exposes no child pid, and
+  a memory-less respawned child cannot produce the token, so content memory
+  is the stronger "no respawn" observable). New helper
+  `drainForCompletedTurnText` is a text-capturing superset of #1153's
+  `drainForCompletedTurn`: byte-identical M1/M2 milestone semantics, plus
+  accumulating every matching `assistant_delta.Text` into the return value
+  instead of stopping at the first delta — kept as a separate helper rather
+  than parameterizing the shared drain, since editing the shared one would
+  touch the two already-merged sibling call sites (#1153, #1154). Fresh seed
+  constants (`streamMultiTurnBootstrapUUID`/`streamMultiTurnConvID`). Zero
+  production files touched. Split from #1083; siblings #1174 (new-session
+  rotation) and #1175 (permission DENY) are out of scope here. See
+  [`codebase/1173.md`](../codebase/1173.md).
+
+- `interactive_stream_interrupt_test.go` (#1176) — the real-`claude`
+  counterpart of the fakeclaude interrupt proof
+  (`TestRelayV2_StreamInterruptStopsRunningTurn`, #1136), closing the
+  fake-green/real-red gap (#949) on the interrupt path.
+  `TestInteractiveStreamInterruptStopsRunningTurn` composes #1172's seam
+  verbatim (`startStreamRunningTurnHarness` + `driveRunningTurn` +
+  `drainForResponding`) to put a genuinely-running live turn in flight, sends
+  a payload-less `TypeInterrupt` envelope (routes via the active cursor →
+  `resolveBoundRunner` → the running turn's bound runner), and asserts the
+  turn stops **cancelled** via a new drain, `drainForCancelledTurnEnd` — its
+  vacuous-pass guard is the reason it exists as its own helper rather than a
+  generic type-targeted drain: the first `turn_end` for the conversation must
+  carry `StopReason == "cancelled"`, since the 40s running-turn loop *will*
+  complete naturally (`"end_turn"`) if the interrupt no-ops. A trivial fourth
+  turn drained via #1153's `drainForCompletedTurn` proves the session stays
+  usable afterwards. Deliberately bootstrap-bound rather than minting a
+  second conversation — AC only requires the interrupt reach the *running
+  turn's* bound runner (proven here), not cross-conversation isolation
+  (unit-owned deterministically by #1121). No new package-level constants,
+  zero production files touched. Split from #1083. See
+  [`codebase/1176.md`](../codebase/1176.md).
+
+- `interactive_stream_resume_after_eviction_test.go` (#1177) — the
+  real-`claude` proof that an idle-evicted **stream** session resumes via
+  `--resume` with prior context intact, closing the last uncovered rung of
+  the streamrunner plan's "restart after eviction" risk. Idle-evict +
+  respawn was covered only against fakeclaude and only on the PTY/bootstrap
+  runner (`TestE2E_IdleEviction_RespawnsOnSendMessage`, #396); the stream
+  path's `TestE2E_PerConversation_IdleEvictsAndReactivates` (#680)
+  explicitly deferred content-recall to "realclaude's domain" — this is that
+  deferred work (see [idle-eviction.md § Testing](idle-eviction.md#testing)).
+  `TestInteractiveStreamResumeAfterEviction` transcribes #1153's setup, then:
+  plants a per-run-unique token in a turn drained via #1153's
+  `drainForCompletedTurn` (the sync point guaranteeing the token committed
+  before eviction); polls the daemon's stderr for the
+  `session.idle_eviction` WARN via the new `waitForIdleEvictionWARN` — the
+  non-vacuity gate proving eviction happened *before* the resume turn is
+  sent; drives a second turn via the new `drainForResumedTurnText` (a fork
+  of `drainForCompletedTurn` that accumulates delta text instead of stopping
+  at the first); and asserts the reply recalls the token
+  (`strings.Contains(strings.ToUpper(...))`) — a forked fresh spawn has no
+  memory of it, so this is the discriminator. First stream spec to *enable*
+  the idle timer (`-pyry-idle-timeout=30s` via the new
+  `spawnBootstrapDaemonWithIdle`, a self-contained near-copy of
+  `spawnBootstrapDaemon` keeping zero shared-file merge surface with
+  siblings #1173–#1176); every prior spec disables it. Standing coupling
+  constraint documented in-file: the idle timer arms once at activation and
+  never resets per-turn, so the 30s window must exceed plant-turn
+  completion or the plant drain REDs loudly. `waitForIdleEvictionWARN` pins
+  the WARN's `session_id` **value** (stronger than #396's key-only pin),
+  sound because the stream path's `--session-id`-first `buildArgs` never
+  forks, so the pool id equals the on-disk transcript stem across
+  `--resume`. Ticket-encoded fixed UUIDs (single-char-repeat stems
+  exhausted by prior siblings). Zero production files touched. Split from
+  #1083. See [`codebase/1177.md`](../codebase/1177.md).
+- `interactive_stream_permission_deny_test.go` (#1175) — the security-relevant
+  **deny** half of the remote permission round-trip on the stream-json runner
+  (security-sensitive; architect security-review verdict PASS). #1154 proved
+  allow on this stack; a fail-open regression (denied tool executes anyway)
+  or a hang on the denied modal is exactly the real-claude-specific failure
+  the fake tier (#1139) cannot surface.
+  `TestInteractiveStreamPermissionDeny` reuses #1154's
+  `startStreamModalResolutionHarness` verbatim (no new harness, no new seeded
+  UUIDs) and `raiseRealPermissionModal`/`writeFileTrigger` (#1030), swaps the
+  answer to `reject_once`, and adds two checks: a `modal_dismissed` drain
+  asserting `Source == "remote"` + `Outcome == "reject_once"` (attribution —
+  closed vocabulary rules out a timeout-deny or dropped answer masquerading
+  as the explicit reject) and a workdir walk,
+  `requireTriggerFileAbsent`, proving the gated `Write`'s target file never
+  materialised. The retry-answering helper `denyModalsUntilIdle` (rework
+  after an operator live-gate FAIL surfaced that real haiku retries a denied
+  tool at least once) rejects every permission modal the turn raises until
+  terminal `turn_state{idle}`, bounded by a retry-count cap
+  (`maxRetryDenies`) and `perTurnReplyBudget` wall-clock, each with a distinct
+  diagnostic. No content/echo assertion. Zero production files touched. Split
+  from #1083. See [`codebase/1175.md`](../codebase/1175.md).
 - `interactive_stream_new_session_test.go` (#1174) — real-claude cross of
   the fakeclaude sibling #1137: on the stream-json runner, `new_session`
   rotates the bootstrap session id AND `streamsup.Runner.RestartFresh`
@@ -335,6 +438,201 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   #989 `canonicalCase` hazard). Zero production files touched. Split from
   #1083; sibling leaves #1173 (multi-turn continuity), #1175 (permission
   DENY). See [`codebase/1174.md`](../codebase/1174.md).
+- `background_trigger_probe_test.go` (#1223) — **evidence probe, not a
+  regression gate**; opt-in behind `PYRY_PROBE_BACKGROUND_TRIGGER=1` on top of
+  the package's normal auth skip (an ungated probe would burn ~9 live claude
+  turns on every `make preship`). Settles which environment lever
+  deterministically makes claude return a background handle under `pyry
+  agent-run`, so #1224–#1227 can be specified against a known trigger instead
+  of the model's discretion. Mechanism: the test `mkfifo`s a FIFO and holds
+  the write end open in a goroutine (`holdProbeFIFO`, release only in
+  `t.Cleanup`, never exposing the `*os.File`); claude's `cat <fifo>` Bash call
+  blocks on the read end and cannot complete on its own, so a matching
+  `tool_result` observed while the write end is held is a **structural**
+  signal that claude ended the call itself — not a match against claude's
+  result prose (the treadmill #563 and #1219 each paid for once). The same
+  property removes the timing race from the `ps -axo pid=,ppid=,pgid=`
+  snapshot: it is taken synchronously at the observation point, with liveness
+  self-evidenced via a `cmd.Wait` channel rather than `Signal(0)` (which
+  reports an unreaped zombie as alive). Row-table design over
+  `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` /
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` / model-set `run_in_background`, each
+  a `t.Run` subtest with its own `t.TempDir()`/`t.Setenv`/FIFO. **Result:**
+  `BASH_DEFAULT_TIMEOUT_MS` set low is the deterministic trigger (7/7 firing
+  reps across all rows that carry it); `BASH_MAX_TIMEOUT_MS` alone does not
+  fire (it caps what the model may set, and the model set no `timeout` in any
+  rep); `toolUseResult.timedOutAfterMs` is the only surface that discriminates
+  the timeout-expiry path from the model-set `run_in_background` path — the
+  process tree is byte-identical between them. Four credential-free
+  self-checks (FIFO hold/release, `ps`-parse, `input.timeout` projection) run
+  ungated. Zero production files touched. Kept (not deleted) because
+  #1224–#1227 all have to stage this same scenario. See
+  [`codebase/1223.md`](../codebase/1223.md) for the full lever table, the
+  live-run evidence, and two known gaps flagged by code review (SHOULD FIX,
+  not blocking) in the Bash-call selection and the env-arrival control's
+  absent/unread collapse.
+- `fifo_reader_liveness_test.go` (#1239) — **offline instrument, not a probe**;
+  no auth skip, no env gate, no live claude. Answers "is some process
+  currently holding this FIFO's read end?" with no pid and no `ps`, closing a
+  gap `holdProbeFIFO` alone leaves open: holding the write end proves a
+  command could not have *finished*, not that it is still *alive* — a killed
+  command leaves the same held write end. `fifoLiveRead(path)` returns a
+  three-valued `fifoLiveOutcome` (`reader-present` / `no-reader` /
+  `instrument-failed`, never a bare boolean) via `Lstat` → positive
+  `os.ModeNamedPipe` allowlist gate → `open(path, O_WRONLY|O_NONBLOCK)`
+  (success = reader present, `ENXIO` = no reader, everything else =
+  instrument failure). The allowlist gate is what closes the inverting
+  failure on the success arm: a bare open on `/dev/null` or a regular file
+  succeeds with no reader anywhere, which a regular-file blacklist would
+  misread as "reader present." Four offline self-checks prove: the read
+  flips on one FIFO across one reader's lifetime (`Kill()` alone does not
+  flip it — `Wait()`/reap does), the mode gate rejects every non-FIFO path
+  including `/dev/null`, every open errno except `ENXIO` yields
+  instrument-failed, and repeated reads don't perturb a blocked reader.
+  Zero production files touched. #1240 is natively blocked on this file and
+  calls `fifoLiveRead` at the instant it records `turn_state{idle}`. See
+  [`codebase/1239.md`](../codebase/1239.md) for the implementation detail and
+  two known gaps flagged by code review (SHOULD FIX, not blocking) in the
+  `Lstat`-arm errno assertion coverage and a stuttering `Detail` string.
+- `background_reach_probe_test.go` (#1230) — **evidence probe, not a regression
+  gate**; opt-in behind `PYRY_PROBE_BACKGROUND_REACH=1`, reusing #1223's staging
+  rig verbatim (`background_trigger_probe_test.go` not edited; every new symbol
+  `reach`-prefixed against the concurrent `feature/1219` branch and sibling
+  #1231). Answers the predictive half of "does a backgrounded Bash command
+  outlive pyry": is it still a transitive child of claude's pid inside
+  `agentrun.ReapDescendantGroups`'s descendant-BFS reach, and would its process
+  group survive the reaper's three exclusions (`reap.go:52`) — one during-turn
+  snapshot, no teardown. **Content-first identification, not subtree-first**:
+  one full-table `ps -axww -o pid=,ppid=,pgid=,command=` matched in Go against
+  the run's FIFO path and session UUID across the whole process table — the
+  read #1223's subtree-first, base-name-only `probeAnnotateCommands` cannot
+  perform, and the one that could actually catch a re-parented survivor. Root
+  pinned content-first via `--session-id <uuid>` in claude's argv (the ptyrunner
+  path only), checked for agreement against the rig's positional
+  `probeWaitForDirectChild` guess rather than trusted on its own. Two
+  reachability reads off one integer snapshot — `reachChainUp` walking ppid
+  links up, `probeDescendantsFromPS` (#1223's, unedited) BFS-ing down —
+  disagreement recorded as an instrument fault, never a finding. Three-valued
+  match outcome (`matched` / `trigger-never-fired` / `fired-no-row-matched`),
+  established before any reachability claim is made. **Result (live run,
+  2026-07-30, claude 2.1.220):** the backgrounded `cat`/`zsh -c` pair IS
+  reachable from claude's pid, two hops down, and the zsh wrapper's process
+  group survives all three exclusions — the reaper *would* target it; whether
+  it actually dies is #1231's question. Redaction is structural
+  (`security-sensitive`, earned by this ticket): the raw argv table never
+  leaves one stack frame, no `-E`/`-e`-with-environment/`eww` anywhere,
+  commands capped at 512 bytes after matching, only the integer-column
+  snapshot is persisted verbatim. Three credential-free self-checks
+  (`TestReachMatchArgvRows`, `TestReachChainUp`, `TestReachBackgroundHandle`)
+  run ungated. Zero production files touched. See
+  [`codebase/1230.md`](../codebase/1230.md) for the full arithmetic, the
+  live-run evidence, and lessons from two rounds of code review (a MUST FIX
+  gating the reachability verdict on the integer snapshot's own read error,
+  plus a still-open SHOULD FIX on two record fields' finding-semantics).
+- `process_pin_liveness_test.go` (#1235) — **offline instrument, not a probe**;
+  no auth skip, no env gate, no live claude, no verdict about pyry — it is
+  depended on as code, not as evidence, by the live probes #1236 → #1237. Two
+  parts, both additive over #1230's `reach*` surface. **Exclusion-aware argv
+  scan (`pin*` prefix)**: `pinPartition` is a pure post-filter over
+  `reachMatchArgvRows`' own `(matches, total)`, splitting by a caller-supplied
+  `exclude map[int]string` so an instrument-owned pid is withheld with its
+  reason recorded rather than relying on a needle that happens not to collide
+  with it; every matched row is retained (`MatchCount` visible as `> 1` rather
+  than resolved to the first), and `reachMatchArgvRows`/`TestReachMatchArgvRows`
+  are untouched. **Four-valued per-pid liveness read**: `pinReadState(pid)`
+  execs a narrow `ps -p <pid> -o pid=,ppid=,stat=` (no descendant requirement —
+  a target re-parented to pid 1 reads like any other) and classifies into
+  `running` / `exited-but-not-yet-reaped` / `no-such-process` /
+  `instrument-failed`, never collapsing two of them. Branch order is the
+  contract: stderr, a `CommandContext` timeout's non-`ExitError` type, and
+  stdout arriving alongside an error are all checked before the
+  `no-such-process` default is reachable — closing the measured trap where a
+  bad `ps` column prints a keyword list on stdout next to a non-zero exit, and
+  the measured trap where a timeout-killed `ps` is byte-identical to a dead pid
+  on every field but the sign of its exit status. Zombie detection is
+  first-rune (`state[0] == 'Z'`), not equality — darwin emits `ZN`/`Z`, Linux
+  `Z+`, and an equality miss falls through to `running` silently, the one
+  direction this instrument must never fail in. Five credential-free
+  self-checks, including a one-subject one-lifetime flip
+  (`running` → kill-without-wait → `exited-but-not-yet-reaped` → wait →
+  `no-such-process`) that proves the exec wiring rather than only the
+  classifier. `security-sensitive`, earned by the column set's environment-read
+  prohibition (`pid=,ppid=,stat=`, no `-E`/`-e`-env/`eww`) backed by a
+  deterministic tripwire test, not just a doc comment. Zero production files
+  touched; blocked by, and reuses rather than rebuilds, #1230's argv scan. See
+  [`codebase/1235.md`](../codebase/1235.md) for the branch-order table, the
+  patterns this ticket's measured traps establish, and a code-review SHOULD FIX
+  (not blocking, deferred to #1236) on a self-check whose comment overclaims
+  what its assertion pins.
+- `teardown_liveness_test.go` (#1250) — **offline instrument, not a probe**; no
+  auth skip, no env gate, no live claude, no verdict about pyry — depended on
+  as code by the live rig #1251. Two additive parts over #1235's `pin*` and
+  #1239's `fifoLive*` surfaces, both unedited. **Reaper-log classifier
+  (`tdn*` prefix)**: `tdnClassifyReapLog(stderr, heldPGID)` is pure over bytes
+  and answers `held-pgid-in-reap-line` / `reap-line-without-held-pgid` /
+  `no-reap-line` (ambiguous by construction — `reap.go:64` guards the emit on
+  `len(reaped) > 0`, so silence means "reaped nothing" or "never fired," and
+  the `Detail` names both) / `instrument-failed`. Anchored on the reap
+  message's bare text as a string literal, never `msg="..."` — `runAgentRunPty`
+  passes no `Logger`, so `ptyrunner` falls back to `slog.Default()`, not the
+  `slog.NewTextHandler` the ticket body cited, and an anchor built against the
+  wrong handler would silently read "no line" on the only path that matters.
+  Membership decided over parsed integers via a key-boundary attribute match
+  (`tdnAttrIndex`), never a substring — closes both a false negative (`slog`
+  quotes `pgids=` the moment a second pgid appears) and its dual false
+  positive (held `77` inside the text of `pgids=[7788]`). **Real-`ps`
+  fail-safe premise (AC2)**: four mis-invocation arms assert
+  `len(exitErr.Stderr) > 0` read from `.Output()`'s own `*exec.ExitError`
+  (the exact channel `pinReadState` consumes) before requiring
+  `pinClassifyState` to return `instrument-failed` — proving, against real
+  bytes rather than #1235's hand-built errors, that branch 1 keeps every
+  broken invocation off the `no-such-process` verdict. The bad-column arm
+  uses four requested columns (not three) because `ps` silently drops the
+  unknown one and prints the rest, producing a row `pinStateRow` parses
+  *successfully* as a live pid; the out-of-range arm escalates a candidate
+  ladder until `ps` actually rejects one, rather than assuming a hard-coded
+  constant is out of range (macOS caps at 99999, Linux's default `pid_max` is
+  4194304). **Record + writer (AC3)**: `tdnRecord` composes
+  `pinStateOutcome`/`fifoLiveOutcome`/`tdnReapOutcome` with no new liveness
+  type and no verdict synthesized across them; `writeTdnArtifacts` emits
+  exactly one file (`teardown.json`, `0o600`) — "exactly one file" is itself
+  the redaction assertion, since the sibling writer's second file (a verbatim
+  `ps` snapshot) has no analog here. 22 credential-free self-checks, zero
+  SKIP. Zero production files touched. See [`codebase/1250.md`](../codebase/1250.md)
+  for the full implementation, the subprocess-boundary citation-swap pattern,
+  and a code-review SHOULD FIX (not blocking, deferred to #1251) on a
+  first-match self-check row that doesn't discriminate its own claimed
+  mutation.
+- `teardown_reap_capture_test.go` (#1253) — **offline instrument, not a
+  probe**; no auth skip, no env gate, no live claude. Drives #1250's
+  `tdnClassifyReapLog` with bytes captured from a *real*
+  `agentrun.ReapDescendantGroups` call, replacing that classifier's
+  hand-written string-constant fixtures with a live capture so a future
+  `slog` rendering change fails a test instead of silently making every
+  liveness answer read `no-reap-line`. Builds real two-level process trees
+  (test → re-exec'd parent → leaves, the parent required because
+  `setpgid` on a child rules out a shell) and captures whatever
+  `slog.Default()` emits during the reap via `log.SetOutput` — no `t.Parallel`
+  in the file, since that redirect is process-global and not reentrant. Proves
+  the capture *flips* within one harness: a killed group classifies
+  `held-pgid-in-reap-line`, a childless walk root emits no line at all and
+  classifies `no-reap-line`. A same-group sibling spared by `reap.go:52` is
+  asserted *still alive* at the instant its pgid reads absent from the line —
+  the unearned negative the instrument exists to refuse. Both renderings
+  (`pgids=[N]` unquoted, `pgids="[N M]"` quoted) come from real reaps and are
+  asserted to differ; the substring hazard is closed in the previously-untested
+  suffix direction (`88` vs `[7788]`). One new file rather than an edit to
+  `teardown_liveness_test.go`, both because that file's header declares itself
+  "pure over bytes" (this harness spawns real trees and issues real SIGKILLs)
+  and because #1251 had an in-flight +259/−40 diff to it at filing time. Every
+  pid a real reap produces is treated as a trust boundary: `tdnKillTree`
+  refuses `pid <= 1`/the test's own pid/pgid before any `syscall.Kill`, and the
+  multi-line report-file parse is all-or-nothing rather than treating a short
+  read as "not ready yet." 32 credential-free subtests, zero SKIP. Zero
+  production files touched; calls `tdnClassifyReapLog` and does not edit it.
+  See [`codebase/1253.md`](../codebase/1253.md) for the full implementation and
+  two non-blocking code-review NITs (a misleadingly-named loop variable, one
+  reasoned-not-measured comment).
 
 ## Test infrastructure
 
@@ -406,5 +704,7 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#854](https://github.com/pyrycode/pyrycode/issues/854) — real-claude interactive two-turn liveness test, the RED/GREEN oracle for the fresh-daemon bootstrap-reply deadlock fix (`cmd/pyry/interactive_turn_stream_v2.go`'s `resolveTarget`); the only test in the suite that drives the daemon's interactive relay path directly rather than `pyry agent-run` — see [`codebase/854.md`](../codebase/854.md) and [`turnbridge-package.md`](turnbridge-package.md#which-jsonl-and-surviving-clear-rotation).
 - Ticket [#1153](https://github.com/pyrycode/pyrycode/issues/1153) — real-claude counterpart of #1141's stream-json liveness proof; first real-claude test to flip `interactive_runner: "stream-json"`; introduces the reusable `writeStreamInteractiveConfig` config-toggle helper (composed with `spawnPermissionDaemon` by the blocked-by rider #1154) and the two-milestone `drainForCompletedTurn` drain; codebase note at [`codebase/1153.md`](../codebase/1153.md).
 - Ticket [#1154](https://github.com/pyrycode/pyrycode/issues/1154) — stream-json sibling of #1030's real permission round-trip (desktop#483 scenario, real stream stack); composes #1030's harness/trigger scaffold with #1153's `writeStreamInteractiveConfig`/`drainForCompletedTurn` seams, zero production files; answer-only (approve), PTY-path cancel stays owned by #1030 Phase B; split from #1083; codebase note at [`codebase/1154.md`](../codebase/1154.md).
-- Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by (blocks) #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
+- Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
+- Ticket [#1176](https://github.com/pyrycode/pyrycode/issues/1176) — real-claude interrupt-stops-a-running-turn gate, composing #1172's running-turn trigger with the shipped interrupt primitives (#1120/#1121); new `drainForCancelledTurnEnd` drain guards against the spontaneous-`end_turn` vacuous pass; closes the fake-green/real-red gap (#949) on the interrupt path; split from #1083, zero production files; codebase note at [`codebase/1176.md`](../codebase/1176.md).
+- Ticket [#1175](https://github.com/pyrycode/pyrycode/issues/1175) — real-claude permission **deny** round-trip on the stream-json runner (security-sensitive, architect security review PASS); reuses #1154's harness/trigger scaffold, swaps the answer to `reject_once`, and adds a `Source == "remote"`/`Outcome == "reject_once"` attribution assertion so a timeout-deny can't masquerade as the explicit reject, plus a workdir walk proving the gated `Write` never executed; rework `denyModalsUntilIdle` answers every retry modal (real haiku retries a denied tool at least once) bounded by a retry-count cap and wall-clock budget; zero production files; codebase note at [`codebase/1175.md`](../codebase/1175.md).
 - Ticket [#1174](https://github.com/pyrycode/pyrycode/issues/1174) — real-claude cross of fakeclaude sibling #1137: on the stream-json runner, `new_session` rotates the bootstrap session id and `RestartFresh` spawns a genuinely fresh live claude child under the rotated id (not `--resume`), proven by a fresh `<idAfter>.jsonl` transcript appearing on disk; transcribes #1031's spine + #1153's/#1154's drain helpers, zero production files; split from #1083, sibling of #1173/#1175; codebase note at [`codebase/1174.md`](../codebase/1174.md).

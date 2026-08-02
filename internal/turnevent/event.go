@@ -21,11 +21,12 @@ package turnevent
 import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
-// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, and the internal-only status
-// peers Stall, ApiRetry, and Compacting. The unexported marker keeps the
-// variant set closed to this package, so external ACP-spec churn cannot inject
-// a variant. The bridge (#608) ranges a stream of Event and the wire adapter
-// (#607) type-switches to map each kind.
+// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, the internal-only status
+// peers Stall, ApiRetry, and Compacting, and the diagnostic marker
+// Unrecognized. The unexported marker keeps the variant set closed to this
+// package, so external ACP-spec churn cannot inject a variant. The bridge
+// (#608) ranges a stream of Event and the wire adapter (#607) type-switches to
+// map each kind.
 type Event interface{ isTurnEvent() }
 
 // TextChunk is incremental assistant text, grouped by message.
@@ -95,6 +96,52 @@ type ApiRetry struct {
 // bridge-injected conversation id.
 type Compacting struct{ Active bool }
 
+// UnrecognizedSite names WHERE in the stream-json line mapping a payload was
+// found that the parser has no mapping for. String-backed so the producer's call
+// site is enum-safe and the value crosses the wire unchanged.
+type UnrecognizedSite string
+
+const (
+	// UnrecognizedLineType is a top-level stream-json line whose `type` is
+	// neither mapped nor on the measured known-ignored list.
+	UnrecognizedLineType UnrecognizedSite = "line_type"
+	// UnrecognizedAssistantBlock is an assistant message content block whose
+	// `type` is not text, thinking, or tool_use.
+	UnrecognizedAssistantBlock UnrecognizedSite = "assistant_block"
+	// UnrecognizedUserBlock is a user message content block whose `type` is not
+	// tool_result.
+	UnrecognizedUserBlock UnrecognizedSite = "user_block"
+	// UnrecognizedUndecodable is a line or block that failed to JSON-decode at
+	// all. Kind is empty for this site — there is no type to report.
+	UnrecognizedUndecodable UnrecognizedSite = "undecodable"
+)
+
+// Unrecognized is a diagnostic marker: the stream-json parser met a payload it
+// has no mapping for and dropped it. It exists so genuinely unknown claude
+// output becomes VISIBLE the moment it arrives, instead of vanishing into a
+// debug log the production daemon does not print.
+//
+// It is deliberately NOT the parser's tolerate-and-drop path. Types we
+// knowingly ignore (system/*, rate_limit_event) stay silent exactly as before;
+// only output outside that measured set reaches here. A row per turn would make
+// the feature worthless noise, so the known-ignored list is the whole design.
+//
+// Raw is a plain string, not json.RawMessage, because the producer truncates it
+// at construction: a truncated blob is no longer valid JSON, so typing it as raw
+// JSON would be a lie. Truncated says whether that happened. Like every variant
+// here it carries no conversation identity — the bridge injects that.
+type Unrecognized struct {
+	// Site is where the drop happened.
+	Site UnrecognizedSite
+	// Kind is the message or block `type` that had no mapping. Empty when Site
+	// is UnrecognizedUndecodable (nothing decoded, so no type was ever read).
+	Kind string
+	// Raw is the offending JSON, already truncated by the producer.
+	Raw string
+	// Truncated reports whether Raw was cut to fit the producer's cap.
+	Truncated bool
+}
+
 // Location is a file a tool call touches (ACP tool-call location). Line is
 // 1-based; 0 means unspecified.
 type Location struct {
@@ -112,6 +159,7 @@ func (TurnEnd) isTurnEvent()      {}
 func (Stall) isTurnEvent()        {}
 func (ApiRetry) isTurnEvent()     {}
 func (Compacting) isTurnEvent()   {}
+func (Unrecognized) isTurnEvent() {}
 
 var (
 	_ Event = TextChunk{}
@@ -122,4 +170,5 @@ var (
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}
+	_ Event = Unrecognized{}
 )

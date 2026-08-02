@@ -810,6 +810,25 @@ func runSupervisor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
 	}
+	// The #1201 per-conversation turn-busy tracker, constructed HERE — at the
+	// composition root — because it now has two consumers in different subtrees: the
+	// inbound-delivery seam below (#1199, via msgqueue.Config.Deliver) and the relay
+	// leg's drain + teardown clear (relayWiring.busy). Its only input is convReg
+	// (loaded above), so it can be minted between the runner selection and
+	// msgqueue.New without hoisting or late-binding anything: the runner factory's
+	// parameter list is untouched.
+	//
+	// The gate is streamSink != nil, NOT cfg.InteractiveRunner == "stream-json":
+	// that is selectInteractiveRunner's own post-validation answer, so an
+	// unrecognised config value has already failed fast one line above, and this
+	// stays byte-identical to the discriminant relayWiring.streamSink documents. In
+	// PTY mode the tracker is nil and every method reached from either consumer is a
+	// nil-receiver no-op.
+	var turnBusy *turnBusyTracker
+	if streamSink != nil {
+		turnBusy = newTurnBusyTracker(
+			func(sid string) (string, bool) { return conversationForSession(convReg, sid) }, logger)
+	}
 	pool, err := sessions.New(sessions.Config{
 		Logger:                    logger,
 		RegistryPath:              registryPath,
@@ -902,7 +921,7 @@ func runSupervisor(args []string) error {
 	// One closure, two senders into the same #1008 frame path.
 	blocked := sessionErrorNotify(giveUps, logger)
 	queue, err := msgqueue.New(msgqueue.Config{
-		Deliver:  newInboundDeliver(router.resolve),
+		Deliver:  newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
 		// Pending exempts a legitimately-held turn (claude's startup trust modal is
@@ -998,6 +1017,7 @@ func runSupervisor(args []string) error {
 			resolveRunner: func(convID string) (sessions.Runner, bool) {
 				return resolveBoundRunner(convReg, pool, convID)
 			},
+			log: logger,
 		},
 		activeSessionStarter: activeSessionStarter{
 			currentConv: active.CurrentConversation,
@@ -1024,6 +1044,7 @@ func runSupervisor(args []string) error {
 		snapshotSettings:  snapshotSettings,
 		approvals:         approvals,
 		streamSink:        streamSink,
+		busy:              turnBusy,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
@@ -1248,6 +1269,17 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 	return b.sess.WriteUserTurn(ctx, conversationID, payload)
 }
 
+// interruptArm names which actuation interruptRunner dispatched to. The constant
+// VALUES are operator-facing: SendEsc logs them verbatim as a record's arm field
+// (#1193), so they are part of the record contract, not an internal detail.
+type interruptArm string
+
+const (
+	armInterrupt interruptArm = "interrupt" // streamRunner.Interrupt()
+	armSendEsc   interruptArm = "send_esc"  // *supervisor.Supervisor.SendEsc()
+	armNone      interruptArm = "none"      // neither method — inert
+)
+
 // interruptRunner actuates a runner's interrupt through whichever concrete method
 // its runner type exposes — the SendEsc-vs-Interrupt dispatch #1121 places in
 // cmd/pyry, the only package that sees both concrete runner types (the streamRunner
@@ -1257,14 +1289,23 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 // is matched first so any future runner that grows both prefers the stream-json
 // control_request over a PTY Esc. An unknown runner is inert (nil) — no actuation
 // beats wrong actuation.
-func interruptRunner(r sessions.Runner) error {
+//
+// It returns the arm it dispatched to alongside the chosen method's error, so the
+// caller — the only scope holding the conversation id — can record which arm ran
+// (#1193); armNone always pairs with a nil error. The dispatcher itself stays pure:
+// no logger, no ambient state. The arm is an OBSERVABILITY value and nothing may
+// branch on it beyond selecting a record — in particular armNone must NOT trigger a
+// fallback actuation, since the only other runner to try is the bootstrap
+// supervisor, the #678 cross-conversation isolation break resolveBoundRunner's
+// guard exists to prevent.
+func interruptRunner(r sessions.Runner) (interruptArm, error) {
 	switch v := r.(type) {
 	case interface{ Interrupt() error }:
-		return v.Interrupt()
+		return armInterrupt, v.Interrupt()
 	case interface{ SendEsc() error }:
-		return v.SendEsc()
+		return armSendEsc, v.SendEsc()
 	default:
-		return nil
+		return armNone, nil
 	}
 }
 
@@ -1299,6 +1340,23 @@ func resolveBoundRunner(convReg *conversations.Registry, pool *sessions.Pool, co
 type activeInterrupter struct {
 	currentConv   func() string
 	resolveRunner func(convID string) (sessions.Runner, bool)
+
+	// log records which arm an inbound interrupt took (#1192). Optional: nil
+	// falls back to slog.Default() via logger().
+	log *slog.Logger
+}
+
+// logger returns a's logger, falling back to slog.Default() when unset.
+// activeInterrupter is a constructor-less bag of injected seams built as a
+// named-field literal, so an omitted field is a reachable state — and a nil
+// *slog.Logger panics on first use, which on this remotely-driven relay path
+// would be a latent crash on a rarely-hit inert arm. Falling back to the default
+// logger (not a discard handler) keeps an unwired literal's record visible.
+func (a activeInterrupter) logger() *slog.Logger {
+	if a.log == nil {
+		return slog.Default()
+	}
+	return a.log
 }
 
 // SendEsc interrupts the active conversation's bound runner. It keeps the relay
@@ -1309,16 +1367,56 @@ type activeInterrupter struct {
 // ambiguous state (no active conversation, unbound/dangling binding) is inert
 // (nil), never actuating the wrong child; a live runner's no-child error
 // propagates for handleInterrupt to Warn-log and tolerate (best-effort contract).
+// EVERY arm records which one it took, at Info so the records are visible at the
+// daemon's default level (#1192, #1193) — the inert ones, the actuation, and a
+// bound runner exposing no interrupt method at all. Combined with handleInterrupt's
+// own records that closes the route: an interrupt reaching it always leaves at
+// least one v2.interrupt.* record, so on a wired daemon an empty log means the
+// frame never arrived. The dispatched record is written when the arm RETURNS —
+// under #1193's direction choice the arm identity IS interruptRunner's return
+// value — so an actuation that blocked forever would leave none; both actuations
+// are single small writes and no such hang has been observed. The records identify
+// the CONVERSATION: resolveBoundRunner never surfaces the bound session id to this
+// caller.
 func (a activeInterrupter) SendEsc() error {
 	convID := a.currentConv()
 	if convID == "" {
+		// No conversation id to carry — the record's information is its existence:
+		// the frame reached SendEsc and nothing was active.
+		a.logger().Info("relay: v2 interrupt inert; no active conversation",
+			"event", "v2.interrupt.no_active_conv")
 		return nil
 	}
 	r, ok := a.resolveRunner(convID)
 	if !ok {
+		a.logger().Info("relay: v2 interrupt inert; active conversation has no bound runner",
+			"event", "v2.interrupt.no_bound_runner",
+			"conversation_id", convID)
 		return nil
 	}
-	return interruptRunner(r)
+	arm, err := interruptRunner(r)
+	if arm == armNone {
+		a.logger().Info("relay: v2 interrupt inert; bound runner exposes no interrupt method",
+			"event", "v2.interrupt.no_actuator",
+			"conversation_id", convID)
+		return err
+	}
+	// Emitted even when the arm returned an error: this records WHICH arm was
+	// dispatched to, not that the child quiesced (hence dispatched, not actuated).
+	// handleInterrupt's v2.interrupt.keystroke_err carries the error but not the
+	// arm, so on a failed actuation the PAIR is what names the failing actuation —
+	// suppressing this record on error would delete that. The error itself is NOT
+	// repeated here: keystroke_err already carries it, and logging a wrapped
+	// supervisor/streamsup sentinel twice under two correlation keys widens the
+	// record surface for no diagnostic gain. arm is logged as a plain string, never
+	// the named
+	// type: slog renders a named string type through the Any path, and relay's
+	// TextHandler and cmd/pyry's JSONHandler do not agree on how that renders.
+	a.logger().Info("relay: v2 interrupt dispatched",
+		"event", "v2.interrupt.dispatched",
+		"conversation_id", convID,
+		"arm", string(arm))
+	return err
 }
 
 // resolveBoundSession is the new_session twin of resolveBoundRunner: it resolves
@@ -1418,8 +1516,40 @@ func (a activeSessionStarter) StartNewSession() error {
 // retries the FIFO head rather than blocking forever inside Activate. Unlike the
 // removed #594 deliver timeout, it does NOT bound the WriteUserTurn that follows
 // — that block is the drain's turn-end pacing and may run for a whole claude
-// turn. A tuning knob, not a contract.
+// turn. That remains exactly right on the PTY path, where the pacing block lives
+// INSIDE WriteUserTurn (supervisor's idle gate). On the stream path the pacing
+// block sits in FRONT of WriteUserTurn instead — the write there returns as soon
+// as the envelope is in the child's stdin pipe — and it is bounded, by
+// streamTurnHoldTimeout (#1199). A tuning knob, not a contract.
 const inboundActivateTimeout = 30 * time.Second
+
+// streamTurnHoldTimeout bounds ONE delivery attempt's wait for the conversation's
+// running turn to end on the stream-json path (#1199). Unused when the turn-busy
+// tracker is nil (PTY mode), where the pacing block is inside WriteUserTurn and
+// unbounded, as inboundActivateTimeout's doc above records.
+//
+// The arithmetic, against msgqueue's drain: a turn that never ends fails attempt 1
+// after this window, which starts the give-up streak (elapsed ≈ 0 <
+// defaultGiveUpAfter, 2m), sleeps defaultRetryInterval (1s) and retries; attempt 2
+// fails with elapsed ≈ this window ≥ the bound, so the drain gives up, fires
+// OnGiveUp, and the head surfaces as a typed session_error / CodeSessionBlocked
+// (#1000/#1008) instead of holding the conversation forever. Worst case ≈ 2× this
+// value, so a client-visible bound of about half an hour.
+//
+// The trade-off the value encodes: give-up ABANDONS the head, so any finite bound
+// trades "a wedged turn is reported late" against "a message queued behind a
+// genuinely long agentic turn is thrown away". 15 minutes sits above any
+// interactive turn observed to date while keeping the client-visible bound inside
+// the half hour. There is deliberately NO Pending analogue (contrast
+// supervisor.ErrTrustModalPending at the msgqueue.Config literal): that exemption
+// resets the give-up streak forever, which a HUMAN decision may legitimately need
+// and a running turn should not — it would make the bound unsatisfiable. The
+// better discriminator is staleness (no turn event for N minutes) rather than
+// duration, but that needs a per-conversation timestamp the tracker deliberately
+// does not hold (#1201); it is a separate ticket if production ever surfaces a
+// session_error for a turn that was legitimately progressing. A tuning knob, not a
+// contract.
+const streamTurnHoldTimeout = 15 * time.Minute
 
 // mcpApprovalTimeout is the human-approval window handed to the
 // pending-approval registry (internal/permbridge) for every VerbMCPApprove
@@ -1463,16 +1593,36 @@ func approvalTimeout() time.Duration {
 //     not dropped);
 //   - Activates under a bounded budget so a wedged respawn becomes a retryable
 //     error instead of a permanent block;
+//   - HOLDS the delivery while the conversation's turn is running on the
+//     stream-json path (#1199), then marks the conversation mid-turn, both
+//     between Activate and the write — see the placement note below;
 //   - writes the turn with the RAW lifecycle ctx — no deliver timeout, because
 //     that blocking IS the drain's turn-end pacing (DeliverFunc must return nil
 //     only on a confirmed commit, queue.go:65-70).
+//
+// PLACEMENT of the hold, all three constraints load-bearing. It sits BEFORE
+// WriteUserTurn, therefore before the turncommit claim streamsup.WriteTurn makes
+// inside it: that is what keeps the queued head draining && !committing for the
+// whole wait, which is the only window in which msgqueue.Remove drops it — so the
+// drop-before-drain control is delivered by placement, not by new code (commitGate
+// itself documents the seam as calling it "after the idle-gate wait and before the
+// write"). It sits AFTER Activate, which is already bounded and idempotent, so a
+// wedged respawn still surfaces as a prompt retryable error rather than being
+// masked behind a long hold. And the MARK precedes the write rather than following
+// it, because the tracker's ordinary opener feed is asynchronous and a fast child's
+// TurnEnd could otherwise clear before the mark landed; openForDelivery's doc
+// carries that argument, and returns the undo this body runs on a write error.
+//
+// A nil tracker (PTY mode) makes both calls no-ops, leaving this body semantically
+// identical to the pre-#1199 sequence.
 //
 // It is built over router.resolve, NOT router.Route, so it never stamps the
 // active-conversation cursor: the cursor stays single-writer (the routing-path
 // goroutine via Route), preserving the #679/#687 follow-active invariant against
 // a drain-time re-stamp. Taking resolve as a func value (not the struct) keeps
-// the seam unit-testable with a fake resolve.
-func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error)) msgqueue.DeliverFunc {
+// the seam unit-testable with a fake resolve; busy and hold are taken the same way
+// so the hold is exercisable with a short bound.
+func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *turnBusyTracker, hold time.Duration) msgqueue.DeliverFunc {
 	return func(ctx context.Context, convID string, payload []byte) error {
 		w, err := resolve(convID)
 		if err != nil {
@@ -1484,7 +1634,21 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error)) msgque
 		if err != nil {
 			return err
 		}
-		return w.WriteUserTurn(ctx, convID, payload)
+		// Wrapped, so a hold failure is legible in msgqueue's retry Warn; the wrap
+		// keeps errors.Is(err, context.DeadlineExceeded) and context.Canceled true for
+		// the drain's own classification. Nothing has been written at this point.
+		if err := busy.waitIdleForDelivery(ctx, convID, hold); err != nil {
+			return fmt.Errorf("stream turn hold: %w", err)
+		}
+		undo := busy.openForDelivery(convID)
+		if err := w.WriteUserTurn(ctx, convID, payload); err != nil {
+			// Returned VERBATIM (unwrapped): msgqueue classifies ErrNoLiveSession,
+			// ErrTrustModalPending and turncommit.ErrDropped by errors.Is, and the undo
+			// leaves the tracker exactly as it was before this attempt.
+			undo()
+			return err
+		}
+		return nil
 	}
 }
 

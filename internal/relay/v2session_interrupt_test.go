@@ -2,6 +2,7 @@ package relay
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,16 +42,27 @@ func (f *fakeInterrupter) escCount() int {
 // conn is opened as a barrier: because Frames is a single FIFO channel drained by
 // the one Run goroutine, the interrupt (enqueued first) is fully handled before
 // the barrier conn opens, so escCount is final regardless of the gate's verdict.
+//
+// Since #1192 it also asserts the non-interactive arm records which arm it took:
+// the barrier is what makes the interactive case's NEGATIVE assertion sound —
+// the interrupt is provably handled before the buffer is read, so an absent
+// record is a real absence and not a race.
 func TestV2Session_Interrupt_RoutesEscByCapability(t *testing.T) {
 	t.Parallel()
 
+	// nonInteractiveEvent is asserted by name, never by the v2.interrupt. prefix:
+	// #1193 adds a success-path record to the same family, and a prefix-wide
+	// absence assertion here would go red the moment it lands.
+	const nonInteractiveEvent = "event=v2.interrupt.non_interactive"
+
 	cases := []struct {
-		name    string
-		caps    []string
-		wantEsc int
+		name       string
+		caps       []string
+		wantEsc    int
+		wantRecord bool
 	}{
-		{"interactive routes one Esc", []string{protocol.CapabilityInteractive}, 1},
-		{"non-interactive is inert", nil, 0},
+		{"interactive routes one Esc", []string{protocol.CapabilityInteractive}, 1, false},
+		{"non-interactive is inert", nil, 0, true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -61,13 +73,14 @@ func TestV2Session_Interrupt_RoutesEscByCapability(t *testing.T) {
 			fake := &fakeInterrupter{}
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
+			logger, logBuf := bufferLogger()
 			mgr, stop := startManager(t, V2SessionConfig{
 				Frames:      frames,
 				Outbound:    rec.outbound,
 				StaticPriv:  respPriv,
 				Devices:     v2PairedRegistry(t, v2TestToken),
 				ServerID:    v2TestServerID,
-				Logger:      silentLogger(),
+				Logger:      logger,
 				Interrupter: fake,
 			})
 			t.Cleanup(stop)
@@ -85,8 +98,47 @@ func TestV2Session_Interrupt_RoutesEscByCapability(t *testing.T) {
 			if got := fake.escCount(); got != tc.wantEsc {
 				t.Errorf("escCalls = %d, want %d", got, tc.wantEsc)
 			}
+
+			if !tc.wantRecord {
+				// Non-vacuity guard: an emission placed ABOVE the !s.interactive
+				// check would still satisfy the positive case below.
+				if strings.Contains(logBuf.String(), nonInteractiveEvent) {
+					t.Errorf("interactive conn emitted %s; that record belongs to the non-interactive arm only\nlog:\n%s",
+						nonInteractiveEvent, logBuf.String())
+				}
+				return
+			}
+			waitForLogContains(t, logBuf, nonInteractiveEvent)
+			line := findLogLine(t, logBuf, nonInteractiveEvent)
+			if !strings.Contains(line, "conn_id=c-int") {
+				t.Errorf("record does not identify the conn: %s", line)
+			}
+			// AC3 log hygiene, asserted on THIS line: the arm emits with the whole
+			// *V2Session in scope, so neither the identity-bearing peer static key
+			// (v2session.go SECURITY comment) nor the matched device snapshot may
+			// appear. Other records in this buffer (the handshake) legitimately
+			// mention the device, hence the per-line assertion.
+			for _, forbidden := range []string{"peer", "static", "key", "device", v2TestDevName} {
+				if strings.Contains(strings.ToLower(line), forbidden) {
+					t.Errorf("record leaks %q — identifiers and enumerated outcomes only: %s", forbidden, line)
+				}
+			}
 		})
 	}
+}
+
+// findLogLine returns the one log line containing substr. slog's TextHandler
+// emits a single line per record, so this is what lets a hygiene assertion apply
+// to one record rather than to the whole buffer.
+func findLogLine(t *testing.T, buf *syncLogBuffer, substr string) string {
+	t.Helper()
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, substr) {
+			return line
+		}
+	}
+	t.Fatalf("no log line containing %q; got:\n%s", substr, buf.String())
+	return ""
 }
 
 // TestV2Session_Interrupt_NilInterrupterInert proves a nil Interrupter (foreground

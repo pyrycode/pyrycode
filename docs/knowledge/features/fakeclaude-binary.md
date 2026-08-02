@@ -144,15 +144,37 @@ PYRY_FAKE_CLAUDE_STREAM_HOLD        path to a trigger file; when set, the stream
                                     path appears, then proceeds normally (#1138; see
                                     § Stream-path startup hold). A no-op outside stream
                                     mode. Default-off; unset ⟹ byte-identical.
+PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV  when non-empty, take the INITIAL <uuid>.jsonl
+                                    stem from this spawn's own argv — the value
+                                    after the last --session-id/--resume
+                                    (argvSessionID) — instead of
+                                    PYRY_FAKE_CLAUDE_INITIAL_UUID (#1195; see
+                                    § Argv-derived stem mode). No flag found, or a
+                                    value that fails the filename-stem guard, falls
+                                    back to the env var. A flag, not a path.
+PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR  directory watched in parallel with
+                                    PYRY_FAKE_CLAUDE_JSONL_TRIGGER for
+                                    <dir>/<this child's own initial stem>.jsonl.trig
+                                    (#1195; see § Per-child JSONL trigger mode).
+                                    Computed once from the same stem
+                                    SESSION_ID_FROM_ARGV resolves, so the two are
+                                    typically set together, but neither requires
+                                    the other.
 ```
 
-No flags, no positional args — env is the entire configuration surface,
-matching how the harness consumer configures the child via `cmd.Env`.
-fakeclaude reads stdin only when `STDIN_LOG`, `TUI`, `MODAL_TRIGGER`,
-`ESC_ENDS_TURN`, `MODAL_CLEAR_ON_ANSWER`, `CLEAR_ROTATES`, or `STREAM_JSON` is set;
-otherwise it ignores stdin entirely. `STREAM_JSON` never inspects `os.Args` either —
-the daemon's injected `--input-format`/`--output-format`/`--verbose`/`--session-id`/
-`--resume` flags are silently tolerated by construction, not parsed.
+env is the entire configuration surface, matching how the harness consumer
+configures the child via `cmd.Env`. fakeclaude reads stdin only when
+`STDIN_LOG`, `TUI`, `MODAL_TRIGGER`, `ESC_ENDS_TURN`, `MODAL_CLEAR_ON_ANSWER`,
+`CLEAR_ROTATES`, or `STREAM_JSON` is set; otherwise it ignores stdin entirely.
+`STREAM_JSON` never inspects `os.Args` either — the daemon's injected
+`--input-format`/`--output-format`/`--verbose`/`--session-id`/`--resume` flags
+are silently tolerated by construction, not parsed.
+
+`SESSION_ID_FROM_ARGV` (#1195, § Argv-derived stem mode below) is the one
+exception to "no positional args": when set, it is the sole mode that reads
+`os.Args`, and only to extract the value following `--session-id`/`--resume` —
+never to reject an unrecognised flag. When unset (every caller before #1195),
+`os.Args` is never read at all.
 
 ## TUI mode (#603)
 
@@ -319,11 +341,19 @@ end the running turn — the harness piece behind the live interrupt capstone
 ([codebase/794.md](../codebase/794.md)). The interrupt path routes a phone
 `interrupt` frame → `handleInterrupt` → `supervisor.SendEsc()` → a **lone `0x1b`**
 into the supervised child's stdin. In this mode fakeclaude detects that bare ESC
-and appends one canned `end_turn` line to the live session JSONL, so the daemon's
-structured-turn producer maps it to a `turn_end` — making the Esc the **cause** of
-the turn ending. (Reusing #792's *file*-driven busy→idle flip would instead let an
-"interrupt stopped the turn" assertion pass **vacuously** — the idle would come
-from a file, not the Esc.)
+and appends claude's own interruption marker to the live session JSONL, so the
+daemon's structured-turn producer maps it to a `turn_end{cancelled}` — making the
+Esc the **cause** of the turn ending. (Reusing #792's *file*-driven busy→idle flip
+would instead let an "interrupt stopped the turn" assertion pass **vacuously** —
+the idle would come from a file, not the Esc.)
+
+> Through #1244 (2026-07-31), this appended an assistant `stop_reason:"end_turn"`
+> line (`interruptEndTurnLine`) — a shape that looked like a clean completion on
+> disk and could only prove *causality*, never the stop reason, because
+> `EventKindJsonlEndOfTurn` was the mapper's only `turn_end` source. #1243 added a
+> second source — claude's own interruption marker (`turnbridge/mapper.go:95`) —
+> and #1244 restaged this handler to write that marker instead. See
+> [codebase/1244.md](../codebase/1244.md).
 
 When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
 
@@ -331,7 +361,7 @@ When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
 |---|---|---|
 | startup | `enterRawMode()` (like modal mode) | a lone ESC with no line terminator reaches `read()` verbatim (canonical discipline would otherwise withhold it) |
 | stdin read containing a bare ESC | `containsBareESC(buf)` → set `escPending` (signal only) | stdin reader flags the interrupt without touching `f` |
-| main poll loop, `escPending.Swap(true)`, one-shot `escEnded` | `appendTurnEnd(f)`: write `interruptEndTurnLine` + `f.Sync()` | producer tails it → `EventKindJsonlEndOfTurn` → `TurnEnd` → `turn_end` to the phone |
+| main poll loop, `escPending.Swap(true)`, one-shot `escEnded` | `appendTurnEnd(f)`: write `interruptMarkerLine` + `f.Sync()` | producer tails it → `isInterruptMarker` (`turnbridge/mapper.go:95`) → `TurnEnd{Cancelled}` → `turn_end{cancelled}` to the phone |
 
 - **A bare ESC is unambiguously the interrupt.** The stdin stream carries exactly
   three ESC sources — bracketed-paste open (`ESC[200~`), close (`ESC[201~`), and
@@ -354,12 +384,20 @@ When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
 - **Single-writer-of-`f` preserved.** The stdin reader only *signals*
   (`escPending atomic.Bool`, exactly like `turnPending`); the `appendTurnEnd(f)`
   write runs on the main poll goroutine. No mutex on `f`, no new writer goroutine.
-- **`interruptEndTurnLine` is a fixed literal** —
-  `{"type":"assistant","message":{"id":"interrupt-end","stop_reason":"end_turn",
-  "content":[{"type":"text","text":"[interrupted]"}]}}` — the exact shape
-  `turnbridge`'s mapper needs for `EventKindJsonlEndOfTurn` (assistant +
-  `stop_reason=="end_turn"` + non-empty text). It is inert JSONL data, **not** a TUI
-  substrate glyph, so the `cmd/substrate-guard` allowlist is unchanged.
+- **`interruptMarkerLine` is a fixed literal, derived from a real capture** — the
+  claude-format `type:"user"` interruption entry `mapEntry`'s `case "user"` maps to
+  `turnevent.TurnEnd{Cancelled}` (`turnbridge/mapper.go:95`), byte-shaped after the
+  repo's one recorded interruption entry
+  (`internal/agentrun/jsonl/testdata/no_end_turn.jsonl:53`, claude 2.1.128): the
+  full 13-key top-level set and its order preserved verbatim, only the
+  session-identity fields (`parentUuid`, `promptId`, `uuid`, `timestamp`, `cwd`,
+  `sessionId`, `gitBranch`) substituted with shape-preserving canned values. Two
+  absences are load-bearing and silent if broken — no top-level `permissionMode`
+  key (`userAuthored`'s presence check, `mapper.go:163-166`) and no `tool_result`
+  block (`ParseToolResult` precedes the marker check and would intercept it,
+  `mapper.go:80-86`) — either one makes the mapper produce no `turn_end` at all. It
+  is inert JSONL data, **not** a TUI substrate glyph, so the `cmd/substrate-guard`
+  allowlist is unchanged.
 - **One-shot.** The `escEnded` gate bounds the append to one end-of-turn line; a
   second ESC is inert — a re-interrupt of an already-ended turn is a no-op, matching
   claude.
@@ -368,13 +406,17 @@ When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
   detector scans for the bare ESC. The #794 capstone runs both ON. **When unset,
   byte-identical to today** — every existing caller is unperturbed.
 
-The turn_end carries `StopReason == "end_turn"`, **not** `"cancelled"`: tui-driver
-v1.3.0's `EventKindJsonlEndOfTurn` cannot distinguish an interrupt-stop from a
-normal end (`turnbridge/mapper.go:25-28`), so the mode proves **causality** (the
-`turn_end` exists only because the Esc was received), not stop-reason semantics.
-See [codebase/794.md](../codebase/794.md) for the live interrupt capstone this mode
-feeds (the structural-causality guard, the two ordered `t.Fatal`s, the two-oracle
-belt-and-suspenders).
+The turn_end carries `StopReason == "cancelled"` (since #1244; through #1244 it was
+`"end_turn"`, because `EventKindJsonlEndOfTurn` was the mapper's only `turn_end`
+source and could not distinguish an interrupt-stop from a normal end). The
+bootstrap-tier consumer (`relay_v2_interrupt_test.go`, the #794 capstone) still does
+not assert the reason — it proves **causality** (the `turn_end` exists only because
+the Esc was received), by choice now rather than by impossibility, leaving the
+reason assertion to the minted-tier oracle one level up
+([codebase/1244.md](../codebase/1244.md)). See [codebase/794.md](../codebase/794.md)
+for the live interrupt capstone this mode feeds (the structural-causality guard, the
+two ordered `t.Fatal`s, the two-oracle belt-and-suspenders) — historical as of its
+own ticket, so its `end_turn`-not-`cancelled` framing there is not rewritten here.
 
 ## Modal-clear-on-answer mode (#793)
 
@@ -751,6 +793,111 @@ verdict) without depending on that still-open wiring gap. See
 [codebase/1139.md](../codebase/1139.md) for the live e2e this feeds and the
 production follow-up this gap is tracked under.
 
+## Argv-derived stem mode (#1195)
+
+Every mode above binds its transcript stem to `PYRY_FAKE_CLAUDE_INITIAL_UUID` — a
+single **process-wide** value, so every child of one daemon opens the *same*
+`<uuid>.jsonl`. That is fine for a bootstrap-only e2e, but for a **minted**
+per-conversation session the daemon tails `<convDir>/<mintedSessionID>.jsonl`
+(`resolveBoundSessionJSONL`), and the two stems can never agree — the
+subscription never opens, and conversation-scoped turn lifecycle
+(`turn_state`/`turn_end`) was observable on **zero** PTY-tier tests. The fix
+is not a new env value carrying the id (that's still process-wide); it's
+reading the id the daemon already pinned this **specific** spawn to, off argv:
+`sessions.buildSession` bakes `--session-id <pool id>` into a minted child's
+argv, and `supervisor.buildClaudeArgs` appends `--session-id`/`--resume
+<id>` to every bootstrap spawn too (#1164 picks the flag based on whether the
+transcript already exists).
+
+When `PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV` is non-empty, `main()` resolves
+the initial stem via `argvSessionID(os.Args[1:])` before calling `openSession`,
+falling back to `PYRY_FAKE_CLAUDE_INITIAL_UUID` on no match:
+
+```go
+// argvSessionID returns the value after the LAST "--session-id" or "--resume"
+// in args, and whether it is present and safe to use as a filename stem.
+func argvSessionID(args []string) (string, bool)
+```
+
+- **Both flags, last occurrence wins.** `--session-id` (create) and `--resume`
+  (warm reattach, #1164) name the same stem; `buildClaudeArgs` always appends
+  the flag last, so the spawn-time value beats anything a template
+  contributed. Two-token form only — neither call site emits `--flag=value`.
+- **Stem guard (security).** The returned value reaches `filepath.Join` in
+  `openSession` and in the per-child JSONL trigger path below, so an unguarded
+  value could steer a write outside the sessions dir. `argvSessionID` refuses
+  anything empty or containing `/`, `\`, or `.` and reports not-found instead —
+  a **laxer** predicate than the daemon's `transcript.ValidStem` (a full UUID
+  regex), so it is not literally that function's mirror, but the no-separator/
+  no-dot rule is enough on its own to make `filepath.Join` incapable of
+  escaping the sessions dir. See [codebase/1195.md](../codebase/1195.md) for
+  why the doc comment originally overstated this as a "mirror".
+- **The flag's presence is NOT a minted/bootstrap discriminator.** Since #839
+  the bootstrap spawn is pinned too, so a design that keyed the stem on "argv
+  carries a session id" unconditionally would re-point *every* existing
+  bootstrap child's transcript. Inertness comes from the explicit env knob,
+  like every other mode here — with both effectively pinned in the harness's
+  seeded-bootstrap setup (`seedBootstrapRegistry` makes the bootstrap pool id
+  *equal* `PYRY_FAKE_CLAUDE_INITIAL_UUID`), the knob resolves to the same
+  value the env would have given for the bootstrap child, byte-identical by
+  construction.
+- **Fallback, never fatal.** No flag, or a value the guard rejects, falls back
+  to `mustEnv(envInitialUUID)` exactly as today — a legacy unpinned spawn keeps
+  working, and a malformed value degrades to today's behaviour instead of
+  writing somewhere unexpected. `rotateSession` is untouched: a later `/clear`
+  still mints a fresh random UUID.
+- **When unset, byte-identical to today**, including for a child whose argv
+  carries `--session-id`/`--resume` (every bootstrap spawn does) — `os.Args`
+  is never read at all.
+
+Pinned by the untagged `TestArgvSessionID` (`argv_session_id_test.go`, no
+build tag, mirroring `esc_detect_test.go`): both flags, last-occurrence-wins
+in both orders, the unhandled `=` form, and every stem-guard rejection
+(`../escape`, `a/b`, `a\b`, `x.jsonl`, empty).
+
+## Per-child JSONL trigger mode (#1195)
+
+The existing `PYRY_FAKE_CLAUDE_JSONL_TRIGGER` is a single **shared** path, and
+its claim protocol (a fixed `<path>.consuming` sidecar) is sound only because
+one fakeclaude process runs one poll goroutine — with a bootstrap child and a
+minted child both polling the *same* path, whichever claims first appends the
+line to *its own* transcript, a coin flip. `PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR`
+gives each child its own trigger instead: when set, fakeclaude also watches
+`<dir>/<its own initial stem>.jsonl.trig` and, on each appearance, appends the
+file's contents verbatim to its live transcript — the same
+`emitStructuredJSONLIfTriggered(f, path)` consume as the shared trigger
+(§ JSONL-trigger mode), called with a different `path`.
+
+- **Path computed once, before the poll loop**, from the same stem
+  `openSession` used — so per-child isolation is exactly as good as
+  `SESSION_ID_FROM_ARGV`'s stem divergence. The two are typically set
+  together but neither requires the other (a future bootstrap-only test could
+  use this knob alone).
+- **Watched independently of `PYRY_FAKE_CLAUDE_JSONL_TRIGGER`** — a separate
+  `if` block in the poll loop; neither disables the other, and a test may set
+  both.
+- **Not one-shot.** The consume re-fires on every re-drop — needed by the
+  #929 subscription-offset kicker: the structured producer subscribes at EOF
+  after a settle delay, so a single-shot drop can land below the tailed range
+  and never be seen; re-dropping the same line on a ticker until the drain
+  observes it is the established fix (see [codebase/929.md](../codebase/929.md)).
+- **When unset, no watch and byte-identical to today.**
+
+Both knobs together are what makes `TestRelayV2_PerConversationTurnEnd`
+(`internal/e2e/relay_v2_perconv_turn_end_test.go`, #1195) possible: mint a
+conversation over the wire, route a turn to move the active cursor, then
+re-drop an `end_turn` line at the minted child's own trigger path until the
+daemon's turn stream emits a `turn_end` carrying that conversation's id — the
+first PTY-tier proof that conversation-scoped turn lifecycle exists at all.
+The daemon-side resolver (`resolveBoundSessionJSONL`) is untouched; the fake
+moves to meet the daemon, never the reverse. Deliberately **not** fused into
+one "every turn ends" knob: #1191 (blocked on this ticket) needs
+`SESSION_ID_FROM_ARGV` alone, without an unconditional end-of-turn line that
+would fabricate the very event its interrupt oracle must attribute to the
+interrupt. See [codebase/1195.md](../codebase/1195.md) for the full design and
+the on-disk non-vacuity assertion (the minted transcript must contain the
+test's marker text; the bootstrap transcript must not).
+
 ## On-turn transcript growth (#673)
 
 #668 made the supervised-bootstrap delivery path confirm a turn by observing the
@@ -813,11 +960,12 @@ the five tests aligned by #673.
 
 ```
 internal/e2e/internal/fakeclaude/
-  main.go        ~850 LOC, package main, no build tag (grew from the #122
+  main.go        ~990 LOC, package main, no build tag (grew from the #122
                  rotation core with the #311/#323/#603/#642/#791/#792/#793/#794/#1004
                  optional modes, the #673 on-turn transcript growth, the #1140
                  stream-json mode, the #1136 interrupt rider, the #1137 stdin tee,
-                 and the #1138 startup hold)
+                 the #1138 startup hold, and the #1195 argv-derived stem +
+                 per-child JSONL trigger modes)
   main_test.go   ~125 LOC, //go:build e2e
   modal_detect_test.go  untagged unit test for the modal-class detector
   esc_detect_test.go    ~60 LOC untagged unit test — TestContainsBareESC pins the
@@ -826,6 +974,9 @@ internal/e2e/internal/fakeclaude/
                         /clear discriminator the #1004 clear-rotate mode relies on
   stream_detect_test.go  untagged unit test — drives runStreamJSON against
                         in-memory buffers and the real streamsup.Parser (#1140)
+  argv_session_id_test.go  untagged unit test — TestArgvSessionID pins the
+                        last-occurrence-wins argv parse + stem guard the #1195
+                        argv-derived stem mode relies on
 ```
 
 The `internal/e2e/internal/` nesting visibility-fences the binary so
@@ -923,7 +1074,9 @@ affect correctness.
   interrupt rider: `docs/specs/architecture/1136-stream-e2e-interrupt.md`;
   new_session rider: `docs/specs/architecture/1137-stream-new-session-rotation-e2e.md`;
   startup-hold rider: `docs/specs/architecture/1138-stream-e2e-queue-drain-in-order.md`;
-  approve rider: `docs/specs/architecture/1139-stream-e2e-permission-round-trip.md`
+  approve rider: `docs/specs/architecture/1139-stream-e2e-permission-round-trip.md`;
+  argv-derived stem + per-child JSONL trigger modes:
+  `docs/specs/architecture/1195-minted-perconv-pty-transcript-substrate.md`
 - TUI mode per-ticket notes: [codebase/603.md](../codebase/603.md) (glyph
   emission, the ack-pollution drain, the substrate-guard exemption)
 - JSONL-trigger per-ticket notes: [codebase/642.md](../codebase/642.md) (the
@@ -959,6 +1112,11 @@ affect correctness.
 - Startup-hold rider per-ticket notes: [codebase/1138.md](../codebase/1138.md) (the
   live queue-drain-in-order e2e this mode feeds — why a msgqueue backlog isn't
   observable on the stream path, and the FIFO stdin-pipe chain proof instead)
+- Argv-derived stem + per-child JSONL trigger per-ticket notes:
+  [codebase/1195.md](../codebase/1195.md) (the minted per-conversation
+  turn-lifecycle PTY e2e these modes feed, the stem guard vs the daemon's
+  `transcript.ValidStem`, the on-disk non-vacuity assertion pair, why the two
+  knobs stay separate for #1191)
 - Substrate seal: `cmd/substrate-guard/main.go` allowlists this file
   alongside `internal/agentrun/ptyrunner/helper_test.go` (the two sanctioned
   fake-claude helpers that emit claude-TUI glyphs)

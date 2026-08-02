@@ -251,6 +251,17 @@ type relayWiring struct {
 	// three raw w.sup.State() readers off and feeds the stream turn drain in their
 	// place. See the branch at the interactive-streams gate below.
 	streamSink *streamTurnSink
+	// busy is the #1201 per-conversation turn-busy tracker. Non-nil exactly when
+	// streamSink is non-nil — both are minted at the composition root (main.go) from
+	// the same streamSink != nil condition — so PTY mode leaves it nil and the #1202
+	// teardown clear composed onto the UNCONDITIONAL session-transition observer
+	// below stays a nil-receiver no-op.
+	//
+	// It is a field rather than a local because it now has a consumer outside this
+	// file: the inbound-delivery seam (#1199, newInboundDeliver) holds a mid-turn
+	// send against it. This leg's two consumers are the stream turn drain (which
+	// FEEDS it) and that teardown clear.
+	busy *turnBusyTracker
 }
 
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
@@ -723,7 +734,21 @@ func startRelayV2(
 		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession
 		// enforces. An unmatched/empty id forwards nothing (fail-closed).
 		activeSession := func() (string, bool) { return boundSessionIDForActive(w.active, w.convReg) }
-		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, logger)
+		// The #1201 per-conversation turn-busy tracker (w.busy), fed from the same
+		// fan-in BEFORE the gate above, so a turn on a non-active conversation still
+		// reports busy. It is minted at the composition root, not here, because the
+		// inbound-delivery seam consumes it too (#1199) and that seam is built for
+		// msgqueue.New — outside this leg entirely. Its resolve closure there is the
+		// same session→conversation closure the session_transition producer uses below,
+		// which inherits conversationForSession's SessionHistory match (a just-rotated
+		// session still resolves) and keeps internal/conversations out of the tracker's
+		// file.
+		//
+		// Every clear that must land does: TurnEnd on the fan-in, the #1202 teardown
+		// transition below, the #1210 child-exit lane through the drain, and — for a
+		// write that fails after its mark — the delivery seam's own undo (see
+		// stream_turn_busy.go's feeds note).
+		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, w.busy, logger)
 	} else if w.bridge != nil && w.claudeSessionsDir != "" {
 		// PTY MODE (unchanged): the bootstrap-branch resolver tails the transcript
 		// the daemon's OWN claude child has open (probe over its PID) rather than the
@@ -752,8 +777,12 @@ func startRelayV2(
 	// emitted envelope. It captures w.convReg (a relayWiring field in scope here)
 	// so session_transition_v2.go never imports internal/conversations — the same
 	// purity discipline that keeps toWirePayload registry-free.
+	// The pool's observer slot is single-valued, so #1202's turn-busy clear is
+	// COMPOSED onto the emitter in there rather than installed separately. w.busy is
+	// nil in PTY mode (the composition root mints it only alongside streamSink) and
+	// the clear is nil-safe.
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, w.transitions, mgr,
-		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, logger)
+		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, logger)
 
 	// Wire the queue_state producer (#722): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a queue_state envelope to capability-gated
