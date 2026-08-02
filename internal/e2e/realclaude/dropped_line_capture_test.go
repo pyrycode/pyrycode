@@ -57,7 +57,7 @@ package realclaude
 //	  -run '^TestRealClaude_DroppedLineCapture$' ./internal/e2e/realclaude/
 //
 // A skip is the normal `make e2e-realclaude` outcome and carries no signal. The
-// four TestDropcap* tests below run offline, with no claude and no gate.
+// TestDropcap* tests below run offline, with no claude and no gate.
 
 import (
 	"bytes"
@@ -193,7 +193,17 @@ const dropcapRedactionRationale = "The primary defence is by construction: the w
 	"workdir, the session UUID and any tool output untouched. " +
 	"DELIBERATELY KEPT, because removing them would defeat the ticket: top-level types and subtypes, " +
 	"claude's own structural fields, tool names, model names, token counts, timestamps, the task-lifecycle " +
-	"payload structure and its human-readable strings, and the harness nudge text."
+	"payload structure and its human-readable strings, and the harness nudge text. " +
+	"ALSO KEPT, AND OPERATOR-DERIVED — named separately because it is the largest operator-specific class " +
+	"in this file and the one a person deciding whether to paste the record into a public issue has to be " +
+	"told about: system/init carries the operator's local claude configuration inventory. Concretely, the " +
+	"MCP server names, the tool list (which includes each MCP server's tool names), the slash-command " +
+	"names, the skill names, the subagent names in `agents`, `plugins`, `capabilities`, `output_style`, " +
+	"`apiKeySource`, `permissionMode`, and the analytics_disabled / product_feedback_disabled flags. None " +
+	"of it is a credential, and it is kept because system/init's payload is exactly what #1261-#1264 have " +
+	"to map. It is nonetheless a description of one machine's setup rather than of claude, so whether to " +
+	"publish it is the operator's call — which is the point of stating it here instead of leaving a reader " +
+	"to notice it."
 
 // --- the recorder ------------------------------------------------------------
 
@@ -237,6 +247,18 @@ type dropcapRecorder struct {
 	bytes   int
 	caps    dropcapCaps
 
+	// maxPartial caps the accumulator. Carried as a per-recorder field rather
+	// than read from the constant so a test can shrink it without racing a
+	// shared global — the same reasoning, and the same shape, as the parser's
+	// own maxBuf (parser.go:13-19).
+	maxPartial int
+	// skipUntilNewline is set when the accumulator was discarded at maxPartial.
+	// The TAIL of that over-long line is a FRAGMENT, not a line: appending it
+	// would put a partial payload in the record with nothing at the entry saying
+	// so, which is the mutation AC3 forbids going unstated. Cleared at the next
+	// '\n', where the next real line begins.
+	skipUntilNewline bool
+
 	resultOnce sync.Once
 	resultSeen chan struct{}
 }
@@ -244,7 +266,7 @@ type dropcapRecorder struct {
 var _ io.Writer = (*dropcapRecorder)(nil)
 
 func newDropcapRecorder() *dropcapRecorder {
-	return &dropcapRecorder{resultSeen: make(chan struct{})}
+	return &dropcapRecorder{maxPartial: dropcapMaxPartial, resultSeen: make(chan struct{})}
 }
 
 func (r *dropcapRecorder) Write(b []byte) (int, error) {
@@ -258,11 +280,18 @@ func (r *dropcapRecorder) Write(b []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		r.consume(rest[:i])
+		if r.skipUntilNewline {
+			// The tail of a line whose head was already discarded. The discard is
+			// counted in PartialsDropped; the fragment is not recorded.
+			r.skipUntilNewline = false
+		} else {
+			r.consume(rest[:i])
+		}
 		rest = rest[i+1:]
 	}
-	if len(rest) > dropcapMaxPartial {
+	if len(rest) > r.maxPartial {
 		r.caps.PartialsDropped++
+		r.skipUntilNewline = true
 		rest = nil
 	}
 	// Copy so the (possibly large) backing array is released, mirroring
@@ -885,8 +914,15 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 
 	// The rendezvous is stamped on its own goroutine into a BUFFERED(1) channel,
 	// never into rec: a direct field write would race the test goroutine under
-	// -race, and the buffer keeps a never-firing rendezvous from leaking the
-	// goroutine (holdProbeFIFO's cleanup closes the channel).
+	// -race. The buffer is what keeps the STAMPER from parking on its send when
+	// the turn ends before the rendezvous fires and the read below takes its
+	// default arm. It is not what unblocks the receive: `rendezvous` is closed by
+	// holdProbeFIFO's HOLD goroutine once its open(O_WRONLY) returns, which the
+	// helper's cleanup arranges by opening the read end non-blockingly
+	// (background_trigger_probe_test.go:689-703) — and which does not happen at
+	// all if that open errored, leaving this goroutine parked on the receive for
+	// the rest of the binary. One parked, non-writing goroutine is the bounded
+	// residue; a racing field write would not be.
 	rendezvousAt := make(chan time.Time, 1)
 	go func() {
 		<-rendezvous
@@ -1170,6 +1206,40 @@ func dropcapHasUserBlockUnrecognized(events []turnevent.Event) bool {
 
 // --- writing the record ------------------------------------------------------
 
+// dropcapB64Payload is one payload the record carries base64-encoded, plus the
+// name of the field holding it. bytes.Contains cannot see through base64, so
+// every one of these has to be decoded before the deny-scan can search it.
+//
+// It exists so there is ONE enumeration of those fields. The nudge lives outside
+// dropped_lines, and a scan loop written over the entries alone silently omits
+// it — which is exactly what happened here until code review caught it.
+type dropcapB64Payload struct {
+	where string
+	b64   string
+}
+
+// decode returns the bytes to scan. A decode error is deliberately not fatal and
+// not skipped: DecodeString returns what it managed before the error, and those
+// bytes are as publishable as a clean decode's. The offline fixture validation
+// reports the malformed encoding separately.
+func (p dropcapB64Payload) decode() []byte {
+	raw, _ := base64.StdEncoding.DecodeString(p.b64)
+	return raw
+}
+
+func dropcapBase64Payloads(rec *dropcapRecord) []dropcapB64Payload {
+	out := []dropcapB64Payload{}
+	for _, e := range rec.DroppedLines {
+		if e.PayloadEncoding == dropcapEncodingBase64 {
+			out = append(out, dropcapB64Payload{where: fmt.Sprintf("entry %d", e.Index), b64: e.PayloadB64})
+		}
+	}
+	if rec.HarnessNudge.PayloadEncoding == dropcapEncodingBase64 {
+		out = append(out, dropcapB64Payload{where: "harness_nudge", b64: rec.HarnessNudge.PayloadB64})
+	}
+	return out
+}
+
 // dropcapWriteRecord is the fail-closed boundary. It marshals the (already
 // substituted) record, runs the deny-scan over the WHOLE blob plus every
 // base64 payload's decoded bytes, and only then writes at 0600 and logs.
@@ -1195,16 +1265,12 @@ func dropcapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner 
 	}
 	hits, notApplied := scanner.scan(blob)
 	// A base64 payload hides its bytes from a scan of the marshalled record, so
-	// the decoded bytes are scanned too.
-	for _, e := range rec.DroppedLines {
-		if e.PayloadEncoding != dropcapEncodingBase64 {
-			continue
-		}
-		raw, derr := base64.StdEncoding.DecodeString(e.PayloadB64)
-		if derr != nil {
-			continue
-		}
-		if h, _ := scanner.scan(raw); len(h) > 0 {
+	// the decoded bytes are scanned too — for EVERY base64 payload the record
+	// carries, which is the entries AND the harness nudge. The nudge sits outside
+	// dropped_lines, so a loop over the entries alone would let a nudge block with
+	// invalid UTF-8 take the base64 branch and bypass this net entirely.
+	for _, p := range dropcapBase64Payloads(rec) {
+		if h, _ := scanner.scan(p.decode()); len(h) > 0 {
 			hits = append(hits, h...)
 		}
 	}
@@ -1231,7 +1297,8 @@ func dropcapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner 
 
 // dropcapLocateHits narrows a hit to a CLASS plus an entry index — the two
 // things the spec permits the failure message to carry. It re-scans each entry
-// alone, and the record frame (every field except the entries) alone, so an
+// alone, each base64 payload's decoded bytes alone (the entries' and the
+// nudge's), and the record frame (every field except the entries) alone, so an
 // operator learns where to extend the table without any value being printed.
 //
 // The frame arm is not decorative: the first live capture's only hit was in the
@@ -1247,6 +1314,11 @@ func dropcapLocateHits(scanner dropcapScanner, rec *dropcapRecord) []string {
 			located = append(located, fmt.Sprintf("entry %d (%s) %v", e.Index, dropcapCensusKey(e), h))
 		}
 	}
+	for _, p := range dropcapBase64Payloads(rec) {
+		if h, _ := scanner.scan(p.decode()); len(h) > 0 {
+			located = append(located, fmt.Sprintf("%s (base64 payload, decoded) %v", p.where, h))
+		}
+	}
 	frame := *rec
 	frame.DroppedLines = nil
 	frame.HarnessNudge.Payload = ""
@@ -1258,8 +1330,8 @@ func dropcapLocateHits(scanner dropcapScanner, rec *dropcapRecord) []string {
 		}
 	}
 	if len(located) == 0 {
-		located = append(located, "not localised: the hit is in the harness_nudge payload or in a "+
-			"base64 payload's decoded bytes")
+		located = append(located, "not localised: the hit is in the harness_nudge json-string payload, "+
+			"the one field the frame scan above blanks")
 	}
 	return located
 }
@@ -1377,6 +1449,46 @@ func TestDropcapRecorderClosesOnResult(t *testing.T) {
 	case <-r.resultSeen:
 	default:
 		t.Fatal("resultSeen not closed after a `result` line; the live turn would run to budget")
+	}
+}
+
+// TestDropcapRecorderDiscardsAnOverlongLineWhole pins the discard as TOTAL. Past
+// maxPartial the head of a line is gone, and the tail arriving after the next
+// '\n' is a FRAGMENT: recording it would add an entry that no field labels as
+// partial — the silent mutation AC3 forbids. Unobserved in practice
+// (partials_dropped is 0 in the committed capture, and reaching it needs a
+// newline-free line over 4 MiB), pinned because an instrument that quietly
+// reclassifies a fragment as a line misstates the census.
+func TestDropcapRecorderDiscardsAnOverlongLineWhole(t *testing.T) {
+	t.Parallel()
+	r := newDropcapRecorder()
+	r.maxPartial = 64 // per-recorder, so shrinking it races no shared global
+
+	const good = `{"type":"system","subtype":"init"}`
+	// The head of one enormous line: over the cap with no newline in sight, so
+	// the accumulator is discarded.
+	if _, err := r.Write([]byte(strings.Repeat("x", 4*r.maxPartial))); err != nil {
+		t.Fatalf("Write head: %v", err)
+	}
+	// Its tail, then a complete line behind it.
+	if _, err := r.Write([]byte(`","done":true}` + "\n" + good + "\n")); err != nil {
+		t.Fatalf("Write tail: %v", err)
+	}
+
+	lines, caps := r.snapshot()
+	if caps.PartialsDropped != 1 {
+		t.Errorf("partials_dropped = %d; want 1 — the discard must be counted, never silent",
+			caps.PartialsDropped)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("captured %d line(s); want exactly the one COMPLETE line — the tail of a discarded "+
+			"line is a fragment, not a payload", len(lines))
+	}
+	if string(lines[0].Raw) != good {
+		t.Errorf("captured %q; want %q", lines[0].Raw, good)
+	}
+	if lines[0].Index != 0 {
+		t.Errorf("index = %d; a fragment must not consume a stream index it never had", lines[0].Index)
 	}
 }
 
@@ -1629,6 +1741,56 @@ func TestDropcapRedactionAndDenyScan(t *testing.T) {
 		}
 	})
 
+	t.Run("every base64 payload is inside the net's reach, the nudge included", func(t *testing.T) {
+		t.Parallel()
+		// base64 is opaque to bytes.Contains, so such a payload is searchable only
+		// once decoded. The nudge lives OUTSIDE dropped_lines, and a nudge block
+		// carrying invalid UTF-8 takes the base64 branch in dropcapFindNudge — so
+		// a scan loop written over the entries alone skips a reachable payload,
+		// not a theoretical one. That omission was real until code review caught
+		// it, which is why the enumeration is one function with one test.
+		rec := &dropcapRecord{
+			DroppedLines: []dropcapEntry{
+				{Index: 4, PayloadEncoding: dropcapEncodingJSONString, Payload: `{"type":"system"}`},
+				{Index: 7, PayloadEncoding: dropcapEncodingBase64,
+					PayloadB64: base64.StdEncoding.EncodeToString([]byte(`{"k":"` + fakeToken + `"}`))},
+			},
+			HarnessNudge: dropcapNudge{
+				Observed:        true,
+				PayloadEncoding: dropcapEncodingBase64,
+				PayloadB64:      base64.StdEncoding.EncodeToString([]byte(`{"text":"` + fakeHome + `/x"}`)),
+			},
+		}
+		blob, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		scanner := dropcapScanner{needles: dropcapFixedNeedles()}
+		if hits, _ := scanner.scan(blob); len(hits) != 0 {
+			t.Fatalf("hits = %v scanning the record undecoded; the row proves nothing unless base64 "+
+				"really does hide these needles from a scan of the blob", hits)
+		}
+
+		payloads := dropcapBase64Payloads(rec)
+		if len(payloads) != 2 {
+			t.Fatalf("dropcapBase64Payloads returned %d payload(s); want the entry AND the nudge",
+				len(payloads))
+		}
+		got := []string{}
+		for _, p := range payloads {
+			h, _ := scanner.scan(p.decode())
+			got = append(got, h...)
+		}
+		// One class per source: sk-ant- is the entry's, /Users/ is the nudge's, so
+		// both present is proof both sources were enumerated.
+		for _, want := range []string{dropcapDenySkAnt, dropcapDenyUsers} {
+			if !dropcapContains(got, want) {
+				t.Errorf("hits = %v; want %q — a base64 payload the enumeration misses bypasses the "+
+					"fail-closed net entirely", got, want)
+			}
+		}
+	})
+
 	t.Run("a fixed literal is exempt from the minimum", func(t *testing.T) {
 		t.Parallel()
 		// sk-ant- and /Users/ are seven bytes. Applying the dynamic minimum to them
@@ -1657,6 +1819,13 @@ func dropcapContains(haystack []string, needle string) bool {
 // failure this ticket exists to prevent, and the deny-scan arm is the one that
 // keeps running forever — it turns "a future re-capture must not commit an
 // operator's home path" from a rule someone remembers into a check that fails.
+//
+// That arm runs twice, over the raw file AND over every base64 payload decoded,
+// because bytes.Contains cannot see through base64 and the live write path
+// deliberately routes invalid UTF-8 there. It is not redundant with the live
+// scan: the FIXED needles are the version-independent half of the net, and the
+// case they exist for is a re-capture taken on another operator's machine, where
+// the live run's dynamic needles were a different set.
 func TestDropcapFixtureIsACapture(t *testing.T) {
 	t.Parallel()
 
@@ -1747,9 +1916,54 @@ func TestDropcapFixtureIsACapture(t *testing.T) {
 					if _, err := base64.StdEncoding.DecodeString(e.PayloadB64); err != nil {
 						t.Errorf("entry %d payload_b64 does not decode: %v", e.Index, err)
 					}
+					// Its BYTES are scanned below, not here: base64 is opaque to the
+					// blob scan above.
 				default:
 					t.Errorf("entry %d payload_encoding = %q; want %q or %q", e.Index,
 						e.PayloadEncoding, dropcapEncodingJSONString, dropcapEncodingBase64)
+				}
+			}
+
+			// The blob scan above is bytes.Contains over the file, which cannot see
+			// through base64 — so without this pass the check goes blind on exactly
+			// the encoding the live write path deliberately decodes. It is not
+			// redundant with that live scan: the FIXED needles are the
+			// version-independent half of the net, the half built to catch a
+			// re-capture taken on ANOTHER operator's machine, where the live run's
+			// dynamic needles were a different set entirely.
+			for _, p := range dropcapBase64Payloads(&rec) {
+				if hits, _ := scanner.scan(p.decode()); len(hits) > 0 {
+					t.Fatalf("%s in the committed capture decodes to %d denied class(es): %v. "+
+						"The offending value is deliberately not printed. Re-capture with an "+
+						"extended dropcapRedactor table", p.where, len(hits), hits)
+				}
+			}
+
+			// The rig-authored frame prose is a verbatim copy of the constants that
+			// produced it — pinned, not assumed. AC3/AC4 put the provenance, the
+			// spawn-shape delta, the redaction rationale (including what is
+			// deliberately KEPT) and the limitations in the RECORD, so a constant
+			// that gains a sentence while the committed record keeps the old one
+			// leaves the fixture making a claim the code no longer makes. This
+			// fails until the two agree.
+			//
+			// Which also fixes the way they are allowed to be made to agree. These
+			// three fields are compile-time literals, never claude's bytes, so
+			// propagating a constant into the committed record is a mechanical
+			// substitution and this check is what verifies it landed exactly. The
+			// PAYLOADS carry no such licence: they are captured bytes, editing one
+			// is inventing evidence, and the only way to change one is a fresh
+			// capture.
+			for _, kv := range [][3]string{
+				{"spawn_shape_delta", rec.SpawnShapeDelta, dropcapSpawnShapeDelta},
+				{"redaction_rationale", rec.RedactionRationale, dropcapRedactionRationale},
+				{"limitations", rec.Limitations, dropcapLimitations},
+			} {
+				if kv[1] != kv[2] {
+					t.Errorf("%s in the committed capture is not the constant that writes it. "+
+						"Either the fixture predates a change to the constant, or it was edited "+
+						"away from it; propagate the constant into the fixture (or re-capture)",
+						kv[0])
 				}
 			}
 
