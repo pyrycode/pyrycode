@@ -1,0 +1,509 @@
+{
+  "ticket": "1260",
+  "claude_version": "2.1.220 (Claude Code)",
+  "captured_at": "2026-08-02T22:04:56+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "This is the YOLO interactive shape. Production's stream path adds, via withApprovalArgs (cmd/pyry/streamsup_runner.go:116) and internal/sessions.claudeSettingsArgs, a --permission-prompt-tool / --mcp-config pair on NON-yolo spawns plus a per-session --settings. This capture passes none of them: it uses --dangerously-skip-permissions, a real production shape (the YOLO session bit, internal/sessions/session.go) and precisely the arm on which withApprovalArgs injects nothing. Consequence: the --mcp-config server would appear in system/init's mcp_servers / tools, so this capture's system/init is the yolo variant. Whether the flag alters the system/task_* family is UNMEASURED — do not read parity into it.",
+  "env_delta": [
+    "BASH_DEFAULT_TIMEOUT_MS=5000"
+  ],
+  "workdir": "$WORKDIR",
+  "fifo_path": "$FIFO",
+  "prompt": "Use the Bash tool exactly once to run this command verbatim: cat $FIFO. Do not chain it with \u0026\u0026 or ;, do not add any flags or redirections, do not comment on it, and do nothing else. run=$NONCE",
+  "outcome": "fired",
+  "outcome_detail": "a Bash command was left running in the background: the rendezvous fired and a process still held the FIFO's read end at turn end (terminated_on=result). The per-subtype census and expected_absent are valid for THIS turn",
+  "absence_claim_valid": true,
+  "pre_rendezvous_read": {
+    "verdict": "no-reader",
+    "detail": "open returned ENXIO: no process holds the read end",
+    "path": "$FIFO",
+    "mode": "prw-------",
+    "errno": 6,
+    "errno_name": "ENXIO"
+  },
+  "turn_end_read": {
+    "verdict": "reader-present",
+    "detail": "open($FIFO, O_WRONLY|O_NONBLOCK) succeeded: a process currently holds the read end",
+    "path": "$FIFO",
+    "mode": "prw-------"
+  },
+  "rendezvous_at": "2026-08-02T22:05:00.483869+03:00",
+  "terminated_on": "result",
+  "lines_captured": 49,
+  "dropped_lines": [
+    {
+      "index": 0,
+      "type": "system",
+      "subtype": "init",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 2309,
+      "payload_len_bytes": 1980,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"$WORKDIR\",\"session_id\":\"$SESSION_ID\",\"tools\":[\"Task\",\"Artifact\",\"Bash\",\"CronCreate\",\"CronDelete\",\"CronList\",\"DesignSync\",\"Edit\",\"EnterWorktree\",\"ExitWorktree\",\"Monitor\",\"NotebookEdit\",\"PushNotification\",\"Read\",\"RemoteTrigger\",\"ReportFindings\",\"ScheduleWakeup\",\"SendMessage\",\"Skill\",\"TaskCreate\",\"TaskGet\",\"TaskList\",\"TaskOutput\",\"TaskStop\",\"TaskUpdate\",\"ToolSearch\",\"WebFetch\",\"WebSearch\",\"Workflow\",\"Write\"],\"mcp_servers\":[{\"name\":\"blender\",\"status\":\"pending\"},{\"name\":\"codegraph\",\"status\":\"pending\"}],\"model\":\"claude-haiku-4-5-20251001\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[\"deep-research\",\"design-sync\",\"dataviz\",\"artifact-design\",\"artifact-capabilities\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"run\",\"run-skill-generator\",\"agents\",\"clear\",\"color\",\"compact\",\"config\",\"context\",\"effort\",\"fast\",\"heapdump\",\"init\",\"mcp\",\"model\",\"__remote-workflow\",\"workflow-launch-exec\",\"reload-skills\",\"rename\",\"review\",\"security-review\",\"usage-credits\",\"extra-usage\",\"usage\",\"insights\",\"recap\",\"goal\",\"design\",\"design-consent\",\"design-revoke\",\"team-onboarding\"],\"apiKeySource\":\"none\",\"claude_code_version\":\"2.1.220\",\"output_style\":\"default\",\"agents\":[\"claude\",\"claude-code-guide\",\"Explore\",\"general-purpose\",\"Plan\",\"statusline-setup\"],\"skills\":[\"deep-research\",\"design-sync\",\"dataviz\",\"artifact-design\",\"artifact-capabilities\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"330fe997-9dee-4750-9407-f9c67f416126\",\"memory_paths\":{\"auto\":\"$TEMP_HOME/.claude/projects/$WORKDIR/memory/\"},\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\"}"
+    },
+    {
+      "index": 1,
+      "type": "rate_limit_event",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 309,
+      "payload_len_bytes": 284,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1785699000,\"rateLimitType\":\"five_hour\",\"overageStatus\":\"rejected\",\"overageDisabledReason\":\"org_level_disabled\",\"isUsingOverage\":false},\"uuid\":\"150c258a-ea0f-4c78-8ac9-7b1d8873a1fc\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 2,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 191,
+      "payload_len_bytes": 166,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":5,\"estimated_tokens_delta\":5,\"uuid\":\"cbf2d061-e904-45fb-badb-31062622ea65\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 3,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":23,\"estimated_tokens_delta\":18,\"uuid\":\"c03415e7-161f-4706-a33b-ef57b2a06f75\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 4,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":38,\"estimated_tokens_delta\":15,\"uuid\":\"f6a33de4-f8ca-41fd-b18e-3d0cd2d802ef\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 5,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":54,\"estimated_tokens_delta\":16,\"uuid\":\"4bd5c4b7-86d6-438f-88e0-cbd32e92959f\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 6,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":70,\"estimated_tokens_delta\":16,\"uuid\":\"e40a00ec-44d1-439c-a938-6d085674dd7e\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 7,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":92,\"estimated_tokens_delta\":22,\"uuid\":\"bd1496e9-4943-4c06-87c8-2c8cdb16fd94\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 8,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":106,\"estimated_tokens_delta\":14,\"uuid\":\"188b9474-9798-4de8-afc4-5a0f03d5aef7\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 9,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":124,\"estimated_tokens_delta\":18,\"uuid\":\"41b1c489-1247-44a6-b0bb-8d05b03ead02\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 10,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":184,\"estimated_tokens_delta\":60,\"uuid\":\"66a760d0-7385-4f3f-839f-6cb4d0f777ee\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 13,
+      "type": "system",
+      "subtype": "task_started",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 377,
+      "payload_len_bytes": 235,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"bybi8g8i8\",\"tool_use_id\":\"toolu_01ENMNP5P4d3pqjTg9LgCxgZ\",\"description\":\"cat $FIFO\",\"task_type\":\"local_bash\",\"uuid\":\"c8f0ec50-0362-4dad-9418-5fd911cf3d62\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 14,
+      "type": "system",
+      "subtype": "background_tasks_changed",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 354,
+      "payload_len_bytes": 212,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[{\"task_id\":\"bybi8g8i8\",\"task_type\":\"local_bash\",\"description\":\"cat $FIFO\"}],\"uuid\":\"702eb3a1-a939-43d8-b47d-e200e77712ae\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 15,
+      "type": "system",
+      "subtype": "task_updated",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 195,
+      "payload_len_bytes": 170,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_updated\",\"task_id\":\"bybi8g8i8\",\"patch\":{\"is_backgrounded\":true},\"uuid\":\"705d0c1b-91e9-43f0-9114-5da06d0e3ac6\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 17,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 191,
+      "payload_len_bytes": 166,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":4,\"estimated_tokens_delta\":4,\"uuid\":\"5d24e4b9-4815-46d7-9d4b-28c4fb8325d9\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 18,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":32,\"estimated_tokens_delta\":28,\"uuid\":\"e6220bc7-7271-4149-9f88-ef521cebdb4f\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 19,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":48,\"estimated_tokens_delta\":16,\"uuid\":\"b5f845fd-d33b-4fd1-a51e-4906a3f71143\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 20,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":66,\"estimated_tokens_delta\":18,\"uuid\":\"bc951b02-b4aa-4f7b-923a-e15cdc8f0090\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 21,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 192,
+      "payload_len_bytes": 167,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":75,\"estimated_tokens_delta\":9,\"uuid\":\"07acc9a2-8efe-4dee-90fd-08201395ed72\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 22,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":87,\"estimated_tokens_delta\":12,\"uuid\":\"12416a70-040b-4e07-a6b0-af926d2974cd\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 23,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":107,\"estimated_tokens_delta\":20,\"uuid\":\"659f83c1-1c59-4fa2-8a5e-20c9c5e5ba0e\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 24,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":167,\"estimated_tokens_delta\":60,\"uuid\":\"a2bb08f1-9bbe-41aa-802e-feb1cd48c48c\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 26,
+      "type": "user",
+      "reason": "user-block-suppressed",
+      "payload_len_bytes_captured": 361,
+      "payload_len_bytes": 336,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Your previous response had no visible output. Please continue and produce a user-visible response.]\"}]},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"19ae3dc1-537b-4f29-ab04-561aae886c2a\",\"timestamp\":\"2026-08-02T19:05:08.197Z\",\"isSynthetic\":true}"
+    },
+    {
+      "index": 27,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 191,
+      "payload_len_bytes": 166,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":3,\"estimated_tokens_delta\":3,\"uuid\":\"00a1fd9e-29b3-4c66-a2af-d165f13ac58b\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 28,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":25,\"estimated_tokens_delta\":22,\"uuid\":\"d198e176-499a-40c8-be66-d29ccc252196\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 29,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":43,\"estimated_tokens_delta\":18,\"uuid\":\"82ed00a7-5d03-49b5-a79d-ecea1ae65a70\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 30,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":63,\"estimated_tokens_delta\":20,\"uuid\":\"4dcc57ed-bdf8-4100-a86d-d15580f88eef\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 31,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 192,
+      "payload_len_bytes": 167,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":64,\"estimated_tokens_delta\":1,\"uuid\":\"9f1a9f05-691c-471d-9804-0b509a3b5056\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 32,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":126,\"estimated_tokens_delta\":62,\"uuid\":\"5afa65fa-b589-4d47-8c0c-e232a85e47ff\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 36,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 191,
+      "payload_len_bytes": 166,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":1,\"estimated_tokens_delta\":1,\"uuid\":\"5aea1d00-d6da-4c9c-b880-d80985b88537\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 37,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":15,\"estimated_tokens_delta\":14,\"uuid\":\"e3b81e9b-84ad-4dcb-b806-b916c6540f87\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 38,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":29,\"estimated_tokens_delta\":14,\"uuid\":\"b71bf4f3-793e-49cb-ad37-af6d7c4da238\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 39,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":44,\"estimated_tokens_delta\":15,\"uuid\":\"3764699f-c7ff-40d3-aee6-ca1b4955bfb8\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 40,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":58,\"estimated_tokens_delta\":14,\"uuid\":\"1bb7b376-d8ea-40fb-b328-11f7638f8fe9\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 41,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":72,\"estimated_tokens_delta\":14,\"uuid\":\"905c0ecb-bc59-46e7-8541-359ceec34510\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 42,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 193,
+      "payload_len_bytes": 168,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":86,\"estimated_tokens_delta\":14,\"uuid\":\"779e4b6c-e840-4285-be6a-328d91f9e1a8\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 43,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":111,\"estimated_tokens_delta\":25,\"uuid\":\"a9f36cc8-889d-4d67-8bb1-d2b4652ccf16\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 44,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":137,\"estimated_tokens_delta\":26,\"uuid\":\"e339b06e-a76f-44e0-9bc3-d78cfeced5e5\",\"session_id\":\"$SESSION_ID\"}"
+    },
+    {
+      "index": 45,
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "reason": "ignored-line-type",
+      "payload_len_bytes_captured": 194,
+      "payload_len_bytes": 169,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"thinking_tokens\",\"estimated_tokens\":197,\"estimated_tokens_delta\":60,\"uuid\":\"b18f6dc4-b11d-4f41-8cea-dfd782dd144f\",\"session_id\":\"$SESSION_ID\"}"
+    }
+  ],
+  "census": {
+    "rate_limit_event": 1,
+    "system/background_tasks_changed": 1,
+    "system/init": 1,
+    "system/task_started": 1,
+    "system/task_updated": 1,
+    "system/thinking_tokens": 33,
+    "user": 1
+  },
+  "expected_absent": [
+    "task_notification"
+  ],
+  "rate_limit_event_observed": true,
+  "harness_nudge": {
+    "observed": true,
+    "matches_shipped_constant": true,
+    "block_count": 1,
+    "line_index": 26,
+    "payload_encoding": "json-string",
+    "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Your previous response had no visible output. Please continue and produce a user-visible response.]\"}]}}"
+  },
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "fifo_path",
+      "replacement": "$FIFO",
+      "count": 7
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 1
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 40
+    },
+    {
+      "class": "temp_home",
+      "replacement": "$TEMP_HOME",
+      "count": 1
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 3
+    }
+  ],
+  "redaction_rationale": "The primary defence is by construction: the workdir is a fresh empty directory with NO git repo (no branch names, no file contents), the prompt is rig-authored (bgIdlePrompt), the Bash command is `cat \u003cfifo\u003e` which produces no output before it is backgrounded, and os.Environ() is never read into the record. On top of that, dropcapRedactor substitutes a declared table of path/identifier classes into EVERY string that enters the record, and dropcapScanner is a fail-closed deny-scan over the whole marshalled record. bgIdleRedact (interactive_background_idle_probe_test.go:824) is NOT sufficient here: it substitutes one value (the operator's home) into a SUMMARY that turnbridge/outbound.go had already capped at 200 runes, so the exposure was structurally bounded before redaction ran. Here the input is an uncapped raw payload that can carry cwd, tool output, file contents, branch names and prompt text, and it passes through unsummarised; a single home substitution would leave the temp $HOME path, the workdir, the session UUID and any tool output untouched. DELIBERATELY KEPT, because removing them would defeat the ticket: top-level types and subtypes, claude's own structural fields, tool names, model names, token counts, timestamps, the task-lifecycle payload structure and its human-readable strings, and the harness nudge text.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "limitations": "One turn, one spawn shape, one claude version, one model (haiku). Cross-version and cross-surface stability are UNMEASURED. The census is a census of THIS turn: a subtype listed in expected_absent did not appear here, which is not the same as claude never emitting it. #1218 measured one subtype's rate as surface-dependent (ptyrunner emits zero system/thinking_tokens, streamrunner ~10/turn), so model- and surface-dependence are live possibilities, not ruled-out ones.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}
