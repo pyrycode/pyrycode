@@ -494,6 +494,35 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   [`codebase/1239.md`](../codebase/1239.md) for the implementation detail and
   two known gaps flagged by code review (SHOULD FIX, not blocking) in the
   `Lstat`-arm errno assertion coverage and a stuttering `Detail` string.
+- `interactive_background_idle_probe_test.go` (#1240) — **evidence probe,
+  security-sensitive**; opt-in behind `PYRY_PROBE_INTERACTIVE_BG_IDLE=1` on
+  top of the package's normal auth skip. Stages one turn on the production
+  stream-json interactive daemon around a Bash command claude backgrounds on
+  timeout expiry (#1223's `BASH_DEFAULT_TIMEOUT_MS` trigger, reused unedited),
+  records every frame the phone receives in receive order via the new
+  `bgIdleRecordTurn` (the genuinely new code — both existing drains in this
+  file discard frames, so neither was reusable as a recorder), and takes
+  `fifoLiveRead` (#1239) twice on the same FIFO path across one command's
+  lifetime — pre-rendezvous (must read `no-reader`) and at the instant `idle`
+  is recorded — to re-prove the liveness flip in this rig rather than
+  inheriting #1239's self-check. Attribution of the held FIFO to the
+  backgrounded `tool_use` is closed by counting recorded frames
+  (`bgIdleCountFIFONaming`, 201-rune truncation tell), not a third pid
+  matcher. One extraction allowlist (`bgIdleFrameFromEnvelope`, five named
+  arms + a default that can hold nothing but `conversation_id`) keeps
+  claude's verbatim `unrecognized_message.Raw` and `assistant_delta.text` out
+  of the published artefact by construction. **Result, run live 2026-07-30
+  (3 reps, claude 2.1.220): yes — `turn_state{idle}` is emitted while the
+  backgrounded command is still alive**, and `turn_end.stop_reason` is
+  byte-identical (`"end_turn"`) between that case and a genuine finish, so a
+  client has no field to key on. Side finding: an `unrecognized_message`
+  frame appeared in all 3 reps specifically on the backgrounding path, filed
+  separately. Zero production files touched. Split from #1227; blocks #1241
+  (client-distinguishability baseline diff), which inherits this recorder.
+  See [`codebase/1240.md`](../codebase/1240.md) for the full finding, two
+  known gaps flagged by code review (SHOULD FIX, not blocking) in claude
+  version attribution and anomaly-flag verdict gating, and the live-run
+  timeline.
 - `background_reach_probe_test.go` (#1230) — **evidence probe, not a regression
   gate**; opt-in behind `PYRY_PROBE_BACKGROUND_REACH=1`, reusing #1223's staging
   rig verbatim (`background_trigger_probe_test.go` not edited; every new symbol
