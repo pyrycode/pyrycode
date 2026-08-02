@@ -422,6 +422,22 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (`maxRetryDenies`) and `perTurnReplyBudget` wall-clock, each with a distinct
   diagnostic. No content/echo assertion. Zero production files touched. Split
   from #1083. See [`codebase/1175.md`](../codebase/1175.md).
+- `interactive_stream_new_session_test.go` (#1174) — real-claude cross of
+  the fakeclaude sibling #1137: on the stream-json runner, `new_session`
+  rotates the bootstrap session id AND `streamsup.Runner.RestartFresh`
+  spawns a genuinely fresh live `claude` child under the rotated id, not a
+  `--resume`. Five milestones: M1 turn-1 liveness (#1153's
+  `drainForCompletedTurn`), M2 on-disk id rotation (#1031's actuation
+  loop), M3 client-observed `session_transition{clear}` (#1154's
+  `drainForControlEvent`), M4 turn-2 accepted (**ack only** —  a
+  phone-side delta would hang, the drain gate's sink tag is fixed at
+  runner construction and drops post-rotation deltas, #1081 out of
+  scope), M5 a fresh `<idAfter>.jsonl` transcript appears alongside the
+  untouched `<idBefore>.jsonl` (the word-independent, fake-unregressable
+  fresh-spawn proof; transcript dir located empirically to sidestep the
+  #989 `canonicalCase` hazard). Zero production files touched. Split from
+  #1083; sibling leaves #1173 (multi-turn continuity), #1175 (permission
+  DENY). See [`codebase/1174.md`](../codebase/1174.md).
 - `background_trigger_probe_test.go` (#1223) — **evidence probe, not a
   regression gate**; opt-in behind `PYRY_PROBE_BACKGROUND_TRIGGER=1` on top of
   the package's normal auth skip (an ungated probe would burn ~9 live claude
@@ -691,3 +707,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
 - Ticket [#1176](https://github.com/pyrycode/pyrycode/issues/1176) — real-claude interrupt-stops-a-running-turn gate, composing #1172's running-turn trigger with the shipped interrupt primitives (#1120/#1121); new `drainForCancelledTurnEnd` drain guards against the spontaneous-`end_turn` vacuous pass; closes the fake-green/real-red gap (#949) on the interrupt path; split from #1083, zero production files; codebase note at [`codebase/1176.md`](../codebase/1176.md).
 - Ticket [#1175](https://github.com/pyrycode/pyrycode/issues/1175) — real-claude permission **deny** round-trip on the stream-json runner (security-sensitive, architect security review PASS); reuses #1154's harness/trigger scaffold, swaps the answer to `reject_once`, and adds a `Source == "remote"`/`Outcome == "reject_once"` attribution assertion so a timeout-deny can't masquerade as the explicit reject, plus a workdir walk proving the gated `Write` never executed; rework `denyModalsUntilIdle` answers every retry modal (real haiku retries a denied tool at least once) bounded by a retry-count cap and wall-clock budget; zero production files; codebase note at [`codebase/1175.md`](../codebase/1175.md).
+- Ticket [#1174](https://github.com/pyrycode/pyrycode/issues/1174) — real-claude cross of fakeclaude sibling #1137: on the stream-json runner, `new_session` rotates the bootstrap session id and `RestartFresh` spawns a genuinely fresh live claude child under the rotated id (not `--resume`), proven by a fresh `<idAfter>.jsonl` transcript appearing on disk; transcribes #1031's spine + #1153's/#1154's drain helpers, zero production files; split from #1083, sibling of #1173/#1175; codebase note at [`codebase/1174.md`](../codebase/1174.md).
