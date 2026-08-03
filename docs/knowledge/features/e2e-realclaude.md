@@ -770,6 +770,30 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   [`codebase/1270.md`](../codebase/1270.md) for the full implementation, the
   ordering arguments, and the deferred findings.
 
+- `trail_run_outcome_test.go` (#1271) — the **run-level classifier**:
+  `trailClassifyRun(trailRunReadings) trailRunOutcome` maps one probe run's raw
+  observations onto exactly one of eleven outcomes (three answers, eight named
+  voids) so a run that measured nothing is recorded as having measured nothing
+  rather than falling through to a finding. Consumes #1270's two admissibility
+  results; a nine-check contract block (C1–C9) guards the top, calling
+  #1270's/#1235's shipped membership predicates rather than re-deriving them,
+  so the out-of-contract value is a guard, never a switch default. An
+  admissible attribution is consulted *before* any point-in-time reading
+  (proof outranks pyry-not-exiting outranks every instrument void), because
+  the point-in-time reads are expected to be late and must never be what a
+  verdict rests on — the systematic-false-negative case this ticket exists to
+  prevent is a regression row in `TestTrailClassifyRun`. Input and outcome
+  records carry discriminators and counts only — `BoundFrom` rather than the
+  `trailObservation` that embeds `trailScanResult`, `MatchCount`/`RowsScanned`
+  rather than `pinScan.Matches`' verbatim argv, no command string anywhere —
+  enforced by a marshal-and-search test with a needle in four inputs. Folds in
+  #1270's parked SHOULD FIX (an uncontracted `certified` parameter) at both the
+  layer it was found and as a composition pair (C4/C5) one layer up. Purely
+  additive, one new file plus a ~70-line extension of #1270's own closure test
+  (eighteen constants → twenty-nine); 14 `TestTrail`-prefixed functions, 82
+  subtests, 0 SKIP on `-run '^TestTrail'`. See
+  [`codebase/1271.md`](../codebase/1271.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
