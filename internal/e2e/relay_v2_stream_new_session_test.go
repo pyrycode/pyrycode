@@ -81,6 +81,17 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		sendReqIDTwo  = uint64(1237)
 	)
 
+	// Every milestone line below carries the wall-clock elapsed since this point,
+	// so a failing run's output shows WHERE the time went instead of leaving a
+	// single total to be reconstructed by hand (#1273: the 20.21 s failure was
+	// read as a slow machine when it was really a full 20.00 s deadline burn on a
+	// 0.21 s prefix). Captured before shortHome/pairing/daemon startup so the
+	// stamp covers that prefix too — it is exactly the quantity that arithmetic
+	// turns on. go test prints buffered t.Logf output when a test FAILS, not only
+	// under -v, so M1–M3's stamps ride along with any later failure for free.
+	testStart := time.Now()
+	elapsed := func() string { return time.Since(testStart).Round(time.Millisecond).String() }
+
 	home := shortHome(t)
 
 	// Pair one interactive device.
@@ -229,7 +240,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		}
 		sawDelta = true
 	}
-	t.Logf("M1: observed assistant_delta echoing the pre-rotation prompt — the child is live and the turn drained")
+	t.Logf("[t=%s] M1: observed assistant_delta echoing the pre-rotation prompt — the child is live and the turn drained", elapsed())
 
 	// Baseline (non-vacuity for M2): the daemon reconciled the bootstrap id to
 	// initialUUID before any rotation, so the "id changed" assertion below is
@@ -279,7 +290,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 			pre.LastActiveAt.Format(time.RFC3339Nano),
 			post.LastActiveAt.Format(time.RFC3339Nano))
 	}
-	t.Logf("M2: registry rotated %s → %s — the id rotated and the bound runner restarted fresh", initialUUID, post.ID)
+	t.Logf("[t=%s] M2: registry rotated %s → %s — the id rotated and the bound runner restarted fresh", elapsed(), initialUUID, post.ID)
 
 	// --- M3 (AC-2 "the client observes …"): drain phone envelopes until the
 	// session_transition broadcast for the rotation. notifyTransition(ReasonClear)
@@ -317,7 +328,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		}
 		sawTransition = true
 	}
-	t.Logf("M3: observed session_transition{clear, %s → %s} for the conversation — the client saw the rotation", initialUUID, post.ID)
+	t.Logf("[t=%s] M3: observed session_transition{clear, %s → %s} for the conversation — the client saw the rotation", elapsed(), initialUUID, post.ID)
 
 	// --- M4 (AC-2 "…serving a subsequent turn"): the post-rotation session serves a
 	// subsequent turn. send_message #2 to knownConvID (now rebound to post.ID) → await
@@ -356,24 +367,79 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		}
 	}
 
+	// The stdin log's size the moment ack #2 landed, paired with its size at the
+	// poll deadline below. Growth between the two falsifies "no bytes arrived at
+	// all": the log is opened O_APPEND with a per-write Sync and BOTH the bootstrap
+	// and the fresh post-rotation child accumulate into this one file, so growth
+	// means some child was alive and receiving — separating that from "bytes
+	// arrived, but not turn #2's". Both probes use the SAME instrument
+	// (os.ReadFile + len) as the poll loop and as the log=%q the failure prints:
+	// the file is appended to concurrently, and mixing an os.Stat size into one end
+	// would make the delta unattributable. The elapsed stamp is load-bearing, not
+	// decoration — there is no milestone line between M3 and an M4 failure, so the
+	// up-to-15 s ack #2 wait is otherwise invisible, and whether ack #2 landed at
+	// t=0.2 s or t=14 s is the slowness-vs-stall discriminator.
+	ackTwoAt := elapsed()
+	ackTwoBytes, ackTwoErr := os.ReadFile(stdinLog)
+
 	// Poll the stdin log until the fresh child has received turn #2. The daemon's
 	// inbound queue retries WriteUserTurn until the fresh child is stdin-ready, so a
 	// generous deadline absorbs the fresh spawn.
+	//
+	// This deadline stays where it is, deliberately (#1273). The msgqueue drain
+	// BLOCKS inside the delivery seam waiting for claude to go idle (#704) with no
+	// periodic retry, so a missed wake-up is an unbounded stall and 20 s, 60 s and
+	// 300 s are the same red — raising it cannot fix the failure it would hide. Nor
+	// is the test wrapped in a re-run: auto-retrying before reporting red converts a
+	// possible permanent-stall defect into an invisible one, the false-green shape
+	// that already shipped an unverified change once (#1168 / PR #1169, where a SKIP
+	// exited 0 and read as a pass). The diagnostics below make the next occurrence
+	// decidable instead; that is the whole scope here.
+	//
+	// The read error is KEPT rather than discarded: without it len(nil) == 0 renders
+	// an unreadable file as "the file was empty" — a broken instrument reporting
+	// itself as a measurement, which is exactly the ambiguity this change closes.
 	var logBytes []byte
+	var logErr error
 	turnTwoDeadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(turnTwoDeadline) {
-		logBytes, _ = os.ReadFile(stdinLog)
+		logBytes, logErr = os.ReadFile(stdinLog)
 		if bytes.Contains(logBytes, []byte(echoNeedleTwo)) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	if !bytes.Contains(logBytes, []byte(echoNeedleTwo)) {
+		// Re-read the registry's bootstrap id ONE-SHOT and report it beside the
+		// post.ID captured at M2. A mismatch means a SECOND rotation re-keyed the
+		// binding out from under turn #2's in-flight write — the M2 loop re-sends
+		// new_session every ~250 ms and this file's own comments already anticipate
+		// double-actuation — a reading the old message could not tell from a stall.
+		// readBootstrapIfPresent reads the same file and the same field M2 did, so a
+		// mismatch has exactly one reading; comparing against conversations.json's
+		// CurrentSessionID would confound "second rotation" with "cross-file skew".
+		// It is also the only admissible reader here: nothing on this failure path may
+		// call a t.Fatal*-ing helper (readBootstrap, waitForBootstrapID*, mustReadFile,
+		// boundSessionID), or its fatal fires first and this message never prints.
+		//
+		// ok=false conflates missing / unparseable / no bootstrap row, so it renders as
+		// a sentinel — never as "", which would read as "the rotation lost the id" and
+		// fabricate a finding out of a broken instrument.
+		regNowID := "<no bootstrap entry: registry missing, unparseable, or bootstrap row absent>"
+		if e, ok := readBootstrapIfPresent(regPath); ok {
+			regNowID = e.ID
+		}
 		t.Fatalf("M4: the fresh child never received the subsequent turn; the stdin log has no %q bytes "+
-			"(delivery never reached it, or the rotated session did not re-spawn). ack #2 received=%t\nlog=%q",
-			echoNeedleTwo, gotAck2, logBytes)
+			"(delivery never reached it, or the rotated session did not re-spawn). ack #2 received=%t\n"+
+			"stdin log: %d bytes at ack #2 (t=%s, read err: %v) → %d bytes at expiry (read err: %v) "+
+			"— no growth ⟹ no bytes arrived at all; growth ⟹ bytes arrived, but not turn #2's\n"+
+			"registry bootstrap id: %q at M2 (post.ID) → %q re-read now — a mismatch ⟹ a second rotation "+
+			"re-keyed the binding under turn #2\nlog=%q",
+			echoNeedleTwo, gotAck2,
+			len(ackTwoBytes), ackTwoAt, ackTwoErr, len(logBytes), logErr,
+			post.ID, regNowID, logBytes)
 	}
-	t.Logf("M4: the fresh post-rotation child received the subsequent turn (stdin log carries %q)", echoNeedleTwo)
+	t.Logf("[t=%s] M4: the fresh post-rotation child received the subsequent turn (stdin log carries %q)", elapsed(), echoNeedleTwo)
 
 	// --- M5 (AC-3): no "/clear" on the stream path. On the stream path new_session is
 	// a process re-spawn (RestartFresh), never a keystroke, so no child ever receives
@@ -391,5 +457,5 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 			"/clear path (a startFreshRunner type-switch regression) — the stream path must re-spawn, never type "+
 			"/clear\nlog=%q", logBytes)
 	}
-	t.Logf("M5: the stdin log captured user turns and never a /clear — the stream new_session re-spawned, no keystroke (AC-3)")
+	t.Logf("[t=%s] M5: the stdin log captured user turns and never a /clear — the stream new_session re-spawned, no keystroke (AC-3)", elapsed())
 }
