@@ -318,33 +318,131 @@ func tdnDetail(format string, args ...any) string {
 // tdnArtifactName is the ONE file this writer emits.
 const tdnArtifactName = "teardown.json"
 
-// tdnRecord composes the three readings a teardown measurement rests on. It
+// The two points a teardown measurement is read at, carried in the snapshot
+// itself. A snapshot that cannot say WHICH point it was taken at is exactly the
+// ambiguity #1251's flip gate exists to remove, so this is a member and never a
+// position in a slice.
+const (
+	tdnAtBefore = "before-teardown"
+	tdnAtAfter  = "after-teardown"
+)
+
+// The dispositions a live consumer reaches, as a POSITIVE ALLOWLIST: exactly
+// one of them is a finding about pyry and everything ambiguous lands on
+// tdnDispositionSkipped rather than on a verdict.
+//
+// Two rules the allowlist encodes, neither of which may be softened:
+//
+//   - A BROKEN INSTRUMENT NEVER OPENS A LEAK TICKET. Either classifier
+//     reporting instrument-failed records and skips. Without that arm an
+//     unparseable pgids= collapses into reap-line-without-held-pgid, which a
+//     consumer reads as "the reaper ran and did not kill our group" — a leak
+//     finding manufactured out of the instrument's own breakage.
+//   - A TRIGGER MISS IS NOT A PYRY REGRESSION. Preconditions unmet is a
+//     record-and-skip, not a red test.
+const (
+	// tdnDispositionReaperKilled: the command is dead, it could not have
+	// finished on its own (the FIFO write end was held across the teardown),
+	// and the reaper reported killing its group — so kill(2) succeeded, because
+	// reap.go:56-62 skips ESRCH BEFORE the append. The full-strength reading.
+	tdnDispositionReaperKilled = "dead-by-reaper"
+	// tdnDispositionDeadUnattributed: the command is dead and could not have
+	// finished on its own, but the reaper's hand is not established.
+	tdnDispositionDeadUnattributed = "dead-not-attributed-to-the-reaper"
+	// tdnDispositionLeaked: the ONLY red arm. The pinned process is still
+	// running after pyry exited and the content re-match still identifies it as
+	// this run's command.
+	tdnDispositionLeaked = "leaked"
+	// tdnDispositionSkipped: everything else. Never a statement about pyry.
+	tdnDispositionSkipped = "skipped"
+)
+
+// tdnSnapshot is one point-in-time reading of the pinned command: the content
+// match, one per-pid liveness read for every pid pinned at the before-snapshot,
+// and the FIFO's own reader state.
+//
+// ScanErr and Liveness are SEPARATE VALUES WITH NO CROSS-ASSIGNMENT — #1235's
+// gate-placement obligation. A failed scan must neither relabel a genuine
+// liveness verdict nor be relabelled by one; the consumer's gate belongs after
+// its own outcome is decided.
+type tdnSnapshot struct {
+	At string `json:"at"`
+	// ArgvScan is the ONLY member of this record that can carry a command
+	// string, and that is the design rather than an accident: `command` reaches
+	// the record from the content-first argv scan that already publishes
+	// matched rows, never from the narrow per-pid read whose column set
+	// TestPinStateColumns_ReadsNoEnvironment pins.
+	ArgvScan pinScan `json:"argv_scan"`
+	ScanErr  string  `json:"argv_scan_error,omitempty"`
+	// Liveness is INDEX-ALIGNED with tdnRecord.HeldPIDs: entry i is about
+	// HeldPIDs[i]. That is an invariant, not a convention — every
+	// pinStateOutcome carries its own PID, so the artifact is self-checking and
+	// the alignment is asserted rather than trusted.
+	Liveness []pinStateOutcome `json:"liveness"`
+	FIFO     fifoLiveOutcome   `json:"fifo"`
+}
+
+// tdnRecord composes the readings a teardown measurement rests on. It
 // COMPOSES; it does not conclude — no verdict is synthesised across the
 // members, and no pid/content join is performed here, because both live
 // consumers own their own join at the rig level (#1236 AC2, #1251 AC3).
+// Disposition is a field the rig SETS through decide; nothing inside this type
+// derives it.
 //
-// No new liveness type: Liveness and FIFO are #1235's and #1239's outcomes
-// verbatim.
+// No new liveness type: the per-pid and FIFO readings are #1235's and #1239's
+// outcomes verbatim.
+//
+// The before/after PAIR is the shape, not a single reading with a Notes
+// sentence beside it: the instrument has to be shown flipping inside the very
+// run whose verdict it reports, and a flip recorded as prose is one keystroke
+// from the hand-typed record #1251 exists to rule out.
 type tdnRecord struct {
 	Ticket string   `json:"ticket"`
 	Notes  []string `json:"notes,omitempty"`
 
-	HeldPGID int `json:"held_pgid"`
-	HeldPID  int `json:"held_pid"`
+	// Provenance. RunnerFromEnv is DOCUMENTATION and RunnerFromArgv is the
+	// EVIDENCE — reachRunnerPathFromEnv reads an environment the operator's
+	// shell may already have set (it had, on 2026-07-25, silently invalidating
+	// a #1223 gate), while the argv read names the runner from the process
+	// table this run actually produced.
+	ClaudeVersion  string `json:"claude_version,omitempty"`
+	TeardownPath   string `json:"teardown_path,omitempty"`
+	RunnerFromEnv  string `json:"runner_from_env,omitempty"`
+	RunnerFromArgv string `json:"runner_from_argv,omitempty"`
 
-	// ArgvScan is the ONLY member that can carry a command string, and that is
-	// the design rather than an accident: `command` reaches the record from the
-	// content-first argv scan that already publishes matched rows, never from
-	// the narrow per-pid read whose column set
-	// TestPinStateColumns_ReadsNoEnvironment pins.
-	ArgvScan pinScan         `json:"argv_scan"`
-	Liveness pinStateOutcome `json:"liveness"`
-	FIFO     fifoLiveOutcome `json:"fifo"`
-	Reap     tdnReapOutcome  `json:"reap"`
+	// FIFOPath is the run-unique needle the content match is decided against,
+	// carried so the after-read's pid-reuse join is decidable from the record
+	// alone.
+	FIFOPath string `json:"fifo_path,omitempty"`
+	PyryPID  int    `json:"pyry_pid,omitempty"`
+	HeldPGID int    `json:"held_pgid"`
+	// HeldPIDs is a SLICE, not a pid: #1230's live run matched two rows on the
+	// FIFO needle — the `zsh -c` wrapper claude runs Bash through, whose argv
+	// carries the whole command string, and the `cat` itself — so resolving
+	// "the" held pid is the first-match defect this family already flags.
+	HeldPIDs []int `json:"held_pids,omitempty"`
+
+	Before *tdnSnapshot `json:"before,omitempty"`
+	After  *tdnSnapshot `json:"after,omitempty"`
+
+	Reap tdnReapOutcome `json:"reap"`
+
+	Disposition       string `json:"disposition"`
+	DispositionDetail string `json:"disposition_detail"`
 }
 
 func (r *tdnRecord) note(format string, args ...any) {
 	r.Notes = append(r.Notes, fmt.Sprintf(format, args...))
+}
+
+// decide sets the disposition and the sentence that earns it, mirroring
+// reachRecord.decide (background_reach_probe_test.go:261). The detail is capped
+// like every other string in this record: it lands in an artifact an operator
+// pastes into a public issue and can quote a classifier Detail that already
+// carries `ps` stderr.
+func (r *tdnRecord) decide(verdict, format string, args ...any) {
+	r.Disposition = verdict
+	r.DispositionDetail = tdnDetail(format, args...)
 }
 
 // writeTdnArtifacts persists the record as ONE JSON file, mode 0600, in dir.
@@ -530,13 +628,29 @@ func TestTdnClassifyReapLog(t *testing.T) {
 			// The union across lines, not the first match. #1235's own
 			// anti-first-match discipline (pinScan.Matches is a slice precisely
 			// because nothing here resolves to "the" one) applied to lines.
+			//
+			// The ORDER of the two fixtures is the whole point and is not
+			// interchangeable — #1250 shipped it the other way round and code
+			// review caught that the row did not discriminate the mutation its
+			// name claims to guard (#1250 PR #1252, SHOULD FIX, repaired here).
+			// tdnFixtureDefaultTwo renders `pgids="[89355 4242]"`, so putting it
+			// FIRST puts the held pgid in line 1 and a first-line-only union still
+			// answers held-pgid-in-reap-line: only the LineCount/Count bookkeeping
+			// caught the truncation, never the verdict a consumer reads.
+			//
+			// This way round, line 1 contributes {89355} alone and 4242 appears
+			// solely in line 2, so a first-line-only union yields
+			// tdnReapHeldPGIDAbsent and the row fails on the VERDICT. AC4's
+			// multi-group requirement rests on this arm.
 			name:        "two reap lines, the held pgid only in the second",
-			stderr:      tdnFixtureDefaultTwo + "\n" + tdnFixtureTextOne,
+			stderr:      tdnFixtureTextOne + "\n" + tdnFixtureDefaultTwo,
 			held:        4242,
 			wantVerdict: tdnReapHeldPGIDKilled,
-			wantPGIDs:   []int{89355, 4242},
-			wantLines:   2,
-			wantCount:   3,
+			// 89355 from line 1, 4242 new in line 2; line 2's duplicate 89355 is
+			// deduped by `seen`. count= totals 1 + 2 = 3 across the two lines.
+			wantPGIDs: []int{89355, 4242},
+			wantLines: 2,
+			wantCount: 3,
 		},
 	}
 
@@ -862,10 +976,24 @@ func TestTdnRecordWriter(t *testing.T) {
 		}
 	})
 
+	t.Run("the disposition is one of the recorded values", func(t *testing.T) {
+		// The record composes; it does not conclude. Disposition is a field the
+		// rig SETS, so the only property this file can assert about it is that
+		// it is a member of the allowlist — an unrecognised string in a
+		// published artifact is a verdict nobody can look up.
+		if !tdnIsDisposition(rec.Disposition) {
+			t.Errorf("disposition %q is not one of the recorded values", rec.Disposition)
+		}
+		if rec.DispositionDetail == "" {
+			t.Error("empty disposition detail: a disposition that cannot say what earned it " +
+				"is indistinguishable from an unset field")
+		}
+	})
+
 	t.Run("a command string reaches the record only from the argv scan", func(t *testing.T) {
 		// The positive half first: the allowed source genuinely publishes one,
 		// so the negative assertions below are not vacuous.
-		scan, err := json.Marshal(rec.ArgvScan)
+		scan, err := json.Marshal(rec.Before.ArgvScan)
 		if err != nil {
 			t.Fatalf("marshal argv scan: %v", err)
 		}
@@ -877,13 +1005,18 @@ func TestTdnRecordWriter(t *testing.T) {
 		// The narrow per-pid read's column set is pinned by
 		// TestPinStateColumns_ReadsNoEnvironment (:950) and is not restated
 		// here. This is the record-level tripwire against a FUTURE field: it
-		// holds structurally today because none of the three types has one.
+		// holds structurally today because none of these types has one. Both
+		// snapshots are walked, not just one: #1251 widened the record to carry
+		// a before/after pair, and a tripwire that only watched one half would
+		// let a future field through on the other.
 		for _, part := range []struct {
 			name string
 			v    any
 		}{
-			{name: "liveness (the narrow per-pid read)", v: rec.Liveness},
-			{name: "fifo", v: rec.FIFO},
+			{name: "before liveness (the narrow per-pid read)", v: rec.Before.Liveness},
+			{name: "before fifo", v: rec.Before.FIFO},
+			{name: "after liveness (the narrow per-pid read)", v: rec.After.Liveness},
+			{name: "after fifo", v: rec.After.FIFO},
 			{name: "reap", v: rec.Reap},
 		} {
 			b, err := json.Marshal(part.v)
@@ -935,33 +1068,106 @@ func TestTdnRecordWriter(t *testing.T) {
 		if err := json.Unmarshal(written, &round); err != nil {
 			t.Fatalf("the artifact is not valid JSON: %v\n%s", err, written)
 		}
-		if round.Reap.Verdict != rec.Reap.Verdict || round.Liveness.Verdict != rec.Liveness.Verdict {
-			t.Errorf("round-tripped record lost its verdicts: reap %q/%q liveness %q/%q",
-				round.Reap.Verdict, rec.Reap.Verdict, round.Liveness.Verdict, rec.Liveness.Verdict)
+		if round.Reap.Verdict != rec.Reap.Verdict {
+			t.Errorf("round-tripped record lost its reap verdict: %q, want %q",
+				round.Reap.Verdict, rec.Reap.Verdict)
+		}
+		// The FLIP is the property #1251 depends on, so the round-trip asserts
+		// the pair rather than a single verdict: a record that marshalled only
+		// one of the two snapshots would still round-trip a verdict cleanly.
+		if round.Before == nil || round.After == nil {
+			t.Fatalf("round-tripped record lost a snapshot: before=%v after=%v",
+				round.Before, round.After)
+		}
+		if round.Before.Liveness[0].Verdict != rec.Before.Liveness[0].Verdict ||
+			round.After.Liveness[0].Verdict != rec.After.Liveness[0].Verdict {
+			t.Errorf("round-tripped record lost its liveness verdicts: before %q/%q after %q/%q",
+				round.Before.Liveness[0].Verdict, rec.Before.Liveness[0].Verdict,
+				round.After.Liveness[0].Verdict, rec.After.Liveness[0].Verdict)
+		}
+		if round.Before.At != tdnAtBefore || round.After.At != tdnAtAfter {
+			t.Errorf("round-tripped snapshots lost the point they were taken at: %q / %q",
+				round.Before.At, round.After.At)
 		}
 	})
 }
 
-// tdnFixtureRecord builds a record with every field non-zero, composed from the
-// real classifiers rather than from literals: a redaction check over a record
-// nobody populated proves nothing.
+// tdnFixtureRecord builds a record with every member populated, composed from
+// the real classifiers rather than from literals: a redaction check over a
+// record nobody populated proves nothing.
+//
+// It is a FIXTURE, not a coherent run: the held pids come from pinArgvFixture
+// (rows 300 and 400, the `zsh -c` wrapper and its `cat`, one shared pgid) while
+// the held pgid and the reap line come from this file's reap fixtures. Nothing
+// here joins the two, and nothing needs to — the assertions it feeds are about
+// redaction, disposition membership and the JSON round trip.
 func tdnFixtureRecord() *tdnRecord {
-	fifo := fifoLiveClassifyOpenErr(syscall.ENXIO)
-	fifo.Path = "/tmp/pyry-1250-fixture/teardown-hold"
-	fifo.Mode = os.ModeNamedPipe.String()
-
 	rec := &tdnRecord{
-		Ticket:   tdnTicket,
-		HeldPGID: tdnFixtureHeldPGID,
-		HeldPID:  pinFixtureOwnPID,
-		ArgvScan: pinMatchArgvExcluding([]byte(pinArgvFixture), []string{pinFixtureNeedle},
-			map[int]string{pinFixtureOwnPID: "the instrument's own test binary"}),
-		Liveness: pinClassifyState(4242, []byte("4242 1 S\n"), nil),
-		FIFO:     fifo,
-		Reap:     tdnClassifyReapLog([]byte(tdnFixtureDefaultTwo), tdnFixtureHeldPGID),
+		Ticket:         tdnTicket,
+		ClaudeVersion:  "2.1.220 (Claude Code)",
+		TeardownPath:   "fixture: no teardown was performed",
+		RunnerFromEnv:  reachRunnerPathFromEnv(nil),
+		RunnerFromArgv: "fixture: no claude row was pinned",
+		FIFOPath:       pinFixtureNeedle,
+		PyryPID:        100,
+		HeldPGID:       tdnFixtureHeldPGID,
+		HeldPIDs:       []int{300, 400},
+		Before: &tdnSnapshot{
+			At: tdnAtBefore,
+			ArgvScan: pinMatchArgvExcluding([]byte(pinArgvFixture), []string{pinFixtureNeedle},
+				map[int]string{pinFixtureOwnPID: "the instrument's own test binary"}),
+			Liveness: []pinStateOutcome{
+				pinClassifyState(300, []byte("300 200 S\n"), nil),
+				pinClassifyState(400, []byte("400 300 S\n"), nil),
+			},
+			FIFO: tdnFixtureReaderPresent(),
+		},
+		After: &tdnSnapshot{
+			At: tdnAtAfter,
+			// The needle is GONE from the after table: the kernel replaces a
+			// defunct process's argv, and a dead pid has no row at all. That is
+			// expected and carries no information, which is exactly why the
+			// content re-match is dispositive only for a `running` verdict.
+			ArgvScan: pinMatchArgvExcluding([]byte(pinArgvFixture), []string{"/tmp/run-p/gone"}, nil),
+			Liveness: []pinStateOutcome{
+				pinClassifyState(300, []byte("300 200 Z\n"), nil),
+				pinClassifyState(400, []byte("400 300 Z\n"), nil),
+			},
+			FIFO: tdnFixtureNoReader(),
+		},
+		Reap: tdnClassifyReapLog([]byte(tdnFixtureDefaultTwo), tdnFixtureHeldPGID),
 	}
+	rec.decide(tdnDispositionReaperKilled, "fixture disposition, set through the real setter; "+
+		"no live turn was taken and no claim is made about pyry")
 	rec.note("fixture record for %s's redaction self-check; no live turn was taken", tdnTicket)
 	return rec
+}
+
+// tdnFixtureNoReader is the after point's FIFO reading, from #1239's own pure
+// constructor.
+func tdnFixtureNoReader() fifoLiveOutcome {
+	out := fifoLiveClassifyOpenErr(syscall.ENXIO)
+	out.Path = "/tmp/pyry-1250-fixture/teardown-hold"
+	out.Mode = os.ModeNamedPipe.String()
+	return out
+}
+
+// tdnFixtureReaderPresent is the before point's FIFO reading.
+//
+// It is the ONE member of this fixture built by literal rather than by calling
+// a classifier, and the reason is structural: fifoLiveRead's positive arm is
+// reached only by an open(2) that succeeds, so there is no pure constructor for
+// it — producing one honestly would mean staging a live FIFO with a live reader,
+// which this offline file deliberately does not do. Nothing gates on it: the
+// FIFO readings are corroboration in #1251's record and never decide a verdict.
+func tdnFixtureReaderPresent() fifoLiveOutcome {
+	return fifoLiveOutcome{
+		Verdict: fifoLiveReaderPresent,
+		Detail: "fixture: open(…, O_WRONLY|O_NONBLOCK) succeeded, so a process held the " +
+			"read end at the before point",
+		Path: "/tmp/pyry-1250-fixture/teardown-hold",
+		Mode: os.ModeNamedPipe.String(),
+	}
 }
 
 // --- test helpers ------------------------------------------------------------
@@ -970,6 +1176,19 @@ func tdnFixtureRecord() *tdnRecord {
 func tdnIsReapVerdict(v string) bool {
 	switch v {
 	case tdnReapHeldPGIDKilled, tdnReapHeldPGIDAbsent, tdnReapNoLine, tdnReapInstrumentFailed:
+		return true
+	}
+	return false
+}
+
+// tdnIsDisposition reports whether v is one of the recorded dispositions. It
+// mirrors tdnIsReapVerdict and exists for the same reason: a disposition string
+// nobody can look up is a verdict a reader of the published artifact cannot
+// interpret.
+func tdnIsDisposition(v string) bool {
+	switch v {
+	case tdnDispositionReaperKilled, tdnDispositionDeadUnattributed,
+		tdnDispositionLeaked, tdnDispositionSkipped:
 		return true
 	}
 	return false
