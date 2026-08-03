@@ -737,6 +737,39 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   file, zero production files touched; 11 subtests, 0 SKIP on
   `-run '^TestTrail'`. See [`codebase/1266.md`](../codebase/1266.md).
 
+- `trailer_admissibility_test.go` (#1270) — **offline instrument, not a
+  probe**; two pure predicates that decide whether #1266's trailer scan and
+  #1253's reap-log attribution can support a claim, so #1271's downstream
+  classifier never has to. `trailGate(trailScanResult) trailGateResult` maps
+  onto a five-value positive allowlist (`trailGateUsable`/`NoTrailer`/
+  `ScanAborted`/`BudgetFired`/`OutOfContract`) and certifies a non-empty
+  terminal reason on the two arms that carry one.
+  `trailAdmitAttribution(tdnReapOutcome, certified string) trailAdmitResult`
+  maps the reap attribution onto a seven-value allowlist — one admissible
+  value (`trailAdmitProof`, requiring verdict `tdnReapHeldPGIDKilled`,
+  exactly one reap line, and a non-`max_turns` reason) plus five named voids
+  plus an out-of-contract value. Both open with a contract block ahead of
+  every real arm, so out-of-contract is a guard at the top, never a
+  fall-through default. The reap-side voids are outranked by the
+  budget-fired void (structural: on that path the reap ran before the
+  trailer, so the reap record's contents are irrelevant), which is itself
+  outranked by the contract block (a caller's bug must surface regardless of
+  path). `trailGateResult` is trap-free by construction — no `*resultTrailer`
+  reachable from it, directly or through an embedded field — even though the
+  gate cannot be the pointer trap's last consumer (`trailObservation` embeds
+  `trailScanResult`, so `.Trailer` is still reachable by promotion elsewhere).
+  `trailBudgetTerminalReason = "max_turns"` is a string literal with no
+  executable pin to `emitter.go`'s unexported `wireFields`; a production
+  rename would silently turn a budget-fired void into a false proof — named
+  as a known limit, not fixed, since fixing it needs either a production
+  change or a live budget-fired fixture, both out of scope for this
+  probe-family ticket. Purely additive, one new file, zero production files
+  touched; 50 subtests, 0 SKIP on `-run '^TestTrail'`. One code-review
+  SHOULD FIX (an uncontracted `certified` parameter that lets `""` read as
+  `trailAdmitProof`) shipped as a named, un-fixed gap — see
+  [`codebase/1270.md`](../codebase/1270.md) for the full implementation, the
+  ordering arguments, and the deferred findings.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
