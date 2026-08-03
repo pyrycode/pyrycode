@@ -707,6 +707,36 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   two non-blocking code-review findings (a SHOULD FIX and a NIT, both deferred
   to a future touch on this file).
 
+- `result_trailer_observation_test.go` (#1266) — **offline instrument, not a
+  probe**; ships the observation only, no verdict. Answers "when did pyry's
+  `{"type":"result",...}` trailer first become visible on stdout, and how late
+  might that observation be?" for #1267's downstream liveness classifier.
+  Two closed value spaces, neither collapsible into the other's zero value:
+  `trailSeen`/`trailAbsent`/`trailAborted` (what a pure scan, `trailScan`,
+  found) and `trailBoundFromMiss`/`trailBoundFromStart`/`trailBoundNone` (what
+  the staleness bound was measured from — `trailBoundFromStart` names the trap
+  where a first-poll match yields a duration that bounds nothing, because the
+  write may precede the poll loop entirely). Fixes a gap in the existing
+  `parseResultTrailer` (`tool_loop_test.go:216`, untouched, all nine call
+  sites keep today's behaviour) without touching it: that function discards
+  `scanner.Err()`, so a stdout line past `bufio.Scanner`'s 64 KiB default
+  (reachable — the trailer's `result` field is the last assistant message
+  verbatim) reads identically to a genuine absence; `trailScan` reads the
+  scanner error and reports the new `trailAborted` state instead. The cap
+  (`reachCapCommand`, `reachMaxCommandBytes = 512`) is applied only to the
+  retained verbatim `Line` copy, never to the bytes decoded into
+  `resultTrailer` — `result` sits sixth on the pinned wire order
+  (`emitter.go:456-468`) and `terminal_reason` last, so capping the raw line
+  would truncate inside `result` and destroy the field #1267 branches on;
+  `resultTrailer` has no `result` member, so the decoded value structurally
+  cannot leak the assistant payload regardless. `trailWaitForTrailer` polls
+  `probeSyncBuffer` on the existing `probePollInterval` (200 ms) and stamps
+  `now` **before** reading the buffer each iteration, which is what makes a
+  miss-derived bound an over-estimate of the true lateness rather than a
+  possible under-estimate wearing a bound's label. Purely additive, one new
+  file, zero production files touched; 11 subtests, 0 SKIP on
+  `-run '^TestTrail'`. See [`codebase/1266.md`](../codebase/1266.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
