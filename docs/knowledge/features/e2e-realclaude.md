@@ -662,6 +662,50 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   See [`codebase/1253.md`](../codebase/1253.md) for the full implementation and
   two non-blocking code-review NITs (a misleadingly-named loop variable, one
   reasoned-not-measured comment).
+- `teardown_liveness_probe_test.go` (#1251) — **live rig, security-sensitive**;
+  opt-in behind `PYRY_PROBE_TEARDOWN_LIVENESS=1` on top of the package's normal
+  auth skip. The standing check that keeps #1231's hand-verified answer true:
+  stages one claude turn around #1223's `BASH_DEFAULT_TIMEOUT_MS` trigger, tears
+  pyry down through its real SIGTERM-to-pid path, and records whether the
+  backgrounded Bash command survived and by whose hand it died — calling
+  #1250's classifier/record, #1235's liveness read, and #1239's FIFO read as
+  code, not evidence. **The core idea is `tdnBeforeFault`**: the same
+  after-teardown liveness classifier is run at the before-snapshot too, and a
+  run whose before reading isn't uniformly `pinStateRunning` voids rather than
+  passes — an instrument hard-wired to `dead` cannot pass a live run for free.
+  Two structural discriminators separate the three readings that all look like
+  "dead after exit": the still-held FIFO (released only in `t.Cleanup`, after
+  the SIGTERM/wait/after-snapshot run inside the test body — the
+  `background_reach_probe_test.go:355-356` cleanup-ordering trap inverted on
+  purpose) rules out the command finishing on its own, and a pgid in the reap
+  line rules out dying alongside claude (`reap.go:56-62` skips `ESRCH` before
+  the append). `tdnRecord` widened rather than duplicated: `HeldPID` → `HeldPIDs`
+  (a slice — #1230's live run matched two rows on one needle), single
+  `ArgvScan`/`Liveness`/`FIFO` → paired `Before`/`After *tdnSnapshot`, plus
+  `ClaudeVersion`/`TeardownPath`/`RunnerFromEnv`/`RunnerFromArgv` provenance.
+  Disposition is a positive allowlist with one red arm
+  (`tdnDispositionLeaked`); a content re-match is dispositive only when the
+  after-liveness verdict is `pinStateRunning` — otherwise a zombie's
+  kernel-blanked argv would misfile as pid reuse. A ninth reject branch beyond
+  the spec guards teardown provenance itself: pyry exiting on its own before
+  the rig's SIGTERM would still read `dead-by-reaper` correctly but attribute it
+  to a `TeardownPath` that never ran. Repairs #1250's inherited SHOULD FIX (a
+  reap-classifier fixture row that didn't discriminate its own claimed
+  mutation) by swapping a concatenation order, verified red-then-reverted by
+  deliberate mutation. Deliberately does **not** reuse
+  `reachRunnerPathFromArgv` for the runner label — it keys on
+  `--append-system-prompt-file`, which the streamrunner path also emits, so
+  reuse would have silently mislabelled every stream-path record; the fresh
+  `tdnRunnerFromArgv` discriminates on `--session-id` vs. `--input-format`
+  instead. Live test named `TestRealClaude_TeardownLiveness` (not `TestTdn…`)
+  so it doesn't join #1250's zero-SKIP offline suite; three offline
+  self-checks (`TestTdnRunnerFromArgv`, `TestTdnDecideAfter`, `TestTdnPinHeld`)
+  do. 48 subtests, zero SKIP on `^TestTdn`; full package 216 PASS / 44 SKIP.
+  Zero production files touched. **The live half has not been run** — no
+  claude login in the dispatch environment; ticket carries `needs-real-claude`.
+  See [`codebase/1251.md`](../codebase/1251.md) for the full implementation and
+  two non-blocking code-review findings (a SHOULD FIX and a NIT, both deferred
+  to a future touch on this file).
 
 ## Test infrastructure
 
