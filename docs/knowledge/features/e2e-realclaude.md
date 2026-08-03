@@ -794,6 +794,30 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   subtests, 0 SKIP on `-run '^TestTrail'`. See
   [`codebase/1271.md`](../codebase/1271.md).
 
+- `trail_run_rig_test.go` (#1268) — **proof-of-wiring rig, not a new
+  instrument.** #1266/#1270/#1271 each prove their piece against fixtures and
+  synthetic buffers; `trailClassifyRun` is pure, so a fixture proof never
+  shows which code path fed it — a rig wired to the wrong path emits the same
+  positive as one wired to the right one. This file gathers the classifier's
+  inputs through the live producer chain (`trailWaitForTrailer` → `trailGate`,
+  `pinScanArgv`, `pinReadState`, `tdnClassifyReapLog` → `trailAdmitAttribution`)
+  against a real FIFO and a real `cat`, funnelled through one seam
+  (`trailRigGather`) so "no field is hand-assigned and no reap line is
+  synthesised" is a property of the file rather than a promise about its call
+  sites — `tdnClassifyReapLog` is called over a literal `nil` inside that
+  function, never a parameter. Three tests: a pre-subject reading
+  (`trailOutcomeNoRowMatched`) flipping to a during-subject reading
+  (`trailOutcomeMatchedUnattributed`) across one subject's life, with both
+  post-death per-pid states (`pinStateExitedNotReaped` then
+  `pinStateNoSuchProcess`) taken deterministically because the subject is a
+  direct child; a staleness-bound margin pinned tight enough that a
+  start-derived (rather than miss-derived) bound fails it; and a
+  shell-wrapped subject staged so more than one row matches, without
+  resolving "the" pid. `trailOutcomeRunningAtTrailer` — the finding itself —
+  stays deliberately unreachable, twice-stated in the header: it requires a
+  reap line this rig must not grow. Purely additive, one new file, 594 lines,
+  zero existing call sites changed. See [`codebase/1268.md`](../codebase/1268.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
