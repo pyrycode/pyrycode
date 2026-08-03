@@ -400,6 +400,26 @@ func trailAdmitAttribution(reap tdnReapOutcome, certified string) trailAdmitResu
 				"it never saw", reap.Verdict, reap.LineCount),
 		}
 	}
+	// The SECOND parameter, contracted at #1271's request. #1270's review found
+	// this file's own doctrine — "each function opens with a contract block
+	// rejecting what its producer cannot emit" — checked per-function rather than
+	// per-parameter: reap got three checks and certified got none, so certified
+	// == "" reached trailAdmitProof. That is a FALSE PROOF from a run the gate
+	// never certified, the same failure direction as the nil-Trailer trap and the
+	// empty-reason gate arm this file exists to close. trailGate certifies a
+	// non-empty reason on exactly two values, so "" is a record its producer
+	// cannot emit. No existing row changes value: every one passes a non-empty
+	// reason.
+	if certified == "" {
+		return trailAdmitResult{
+			Value: trailAdmitOutOfContract,
+			Detail: trailDetail("no terminal reason was certified, a value trailGate does not "+
+				"emit: it fills Reason on exactly %s and %s. Without a certified reason the "+
+				"budget arm below cannot fire, so verdict %s would reach %s — a proof about a "+
+				"run whose trailer nothing approved", trailGateUsable, trailGateBudgetFired,
+				reap.Verdict, trailAdmitProof),
+		}
+	}
 
 	// The structural void, ahead of every incidental one.
 	if certified == trailBudgetTerminalReason {
@@ -581,8 +601,21 @@ func trailGateCases() []trailGateCase {
 // #1266's helper is scoped to one space per call, so it cannot see a new value
 // colliding with a shipped one — and that collision is the realistic mistake
 // here, because this file's results mean nearly what the scan's input states
-// mean. One union map over all eighteen constants covers within-space,
+// mean. One union map over all twenty-nine constants covers within-space,
 // cross-space and against-shipped distinctness in a single loop.
+//
+// #1271's eleven run-level outcomes joined the map rather than starting a third
+// closure test, for the same reason: three spaces now mean nearly the same words
+// (an input state, the gate's view of it, and the run's view of it), and only a
+// union can see a copy-paste across them.
+//
+// EVERY VALUE IN THIS MAP HAS AN ARM IN ITS CONSUMER — trailGate and
+// trailAdmitAttribution for the first two spaces, trailClassifyRun for the
+// third. That is a comment and not a check: this test catches a COLLIDING value,
+// never an UNHANDLED one, so a sixth gate or admit value added here and to its
+// membership predicate would pass trailClassifyRun's contract block and then find
+// no arm. Recorded in #1271's spec § Open questions Q2; if the value spaces ever
+// grow, this is the first thing to revisit.
 func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 	all := map[string]string{
 		// This ticket's gate values.
@@ -599,6 +632,18 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailAdmitVoidGroupUnnamed":   trailAdmitVoidGroupUnnamed,
 		"trailAdmitVoidNotOneReapLine": trailAdmitVoidNotOneReapLine,
 		"trailAdmitOutOfContract":      trailAdmitOutOfContract,
+		// #1271's run-level outcomes: three answers and eight named voids.
+		"trailOutcomeRunningAtTrailer":       trailOutcomeRunningAtTrailer,
+		"trailOutcomeMatchedUnattributed":    trailOutcomeMatchedUnattributed,
+		"trailOutcomeNoRowMatched":           trailOutcomeNoRowMatched,
+		"trailOutcomeVoidBudgetFired":        trailOutcomeVoidBudgetFired,
+		"trailOutcomeVoidNoTrailer":          trailOutcomeVoidNoTrailer,
+		"trailOutcomeVoidTrailerScanAborted": trailOutcomeVoidTrailerScanAborted,
+		"trailOutcomeVoidPyryDidNotExit":     trailOutcomeVoidPyryDidNotExit,
+		"trailOutcomeVoidArgvScanErrored":    trailOutcomeVoidArgvScanErrored,
+		"trailOutcomeVoidNoRowsParsed":       trailOutcomeVoidNoRowsParsed,
+		"trailOutcomeVoidLivenessInstrument": trailOutcomeVoidLivenessInstrument,
+		"trailOutcomeOutOfContract":          trailOutcomeOutOfContract,
 		// #1266's shipped spaces, in the same map on purpose: a gate result that
 		// collided with a scan state would be a result and an input wearing one
 		// string, which is the confusion the gate- prefix exists to prevent.
@@ -631,6 +676,7 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 	// space's.
 	var zeroGate trailGateResult
 	var zeroAdmit trailAdmitResult
+	var zeroRun trailRunOutcome
 	for name, value := range all {
 		if zeroGate.Value == value {
 			t.Errorf("the zero trailGateResult reads as %s (%q)", name, value)
@@ -638,10 +684,22 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		if zeroAdmit.Value == value {
 			t.Errorf("the zero trailAdmitResult reads as %s (%q)", name, value)
 		}
+		if zeroRun.Value == value {
+			t.Errorf("the zero trailRunOutcome reads as %s (%q)", name, value)
+		}
 	}
 	if zeroGate.Reason != "" {
 		t.Errorf("the zero trailGateResult certifies %q — an uncertified record must never read "+
 			"as certified", zeroGate.Reason)
+	}
+	// The same failure mode on #1271's record: an unfilled field reading as a
+	// filled one. trailBoundFromStart carries a real duration that bounds
+	// NOTHING, so an unbounded record that read as bounded would publish a
+	// non-bound wearing a bound's label.
+	if zeroRun.Bounded || zeroRun.BoundFrom != "" {
+		t.Errorf("the zero trailRunOutcome reports bounded=%t from %q — a record carrying no "+
+			"bound must never read as one bounded by a non-matching poll", zeroRun.Bounded,
+			zeroRun.BoundFrom)
 	}
 
 	// trailBudgetTerminalReason is a wire literal rather than an outcome, so it
@@ -786,6 +844,15 @@ func TestTrailAdmitAttribution(t *testing.T) {
 			name:      "the zero outcome is out of contract",
 			reap:      tdnReapOutcome{},
 			certified: "completed",
+			want:      trailAdmitOutOfContract,
+		},
+		{
+			// The second parameter's contract check, in the direction that
+			// matters: the same record that is proof at the top of this table
+			// must not be proof when nothing certified the run.
+			name:      "a record that would otherwise be proof is out of contract with no certified reason",
+			reap:      classified,
+			certified: "",
 			want:      trailAdmitOutOfContract,
 		},
 		{
