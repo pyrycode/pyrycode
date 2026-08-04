@@ -332,82 +332,141 @@ func finWriteReadDir(t *testing.T, dir string) map[string][]byte {
 	return files
 }
 
-// finWriteDeclaredKeys collects every json tag name reachable from typ, recursing
-// through struct fields and slice, array and pointer element types.
+// finWriteDeclaredPaths collects every json PATH reachable from typ: each field's
+// tag name joined to its parent's with ".", and "[]" appended where the walk
+// descends through a slice, array or pointer element.
 //
-// The TYPE walk to finWriteObservedKeys' VALUE walk. Both are recursive for the
-// reason finding_run_record_test.go:934-944 states: finRecordRun has four struct-
-// or slice-valued fields, so a top-level scan inspects ten keys, misses every
-// nested one, and reads as a structural guarantee it is not providing — "vacuous
-// coverage is worse than none". `seen` closes the walk against a self-referential
-// type and against re-walking a type reached twice (trailAdmitResult is reachable
-// through both Entries[].Admit and Selected); the collected keys are shared, so a
-// skipped second visit loses nothing. Same shape as finRecordInputReaches (:731),
-// which answers a different question and is called directly by AC4 rather than
-// reimplemented.
+// # Paths and not bare names, because four of these names are shared
 //
-// An anonymous field with no tag contributes no key of its own — encoding/json
-// promotes its fields — so the walk descends without recording one.
-func finWriteDeclaredKeys(typ reflect.Type, seen map[reflect.Type]bool) map[string]bool {
-	keys := make(map[string]bool)
+// A census over bare NAMES cannot see a nested field vanish, because some OTHER
+// type still renders the name: `detail` is declared by five of the seven types
+// reached here, and `pid`, `ppid` and `pgid` by two each. Zeroing the liveness
+// outcome's PPID drops liveness[].ppid from the published artifact, and a name
+// census stays green because matched_rows[].ppid still renders it — the exact
+// "an operator reads absence as not measured" failure AC1 exists to prevent, on
+// the field-shape #1291's {Verdict, PID} fixture already exhibits. It is sharpest
+// for matched_rows, one of the two slices AC1 names explicitly: ALL THREE of
+// finRecordProc's keys are shared, so a name census covers that slice not at all.
+//
+// # Both walks are recursive, for the reason the deferral gave
+//
+// The TYPE walk to finWriteObservedPaths' VALUE walk. finRecordRun has four
+// struct- or slice-valued fields, so a top-level scan inspects ten keys, misses
+// every nested one, and reads as a structural guarantee it is not providing —
+// "vacuous coverage is worse than none" (finding_run_record_test.go:934-944).
+// Same shape as finRecordInputReaches (:731), which answers a different question
+// and is called directly by AC4 rather than reimplemented.
+//
+// `stack` closes the walk against a self-referential type. It is a RECURSION
+// STACK rather than a visited set: the same type reached at two different paths
+// yields two different path sets and both must be collected — trailAdmitResult is
+// reachable through attribution.entries[].admit AND attribution.selected, and a
+// visited set would silently drop whichever it met second.
+//
+// # Which fields encoding/json actually renders
+//
+// An unexported field is skipped: encoding/json renders none of them, tagged or
+// not, so recording one would fail AC1 over a field the artifact was never going
+// to carry. The single exception is an ANONYMOUS field, whose tag json ignores
+// and whose exported fields it promotes to the parent — so the walk descends at
+// the PARENT's path and records no path of its own. No type reached from
+// finRecordRun has either shape today; both arms are here so that a sibling
+// adding one does not turn this census into a spurious failure that reads like a
+// dropped field.
+func finWriteDeclaredPaths(typ reflect.Type) map[string]bool {
+	paths := make(map[string]bool)
+	stack := make(map[reflect.Type]bool)
 
-	var walk func(t reflect.Type)
-	walk = func(t reflect.Type) {
+	var walk func(t reflect.Type, path string)
+	walk = func(t reflect.Type, path string) {
 		switch t.Kind() {
-		case reflect.Pointer, reflect.Slice, reflect.Array:
-			walk(t.Elem())
+		case reflect.Pointer:
+			walk(t.Elem(), path)
+			return
+		case reflect.Slice, reflect.Array:
+			walk(t.Elem(), path+"[]")
 			return
 		case reflect.Struct:
 		default:
 			return
 		}
-		if seen[t] {
+		if stack[t] {
 			return
 		}
-		seen[t] = true
+		stack[t] = true
+		defer delete(stack, t)
 
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
 			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-			switch {
-			case name == "-":
+			if name == "-" {
 				continue
-			case name != "":
-				keys[name] = true
-			case !field.Anonymous:
-				keys[field.Name] = true
 			}
-			walk(field.Type)
+			if !field.IsExported() || (name == "" && field.Anonymous) {
+				if field.Anonymous {
+					walk(field.Type, path)
+				}
+				continue
+			}
+			if name == "" {
+				name = field.Name
+			}
+			child := name
+			if path != "" {
+				child = path + "." + name
+			}
+			paths[child] = true
+			walk(field.Type, child)
 		}
 	}
-	walk(typ)
-	return keys
+	walk(typ, "")
+	return paths
 }
 
-// finWriteObservedKeys collects every key present in a decoded JSON value,
-// recursing through objects and arrays.
-func finWriteObservedKeys(raw json.RawMessage, into map[string]bool) error {
+// finWriteObservedPaths collects every key present in a decoded JSON value, keyed
+// by its PATH, with array indices NORMALISED to "[]".
+//
+// Normalised because finWriteDeclaredPaths cannot know how many elements a slice
+// held, and the two sets have to be comparable. The indexed form is what the
+// headroom walk below needs instead, which is why that one is separate: it has to
+// name WHICH detail overran.
+func finWriteObservedPaths(raw json.RawMessage, into map[string]bool) error {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return fmt.Errorf("decoding the artifact: %w", err)
 	}
 
-	var walk func(v any)
-	walk = func(v any) {
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
 		switch typed := v.(type) {
 		case map[string]any:
 			for key, inner := range typed {
-				into[key] = true
-				walk(inner)
+				child := key
+				if path != "" {
+					child = path + "." + key
+				}
+				into[child] = true
+				walk(child, inner)
 			}
 		case []any:
 			for _, inner := range typed {
-				walk(inner)
+				walk(path+"[]", inner)
 			}
 		}
 	}
-	walk(value)
+	walk("", value)
 	return nil
+}
+
+// finWriteLeafKey is the bare json key at the end of a path: the segment after
+// the last ".". AC3 asks about key SHAPES rather than positions, and matching the
+// forbidden substrings against a whole path would let a parent segment decide a
+// child's verdict.
+func finWriteLeafKey(path string) string {
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 // finWriteObservedDetails collects every Detail the artifact carries, keyed by its
@@ -449,10 +508,20 @@ func finWriteObservedDetails(raw json.RawMessage, into map[string]string) error 
 	return nil
 }
 
-// finWriteSorted renders a key set in a stable order, so a failure message names
-// the same keys in the same order on every run rather than in Go's randomized map
-// order.
-func finWriteSorted(set map[string]bool) []string {
+// finWriteSorted renders any of this file's string-keyed sets in a stable order,
+// so a failure message names the same entries in the same order on every run
+// rather than in Go's randomized map order.
+//
+// IT RETURNS THE KEYS AND NEVER THE VALUES, and that is load-bearing rather than
+// incidental: it is called on the artifact directory (keys are file names, values
+// are the file CONTENTS), on the walked details (keys are JSON paths, values are
+// the published strings) and on the key sets. Printing what a file or a detail
+// HOLDS after it just failed a leak check would write the leak into CI logs —
+// security review item [7]. Generic over the value type so there is one such
+// function to get right rather than one per map, which is this file's own
+// finWriteArtifacts-signature doctrine: prefer the shape that cannot be got wrong
+// over the discipline that must not be.
+func finWriteSorted[V any](set map[string]V) []string {
 	out := make([]string, 0, len(set))
 	for key := range set {
 		out = append(out, key)
@@ -475,69 +544,75 @@ func finWriteSorted(set map[string]bool) []string {
 //
 // This census is also what stops AC2 from passing against a writer that renders
 // nothing: a needle sweep over an empty artifact is green.
+//
+// # Compared by PATH, not by key name
+//
+// Bare names cannot carry AC1's guarantee, because four of the names this record
+// renders are declared by more than one of the seven types it reaches. See
+// finWriteDeclaredPaths: a dropped liveness[].ppid is invisible to a name census
+// because matched_rows[].ppid still renders `ppid`, and matched_rows — one of the
+// two slices AC1 names explicitly — has no unshared key at all.
+//
+// WHAT THIS CENSUS IS ABOUT IS ABSENCE, which is what an operator misreads as
+// "not measured". A field without omitempty cannot go absent: it renders its zero
+// value, and `"detail": ""` is a visible empty reading rather than a missing one.
+// So the fields this can actually catch are the eight omitempty ones — every one
+// of which finWriteInputs fills for exactly that reason — plus any whole subtree
+// a writer stopped descending into. A zero value that should not have been zero
+// is a different claim and belongs to the builder's own tests, not here.
 func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 	files := finWriteRender(t)
 	record, ok := files[finWriteRecordFile]
 	if !ok {
 		t.Fatalf("no %s in the artifact directory, which holds %v", finWriteRecordFile,
-			finWriteSortedFiles(files))
+			finWriteSorted(files))
 	}
 
-	declared := finWriteDeclaredKeys(reflect.TypeOf(finRecordRun{}), map[reflect.Type]bool{})
+	declared := finWriteDeclaredPaths(reflect.TypeOf(finRecordRun{}))
 
-	// THE NON-VACUITY PRECONDITION. A walk that collected implausibly few keys
+	// THE NON-VACUITY PRECONDITION. A walk that collected implausibly few paths
 	// would make the equality below trivially satisfiable. The floor rather than
-	// the exact count (32 at 4bc5f5b: finRecordRun 10, finRecordProc 3,
-	// pinStateOutcome 7, finAttributeRecord 5, finAttributeEntry 2,
-	// trailAdmitResult 2 and finTrailerRecord 10, less the names shared across
-	// types — detail, pid, ppid, pgid, value), so that a sibling adding a field to
-	// its own record is not a failure here.
-	if len(declared) < 30 {
-		t.Fatalf("the type walk collected %d declared key(s): %v. The record reaches seven struct "+
-			"types, so a count this low means the walk stopped at the top level and the equality "+
-			"below would be trivially satisfiable", len(declared), finWriteSorted(declared))
+	// the exact count (41 at 4bc5f5b: finRecordRun's 10 fields, plus 3 under
+	// matched_rows[], 7 under liveness[], 8 under attribution — 2 of them the
+	// twice-reached trailAdmitResult's, at both entries[].admit and selected — and
+	// 10 under trailer), so that a sibling adding a field to its own record is not
+	// a failure here. Well above the 10 a walk that stopped at the top level
+	// collects, which is the failure this floor is for.
+	if len(declared) < 35 {
+		t.Fatalf("the type walk collected %d declared path(s): %v. The record reaches seven struct "+
+			"types, so a count this low means the walk stopped short and the equality below would "+
+			"be trivially satisfiable", len(declared), finWriteSorted(declared))
 	}
 
 	observed := make(map[string]bool)
-	if err := finWriteObservedKeys(record, observed); err != nil {
+	if err := finWriteObservedPaths(record, observed); err != nil {
 		t.Fatalf("walking %s: %v", finWriteRecordFile, err)
 	}
 
 	var missing, extra []string
-	for _, key := range finWriteSorted(declared) {
-		if !observed[key] {
-			missing = append(missing, key)
+	for _, path := range finWriteSorted(declared) {
+		if !observed[path] {
+			missing = append(missing, path)
 		}
 	}
-	for _, key := range finWriteSorted(observed) {
-		if !declared[key] {
-			extra = append(extra, key)
+	for _, path := range finWriteSorted(observed) {
+		if !declared[path] {
+			extra = append(extra, path)
 		}
 	}
 
 	if len(missing) > 0 {
-		t.Errorf("the record declares %d key(s) the artifact does not render: %v. An operator "+
+		t.Errorf("the record declares %d path(s) the artifact does not render: %v. An operator "+
 			"reads an absent field as \"not measured\" rather than as \"dropped on the way to the "+
 			"file\", so a field that vanishes here publishes a false absence. Every omitempty field "+
 			"is non-zero in finWriteInputs precisely so this cannot pass by rendering less",
 			len(missing), missing)
 	}
 	if len(extra) > 0 {
-		t.Errorf("the artifact renders %d key(s) the record's type does not declare: %v — content "+
+		t.Errorf("the artifact renders %d path(s) the record's type does not declare: %v — content "+
 			"reaching the file from somewhere other than finRecordRun is content no census here "+
 			"reviewed", len(extra), extra)
 	}
-}
-
-// finWriteSortedFiles names the artifact directory's contents in a stable order.
-// Names only, never contents.
-func finWriteSortedFiles(files map[string][]byte) []string {
-	out := make([]string, 0, len(files))
-	for name := range files {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // --- AC2 -----------------------------------------------------------------------------
@@ -630,11 +705,20 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// finding_attribution_fanout_test.go:737-741: trailAdmitProof is reachable only
 	// if the needle-bearing line was recognised as anchored, parsed and found to
 	// name the held group. A plant that stopped being anchored lands here.
-	if len(in.Attribution.Entries) != 1 ||
-		in.Attribution.Entries[0].Admit.Value != trailAdmitProof {
-		t.Fatalf("channel 4 (reap stderr): entries %+v, want one reading %s — the premise is that "+
-			"the needle rides an ANCHORED line the classifier read in full",
-			in.Attribution.Entries, trailAdmitProof)
+	//
+	// The COUNT and the closed-set Value, never the entries themselves: a %+v on
+	// them renders every Admit.Detail, and the rule is to name the count, the path
+	// and the length rather than the string (security review item [7]). The Values
+	// are safe to print because trailAdmitAttribution returns one of a closed set
+	// (trailer_admissibility_test.go:190-197); the Details beside them are not.
+	first := "<no entries>"
+	if len(in.Attribution.Entries) > 0 {
+		first = in.Attribution.Entries[0].Admit.Value
+	}
+	if len(in.Attribution.Entries) != 1 || first != trailAdmitProof {
+		t.Fatalf("channel 4 (reap stderr): the fan-out produced %d entr(ies), the first reading %q; "+
+			"want exactly one reading %s — the premise is that the needle rides an ANCHORED line "+
+			"the classifier read in full", len(in.Attribution.Entries), first, trailAdmitProof)
 	}
 
 	// The two embedded sub-records asserted CLEAN before the build, per
@@ -679,9 +763,9 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	if len(details) < 6 {
 		t.Fatalf("the artifact walk found %d detail(s) at %v, want at least 6 — the headroom claim "+
 			"below would otherwise hold over a subset of the strings the artifact publishes",
-			len(details), finWriteSortedDetailPaths(details))
+			len(details), finWriteSorted(details))
 	}
-	for _, path := range finWriteSortedDetailPaths(details) {
+	for _, path := range finWriteSorted(details) {
 		if room := reachMaxCommandBytes - len(details[path]); room < len(trailNeedle) {
 			t.Errorf("the detail at %s is %d bytes, leaving %d of the %d-byte cap against a "+
 				"%d-byte needle: a detail that leaked an argv would be truncated before the needle "+
@@ -694,26 +778,15 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// THE SWEEP, over the map rather than over the two names the writer wrote. The
 	// failure names the FILE and never its contents: printing the bytes of a file
 	// that just failed a leak sweep would write the leak into CI logs.
-	for _, name := range finWriteSortedFiles(files) {
+	for _, name := range finWriteSorted(files) {
 		if bytes.Contains(files[name], []byte(trailNeedle)) {
 			t.Errorf("%s carries the needle. Every plant sits in an input the pipeline REDUCES OR "+
 				"DROPS — a row's verbatim argv, the claude argv, the trailer scan's Line, pyry's "+
 				"captured stderr — and the record retains no trailer line in any form, capped or "+
 				"otherwise, so one occurrence means a reduction was widened back into a retention. "+
-				"The artifact directory holds %v", name, finWriteSortedFiles(files))
+				"The artifact directory holds %v", name, finWriteSorted(files))
 		}
 	}
-}
-
-// finWriteSortedDetailPaths renders the walked Detail paths in a stable order.
-// Paths only, never the strings they hold.
-func finWriteSortedDetailPaths(details map[string]string) []string {
-	out := make([]string, 0, len(details))
-	for path := range details {
-		out = append(out, path)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // --- AC3 -----------------------------------------------------------------------------
@@ -731,8 +804,15 @@ func finWriteSortedDetailPaths(details map[string]string) []string {
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)
 	observed := make(map[string]bool)
-	if err := finWriteObservedKeys(files[finWriteRecordFile], observed); err != nil {
+	if err := finWriteObservedPaths(files[finWriteRecordFile], observed); err != nil {
 		t.Fatalf("walking %s: %v", finWriteRecordFile, err)
+	}
+	// The paths carry where each key sits, which is what the failure has to name;
+	// the SHAPE question is about the key itself, so both the exemptions and the
+	// forbidden list are matched against the leaf.
+	keys := make(map[string]bool, len(observed))
+	for path := range observed {
+		keys[finWriteLeafKey(path)] = true
 	}
 
 	// TWO EXEMPTIONS, EACH BY EXACT KEY AND EACH WITH ITS OWN REASON. Never a
@@ -756,31 +836,35 @@ func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 		"runner_from_argv": "a closed-set reading of the argv, never the argv",
 	}
 
-	// THE EXEMPTION MECHANISM'S OWN NON-VACUITY. An exemption for a key the
-	// artifact does not render could be quietly hiding a stricter rule's failure —
-	// if tool_stderr stops rendering under omitempty, that is a loud failure here
-	// rather than a silent widening.
-	for _, key := range finWriteSorted(map[string]bool{"tool_stderr": true, "runner_from_argv": true}) {
-		if !observed[key] {
+	// THE EXEMPTION MECHANISM'S OWN NON-VACUITY, iterated over `exempt` ITSELF
+	// rather than over a restatement of it. An exemption for a key the artifact
+	// does not render could be quietly hiding a stricter rule's failure — if
+	// tool_stderr stops rendering under omitempty, that is a loud failure here
+	// rather than a silent widening. Restating the set as a second literal would
+	// mean a third exemption shipped with no such coverage, which is this file's
+	// own finWriteArtifacts-signature doctrine violated in miniature.
+	for _, key := range finWriteSorted(exempt) {
+		if !keys[key] {
 			t.Fatalf("the artifact does not render the exempted key %q, so its exemption covers "+
 				"nothing and could be hiding a stricter rule's failure. The artifact's keys are %v",
-				key, finWriteSorted(observed))
+				key, finWriteSorted(keys))
 		}
 	}
 
-	for _, forbidden := range []string{
-		"command", "args", "comm", "argv", "line", "stderr", "result", "raw",
-	} {
-		for _, key := range finWriteSorted(observed) {
-			if _, ok := exempt[key]; ok {
-				continue
-			}
+	for _, path := range finWriteSorted(observed) {
+		key := finWriteLeafKey(path)
+		if _, ok := exempt[key]; ok {
+			continue
+		}
+		for _, forbidden := range []string{
+			"command", "args", "comm", "argv", "line", "stderr", "result", "raw",
+		} {
 			if strings.Contains(key, forbidden) {
-				t.Errorf("the artifact carries key %q, which is %q-shaped: this artifact's whole "+
-					"value is that it can be pasted unreviewed, and such a field would inherit the "+
-					"operator-review obligation onto the whole directory. If the key is genuinely "+
-					"safe, exempt it BY EXACT KEY with its own reason, as %q and %q are",
-					key, forbidden, "tool_stderr", "runner_from_argv")
+				t.Errorf("the artifact carries key %q at %s, which is %q-shaped: this artifact's "+
+					"whole value is that it can be pasted unreviewed, and such a field would "+
+					"inherit the operator-review obligation onto the whole directory. If the key is "+
+					"genuinely safe, exempt it BY EXACT KEY with its own reason, as %v are",
+					key, path, forbidden, finWriteSorted(exempt))
 			}
 		}
 	}
