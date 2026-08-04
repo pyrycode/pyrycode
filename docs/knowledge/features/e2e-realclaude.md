@@ -847,6 +847,127 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   implementation, the selection-order argument, and the mutation-tested
   lessons.
 
+- `finding_staging_gate_test.go` (#1284) — **the tier below the classifier**:
+  `trailClassifyRun` (#1271) assumes a run staged — a Bash call issued, the
+  rig's hold command, a completed rendezvous — and on an unstaged run its
+  argv scan still runs over a healthy process table and matches nothing,
+  landing on `trailOutcomeNoRowMatched`: a real answer, published as a false
+  negative about a run where no command ever existed. `finOutcomeStagingGate(
+  finOutcomeStaging) finOutcomeResult` decides, from synthetic staging
+  conditions alone, one of six failure outcomes or the pass-through
+  (`finOutcomeReadyToClassify`, deliberately not the zero value — an unfilled
+  result must never read as "staged, go classify"), all seven in their own
+  `stage-` sub-namespace apart from the eleven's `run-`. The structural
+  closure is the signature itself: neither type mentions `trailRunReadings`,
+  so a failure arm holds nothing a classifier call could be made from — the
+  forbidden call is unwritable, not discouraged. Two guard conditions close
+  reachable pass-through holes (both commands left empty; an unfilled
+  match-count want agreeing with an unfilled count at zero). No Detail
+  interpolates either command — both the issued command (verbatim model
+  output) and the staged one (embeds a `t.TempDir()` path and an
+  `exec.LookPath` result) are captured strings on the same footing — and the
+  no-captured-bytes test plants `trailNeedle` in both, with a per-row
+  headroom assertion against `trailDetail`'s 512-byte cap: house-style Detail
+  prose alone was found to eat enough of that cap in the first draft to
+  truncate a leaked command's needle away before it could be caught, a
+  vacuity distinct from (and the mirror image of) #1278's cap hazard. Purely
+  additive, one new file, 790 lines, zero production change, zero consumer
+  call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
+  implementation and the mutation-tested lesson on redaction-test vacuity.
+
+- `finding_trailer_evidence_test.go` (#1290) — **the trailer half of the
+  probe's published record.** `finTrailerRecord` (ten scalars, no pointer, no
+  embedded observation) carries one run's outcome value together with the
+  trailer evidence behind it — scan `State`, the `BoundFrom` lateness
+  discriminator with its `Bounded` boolean (`== trailBoundFromMiss` and
+  nothing else, never `Staleness != 0`) and `Staleness` itself, and the four
+  decoded trailer fields (`Subtype`, `IsError`, `TerminalReason`,
+  `StopReason`). `finTrailerBuild(outcome string, obs trailObservation)
+  finTrailerRecord` is the pure projection: the four fields are read from
+  `obs.Trailer` under a guard whose *first* operand is `State == trailSeen`
+  (so a no-trailer run returns its void instead of panicking through the
+  #1266 discriminated optional), never from the capped `Line`; `Outcome` is
+  copied from the caller's #1271/#1284 value as handed, never re-derived from
+  `State`. No field carries `omitempty` — under it a seen trailer with an
+  empty `terminal_reason` would render byte-identical to a no-trailer record,
+  the exact collapse the nil-pointer design one tier down exists to prevent.
+  The no-captured-bytes proof plants `trailNeedle` via `trailPaddedTrailer(0)`
+  (385 bytes, needle inside the 512-byte cap at offset 104–146) rather than
+  the family's habitual past-the-cap pad, which would pass vacuously against
+  a record that kept the capped line. Purely additive, one new file, 697
+  lines, zero production change, zero consumer call sites. See
+  [`codebase/1290.md`](../codebase/1290.md) for the full implementation, the
+  guard-ordering disclosure code review confirmed by mutation, and the
+  in-cap-plant lesson.
+
+- `finding_run_record_test.go` (#1291) — **the assembled run record.**
+  `finRecordRun` is the record one probe run publishes: pyry's exit code,
+  every matched row reduced to `finRecordProc` (`PID`/`PPID`/`PGID` — three
+  `int` fields, reflection-asserted, nothing else), the per-pid liveness
+  verdicts (`[]pinStateOutcome`, carried whole), the reap-log attribution
+  (`finAttributeRecord`, #1280) and the trailer sub-record
+  (`finTrailerRecord`, #1290), both embedded whole rather than re-derived,
+  and the runner path. The runner path is recorded **as observed**: the
+  env reading (`reachRunnerPathFromEnv`) is carried as documentation, not
+  corroboration, alongside an independent argv reading
+  (`tdnRunnerFromArgv`), reduced to a three-valued `RunnerAgreement` —
+  `agree` / `disagree` / `indeterminate` — decided on the **label** each
+  reading's leading token, never the whole string, because the two
+  producers append their own free-text reasons and the full strings are
+  therefore never equal even when both name the same runner.
+  `finRecordInputs` uses named fields rather than positional parameters
+  specifically because two adjacent same-typed strings
+  (`RunnerFromEnv`/`ClaudeCommand`) sit on opposite sides of the argv
+  prohibition, and it carries neither a `trailObservation` nor a
+  `trailScanResult` field, which is what keeps the discriminated-optional
+  trailer pointer out of reach. Purely additive, one new file, 1061 lines,
+  zero production change, zero consumer call sites; five top-level tests,
+  all offline. One code-review SHOULD FIX left non-blocking: the
+  attribution sub-record's "carried whole" claim is pinned by a single
+  nested scalar rather than `reflect.DeepEqual` (the trailer half's
+  pattern), so a future partial-carriage regression there would pass
+  unnoticed — deferred to #1286. See [`codebase/1291.md`](../codebase/1291.md)
+  for the full implementation and the mutation-tested lessons.
+
+- `finding_artifact_write_test.go` (#1286) — **rendering the run record into
+  a pasteable artifact, and proving the directory it lands in leaks no
+  captured bytes.** `finWriteArtifacts(t, dir, rec finRecordRun)` takes the
+  built record and nothing else — no raw process-table bytes, no second
+  `[]byte` parameter — and writes exactly two files: `run.json`
+  (`json.MarshalIndent`) and `run.md` (a fixed safety-claim constant, the
+  same bytes fenced, one summary line built from derived scalars only). The
+  signature *is* the design: `writeReachArtifacts` (`background_reach_probe_
+  test.go:823`) is the cautionary precedent it deliberately does not
+  reuse — that writer's unexported `rawPS` field produces a second file,
+  `reach.ps.txt`, carrying the verbatim process table beside a clean
+  `reach.json`; `finRecordRun` has no unexported field, so there is nothing
+  raw in this writer's reach to write. Four tests measure what was
+  **written**, not what was built: a set-equality census of every JSON
+  *path* the record declares against every path the artifact renders
+  (path-based rather than name-based after a code-review MUST FIX — four of
+  the family's key names are shared across types, and `matched_rows[]`'s
+  three keys are shared with `pinStateOutcome`'s, so a name-based census
+  covered that slice not at all); a four-channel `trailNeedle` sweep over
+  every file `os.ReadDir` returns (planted only in inputs the pipeline
+  reduces or drops — a matched row's argv, the claude argv, an in-cap
+  trailer scan line, a reap outcome's stderr — never in the four fields the
+  record carries whole), with a mandated pair of applied-and-reverted
+  mutations (one inside the Detail format, one adding an undeclared third
+  file) both observed RED before the sweep shipped; a recursive
+  forbidden-key scan with two exact-key exemptions (`tool_stderr`, carried
+  whole and permitted; `runner_from_argv`, a closed three-constant set with
+  no input byte in reach); and a structural + behavioural pair proving
+  `resultTrailer` has no `result` member and that the four decoded trailer
+  scalars cross into the artifact verbatim while the needle beside them does
+  not. The trailer plant lands **inside** `reachCapCommand`'s 512-byte cap
+  (pad `0`, needle at byte 104–146) — `trailNeedle`'s own comment claims it
+  is placed past the cap, which this ticket measured to be false against the
+  fixture the family actually reuses; the comment was left uncorrected as a
+  sibling file, out of scope here. Purely additive, one new file, 966 lines,
+  zero production change, zero consumer call sites. See
+  [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
+  path-vs-name census MUST FIX, and the stale-comment lesson.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
