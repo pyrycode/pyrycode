@@ -506,7 +506,8 @@ post-rotation child and in no other. The seam is not the defect on this path.
    matches every feature of the M4 record. **This test cannot decide it** — the ordering it
    forces is precisely the non-straggler one, and deciding the straggler needs the drain's
    fan-in (`startStreamTurnDrainV2` + `streamTurnSink` + the tracker), not the seam alone.
-   Strongest surviving hypothesis; wants its own ticket.
+   Strongest surviving hypothesis; filed as **#1298**, sequenced after #1296 (whose log capture
+   raises or drops its rank by showing silence vs. the 1 Hz retry Warn).
 2. **A dropped exit envelope.** `exitFor` sends non-blockingly and drops on a full sink with a
    `stream_turn.exit_sink_full` Warn. A drop removes the second clear keyed to the
    construction-time id, widening (1)'s window. #1296's log capture shows the Warn if it fired.
