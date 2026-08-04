@@ -875,6 +875,31 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
   implementation and the mutation-tested lesson on redaction-test vacuity.
 
+- `finding_trailer_evidence_test.go` (#1290) — **the trailer half of the
+  probe's published record.** `finTrailerRecord` (ten scalars, no pointer, no
+  embedded observation) carries one run's outcome value together with the
+  trailer evidence behind it — scan `State`, the `BoundFrom` lateness
+  discriminator with its `Bounded` boolean (`== trailBoundFromMiss` and
+  nothing else, never `Staleness != 0`) and `Staleness` itself, and the four
+  decoded trailer fields (`Subtype`, `IsError`, `TerminalReason`,
+  `StopReason`). `finTrailerBuild(outcome string, obs trailObservation)
+  finTrailerRecord` is the pure projection: the four fields are read from
+  `obs.Trailer` under a guard whose *first* operand is `State == trailSeen`
+  (so a no-trailer run returns its void instead of panicking through the
+  #1266 discriminated optional), never from the capped `Line`; `Outcome` is
+  copied from the caller's #1271/#1284 value as handed, never re-derived from
+  `State`. No field carries `omitempty` — under it a seen trailer with an
+  empty `terminal_reason` would render byte-identical to a no-trailer record,
+  the exact collapse the nil-pointer design one tier down exists to prevent.
+  The no-captured-bytes proof plants `trailNeedle` via `trailPaddedTrailer(0)`
+  (385 bytes, needle inside the 512-byte cap at offset 104–146) rather than
+  the family's habitual past-the-cap pad, which would pass vacuously against
+  a record that kept the capped line. Purely additive, one new file, 697
+  lines, zero production change, zero consumer call sites. See
+  [`codebase/1290.md`](../codebase/1290.md) for the full implementation, the
+  guard-ordering disclosure code review confirmed by mutation, and the
+  in-cap-plant lesson.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
