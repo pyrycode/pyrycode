@@ -65,9 +65,9 @@ package realclaude
 // THE COMMAND HAD EXITED". Reaching for a run-void-* to make the negative arm
 // "assert a void" would vary two dimensions at once.
 //
-// # The certified terminal reason crosses into the readings VERBATIM, by design
+// # Two caller-supplied strings cross into the readings VERBATIM, by design
 //
-// This is the one boundary the no-captured-bytes test must STATE rather than
+// These are the boundaries the no-captured-bytes test must STATE rather than
 // leave to its plant site, because the obvious reading of #1271's "plant the
 // needle in every string-bearing input" makes it red against shipped code:
 //
@@ -76,26 +76,31 @@ package realclaude
 //     :317); readings.Gate takes that result whole;
 //   - the gather hands the same Reason to the fan-out as certified, and
 //     trailAdmitAttribution splices it %q into Detail on the budget arm (:428)
-//     and the proof arm (:470); readings.Admit takes that result whole too.
+//     and the proof arm (:470); readings.Admit takes that result whole too;
+//   - finGatherInputs.ClaudeState is copied into readings.ClaudeState whole,
+//     trailClassifyRun republishes it as claude_state
+//     (trail_run_outcome_test.go:249, :356), and C7 quotes an out-of-contract
+//     value %q into the published Detail (:444-449).
 //
 // So a needle in terminal_reason lands in readings.Gate.Detail and, on the
-// finding row, in readings.Admit.Detail as well, and the only fix would be to
-// stop quoting the reason in two shipped predicates — deleting the field the
-// operator reads to interpret the gate. #1280 met this one layer down and
-// resolved it by planting only in the stderr
+// finding row, in readings.Admit.Detail as well; a needle in the claude verdict
+// lands in readings.ClaudeState itself. In either case the only fix would be to
+// stop publishing a field the operator reads to interpret the run — the
+// certified reason, or the corroboration verdict. #1280 met the first one layer
+// down and resolved it by planting only in the stderr
 // (finding_attribution_fanout_test.go:730-731). THE NEEDLE'S HOME HERE IS THE
-// TRAILER'S `result` FIELD AND THE REAP-LOG STDERR; it may not enter
-// terminal_reason. That plant is the STRONGER test, not a weakened one:
-// resultTrailer has no `result` member so trailScanResult.Trailer structurally
-// cannot carry it, trailScanResult.Line carries it verbatim but capped, and
-// trailRunReadings carries neither field.
+// TRAILER'S `result` FIELD AND THE REAP-LOG STDERR; it may enter neither
+// terminal_reason nor ClaudeState. That plant is the STRONGER test, not a
+// weakened one: resultTrailer has no `result` member so trailScanResult.Trailer
+// structurally cannot carry it, trailScanResult.Line carries it verbatim but
+// capped, and trailRunReadings carries neither field.
 //
-// # The two staged values that are still staged, and who owns them
-//
-// PyryExited = true and ClaudeState = "" are #1268's two staged values, kept here
-// with their original justification (see finGatherReadings). #1282 must not
-// inherit the first silently: the argument that condemns the nil stderr applies
-// one field over.
+// Both exclusions are made STRUCTURAL IN THE FIXTURES rather than left as a
+// discipline at the plant site: finGatherNeedleTrailer renders terminal_reason
+// "completed", and TestFinGatherReturnsNoCapturedBytes hands the gather
+// pinStateRunning — a constant from pinReadState's closed set, which cannot
+// carry a needle and which proves the field introduces no forbidden key, as ""
+// would not.
 //
 // # Failure messages
 //
@@ -142,6 +147,12 @@ const (
 	// and nothing more. NOTHING IS EVER CREATED AT THAT PATH: it is a match
 	// pattern handed to a Go-side matcher, never a filesystem operand.
 	finGatherNeedleName = "fin-gather-subject"
+	// finGatherUndocumentedState is a claude liveness verdict nobody defined:
+	// neither one of pinReadState's four nor "" for not-read. Deliberately NOT
+	// the classifier layer's own "some-verdict-nobody-defined"
+	// (trail_run_outcome_test.go:749), so a failure names which layer produced
+	// the value that reached C7.
+	finGatherUndocumentedState = "fin-gather-verdict-nobody-defined"
 )
 
 // finGatherNeedleTrailer is an ORDINARY trailer in emitter.go:456-468's pinned
@@ -173,9 +184,75 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 
 // --- the gather -------------------------------------------------------------------
 
-// finGatherReadings assembles a complete trailRunReadings from the four inputs a
-// live probe holds, using ONLY shipped producers, and returns the attribution
-// record alongside it.
+// finGatherInputs is what a live probe holds when it composes one run's
+// readings: #1281's four values, plus the two #1282 left staged in the gather's
+// own body.
+//
+// NAMED FIELDS RATHER THAN POSITIONAL PARAMETERS, for a different reason than
+// finRecordInputs' (finding_run_record_test.go:205-212). That type's reason —
+// two adjacent same-typed strings on opposite sides of the argv prohibition —
+// applies only weakly here, because a bool and a string cannot transpose without
+// a compile error. The reason that does apply is
+// TestFinGatherPyryExitIsObservableAtTheOutcome's: its two arms must be
+// identical in stdout seed, needles, stderr and pinned set BYTE FOR BYTE and
+// differ in one field. Across six positional arguments that identity is a
+// discipline retyped at each call site and checkable only by reading; over a
+// struct it is `copy the value, set one field` — the package's own
+// vary-one-dimension idiom (trailRunWellFormed, trail_run_outcome_test.go:611) —
+// and it holds BY CONSTRUCTION. Same doctrine either way: prefer the shape that
+// cannot be got wrong over the discipline that must not be. Secondarily, a
+// reader of finGatherReadings(&stdout, needles, stderr, pinned, true, "") has no
+// way to know what that true asserts.
+//
+// # Both new fields keep the readings' own names, types and ZERO-POLARITY
+//
+//   - PyryExited's zero is false, which reads as "did not exit" and reaches Step
+//     3's void. That is the SAFE direction, and it is the identical argument
+//     trailRunReadings.PyryExited makes for itself
+//     (trail_run_outcome_test.go:204-207): a caller who omits the field gets a
+//     void, never a finding.
+//   - ClaudeState's zero is "", which is C7's shipped "not read" (:215-218,
+//     :444) — an honest report rather than an unfilled field.
+//
+// Because the two zeros land where the readings' own zeros land, an
+// incompletely-filled finGatherInputs degrades to a named nothing-was-measured
+// rather than to a claim.
+type finGatherInputs struct {
+	// Stdout is the buffer the trailer leg polls. It is read through Bytes(),
+	// which returns a COPY (background_trigger_probe_test.go:736-742), so
+	// handing one buffer to two gathers is non-destructive.
+	Stdout *probeSyncBuffer
+	// Needles is the post-trailer argv scan's match set: the content join and
+	// the per-pid corroboration.
+	Needles []string
+	// Stderr is pyry's reap-log stderr, the attribution leg's own input.
+	Stderr []byte
+	// Pinned is the during-turn pin, the join key into that reap log. []int AND
+	// NEVER []reachProc — see the caller's obligations on finGatherReadings.
+	Pinned []int
+	// PyryExited is whether pyry exited within its deadline, as its caller
+	// measured it.
+	PyryExited bool
+	// ClaudeState is the claude child's liveness verdict, as its caller read it.
+	//
+	// ITS ADMISSIBLE PRODUCER IS pinReadState's Verdict
+	// (process_pin_liveness_test.go:275) over the pid probeWaitForDirectChild
+	// returns (background_trigger_probe_test.go:975) — a CLOSED four-value set
+	// whose pinStateColumns is `pid=,ppid=,stat=` and carries no command column
+	// by construction. NEVER a raw ps column. This value crosses the gather
+	// unvalidated, is republished as claude_state and is quoted into a published
+	// Detail on C7's arm, so a column read here would put verbatim argv — and
+	// with it an operator's CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY — into
+	// an artifact destined for a public issue, which is the channel Pinned is
+	// []int to keep shut. "" is admissible and is the honest report for "no
+	// claude was read"; the gather validates nothing else, and that is a
+	// statement about the gather rather than a licence for its caller.
+	ClaudeState string
+}
+
+// finGatherReadings assembles a complete trailRunReadings from the
+// finGatherInputs a live probe holds, using ONLY shipped producers, and returns
+// the attribution record alongside it.
 //
 // Nothing it returns is built by struct literal: no trailGateResult,
 // trailAdmitResult or tdnReapOutcome reaches the readings except as the output of
@@ -204,15 +281,6 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 //     argv, and a ps column is how an operator's CLAUDE_CODE_OAUTH_TOKEN or
 //     ANTHROPIC_API_KEY reaches an artifact destined for a public issue. That
 //     conversion site is #1282's, and it is where the channel would reopen.
-//   - PyryExited IS STAGED true HERE AND #1282 MUST NOT INHERIT THAT SILENTLY.
-//     The same argument that condemns #1268's nil stderr applies one field over:
-//     fed a live pyry, a gather that hardcodes PyryExited would never let Step 3's
-//     trailOutcomeVoidPyryDidNotExit fire, and a run where pyry hung would report a
-//     scan-side answer — or the finding — instead of the staging void. That is a
-//     FALSE-POSITIVE direction, worse than the false negative this function
-//     closes. #1282 owns promoting PyryExited (and ClaudeState) to parameters, or
-//     filling them from real producers, BEFORE it feeds this gather a live pyry.
-//     Not done here because no test in this file could exercise either value.
 //
 // # Which contract check shapes which leg
 //
@@ -227,14 +295,13 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 //     pinScanArgv call's own, which is why nothing here types one in. pinScanArgv
 //     returns the ZERO pinScan on error, so the three are consistent by
 //     construction.
-func finGatherReadings(stdout *probeSyncBuffer, needles []string, stderr []byte,
-	pinned []int) (trailRunReadings, finAttributeRecord) {
+func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord) {
 	var readings trailRunReadings
 	var record finAttributeRecord
 
 	// The trailer leg. The observation's embedded scan result is REUSED rather
 	// than re-scanned, because that is the composition a live probe performs.
-	obs := trailWaitForTrailer(stdout, finGatherTrailerWait)
+	obs := trailWaitForTrailer(in.Stdout, finGatherTrailerWait)
 	readings.BoundFrom = obs.BoundFrom
 	readings.Gate = trailGate(obs.trailScanResult)
 
@@ -251,7 +318,7 @@ func finGatherReadings(stdout *probeSyncBuffer, needles []string, stderr []byte,
 	// condition is passed OUT to the caller instead; the outcome tier that names
 	// such runs is #1278's.
 	if readings.Gate.Reason != "" {
-		record = finAttributeFanOut(stderr, pinned, readings.Gate.Reason)
+		record = finAttributeFanOut(in.Stderr, in.Pinned, readings.Gate.Reason)
 		if !finAttributeHasCondition(record, finAttributeNoGroups) {
 			readings.Admit = record.Selected
 		}
@@ -259,7 +326,7 @@ func finGatherReadings(stdout *probeSyncBuffer, needles []string, stderr []byte,
 
 	// The argv leg. No exclusions: this file excludes nothing, and nil says so
 	// more clearly than an empty map. One call, three fields — C8/C9's subject.
-	scan, err := pinScanArgv(needles, nil)
+	scan, err := pinScanArgv(in.Needles, nil)
 	readings.ArgvScanErrored = err != nil
 	readings.MatchCount = scan.MatchCount
 	readings.RowsScanned = scan.RowsScanned
@@ -270,10 +337,22 @@ func finGatherReadings(stdout *probeSyncBuffer, needles []string, stderr []byte,
 		readings.Liveness = append(readings.Liveness, pinReadState(match.PID))
 	}
 
-	// The only two staged values. See the doc comment above for why the first is
-	// not cosmetic and why #1282 owns it.
-	readings.PyryExited = true // no pyry runs here, so there is none to fail to exit
-	readings.ClaudeState = ""  // no claude runs here; C7 admits "" as "not read"
+	// The caller's own two readings, carried WHOLE. No default, no zero-value
+	// rewrite, no fill-in-if-unset, no normalisation and no pinIsVerdict call: C7
+	// is the classifier's check over the claude verdict and it is already
+	// shipped, so a second opinion here would repair exactly the record C7 exists
+	// to reject and put trailOutcomeOutOfContract out of reach through this
+	// composition.
+	//
+	// What honest readings buy is ONE class of run: with a usable gate and an
+	// attribution that is not proof, PyryExited false now reaches Step 3's
+	// staging void where the constant reported a scan-side answer or a Step 4-6
+	// void. A proof-carrying run is unchanged — Step 2 sits above Step 3 by
+	// design (trail_run_outcome_test.go:323-334) and proofPyryLive pins it
+	// (:695-696, :820-821) — and so is a run whose gate is not usable, which Step
+	// 1 answers first.
+	readings.PyryExited = in.PyryExited
+	readings.ClaudeState = in.ClaudeState
 
 	return readings, record
 }
@@ -381,7 +460,19 @@ func TestFinGatherComposesTheFindingAndTheNegative(t *testing.T) {
 			var stdout probeSyncBuffer
 			seed := finGatherSeed(t, &stdout, tc.seed)
 
-			readings, record := finGatherReadings(&stdout, finGatherNeedles(t), tc.stderr, tc.pinned)
+			readings, record := finGatherReadings(finGatherInputs{
+				Stdout:  &stdout,
+				Needles: finGatherNeedles(t),
+				Stderr:  tc.stderr,
+				Pinned:  tc.pinned,
+				// Passed on every row rather than carried as a finGatherCase
+				// field: all three rows want this value, so a per-row field would
+				// be a zero to point somewhere plus three copies to keep in step.
+				// No pyry runs here, so there is none to fail to exit.
+				PyryExited: true,
+				// ClaudeState omitted: no claude runs here, and "" is C7's
+				// shipped "not read".
+			})
 			finGatherAssertContract(t, tc, seed, readings, record)
 
 			outcome := trailClassifyRun(readings)
@@ -550,7 +641,15 @@ func TestFinGatherEmptyPinnedSetIsNotAReading(t *testing.T) {
 			var stdout probeSyncBuffer
 			finGatherSeed(t, &stdout, trailFixtureTrailer)
 
-			readings, record := finGatherReadings(&stdout, finGatherNeedles(t), stderr, tc.pinned)
+			readings, record := finGatherReadings(finGatherInputs{
+				Stdout:  &stdout,
+				Needles: finGatherNeedles(t),
+				Stderr:  stderr,
+				Pinned:  tc.pinned,
+				// No pyry runs here, so there is none to fail to exit;
+				// ClaudeState is omitted because no claude runs here either.
+				PyryExited: true,
+			})
 
 			// The premise: the gate certified, so the attribution leg genuinely ran
 			// and the empty set is what stopped it — not a short-circuiting void.
@@ -611,6 +710,223 @@ func TestFinGatherEmptyPinnedSetIsNotAReading(t *testing.T) {
 	}
 }
 
+// finGatherNegativeInputs returns the inputs of finGatherCases()' second row —
+// an ordinary trailer, an anchored reap line naming a group the caller did NOT
+// pin, and a needle nothing is staged at — with both caller readings at the
+// values the gather's two constants used to hold.
+//
+// It seeds the buffer it is handed and is the base the two tests below copy and
+// vary ONE field of. The negative composition is the one those tests need,
+// because it is the only class of run the promotion moves: its gate is usable,
+// so Step 1 does not answer it, and its attribution is not proof, so Step 2 does
+// not either.
+func finGatherNegativeInputs(t *testing.T, stdout *probeSyncBuffer) finGatherInputs {
+	t.Helper()
+	finGatherSeed(t, stdout, trailFixtureTrailer)
+	return finGatherInputs{
+		Stdout:     stdout,
+		Needles:    finGatherNeedles(t),
+		Stderr:     []byte(trailReapLine(1, fmt.Sprintf("[%d]", finGatherNamedPGID)) + "\n"),
+		Pinned:     []int{finGatherUnnamedPGID},
+		PyryExited: true,
+	}
+}
+
+// TestFinGatherPyryExitIsObservableAtTheOutcome pins that the pyry-exit reading
+// the CALLER hands in is what the outcome is decided on, by varying that field
+// alone across two arms and separating their outcomes.
+//
+// # Why the pair is built on the negative arm and never on the proof arm
+//
+// Promoting the reading moves the outcome of exactly one class of run: usable
+// gate, attribution NOT proof. A run whose gate is not usable is answered by
+// Step 1 before the reading is consulted, and a PROOF-CARRYING run is answered
+// by Step 2 — which sits above Step 3 BY DESIGN
+// (trail_run_outcome_test.go:323-334, "Voiding it for a staging failure would
+// SUPPRESS A FINDING THE RUN GENUINELY ESTABLISHED") and is pinned by
+// proofPyryLive, a proof carrying PyryExited false that wants
+// trailOutcomeRunningAtTrailer (:695-696, :820-821). Building this pair on the
+// proof arm would require reordering the classifier, which is a defect and not
+// a fix.
+//
+// # The two arms are identical BY CONSTRUCTION, not by discipline
+//
+// The live arm is a COPY of the exited arm's finGatherInputs with one field set,
+// so the stdout buffer, the needle slice, the stderr and the pinned set are the
+// same values rather than equal-looking rebuilds. Sharing one buffer is sound:
+// trailWaitForTrailer only ever calls stdout.Bytes()
+// (result_trailer_observation_test.go:251), which returns a COPY of an
+// append-only buffer (background_trigger_probe_test.go:736-742), so the read is
+// non-destructive, both arms observe the same bytes on their first poll and both
+// take BoundFrom trailBoundFromStart. Rebuilding the needles instead of sharing
+// them would vary a second dimension, because finGatherNeedles calls t.TempDir()
+// and that returns a NEW directory on every call.
+func TestFinGatherPyryExitIsObservableAtTheOutcome(t *testing.T) {
+	var stdout probeSyncBuffer
+	exited := finGatherNegativeInputs(t, &stdout)
+
+	exitedReadings, _ := finGatherReadings(exited)
+
+	// The premises. The first two put this pair in the class of run the reading
+	// can move at all; without the last two the exited arm could be sitting on
+	// Step 5's run-void-no-rows-parsed and the pair would separate two voids
+	// rather than an answer from a void.
+	if exitedReadings.Gate.Value != trailGateUsable || exitedReadings.Gate.Reason != "completed" {
+		t.Fatalf("the gate reads %q certifying %q; want %q certifying \"completed\" — at any other "+
+			"gate value Step 1 answers both arms before the pyry-exit reading is reached and the "+
+			"pair asserts nothing", exitedReadings.Gate.Value, exitedReadings.Gate.Reason,
+			trailGateUsable)
+	}
+	if exitedReadings.Admit.Value != trailAdmitVoidGroupUnnamed {
+		t.Fatalf("the attribution reads %q; want %q — on %s Step 2 answers both arms and the pair "+
+			"would be asserting against the classifier's own ordering",
+			exitedReadings.Admit.Value, trailAdmitVoidGroupUnnamed, trailAdmitProof)
+	}
+	if exitedReadings.MatchCount != 0 || exitedReadings.RowsScanned <= 0 {
+		t.Fatalf("the argv scan matched %d of %d row(s); want 0 of more than 0 — at zero rows the "+
+			"exited arm lands on %s and the pair separates two voids",
+			exitedReadings.MatchCount, exitedReadings.RowsScanned, trailOutcomeVoidNoRowsParsed)
+	}
+
+	live := exited
+	live.PyryExited = false
+	liveReadings, _ := finGatherReadings(live)
+
+	// Each arm's reading is the one its caller handed in, which is the crossing
+	// the outcomes below are downstream of.
+	if exitedReadings.PyryExited != exited.PyryExited ||
+		liveReadings.PyryExited != live.PyryExited {
+		t.Fatalf("the arms were handed %t and %t and their readings carry %t and %t — the value "+
+			"is being rewritten inside the gather rather than carried", exited.PyryExited,
+			live.PyryExited, exitedReadings.PyryExited, liveReadings.PyryExited)
+	}
+
+	exitedOutcome := trailClassifyRun(exitedReadings)
+	liveOutcome := trailClassifyRun(liveReadings)
+
+	// Stated first, because this is the failure a gather that ignores the value
+	// produces and the message that names the diagnosis.
+	if exitedOutcome.Value == liveOutcome.Value {
+		t.Fatalf("both arms classify as %q although they differ in the pyry-exit reading ALONE "+
+			"(%t against %t): the value is not reaching the classifier, so a run in which pyry "+
+			"never exited would be reported as whatever the scan happened to say",
+			exitedOutcome.Value, exited.PyryExited, live.PyryExited)
+	}
+	if exitedOutcome.Value != trailOutcomeNoRowMatched {
+		t.Fatalf("the arm reporting pyry as exited classifies as %q (%s); want %q — this arm is "+
+			"the composition's own answer and must be unchanged by the promotion",
+			exitedOutcome.Value, exitedOutcome.Detail, trailOutcomeNoRowMatched)
+	}
+	if liveOutcome.Value != trailOutcomeVoidPyryDidNotExit {
+		t.Fatalf("the arm reporting pyry as still live classifies as %q (%s); want %q — every "+
+			"reading on that arm is staged after a teardown that did not complete, and reporting "+
+			"the scan-side answer instead states the negative %s names about a run that never "+
+			"reached it", liveOutcome.Value, liveOutcome.Detail, trailOutcomeVoidPyryDidNotExit,
+			trailOutcomeNoRowMatched)
+	}
+}
+
+// TestFinGatherCarriesTheClaudeVerdictAsHandedIn pins that the claude liveness
+// verdict crosses the gather EXACTLY as the caller handed it in: not defaulted,
+// not re-derived from anything else the gather read, and not validated on the
+// way.
+//
+// # Why this is not a finGatherCases row
+//
+// finGatherAssertContract runs on every row of that table and fails any row
+// classifying trailOutcomeOutOfContract (:511-514), which is precisely the
+// answer the middle row requires. The claim needs a test of its own.
+//
+// # Why the gather validates nothing
+//
+// C7 (trail_run_outcome_test.go:444-449) is the classifier's check over this
+// field and it is already shipped. A pinIsVerdict call in the gather would
+// repair exactly the record C7 exists to reject, putting the out-of-contract
+// answer out of reach through this composition — and it would break the LAST row
+// first, because "" is C7's shipped "not read" and is not a pinIsVerdict value.
+// A caller with no claude to read must be able to say so.
+//
+// The first and last rows want the SAME outcome, and that is the point: the
+// verdict is corroboration, and corroboration never moves the answer
+// (trail_run_outcome_test.go:336-343).
+func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
+	var stdout probeSyncBuffer
+	base := finGatherNegativeInputs(t, &stdout)
+
+	cases := []struct {
+		name        string
+		claudeState string
+		wantOutcome string
+		// wantDetail is a fragment of the arm's OWN sentence. Asserted rather
+		// than the value alone because eight other contract checks answer with
+		// trailOutcomeOutOfContract, so a gather bug that broke the gate or the
+		// bound would satisfy a value-only assertion.
+		wantDetail string
+	}{
+		{
+			name:        "a documented verdict crosses unchanged and does not move the outcome",
+			claudeState: pinStateRunning,
+			wantOutcome: trailOutcomeNoRowMatched,
+		},
+		{
+			name:        "a verdict outside the documented set reaches the out-of-contract answer unrepaired",
+			claudeState: finGatherUndocumentedState,
+			wantOutcome: trailOutcomeOutOfContract,
+			wantDetail:  "the claude-still-alive reading carries verdict",
+		},
+		{
+			name:        "the empty value stays reachable as a deliberate not-read",
+			claudeState: "",
+			wantOutcome: trailOutcomeNoRowMatched,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := base
+			in.ClaudeState = tc.claudeState
+
+			readings, _ := finGatherReadings(in)
+
+			// IDENTITY with what was handed in, never membership: a gather that
+			// normalised, blanked or re-derived the field would still satisfy a
+			// pinIsVerdict check on the first row.
+			if readings.ClaudeState != tc.claudeState {
+				t.Fatalf("the gather was handed the claude verdict %q and its readings carry %q — "+
+					"the value is defaulted, repaired or re-derived rather than carried",
+					tc.claudeState, readings.ClaudeState)
+			}
+			// The premise for both halves of "not re-derived": this file's scan
+			// matches no row, so there is no per-pid read the gather could have
+			// derived a verdict from — and C7's per-pid loop cannot be the arm
+			// that fires on the middle row.
+			if len(readings.Liveness) != 0 {
+				t.Fatalf("the readings carry %d per-pid read(s); want none — with a non-empty "+
+					"liveness set a gather deriving the claude verdict from it would pass the "+
+					"identity check by coincidence", len(readings.Liveness))
+			}
+
+			outcome := trailClassifyRun(readings)
+
+			// The second half of "carried exactly as handed in": the classifier
+			// republishes the field verbatim (trail_run_outcome_test.go:356).
+			if outcome.ClaudeState != tc.claudeState {
+				t.Fatalf("the published claude_state reads %q; want the %q that was handed in",
+					outcome.ClaudeState, tc.claudeState)
+			}
+			if outcome.Value != tc.wantOutcome {
+				t.Fatalf("the readings classify as %q (%s); want %q", outcome.Value, outcome.Detail,
+					tc.wantOutcome)
+			}
+			if tc.wantDetail != "" && !strings.Contains(outcome.Detail, tc.wantDetail) {
+				t.Errorf("detail: got %q, want C7's own claude-verdict sentence — the arm reached "+
+					"matters as much as the value, because eight other contract checks also answer "+
+					"%s", outcome.Detail, trailOutcomeOutOfContract)
+			}
+		})
+	}
+}
+
 // TestFinGatherReturnsNoCapturedBytes makes the operator-review-before-paste
 // obligation checkable rather than advisory, over BOTH of the gather's returns.
 //
@@ -645,8 +961,20 @@ func TestFinGatherReturnsNoCapturedBytes(t *testing.T) {
 	seed := finGatherSeed(t, &stdout, finGatherNeedleTrailer)
 	stderr := []byte(trailReapLine(1, fmt.Sprintf("[%d] %s", finGatherNamedPGID, trailNeedle)) + "\n")
 
-	readings, record := finGatherReadings(&stdout, finGatherNeedles(t), stderr,
-		[]int{finGatherNamedPGID})
+	readings, record := finGatherReadings(finGatherInputs{
+		Stdout:     &stdout,
+		Needles:    finGatherNeedles(t),
+		Stderr:     stderr,
+		Pinned:     []int{finGatherNamedPGID},
+		PyryExited: true,
+		// A CONSTANT FROM pinReadState's CLOSED SET rather than "": it makes the
+		// header's ClaudeState exclusion structural in the fixture instead of a
+		// discipline at the plant site, the way finGatherNeedleTrailer does for
+		// terminal_reason, and it proves the field introduces no forbidden key —
+		// which "" would not. It does not move the outcome, because a verdict is
+		// corroboration (trail_run_outcome_test.go:336-343).
+		ClaudeState: pinStateRunning,
+	})
 
 	// --- the premises, each of which turns a vacuous plant into a Fatalf ---
 
