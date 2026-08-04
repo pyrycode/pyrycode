@@ -801,6 +801,22 @@ write to.
 PTY is unaffected: the tracker is nil there, both calls are no-ops, and `newInboundDeliver`'s body is
 semantically identical to before #1199. See [codebase/1199.md](../codebase/1199.md).
 
+**Forced-ordering test coverage across a `new_session` rotation (#1295).** The #1137 e2e had
+failed twice at its M4 milestone with the same shape — rotation succeeds, the follow-up turn is
+accepted, then zero bytes reach any child for the full 20 s deadline — consistent with a
+delivery parked here (`waitIdleForDelivery`, bounded by `streamTurnHoldTimeout`, 15 min: far
+outside the e2e's window, and silent while parked, matching the record). Rather than wait for
+the ~1-in-N-per-week e2e to fire again, #1295 drives the ordering directly at this seam: park a
+delivery in the hold, run the rotation underneath it (rekey the binding, tear the child down,
+fire `clearForSession` keyed to the rotation's new session id), and check whether the clear is
+what releases it. Forced 50/50 under `-race -count=50`, mutation-demonstrated — **the clear does
+release the parked delivery**, and it lands in the post-rotation child and no other. That rules
+out this seam as the M4 stall's cause on the ordering the test forces (pre-rotation turn events
+and the transition arriving in order); it does **not** decide a straggler pre-rotation event
+re-marking the conversation *after* the clear fires, which needs the drain's fan-in rather than
+the seam alone and is filed as [#1298](https://github.com/pyrycode/pyrycode/issues/1298). See
+[codebase/1295.md](../codebase/1295.md).
+
 ## Production wiring — the `interactive_runner` toggle (#1081)
 
 `cmd/pyry/main.go`'s `selectInteractiveRunner(cfg, logger)` maps `cfg.InteractiveRunner` to
@@ -875,6 +891,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1206.md`](../codebase/1206.md) — `Config.OnChildExit`, the per-child-exit seam on the streamsup `Run` loop (one field, one unconditional call above the shutdown return); split from #1203 alongside #1207, which itself later split into #1209 (the fan-in exit lane) and #1210 (the production wiring, landed).
 - [`codebase/1209.md`](../codebase/1209.md) — `streamTurnEnvelope.exit` / `streamTurnSink.exitFor`, the fan-in lane that carries a child-exit signal ordered correctly against the dead child's already-pushed events; fired in production by #1210.
 - [`codebase/1199.md`](../codebase/1199.md) — `waitIdleForDelivery`/`openForDelivery`, the inbound-delivery seam that holds a mid-turn send in the queue and marks the conversation busy before writing; the tracker's first production reader.
+- [`codebase/1295.md`](../codebase/1295.md) — forced-ordering test proving this seam's hold is released by the `new_session` rotation's `clearForSession` and delivers to the post-rotation child; eliminates one M4-stall hypothesis, leaves the straggler-re-mark hypothesis ([#1298](https://github.com/pyrycode/pyrycode/issues/1298)) open.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
