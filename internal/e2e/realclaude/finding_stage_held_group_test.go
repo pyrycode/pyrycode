@@ -420,7 +420,7 @@ func finStageRun(t *testing.T, subject finStageSubject, stderr []byte,
 		t.Fatalf("seed the arm's stdout buffer with the trailer fixture: %v", err)
 	}
 
-	readings, record := finGatherReadings(finGatherInputs{
+	readings, record, _ := finGatherReadings(finGatherInputs{
 		Stdout:  &stdout,
 		Needles: subject.Needles,
 		Stderr:  stderr,
