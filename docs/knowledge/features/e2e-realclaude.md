@@ -968,6 +968,33 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
   path-vs-name census MUST FIX, and the stale-comment lesson.
 
+- `finding_run_gather_test.go` (#1281) — **parameterises `trailRigGather`
+  (#1268) on the two inputs it hardcoded.** That rig passes a `nil` literal
+  as the reap-log stderr and keys attribution on the test process's own
+  process group; under those two hardcodings, `trailAdmitProof` — and with
+  it `trailOutcomeRunningAtTrailer`, the only outcome that is a finding —
+  is structurally unreachable, so a probe built on it would report a clean
+  negative forever with no symptom. `finGatherReadings(stdout
+  *probeSyncBuffer, needles []string, stderr []byte, pinned []int)
+  (trailRunReadings, finAttributeRecord)` takes both as parameters and,
+  driven offline from synthetic stdout/stderr, reaches both the finding and
+  a genuine negative (`trailOutcomeNoRowMatched`, never a `run-void-*`)
+  through its own composition, both at `MatchCount == 0` under a certifying
+  gate — demonstrating rather than describing that Step 2 outranks the
+  match-count arms. `pinned` is `[]int`, never `[]reachProc`, continuing
+  #1280's credential-channel-closed-by-signature pattern; the
+  `[]reachProc` → `[]int` conversion is left to #1282's call site by
+  design. The trailer observation is a function-local and never returned,
+  which is what keeps `trailScanResult.Trailer`/`.Line` structurally out of
+  the caller's reach. A recursive forbidden-key walk (lowercased keys, two
+  named exact-key exemptions) closes the flat-only-key-scan gap #1280 left
+  open for nested records. `PyryExited`/`ClaudeState` remain staged as
+  #1268 staged them; #1282 must promote them before feeding this gather a
+  live pyry. Purely additive, one new file, 830 lines, zero production
+  change, zero consumer call sites; four top-level tests, 0 SKIP on
+  `-run '^TestFinGather'`. See [`codebase/1281.md`](../codebase/1281.md)
+  for the full implementation and the mutation-tested lessons.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
