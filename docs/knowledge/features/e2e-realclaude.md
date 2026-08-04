@@ -969,16 +969,17 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   path-vs-name census MUST FIX, and the stale-comment lesson.
 
 - `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
-  #1302) — **parameterises `trailRigGather` (#1268) on the two inputs it
-  hardcoded.** That rig passes a `nil` literal as the reap-log stderr and
-  keys attribution on the test process's own process group; under those two
-  hardcodings, `trailAdmitProof` — and with it
-  `trailOutcomeRunningAtTrailer`, the only outcome that is a finding — is
-  structurally unreachable, so a probe built on it would report a clean
-  negative forever with no symptom. `finGatherReadings(in finGatherInputs)
-  (trailRunReadings, finAttributeRecord)` takes `Stdout`, `Needles`,
-  `Stderr` and `Pinned` as fields and, driven offline from synthetic
-  stdout/stderr, reaches both the finding and a genuine negative
+  #1302, trailer-sighting carrier added #1309) — **parameterises
+  `trailRigGather` (#1268) on the two inputs it hardcoded.** That rig passes
+  a `nil` literal as the reap-log stderr and keys attribution on the test
+  process's own process group; under those two hardcodings,
+  `trailAdmitProof` — and with it `trailOutcomeRunningAtTrailer`, the only
+  outcome that is a finding — is structurally unreachable, so a probe built
+  on it would report a clean negative forever with no symptom.
+  `finGatherReadings(in finGatherInputs) (trailRunReadings,
+  finAttributeRecord, finSighting)` takes `Stdout`, `Needles`, `Stderr` and
+  `Pinned` as fields and, driven offline from synthetic stdout/stderr,
+  reaches both the finding and a genuine negative
   (`trailOutcomeNoRowMatched`, never a `run-void-*`) through its own
   composition, both at `MatchCount == 0` under a certifying gate —
   demonstrating rather than describing that Step 2 outranks the match-count
@@ -995,11 +996,23 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   varying `PyryExited` alone across an identical stdout/needle pair to prove
   the outcome moves (`trailOutcomeNoRowMatched` ↔
   `trailOutcomeVoidPyryDidNotExit`), one carrying a documented verdict, an
-  undocumented one, and `""` through unchanged. Purely additive, zero
-  production change, zero consumer call sites; six top-level tests, 0 SKIP
-  on `-run '^TestFinGather'`. See [`codebase/1281.md`](../codebase/1281.md)
-  and [`codebase/1302.md`](../codebase/1302.md) for the full implementation
-  and the mutation-tested lessons.
+  undocumented one, and `""` through unchanged. The third return, `finSighting`
+  (#1309), is what the classified poll *measured* — scan state, the bound and
+  its discriminator, staleness, a carries-a-decoded-trailer discriminator and
+  the four decoded scalars (`Subtype`/`IsError`/`TerminalReason`/
+  `StopReason`) — filled from the same `trailWaitForTrailer` call that fills
+  `BoundFrom`, so no second scan is needed to recover what the sighting saw.
+  It reaches none of `trailObservation`, `trailScanResult` or `resultTrailer`
+  (proven by walking types, reusing `finRecordInputReaches` rather than a
+  second traversal), so `.Line` and the decoded `*resultTrailer` stay exactly
+  as unreachable as before; nothing consumes the carrier yet —
+  `finTrailerBuild` keeps its present signature, and #1308 moves it across.
+  Purely additive, zero production change, zero consumer call sites; nine
+  top-level tests, 0 SKIP on `-run '^TestFinGather'`. See
+  [`codebase/1281.md`](../codebase/1281.md),
+  [`codebase/1302.md`](../codebase/1302.md) and
+  [`codebase/1309.md`](../codebase/1309.md) for the full implementation and
+  the mutation-tested lessons.
 
 - `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
   (#1281) two parameters from a real held command, not hand-passed
