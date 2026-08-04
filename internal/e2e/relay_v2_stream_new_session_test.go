@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,19 +383,43 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	ackTwoAt := elapsed()
 	ackTwoBytes, ackTwoErr := os.ReadFile(stdinLog)
 
+	// The daemon log's length at that same moment — the failure record's window
+	// boundary (#1296). A byte OFFSET, not a timestamp: safeBuffer is append-only
+	// (its whole method set is Write/String/Bytes — no Reset, no Read, and nothing
+	// in the harness truncates it), so byte N means the same byte for the life of
+	// the test and snapshot[ackTwoLogLen:] is exactly "what the daemon logged
+	// after ack #2" — no clock, no parsing, no coupling to the log's format. Same
+	// instrument at both ends (h.Stderr.Bytes() + len) for the reason the
+	// paragraph above gives about the stdin log; measuring by copying the buffer
+	// costs a few KB and is the right trade for instrument consistency.
+	//
+	// The boundary is approximate, not exact: os/exec's stderr-copy goroutine is
+	// asynchronous, so a line written microseconds before this point may land just
+	// after it. Against a 20 s window at msgqueue's 1 s retry cadence that cannot
+	// change any reading below, but the record should not pretend otherwise.
+	ackTwoLogLen := len(h.Stderr.Bytes())
+
 	// Poll the stdin log until the fresh child has received turn #2. The daemon's
 	// inbound queue retries WriteUserTurn until the fresh child is stdin-ready, so a
 	// generous deadline absorbs the fresh spawn.
 	//
-	// This deadline stays where it is, deliberately (#1273). The msgqueue drain
-	// BLOCKS inside the delivery seam waiting for claude to go idle (#704) with no
-	// periodic retry, so a missed wake-up is an unbounded stall and 20 s, 60 s and
-	// 300 s are the same red — raising it cannot fix the failure it would hide. Nor
-	// is the test wrapped in a re-run: auto-retrying before reporting red converts a
-	// possible permanent-stall defect into an invisible one, the false-green shape
-	// that already shipped an unverified change once (#1168 / PR #1169, where a SKIP
-	// exited 0 and read as a pass). The diagnostics below make the next occurrence
-	// decidable instead; that is the whole scope here.
+	// This deadline stays where it is, deliberately (#1273) — though NOT for the
+	// reason this comment used to give, which was wrong on both clauses (#1296).
+	// The drain is not retry-less: on the error arm it re-attempts the same head
+	// every defaultRetryInterval (1 s) and abandons it after defaultGiveUpAfter
+	// (2 m). And the two parked waits are BOUNDED, not unbounded —
+	// inboundActivateTimeout (30 s) and streamTurnHoldTimeout (15 min). What they
+	// are is SILENT at the daemon's Info level, for the whole of this 20 s window,
+	// which sits below both. Raising the deadline still cannot fix the failure, and
+	// the reason is the OUTCOME, not the silence: past 15 min a wedged hold gives up
+	// and surfaces a typed session_error, and everything shorter just spends longer
+	// inside the same stall — 20 s, 60 s and 300 s are all red. A longer deadline
+	// buys only more evidence, and attaching the daemon's log to the failure below
+	// buys that evidence without paying the wall-clock. Nor is the test wrapped in a
+	// re-run: auto-retrying before reporting red converts a possible permanent-stall
+	// defect into an invisible one, the false-green shape that already shipped an
+	// unverified change once (#1168 / PR #1169, where a SKIP exited 0 and read as a
+	// pass).
 	//
 	// The read error is KEPT rather than discarded: without it len(nil) == 0 renders
 	// an unreadable file as "the file was empty" — a broken instrument reporting
@@ -424,9 +449,13 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		//
 		// ok=false conflates missing / unparseable / no bootstrap row, so it renders as
 		// a sentinel — never as "", which would read as "the rotation lost the id" and
-		// fabricate a finding out of a broken instrument.
-		regNowID := "<no bootstrap entry: registry missing, unparseable, or bootstrap row absent>"
-		if e, ok := readBootstrapIfPresent(regPath); ok {
+		// fabricate a finding out of a broken instrument. The `e.ID != ""` clause is the
+		// same guard M2's read carries 170 lines up (:267): readBootstrapIfPresent does
+		// not require a non-empty id, and an empty one would print as a MANUFACTURED
+		// second-rotation proof — flagged in docs/knowledge/codebase/1273.md as a
+		// fold-in for the next ticket touching this file, which is this one.
+		regNowID := "<no bootstrap entry: registry missing, unparseable, bootstrap row absent, or its id empty>"
+		if e, ok := readBootstrapIfPresent(regPath); ok && e.ID != "" {
 			regNowID = e.ID
 		}
 		t.Fatalf("M4: the fresh child never received the subsequent turn; the stdin log has no %q bytes "+
@@ -434,10 +463,22 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 			"stdin log: %d bytes at ack #2 (t=%s, read err: %v) → %d bytes at expiry (read err: %v) "+
 			"— no growth ⟹ no bytes arrived at all; growth ⟹ bytes arrived, but not turn #2's\n"+
 			"registry bootstrap id: %q at M2 (post.ID) → %q re-read now — a mismatch ⟹ a second rotation "+
-			"re-keyed the binding under turn #2\nlog=%q",
+			"re-keyed the binding under turn #2\n%s\n"+
+			"how to read that window: ~1 retry Warn per second (msgqueue's defaultRetryInterval, 1s) ⟹ the "+
+			"drain was in the ERROR-RETURN arm — DeliverFunc returned non-nil, the head stayed queued and was "+
+			"re-attempted every second, and the fresh child never became writable; no give-up is possible "+
+			"inside this window (defaultGiveUpAfter is 2m). ZERO retry Warns ⟹ the drain was NOT in that arm; "+
+			"it does NOT mean the daemon never attempted delivery. Three states are silent at the daemon's "+
+			"Info level (this harness starts pyry without -pyry-verbose): parked in Activate (bounded by "+
+			"inboundActivateTimeout, 30s), parked in the mid-turn hold (streamTurnHoldTimeout, 15m), or "+
+			"RETRYING at that same 1s cadence under the pending/hold branch, which logs at Debug so a "+
+			"legitimate hold never spams the operator log — the third is looping, i.e. the very behaviour "+
+			"the Warn count is meant to detect, and it is invisible here.\nlog=%q",
 			echoNeedleTwo, gotAck2,
 			len(ackTwoBytes), ackTwoAt, ackTwoErr, len(logBytes), logErr,
-			post.ID, regNowID, logBytes)
+			post.ID, regNowID,
+			daemonLogWindow(h.Stderr.Bytes(), ackTwoLogLen, daemonLogBudget),
+			logBytes)
 	}
 	t.Logf("[t=%s] M4: the fresh post-rotation child received the subsequent turn (stdin log carries %q)", elapsed(), echoNeedleTwo)
 
@@ -458,4 +499,189 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 			"/clear\nlog=%q", logBytes)
 	}
 	t.Logf("[t=%s] M5: the stdin log captured user turns and never a /clear — the stream new_session re-spawned, no keystroke (AC-3)", elapsed())
+}
+
+// daemonLogBudget bounds the daemon-log excerpt M4's failure message attaches.
+// Sized against the arm the excerpt exists to detect: ~20 retry Warns (one per
+// msgqueue defaultRetryInterval across the 20 s window) at ~250 B each ≈ 5 KB,
+// so the modelled failure renders COMPLETE and elision is reserved for a
+// genuinely chatty run. A tuning knob, not a contract — if a real recurrence
+// renders elided, the Warn count in the header still answers the question the
+// excerpt only corroborates, so the constant can move without touching the shape.
+const daemonLogBudget = 8 << 10
+
+// msgqueueRetryWarn is the drain's delivery-failure retry line, verbatim from
+// internal/msgqueue/queue.go (the q.log.Warn at the end of the drain loop — Warn,
+// unlike the pending/hold branch just above it, which logs at Debug). Duplicated
+// here rather than exported from msgqueue on purpose: exporting a log message
+// turns operator-facing prose into an API. The rendering prints the literal it
+// counted, so a drift surfaces as "retry Warns: 0" beside an excerpt that visibly
+// contains the lines — a discrepancy the reader sees in one look, which is the
+// cheaper guard.
+const msgqueueRetryWarn = "msgqueue: delivery failed, will retry"
+
+// daemonLogWindow renders the daemon-log bytes written after the byte offset
+// `since` — the window between M4's ack #2 and its poll expiry (#1296). Pure
+// over its arguments: no *testing.T, no I/O, no clock, so it cannot fire a fatal
+// while t.Fatalf's arguments are being built (the rule the M4 branch states, and
+// the reason readBootstrapIfPresent is the only registry reader admissible there).
+//
+// It NEVER returns "". A failure to measure and a measured absence render as
+// distinct sentinels, because an empty rendering would read as the FINDING "the
+// daemon logged nothing during the window" when it may be the absence of data —
+// the same posture as the regNowID sentinel above: the instrument reports itself.
+func daemonLogWindow(snapshot []byte, since, budget int) string {
+	if since < 0 || since > len(snapshot) {
+		// Unreachable while safeBuffer stays append-only; it exists so that
+		// assumption is checkable rather than implicit, and so a broken boundary
+		// can never render as a measurement.
+		return fmt.Sprintf("<unmeasurable: the ack #2 offset is %d into a %d-byte daemon-log snapshot; "+
+			"the window boundary cannot be applied>", since, len(snapshot))
+	}
+	window := snapshot[since:]
+	if len(window) == 0 {
+		return "<empty: the daemon logged nothing between ack #2 and expiry>"
+	}
+	// The count is the primary datum and the excerpt is corroboration: the count
+	// answers "did the drain retry?" as a number and survives elision, which a
+	// hand-count of the excerpt does not. It is scoped to the window, never to the
+	// whole buffer — pre-ack-#2 lines are not evidence about the dead window.
+	header := fmt.Sprintf("daemon log, ack #2 → expiry: %d bytes, retry Warns: %d (matching %q)",
+		len(window), bytes.Count(window, []byte(msgqueueRetryWarn)), msgqueueRetryWarn)
+	if len(window) <= budget {
+		// Says nothing about eliding: a short window that LOOKS truncated is the
+		// symmetric half of the bound's honesty obligation.
+		return header + "\n" + string(window)
+	}
+	// Head AND tail. The realistic over-budget case is an unexpectedly chatty run,
+	// where onset (did the retries begin at all?) and end (what was the daemon's
+	// last word) are both load-bearing, and head-only elision buries one of them.
+	// The cut is by byte, not newline-aligned — the header says "bytes" and means
+	// it. The header states the window's TOTAL size, not the kept size: a bound
+	// that reports only what survived it is exactly the silent truncation this
+	// record must not do.
+	keep := budget / 2
+	if keep < 0 {
+		keep = 0
+	}
+	elided := len(window) - 2*keep
+	return fmt.Sprintf("%s\n  (bounded at %d bytes: showing the first %d and the last %d, %d elided from "+
+		"the middle)\n%s… [%d bytes elided from the middle] …%s",
+		header, budget, keep, keep, elided, window[:keep], elided, window[len(window)-keep:])
+}
+
+// TestDaemonLogWindow pins daemonLogWindow's four arms. The renderer is pure over
+// (snapshot, since, budget), so every arm is provable offline here — including the
+// genuinely-empty window, which has no live repro in the M4 fixture (a window with
+// zero daemon output at Info level is plausible but not producible on demand). That
+// arm is a CONTRACT check, not a manufactured failing scenario.
+//
+// Assertions are substrings and computed numbers rather than a whole-output golden:
+// a golden would turn every wording tweak in a diagnostic into a test edit.
+func TestDaemonLogWindow(t *testing.T) {
+	const (
+		before   = "pyrycode starting\n"                   // pre-window: must never be rendered
+		midNeed  = "MIDDLE-NEEDLE"                         // must not survive elision
+		headNeed = "HEAD-NEEDLE-0123456789012345678901234" // 37 B, the kept head
+		tailNeed = "TAIL-NEEDLE-9876543210987654321098765" // 37 B, inside the kept tail
+	)
+	chatty := headNeed + strings.Repeat("m", 40) + midNeed + strings.Repeat("m", 40) + tailNeed
+
+	tests := []struct {
+		name     string
+		snapshot string
+		since    int
+		budget   int
+		want     []string
+		notWant  []string
+	}{
+		{
+			name:     "empty window renders the sentinel, not a blank",
+			snapshot: before + msgqueueRetryWarn + "\n",
+			since:    len(before + msgqueueRetryWarn + "\n"),
+			budget:   daemonLogBudget,
+			want:     []string{"<empty:", "logged nothing"},
+			// A blank rendering would read as the finding, and pre-window bytes must
+			// not leak in past the boundary.
+			notWant: []string{"pyrycode starting", "retry Warns"},
+		},
+		{
+			name:     "offset past the end is unmeasurable, naming both numbers",
+			snapshot: "abc",
+			since:    4,
+			budget:   daemonLogBudget,
+			want:     []string{"<unmeasurable:", "offset is 4", "3-byte"},
+			notWant:  []string{"retry Warns"},
+		},
+		{
+			name:     "negative offset takes the same arm",
+			snapshot: "abc",
+			since:    -1,
+			budget:   daemonLogBudget,
+			want:     []string{"<unmeasurable:", "offset is -1"},
+			notWant:  []string{"retry Warns"},
+		},
+		{
+			name:     "window under budget renders verbatim and says nothing about eliding",
+			snapshot: before + "spawning claude\n" + msgqueueRetryWarn + " err=boom\n",
+			since:    len(before),
+			budget:   daemonLogBudget,
+			want: []string{
+				"spawning claude\n" + msgqueueRetryWarn + " err=boom\n",
+				fmt.Sprintf("%d bytes", len("spawning claude\n"+msgqueueRetryWarn+" err=boom\n")),
+				"retry Warns: 1",
+			},
+			notWant: []string{"elided", "bounded at", "pyrycode starting"},
+		},
+		{
+			name:     "over-budget window keeps both ends and states the exact elision",
+			snapshot: chatty,
+			since:    0,
+			budget:   74, // keep = 37 each end
+			want: []string{
+				headNeed,
+				tailNeed,
+				fmt.Sprintf("%d bytes,", len(chatty)),    // the TOTAL, not the kept count
+				fmt.Sprintf("%d elided", len(chatty)-74), // header restatement
+				fmt.Sprintf("[%d bytes elided", len(chatty)-74), // the in-excerpt marker
+				"showing the first 37 and the last 37",
+			},
+			notWant: []string{midNeed},
+		},
+		{
+			name:     "the Warn count is scoped to the window, not the whole buffer",
+			snapshot: msgqueueRetryWarn + "\n" + msgqueueRetryWarn + "\n" + msgqueueRetryWarn + "\n",
+			since:    len(msgqueueRetryWarn + "\n"), // one copy sits BEFORE the boundary
+			budget:   daemonLogBudget,
+			want:     []string{"retry Warns: 2"},
+		},
+		{
+			name:     "a non-empty window with no retries reads zero, not empty",
+			snapshot: "spawning claude\nclaude exited\n",
+			since:    0,
+			budget:   daemonLogBudget,
+			want:     []string{"retry Warns: 0", "spawning claude", "claude exited"},
+			notWant:  []string{"<empty:", "<unmeasurable:"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := daemonLogWindow([]byte(tc.snapshot), tc.since, tc.budget)
+			if got == "" {
+				t.Fatal("daemonLogWindow returned \"\": a failure to measure must never render as an " +
+					"absence of output — every arm owes a sentinel or a header")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("rendering does not contain %q\ngot:\n%s", w, got)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(got, w) {
+					t.Errorf("rendering unexpectedly contains %q\ngot:\n%s", w, got)
+				}
+			}
+		})
+	}
 }
