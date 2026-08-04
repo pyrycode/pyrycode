@@ -900,6 +900,35 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   guard-ordering disclosure code review confirmed by mutation, and the
   in-cap-plant lesson.
 
+- `finding_run_record_test.go` (#1291) — **the assembled run record.**
+  `finRecordRun` is the record one probe run publishes: pyry's exit code,
+  every matched row reduced to `finRecordProc` (`PID`/`PPID`/`PGID` — three
+  `int` fields, reflection-asserted, nothing else), the per-pid liveness
+  verdicts (`[]pinStateOutcome`, carried whole), the reap-log attribution
+  (`finAttributeRecord`, #1280) and the trailer sub-record
+  (`finTrailerRecord`, #1290), both embedded whole rather than re-derived,
+  and the runner path. The runner path is recorded **as observed**: the
+  env reading (`reachRunnerPathFromEnv`) is carried as documentation, not
+  corroboration, alongside an independent argv reading
+  (`tdnRunnerFromArgv`), reduced to a three-valued `RunnerAgreement` —
+  `agree` / `disagree` / `indeterminate` — decided on the **label** each
+  reading's leading token, never the whole string, because the two
+  producers append their own free-text reasons and the full strings are
+  therefore never equal even when both name the same runner.
+  `finRecordInputs` uses named fields rather than positional parameters
+  specifically because two adjacent same-typed strings
+  (`RunnerFromEnv`/`ClaudeCommand`) sit on opposite sides of the argv
+  prohibition, and it carries neither a `trailObservation` nor a
+  `trailScanResult` field, which is what keeps the discriminated-optional
+  trailer pointer out of reach. Purely additive, one new file, 1061 lines,
+  zero production change, zero consumer call sites; five top-level tests,
+  all offline. One code-review SHOULD FIX left non-blocking: the
+  attribution sub-record's "carried whole" claim is pinned by a single
+  nested scalar rather than `reflect.DeepEqual` (the trailer half's
+  pattern), so a future partial-carriage regression there would pass
+  unnoticed — deferred to #1286. See [`codebase/1291.md`](../codebase/1291.md)
+  for the full implementation and the mutation-tested lessons.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
