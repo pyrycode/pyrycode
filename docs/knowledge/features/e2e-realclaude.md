@@ -818,6 +818,35 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   reap line this rig must not grow. Purely additive, one new file, 594 lines,
   zero existing call sites changed. See [`codebase/1268.md`](../codebase/1268.md).
 
+- `finding_attribution_fanout_test.go` (#1280) — **the many-to-one reduction**:
+  `trailAdmitAttribution` (#1270) takes one held process group; the probe's
+  argv scan returns a set, because `pinScanArgv` deliberately refuses to
+  resolve "the" pid. `finAttributeFanOut(stderr []byte, pgids []int, certified
+  string) finAttributeRecord` reduces that set to the single `trailAdmitResult`
+  `trailRunReadings.Admit` (#1271) accepts, under a total order
+  (`finAttributeOrder`, proof first, argued in the code) so no group's void
+  suppresses another group's proof and no composition of voids manufactures
+  one. Two record-level conditions, never selectable values:
+  `finAttributeGroupUnreportable` (a `pgid <= 1` group `reap.go:52` skips
+  before it ever kills anything — surfaced rather than handed to
+  `tdnClassifyReapLog`, which would misattribute the staging fault to the
+  instrument) and `finAttributeNoGroups` (no reportable group remained — a
+  staging fault, `Selected` left zero rather than filled with either of the
+  two publishable falsehoods AC4 prices). The credential channel is closed by
+  the **signature** — `pgids []int`, never `[]reachProc` — not a check;
+  `certified` crosses verbatim by design (already-shipped, publishable
+  behaviour) and the fan-out multiplies its copy count by the distinct-group
+  count, each capped at 512 bytes. `finAttributeEntry` carries only `PGID`
+  and `Admit` — no `tdnReapOutcome.Line`, no `reachProc.Command`. Purely
+  additive, one new file, 767 lines, zero production change, zero consumer
+  call sites; four top-level tests, 0 SKIP on `-run '^TestFinAttribute'`. One
+  code-review SHOULD FIX, not blocking, deferred to #1281: the no-captured-
+  bytes structural check is top-level-key-only over what is now a *nested*
+  record, so a future `Command` field added to `finAttributeEntry` would pass
+  it unnoticed. See [`codebase/1280.md`](../codebase/1280.md) for the full
+  implementation, the selection-order argument, and the mutation-tested
+  lessons.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
