@@ -136,10 +136,18 @@ import (
 
 const (
 	// finGatherTrailerWait is the trailer poll's timeout, matching
-	// trailRigTrailerWait. NO ROW EVER WAITS IT OUT: the certifying rows pre-seed
-	// the buffer so the first poll hits, and the non-certifying row seeds an
-	// over-long line, which trailWaitForTrailer returns from IMMEDIATELY
-	// (result_trailer_observation_test.go:264-266) because abortion is monotone.
+	// trailRigTrailerWait. NO ROW EVER WAITS IT OUT — a claim that no longer rests
+	// on pre-seeding alone, because one row deliberately does not pre-seed:
+	//
+	//   - the pre-seeded rows still hit on the FIRST poll, so their loop returns
+	//     before it ever sleeps;
+	//   - TestFinGatherSightingReportsTheMissBound leaves the buffer empty on
+	//     purpose and appends the trailer past two poll ticks, so its trailer
+	//     arrives well inside the wait and the loop costs roughly 600ms — this
+	//     file's only wall clock, and what the miss bound costs;
+	//   - the non-certifying row seeds an over-long line, which trailWaitForTrailer
+	//     returns from IMMEDIATELY (result_trailer_observation_test.go:264-266)
+	//     because abortion is monotone.
 	finGatherTrailerWait = 10 * time.Second
 	// finGatherNamedPGID is the group the synthetic reap line names. It is
 	// finding_attribution_fanout_test.go's own fixture value, so the two chains
@@ -1192,10 +1200,11 @@ func TestFinGatherReturnsNoCapturedBytes(t *testing.T) {
 //
 // Agreement on the bound discriminator is the claim available from a single call.
 // A second trailWaitForTrailer over this pre-seeded buffer would ALSO report
-// trailBoundFromStart, so this row does not go red against a re-scan; the row that
-// would needs a buffer that misses a poll first, and it is #1310's along with its
-// wall clock. What this row does close is a carrier filled from anywhere other
-// than the poll whose scan result was classified.
+// trailBoundFromStart, so this row does not go red against a re-scan. The row that
+// does is TestFinGatherSightingReportsTheMissBound below: it pays a real sleep for
+// a buffer that misses a poll first, and so proves the carrier reports the bound
+// that bounds something. What THIS row closes is a carrier filled from anywhere
+// other than the poll whose scan result was classified.
 //
 // Staleness has no counterpart on the readings to agree with — trailRunReadings
 // deliberately carries no staleness field (trail_run_outcome_test.go:211-214) — so
@@ -1230,6 +1239,133 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 	}
 }
 
+// TestFinGatherSightingReportsTheMissBound proves the carrier reports the one
+// bound value that bounds anything, MEASURED against a poll that really missed
+// before the trailer arrived rather than trusted because a comment says the
+// carrier copies what the sighting measured.
+//
+// # Why this row costs wall clock, and why no other one does
+//
+// Every other row here pre-seeds the buffer, so the first poll hits, lastMiss
+// stays zero and the bound is trailBoundFromStart — the discriminator whose own
+// doc says it BOUNDS NOTHING (result_trailer_observation_test.go:80-85).
+// trailBoundFromMiss is produced only where a poll missed first (:256-262 there),
+// and reaching it costs a real sleep: polls at ~0, ~200 and ~400ms miss, the
+// append lands at ~500ms, and the poll at ~600ms hits with the bound measured
+// from the ~400ms miss. There is no cheaper route to the interesting value.
+//
+// The structure is TestTrailWaitForTrailer's first subtest (:529-569 there),
+// mirrored rather than reinvented — including the goroutine split, which is not
+// style: probeSyncBuffer.Write returns an error that must be reported with
+// t.Fatalf, and calling t.* from a spawned goroutine after the test function has
+// returned panics. finGatherReadings takes no *testing.T (:422), so the inputs are
+// built on the test goroutine and only the call itself crosses. The increment
+// over that subtest is that the claim is made over the CARRIER the gather returns,
+// one level up, and never over the observation.
+//
+// # The second observation is the contrast, and only its discriminator is bound
+//
+// A second trailWaitForTrailer over the SAME buffer after the gather has returned
+// reports trailBoundFromStart: the trailer is in the buffer by then, so its first
+// poll matches and lastMiss is still zero. That contrast is what makes the miss
+// bound above discriminating rather than merely asserted — it measures, in this
+// test and over these bytes, what a carrier filled from a second scan would have
+// reported instead. Its timeout is immaterial for that same reason; passing the
+// file's own constant is what keeps a new literal out. It is a direct call and NOT
+// a second finGatherReadings, which would re-run the argv and attribution legs
+// this row asserts nothing about.
+//
+// THE DISCRIMINATOR IS READ OFF THE CALL AND THE OBSERVATION IS NEVER BOUND. That
+// value is a trailObservation, so it carries .Line and the decoded pointer — the
+// two things the carrier exists to keep out of a caller's reach and the two the
+// header forbids a message from naming (:114-116). With no observation in scope a
+// later edit CANNOT %v one into a failure; with one in scope only attention would
+// stop it, and the failure would be SILENT, because trailFixtureTrailer carries no
+// needle and a stray print would trip no sweep. Prefer the shape that cannot be
+// got wrong over the discipline that must not be (:219-220).
+//
+// # What this row does not assert
+//
+// The gate and the attribution run here as on every other row — trailFixtureTrailer
+// certifies "completed" — and this row asserts on neither; the file's other tests
+// own them. That the carrier is filled independently of the verdict is already a
+// property of the source rather than of this fixture: the fill sits at the trailer
+// leg and the attribution guard on Gate.Reason sits below it. Staleness is
+// TestFinGatherSightingComesFromTheClassifiedPoll's, the claim that a staleness
+// covers the true lateness is TestTrailWaitForTrailer's (:559-562 there), and
+// lateness_bounded is derived from this discriminator at one place only
+// (finding_trailer_evidence_test.go:209-215). This row adds a second source of none
+// of the three, and plants no needle.
+func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
+	var stdout probeSyncBuffer
+	// Built inline rather than through finGatherNegativeInputs, which SEEDS the
+	// buffer it is handed — the one thing this row exists not to do, since a seeded
+	// buffer makes the first poll hit and the bound the opposite of this row's
+	// claim. Every other field is that helper's, so this row differs from the file's
+	// base fixture in exactly one dimension: the buffer starts empty. Built on the
+	// TEST goroutine, because finGatherNeedles calls t.TempDir().
+	in := finGatherInputs{
+		Stdout:     &stdout,
+		Needles:    finGatherNeedles(t),
+		Stderr:     []byte(trailReapLine(1, fmt.Sprintf("[%d]", finGatherNamedPGID)) + "\n"),
+		Pinned:     []int{finGatherUnnamedPGID},
+		PyryExited: true,
+	}
+
+	var readings trailRunReadings
+	var sighting finSighting
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		readings, _, sighting = finGatherReadings(in)
+	}()
+
+	// Past two poll ticks, so at least one non-matching poll is certainly observed
+	// before the append.
+	time.Sleep(500 * time.Millisecond)
+
+	// ONE Write call, deliberately: it holds the mutex for its whole body, so a
+	// concurrent poll sees either none of the line or all of it. Two writes would
+	// let a poll observe a torn JSON line — ordinary input to trailScan, which fails
+	// to unmarshal it and simply does not match — but enough to make the tick on
+	// which the trailer becomes visible non-deterministic.
+	if _, err := stdout.Write([]byte(trailFixtureTrailer + "\n")); err != nil {
+		t.Fatalf("appending the trailer: %v", err)
+	}
+	<-done
+
+	secondBound := trailWaitForTrailer(&stdout, finGatherTrailerWait).BoundFrom
+
+	// The premise: the poll MATCHED. At any other state the bound is trailBoundNone
+	// and the checks below would be asserting about a sighting that measured
+	// nothing, arriving as a bare bound mismatch rather than naming itself.
+	if sighting.State != trailSeen {
+		t.Fatalf("the sighting reports scan state %q; want %q — the trailer was appended past two "+
+			"poll ticks and well inside the %v wait, so any other state means the poll never "+
+			"observed it and there is no bound to assert about", sighting.State, trailSeen,
+			finGatherTrailerWait)
+	}
+
+	if sighting.BoundFrom != trailBoundFromMiss {
+		t.Fatalf("the carrier reports bound origin %q; want %q — the buffer was EMPTY when the "+
+			"gather started and the append landed past two poll ticks, so a non-matching poll was "+
+			"certainly observed before it and the bound is a real one", sighting.BoundFrom,
+			trailBoundFromMiss)
+	}
+	if readings.BoundFrom != sighting.BoundFrom {
+		t.Fatalf("the readings report bound origin %q and the carrier %q — ONE gather call makes "+
+			"ONE trailWaitForTrailer call, so a disagreement on the value that actually bounds "+
+			"something means the carrier was filled from somewhere other than the poll whose scan "+
+			"result was classified", readings.BoundFrom, sighting.BoundFrom)
+	}
+	if secondBound != trailBoundFromStart {
+		t.Errorf("a second observation of the same buffer reports bound origin %q; want %q — the "+
+			"contrast is what makes the check above discriminating rather than merely asserted: it "+
+			"measures, over these very bytes, what a carrier filled from a second scan would have "+
+			"reported instead", secondBound, trailBoundFromStart)
+	}
+}
+
 // TestFinGatherSightingCarriesTheDecodedScalars pins the carrier's own
 // discriminator and the four decoded scalars across the two arms the shipped
 // fixtures already reach.
@@ -1250,7 +1386,7 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 //
 // Both seeds pre-empt the poll loop: the first matches on the first iteration, and
 // trailWaitForTrailer returns from an ABORTED scan immediately because abortion is
-// monotone (:129-135). A genuinely absent trailer would carry no decode either and
+// monotone (:148-150). A genuinely absent trailer would carry no decode either and
 // would burn finGatherTrailerWait in full, which is why it is not the arm used.
 func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 	cases := []struct {
