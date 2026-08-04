@@ -1375,7 +1375,11 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // Over the in-cap fixture the decoded arm is a FILL CHECK AND NOTHING MORE: the
 // capped copy and the full line are the same bytes there, so no row here can claim
 // which of the two the gather read. That discrimination needs a fixture whose
-// terminal_reason falls past the cap, and it is #1310's.
+// terminal_reason falls past the cap, and it belongs to
+// TestFinGatherSightingScalarsComeFromTheFullLineDecode, below in this file. Named
+// by SYMBOL and with no line number deliberately: that test and this sentence land
+// in one diff, so any number written here would be measured before the lines it
+// points at existed.
 //
 // Equally, no reachable sighting produces trailSeen with a nil Trailer —
 // trailWaitForTrailer fills the pointer on every seen result — so the inconsistent
@@ -1405,7 +1409,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 			wantCarries: true,
 		},
 		{
-			// finGatherCases()' C4 row (:413-423), for its stated reason: it is the
+			// finGatherCases()' C4 row (:560-571), for its stated reason: it is the
 			// no-decode arm this file already ships and it returns immediately.
 			name:        "an aborted scan, which carries no decoded trailer at all",
 			seed:        trailPaddedTrailer(trailOverlongPad),
@@ -1420,7 +1424,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 			seed := finGatherSeed(t, &stdout, tc.seed)
 
 			// Recomputed through the SHIPPED scanner over the SAME bytes the gather
-			// read, the file's own C2 idiom (:502): the expectation is the decode's
+			// read, the file's own C2 idiom (:649): the expectation is the decode's
 			// and never four typed-in literals. On the no-decode arm want stays the
 			// zero resultTrailer, which makes "their zero values" exact.
 			scan := trailScan(seed)
@@ -1469,6 +1473,210 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 		})
 	}
 }
+
+// --- the over-cap fixture ---------------------------------------------------------
+
+// finGatherOverCapPad is the padding that makes the two candidate reads of a
+// scanned trailer give DIFFERENT ANSWERS, which is the whole of
+// TestFinGatherSightingScalarsComeFromTheFullLineDecode's premise.
+//
+// trailPaddedTrailer(200) renders a 585-byte line, past reachCapCommand's
+// 512-byte cap. Measured at 8ce6a7f, on that line:
+//
+//	"subtype"          byte 17           inside the cap
+//	"is_error"         byte 45           inside the cap
+//	"stop_reason"      byte 348          inside the cap
+//	"terminal_reason"  byte 555          PAST it — key and value both cut
+//	trailNeedle        bytes [304, 346)  inside the cap
+//
+// Those offsets are a property of the PAD and not an invariant of the fixture, so
+// the test asserts the one it rests on rather than trusting this comment —
+// finWriteTrailerPad makes the same disclaimer for the same reason
+// (finding_artifact_write_test.go:183-184).
+//
+// # The usable window is pad 141 through 366
+//
+// Below 141 the "terminal_reason" KEY still fits: at pad 140 it occupies bytes
+// [495, 512) and survives the cap exactly, while its value does not. The two reads
+// would then agree about the key and the precondition would go vacuous. Above 366
+// trailNeedle falls past the cap, which costs this pad its reusability rather than
+// this test's claim. 200 sits comfortably inside both ends.
+//
+// # Pin the KEY, never the value
+//
+// trailPaddedTrailer renders subtype "error_max_turns" alongside terminal_reason
+// "max_turns", so "max_turns" first occurs at byte 34 and survives every cap:
+// strings.Contains(Line, "max_turns") is true even on a line whose terminal_reason
+// was cut clean off. A precondition pinning the VALUE is silently vacuous. This is
+// the one edit a later "simplification" would reach for.
+//
+// # The needle lands INSIDE the cap at this pad
+//
+// That is the opposite of trailNeedle's own stated intent, "placed PAST the cap so
+// a record that leaked it could only have done so by recording the line in full"
+// (result_trailer_observation_test.go:297-300). It is safe for the test below,
+// which plants no needle of its own, marshals nothing and makes no leak claim. It
+// means this pad MUST NOT be reused by a sweep whose argument is "a needle sighting
+// proves the line was recorded in full" — under this pad a needle in Line is
+// expected. finWriteTrailerPad deliberately takes the opposite position for its own
+// sweep, where in-cap is exactly what makes the plant non-vacuous; both conventions
+// are correct, and which one a pad holds has to be written down where the pad is.
+const finGatherOverCapPad = 200
+
+// TestFinGatherSightingScalarsComeFromTheFullLineDecode proves the carrier's four
+// decoded scalars are what the FULL trailer line decoded to and never a re-read of
+// the capped copy, MEASURED on a fixture where the two reads give different answers
+// rather than trusted because trailScanResult.Trailer's doc says which one it is
+// (result_trailer_observation_test.go:108-118).
+//
+// That separation is what licenses the cap being applied to Line alone: truncation
+// degrades human-readable evidence and never a field the consumer branches on.
+//
+// # Why the shipped fill check cannot make this claim
+//
+// TestFinGatherSightingCarriesTheDecodedScalars runs its decoded arm over
+// trailFixtureTrailer, 342 bytes and so UNDER the cap. There the capped copy IS the
+// full line, both reads agree, and the row passes whichever one the gather took —
+// which is why its own doc calls itself a fill check and nothing more. This test
+// pays for a line past the cap, where the two disagree.
+//
+// # All four scalars discriminate, not only the one whose bytes the cap reached
+//
+// At finGatherOverCapPad only terminal_reason is cut; subtype, is_error and
+// stop_reason all sit inside the cap, and the first two are early enough on the
+// wire order that no pad could ever cut them. A reader checking key positions alone
+// would conclude three of the four are decorative. They are not, because the
+// alternative read is not a per-key one. The capped copy is line[:512] plus a
+// truncation marker — JSON cut mid-token — and json.Unmarshal validates its whole
+// input before it fills anything, so it returns an error and writes NOTHING:
+//
+//	                  full-line decode   re-read of the capped copy
+//	subtype           error_max_turns    ""
+//	is_error          true               false
+//	stop_reason       end_turn           ""
+//	terminal_reason   max_turns          ""
+//
+// That is a property of encoding/json rather than of this fixture, which is why the
+// contrast below is measured here rather than argued. It is unmarshalled into a
+// FRESHLY DECLARED destination, and that is load-bearing: on a syntax error
+// Unmarshal leaves the destination untouched, so a reused variable would carry its
+// own contents into the comparison instead of the zero resultTrailer.
+//
+// # Failure messages
+//
+// The header's rule (:114-116) binds harder here than anywhere else in this file.
+// At this pad the retained Line genuinely carries padded stand-in payload AND
+// trailNeedle within the cap, and no sweep covers this row —
+// TestFinGatherReturnsNoCapturedBytes runs over its own fixture, not this one, so a
+// stray print here would reach a published artifact with no test to catch it. A
+// message in this test MAY name scan.State, scan.Detail, len(scan.Line),
+// reachMaxCommandBytes, finGatherOverCapPad, the key being sought, and the four
+// scalars on either side of a comparison. It MAY NEVER render scan.Line, scan,
+// scan.Trailer, or a whole resultTrailer. :1141-1145 is the shipped model for this:
+// it reasons about Line and prints only its length.
+//
+// # What this row does not assert
+//
+// The gate and the attribution. terminal_reason "max_turns" makes trailGate answer
+// trailGateBudgetFired carrying a NON-EMPTY Reason
+// (trailer_admissibility_test.go:302-312), so the gather's attribution guard is
+// satisfied and that leg RUNS here, returning a structural void for the budget path.
+// Incidental: this row is about the trailer leg, and asserting on either would
+// restate rows the file already ships. That the carrier fill is independent of the
+// gate's verdict holds by DATA DEPENDENCE and not by ordering — the fill reads only
+// obs and never reads readings.Gate, which is computed ABOVE it (:431 against
+// :442-453). Staleness and BoundFrom belong to the two tests above; this row adds no
+// second source of either.
+//
+// # It costs no wall clock
+//
+// The buffer is pre-seeded and 585 bytes is far under bufio.Scanner's 64 KiB
+// default, so the first poll hits and the loop returns before it ever sleeps.
+func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
+	var stdout probeSyncBuffer
+	seed := finGatherSeed(t, &stdout, trailPaddedTrailer(finGatherOverCapPad))
+
+	// Recomputed through the SHIPPED scanner over the SAME bytes the gather is
+	// about to read, the file's own C2 idiom (:649): the expectation is the
+	// decode's and never four typed-in literals.
+	scan := trailScan(seed)
+	if scan.State != trailSeen || scan.Trailer == nil {
+		t.Fatalf("the shipped scan reads state %q carrying a decoded trailer %t (%s); want %q "+
+			"carrying one — every check below is about WHICH of the two reads the carrier took, "+
+			"and with no decode there is nothing to compare either of them against",
+			scan.State, scan.Trailer != nil, scan.Detail, trailSeen)
+	}
+	want := *scan.Trailer
+
+	// --- the precondition: the two candidate reads genuinely disagree ---
+
+	// The decode has it. Literal-free, and exact: the zero resultTrailer holds "",
+	// so a non-empty value here is one the FULL-line decode filled.
+	if want.TerminalReason == "" {
+		t.Fatalf("the full-line decode reports an EMPTY terminal_reason — the fixture renders it " +
+			"last on the wire order, and with it empty the decode and the capped copy agree on the " +
+			"zero value and every check below asserts nothing")
+	}
+	// The capped copy lacks it. The KEY and never the value: trailPaddedTrailer
+	// renders subtype "error_max_turns", so "max_turns" first occurs at byte 34
+	// and survives every cap — a check for the VALUE reads true even on a line
+	// whose terminal_reason was cut clean off, and would be silently vacuous.
+	if strings.Contains(scan.Line, `"terminal_reason"`) {
+		t.Fatalf("the retained copy still carries the \"terminal_reason\" KEY inside the %d-byte "+
+			"cap (%d bytes retained), so the two candidate reads no longer disagree and this row "+
+			"is vacuous — pad %d must keep that key past the cap, and the usable window is 141 "+
+			"through 366", reachMaxCommandBytes, len(scan.Line), finGatherOverCapPad)
+	}
+
+	// --- the contrast: what a re-read of the capped copy would have reported ---
+
+	// FRESHLY declared, and that is the point: on a syntax error Unmarshal leaves
+	// its destination untouched, so a reused value would carry its own contents
+	// into the comparison rather than the zero resultTrailer.
+	var reread resultTrailer
+	if err := json.Unmarshal([]byte(scan.Line), &reread); err == nil {
+		t.Fatalf("the retained copy decoded CLEANLY — it is the first %d bytes plus a truncation "+
+			"marker and is expected to be JSON cut mid-token. If the cap learned to close what it "+
+			"truncates, the checks below stop measuring a contrast and start recording an "+
+			"agreement", reachMaxCommandBytes)
+	}
+	if reread.Subtype == want.Subtype || reread.IsError == want.IsError ||
+		reread.TerminalReason == want.TerminalReason || reread.StopReason == want.StopReason {
+		t.Fatalf("a re-read of the capped copy AGREES with the full-line decode on at least one of "+
+			"the four, so that one cannot discriminate between the two reads: subtype %q vs %q, "+
+			"is_error %t vs %t, terminal_reason %q vs %q, stop_reason %q vs %q",
+			reread.Subtype, want.Subtype, reread.IsError, want.IsError,
+			reread.TerminalReason, want.TerminalReason, reread.StopReason, want.StopReason)
+	}
+
+	// --- the claim ---
+
+	_, _, sighting := finGatherReadings(finGatherInputs{
+		Stdout:  &stdout,
+		Needles: finGatherNeedles(t),
+		// No reap log and no pin, exactly as the shipped table's rows pass them:
+		// this row asserts about the trailer leg.
+		PyryExited: true,
+	})
+
+	if sighting.State != trailSeen || !sighting.CarriesTrailer {
+		t.Fatalf("the sighting reports scan state %q carrying a decoded trailer %t; want %q "+
+			"carrying one — the four scalars are filled only behind that pair, so at any other "+
+			"reading they hold zero values and the comparison below would be about nothing",
+			sighting.State, sighting.CarriesTrailer, trailSeen)
+	}
+	if sighting.Subtype != want.Subtype || sighting.IsError != want.IsError ||
+		sighting.TerminalReason != want.TerminalReason || sighting.StopReason != want.StopReason {
+		t.Errorf("the sighting carries subtype=%q is_error=%t terminal_reason=%q stop_reason=%q; "+
+			"want %q, %t, %q, %q — the capped copy decodes to NONE of the four, so a carrier filled "+
+			"from a re-read of the retained line misses every one of them and not merely the one "+
+			"whose bytes the cap reached",
+			sighting.Subtype, sighting.IsError, sighting.TerminalReason, sighting.StopReason,
+			want.Subtype, want.IsError, want.TerminalReason, want.StopReason)
+	}
+}
+
+// --- the carrier's structural claim -----------------------------------------------
 
 // TestFinSightingReachesNoScanType is the carrier's structural claim, and a
 // comment could not serve it: the point is that a LATER EDIT adding a field that
