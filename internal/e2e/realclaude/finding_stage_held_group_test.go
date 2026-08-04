@@ -14,7 +14,7 @@ package realclaude
 //
 // # What this closes that #1281's rows structurally cannot
 //
-// finGatherReadings (finding_run_gather_test.go:230) takes pyry's reap-log
+// finGatherReadings (finding_run_gather_test.go:298) takes pyry's reap-log
 // stderr and the pinned process-group set as PARAMETERS, and proves that both
 // the finding and a genuine negative come out of its own composition. Every row
 // that proves it is driven from a synthetic stdout, a synthetic stderr and
@@ -23,7 +23,7 @@ package realclaude
 // pinScanArgv (process_pin_liveness_test.go:191) over a real process table,
 // taking each matched row's .PGID (reachProc, background_reach_probe_test.go:162)
 // as the join key into pyry's reap log. This file is that conversion site, and
-// the obligation finGatherReadings' own doc (:202-206) names as #1282's.
+// the obligation finGatherReadings' own doc (:279-283) names as #1282's.
 //
 // The one reading that differs is MatchCount, and it moves the NEGATIVE arm one
 // step earlier. #1281's rows all run at MatchCount == 0 — its negative needle is
@@ -108,7 +108,7 @@ package realclaude
 // It may also never print a WHOLE trailRunReadings or a whole
 // finAttributeRecord — %v or %+v on either value. Name scalar fields. This
 // deliberately diverges from the neighbouring file, which licenses the whole
-// struct (finding_run_gather_test.go:100-108) "and only because
+// struct (finding_run_gather_test.go:105-113) "and only because
 // TestFinGatherReturnsNoCapturedBytes proves it": THAT PROOF DOES NOT COVER THIS
 // FILE'S VALUES. Every row in the blocker's file runs at MatchCount == 0, so
 // readings.Liveness is empty on every value it marshals, and this file is the
@@ -403,7 +403,7 @@ func finStageAssertLiveness(t *testing.T, readings trailRunReadings) {
 // The shared checks are what keep every arm off a void it did not intend. The
 // gate check closes Step 1; MatchCount > 1 closes Steps 4 and 5, because
 // pinScanArgv returns the ZERO pinScan on error and a matched row is a scanned
-// row; finStageAssertLiveness closes Step 6; and finGatherReadings stages
+// row; finStageAssertLiveness closes Step 6; and this function PASSES
 // PyryExited true, which closes Step 3. What is left is Step 2 against Step 7,
 // which is the dimension every arm below actually varies.
 func finStageRun(t *testing.T, subject finStageSubject, stderr []byte,
@@ -420,7 +420,21 @@ func finStageRun(t *testing.T, subject finStageSubject, stderr []byte,
 		t.Fatalf("seed the arm's stdout buffer with the trailer fixture: %v", err)
 	}
 
-	readings, record := finGatherReadings(&stdout, subject.Needles, stderr, pinned)
+	readings, record := finGatherReadings(finGatherInputs{
+		Stdout:  &stdout,
+		Needles: subject.Needles,
+		Stderr:  stderr,
+		Pinned:  pinned,
+		// #1302 promoted this reading out of the gather's body; the original
+		// justification is unchanged and now lives at the call site that makes
+		// the claim. No pyry runs in this file, so there is none to fail to
+		// exit. finStageRun does not take it as a parameter: all five of its
+		// callers want this value, and threading one through them would be
+		// noise.
+		PyryExited: true,
+		// ClaudeState omitted for the same reason one field over: no claude runs
+		// here, and "" is C7's shipped "not read".
+	})
 
 	if readings.Gate.Value != trailGateUsable || readings.Gate.Reason != finStageTerminalReason {
 		t.Fatalf("the gate reads %q certifying reason %q; want %q certifying %q — without a usable "+

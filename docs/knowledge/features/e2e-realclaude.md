@@ -968,32 +968,38 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
   path-vs-name census MUST FIX, and the stale-comment lesson.
 
-- `finding_run_gather_test.go` (#1281) — **parameterises `trailRigGather`
-  (#1268) on the two inputs it hardcoded.** That rig passes a `nil` literal
-  as the reap-log stderr and keys attribution on the test process's own
-  process group; under those two hardcodings, `trailAdmitProof` — and with
-  it `trailOutcomeRunningAtTrailer`, the only outcome that is a finding —
-  is structurally unreachable, so a probe built on it would report a clean
-  negative forever with no symptom. `finGatherReadings(stdout
-  *probeSyncBuffer, needles []string, stderr []byte, pinned []int)
-  (trailRunReadings, finAttributeRecord)` takes both as parameters and,
-  driven offline from synthetic stdout/stderr, reaches both the finding and
-  a genuine negative (`trailOutcomeNoRowMatched`, never a `run-void-*`)
-  through its own composition, both at `MatchCount == 0` under a certifying
-  gate — demonstrating rather than describing that Step 2 outranks the
-  match-count arms. `pinned` is `[]int`, never `[]reachProc`, continuing
-  #1280's credential-channel-closed-by-signature pattern; the
-  `[]reachProc` → `[]int` conversion is left to #1282's call site by
-  design. The trailer observation is a function-local and never returned,
-  which is what keeps `trailScanResult.Trailer`/`.Line` structurally out of
-  the caller's reach. A recursive forbidden-key walk (lowercased keys, two
-  named exact-key exemptions) closes the flat-only-key-scan gap #1280 left
-  open for nested records. `PyryExited`/`ClaudeState` remain staged as
-  #1268 staged them; #1282 must promote them before feeding this gather a
-  live pyry. Purely additive, one new file, 830 lines, zero production
-  change, zero consumer call sites; four top-level tests, 0 SKIP on
-  `-run '^TestFinGather'`. See [`codebase/1281.md`](../codebase/1281.md)
-  for the full implementation and the mutation-tested lessons.
+- `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
+  #1302) — **parameterises `trailRigGather` (#1268) on the two inputs it
+  hardcoded.** That rig passes a `nil` literal as the reap-log stderr and
+  keys attribution on the test process's own process group; under those two
+  hardcodings, `trailAdmitProof` — and with it
+  `trailOutcomeRunningAtTrailer`, the only outcome that is a finding — is
+  structurally unreachable, so a probe built on it would report a clean
+  negative forever with no symptom. `finGatherReadings(in finGatherInputs)
+  (trailRunReadings, finAttributeRecord)` takes `Stdout`, `Needles`,
+  `Stderr` and `Pinned` as fields and, driven offline from synthetic
+  stdout/stderr, reaches both the finding and a genuine negative
+  (`trailOutcomeNoRowMatched`, never a `run-void-*`) through its own
+  composition, both at `MatchCount == 0` under a certifying gate —
+  demonstrating rather than describing that Step 2 outranks the match-count
+  arms. `Pinned` is `[]int`, never `[]reachProc`, continuing #1280's
+  credential-channel-closed-by-signature pattern; the `[]reachProc` →
+  `[]int` conversion is left to #1282's call site by design. The trailer
+  observation is a function-local and never returned, which is what keeps
+  `trailScanResult.Trailer`/`.Line` structurally out of the caller's reach.
+  A recursive forbidden-key walk (lowercased keys, two named exact-key
+  exemptions) closes the flat-only-key-scan gap #1280 left open for nested
+  records. `finGatherInputs.PyryExited`/`.ClaudeState` (#1302) are the same
+  struct's remaining two fields — copied into the readings whole, no
+  default, no repair — and are exercised by two more top-level tests: one
+  varying `PyryExited` alone across an identical stdout/needle pair to prove
+  the outcome moves (`trailOutcomeNoRowMatched` ↔
+  `trailOutcomeVoidPyryDidNotExit`), one carrying a documented verdict, an
+  undocumented one, and `""` through unchanged. Purely additive, zero
+  production change, zero consumer call sites; six top-level tests, 0 SKIP
+  on `-run '^TestFinGather'`. See [`codebase/1281.md`](../codebase/1281.md)
+  and [`codebase/1302.md`](../codebase/1302.md) for the full implementation
+  and the mutation-tested lessons.
 
 - `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
   (#1281) two parameters from a real held command, not hand-passed
@@ -1018,7 +1024,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   same-staging control, each varying exactly one dimension. First `fin*`
   file whose scan matches live rows, so `readings.Liveness` is non-empty
   for the first time — the neighbour's whole-struct-print licence
-  (`finding_run_gather_test.go:100-108`) is deliberately not inherited,
+  (`finding_run_gather_test.go:105-113`) is deliberately not inherited,
   since its proof ran with `Liveness` empty on every row. Purely additive,
   one new file, 617 lines, zero production change; both new tests PASS,
   never SKIP. See [`codebase/1282.md`](../codebase/1282.md) for the full
