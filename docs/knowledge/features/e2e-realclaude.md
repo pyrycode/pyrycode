@@ -969,7 +969,8 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   path-vs-name census MUST FIX, and the stale-comment lesson.
 
 - `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
-  #1302, trailer-sighting carrier added #1309) — **parameterises
+  #1302, trailer-sighting carrier added #1309, carrier's miss bound proven
+  #1312) — **parameterises
   `trailRigGather` (#1268) on the two inputs it hardcoded.** That rig passes
   a `nil` literal as the reap-log stderr and keys attribution on the test
   process's own process group; under those two hardcodings,
@@ -1008,10 +1009,21 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   as unreachable as before; nothing consumes the carrier yet —
   `finTrailerBuild` keeps its present signature, and #1308 moves it across.
   Purely additive, zero production change, zero consumer call sites; nine
-  top-level tests, 0 SKIP on `-run '^TestFinGather'`. See
+  top-level tests, 0 SKIP on `-run '^TestFinGather'`. #1312 adds the row #1309
+  shipped without: `TestFinGatherSightingReportsTheMissBound` leaves the
+  buffer unseeded (this file's first row to do so, and its first to cost wall
+  clock — ~600ms), appends the trailer past two poll ticks on a spawned
+  goroutine's sibling, and proves `BoundFrom` reports `trailBoundFromMiss` —
+  the discriminator that actually bounds something, as opposed to
+  `trailBoundFromStart`, which every pre-seeded row reaches and whose own doc
+  says it BOUNDS NOTHING. A second, direct `trailWaitForTrailer` call over the
+  same buffer supplies the contrast (`trailBoundFromStart`), with only its
+  discriminator ever bound to a variable — never the observation itself, which
+  carries the two things the carrier exists to keep unreachable. See
   [`codebase/1281.md`](../codebase/1281.md),
-  [`codebase/1302.md`](../codebase/1302.md) and
-  [`codebase/1309.md`](../codebase/1309.md) for the full implementation and
+  [`codebase/1302.md`](../codebase/1302.md),
+  [`codebase/1309.md`](../codebase/1309.md) and
+  [`codebase/1312.md`](../codebase/1312.md) for the full implementation and
   the mutation-tested lessons.
 
 - `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
