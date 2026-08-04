@@ -847,6 +847,34 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   implementation, the selection-order argument, and the mutation-tested
   lessons.
 
+- `finding_staging_gate_test.go` (#1284) — **the tier below the classifier**:
+  `trailClassifyRun` (#1271) assumes a run staged — a Bash call issued, the
+  rig's hold command, a completed rendezvous — and on an unstaged run its
+  argv scan still runs over a healthy process table and matches nothing,
+  landing on `trailOutcomeNoRowMatched`: a real answer, published as a false
+  negative about a run where no command ever existed. `finOutcomeStagingGate(
+  finOutcomeStaging) finOutcomeResult` decides, from synthetic staging
+  conditions alone, one of six failure outcomes or the pass-through
+  (`finOutcomeReadyToClassify`, deliberately not the zero value — an unfilled
+  result must never read as "staged, go classify"), all seven in their own
+  `stage-` sub-namespace apart from the eleven's `run-`. The structural
+  closure is the signature itself: neither type mentions `trailRunReadings`,
+  so a failure arm holds nothing a classifier call could be made from — the
+  forbidden call is unwritable, not discouraged. Two guard conditions close
+  reachable pass-through holes (both commands left empty; an unfilled
+  match-count want agreeing with an unfilled count at zero). No Detail
+  interpolates either command — both the issued command (verbatim model
+  output) and the staged one (embeds a `t.TempDir()` path and an
+  `exec.LookPath` result) are captured strings on the same footing — and the
+  no-captured-bytes test plants `trailNeedle` in both, with a per-row
+  headroom assertion against `trailDetail`'s 512-byte cap: house-style Detail
+  prose alone was found to eat enough of that cap in the first draft to
+  truncate a leaked command's needle away before it could be caught, a
+  vacuity distinct from (and the mirror image of) #1278's cap hazard. Purely
+  additive, one new file, 790 lines, zero production change, zero consumer
+  call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
+  implementation and the mutation-tested lesson on redaction-test vacuity.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
