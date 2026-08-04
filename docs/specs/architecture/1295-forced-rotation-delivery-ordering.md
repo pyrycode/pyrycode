@@ -384,3 +384,141 @@ move the test to it. The PR then ships the write-up only.
 - Do **not** raise a deadline, add a retry/re-run wrapper, or skip the e2e test (#1273's pin:
   auto-retry converts a possible permanent-stall defect into an invisible one).
 - Do **not** fix anything, in either branch of AC4.
+
+---
+
+## Outcome
+
+**Verdict: GREEN. The forced ordering does NOT reproduce the M4 stall.** The test merges as a
+permanent guard, per AC4's green branch. No fix was attempted and no production code was
+touched — the whole diff is `cmd/pyry/inbound_deliver_rotation_test.go` plus this section.
+
+### What was built
+
+`cmd/pyry/inbound_deliver_rotation_test.go`, one new file, two tests, no `t.Parallel()`:
+
+- `TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild` — the forced ordering,
+  exactly the nine steps in § Design. The hold is the production `streamTurnHoldTimeout`
+  (15 min) verbatim, so a failure would carry the *silent-park* signature the field record
+  shows rather than the retry-ladder signature a shortened hold would produce.
+  `RetryInterval` is 10 ms so step 8's re-attempt is prompt; `GiveUpAfter` keeps its default
+  and an `OnGiveUp` that `t.Errorf`s guards against ever reaching it.
+- `TestInboundDeliver_RotationWithoutHold_WritesIntoThePreRotationChild` — the control.
+
+Two deviations from § Design, both minor and both deliberate:
+
+1. The fixture exposes `snapshot() []childSnapshot` instead of `childIDs() []string`.
+   `snapshot` subsumes it and is what the misroute failure message needs — every child's
+   session id, dead flag and stdin contents in one race-free copy.
+2. The control stops at the pre-rotation write rather than replaying steps 1–3. With a nil
+   tracker there is no tracker to feed a running turn into and no hold to park in, so the
+   rotation steps would order nothing. Its purpose — proving the fixture has a reachable path
+   into the pre-rotation child, which is what keeps the primary test's "no other child holds
+   the payload" assertion non-vacuous permanently — is unaffected.
+
+### AC2 — forced, not sampled (verbatim)
+
+```
+$ go test -race -count=50 -v -run '^TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild$' ./cmd/pyry/
+primary  PASS=50  FAIL=0
+--- PASS: TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild (0.06s)
+PASS
+ok  	github.com/pyrycode/pyrycode/cmd/pyry	4.626s
+
+$ go test -race -count=50 -v -run '^TestInboundDeliver_RotationWithoutHold_WritesIntoThePreRotationChild$' ./cmd/pyry/
+control  PASS=50  FAIL=0
+--- PASS: TestInboundDeliver_RotationWithoutHold_WritesIntoThePreRotationChild (0.00s)
+PASS
+ok  	github.com/pyrycode/pyrycode/cmd/pyry	1.294s
+```
+
+50 passes, 0 failures, on both, and the `ok` line rules out the build-failure reading of a
+`0`/`0` grep.
+
+### AC3 — the verdict is demonstrated (verbatim)
+
+Both mutations were applied to a **copy** under `go test -overlay`, so the worktree stayed
+byte-clean throughout (`git status --porcelain` showed only the untracked new test file).
+The mutation script asserts each textual substitution matched **exactly once**, so a
+no-op `.replace()` cannot masquerade as a weak test.
+
+**M1 — misroute.** Delete the `waitIdleForDelivery` block from `newInboundDeliver`
+(`cmd/pyry/main.go`). The delivery no longer parks and writes at once into the still-live
+pre-rotation child:
+
+```
+=== RUN   TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild
+    inbound_deliver_rotation_test.go:349: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa" was written while the conversation's turn was still running; the mid-turn hold did not engage
+--- FAIL: TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild (0.00s)
+FAIL
+FAIL	github.com/pyrycode/pyrycode/cmd/pyry	0.404s
+```
+
+It reddens one barrier earlier than § Design predicted — on step 4's `assertNoWriteWithin`
+rather than on step 9's "no other child" assertion — because the unheld write lands before the
+rotation has even started. The failure names the *pre-rotation session id*, so it discriminates
+the misroute precisely, and it proves the test forces the **hold arm** specifically.
+
+**M2 — drop.** Replace `WriteUserTurn` and its error branch with `return nil`. The seam reports
+success having written nothing:
+
+```
+=== RUN   TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild
+    inbound_deliver_rotation_test.go:363: timed out waiting for the parked delivery to attempt a write, 2s after the rotation's clear — either it is still inside waitIdleForDelivery because the clear did not release the hold (the defect under investigation); or the clear resolved to no conversation because the rebind in step 5 did not land (a fixture bug — production skips that case at Debug level, invisibly); or the seam returned without attempting a write at all
+--- FAIL: TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild (2.06s)
+FAIL
+FAIL	github.com/pyrycode/pyrycode/cmd/pyry	2.410s
+```
+
+The first M2 run reddened with a two-clause message that named only the two *park* readings,
+which would have mis-diagnosed a real drop as a stuck hold. The third clause ("or the seam
+returned without attempting a write at all") was added and M2 re-run; the output above is the
+re-run. Both REDs are assertion failures, not build failures.
+
+### Open question 1, answered: the PRE-rotation id also releases
+
+Running the same test through an overlay whose step 7 clears on `rotationOldSID` instead of
+`rotationNewSID` **passes** (`--- PASS … (0.07s)`). That is the `SessionHistory` redundancy
+`transitionClearsTurn`'s doc calls conditional on `notifyTransition` keeping the rebind ahead
+of the observer fan-out: with the old id retained by `rekey`, either key resolves to the same
+conversation and either clear releases the hold. It is redundancy, not a second guarantee —
+it survives only as long as that ordering does.
+
+### What this eliminates
+
+> "The rotation's `clearForSession` fails to release a delivery parked in
+> `waitIdleForDelivery`, when the pre-rotation turn's events and the transition arrive in
+> order."
+
+Forced 50/50, mutation-demonstrated. When the ordering is *exactly* the one above — one
+opener for the pre-rotation turn, then the rebind, then the teardown, then the clear — the
+parked delivery wakes, the retry ladder re-attempts the head, and the turn lands in the
+post-rotation child and in no other. The seam is not the defect on this path.
+
+### What remains open, in this investigation's ranking
+
+1. **A straggler pre-rotation event re-marks the conversation after the clear.** The tracker's
+   opener feed is asynchronous (child → parser → sink → drain → `observe`). A `TextChunk` still
+   buffered in the fan-in when the transition clear fires lands *after* it, and the old session
+   id still resolves via `SessionHistory` — so it re-marks the conversation busy with a mark
+   **no future event can clear**: the turn it belongs to is dead, its `TurnEnd` will never come,
+   and both session-keyed clears have already fired. Result: a 15-minute silent park. This
+   matches every feature of the M4 record. **This test cannot decide it** — the ordering it
+   forces is precisely the non-straggler one, and deciding the straggler needs the drain's
+   fan-in (`startStreamTurnDrainV2` + `streamTurnSink` + the tracker), not the seam alone.
+   Strongest surviving hypothesis; wants its own ticket.
+2. **A dropped exit envelope.** `exitFor` sends non-blockingly and drops on a full sink with a
+   `stream_turn.exit_sink_full` Warn. A drop removes the second clear keyed to the
+   construction-time id, widening (1)'s window. #1296's log capture shows the Warn if it fired.
+3. **The persistently-failing error arm.** Not separable from a park by byte count alone; that
+   is #1296's job (1 Hz `msgqueue: delivery failed, will retry` Warn vs. silence).
+4. **The clear-before-`RestartFresh` window.** § Design pulls the teardown ahead of the clear to
+   remove a race the forced ordering may not decide by luck, so a parked turn waking into a
+   still-live doomed child is a window this test deliberately does not decide. Argued *against*
+   by the record — that path writes bytes and the shared stdin log showed none — but not
+   structurally excluded.
+
+Open question 2 (an eviction variant, `ReasonEviction` → the mirrored previous id) stays out of
+scope: this ticket is about `new_session`, and the fixture would make it a five-line variant if
+a later ticket wants it. Open question 4 (#1133, rotating the turn-event Parser tag on
+`RestartFresh`) is unchanged and still open.
