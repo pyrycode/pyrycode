@@ -995,6 +995,35 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `-run '^TestFinGather'`. See [`codebase/1281.md`](../codebase/1281.md)
   for the full implementation and the mutation-tested lessons.
 
+- `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
+  (#1281) two parameters from a real held command, not hand-passed
+  integers.** `finStageHeldGroup` stages `sh -c '"$1" "$2"; exit 0'` over a
+  real `cat` held on a real FIFO, in a process group of its own
+  (`SysProcAttr{Setpgid: true}` — copying the wrapper subject shape from
+  `trail_run_rig_test.go`, not the flip test's bare `exec.Command`, which
+  would inherit the test's own group), then pins that group off a real
+  `pinScanArgv` (#1280) match set's `.PGID`s. AC1's distinctness guard
+  compares the **scanned** pgid against `syscall.Getpgrp()`, never
+  `cmd.Process.Pid` — the pid form is vacuous under the dropped-`Setpgid`
+  mutation, confirmed green in code review, while the scanned form reddens
+  in 0.06s. The teardown adds a third statement (a direct
+  `cmd.Process.Kill()`) that the neighbouring rig's two-statement teardown
+  doesn't need, because only this file's guard can redden on a path where
+  the group kill finds no group to signal — without it, `t.Fatalf`'s
+  `runtime.Goexit()` would deadlock the mutation against `holdProbeFIFO`'s
+  `t.Cleanup`. Two tests, five arms: the finding and a genuine negative
+  (`trailOutcomeMatchedUnattributed`, one step earlier than #1281's
+  `trailOutcomeNoRowMatched` because a real command carries the needle),
+  plus #1268's two hardcodings trapped at the **`Admit`** layer against a
+  same-staging control, each varying exactly one dimension. First `fin*`
+  file whose scan matches live rows, so `readings.Liveness` is non-empty
+  for the first time — the neighbour's whole-struct-print licence
+  (`finding_run_gather_test.go:100-108`) is deliberately not inherited,
+  since its proof ran with `Liveness` empty on every row. Purely additive,
+  one new file, 617 lines, zero production change; both new tests PASS,
+  never SKIP. See [`codebase/1282.md`](../codebase/1282.md) for the full
+  implementation and the grade-mutations-per-line lesson.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
