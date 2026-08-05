@@ -72,7 +72,6 @@ package realclaude
 // reach. A twin would only fork the cap.
 
 import (
-	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -148,8 +147,11 @@ import (
 // Every Detail must also leave len(trailNeedle) bytes of headroom under
 // reachMaxCommandBytes — under 470 bytes on every row. That is not stylistic:
 // trailDetail caps at 512, so a house-style multi-sentence Detail can eat the
-// budget and let a leak be truncated away, turning the sweep below green against
-// a record that did leak. That is the defect #1284 shipped and then had to fix.
+// budget and let a leak be truncated away, turning the byte sweeps that RECURSE
+// INTO THIS RECORD green against a record that did leak — TestFinRecordCarriesNoCapturedBytes'
+// marshal sweep and the artifact writer's Detail walk, both of which reach this
+// Detail because finRecordRun embeds the record whole. That is the defect #1284
+// shipped and then had to fix.
 // TestFinTrailerRecordCarriesNoCapturedBytes is the enforcing test and asserts
 // the headroom PER ROW.
 type finTrailerRecord struct {
@@ -446,111 +448,136 @@ func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 	}
 }
 
-// TestFinTrailerRecordReadsTheDecodedTrailer pins the two properties that make
-// the four trailer fields safe to publish: the build survives a run that wrote
-// no trailer, and the fields come from the decode of the FULL line rather than
-// from the capped copy.
-func TestFinTrailerRecordReadsTheDecodedTrailer(t *testing.T) {
-	// SUPERSEDED BY #1320, RETIRED BY #1321 — NOT A LIVE GUARD. The claim the
-	// comment below makes is structurally unreachable now: the carrier holds no
-	// pointer, so an unguarded build has nothing to dereference and cannot panic
-	// on this input. That obligation is named by TestFinSightingReachesNoScanType's
-	// failure message instead. The zero-fields assertions still stand and are
-	// AC2's, but they are TAUTOLOGICAL over the migrated fixture — the carrier
-	// derives all-zero scalars from an absent scan, so they pass against a builder
-	// with no guard at all. What carries that weight is
-	// TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer. Migrated
-	// minimally here; the argument for retiring it is #1321's.
-	t.Run("a no-trailer observation returns rather than panicking", func(t *testing.T) {
-		scan := finTrailerAbsentScan()
-		if scan.State != trailAbsent {
-			t.Fatalf("fixture state: got %q (%s), want %q", scan.State, scan.Detail, trailAbsent)
-		}
-		if scan.Trailer != nil {
-			t.Fatalf("fixture trailer: got %+v, want nil — only %s carries a decode", scan.Trailer,
-				trailSeen)
-		}
+// RETIRED BY #1325: the shell TestFinTrailerRecordReadsTheDecodedTrailer and its
+// "a no-trailer observation returns rather than panicking" row, which #1320
+// migrated onto the carrier and marked. Under the carrier that row's assertions
+// are TAUTOLOGICAL — an absent scan gives finTrailerSighting a false
+// CarriesTrailer and four zero scalars, so the record publishes zeroes whether
+// the builder guards or not, and there is no pointer left for an unguarded build
+// to panic on. Keeping it for its assertions would keep a second test of nothing.
+//
+// Each claim it made is held elsewhere, BY SYMBOL:
+//
+//   - the panic-on-unchecked-deref obligation, by TestFinSightingReachesNoScanType
+//     (finding_run_gather_test.go), and STRONGER: it walks the carrier's TYPE for
+//     all three scan types, so a later field carrying one a level down fails there,
+//     where the retired row asserted over a single instance. Its failure message
+//     names the obligation.
+//   - the four zero fields, by
+//     TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer, and
+//     STRONGER: it drives both arms off one carrier and its one flipped bit, so
+//     neither an always-zero nor an always-copy builder survives, where the retired
+//     assertions pass against a builder with no guard at all.
+//   - rec.State == trailAbsent, by
+//     TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator's absent row — the
+//     SAME property, under an executable coverage claim that goes red if that row
+//     is ever dropped.
+//
+// The outcome is not a survival candidate: the retired row never asserted it, and
+// TestFinTrailerRecordOutcomeIsConsumedAsHanded owns it, including "every value
+// the field can carry comes back exactly as handed".
+//
+// The shell's other row survives as the test below, promoted to top-level: with
+// one child left a t.Run is ceremony, and the shell's name pointed at a record
+// where the surviving property is finTrailerSighting's.
 
-		// REACHING THE ASSERTIONS BELOW IS ITSELF THE ASSERTION. A build that
-		// dereferenced Trailer without a guard panics on this input, which fails
-		// the test before any comparison runs. What the guard cannot distinguish
-		// is WHICH operand held: dropping the State operand alone leaves this row
-		// green, because the fixture's pointer is nil either way. The ordering —
-		// State first, && short-circuiting left to right — is therefore a property
-		// of the source, documented at finTrailerBuild, and this row pins that a
-		// guard exists at all rather than claiming to pin its shape.
-		rec := finTrailerBuild(trailOutcomeVoidNoTrailer,
-			finTrailerSighting(scan, 0, trailBoundNone))
+// TestFinTrailerSightingScalarsComeFromTheFullLineDecode proves finTrailerSighting
+// fills the four scalars from the decode of the FULL trailer line and never from a
+// re-read of the capped copy, MEASURED on a fixture where the two reads give
+// different answers rather than trusted because trailScanResult.Trailer's doc says
+// which one it is.
+//
+// # The name says which half of an agreement obligation this pins
+//
+// It mirrors TestFinGatherSightingScalarsComeFromTheFullLineDecode
+// (finding_run_gather_test.go) with the prefix naming WHICH of the two functions
+// the obligation binds. finTrailerSighting is a copy of finGatherReadings' carrier
+// fill and the two are REQUIRED TO AGREE; a grep for
+// ScalarsComeFromTheFullLineDecode returns both halves, which says that without
+// prose.
+//
+// # Why this row cannot be retired against either sibling
+//
+// Not against the gather's: that pins finGatherReadings' fill, a DIFFERENT
+// function, and the two are required to agree precisely because neither proves the
+// other. That obligation is otherwise held only by comment and by review —
+// finGatherReadings reaches ps through pinScanArgv and pinReadState, and this file
+// forbids exec by its own header — so this row is the ONLY executable pin on the
+// helper's half of it, for the decode-vs-capped question specifically.
+//
+// Not against TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer
+// either. Its precondition pins that the helper fills the four AT ALL; it cannot
+// tell which source they came from, because its fixture is trailPaddedTrailer(0),
+// wholly inside the cap, where the two candidate reads agree.
+//
+// # The subject is the carrier, not a built record
+//
+// Since #1320 the builder reads no line, so a record asserted here would prove
+// nothing about which read the four came from — it copies whatever the carrier
+// holds, and that carry-through is pinned by the Fills test over a fixture whose
+// pad is irrelevant to it. The over-cap dimension was only ever about the HELPER's
+// read, so that is what the row asserts on.
+//
+// # The expectations stay literals
+//
+// Deliberately not the sibling's `want := *scan.Trailer` form. One tier down that
+// is literal-free because the gather runs its OWN scan over the same bytes, so
+// want and the subject are two computations. Here the helper is handed the very
+// scan this test built, so a derived expectation would compare a value to itself
+// across a two-line assignment. The literals are what tie the assertion to the
+// full-line decode.
+//
+// Failure messages name len(scan.Line) and never render it, the sibling's rule
+// (finding_run_gather_test.go's "# Failure messages"): at this pad the retained
+// copy carries padded stand-in payload, and no sweep covers this row's fixture.
+func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
+	// Pad 2000 is the plant this family already uses at
+	// result_trailer_observation_test.go:482. Any pad from 142 up satisfies the
+	// precondition; it is ASSERTED below rather than assumed, so a later fixture
+	// change surfaces as a failed precondition instead of as a silently weaker
+	// test.
+	scan := trailScan([]byte(trailPaddedTrailer(2000) + "\n"))
+	if scan.State != trailSeen {
+		t.Fatalf("fixture state: got %q (%s), want %q", scan.State, scan.Detail, trailSeen)
+	}
+	if strings.Contains(scan.Line, "terminal_reason") {
+		t.Fatalf("precondition: the capped line still contains terminal_reason, so this row "+
+			"would pass even against a helper that read the four fields off the CAPPED copy. "+
+			"Line is %d bytes", len(scan.Line))
+	}
 
-		// The load-bearing assertions of this test, the outcome being an input
-		// rather than a derivation: with no decode to read, the four fields hold
-		// their zero values and claim nothing.
-		if rec.IsError {
-			t.Errorf("is_error: got true, want false — a bool (tool_loop_test.go:200) with no "+
-				"decode behind it; detail %q", rec.Detail)
-		}
-		for _, f := range []struct{ name, got string }{
-			{"subtype", rec.Subtype},
-			{"terminal_reason", rec.TerminalReason},
-			{"stop_reason", rec.StopReason},
-		} {
-			if f.got != "" {
-				t.Errorf("%s: got %q, want empty — there was no trailer to read it from",
-					f.name, f.got)
-			}
-		}
-		if rec.State != trailAbsent {
-			t.Errorf("state: got %q, want %q — the void is carried, not collapsed", rec.State,
-				trailAbsent)
-		}
-	})
+	sighting := finTrailerSighting(scan, 250*time.Millisecond, trailBoundFromMiss)
 
-	// SUPERSEDED BY #1320, RETIRED BY #1321 — NOT A LIVE GUARD. The claim the
-	// comment below makes, that the projection reads Trailer and not Line, is dead
-	// at this tier: the builder reads neither. #1313 shipped it one tier down as
-	// TestFinGatherSightingScalarsComeFromTheFullLineDecode
-	// (finding_run_gather_test.go:1595), over an over-cap fixture whose
-	// disagree-precondition is asserted on the KEY rather than on the value. What
-	// this row still exercises is finTrailerSighting's read of the decode.
-	// Migrated minimally here; the argument for retiring it is #1321's.
-	t.Run("the four fields survive a cap that destroys terminal_reason in the line", func(t *testing.T) {
-		// Pad 2000 is the plant this family already uses at
-		// result_trailer_observation_test.go:482. Any pad from 142 up satisfies the
-		// precondition; it is ASSERTED below rather than assumed, so a later
-		// fixture change surfaces as a failed precondition instead of as a
-		// silently weaker test.
-		scan := trailScan([]byte(trailPaddedTrailer(2000) + "\n"))
-		if scan.State != trailSeen {
-			t.Fatalf("fixture state: got %q (%s), want %q", scan.State, scan.Detail, trailSeen)
-		}
-		if strings.Contains(scan.Line, "terminal_reason") {
-			t.Fatalf("precondition: the capped line still contains terminal_reason, so this row "+
-				"would pass even against a record that read the four fields off the CAPPED copy. "+
-				"Line is %d bytes: %q", len(scan.Line), scan.Line)
-		}
+	// The pair, mirroring the same precondition in
+	// TestFinGatherSightingScalarsComeFromTheFullLineDecode — and honestly
+	// labelled: at THIS tier a false pair leaves the four zero and the checks below
+	// go RED rather than vacuous, so this is a DIAGNOSIS guard (one Fatalf naming
+	// the pair beats four value mismatches) and NOT a non-vacuity guard. Written as
+	// the latter it would be a false claim.
+	if sighting.State != trailSeen || !sighting.CarriesTrailer {
+		t.Fatalf("the carrier reports scan state %q carrying a decoded trailer %t; want %q "+
+			"carrying one — the four scalars are filled only behind that pair, so a failure here "+
+			"explains the four below rather than adding to them", sighting.State,
+			sighting.CarriesTrailer, trailSeen)
+	}
 
-		rec := finTrailerBuild(trailOutcomeVoidBudgetFired,
-			finTrailerSighting(scan, 250*time.Millisecond, trailBoundFromMiss))
-
-		// Pinned ON THE BUILT RECORD. The scan result's own survival of the cap is
-		// already pinned at result_trailer_observation_test.go:477-505 and is not
-		// restated here; what is new is that the projection reads Trailer and not
-		// Line.
-		for _, f := range []struct{ name, got, want string }{
-			{"subtype", rec.Subtype, "error_max_turns"},
-			{"terminal_reason", rec.TerminalReason, "max_turns"},
-			{"stop_reason", rec.StopReason, "end_turn"},
-		} {
-			if f.got != f.want {
-				t.Errorf("%s: got %q, want %q — terminal_reason is LAST on the pinned wire order "+
-					"(emitter.go:456-468) and ~2 KiB past the cap here, so a record reading the "+
-					"capped Line could not have recovered it", f.name, f.got, f.want)
-			}
+	// Pinned ON THE CARRIER. The scan result's own survival of the cap is already
+	// pinned at result_trailer_observation_test.go:477-505 and is not restated
+	// here; what is new is that the HELPER reads Trailer and not Line.
+	for _, f := range []struct{ name, got, want string }{
+		{"subtype", sighting.Subtype, "error_max_turns"},
+		{"terminal_reason", sighting.TerminalReason, "max_turns"},
+		{"stop_reason", sighting.StopReason, "end_turn"},
+	} {
+		if f.got != f.want {
+			t.Errorf("%s: got %q, want %q — terminal_reason is LAST on the pinned wire order "+
+				"(emitter.go:456-468) and ~2 KiB past the cap here, so a carrier filled from the "+
+				"capped Line could not have recovered it", f.name, f.got, f.want)
 		}
-		if !rec.IsError {
-			t.Error("is_error: got false, want true — the budget-fired reading must cross too")
-		}
-	})
+	}
+	if !sighting.IsError {
+		t.Error("is_error: got false, want true — the budget-fired reading must cross too")
+	}
 }
 
 // TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer drives the
@@ -784,97 +811,103 @@ func TestFinTrailerRecordOutcomeIsConsumedAsHanded(t *testing.T) {
 	})
 }
 
-// SUPERSEDED BY #1320, RETIRED BY #1321 — NOT A LIVE GUARD. The builder's input
-// is a finSighting now, which has no .Line for the plant below to sit in, so
-// every check here asserts the absence of a needle its input structurally cannot
-// carry. Nothing lapses while it stands marked: TestFinGatherReturnsNoCapturedBytes
-// (finding_run_gather_test.go:1107) sweeps the carrier as the gather's third
-// return, one tier down and with its own in-cap non-vacuity precondition.
-// Migrated minimally here; the argument for retiring it is #1321's, and the
-// headroom check and the flat forbidden-key scan are untouched.
+// RETIRED BY #1325: the two in-cap preconditions, the detail-quotes-the-line
+// check and the marshalled-record containment check. Since #1320 the builder's
+// input is a finSighting, which has no .Line for a plant to sit in, so each of
+// those asserted the absence of a needle its input structurally cannot carry —
+// not a weakened test but a test of nothing, and a green proof of a false claim
+// is worse than no proof.
 //
-// TestFinTrailerRecordCarriesNoCapturedBytes is the record's own construction
-// claim made checkable rather than advisory: no trailer line in any form, capped
-// or otherwise, in a field or quoted into the detail.
+// THE CLAIM THEY MADE STILL HOLDS, at the step that now drops the line and more
+// strongly than it ever could here. TestFinGatherReturnsNoCapturedBytes
+// (finding_run_gather_test.go) sweeps the carrier as the gather's THIRD return
+// and asserts the same IN-CAP precondition IN CODE — that the needle survived the
+// 512-byte cap in the retained copy — so what it plants is something a leaking
+// value would actually leak. That in-cap strength is the whole point and is why
+// the strong claim is what travels: the pads this family usually plants with put
+// the needle PAST the cap, where only a value recording the line IN FULL leaks
+// it, so a record carrying the CAPPED Line publishes ~415 bytes of model-chosen
+// text while the sweep passes green. This tier could only ever assert the absence
+// of what its input cannot carry; that one measures.
 //
-// # Why the plant lands INSIDE the cap, and why the family's usual plant would not
+// What remains is not a byte claim about the line at all:
 //
-// trailNeedle sits at a fixed offset inside trailPaddedTrailer's `result` field,
-// so its position in the rendered line is 104 + pad. The pads this family plants
-// with put it well PAST the 512-byte cap — 2000 at
-// result_trailer_observation_test.go:482 and trailer_admissibility_test.go:553,
-// and trailOverlongPad — which is precisely the point there: only a record
-// recording the line IN FULL leaks it. That makes it the wrong plant for THIS
-// claim. A record carrying the CAPPED Line publishes ~415 bytes of model-chosen
-// text while a past-the-cap needle sweep passes — a green proof of a false
-// claim, which is worse than no proof.
+// TestFinTrailerRecordCarriesNoCapturedBytes pins the record's two channel-
+// independent construction rules — the Detail's HEADROOM under trailDetail's cap,
+// asserted per row, and the structural absence of a line-shaped KEY.
 //
-// trailPaddedTrailer(0) renders 385 bytes against the 512-byte cap with the
-// needle at offset 104-146, so it survives into Line intact and a record that
-// kept the line is caught. The offset is a property of the PAD rather than an
-// invariant of the needle, so it is asserted on the scan result below rather
-// than trusted.
-//
-// # Line is the only channel swept
+// # Line was the only channel swept, and that half of the argument is not lost
 //
 // resultTrailer has no `result` member, so no plant placed in the trailer's
-// `result` field can reach this record through the decode — it can only arrive
-// by way of Line. The four decoded fields are a different matter: they cross
-// into the record VERBATIM BY DESIGN, which is what AC2 asks for, so a needle
-// planted in them would be pinning against AC2 rather than for it. The full
-// multi-input sweep across every artifact input is #1286's and is not restated
-// here.
+// `result` field could reach this record through the decode. The four decoded
+// fields are a different matter: they cross into the record VERBATIM BY DESIGN,
+// so a needle planted in them would pin AGAINST this record's construction rather
+// than for it. That is stated on finTrailerRecord above ("# What the four trailer
+// fields are worth"), on finTrailerBuild, and where the plant now lives
+// (TestFinGatherReturnsNoCapturedBytes' "# Both plants, and the one that is
+// excluded"). Deleting it here loses no unique content. The full multi-input
+// sweep across every artifact input is #1286's and is not restated here.
 func TestFinTrailerRecordCarriesNoCapturedBytes(t *testing.T) {
-	line := trailPaddedTrailer(0)
-	scan := trailScan([]byte(line + "\n"))
+	// The same fixture and the same argument as
+	// TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer's, above: the
+	// pad is irrelevant now that the carrier holds no line for a needle to sit in,
+	// so it is the shortest one this family plants with. NOT REPADDED past the cap
+	// — nothing here reads the line, and a longer pad would only dress the fixture
+	// in a reach it no longer has.
+	scan := trailScan([]byte(trailPaddedTrailer(0) + "\n"))
 
+	// The fixture puts the build on the FILLED arm, which is the one the headroom
+	// must be measured against: trailScan attaches the decode in the same return
+	// that answers trailSeen, so finTrailerSighting reports CarriesTrailer and
+	// finTrailerBuild takes the longer of its two Detail shapes — the one
+	// interpolating all four scalars. Measuring the shorter arm would measure the
+	// easier case.
 	if scan.State != trailSeen {
 		t.Fatalf("fixture state: got %q (%s), want %q", scan.State, scan.Detail, trailSeen)
-	}
-	// THE NON-VACUITY PRECONDITION. Without it the whole test is theatre: a
-	// needle the cap already ate is absent from a leaking record too.
-	if end := strings.Index(line, trailNeedle) + len(trailNeedle); end > reachMaxCommandBytes {
-		t.Fatalf("the needle ends at byte %d of the %d-byte fixture line, past the %d-byte cap: "+
-			"a record that kept the capped line would pass this test", end, len(line),
-			reachMaxCommandBytes)
-	}
-	if !strings.Contains(scan.Line, trailNeedle) {
-		t.Fatalf("precondition: the capped line does not carry the needle, so the sweep below "+
-			"would pass against a record that kept it verbatim. Line is %d bytes", len(scan.Line))
 	}
 
 	rec := finTrailerBuild(trailOutcomeVoidBudgetFired,
 		finTrailerSighting(scan, 250*time.Millisecond, trailBoundFromMiss))
 
-	// THE HEADROOM, ASSERTED PER ROW RATHER THAN ARGUED IN PROSE. trailDetail
-	// caps the formatted detail at reachMaxCommandBytes, so a Detail that had
-	// wrongly interpolated the line would be truncated before the needle if the
-	// surrounding prose left no room — and the containment checks below would
-	// then pass against a leaking implementation. That is the defect #1284
-	// shipped. Pinning the room keeps it impossible, and keeps it impossible
-	// after a later edit lengthens a Detail: the failure lands here, naming the
-	// record, rather than silently disarming the sweep.
+	// THE HEADROOM, ASSERTED PER ROW RATHER THAN ARGUED IN PROSE — and it is
+	// finTrailerRecord's OWN TYPE-LEVEL RULE rather than this test's local
+	// precaution: every Detail leaves len(trailNeedle) bytes under
+	// reachMaxCommandBytes, under 470 on every row, because trailDetail caps the
+	// formatted detail at reachMaxCommandBytes and a house-style multi-sentence
+	// Detail can eat that budget on its own. That is the defect #1284 shipped and
+	// then had to fix, and this assertion is that fix.
+	//
+	// WHAT THE ROOM KEEPS NON-VACUOUS SITS ONE AND TWO TIERS UP, not four lines
+	// below (#1325 retired the containment checks that used to). THE RECORD TRAVELS
+	// WHOLE: finRecordSeenTrailer and finRecordAbsentTrailer build it with this
+	// shipped builder, finRecordRun embeds it as Trailer with nothing re-derived
+	// (TestFinRecordEmbedsTrailerRecordWhole pins that), and the artifact carries it
+	// from there. Both byte sweeps up there DESCEND INTO IT —
+	// TestFinRecordCarriesNoCapturedBytes' marshal sweep walks the embedded
+	// sub-records, and the artifact writer's Detail walk collects every Detail by
+	// JSON path, asserts it found at least six with the trailer's among them, and
+	// applies this identical room < len(trailNeedle) test per path. A Detail that
+	// has eaten its own budget truncates a leak away and turns both of them green.
+	//
+	// PROSPECTIVE, NOT A LIVE PLANT: after #1320 the builder reaches no line, so
+	// nothing leaks into this Detail today. This is a guard against a FUTURE Detail
+	// edit or field, in the same register as the key scan below. What it buys is
+	// WHERE the failure lands — here, naming the record, rather than as a JSON path
+	// in an artifact two tiers up with the reader hunting for which Detail grew.
 	if room := reachMaxCommandBytes - len(rec.Detail); room < len(trailNeedle) {
-		t.Errorf("the detail is %d bytes, leaving %d of trailDetail's %d-byte cap against a "+
-			"%d-byte needle: a detail that leaked the line would be truncated before the needle "+
-			"and the checks below would pass against it. Shorten the detail — the long-form "+
+		t.Errorf("the detail is %d bytes, leaving %d of trailDetail's %d-byte cap against the "+
+			"%d-byte yardstick: finTrailerRecord's rule is that every row keeps that much room, "+
+			"because this record is embedded WHOLE into finRecordRun and into the artifact and the "+
+			"byte sweeps up there recurse into it — a Detail that has eaten its own budget "+
+			"truncates a future leak away and passes both. Shorten the detail — the long-form "+
 			"argument belongs in a comment, which no cap applies to",
 			len(rec.Detail), room, reachMaxCommandBytes, len(trailNeedle))
 	}
 
-	// Named separately from the marshal sweep so the failure message says WHICH
-	// channel leaked.
-	if strings.Contains(rec.Detail, trailNeedle) {
-		t.Errorf("the detail quotes the trailer line: %q", rec.Detail)
-	}
-
+	// Marshalled once, for the key scan below.
 	encoded, err := json.Marshal(rec)
 	if err != nil {
 		t.Fatalf("marshalling the trailer record: %v", err)
-	}
-	if bytes.Contains(encoded, []byte(trailNeedle)) {
-		t.Errorf("the marshalled record carries verbatim model output from inside the cap: %s",
-			encoded)
 	}
 
 	// The structural half: the record has no field for a line today, and this is
