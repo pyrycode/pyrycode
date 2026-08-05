@@ -905,16 +905,33 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   field the record must carry verbatim. No field carries `omitempty` — under
   it a seen trailer with an empty `terminal_reason` would render
   byte-identical to a no-trailer record, the exact collapse the nil-pointer
-  design one tier down exists to prevent. The no-captured-bytes proof plants
-  `trailNeedle` via `trailPaddedTrailer(0)` (385 bytes, needle inside the
-  512-byte cap at offset 104–146) rather than the family's habitual
-  past-the-cap pad, which would pass vacuously against a record that kept
-  the capped line — the #1320 migration retired that plant's target (the
-  carrier has no `.Line`), marked pending #1321's retirement. Purely
-  additive at #1290, one new file, 697 lines, zero production change, zero
+  design one tier down exists to prevent. `TestFinTrailerRecordCarriesNoCapturedBytes`
+  no longer plants `trailNeedle` here — #1325 retired that plant along with the
+  test's other `.Line`-dependent checks, since the carrier the builder now takes
+  has no `.Line` for a needle to sit in. The in-cap plant (`trailPaddedTrailer(0)`,
+  needle inside the 512-byte cap at offset 104–146, chosen over the family's
+  habitual past-the-cap pad specifically so a record that kept the capped line
+  would still be caught) lives one tier down instead, at
+  `TestFinGatherReturnsNoCapturedBytes` (`finding_run_gather_test.go`), which
+  sweeps the carrier itself. What remains in this file is two channel-independent
+  construction rules on `finTrailerRecord`: the per-row `Detail` headroom
+  assertion (#1284's fix, argued as a type-level rule that travels — the record
+  embeds whole into `finRecordRun.Trailer` and from there into the artifact, so
+  a Detail that ate its own budget would defeat the marshal sweep and the
+  artifact's file byte sweep two tiers up) and the flat forbidden-key scan
+  (`finTrailerRecord` is ten scalars, so a top-level key scan is exhaustive).
+  The shell `TestFinTrailerRecordReadsTheDecodedTrailer` is gone; its one
+  surviving row — the four scalars come from the full-line decode rather than
+  the capped copy — is promoted to top-level as
+  `TestFinTrailerSightingScalarsComeFromTheFullLineDecode`, re-stated onto
+  `finTrailerSighting` (the builder reads neither `Trailer` nor `Line`) and
+  named to mirror `TestFinGatherSightingScalarsComeFromTheFullLineDecode`, the
+  two halves of one agreement obligation that a grep now returns together.
+  Purely additive at #1290, one new file, 697 lines, zero production change, zero
   consumer call sites. See [`codebase/1290.md`](../codebase/1290.md) for the
-  original implementation and [`codebase/1320.md`](../codebase/1320.md) for
-  the move onto the carrier.
+  original implementation, [`codebase/1320.md`](../codebase/1320.md) for the
+  move onto the carrier, and [`codebase/1325.md`](../codebase/1325.md) for the
+  retirement.
 
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
