@@ -875,6 +875,36 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
   implementation and the mutation-tested lesson on redaction-test vacuity.
 
+- `finding_staging_fill_test.go` (#1304) — **fills the staging record from a
+  run's own transcript.** `finOutcomeStagingGate` (#1284, above) decides all
+  seven staging outcomes from synthetic inputs; this file fills exactly the
+  three transcript-side fields (`BashIssued`, `IssuedCommand`, `TriggerFired`)
+  a real caller would supply, through a `finTranscript*` composition reading a
+  JSONL transcript the test writes at the session's own path. The scan's unit
+  is a `finTranscriptBashCall{ToolUseID, Command}` pair rather than a bare
+  command: the shipped `probeWaitForBashToolUse` returns the **first** Bash
+  `tool_use` regardless of `input.command` (a #1223 code-review SHOULD FIX
+  shipped unfixed), and #1230 guarded that value-side caller-side already
+  without editing the shared rig — this file generalises the guard and closes
+  a second, key-side route to the same defect: a composition that selects the
+  staged call for its *command* but keeps the first call's *id* would still
+  read the trigger off the decoy's `tool_result`, since the trigger reading is
+  `probeWaitForToolResult(<id>)`. The content guard (`finTranscriptSelect`) is
+  pure over its input — no `*testing.T` — so its removal (AC2's mutation) runs
+  and grades without touching the worktree; the first-match id is bound inside
+  an `if` statement in `finTranscriptSelectBash` and goes out of scope
+  immediately after, making it unreferenceable rather than merely unused
+  below. `TriggerFired` reads `timedOutAfterMs` presence alone, never
+  conjoined with the handle and never corroborated by
+  `tool_use.input.run_in_background` — that flag marks the model-set
+  backgrounding path this probe must exclude (`docs/knowledge/codebase/
+  1223.md:87-88`). Nothing on the path trims, unquotes, or canonicalises
+  either command; both new types carry no json tags, mirroring
+  `finOutcomeStaging`'s own rule (`finding_staging_gate_test.go:141-157`).
+  Purely additive, one new file, 602 lines, zero production change, zero
+  consumer call sites. See [`codebase/1304.md`](../codebase/1304.md) for the
+  full implementation and both mutation-tested rows.
+
 - `finding_trailer_evidence_test.go` (#1290, builder moved onto the sighting
   carrier #1320, published bound proven measured #1316) — **the trailer half
   of the probe's published record.**
