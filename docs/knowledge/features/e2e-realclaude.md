@@ -1234,6 +1234,45 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   reachable-red-vs-shadowed-by-Fatalf lesson code review surfaced on the
   extraction round-trip's pass-through guard.
 
+- `finding_live_assembly_test.go` (#1343) — **the join, not a probe**; the one
+  function, `finLiveAssembleStaging`, that fills all eight
+  `finOutcomeStaging` fields — three read from the run's transcript via
+  `finTranscriptFill` (#1304), five supplied by the caller as
+  `finLiveAssembleFacts`, `finTranscriptReading`'s mirror image — and returns
+  `finOutcomeStagingGate`'s decision (#1284) as returned, never re-derived.
+  Exists because nothing previously called both halves together: the only
+  thing filling the five caller-side fields was `finTranscriptStagedCaller`,
+  a #1304 test fixture whose hardcoded `PinMatchCount: 1, PinWantCount: 1` is
+  wrong for the rig, whose real expectation is `finLivePinWantRows = 2`
+  (#1338) — an assembly that inherited the `1` would send every
+  correctly-staged live run to `finOutcomePinCountUnexpected`, burning a live
+  claude turn per attempt. The composite literal is name-for-name with no
+  literal on any right-hand side, which is the one rule that keeps both the
+  fixture's `1` and the driver's `finLivePinWantRows` out of the assembly's
+  body — the counts are forwarded unaltered, neither re-derived nor fixed
+  internally. `facts.StagedCommand` is the single source of the staged
+  string, closing structurally (rather than by care) the two-consumer drift
+  between the gate's identity arm and the fill's own `call.Command == staged`
+  guard. `finLiveAssembleContractWant = finLivePinWantRows + 1` backs a
+  deliberate contract row over a want no live driver emits — the only row
+  that catches an assembly forwarding the match count while fixing the want
+  internally — derived rather than written as a literal so it can never
+  coincide with the real constant. Test drives four rows over one
+  correctly-staged synthetic transcript, written once in the parent, with
+  every assertion reading the assembly's return value rather than
+  `finOutcomeStagingGate` directly, so it proves the counts travel without
+  re-asserting `finOutcomeGateCases`' (#1284) already-shipped count mapping.
+  Two mis-assemblies survive every row by construction — a count swap inside
+  the literal, and hardcoding the three transcript fields at their staged
+  values — and are stated as accepted in the file's own header rather than
+  chased with the duplicate rows this ticket's AC forbade reproducing.
+  Purely additive, one new file, 428 lines, zero production change, zero live
+  caller — #1340 (driver) and #1337 (record/classification) are the tickets
+  that call `finLiveAssembleStaging` for real. See
+  [`codebase/1343.md`](../codebase/1343.md) for the full implementation, the
+  mutation matrix, and the code-review NIT on the assembly's two adjacent
+  `time.Duration` parameters.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
