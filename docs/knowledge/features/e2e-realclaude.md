@@ -1195,6 +1195,45 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   makes the empty-needle assertion a real second witness for the
   membership-re-scan defect rather than comment-only work.
 
+- `finding_live_staging_test.go` (#1342) — **declarations, not a probe**;
+  the run's FIFO name, hold prompt, staged command literal and env delta a
+  later live turn stages from, plus one offline trap per declaration. Exists
+  because `finOutcomeStagingGate`'s identity arm
+  (`finding_staging_gate_test.go:299`) is byte equality between claude's
+  verbatim `input.command` and whatever the rig says it staged — get either
+  operand wrong and every *correctly*-staged run reports
+  `stage-command-not-staged`, one live claude turn burned per attempt.
+  `finLiveStageCommand(fifoPath)` splices `probeHeldCommandName` rather than
+  re-typing `"cat"` (a rig staging one verb while #1340's liveness check
+  looks for another would drift silently; the splice makes a rename a build
+  break) and is deliberately bare, never `finOutcomeHoldCommand`'s
+  `sh -c … ; exit 0` stand-in shape. `finLiveStagePrompt(fifoPath)` follows
+  `probePrompt`'s backtick-delimited form with the *whole* command
+  interpolated, not just the path, so the prompt and the staged literal
+  derive from one `fmt.Sprintf` instead of being written twice; the offline
+  trap recovers the command back out of the prompt by an independent
+  delimiter scan (`finLiveStageCommandFromPrompt`) rather than comparing
+  against a hand-copied second literal. `finLiveStageFIFOName =
+  "fin-live-stage-hold"` is checked both-directions substring-disjoint
+  against all eight shipped FIFO name/path constants, referenced **by
+  identifier** so a rename breaks the build instead of rotting the taken-set
+  list silently — re-derived at `26d83b7` via
+  `rg -n 'FIFOName *=|FIFOPath *=' internal/e2e/realclaude/` (the
+  `FIFOPath`-inclusive recipe; a `FIFOName`-only search misses #1338's
+  `finLivePinFIFOPath`). `finLiveStageEnvDelta()` names
+  `BASH_DEFAULT_TIMEOUT_MS=5000` (the settled #1223 trigger) and
+  `PYRY_USE_STREAMJSON=0` explicitly — the latter because
+  `reachRunnerPathFromEnv` reads the ambient `os.Getenv` first, so an empty
+  delta would make the downstream runner reading a reading of the operator's
+  shell; its offline trap sets a hostile ambient (`t.Setenv`) to prove the
+  claim is non-vacuous rather than accidentally true whenever the variable
+  happens to be unset. Purely additive, one new file, 489 lines, zero
+  production change, zero live caller — #1340 is the driver that spends a
+  real turn on these declarations. See [`codebase/1342.md`](../codebase/1342.md)
+  for the full implementation, the mutation-tested lessons, and the
+  reachable-red-vs-shadowed-by-Fatalf lesson code review surfaced on the
+  extraction round-trip's pass-through guard.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
