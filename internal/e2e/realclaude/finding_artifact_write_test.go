@@ -164,8 +164,9 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 
 // --- the fixture -------------------------------------------------------------------
 
-// finWriteTrailerPad is 0 DELIBERATELY, and the reason is the whole of AC2's
-// trailer channel.
+// finWriteTrailerPad is 0 DELIBERATELY, and since #1326 the consumer that needs
+// it is the pre-build clean check on the trailer sub-record rather than a channel
+// of the directory sweep.
 //
 // trailNeedle's own comment says it is "placed PAST the cap"
 // (result_trailer_observation_test.go:297-300). Against trailPaddedTrailer(0)
@@ -173,20 +174,46 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 // byte 146, comfortably inside reachCapCommand's 512-byte cap, so trailScan
 // records it into Line INTACT (:176-182).
 //
-// THAT IS THE PLANT THIS TICKET NEEDS. A needle past the cap never reaches Line
-// in the first place, so its absence downstream proves nothing about whether the
-// line is carried — a green assertion about nothing. #1290 AC4 established the
-// same plant position for the same reason
-// (finding_trailer_evidence_test.go:600-612). Measured at 4bc5f5b: pad 0 -> 385
-// bytes, needle at 104-146; pad 200 -> 585 bytes, needle still in-cap but
-// terminal_reason cut off the end; pad >= 367 -> needle past the cap and the
-// test goes vacuous. The offset is a property of the PAD rather than an invariant
-// of the needle, so AC2 asserts it rather than trusting this comment.
+// THAT IS THE PLANT THE SURVIVING GUARD NEEDS. A needle past the cap never
+// reaches Line in the first place, so its absence downstream proves nothing about
+// whether the line is carried — a green assertion about nothing, which is why
+// this family's usual pads (200, trailOverlongPad) would be the WRONG plant here.
+// TestFinGatherReturnsNoCapturedBytes (finding_run_gather_test.go) is the live
+// in-code precedent for that position: it asserts the same in-cap precondition
+// for the same reason, over the carrier the gather returns.
+//
+// Re-measured at a270bac, against a 42-byte needle: pad 0 -> 385 bytes, needle at
+// 104-146; pad 200 -> 585 bytes, needle still in-cap but terminal_reason cut off
+// the end of the retained copy; pad >= 367 -> needle past the cap and the guard
+// goes vacuous. The offset is a property of the PAD rather than an invariant of
+// the needle, so the guard on the pre-build clean check in
+// TestFinWriteArtifactsCarryNoCapturedBytes asserts it rather than trusting this
+// comment.
+//
+// NOT REPADDED, and for a second reason beyond its own: finGatherOverCapPad's doc
+// pairs with this constant across files (finding_run_gather_test.go), naming it as
+// the pad that "deliberately takes the opposite position for its own sweep".
+// Repadding here — or deleting the constant, which the in-cap position might
+// otherwise look to have made pointless — falsifies a merged sibling's prose in a
+// file this ticket may not edit.
 const finWriteTrailerPad = 0
 
 // finWritePlantedTrailerScan is the shipped scan over the in-cap trailer plant.
-// One construction site, so the fixture and AC2's precondition cannot disagree
-// about which bytes were scanned.
+// The name still reads true after #1326's retirement: the scanned bytes carry the
+// needle. What they are FOR is no longer a channel of the directory sweep but the
+// two checks that outlived it — the guard on the pre-build clean check in
+// TestFinWriteArtifactsCarryNoCapturedBytes, and
+// TestFinWriteArtifactPublishesNoVerbatimModelOutput's pairing of the four
+// published scalars against the payload they sat beside on the wire.
+//
+// ONE CONSTRUCTION SITE, so the fixture and that guard cannot disagree about which
+// bytes were scanned — and it carries more weight than before, because the guard
+// invokes this a SECOND time after finWriteInputs already did. Two calls are safe
+// because trailScan is deterministic over the bytes it is handed and
+// trailPaddedTrailer renders the same line for the same pad. What would NOT be
+// safe is hoisting the result to a package-level var to avoid the second scan:
+// that is the fixture rule trail_run_outcome_test.go:608-610 states for this whole
+// package, whose reason is that `go test -race` runs these tests in parallel.
 func finWritePlantedTrailerScan() trailScanResult {
 	return trailScan([]byte(trailPaddedTrailer(finWriteTrailerPad) + "\n"))
 }
@@ -205,7 +232,10 @@ func finWritePlantedReapLog() []byte {
 }
 
 // finWriteInputs returns the maximal input set: every omitempty field non-zero,
-// and trailNeedle planted in every input the pipeline REDUCES OR DROPS.
+// and trailNeedle planted in every input the pipeline REDUCES OR DROPS — three of
+// them since #1326. The trailer fixture's line carries the needle too, by
+// construction of trailPaddedTrailer, and is NOT a fourth: see the retirement note
+// on TestFinWriteArtifactsCarryNoCapturedBytes.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
 // reason (trail_run_outcome_test.go:608-610): a shared backing array is reachable
@@ -219,15 +249,21 @@ func finWritePlantedReapLog() []byte {
 // whole including the four decoded scalars; RunnerFromEnv; ClaudeVersion (capped)
 // — and finding_run_record_test.go:137-151 states it while
 // TestFinRecordEmbedsTrailerRecordWhole pins it. A needle in any of those WILL
-// appear in the artifact, correctly. The four plants are therefore exactly the
+// appear in the artifact, correctly. The three plants are therefore exactly the
 // inputs that are reduced or dropped:
 //
 //  1. each matched row's Command — verbatim argv, reduced to finRecordProc's
 //     three integers (finding_run_record_test.go:372-374)
 //  2. ClaudeCommand — reduced to one of tdnRunnerFromArgv's three constants (:379)
-//  3. the trailer scan's Line — dropped by finTrailerBuild
-//  4. the reap stderr — pyry's own captured bytes (teardown_liveness_test.go:126),
+//  3. the reap stderr — pyry's own captured bytes (teardown_liveness_test.go:126),
 //     dropped by finAttributeFanOut
+//
+// The trailer fixture's line carries the needle as well, by construction of
+// trailPaddedTrailer, and it is NOT a plant of this sweep: since #1320 no channel
+// carries it into finRecordInputs at all, which is what #1326 retired and what the
+// Trailer field below records. Its two consumers are the guard on the pre-build
+// clean check in TestFinWriteArtifactsCarryNoCapturedBytes and
+// TestFinWriteArtifactPublishesNoVerbatimModelOutput's pairing.
 //
 // # Why each omitempty field is filled
 //
@@ -275,12 +311,18 @@ func finWriteInputs() finRecordInputs {
 		}},
 		Attribution: finAttributeFanOut(finWritePlantedReapLog(),
 			[]int{1, finRecordSharedPGID}, "completed"),
-		// #1286's Plant #3, SUPERSEDED BY #1320 AND RETIRED BY #1321 — not a live
-		// guard. finTrailerBuild takes a finSighting now, which has no .Line, so
-		// the needle in the scanned line reaches this record through no channel its
-		// input has. The directory-wide sweep stays non-vacuous on the other three
-		// plants (each row's Command, ClaudeCommand, the reap stderr); the plant
-		// list at :228 is #1321's to revisit.
+		// The trailer input is carried WHOLE, per the list above, and its fixture
+		// line carries the needle by construction of trailPaddedTrailer — which is
+		// not a plant of this sweep. finTrailerBuild takes a finSighting since
+		// #1320, and the carrier is filled by finTrailerSighting, which copies four
+		// scalars off the decode and never reads scan.Line: the needle is consumed
+		// at fixture-construction time, one tier below the writer under test.
+		//
+		// #1326 retired the plant-list entry that claimed otherwise, along with the
+		// preconditions that certified it; the retirement note on
+		// TestFinWriteArtifactsCarryNoCapturedBytes holds the argument. The claim
+		// they made is asserted in code at TestFinGatherReturnsNoCapturedBytes
+		// (finding_run_gather_test.go), over the carrier the gather returns.
 		Trailer: finTrailerBuild(trailOutcomeVoidBudgetFired,
 			finTrailerSighting(finWritePlantedTrailerScan(), 250*time.Millisecond,
 				trailBoundFromMiss)),
@@ -622,8 +664,9 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // --- AC2 -----------------------------------------------------------------------------
 
 // TestFinWriteArtifactsCarryNoCapturedBytes is AC2: the shipped trailNeedle is
-// planted in every input the pipeline reduces or drops, and appears ZERO times
-// across EVERY FILE the writer wrote.
+// planted in every input the pipeline reduces or drops — three of them since
+// #1326, the trailer fixture's needle-bearing line being none of them — and
+// appears ZERO times across EVERY FILE the writer wrote.
 //
 // # Why zero, and not "once, in a field marked for review"
 //
@@ -635,11 +678,48 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // THEREFORE MEAN A REDUCTION HAD BEEN WIDENED BACK INTO A RETENTION — not that a
 // permitted field needed review.
 //
-// # Why the trailer plant lands INSIDE the cap
+// # RETIRED BY #1326: the trailer channel
 //
-// Past the cap the needle never reaches trailScanResult.Line in the first place,
-// so its absence downstream would prove nothing about whether the line is carried
-// — see finWriteTrailerPad. Both halves are asserted below rather than trusted.
+// #1286's Plant #3 — "the trailer scan's Line", and the three channel-3
+// preconditions that certified it — is gone from the plant list, from the
+// non-vacuity block below and from the sweep's own failure message. The numbers CLOSED
+// UP rather than leaving a gap: what #1286 called channel 4, the reap stderr, is
+// channel 3 here now. A historical reference to "Plant #3" means the trailer; a
+// reference to channel 3 in this file means the reap stderr.
+//
+// IT WAS A TEST OF NOTHING AT THIS TIER. Since #1320 finTrailerBuild takes a
+// finSighting, and that carrier is filled by finTrailerSighting, which copies four
+// scalars off the decode and NEVER READS scan.Line. The needle in the scanned line
+// is therefore consumed at fixture-construction time and never enters
+// finRecordInputs, so the writer under test performs no reduction there. The
+// preconditions certified a channel running one tier below the instrument they
+// were guarding, and the list entry named a reduction this writer does not
+// perform — not a weakened test but a test of nothing, and a green proof of a
+// false claim is worse than no proof.
+//
+// THE CLAIM STILL HOLDS AT THE STEP THAT NOW DROPS THE LINE, named by symbol:
+// TestFinGatherReturnsNoCapturedBytes (finding_run_gather_test.go) sweeps the
+// gather's finSighting carrier as its THIRD return and asserts the same IN-CAP
+// precondition IN CODE — that the needle survived the 512-byte cap in the retained
+// copy — so what it plants is something a leaking value would actually leak. IT IS
+// THE IN-CAP CLAIM THAT TRAVELS AND NEVER THE PAST-THE-CAP ONE: this family's usual
+// pads put the needle past the cap, where only a value recording the line IN FULL
+// leaks it, so a record carrying the CAPPED Line publishes ~415 bytes of
+// model-chosen text while such a sweep passes green. Note it sweeps the CARRIER
+// and not this record — the transport argument is that the carrier holds no needle
+// and the builder reads only the carrier.
+//
+// WHAT IS LEFT IS THE POSITION THE TRAILER ALWAYS BELONGED IN. finWriteInputs
+// already lists Trailer among the inputs carried VERBATIM BY DESIGN, "Trailer
+// whole including the four decoded scalars", and then listed it a second time as
+// an input that is reduced — the same doc comment contradicting itself. After the
+// retirement it appears only in the first list.
+//
+// TWO CHECKS THE RETIREMENT DOES NOT REACH, each arguing its own survival where it
+// sits: the pre-build clean check on the trailer sub-record below, which is why the
+// in-cap guard is relocated onto it rather than dropped with the plant list, and
+// TestFinWriteArtifactPublishesNoVerbatimModelOutput's "the four decoded scalars
+// crossed and the payload beside them did not".
 //
 // # The mandated mutations, applied and observed
 //
@@ -684,26 +764,8 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 			"runner-path reduction is not under test")
 	}
 
-	line := trailPaddedTrailer(finWriteTrailerPad)
-	scan := finWritePlantedTrailerScan()
-	if scan.State != trailSeen {
-		t.Fatalf("channel 3 (trailer line): fixture state is %q (%s), want %q", scan.State,
-			scan.Detail, trailSeen)
-	}
-	if end := strings.Index(line, trailNeedle) + len(trailNeedle); end > reachMaxCommandBytes {
-		t.Fatalf("channel 3 (trailer line): the needle ends at byte %d of the %d-byte fixture line, "+
-			"PAST the %d-byte cap — so it never reaches trailScanResult.Line and its absence from "+
-			"the artifact would prove nothing about whether the line is carried", end, len(line),
-			reachMaxCommandBytes)
-	}
-	if !strings.Contains(scan.Line, trailNeedle) {
-		t.Fatalf("channel 3 (trailer line): the capped line does not carry the needle, so the sweep "+
-			"below would pass against a writer that kept it verbatim. Line is %d bytes",
-			len(scan.Line))
-	}
-
 	if !bytes.Contains(finWritePlantedReapLog(), []byte(trailNeedle)) {
-		t.Fatalf("channel 4 (reap stderr): the synthetic reap log carries no needle")
+		t.Fatalf("channel 3 (reap stderr): the synthetic reap log carries no needle")
 	}
 	// The premise doubles as the non-vacuity proof, following
 	// finding_attribution_fanout_test.go:737-741: trailAdmitProof is reachable only
@@ -720,7 +782,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 		first = in.Attribution.Entries[0].Admit.Value
 	}
 	if len(in.Attribution.Entries) != 1 || first != trailAdmitProof {
-		t.Fatalf("channel 4 (reap stderr): the fan-out produced %d entr(ies), the first reading %q; "+
+		t.Fatalf("channel 3 (reap stderr): the fan-out produced %d entr(ies), the first reading %q; "+
 			"want exactly one reading %s — the premise is that the needle rides an ANCHORED line "+
 			"the classifier read in full", len(in.Attribution.Entries), first, trailAdmitProof)
 	}
@@ -728,7 +790,50 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// The two embedded sub-records asserted CLEAN before the build, per
 	// finding_run_record_test.go:996-1014, so a red sweep below names THIS ticket's
 	// writer rather than a sibling's builder. Both are built from planted inputs;
-	// what is asserted is that the plant did not survive the sub-builder.
+	// what is asserted is that the plant did not survive the sub-builder — and the
+	// two sub-builders are different functions. The attribution's is
+	// finAttributeFanOut, which drops the reap line channel 3 plants in. The
+	// trailer's is finTrailerSighting, which is where the scanned line is dropped:
+	// finTrailerBuild never sees it.
+	//
+	// # Why the trailer row survives a retirement its neighbours did not
+	//
+	// Its ONLY leak channel is the retained Line. resultTrailer has no `result`
+	// member (tool_loop_test.go:194-203, which
+	// TestFinWriteArtifactPublishesNoVerbatimModelOutput asserts rather than trusts),
+	// so the four decoded scalars cannot carry the needle at ANY pad — and without
+	// the in-cap guard below the row degenerates into asserting the absence of
+	// something the TYPE already forbids. That is why the guard lands here rather
+	// than being dropped with the plant list.
+	//
+	// PROSPECTIVE, NOT A LIVE PLANT: nothing carries the needle into this
+	// sub-record today, and the row is a guard against a FUTURE finTrailerSighting
+	// or finTrailerBuild that started reading the line. Same register as the key
+	// scans this family ships; a re-statement claiming a needle reaches this
+	// sub-record today would be the very claim #1326 retired from the plant list,
+	// re-entering the file here.
+	scan := finWritePlantedTrailerScan()
+	// A DIAGNOSIS guard and NOT a non-vacuity one, labelled the way
+	// TestFinTrailerSightingScalarsComeFromTheFullLineDecode labels its pair: a
+	// fixture that stopped seeing a trailer fails the guard below anyway, and one
+	// Fatalf naming the state beats a confusing report about a missing needle.
+	if scan.State != trailSeen {
+		t.Fatalf("the trailer fixture reports state %q (%s), want %q", scan.State, scan.Detail,
+			trailSeen)
+	}
+	// THE GUARD, kept from #1286's retired channel-3 preconditions because the
+	// trailer row is the one surviving check that rests on it. Loud and BEFORE the
+	// build: a repad of finWriteTrailerPad past the cap leaves the row asserting the
+	// absence of a needle the sub-builder was never handed, which is a silent pass
+	// rather than a failure. It reads the retained copy rather than re-deriving the
+	// capping rule from byte offsets, so it stays true of whatever reachCapCommand
+	// does next.
+	if !strings.Contains(scan.Line, trailNeedle) {
+		t.Fatalf("the retained trailer line does not carry the needle within the %d-byte cap: "+
+			"%d bytes retained at finWriteTrailerPad = %d. The trailer row below would then assert "+
+			"the absence of a needle nothing could have handed it, and pass in silence",
+			reachMaxCommandBytes, len(scan.Line), finWriteTrailerPad)
+	}
 	for _, sub := range []struct {
 		name string
 		val  any
@@ -785,10 +890,13 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	for _, name := range finWriteSorted(files) {
 		if bytes.Contains(files[name], []byte(trailNeedle)) {
 			t.Errorf("%s carries the needle. Every plant sits in an input the pipeline REDUCES OR "+
-				"DROPS — a row's verbatim argv, the claude argv, the trailer scan's Line, pyry's "+
-				"captured stderr — and the record retains no trailer line in any form, capped or "+
-				"otherwise, so one occurrence means a reduction was widened back into a retention. "+
-				"The artifact directory holds %v", name, finWriteSorted(files))
+				"DROPS — a row's verbatim argv, the claude argv, pyry's captured stderr — and the "+
+				"record retains no trailer line in any form, capped or otherwise, so one occurrence "+
+				"means a reduction was widened back into a retention. The trailer fixture's line "+
+				"carries the needle too and is NOT one of these three: it is dropped a tier below "+
+				"this writer, so a red result none of the three explains points at "+
+				"finTrailerSighting having started to copy the line. The artifact directory holds %v",
+				name, finWriteSorted(files))
 		}
 	}
 }
@@ -921,6 +1029,16 @@ func TestFinWriteArtifactPublishesNoVerbatimModelOutput(t *testing.T) {
 		// fields cross by design, and the payload they sat beside does not. The
 		// full-directory sweep is AC2's; the needle check here is what makes the
 		// pairing local rather than a cross-reference.
+		//
+		// UNTOUCHED BY #1326's RETIREMENT, because it rests on a WEAKER property
+		// than the one retired. The four scalar assertions are a live claim about
+		// THIS writer, and the needle half is about the WIRE line rather than the
+		// retained copy: trailPaddedTrailer splices trailNeedle into its `result`
+		// field at EVERY pad, so the bytes the four published scalars sat beside
+		// carry it whatever the cap does. This check therefore needs no in-cap guard
+		// of its own and MUST NOT ACQUIRE A COPY OF ONE — a cap guard here would
+		// state a precondition its claim does not use, and would read as a second,
+		// redundant plant channel of a sweep that has three.
 		for _, f := range []struct{ name, got, want string }{
 			{"subtype", artifact.Trailer.Subtype, "error_max_turns"},
 			{"terminal_reason", artifact.Trailer.TerminalReason, "max_turns"},
@@ -939,10 +1057,11 @@ func TestFinWriteArtifactPublishesNoVerbatimModelOutput(t *testing.T) {
 		}
 
 		// NOT RESTATED HERE: that the decode ran against the FULL line rather than
-		// the capped Line. TestFinTrailerRecordReadsTheDecodedTrailer already pins
-		// it (finding_trailer_evidence_test.go:430-470, at pad 200 so
-		// terminal_reason is cut from Line), and re-deriving a merged sibling's test
-		// is out of scope.
+		// the capped Line. TestFinTrailerSightingScalarsComeFromTheFullLineDecode
+		// already pins it — on finTrailerSighting, the helper this fixture calls
+		// through, over trailPaddedTrailer(2000), with the precondition that
+		// terminal_reason is cut from the capped Line asserted in code — and
+		// re-deriving a merged sibling's test is out of scope.
 	})
 
 	t.Run("the artifact states the claim and not the caveat", func(t *testing.T) {
