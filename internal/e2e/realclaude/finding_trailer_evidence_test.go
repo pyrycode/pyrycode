@@ -101,7 +101,7 @@ import (
 // still exists. finSighting has no pointer field at all, so no two records built
 // from one carrier can alias a shared *resultTrailer: the property is structural
 // now rather than bought at build time, and it is CHECKED by
-// TestFinSightingReachesNoScanType (finding_run_gather_test.go:1696) — which
+// TestFinSightingReachesNoScanType (finding_run_gather_test.go:1916) — which
 // walks the carrier's type for all three scan types, so a later field carrying
 // one of them a level down fails there — rather than asserted in prose.
 //
@@ -185,7 +185,7 @@ type finTrailerRecord struct {
 // trailScanResult.Line nor the *resultTrailer, so the no-captured-bytes property
 // of this builder is held BY THE SHAPE OF THE INPUT — and that shape is checked
 // rather than asserted: TestFinSightingReachesNoScanType
-// (finding_run_gather_test.go:1696) walks the carrier for all three scan types.
+// (finding_run_gather_test.go:1916) walks the carrier for all three scan types.
 // The Detail content rule stated on finTrailerRecord keeps shut the one channel
 // a scalar-only input still leaves open, which is what the Detail may SAY.
 //
