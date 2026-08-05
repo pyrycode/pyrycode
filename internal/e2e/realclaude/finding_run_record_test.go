@@ -464,18 +464,14 @@ func finRecordVoidAttribution() finAttributeRecord {
 // finRecordSeenTrailer and finRecordAbsentTrailer are two sub-records built by
 // the shipped #1290 builder over the shipped scan, for the same reason.
 func finRecordSeenTrailer() finTrailerRecord {
-	return finTrailerBuild(trailOutcomeRunningAtTrailer, trailObservation{
-		trailScanResult: trailScan([]byte(trailFixtureTrailer + "\n")),
-		Staleness:       250 * time.Millisecond,
-		BoundFrom:       trailBoundFromMiss,
-	})
+	return finTrailerBuild(trailOutcomeRunningAtTrailer,
+		finTrailerSighting(trailScan([]byte(trailFixtureTrailer+"\n")), 250*time.Millisecond,
+			trailBoundFromMiss))
 }
 
 func finRecordAbsentTrailer() finTrailerRecord {
-	return finTrailerBuild(trailOutcomeVoidNoTrailer, trailObservation{
-		trailScanResult: trailScan([]byte(trailFixtureNoTrailer)),
-		BoundFrom:       trailBoundNone,
-	})
+	return finTrailerBuild(trailOutcomeVoidNoTrailer,
+		finTrailerSighting(trailScan([]byte(trailFixtureNoTrailer)), 0, trailBoundNone))
 }
 
 // finRecordLivenessValues returns the four pinState* values by NAMING THE
