@@ -1273,6 +1273,49 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   mutation matrix, and the code-review NIT on the assembly's two adjacent
   `time.Duration` parameters.
 
+- `finding_live_run_test.go` (#1340) — **the live staging driver, not a
+  probe of pyry itself**; `finLiveRunStage(t) *finLiveRunHandle` spawns pyry
+  on the ptyrunner default, holds the rendezvous FIFO, drives the turn to
+  the instant a during-turn process pin is meaningful, takes that pin, and
+  hands it plus the rig's own facts to #1343's `finLiveAssembleStaging`,
+  returning a handle carrying the run's live facts and the staging tier's
+  `finOutcomeResult` **as the gate returned it**. Nothing #1338/#1342/#1343
+  already shipped is re-derived: the pin reduction and its expected row
+  count, the staged command/prompt/FIFO-name/env-delta declarations, and the
+  eight-field assembly all cross unchanged. `finLiveRunHandle` is returned as
+  a **pointer** — the pyry-exit kill cleanup is registered before `PyryPID`
+  exists, so its closure has to read a field written later — and carries
+  **no JSON tags**, inheriting the "input only, never published" posture of
+  the types it wraps (`Pin.Rows`/`Pin.ClaudeCommand` are verbatim argv off
+  the ambient process table). The kill cleanup is registered **before**
+  `holdProbeFIFO` so LIFO releases the FIFO first and the kill is
+  defence-in-depth rather than the thing that produces the exit — inverting
+  that order yields a run that looks identical (green, handle populated)
+  while the rig itself produced the exit; copied verbatim, `PyryPID <= 0`
+  guard and `// LOAD-BEARING` comment included, from the reach precedent
+  (`background_reach_probe_test.go:355-374`), not the comment-less trigger
+  copy. **The driver takes its own `tool_use`/`tool_result` wait before
+  pinning**, even though the assembly waits internally too — the assembly's
+  wait fires strictly after the pin (it takes pin counts as inputs), so
+  skipping the driver's own wait pins before the held `cat` exists and fires
+  the gate's count arm on a correctly staged run, one live claude turn spent
+  finding out. The pin itself is one `ps -axww` scan carrying both needles
+  (the FIFO path and `tdnClaudeNeedle`) with two exclusions, handed to
+  `finLivePinReduce` unchanged, forwarding `finLivePinWantRows` as the want
+  (never `scan.MatchCount`, never `len(Pin.PGIDs)`). No budget-fired run is
+  staged — `--max-turns=6` gives the turn room to complete, since a
+  budget-fired run's exit code can't discriminate outcomes and its
+  `Terminate` hook reaps before the trailer is written. No `ps -E`/`-Eww`
+  anywhere; matched rows and claude's argv cross the handle only as the
+  already-capped `reachProc.Command`; the file formats no `Detail` and writes
+  no artifact. **Ships no test** — its only exercise is compilation and
+  `go test`'s vet subset under `make e2e-realclaude`; `finLiveRunStage` has
+  no caller anywhere in the tree until #1337 lands, which is expected and
+  correct for this instrument family. Purely additive, one new file, 446
+  lines, zero production change. See [`codebase/1340.md`](../codebase/1340.md)
+  for the full implementation and the code-review SHOULD FIX on a counted
+  `t.Fatalf` claim the shipped file falsified.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
