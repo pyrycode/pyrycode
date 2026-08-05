@@ -876,7 +876,8 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   implementation and the mutation-tested lesson on redaction-test vacuity.
 
 - `finding_trailer_evidence_test.go` (#1290, builder moved onto the sighting
-  carrier #1320) — **the trailer half of the probe's published record.**
+  carrier #1320, published bound proven measured #1316) — **the trailer half
+  of the probe's published record.**
   `finTrailerRecord` (ten scalars, no pointer, no embedded observation)
   carries one run's outcome value together with the trailer evidence behind
   it — scan `State`, the `BoundFrom` lateness discriminator with its
@@ -930,8 +931,10 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   Purely additive at #1290, one new file, 697 lines, zero production change, zero
   consumer call sites. See [`codebase/1290.md`](../codebase/1290.md) for the
   original implementation, [`codebase/1320.md`](../codebase/1320.md) for the
-  move onto the carrier, and [`codebase/1325.md`](../codebase/1325.md) for the
-  retirement.
+  move onto the carrier, [`codebase/1325.md`](../codebase/1325.md) for the
+  retirement, and [`codebase/1316.md`](../codebase/1316.md) for the row that
+  joins this file's `Bounded` derivation to a poll that genuinely measured it
+  (`finding_run_gather_test.go`'s `TestFinGatherRecordPublishesTheMeasuredMissBound`).
 
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
@@ -1020,7 +1023,8 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 - `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
   #1302, trailer-sighting carrier added #1309, carrier's miss bound proven
   #1312, carrier's four decoded scalars proven to come from the full-line
-  decode #1313) — **parameterises
+  decode #1313, published record's bound proven to be the classified
+  sighting's #1316) — **parameterises
   `trailRigGather` (#1268) on the two inputs it hardcoded.** That rig passes
   a `nil` literal as the reap-log stderr and keys attribution on the test
   process's own process group; under those two hardcodings,
@@ -1079,12 +1083,21 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   pins the bare `"terminal_reason"` **key** (never the `"max_turns"` value,
   which survives every cap via `subtype`'s `error_max_turns`), asserted so a
   fixture edit that collapses the disagreement fails loudly instead of the row
-  going quietly vacuous. See
+  going quietly vacuous. #1316 adds this file's second and last row that costs
+  wall clock, `TestFinGatherRecordPublishesTheMeasuredMissBound`, placed
+  directly after #1312's row: it builds a `finTrailerRecord` from the
+  composition's classified sighting over the same unseeded-buffer/delayed-append
+  idiom, and puts it beside a record built over the same frozen bytes from a
+  second, direct `trailWaitForTrailer` call — joining the record tier (which
+  pinned `Bounded` with the discriminator handed in) to the carrier tier
+  (#1312, which measured the discriminator but stopped short of publishing it),
+  separated by measurement rather than by `finTrailerBuild`'s input type. See
   [`codebase/1281.md`](../codebase/1281.md),
   [`codebase/1302.md`](../codebase/1302.md),
   [`codebase/1309.md`](../codebase/1309.md),
-  [`codebase/1312.md`](../codebase/1312.md) and
-  [`codebase/1313.md`](../codebase/1313.md) for the full implementation and
+  [`codebase/1312.md`](../codebase/1312.md),
+  [`codebase/1313.md`](../codebase/1313.md) and
+  [`codebase/1316.md`](../codebase/1316.md) for the full implementation and
   the mutation-tested lessons.
 
 - `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
