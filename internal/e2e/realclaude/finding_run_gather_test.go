@@ -1263,7 +1263,7 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // mirrored rather than reinvented — including the goroutine split, which is not
 // style: probeSyncBuffer.Write returns an error that must be reported with
 // t.Fatalf, and calling t.* from a spawned goroutine after the test function has
-// returned panics. finGatherReadings takes no *testing.T (:422), so the inputs are
+// returned panics. finGatherReadings takes no *testing.T (:424), so the inputs are
 // built on the test goroutine and only the call itself crosses. The increment
 // over that subtest is that the claim is made over the CARRIER the gather returns,
 // one level up, and never over the observation.
@@ -1287,7 +1287,7 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // later edit CANNOT %v one into a failure; with one in scope only attention would
 // stop it, and the failure would be SILENT, because trailFixtureTrailer carries no
 // needle and a stray print would trip no sweep. Prefer the shape that cannot be
-// got wrong over the discipline that must not be (:219-220).
+// got wrong over the discipline that must not be (:221-222).
 //
 // # What this row does not assert
 //
@@ -1381,7 +1381,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator
 // (finding_trailer_evidence_test.go:339) pins lateness_bounded on
 // trailBoundFromMiss alone across all three discriminators — but with the
-// discriminator HANDED IN, as every finTrailerBuild call site in this package
+// discriminator HANDED IN, as every finTrailerBuild call site before this row
 // does: each reaches the builder through finTrailerSighting over a shipped scan,
 // with the bound arriving as a literal or a table field. Nothing at that tier
 // ever met a poll. The row above measures the discriminator against a poll that
@@ -1610,7 +1610,7 @@ func TestFinGatherRecordPublishesTheMeasuredMissBound(t *testing.T) {
 //
 // Both seeds pre-empt the poll loop: the first matches on the first iteration, and
 // trailWaitForTrailer returns from an ABORTED scan immediately because abortion is
-// monotone (:148-150). A genuinely absent trailer would carry no decode either and
+// monotone (:150-152). A genuinely absent trailer would carry no decode either and
 // would burn finGatherTrailerWait in full, which is why it is not the arm used.
 func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 	cases := []struct {
@@ -1629,7 +1629,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 			wantCarries: true,
 		},
 		{
-			// finGatherCases()' C4 row (:560-571), for its stated reason: it is the
+			// finGatherCases()' C4 row (:562-573), for its stated reason: it is the
 			// no-decode arm this file already ships and it returns immediately.
 			name:        "an aborted scan, which carries no decoded trailer at all",
 			seed:        trailPaddedTrailer(trailOverlongPad),
@@ -1644,7 +1644,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 			seed := finGatherSeed(t, &stdout, tc.seed)
 
 			// Recomputed through the SHIPPED scanner over the SAME bytes the gather
-			// read, the file's own C2 idiom (:649): the expectation is the decode's
+			// read, the file's own C2 idiom (:651): the expectation is the decode's
 			// and never four typed-in literals. On the no-decode arm want stays the
 			// zero resultTrailer, which makes "their zero values" exact.
 			scan := trailScan(seed)
@@ -1792,7 +1792,7 @@ const finGatherOverCapPad = 200
 // message in this test MAY name scan.State, scan.Detail, len(scan.Line),
 // reachMaxCommandBytes, finGatherOverCapPad, the key being sought, and the four
 // scalars on either side of a comparison. It MAY NEVER render scan.Line, scan,
-// scan.Trailer, or a whole resultTrailer. :1141-1145 is the shipped model for this:
+// scan.Trailer, or a whole resultTrailer. :1143-1147 is the shipped model for this:
 // it reasons about Line and prints only its length.
 //
 // # What this row does not assert
@@ -1804,8 +1804,8 @@ const finGatherOverCapPad = 200
 // Incidental: this row is about the trailer leg, and asserting on either would
 // restate rows the file already ships. That the carrier fill is independent of the
 // gate's verdict holds by DATA DEPENDENCE and not by ordering — the fill reads only
-// obs and never reads readings.Gate, which is computed ABOVE it (:431 against
-// :442-453). Staleness and BoundFrom belong to the two tests above; this row adds no
+// obs and never reads readings.Gate, which is computed ABOVE it (:433 against
+// :444-455). Staleness and BoundFrom belong to the two tests above; this row adds no
 // second source of either.
 //
 // # It costs no wall clock
@@ -1817,7 +1817,7 @@ func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	seed := finGatherSeed(t, &stdout, trailPaddedTrailer(finGatherOverCapPad))
 
 	// Recomputed through the SHIPPED scanner over the SAME bytes the gather is
-	// about to read, the file's own C2 idiom (:649): the expectation is the
+	// about to read, the file's own C2 idiom (:651): the expectation is the
 	// decode's and never four typed-in literals.
 	scan := trailScan(seed)
 	if scan.State != trailSeen || scan.Trailer == nil {

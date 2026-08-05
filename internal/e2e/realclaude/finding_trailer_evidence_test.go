@@ -21,7 +21,7 @@ package realclaude
 // (result_trailer_observation_test.go:108-118), which was chosen over a value
 // type handing back TerminalReason == "" and letting an empty terminal reason
 // pass as a real one. Since #1320 this record reads the four fields from a
-// finSighting (finding_run_gather_test.go:346), which answers the State/nil PAIR
+// finSighting (finding_run_gather_test.go:348), which answers the State/nil PAIR
 // as CarriesTrailer one tier up and hands the four on as scalars — so the
 // optional is discriminated where the pointer still exists, and a run that wrote
 // no trailer carries its void down here with nothing left to dereference.
@@ -181,7 +181,7 @@ type finTrailerRecord struct {
 // mid-turn is a datum to publish, not a reason to abort the turn.
 //
 // LIKE THE RECORD IT RETURNS, THIS FUNCTION IS TRAP-FREE BY CONSTRUCTION. Its
-// input is a finSighting (finding_run_gather_test.go:346), which carries neither
+// input is a finSighting (finding_run_gather_test.go:348), which carries neither
 // trailScanResult.Line nor the *resultTrailer, so the no-captured-bytes property
 // of this builder is held BY THE SHAPE OF THE INPUT — and that shape is checked
 // rather than asserted: TestFinSightingReachesNoScanType
@@ -219,7 +219,7 @@ type finTrailerRecord struct {
 // answered the State/nil PAIR as CarriesTrailer, and the ordering argument — the
 // State operand FIRST, Go's && short-circuiting left to right — lives wherever
 // that pair is computed. That is finGatherReadings' fill on the live path
-// (finding_run_gather_test.go:442-453) and finTrailerSighting on the fixture
+// (finding_run_gather_test.go:444-455) and finTrailerSighting on the fixture
 // side, and the two are required to agree.
 //
 // On the false arm the four are ZEROED rather than copied through, and under the
@@ -290,7 +290,7 @@ func finTrailerAbortedScan() trailScanResult {
 }
 
 // finTrailerSighting is the fixture-side stand-in for finGatherReadings' carrier
-// fill, and is a COPY of it (finding_run_gather_test.go:442-453): the same State
+// fill, and is a COPY of it (finding_run_gather_test.go:444-455): the same State
 // operand first, the same four scalars filled only behind the pair.
 //
 // THE AGREEMENT OBLIGATION LANDS HERE. That fill is commented as deliberately
