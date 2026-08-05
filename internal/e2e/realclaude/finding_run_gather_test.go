@@ -272,14 +272,14 @@ type finGatherInputs struct {
 //
 // finGatherReadings classifies against a trailObservation and then drops it (see
 // there). Step 3 of the live composition — finTrailerBuild
-// (finding_trailer_evidence_test.go:203) — needs what that sighting saw, and
+// (finding_trailer_evidence_test.go) — needs what that sighting saw, and
 // recovering it with a SECOND trailWaitForTrailer is not equivalent: by then the
 // trailer is already in the buffer, the second call matches on its first poll and
 // reports trailBoundFromStart, a discriminator whose own doc says it BOUNDS
 // NOTHING (result_trailer_observation_test.go:80-84). The difference is a
 // mis-report and not a cost. So the gather copies the measurements onto this
-// value, which carries neither .Line nor the decoded pointer. #1308 moves
-// finTrailerBuild onto it; nothing consumes it yet.
+// value, which carries neither .Line nor the decoded pointer. #1320 moved
+// finTrailerBuild onto it, and that builder is now its consumer.
 //
 // # What it deliberately does not carry
 //
@@ -308,14 +308,14 @@ type finGatherInputs struct {
 //
 // # CarriesTrailer records the outcome of a PAIR, not a State
 //
-// finTrailerBuild gates on obs.State == trailSeen && obs.Trailer != nil (:218).
-// Once this value is forbidden the pointer, that pair is unrecomputable
-// downstream, and State alone cannot serve — a trailSeen scan with a nil Trailer
-// is exactly the case the pair exists to separate. The field is what lets a reader
-// tell "there was no trailer" from "the trailer's fields were empty". No reachable
-// sighting separates the two today, because trailWaitForTrailer fills Trailer on
-// every trailSeen result; the pair is the shape that stays correct if a later scan
-// learns to return one without the other.
+// The gather computes obs.State == trailSeen && obs.Trailer != nil; finTrailerBuild
+// reads the bool it records. Once this value is forbidden the pointer, that pair is
+// unrecomputable downstream, and State alone cannot serve — a trailSeen scan with a
+// nil Trailer is exactly the case the pair exists to separate. The field is what
+// lets a reader tell "there was no trailer" from "the trailer's fields were empty".
+// No reachable sighting separates the two today, because trailWaitForTrailer fills
+// Trailer on every trailSeen result; the pair is the shape that stays correct if a
+// later scan learns to return one without the other.
 //
 // Its zero is false, which routes to the no-decoded-trailer arm where the four
 // scalars are zeroes — an honest nothing-was-measured, the same argument
@@ -338,8 +338,8 @@ type finGatherInputs struct {
 //
 // Tagged because encoding/json renders a Duration as a bare nanosecond count and
 // the unit belongs in the key — trailObservation:133-135 and finTrailerRecord:147
-// both give that reason — and MIRRORING finTrailerRecord's keys, so #1308's move
-// onto this value is a rename-free projection. NO FIELD CARRIES omitempty, for
+// both give that reason — and MIRRORING finTrailerRecord's keys, so #1320's move
+// onto this value was a rename-free projection. NO FIELD CARRIES omitempty, for
 // that record's own reason (:102-110): the discriminator must always be present
 // beside the four, and dropping a false IsError or an honest zero Staleness
 // collapses distinctions this type exists to keep.
@@ -442,8 +442,8 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	sighting = finSighting{State: obs.State, BoundFrom: obs.BoundFrom, Staleness: obs.Staleness}
 	// The State operand goes FIRST and Go's && short-circuits left to right, so
 	// the ordering is a property of the source rather than of this comment. It is
-	// deliberately identical to finTrailerBuild:218, because #1308 moves that
-	// builder onto this value and the two computations must agree.
+	// deliberately identical to finTrailerSighting's fill on the fixture side:
+	// finTrailerBuild computes nothing now, and the two computations must agree.
 	sighting.CarriesTrailer = obs.State == trailSeen && obs.Trailer != nil
 	if sighting.CarriesTrailer {
 		sighting.Subtype = obs.Trailer.Subtype
@@ -1383,8 +1383,8 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 //
 // Equally, no reachable sighting produces trailSeen with a nil Trailer —
 // trailWaitForTrailer fills the pointer on every seen result — so the inconsistent
-// pair is not exercised. It arrives only from a hand-built fixture, which is all
-// finTrailerBuild ever sees and nothing this gather can emit.
+// pair is not exercised. finTrailerBuild sees no pair at all now, only this bool, and
+// its synthetic analogue is flipped off a scan-filled carrier rather than typed in.
 //
 // # Neither arm costs wall clock
 //
@@ -1457,9 +1457,9 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 			}
 			if sighting.CarriesTrailer != tc.wantCarries {
 				t.Fatalf("the sighting reports carries-a-decoded-trailer %t; want %t — the field "+
-					"records the outcome of the State/nil PAIR finTrailerBuild gates on, and a "+
-					"reader with only a State cannot tell \"there was no trailer\" from \"the "+
-					"trailer's fields were empty\"", sighting.CarriesTrailer, tc.wantCarries)
+					"records the outcome of the State/nil PAIR and is the one bool finTrailerBuild "+
+					"gates on, and a reader with only a State cannot tell \"there was no trailer\" "+
+					"from \"the trailer's fields were empty\"", sighting.CarriesTrailer, tc.wantCarries)
 			}
 			if sighting.Subtype != want.Subtype || sighting.IsError != want.IsError ||
 				sighting.TerminalReason != want.TerminalReason ||

@@ -48,13 +48,13 @@ package realclaude
 // the property trailRunReadings.BoundFrom's comment states as its own reason for
 // taking a plain value (trail_run_outcome_test.go:208-214): taking the
 // observation "would promote that pointer back into reach". It is the STRONGER
-// property #1290 could not buy — finTrailerBuild takes the observation, so Line
-// is in its reach (finding_trailer_evidence_test.go:168-171).
+// property #1290 could not buy; #1320 bought it — finTrailerBuild's input is now a
+// finSighting carrying neither .Line nor the pointer, as finTrailerBuild's doc says.
 //
 // THE BUILDER IS NOT. in.Rows[i].Command and in.ClaudeCommand are verbatim argv,
 // in reach inside finRecordBuild. The no-captured-bytes property across the
 // CONVERSION is held by the Detail content rule plus
-// TestFinRecordCarriesNoCapturedBytes — exactly finTrailerBuild's posture, and
+// TestFinRecordCarriesNoCapturedBytes — NOT finTrailerBuild's posture now, and
 // it is said in both places so that neither claim is read as covering the other.
 //
 // # Reused, not rebuilt
