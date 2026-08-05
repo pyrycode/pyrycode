@@ -11,6 +11,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -95,10 +96,20 @@ func (c childSnapshot) String() string {
 // construction in the wrong direction; this one keeps it a real question about
 // the seam.
 //
-// It deliberately has NO "refuse to write to a dead child" branch. Refusing would
-// mask a misroute behind an error and let msgqueue retry it away; appending
+// It deliberately has NO "refuse to write to a DEAD child" branch. Refusing there
+// would mask a misroute behind an error and let msgqueue retry it away; appending
 // leaves the misroute observable, which is what the "no other child holds the
 // payload" assertion below is for. The control test proves that path is reachable.
+//
+// #1330 AMENDS that decision rather than deleting it, because it governs one case
+// and production grew another. The dead-child case is unchanged: a write to a
+// child that has already gone still appends, still reads as a misroute. What is
+// new is the ROTATION GATE (rotating/rotateGen below) — a refusal production now
+// genuinely makes, in (*streamsup.Runner).WriteUserTurn, for a child that is very
+// much alive but doomed. Modelling it is not the same as asserting it: the fixture
+// only OFFERS the capability, and whether the real startFreshRunner arms it is
+// the question TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild
+// asks.
 //
 // All three signal channels are buffered and sent to non-blockingly, mirroring
 // exitFor/sinkFor's discipline: these methods run on the drain's own goroutine and
@@ -108,6 +119,15 @@ type rotatingWriter struct {
 	mu       sync.Mutex
 	current  *fakeChild
 	children []*fakeChild
+
+	// rotating/rotateGen are the fixture twin of the runner's rotation gate,
+	// including its generation-stamped disarm. Guarded by the SAME mu that guards
+	// current, because the property being modelled is that "is a rotation armed?"
+	// and "which child?" are answered under one acquisition. spawn clears the arm
+	// (the twin of setStdin); beginRestart deliberately does not (the twin of
+	// takeStdin) — the gate spans the teardown.
+	rotating  bool
+	rotateGen uint64
 
 	// activated fires from Activate — the statement IMMEDIATELY BEFORE
 	// waitIdleForDelivery, on the same goroutine. Receiving it therefore
@@ -142,14 +162,40 @@ func (w *rotatingWriter) Activate(context.Context) error {
 	return nil
 }
 
+// BeginRotation arms the fixture's rotation gate and returns the generation-stamped
+// disarm, modelling (*streamsup.Runner).BeginRotation. Offering the method is what
+// lets the REAL startFreshRunner decide whether to use it.
+func (w *rotatingWriter) BeginRotation() func() {
+	w.mu.Lock()
+	w.rotating = true
+	w.rotateGen++
+	gen := w.rotateGen
+	w.mu.Unlock()
+
+	return func() {
+		w.mu.Lock()
+		if w.rotateGen == gen {
+			w.rotating = false
+		}
+		w.mu.Unlock()
+	}
+}
+
 // WriteUserTurn appends to whichever child is current AT WRITE TIME, or returns
 // streamsup.ErrNoLiveChild verbatim when there is none — the sentinel
 // streamsup.WriteTurn returns for a nil Stdin(), which msgqueue classifies as a
 // retryable delivery failure and re-attempts on the same head.
+//
+// An armed rotation takes the same refusal, read under the SAME acquisition as
+// current (modelling turnTarget), and returns the same sentinel: production
+// deliberately mints no new error, because ErrNoLiveChild is already the retryable
+// classification msgqueue and cmd/pyry agree on.
 func (w *rotatingWriter) WriteUserTurn(_ context.Context, _ string, payload []byte) error {
 	w.mu.Lock()
 	child := w.current
-	if child != nil {
+	if w.rotating {
+		child = nil // gated: the live child is doomed, so it is not a target
+	} else if child != nil {
 		child.stdin = append(child.stdin, string(payload))
 	}
 	w.mu.Unlock()
@@ -163,7 +209,15 @@ func (w *rotatingWriter) WriteUserTurn(_ context.Context, _ string, payload []by
 }
 
 // beginRestart models RestartFresh's teardown half: the old child dies and
-// Stdin() returns nil until the fresh spawn binds.
+// Stdin() returns nil until the fresh spawn binds. It leaves the rotation gate
+// armed, as takeStdin does — the teardown is the middle of that window, not its
+// end.
+//
+// It is driven as its OWN step rather than from the fixture's RestartFresh,
+// because in production RestartFresh returns after cancel() and the kill, the Wait
+// and the respawn all run later on the Run goroutine. A fixture that killed
+// synchronously would make "the woken delivery found the child already gone" a
+// race, which is precisely the thing under test.
 func (w *rotatingWriter) beginRestart() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -173,13 +227,16 @@ func (w *rotatingWriter) beginRestart() {
 	}
 }
 
-// spawn installs a fresh live child as current, retaining it in arrival order.
+// spawn installs a fresh live child as current, retaining it in arrival order, and
+// disarms the rotation gate in the same acquisition — the fixture twin of setStdin,
+// which is production's single release point.
 func (w *rotatingWriter) spawn(sessionID string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	c := &fakeChild{sessionID: sessionID}
 	w.children = append(w.children, c)
 	w.current = c
+	w.rotating = false
 }
 
 // stdinOf returns everything written to the child spawned under sessionID.
@@ -257,6 +314,189 @@ const (
 	rotationOldSID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
 	rotationNewSID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 )
+
+// rotatingRunner adapts a *rotatingWriter to sessions.Runner so the REAL
+// startFreshRunner can dispatch to it. It is streamRunner-shaped in the two ways
+// that matter: RestartFresh(string) selects the direct stream-json arm, and
+// BeginRotation() func() offers the rotation gate as an OPTIONAL capability — the
+// same shape production's optional assertion looks for.
+//
+// It exposes both unconditionally. Whether the gate is ARMED is the dispatch's
+// decision, not the fixture's, which is what leaves the test a real question:
+// against a startFreshRunner that never calls BeginRotation, the gate stays open
+// and the woken delivery writes into the outgoing child.
+//
+// RestartFresh records the id and does NOT tear the child down — see beginRestart's
+// doc for why the teardown is a separate step.
+type rotatingRunner struct {
+	baseRunner
+	w *rotatingWriter
+
+	restartFreshIDs []string
+}
+
+func (r *rotatingRunner) RestartFresh(newID string) {
+	r.restartFreshIDs = append(r.restartFreshIDs, newID)
+}
+
+func (r *rotatingRunner) BeginRotation() func() { return r.w.BeginRotation() }
+
+// TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild is #1330's
+// primary proof, and it is the third test in this file rather than an edit to
+// either existing one because it decides a window they deliberately leave open.
+//
+// WHAT MAKES IT DIFFERENT FROM ITS TWO SIBLINGS:
+//
+//   - TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild inverts
+//     steps 6 and 7 relative to production — teardown BEFORE the clear — and says
+//     so at :281-293, naming the un-inverted order as "a DISTINCT window this test
+//     deliberately does not decide". This test runs the PRODUCTION order: the
+//     clear fires while the outgoing child is still live.
+//   - The control below never begins a rotation at all.
+//
+// And it drives the REAL startFreshRunner rather than open-coding the sequence.
+// That is what makes it RED on an unmodified tree: the fixture offers a gate, and
+// an unmodified startFreshRunner never arms it, so the woken delivery finds the
+// still-live outgoing child and the write SUCCEEDS into the child that is about to
+// die — which is the defect, verbatim.
+//
+// WHERE THE DETERMINISM COMES FROM — the sibling's four facts still hold (the busy
+// mark happens-before the Enqueue; waitIdleForDelivery's single-acquisition
+// re-check; the clear is the sole release; Activate immediately precedes the hold),
+// plus a fifth this ordering needs: the outgoing child stays LIVE across the whole
+// delivery attempt, because the teardown is step 7 and the test does not run it
+// until it has observed step 6's outcome. So "the write found no live child"
+// cannot happen by luck here — on an unmodified tree it cannot happen at all, and
+// the red is a misroute rather than a timeout race.
+func TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild(t *testing.T) {
+	owner := newRotatingSessionOwner(rotationOldSID)
+	w := newRotatingWriter()
+	w.spawn(rotationOldSID)
+	tr := newTurnBusyTracker(owner.resolve, discardLogger())
+
+	gaveUp := make(chan string, 1)
+	q, err := msgqueue.New(msgqueue.Config{
+		Deliver: newInboundDeliver(
+			func(string) (handlers.TurnWriter, error) { return w, nil },
+			tr,
+			streamTurnHoldTimeout,
+		),
+		RetryInterval: 10 * time.Millisecond,
+		OnGiveUp: func(convID, reason string) {
+			rotationSignal(gaveUp, convID+": "+reason)
+		},
+		Logger: inboundTestLogger(t),
+	})
+	if err != nil {
+		t.Fatalf("msgqueue.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- q.Run(ctx) }()
+
+	// Step 1 — the pre-rotation turn is running (the e2e's M1). Non-vacuity guard:
+	// without a standing mark nothing is held and every step below proves nothing.
+	tr.observe(rotationOldSID, turnevent.TextChunk{MessageID: "m1", Text: "working"})
+	if !tr.Busy(testConvID) {
+		t.Fatal("Busy = false after the pre-rotation turn opened; nothing would be held and the rest of this test is vacuous")
+	}
+
+	// Step 2 — the subsequent turn is accepted (the e2e's ack #2); receiving
+	// w.activated puts the drain AT the hold, by program order.
+	q.Enqueue(testConvID, "turn-two")
+	recvStringWithin(t, w.activated, "the drain to enter delivery (Activate precedes the hold)")
+
+	// Step 3 — parked, zero bytes. Fires only if the hold did not engage.
+	assertNoWriteWithin(t, w.wrote, 50*time.Millisecond)
+
+	// Step 4 — the rotation, IN PRODUCTION ORDER, driven through the real dispatch.
+	// rotate models Pool.RotateForNewSession: re-key the binding, then fire the
+	// ReasonClear fan-out — which reaches clearForSession and releases the parked
+	// delivery — all while the outgoing child is still alive and no fresh child
+	// exists. startFreshRunner, not this test, decides whether a gate was armed
+	// first.
+	rr := &rotatingRunner{w: w}
+	rotate := func(gotOld sessions.SessionID) (sessions.SessionID, error) {
+		if string(gotOld) != rotationOldSID {
+			t.Errorf("rotate received oldID %q, want the bound pre-rotation id %q", gotOld, rotationOldSID)
+		}
+		owner.rekey(rotationOldSID, rotationNewSID)
+		tr.clearForSession(rotationNewSID)
+		return sessions.SessionID(rotationNewSID), nil
+	}
+	if err := startFreshRunner(rr, rotationOldSID, rotate); err != nil {
+		t.Fatalf("startFreshRunner: %v", err)
+	}
+	if !slices.Equal(rr.restartFreshIDs, []string{rotationNewSID}) {
+		t.Fatalf("RestartFresh calls = %v, want exactly one with the rotated id %q; the dispatch did not take the stream arm and the rest of this test would measure the wrong path",
+			rr.restartFreshIDs, rotationNewSID)
+	}
+
+	// Step 5 — the woken delivery attempts its write and is REFUSED. Written as a
+	// three-way select rather than recvStringWithin so the two red modes are
+	// DISCRIMINATED in the record instead of collapsing into one timeout: a write
+	// that landed is #1330's defect, and no attempt at all is a release failure.
+	select {
+	case <-w.noChild:
+		// Refused: the gate was armed before rotate() fired the clear.
+	case sid := <-w.wrote:
+		t.Fatalf("the woken delivery WROTE the turn into session %q instead of being refused. startFreshRunner did not "+
+			"arm the rotation gate before rotate(), so the turn went into the child RestartFresh is about to kill — "+
+			"msgqueue reads that successful write as a commit and drops the head, so the fresh child never receives it "+
+			"and never echoes it (#1330). children = %v", sid, w.snapshot())
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the woken delivery neither wrote nor was refused within 2s of the rotation's clear. Two readings, and "+
+			"neither is #1330's window: the clear did not release the parked delivery, or it resolved to no "+
+			"conversation because the rebind in rotate() did not land (a fixture bug — production skips that case at "+
+			"Debug level, invisibly). children = %v, Busy = %t", w.snapshot(), tr.Busy(testConvID))
+	}
+
+	// Step 6 — the asynchronous teardown finally lands (production's Run goroutine
+	// reaping the cancelled child). Kept for ordering fidelity, and the assertion is
+	// a no-bytes window check rather than a discriminator: once current is nil a
+	// gated and an ungated writer refuse alike, so this step cannot distinguish
+	// them. The property it models — the gate SURVIVES the teardown, because
+	// takeStdin does not clear it — is pinned one layer down, in
+	// TestRunner_BeginRotation_FreshChildClearsTheGate.
+	w.beginRestart()
+	assertNoWriteWithin(t, w.wrote, 50*time.Millisecond)
+
+	// Step 7 — the fresh child binds stdin (setStdin), which is the gate's sole
+	// release point; msgqueue re-attempts the same head.
+	w.spawn(rotationNewSID)
+	if got := recvStringWithin(t, w.wrote, "the retried delivery to reach the fresh child"); got != rotationNewSID {
+		t.Fatalf("the turn was written to session %q, want the post-rotation session %q", got, rotationNewSID)
+	}
+
+	// Step 8 — the turn is in the post-rotation child, and in NO other.
+	if got := w.stdinOf(rotationNewSID); !slices.Equal(got, []string{"turn-two"}) {
+		t.Errorf("post-rotation child stdin = %v, want [turn-two]; children = %v", got, w.snapshot())
+	}
+	for _, c := range w.snapshot() {
+		if c.sessionID == rotationNewSID {
+			continue
+		}
+		if slices.Contains(c.stdin, "turn-two") {
+			t.Errorf("the turn was delivered into a child that is not the post-rotation one (%v); "+
+				"bytes into a doomed child's pipe are not a delivery. children = %v", c, w.snapshot())
+		}
+	}
+	if !tr.Busy(testConvID) {
+		t.Error("Busy = false after the post-rotation write; the mark that precedes the write was undone or never placed")
+	}
+	select {
+	case reason := <-gaveUp:
+		t.Errorf("msgqueue gave up on the head (%s); the retry ladder ran to its bound, which is a finding rather than a timeout", reason)
+	default:
+	}
+
+	cancel()
+	if err := recvErrWithin(t, runDone, "queue Run exit"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+}
 
 // TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild forces the
 // ordering the M4 failure is suspected of: a turn is queued while the

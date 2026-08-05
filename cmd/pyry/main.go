@@ -1459,12 +1459,31 @@ func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, c
 // register published under Pool.mu — BEFORE RestartFresh spawns <newID>.jsonl, so
 // the watcher's CREATE observation is guaranteed to see the registration and skip
 // the id. Reversing it reopens the double-rotation race (spec §Concurrency).
+//
+// That order is PRESERVED at #1330; the rotation gate is armed AHEAD of both, not
+// substituted for either. rotate() also fires the ReasonClear transition fan-out,
+// so without the arm the clear reaches clients — and releases whatever the turn
+// tracker held — while the outgoing child is still alive and the fresh one does
+// not yet exist. A turn accepted in that ~4 ms window writes into the doomed
+// child, msgqueue reads the successful write as a commit and drops the head, and
+// the turn is gone. Arming first makes every WriteUserTurn in the window return
+// the retryable ErrNoLiveChild instead, so msgqueue re-attempts the same head
+// until the fresh child binds.
 func startFreshRunner(r sessions.Runner, oldID sessions.SessionID,
 	rotate func(sessions.SessionID) (sessions.SessionID, error)) error {
 	switch v := r.(type) {
 	case interface{ RestartFresh(string) }:
+		abort := beginRotationOrNoop(r)
 		newID, err := rotate(oldID)
 		if err != nil {
+			// The rotation never happened, so the gate must not outlive it: left
+			// armed it would refuse every turn on this conversation until the next
+			// respawn — a wedge the failed rotation never earned. Losing a race with
+			// a concurrent new_session frame is the ORDINARY way to land here
+			// (RotateForNewSession's ErrSessionNotFound), which is exactly why the
+			// disarm is generation-stamped runner-side: it must not clear the winner's
+			// arm.
+			abort()
 			return err
 		}
 		v.RestartFresh(string(newID))
@@ -1474,6 +1493,25 @@ func startFreshRunner(r sessions.Runner, oldID sessions.SessionID,
 	default:
 		return nil
 	}
+}
+
+// beginRotationOrNoop arms r's rotation gate when the runner has one (#1330) and
+// returns the disarm; a runner without the gate returns an inert disarm, leaving
+// the dispatch shape unchanged.
+//
+// An OPTIONAL assertion, deliberately, rather than widening startFreshRunner's
+// case to interface{ RestartFresh(string); BeginRotation() func() }. Widening it
+// would silently re-route restartFreshStub and bothMethodsStub
+// (new_session_routing_test.go) to the inert default arm, turning existing
+// subtests from assertions into vacuities without a single failure, and would
+// change the documented "RestartFresh is matched first" dispatch contract. Treating
+// the gate as a CAPABILITY is also how Interrupt and RestartFresh are already
+// treated one layer up.
+func beginRotationOrNoop(r sessions.Runner) (abort func()) {
+	if g, ok := r.(interface{ BeginRotation() func() }); ok {
+		return g.BeginRotation()
+	}
+	return func() {}
 }
 
 // activeSessionStarter satisfies relay.SessionStarter by routing an inbound
