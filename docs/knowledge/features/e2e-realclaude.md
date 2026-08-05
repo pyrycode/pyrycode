@@ -875,30 +875,46 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
   implementation and the mutation-tested lesson on redaction-test vacuity.
 
-- `finding_trailer_evidence_test.go` (#1290) — **the trailer half of the
-  probe's published record.** `finTrailerRecord` (ten scalars, no pointer, no
-  embedded observation) carries one run's outcome value together with the
-  trailer evidence behind it — scan `State`, the `BoundFrom` lateness
-  discriminator with its `Bounded` boolean (`== trailBoundFromMiss` and
-  nothing else, never `Staleness != 0`) and `Staleness` itself, and the four
-  decoded trailer fields (`Subtype`, `IsError`, `TerminalReason`,
-  `StopReason`). `finTrailerBuild(outcome string, obs trailObservation)
-  finTrailerRecord` is the pure projection: the four fields are read from
-  `obs.Trailer` under a guard whose *first* operand is `State == trailSeen`
-  (so a no-trailer run returns its void instead of panicking through the
-  #1266 discriminated optional), never from the capped `Line`; `Outcome` is
-  copied from the caller's #1271/#1284 value as handed, never re-derived from
-  `State`. No field carries `omitempty` — under it a seen trailer with an
-  empty `terminal_reason` would render byte-identical to a no-trailer record,
-  the exact collapse the nil-pointer design one tier down exists to prevent.
-  The no-captured-bytes proof plants `trailNeedle` via `trailPaddedTrailer(0)`
-  (385 bytes, needle inside the 512-byte cap at offset 104–146) rather than
-  the family's habitual past-the-cap pad, which would pass vacuously against
-  a record that kept the capped line. Purely additive, one new file, 697
-  lines, zero production change, zero consumer call sites. See
-  [`codebase/1290.md`](../codebase/1290.md) for the full implementation, the
-  guard-ordering disclosure code review confirmed by mutation, and the
-  in-cap-plant lesson.
+- `finding_trailer_evidence_test.go` (#1290, builder moved onto the sighting
+  carrier #1320) — **the trailer half of the probe's published record.**
+  `finTrailerRecord` (ten scalars, no pointer, no embedded observation)
+  carries one run's outcome value together with the trailer evidence behind
+  it — scan `State`, the `BoundFrom` lateness discriminator with its
+  `Bounded` boolean (`== trailBoundFromMiss` and nothing else, never
+  `Staleness != 0`) and `Staleness` itself, and the four decoded trailer
+  fields (`Subtype`, `IsError`, `TerminalReason`, `StopReason`).
+  `finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord`
+  is the pure projection: since #1320 it takes the #1309 carrier rather than
+  a `trailObservation`, so its input carries no `.Line` and no
+  `*resultTrailer` — both the record it returns and the builder itself are
+  now trap-free by construction, checked by
+  `TestFinSightingReachesNoScanType` rather than asserted in prose. The four
+  fields are read from `sighting`'s own scalars under a guard on
+  `sighting.CarriesTrailer` (a bool the carrier precomputes — no pointer left
+  to guard a dereference of; a no-trailer run returns its void instead of
+  panicking, unreachably now rather than through a checked short-circuit);
+  `Outcome` is copied from the caller's #1271/#1284 value as handed, never
+  re-derived from `State`. On the false arm the four scalars are zeroed
+  rather than copied through — under the carrier that is a decision the
+  builder makes rather than a consequence of there being no pointer to read,
+  pinned in both directions by
+  `TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer` over one
+  carrier with its one impossible bit flipped. `StopReason` is the one
+  exception to trap-free: forwarded from the model's last message uncapped,
+  by design, named explicitly so a sweep author doesn't plant a needle in a
+  field the record must carry verbatim. No field carries `omitempty` — under
+  it a seen trailer with an empty `terminal_reason` would render
+  byte-identical to a no-trailer record, the exact collapse the nil-pointer
+  design one tier down exists to prevent. The no-captured-bytes proof plants
+  `trailNeedle` via `trailPaddedTrailer(0)` (385 bytes, needle inside the
+  512-byte cap at offset 104–146) rather than the family's habitual
+  past-the-cap pad, which would pass vacuously against a record that kept
+  the capped line — the #1320 migration retired that plant's target (the
+  carrier has no `.Line`), marked pending #1321's retirement. Purely
+  additive at #1290, one new file, 697 lines, zero production change, zero
+  consumer call sites. See [`codebase/1290.md`](../codebase/1290.md) for the
+  original implementation and [`codebase/1320.md`](../codebase/1320.md) for
+  the move onto the carrier.
 
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
@@ -1007,8 +1023,9 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   It reaches none of `trailObservation`, `trailScanResult` or `resultTrailer`
   (proven by walking types, reusing `finRecordInputReaches` rather than a
   second traversal), so `.Line` and the decoded `*resultTrailer` stay exactly
-  as unreachable as before; nothing consumes the carrier yet —
-  `finTrailerBuild` keeps its present signature, and #1308 moves it across.
+  as unreachable as before; #1320 moved `finTrailerBuild` onto this carrier,
+  via a fixture-side helper (`finTrailerSighting`) that is a copy of this
+  file's fill and inherits its agreement obligation.
   Purely additive, zero production change, zero consumer call sites; nine
   top-level tests, 0 SKIP on `-run '^TestFinGather'`. #1312 adds the row #1309
   shipped without: `TestFinGatherSightingReportsTheMissBound` leaves the
