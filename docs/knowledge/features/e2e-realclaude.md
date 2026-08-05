@@ -875,8 +875,39 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
   implementation and the mutation-tested lesson on redaction-test vacuity.
 
+- `finding_staging_fill_test.go` (#1304) — **fills the staging record from a
+  run's own transcript.** `finOutcomeStagingGate` (#1284, above) decides all
+  seven staging outcomes from synthetic inputs; this file fills exactly the
+  three transcript-side fields (`BashIssued`, `IssuedCommand`, `TriggerFired`)
+  a real caller would supply, through a `finTranscript*` composition reading a
+  JSONL transcript the test writes at the session's own path. The scan's unit
+  is a `finTranscriptBashCall{ToolUseID, Command}` pair rather than a bare
+  command: the shipped `probeWaitForBashToolUse` returns the **first** Bash
+  `tool_use` regardless of `input.command` (a #1223 code-review SHOULD FIX
+  shipped unfixed), and #1230 guarded that value-side caller-side already
+  without editing the shared rig — this file generalises the guard and closes
+  a second, key-side route to the same defect: a composition that selects the
+  staged call for its *command* but keeps the first call's *id* would still
+  read the trigger off the decoy's `tool_result`, since the trigger reading is
+  `probeWaitForToolResult(<id>)`. The content guard (`finTranscriptSelect`) is
+  pure over its input — no `*testing.T` — so its removal (AC2's mutation) runs
+  and grades without touching the worktree; the first-match id is bound inside
+  an `if` statement in `finTranscriptSelectBash` and goes out of scope
+  immediately after, making it unreferenceable rather than merely unused
+  below. `TriggerFired` reads `timedOutAfterMs` presence alone, never
+  conjoined with the handle and never corroborated by
+  `tool_use.input.run_in_background` — that flag marks the model-set
+  backgrounding path this probe must exclude (`docs/knowledge/codebase/
+  1223.md:87-88`). Nothing on the path trims, unquotes, or canonicalises
+  either command; both new types carry no json tags, mirroring
+  `finOutcomeStaging`'s own rule (`finding_staging_gate_test.go:141-157`).
+  Purely additive, one new file, 602 lines, zero production change, zero
+  consumer call sites. See [`codebase/1304.md`](../codebase/1304.md) for the
+  full implementation and both mutation-tested rows.
+
 - `finding_trailer_evidence_test.go` (#1290, builder moved onto the sighting
-  carrier #1320) — **the trailer half of the probe's published record.**
+  carrier #1320, published bound proven measured #1316) — **the trailer half
+  of the probe's published record.**
   `finTrailerRecord` (ten scalars, no pointer, no embedded observation)
   carries one run's outcome value together with the trailer evidence behind
   it — scan `State`, the `BoundFrom` lateness discriminator with its
@@ -930,8 +961,10 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   Purely additive at #1290, one new file, 697 lines, zero production change, zero
   consumer call sites. See [`codebase/1290.md`](../codebase/1290.md) for the
   original implementation, [`codebase/1320.md`](../codebase/1320.md) for the
-  move onto the carrier, and [`codebase/1325.md`](../codebase/1325.md) for the
-  retirement.
+  move onto the carrier, [`codebase/1325.md`](../codebase/1325.md) for the
+  retirement, and [`codebase/1316.md`](../codebase/1316.md) for the row that
+  joins this file's `Bounded` derivation to a poll that genuinely measured it
+  (`finding_run_gather_test.go`'s `TestFinGatherRecordPublishesTheMeasuredMissBound`).
 
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
@@ -980,11 +1013,11 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (path-based rather than name-based after a code-review MUST FIX — four of
   the family's key names are shared across types, and `matched_rows[]`'s
   three keys are shared with `pinStateOutcome`'s, so a name-based census
-  covered that slice not at all); a four-channel `trailNeedle` sweep over
+  covered that slice not at all); a `trailNeedle` sweep over
   every file `os.ReadDir` returns (planted only in inputs the pipeline
-  reduces or drops — a matched row's argv, the claude argv, an in-cap
-  trailer scan line, a reap outcome's stderr — never in the four fields the
-  record carries whole), with a mandated pair of applied-and-reverted
+  reduces or drops — a matched row's argv, the claude argv, a reap
+  outcome's stderr — never in the four fields the record carries whole),
+  with a mandated pair of applied-and-reverted
   mutations (one inside the Detail format, one adding an undeclared third
   file) both observed RED before the sweep shipped; a recursive
   forbidden-key scan with two exact-key exemptions (`tool_stderr`, carried
@@ -992,19 +1025,36 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   no input byte in reach); and a structural + behavioural pair proving
   `resultTrailer` has no `result` member and that the four decoded trailer
   scalars cross into the artifact verbatim while the needle beside them does
-  not. The trailer plant lands **inside** `reachCapCommand`'s 512-byte cap
-  (pad `0`, needle at byte 104–146) — `trailNeedle`'s own comment claims it
-  is placed past the cap, which this ticket measured to be false against the
-  fixture the family actually reuses; the comment was left uncorrected as a
-  sibling file, out of scope here. Purely additive, one new file, 966 lines,
-  zero production change, zero consumer call sites. See
+  not. The sweep shipped with a fourth channel, a trailer-scan-line plant
+  landing **inside** `reachCapCommand`'s 512-byte cap (pad `0`, needle at
+  byte 104–146) — `trailNeedle`'s own comment claims it is placed past the
+  cap, which this ticket measured to be false against the fixture the
+  family actually reuses; the comment was left uncorrected as a sibling
+  file, out of scope here. **#1326 retired that fourth channel**: since
+  #1320 `finTrailerBuild` takes the sighting carrier, and the needle in the
+  scanned line is consumed at fixture-construction time by
+  `finTrailerSighting` — which never reads `.Line` — so it never enters
+  `finRecordInputs` and the writer performs no reduction there. The in-cap
+  fixture (`finWriteTrailerPad = 0`) was kept, not deleted: it still backs
+  a diagnosis-and-guard pair relocated onto the pre-build clean check for
+  the embedded trailer sub-record (a prospective guard against a future
+  builder that starts reading the line) and the four-scalar-vs-needle
+  pairing in the verbatim-output test, which rests on the weaker claim that
+  the *wire* line carries the needle at every pad regardless of the cap and
+  so needs no cap guard of its own. The retired in-cap claim itself now
+  holds one tier down, at `TestFinGatherReturnsNoCapturedBytes`
+  (`finding_run_gather_test.go`), which sweeps the carrier. Purely
+  additive, one new file, 966 lines then trimmed by #1326's prose-and-guard
+  rewrite, zero production change, zero consumer call sites. See
   [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
-  path-vs-name census MUST FIX, and the stale-comment lesson.
+  path-vs-name census MUST FIX, and the stale-comment lesson, and
+  [`codebase/1326.md`](../codebase/1326.md) for the channel retirement.
 
 - `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
   #1302, trailer-sighting carrier added #1309, carrier's miss bound proven
   #1312, carrier's four decoded scalars proven to come from the full-line
-  decode #1313) — **parameterises
+  decode #1313, published record's bound proven to be the classified
+  sighting's #1316) — **parameterises
   `trailRigGather` (#1268) on the two inputs it hardcoded.** That rig passes
   a `nil` literal as the reap-log stderr and keys attribution on the test
   process's own process group; under those two hardcodings,
@@ -1063,12 +1113,21 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   pins the bare `"terminal_reason"` **key** (never the `"max_turns"` value,
   which survives every cap via `subtype`'s `error_max_turns`), asserted so a
   fixture edit that collapses the disagreement fails loudly instead of the row
-  going quietly vacuous. See
+  going quietly vacuous. #1316 adds this file's second and last row that costs
+  wall clock, `TestFinGatherRecordPublishesTheMeasuredMissBound`, placed
+  directly after #1312's row: it builds a `finTrailerRecord` from the
+  composition's classified sighting over the same unseeded-buffer/delayed-append
+  idiom, and puts it beside a record built over the same frozen bytes from a
+  second, direct `trailWaitForTrailer` call — joining the record tier (which
+  pinned `Bounded` with the discriminator handed in) to the carrier tier
+  (#1312, which measured the discriminator but stopped short of publishing it),
+  separated by measurement rather than by `finTrailerBuild`'s input type. See
   [`codebase/1281.md`](../codebase/1281.md),
   [`codebase/1302.md`](../codebase/1302.md),
   [`codebase/1309.md`](../codebase/1309.md),
-  [`codebase/1312.md`](../codebase/1312.md) and
-  [`codebase/1313.md`](../codebase/1313.md) for the full implementation and
+  [`codebase/1312.md`](../codebase/1312.md),
+  [`codebase/1313.md`](../codebase/1313.md) and
+  [`codebase/1316.md`](../codebase/1316.md) for the full implementation and
   the mutation-tested lessons.
 
 - `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
@@ -1099,6 +1158,163 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   one new file, 617 lines, zero production change; both new tests PASS,
   never SKIP. See [`codebase/1282.md`](../codebase/1282.md) for the full
   implementation and the grade-mutations-per-line lesson.
+
+- `finding_live_pin_test.go` (#1338) — **offline reduction, not a probe**;
+  the pure post-filter a later ticket's during-turn `pinScan` (held `cat` on
+  a FIFO, pinned mid-turn) is reduced through before it ever reaches the
+  staging record — no live scan, no `ps` exec, no `pyry` spawn, no caller.
+  `finLivePinReduce(scan pinScan, fifoPath string) finLivePinReading` takes
+  membership from `reachMatchedNeedle` over each row's recorded needle list
+  (never a re-scan of `.Command`, which the byte cap may have truncated past
+  `reachMaxCommandBytes`), returns every FIFO-matched row and its `.PGID`
+  raw — unsorted, undeduped, since the consumer `finAttributeFanOut` (#1280)
+  dedupes and sorts internally — and reads claude's own argv via
+  `tdnClaudeCommand(scan)` over the whole scan, not the FIFO-filtered rows
+  (claude's row carries only the claude needle, so filtering first always
+  returns `""`). `finLivePinWantRows = 2` names the expected FIFO-row count,
+  sourced from #1230's live measurement (the `zsh -c` wrapper plus the
+  forked `cat`) and corroborated, not primarily sourced, from #1268's
+  rig-staged mutation test; `trail_run_rig_test.go:563` is deliberately not
+  cited, since it asserts only `MatchCount > 1`, never `== 2`. Both
+  plausible-wrong fills — `scan.MatchCount` (3, since one scan carries both
+  the FIFO and claude needles) and the distinct-pgid count of the FIFO rows
+  (1, since claude isolates the Bash command into its own group) — are
+  pinned as asserted values in `TestFinLivePinCountIsNeitherWrongCandidate`
+  and checked pairwise-distinct from the correct count, so a fixture edit
+  that collapses two candidates together fails loudly instead of silently
+  disarming the trap. The offline trap drives everything over a synthetic
+  four-column `ps` table built as **bytes** and turned into a `pinScan`
+  through the real `pinMatchArgvExcluding` (a hand-built `pinScan` would skip
+  the match-uncapped/store-capped asymmetry the truncation assertion rests
+  on); the wrapper row's padding is derived from `reachMaxCommandBytes`
+  itself, never a literal 512. Purely additive, one new file, 514 lines,
+  zero production change, zero consumer call sites — the driver and record
+  tickets that call `finLivePinReduce` for real land later. See
+  [`codebase/1338.md`](../codebase/1338.md) for the full implementation, the
+  mutation-tested lessons, and why `strings.Contains(s, "")` being `true`
+  makes the empty-needle assertion a real second witness for the
+  membership-re-scan defect rather than comment-only work.
+
+- `finding_live_staging_test.go` (#1342) — **declarations, not a probe**;
+  the run's FIFO name, hold prompt, staged command literal and env delta a
+  later live turn stages from, plus one offline trap per declaration. Exists
+  because `finOutcomeStagingGate`'s identity arm
+  (`finding_staging_gate_test.go:299`) is byte equality between claude's
+  verbatim `input.command` and whatever the rig says it staged — get either
+  operand wrong and every *correctly*-staged run reports
+  `stage-command-not-staged`, one live claude turn burned per attempt.
+  `finLiveStageCommand(fifoPath)` splices `probeHeldCommandName` rather than
+  re-typing `"cat"` (a rig staging one verb while #1340's liveness check
+  looks for another would drift silently; the splice makes a rename a build
+  break) and is deliberately bare, never `finOutcomeHoldCommand`'s
+  `sh -c … ; exit 0` stand-in shape. `finLiveStagePrompt(fifoPath)` follows
+  `probePrompt`'s backtick-delimited form with the *whole* command
+  interpolated, not just the path, so the prompt and the staged literal
+  derive from one `fmt.Sprintf` instead of being written twice; the offline
+  trap recovers the command back out of the prompt by an independent
+  delimiter scan (`finLiveStageCommandFromPrompt`) rather than comparing
+  against a hand-copied second literal. `finLiveStageFIFOName =
+  "fin-live-stage-hold"` is checked both-directions substring-disjoint
+  against all eight shipped FIFO name/path constants, referenced **by
+  identifier** so a rename breaks the build instead of rotting the taken-set
+  list silently — re-derived at `26d83b7` via
+  `rg -n 'FIFOName *=|FIFOPath *=' internal/e2e/realclaude/` (the
+  `FIFOPath`-inclusive recipe; a `FIFOName`-only search misses #1338's
+  `finLivePinFIFOPath`). `finLiveStageEnvDelta()` names
+  `BASH_DEFAULT_TIMEOUT_MS=5000` (the settled #1223 trigger) and
+  `PYRY_USE_STREAMJSON=0` explicitly — the latter because
+  `reachRunnerPathFromEnv` reads the ambient `os.Getenv` first, so an empty
+  delta would make the downstream runner reading a reading of the operator's
+  shell; its offline trap sets a hostile ambient (`t.Setenv`) to prove the
+  claim is non-vacuous rather than accidentally true whenever the variable
+  happens to be unset. Purely additive, one new file, 489 lines, zero
+  production change, zero live caller — #1340 is the driver that spends a
+  real turn on these declarations. See [`codebase/1342.md`](../codebase/1342.md)
+  for the full implementation, the mutation-tested lessons, and the
+  reachable-red-vs-shadowed-by-Fatalf lesson code review surfaced on the
+  extraction round-trip's pass-through guard.
+
+- `finding_live_assembly_test.go` (#1343) — **the join, not a probe**; the one
+  function, `finLiveAssembleStaging`, that fills all eight
+  `finOutcomeStaging` fields — three read from the run's transcript via
+  `finTranscriptFill` (#1304), five supplied by the caller as
+  `finLiveAssembleFacts`, `finTranscriptReading`'s mirror image — and returns
+  `finOutcomeStagingGate`'s decision (#1284) as returned, never re-derived.
+  Exists because nothing previously called both halves together: the only
+  thing filling the five caller-side fields was `finTranscriptStagedCaller`,
+  a #1304 test fixture whose hardcoded `PinMatchCount: 1, PinWantCount: 1` is
+  wrong for the rig, whose real expectation is `finLivePinWantRows = 2`
+  (#1338) — an assembly that inherited the `1` would send every
+  correctly-staged live run to `finOutcomePinCountUnexpected`, burning a live
+  claude turn per attempt. The composite literal is name-for-name with no
+  literal on any right-hand side, which is the one rule that keeps both the
+  fixture's `1` and the driver's `finLivePinWantRows` out of the assembly's
+  body — the counts are forwarded unaltered, neither re-derived nor fixed
+  internally. `facts.StagedCommand` is the single source of the staged
+  string, closing structurally (rather than by care) the two-consumer drift
+  between the gate's identity arm and the fill's own `call.Command == staged`
+  guard. `finLiveAssembleContractWant = finLivePinWantRows + 1` backs a
+  deliberate contract row over a want no live driver emits — the only row
+  that catches an assembly forwarding the match count while fixing the want
+  internally — derived rather than written as a literal so it can never
+  coincide with the real constant. Test drives four rows over one
+  correctly-staged synthetic transcript, written once in the parent, with
+  every assertion reading the assembly's return value rather than
+  `finOutcomeStagingGate` directly, so it proves the counts travel without
+  re-asserting `finOutcomeGateCases`' (#1284) already-shipped count mapping.
+  Two mis-assemblies survive every row by construction — a count swap inside
+  the literal, and hardcoding the three transcript fields at their staged
+  values — and are stated as accepted in the file's own header rather than
+  chased with the duplicate rows this ticket's AC forbade reproducing.
+  Purely additive, one new file, 428 lines, zero production change, zero live
+  caller — #1340 (driver) and #1337 (record/classification) are the tickets
+  that call `finLiveAssembleStaging` for real. See
+  [`codebase/1343.md`](../codebase/1343.md) for the full implementation, the
+  mutation matrix, and the code-review NIT on the assembly's two adjacent
+  `time.Duration` parameters.
+
+- `finding_live_run_test.go` (#1340) — **the live staging driver, not a
+  probe of pyry itself**; `finLiveRunStage(t) *finLiveRunHandle` spawns pyry
+  on the ptyrunner default, holds the rendezvous FIFO, drives the turn to
+  the instant a during-turn process pin is meaningful, takes that pin, and
+  hands it plus the rig's own facts to #1343's `finLiveAssembleStaging`,
+  returning a handle carrying the run's live facts and the staging tier's
+  `finOutcomeResult` **as the gate returned it**. Nothing #1338/#1342/#1343
+  already shipped is re-derived: the pin reduction and its expected row
+  count, the staged command/prompt/FIFO-name/env-delta declarations, and the
+  eight-field assembly all cross unchanged. `finLiveRunHandle` is returned as
+  a **pointer** — the pyry-exit kill cleanup is registered before `PyryPID`
+  exists, so its closure has to read a field written later — and carries
+  **no JSON tags**, inheriting the "input only, never published" posture of
+  the types it wraps (`Pin.Rows`/`Pin.ClaudeCommand` are verbatim argv off
+  the ambient process table). The kill cleanup is registered **before**
+  `holdProbeFIFO` so LIFO releases the FIFO first and the kill is
+  defence-in-depth rather than the thing that produces the exit — inverting
+  that order yields a run that looks identical (green, handle populated)
+  while the rig itself produced the exit; copied verbatim, `PyryPID <= 0`
+  guard and `// LOAD-BEARING` comment included, from the reach precedent
+  (`background_reach_probe_test.go:355-374`), not the comment-less trigger
+  copy. **The driver takes its own `tool_use`/`tool_result` wait before
+  pinning**, even though the assembly waits internally too — the assembly's
+  wait fires strictly after the pin (it takes pin counts as inputs), so
+  skipping the driver's own wait pins before the held `cat` exists and fires
+  the gate's count arm on a correctly staged run, one live claude turn spent
+  finding out. The pin itself is one `ps -axww` scan carrying both needles
+  (the FIFO path and `tdnClaudeNeedle`) with two exclusions, handed to
+  `finLivePinReduce` unchanged, forwarding `finLivePinWantRows` as the want
+  (never `scan.MatchCount`, never `len(Pin.PGIDs)`). No budget-fired run is
+  staged — `--max-turns=6` gives the turn room to complete, since a
+  budget-fired run's exit code can't discriminate outcomes and its
+  `Terminate` hook reaps before the trailer is written. No `ps -E`/`-Eww`
+  anywhere; matched rows and claude's argv cross the handle only as the
+  already-capped `reachProc.Command`; the file formats no `Detail` and writes
+  no artifact. **Ships no test** — its only exercise is compilation and
+  `go test`'s vet subset under `make e2e-realclaude`; `finLiveRunStage` has
+  no caller anywhere in the tree until #1337 lands, which is expected and
+  correct for this instrument family. Purely additive, one new file, 446
+  lines, zero production change. See [`codebase/1340.md`](../codebase/1340.md)
+  for the full implementation and the code-review SHOULD FIX on a counted
+  `t.Fatalf` claim the shipped file falsified.
 
 ## Test infrastructure
 
