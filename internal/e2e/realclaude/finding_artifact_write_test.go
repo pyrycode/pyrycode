@@ -275,11 +275,15 @@ func finWriteInputs() finRecordInputs {
 		}},
 		Attribution: finAttributeFanOut(finWritePlantedReapLog(),
 			[]int{1, finRecordSharedPGID}, "completed"),
-		Trailer: finTrailerBuild(trailOutcomeVoidBudgetFired, trailObservation{
-			trailScanResult: finWritePlantedTrailerScan(),
-			Staleness:       250 * time.Millisecond,
-			BoundFrom:       trailBoundFromMiss,
-		}),
+		// #1286's Plant #3, SUPERSEDED BY #1320 AND RETIRED BY #1321 — not a live
+		// guard. finTrailerBuild takes a finSighting now, which has no .Line, so
+		// the needle in the scanned line reaches this record through no channel its
+		// input has. The directory-wide sweep stays non-vacuous on the other three
+		// plants (each row's Command, ClaudeCommand, the reap stderr); the plant
+		// list at :228 is #1321's to revisit.
+		Trailer: finTrailerBuild(trailOutcomeVoidBudgetFired,
+			finTrailerSighting(finWritePlantedTrailerScan(), 250*time.Millisecond,
+				trailBoundFromMiss)),
 		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
 		ClaudeCommand: tdnFixturePtyArgv + " " + trailNeedle,
 		ClaudeVersion: "2.1.220 (Claude Code)",
