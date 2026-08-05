@@ -980,11 +980,11 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (path-based rather than name-based after a code-review MUST FIX — four of
   the family's key names are shared across types, and `matched_rows[]`'s
   three keys are shared with `pinStateOutcome`'s, so a name-based census
-  covered that slice not at all); a four-channel `trailNeedle` sweep over
+  covered that slice not at all); a `trailNeedle` sweep over
   every file `os.ReadDir` returns (planted only in inputs the pipeline
-  reduces or drops — a matched row's argv, the claude argv, an in-cap
-  trailer scan line, a reap outcome's stderr — never in the four fields the
-  record carries whole), with a mandated pair of applied-and-reverted
+  reduces or drops — a matched row's argv, the claude argv, a reap
+  outcome's stderr — never in the four fields the record carries whole),
+  with a mandated pair of applied-and-reverted
   mutations (one inside the Detail format, one adding an undeclared third
   file) both observed RED before the sweep shipped; a recursive
   forbidden-key scan with two exact-key exemptions (`tool_stderr`, carried
@@ -992,14 +992,30 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   no input byte in reach); and a structural + behavioural pair proving
   `resultTrailer` has no `result` member and that the four decoded trailer
   scalars cross into the artifact verbatim while the needle beside them does
-  not. The trailer plant lands **inside** `reachCapCommand`'s 512-byte cap
-  (pad `0`, needle at byte 104–146) — `trailNeedle`'s own comment claims it
-  is placed past the cap, which this ticket measured to be false against the
-  fixture the family actually reuses; the comment was left uncorrected as a
-  sibling file, out of scope here. Purely additive, one new file, 966 lines,
-  zero production change, zero consumer call sites. See
+  not. The sweep shipped with a fourth channel, a trailer-scan-line plant
+  landing **inside** `reachCapCommand`'s 512-byte cap (pad `0`, needle at
+  byte 104–146) — `trailNeedle`'s own comment claims it is placed past the
+  cap, which this ticket measured to be false against the fixture the
+  family actually reuses; the comment was left uncorrected as a sibling
+  file, out of scope here. **#1326 retired that fourth channel**: since
+  #1320 `finTrailerBuild` takes the sighting carrier, and the needle in the
+  scanned line is consumed at fixture-construction time by
+  `finTrailerSighting` — which never reads `.Line` — so it never enters
+  `finRecordInputs` and the writer performs no reduction there. The in-cap
+  fixture (`finWriteTrailerPad = 0`) was kept, not deleted: it still backs
+  a diagnosis-and-guard pair relocated onto the pre-build clean check for
+  the embedded trailer sub-record (a prospective guard against a future
+  builder that starts reading the line) and the four-scalar-vs-needle
+  pairing in the verbatim-output test, which rests on the weaker claim that
+  the *wire* line carries the needle at every pad regardless of the cap and
+  so needs no cap guard of its own. The retired in-cap claim itself now
+  holds one tier down, at `TestFinGatherReturnsNoCapturedBytes`
+  (`finding_run_gather_test.go`), which sweeps the carrier. Purely
+  additive, one new file, 966 lines then trimmed by #1326's prose-and-guard
+  rewrite, zero production change, zero consumer call sites. See
   [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
-  path-vs-name census MUST FIX, and the stale-comment lesson.
+  path-vs-name census MUST FIX, and the stale-comment lesson, and
+  [`codebase/1326.md`](../codebase/1326.md) for the channel retirement.
 
 - `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
   #1302, trailer-sighting carrier added #1309, carrier's miss bound proven
