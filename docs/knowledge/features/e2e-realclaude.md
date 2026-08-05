@@ -1159,6 +1159,42 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   never SKIP. See [`codebase/1282.md`](../codebase/1282.md) for the full
   implementation and the grade-mutations-per-line lesson.
 
+- `finding_live_pin_test.go` (#1338) — **offline reduction, not a probe**;
+  the pure post-filter a later ticket's during-turn `pinScan` (held `cat` on
+  a FIFO, pinned mid-turn) is reduced through before it ever reaches the
+  staging record — no live scan, no `ps` exec, no `pyry` spawn, no caller.
+  `finLivePinReduce(scan pinScan, fifoPath string) finLivePinReading` takes
+  membership from `reachMatchedNeedle` over each row's recorded needle list
+  (never a re-scan of `.Command`, which the byte cap may have truncated past
+  `reachMaxCommandBytes`), returns every FIFO-matched row and its `.PGID`
+  raw — unsorted, undeduped, since the consumer `finAttributeFanOut` (#1280)
+  dedupes and sorts internally — and reads claude's own argv via
+  `tdnClaudeCommand(scan)` over the whole scan, not the FIFO-filtered rows
+  (claude's row carries only the claude needle, so filtering first always
+  returns `""`). `finLivePinWantRows = 2` names the expected FIFO-row count,
+  sourced from #1230's live measurement (the `zsh -c` wrapper plus the
+  forked `cat`) and corroborated, not primarily sourced, from #1268's
+  rig-staged mutation test; `trail_run_rig_test.go:563` is deliberately not
+  cited, since it asserts only `MatchCount > 1`, never `== 2`. Both
+  plausible-wrong fills — `scan.MatchCount` (3, since one scan carries both
+  the FIFO and claude needles) and the distinct-pgid count of the FIFO rows
+  (1, since claude isolates the Bash command into its own group) — are
+  pinned as asserted values in `TestFinLivePinCountIsNeitherWrongCandidate`
+  and checked pairwise-distinct from the correct count, so a fixture edit
+  that collapses two candidates together fails loudly instead of silently
+  disarming the trap. The offline trap drives everything over a synthetic
+  four-column `ps` table built as **bytes** and turned into a `pinScan`
+  through the real `pinMatchArgvExcluding` (a hand-built `pinScan` would skip
+  the match-uncapped/store-capped asymmetry the truncation assertion rests
+  on); the wrapper row's padding is derived from `reachMaxCommandBytes`
+  itself, never a literal 512. Purely additive, one new file, 514 lines,
+  zero production change, zero consumer call sites — the driver and record
+  tickets that call `finLivePinReduce` for real land later. See
+  [`codebase/1338.md`](../codebase/1338.md) for the full implementation, the
+  mutation-tested lessons, and why `strings.Contains(s, "")` being `true`
+  makes the empty-needle assertion a real second witness for the
+  membership-re-scan defect rather than comment-only work.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
