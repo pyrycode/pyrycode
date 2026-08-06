@@ -1316,6 +1316,50 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   for the full implementation and the code-review SHOULD FIX on a counted
   `t.Fatalf` claim the shipped file falsified.
 
+- `dropped_line_capture_test.go` (#1260) — **evidence probe,
+  security-sensitive**; opt-in behind `PYRY_PROBE_DROPPED_LINE_CAPTURE=1`.
+  Answers what four downstream tickets (#1261–#1264) all needed and nobody
+  had ever read: the verbatim payload of every stream-json line
+  `internal/streamsup/parser.go` drops on the **interactive** surface (not
+  headless — #1218 already proved the two surfaces don't share subtype
+  rates). Drives `streamsup.Runner` **in process** and installs
+  `dropcapRecorder` in the exact `Config.Stdout` slot production gives
+  `streamsup.NewParser` (`cmd/pyry/streamsup_runner.go:117`), so "upstream of
+  the parser" is structural; `spawn_shape` is observed from production's own
+  `buildArgs` output through a discard-`slog.Handler` on the runner's log
+  record rather than transcribed, so the recorded argv cannot drift from the
+  shape it claims to measure. Reuses #1223's FIFO-hold lever and #1240's
+  interactive staging idioms unedited (`holdProbeFIFO`, `bgIdlePrompt`), but
+  is deliberately **not** built on #1240's `bgIdleRecordTurn` — that recorder
+  reads decrypted phone frames downstream of the parser, so every line this
+  ticket needs would be structurally absent from it. Classification asks the
+  shipped parser (`parseOne`) rather than mirroring `ignoredLineTypes`, so a
+  future parser change can't silently desync the census from what actually
+  ships. Three outcomes (`fired`/`did-not-fire`/`instrument-broken`), only
+  the first licensing an absence claim, gated by a pre- and post-rendezvous
+  `fifoLiveRead` pair. Redaction is two mechanisms with different fabric: a
+  declared substitution table applied to every string that enters the
+  record (not just payloads — `fifoLiveOutcome.Path`/`.Detail` and every
+  `t.Logf` leak a path with no payload involved), and a fail-closed deny-scan
+  over the whole marshalled record as the deterministic net behind it,
+  `t.Fatalf`-ing on a hit and writing no file. **Result, committed as
+  `testdata/dropped_lines_v2.1.220.json`** (`outcome: fired`,
+  `absence_claim_valid: true`): 49 lines captured, 39 dropped —
+  `system/init` ×1, `system/thinking_tokens` ×33, `system/task_started` ×1,
+  `system/task_updated` ×1, `system/background_tasks_changed` ×1,
+  `rate_limit_event` ×1, and the suppressed `user`/`text` harness-nudge block
+  ×1 (matched `harnessNoOutputNudge` byte-exactly — the second confirmed
+  observation #1247's doc comment asks for before promoting that constant to
+  a set, deferred as a follow-up). `task_notification` is named explicitly
+  as absent, not silently zero. Code review FAILed once on 3 SHOULD FIX (all
+  in the deny-scan's base64 arm and the redaction kept-list prose; no MUST
+  FIX, nothing in the committed fixture unsafe), fixed before merge with no
+  re-capture needed. Zero production files, zero modified files. See
+  [`codebase/1260.md`](../codebase/1260.md) for the full implementation, the
+  capture's field-level contents, and the code-review lessons (a deny class
+  that carries its own needle; a path that leaks in a slug spelling no
+  substitution rule enumerated).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
