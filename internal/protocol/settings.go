@@ -31,8 +31,12 @@ package protocol
 // style.
 //
 // SessionID is the addressing key — it matches sessions.Pool.UpdateSettings(id
-// sessions.SessionID, …) and the new_session_id already carried to clients in
-// the session_transition marker, so a client already knows it. A plain string,
+// sessions.SessionID, …). A client learns it from SessionSettingsPayload below,
+// the request/response route it can drive at any time, or observes a change to
+// it on the unsolicited session_transition marker. The marker ALONE is not a
+// sufficient source and this comment used to imply it was: the daemon fires it
+// only on a clear or an idle eviction, never on session creation, so a client
+// that had done neither never learned an id and could not write. A plain string,
 // always required, no omitempty.
 type SetSessionSettingsPayload struct {
 	SessionID string  `json:"session_id"`
@@ -52,4 +56,47 @@ type SetSessionSettingsPayload struct {
 // SessionID is a plain string, always present, no omitempty.
 type SessionSettingsUpdatedPayload struct {
 	SessionID string `json:"session_id"`
+}
+
+// SessionSettingsPayload is the body of an Envelope whose Type ==
+// TypeSessionSettings (docs/protocol-mobile.md § Session settings). Binary →
+// phone direction; the daemon's answer to a bare request_session_settings.
+//
+// It is the READ half the #844 cluster never had. A client needs two things to
+// drive the run-configuration UI: the current values, and the SessionID to
+// address a set_session_settings to. Before this payload the only source of the
+// values was screen_snapshot's side-load, and the only source of the id was the
+// unsolicited session_transition marker — which the daemon fires ONLY on a clear
+// or an idle eviction, never on session creation, so a client that had done
+// neither never learned an id at all and could not write. That is the defect
+// this payload closes.
+//
+// NO omitempty on any field, matching ScreenSnapshotPayload (snapshot.go) and
+// deliberately UNLIKE the sibling SetSessionSettingsPayload above, whose
+// per-field pointers encode a presence contract. Nothing here is optional: this
+// is a full report of current state, so every field is always on the wire and a
+// zero value is a real answer, not an absence. Specifically:
+//
+//   - SessionID "" means the daemon could not resolve a session to address.
+//     A client MUST treat the settings as read-only rather than sending a
+//     set_session_settings with an empty id, which would be rejected.
+//   - Model / Effort "" mean "inherited default, no per-session override" —
+//     the same meaning they carry on screen_snapshot.
+//   - YOLO false means permissions are enforced.
+//   - WindowTokens 0 means the usage seam was not wired; UsedTokens 0 against a
+//     non-zero WindowTokens is a genuine fresh session.
+//
+// Scope: the values are the BOOTSTRAP session's, not the requesting
+// conversation's, per #848's explicit "do not pre-carve a conversation-keyed
+// settings seam". SessionID reports that same bootstrap session, so a client
+// reads and writes the same place. Keying the whole set by conversation is a
+// deferred follow-up; when it lands, both the values and SessionID move together
+// or the read and the write would address different sessions.
+type SessionSettingsPayload struct {
+	SessionID    string `json:"session_id"`
+	Model        string `json:"model"`
+	Effort       string `json:"effort"`
+	YOLO         bool   `json:"yolo"`
+	UsedTokens   int    `json:"used_tokens"`
+	WindowTokens int    `json:"window_tokens"`
 }

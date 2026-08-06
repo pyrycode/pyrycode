@@ -485,6 +485,47 @@ const (
 	TypeSessionSettingsUpdated = "session_settings_updated" // binary → phone, outbound v2 reply confirming the change
 )
 
+// Mobile Protocol v2 read-session-settings vocabulary (#491/#1214;
+// docs/protocol-mobile.md § Session settings). The READ half of the #844
+// cluster above, which shipped write-only: set_session_settings changes the
+// values and session_settings_updated only echoes the id back, so a client had
+// no way to ASK what the current values are, nor to learn the session id it
+// must address a change to.
+//
+// Until now a client got both by reading screen_snapshot, which carries them as
+// a side-load (#848, #857). That coupling is the bug: screen_snapshot is a
+// photograph of the terminal, and on the stream-json runner there is no terminal
+// to photograph, so handleRequestSnapshot answers CodeServerBinaryOffline
+// (#1101) and the settings — which have nothing to do with a terminal — are
+// refused with it. This pair carries them on their own route, gated on their own
+// seams, so it answers on BOTH runners. screen_snapshot is deliberately left
+// untouched: its side-loaded copies stay for the shipped mobile client.
+//
+// The request frame is BARE (no payload), exactly like TypeRequestDebugBundle
+// and for the same reason: the reported values are daemon-wide (the bootstrap
+// session's, per #848's "do not pre-carve a conversation-keyed settings seam"),
+// so there is no attacker-controlled field — no conversation_id, no id — that
+// could select another session's data. Should the values later become
+// conversation-scoped, the request gains a conversation_id then and the gate
+// comes with it.
+//
+// Two natures in one cluster, mirroring #844. request_session_settings is an
+// inbound phone → binary *control* envelope the v2 session manager intercepts at
+// internal/relay/v2session.go's dispatchAppFrame before internal/dispatch.Route
+// (like TypeSetSessionSettings / TypeRequestSnapshot); there is NO dispatch.Route
+// handler for it. session_settings is an outbound binary → phone reply an old
+// phone must never receive.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
+// either route the inbound control envelope to the handler chain or offer the
+// outbound reply to an old phone, violating the v1/v2 boundary. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
+const (
+	TypeRequestSessionSettings = "request_session_settings" // phone → binary, inbound v2 control, bare frame (intercepted pre-dispatch.Route)
+	TypeSessionSettings        = "session_settings"         // binary → phone, outbound v2 reply carrying the current run configuration
+)
+
 // Mobile Protocol v2 session-error marker (#1007, split from #1001;
 // docs/protocol-mobile.md § Error codes). When the daemon's interactive
 // message queue (internal/msgqueue) bounds a persistent-failure drain and
