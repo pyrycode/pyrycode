@@ -100,13 +100,15 @@
 //	                               (i.e. not immediately followed by '[').
 //	                               That bare ESC is the remote interrupt keystroke
 //	                               (supervisor.SendEsc writes a lone 0x1b). On the
-//	                               first bare ESC fakeclaude appends one canned
-//	                               assistant end_turn line (interruptEndTurnLine) to
-//	                               the live session JSONL and fsyncs, so the daemon's
-//	                               structured-turn producer maps it to a turn_end —
-//	                               making the Esc the CAUSE of the turn ending (the
-//	                               interrupt-live e2e #794 asserts a turn_end whose
-//	                               only source is this handler). One-shot: a second
+//	                               first bare ESC fakeclaude appends claude's own
+//	                               interruption marker (interruptMarkerLine) to the
+//	                               live session JSONL and fsyncs, so the daemon's
+//	                               structured-turn producer maps it to a
+//	                               turn_end{cancelled} — making the Esc the CAUSE of
+//	                               the turn ending (the interrupt-live e2e #794
+//	                               asserts a turn_end whose only source is this
+//	                               handler; #1244 additionally asserts the reason).
+//	                               One-shot: a second
 //	                               ESC is inert, matching claude's own re-interrupt
 //	                               no-op. Unlike the idle/modal triggers this
 //	                               coexists with PYRY_FAKE_CLAUDE_TUI (the two touch
@@ -339,6 +341,7 @@ const (
 	envStreamInterrupt   = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
 	envStreamHold        = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
 	envStreamApprove     = "PYRY_FAKE_CLAUDE_STREAM_APPROVE"
+	envStreamBogus       = "PYRY_FAKE_CLAUDE_STREAM_BOGUS"
 	envApproveSocketFile = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	assistantMaxBytes    = 64 * 1024
 	pollInterval         = 50 * time.Millisecond
@@ -491,14 +494,42 @@ var clearRotatePending atomic.Bool
 // trust mode; untouched otherwise.
 var trustAcceptPending atomic.Bool
 
-// interruptEndTurnLine is the canned claude-format assistant end_turn JSONL line
-// appendTurnEnd writes when Esc-ends-turn mode (envEscEndsTurn) detects the remote
-// interrupt keystroke. Its shape is exactly what turnbridge's mapper requires to
-// emit EventKindJsonlEndOfTurn (assistant + stop_reason=="end_turn" + non-empty
-// text), mirroring relay_two_phone_structured_test.go's end-of-turn fixture line.
-// It is inert JSONL data, not a TUI substrate glyph, so the cmd/substrate-guard
-// allowlist is unaffected.
-const interruptEndTurnLine = `{"type":"assistant","message":{"id":"interrupt-end","stop_reason":"end_turn","content":[{"type":"text","text":"[interrupted]"}]}}` + "\n"
+// interruptMarkerLine is the claude-format JSONL line appendTurnEnd writes when
+// Esc-ends-turn mode (envEscEndsTurn) detects the remote interrupt keystroke: the
+// interruption marker claude itself records when a turn is interrupted, which
+// turnbridge's mapper maps to turnevent.TurnEnd{cancelled} (#1243,
+// internal/turnbridge/mapper.go:95). It is inert JSONL data, not a TUI substrate
+// glyph, so the cmd/substrate-guard allowlist is unaffected.
+//
+// PROVENANCE: arm (b), DERIVED — not captured. The base line is
+// internal/agentrun/jsonl/testdata/no_end_turn.jsonl:53 (claude 2.1.128), the only
+// recorded interruption entry in the repo. Preserved verbatim from it: the full
+// 13-key top-level set and its order, and the values of isSidechain, type, message,
+// userType, entrypoint, version. Substituted span, shape-preserving: the
+// session-identity fields parentUuid, promptId, uuid, timestamp, cwd, sessionId,
+// gitBranch — nothing on this path reads any of them, and the base line's real
+// values name a developer worktree and a real session.
+//
+// Two absences are load-bearing, both silent if broken (the mapper simply produces
+// no turn_end, and the consuming e2e times out 15 s later):
+//
+//   - NO top-level "permissionMode" key. isInterruptMarker requires
+//     !userAuthored(e), and userAuthored is the PRESENCE of that key
+//     (mapper.go:163-166). One extra key and the line reads as a human prompt.
+//   - NO tool_result content block. mapEntry's ParseToolResult branch precedes the
+//     marker check and returns (mapper.go:80-86), so any entry carrying one becomes
+//     a ToolUpdate and never reaches the prose matcher.
+//
+// The full key set is deliberate rather than a minimal {"type":"user","message":…}:
+// tui-driver's parseEntry builds Raw from the WHOLE line, so a 2-key line would make
+// permissionMode's absence an absence among 2 keys where production sees an absence
+// among 13.
+const interruptMarkerLine = `{"parentUuid":"00000000-0000-4000-8000-000000000001","isSidechain":false,` +
+	`"promptId":"00000000-0000-4000-8000-000000000002","type":"user",` +
+	`"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},` +
+	`"uuid":"00000000-0000-4000-8000-000000000003","timestamp":"2026-01-01T00:00:00.000Z",` +
+	`"userType":"external","entrypoint":"code-review","cwd":"/tmp/fake-claude",` +
+	`"sessionId":"00000000-0000-4000-8000-000000000004","version":"2.1.128","gitBranch":"fake-claude"}` + "\n"
 
 // writeStdout writes p to os.Stdout under stdoutMu and fsyncs. Best-effort:
 // errors are silenced, mirroring emitAssistantIfTriggered — the e2e asserts
@@ -565,7 +596,14 @@ func main() {
 			runStreamJSONApprove(stdin, os.Stdout, os.Getenv(envApproveSocketFile))
 			return
 		}
-		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
+		// Bogus rider (envStreamBogus, default-off): prepend one line of a
+		// top-level type the parser has never seen, and one assistant message
+		// carrying a block type it has never seen, ahead of the normal per-turn
+		// reply. Both are the two drop sites the unrecognized-message diagnostic
+		// exists to surface, so the e2e can assert they reach a client instead of
+		// vanishing. Passed as a value so runStreamJSON stays a pure I/O seam;
+		// unset ⟹ byte-identical to prior behaviour.
+		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "")
 		return
 	}
 
@@ -1026,15 +1064,15 @@ func appendTurnGrowth(f *os.File) {
 	_ = f.Sync()
 }
 
-// appendTurnEnd grows the current session JSONL f by one canned assistant
-// end_turn line (interruptEndTurnLine) so the daemon's structured-turn producer
-// maps it to turnevent.TurnEnd -> a turn_end envelope: the daemon's "turn
-// stopped" signal after a remote interrupt. Runs ONLY on the main goroutine,
-// preserving the single-writer-of-f invariant (see escPending / turnPending).
-// Best-effort + fsync, mirroring emitStructuredJSONLIfTriggered; the e2e asserts
-// downstream (the phone receives turn_end), never on the write itself.
+// appendTurnEnd grows the current session JSONL f by claude's interruption marker
+// (interruptMarkerLine) so the daemon's structured-turn producer maps it to
+// turnevent.TurnEnd{cancelled} -> a turn_end envelope: the daemon's "turn stopped"
+// signal after a remote interrupt. Runs ONLY on the main goroutine, preserving the
+// single-writer-of-f invariant (see escPending / turnPending). Best-effort + fsync,
+// mirroring emitStructuredJSONLIfTriggered; the e2e asserts downstream (the phone
+// receives turn_end), never on the write itself.
 func appendTurnEnd(f *os.File) {
-	if _, err := f.WriteString(interruptEndTurnLine); err != nil {
+	if _, err := f.WriteString(interruptMarkerLine); err != nil {
 		return
 	}
 	_ = f.Sync()
@@ -1277,7 +1315,7 @@ func fatalf(format string, a ...any) {
 // The types and functions below implement PYRY_FAKE_CLAUDE_STREAM_JSON: the
 // line-delimited stream-json I/O the daemon's interactive_runner path drives. The
 // wire shapes are hand-mirrored (not imported from internal/streamsup) to keep
-// this stand-in zero-dependency, exactly like interruptEndTurnLine. The inbound
+// this stand-in zero-dependency, exactly like interruptMarkerLine. The inbound
 // decode mirrors streamsup.userTurn (envelope.go); the outbound lines are
 // byte-compatible with what streamsup.Parser (parser.go) maps to
 // turnevent.TextChunk + turnevent.TurnEnd.
@@ -1369,7 +1407,7 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // With honorInterrupt false the control_request is ignored (the default the send /
 // new_session / queue riders depend on staying byte-identical). The mode is stateless:
 // it emits an interrupted result on each interrupt control_request.
-func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt bool) {
+func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1382,6 +1420,14 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt bool) {
 			if text, ok := userTurnText(b); ok {
 				turn++
 				msgID := fmt.Sprintf("m%d", turn)
+				// The bogus rider emits its two unmappable shapes BEFORE the real
+				// reply, so a test that waits on the reply has necessarily already
+				// seen them — no ordering race to tune.
+				if emitBogus {
+					if werr := writeBogusLines(w, msgID); werr != nil {
+						return
+					}
+				}
 				// Default mode ends the turn (echo + result{success}); interrupt mode
 				// echoes ONLY, withholding the result so the turn stays in flight.
 				var werr error
@@ -1474,6 +1520,44 @@ func writeAssistantEcho(w io.Writer, msgID, text string) error {
 		},
 	})
 }
+
+// writeBogusLines writes the two shapes the daemon's stream parser has no
+// mapping for: one top-level line of an invented type, and one assistant message
+// whose single content block is of an invented type. They exercise the two drop
+// sites that used to vanish into a debug log the production daemon never prints,
+// so an e2e can assert both now reach a client as unrecognized_message frames.
+//
+// The needles are deliberately distinctive strings so the assertion cannot pass
+// on some other frame's content.
+func writeBogusLines(w io.Writer, msgID string) error {
+	if err := writeJSONLine(w, map[string]any{
+		"type":   bogusLineType,
+		"detail": bogusLineNeedle,
+	}); err != nil {
+		return err
+	}
+	return writeJSONLine(w, map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"id":   msgID + "-bogus",
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type":   bogusBlockType,
+				"detail": bogusBlockNeedle,
+			}},
+		},
+	})
+}
+
+// The invented type names and needles the bogus rider emits. Exported-in-spirit
+// constants rather than inline literals so the e2e asserts against the same
+// strings the fake writes.
+const (
+	bogusLineType    = "fake_future_event"
+	bogusLineNeedle  = "bogus-line-needle"
+	bogusBlockType   = "fake_future_block"
+	bogusBlockNeedle = "bogus-block-needle"
+)
 
 // writeInterruptedResult writes a single result{subtype:"error_during_execution"}
 // line — the stream-json shape claude emits for an interrupt-terminated turn.

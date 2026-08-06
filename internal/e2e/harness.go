@@ -385,6 +385,27 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 // turn, writes one assistant text line (echoing the prompt) + one result line — the
 // wire the daemon's stream drain parses into the assistant_delta + turn_state the
 // client observes. ClaudeSessionsDir is left unset (stream mode opens no transcript).
+//
+// The daemon runs with -pyry-verbose, i.e. at slog.LevelDebug (cmd/pyry/main.go's
+// flag flips the stderr handler's level and does nothing else — no behavioural
+// branch keys off it, so no code path changes shape under test). This is for the
+// INSTRUMENT, not the daemon: M4 of the new_session spec attaches a window of the
+// captured daemon log to its failure record, and msgqueue's pending/hold retry
+// line logs at Debug deliberately ("a long legitimate wait must not spam the
+// operator log"), so at Info a drain LOOPING in that arm is indistinguishable from
+// one parked in silence — the two readings point at different defects. Raising the
+// harness's level turns that count into a measurement; raising the production call
+// site's would invert the dependency and degrade every operator's log (#1318).
+//
+// Applied to ALL callers rather than gated behind a parameter or a …Verbose
+// sibling. A bool would cost six call-site edits for no gain and leave two harness
+// variants behind, so a reader of a captured daemon log would first have to work
+// out which variant produced it before the log meant anything. One level across
+// every stream spec keeps the instrument singular. The cost is that the five
+// sibling specs capture chattier stderr — none of them reads h.Stderr — and that
+// Debug records now also enter the 200-entry `pyry logs` ring (control.SlogTee's
+// handler delegates Enabled to the stderr handler), shortening its history in
+// these specs; no test reads that either.
 func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
 	t.Helper()
 
@@ -419,6 +440,10 @@ func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL s
 		extraFlags: []string{
 			"-pyry-workdir=" + home,
 			"-pyry-relay=" + relayURL,
+			// Raises the stderr handler to slog.LevelDebug — see the doc comment.
+			// A pyry flag, so spawnWith places it before the "--" separator and it
+			// never reaches the supervised child's argv.
+			"-pyry-verbose",
 		},
 		extraEnv: envSet,
 	})

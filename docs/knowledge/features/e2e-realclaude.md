@@ -118,7 +118,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 - `resilience_test.go` (#382) — fifth consumer of the trio. **Protocol-resilience suite.** Four named top-level tests — one per production failure mode that pyry's supervisor must interpret as a structured signal: `TestRealClaude_BashTool_NonZeroExit` (Bash exits non-zero → tool_result with `is_error=true` + trailer `subtype="success"`), `TestRealClaude_PrematureStdinClose` (write user-turn envelope, close stdin, assert claude exits 0 within 60 s — the exact streamrunner production pattern), `TestRealClaude_MalformedStreamJSON` (garbage stdin → non-zero exit + parse-shaped stderr keyword), `TestRealClaude_LargePromptNearContextWindow` (~52 KB prompt → success-without-overflow-shaped-stop-reason OR non-success trailer with `ExitCode != 0`; "neither" is the failure mode). Each test pins a **structured exit signal** (exit code, JSONL event, or stderr substring) under a bounded timeout — a hang IS the failure mode being guarded against, so deadline expiry is itself an assertion target. **Two tests bypass pyry** (PrematureStdinClose, MalformedStreamJSON) and exercise `claude` directly via `exec.CommandContext` so the test can control raw stdin bytes and observe claude's untransformed exit shape; file-local helpers `resolveClaudeBin` (with the 2026-05-16 fork-bomb defense: refuse `PYRY_CLAUDE_BIN == os.Args[0]`), `directClaudeArgs`, `runClaudeDirect`, and `buildUserTurnEnvelope` own that surface — promoted to `fixtures.go` only if a third raw-exec test materialises. **Stderr predicate is OR-of-keywords** (`{"json","parse","input","format","envelope"}` case-insensitive), not a hard-coded phrase — pinning specific prose would couple the test to claude's diagnostic copy. Test 4's disjunction is structured as a single `if !branchA && !branchB { t.Fatalf(...) }` so the failure message lists both branches' requirements on "neither". Two-field extension to the `contentBlock` struct in `tool_loop_test.go` adds `Content json.RawMessage` (tool_result body lives in `content`, not `text`; can be string OR array of nested blocks per stream-json contract — `RawMessage` holds either shape) and `IsError bool` (`is_error` field on `tool_result` blocks, verified against 19 occurrences in `internal/agentrun/jsonl/testdata/*.jsonl`). Three real haiku calls per run (Test 3 rejects before reaching the model and incurs zero API cost), ~$0.08 total with cache warm. **`t.Parallel()` is NOT called** — matches the existing realclaude convention. See [`codebase/382.md`](../codebase/382.md) for the design rationale.
 - `per_agent_test.go` (#381) — fourth consumer of the trio. **Per-dispatcher-role smoke suite.** Five named top-level tests (`TestRealClaude_PO_RoleLoop`, `TestRealClaude_Architect_RoleLoop`, `TestRealClaude_Developer_RoleLoop`, `TestRealClaude_CodeReview_RoleLoop`, `TestRealClaude_Documentation_RoleLoop`) — one per dispatcher role — exercising each role's `(allowedTools, system-prompt shape)` combination end-to-end. Motivated by the failure mode the prior tests don't cover: per-role drift (the 2026-05-14 `/doctor` bug failed all five roles together; the next failure of this class will likely hit one role only). Five separate top-level functions give five independent pass/fail signals on the nightly board; do NOT factor into a table loop. File-private `dispatcherBaseTools []string` mirrors `agents/dispatcher/src/dispatch.ts:1183` from the sibling `agent-dispatcher` repo (21 entries: Bash/Read/Write/Edit/Glob/Grep/TodoWrite + 4 qmd + 2 context7 + 7 codegraph; **no figma entries** — the dispatcher source-of-truth literal has none, despite the ticket-body parenthetical, see #381's lessons-learned). `dispatcherAllowedToolsForRole(role)` returns `dispatcherBaseTools` for po/developer/documentation and `dispatcherBaseTools + "Agent"` for architect/code-review, mirroring `dispatch.ts:1184-1186`'s `needsAgent` membership check; cite comments above both are the renumber-detection breadcrumbs. **Defensive `make+copy` on both branches** so a caller's slice mutation cannot corrupt the package-level constant. Unknown role panics (programmer error at the 5 call sites, not a runtime condition). System prompts are deliberate 1-2 line stand-ins (e.g. PO: "You are a Pyrycode product-owner agent. You refine issue bodies. Use Read/Edit/qmd/codegraph for research."), NOT verbatim copies of `agents/<role>/CLAUDE.md` — the goal is to exercise pyry's agent-run wiring with dispatcher-shaped inputs, not to validate operator prompts (which are large, frequently revised, and would make the suite both expensive and falsely sensitive to prompt-edit churn). User prompts are role-appropriate one-shot tasks ("Rewrite this one-line ticket title…", "Implement a Go function `Add(a, b int) int`…", "Summarize this one-line commit message…") that resolve in ≤4 turns with haiku/low and produce a single end-of-turn assistant text block (no tool_use); each explicitly constrains reply shape so haiku doesn't drift into exploratory tool-use. Shared `runRoleSmokeTest(t, role, systemPrompt, userPrompt)` body consolidates the six identical assertions: `ExitCode == 0`, `SessionID != ""`, `parseResultTrailer(result.Stdout)` succeeds, `PermissionDenials` empty (nil-or-zero-length, pointer-vs-empty distinction from #376 preserved), `NumTurns >= 1` (single-shot no-tool minimum; #376's `>= 2` is tool-loop specific), and the LAST `assistant`-kinded JSONL event has `EndOfTurn == true && TextChars > 0`. Shared helper is NOT a table loop — each `Test…_RoleLoop` is its own top-level function, so per-role failure attribution surfaces on the nightly board. Reuses the package-private `parseResultTrailer` + `resultTrailer` from #376 directly (second consumer; no fixture-export widening) and `jsonlPathFor` from #364 (fourth consumer). File-local `truncate([]byte) string` (1 KiB cap, suffixed `... (truncated)`) used in failure messages — matches the inline pattern from #376/#365 but is extracted file-locally because the five assertion blocks invoke it 2-3 times each. `RunOpts: MaxTurns=4, Effort="low", Model="claude-haiku-4-5"`, no `Timeout` override (5-minute default is the runaway guard, not the SLO). Production dispatch uses opus/high; this deliberate haiku/low downgrade is the cost/coverage trade — a future nightly opus suite is a separate file, not an additive flag. `t.Parallel()` is NOT called — matches the existing realclaude convention, keeps cost predictable, avoids API rate-limit interactions. ~$0.10 total per run (5 calls, cache warm); ~30 s per test, ~150 s aggregate wall time. See [`codebase/381.md`](../codebase/381.md) for the design rationale.
 - `large_tool_output_test.go` (#423) — tenth consumer of the trio. **Large tool-output regression sensor (>64 KiB on one line).** One named test (`TestRealClaude_LargeToolOutput_ExceedsDefaultScannerBuffer`) drives a real claude session through a single Bash invocation producing ~80 KiB of stdout in one `tool_result` content block and pins four contracts: trailer reports `subtype="success"` + `stop_reason="end_turn"`, the on-disk JSONL `tool_result` content block exceeds 70 KiB (headroom under the ~80 KiB target), pyry's stdout-forwarded `tool_result` content block has **byte-equal length** to the on-disk twin (the regression sensor — the emitter is contracted to re-emit `ev.Raw` verbatim per `internal/agentrun/streamjson/emitter.go:149-150`, so any non-zero delta means a scanner truncated the forwarding path), and stderr does NOT contain `bufio.Scanner: token too long`. **Orthogonal to #421's long-session test**: that test fires when many short lines accumulate; this one fires when a single line on pyry's stream-json stdout exceeds the 64 KiB stdlib `bufio.Scanner` cap. Today only `permission_protocol_spike_test.go:133` extends a Scanner past the default; if that buffer extension is ever dropped — or if a similarly truncating scanner is wired into pyry's stream-json forwarding path — large tool output gets silently corrupted; this test fails. **Deterministic prompt** (`printf '%80000s' '' | tr ' ' 'A'` — exactly 80,000 literal `A` characters on a single line) preferred over `/dev/urandom` per the AC so any future fixture-snapshot work doesn't churn; the `"exactly as given"` wording in the system prompt is load-bearing because paraphrasing risks fewer bytes. `RunOpts: MaxTurns=2, Effort="low", Model="claude-haiku-4-5", AllowedTools=["Bash"]`. **Why a local scanner — not a call to `parseResultTrailer`**: the shared `parseResultTrailer` (`tool_loop_test.go:211`) uses the stdlib's 64 KiB default; with an 80 KiB `user`/`tool_result` line on stdout **before** the trailer line, the default scanner returns `Scan() == false` (no error) on the long line, exits the loop, and returns `"no type:result line in stdout"` — a false negative that would mask the very regression this test exists to catch. The new file's `findResultTrailer` walks pre-scanned 1 MiB-capped lines from `scanLargeStdoutLines` instead (canonical extension pattern: `scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)`, mirrors `permission_protocol_spike_test.go:133`). `scanner.Err()` is propagated so a future buffer-exhaustion regression (a line above 1 MiB) fails loudly rather than silently truncating. **Exact byte-length match, not a tolerance band** — the emitter writes `ev.Raw + '\n'` verbatim, so the disk-side and stdout-side bytes are byte-identical; comparing `len(stdoutContent) == len(jsonlContent)` is the strongest possible assertion and any non-zero delta IS the regression. **Invariant to `Content` shape**: claude may emit `tool_result.content` as either a bare JSON string OR a nested `[{type:"text",text:"..."}]` array; both shapes are byte-equal through `Emit`, so comparing raw `json.RawMessage` byte lengths between disk and stdout is shape-invariant — the test does NOT decode `Content` further. Four file-local helpers (`scanLargeStdoutLines`, `findResultTrailer`, `findBashToolResultBlock`, `findToolResultContentByID`, ~70 LoC combined) and two file-scope prompt constants (`largeToolOutputSystemPrompt`, `largeToolOutputUserPrompt`); helpers stay file-local until a second test needs the same shape, mirroring `resilience_test.go`'s precedent and #422's `spawnPyryAgentRun`/`processesInProcessGroup`. **Reuses unchanged** (no new fixture-package surface, no struct extensions): `WithWorktreeAuthenticated` (tenth consumer), `RunPyryAgentRun`/`RunOpts`/`RunResult`, `ReadJSONL`+`JSONLEntry`, `parseContentBlocks`+`contentBlock` (sixth consumer — `Content json.RawMessage` extended in #382 is the load-bearing field that makes the byte-length comparison work), `resultTrailer` (the local `findResultTrailer` decodes into it directly; the `parseResultTrailer` function itself is bypassed for the 64 KiB-cap reason above), `jsonlPathFor` (tenth consumer), `truncate` (sixth consumer). Failure-message discipline distinguishes "test setup wrong" (model paraphrased / refused — sharpen the system prompt, bump MaxTurns to 3) from "production broken" (the regression sensor named explicitly, with the emitter line cited so a future PR has to update both the assertion and the contract together). Forward-defensive stderr substring tripwire (`!bytes.Contains(result.Stderr, []byte("bufio.Scanner: token too long"))`) mirrors `long_session_test.go:135-139` — pins the literal stdlib error text verbatim (paraphrasing would silently disable it). One real haiku call per run, ~$0.02 (large `tool_result` inflates token count above peer haiku-low tests but is bounded). `t.Parallel()` is NOT called — matches the existing realclaude convention. ~252 LoC including the package-level comment block, two prompt constants, and inline rationale, zero edits to `fixtures.go` or any peer test file, zero production-source changes. See [`codebase/423.md`](../codebase/423.md) for the design rationale.
-- `sigterm_mid_tool_use_test.go` (#422) — ninth consumer of the trio. **SIGTERM-mid-tool_use cleanup regression guard.** One named test (`TestRealClaude_SigtermMidToolUse`) pins three production invariants together when pyry receives SIGTERM with a Bash subprocess in flight: (a) no orphan subprocess survives pyry's exit, (b) the on-disk session JSONL ends at a complete envelope boundary, and (c) pyry exits within 5 s of SIGTERM. Drives `pyry agent-run --allowed-tools Bash --max-turns=2` with a prompt that forces a single `sleep 30` Bash invocation, sleeps 3 s (long enough for claude to write the `tool_use` envelope to disk and fork Bash), sends SIGTERM, and runs `cmd.Wait` in a goroutine raced against `time.After(5 * time.Second)`. The 5 s deadline is the production contract — `internal/agentrun/streamrunner/runner.go:40`'s `killGrace = 5 * time.Second` — not an arbitrary budget; deadline expiry IS the regression being guarded against. On timeout, `cmd.Process.Kill` is called and the wait channel is drained under a 2 s ceiling before `t.Fatalf` reads the stderr buffer (happens-before via the drained `Wait`). **Process-group orphan check, not direct-children**: `cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}` makes pyry its own process-group leader (`pgid == pid`); after `cmd.Wait` returns, `pgrep -g <pgid>` catches reparented orphans that `pgrep -P <pyry-pid>` would miss (claude and its Bash descendant are reparented to init/launchd at the moment pyry exits, so the parent-pid linkage is gone before the test can observe it). Architect-picked shape "most reliable on macOS + Linux"; the test filters out `pgid` itself from the result list (defense against transient zombie visibility) and salvage-kills the group via `syscall.Kill(-pgid, SIGKILL)` on a positive hit + via `t.Cleanup` as defense-in-depth from spawn time. **JSONL terminal-shape pin: branch B** (clean stream truncation at a complete envelope boundary), chosen over branch A (structured trailer with non-success subtype) because the on-disk JSONL is claude's session-state file for `--continue`, NOT a stream-json result stream — there is no evidence claude flushes a structured trailer line to disk on signal. Assertions: byte-tail check (`jsonlBytes[len-1] == '\n'` — the ONLY way to surface a half-written line; `ReadJSONL` silently retains trailing partial bytes per `jsonl/reader.go:188-262`), Bash `tool_use` envelope present (assistant entry with `{Type:"tool_use", Name:"Bash", ID:!=""}` content block), matching `tool_result` absent in subsequent user entries. Each failure message distinguishes "test setup wrong" (raise/lower pre-SIGTERM sleep) from "production broken" (real hang, real append-discipline drift). If a future probe reveals branch A holds, flip the tool_result assertion to "find a result envelope with `subtype != success`" — same surface, opposite sign; the contract that the shape is **pinned** is unchanged. Two file-local helpers (`spawnPyryAgentRun`, `processesInProcessGroup`, ~35 LoC combined) and two file-scope prompt constants (`sigtermSystemPrompt` mirrors the anti-chain wording from `longSessionSystemPrompt`; `sigtermPrompt` is `"Use the Bash tool to run \`sleep 30\`. Do nothing else."`). `RunPyryAgentRun` is unusable here because it runs to completion synchronously and provides no PID access during the run; `spawnPyryAgentRun` constructs the same eight-flag argv but does not wait — per the ticket's "Technical Notes" guidance and `resilience_test.go`'s `resolveClaudeBin`/`runClaudeDirect` precedent, the helpers stay file-local until a second test needs the same shape. **Reuses unchanged** (no new fixture-package surface, no struct extensions): `WithWorktreeAuthenticated` (ninth consumer), `ReadJSONL`, `ensurePyryBuilt`, `parseInitSessionID`, `parseContentBlocks`+`contentBlock` (fifth consumer of the post-#382 struct — `Name`/`ID`/`ToolUseID` cover exactly what assertions need), `jsonlPathFor` (ninth consumer), `truncate` (fifth consumer). Same family as the 2026-05-16 fork-bomb incident (`ca8b688`, different shape, same cleanup-paths-leaking class) and the SIGTERM-mid-tool_use cell of the same resilience matrix `resilience_test.go` (#382) opened. One real haiku call per run, ~$0.005 with cache warm (lower than peer haiku-low tests because the run is truncated at SIGTERM before claude generates the final response turn — only the `tool_use` envelope is billed). `t.Parallel()` is NOT called — matches the existing realclaude convention. ~280 LoC including the package-level comment block and inline rationale, zero edits to `fixtures.go` or any peer test file, zero production-source changes. See [`codebase/422.md`](../codebase/422.md) for the design rationale.
+- `sigterm_mid_tool_use_test.go` (#422, re-specified twice by #1219) — ninth consumer of the trio. **SIGTERM-mid-tool_use cleanup regression guard.** One named test (`TestRealClaude_SigtermMidToolUse`) pins four production invariants when pyry receives SIGTERM with a Bash subprocess in flight: (1) full-subtree cleanup — no orphan claude or Bash descendant survives pyry's exit; (2) the on-disk session JSONL ends at a complete envelope boundary; (3) pyry exits within 5 s of SIGTERM (`internal/agentrun/streamrunner/runner.go:40`'s `killGrace` — the production contract, not a test-tuning budget: deadline expiry IS the regression); (4) the signal genuinely landed mid-tool_use — the precondition that makes 1–3 mean anything. **#1219 replaced the fixture command and invariant 4's discriminator twice** after claude's Bash-tool policy changed out from under both; see [`codebase/1219.md`](../codebase/1219.md) for the fragility history (`sleep 30` → refused by claude 2.1.158 → `tail -f /dev/null` → backgrounded-on-timeout by claude 2.1.220 → the current FIFO-owned shape) and the file's own header, which is the authoritative running record for any future defeat. **Current mechanics**: `holdFIFO` inverts ownership of the open window — the test `mkfifo`s a FIFO and blocks a goroutine on `open(O_WRONLY)`; claude's Bash call is `cat <fifo>`, which blocks in `read()` the instant the rendezvous with the test's open completes, and can only unblock via the test's own `t.Cleanup` release (the `*os.File` is never exposed to the test body). An event-driven wait (FIFO rendezvous → subprocess appears as a pyry descendant → Bash `tool_use` flushed to the on-disk JSONL) times the SIGTERM instead of a fixed sleep, so invariant 4's precondition holds regardless of claude version speed. Invariant 1's orphan check now walks claude's descendant process groups (claude runs Bash two levels below pyry, so `pgrep -g <pyry-pgid>` alone can't see it); invariant 4b's terminal-shape check is `classifyBashToolResult`, a four-way classifier (`toolResultAbsent` / `toolResultInterrupted` / `toolResultUnbounded` / `toolResultBounded`) that **rejects only on positive evidence claude's own bound ended the call**, read from two surfaces — `toolUseResult.backgroundTaskId`/`timedOutAfterMs` (claude's client-default timeout branch, #1223) and `input.timeout`/`run_in_background` (the model-chosen-bound branch, 2026-07-27) — because neither surface alone covers both of claude's bounding mechanisms. Every other shape accepts, including claude's teardown-interruption marker (`interruptedByShutdown: true`) and an ordinary non-zero-exit result claude writes when pyry's own reaper wins a teardown race against claude's signal handling (the 2026-07-29 defeat that flipped the polarity a second time — keying acceptance on the *absence* of a claude-internal flag accused pyry of doing its job correctly). A pre-SIGTERM JSONL snapshot backs the post-exit check with different fabric — a pure timing fact, no claude field — since a bounding defeat's `tool_result` is always written before the signal. `TestClassifyBashToolResult_ProbeEnvelopes` (credential-free, 11 fixture rows including verbatim probe captures from both the 2026-07-27 and 2026-07-29 live defeats) is the classifier's oracle and the AC2 gate. **Reuses unchanged**: `WithWorktreeAuthenticated` (ninth consumer), `ReadJSONL`, `ensurePyryBuilt`, `parseInitSessionID`, `parseContentBlocks`+`contentBlock`, `jsonlPathFor`, `truncate`. Same family as the 2026-05-16 fork-bomb incident (`ca8b688`, different shape, same cleanup-paths-leaking class). One real haiku call per run, ~$0.005 with cache warm. `t.Parallel()` is NOT called — matches the existing realclaude convention. Grew ~280 LoC → ~1500 LoC across the two reworks; zero production-source changes in any of the three. See [`codebase/422.md`](../codebase/422.md) for the original design and [`codebase/1219.md`](../codebase/1219.md) for the rework.
 - `long_session_test.go` (#421) — eighth consumer of the trio. **Long-running session JSONL append integrity (≥10 turns).** Closes the long-turn-count gap left by the prior suite (peer tests cap at `MaxTurns ∈ {1,2,3,4}`): a regression in the multi-turn append path — Scanner buffer downgrade, off-by-one trailer write, trailing-newline drift, scanner reset across turn boundaries, buffer flush gap swallowing the last event — would not have been caught by any test that runs today. Single `TestRealClaude_LongSessionJSONLIntegrity` seeds the worktree with a 10-line `numbers.txt` (`"1\n2\n…\n10\n"`, `0o600`) and drives a real `claude` session through ten distinct single-command Bash operations against it (`wc -l`, `head -n 3`, `tail -n 3`, `sort`, `uniq`, `cat`, `grep 5`, `wc -c`, `awk '{s+=$1} END {print s}'`, `ls -l`) with an anti-chain steering paragraph reused from `budget_test.go`'s `maxTurnsSystemPrompt` shape (count bumped from 5 to 10, `error_max_turns` assertions removed). `RunOpts: MaxTurns=12, Effort="low", Model="claude-haiku-4-5", AllowedTools=["Bash"], Timeout=10 * time.Minute` — `MaxTurns=12` is deliberate 2-turn headroom above the ≥10 floor, `Timeout` bumped from the 5-minute `RunPyryAgentRun` default to absorb cold-network/queue tail latency without inflating the success-path budget on short tests. Six sequential assertions: `ExitCode == 0`, `SessionID != ""`, `parseResultTrailer` succeeds, `trailer.NumTurns >= 10` (failure message names the prompt-design recourse — "expand the prompt or strengthen anti-chain steering — do NOT lower the threshold" — at the point of failure so the next maintainer doesn't paper over the regression by lowering the constant), single-pass JSONL walk asserting `endOfTurnCount >= 10` on `e.Kind == "assistant"` entries AND that the last `assistant` entry satisfies `EndOfTurn && TextChars > 0`, and the **forward-defensive negative tripwire** `!bytes.Contains(result.Stderr, []byte("bufio.Scanner: token too long"))`. The Scanner tripwire pins the literal stdlib error text verbatim (paraphrasing would silently disable it) and is expected to pass trivially today — its job is to fire the day someone wires a stdlib `bufio.Scanner` into pyry's production stdout/stderr path WITHOUT bumping its buffer, hits a long claude line in this multi-turn run, and the regression would otherwise land silently; the failure message points the maintainer at the fix (`tool_loop_test.go:210` precedent: bump to 1 MiB). `ReadJSONL`'s underlying `jsonl.NewReader` has a 16 MiB cap (`internal/agentrun/jsonl/reader.go:27-30`), so the read path is structurally safe — the tripwire targets the OTHER stdout/stderr Scanner surface, not the read path. The user prompt ends with an explicit "After all ten results, summarize what you saw in one short sentence" — the summary tail nudges the model to emit one more `assistant`-kinded `end_turn` text block, giving the last-event-EndOfTurn assertion something to land on without depending on the model spontaneously producing a closing turn (without it, the run still completes successfully but the LAST assistant entry can be a `tool_use`-only message with `TextChars == 0`, failing the assertion on a non-regression). Reuses `WithWorktreeAuthenticated` + `RunPyryAgentRun` + `ReadJSONL` + `parseResultTrailer` + `jsonlPathFor` + `truncate` unchanged — zero new helpers, zero exported types, zero edits to `fixtures.go` or any peer test file. **Eighth consumer of `WithWorktreeAuthenticated`/fixture trio**, **sixth consumer of `parseResultTrailer`**, **eighth consumer of `jsonlPathFor`**, **fourth consumer of `truncate`**. One real haiku call per run, ~$0.05–$0.10 (higher per-test than peers because of the turn count, but bounded — same order of magnitude as `budget_test.go`'s cache-hit + max-turns pair). `t.Parallel()` is NOT called — matches the existing realclaude convention. The seeded-Bash variant was chosen over the text-only fallback ("list 10 facts about Helsinki, one per turn") because ten distinct shell commands give the model ten concrete, separable tasks (`wc -l` ≠ `head -n 3` ≠ `tail -n 3`) that resist collapsing into a single combined turn even under brevity pressure; the fallback stays documented as recourse if a future haiku revision collapses the Bash prompt. ~140 LoC including the two prompt constants and inline comments, zero production-source changes. See [`codebase/421.md`](../codebase/421.md) for the design rationale.
 - `doctor_poisoning_regression_test.go` (#487) — eleventh consumer of the trio. **`/doctor` prompt-injection regression sensor.** One named test (`TestRealClaude_DoctorPoisoningRegression`) guards the contract that the per-spawn settings JSON pyry writes is one claude accepts at startup. A regression means claude rejected the JSON, prepopulated its `/doctor` repair template into the user input buffer, and processed THAT instead of pyry's prompt — the #487 failure mode that was alive across the [`ptyrunner`](ptyrunner-package.md) cutover (#470) because [`settings.WriteSettings`](agentrun-settings-subpackage.md) was emitting the invalid `permissions.defaultMode:"deny"` literal. Detector: walk JSONL events for the first `Kind == "user"` entry, decode its `Raw` into a content string (coercing both observed claude shapes via the file-local `decodeUserContent` helper: string literal AND `[{type:"text", text:"..."}]` array), assert the content does NOT contain the verbatim `/doctor` template opening substring `"Help me fix the issues reported by /doctor below."` (observed in the ticket's reproduction `out.jsonl`). Defence-in-depth: requires at least one `assistant` event in the JSONL (empty assistant set under a non-poisoned session indicates a different upstream failure that masks the regression-guard's signal — `t.Fatalf` with diagnostic context, not silent pass). **Malformed-line policy mirrors `bashInvokedInRaw`** at `allowed_tools_enforcement_test.go:74-76` — a JSONL line that fails to parse into the minimal `{Message: {Content: ...}}` shape is skipped silently; one malformed line must not turn a PASS into an inconclusive. `RunOpts: AllowedTools=["Read"], MaxTurns=1, Effort="low", Model="claude-haiku-4-5"`. Failure diagnostic includes the verbatim user-entry content (truncated to ~512 bytes with `"... (truncated)"` suffix), the JSONL path, and the operator-visible direction `"claude is rejecting the per-spawn settings JSON at startup — see #487"` — content is operator-supplied test data under a tempdir-pinned HOME so the dump is safe to print. Does NOT assert on `stop_reason: end_turn` (that AC item is satisfied by the manual reproduction in the ticket Context, not by the automated test — pinning it would couple the test to upstream model-behaviour detail beyond the contract being guarded). One real haiku call per run (~$0.01). **Reuses unchanged** (zero fixture-package surface changes): `WithWorktreeAuthenticated` (eleventh consumer), `RunPyryAgentRun`/`RunOpts`/`RunResult`, `ReadJSONL`+`JSONLEntry`, `jsonlPathFor` (eleventh consumer). Imports `encoding/json`, `strings`, `testing` — no internal package imports beyond the realclaude fixture surface. `t.Parallel()` is NOT called — matches the existing realclaude convention. **Post-mortem note**: `ptyrunner_byte_equivalence_test.go` (#482) should have caught the invalid literal but didn't — its `WithWorktreeAuthenticated` gate silently skipped on Max-only environments (no `ANTHROPIC_API_KEY`); the fixture-wide auth-skip cleanup to recognise Max-plan credentials is the architectural follow-up. ~149 LoC including the package-level comment block, zero edits to `fixtures.go` or any peer test file, zero production-source changes (the production fix is the single-literal flip in `internal/agentrun/settings/settings.go:72`). See [`codebase/487.md`](../codebase/487.md) for the design rationale.
 - `budget_test.go` (#385) — seventh consumer of the trio. **Budget guardrails.** Two top-level tests pinning cost-relevant guarantees the suite did not previously exercise end-to-end. `TestRealClaude_CacheHitWarmsAcrossRuns` runs the same `RunOpts` skeleton twice through `RunPyryAgentRun` against `WithWorktreeAuthenticated(t)` and asserts the second invocation's trailer reports `Usage.CacheReadInputTokens > 0` (primary, `t.Fatalf`) — pinning Anthropic prompt-cache alignment within the 1-hour TTL when (system-prompt, allowed-tools, model, effort) are identical. A regression that breaks cache-key alignment (dynamic content in the system prompt, per-invocation tool-list churn) will show `== 0` here. A diagnostic-only check on the first run's `CacheCreationInputTokens > 0` uses `t.Errorf` (not `t.Fatalf`) so a sub-threshold system prompt surfaces as a soft signal rather than masking the primary on a passing run; the interpretation matrix (0+pass vs. 0+0) is documented in a comment above the check. `cacheHitSystemPrompt` is a deterministic 5-sentence string concatenation (~300 tokens) sized to clear Haiku 4.5's ~2048-token implicit-cache minimum by margin; the doc comment names the "no dynamic content" constraint (date, run id) explicitly because that is the regression class the test catches. `TestRealClaude_MaxTurnsHonored` runs `pyry agent-run --max-turns=2` against a prompt that natural-completion would require ≥5 turns (numbered 5-line Bash sequence with explicit "do NOT combine" guidance) and asserts five fields on the trailer: `Subtype == "error_max_turns"`, `TerminalReason == "max_turns"`, `NumTurns == 2` (exact — off-by-one fires here), `StopReason != "end_turn"`, `IsError == true`. **`ExitCode == 0` is correct** — `pyry agent-run` exits 0 on a successfully-emitted result trailer regardless of trailer `is_error`; the budget-exhaustion signal lives in the trailer fields, not the subprocess exit code, and a code comment pins this so a future maintainer doesn't "fix" the assertion to `!= 0`. Tool-call-collapse risk pinned in a comment above `maxTurnsPrompt`: if a future haiku revision is smart enough to fire all five `echo`s in one tool_use block (or otherwise complete in ≤2 turns naturally), the assertions fail loudly and the right fix is to bump the prompt to force more turns (e.g. 8 sequential `read X.txt` calls), not to weaken the assertion. Three-field extension to the `resultTrailer` struct in `tool_loop_test.go` adds `IsError bool`, `TerminalReason string`, and `Usage resultTrailerUsage` (plus the new `resultTrailerUsage` sub-struct emitting all four token-count fields); all `omitempty`-tagged so pre-#385 consumers (#376/#381/#382/#384) decode unchanged. **Fifth consumer of `parseResultTrailer`**. File-local `truncateStdout([]byte) string` mirrors the inline pattern from `tool_loop_test.go:127` (the existing file-local `truncate` from #381 stays untouched because the spec forbids touching `fixtures.go` and the existing helper is its own file's private). `RunOpts`: cache-hit uses `MaxTurns=1, AllowedTools=["Read"]`; max-turns uses `MaxTurns=2, AllowedTools=["Bash"]`; both `Effort="low", Model="claude-haiku-4-5"`. Three real haiku calls per run (2+1), ~$0.04 total with cache warm, matching the AC estimate. `t.Parallel()` is NOT called — matches the existing realclaude convention; also load-bearing on the cache-hit test where concurrent runs would muddy the "cache warmed by run 1 specifically" diagnostic. ~199 LoC, zero edits to `fixtures.go`, zero production-source changes. See [`codebase/385.md`](../codebase/385.md) for the design rationale.
@@ -422,6 +422,899 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (`maxRetryDenies`) and `perTurnReplyBudget` wall-clock, each with a distinct
   diagnostic. No content/echo assertion. Zero production files touched. Split
   from #1083. See [`codebase/1175.md`](../codebase/1175.md).
+- `interactive_stream_new_session_test.go` (#1174) — real-claude cross of
+  the fakeclaude sibling #1137: on the stream-json runner, `new_session`
+  rotates the bootstrap session id AND `streamsup.Runner.RestartFresh`
+  spawns a genuinely fresh live `claude` child under the rotated id, not a
+  `--resume`. Five milestones: M1 turn-1 liveness (#1153's
+  `drainForCompletedTurn`), M2 on-disk id rotation (#1031's actuation
+  loop), M3 client-observed `session_transition{clear}` (#1154's
+  `drainForControlEvent`), M4 turn-2 accepted (**ack only** —  a
+  phone-side delta would hang, the drain gate's sink tag is fixed at
+  runner construction and drops post-rotation deltas, #1081 out of
+  scope), M5 a fresh `<idAfter>.jsonl` transcript appears alongside the
+  untouched `<idBefore>.jsonl` (the word-independent, fake-unregressable
+  fresh-spawn proof; transcript dir located empirically to sidestep the
+  #989 `canonicalCase` hazard). Zero production files touched. Split from
+  #1083; sibling leaves #1173 (multi-turn continuity), #1175 (permission
+  DENY). See [`codebase/1174.md`](../codebase/1174.md).
+- `background_trigger_probe_test.go` (#1223) — **evidence probe, not a
+  regression gate**; opt-in behind `PYRY_PROBE_BACKGROUND_TRIGGER=1` on top of
+  the package's normal auth skip (an ungated probe would burn ~9 live claude
+  turns on every `make preship`). Settles which environment lever
+  deterministically makes claude return a background handle under `pyry
+  agent-run`, so #1224–#1227 can be specified against a known trigger instead
+  of the model's discretion. Mechanism: the test `mkfifo`s a FIFO and holds
+  the write end open in a goroutine (`holdProbeFIFO`, release only in
+  `t.Cleanup`, never exposing the `*os.File`); claude's `cat <fifo>` Bash call
+  blocks on the read end and cannot complete on its own, so a matching
+  `tool_result` observed while the write end is held is a **structural**
+  signal that claude ended the call itself — not a match against claude's
+  result prose (the treadmill #563 and #1219 each paid for once). The same
+  property removes the timing race from the `ps -axo pid=,ppid=,pgid=`
+  snapshot: it is taken synchronously at the observation point, with liveness
+  self-evidenced via a `cmd.Wait` channel rather than `Signal(0)` (which
+  reports an unreaped zombie as alive). Row-table design over
+  `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` /
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` / model-set `run_in_background`, each
+  a `t.Run` subtest with its own `t.TempDir()`/`t.Setenv`/FIFO. **Result:**
+  `BASH_DEFAULT_TIMEOUT_MS` set low is the deterministic trigger (7/7 firing
+  reps across all rows that carry it); `BASH_MAX_TIMEOUT_MS` alone does not
+  fire (it caps what the model may set, and the model set no `timeout` in any
+  rep); `toolUseResult.timedOutAfterMs` is the only surface that discriminates
+  the timeout-expiry path from the model-set `run_in_background` path — the
+  process tree is byte-identical between them. Four credential-free
+  self-checks (FIFO hold/release, `ps`-parse, `input.timeout` projection) run
+  ungated. Zero production files touched. Kept (not deleted) because
+  #1224–#1227 all have to stage this same scenario. See
+  [`codebase/1223.md`](../codebase/1223.md) for the full lever table, the
+  live-run evidence, and two known gaps flagged by code review (SHOULD FIX,
+  not blocking) in the Bash-call selection and the env-arrival control's
+  absent/unread collapse.
+- `fifo_reader_liveness_test.go` (#1239) — **offline instrument, not a probe**;
+  no auth skip, no env gate, no live claude. Answers "is some process
+  currently holding this FIFO's read end?" with no pid and no `ps`, closing a
+  gap `holdProbeFIFO` alone leaves open: holding the write end proves a
+  command could not have *finished*, not that it is still *alive* — a killed
+  command leaves the same held write end. `fifoLiveRead(path)` returns a
+  three-valued `fifoLiveOutcome` (`reader-present` / `no-reader` /
+  `instrument-failed`, never a bare boolean) via `Lstat` → positive
+  `os.ModeNamedPipe` allowlist gate → `open(path, O_WRONLY|O_NONBLOCK)`
+  (success = reader present, `ENXIO` = no reader, everything else =
+  instrument failure). The allowlist gate is what closes the inverting
+  failure on the success arm: a bare open on `/dev/null` or a regular file
+  succeeds with no reader anywhere, which a regular-file blacklist would
+  misread as "reader present." Four offline self-checks prove: the read
+  flips on one FIFO across one reader's lifetime (`Kill()` alone does not
+  flip it — `Wait()`/reap does), the mode gate rejects every non-FIFO path
+  including `/dev/null`, every open errno except `ENXIO` yields
+  instrument-failed, and repeated reads don't perturb a blocked reader.
+  Zero production files touched. #1240 is natively blocked on this file and
+  calls `fifoLiveRead` at the instant it records `turn_state{idle}`. See
+  [`codebase/1239.md`](../codebase/1239.md) for the implementation detail and
+  two known gaps flagged by code review (SHOULD FIX, not blocking) in the
+  `Lstat`-arm errno assertion coverage and a stuttering `Detail` string.
+- `interactive_background_idle_probe_test.go` (#1240) — **evidence probe,
+  security-sensitive**; opt-in behind `PYRY_PROBE_INTERACTIVE_BG_IDLE=1` on
+  top of the package's normal auth skip. Stages one turn on the production
+  stream-json interactive daemon around a Bash command claude backgrounds on
+  timeout expiry (#1223's `BASH_DEFAULT_TIMEOUT_MS` trigger, reused unedited),
+  records every frame the phone receives in receive order via the new
+  `bgIdleRecordTurn` (the genuinely new code — both existing drains in this
+  file discard frames, so neither was reusable as a recorder), and takes
+  `fifoLiveRead` (#1239) twice on the same FIFO path across one command's
+  lifetime — pre-rendezvous (must read `no-reader`) and at the instant `idle`
+  is recorded — to re-prove the liveness flip in this rig rather than
+  inheriting #1239's self-check. Attribution of the held FIFO to the
+  backgrounded `tool_use` is closed by counting recorded frames
+  (`bgIdleCountFIFONaming`, 201-rune truncation tell), not a third pid
+  matcher. One extraction allowlist (`bgIdleFrameFromEnvelope`, five named
+  arms + a default that can hold nothing but `conversation_id`) keeps
+  claude's verbatim `unrecognized_message.Raw` and `assistant_delta.text` out
+  of the published artefact by construction. **Result, run live 2026-07-30
+  (3 reps, claude 2.1.220): yes — `turn_state{idle}` is emitted while the
+  backgrounded command is still alive**, and `turn_end.stop_reason` is
+  byte-identical (`"end_turn"`) between that case and a genuine finish, so a
+  client has no field to key on. Side finding: an `unrecognized_message`
+  frame appeared in all 3 reps specifically on the backgrounding path, filed
+  separately. Zero production files touched. Split from #1227; blocks #1241
+  (client-distinguishability baseline diff), which inherits this recorder.
+  See [`codebase/1240.md`](../codebase/1240.md) for the full finding, two
+  known gaps flagged by code review (SHOULD FIX, not blocking) in claude
+  version attribution and anomaly-flag verdict gating, and the live-run
+  timeline.
+- `background_reach_probe_test.go` (#1230) — **evidence probe, not a regression
+  gate**; opt-in behind `PYRY_PROBE_BACKGROUND_REACH=1`, reusing #1223's staging
+  rig verbatim (`background_trigger_probe_test.go` not edited; every new symbol
+  `reach`-prefixed against the concurrent `feature/1219` branch and sibling
+  #1231). Answers the predictive half of "does a backgrounded Bash command
+  outlive pyry": is it still a transitive child of claude's pid inside
+  `agentrun.ReapDescendantGroups`'s descendant-BFS reach, and would its process
+  group survive the reaper's three exclusions (`reap.go:52`) — one during-turn
+  snapshot, no teardown. **Content-first identification, not subtree-first**:
+  one full-table `ps -axww -o pid=,ppid=,pgid=,command=` matched in Go against
+  the run's FIFO path and session UUID across the whole process table — the
+  read #1223's subtree-first, base-name-only `probeAnnotateCommands` cannot
+  perform, and the one that could actually catch a re-parented survivor. Root
+  pinned content-first via `--session-id <uuid>` in claude's argv (the ptyrunner
+  path only), checked for agreement against the rig's positional
+  `probeWaitForDirectChild` guess rather than trusted on its own. Two
+  reachability reads off one integer snapshot — `reachChainUp` walking ppid
+  links up, `probeDescendantsFromPS` (#1223's, unedited) BFS-ing down —
+  disagreement recorded as an instrument fault, never a finding. Three-valued
+  match outcome (`matched` / `trigger-never-fired` / `fired-no-row-matched`),
+  established before any reachability claim is made. **Result (live run,
+  2026-07-30, claude 2.1.220):** the backgrounded `cat`/`zsh -c` pair IS
+  reachable from claude's pid, two hops down, and the zsh wrapper's process
+  group survives all three exclusions — the reaper *would* target it; whether
+  it actually dies is #1231's question. Redaction is structural
+  (`security-sensitive`, earned by this ticket): the raw argv table never
+  leaves one stack frame, no `-E`/`-e`-with-environment/`eww` anywhere,
+  commands capped at 512 bytes after matching, only the integer-column
+  snapshot is persisted verbatim. Three credential-free self-checks
+  (`TestReachMatchArgvRows`, `TestReachChainUp`, `TestReachBackgroundHandle`)
+  run ungated. Zero production files touched. See
+  [`codebase/1230.md`](../codebase/1230.md) for the full arithmetic, the
+  live-run evidence, and lessons from two rounds of code review (a MUST FIX
+  gating the reachability verdict on the integer snapshot's own read error,
+  plus a still-open SHOULD FIX on two record fields' finding-semantics).
+- `process_pin_liveness_test.go` (#1235) — **offline instrument, not a probe**;
+  no auth skip, no env gate, no live claude, no verdict about pyry — it is
+  depended on as code, not as evidence, by the live probes #1236 → #1237. Two
+  parts, both additive over #1230's `reach*` surface. **Exclusion-aware argv
+  scan (`pin*` prefix)**: `pinPartition` is a pure post-filter over
+  `reachMatchArgvRows`' own `(matches, total)`, splitting by a caller-supplied
+  `exclude map[int]string` so an instrument-owned pid is withheld with its
+  reason recorded rather than relying on a needle that happens not to collide
+  with it; every matched row is retained (`MatchCount` visible as `> 1` rather
+  than resolved to the first), and `reachMatchArgvRows`/`TestReachMatchArgvRows`
+  are untouched. **Four-valued per-pid liveness read**: `pinReadState(pid)`
+  execs a narrow `ps -p <pid> -o pid=,ppid=,stat=` (no descendant requirement —
+  a target re-parented to pid 1 reads like any other) and classifies into
+  `running` / `exited-but-not-yet-reaped` / `no-such-process` /
+  `instrument-failed`, never collapsing two of them. Branch order is the
+  contract: stderr, a `CommandContext` timeout's non-`ExitError` type, and
+  stdout arriving alongside an error are all checked before the
+  `no-such-process` default is reachable — closing the measured trap where a
+  bad `ps` column prints a keyword list on stdout next to a non-zero exit, and
+  the measured trap where a timeout-killed `ps` is byte-identical to a dead pid
+  on every field but the sign of its exit status. Zombie detection is
+  first-rune (`state[0] == 'Z'`), not equality — darwin emits `ZN`/`Z`, Linux
+  `Z+`, and an equality miss falls through to `running` silently, the one
+  direction this instrument must never fail in. Five credential-free
+  self-checks, including a one-subject one-lifetime flip
+  (`running` → kill-without-wait → `exited-but-not-yet-reaped` → wait →
+  `no-such-process`) that proves the exec wiring rather than only the
+  classifier. `security-sensitive`, earned by the column set's environment-read
+  prohibition (`pid=,ppid=,stat=`, no `-E`/`-e`-env/`eww`) backed by a
+  deterministic tripwire test, not just a doc comment. Zero production files
+  touched; blocked by, and reuses rather than rebuilds, #1230's argv scan. See
+  [`codebase/1235.md`](../codebase/1235.md) for the branch-order table, the
+  patterns this ticket's measured traps establish, and a code-review SHOULD FIX
+  (not blocking, deferred to #1236) on a self-check whose comment overclaims
+  what its assertion pins.
+- `teardown_liveness_test.go` (#1250) — **offline instrument, not a probe**; no
+  auth skip, no env gate, no live claude, no verdict about pyry — depended on
+  as code by the live rig #1251. Two additive parts over #1235's `pin*` and
+  #1239's `fifoLive*` surfaces, both unedited. **Reaper-log classifier
+  (`tdn*` prefix)**: `tdnClassifyReapLog(stderr, heldPGID)` is pure over bytes
+  and answers `held-pgid-in-reap-line` / `reap-line-without-held-pgid` /
+  `no-reap-line` (ambiguous by construction — `reap.go:64` guards the emit on
+  `len(reaped) > 0`, so silence means "reaped nothing" or "never fired," and
+  the `Detail` names both) / `instrument-failed`. Anchored on the reap
+  message's bare text as a string literal, never `msg="..."` — `runAgentRunPty`
+  passes no `Logger`, so `ptyrunner` falls back to `slog.Default()`, not the
+  `slog.NewTextHandler` the ticket body cited, and an anchor built against the
+  wrong handler would silently read "no line" on the only path that matters.
+  Membership decided over parsed integers via a key-boundary attribute match
+  (`tdnAttrIndex`), never a substring — closes both a false negative (`slog`
+  quotes `pgids=` the moment a second pgid appears) and its dual false
+  positive (held `77` inside the text of `pgids=[7788]`). **Real-`ps`
+  fail-safe premise (AC2)**: four mis-invocation arms assert
+  `len(exitErr.Stderr) > 0` read from `.Output()`'s own `*exec.ExitError`
+  (the exact channel `pinReadState` consumes) before requiring
+  `pinClassifyState` to return `instrument-failed` — proving, against real
+  bytes rather than #1235's hand-built errors, that branch 1 keeps every
+  broken invocation off the `no-such-process` verdict. The bad-column arm
+  uses four requested columns (not three) because `ps` silently drops the
+  unknown one and prints the rest, producing a row `pinStateRow` parses
+  *successfully* as a live pid; the out-of-range arm escalates a candidate
+  ladder until `ps` actually rejects one, rather than assuming a hard-coded
+  constant is out of range (macOS caps at 99999, Linux's default `pid_max` is
+  4194304). **Record + writer (AC3)**: `tdnRecord` composes
+  `pinStateOutcome`/`fifoLiveOutcome`/`tdnReapOutcome` with no new liveness
+  type and no verdict synthesized across them; `writeTdnArtifacts` emits
+  exactly one file (`teardown.json`, `0o600`) — "exactly one file" is itself
+  the redaction assertion, since the sibling writer's second file (a verbatim
+  `ps` snapshot) has no analog here. 22 credential-free self-checks, zero
+  SKIP. Zero production files touched. See [`codebase/1250.md`](../codebase/1250.md)
+  for the full implementation, the subprocess-boundary citation-swap pattern,
+  and a code-review SHOULD FIX (not blocking, deferred to #1251) on a
+  first-match self-check row that doesn't discriminate its own claimed
+  mutation.
+- `teardown_reap_capture_test.go` (#1253) — **offline instrument, not a
+  probe**; no auth skip, no env gate, no live claude. Drives #1250's
+  `tdnClassifyReapLog` with bytes captured from a *real*
+  `agentrun.ReapDescendantGroups` call, replacing that classifier's
+  hand-written string-constant fixtures with a live capture so a future
+  `slog` rendering change fails a test instead of silently making every
+  liveness answer read `no-reap-line`. Builds real two-level process trees
+  (test → re-exec'd parent → leaves, the parent required because
+  `setpgid` on a child rules out a shell) and captures whatever
+  `slog.Default()` emits during the reap via `log.SetOutput` — no `t.Parallel`
+  in the file, since that redirect is process-global and not reentrant. Proves
+  the capture *flips* within one harness: a killed group classifies
+  `held-pgid-in-reap-line`, a childless walk root emits no line at all and
+  classifies `no-reap-line`. A same-group sibling spared by `reap.go:52` is
+  asserted *still alive* at the instant its pgid reads absent from the line —
+  the unearned negative the instrument exists to refuse. Both renderings
+  (`pgids=[N]` unquoted, `pgids="[N M]"` quoted) come from real reaps and are
+  asserted to differ; the substring hazard is closed in the previously-untested
+  suffix direction (`88` vs `[7788]`). One new file rather than an edit to
+  `teardown_liveness_test.go`, both because that file's header declares itself
+  "pure over bytes" (this harness spawns real trees and issues real SIGKILLs)
+  and because #1251 had an in-flight +259/−40 diff to it at filing time. Every
+  pid a real reap produces is treated as a trust boundary: `tdnKillTree`
+  refuses `pid <= 1`/the test's own pid/pgid before any `syscall.Kill`, and the
+  multi-line report-file parse is all-or-nothing rather than treating a short
+  read as "not ready yet." 32 credential-free subtests, zero SKIP. Zero
+  production files touched; calls `tdnClassifyReapLog` and does not edit it.
+  See [`codebase/1253.md`](../codebase/1253.md) for the full implementation and
+  two non-blocking code-review NITs (a misleadingly-named loop variable, one
+  reasoned-not-measured comment).
+- `teardown_liveness_probe_test.go` (#1251) — **live rig, security-sensitive**;
+  opt-in behind `PYRY_PROBE_TEARDOWN_LIVENESS=1` on top of the package's normal
+  auth skip. The standing check that keeps #1231's hand-verified answer true:
+  stages one claude turn around #1223's `BASH_DEFAULT_TIMEOUT_MS` trigger, tears
+  pyry down through its real SIGTERM-to-pid path, and records whether the
+  backgrounded Bash command survived and by whose hand it died — calling
+  #1250's classifier/record, #1235's liveness read, and #1239's FIFO read as
+  code, not evidence. **The core idea is `tdnBeforeFault`**: the same
+  after-teardown liveness classifier is run at the before-snapshot too, and a
+  run whose before reading isn't uniformly `pinStateRunning` voids rather than
+  passes — an instrument hard-wired to `dead` cannot pass a live run for free.
+  Two structural discriminators separate the three readings that all look like
+  "dead after exit": the still-held FIFO (released only in `t.Cleanup`, after
+  the SIGTERM/wait/after-snapshot run inside the test body — the
+  `background_reach_probe_test.go:355-356` cleanup-ordering trap inverted on
+  purpose) rules out the command finishing on its own, and a pgid in the reap
+  line rules out dying alongside claude (`reap.go:56-62` skips `ESRCH` before
+  the append). `tdnRecord` widened rather than duplicated: `HeldPID` → `HeldPIDs`
+  (a slice — #1230's live run matched two rows on one needle), single
+  `ArgvScan`/`Liveness`/`FIFO` → paired `Before`/`After *tdnSnapshot`, plus
+  `ClaudeVersion`/`TeardownPath`/`RunnerFromEnv`/`RunnerFromArgv` provenance.
+  Disposition is a positive allowlist with one red arm
+  (`tdnDispositionLeaked`); a content re-match is dispositive only when the
+  after-liveness verdict is `pinStateRunning` — otherwise a zombie's
+  kernel-blanked argv would misfile as pid reuse. A ninth reject branch beyond
+  the spec guards teardown provenance itself: pyry exiting on its own before
+  the rig's SIGTERM would still read `dead-by-reaper` correctly but attribute it
+  to a `TeardownPath` that never ran. Repairs #1250's inherited SHOULD FIX (a
+  reap-classifier fixture row that didn't discriminate its own claimed
+  mutation) by swapping a concatenation order, verified red-then-reverted by
+  deliberate mutation. Deliberately does **not** reuse
+  `reachRunnerPathFromArgv` for the runner label — it keys on
+  `--append-system-prompt-file`, which the streamrunner path also emits, so
+  reuse would have silently mislabelled every stream-path record; the fresh
+  `tdnRunnerFromArgv` discriminates on `--session-id` vs. `--input-format`
+  instead. Live test named `TestRealClaude_TeardownLiveness` (not `TestTdn…`)
+  so it doesn't join #1250's zero-SKIP offline suite; three offline
+  self-checks (`TestTdnRunnerFromArgv`, `TestTdnDecideAfter`, `TestTdnPinHeld`)
+  do. 48 subtests, zero SKIP on `^TestTdn`; full package 216 PASS / 44 SKIP.
+  Zero production files touched. **The live half has not been run** — no
+  claude login in the dispatch environment; ticket carries `needs-real-claude`.
+  See [`codebase/1251.md`](../codebase/1251.md) for the full implementation and
+  two non-blocking code-review findings (a SHOULD FIX and a NIT, both deferred
+  to a future touch on this file).
+
+- `result_trailer_observation_test.go` (#1266) — **offline instrument, not a
+  probe**; ships the observation only, no verdict. Answers "when did pyry's
+  `{"type":"result",...}` trailer first become visible on stdout, and how late
+  might that observation be?" for #1267's downstream liveness classifier.
+  Two closed value spaces, neither collapsible into the other's zero value:
+  `trailSeen`/`trailAbsent`/`trailAborted` (what a pure scan, `trailScan`,
+  found) and `trailBoundFromMiss`/`trailBoundFromStart`/`trailBoundNone` (what
+  the staleness bound was measured from — `trailBoundFromStart` names the trap
+  where a first-poll match yields a duration that bounds nothing, because the
+  write may precede the poll loop entirely). Fixes a gap in the existing
+  `parseResultTrailer` (`tool_loop_test.go:216`, untouched, all nine call
+  sites keep today's behaviour) without touching it: that function discards
+  `scanner.Err()`, so a stdout line past `bufio.Scanner`'s 64 KiB default
+  (reachable — the trailer's `result` field is the last assistant message
+  verbatim) reads identically to a genuine absence; `trailScan` reads the
+  scanner error and reports the new `trailAborted` state instead. The cap
+  (`reachCapCommand`, `reachMaxCommandBytes = 512`) is applied only to the
+  retained verbatim `Line` copy, never to the bytes decoded into
+  `resultTrailer` — `result` sits sixth on the pinned wire order
+  (`emitter.go:456-468`) and `terminal_reason` last, so capping the raw line
+  would truncate inside `result` and destroy the field #1267 branches on;
+  `resultTrailer` has no `result` member, so the decoded value structurally
+  cannot leak the assistant payload regardless. `trailWaitForTrailer` polls
+  `probeSyncBuffer` on the existing `probePollInterval` (200 ms) and stamps
+  `now` **before** reading the buffer each iteration, which is what makes a
+  miss-derived bound an over-estimate of the true lateness rather than a
+  possible under-estimate wearing a bound's label. Purely additive, one new
+  file, zero production files touched; 11 subtests, 0 SKIP on
+  `-run '^TestTrail'`. See [`codebase/1266.md`](../codebase/1266.md).
+
+- `trailer_admissibility_test.go` (#1270) — **offline instrument, not a
+  probe**; two pure predicates that decide whether #1266's trailer scan and
+  #1253's reap-log attribution can support a claim, so #1271's downstream
+  classifier never has to. `trailGate(trailScanResult) trailGateResult` maps
+  onto a five-value positive allowlist (`trailGateUsable`/`NoTrailer`/
+  `ScanAborted`/`BudgetFired`/`OutOfContract`) and certifies a non-empty
+  terminal reason on the two arms that carry one.
+  `trailAdmitAttribution(tdnReapOutcome, certified string) trailAdmitResult`
+  maps the reap attribution onto a seven-value allowlist — one admissible
+  value (`trailAdmitProof`, requiring verdict `tdnReapHeldPGIDKilled`,
+  exactly one reap line, and a non-`max_turns` reason) plus five named voids
+  plus an out-of-contract value. Both open with a contract block ahead of
+  every real arm, so out-of-contract is a guard at the top, never a
+  fall-through default. The reap-side voids are outranked by the
+  budget-fired void (structural: on that path the reap ran before the
+  trailer, so the reap record's contents are irrelevant), which is itself
+  outranked by the contract block (a caller's bug must surface regardless of
+  path). `trailGateResult` is trap-free by construction — no `*resultTrailer`
+  reachable from it, directly or through an embedded field — even though the
+  gate cannot be the pointer trap's last consumer (`trailObservation` embeds
+  `trailScanResult`, so `.Trailer` is still reachable by promotion elsewhere).
+  `trailBudgetTerminalReason = "max_turns"` is a string literal with no
+  executable pin to `emitter.go`'s unexported `wireFields`; a production
+  rename would silently turn a budget-fired void into a false proof — named
+  as a known limit, not fixed, since fixing it needs either a production
+  change or a live budget-fired fixture, both out of scope for this
+  probe-family ticket. Purely additive, one new file, zero production files
+  touched; 50 subtests, 0 SKIP on `-run '^TestTrail'`. One code-review
+  SHOULD FIX (an uncontracted `certified` parameter that lets `""` read as
+  `trailAdmitProof`) shipped as a named, un-fixed gap — see
+  [`codebase/1270.md`](../codebase/1270.md) for the full implementation, the
+  ordering arguments, and the deferred findings.
+
+- `trail_run_outcome_test.go` (#1271) — the **run-level classifier**:
+  `trailClassifyRun(trailRunReadings) trailRunOutcome` maps one probe run's raw
+  observations onto exactly one of eleven outcomes (three answers, eight named
+  voids) so a run that measured nothing is recorded as having measured nothing
+  rather than falling through to a finding. Consumes #1270's two admissibility
+  results; a nine-check contract block (C1–C9) guards the top, calling
+  #1270's/#1235's shipped membership predicates rather than re-deriving them,
+  so the out-of-contract value is a guard, never a switch default. An
+  admissible attribution is consulted *before* any point-in-time reading
+  (proof outranks pyry-not-exiting outranks every instrument void), because
+  the point-in-time reads are expected to be late and must never be what a
+  verdict rests on — the systematic-false-negative case this ticket exists to
+  prevent is a regression row in `TestTrailClassifyRun`. Input and outcome
+  records carry discriminators and counts only — `BoundFrom` rather than the
+  `trailObservation` that embeds `trailScanResult`, `MatchCount`/`RowsScanned`
+  rather than `pinScan.Matches`' verbatim argv, no command string anywhere —
+  enforced by a marshal-and-search test with a needle in four inputs. Folds in
+  #1270's parked SHOULD FIX (an uncontracted `certified` parameter) at both the
+  layer it was found and as a composition pair (C4/C5) one layer up. Purely
+  additive, one new file plus a ~70-line extension of #1270's own closure test
+  (eighteen constants → twenty-nine); 14 `TestTrail`-prefixed functions, 82
+  subtests, 0 SKIP on `-run '^TestTrail'`. See
+  [`codebase/1271.md`](../codebase/1271.md).
+
+- `trail_run_rig_test.go` (#1268) — **proof-of-wiring rig, not a new
+  instrument.** #1266/#1270/#1271 each prove their piece against fixtures and
+  synthetic buffers; `trailClassifyRun` is pure, so a fixture proof never
+  shows which code path fed it — a rig wired to the wrong path emits the same
+  positive as one wired to the right one. This file gathers the classifier's
+  inputs through the live producer chain (`trailWaitForTrailer` → `trailGate`,
+  `pinScanArgv`, `pinReadState`, `tdnClassifyReapLog` → `trailAdmitAttribution`)
+  against a real FIFO and a real `cat`, funnelled through one seam
+  (`trailRigGather`) so "no field is hand-assigned and no reap line is
+  synthesised" is a property of the file rather than a promise about its call
+  sites — `tdnClassifyReapLog` is called over a literal `nil` inside that
+  function, never a parameter. Three tests: a pre-subject reading
+  (`trailOutcomeNoRowMatched`) flipping to a during-subject reading
+  (`trailOutcomeMatchedUnattributed`) across one subject's life, with both
+  post-death per-pid states (`pinStateExitedNotReaped` then
+  `pinStateNoSuchProcess`) taken deterministically because the subject is a
+  direct child; a staleness-bound margin pinned tight enough that a
+  start-derived (rather than miss-derived) bound fails it; and a
+  shell-wrapped subject staged so more than one row matches, without
+  resolving "the" pid. `trailOutcomeRunningAtTrailer` — the finding itself —
+  stays deliberately unreachable, twice-stated in the header: it requires a
+  reap line this rig must not grow. Purely additive, one new file, 594 lines,
+  zero existing call sites changed. See [`codebase/1268.md`](../codebase/1268.md).
+
+- `finding_attribution_fanout_test.go` (#1280) — **the many-to-one reduction**:
+  `trailAdmitAttribution` (#1270) takes one held process group; the probe's
+  argv scan returns a set, because `pinScanArgv` deliberately refuses to
+  resolve "the" pid. `finAttributeFanOut(stderr []byte, pgids []int, certified
+  string) finAttributeRecord` reduces that set to the single `trailAdmitResult`
+  `trailRunReadings.Admit` (#1271) accepts, under a total order
+  (`finAttributeOrder`, proof first, argued in the code) so no group's void
+  suppresses another group's proof and no composition of voids manufactures
+  one. Two record-level conditions, never selectable values:
+  `finAttributeGroupUnreportable` (a `pgid <= 1` group `reap.go:52` skips
+  before it ever kills anything — surfaced rather than handed to
+  `tdnClassifyReapLog`, which would misattribute the staging fault to the
+  instrument) and `finAttributeNoGroups` (no reportable group remained — a
+  staging fault, `Selected` left zero rather than filled with either of the
+  two publishable falsehoods AC4 prices). The credential channel is closed by
+  the **signature** — `pgids []int`, never `[]reachProc` — not a check;
+  `certified` crosses verbatim by design (already-shipped, publishable
+  behaviour) and the fan-out multiplies its copy count by the distinct-group
+  count, each capped at 512 bytes. `finAttributeEntry` carries only `PGID`
+  and `Admit` — no `tdnReapOutcome.Line`, no `reachProc.Command`. Purely
+  additive, one new file, 767 lines, zero production change, zero consumer
+  call sites; four top-level tests, 0 SKIP on `-run '^TestFinAttribute'`. One
+  code-review SHOULD FIX, not blocking, deferred to #1281: the no-captured-
+  bytes structural check is top-level-key-only over what is now a *nested*
+  record, so a future `Command` field added to `finAttributeEntry` would pass
+  it unnoticed. See [`codebase/1280.md`](../codebase/1280.md) for the full
+  implementation, the selection-order argument, and the mutation-tested
+  lessons.
+
+- `finding_staging_gate_test.go` (#1284) — **the tier below the classifier**:
+  `trailClassifyRun` (#1271) assumes a run staged — a Bash call issued, the
+  rig's hold command, a completed rendezvous — and on an unstaged run its
+  argv scan still runs over a healthy process table and matches nothing,
+  landing on `trailOutcomeNoRowMatched`: a real answer, published as a false
+  negative about a run where no command ever existed. `finOutcomeStagingGate(
+  finOutcomeStaging) finOutcomeResult` decides, from synthetic staging
+  conditions alone, one of six failure outcomes or the pass-through
+  (`finOutcomeReadyToClassify`, deliberately not the zero value — an unfilled
+  result must never read as "staged, go classify"), all seven in their own
+  `stage-` sub-namespace apart from the eleven's `run-`. The structural
+  closure is the signature itself: neither type mentions `trailRunReadings`,
+  so a failure arm holds nothing a classifier call could be made from — the
+  forbidden call is unwritable, not discouraged. Two guard conditions close
+  reachable pass-through holes (both commands left empty; an unfilled
+  match-count want agreeing with an unfilled count at zero). No Detail
+  interpolates either command — both the issued command (verbatim model
+  output) and the staged one (embeds a `t.TempDir()` path and an
+  `exec.LookPath` result) are captured strings on the same footing — and the
+  no-captured-bytes test plants `trailNeedle` in both, with a per-row
+  headroom assertion against `trailDetail`'s 512-byte cap: house-style Detail
+  prose alone was found to eat enough of that cap in the first draft to
+  truncate a leaked command's needle away before it could be caught, a
+  vacuity distinct from (and the mirror image of) #1278's cap hazard. Purely
+  additive, one new file, 790 lines, zero production change, zero consumer
+  call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
+  implementation and the mutation-tested lesson on redaction-test vacuity.
+
+- `finding_staging_fill_test.go` (#1304) — **fills the staging record from a
+  run's own transcript.** `finOutcomeStagingGate` (#1284, above) decides all
+  seven staging outcomes from synthetic inputs; this file fills exactly the
+  three transcript-side fields (`BashIssued`, `IssuedCommand`, `TriggerFired`)
+  a real caller would supply, through a `finTranscript*` composition reading a
+  JSONL transcript the test writes at the session's own path. The scan's unit
+  is a `finTranscriptBashCall{ToolUseID, Command}` pair rather than a bare
+  command: the shipped `probeWaitForBashToolUse` returns the **first** Bash
+  `tool_use` regardless of `input.command` (a #1223 code-review SHOULD FIX
+  shipped unfixed), and #1230 guarded that value-side caller-side already
+  without editing the shared rig — this file generalises the guard and closes
+  a second, key-side route to the same defect: a composition that selects the
+  staged call for its *command* but keeps the first call's *id* would still
+  read the trigger off the decoy's `tool_result`, since the trigger reading is
+  `probeWaitForToolResult(<id>)`. The content guard (`finTranscriptSelect`) is
+  pure over its input — no `*testing.T` — so its removal (AC2's mutation) runs
+  and grades without touching the worktree; the first-match id is bound inside
+  an `if` statement in `finTranscriptSelectBash` and goes out of scope
+  immediately after, making it unreferenceable rather than merely unused
+  below. `TriggerFired` reads `timedOutAfterMs` presence alone, never
+  conjoined with the handle and never corroborated by
+  `tool_use.input.run_in_background` — that flag marks the model-set
+  backgrounding path this probe must exclude (`docs/knowledge/codebase/
+  1223.md:87-88`). Nothing on the path trims, unquotes, or canonicalises
+  either command; both new types carry no json tags, mirroring
+  `finOutcomeStaging`'s own rule (`finding_staging_gate_test.go:141-157`).
+  Purely additive, one new file, 602 lines, zero production change, zero
+  consumer call sites. See [`codebase/1304.md`](../codebase/1304.md) for the
+  full implementation and both mutation-tested rows.
+
+- `finding_trailer_evidence_test.go` (#1290, builder moved onto the sighting
+  carrier #1320, published bound proven measured #1316) — **the trailer half
+  of the probe's published record.**
+  `finTrailerRecord` (ten scalars, no pointer, no embedded observation)
+  carries one run's outcome value together with the trailer evidence behind
+  it — scan `State`, the `BoundFrom` lateness discriminator with its
+  `Bounded` boolean (`== trailBoundFromMiss` and nothing else, never
+  `Staleness != 0`) and `Staleness` itself, and the four decoded trailer
+  fields (`Subtype`, `IsError`, `TerminalReason`, `StopReason`).
+  `finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord`
+  is the pure projection: since #1320 it takes the #1309 carrier rather than
+  a `trailObservation`, so its input carries no `.Line` and no
+  `*resultTrailer` — both the record it returns and the builder itself are
+  now trap-free by construction, checked by
+  `TestFinSightingReachesNoScanType` rather than asserted in prose. The four
+  fields are read from `sighting`'s own scalars under a guard on
+  `sighting.CarriesTrailer` (a bool the carrier precomputes — no pointer left
+  to guard a dereference of; a no-trailer run returns its void instead of
+  panicking, unreachably now rather than through a checked short-circuit);
+  `Outcome` is copied from the caller's #1271/#1284 value as handed, never
+  re-derived from `State`. On the false arm the four scalars are zeroed
+  rather than copied through — under the carrier that is a decision the
+  builder makes rather than a consequence of there being no pointer to read,
+  pinned in both directions by
+  `TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer` over one
+  carrier with its one impossible bit flipped. `StopReason` is the one
+  exception to trap-free: forwarded from the model's last message uncapped,
+  by design, named explicitly so a sweep author doesn't plant a needle in a
+  field the record must carry verbatim. No field carries `omitempty` — under
+  it a seen trailer with an empty `terminal_reason` would render
+  byte-identical to a no-trailer record, the exact collapse the nil-pointer
+  design one tier down exists to prevent. `TestFinTrailerRecordCarriesNoCapturedBytes`
+  no longer plants `trailNeedle` here — #1325 retired that plant along with the
+  test's other `.Line`-dependent checks, since the carrier the builder now takes
+  has no `.Line` for a needle to sit in. The in-cap plant (`trailPaddedTrailer(0)`,
+  needle inside the 512-byte cap at offset 104–146, chosen over the family's
+  habitual past-the-cap pad specifically so a record that kept the capped line
+  would still be caught) lives one tier down instead, at
+  `TestFinGatherReturnsNoCapturedBytes` (`finding_run_gather_test.go`), which
+  sweeps the carrier itself. What remains in this file is two channel-independent
+  construction rules on `finTrailerRecord`: the per-row `Detail` headroom
+  assertion (#1284's fix, argued as a type-level rule that travels — the record
+  embeds whole into `finRecordRun.Trailer` and from there into the artifact, so
+  a Detail that ate its own budget would defeat the marshal sweep and the
+  artifact's file byte sweep two tiers up) and the flat forbidden-key scan
+  (`finTrailerRecord` is ten scalars, so a top-level key scan is exhaustive).
+  The shell `TestFinTrailerRecordReadsTheDecodedTrailer` is gone; its one
+  surviving row — the four scalars come from the full-line decode rather than
+  the capped copy — is promoted to top-level as
+  `TestFinTrailerSightingScalarsComeFromTheFullLineDecode`, re-stated onto
+  `finTrailerSighting` (the builder reads neither `Trailer` nor `Line`) and
+  named to mirror `TestFinGatherSightingScalarsComeFromTheFullLineDecode`, the
+  two halves of one agreement obligation that a grep now returns together.
+  Purely additive at #1290, one new file, 697 lines, zero production change, zero
+  consumer call sites. See [`codebase/1290.md`](../codebase/1290.md) for the
+  original implementation, [`codebase/1320.md`](../codebase/1320.md) for the
+  move onto the carrier, [`codebase/1325.md`](../codebase/1325.md) for the
+  retirement, and [`codebase/1316.md`](../codebase/1316.md) for the row that
+  joins this file's `Bounded` derivation to a poll that genuinely measured it
+  (`finding_run_gather_test.go`'s `TestFinGatherRecordPublishesTheMeasuredMissBound`).
+
+- `finding_run_record_test.go` (#1291) — **the assembled run record.**
+  `finRecordRun` is the record one probe run publishes: pyry's exit code,
+  every matched row reduced to `finRecordProc` (`PID`/`PPID`/`PGID` — three
+  `int` fields, reflection-asserted, nothing else), the per-pid liveness
+  verdicts (`[]pinStateOutcome`, carried whole), the reap-log attribution
+  (`finAttributeRecord`, #1280) and the trailer sub-record
+  (`finTrailerRecord`, #1290), both embedded whole rather than re-derived,
+  and the runner path. The runner path is recorded **as observed**: the
+  env reading (`reachRunnerPathFromEnv`) is carried as documentation, not
+  corroboration, alongside an independent argv reading
+  (`tdnRunnerFromArgv`), reduced to a three-valued `RunnerAgreement` —
+  `agree` / `disagree` / `indeterminate` — decided on the **label** each
+  reading's leading token, never the whole string, because the two
+  producers append their own free-text reasons and the full strings are
+  therefore never equal even when both name the same runner.
+  `finRecordInputs` uses named fields rather than positional parameters
+  specifically because two adjacent same-typed strings
+  (`RunnerFromEnv`/`ClaudeCommand`) sit on opposite sides of the argv
+  prohibition, and it carries neither a `trailObservation` nor a
+  `trailScanResult` field, which is what keeps the discriminated-optional
+  trailer pointer out of reach. Purely additive, one new file, 1061 lines,
+  zero production change, zero consumer call sites; five top-level tests,
+  all offline. One code-review SHOULD FIX left non-blocking: the
+  attribution sub-record's "carried whole" claim is pinned by a single
+  nested scalar rather than `reflect.DeepEqual` (the trailer half's
+  pattern), so a future partial-carriage regression there would pass
+  unnoticed — deferred to #1286. See [`codebase/1291.md`](../codebase/1291.md)
+  for the full implementation and the mutation-tested lessons.
+
+- `finding_artifact_write_test.go` (#1286) — **rendering the run record into
+  a pasteable artifact, and proving the directory it lands in leaks no
+  captured bytes.** `finWriteArtifacts(t, dir, rec finRecordRun)` takes the
+  built record and nothing else — no raw process-table bytes, no second
+  `[]byte` parameter — and writes exactly two files: `run.json`
+  (`json.MarshalIndent`) and `run.md` (a fixed safety-claim constant, the
+  same bytes fenced, one summary line built from derived scalars only). The
+  signature *is* the design: `writeReachArtifacts` (`background_reach_probe_
+  test.go:823`) is the cautionary precedent it deliberately does not
+  reuse — that writer's unexported `rawPS` field produces a second file,
+  `reach.ps.txt`, carrying the verbatim process table beside a clean
+  `reach.json`; `finRecordRun` has no unexported field, so there is nothing
+  raw in this writer's reach to write. Four tests measure what was
+  **written**, not what was built: a set-equality census of every JSON
+  *path* the record declares against every path the artifact renders
+  (path-based rather than name-based after a code-review MUST FIX — four of
+  the family's key names are shared across types, and `matched_rows[]`'s
+  three keys are shared with `pinStateOutcome`'s, so a name-based census
+  covered that slice not at all); a `trailNeedle` sweep over
+  every file `os.ReadDir` returns (planted only in inputs the pipeline
+  reduces or drops — a matched row's argv, the claude argv, a reap
+  outcome's stderr — never in the four fields the record carries whole),
+  with a mandated pair of applied-and-reverted
+  mutations (one inside the Detail format, one adding an undeclared third
+  file) both observed RED before the sweep shipped; a recursive
+  forbidden-key scan with two exact-key exemptions (`tool_stderr`, carried
+  whole and permitted; `runner_from_argv`, a closed three-constant set with
+  no input byte in reach); and a structural + behavioural pair proving
+  `resultTrailer` has no `result` member and that the four decoded trailer
+  scalars cross into the artifact verbatim while the needle beside them does
+  not. The sweep shipped with a fourth channel, a trailer-scan-line plant
+  landing **inside** `reachCapCommand`'s 512-byte cap (pad `0`, needle at
+  byte 104–146) — `trailNeedle`'s own comment claims it is placed past the
+  cap, which this ticket measured to be false against the fixture the
+  family actually reuses; the comment was left uncorrected as a sibling
+  file, out of scope here. **#1326 retired that fourth channel**: since
+  #1320 `finTrailerBuild` takes the sighting carrier, and the needle in the
+  scanned line is consumed at fixture-construction time by
+  `finTrailerSighting` — which never reads `.Line` — so it never enters
+  `finRecordInputs` and the writer performs no reduction there. The in-cap
+  fixture (`finWriteTrailerPad = 0`) was kept, not deleted: it still backs
+  a diagnosis-and-guard pair relocated onto the pre-build clean check for
+  the embedded trailer sub-record (a prospective guard against a future
+  builder that starts reading the line) and the four-scalar-vs-needle
+  pairing in the verbatim-output test, which rests on the weaker claim that
+  the *wire* line carries the needle at every pad regardless of the cap and
+  so needs no cap guard of its own. The retired in-cap claim itself now
+  holds one tier down, at `TestFinGatherReturnsNoCapturedBytes`
+  (`finding_run_gather_test.go`), which sweeps the carrier. Purely
+  additive, one new file, 966 lines then trimmed by #1326's prose-and-guard
+  rewrite, zero production change, zero consumer call sites. See
+  [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
+  path-vs-name census MUST FIX, and the stale-comment lesson, and
+  [`codebase/1326.md`](../codebase/1326.md) for the channel retirement.
+
+- `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
+  #1302, trailer-sighting carrier added #1309, carrier's miss bound proven
+  #1312, carrier's four decoded scalars proven to come from the full-line
+  decode #1313, published record's bound proven to be the classified
+  sighting's #1316) — **parameterises
+  `trailRigGather` (#1268) on the two inputs it hardcoded.** That rig passes
+  a `nil` literal as the reap-log stderr and keys attribution on the test
+  process's own process group; under those two hardcodings,
+  `trailAdmitProof` — and with it `trailOutcomeRunningAtTrailer`, the only
+  outcome that is a finding — is structurally unreachable, so a probe built
+  on it would report a clean negative forever with no symptom.
+  `finGatherReadings(in finGatherInputs) (trailRunReadings,
+  finAttributeRecord, finSighting)` takes `Stdout`, `Needles`, `Stderr` and
+  `Pinned` as fields and, driven offline from synthetic stdout/stderr,
+  reaches both the finding and a genuine negative
+  (`trailOutcomeNoRowMatched`, never a `run-void-*`) through its own
+  composition, both at `MatchCount == 0` under a certifying gate —
+  demonstrating rather than describing that Step 2 outranks the match-count
+  arms. `Pinned` is `[]int`, never `[]reachProc`, continuing #1280's
+  credential-channel-closed-by-signature pattern; the `[]reachProc` →
+  `[]int` conversion is left to #1282's call site by design. The trailer
+  observation is a function-local and never returned, which is what keeps
+  `trailScanResult.Trailer`/`.Line` structurally out of the caller's reach.
+  A recursive forbidden-key walk (lowercased keys, two named exact-key
+  exemptions) closes the flat-only-key-scan gap #1280 left open for nested
+  records. `finGatherInputs.PyryExited`/`.ClaudeState` (#1302) are the same
+  struct's remaining two fields — copied into the readings whole, no
+  default, no repair — and are exercised by two more top-level tests: one
+  varying `PyryExited` alone across an identical stdout/needle pair to prove
+  the outcome moves (`trailOutcomeNoRowMatched` ↔
+  `trailOutcomeVoidPyryDidNotExit`), one carrying a documented verdict, an
+  undocumented one, and `""` through unchanged. The third return, `finSighting`
+  (#1309), is what the classified poll *measured* — scan state, the bound and
+  its discriminator, staleness, a carries-a-decoded-trailer discriminator and
+  the four decoded scalars (`Subtype`/`IsError`/`TerminalReason`/
+  `StopReason`) — filled from the same `trailWaitForTrailer` call that fills
+  `BoundFrom`, so no second scan is needed to recover what the sighting saw.
+  It reaches none of `trailObservation`, `trailScanResult` or `resultTrailer`
+  (proven by walking types, reusing `finRecordInputReaches` rather than a
+  second traversal), so `.Line` and the decoded `*resultTrailer` stay exactly
+  as unreachable as before; #1320 moved `finTrailerBuild` onto this carrier,
+  via a fixture-side helper (`finTrailerSighting`) that is a copy of this
+  file's fill and inherits its agreement obligation.
+  Purely additive, zero production change, zero consumer call sites; nine
+  top-level tests, 0 SKIP on `-run '^TestFinGather'`. #1312 adds the row #1309
+  shipped without: `TestFinGatherSightingReportsTheMissBound` leaves the
+  buffer unseeded (this file's first row to do so, and its first to cost wall
+  clock — ~600ms), appends the trailer past two poll ticks on a spawned
+  goroutine's sibling, and proves `BoundFrom` reports `trailBoundFromMiss` —
+  the discriminator that actually bounds something, as opposed to
+  `trailBoundFromStart`, which every pre-seeded row reaches and whose own doc
+  says it BOUNDS NOTHING. A second, direct `trailWaitForTrailer` call over the
+  same buffer supplies the contrast (`trailBoundFromStart`), with only its
+  discriminator ever bound to a variable — never the observation itself, which
+  carries the two things the carrier exists to keep unreachable. #1313 is #1312's
+  sibling half of the #1310 split: a standalone test on a 585-byte over-cap
+  fixture (`trailPaddedTrailer(200)`) proves the same carrier's four decoded
+  scalars come from `trailScanResult.Trailer` — the full-line decode — and
+  never from a re-read of the capped `.Line`, which fails to decode wholesale
+  on a syntax error rather than losing fields one at a time. The precondition
+  pins the bare `"terminal_reason"` **key** (never the `"max_turns"` value,
+  which survives every cap via `subtype`'s `error_max_turns`), asserted so a
+  fixture edit that collapses the disagreement fails loudly instead of the row
+  going quietly vacuous. #1316 adds this file's second and last row that costs
+  wall clock, `TestFinGatherRecordPublishesTheMeasuredMissBound`, placed
+  directly after #1312's row: it builds a `finTrailerRecord` from the
+  composition's classified sighting over the same unseeded-buffer/delayed-append
+  idiom, and puts it beside a record built over the same frozen bytes from a
+  second, direct `trailWaitForTrailer` call — joining the record tier (which
+  pinned `Bounded` with the discriminator handed in) to the carrier tier
+  (#1312, which measured the discriminator but stopped short of publishing it),
+  separated by measurement rather than by `finTrailerBuild`'s input type. See
+  [`codebase/1281.md`](../codebase/1281.md),
+  [`codebase/1302.md`](../codebase/1302.md),
+  [`codebase/1309.md`](../codebase/1309.md),
+  [`codebase/1312.md`](../codebase/1312.md),
+  [`codebase/1313.md`](../codebase/1313.md) and
+  [`codebase/1316.md`](../codebase/1316.md) for the full implementation and
+  the mutation-tested lessons.
+
+- `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
+  (#1281) two parameters from a real held command, not hand-passed
+  integers.** `finStageHeldGroup` stages `sh -c '"$1" "$2"; exit 0'` over a
+  real `cat` held on a real FIFO, in a process group of its own
+  (`SysProcAttr{Setpgid: true}` — copying the wrapper subject shape from
+  `trail_run_rig_test.go`, not the flip test's bare `exec.Command`, which
+  would inherit the test's own group), then pins that group off a real
+  `pinScanArgv` (#1280) match set's `.PGID`s. AC1's distinctness guard
+  compares the **scanned** pgid against `syscall.Getpgrp()`, never
+  `cmd.Process.Pid` — the pid form is vacuous under the dropped-`Setpgid`
+  mutation, confirmed green in code review, while the scanned form reddens
+  in 0.06s. The teardown adds a third statement (a direct
+  `cmd.Process.Kill()`) that the neighbouring rig's two-statement teardown
+  doesn't need, because only this file's guard can redden on a path where
+  the group kill finds no group to signal — without it, `t.Fatalf`'s
+  `runtime.Goexit()` would deadlock the mutation against `holdProbeFIFO`'s
+  `t.Cleanup`. Two tests, five arms: the finding and a genuine negative
+  (`trailOutcomeMatchedUnattributed`, one step earlier than #1281's
+  `trailOutcomeNoRowMatched` because a real command carries the needle),
+  plus #1268's two hardcodings trapped at the **`Admit`** layer against a
+  same-staging control, each varying exactly one dimension. First `fin*`
+  file whose scan matches live rows, so `readings.Liveness` is non-empty
+  for the first time — the neighbour's whole-struct-print licence
+  (`finding_run_gather_test.go:105-113`) is deliberately not inherited,
+  since its proof ran with `Liveness` empty on every row. Purely additive,
+  one new file, 617 lines, zero production change; both new tests PASS,
+  never SKIP. See [`codebase/1282.md`](../codebase/1282.md) for the full
+  implementation and the grade-mutations-per-line lesson.
+
+- `finding_live_pin_test.go` (#1338) — **offline reduction, not a probe**;
+  the pure post-filter a later ticket's during-turn `pinScan` (held `cat` on
+  a FIFO, pinned mid-turn) is reduced through before it ever reaches the
+  staging record — no live scan, no `ps` exec, no `pyry` spawn, no caller.
+  `finLivePinReduce(scan pinScan, fifoPath string) finLivePinReading` takes
+  membership from `reachMatchedNeedle` over each row's recorded needle list
+  (never a re-scan of `.Command`, which the byte cap may have truncated past
+  `reachMaxCommandBytes`), returns every FIFO-matched row and its `.PGID`
+  raw — unsorted, undeduped, since the consumer `finAttributeFanOut` (#1280)
+  dedupes and sorts internally — and reads claude's own argv via
+  `tdnClaudeCommand(scan)` over the whole scan, not the FIFO-filtered rows
+  (claude's row carries only the claude needle, so filtering first always
+  returns `""`). `finLivePinWantRows = 2` names the expected FIFO-row count,
+  sourced from #1230's live measurement (the `zsh -c` wrapper plus the
+  forked `cat`) and corroborated, not primarily sourced, from #1268's
+  rig-staged mutation test; `trail_run_rig_test.go:563` is deliberately not
+  cited, since it asserts only `MatchCount > 1`, never `== 2`. Both
+  plausible-wrong fills — `scan.MatchCount` (3, since one scan carries both
+  the FIFO and claude needles) and the distinct-pgid count of the FIFO rows
+  (1, since claude isolates the Bash command into its own group) — are
+  pinned as asserted values in `TestFinLivePinCountIsNeitherWrongCandidate`
+  and checked pairwise-distinct from the correct count, so a fixture edit
+  that collapses two candidates together fails loudly instead of silently
+  disarming the trap. The offline trap drives everything over a synthetic
+  four-column `ps` table built as **bytes** and turned into a `pinScan`
+  through the real `pinMatchArgvExcluding` (a hand-built `pinScan` would skip
+  the match-uncapped/store-capped asymmetry the truncation assertion rests
+  on); the wrapper row's padding is derived from `reachMaxCommandBytes`
+  itself, never a literal 512. Purely additive, one new file, 514 lines,
+  zero production change, zero consumer call sites — the driver and record
+  tickets that call `finLivePinReduce` for real land later. See
+  [`codebase/1338.md`](../codebase/1338.md) for the full implementation, the
+  mutation-tested lessons, and why `strings.Contains(s, "")` being `true`
+  makes the empty-needle assertion a real second witness for the
+  membership-re-scan defect rather than comment-only work.
+
+- `finding_live_staging_test.go` (#1342) — **declarations, not a probe**;
+  the run's FIFO name, hold prompt, staged command literal and env delta a
+  later live turn stages from, plus one offline trap per declaration. Exists
+  because `finOutcomeStagingGate`'s identity arm
+  (`finding_staging_gate_test.go:299`) is byte equality between claude's
+  verbatim `input.command` and whatever the rig says it staged — get either
+  operand wrong and every *correctly*-staged run reports
+  `stage-command-not-staged`, one live claude turn burned per attempt.
+  `finLiveStageCommand(fifoPath)` splices `probeHeldCommandName` rather than
+  re-typing `"cat"` (a rig staging one verb while #1340's liveness check
+  looks for another would drift silently; the splice makes a rename a build
+  break) and is deliberately bare, never `finOutcomeHoldCommand`'s
+  `sh -c … ; exit 0` stand-in shape. `finLiveStagePrompt(fifoPath)` follows
+  `probePrompt`'s backtick-delimited form with the *whole* command
+  interpolated, not just the path, so the prompt and the staged literal
+  derive from one `fmt.Sprintf` instead of being written twice; the offline
+  trap recovers the command back out of the prompt by an independent
+  delimiter scan (`finLiveStageCommandFromPrompt`) rather than comparing
+  against a hand-copied second literal. `finLiveStageFIFOName =
+  "fin-live-stage-hold"` is checked both-directions substring-disjoint
+  against all eight shipped FIFO name/path constants, referenced **by
+  identifier** so a rename breaks the build instead of rotting the taken-set
+  list silently — re-derived at `26d83b7` via
+  `rg -n 'FIFOName *=|FIFOPath *=' internal/e2e/realclaude/` (the
+  `FIFOPath`-inclusive recipe; a `FIFOName`-only search misses #1338's
+  `finLivePinFIFOPath`). `finLiveStageEnvDelta()` names
+  `BASH_DEFAULT_TIMEOUT_MS=5000` (the settled #1223 trigger) and
+  `PYRY_USE_STREAMJSON=0` explicitly — the latter because
+  `reachRunnerPathFromEnv` reads the ambient `os.Getenv` first, so an empty
+  delta would make the downstream runner reading a reading of the operator's
+  shell; its offline trap sets a hostile ambient (`t.Setenv`) to prove the
+  claim is non-vacuous rather than accidentally true whenever the variable
+  happens to be unset. Purely additive, one new file, 489 lines, zero
+  production change, zero live caller — #1340 is the driver that spends a
+  real turn on these declarations. See [`codebase/1342.md`](../codebase/1342.md)
+  for the full implementation, the mutation-tested lessons, and the
+  reachable-red-vs-shadowed-by-Fatalf lesson code review surfaced on the
+  extraction round-trip's pass-through guard.
+
+- `finding_live_assembly_test.go` (#1343) — **the join, not a probe**; the one
+  function, `finLiveAssembleStaging`, that fills all eight
+  `finOutcomeStaging` fields — three read from the run's transcript via
+  `finTranscriptFill` (#1304), five supplied by the caller as
+  `finLiveAssembleFacts`, `finTranscriptReading`'s mirror image — and returns
+  `finOutcomeStagingGate`'s decision (#1284) as returned, never re-derived.
+  Exists because nothing previously called both halves together: the only
+  thing filling the five caller-side fields was `finTranscriptStagedCaller`,
+  a #1304 test fixture whose hardcoded `PinMatchCount: 1, PinWantCount: 1` is
+  wrong for the rig, whose real expectation is `finLivePinWantRows = 2`
+  (#1338) — an assembly that inherited the `1` would send every
+  correctly-staged live run to `finOutcomePinCountUnexpected`, burning a live
+  claude turn per attempt. The composite literal is name-for-name with no
+  literal on any right-hand side, which is the one rule that keeps both the
+  fixture's `1` and the driver's `finLivePinWantRows` out of the assembly's
+  body — the counts are forwarded unaltered, neither re-derived nor fixed
+  internally. `facts.StagedCommand` is the single source of the staged
+  string, closing structurally (rather than by care) the two-consumer drift
+  between the gate's identity arm and the fill's own `call.Command == staged`
+  guard. `finLiveAssembleContractWant = finLivePinWantRows + 1` backs a
+  deliberate contract row over a want no live driver emits — the only row
+  that catches an assembly forwarding the match count while fixing the want
+  internally — derived rather than written as a literal so it can never
+  coincide with the real constant. Test drives four rows over one
+  correctly-staged synthetic transcript, written once in the parent, with
+  every assertion reading the assembly's return value rather than
+  `finOutcomeStagingGate` directly, so it proves the counts travel without
+  re-asserting `finOutcomeGateCases`' (#1284) already-shipped count mapping.
+  Two mis-assemblies survive every row by construction — a count swap inside
+  the literal, and hardcoding the three transcript fields at their staged
+  values — and are stated as accepted in the file's own header rather than
+  chased with the duplicate rows this ticket's AC forbade reproducing.
+  Purely additive, one new file, 428 lines, zero production change, zero live
+  caller — #1340 (driver) and #1337 (record/classification) are the tickets
+  that call `finLiveAssembleStaging` for real. See
+  [`codebase/1343.md`](../codebase/1343.md) for the full implementation, the
+  mutation matrix, and the code-review NIT on the assembly's two adjacent
+  `time.Duration` parameters.
+
+- `finding_live_run_test.go` (#1340) — **the live staging driver, not a
+  probe of pyry itself**; `finLiveRunStage(t) *finLiveRunHandle` spawns pyry
+  on the ptyrunner default, holds the rendezvous FIFO, drives the turn to
+  the instant a during-turn process pin is meaningful, takes that pin, and
+  hands it plus the rig's own facts to #1343's `finLiveAssembleStaging`,
+  returning a handle carrying the run's live facts and the staging tier's
+  `finOutcomeResult` **as the gate returned it**. Nothing #1338/#1342/#1343
+  already shipped is re-derived: the pin reduction and its expected row
+  count, the staged command/prompt/FIFO-name/env-delta declarations, and the
+  eight-field assembly all cross unchanged. `finLiveRunHandle` is returned as
+  a **pointer** — the pyry-exit kill cleanup is registered before `PyryPID`
+  exists, so its closure has to read a field written later — and carries
+  **no JSON tags**, inheriting the "input only, never published" posture of
+  the types it wraps (`Pin.Rows`/`Pin.ClaudeCommand` are verbatim argv off
+  the ambient process table). The kill cleanup is registered **before**
+  `holdProbeFIFO` so LIFO releases the FIFO first and the kill is
+  defence-in-depth rather than the thing that produces the exit — inverting
+  that order yields a run that looks identical (green, handle populated)
+  while the rig itself produced the exit; copied verbatim, `PyryPID <= 0`
+  guard and `// LOAD-BEARING` comment included, from the reach precedent
+  (`background_reach_probe_test.go:355-374`), not the comment-less trigger
+  copy. **The driver takes its own `tool_use`/`tool_result` wait before
+  pinning**, even though the assembly waits internally too — the assembly's
+  wait fires strictly after the pin (it takes pin counts as inputs), so
+  skipping the driver's own wait pins before the held `cat` exists and fires
+  the gate's count arm on a correctly staged run, one live claude turn spent
+  finding out. The pin itself is one `ps -axww` scan carrying both needles
+  (the FIFO path and `tdnClaudeNeedle`) with two exclusions, handed to
+  `finLivePinReduce` unchanged, forwarding `finLivePinWantRows` as the want
+  (never `scan.MatchCount`, never `len(Pin.PGIDs)`). No budget-fired run is
+  staged — `--max-turns=6` gives the turn room to complete, since a
+  budget-fired run's exit code can't discriminate outcomes and its
+  `Terminate` hook reaps before the trailer is written. No `ps -E`/`-Eww`
+  anywhere; matched rows and claude's argv cross the handle only as the
+  already-capped `reachProc.Command`; the file formats no `Detail` and writes
+  no artifact. **Ships no test** — its only exercise is compilation and
+  `go test`'s vet subset under `make e2e-realclaude`; `finLiveRunStage` has
+  no caller anywhere in the tree until #1337 lands, which is expected and
+  correct for this instrument family. Purely additive, one new file, 446
+  lines, zero production change. See [`codebase/1340.md`](../codebase/1340.md)
+  for the full implementation and the code-review SHOULD FIX on a counted
+  `t.Fatalf` claim the shipped file falsified.
 
 ## Test infrastructure
 
@@ -496,3 +1389,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1172](https://github.com/pyrycode/pyrycode/issues/1172) — reusable running-turn trigger infra (ports desktop `e1fe219`'s bounded foreground Bash-loop fix), holds a live claude turn in `turn_state{responding}` for a bounded window and proves it via `drainForResponding`/`assertNoIdleWithin`; transcribes #1153's setup, zero production files; split from #1083, consumed by #1176 (interrupt); codebase note at [`codebase/1172.md`](../codebase/1172.md).
 - Ticket [#1176](https://github.com/pyrycode/pyrycode/issues/1176) — real-claude interrupt-stops-a-running-turn gate, composing #1172's running-turn trigger with the shipped interrupt primitives (#1120/#1121); new `drainForCancelledTurnEnd` drain guards against the spontaneous-`end_turn` vacuous pass; closes the fake-green/real-red gap (#949) on the interrupt path; split from #1083, zero production files; codebase note at [`codebase/1176.md`](../codebase/1176.md).
 - Ticket [#1175](https://github.com/pyrycode/pyrycode/issues/1175) — real-claude permission **deny** round-trip on the stream-json runner (security-sensitive, architect security review PASS); reuses #1154's harness/trigger scaffold, swaps the answer to `reject_once`, and adds a `Source == "remote"`/`Outcome == "reject_once"` attribution assertion so a timeout-deny can't masquerade as the explicit reject, plus a workdir walk proving the gated `Write` never executed; rework `denyModalsUntilIdle` answers every retry modal (real haiku retries a denied tool at least once) bounded by a retry-count cap and wall-clock budget; zero production files; codebase note at [`codebase/1175.md`](../codebase/1175.md).
+- Ticket [#1174](https://github.com/pyrycode/pyrycode/issues/1174) — real-claude cross of fakeclaude sibling #1137: on the stream-json runner, `new_session` rotates the bootstrap session id and `RestartFresh` spawns a genuinely fresh live claude child under the rotated id (not `--resume`), proven by a fresh `<idAfter>.jsonl` transcript appearing on disk; transcribes #1031's spine + #1153's/#1154's drain helpers, zero production files; split from #1083, sibling of #1173/#1175; codebase note at [`codebase/1174.md`](../codebase/1174.md).

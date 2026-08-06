@@ -54,7 +54,7 @@ const mintedTurnEndMarker = "e2e-1195:minted-turn-end"
 // minted child's transcript — an assistant message with stop_reason "end_turn",
 // the shape the turnbridge mapper turns into EventKindJsonlEndOfTurn -> turn_end
 // (the fixture shape at relay_two_phone_structured_test.go). Test-authored, so it
-// is inert substrate, and deliberately NOT the fake's own interruptEndTurnLine —
+// is inert substrate, and deliberately NOT the fake's own interruptMarkerLine —
 // this test must not depend on the interrupt route.
 const mintedEndTurnLine = `{"type":"assistant","message":{"id":"m-1195","stop_reason":"end_turn","content":[{"type":"text","text":"` +
 	mintedTurnEndMarker + `"}]}}` + "\n"

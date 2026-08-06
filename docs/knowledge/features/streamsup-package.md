@@ -161,9 +161,55 @@ forge a turn boundary:
 | Line `type` | Emits |
 |---|---|
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
-| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union) |
+| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other block surfaces as `Unrecognized{Site: user_block}` **except one exact 100-byte payload** (#1247, below), dropped in silence |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
-| `system` (`init`/`thinking_tokens`/`status`), `rate_limit_event`, unknown/malformed | nothing (Debug-logged by type/reason only, never content) |
+| `system` (every subtype), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
+| any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
+
+**Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
+types was dropped with a `Debug` log. The production daemon runs at info level, so that drop left **no
+trace anywhere and no client was told** — fine for the types we ignore on purpose, useless for a type we
+have never seen. Now the parser distinguishes *known and deliberately ignored* (silent, as before) from
+*genuinely unrecognized* (surfaced as `turnevent.Unrecognized`, which reaches desktop clients as an
+`unrecognized_message` frame and renders as an expandable timeline row).
+
+`ignoredLineTypes` holds the first tier. It is **measured, not guessed** — claude driven directly on the
+bare stream-json surface on 2026-07-27, three turns each on two models, one calling tools:
+
+- `system` is ignored **wholesale**, not per-subtype. It is claude's catch-all namespace and its
+  highest-rate emitter: `system/init` fires **once per turn** and `system/thinking_tokens` roughly ten
+  times per turn. Subtype-grained matching would turn every new subtype into a per-turn noise row, which
+  is exactly the failure the two tiers exist to prevent.
+- `rate_limit_event` is ignored, ~1 per run.
+- The measurement also settled a standing question: claude does **not** echo the delivered prompt back
+  as a `user`/`text` message on this surface, though it does on the agent-run surface. So `user`/`text`
+  needs no ignore entry, and one appearing in future is a real change that surfaces.
+
+**AMENDED 2026-07-30 (#1247).** That measurement never drove a *backgrounded* command. Backgrounding
+produces a turn with no visible model output, and claude's harness then injects a `user`/`text` message
+prodding the model to speak — reproduced 3 of 3 on the #1240 probe, claude 2.1.220. Exactly one such
+string, `harnessNoOutputNudge`, is now dropped in silence by byte-exact equality, guarded on block type
+`text` so a `tool_result` (whose payload decodes into `Content`, never `Text`) can't reach it — this is
+the parser's **first block-level suppression**, a new tier sitting below `ignoredLineTypes` rather than
+an entry on it (that map stays top-level types only, and its own comment now carries this amendment
+in place). `continue`, not `return`, scopes the drop to the one block, so a sibling `tool_result` in the
+same message still maps. Every *other* `user`/`text` block is still a real change and still surfaces —
+matched by exact string, not prefix or substring, because the wording is attested on one claude version
+and drift must bring the row back rather than stay silently swallowed. See
+[codebase/1247.md](../codebase/1247.md).
+
+`TestParser_IgnoredLineTypesIsTheMeasuredSet` pins the list, so growing it is a deliberate edit with a
+measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fails on **any**
+unrecognized frame, so every stream spec is a sentinel: it goes red the day claude adds a message type,
+in the pre-ship gate rather than in front of a user.
+
+**Content blocks are held as `[]json.RawMessage`, decoded per block.** This is load-bearing rather than
+tidying: `streamBlock` declares only the fields the mapping reads, so decoding straight into it would
+discard exactly the unknown fields an unrecognized block exists to show, and re-marshalling afterwards
+would lose them. It also turns a block that fails to decode into a surfaced event rather than a silent
+skip. `Unrecognized.Raw` is truncated to `maxUnrecognizedRaw` (16 KiB) **at construction**, so an
+oversized payload never enters the event stream or any log; it is a `string` rather than
+`json.RawMessage` because a truncated blob is no longer valid JSON.
 
 Mapping logic mirrors (not imports — `mapper.go`'s helpers are unexported and keyed on tui-driver types)
 [`turnbridge/mapper.go`](turnbridge-package.md). Two deliberate divergences: (1) a stream-json
@@ -490,11 +536,16 @@ both wedge and collide with the "unknown conversation" answer).
 
 The opener set is a **whitelist**: `ThoughtChunk`/`TextChunk`/`ToolStart`/`ToolUpdate` add the conversation,
 `TurnEnd` (either stop reason — `resultTurnEndReason` sends both through one parser arm) deletes it,
-everything else (`Stall`/`ApiRetry`/`Compacting`, and any future variant) is a no-op. The evidence is the
-parser's own tolerate-and-drop `default:` arm (`parser.go:158-163`) — `rate_limit_event` is the line that
-becomes a wired `ApiRetry` the day someone adds it, and a blacklist ("anything that isn't `TurnEnd` opens a
-turn") would wedge a conversation on it. `Stall` cannot reach this tracker through the real sink today (the
-parser emits only the five variants in the table above) — it's asserted only at the unit tier, fed directly.
+everything else (`Stall`/`ApiRetry`/`Compacting`/`Unrecognized`, and any future variant) is a no-op.
+
+**The whitelist has now been vindicated by a real case.** `Stall`/`ApiRetry`/`Compacting` are tui-driver
+signals this sink's only producer never emits, so they are asserted at the unit tier only, fed directly.
+`Unrecognized` is different: it **is** reachable — the parser emits it for any claude output outside the
+measured known-ignored list — and it reached this tracker correctly **without one line of change here**,
+because a new variant falls to the default. A blacklist ("anything that isn't `TurnEnd` opens a turn")
+would be behaviourally identical through the older sink and would have wedged every conversation that met
+an unknown message: the turn would open, and no turn end would ever follow, because we could not
+understand the message that opened it.
 
 Concurrency: one mutex guards one `map[string]struct{}` plus a `chan struct{}` "generation" broadcast,
 closed-and-replaced under the same lock as any membership mutation. `WaitIdle` captures that channel and
@@ -750,6 +801,22 @@ write to.
 PTY is unaffected: the tracker is nil there, both calls are no-ops, and `newInboundDeliver`'s body is
 semantically identical to before #1199. See [codebase/1199.md](../codebase/1199.md).
 
+**Forced-ordering test coverage across a `new_session` rotation (#1295).** The #1137 e2e had
+failed twice at its M4 milestone with the same shape — rotation succeeds, the follow-up turn is
+accepted, then zero bytes reach any child for the full 20 s deadline — consistent with a
+delivery parked here (`waitIdleForDelivery`, bounded by `streamTurnHoldTimeout`, 15 min: far
+outside the e2e's window, and silent while parked, matching the record). Rather than wait for
+the ~1-in-N-per-week e2e to fire again, #1295 drives the ordering directly at this seam: park a
+delivery in the hold, run the rotation underneath it (rekey the binding, tear the child down,
+fire `clearForSession` keyed to the rotation's new session id), and check whether the clear is
+what releases it. Forced 50/50 under `-race -count=50`, mutation-demonstrated — **the clear does
+release the parked delivery**, and it lands in the post-rotation child and no other. That rules
+out this seam as the M4 stall's cause on the ordering the test forces (pre-rotation turn events
+and the transition arriving in order); it does **not** decide a straggler pre-rotation event
+re-marking the conversation *after* the clear fires, which needs the drain's fan-in rather than
+the seam alone and is filed as [#1298](https://github.com/pyrycode/pyrycode/issues/1298). See
+[codebase/1295.md](../codebase/1295.md).
+
 ## Production wiring — the `interactive_runner` toggle (#1081)
 
 `cmd/pyry/main.go`'s `selectInteractiveRunner(cfg, logger)` maps `cfg.InteractiveRunner` to
@@ -824,6 +891,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1206.md`](../codebase/1206.md) — `Config.OnChildExit`, the per-child-exit seam on the streamsup `Run` loop (one field, one unconditional call above the shutdown return); split from #1203 alongside #1207, which itself later split into #1209 (the fan-in exit lane) and #1210 (the production wiring, landed).
 - [`codebase/1209.md`](../codebase/1209.md) — `streamTurnEnvelope.exit` / `streamTurnSink.exitFor`, the fan-in lane that carries a child-exit signal ordered correctly against the dead child's already-pushed events; fired in production by #1210.
 - [`codebase/1199.md`](../codebase/1199.md) — `waitIdleForDelivery`/`openForDelivery`, the inbound-delivery seam that holds a mid-turn send in the queue and marks the conversation busy before writing; the tracker's first production reader.
+- [`codebase/1295.md`](../codebase/1295.md) — forced-ordering test proving this seam's hold is released by the `new_session` rotation's `clearForSession` and delivers to the post-rotation child; eliminates one M4-stall hypothesis, leaves the straggler-re-mark hypothesis ([#1298](https://github.com/pyrycode/pyrycode/issues/1298)) open.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.

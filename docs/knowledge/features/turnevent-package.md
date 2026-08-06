@@ -38,7 +38,7 @@ the first inbound member `PermissionResponse`, see [codebase/700.md](../codebase
 
 ```
 internal/turnevent/
-├── event.go         Event sealed sum type; the 5 ACP-shaped event structs + the internal-only status peers Stall (#638), ApiRetry / Compacting (#1074); Location; value-receiver markers; var _ Event = … assertions
+├── event.go         Event sealed sum type; the 5 ACP-shaped event structs + the internal-only status peers Stall (#638), ApiRetry / Compacting (#1074) + the internal-only diagnostic Unrecognized; Location; value-receiver markers; var _ Event = … assertions
 ├── permission.go    (#700) PermissionRequest (outbound Event variant) + PermissionOption + NewPermissionRequest; Inbound sealed sum type + PermissionResponse (first member) + Cancel (#707, fieldless inbound command); markers + assertions. Zero imports.
 ├── taxonomy.go      ToolKind / ToolStatus / TurnEndReason / PermissionOptionKind (#700) enums + const blocks + unexported canonical slices + Valid() methods
 ├── content.go       ToolContent sealed sum type; TextContent / DiffContent / TerminalContent; markers; var _ ToolContent = … assertions
@@ -96,6 +96,7 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
 | `ApiRetry` (#1074) | `Active bool`, `Current, Total int` | **internal-only** status peer of `Stall`: claude's live API-error retry state. `Active` is the rising/falling edge; `Current`/`Total` are the parsed `attempt N/M` counter (`{0,0}` when unparsed) |
 | `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
+| `Unrecognized` | `Site UnrecognizedSite`, `Kind string`, `Raw string`, `Truncated bool` | **internal-only** diagnostic, and the one variant that is not a claude sub-state: the stream parser met output it has no mapping for. `Site` is a closed enum (`line_type` / `assistant_block` / `user_block` / `undecodable`); `Kind` is the offending type, empty for `undecodable`; `Raw` is the offending JSON already truncated by the producer, a `string` and not `json.RawMessage` because a truncated blob is no longer valid JSON |
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
 
 - **`Stall` is an internal-only, onset-only empty marker (#638).** It mirrors

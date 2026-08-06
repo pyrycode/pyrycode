@@ -1230,3 +1230,115 @@ func TestInteractiveTurnEmitterV2_WireEventIDsStrictlyIncreasing(t *testing.T) {
 		}
 	}
 }
+
+// An Unrecognized fans out as an unrecognized_message envelope to
+// interactive-capable conns only (the capability gate), carrying the cursor's
+// conversation_id plus the drop site, the offending type, the raw JSON, and the
+// truncated flag.
+func TestInteractiveTurnEmitterV2_UnrecognizedFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.Unrecognized{
+		Site:      turnevent.UnrecognizedLineType,
+		Kind:      "some_future_event",
+		Raw:       `{"type":"some_future_event"}`,
+		Truncated: true,
+	})
+
+	if got := len(bcast.pushes); got != 1 {
+		t.Fatalf("unrecognized pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	}
+	p := bcast.pushes[0]
+	if p.connID != "a" {
+		t.Fatalf("unrecognized pushed to conn %q; want interactive conn %q", p.connID, "a")
+	}
+	if p.env.Type != protocol.TypeUnrecognizedMessage {
+		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeUnrecognizedMessage)
+	}
+	var up protocol.UnrecognizedMessagePayload
+	if err := json.Unmarshal(p.env.Payload, &up); err != nil {
+		t.Fatalf("decode unrecognized_message payload: %v", err)
+	}
+	if up.ConversationID != testConvID {
+		t.Fatalf("conversation_id: got %q, want %q", up.ConversationID, testConvID)
+	}
+	if up.Site != "line_type" || up.MessageType != "some_future_event" {
+		t.Fatalf("site/message_type: got %q/%q, want line_type/some_future_event", up.Site, up.MessageType)
+	}
+	if up.Raw != `{"type":"some_future_event"}` {
+		t.Fatalf("raw: got %q, want the offending JSON", up.Raw)
+	}
+	if !up.Truncated {
+		t.Fatal("truncated flag did not survive the mapping")
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatal("non-interactive conn b received the unrecognized_message")
+	}
+}
+
+// An Unrecognized mutates no turn lifecycle. This is the load-bearing assertion
+// of the whole variant: we do not know what the message is, so it must neither
+// open nor close a turn. Opening one would wedge the conversation, because no
+// turn end follows a message we could not understand.
+func TestInteractiveTurnEmitterV2_UnrecognizedNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	// Bare unrecognized before any turn: its own frame only, no turn_state.
+	e.Handle(context.Background(), turnevent.Unrecognized{
+		Site: turnevent.UnrecognizedLineType,
+		Kind: "some_future_event",
+		Raw:  `{"type":"some_future_event"}`,
+	})
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeUnrecognizedMessage}) {
+		t.Fatalf("bare unrecognized envelopes: got %v, want [%s]", got, protocol.TypeUnrecognizedMessage)
+	}
+
+	// The next content still opens a fresh turn, as if it never happened.
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeUnrecognizedMessage,
+		protocol.TypeTurnState,      // responding — fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-unrecognized envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+}
+
+// Buffered assistant text keeps its wire position AHEAD of an unrecognized
+// frame, matching the flush-first discipline every status peer follows.
+func TestInteractiveTurnEmitterV2_UnrecognizedFlushesPendingDeltaFirst(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "before"})
+	e.Handle(context.Background(), turnevent.Unrecognized{
+		Site: turnevent.UnrecognizedAssistantBlock,
+		Kind: "fake_future_block",
+		Raw:  `{"type":"fake_future_block"}`,
+	})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,           // responding, opening the turn
+		protocol.TypeAssistantDelta,      // "before", flushed ahead of the diagnostic
+		protocol.TypeUnrecognizedMessage, //
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+}

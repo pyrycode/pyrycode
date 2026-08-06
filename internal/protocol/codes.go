@@ -202,6 +202,26 @@ const (
 	TypeCompacting = "compacting" // binary → phone, outbound v2 compaction status
 )
 
+// Mobile Protocol v2 unrecognized-message diagnostic. The stream-json parser
+// recognises three top-level message types from claude and a fixed set of
+// content blocks; everything outside the measured known-ignored list used to be
+// dropped into a debug log the production daemon does not print, so a claude
+// version that moved something meaningful into a new type would show nothing
+// anywhere. This frame carries that drop to the client instead
+// (docs/protocol-mobile.md § unrecognized_message).
+//
+// Grouped alone rather than with api_retry/compacting because it is not a claude
+// sub-state: it reports a gap in OUR mapping, and its payload is the only
+// interactive frame that carries raw model-adjacent JSON.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an old
+// phone never receives it. The drift detector in
+// internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this lives in the latter.
+const (
+	TypeUnrecognizedMessage = "unrecognized_message" // binary → phone, outbound v2 parser-gap diagnostic
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the
