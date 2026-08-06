@@ -105,6 +105,7 @@ const modalSurfaceBudget = 120 * time.Second
 const modalDismissBudget = 30 * time.Second
 
 func TestInteractiveModalResolution(t *testing.T) {
+	skipUnlessPTYGate(t)
 	h, convID := startModalResolutionHarness(t)
 	// A per-run nonce keeps each phase's trigger command distinct (defeats any
 	// accidental caching) without asserting on its echo. Phase B uses nonce+1 so

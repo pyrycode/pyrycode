@@ -45,6 +45,7 @@ import (
 const livePerConvModalBootstrapUUID = "55555555-5555-4555-8555-555555555555"
 
 func TestInteractivePerConversationModalShown(t *testing.T) {
+	skipUnlessPTYGate(t)
 	h := startPerConvPermissionHarness(t)
 	nonce := time.Now().UnixNano()
 
