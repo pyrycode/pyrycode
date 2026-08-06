@@ -53,6 +53,16 @@ func (a streamRunner) Interrupt() error { return a.r.Interrupt() }
 // runner's (*supervisor.Supervisor).StartNewSession is reached for /clear.
 func (a streamRunner) RestartFresh(newID string) { a.r.RestartFresh(newID) }
 
+// BeginRotation forwards to (*streamsup.Runner).BeginRotation (#1330), arming the
+// rotation gate so no turn accepted once the rotation has begun is written into
+// the outgoing child, and returning the disarm for startFreshRunner's rotate-error
+// path. It is the THIRD concrete method reached by type assertion off the
+// un-widened sessions.Runner (#1077), after Interrupt (#1120) and RestartFresh
+// (#1124) — but the only OPTIONAL one: startFreshRunner asserts for it separately
+// (beginRotationOrNoop) rather than widening the RestartFresh case, so a runner
+// that exposes RestartFresh without a gate keeps today's dispatch exactly.
+func (a streamRunner) BeginRotation() func() { return a.r.BeginRotation() }
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.

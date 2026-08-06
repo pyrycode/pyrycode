@@ -158,11 +158,56 @@ type Runner struct {
 	log     *slog.Logger
 	workDir string // resolved absolute path (agentrun.ResolveWorkdir)
 
-	// mu is a leaf mutex guarding stdin, the write end of the live child's
-	// StdinPipe. It is swapped at spawn/teardown by the Run goroutine and read
-	// by Stdin() from #1088's writer goroutine, so every access is serialised.
+	// mu is a leaf mutex guarding WHICH CHILD, IF ANY, MAY RECEIVE A TURN: stdin
+	// (the write end of the live child's StdinPipe) together with the rotation gate
+	// (rotating + rotateGen). stdin is swapped at spawn/teardown by the Run
+	// goroutine and read by Stdin() from #1088's writer goroutine, so every access
+	// is serialised.
+	//
+	// The charter widened from "the stdin handle" to that broader statement at
+	// #1330, deliberately: WriteUserTurn must answer "is a rotation in flight?" and
+	// "which child's stdin?" as ONE question, because two acquisitions reintroduce
+	// the defect at nanosecond width (read the flag false → a rotation arms → read
+	// stdin → write into the doomed child). turnTarget answers both under this
+	// single acquisition, so the race is structurally excluded rather than
+	// narrowed; splitting it as a "simplification" reopens it silently. mu remains
+	// a leaf — never held across a channel op, a log call or any other call-out.
 	mu    sync.Mutex
 	stdin io.WriteCloser
+
+	// rotating reports that a new_session rotation is armed and no successor child
+	// has bound yet. BeginRotation sets it strictly BEFORE the pool-side rotate()
+	// re-keys the binding and fires its session_transition{clear}; setStdin clears
+	// it when the fresh child binds. While it stands every WriteUserTurn refuses
+	// with ErrNoLiveChild instead of writing into the child RestartFresh is about
+	// to kill — the ~4 ms window on #1330's record, where the clear reaches clients
+	// while the outgoing child is still alive and msgqueue reads the successful
+	// write as a commit and drops the head.
+	//
+	// takeStdin deliberately does NOT clear it: the gate must survive the teardown,
+	// which is the whole interval it exists for. Nor would releasing it when
+	// RestartFresh returns suffice — that call returns after cancel(), while the
+	// kill, cmd.Wait and the respawn all run later on the Run goroutine.
+	//
+	// Kept STRICTLY SEPARATE from rotatePending (restartMu), which the two fields
+	// superficially resemble. rotatePending selects the next spawn's id FORM
+	// (--session-id vs --resume); folding them together would leave an ABORTED
+	// rotation's rotatePending set, so the next unrelated crash-respawn would spawn
+	// --session-id <oldID> — first-run form, a fresh transcript — silently
+	// discarding the conversation's history.
+	rotating bool
+
+	// rotateGen stamps each arm so a LOSING rotation's abort cannot disarm a
+	// WINNER's gate. Two overlapping new_session frames are an ordinary shape, not
+	// a contrivance (#1330's e2e re-sends the frame every ~250 ms): frame 2's
+	// rotate() wins the re-key, frame 1's then fails ErrSessionNotFound
+	// (sessions/transition.go:120-123 — the ordinary outcome of losing that race)
+	// and runs its abort, which unstamped would clear the arm frame 2 is holding
+	// while frame 2's outgoing child is still alive. That reproduces the defect on
+	// demand from two frames, and no test driving one rotation at a time can see
+	// it. Monotonic and process-local: never persisted, never serialised, never
+	// logged, and compared only against a value BeginRotation itself captured.
+	rotateGen uint64
 
 	// stateMu is a leaf mutex guarding state, the control-plane snapshot. The
 	// Run goroutine writes it via updateState; State() reads it from any
@@ -269,19 +314,107 @@ func (r *Runner) Stdin() io.Writer {
 	return r.stdin
 }
 
+// BeginRotation arms the rotation gate: from this call until the next child binds
+// its stdin, every WriteUserTurn refuses with ErrNoLiveChild instead of writing
+// into the child the accompanying RestartFresh is about to kill. It is called
+// strictly BEFORE the pool-side rotate() that re-keys the binding and fires the
+// session_transition{clear}, so no turn accepted on the strength of that clear can
+// reach the outgoing child (#1330, AC1).
+//
+// It returns the DISARM for the caller's error path — startFreshRunner runs it
+// when rotate() fails, because a gate left armed by a rotation that never happened
+// would refuse every turn until the next respawn, a wedge the rotation never
+// earned. The disarm is LIVE ONLY IF NO LATER ARM HAS LANDED (the rotateGen
+// stamp), mirroring openForDelivery's undo in cmd/pyry: the only way to obtain a
+// disarm is to have placed the matching arm, and a second arm retires the first
+// one's. See rotateGen for the two-frame sequence that needs it.
+//
+// Like RestartFresh it drives only Runner-internal state — one leaf-mutex
+// acquisition, no channel, no call-out — so the sessions layer can call it with no
+// Pool lock held, which startFreshRunner does. Safe from any goroutine.
+func (r *Runner) BeginRotation() (abort func()) {
+	r.mu.Lock()
+	r.rotating = true
+	r.rotateGen++
+	gen := r.rotateGen
+	r.mu.Unlock()
+
+	return func() {
+		r.mu.Lock()
+		if r.rotateGen == gen {
+			r.rotating = false
+		}
+		r.mu.Unlock()
+	}
+}
+
+// turnTarget reports the writer a turn may be written to — nil while a rotation is
+// armed and nil when no child is live — together with whether the ROTATION GATE is
+// what refused, under ONE r.mu acquisition. That single acquisition is the whole
+// property: see mu's doc for why splitting the two reads reopens #1330's race at
+// nanosecond width.
+//
+// The nil-handle branch returns an untyped nil rather than r.stdin, for the same
+// reason Stdin() does: a typed-nil io.WriteCloser widened to io.Writer is not nil,
+// and WriteTurn's no-live-child refusal keys on the interface being nil.
+func (r *Runner) turnTarget() (w io.Writer, gated bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.rotating {
+		return nil, true
+	}
+	if r.stdin == nil {
+		return nil, false
+	}
+	return r.stdin, false
+}
+
 // WriteUserTurn writes the user envelope to the live child's stdin and claims
 // the turncommit gate, wrapping the reviewed WriteTurn free function (#1088). It
 // is the delivery path the session pool dispatches through (send_message →
-// Session.WriteUserTurn → here). A nil Stdin() (no live child) yields
-// ErrNoLiveChild without writing — the retryable no-live-child refusal — and a
-// gate deny yields turncommit.ErrDropped with zero bytes written; both are
-// WriteTurn's verbatim contract, so no new envelope construction is introduced.
+// Session.WriteUserTurn → here). A nil target — no live child, or a rotation armed
+// by BeginRotation (#1330) — yields ErrNoLiveChild without writing, the retryable
+// no-live-child refusal; a gate deny yields turncommit.ErrDropped with zero bytes
+// written. Both are WriteTurn's verbatim contract, so no new envelope construction
+// is introduced.
+//
+// The rotation refusal deliberately reuses ErrNoLiveChild rather than minting a
+// sentinel: that is already the retryable classification msgqueue and cmd/pyry
+// agree on, and the e2e asserts as a contract check that stream WriteUserTurn
+// returns only ErrNoLiveChild, turncommit.ErrDropped or nil
+// (relay_v2_stream_new_session_test.go:480). The discriminator an operator needs —
+// "refused by the rotation gate" vs "no child yet" — is carried by the record
+// below instead. Cost of refusing rather than blocking: the turn lands up to one
+// msgqueue retry interval (1 s) later, against a give-up bound of 2 m.
 //
 // conversationID is accepted for interface conformance (sessions.Runner) and
 // future outbound-cursor wiring (T4/T7); this slice does not yet track a cursor,
-// so it is intentionally unused here.
+// so it is intentionally unused here — and it MUST NOT be logged: conversation ids
+// are resolved daemon-side and stamped on the wire, never logged (cmd/pyry's
+// stream_turn_busy.go, session_transition_v2.go), and streamsup logs none today.
+// Neither may payload bytes be.
 func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
-	return WriteTurn(ctx, r.Stdin(), payload)
+	w, gated := r.turnTarget()
+	if gated {
+		// Emitted OUTSIDE r.mu: a slow slog handler must never block the Run
+		// goroutine's setStdin, which is the thing that ends this very window.
+		//
+		// INFO, NOT DEBUG, and the level is load-bearing rather than taste. #1330's
+		// AC4 measures the fix against the e2e's AC-1 instrument guard, which greps
+		// the daemon's WHOLE captured stderr for the literal "level=DEBUG"
+		// (relay_v2_stream_new_session_test.go:528-546) and which AC5 forbids
+		// editing. A Debug record here fires on essentially every rotation, so it
+		// would satisfy that guard from the fix's own diagnostic and turn the
+		// measurement into a near-tautology — the false-green shape the ticket
+		// spends a paragraph rejecting. Volume at Info is bounded and low: one
+		// record per delivery attempt inside a window a respawn closes, and ~120
+		// then a typed session_error in the pathological case where Run has already
+		// returned — which is an anomaly worth being loud about. (Spec Open
+		// question 1 left the level open on exactly this kind of evidence.)
+		r.log.Info("streamsup: turn refused; new_session rotation in flight",
+			"session", r.liveSessionID())
+	}
+	return WriteTurn(ctx, w, payload)
 }
 
 // Interrupt writes a single interrupt control_request line to the live child's
@@ -407,6 +540,17 @@ func (r *Runner) nextSpawnID() (sessionID string, forceFirst bool) {
 	sessionID, forceFirst = r.sessionID, r.rotatePending
 	r.rotatePending = false
 	return sessionID, forceFirst
+}
+
+// liveSessionID snapshots the live session id under restartMu, for a diagnostic
+// that must name WHICH runner it came from (the daemon's logger is pool-wide, not
+// per-session). It takes restartMu only, never mu, so it is safe to call from a
+// WriteUserTurn that has already released mu — and must not be called with mu
+// held, which would nest two leaf locks for a log field.
+func (r *Runner) liveSessionID() string {
+	r.restartMu.Lock()
+	defer r.restartMu.Unlock()
+	return r.sessionID
 }
 
 // setIterCancel publishes (or clears, when c is nil) the current iteration's
@@ -610,15 +754,23 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string) (started bool,
 	return true, waitErr
 }
 
-// setStdin publishes the live child's stdin write end under the leaf mutex.
+// setStdin publishes the live child's stdin write end under the leaf mutex and,
+// in the SAME acquisition, disarms the rotation gate (#1330): a successor child is
+// bound, so the window in which a turn could be written into a doomed child is
+// over. Pairing the two here is what makes "armed until the successor binds"
+// exact — a gate released on RestartFresh's return would only narrow the race,
+// since that call returns before the kill, the Wait and the respawn have happened.
 func (r *Runner) setStdin(w io.WriteCloser) {
 	r.mu.Lock()
 	r.stdin = w
+	r.rotating = false
 	r.mu.Unlock()
 }
 
 // takeStdin clears the stored stdin handle and returns the previous value so
 // the caller can close it outside the lock (a slow close never blocks Stdin()).
+// It deliberately leaves the rotation gate alone: the teardown is the MIDDLE of
+// the window the gate covers, not its end (see the rotating field).
 func (r *Runner) takeStdin() io.WriteCloser {
 	r.mu.Lock()
 	w := r.stdin
