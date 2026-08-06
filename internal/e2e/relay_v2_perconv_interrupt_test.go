@@ -216,7 +216,7 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	//
 	// TUI mode and Esc-ends-turn coexist by design — they touch different bytes:
 	// TUI emits the startup glyph + spinner, the ESC detector scans stdin for the
-	// bare interrupt ESC (fakeclaude/main.go:112-116).
+	// bare interrupt ESC (fakeclaude/main.go:120-124).
 	StartRotationWithRelay(t, home, sessionsDir, initialUUID, neverRotate, stdinLog,
 		fr.URL()+"/v2/server",
 		"PYRY_MOBILE_V2=1",

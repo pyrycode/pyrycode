@@ -382,7 +382,7 @@ func (r *Runner) turnTarget() (w io.Writer, gated bool) {
 // sentinel: that is already the retryable classification msgqueue and cmd/pyry
 // agree on, and the e2e asserts as a contract check that stream WriteUserTurn
 // returns only ErrNoLiveChild, turncommit.ErrDropped or nil
-// (relay_v2_stream_new_session_test.go:480). The discriminator an operator needs —
+// (relay_v2_stream_new_session_test.go:523). The discriminator an operator needs —
 // "refused by the rotation gate" vs "no child yet" — is carried by the record
 // below instead. Cost of refusing rather than blocking: the turn lands up to one
 // msgqueue retry interval (1 s) later, against a give-up bound of 2 m.
@@ -402,7 +402,7 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 		// INFO, NOT DEBUG, and the level is load-bearing rather than taste. #1330's
 		// AC4 measures the fix against the e2e's AC-1 instrument guard, which greps
 		// the daemon's WHOLE captured stderr for the literal "level=DEBUG"
-		// (relay_v2_stream_new_session_test.go:528-546) and which AC5 forbids
+		// (relay_v2_stream_new_session_test.go:577-600) and which AC5 forbids
 		// editing. A Debug record here fires on essentially every rotation, so it
 		// would satisfy that guard from the fix's own diagnostic and turn the
 		// measurement into a near-tautology — the false-green shape the ticket

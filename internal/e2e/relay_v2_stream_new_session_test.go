@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,8 +45,9 @@ import (
 //	  RestartFresh(newID) re-spawns claude --session-id newID (NO /clear keystroke)
 //	    registry id: initialUUID → newID                                            ── M2
 //	    session_transition{clear, initialUUID → newID, knownConvID} broadcast        ── M3
-//	phone send_message #2(knownConvID→newID,"…two") → ack → the FRESH child's stdin   ── M4
-//	the stdin log never carries "/clear"                                             ── M5
+//	phone send_message #2(knownConvID→newID,"…two") → ack → the FRESH child's OWN
+//	  per-child stdin log (<stem>.<post.ID>), never the outgoing child's            ── M4
+//	no child's stdin log ever carries "/clear"                                      ── M5
 //
 // THE STREAM TWIN OF TestRelayV2_NewSessionRotatesOnDisk (the PTY new_session e2e).
 // The PTY test asserts the fsnotify watcher follows claude's self-rotated
@@ -70,6 +72,16 @@ import (
 // stream path (a SEPARATE concern from new_session routing, which this ticket proves
 // works; flagged for a production follow-up), and is why M4 asserts the fresh child's
 // STDIN, not a phone-side delta — asserting a delta would HANG.
+//
+// WHY THAT STDIN EVIDENCE IS PER-CHILD (#1331). The tee's env value is a path STEM and
+// each child appends to <stem>.<its own session id>, so M4 reads ONLY the log of the
+// child the daemon spawned with --session-id post.ID. Under the retired one-shared-file
+// contract a needle proved that SOME child received the turn and never which, so a turn
+// delivered to the OUTGOING child passed M4 — and the run then surfaced downstream as an
+// AC-1 failure whose two named readings were both wrong, a broken-instrument report about
+// a working instrument. M5 spans EVERY per-child log for the same reason in reverse: a
+// "/clear" typed at the outgoing child must still be caught, and turn #1's needle (the
+// outgoing child's bytes) is what discharges M5's non-vacuity.
 func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	const (
 		initialUUID   = "11111111-1111-4111-8111-111111111111" // bootstrap
@@ -114,11 +126,15 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// conversations.json once at startup, so the row must exist BEFORE it starts.
 	seedBoundConversation(t, home, knownConvID, initialUUID)
 
-	// The stdin tee target. StartStreamInteractiveWithRelay flows this env to the
-	// daemon's process env, inherited by BOTH the bootstrap child and the fresh
-	// post-rotation child (append-mode, so both accumulate into one log — see the
-	// fakeclaude stream-mode tee).
-	stdinLog := filepath.Join(t.TempDir(), "fakeclaude-stdin.log")
+	// The stdin tee target — a path STEM, not a file. StartStreamInteractiveWithRelay
+	// flows this env to the daemon's process env, inherited identically by BOTH the
+	// bootstrap child and the fresh post-rotation child; each of them appends its own
+	// stdin to <stem>.<its own session id> (fakeclaude's stream tee, #1331). That
+	// per-child split is what lets M4 name the child that received turn #2: one shared
+	// file could only ever say SOME child did, so a turn delivered to the outgoing child
+	// read as green. No ".log" suffix — the id takes the place the extension used to
+	// hold, and the bare stem's absence stays meaningful (only the PTY tee writes it).
+	stdinLogStem := filepath.Join(t.TempDir(), "fakeclaude-stdin")
 
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
@@ -126,7 +142,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 
 	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
-		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinLog)
+		"PYRY_FAKE_CLAUDE_STDIN_LOG="+stdinLogStem)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)
@@ -368,20 +384,29 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		}
 	}
 
-	// The stdin log's size the moment ack #2 landed, paired with its size at the
-	// poll deadline below. Growth between the two falsifies "no bytes arrived at
-	// all": the log is opened O_APPEND with a per-write Sync and BOTH the bootstrap
-	// and the fresh post-rotation child accumulate into this one file, so growth
-	// means some child was alive and receiving — separating that from "bytes
-	// arrived, but not turn #2's". Both probes use the SAME instrument
-	// (os.ReadFile + len) as the poll loop and as the log=%q the failure prints:
-	// the file is appended to concurrently, and mixing an os.Stat size into one end
-	// would make the delta unattributable. The elapsed stamp is load-bearing, not
-	// decoration — there is no milestone line between M3 and an M4 failure, so the
-	// up-to-15 s ack #2 wait is otherwise invisible, and whether ack #2 landed at
-	// t=0.2 s or t=14 s is the slowness-vs-stall discriminator.
+	// The POST-ROTATION child's stdin log's size the moment ack #2 landed, paired
+	// with its size at the poll deadline below. Growth between the two falsifies "no
+	// bytes arrived at all" FOR THAT CHILD: the file is opened O_APPEND with a
+	// per-write Sync and exactly ONE child ever writes it (#1331), so growth means
+	// the post-rotation child was alive and receiving — separating that from "bytes
+	// arrived, but not turn #2's". Which child the bytes went to is the other
+	// dimension entirely, and the per-child inventory in the failure record carries
+	// it.
+	//
+	// A read error here is INFORMATIVE, not just noise to be kept: the child opens
+	// its log before it reads its first stdin byte, so an ENOENT at ack #2 means the
+	// fresh child had not started yet at that moment — a reading no byte count can
+	// express, and one the shared-file instrument could never produce.
+	//
+	// Both probes use the SAME instrument (os.ReadFile + len) as the poll loop and as
+	// the log=%q the failure prints, on the SAME per-child path: the file is appended
+	// to concurrently, and mixing an os.Stat size into one end would make the delta
+	// unattributable. The elapsed stamp is load-bearing, not decoration — there is no
+	// milestone line between M3 and an M4 failure, so the up-to-15 s ack #2 wait is
+	// otherwise invisible, and whether ack #2 landed at t=0.2 s or t=14 s is the
+	// slowness-vs-stall discriminator.
 	ackTwoAt := elapsed()
-	ackTwoBytes, ackTwoErr := os.ReadFile(stdinLog)
+	ackTwoBytes, ackTwoErr := os.ReadFile(childStdinLog(stdinLogStem, post.ID))
 
 	// The daemon log's length at that same moment — the failure record's window
 	// boundary (#1296). A byte OFFSET, not a timestamp: safeBuffer is append-only
@@ -399,9 +424,15 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// change any reading below, but the record should not pretend otherwise.
 	ackTwoLogLen := len(h.Stderr.Bytes())
 
-	// Poll the stdin log until the fresh child has received turn #2. The daemon's
-	// inbound queue retries WriteUserTurn until the fresh child is stdin-ready, so a
-	// generous deadline absorbs the fresh spawn.
+	// Poll the POST-ROTATION child's OWN stdin log until it has received turn #2. The
+	// daemon's inbound queue retries WriteUserTurn until the fresh child is
+	// stdin-ready, so a generous deadline absorbs the fresh spawn.
+	//
+	// Reading only <stem>.<post.ID> is the assertion (#1331): a turn delivered solely
+	// to the outgoing child (initialUUID) leaves this file needle-free and fails M4,
+	// where the retired shared-file read passed it. The needle can only appear here if
+	// a child that the daemon pinned to post.ID wrote it, so a drift between this
+	// derivation and fakeclaude's fails LOUD rather than silently green.
 	//
 	// This deadline stays where it is, deliberately (#1273) — though NOT for the
 	// reason this comment used to give, which was wrong on both clauses (#1296).
@@ -426,15 +457,16 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// itself as a measurement, which is exactly the ambiguity this change closes.
 	var logBytes []byte
 	var logErr error
+	gotTurnTwo := false
 	turnTwoDeadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(turnTwoDeadline) {
-		logBytes, logErr = os.ReadFile(stdinLog)
-		if bytes.Contains(logBytes, []byte(echoNeedleTwo)) {
+		gotTurnTwo, logBytes, logErr = childReceivedTurn(stdinLogStem, post.ID, []byte(echoNeedleTwo))
+		if gotTurnTwo {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if !bytes.Contains(logBytes, []byte(echoNeedleTwo)) {
+	if !gotTurnTwo {
 		// Re-read the registry's bootstrap id ONE-SHOT and report it beside the
 		// post.ID captured at M2. A mismatch means a SECOND rotation re-keyed the
 		// binding out from under turn #2's in-flight write — the M2 loop re-sends
@@ -450,7 +482,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		// ok=false conflates missing / unparseable / no bootstrap row, so it renders as
 		// a sentinel — never as "", which would read as "the rotation lost the id" and
 		// fabricate a finding out of a broken instrument. The `e.ID != ""` clause is the
-		// same guard M2's read carries 170 lines up (:267): readBootstrapIfPresent does
+		// same guard M2's read carries ~200 lines up (:284): readBootstrapIfPresent does
 		// not require a non-empty id, and an empty one would print as a MANUFACTURED
 		// second-rotation proof — flagged in docs/knowledge/codebase/1273.md as a
 		// fold-in for the next ticket touching this file, which is this one.
@@ -458,10 +490,21 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		if e, ok := readBootstrapIfPresent(regPath); ok && e.ID != "" {
 			regNowID = e.ID
 		}
-		t.Fatalf("M4: the fresh child never received the subsequent turn; the stdin log has no %q bytes "+
-			"(delivery never reached it, or the rotated session did not re-spawn). ack #2 received=%t\n"+
-			"stdin log: %d bytes at ack #2 (t=%s, read err: %v) → %d bytes at expiry (read err: %v) "+
-			"— no growth ⟹ no bytes arrived at all; growth ⟹ bytes arrived, but not turn #2's\n"+
+		// The attribution dimension (#1331), and the reason it is rendered ahead of
+		// every delivery reading below: those readings all presume the turn was
+		// heading for the right child. childStdinLogs and childStdinInventory are
+		// fatal-free for the same reason readBootstrapIfPresent is.
+		inventoryLogs, inventoryErr := childStdinLogs(stdinLogStem)
+		t.Fatalf("M4: the POST-ROTATION child — the one the daemon spawned with --session-id %s — never received "+
+			"the subsequent turn; that child's OWN stdin log has no %q bytes (delivery never reached it, it "+
+			"reached the OUTGOING child instead, or the rotated session did not re-spawn). ack #2 received=%t\n"+
+			"post-rotation child's stdin log: %d bytes at ack #2 (t=%s, read err: %v) → %d bytes at expiry "+
+			"(read err: %v) — no growth ⟹ no bytes reached THAT child at all; growth ⟹ bytes reached it, but not "+
+			"turn #2's\n%s\n"+
+			"read that inventory FIRST: bytes under the outgoing id and none under the post-rotation id ⟹ the turn "+
+			"was delivered to the child the rotation replaced — a delivery-ordering defect (#1330's class, which "+
+			"this per-child attribution exists to make visible), NOT a stall, and none of the delivery readings "+
+			"below apply to it\n"+
 			"registry bootstrap id: %q at M2 (post.ID) → %q re-read now — a mismatch ⟹ a second rotation "+
 			"re-keyed the binding under turn #2\n%s\n"+
 			"how to read that count pair (the harness starts pyry WITH -pyry-verbose, so the daemon logs at "+
@@ -485,13 +528,14 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 			"30s), which newInboundDeliver does not log around, and parked in the mid-turn hold "+
 			"(streamTurnHoldTimeout, 15m), whose whole waitIdleForDelivery → WaitIdle chain is silent. That "+
 			"pair is NOT decided by this record; raising the level further would not decide it either.\nlog=%q",
-			echoNeedleTwo, gotAck2,
+			post.ID, echoNeedleTwo, gotAck2,
 			len(ackTwoBytes), ackTwoAt, ackTwoErr, len(logBytes), logErr,
+			childStdinInventory(inventoryLogs, inventoryErr, initialUUID, post.ID),
 			post.ID, regNowID,
 			daemonLogWindow(h.Stderr.Bytes(), ackTwoLogLen, daemonLogBudget),
 			logBytes)
 	}
-	t.Logf("[t=%s] M4: the fresh post-rotation child received the subsequent turn (stdin log carries %q)", elapsed(), echoNeedleTwo)
+	t.Logf("[t=%s] M4: the post-rotation child (--session-id %s) received the subsequent turn — its OWN stdin log carries %q, so the turn was served by the FRESH child and not by the outgoing one", elapsed(), post.ID, echoNeedleTwo)
 
 	// --- AC-1 instrument guard (#1318). Prove the daemon really is logging at Debug,
 	// so M4's pending/holds count above is a MEASUREMENT and not a suppression.
@@ -515,7 +559,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// the fresh child produces for turn #2 is dropped at the drain's active-session
 	// gate with a Debug "relay: stream-turn drop; not active session"
 	// (cmd/pyry/stream_turn_drain.go) — the very divergence this file's header
-	// documents at :62-72, and the reason M4 asserts stdin rather than a phone-side
+	// documents at :64-74, and the reason M4 asserts stdin rather than a phone-side
 	// delta. So on any run where M4 goes green, turn #2's echo owes at least one such
 	// record. The assertion is deliberately the WEAKER "some Debug record exists
 	// anywhere in the capture": the level flip is the thing under test, and pinning a
@@ -523,8 +567,13 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	//
 	// The poll is bounded rather than one-shot because the drop is asynchronous
 	// (child stdout → parser → sink → drain goroutine) while M4's poll exits on the
-	// stdin log, which the child writes to BEFORE it emits its echo. 5s at 50ms sits
-	// well inside the test's existing budget.
+	// post-rotation child's stdin log, which that child writes to BEFORE it emits its
+	// echo. 5s at 50ms sits well inside the test's existing budget. That same ordering
+	// is where this guard's third reading comes from (#1331): received-but-never-echoed
+	// is a real window, and it is now the ONLY "the child did not produce an event"
+	// reading left — M4 attributes, so a green M4 has already proven the post-rotation
+	// child received the turn, and "it never received it" is excluded before this guard
+	// can fire.
 	sawDebug := false
 	debugDeadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(debugDeadline) {
@@ -537,31 +586,51 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	if !sawDebug {
 		t.Fatalf("AC-1: the daemon's captured stderr carries no %q record within 5s of M4, so this harness is "+
 			"NOT logging at Debug and M4's pending/holds count is a suppression rather than a measurement. "+
-			"Two readings, and they are different defects: either -pyry-verbose no longer reaches the handler "+
+			"Three readings, and they are different defects: either -pyry-verbose no longer reaches the handler "+
 			"level (internal/e2e/harness.go's extraFlags, or cmd/pyry/main.go's flag → slog.LevelDebug), or "+
 			"the drain stopped dropping post-rotation events at the active-session gate — which would mean "+
-			"this file's header divergence analysis (:62-72) is stale and M4 could assert a phone-side delta "+
-			"after all\nstderr=%q", daemonDebugLevel, h.Stderr.Bytes())
+			"this file's header divergence analysis (:64-74) is stale and M4 could assert a phone-side delta "+
+			"after all — or the post-rotation child received turn #2 but never echoed it, so the drain had no "+
+			"post-rotation event to drop at all: M4's poll exits on that child's stdin write, which precedes its "+
+			"echo, so received-but-never-echoed is a real window and this guard sits inside it. What is NOT a "+
+			"reading, and must not be read in: \"the fresh child never received the turn\". M4 reads only the "+
+			"post-rotation child's own per-child log (#1331) and this guard runs only on a green M4, so a green "+
+			"M4 is itself the proof that that child received it\nstderr=%q", daemonDebugLevel, h.Stderr.Bytes())
 	}
 	t.Logf("[t=%s] AC-1: the daemon's capture carries a %q record — -pyry-verbose reached the handler, so M4's pending/holds count is a measurement", elapsed(), daemonDebugLevel)
 
 	// --- M5 (AC-3): no "/clear" on the stream path. On the stream path new_session is
-	// a process re-spawn (RestartFresh), never a keystroke, so no child ever receives
-	// "/clear". Read the full stdin log and assert it (a) captured a user turn — the
-	// non-vacuity guard proving the tee is actually wired — and (b) never contains
-	// "/clear".
-	logBytes, _ = os.ReadFile(stdinLog)
-	if !bytes.Contains(logBytes, []byte(echoNeedleOne)) && !bytes.Contains(logBytes, []byte(`"type":"user"`)) {
-		t.Fatalf("M5 non-vacuity: the stdin log captured no user turn (neither %q nor `\"type\":\"user\"`); the "+
-			"tee is not wired or PYRY_FAKE_CLAUDE_STDIN_LOG never reached the child, so the no-/clear assertion "+
-			"below would pass vacuously\nlog=%q", echoNeedleOne, logBytes)
+	// a process re-spawn (RestartFresh), never a keystroke, so NO child ever receives
+	// "/clear". Read EVERY per-child log — not just the post-rotation child's — and
+	// assert (a) some child captured a user turn, the non-vacuity guard proving the tee
+	// is actually wired, and (b) no child's bytes contain "/clear".
+	//
+	// Spanning every child is load-bearing in BOTH directions (#1331), which is why the
+	// per-child split narrows M4 without narrowing M5. Non-vacuity is discharged by turn
+	// #1's needle, and turn #1 went to the OUTGOING child — reading only the
+	// post-rotation child's log would make the guard depend on turn #2, the very thing
+	// M4 may have just found missing. And a "/clear" typed at the outgoing child is
+	// exactly the mis-route M5 exists to catch, so a post-rotation-only scan would let
+	// the regression through.
+	logs, logsErr := childStdinLogs(stdinLogStem)
+	if logsErr != nil {
+		// A broken instrument must not read as a pass: the scans below span only what
+		// was read, so an unread log is a hole in both of them.
+		t.Errorf("M5: could not read every per-child stdin log under %s.*: %v", stdinLogStem, logsErr)
 	}
-	if bytes.Contains(logBytes, []byte("/clear")) {
-		t.Fatalf("M5 (AC-3): the stdin log contains \"/clear\"; the stream new_session mis-routed to the PTY "+
-			"/clear path (a startFreshRunner type-switch regression) — the stream path must re-spawn, never type "+
-			"/clear\nlog=%q", logBytes)
+	if len(childrenWith(logs, echoNeedleOne)) == 0 && len(childrenWith(logs, `"type":"user"`)) == 0 {
+		t.Fatalf("M5 non-vacuity: no per-child stdin log captured a user turn (neither %q nor `\"type\":\"user\"` "+
+			"in any of them); the tee is not wired, PYRY_FAKE_CLAUDE_STDIN_LOG never reached the children, or this "+
+			"test and fakeclaude disagree on the per-child path shape — so the no-/clear assertion below would "+
+			"pass vacuously\n%s", echoNeedleOne, childStdinInventory(logs, logsErr, initialUUID, post.ID))
 	}
-	t.Logf("[t=%s] M5: the stdin log captured user turns and never a /clear — the stream new_session re-spawned, no keystroke (AC-3)", elapsed())
+	if clearIDs := childrenWith(logs, "/clear"); len(clearIDs) > 0 {
+		t.Fatalf("M5 (AC-3): the stdin log of child(ren) %q contains \"/clear\"; the stream new_session mis-routed "+
+			"to the PTY /clear path (a startFreshRunner type-switch regression) — the stream path must re-spawn, "+
+			"never type /clear\n%s\nlogs=%q", clearIDs,
+			childStdinInventory(logs, logsErr, initialUUID, post.ID), logs)
+	}
+	t.Logf("[t=%s] M5: %d per-child stdin log(s), at least one carrying a user turn and NONE of them a /clear — the stream new_session re-spawned, no keystroke (AC-3)", elapsed(), len(logs))
 }
 
 // daemonLogBudget bounds the daemon-log excerpt M4's failure message attaches.
@@ -675,6 +744,127 @@ func daemonLogWindow(snapshot []byte, since, budget int) string {
 	return fmt.Sprintf("%s\n  (bounded at %d bytes: showing the first %d and the last %d, %d elided from "+
 		"the middle)\n%s… [%d bytes elided from the middle] …%s",
 		header, budget, keep, keep, elided, window[:keep], elided, window[len(window)-keep:])
+}
+
+// --- Per-child stdin evidence (#1331) ---------------------------------------
+//
+// fakeclaude's stream tee treats PYRY_FAKE_CLAUDE_STDIN_LOG as a path STEM and writes
+// each child's stdin to <stem>.<that child's session id>, so the evidence M4 and M5
+// read is attributed to the child that received it. Every helper below is FATAL-FREE
+// — no *testing.T, no t.Fatal* — because M4's failure record calls them while building
+// its message, and a fatal fired there means the message never prints (the rule the M4
+// branch states, and the reason readBootstrapIfPresent is its only registry reader).
+
+// childStdinLog is the path the child pinned to sessionID tees its stdin to.
+// Deliberately DUPLICATES fakeclaude's streamStdinLogPath derivation rather than
+// sharing it: fakeclaude is package main and unimportable — the same posture
+// msgqueueRetryWarn takes toward msgqueue's log literal. A drift between the two fails
+// LOUD rather than silently green: the needle can only ever appear in a file some child
+// actually wrote, so a reader looking at the wrong path finds nothing and M4 goes red.
+func childStdinLog(stem, sessionID string) string {
+	return stem + "." + sessionID
+}
+
+// childReceivedTurn reports whether the child pinned to sessionID received needle,
+// reading ONLY that child's log — which is what makes "a turn delivered to the outgoing
+// child" fail M4 instead of passing it. The bytes and the read error both come back so
+// a caller can render an absent or unreadable file as itself: without the error,
+// len(nil) == 0 renders "the file does not exist" as "the file was empty", a broken
+// instrument reporting itself as a measurement.
+func childReceivedTurn(stem, sessionID string, needle []byte) (bool, []byte, error) {
+	b, err := os.ReadFile(childStdinLog(stem, sessionID))
+	return bytes.Contains(b, needle), b, err
+}
+
+// childStdinLogs returns every per-child stdin log under stem, keyed by the session id
+// its name carries. os.ReadDir plus a filepath.Base(stem)+"." prefix filter, NOT
+// filepath.Glob: a stem containing a glob metacharacter would make Glob return
+// ErrBadPattern, and that renders as "no children" — an instrument failure reported as
+// a measurement. The trailing dot in the prefix is load-bearing too: it skips the bare
+// <stem> file, which only the PTY tee ever writes.
+//
+// A per-file read error is errors.Join'd into err while every other file still lands in
+// the map, so partial evidence survives with the gap stated rather than being discarded
+// wholesale.
+func childStdinLogs(stem string) (map[string][]byte, error) {
+	dir, prefix := filepath.Dir(stem), filepath.Base(stem)+"."
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read per-child stdin log dir %s: %w", dir, err)
+	}
+	logs := make(map[string][]byte)
+	var readErrs []error
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			readErrs = append(readErrs, err)
+			continue
+		}
+		logs[strings.TrimPrefix(e.Name(), prefix)] = b
+	}
+	return logs, errors.Join(readErrs...)
+}
+
+// childrenWith returns the session ids whose stdin log contains needle, sorted so a
+// failure message is stable. It serves BOTH of M5's checks — the "/clear" scan, which
+// must NAME the child that received one, and the non-vacuity guard, which holds when
+// some child's bytes carry a user turn — so both span every child by construction. An
+// empty inventory therefore yields an empty list, i.e. FAILS non-vacuity rather than
+// passing it vacuously.
+func childrenWith(logs map[string][]byte, needle string) []string {
+	var ids []string
+	for id, b := range logs {
+		if bytes.Contains(b, []byte(needle)) {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// childStdinInventory renders every per-child log's size beside the id that wrote it,
+// marking the two ids the assertion is about. It is the attribution half of M4's failure
+// record, and its decisive reading is the wrong-child one: bytes under the OUTGOING id
+// and none under the post-rotation id ⟹ the turn was delivered to the child the rotation
+// replaced. An id that is neither is named as such — a second rotation (M2 re-sends
+// new_session every ~250 ms, and this file already anticipates double actuation) or an
+// unattributed child.
+//
+// Pure over its arguments, and it NEVER returns "": a failure to enumerate and an
+// enumerated absence render as distinct sentinels — the same posture daemonLogWindow
+// takes — because a blank rendering would read as the finding "no child ever wrote".
+func childStdinInventory(logs map[string][]byte, err error, outgoingID, postID string) string {
+	if len(logs) == 0 {
+		if err != nil {
+			return fmt.Sprintf("per-child stdin logs: <unenumerable: %v>", err)
+		}
+		return "per-child stdin logs: <none: not one child wrote a single stdin byte, so the tee never wired " +
+			"(or this test and fakeclaude disagree on the per-child path shape)>"
+	}
+	ids := make([]string, 0, len(logs))
+	for id := range logs {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	var b strings.Builder
+	fmt.Fprintf(&b, "per-child stdin logs (%d):", len(ids))
+	for _, id := range ids {
+		mark := "neither the outgoing nor the post-rotation id — a second rotation, or an unattributed child"
+		switch id {
+		case postID:
+			mark = "POST-ROTATION (the child M4 asserts)"
+		case outgoingID:
+			mark = "outgoing (the child the rotation replaced)"
+		}
+		fmt.Fprintf(&b, "\n  %s = %d bytes ← %s", id, len(logs[id]), mark)
+	}
+	if err != nil {
+		fmt.Fprintf(&b, "\n  (incomplete — some logs were unreadable: %v)", err)
+	}
+	return b.String()
 }
 
 // TestDaemonLogWindow pins daemonLogWindow's four arms and BOTH of its header
@@ -833,4 +1023,295 @@ func TestDaemonLogWindow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestChildStdinLogAttribution is #1331's falsifiability proof for M4's attributed
+// assertion and for M5's spanning ones. Every fixture path is written with a
+// HAND-WRITTEN literal shape — filepath.Join(dir, "fakeclaude-stdin."+id) — and never
+// by calling childStdinLog: a fixture built through the helper would agree with
+// whatever derivation the helper happened to have and would prove nothing.
+//
+// WHAT THIS PROVES. The attribution property: evidence in which only the OUTGOING child
+// received the turn cannot satisfy the post-rotation child's assertion. The first M4 row
+// below is exactly that evidence — green under the retired shared-file instrument, red
+// under this one.
+//
+// WHAT IT DOES NOT PROVE. That fakeclaude and this file agree on the path shape. Nothing
+// offline can: fakeclaude is a separate `package main` binary, unimportable from here,
+// which is why childStdinLog duplicates its derivation. That agreement is proven live, by
+// a green M4 together with M5's non-vacuity, and a disagreement is loud (M4 red), never
+// silently green. Do not read these rows as covering it.
+//
+// WHY A FIXTURE AND NOT A LIVE RE-RUN. The production race that delivered a turn to the
+// wrong child is CLOSED (#1330, dac5779), so the wrong-child evidence is no longer
+// producible on demand even in principle. A fixture is the only available proof, not a
+// convenience.
+func TestChildStdinLogAttribution(t *testing.T) {
+	const (
+		outgoingID = "11111111-1111-4111-8111-111111111111" // the bootstrap child
+		postID     = "33333333-3333-4333-8333-333333333333" // the post-rotation child
+		thirdID    = "44444444-4444-4444-8444-444444444444" // a second rotation's child
+		turnTwo    = "e2e-1137-user:two"                    // M4's needle
+		turnOne    = "e2e-1137-user:one"                    // M5's non-vacuity needle
+	)
+
+	// fixture lays the named per-child files down in a fresh dir and returns the stem.
+	// The path shape is written out literally here, on purpose (see the doc comment).
+	fixture := func(t *testing.T, files map[string]string, extra map[string]string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for id, body := range files {
+			if err := os.WriteFile(filepath.Join(dir, "fakeclaude-stdin."+id), []byte(body), 0o600); err != nil {
+				t.Fatalf("write per-child fixture for %s: %v", id, err)
+			}
+		}
+		for name, body := range extra {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatalf("write extra fixture %s: %v", name, err)
+			}
+		}
+		return filepath.Join(dir, "fakeclaude-stdin")
+	}
+
+	t.Run("M4 predicate reads only the post-rotation child", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			files   map[string]string
+			want    bool
+			wantErr bool
+		}{
+			{
+				// THE AC-3 ROW. The outgoing child got turn #2 and the post-rotation
+				// child got nothing — the shape the #1330 race produced. The retired
+				// shared-file read found the needle and went green here; the attributed
+				// read must not. The non-nil error is half the point: an absent file
+				// must render as absent, never as an empty one.
+				name:    "only the OUTGOING child received the turn: M4 must go red",
+				files:   map[string]string{outgoingID: turnOne + "\n" + turnTwo + "\n"},
+				want:    false,
+				wantErr: true,
+			},
+			{
+				// The control (#1295/#1330): proves the fixture shape is reachable at
+				// all, so the row above is red because of attribution and not because
+				// the predicate can never see a needle.
+				name: "the post-rotation child received it: M4 goes green",
+				files: map[string]string{
+					outgoingID: turnOne + "\n",
+					postID:     turnTwo + "\n",
+				},
+				want: true,
+			},
+			{
+				name: "a second delivery to the outgoing child does not un-prove it",
+				files: map[string]string{
+					outgoingID: turnOne + "\n" + turnTwo + "\n",
+					postID:     turnTwo + "\n",
+				},
+				want: true,
+			},
+			{
+				// An empty file and an absent one are different readings: this child
+				// opened its log (so it started) and received nothing.
+				name:    "the post-rotation child's log exists but is empty: red, and NO error",
+				files:   map[string]string{outgoingID: turnTwo + "\n", postID: ""},
+				want:    false,
+				wantErr: false,
+			},
+			{
+				name:    "no per-child log at all: red, with the error kept",
+				files:   nil,
+				want:    false,
+				wantErr: true,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				stem := fixture(t, tc.files, nil)
+				got, b, err := childReceivedTurn(stem, postID, []byte(turnTwo))
+				if got != tc.want {
+					t.Errorf("childReceivedTurn(post=%s, %q) = %v, want %v (bytes read: %q)",
+						postID, turnTwo, got, tc.want, b)
+				}
+				if (err != nil) != tc.wantErr {
+					t.Errorf("childReceivedTurn read error = %v, want error present: %v", err, tc.wantErr)
+				}
+			})
+		}
+	})
+
+	t.Run("M5 predicates span every child", func(t *testing.T) {
+		tests := []struct {
+			name string
+			// files/extra build the fixture; extra names are literal, unprefixed.
+			files      map[string]string
+			extra      map[string]string
+			wantIDs    []string // childStdinLogs' keys
+			wantClear  []string // childrenWith(logs, "/clear")
+			wantVacuum bool     // no child carried a user turn ⟹ non-vacuity FAILS
+		}{
+			{
+				// AC-5's explicit case: the mis-route is caught even when it lands on
+				// the child M4 no longer reads.
+				name: "/clear at the OUTGOING child is reported, naming it",
+				files: map[string]string{
+					outgoingID: turnOne + "\n/clear\n",
+					postID:     turnTwo + "\n",
+				},
+				wantIDs:   []string{outgoingID, postID},
+				wantClear: []string{outgoingID},
+			},
+			{
+				name: "/clear at the post-rotation child is reported, naming it",
+				files: map[string]string{
+					outgoingID: turnOne + "\n",
+					postID:     turnTwo + "\n/clear\n",
+				},
+				wantIDs:   []string{outgoingID, postID},
+				wantClear: []string{postID},
+			},
+			{
+				name: "no /clear anywhere: nothing reported",
+				files: map[string]string{
+					outgoingID: turnOne + "\n",
+					postID:     turnTwo + "\n",
+				},
+				wantIDs: []string{outgoingID, postID},
+			},
+			{
+				// Non-vacuity is discharged by turn #1's bytes, which are the OUTGOING
+				// child's — the reason M5 must keep spanning every child even though
+				// M4 narrowed to one.
+				name:    "only the outgoing child carries a user turn: non-vacuity still holds",
+				files:   map[string]string{outgoingID: turnOne + "\n"},
+				wantIDs: []string{outgoingID},
+			},
+			{
+				name:       "no per-child logs at all: non-vacuity FAILS",
+				files:      nil,
+				wantVacuum: true,
+			},
+			{
+				// A third id is collected too, so the inventory can name a second
+				// rotation instead of hiding it.
+				name: "a third child is collected, not filtered out",
+				files: map[string]string{
+					outgoingID: turnOne + "\n",
+					postID:     turnTwo + "\n",
+					thirdID:    `{"type":"user"}` + "\n",
+				},
+				wantIDs: []string{outgoingID, postID, thirdID},
+			},
+			{
+				// The prefix filter: the bare stem (only the PTY tee writes it) and an
+				// unrelated neighbour are not per-child evidence.
+				name:    "files without the <stem>. prefix are not collected",
+				files:   map[string]string{outgoingID: turnOne + "\n"},
+				extra:   map[string]string{"fakeclaude-stdin": "/clear\n", "unrelated.log": "/clear\n"},
+				wantIDs: []string{outgoingID},
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				stem := fixture(t, tc.files, tc.extra)
+				logs, err := childStdinLogs(stem)
+				if err != nil {
+					t.Fatalf("childStdinLogs: %v", err)
+				}
+				gotIDs := make([]string, 0, len(logs))
+				for id := range logs {
+					gotIDs = append(gotIDs, id)
+				}
+				slices.Sort(gotIDs)
+				wantIDs := slices.Sorted(slices.Values(tc.wantIDs))
+				if !slices.Equal(gotIDs, wantIDs) {
+					t.Errorf("childStdinLogs ids = %q, want %q", gotIDs, wantIDs)
+				}
+				if got := childrenWith(logs, "/clear"); !slices.Equal(got, tc.wantClear) {
+					t.Errorf("childrenWith(/clear) = %q, want %q", got, tc.wantClear)
+				}
+				// The milestone's own non-vacuity expression, verbatim.
+				vacuous := len(childrenWith(logs, turnOne)) == 0 && len(childrenWith(logs, `"type":"user"`)) == 0
+				if vacuous != tc.wantVacuum {
+					t.Errorf("non-vacuity guard vacuous = %v, want %v", vacuous, tc.wantVacuum)
+				}
+			})
+		}
+	})
+
+	t.Run("the inventory never renders as a blank", func(t *testing.T) {
+		logs := map[string][]byte{
+			outgoingID: []byte(turnOne + "\n"),
+			postID:     nil,
+			thirdID:    []byte(turnTwo),
+		}
+		tests := []struct {
+			name    string
+			logs    map[string][]byte
+			err     error
+			want    []string
+			notWant []string
+		}{
+			{
+				name: "an enumerated inventory marks both ids and names the stranger",
+				logs: logs,
+				want: []string{
+					// Computed, not transcribed: a byte count spelled by hand is a
+					// second source of truth that drifts on the next fixture edit.
+					fmt.Sprintf("%s = %d bytes ← outgoing", outgoingID, len(turnOne+"\n")),
+					postID + " = 0 bytes ← POST-ROTATION",
+					fmt.Sprintf("%s = %d bytes ← neither", thirdID, len(turnTwo)),
+					"per-child stdin logs (3):",
+				},
+				notWant: []string{"<none:", "<unenumerable:"},
+			},
+			{
+				// An enumerated absence: the tee never wired. Distinct from the arm
+				// below, and it must not claim to have failed to look.
+				name:    "an empty inventory is a sentinel, not a blank",
+				logs:    nil,
+				want:    []string{"<none:", "the tee never wired"},
+				notWant: []string{"<unenumerable:", "bytes ←"},
+			},
+			{
+				// A failure to look. It must not read as "no child wrote".
+				name:    "an unenumerable inventory names the error, not an absence",
+				logs:    nil,
+				err:     errors.New("readdir: boom"),
+				want:    []string{"<unenumerable:", "readdir: boom"},
+				notWant: []string{"<none:"},
+			},
+			{
+				name: "a partial read states the gap beside the counts it did get",
+				logs: map[string][]byte{outgoingID: []byte(turnOne)},
+				err:  errors.New("open …post: permission denied"),
+				want: []string{
+					fmt.Sprintf("%s = %d bytes ← outgoing", outgoingID, len(turnOne)),
+					"incomplete", "permission denied",
+				},
+				notWant: []string{"<none:", "<unenumerable:"},
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				got := childStdinInventory(tc.logs, tc.err, outgoingID, postID)
+				if got == "" {
+					t.Fatal("childStdinInventory returned \"\": a failure to enumerate must never render as an " +
+						"absence of output — every arm owes a sentinel or an inventory")
+				}
+				for _, w := range tc.want {
+					if !strings.Contains(got, w) {
+						t.Errorf("rendering does not contain %q\ngot:\n%s", w, got)
+					}
+				}
+				for _, w := range tc.notWant {
+					if strings.Contains(got, w) {
+						t.Errorf("rendering unexpectedly contains %q\ngot:\n%s", w, got)
+					}
+				}
+			})
+		}
+	})
 }
