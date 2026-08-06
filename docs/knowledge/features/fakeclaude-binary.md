@@ -317,7 +317,7 @@ When `PYRY_FAKE_CLAUDE_IDLE_TRIGGER` is set:
   mirroring the sibling `emit*` helpers.
 - **Per-turn commit relies on `STDIN_LOG`, not on this mode.** Idle-trigger does
   **not** itself open the stdin reader (the gate is still `logPath != "" || tui`,
-  `main.go:149`). The #792 consumer sets `PYRY_FAKE_CLAUDE_STDIN_LOG` (via
+  `main.go:692`). The #792 consumer sets `PYRY_FAKE_CLAUDE_STDIN_LOG` (via
   `StartRotationWithRelay`), so the reader runs, `turnPending` fires, and the
   existing `appendTurnGrowth(f)` grows the JSONL that the supervisor's
   `confirmViaTranscriptGrowth` (#668/#673) observes as the commit. No spinner is
@@ -664,29 +664,58 @@ gets the right behaviour for free; nothing polices "interrupt with no turn open"
 the specific value that makes the daemon report the turn as interrupted rather than
 merely errored. See [codebase/1136.md](../codebase/1136.md).
 
-### Stream-path stdin tee (`PYRY_FAKE_CLAUDE_STDIN_LOG`, #1137)
+### Stream-path stdin tee (`PYRY_FAKE_CLAUDE_STDIN_LOG`, #1137, per-child since #1331)
 
 `PYRY_FAKE_CLAUDE_STDIN_LOG` already existed for the PTY path (`startStdinReader`,
-above). #1137 extends the *same* env var to the stream-json branch: when set, the
+above). #1137 extended the *same* env var to the stream-json branch: when set, the
 stream dispatch wraps `os.Stdin` in `io.TeeReader(os.Stdin, syncWriter{f})` before
 calling `runStreamJSON`, so every byte the daemon writes to the child's stdin — user-
 turn envelopes, interrupt `control_request`s — is appended to the log. `syncWriter`
 is a tiny `io.Writer` (`Write` → `f.Write` → `f.Sync`) mirroring the PTY reader's
-per-write `Sync`; the file is opened with the same flags
-(`O_WRONLY|O_APPEND|O_CREATE, 0o600`) so a bootstrap child and a later fresh
-post-rotation child (after a stream `new_session`) both accumulate into one log.
+per-write `Sync`.
+
+**The value's meaning differs by mode.** On the PTY path the env value is still the
+literal file every child appends to, unchanged. On the stream path (since #1331) the
+value is a path *stem*, not a file: each child tees to `<stem>.<the session id its
+own argv was pinned to>`, derived by the pure helper `streamStdinLogPath(stem, args)`
+on top of `argvSessionID`'s existing stem guard (`main.go:1181`, rejects `/`, `\`,
+`.`) — reused rather than re-implemented, which is what makes splicing the raw argv
+value into a path safe. A child whose argv carries no usable id (unreachable via
+`streamsup.buildArgs`, which always appends `--session-id`/`--resume`) falls back to
+`<stem>.unattributed` — a rendering choice, not a defense.
+
+#1137 originally had the bootstrap child and a later fresh post-rotation child
+(after a stream `new_session`) accumulate into one shared log, on the theory that a
+needle proved the turn was received. #1331 retired that: the daemon's process env is
+inherited identically by every child, so a needle in a shared file proved only that
+*some* child received a turn, never which one — and when the *outgoing* child got it
+instead of the fresh one, the test that reads this log went green on the wrong
+evidence. Per-child files close that gap by construction: each is written by exactly
+one child's single stdin-read loop, so a needle can only appear in the file the
+child that actually received it wrote. Keying on the *session id* (not pid or spawn
+ordinal) means a same-session crash-respawn (`--resume <sameID>`) still appends to
+one file — the file identifies a session, not a process. Same move #1195 already
+made for the per-child JSONL trigger path (below): stop sharing one path, key it on
+the child's own argv stem.
+
+`O_APPEND | O_CREATE | O_WRONLY, 0o600` and the per-write `Sync` are unchanged in
+both modes — append is still load-bearing for same-session respawns, and the fsync
+is still what makes a sibling process's `os.ReadFile` see bytes promptly.
 
 The tee lives at the `main()` call site, not inside `runStreamJSON` — the function
 keeps its pure `(io.Reader, io.Writer, bool) ` I/O seam, so the #1140 unit test and
-the #1136 interrupt rider are byte-identical whether or not this ticket's change
-exists. With the env unset (every caller except #1137's own test) the branch is
-exactly `runStreamJSON(os.Stdin, os.Stdout, honorInterrupt)` — unchanged.
+the #1136 interrupt rider are byte-identical regardless of this tee's shape. With
+the env unset (every caller except the one test that sets it) the branch is exactly
+`runStreamJSON(os.Stdin, os.Stdout, honorInterrupt)` — unchanged.
 
 This is the runtime oracle for proving a stream `new_session` never types `/clear`
-to the child: on the stream path `new_session` is a process re-spawn
-(`(*streamsup.Runner).RestartFresh`, #1124), never a keystroke, so the log should
-contain a user-turn marker (non-vacuity) but never the substring `/clear`. See
-[codebase/1137.md](../codebase/1137.md).
+to a child, and — since #1331 — for proving *which specific child* received a given
+turn: on the stream path `new_session` is a process re-spawn
+(`(*streamsup.Runner).RestartFresh`, #1124), never a keystroke, so a child's log
+should contain a user-turn marker (non-vacuity) but never the substring `/clear`,
+and the post-rotation child's own file — not any shared file — is what a "did the
+fresh child receive turn N" assertion must read. See [codebase/1137.md](../codebase/1137.md)
+and [codebase/1331.md](../codebase/1331.md).
 
 ### Stream-path startup hold (`PYRY_FAKE_CLAUDE_STREAM_HOLD`, #1138)
 
@@ -942,7 +971,7 @@ single-writer-of-`f` invariant** (only the main goroutine writes `f`):
   *after* `deliver`, so a grow always lands strictly past the baseline.
 
 **Blast radius is exactly the TUI tests.** The stdin reader runs only when
-`logPath != "" || tui` (`main.go:129`), so the grow fires only there — the other e2e
+`logPath != "" || tui` (`main.go:692`), so the grow fires only there — the other e2e
 callers (`StartRotation`, the fakeclaude primitive, attach-stdio) set neither and are
 unperturbed.
 
