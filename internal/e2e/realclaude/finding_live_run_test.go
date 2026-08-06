@@ -80,8 +80,9 @@ import (
 // --- the handle -------------------------------------------------------------------
 
 // finLiveRunHandle is one staged live turn: pyry's and claude's pids, the exit
-// signal, the two live output buffers, the run's FIFO path, env delta and claude
-// version, the during-turn pin reading, and the staging tier's verdict.
+// signal and the exit status it publishes, the two live output buffers, the run's
+// FIFO path, env delta and claude version, the during-turn pin reading, and the
+// staging tier's verdict.
 //
 // INPUT ONLY — NEVER PUBLISHED, and NO JSON TAGS. The rule is inherited rather
 // than invented: Pin.Rows[i].Command and Pin.ClaudeCommand are verbatim argv read
@@ -130,7 +131,30 @@ type finLiveRunHandle struct {
 	// The driver's own body NEVER reads it and never releases the hold early. It
 	// crosses unread so the consumer can take that wait itself, with the FIFO still
 	// held, which is what lets #1337 observe the trailer at all.
+	//
+	// ITS CLOSE IS ALSO THE ONLY HAPPENS-BEFORE EDGE FOR ExitStatus, which the
+	// goroutine writes strictly BEFORE closing this channel. A consumer reading that
+	// field anywhere but inside a receive arm on this channel races that goroutine.
 	PyryExited <-chan struct{}
+	// ExitStatus is pyry's process exit code, and it is VALID ONLY AFTER A RECEIVE
+	// FROM PyryExited. #1337 argued for it under the invitation above: the goroutine
+	// discarded the status, cmd is function-local, and a consumer holding only
+	// PyryPID cannot recover it — cmd.Wait has already reaped pyry, and a second wait
+	// on a reaped child returns ECHILD.
+	//
+	// Initialised to pinExitStatusUnknown (process_pin_liveness_test.go:236) rather
+	// than left at the int zero, because finRecordRun.ExitCode documents 0 as A REAL
+	// SUCCESSFUL EXIT (finding_run_record_test.go:126-135): an unwritten field would
+	// publish a clean exit for a run that never exited. Same zero-polarity doctrine
+	// trailRunReadings.PyryExited and finOutcomeReadyToClassify each argue for
+	// themselves. That makes the VALUE point the safe way; it does NOT make an
+	// unsynchronised ACCESS safe, which is what the edge above is for.
+	//
+	// -1 is not uniquely "did not exit": ProcessState.ExitCode() also returns it for
+	// a signalled process, which the defence-in-depth SIGKILL below would produce.
+	// Both mean "not a clean self-exit"; separating them is the consumer's job, from
+	// whether its own wait completed.
+	ExitStatus int
 	// Stdout and Stderr are the LIVE buffers, never a []byte snapshot. This is
 	// load-bearing rather than convenient: pyry's reap log lands on stderr at
 	// teardown and the trailer lands on stdout at emitter.Close(), BOTH after this
@@ -256,7 +280,10 @@ func finLiveRunStage(t *testing.T) *finLiveRunHandle {
 	var stdout, stderr probeSyncBuffer
 	pyryExited := make(chan struct{})
 	h := &finLiveRunHandle{
-		PyryExited:    pyryExited,
+		PyryExited: pyryExited,
+		// Points the unwritten value the safe way — 0 is a real successful exit
+		// downstream. See the field's own doc.
+		ExitStatus:    pinExitStatusUnknown,
 		Stdout:        &stdout,
 		Stderr:        &stderr,
 		FIFOPath:      fifoPath,
@@ -323,8 +350,18 @@ func finLiveRunStage(t *testing.T) *finLiveRunHandle {
 	// and its stdout/stderr copiers finish. Both cleanups guarantee that
 	// terminates. Claude runs on a PTY, so the held `cat` does not inherit
 	// pyry's stdout/stderr pipe write ends and cannot hold Wait open.
+	//
+	// The exit status is written BEFORE the close, because that close is the only
+	// happens-before edge a consumer has: a write after it is a race that reads
+	// correct on every run nobody is examining. The Wait error itself stays
+	// discarded — it carries no information the status does not — and the
+	// ProcessState guard follows the repo's own shape (internal/e2e/attach_stdio.go:234-237),
+	// leaving pinExitStatusUnknown in place when there is no state to read.
 	go func() {
 		_ = cmd.Wait()
+		if cmd.ProcessState != nil {
+			h.ExitStatus = cmd.ProcessState.ExitCode()
+		}
 		close(pyryExited)
 	}()
 
