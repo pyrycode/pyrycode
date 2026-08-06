@@ -928,7 +928,7 @@ func TestFinRecordRunnerAgreement(t *testing.T) {
 // BUILT record, and the per-channel naming so a failure says which one leaked.
 //
 // NOT copied: its top-level forbidden-key scan. Its own closing comment says why
-// (finding_trailer_evidence_test.go:760-766) — that scan is valid BECAUSE
+// (finding_trailer_evidence_test.go:766-772) — that scan is valid BECAUSE
 // finTrailerRecord is flat, and "lifted onto a record with a struct-valued field
 // it would never examine the inner keys". finRecordRun has four struct- or
 // slice-valued fields, so the same loop here would inspect ten top-level keys,

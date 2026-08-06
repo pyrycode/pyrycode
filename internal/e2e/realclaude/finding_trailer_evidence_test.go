@@ -700,11 +700,12 @@ func TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer(t *testing.
 			"true arm below would then assert the very zero values it exists to separate from",
 			scan.State)
 	}
-	if seen.Subtype == "" || seen.TerminalReason == "" || seen.StopReason == "" || !seen.IsError {
-		t.Fatalf("the carrier holds subtype=%q is_error=%t terminal_reason=%q stop_reason=%q: every "+
-			"one must be non-zero, or the false arm's check on the zero-valued one passes against a "+
-			"builder that copied it through", seen.Subtype, seen.IsError, seen.TerminalReason,
-			seen.StopReason)
+	if seen.Subtype == "" || seen.TerminalReason == "" || seen.StopReason == "" || !seen.IsError ||
+		len(seen.KeyNames) == 0 {
+		t.Fatalf("the carrier holds subtype=%q is_error=%t terminal_reason=%q stop_reason=%q and %d "+
+			"key names: every one must be non-zero, or the false arm's check on the zero-valued one "+
+			"passes against a builder that copied it through", seen.Subtype, seen.IsError,
+			seen.TerminalReason, seen.StopReason, len(seen.KeyNames))
 	}
 
 	filled := finTrailerBuild(trailOutcomeVoidBudgetFired, seen)
@@ -742,6 +743,11 @@ func TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer(t *testing.
 					"zero values, so a builder copying this carrier's scalars through publishes a "+
 					"record contradicting itself in the same breath", f.name, f.got)
 			}
+		}
+		if len(zeroed.KeyNames) != 0 {
+			t.Errorf("trailer_keys: got %q, want none — the key names are dropped with the four and "+
+				"the arm's own Detail says so; a builder copying them through publishes claude's own "+
+				"key names beside a record that says it carries no trailer", zeroed.KeyNames)
 		}
 	})
 

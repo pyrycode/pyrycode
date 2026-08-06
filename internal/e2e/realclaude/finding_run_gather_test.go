@@ -298,7 +298,7 @@ type finGatherInputs struct {
 //     by an assertion: with no formatted string here there is no 512-byte budget
 //     for a leak to hide behind, so the sweep below owes no per-row headroom
 //     check. Adding a Detail later would owe it in full
-//     (finding_trailer_evidence_test.go:722-736).
+//     (finding_trailer_evidence_test.go:723-737).
 //
 // # Staleness travels as PUBLISHED EVIDENCE and is not a classifier input
 //
@@ -1390,7 +1390,7 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // mirrored rather than reinvented — including the goroutine split, which is not
 // style: probeSyncBuffer.Write returns an error that must be reported with
 // t.Fatalf, and calling t.* from a spawned goroutine after the test function has
-// returned panics. finGatherReadings takes no *testing.T (:424), so the inputs are
+// returned panics. finGatherReadings takes no *testing.T (:537), so the inputs are
 // built on the test goroutine and only the call itself crosses. The increment
 // over that subtest is that the claim is made over the CARRIER the gather returns,
 // one level up, and never over the observation.
@@ -1576,7 +1576,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // Its messages name a finTrailerRecord's fields, which the header's licence does
 // NOT cover: that licence is enumerated over the composition's THREE RETURNS and
 // this record is not one of them. The licence is
-// TestFinTrailerRecordCarriesNoCapturedBytes' (finding_trailer_evidence_test.go:924),
+// TestFinTrailerRecordCarriesNoCapturedBytes' (finding_trailer_evidence_test.go:930),
 // which sweeps this record in the other file — named rather than assumed, and
 // stop_reason's uncapped model-authored exposure is inherited knowingly here as
 // it is there.
@@ -1931,8 +1931,8 @@ const finGatherOverCapPad = 200
 // Incidental: this row is about the trailer leg, and asserting on either would
 // restate rows the file already ships. That the carrier fill is independent of the
 // gate's verdict holds by DATA DEPENDENCE and not by ordering — the fill reads only
-// obs and never reads readings.Gate, which is computed ABOVE it (:433 against
-// :444-455). Staleness and BoundFrom belong to the two tests above; this row adds no
+// obs and never reads readings.Gate, which is computed ABOVE it (:546 against
+// :557-582). Staleness and BoundFrom belong to the two tests above; this row adds no
 // second source of either.
 //
 // # It costs no wall clock
