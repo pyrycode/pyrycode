@@ -1254,12 +1254,12 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // buffer makes the first poll hit, so lastMiss stays zero and the bound is
 // trailBoundFromStart — the discriminator whose own doc says it BOUNDS NOTHING
 // (result_trailer_observation_test.go:80-85).
-// trailBoundFromMiss is produced only where a poll missed first (:256-262 there),
+// trailBoundFromMiss is produced only where a poll missed first (:281-287 there),
 // and reaching it costs a real sleep: polls at ~0, ~200 and ~400ms miss, the
 // append lands at ~500ms, and the poll at ~600ms hits with the bound measured
 // from the ~400ms miss. There is no cheaper route to the interesting value.
 //
-// The structure is TestTrailWaitForTrailer's first subtest (:529-569 there),
+// The structure is TestTrailWaitForTrailer's first subtest (:554-594 there),
 // mirrored rather than reinvented — including the goroutine split, which is not
 // style: probeSyncBuffer.Write returns an error that must be reported with
 // t.Fatalf, and calling t.* from a spawned goroutine after the test function has
@@ -1297,7 +1297,7 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // property of the source rather than of this fixture: the fill sits at the trailer
 // leg and the attribution guard on Gate.Reason sits below it. Staleness is
 // TestFinGatherSightingComesFromTheClassifiedPoll's, the claim that a staleness
-// covers the true lateness is TestTrailWaitForTrailer's (:559-562 there), and
+// covers the true lateness is TestTrailWaitForTrailer's (:584-587 there), and
 // lateness_bounded is derived from this discriminator at one place only
 // (finding_trailer_evidence_test.go:247-253). This row adds a second source of none
 // of the three, and plants no needle.

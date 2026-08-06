@@ -169,7 +169,7 @@ const (
 // cannot make itself the pointer trap's LAST consumer: trailObservation embeds
 // trailScanResult (result_trailer_observation_test.go:142), so anything holding
 // an observation reaches .Trailer by field promotion, and shipped code already
-// does exactly that (:563, :613). What the gate can guarantee is its own output.
+// does exactly that (:588, :638). What the gate can guarantee is its own output.
 //
 // It carries neither trailScanResult.Line nor any quote of it. That string is
 // verbatim model output and marked OPERATOR-REVIEW-BEFORE-PASTE; copying it

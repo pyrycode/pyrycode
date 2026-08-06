@@ -53,8 +53,8 @@ package realclaude
 // # Reused, not rebuilt
 //
 // trailScan (result_trailer_observation_test.go:180) and its fixtures
-// trailFixtureTrailer (:282), trailFixtureNoTrailer (:291), trailNeedle (:300),
-// trailPaddedTrailer (:306) and trailOverlongPad (:317) are the shipped scan and
+// trailFixtureTrailer (:307), trailFixtureNoTrailer (:316), trailNeedle (:325),
+// trailPaddedTrailer (:331) and trailOverlongPad (:342) are the shipped scan and
 // the shipped plants — a second scanner over the same bytes that disagreed would
 // be worse than either. The three scan states (:57-71) and the three lateness
 // discriminators (:75-90) are shipped closed spaces, called and never restated.
