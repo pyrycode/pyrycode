@@ -16,8 +16,16 @@
 //	                               appended (with fsync per write) so the
 //	                               e2e harness can observe what the
 //	                               supervisor wrote to the PTY. In
-//	                               stream-json mode the same var tees the
-//	                               stream child's stdin to the file (#1137).
+//	                               stream-json mode the value is a path
+//	                               STEM rather than the file: each child
+//	                               tees its own stdin to
+//	                               <stem>.<its session id> — the value
+//	                               after the last --session-id/--resume on
+//	                               its own argv, or <stem>.unattributed
+//	                               when argv carries none (#1137,
+//	                               per-child since #1331). The PTY path is
+//	                               unchanged: there the value is still the
+//	                               literal file every child appends to.
 //	                               Default off — when unset, stdin is not
 //	                               read.
 //	PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER  optional path watched in parallel
@@ -560,12 +568,26 @@ func main() {
 	// new_session is a fresh SPAWN, so the child NEVER receives a typed "/clear"). The
 	// tee lives at the call site so runStreamJSON keeps its pure I/O signature (the
 	// #1140 unit test and #1136 interrupt rider are untouched). Append-mode + per-write
-	// Sync mirror the PTY reader's log (startStdinReader) so the bootstrap child and
-	// the fresh post-rotation child both accumulate into one file; unset is
-	// byte-identical to prior behaviour (#1141/#1136 set no such env).
+	// Sync mirror the PTY reader's log (startStdinReader); unset is byte-identical to
+	// prior behaviour (#1141/#1136 set no such env).
+	//
+	// In stream mode the env value is a path STEM, not the file: each child appends to
+	// <stem>.<its own session id> (streamStdinLogPath). One shared file was the prior
+	// contract, and it could not carry the claim its consumer makes — the daemon's
+	// process env is inherited identically by the bootstrap child and the fresh
+	// post-rotation child, so a needle in that file proved only that SOME child received
+	// a turn, never which one, and a turn delivered to the OUTGOING child read as green
+	// (#1331). This is the move PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR already made for the
+	// per-child trigger (#1195): keying the path on the child's own stem makes ownership
+	// structural rather than a coin flip. The key is the SESSION ID rather than a pid or
+	// a spawn ordinal because that is what the assertion is about — "the child the daemon
+	// spawned with --session-id <newID>" is a session, not a process — so a crash-respawn
+	// of the same session (--resume <sameID>) re-opens and appends to the same file,
+	// which is why append-mode stays load-bearing here.
 	if os.Getenv(envStreamJSON) != "" {
 		stdin := io.Reader(os.Stdin)
-		if logPath := os.Getenv(envStdinLog); logPath != "" {
+		if logStem := os.Getenv(envStdinLog); logStem != "" {
+			logPath := streamStdinLogPath(logStem, os.Args[1:])
 			f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 			if err != nil {
 				fatalf("open stream stdin log %s: %v", logPath, err)
@@ -1167,6 +1189,39 @@ func argvSessionID(args []string) (string, bool) {
 		return "", false
 	}
 	return id, true
+}
+
+// unattributedStdinLogStem is the id component of the per-child stream stdin log
+// of a child whose argv carried no usable session id. Unreachable through the
+// daemon (streamsup.buildArgs ends every spawn's argv in "--session-id <id>" or
+// "--resume <id>"), so this is a RENDERING choice rather than a defense: such a
+// child stays alive and its bytes land under a name that says what happened,
+// instead of the process dying or the bytes vanishing. It can never manufacture a
+// green — the e2e reads the post-rotation id's file for its "which child" claim,
+// and spans every file including this one for its no-/clear claim.
+//
+// The spelling cannot be a UUID — a UUID is hex digits and dashes, and this word
+// carries 'u', 'n', 't', 'r' and 'i', none of which are hex — so it cannot collide
+// with an id any path reaching here mints. Legible AND unambiguous, which is why no
+// collision guard is specified.
+const unattributedStdinLogStem = "unattributed"
+
+// streamStdinLogPath returns the per-child path the stream tee appends to: the stem
+// the env supplied, plus "." and the session id THIS spawn was pinned to (the value
+// after the last --session-id/--resume on its argv). Pure over (stem, args); never
+// reads the environment.
+//
+// Splicing an argv value into a path is safe here only because argvSessionID's stem
+// guard already refuses any value containing "/", "\" or "." — the guard exists for
+// exactly this kind of join (openSession, the per-child JSONL trigger path) — so the
+// appended component can neither introduce a separator nor traverse, and the result
+// always sits beside the stem in the same directory. Do not re-implement that guard:
+// a rejected value arrives here as not-found and takes the unattributed arm.
+func streamStdinLogPath(stem string, args []string) string {
+	if id, ok := argvSessionID(args); ok {
+		return stem + "." + id
+	}
+	return stem + "." + unattributedStdinLogStem
 }
 
 func openSession(dir, uuid string) *os.File {
