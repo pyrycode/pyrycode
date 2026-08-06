@@ -169,10 +169,10 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 // of the directory sweep.
 //
 // trailNeedle's own comment says it is "placed PAST the cap"
-// (result_trailer_observation_test.go:297-300). Against trailPaddedTrailer(0)
+// (result_trailer_observation_test.go:322-325). Against trailPaddedTrailer(0)
 // that is not what happens: the line renders 385 bytes and the needle ends at
 // byte 146, comfortably inside reachCapCommand's 512-byte cap, so trailScan
-// records it into Line INTACT (:176-182).
+// records it into Line INTACT (:192-206).
 //
 // THAT IS THE PLANT THE SURVIVING GUARD NEEDS. A needle past the cap never
 // reaches Line in the first place, so its absence downstream proves nothing about

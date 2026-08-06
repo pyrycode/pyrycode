@@ -49,7 +49,7 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailScan / trailScanResult (result_trailer_observation_test.go:164, :98) is
+// trailScan / trailScanResult (result_trailer_observation_test.go:180, :98) is
 // the trailer input, shipped by #1266, including its aborted state and its
 // fixtures. tdnClassifyReapLog / tdnReapOutcome / tdnIsReapVerdict
 // (teardown_liveness_test.go:144, :116, :1176) is the attribution input, shipped
@@ -167,9 +167,9 @@ const (
 //
 // That is the property worth pinning, and it is the one that is true. The gate
 // cannot make itself the pointer trap's LAST consumer: trailObservation embeds
-// trailScanResult (result_trailer_observation_test.go:126), so anything holding
+// trailScanResult (result_trailer_observation_test.go:142), so anything holding
 // an observation reaches .Trailer by field promotion, and shipped code already
-// does exactly that (:563, :613). What the gate can guarantee is its own output.
+// does exactly that (:588, :638). What the gate can guarantee is its own output.
 //
 // It carries neither trailScanResult.Line nor any quote of it. That string is
 // verbatim model output and marked OPERATOR-REVIEW-BEFORE-PASTE; copying it
@@ -274,7 +274,7 @@ func trailGate(res trailScanResult) trailGateResult {
 
 	// trailSeen from here. Contract again, before anything reads through the
 	// pointer: trailScan sets Trailer on its trailSeen return and on no other
-	// (result_trailer_observation_test.go:164-208), so a nil here is a
+	// (result_trailer_observation_test.go:180-233), so a nil here is a
 	// hand-built record, not something the producer can emit.
 	if res.Trailer == nil {
 		return trailGateResult{
@@ -596,7 +596,7 @@ func trailGateCases() []trailGateCase {
 
 // TestTrailAdmissibilityConstantsAreClosed is AC5's structural claim made
 // executable, following TestTrailConstantsAreClosed's shape
-// (result_trailer_observation_test.go:326) and EXTENDED TO CHECK ACROSS SPACES.
+// (result_trailer_observation_test.go:351) and EXTENDED TO CHECK ACROSS SPACES.
 //
 // #1266's helper is scoped to one space per call, so it cannot see a new value
 // colliding with a shipped one — and that collision is the realistic mistake

@@ -117,7 +117,23 @@ type trailScanResult struct {
 	// truncation degrades the human-readable evidence and never a field the
 	// consumer branches on.
 	Trailer *resultTrailer `json:"trailer,omitempty"`
-	Detail  string         `json:"detail"`
+	// KeyNames is the sorted list of the FULL line's top-level JSON key NAMES,
+	// read by trailKeyNames (trailer_key_names_test.go:87) before the cap and
+	// carrying no value from the line. Empty unless State == trailSeen.
+	//
+	// It exists because the fixed decode above cannot answer one question: with
+	// TerminalReason a plain omitempty string, an ABSENT terminal_reason and one
+	// emitted as "" are both "". Here they are not — the names say which keys the
+	// line carried, so claude's own result line (no terminal_reason at all, the
+	// healthy shape on the headless path) is distinguishable from pyry's
+	// synthesised idle-stall trailer without widening resultTrailer.
+	//
+	// Names only, and unlike Line that is structural rather than a discipline:
+	// trailKeyNames returns []string and discards its map[string]json.RawMessage
+	// internally, so no VALUE can cross. The names still come from claude — the
+	// claim is only that the payload is not among them; bounding them is #1358's.
+	KeyNames []string `json:"trailer_keys,omitempty"`
+	Detail   string   `json:"detail"`
 }
 
 // trailObservation is a complete observation: a scan result plus when it was
@@ -179,8 +195,17 @@ func trailScan(stdout []byte) trailScanResult {
 			// against the full line, which is why terminal_reason — last on the
 			// wire and the field #1267 branches on — survives a truncation that
 			// lands inside the `result` field sixth on the wire.
-			Line:    reachCapCommand(string(scanner.Bytes())),
-			Trailer: &tr,
+			//
+			// The key-name reading takes scanner.Bytes() for the SAME reason, and
+			// deliberately not Line: a capped realistic trailer is truncated JSON,
+			// so a reader fed the copy below returns NO names at all while staying
+			// correct on every short fixture. Its failure arm is unreachable from
+			// here — this return is past tr.Type == "result", settable only from a
+			// JSON object, so the map decode always succeeds and always carries at
+			// least `type`.
+			Line:     reachCapCommand(string(scanner.Bytes())),
+			Trailer:  &tr,
+			KeyNames: trailKeyNames(scanner.Bytes()),
 			Detail: reachCapCommand(fmt.Sprintf("a type:result line was found at line %d of the "+
 				"%d bytes scanned; the decode ran against the FULL line, so every field the "+
 				"trailer carries survives the %d-byte cap applied to the recorded copy",
