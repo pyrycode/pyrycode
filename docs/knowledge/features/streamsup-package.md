@@ -825,6 +825,71 @@ re-marking the conversation *after* the clear fires, which needs the drain's fan
 the seam alone and is filed as [#1298](https://github.com/pyrycode/pyrycode/issues/1298). See
 [codebase/1295.md](../codebase/1295.md).
 
+### Rotation-delivery gate (#1330)
+
+Closes #1295's Open question 4 ("the clear-before-`RestartFresh` window … not structurally
+excluded"). `startFreshRunner` ran `rotate()` — including `Pool.RotateForNewSession`'s
+`ReasonClear` transition fan-out — to completion before calling `RestartFresh`, so the clear
+reached clients, and released whatever the turn-busy tracker held, while the outgoing child
+was still alive and the fresh one did not yet exist. A turn accepted in that ~4 ms window was
+written into the doomed child; msgqueue reads a successful write as a commit and drops the
+head, so the turn is gone — silently, since nothing errors.
+
+**The invariant:** from `BeginRotation()` until the next child's stdin binds, `WriteUserTurn`
+writes nothing and returns `ErrNoLiveChild`. Two new fields, `rotating bool` and
+`rotateGen uint64`, live under the **same leaf mutex `mu` already guards `stdin` with** —
+`mu`'s charter widened from "guards the stdin handle" to "guards which child, if any, may
+receive a turn." That widening is the whole mechanism: `turnTarget() (w io.Writer, gated bool)`
+answers "is a rotation armed?" and "which child's stdin?" as **one question under one
+acquisition**. Two acquisitions — read the flag, then separately read `stdin` — reopen the
+race at nanosecond width; a later "simplification" that splits them back apart would reintroduce
+this ticket's defect invisibly.
+
+`BeginRotation() (abort func())` sets `rotating = true`, bumps `rotateGen`, and returns a
+disarm that only takes effect if no later arm has landed — the same generation-stamped shape
+as `openForDelivery`'s undo (#1199, above). This is load-bearing, not defensive padding: two
+overlapping `new_session` frames are an ordinary sequence (the e2e's own retry loop re-sends
+every ~250 ms), and the loser's `rotate()` ordinarily fails `ErrSessionNotFound`
+(`sessions/transition.go:120-123`) and runs its `abort()`. Unstamped, that would clear the
+*winner's* arm while the winner's outgoing child is still alive, reproducing the defect on
+demand from two frames. `setStdin` clears `rotating` in the same acquisition that publishes
+the new handle; `takeStdin` deliberately leaves it alone, since the teardown it performs is the
+*middle* of the window the gate covers, not its end — releasing on `RestartFresh`'s return
+would only narrow the race, since that call returns after `cancel()` while the kill, `cmd.Wait`,
+and the respawn all still run later on the Run goroutine.
+
+`startFreshRunner` (`cmd/pyry/main.go`) arms the gate via `beginRotationOrNoop`, an **optional**
+type assertion (`interface{ BeginRotation() func() }`) rather than a widened `RestartFresh`
+dispatch case — so `new_session_routing_test.go`'s stub-based subtests keep exercising the same
+dispatch shape rather than silently degenerating into the inert default arm. The existing
+rotate-before-`RestartFresh` order (load-bearing for the double-rotation watcher skip-set) is
+unchanged; the arm is inserted ahead of both statements. `streamRunner.BeginRotation()` forwards
+it, the third concrete method reached by type assertion off the un-widened `sessions.Runner`
+after `Interrupt` (#1120) and `RestartFresh` (#1124).
+
+**The refusal record is logged at `Info`, deliberately diverging from the spec's `Debug`.** The
+e2e's stability guard greps the daemon's *whole* captured stderr for the literal
+`level=DEBUG`; since the refusal fires on essentially every rotation, a `Debug` record would
+have satisfied that guard from the fix's own diagnostic, turning a 20-run stability measurement
+into a near-tautology. `Info` keeps the "refused by the gate" vs. "no child yet" discriminator
+without touching that guard. It names only the event and the runner's own session id — never
+the `conversationID` parameter (accepted for interface conformance, otherwise unused) and never
+payload bytes.
+
+**Known accepted gap, not fixed (code review SHOULD FIX, below the merge-blocking threshold):
+the release side is not generation-aware.** `setStdin` clears `rotating` for *any* child that
+binds, not specifically the successor of the arm currently standing. Two overlapping frames can
+still, in principle, hand a turn to a doomed child: frame 1 arms → rotates → `RestartFresh` →
+`cancel()` returns with the respawn still pending → frame 2 arms and starts rotating → frame
+1's respawn completes → `setStdin` clears `rotating` while frame 2's outgoing child is still
+alive. Narrower than the pre-fix window by a large margin, and no failure of this shape has
+been observed — accepted per the project's evidence-based-fix-selection convention rather than
+built out speculatively. If evidence appears, the fix is a generation-aware clear: capture the
+arm's generation at `RestartFresh` and compare it in `setStdin`, the same shape `abort` already
+uses. See [codebase/1330.md](../codebase/1330.md) for the full review finding.
+
+See [codebase/1330.md](../codebase/1330.md).
+
 ## Production wiring — the `interactive_runner` toggle (#1081)
 
 `cmd/pyry/main.go`'s `selectInteractiveRunner(cfg, logger)` maps `cfg.InteractiveRunner` to
@@ -899,7 +964,8 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1206.md`](../codebase/1206.md) — `Config.OnChildExit`, the per-child-exit seam on the streamsup `Run` loop (one field, one unconditional call above the shutdown return); split from #1203 alongside #1207, which itself later split into #1209 (the fan-in exit lane) and #1210 (the production wiring, landed).
 - [`codebase/1209.md`](../codebase/1209.md) — `streamTurnEnvelope.exit` / `streamTurnSink.exitFor`, the fan-in lane that carries a child-exit signal ordered correctly against the dead child's already-pushed events; fired in production by #1210.
 - [`codebase/1199.md`](../codebase/1199.md) — `waitIdleForDelivery`/`openForDelivery`, the inbound-delivery seam that holds a mid-turn send in the queue and marks the conversation busy before writing; the tracker's first production reader.
-- [`codebase/1295.md`](../codebase/1295.md) — forced-ordering test proving this seam's hold is released by the `new_session` rotation's `clearForSession` and delivers to the post-rotation child; eliminates one M4-stall hypothesis, leaves the straggler-re-mark hypothesis ([#1298](https://github.com/pyrycode/pyrycode/issues/1298)) open.
+- [`codebase/1295.md`](../codebase/1295.md) — forced-ordering test proving this seam's hold is released by the `new_session` rotation's `clearForSession` and delivers to the post-rotation child; eliminates one M4-stall hypothesis, leaves the straggler-re-mark hypothesis ([#1298](https://github.com/pyrycode/pyrycode/issues/1298)) open and named the clear-before-`RestartFresh` window as an undecided Open question 4, closed by #1330.
+- [`codebase/1330.md`](../codebase/1330.md) — the rotation-delivery gate (`BeginRotation`/`turnTarget`, `rotating`/`rotateGen` under `mu`) that closes #1295's Open question 4: no turn accepted once a `new_session` rotation has begun is written into the outgoing child.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
@@ -911,3 +977,5 @@ and [codebase/1140.md](../codebase/1140.md).
 - Spec [`docs/specs/architecture/1109-streamsup-runner-factory.md`](../../specs/architecture/1109-streamsup-runner-factory.md) — the `streamRunnerFactory` construction architect spec.
 - Spec [`docs/specs/architecture/1098-stream-turn-drain.md`](../../specs/architecture/1098-stream-turn-drain.md) — this slice's architect spec, including the scoping proof and security review.
 - Spec [`docs/specs/architecture/1206-streamsup-child-exit-seam.md`](../../specs/architecture/1206-streamsup-child-exit-seam.md) — the per-child-exit seam architect spec, including the two-wrong-anchors proof and the fire-window security review.
+- Spec [`docs/specs/architecture/1295-forced-rotation-delivery-ordering.md`](../../specs/architecture/1295-forced-rotation-delivery-ordering.md) — the forced-ordering test spec, including the ranked open-questions list #1330 closes item 4 of.
+- Spec [`docs/specs/architecture/1330-rotation-delivery-gate.md`](../../specs/architecture/1330-rotation-delivery-gate.md) — the rotation-delivery gate architect spec, including the two-frame concurrency proof and security review.
