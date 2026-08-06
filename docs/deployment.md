@@ -30,7 +30,7 @@ Other knobs:
 | Flag | Default | Notes |
 |---|---|---|
 | `-pyry-name NAME` | `pyry` | Instance name. Filename becomes `<name>.service`, ExecStart includes `-pyry-name <name>`, socket is `~/.pyry/<name>.sock`. Useful for running multiple pyrys side-by-side. |
-| `--workdir DIR` | install-time cwd | `WorkingDirectory=` baked into the unit. Anchors `claude`'s session storage at `~/.claude/projects/<encoded-cwd>/sessions/...`. Resolved to an absolute path before being written; `~` and `~/sub` are expanded against `$HOME`. If the resolved directory doesn't exist, install-service prints a `mkdir -p` hint and continues — does not abort. |
+| `--workdir DIR` | install-time cwd | `WorkingDirectory=` baked into the unit. Anchors `claude`'s session storage at `~/.claude/projects/<encoded-cwd>/...`. Resolved to an absolute path before being written; `~` and `~/sub` are expanded against `$HOME`. If the resolved directory doesn't exist, install-service prints a `mkdir -p` hint and continues — does not abort. |
 | `--path PATH` | inherited from `$PATH` | Override the captured PATH if you want a curated set instead. |
 | `--force` | refuse to overwrite | Required to clobber an existing `~/.config/systemd/user/<name>.service`. |
 
@@ -47,7 +47,7 @@ cp systemd/pyry.service ~/.config/systemd/user/
 
 Edit `~/.config/systemd/user/pyry.service`:
 
-- Set `WorkingDirectory=` to the absolute directory you want claude to run in (typically a project root or a dedicated workspace). This anchors session storage at `~/.claude/projects/<encoded-cwd>/sessions/...`. The shipped template's value is illustrative — replace it.
+- Set `WorkingDirectory=` to the absolute directory you want claude to run in (typically a project root or a dedicated workspace). This anchors session storage at `~/.claude/projects/<encoded-cwd>/...`. The shipped template's value is illustrative — replace it.
 - Edit the `ExecStart=` line to add any claude flags you need:
 
 ```ini

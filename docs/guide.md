@@ -1,3 +1,9 @@
+> **Historical — Phase-0 user guide.** This guide covers the original
+> single-session Phase-0 surface. The sessions, pairing, mobile/desktop
+> remote, and agent-run surfaces post-date it, and its resize and
+> single-session statements are superseded. For current state see the
+> [README](../README.md) and [`knowledge/`](knowledge/).
+
 # Pyrycode user guide
 
 This guide walks through using `pyry` from first install to running it as a long-lived service. If you just want to try it locally and see what it does, the **Foreground mode** section is enough; everything after that adds production deployment, multi-instance, and operations detail.

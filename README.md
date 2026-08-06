@@ -4,9 +4,9 @@ A process supervisor and runtime for [Claude Code](https://claude.com/claude-cod
 
 ## Status
 
-**Daily-driver-grade and actively shipping.** Foreground mode is a drop-in `claude` wrapper with auto-restart. Service mode runs `pyry` under launchd or systemd and exposes a Unix-socket control plane. As of `v0.13.0` pyrybox runs claude under systemd via the public install path described below, replacing the prior `tmux` + bash restart-loop setup.
+**Daily-driver-grade and actively shipping.** Latest release: `v0.15.0` (2026-07-03). Foreground mode is a drop-in `claude` wrapper with auto-restart. Service mode runs `pyry` under launchd or systemd and exposes a Unix-socket control plane. Since `v0.13.0` pyrybox runs claude under systemd via the public install path described below, replacing the prior `tmux` + bash restart-loop setup.
 
-Shipped since Phase 0: **multi-session routing** (a single pyry hosts N UUID-addressed claude sessions, `pyry sessions new/list/rm/rename` + `pyry attach <id>`), **`pyry agent-run`** (an SDK-consumer runner — `ptyrunner` by default, `streamrunner` via `PYRY_USE_STREAMJSON=1`), and **remote access**: the Pyrycode-Relay is **live at `pyrycode-relay.pyryco.de`** (binary↔relay WSS, Noise_IK E2E crypto, QR pairing). The companion mobile client has its UI through Phase 2 with the real-backend integration (Phase 4) underway.
+Shipped since Phase 0: **multi-session routing** (a single pyry hosts N UUID-addressed claude sessions, `pyry sessions new/list/rm/rename` + `pyry attach <id>`), **`pyry agent-run`** (an SDK-consumer runner — `ptyrunner` by default, `streamrunner` via `PYRY_USE_STREAMJSON=1`), and **remote access**: the Pyrycode-Relay is **live at `pyrycode-relay.pyryco.de`** (binary↔relay WSS, Noise_IK E2E crypto, QR pairing). Operationally the stream-json path is production on both surfaces: all five dispatcher forks have set `PYRY_USE_STREAMJSON=1` since 2026-07-25, and the production interactive daemon has run the stream-json runner (`interactive_runner: "stream-json"`) since 2026-07-24. The PTY interactive path is **not a working fallback**: all four of its live gates fail on clean `main` (measured 2026-08-05, claude 2.1.220, reproduced on two tree states) and they are now skipped by default behind `PYRY_PTY_GATE=1`. Whether that path is kept at all is open as #1348. The companion mobile client has held a stable v2 session against the live relay since 2026-07-03.
 
 Still on the roadmap: Channels integration (pyrycode-owned Discord/Telegram) and voice (see [`docs/plan.md`](docs/plan.md)).
 
@@ -102,7 +102,7 @@ For the full walkthrough — multi-instance, troubleshooting, hooks under servic
 ## Development
 
 ```bash
-make check           # vet + race-enabled tests + staticcheck
+make check           # vet + race-enabled tests + staticcheck + substrate-guard + fake-daemon e2e suite
 make build           # ./pyry
 make linux           # cross-compile for Linux
 ```
