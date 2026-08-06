@@ -10,7 +10,7 @@ pyrycode/
 │   ├── main.go                CLI parsing, signal setup, supervisor init
 │   └── acp.go                 `pyry acp` verb (#756): runACP composition root + serveACP core — serves internal/acp over real stdio (io.Pipe-bridged stdin closer for prompt SIGINT/SIGTERM shutdown), plain-stderr logger, exit 0 on EOF + signal; registers no handlers, drives no claude (EPIC #600)
 ├── internal/supervisor/       Core process supervision
-│   ├── supervisor.go          Supervisor type: hosts claude via a tui-driver Session, I/O bridge, restart loop — the selectable-rollback interactive path since 2026-07-24 (production runs the stream-json runner; see *Interactive Session* below)
+│   ├── supervisor.go          Supervisor type: hosts claude via a tui-driver Session, I/O bridge, restart loop — non-production since 2026-07-24 and unverified since; its four live gates fail on clean main and are skipped by default (production runs the stream-json runner; see *Interactive Session* below and #1348)
 │   ├── backoff.go             Backoff timer: exponential delay with stability reset
 │   └── winsize.go             SIGWINCH → PTY size sync
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
@@ -104,7 +104,11 @@ User terminal
 
 The supervisor puts the controlling terminal into raw mode so keystrokes pass through unmodified. SIGWINCH signals are forwarded to the PTY so terminal resizes propagate to the child.
 
-**Production path since 2026-07-24:** this tui-driver/PTY-hosted path is the **selectable rollback**, not the production default. The production daemon runs the stream-json interactive runner (`internal/streamsup`, selected by `interactive_runner: "stream-json"` in the config file, #1081); setting `interactive_runner` back to `"pty"` (or removing the field) restores the PTY supervisor described here. The agent pipeline is likewise headless since 2026-07-25 — all five dispatcher forks set `PYRY_USE_STREAMJSON=1`, so `pyry agent-run` executes its stream-json path rather than `ptyrunner`. tui-driver therefore currently has no consumer on either production path; it remains the rollback host for both.
+**Production path since 2026-07-24:** this tui-driver/PTY-hosted path is **not the production default, and it is not a working fallback either.** The production daemon runs the stream-json interactive runner (`internal/streamsup`, selected by `interactive_runner: "stream-json"` in the config file, #1081).
+
+**Do not read `interactive_runner: "pty"` as a rollback switch.** Setting it selects the code path described here, and that is the whole of what it does. All four of this path's live interactive gates fail on clean `main`, measured 2026-08-05 against claude 2.1.220 and reproduced on two tree states with matching durations, while all ten stream gates pass; they are now skipped by default behind `PYRY_PTY_GATE=1` (`internal/e2e/realclaude/pty_gate_test.go`). Nothing has exercised this path since the 2026-07-24 cutover. Returning to it would be real work whatever state those tests were in, so the earlier "one config line away" framing was the size of the edit, not the size of the task. Whether the path is kept at all is open as **#1348**, which carries a 2026-09-01 audit expiry.
+
+The agent pipeline is likewise headless since 2026-07-25 — all five dispatcher forks set `PYRY_USE_STREAMJSON=1`, so `pyry agent-run` executes its stream-json path rather than `ptyrunner`. That `ptyrunner` half is measured separately and is less clear-cut: it produced no turn at all on 2026-07-30, and completed a full turn on 2026-08-06 during #1337's live probe. Treat it as untested rather than as either working or dead. tui-driver has no consumer on either production path.
 
 ### Restart Cycle
 
@@ -208,7 +212,7 @@ Extracted backoff logic. Computes the next delay based on how long the previous 
 
 | Module | Purpose | Why not stdlib |
 |--------|---------|----------------|
-| `pyrycode/tui-driver` | Hosts claude as a `Session` (PTY spawn, sealed raw-byte `MirrorOutput`, `AttachInput`, `Resize`, `Wait`/`Close`) — the PTY supervisor's host loop since #593, and `internal/agentrun/ptyrunner`'s since #471. Both are now the selectable rollback paths (production interactive is stream-json via `interactive_runner: "stream-json"` since 2026-07-24; the agent pipeline sets `PYRY_USE_STREAMJSON=1` since 2026-07-25), so tui-driver currently has no consumer on either production path | Single home for all claude screen knowledge (the substrate seal, now guarding the rollback path); no stdlib equivalent. See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md). |
+| `pyrycode/tui-driver` | Hosts claude as a `Session` (PTY spawn, sealed raw-byte `MirrorOutput`, `AttachInput`, `Resize`, `Wait`/`Close`) — the PTY supervisor's host loop since #593, and `internal/agentrun/ptyrunner`'s since #471. Neither is production and neither is a proven fallback (production interactive is stream-json via `interactive_runner: "stream-json"` since 2026-07-24; the agent pipeline sets `PYRY_USE_STREAMJSON=1` since 2026-07-25), so tui-driver currently has no consumer on either production path. The interactive PTY path's four live gates fail on clean main and are skipped by default; see #1348 | Single home for all claude screen knowledge (the substrate seal, now guarding a path nothing runs); no stdlib equivalent. See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md). |
 | `creack/pty` | Reading the operator's *own* terminal size (`GetsizeFull(os.Stdin)`) for the foreground SIGWINCH watcher; pulled in transitively by tui-driver for its internal PTY allocation | No stdlib PTY support |
 | `fsnotify/fsnotify` | Live `/clear` rotation detection on the claude sessions dir (Phase 1.2b-B) | Cross-platform inotify+kqueue without owning two stacks. See [ADR 004](../decisions/004-fsnotify-for-rotation-detection.md). |
 | `golang.org/x/term` | Terminal raw mode, state save/restore | Extended terminal ops not in stdlib |

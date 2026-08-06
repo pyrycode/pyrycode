@@ -21,7 +21,7 @@ Pyrycode is a process supervisor for Claude Code. It wraps the `claude` CLI in a
 ```
 cmd/pyry/                      Binary entry point: CLI parsing, daemon composition root
 cmd/substrate-guard/           Build gate: no claude-TUI substrate literals outside tui-driver
-internal/supervisor/           PTY-hosted claude supervision (rollback interactive path)
+internal/supervisor/           PTY-hosted claude supervision (non-production; unverified, see #1348)
 internal/streamsup/            Stream-json supervision (production interactive path)
 internal/sessions/             Multi-session pool: registry, /clear rotation, idle eviction
 internal/agentrun/             `pyry agent-run` runners (ptyrunner, streamrunner/streamjson)
