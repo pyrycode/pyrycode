@@ -819,6 +819,162 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 	}
 }
 
+// --- #1330: the rotation gate ------------------------------------------------
+//
+// These three cover the property at the layer that OWNS it. The cmd/pyry test
+// (inbound_deliver_rotation_test.go) proves the DISPATCH arms a gate; it runs
+// against a fixture gate and therefore cannot say anything about this one's
+// single-acquisition check-and-capture, its survival across the teardown, or its
+// generation stamp. Each of those is a distinct way to reopen #1330 silently.
+
+// waitSpawn receives one spawn signal or fails the test.
+func waitSpawn(t *testing.T, spawned <-chan struct{}, which string) {
+	t.Helper()
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", which)
+	}
+}
+
+// TestRunner_BeginRotation_RefusesTurnWhileChildIsLive is the core assertion: the
+// gate refuses a turn while Stdin() is STILL NON-NIL. That non-vacuity guard is
+// what distinguishes it from TestRunner_WriteUserTurn_NoLiveChild
+// (interface_test.go) — without it an ErrNoLiveChild would prove only that some
+// child was absent, which is the pre-existing refusal, not the new one. The live,
+// doomed child is exactly the case #1330 exists for.
+func TestRunner_BeginRotation_RefusesTurnWhileChildIsLive(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 4)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	// onSpawn fires AFTER setStdin (spawnAndWait), so this receive establishes
+	// "child 1 is up and its stdin is bound" by program order, with no polling.
+	waitSpawn(t, spawned, "the first spawn")
+	if r.Stdin() == nil {
+		t.Fatal("Stdin() is nil immediately after the spawn; every assertion below would collapse into the pre-existing no-live-child refusal")
+	}
+
+	r.BeginRotation()
+
+	// The gate must not have touched the handle: it refuses turns for a child that
+	// is still very much alive, which is the whole window #1330 closes.
+	if r.Stdin() == nil {
+		t.Fatal("Stdin() went nil when the rotation was armed; the gate must leave the handle alone (Interrupt still uses it) — the refusal below would then be vacuous")
+	}
+	if err := r.WriteUserTurn(context.Background(), "c1", []byte("gate-probe-armed")); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WriteUserTurn with a rotation armed = %v, want ErrNoLiveChild; the turn was written into the child RestartFresh is about to kill", err)
+	}
+	// Zero bytes, not merely a non-nil error: a refusal that writes first and
+	// errors afterwards would still hand the doomed child the turn.
+	time.Sleep(150 * time.Millisecond)
+	if got := out.String(); strings.Contains(got, "gate-probe-armed") {
+		t.Errorf("the doomed child echoed the refused turn, so bytes reached it despite the ErrNoLiveChild; stdout:\n%s", got)
+	}
+}
+
+// TestRunner_BeginRotation_FreshChildClearsTheGate covers the release half: the
+// gate is armed until a SUCCESSOR child binds its stdin, and the next spawn is
+// what clears it. Releasing on RestartFresh's return instead would narrow the race
+// rather than exclude it (that call returns after cancel(); the kill, the Wait and
+// the respawn all run later on the Run goroutine), so this asserts through a real
+// respawn rather than through the call's return.
+func TestRunner_BeginRotation_FreshChildClearsTheGate(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+	spawned := make(chan struct{}, 4)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	waitSpawn(t, spawned, "the first spawn")
+	r.BeginRotation()
+	if err := r.WriteUserTurn(context.Background(), "c1", []byte("gate-probe-armed")); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WriteUserTurn with a rotation armed = %v, want ErrNoLiveChild", err)
+	}
+
+	// The rotation completes: the runner kills child 1 and respawns under the
+	// rotated id. Receiving the second spawn signal means setStdin ran for the
+	// fresh child, which is the gate's release point.
+	r.RestartFresh(rotatedSessionID)
+	waitSpawn(t, spawned, "the post-rotation spawn")
+
+	if err := r.WriteUserTurn(context.Background(), "c1", []byte("gate-probe-fresh")); err != nil {
+		t.Fatalf("WriteUserTurn after the fresh child bound = %v, want nil; the gate outlived the rotation and the conversation would refuse turns until the next respawn", err)
+	}
+	// The fresh child is the only one alive, so its echo proves the bytes landed
+	// there and not in the pre-rotation child.
+	waitForContains(t, out, "gate-probe-fresh", 5*time.Second)
+	if got := out.String(); strings.Contains(got, "gate-probe-armed") {
+		t.Errorf("the refused turn reached a child after all; stdout:\n%s", got)
+	}
+}
+
+// TestRunner_BeginRotation_AbortIsGenerationStamped pins the counter that a
+// "simplification" would delete. Two overlapping new_session frames are ordinary
+// (#1330's e2e re-sends the frame every ~250 ms): the loser's rotate() fails
+// ErrSessionNotFound and it runs its abort, which unstamped would disarm the
+// WINNER's gate while the winner's outgoing child is still alive — reproducing the
+// defect on demand from two frames, invisibly to any test driving one rotation at
+// a time.
+//
+// It asserts through turnTarget's gated return rather than through a spawned
+// child: the property is about the gate's own state, and Run is not needed to
+// exercise it.
+func TestRunner_BeginRotation_AbortIsGenerationStamped(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, gated := r.turnTarget(); gated {
+		t.Fatal("turnTarget reports gated before any rotation was armed; the assertions below could not tell an arm from the initial state")
+	}
+
+	abortFirst := r.BeginRotation()  // frame 1 arms, then loses the re-key race
+	abortSecond := r.BeginRotation() // frame 2 arms and wins
+	if _, gated := r.turnTarget(); !gated {
+		t.Fatal("turnTarget reports not-gated with two rotations armed")
+	}
+
+	abortFirst()
+	if _, gated := r.turnTarget(); !gated {
+		t.Fatal("the LOSING rotation's abort disarmed the WINNER's gate: turns would be written into the winner's outgoing child, which is #1330's defect reproduced from two frames")
+	}
+
+	abortSecond()
+	if _, gated := r.turnTarget(); gated {
+		t.Fatal("the winning rotation's own abort did not disarm the gate; a failed rotation would leave the conversation refusing every turn until the next respawn")
+	}
+}
+
 // --- OnChildExit: the per-child-exit seam ------------------------------------
 
 // newExitRecorder returns an OnChildExit callback plus an exact count reader and
