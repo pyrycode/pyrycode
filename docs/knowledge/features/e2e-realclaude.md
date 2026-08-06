@@ -662,6 +662,659 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   See [`codebase/1253.md`](../codebase/1253.md) for the full implementation and
   two non-blocking code-review NITs (a misleadingly-named loop variable, one
   reasoned-not-measured comment).
+- `teardown_liveness_probe_test.go` (#1251) — **live rig, security-sensitive**;
+  opt-in behind `PYRY_PROBE_TEARDOWN_LIVENESS=1` on top of the package's normal
+  auth skip. The standing check that keeps #1231's hand-verified answer true:
+  stages one claude turn around #1223's `BASH_DEFAULT_TIMEOUT_MS` trigger, tears
+  pyry down through its real SIGTERM-to-pid path, and records whether the
+  backgrounded Bash command survived and by whose hand it died — calling
+  #1250's classifier/record, #1235's liveness read, and #1239's FIFO read as
+  code, not evidence. **The core idea is `tdnBeforeFault`**: the same
+  after-teardown liveness classifier is run at the before-snapshot too, and a
+  run whose before reading isn't uniformly `pinStateRunning` voids rather than
+  passes — an instrument hard-wired to `dead` cannot pass a live run for free.
+  Two structural discriminators separate the three readings that all look like
+  "dead after exit": the still-held FIFO (released only in `t.Cleanup`, after
+  the SIGTERM/wait/after-snapshot run inside the test body — the
+  `background_reach_probe_test.go:355-356` cleanup-ordering trap inverted on
+  purpose) rules out the command finishing on its own, and a pgid in the reap
+  line rules out dying alongside claude (`reap.go:56-62` skips `ESRCH` before
+  the append). `tdnRecord` widened rather than duplicated: `HeldPID` → `HeldPIDs`
+  (a slice — #1230's live run matched two rows on one needle), single
+  `ArgvScan`/`Liveness`/`FIFO` → paired `Before`/`After *tdnSnapshot`, plus
+  `ClaudeVersion`/`TeardownPath`/`RunnerFromEnv`/`RunnerFromArgv` provenance.
+  Disposition is a positive allowlist with one red arm
+  (`tdnDispositionLeaked`); a content re-match is dispositive only when the
+  after-liveness verdict is `pinStateRunning` — otherwise a zombie's
+  kernel-blanked argv would misfile as pid reuse. A ninth reject branch beyond
+  the spec guards teardown provenance itself: pyry exiting on its own before
+  the rig's SIGTERM would still read `dead-by-reaper` correctly but attribute it
+  to a `TeardownPath` that never ran. Repairs #1250's inherited SHOULD FIX (a
+  reap-classifier fixture row that didn't discriminate its own claimed
+  mutation) by swapping a concatenation order, verified red-then-reverted by
+  deliberate mutation. Deliberately does **not** reuse
+  `reachRunnerPathFromArgv` for the runner label — it keys on
+  `--append-system-prompt-file`, which the streamrunner path also emits, so
+  reuse would have silently mislabelled every stream-path record; the fresh
+  `tdnRunnerFromArgv` discriminates on `--session-id` vs. `--input-format`
+  instead. Live test named `TestRealClaude_TeardownLiveness` (not `TestTdn…`)
+  so it doesn't join #1250's zero-SKIP offline suite; three offline
+  self-checks (`TestTdnRunnerFromArgv`, `TestTdnDecideAfter`, `TestTdnPinHeld`)
+  do. 48 subtests, zero SKIP on `^TestTdn`; full package 216 PASS / 44 SKIP.
+  Zero production files touched. **The live half has not been run** — no
+  claude login in the dispatch environment; ticket carries `needs-real-claude`.
+  See [`codebase/1251.md`](../codebase/1251.md) for the full implementation and
+  two non-blocking code-review findings (a SHOULD FIX and a NIT, both deferred
+  to a future touch on this file).
+
+- `result_trailer_observation_test.go` (#1266) — **offline instrument, not a
+  probe**; ships the observation only, no verdict. Answers "when did pyry's
+  `{"type":"result",...}` trailer first become visible on stdout, and how late
+  might that observation be?" for #1267's downstream liveness classifier.
+  Two closed value spaces, neither collapsible into the other's zero value:
+  `trailSeen`/`trailAbsent`/`trailAborted` (what a pure scan, `trailScan`,
+  found) and `trailBoundFromMiss`/`trailBoundFromStart`/`trailBoundNone` (what
+  the staleness bound was measured from — `trailBoundFromStart` names the trap
+  where a first-poll match yields a duration that bounds nothing, because the
+  write may precede the poll loop entirely). Fixes a gap in the existing
+  `parseResultTrailer` (`tool_loop_test.go:216`, untouched, all nine call
+  sites keep today's behaviour) without touching it: that function discards
+  `scanner.Err()`, so a stdout line past `bufio.Scanner`'s 64 KiB default
+  (reachable — the trailer's `result` field is the last assistant message
+  verbatim) reads identically to a genuine absence; `trailScan` reads the
+  scanner error and reports the new `trailAborted` state instead. The cap
+  (`reachCapCommand`, `reachMaxCommandBytes = 512`) is applied only to the
+  retained verbatim `Line` copy, never to the bytes decoded into
+  `resultTrailer` — `result` sits sixth on the pinned wire order
+  (`emitter.go:456-468`) and `terminal_reason` last, so capping the raw line
+  would truncate inside `result` and destroy the field #1267 branches on;
+  `resultTrailer` has no `result` member, so the decoded value structurally
+  cannot leak the assistant payload regardless. `trailWaitForTrailer` polls
+  `probeSyncBuffer` on the existing `probePollInterval` (200 ms) and stamps
+  `now` **before** reading the buffer each iteration, which is what makes a
+  miss-derived bound an over-estimate of the true lateness rather than a
+  possible under-estimate wearing a bound's label. Purely additive, one new
+  file, zero production files touched; 11 subtests, 0 SKIP on
+  `-run '^TestTrail'`. See [`codebase/1266.md`](../codebase/1266.md).
+
+- `trailer_admissibility_test.go` (#1270) — **offline instrument, not a
+  probe**; two pure predicates that decide whether #1266's trailer scan and
+  #1253's reap-log attribution can support a claim, so #1271's downstream
+  classifier never has to. `trailGate(trailScanResult) trailGateResult` maps
+  onto a five-value positive allowlist (`trailGateUsable`/`NoTrailer`/
+  `ScanAborted`/`BudgetFired`/`OutOfContract`) and certifies a non-empty
+  terminal reason on the two arms that carry one.
+  `trailAdmitAttribution(tdnReapOutcome, certified string) trailAdmitResult`
+  maps the reap attribution onto a seven-value allowlist — one admissible
+  value (`trailAdmitProof`, requiring verdict `tdnReapHeldPGIDKilled`,
+  exactly one reap line, and a non-`max_turns` reason) plus five named voids
+  plus an out-of-contract value. Both open with a contract block ahead of
+  every real arm, so out-of-contract is a guard at the top, never a
+  fall-through default. The reap-side voids are outranked by the
+  budget-fired void (structural: on that path the reap ran before the
+  trailer, so the reap record's contents are irrelevant), which is itself
+  outranked by the contract block (a caller's bug must surface regardless of
+  path). `trailGateResult` is trap-free by construction — no `*resultTrailer`
+  reachable from it, directly or through an embedded field — even though the
+  gate cannot be the pointer trap's last consumer (`trailObservation` embeds
+  `trailScanResult`, so `.Trailer` is still reachable by promotion elsewhere).
+  `trailBudgetTerminalReason = "max_turns"` is a string literal with no
+  executable pin to `emitter.go`'s unexported `wireFields`; a production
+  rename would silently turn a budget-fired void into a false proof — named
+  as a known limit, not fixed, since fixing it needs either a production
+  change or a live budget-fired fixture, both out of scope for this
+  probe-family ticket. Purely additive, one new file, zero production files
+  touched; 50 subtests, 0 SKIP on `-run '^TestTrail'`. One code-review
+  SHOULD FIX (an uncontracted `certified` parameter that lets `""` read as
+  `trailAdmitProof`) shipped as a named, un-fixed gap — see
+  [`codebase/1270.md`](../codebase/1270.md) for the full implementation, the
+  ordering arguments, and the deferred findings.
+
+- `trail_run_outcome_test.go` (#1271) — the **run-level classifier**:
+  `trailClassifyRun(trailRunReadings) trailRunOutcome` maps one probe run's raw
+  observations onto exactly one of eleven outcomes (three answers, eight named
+  voids) so a run that measured nothing is recorded as having measured nothing
+  rather than falling through to a finding. Consumes #1270's two admissibility
+  results; a nine-check contract block (C1–C9) guards the top, calling
+  #1270's/#1235's shipped membership predicates rather than re-deriving them,
+  so the out-of-contract value is a guard, never a switch default. An
+  admissible attribution is consulted *before* any point-in-time reading
+  (proof outranks pyry-not-exiting outranks every instrument void), because
+  the point-in-time reads are expected to be late and must never be what a
+  verdict rests on — the systematic-false-negative case this ticket exists to
+  prevent is a regression row in `TestTrailClassifyRun`. Input and outcome
+  records carry discriminators and counts only — `BoundFrom` rather than the
+  `trailObservation` that embeds `trailScanResult`, `MatchCount`/`RowsScanned`
+  rather than `pinScan.Matches`' verbatim argv, no command string anywhere —
+  enforced by a marshal-and-search test with a needle in four inputs. Folds in
+  #1270's parked SHOULD FIX (an uncontracted `certified` parameter) at both the
+  layer it was found and as a composition pair (C4/C5) one layer up. Purely
+  additive, one new file plus a ~70-line extension of #1270's own closure test
+  (eighteen constants → twenty-nine); 14 `TestTrail`-prefixed functions, 82
+  subtests, 0 SKIP on `-run '^TestTrail'`. See
+  [`codebase/1271.md`](../codebase/1271.md).
+
+- `trail_run_rig_test.go` (#1268) — **proof-of-wiring rig, not a new
+  instrument.** #1266/#1270/#1271 each prove their piece against fixtures and
+  synthetic buffers; `trailClassifyRun` is pure, so a fixture proof never
+  shows which code path fed it — a rig wired to the wrong path emits the same
+  positive as one wired to the right one. This file gathers the classifier's
+  inputs through the live producer chain (`trailWaitForTrailer` → `trailGate`,
+  `pinScanArgv`, `pinReadState`, `tdnClassifyReapLog` → `trailAdmitAttribution`)
+  against a real FIFO and a real `cat`, funnelled through one seam
+  (`trailRigGather`) so "no field is hand-assigned and no reap line is
+  synthesised" is a property of the file rather than a promise about its call
+  sites — `tdnClassifyReapLog` is called over a literal `nil` inside that
+  function, never a parameter. Three tests: a pre-subject reading
+  (`trailOutcomeNoRowMatched`) flipping to a during-subject reading
+  (`trailOutcomeMatchedUnattributed`) across one subject's life, with both
+  post-death per-pid states (`pinStateExitedNotReaped` then
+  `pinStateNoSuchProcess`) taken deterministically because the subject is a
+  direct child; a staleness-bound margin pinned tight enough that a
+  start-derived (rather than miss-derived) bound fails it; and a
+  shell-wrapped subject staged so more than one row matches, without
+  resolving "the" pid. `trailOutcomeRunningAtTrailer` — the finding itself —
+  stays deliberately unreachable, twice-stated in the header: it requires a
+  reap line this rig must not grow. Purely additive, one new file, 594 lines,
+  zero existing call sites changed. See [`codebase/1268.md`](../codebase/1268.md).
+
+- `finding_attribution_fanout_test.go` (#1280) — **the many-to-one reduction**:
+  `trailAdmitAttribution` (#1270) takes one held process group; the probe's
+  argv scan returns a set, because `pinScanArgv` deliberately refuses to
+  resolve "the" pid. `finAttributeFanOut(stderr []byte, pgids []int, certified
+  string) finAttributeRecord` reduces that set to the single `trailAdmitResult`
+  `trailRunReadings.Admit` (#1271) accepts, under a total order
+  (`finAttributeOrder`, proof first, argued in the code) so no group's void
+  suppresses another group's proof and no composition of voids manufactures
+  one. Two record-level conditions, never selectable values:
+  `finAttributeGroupUnreportable` (a `pgid <= 1` group `reap.go:52` skips
+  before it ever kills anything — surfaced rather than handed to
+  `tdnClassifyReapLog`, which would misattribute the staging fault to the
+  instrument) and `finAttributeNoGroups` (no reportable group remained — a
+  staging fault, `Selected` left zero rather than filled with either of the
+  two publishable falsehoods AC4 prices). The credential channel is closed by
+  the **signature** — `pgids []int`, never `[]reachProc` — not a check;
+  `certified` crosses verbatim by design (already-shipped, publishable
+  behaviour) and the fan-out multiplies its copy count by the distinct-group
+  count, each capped at 512 bytes. `finAttributeEntry` carries only `PGID`
+  and `Admit` — no `tdnReapOutcome.Line`, no `reachProc.Command`. Purely
+  additive, one new file, 767 lines, zero production change, zero consumer
+  call sites; four top-level tests, 0 SKIP on `-run '^TestFinAttribute'`. One
+  code-review SHOULD FIX, not blocking, deferred to #1281: the no-captured-
+  bytes structural check is top-level-key-only over what is now a *nested*
+  record, so a future `Command` field added to `finAttributeEntry` would pass
+  it unnoticed. See [`codebase/1280.md`](../codebase/1280.md) for the full
+  implementation, the selection-order argument, and the mutation-tested
+  lessons.
+
+- `finding_staging_gate_test.go` (#1284) — **the tier below the classifier**:
+  `trailClassifyRun` (#1271) assumes a run staged — a Bash call issued, the
+  rig's hold command, a completed rendezvous — and on an unstaged run its
+  argv scan still runs over a healthy process table and matches nothing,
+  landing on `trailOutcomeNoRowMatched`: a real answer, published as a false
+  negative about a run where no command ever existed. `finOutcomeStagingGate(
+  finOutcomeStaging) finOutcomeResult` decides, from synthetic staging
+  conditions alone, one of six failure outcomes or the pass-through
+  (`finOutcomeReadyToClassify`, deliberately not the zero value — an unfilled
+  result must never read as "staged, go classify"), all seven in their own
+  `stage-` sub-namespace apart from the eleven's `run-`. The structural
+  closure is the signature itself: neither type mentions `trailRunReadings`,
+  so a failure arm holds nothing a classifier call could be made from — the
+  forbidden call is unwritable, not discouraged. Two guard conditions close
+  reachable pass-through holes (both commands left empty; an unfilled
+  match-count want agreeing with an unfilled count at zero). No Detail
+  interpolates either command — both the issued command (verbatim model
+  output) and the staged one (embeds a `t.TempDir()` path and an
+  `exec.LookPath` result) are captured strings on the same footing — and the
+  no-captured-bytes test plants `trailNeedle` in both, with a per-row
+  headroom assertion against `trailDetail`'s 512-byte cap: house-style Detail
+  prose alone was found to eat enough of that cap in the first draft to
+  truncate a leaked command's needle away before it could be caught, a
+  vacuity distinct from (and the mirror image of) #1278's cap hazard. Purely
+  additive, one new file, 790 lines, zero production change, zero consumer
+  call sites. See [`codebase/1284.md`](../codebase/1284.md) for the full
+  implementation and the mutation-tested lesson on redaction-test vacuity.
+
+- `finding_staging_fill_test.go` (#1304) — **fills the staging record from a
+  run's own transcript.** `finOutcomeStagingGate` (#1284, above) decides all
+  seven staging outcomes from synthetic inputs; this file fills exactly the
+  three transcript-side fields (`BashIssued`, `IssuedCommand`, `TriggerFired`)
+  a real caller would supply, through a `finTranscript*` composition reading a
+  JSONL transcript the test writes at the session's own path. The scan's unit
+  is a `finTranscriptBashCall{ToolUseID, Command}` pair rather than a bare
+  command: the shipped `probeWaitForBashToolUse` returns the **first** Bash
+  `tool_use` regardless of `input.command` (a #1223 code-review SHOULD FIX
+  shipped unfixed), and #1230 guarded that value-side caller-side already
+  without editing the shared rig — this file generalises the guard and closes
+  a second, key-side route to the same defect: a composition that selects the
+  staged call for its *command* but keeps the first call's *id* would still
+  read the trigger off the decoy's `tool_result`, since the trigger reading is
+  `probeWaitForToolResult(<id>)`. The content guard (`finTranscriptSelect`) is
+  pure over its input — no `*testing.T` — so its removal (AC2's mutation) runs
+  and grades without touching the worktree; the first-match id is bound inside
+  an `if` statement in `finTranscriptSelectBash` and goes out of scope
+  immediately after, making it unreferenceable rather than merely unused
+  below. `TriggerFired` reads `timedOutAfterMs` presence alone, never
+  conjoined with the handle and never corroborated by
+  `tool_use.input.run_in_background` — that flag marks the model-set
+  backgrounding path this probe must exclude (`docs/knowledge/codebase/
+  1223.md:87-88`). Nothing on the path trims, unquotes, or canonicalises
+  either command; both new types carry no json tags, mirroring
+  `finOutcomeStaging`'s own rule (`finding_staging_gate_test.go:141-157`).
+  Purely additive, one new file, 602 lines, zero production change, zero
+  consumer call sites. See [`codebase/1304.md`](../codebase/1304.md) for the
+  full implementation and both mutation-tested rows.
+
+- `finding_trailer_evidence_test.go` (#1290, builder moved onto the sighting
+  carrier #1320, published bound proven measured #1316) — **the trailer half
+  of the probe's published record.**
+  `finTrailerRecord` (ten scalars, no pointer, no embedded observation)
+  carries one run's outcome value together with the trailer evidence behind
+  it — scan `State`, the `BoundFrom` lateness discriminator with its
+  `Bounded` boolean (`== trailBoundFromMiss` and nothing else, never
+  `Staleness != 0`) and `Staleness` itself, and the four decoded trailer
+  fields (`Subtype`, `IsError`, `TerminalReason`, `StopReason`).
+  `finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord`
+  is the pure projection: since #1320 it takes the #1309 carrier rather than
+  a `trailObservation`, so its input carries no `.Line` and no
+  `*resultTrailer` — both the record it returns and the builder itself are
+  now trap-free by construction, checked by
+  `TestFinSightingReachesNoScanType` rather than asserted in prose. The four
+  fields are read from `sighting`'s own scalars under a guard on
+  `sighting.CarriesTrailer` (a bool the carrier precomputes — no pointer left
+  to guard a dereference of; a no-trailer run returns its void instead of
+  panicking, unreachably now rather than through a checked short-circuit);
+  `Outcome` is copied from the caller's #1271/#1284 value as handed, never
+  re-derived from `State`. On the false arm the four scalars are zeroed
+  rather than copied through — under the carrier that is a decision the
+  builder makes rather than a consequence of there being no pointer to read,
+  pinned in both directions by
+  `TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer` over one
+  carrier with its one impossible bit flipped. `StopReason` is the one
+  exception to trap-free: forwarded from the model's last message uncapped,
+  by design, named explicitly so a sweep author doesn't plant a needle in a
+  field the record must carry verbatim. No field carries `omitempty` — under
+  it a seen trailer with an empty `terminal_reason` would render
+  byte-identical to a no-trailer record, the exact collapse the nil-pointer
+  design one tier down exists to prevent. `TestFinTrailerRecordCarriesNoCapturedBytes`
+  no longer plants `trailNeedle` here — #1325 retired that plant along with the
+  test's other `.Line`-dependent checks, since the carrier the builder now takes
+  has no `.Line` for a needle to sit in. The in-cap plant (`trailPaddedTrailer(0)`,
+  needle inside the 512-byte cap at offset 104–146, chosen over the family's
+  habitual past-the-cap pad specifically so a record that kept the capped line
+  would still be caught) lives one tier down instead, at
+  `TestFinGatherReturnsNoCapturedBytes` (`finding_run_gather_test.go`), which
+  sweeps the carrier itself. What remains in this file is two channel-independent
+  construction rules on `finTrailerRecord`: the per-row `Detail` headroom
+  assertion (#1284's fix, argued as a type-level rule that travels — the record
+  embeds whole into `finRecordRun.Trailer` and from there into the artifact, so
+  a Detail that ate its own budget would defeat the marshal sweep and the
+  artifact's file byte sweep two tiers up) and the flat forbidden-key scan
+  (`finTrailerRecord` is ten scalars, so a top-level key scan is exhaustive).
+  The shell `TestFinTrailerRecordReadsTheDecodedTrailer` is gone; its one
+  surviving row — the four scalars come from the full-line decode rather than
+  the capped copy — is promoted to top-level as
+  `TestFinTrailerSightingScalarsComeFromTheFullLineDecode`, re-stated onto
+  `finTrailerSighting` (the builder reads neither `Trailer` nor `Line`) and
+  named to mirror `TestFinGatherSightingScalarsComeFromTheFullLineDecode`, the
+  two halves of one agreement obligation that a grep now returns together.
+  Purely additive at #1290, one new file, 697 lines, zero production change, zero
+  consumer call sites. See [`codebase/1290.md`](../codebase/1290.md) for the
+  original implementation, [`codebase/1320.md`](../codebase/1320.md) for the
+  move onto the carrier, [`codebase/1325.md`](../codebase/1325.md) for the
+  retirement, and [`codebase/1316.md`](../codebase/1316.md) for the row that
+  joins this file's `Bounded` derivation to a poll that genuinely measured it
+  (`finding_run_gather_test.go`'s `TestFinGatherRecordPublishesTheMeasuredMissBound`).
+
+- `finding_run_record_test.go` (#1291) — **the assembled run record.**
+  `finRecordRun` is the record one probe run publishes: pyry's exit code,
+  every matched row reduced to `finRecordProc` (`PID`/`PPID`/`PGID` — three
+  `int` fields, reflection-asserted, nothing else), the per-pid liveness
+  verdicts (`[]pinStateOutcome`, carried whole), the reap-log attribution
+  (`finAttributeRecord`, #1280) and the trailer sub-record
+  (`finTrailerRecord`, #1290), both embedded whole rather than re-derived,
+  and the runner path. The runner path is recorded **as observed**: the
+  env reading (`reachRunnerPathFromEnv`) is carried as documentation, not
+  corroboration, alongside an independent argv reading
+  (`tdnRunnerFromArgv`), reduced to a three-valued `RunnerAgreement` —
+  `agree` / `disagree` / `indeterminate` — decided on the **label** each
+  reading's leading token, never the whole string, because the two
+  producers append their own free-text reasons and the full strings are
+  therefore never equal even when both name the same runner.
+  `finRecordInputs` uses named fields rather than positional parameters
+  specifically because two adjacent same-typed strings
+  (`RunnerFromEnv`/`ClaudeCommand`) sit on opposite sides of the argv
+  prohibition, and it carries neither a `trailObservation` nor a
+  `trailScanResult` field, which is what keeps the discriminated-optional
+  trailer pointer out of reach. Purely additive, one new file, 1061 lines,
+  zero production change, zero consumer call sites; five top-level tests,
+  all offline. One code-review SHOULD FIX left non-blocking: the
+  attribution sub-record's "carried whole" claim is pinned by a single
+  nested scalar rather than `reflect.DeepEqual` (the trailer half's
+  pattern), so a future partial-carriage regression there would pass
+  unnoticed — deferred to #1286. See [`codebase/1291.md`](../codebase/1291.md)
+  for the full implementation and the mutation-tested lessons.
+
+- `finding_artifact_write_test.go` (#1286) — **rendering the run record into
+  a pasteable artifact, and proving the directory it lands in leaks no
+  captured bytes.** `finWriteArtifacts(t, dir, rec finRecordRun)` takes the
+  built record and nothing else — no raw process-table bytes, no second
+  `[]byte` parameter — and writes exactly two files: `run.json`
+  (`json.MarshalIndent`) and `run.md` (a fixed safety-claim constant, the
+  same bytes fenced, one summary line built from derived scalars only). The
+  signature *is* the design: `writeReachArtifacts` (`background_reach_probe_
+  test.go:823`) is the cautionary precedent it deliberately does not
+  reuse — that writer's unexported `rawPS` field produces a second file,
+  `reach.ps.txt`, carrying the verbatim process table beside a clean
+  `reach.json`; `finRecordRun` has no unexported field, so there is nothing
+  raw in this writer's reach to write. Four tests measure what was
+  **written**, not what was built: a set-equality census of every JSON
+  *path* the record declares against every path the artifact renders
+  (path-based rather than name-based after a code-review MUST FIX — four of
+  the family's key names are shared across types, and `matched_rows[]`'s
+  three keys are shared with `pinStateOutcome`'s, so a name-based census
+  covered that slice not at all); a `trailNeedle` sweep over
+  every file `os.ReadDir` returns (planted only in inputs the pipeline
+  reduces or drops — a matched row's argv, the claude argv, a reap
+  outcome's stderr — never in the four fields the record carries whole),
+  with a mandated pair of applied-and-reverted
+  mutations (one inside the Detail format, one adding an undeclared third
+  file) both observed RED before the sweep shipped; a recursive
+  forbidden-key scan with two exact-key exemptions (`tool_stderr`, carried
+  whole and permitted; `runner_from_argv`, a closed three-constant set with
+  no input byte in reach); and a structural + behavioural pair proving
+  `resultTrailer` has no `result` member and that the four decoded trailer
+  scalars cross into the artifact verbatim while the needle beside them does
+  not. The sweep shipped with a fourth channel, a trailer-scan-line plant
+  landing **inside** `reachCapCommand`'s 512-byte cap (pad `0`, needle at
+  byte 104–146) — `trailNeedle`'s own comment claims it is placed past the
+  cap, which this ticket measured to be false against the fixture the
+  family actually reuses; the comment was left uncorrected as a sibling
+  file, out of scope here. **#1326 retired that fourth channel**: since
+  #1320 `finTrailerBuild` takes the sighting carrier, and the needle in the
+  scanned line is consumed at fixture-construction time by
+  `finTrailerSighting` — which never reads `.Line` — so it never enters
+  `finRecordInputs` and the writer performs no reduction there. The in-cap
+  fixture (`finWriteTrailerPad = 0`) was kept, not deleted: it still backs
+  a diagnosis-and-guard pair relocated onto the pre-build clean check for
+  the embedded trailer sub-record (a prospective guard against a future
+  builder that starts reading the line) and the four-scalar-vs-needle
+  pairing in the verbatim-output test, which rests on the weaker claim that
+  the *wire* line carries the needle at every pad regardless of the cap and
+  so needs no cap guard of its own. The retired in-cap claim itself now
+  holds one tier down, at `TestFinGatherReturnsNoCapturedBytes`
+  (`finding_run_gather_test.go`), which sweeps the carrier. Purely
+  additive, one new file, 966 lines then trimmed by #1326's prose-and-guard
+  rewrite, zero production change, zero consumer call sites. See
+  [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
+  path-vs-name census MUST FIX, and the stale-comment lesson, and
+  [`codebase/1326.md`](../codebase/1326.md) for the channel retirement.
+
+- `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
+  #1302, trailer-sighting carrier added #1309, carrier's miss bound proven
+  #1312, carrier's four decoded scalars proven to come from the full-line
+  decode #1313, published record's bound proven to be the classified
+  sighting's #1316) — **parameterises
+  `trailRigGather` (#1268) on the two inputs it hardcoded.** That rig passes
+  a `nil` literal as the reap-log stderr and keys attribution on the test
+  process's own process group; under those two hardcodings,
+  `trailAdmitProof` — and with it `trailOutcomeRunningAtTrailer`, the only
+  outcome that is a finding — is structurally unreachable, so a probe built
+  on it would report a clean negative forever with no symptom.
+  `finGatherReadings(in finGatherInputs) (trailRunReadings,
+  finAttributeRecord, finSighting)` takes `Stdout`, `Needles`, `Stderr` and
+  `Pinned` as fields and, driven offline from synthetic stdout/stderr,
+  reaches both the finding and a genuine negative
+  (`trailOutcomeNoRowMatched`, never a `run-void-*`) through its own
+  composition, both at `MatchCount == 0` under a certifying gate —
+  demonstrating rather than describing that Step 2 outranks the match-count
+  arms. `Pinned` is `[]int`, never `[]reachProc`, continuing #1280's
+  credential-channel-closed-by-signature pattern; the `[]reachProc` →
+  `[]int` conversion is left to #1282's call site by design. The trailer
+  observation is a function-local and never returned, which is what keeps
+  `trailScanResult.Trailer`/`.Line` structurally out of the caller's reach.
+  A recursive forbidden-key walk (lowercased keys, two named exact-key
+  exemptions) closes the flat-only-key-scan gap #1280 left open for nested
+  records. `finGatherInputs.PyryExited`/`.ClaudeState` (#1302) are the same
+  struct's remaining two fields — copied into the readings whole, no
+  default, no repair — and are exercised by two more top-level tests: one
+  varying `PyryExited` alone across an identical stdout/needle pair to prove
+  the outcome moves (`trailOutcomeNoRowMatched` ↔
+  `trailOutcomeVoidPyryDidNotExit`), one carrying a documented verdict, an
+  undocumented one, and `""` through unchanged. The third return, `finSighting`
+  (#1309), is what the classified poll *measured* — scan state, the bound and
+  its discriminator, staleness, a carries-a-decoded-trailer discriminator and
+  the four decoded scalars (`Subtype`/`IsError`/`TerminalReason`/
+  `StopReason`) — filled from the same `trailWaitForTrailer` call that fills
+  `BoundFrom`, so no second scan is needed to recover what the sighting saw.
+  It reaches none of `trailObservation`, `trailScanResult` or `resultTrailer`
+  (proven by walking types, reusing `finRecordInputReaches` rather than a
+  second traversal), so `.Line` and the decoded `*resultTrailer` stay exactly
+  as unreachable as before; #1320 moved `finTrailerBuild` onto this carrier,
+  via a fixture-side helper (`finTrailerSighting`) that is a copy of this
+  file's fill and inherits its agreement obligation.
+  Purely additive, zero production change, zero consumer call sites; nine
+  top-level tests, 0 SKIP on `-run '^TestFinGather'`. #1312 adds the row #1309
+  shipped without: `TestFinGatherSightingReportsTheMissBound` leaves the
+  buffer unseeded (this file's first row to do so, and its first to cost wall
+  clock — ~600ms), appends the trailer past two poll ticks on a spawned
+  goroutine's sibling, and proves `BoundFrom` reports `trailBoundFromMiss` —
+  the discriminator that actually bounds something, as opposed to
+  `trailBoundFromStart`, which every pre-seeded row reaches and whose own doc
+  says it BOUNDS NOTHING. A second, direct `trailWaitForTrailer` call over the
+  same buffer supplies the contrast (`trailBoundFromStart`), with only its
+  discriminator ever bound to a variable — never the observation itself, which
+  carries the two things the carrier exists to keep unreachable. #1313 is #1312's
+  sibling half of the #1310 split: a standalone test on a 585-byte over-cap
+  fixture (`trailPaddedTrailer(200)`) proves the same carrier's four decoded
+  scalars come from `trailScanResult.Trailer` — the full-line decode — and
+  never from a re-read of the capped `.Line`, which fails to decode wholesale
+  on a syntax error rather than losing fields one at a time. The precondition
+  pins the bare `"terminal_reason"` **key** (never the `"max_turns"` value,
+  which survives every cap via `subtype`'s `error_max_turns`), asserted so a
+  fixture edit that collapses the disagreement fails loudly instead of the row
+  going quietly vacuous. #1316 adds this file's second and last row that costs
+  wall clock, `TestFinGatherRecordPublishesTheMeasuredMissBound`, placed
+  directly after #1312's row: it builds a `finTrailerRecord` from the
+  composition's classified sighting over the same unseeded-buffer/delayed-append
+  idiom, and puts it beside a record built over the same frozen bytes from a
+  second, direct `trailWaitForTrailer` call — joining the record tier (which
+  pinned `Bounded` with the discriminator handed in) to the carrier tier
+  (#1312, which measured the discriminator but stopped short of publishing it),
+  separated by measurement rather than by `finTrailerBuild`'s input type. See
+  [`codebase/1281.md`](../codebase/1281.md),
+  [`codebase/1302.md`](../codebase/1302.md),
+  [`codebase/1309.md`](../codebase/1309.md),
+  [`codebase/1312.md`](../codebase/1312.md),
+  [`codebase/1313.md`](../codebase/1313.md) and
+  [`codebase/1316.md`](../codebase/1316.md) for the full implementation and
+  the mutation-tested lessons.
+
+- `finding_stage_held_group_test.go` (#1282) — **fills `finGatherReadings`'
+  (#1281) two parameters from a real held command, not hand-passed
+  integers.** `finStageHeldGroup` stages `sh -c '"$1" "$2"; exit 0'` over a
+  real `cat` held on a real FIFO, in a process group of its own
+  (`SysProcAttr{Setpgid: true}` — copying the wrapper subject shape from
+  `trail_run_rig_test.go`, not the flip test's bare `exec.Command`, which
+  would inherit the test's own group), then pins that group off a real
+  `pinScanArgv` (#1280) match set's `.PGID`s. AC1's distinctness guard
+  compares the **scanned** pgid against `syscall.Getpgrp()`, never
+  `cmd.Process.Pid` — the pid form is vacuous under the dropped-`Setpgid`
+  mutation, confirmed green in code review, while the scanned form reddens
+  in 0.06s. The teardown adds a third statement (a direct
+  `cmd.Process.Kill()`) that the neighbouring rig's two-statement teardown
+  doesn't need, because only this file's guard can redden on a path where
+  the group kill finds no group to signal — without it, `t.Fatalf`'s
+  `runtime.Goexit()` would deadlock the mutation against `holdProbeFIFO`'s
+  `t.Cleanup`. Two tests, five arms: the finding and a genuine negative
+  (`trailOutcomeMatchedUnattributed`, one step earlier than #1281's
+  `trailOutcomeNoRowMatched` because a real command carries the needle),
+  plus #1268's two hardcodings trapped at the **`Admit`** layer against a
+  same-staging control, each varying exactly one dimension. First `fin*`
+  file whose scan matches live rows, so `readings.Liveness` is non-empty
+  for the first time — the neighbour's whole-struct-print licence
+  (`finding_run_gather_test.go:105-113`) is deliberately not inherited,
+  since its proof ran with `Liveness` empty on every row. Purely additive,
+  one new file, 617 lines, zero production change; both new tests PASS,
+  never SKIP. See [`codebase/1282.md`](../codebase/1282.md) for the full
+  implementation and the grade-mutations-per-line lesson.
+
+- `finding_live_pin_test.go` (#1338) — **offline reduction, not a probe**;
+  the pure post-filter a later ticket's during-turn `pinScan` (held `cat` on
+  a FIFO, pinned mid-turn) is reduced through before it ever reaches the
+  staging record — no live scan, no `ps` exec, no `pyry` spawn, no caller.
+  `finLivePinReduce(scan pinScan, fifoPath string) finLivePinReading` takes
+  membership from `reachMatchedNeedle` over each row's recorded needle list
+  (never a re-scan of `.Command`, which the byte cap may have truncated past
+  `reachMaxCommandBytes`), returns every FIFO-matched row and its `.PGID`
+  raw — unsorted, undeduped, since the consumer `finAttributeFanOut` (#1280)
+  dedupes and sorts internally — and reads claude's own argv via
+  `tdnClaudeCommand(scan)` over the whole scan, not the FIFO-filtered rows
+  (claude's row carries only the claude needle, so filtering first always
+  returns `""`). `finLivePinWantRows = 2` names the expected FIFO-row count,
+  sourced from #1230's live measurement (the `zsh -c` wrapper plus the
+  forked `cat`) and corroborated, not primarily sourced, from #1268's
+  rig-staged mutation test; `trail_run_rig_test.go:563` is deliberately not
+  cited, since it asserts only `MatchCount > 1`, never `== 2`. Both
+  plausible-wrong fills — `scan.MatchCount` (3, since one scan carries both
+  the FIFO and claude needles) and the distinct-pgid count of the FIFO rows
+  (1, since claude isolates the Bash command into its own group) — are
+  pinned as asserted values in `TestFinLivePinCountIsNeitherWrongCandidate`
+  and checked pairwise-distinct from the correct count, so a fixture edit
+  that collapses two candidates together fails loudly instead of silently
+  disarming the trap. The offline trap drives everything over a synthetic
+  four-column `ps` table built as **bytes** and turned into a `pinScan`
+  through the real `pinMatchArgvExcluding` (a hand-built `pinScan` would skip
+  the match-uncapped/store-capped asymmetry the truncation assertion rests
+  on); the wrapper row's padding is derived from `reachMaxCommandBytes`
+  itself, never a literal 512. Purely additive, one new file, 514 lines,
+  zero production change, zero consumer call sites — the driver and record
+  tickets that call `finLivePinReduce` for real land later. See
+  [`codebase/1338.md`](../codebase/1338.md) for the full implementation, the
+  mutation-tested lessons, and why `strings.Contains(s, "")` being `true`
+  makes the empty-needle assertion a real second witness for the
+  membership-re-scan defect rather than comment-only work.
+
+- `finding_live_staging_test.go` (#1342) — **declarations, not a probe**;
+  the run's FIFO name, hold prompt, staged command literal and env delta a
+  later live turn stages from, plus one offline trap per declaration. Exists
+  because `finOutcomeStagingGate`'s identity arm
+  (`finding_staging_gate_test.go:299`) is byte equality between claude's
+  verbatim `input.command` and whatever the rig says it staged — get either
+  operand wrong and every *correctly*-staged run reports
+  `stage-command-not-staged`, one live claude turn burned per attempt.
+  `finLiveStageCommand(fifoPath)` splices `probeHeldCommandName` rather than
+  re-typing `"cat"` (a rig staging one verb while #1340's liveness check
+  looks for another would drift silently; the splice makes a rename a build
+  break) and is deliberately bare, never `finOutcomeHoldCommand`'s
+  `sh -c … ; exit 0` stand-in shape. `finLiveStagePrompt(fifoPath)` follows
+  `probePrompt`'s backtick-delimited form with the *whole* command
+  interpolated, not just the path, so the prompt and the staged literal
+  derive from one `fmt.Sprintf` instead of being written twice; the offline
+  trap recovers the command back out of the prompt by an independent
+  delimiter scan (`finLiveStageCommandFromPrompt`) rather than comparing
+  against a hand-copied second literal. `finLiveStageFIFOName =
+  "fin-live-stage-hold"` is checked both-directions substring-disjoint
+  against all eight shipped FIFO name/path constants, referenced **by
+  identifier** so a rename breaks the build instead of rotting the taken-set
+  list silently — re-derived at `26d83b7` via
+  `rg -n 'FIFOName *=|FIFOPath *=' internal/e2e/realclaude/` (the
+  `FIFOPath`-inclusive recipe; a `FIFOName`-only search misses #1338's
+  `finLivePinFIFOPath`). `finLiveStageEnvDelta()` names
+  `BASH_DEFAULT_TIMEOUT_MS=5000` (the settled #1223 trigger) and
+  `PYRY_USE_STREAMJSON=0` explicitly — the latter because
+  `reachRunnerPathFromEnv` reads the ambient `os.Getenv` first, so an empty
+  delta would make the downstream runner reading a reading of the operator's
+  shell; its offline trap sets a hostile ambient (`t.Setenv`) to prove the
+  claim is non-vacuous rather than accidentally true whenever the variable
+  happens to be unset. Purely additive, one new file, 489 lines, zero
+  production change, zero live caller — #1340 is the driver that spends a
+  real turn on these declarations. See [`codebase/1342.md`](../codebase/1342.md)
+  for the full implementation, the mutation-tested lessons, and the
+  reachable-red-vs-shadowed-by-Fatalf lesson code review surfaced on the
+  extraction round-trip's pass-through guard.
+
+- `finding_live_assembly_test.go` (#1343) — **the join, not a probe**; the one
+  function, `finLiveAssembleStaging`, that fills all eight
+  `finOutcomeStaging` fields — three read from the run's transcript via
+  `finTranscriptFill` (#1304), five supplied by the caller as
+  `finLiveAssembleFacts`, `finTranscriptReading`'s mirror image — and returns
+  `finOutcomeStagingGate`'s decision (#1284) as returned, never re-derived.
+  Exists because nothing previously called both halves together: the only
+  thing filling the five caller-side fields was `finTranscriptStagedCaller`,
+  a #1304 test fixture whose hardcoded `PinMatchCount: 1, PinWantCount: 1` is
+  wrong for the rig, whose real expectation is `finLivePinWantRows = 2`
+  (#1338) — an assembly that inherited the `1` would send every
+  correctly-staged live run to `finOutcomePinCountUnexpected`, burning a live
+  claude turn per attempt. The composite literal is name-for-name with no
+  literal on any right-hand side, which is the one rule that keeps both the
+  fixture's `1` and the driver's `finLivePinWantRows` out of the assembly's
+  body — the counts are forwarded unaltered, neither re-derived nor fixed
+  internally. `facts.StagedCommand` is the single source of the staged
+  string, closing structurally (rather than by care) the two-consumer drift
+  between the gate's identity arm and the fill's own `call.Command == staged`
+  guard. `finLiveAssembleContractWant = finLivePinWantRows + 1` backs a
+  deliberate contract row over a want no live driver emits — the only row
+  that catches an assembly forwarding the match count while fixing the want
+  internally — derived rather than written as a literal so it can never
+  coincide with the real constant. Test drives four rows over one
+  correctly-staged synthetic transcript, written once in the parent, with
+  every assertion reading the assembly's return value rather than
+  `finOutcomeStagingGate` directly, so it proves the counts travel without
+  re-asserting `finOutcomeGateCases`' (#1284) already-shipped count mapping.
+  Two mis-assemblies survive every row by construction — a count swap inside
+  the literal, and hardcoding the three transcript fields at their staged
+  values — and are stated as accepted in the file's own header rather than
+  chased with the duplicate rows this ticket's AC forbade reproducing.
+  Purely additive, one new file, 428 lines, zero production change, zero live
+  caller — #1340 (driver) and #1337 (record/classification) are the tickets
+  that call `finLiveAssembleStaging` for real. See
+  [`codebase/1343.md`](../codebase/1343.md) for the full implementation, the
+  mutation matrix, and the code-review NIT on the assembly's two adjacent
+  `time.Duration` parameters.
+
+- `finding_live_run_test.go` (#1340) — **the live staging driver, not a
+  probe of pyry itself**; `finLiveRunStage(t) *finLiveRunHandle` spawns pyry
+  on the ptyrunner default, holds the rendezvous FIFO, drives the turn to
+  the instant a during-turn process pin is meaningful, takes that pin, and
+  hands it plus the rig's own facts to #1343's `finLiveAssembleStaging`,
+  returning a handle carrying the run's live facts and the staging tier's
+  `finOutcomeResult` **as the gate returned it**. Nothing #1338/#1342/#1343
+  already shipped is re-derived: the pin reduction and its expected row
+  count, the staged command/prompt/FIFO-name/env-delta declarations, and the
+  eight-field assembly all cross unchanged. `finLiveRunHandle` is returned as
+  a **pointer** — the pyry-exit kill cleanup is registered before `PyryPID`
+  exists, so its closure has to read a field written later — and carries
+  **no JSON tags**, inheriting the "input only, never published" posture of
+  the types it wraps (`Pin.Rows`/`Pin.ClaudeCommand` are verbatim argv off
+  the ambient process table). The kill cleanup is registered **before**
+  `holdProbeFIFO` so LIFO releases the FIFO first and the kill is
+  defence-in-depth rather than the thing that produces the exit — inverting
+  that order yields a run that looks identical (green, handle populated)
+  while the rig itself produced the exit; copied verbatim, `PyryPID <= 0`
+  guard and `// LOAD-BEARING` comment included, from the reach precedent
+  (`background_reach_probe_test.go:355-374`), not the comment-less trigger
+  copy. **The driver takes its own `tool_use`/`tool_result` wait before
+  pinning**, even though the assembly waits internally too — the assembly's
+  wait fires strictly after the pin (it takes pin counts as inputs), so
+  skipping the driver's own wait pins before the held `cat` exists and fires
+  the gate's count arm on a correctly staged run, one live claude turn spent
+  finding out. The pin itself is one `ps -axww` scan carrying both needles
+  (the FIFO path and `tdnClaudeNeedle`) with two exclusions, handed to
+  `finLivePinReduce` unchanged, forwarding `finLivePinWantRows` as the want
+  (never `scan.MatchCount`, never `len(Pin.PGIDs)`). No budget-fired run is
+  staged — `--max-turns=6` gives the turn room to complete, since a
+  budget-fired run's exit code can't discriminate outcomes and its
+  `Terminate` hook reaps before the trailer is written. No `ps -E`/`-Eww`
+  anywhere; matched rows and claude's argv cross the handle only as the
+  already-capped `reachProc.Command`; the file formats no `Detail` and writes
+  no artifact. **Ships no test** — its only exercise is compilation and
+  `go test`'s vet subset under `make e2e-realclaude`; `finLiveRunStage` has
+  no caller anywhere in the tree until #1337 lands, which is expected and
+  correct for this instrument family. Purely additive, one new file, 446
+  lines, zero production change. See [`codebase/1340.md`](../codebase/1340.md)
+  for the full implementation and the code-review SHOULD FIX on a counted
+  `t.Fatalf` claim the shipped file falsified.
 
 ## Test infrastructure
 
