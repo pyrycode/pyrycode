@@ -99,6 +99,7 @@ const (
 )
 
 func TestInteractiveSessionControlLiveness(t *testing.T) {
+	skipUnlessPTYGate(t)
 	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
