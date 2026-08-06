@@ -1316,6 +1316,48 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   for the full implementation and the code-review SHOULD FIX on a counted
   `t.Fatalf` claim the shipped file falsified.
 
+- `finding_exit_path_probe_test.go` (#1337) — **the live entry point that
+  reads, classifies and publishes**, on top of #1340's driver;
+  `TestRealClaude_ExitPathWhileCommandRuns` stages a turn via
+  `finLiveRunStage`, waits for pyry's own exit **in the subtest body, never
+  in a cleanup** (`finExitPyryExitDeadline`, 120s, deliberately not
+  `probePyryExitGrace` — a different wait on a different clock) with the
+  rendezvous FIFO still held, and only then gathers, classifies and writes
+  the artifact. `finLiveRunHandle` gains one field, `ExitStatus int` — the
+  driver's `cmd.Wait` goroutine used to discard it and no consumer could
+  recover a reaped child's status — written **before** `close(pyryExited)`
+  and initialised to `pinExitStatusUnknown`; that close is the sole
+  happens-before edge, so the field is read **inside** the channel receive
+  arm and nowhere else, deliberately with no
+  `finExitObservedCode(exited, status)`-style helper, because any shape that
+  evaluates the field outside the arm races the goroutine. Staging is
+  decided **before** the classifier is consulted:
+  `finExitClassify(staging, readings) (string, trailRunOutcome, bool)`
+  returns the staging value and the **zero** `trailRunOutcome` unconsulted
+  on any non-pass-through staging value — an unstaged run's post-trailer
+  argv scan still parses a healthy process table and matches nothing, which
+  would otherwise reach the classifier's fall-through answer about a run in
+  which no command ever existed. The primary evidence is pyry's own reap
+  log (`ReapDescendantGroups` logs only the groups it actually killed, which
+  on this path is strictly after the trailer write); the claude-still-alive
+  read and the per-pid post-trailer reads are corroboration only, recorded
+  as **known blind** (the reap runs between the trailer and claude's
+  SIGTERM) and **known late** respectively, and neither overrides an
+  attribution. The published artifact carries only the trailer sub-record's
+  outcome string, so the classifier's full outcome and the staging result
+  reach the operator through `t.Logf` alone — `json.Marshal` or field-by-
+  field, never a `%v` on a struct or slice, the mechanism that would
+  otherwise print verbatim argv from an ordinary-looking debug line. One
+  offline table test, `TestFinExitClassifyConsultsTheClassifierOnlyOnThePassThrough`
+  (8 rows, ranged from `finOutcomeValues()`), RED-proved by mutation via
+  `go test -overlay` rather than worktree edits. **Parks for an operator's
+  live run** — the dispatch environment has no Claude login, so the entry
+  point skips (exit 0), which is the expected outcome and not a finding
+  about pyry. See [`codebase/1337.md`](../codebase/1337.md) for the full
+  implementation, the code-review SHOULD FIX on four citations this PR
+  staled in the same file it edited, and the finding status (unrun as of
+  landing).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
@@ -1390,3 +1432,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1176](https://github.com/pyrycode/pyrycode/issues/1176) — real-claude interrupt-stops-a-running-turn gate, composing #1172's running-turn trigger with the shipped interrupt primitives (#1120/#1121); new `drainForCancelledTurnEnd` drain guards against the spontaneous-`end_turn` vacuous pass; closes the fake-green/real-red gap (#949) on the interrupt path; split from #1083, zero production files; codebase note at [`codebase/1176.md`](../codebase/1176.md).
 - Ticket [#1175](https://github.com/pyrycode/pyrycode/issues/1175) — real-claude permission **deny** round-trip on the stream-json runner (security-sensitive, architect security review PASS); reuses #1154's harness/trigger scaffold, swaps the answer to `reject_once`, and adds a `Source == "remote"`/`Outcome == "reject_once"` attribution assertion so a timeout-deny can't masquerade as the explicit reject, plus a workdir walk proving the gated `Write` never executed; rework `denyModalsUntilIdle` answers every retry modal (real haiku retries a denied tool at least once) bounded by a retry-count cap and wall-clock budget; zero production files; codebase note at [`codebase/1175.md`](../codebase/1175.md).
 - Ticket [#1174](https://github.com/pyrycode/pyrycode/issues/1174) — real-claude cross of fakeclaude sibling #1137: on the stream-json runner, `new_session` rotates the bootstrap session id and `RestartFresh` spawns a genuinely fresh live claude child under the rotated id (not `--resume`), proven by a fresh `<idAfter>.jsonl` transcript appearing on disk; transcribes #1031's spine + #1153's/#1154's drain helpers, zero production files; split from #1083, sibling of #1173/#1175; codebase note at [`codebase/1174.md`](../codebase/1174.md).
+- Ticket [#1337](https://github.com/pyrycode/pyrycode/issues/1337) — live entry point measuring whether `pyry agent-run`'s ptyrunner default reaches its normal exit path while a claude-auto-backgrounded command is still running; composes #1338/#1340/#1342/#1343 without re-deriving any of them, adds `ExitStatus` to #1340's `finLiveRunHandle`; split from #1305, blocked by #1340; codebase note at [`codebase/1337.md`](../codebase/1337.md).
