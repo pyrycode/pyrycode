@@ -34,7 +34,7 @@ package realclaude
 //
 // The FIFO-name distinctness rule is NOT re-declared here. It shipped in #1342
 // as TestFinLiveStageFIFONameIsDisjointFromEveryShippedName
-// (finding_live_staging_test.go:363), which pins finLiveStageFIFOName
+// (finding_live_staging_test.go:420), which pins finLiveStageFIFOName
 // substring-disjoint in both directions against every other shipped name. This
 // file CONSUMES the name; it does not declare it, so it owes no trap for it.
 //
@@ -169,7 +169,7 @@ type finLiveRunHandle struct {
 	Stdout *probeSyncBuffer
 	Stderr *probeSyncBuffer
 	// FIFOPath is workdir/finLiveStageFIFOName, the join #1342 named at
-	// finding_live_staging_test.go:204-205. It is finGatherInputs.Needles' content
+	// finding_live_staging_test.go:261-262. It is finGatherInputs.Needles' content
 	// join, and the same string the pin was taken on.
 	FIFOPath string
 	// EnvDelta is exactly what was handed to spawnProbePyry, and ClaudeVersion is
@@ -266,9 +266,17 @@ type finLiveRunHandle struct {
 // driver now holds a CALLER-SUPPLIED environment slice and a caller can put
 // anything in it, so an `envDelta=%v` added for debuggability would put a
 // caller-supplied environment into test output on a rig whose process
-// environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY. The two
-// t.Fatalf's below carry a deadline and pyry's own stderr; the one t.Logf names a
-// duration. That inventory is exact and stays exact.
+// environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+//
+// THE PROHIBITION IS OVER EVERY MESSAGE THIS DRIVER FORMATS, not only the two the
+// section above names — that section counts the RIG-FAULT class, the messages with
+// no named home in the gate, and the body holds FOUR t.Fatalf in all. The two write
+// failures (prompt.txt, system.txt) carry a path and the write error; the two rig
+// faults (no claude child, no session id) carry a deadline and pyry's own stderr;
+// the one t.Logf names a duration. That FIVE-message inventory is exact and stays
+// exact. The heading's count is #1337's and is left as shipped rather than
+// re-derived here — docs/knowledge/codebase/1337.md:243 already records it as an
+// undercount, and this paragraph declines to inherit it.
 //
 // # Turn headroom, and no budget-fired run
 //

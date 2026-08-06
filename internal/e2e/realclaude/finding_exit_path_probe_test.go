@@ -120,7 +120,7 @@ const finExitEnableEnv = "PYRY_PROBE_EXIT_PATH"
 // IT IS THIS FILE'S OWN CONSTANT AND IT IS NOT probePyryExitGrace, which the two are
 // easy to conflate. That one (20s, background_trigger_probe_test.go:134) measures the
 // driver's defence-in-depth cleanup waiting AFTER THE FIFO RELEASE before SIGKILLing
-// (finding_live_run_test.go:277-300) — a mechanical unblock. This one measures a turn
+// (finding_live_run_test.go:455-487) — a mechanical unblock. This one measures a turn
 // COMPLETING with the hold still on: claude receiving the tool_result, producing a
 // final assistant message, emitter.Close() writing the trailer, teardown, exit. That
 // is a model round-trip plus teardown. Reusing the other constant would name one
