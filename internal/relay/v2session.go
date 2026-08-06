@@ -746,6 +746,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeSetSessionSettings:
 			m.handleSetSessionSettings(ctx, s, probeEnv)
 			return
+		case protocol.TypeRequestSessionSettings:
+			m.handleRequestSessionSettings(ctx, s, probeEnv)
+			return
 		}
 	}
 

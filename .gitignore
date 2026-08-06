@@ -49,3 +49,16 @@ agents/
 # that `git checkout -- .` kept restoring on every cleanup.
 .codegraph
 .dispatcher.lock
+
+# Permission-protocol spike output. TestRealClaude_PermissionProtocol_Spike is
+# NOT env-gated — it skips only when the claude binary is off PATH — so every
+# `make e2e-realclaude` run rewrites permission_protocol_v<version>.json into
+# testdata/. Nothing reads those files: permission_protocol_regression_test.go
+# consumes only the `_<mode>`-suffixed fixtures, which the negation below keeps
+# tracked. Two unsuffixed captures had already been swept in by the dispatcher's
+# auto-commit safety net inside unrelated tickets — v2.1.158 in 7907031 (#747)
+# and v2.1.199 in d0d24f8 (#854) — which is the same failure mode as the
+# .codegraph entry above: a regenerating local artifact riding into someone
+# else's commit. Already-tracked files are unaffected; this only stops new ones.
+internal/e2e/realclaude/testdata/permission_protocol_v*.json
+!internal/e2e/realclaude/testdata/permission_protocol_v*_*.json

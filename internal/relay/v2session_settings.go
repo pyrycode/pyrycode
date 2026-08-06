@@ -154,6 +154,107 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 	}
 }
 
+// handleRequestSessionSettings answers a bare inbound request_session_settings
+// control frame with the current run configuration (#491, #1214): the session id
+// to address changes to, the model / effort / YOLO in force, and the
+// context-window occupancy. It is the READ half of the #844 cluster, which
+// shipped write-only. Intercepted in dispatchAppFrame before dispatch.Route,
+// like handleSetSessionSettings above, and runs on the manager's single Run
+// dispatch goroutine.
+//
+// It deliberately does NOT consult m.cfg.Snapshotter, and that is the entire
+// point of the verb existing. A client used to read these values off
+// screen_snapshot's side-load (#848, #857), but that reply is gated on a live
+// terminal screen: on the stream-json runner Snapshotter is nil by construction
+// (#1077/#1101), so handleRequestSnapshot short-circuits to
+// server.binary_offline and takes the settings — which have nothing to do with a
+// terminal — down with it. On the runner now in production that left the
+// run-configuration UI with no values, no session id and no context figure at
+// all. This handler reads only the three primitive seams, so it answers
+// identically on both runners.
+//
+// Order mirrors the write handler, minus the steps a read cannot need:
+//  1. Capability gate (the authz boundary): a non-interactive conn is fully
+//     inert — no seam call, NO reply, so it cannot even learn whether a session
+//     exists. Same posture as the write path's AC #6.
+//  2. No decode step: the request frame is bare, so there is no untrusted field
+//     to parse and no malformed-payload branch to own. A client that sends a
+//     payload anyway is answered normally; the bytes are never read.
+//  3. No nil-seam error branch: unlike the write path, every seam here degrades
+//     to its zero value, which the wire contract defines as a real answer
+//     ("" ⇒ nothing to address, 0 window ⇒ usage unwired). A read that reports
+//     "I have nothing" is more useful than an error, and it keeps the reply
+//     shape constant so a client parses one thing.
+//
+// The reply NEVER carries a screen byte, a transcript byte, or a file path —
+// only the id, two short enum-ish strings, a bool and two aggregate integers.
+func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, env protocol.Envelope) {
+	if !s.interactive {
+		return // non-interactive conn: inert, no reply (mirrors the write path)
+	}
+
+	// Each seam is optional and each degrades to its zero value. Read them
+	// through nil guards rather than requiring production to wire all three:
+	// the foreground and pre-wire cases have none of them.
+	var sessionID string
+	if m.cfg.BootstrapSessionID != nil {
+		sessionID = m.cfg.BootstrapSessionID()
+	}
+	var model, effort string
+	var yolo bool
+	if m.cfg.SnapshotSettings != nil {
+		model, effort, yolo = m.cfg.SnapshotSettings()
+	}
+	var usedTokens, windowTokens int
+	if m.cfg.SnapshotUsage != nil {
+		usedTokens, windowTokens = m.cfg.SnapshotUsage()
+	}
+
+	payload, err := json.Marshal(protocol.SessionSettingsPayload{
+		SessionID:    sessionID,
+		Model:        model,
+		Effort:       effort,
+		YOLO:         yolo,
+		UsedTokens:   usedTokens,
+		WindowTokens: windowTokens,
+	})
+	if err != nil {
+		// A closed struct of two strings, a bool and two ints; marshal cannot fail
+		// in practice. Defensive — NEVER echo err; answer with the deterministic
+		// unavailable reply so the request is still answered, never silently
+		// dropped (same posture as the write path's marshal branch).
+		m.cfg.Logger.Warn("relay: v2 session_settings marshal failed",
+			"event", "v2.settings.read_marshal_err",
+			"conn_id", s.connID)
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeServerBinaryOffline, msgSettingsUnavailable, true)
+		return
+	}
+
+	inReplyTo := env.ID
+	reply := protocol.Envelope{
+		ID:        1, // non-load-bearing; the phone correlates on InReplyTo.
+		Type:      protocol.TypeSessionSettings,
+		TS:        time.Now().UTC(),
+		Payload:   payload,
+		InReplyTo: &inReplyTo,
+	}
+	// Content-free debug log: conn_id only. The model / effort / YOLO values are
+	// NEVER logged at any level (#833 keeps them out of logs), and neither are the
+	// usage integers or the session id — this is a routine read that can fire on
+	// every sheet open, so it logs less than the write path, not more.
+	m.cfg.Logger.Debug("relay: v2 session settings reported",
+		"event", "v2.settings.reported",
+		"conn_id", s.connID)
+	if err := m.forwardEnvelope(ctx, s.connID, reply); err != nil {
+		// Unreachable in practice: s is V2StateOpen on the dispatch goroutine.
+		// Logged at debug and dropped — the package's outbound-drop posture.
+		m.cfg.Logger.Debug("relay: v2 session_settings push dropped",
+			"event", "v2.settings.read_push_err",
+			"conn_id", s.connID,
+			"err", err)
+	}
+}
+
 // settingsReplyError pushes a single TypeError reply to s, correlated to
 // inReplyTo, via the same m.forwardEnvelope seal-and-forward path the success
 // reply uses (no parallel send path). message MUST be a static constant — never

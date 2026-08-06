@@ -50,7 +50,7 @@ package realclaude
 // doubly silent: the identity arm reports stage-command-not-staged AND
 // TriggerFired is zeroed — one defect, two failure arms, both discovered on a
 // burned live turn. The blocker records the same hazard at
-// finding_live_staging_test.go:28-31. The assembly closes it by taking exactly
+// finding_live_staging_test.go:29-32. The assembly closes it by taking exactly
 // ONE value for the staged string, so there is no second value to disagree with.
 //
 // # What this file does NOT prove, because it is already proven
@@ -121,7 +121,7 @@ package realclaude
 // # WithWorktree is the containment boundary — REQUIRED here, not forbidden
 //
 // The blocker's header forbids WithWorktree and t.TempDir()
-// (finding_live_staging_test.go:45-49) because it declares constants and touches
+// (finding_live_staging_test.go:46-50) because it declares constants and touches
 // no filesystem. This file must write a transcript and read it back through the
 // fill, and BOTH ends of that I/O resolve HOME:
 //
@@ -330,7 +330,7 @@ type finLiveAssembleCountCase struct {
 // (finding_staging_gate_test.go:375), which is a gate fixture deliberately of the
 // wrong shape: its `sh -c … ; exit 0` carries a `;` into a string the model is
 // asked to reproduce byte-for-byte against a system prompt that forbids chaining
-// (finding_live_staging_test.go:131-134).
+// (finding_live_staging_test.go:136-139).
 //
 // One `staged` local feeds both the transcript block and every row's
 // facts.StagedCommand, so a mismatch is impossible by construction.

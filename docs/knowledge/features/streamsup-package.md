@@ -198,6 +198,14 @@ matched by exact string, not prefix or substring, because the wording is atteste
 and drift must bring the row back rather than stay silently swallowed. See
 [codebase/1247.md](../codebase/1247.md).
 
+**Second observation, 2026-08-02 (#1260).** A separate capture session (independent of the one #1247's
+constant was transcribed from) reproduced the same block byte-exact
+(`harness_nudge.matches_shipped_constant: true` in `testdata/dropped_lines_v2.1.220.json`) — the second
+confirmed payload `harnessNoOutputNudge`'s own doc comment names as the trigger for promoting the
+constant from a lone string to a set with a pin test. That promotion has not been done; it is deferred
+as a follow-up rather than bundled into #1260, which was scoped to capture and record only. See
+[codebase/1260.md](../codebase/1260.md).
+
 `TestParser_IgnoredLineTypesIsTheMeasuredSet` pins the list, so growing it is a deliberate edit with a
 measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fails on **any**
 unrecognized frame, so every stream spec is a sentinel: it goes red the day claude adds a message type,

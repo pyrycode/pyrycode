@@ -458,6 +458,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
 | **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
+| **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the current run configuration. Bare frame, no payload. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
+| **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
 | **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped terminal session-error frame — the daemon gave up delivering a conversation's queued backlog (`session.blocked`; #1007). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
@@ -740,6 +742,10 @@ Direction **binary → phone**. The one-shot text picture answering a `request_s
 | `model` | string | Bootstrap session's per-session model override; **empty string = inherited daemon default** (no override). |
 | `effort` | string | Bootstrap session's per-session reasoning-effort override; **empty string = inherited daemon default** (no override). |
 | `yolo` | bool | Bypass-permissions (`--dangerously-skip-permissions`) on/off; **`false` = permissions enforced** (the fail-safe default). |
+| `used_tokens` | int | Bootstrap session's context-window tokens consumed by the latest turn (#857). Was shipped in the binary but missing from this table. |
+| `window_tokens` | int | Context-window size (#857). **`0` = the usage reader is unwired**, not an empty window. Was shipped in the binary but missing from this table. |
+
+> **Prefer [`session_settings`](#session_settings) for the four run-configuration fields above.** They are carried here as a side-load (#848, #857) and predate the dedicated read route. This reply is refused with `server.binary_offline` whenever there is no terminal to photograph — which is always, on the stream-json interactive runner — so a client that sources its run configuration from here gets nothing on the runner in production. That was `pyrycode-desktop#491` and `#1214`. The copies stay for the shipped mobile client; new clients should not read them.
 
 ### Modal (v2)
 
@@ -929,7 +935,9 @@ A paired client sends `set_session_settings` to change one session's **per-sessi
 
 Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route` — it is not a `dispatch.Route` handler (like [`modal_answer`](#modal-v2) / [`new_session`](#new-session-v2)).
 
-`session_id` is the **addressing key** — it names the session to change, matching the `sessions.Pool.UpdateSettings(id, …)` seam and the `new_session_id` a client already learns from the [`session_transition`](#interactive-events-v2-capability-gated) marker.
+`session_id` is the **addressing key** — it names the session to change, matching the `sessions.Pool.UpdateSettings(id, …)` seam.
+
+A client learns it from [`session_settings`](#session_settings) below, the request/response route it can drive at any time, or observes a change to it on the [`session_transition`](#interactive-events-v2-capability-gated) marker. **The marker alone is not a sufficient source**, and this document used to say it was. The daemon fires `session_transition` only on a clear or an idle eviction, never on session creation, so a client that had done neither never learned an id and could not write at all. That was the whole of `pyrycode-desktop#491`: the run-configuration UI rendered and stayed permanently inert. Drive `request_session_settings` when you need the current value; treat the marker as an update to it.
 
 The three settings fields are **optional** and encode a *presence contract*: a field that is **absent** from the payload means "leave that setting unchanged", while a field that is **present** — including at its zero value (`""` for `model`/`effort`, `false` for `yolo`) — means "set it to this value". An **absent** `yolo` can therefore never be read as a sent `false`, and an absent `model` can never be read as an instruction to clear the stored value. (On the wire this is `omitempty` over pointer fields: an absent key, not a literal `null`.)
 
@@ -963,6 +971,47 @@ Example:
 {
   "id": 44, "type": "session_settings_updated", "ts": "...", "in_reply_to": 811,
   "payload": { "session_id": "sess-a" }
+}
+```
+
+#### `request_session_settings`
+
+Direction **phone → binary** (inbound v2 control). Intercepted by the v2 session manager before `dispatch.Route`. Interactive-capability-gated: a non-interactive conn is fully inert and gets no reply, so it cannot learn whether a session exists.
+
+**The frame is bare — it carries no payload at all.** The reported values are daemon-wide, so there is no field a client could use to select another session's data. Any payload a client does attach is never read.
+
+Answered by `session_settings` below, correlated by `in_reply_to`.
+
+```json
+{ "id": 812, "type": "request_session_settings", "ts": "..." }
+```
+
+#### `session_settings`
+
+Direction **binary → phone** (outbound). The current run configuration: which session to address, what is in force on it, and how full its context window is. All fields are always present (no omitempty), so **every zero value is a real answer rather than an absence**.
+
+This is the **read half** the settings cluster shipped without. Before it, a client scraped these values off [`screen_snapshot`](#screen_snapshot), which still carries copies of them. Do not do that in new clients, and prefer this route in existing ones: `screen_snapshot` is a picture of the terminal, and a daemon running the stream-json interactive runner has no terminal, so it answers `server.binary_offline` and takes the settings — which have nothing to do with a terminal — down with it. This route is gated on nothing but the interactive capability and answers on both runners.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `session_id` | string | The session to address a `set_session_settings` to. **Empty string = the daemon has no session to address**; a client must treat the settings as read-only rather than sending an empty id, which would be rejected. |
+| `model` | string | Model override in force; **empty string = inherited daemon default** (no override). |
+| `effort` | string | Reasoning-effort override in force; **empty string = inherited daemon default** (no override). |
+| `yolo` | bool | Bypass-permissions (`--dangerously-skip-permissions`) on/off; **`false` = permissions enforced** (the fail-safe default). |
+| `used_tokens` | int | Context-window tokens consumed by the latest turn. `0` against a non-zero `window_tokens` is a genuine fresh session. |
+| `window_tokens` | int | Context-window size. **`0` = the usage reader is unwired**, not an empty window — do not render a percentage from it. |
+
+Scope: the values describe the **bootstrap** session, not the requesting conversation's, and `session_id` names that same session, so a client reads and writes the same place. Keying the whole set by conversation is a deferred follow-up; when it lands, the values and `session_id` move together or a client would read one session and write to another.
+
+Example:
+
+```json
+{
+  "id": 45, "type": "session_settings", "ts": "...", "in_reply_to": 812,
+  "payload": {
+    "session_id": "sess-a", "model": "opus", "effort": "high", "yolo": false,
+    "used_tokens": 12480, "window_tokens": 200000
+  }
 }
 ```
 
@@ -1287,6 +1336,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 ## Changelog
 
 - `2026-07-27`: Added `unrecognized_message` (binary → phone, interactive-capability-gated). The stream-json parser used to drop any claude output it had no mapping for into a debug log the production daemon does not print, so an unknown message type left no trace anywhere and no client was told. It now splits two ways: a **measured** known-ignored list (`system/*`, `rate_limit_event`) stays silent, and everything else surfaces as this frame carrying the drop site, the offending type, and the raw JSON capped at 16 KiB. Carries no `turn_id` and drives no turn lifecycle. Also **fixed a #1074 omission**: `api_retry` and `compacting` shipped without rows in the application-message-types table above; both are now listed.
+- `2026-07-27`: Added the `request_session_settings` → `session_settings` read pair (#491, #1214), the read half the settings cluster shipped without. A client can now ask what the current run configuration is and which session to address a change to, instead of scraping both off `screen_snapshot`. That side-load is refused with `server.binary_offline` whenever there is no terminal to photograph, which is always on the stream-json interactive runner, so it left the desktop run-configuration UI with no values, no session id and no context figure at all. Corrected the `set_session_settings` claim that a client already knows its session id from the `session_transition` marker: the daemon fires that marker only on a clear or an idle eviction, never on session creation. Also filled in the `screen_snapshot` field table, which never listed the `used_tokens` / `window_tokens` fields shipped with #857.
 - `2026-07-03`: Docs-only drift correction against the deployed code. Marked v2 as shipped and the daemon's current default (v1 is the deprecated `PYRY_MOBILE_V2=0` fallback). Normalised every endpoint reference to `/v1/server` / `/v1/client` — the relay routes only those, and the version lives in the `v` frame field, not the route. Added WS close code `4429` (per-server phone cap). Corrected the envelope `id` row: `id` is a per-connection counter that resets on reconnect and is not a durable dedup key; durable ordering/dedup is via `event_id`. Corrected the token contract: the `x-pyrycode-token` header is still required today and passes through the relay opaquely, so the "header removed / relay never sees the token" end-state is marked not yet implemented.
 - `2026-06-07`: Retired the binary↔relay `hello`/`hello_ack` ceremony (#582). That leg is established on WS upgrade with header-based server-id registration; the relay sends no `hello_ack`. Endpoints stay `/v1/server`, `/v1/client` (route path carries no protocol meaning; `/v2` rename not performed).
 - `2026-05-16`: v2 draft (this document). Adds end-to-end encryption via Noise_IK. Hard cutover from v1; v1 doc preserved in git history only.
