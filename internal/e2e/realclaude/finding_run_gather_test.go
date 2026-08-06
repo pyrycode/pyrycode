@@ -1919,7 +1919,7 @@ const finGatherOverCapPad = 200
 // message in this test MAY name scan.State, scan.Detail, len(scan.Line),
 // reachMaxCommandBytes, finGatherOverCapPad, the key being sought, and the four
 // scalars on either side of a comparison. It MAY NEVER render scan.Line, scan,
-// scan.Trailer, or a whole resultTrailer. :1143-1147 is the shipped model for this:
+// scan.Trailer, or a whole resultTrailer. :1270-1274 is the shipped model for this:
 // it reasons about Line and prints only its length.
 //
 // # What this row does not assert

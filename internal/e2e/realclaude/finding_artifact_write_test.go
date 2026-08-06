@@ -704,9 +704,9 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // finTrailerRecord (finding_trailer_evidence_test.go:193) is ten scalars and a
 // name list with no Line, and finRecordInputs carries neither a trailObservation
 // nor a trailScanResult (finding_run_record_test.go:214-221), so
-// trailScanResult.Line is unreachable from this record at any depth. A SINGLE OCCURRENCE WOULD
-// THEREFORE MEAN A REDUCTION HAD BEEN WIDENED BACK INTO A RETENTION — not that a
-// permitted field needed review.
+// trailScanResult.Line is unreachable from this record at any depth. A SINGLE
+// OCCURRENCE WOULD THEREFORE MEAN A REDUCTION HAD BEEN WIDENED BACK INTO A
+// RETENTION — not that a permitted field needed review.
 //
 // # RETIRED BY #1326: the trailer channel
 //
