@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -99,4 +100,76 @@ func TestSessionSettingsUpdatedPayload_RoundTrip(t *testing.T) {
 	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestSessionSettingsPayload_RoundTrip pins the READ reply's shape: it carries
+// the addressing id plus all four reported values plus the two usage integers,
+// and round-trips byte-for-byte. This is the payload that replaces the
+// screen_snapshot side-load, so its field set must cover everything the run
+// configuration UI reads.
+func TestSessionSettingsPayload_RoundTrip(t *testing.T) {
+	t.Parallel()
+	raw := readFixture(t, "session_settings.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSessionSettings {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSessionSettings)
+	}
+
+	var payload SessionSettingsPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.SessionID != "sess-a" {
+		t.Errorf("SessionID: got %q, want %q", payload.SessionID, "sess-a")
+	}
+	if payload.Model != "opus" {
+		t.Errorf("Model: got %q, want %q", payload.Model, "opus")
+	}
+	if payload.Effort != "high" {
+		t.Errorf("Effort: got %q, want %q", payload.Effort, "high")
+	}
+	if payload.YOLO {
+		t.Error("YOLO: got true, want false")
+	}
+	if payload.UsedTokens != 12480 {
+		t.Errorf("UsedTokens: got %d, want %d", payload.UsedTokens, 12480)
+	}
+	if payload.WindowTokens != 200000 {
+		t.Errorf("WindowTokens: got %d, want %d", payload.WindowTokens, 200000)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestSessionSettingsPayload_ZeroFieldsPresent pins the no-omitempty contract
+// that makes this payload a full report rather than a diff: every zero value
+// stays explicitly on the wire. Each one is a real answer a client acts on —
+// session_id "" means "no session to address, treat the controls as read-only",
+// model/effort "" mean "inherited default", yolo false means permissions
+// enforced, and window_tokens 0 means the usage seam was not wired. Dropping any
+// of them would make "the daemon says zero" indistinguishable from "the daemon
+// did not say", which is exactly the ambiguity that let the inert-sheet defect
+// hide. Mirrors TestScreenSnapshotPayload_ZeroSettingsFieldsPresent.
+func TestSessionSettingsPayload_ZeroFieldsPresent(t *testing.T) {
+	t.Parallel()
+	out, err := json.Marshal(SessionSettingsPayload{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"session_id":""`,
+		`"model":""`,
+		`"effort":""`,
+		`"yolo":false`,
+		`"used_tokens":0`,
+		`"window_tokens":0`,
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("zero-value field %s should stay on the wire; got %s", want, out)
+		}
+	}
 }

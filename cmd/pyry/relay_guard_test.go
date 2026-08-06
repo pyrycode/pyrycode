@@ -77,15 +77,16 @@ var inboundTypes = map[string]string{
 	"TypeRegisterPushToken":     "map-dispatched",
 
 	// Surface #2 — switch-intercepted before dispatch.Route (dispatchAppFrame).
-	"TypeRekeyRequest":       "switch-intercepted",
-	"TypeRequestSnapshot":    "switch-intercepted",
-	"TypeModalAnswer":        "switch-intercepted",
-	"TypeModalCancel":        "switch-intercepted",
-	"TypeInterrupt":          "switch-intercepted",
-	"TypeNewSession":         "switch-intercepted",
-	"TypeDequeueMessage":     "switch-intercepted",
-	"TypeRequestDebugBundle": "switch-intercepted",
-	"TypeSetSessionSettings": "switch-intercepted",
+	"TypeRekeyRequest":           "switch-intercepted",
+	"TypeRequestSnapshot":        "switch-intercepted",
+	"TypeModalAnswer":            "switch-intercepted",
+	"TypeModalCancel":            "switch-intercepted",
+	"TypeInterrupt":              "switch-intercepted",
+	"TypeNewSession":             "switch-intercepted",
+	"TypeDequeueMessage":         "switch-intercepted",
+	"TypeRequestDebugBundle":     "switch-intercepted",
+	"TypeSetSessionSettings":     "switch-intercepted",
+	"TypeRequestSessionSettings": "switch-intercepted",
 }
 
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
@@ -108,6 +109,7 @@ var excludedTypes = map[string]string{
 	"TypeWorkspaceFolderCreated": "reply",
 	"TypeRecentWorkspacesList":   "reply",
 	"TypeSessionSettingsUpdated": "reply",
+	"TypeSessionSettings":        "reply",
 
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",
