@@ -82,7 +82,7 @@ package realclaude
 // NOT copied, because neither of its two reasons transfers and copying it would skip
 // a run that would have been correct. (1) Its delta does not name the variable;
 // finLiveStageEnvDelta names PYRY_USE_STREAMJSON=0 EXPLICITLY
-// (finding_live_staging_test.go:174-179, :189-191) and spawnProbePyry appends the
+// (finding_live_staging_test.go:179-184, :194-196) and spawnProbePyry appends the
 // delta to os.Environ(), which os/exec resolves in favour of the later value — so
 // the delta wins over the operator's shell. (2) Its content-first root pinning keys
 // on --session-id, which only ptyrunner emits; this rig pins nothing content-first,
@@ -120,7 +120,7 @@ const finExitEnableEnv = "PYRY_PROBE_EXIT_PATH"
 // IT IS THIS FILE'S OWN CONSTANT AND IT IS NOT probePyryExitGrace, which the two are
 // easy to conflate. That one (20s, background_trigger_probe_test.go:134) measures the
 // driver's defence-in-depth cleanup waiting AFTER THE FIFO RELEASE before SIGKILLing
-// (finding_live_run_test.go:277-300) — a mechanical unblock. This one measures a turn
+// (finding_live_run_test.go:455-487) — a mechanical unblock. This one measures a turn
 // COMPLETING with the hold still on: claude receiving the tool_result, producing a
 // final assistant message, emitter.Close() writing the trailer, teardown, exit. That
 // is a model round-trip plus teardown. Reusing the other constant would name one
@@ -213,7 +213,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	// defence-in-depth SIGKILL cleanup BEFORE that hold, so LIFO releases the FIFO
 	// first and pyry gets a real chance to exit on its own. This rig registers no
 	// cleanup at all, so it cannot disturb that order.
-	h := finLiveRunStage(t)
+	h := finLiveRunStage(t, finLiveStageEnvDelta())
 
 	// 2. Wait for pyry's own exit — IN THE BODY, NEVER IN A CLEANUP. If this wait
 	// were taken after the hold's release, the RIG's release would have produced the

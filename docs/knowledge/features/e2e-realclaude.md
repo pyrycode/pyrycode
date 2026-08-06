@@ -1234,6 +1234,19 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   reachable-red-vs-shadowed-by-Fatalf lesson code review surfaced on the
   extraction round-trip's pass-through guard.
 
+  **#1349 adds a sibling, `finLiveStageStreamEnvDelta()`** — the same two
+  keys with `PYRY_USE_STREAMJSON=1`, two independent literals never derived
+  from `finLiveStageEnvDelta()` (a clone, append or wrap would defeat the
+  property that an edit to either can't silently change the other). Its
+  trap, `TestFinLiveStageStreamEnvDeltaNamesTheRunner`, is a sibling of
+  `TestFinLiveStageEnvDeltaNamesTheRunner`, never a copy: the hostile
+  ambient is `PYRY_USE_STREAMJSON=0` rather than `=1`, and its control's
+  honesty is asymmetric because the truthiness rule is one-sided — only the
+  exact string `"1"` is truthy, so a `0` ambient is indistinguishable from
+  unset and the control excludes an *effective* ambient of `1` without
+  establishing non-vacuity by construction the way the shipped trap's does.
+  See [`codebase/1349.md`](../codebase/1349.md).
+
 - `finding_live_assembly_test.go` (#1343) — **the join, not a probe**; the one
   function, `finLiveAssembleStaging`, that fills all eight
   `finOutcomeStaging` fields — three read from the run's transcript via
@@ -1273,9 +1286,10 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   mutation matrix, and the code-review NIT on the assembly's two adjacent
   `time.Duration` parameters.
 
-- `finding_live_run_test.go` (#1340) — **the live staging driver, not a
-  probe of pyry itself**; `finLiveRunStage(t) *finLiveRunHandle` spawns pyry
-  on the ptyrunner default, holds the rendezvous FIFO, drives the turn to
+- `finding_live_run_test.go` (#1340, parameterised #1349) — **the live
+  staging driver, not a probe of pyry itself**;
+  `finLiveRunStage(t, envDelta) *finLiveRunHandle` spawns pyry on the
+  runner path its caller's `envDelta` selects, holds the rendezvous FIFO, drives the turn to
   the instant a during-turn process pin is meaningful, takes that pin, and
   hands it plus the rig's own facts to #1343's `finLiveAssembleStaging`,
   returning a handle carrying the run's live facts and the staging tier's
@@ -1308,13 +1322,32 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `Terminate` hook reaps before the trailer is written. No `ps -E`/`-Eww`
   anywhere; matched rows and claude's argv cross the handle only as the
   already-capped `reachProc.Command`; the file formats no `Detail` and writes
-  no artifact. **Ships no test** — its only exercise is compilation and
-  `go test`'s vet subset under `make e2e-realclaude`; `finLiveRunStage` has
-  no caller anywhere in the tree until #1337 lands, which is expected and
-  correct for this instrument family. Purely additive, one new file, 446
-  lines, zero production change. See [`codebase/1340.md`](../codebase/1340.md)
-  for the full implementation and the code-review SHOULD FIX on a counted
-  `t.Fatalf` claim the shipped file falsified.
+  no artifact. **Ships no test of its own** — its only exercise is
+  compilation and `go test`'s vet subset under `make e2e-realclaude`;
+  `finLiveRunStage`'s one caller is #1337's live entry point
+  (`finding_exit_path_probe_test.go:216`). See
+  [`codebase/1340.md`](../codebase/1340.md) for the original implementation
+  and the code-review SHOULD FIX on a counted `t.Fatalf` claim the shipped
+  file falsified.
+
+  **#1349 parameterised the delta and re-derived the doc comment site by
+  site.** `envDelta` reaches `spawnProbePyry` verbatim — no default, no
+  nil-check, no package-level fallback, since a silent default would hide
+  exactly the ambient-environment failure `reachRunnerPathFromEnv`'s own doc
+  exists to make visible. The doc comment's argument was ptyrunner-only in
+  five places and one was wrong on its own path: the `cmd.Wait` goroutine's
+  "claude runs on a PTY" reason covered the one fd claude never shares
+  (`cmd.Stderr` is `os.Stderr` on both runner paths, and `creack/pty` fills
+  stdio only when nil), not the fd that can actually hold the wait open.
+  The replacement separates the rig's own `Wait` (evidence transfers
+  unchanged, from the 2026-08-06 live run) from a new stream-path-only
+  hazard — pyry's `Wait` on claude's stdout pipe, bounded by
+  `cmd.WaitDelay=killGrace` (5s) — whose symptom, if it fires, is a
+  distorted `ExitStatus` rather than a hang, for #1353 to meet in the
+  comment before it meets it in an exit reading. See
+  [`codebase/1349.md`](../codebase/1349.md) for the full site-by-site
+  classification, the corrected fd argument, and the stale-citation sweep
+  code review caught across all three touched files.
 
 - `dropped_line_capture_test.go` (#1260) — **evidence probe,
   security-sensitive**; opt-in behind `PYRY_PROBE_DROPPED_LINE_CAPTURE=1`.
@@ -1488,3 +1521,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1175](https://github.com/pyrycode/pyrycode/issues/1175) — real-claude permission **deny** round-trip on the stream-json runner (security-sensitive, architect security review PASS); reuses #1154's harness/trigger scaffold, swaps the answer to `reject_once`, and adds a `Source == "remote"`/`Outcome == "reject_once"` attribution assertion so a timeout-deny can't masquerade as the explicit reject, plus a workdir walk proving the gated `Write` never executed; rework `denyModalsUntilIdle` answers every retry modal (real haiku retries a denied tool at least once) bounded by a retry-count cap and wall-clock budget; zero production files; codebase note at [`codebase/1175.md`](../codebase/1175.md).
 - Ticket [#1174](https://github.com/pyrycode/pyrycode/issues/1174) — real-claude cross of fakeclaude sibling #1137: on the stream-json runner, `new_session` rotates the bootstrap session id and `RestartFresh` spawns a genuinely fresh live claude child under the rotated id (not `--resume`), proven by a fresh `<idAfter>.jsonl` transcript appearing on disk; transcribes #1031's spine + #1153's/#1154's drain helpers, zero production files; split from #1083, sibling of #1173/#1175; codebase note at [`codebase/1174.md`](../codebase/1174.md).
 - Ticket [#1337](https://github.com/pyrycode/pyrycode/issues/1337) — live entry point measuring whether `pyry agent-run`'s ptyrunner default reaches its normal exit path while a claude-auto-backgrounded command is still running; composes #1338/#1340/#1342/#1343 without re-deriving any of them, adds `ExitStatus` to #1340's `finLiveRunHandle`; split from #1305, blocked by #1340; codebase note at [`codebase/1337.md`](../codebase/1337.md).
+- Ticket [#1349](https://github.com/pyrycode/pyrycode/issues/1349) — parameterises #1340's `finLiveRunStage` with the staging delta (previously hardcoded) and ships `finLiveStageStreamEnvDelta()`, the `PYRY_USE_STREAMJSON=1` sibling of #1342's delta, so #1353 can stage a probe on the headless stream path through the existing rig; re-derives the driver's doc comment site by site for a caller passing either delta, correcting the `cmd.Wait` goroutine's fd argument in the process; no live turn staged, no production code touched; split from #1237; codebase note at [`codebase/1349.md`](../codebase/1349.md).
