@@ -44,7 +44,7 @@ package realclaude
 // THE RECORD IS TRAP-FREE BY CONSTRUCTION. No field can hold an argv —
 // finRecordProc is three ints — and trailScanResult.Trailer is unreachable
 // because finRecordInputs carries neither a trailObservation
-// (result_trailer_observation_test.go:125) nor a trailScanResult (:98). That is
+// (result_trailer_observation_test.go:141) nor a trailScanResult (:98). That is
 // the property trailRunReadings.BoundFrom's comment states as its own reason for
 // taking a plain value (trail_run_outcome_test.go:208-214): taking the
 // observation "would promote that pointer back into reach". It is the STRONGER
@@ -68,7 +68,7 @@ package realclaude
 // read, with tdnFixturePtyArgv (:897) and tdnFixtureStreamArgv (:902) its
 // shipped fixtures; reachRunnerPathFromEnv (background_reach_probe_test.go:1102)
 // is the env read. trailReapLine (trailer_admissibility_test.go:533) renders the
-// synthetic reap stderr, trailNeedle (result_trailer_observation_test.go:300) is
+// synthetic reap stderr, trailNeedle (result_trailer_observation_test.go:325) is
 // the plant, and reachMaxCommandBytes / reachCapCommand
 // (background_reach_probe_test.go:123, :945) are the single-sourced cap.
 //

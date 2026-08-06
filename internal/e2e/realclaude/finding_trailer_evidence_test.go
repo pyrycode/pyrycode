@@ -52,7 +52,7 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailScan (result_trailer_observation_test.go:164) and its fixtures
+// trailScan (result_trailer_observation_test.go:180) and its fixtures
 // trailFixtureTrailer (:282), trailFixtureNoTrailer (:291), trailNeedle (:300),
 // trailPaddedTrailer (:306) and trailOverlongPad (:317) are the shipped scan and
 // the shipped plants — a second scanner over the same bytes that disagreed would
@@ -379,7 +379,7 @@ func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 			boundFrom: trailBoundNone,
 			wantState: trailAborted,
 			synthetic: "both trailBoundNone return sites — the aborted arm at " +
-				"result_trailer_observation_test.go:264-265 and the deadline arm at :270 — leave " +
+				"result_trailer_observation_test.go:289-290 and the deadline arm at :295 — leave " +
 				"Staleness at zero, so NO RUN PRODUCES THIS PAIRING. The row is kept as a " +
 				"contract check on a builder pure over its inputs, and it is what kills a " +
 				"Bounded derived from Staleness != 0 on the no-bound discriminator",
@@ -532,7 +532,7 @@ func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 // copy carries padded stand-in payload, and no sweep covers this row's fixture.
 func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	// Pad 2000 is the plant this family already uses at
-	// result_trailer_observation_test.go:482. Any pad from 142 up satisfies the
+	// result_trailer_observation_test.go:507. Any pad from 142 up satisfies the
 	// precondition; it is ASSERTED below rather than assumed, so a later fixture
 	// change surfaces as a failed precondition instead of as a silently weaker
 	// test.
@@ -562,7 +562,7 @@ func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	}
 
 	// Pinned ON THE CARRIER. The scan result's own survival of the cap is already
-	// pinned at result_trailer_observation_test.go:477-505 and is not restated
+	// pinned at result_trailer_observation_test.go:502-530 and is not restated
 	// here; what is new is that the HELPER reads Trailer and not Line.
 	for _, f := range []struct{ name, got, want string }{
 		{"subtype", sighting.Subtype, "error_max_turns"},

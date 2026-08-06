@@ -67,7 +67,7 @@ package realclaude
 //
 // trailIsRunOutcome (trail_run_outcome_test.go:258) and trailRunOutcomeValues
 // (:1194) are the eleven and their membership predicate — called, never
-// re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:300)
+// re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
 // is the shipped needle.
 //
 // trailDetail (trailer_admissibility_test.go:206) is reused rather than given a
@@ -102,7 +102,7 @@ import (
 // read as "this run staged fine, go classify it" — the unsafe direction, and
 // precisely the collapse this tier exists to prevent. The family already argues
 // the point twice: TestTrailConstantsAreClosed
-// (result_trailer_observation_test.go:320) fails any closed-space value that is
+// (result_trailer_observation_test.go:345) fails any closed-space value that is
 // the empty string because "a zero-valued field reads as it", and
 // trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way"
 // (trail_run_outcome_test.go:204-207).
@@ -517,7 +517,7 @@ func finOutcomeGateCases() []finOutcomeGateCase {
 // --- tests ----------------------------------------------------------------------
 
 // TestFinOutcomeConstantsAreClosed is AC1's structural claim made executable, in
-// TestTrailConstantsAreClosed's shape (result_trailer_observation_test.go:320).
+// TestTrailConstantsAreClosed's shape (result_trailer_observation_test.go:345).
 func TestFinOutcomeConstantsAreClosed(t *testing.T) {
 	values := map[string]string{
 		"finOutcomeNoBashCall":           finOutcomeNoBashCall,
@@ -679,7 +679,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // reachMaxCommandBytes, so a Detail that did wrongly interpolate a command would
 // be truncated before a needle sitting past the cap, and this test would pass
 // against a leaking implementation. trailNeedle is placed past the cap
-// deliberately in trailPaddedTrailer (result_trailer_observation_test.go:302-313)
+// deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
 // for the opposite kind of test; here that placement would be the defect. These
 // mirror the ~73-byte planted strings at trail_run_outcome_test.go:1143-1151.
 const (

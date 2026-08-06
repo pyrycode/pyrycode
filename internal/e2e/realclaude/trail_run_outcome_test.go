@@ -56,7 +56,7 @@ package realclaude
 //     (trailer_admissibility_test.go:164-179, :190-197);
 //   - the trailer's lateness enters as the BoundFrom discriminator alone and
 //     never as a trailObservation, which EMBEDS trailScanResult
-//     (result_trailer_observation_test.go:125-126) and would therefore promote
+//     (result_trailer_observation_test.go:141-142) and would therefore promote
 //     the trailer pointer straight back into reach. The dotted selector for that
 //     field is spelled nowhere in this file, in code OR in prose, so the census
 //     recipe — a fixed-string grep, which cannot tell a dereference from a

@@ -148,7 +148,7 @@ const (
 	//     600ms — THESE TWO ARE THIS FILE'S ONLY WALL CLOCK, and what the miss
 	//     bound costs;
 	//   - the non-certifying row seeds an over-long line, which trailWaitForTrailer
-	//     returns from IMMEDIATELY (result_trailer_observation_test.go:264-266)
+	//     returns from IMMEDIATELY (result_trailer_observation_test.go:289-291)
 	//     because abortion is monotone.
 	finGatherTrailerWait = 10 * time.Second
 	// finGatherNamedPGID is the group the synthetic reap line names. It is
@@ -182,7 +182,7 @@ const (
 //   - THE NEEDLE SITS INSIDE reachMaxCommandBytes, so trailScanResult.Line
 //     genuinely carries it and the channel the gather held really was dirty.
 //     trailPaddedTrailer places it PAST the cap deliberately
-//     (result_trailer_observation_test.go:297-300), which would make the stdout
+//     (result_trailer_observation_test.go:322-325), which would make the stdout
 //     half of TestFinGatherReturnsNoCapturedBytes vacuous: the only leak it could
 //     then catch is a record storing the line IN FULL, and trailRunReadings has no
 //     field that could. That test asserts the premise so a later edit cannot push
@@ -371,7 +371,7 @@ type finSighting struct {
 //
 // The trailer observation is STILL a FUNCTION-LOCAL INTERMEDIATE and is still
 // never returned. trailObservation embeds trailScanResult
-// (result_trailer_observation_test.go:125-126), so handing it back would promote
+// (result_trailer_observation_test.go:141-142), so handing it back would promote
 // .Line and .Trailer straight into the caller's reach — and both withholdings
 // stand. .Line is verbatim model output marked OPERATOR-REVIEW-BEFORE-PASTE,
 // roughly 415 of its retained 512 bytes being the trailer's `result` field, which
@@ -435,7 +435,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// What that sighting MEASURED, copied out of the same obs that just filled
 	// BoundFrom and fed the gate: one poll, no second scan, no second wait and no
 	// clock reading of this function's own — trailWaitForTrailer stamped both
-	// durations itself (result_trailer_observation_test.go:256-262).
+	// durations itself (result_trailer_observation_test.go:281-287).
 	//
 	// Inline rather than behind a finSightingFrom constructor, for the reason
 	// stated above: funnelling the whole composition through one function is what
@@ -904,7 +904,7 @@ func finGatherNegativeInputs(t *testing.T, stdout *probeSyncBuffer) finGatherInp
 // so the stdout buffer, the needle slice, the stderr and the pinned set are the
 // same values rather than equal-looking rebuilds. Sharing one buffer is sound:
 // trailWaitForTrailer only ever calls stdout.Bytes()
-// (result_trailer_observation_test.go:251), which returns a COPY of an
+// (result_trailer_observation_test.go:276), which returns a COPY of an
 // append-only buffer (background_trigger_probe_test.go:736-742), so the read is
 // non-destructive, both arms observe the same bytes on their first poll and both
 // take BoundFrom trailBoundFromStart. Rebuilding the needles instead of sharing
@@ -1085,7 +1085,7 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // The needle goes into the two inputs that could carry captured bytes into the
 // returns: the reap-log stderr, and the stdout buffer at the trailer's `result`
 // field, which is what trailNeedle already stands in for
-// (result_trailer_observation_test.go:297-300). IT MAY NOT GO INTO
+// (result_trailer_observation_test.go:322-325). IT MAY NOT GO INTO
 // terminal_reason: trailGate and trailAdmitAttribution both quote the certified
 // reason %q into their Details BY DESIGN (trailer_admissibility_test.go:306,
 // :317, :428, :470), and readings.Gate and readings.Admit take those results
@@ -1427,7 +1427,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // poll, a record whose staleness_ns and lateness_bound_from came from different
 // polls. Zero is the no-measurement value, so the second record is SYNTHETIC IN
 // THAT ONE DIMENSION — a real start-bound poll stamps a positive now.Sub(start)
-// (result_trailer_observation_test.go:257).
+// (result_trailer_observation_test.go:282).
 //
 // The consequence, stated so it is not read as a hole: carrying a zero Staleness
 // beside a false Bounded, this row does NOT discriminate a builder deriving
@@ -1441,7 +1441,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 //
 // It leaves the buffer empty and appends past two poll ticks exactly as the row
 // above does and for the same reason — a pre-seeded buffer cannot reach the miss
-// bound at all (result_trailer_observation_test.go:256-262), so the delayed
+// bound at all (result_trailer_observation_test.go:281-287), so the delayed
 // append is load-bearing rather than decorative — and it costs the same roughly
 // 600ms. finGatherTrailerWait's accounting (:144-149) names both rows, and NO
 // ROW EVER WAITS THAT CONSTANT OUT.
@@ -1734,7 +1734,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 //
 // That is the opposite of trailNeedle's own stated intent, "placed PAST the cap so
 // a record that leaked it could only have done so by recording the line in full"
-// (result_trailer_observation_test.go:297-300). It is safe for the test below,
+// (result_trailer_observation_test.go:322-325). It is safe for the test below,
 // which plants no needle of its own, marshals nothing and makes no leak claim. It
 // means this pad MUST NOT be reused by a sweep whose argument is "a needle sighting
 // proves the line was recorded in full" — under this pad a needle in Line is
