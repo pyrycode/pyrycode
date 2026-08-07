@@ -163,7 +163,8 @@ forge a turn boundary:
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
 | `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other block surfaces as `Unrecognized{Site: user_block}` **except one exact 100-byte payload** (#1247, below), dropped in silence |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
-| `system` (every subtype), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
+| `system` (unmapped subtypes), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
+| `system/task_started` | one `BackgroundTaskStarted` (#1380, below) — the one mapped `system` subtype so far |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
@@ -176,10 +177,12 @@ have never seen. Now the parser distinguishes *known and deliberately ignored* (
 `ignoredLineTypes` holds the first tier. It is **measured, not guessed** — claude driven directly on the
 bare stream-json surface on 2026-07-27, three turns each on two models, one calling tools:
 
-- `system` is ignored **wholesale**, not per-subtype. It is claude's catch-all namespace and its
-  highest-rate emitter: `system/init` fires **once per turn** and `system/thinking_tokens` roughly ten
-  times per turn. Subtype-grained matching would turn every new subtype into a per-turn noise row, which
-  is exactly the failure the two tiers exist to prevent.
+- `system` is claude's catch-all namespace and its highest-rate emitter: `system/init` fires **once per
+  turn** and `system/thinking_tokens` roughly ten times per turn, so subtype-grained matching risks
+  turning every new subtype into a per-turn noise row — exactly the failure the two tiers exist to
+  prevent. Until 2026-08-07 that argument was implemented by ignoring `system` **wholesale**; #1380
+  refines it (below) rather than reversing it — `system` stays on `ignoredLineTypes` unchanged, and one
+  measured subtype is now mapped inside that same ignored branch.
 - `rate_limit_event` is ignored, ~1 per run.
 - The measurement also settled a standing question: claude does **not** echo the delivered prompt back
   as a `user`/`text` message on this surface, though it does on the agent-run surface. So `user`/`text`
@@ -210,6 +213,27 @@ as a follow-up rather than bundled into #1260, which was scoped to capture and r
 measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fails on **any**
 unrecognized frame, so every stream spec is a sentinel: it goes red the day claude adds a message type,
 in the pre-ship gate rather than in front of a user.
+
+**`system` maps per-subtype since 2026-08-07 (#1380) — the first crack in the wholesale-drop design.**
+`system/init`/`thinking_tokens`/`status` and any subtype never seen stay silent exactly as before, but
+`system/task_started` now produces one `turnevent.BackgroundTaskStarted` (`TaskID`, `ToolCallID` —
+claude's `tool_use_id`, renamed to match `ToolStart`/`ToolUpdate`'s field name for the same identifier —
+`Description`, `TaskType`, `TruncatedFields`). This is the fix for #1240's symptom: previously a
+backgrounded command's lifecycle was indistinguishable from a genuine turn end (`turn_end`/`end_turn`,
+state `idle`) because the whole `system` family was dropped regardless of subtype.
+
+The match (`emitSystemSubtype`) sits **inside** `consumeLine`'s existing `ignoredLineTypes` branch rather
+than beside it — `system` stays on the list unchanged, so `emitUnrecognized` (the surfaced tier) stays
+structurally unreachable from any `system` line whatever its subtype, and `TestParser_
+IgnoredLineTypesIsTheMeasuredSet` above is unaffected. `emitSystemSubtype`'s `case` arms are the single
+enumeration of the mapped set; every comment describing the drop rule (this file included) points there
+rather than restating it, since two siblings — `task_updated` (#1382) and `background_tasks_changed`
+(#1381) — extend the same mapped set and event family. Every claude-derived field on the new event is
+truncated **at construction** (`maxTaskFieldID = 256`, `maxTaskDescription = 4 << 10`, mirroring
+`maxUnrecognizedRaw`'s cap-at-construction precedent), with the cut named in `TruncatedFields`. claude's
+`session_id` and `uuid` are deliberately not carried — `session_id` is not the daemon's conversation
+identity. Field mapping and cap arithmetic are built from the committed capture (#1260), never a
+hand-built line. See [codebase/1380.md](../codebase/1380.md).
 
 **Content blocks are held as `[]json.RawMessage`, decoded per block.** This is load-bearing rather than
 tidying: `streamBlock` declares only the fields the mapping reads, so decoding straight into it would
@@ -966,6 +990,8 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1199.md`](../codebase/1199.md) — `waitIdleForDelivery`/`openForDelivery`, the inbound-delivery seam that holds a mid-turn send in the queue and marks the conversation busy before writing; the tracker's first production reader.
 - [`codebase/1295.md`](../codebase/1295.md) — forced-ordering test proving this seam's hold is released by the `new_session` rotation's `clearForSession` and delivers to the post-rotation child; eliminates one M4-stall hypothesis, leaves the straggler-re-mark hypothesis ([#1298](https://github.com/pyrycode/pyrycode/issues/1298)) open and named the clear-before-`RestartFresh` window as an undecided Open question 4, closed by #1330.
 - [`codebase/1330.md`](../codebase/1330.md) — the rotation-delivery gate (`BeginRotation`/`turnTarget`, `rotating`/`rotateGen` under `mu`) that closes #1295's Open question 4: no turn accepted once a `new_session` rotation has begun is written into the outgoing child.
+- [`codebase/1380.md`](../codebase/1380.md) — the `system` subtype dispatch mechanism (`emitSystemSubtype`) and its first mapping, `system/task_started` → `turnevent.BackgroundTaskStarted`; fixes #1240's symptom. `task_updated` (#1382) and `background_tasks_changed` (#1381) extend the same mapped set.
+- [`codebase/1240.md`](../codebase/1240.md) — the symptom #1380 fixes the cause of: `turn_end`/`end_turn` and state `idle` while a backgrounded command claude started is provably still alive.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
