@@ -769,17 +769,19 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (`TestTrailScan`'s padded sub-test) — that idiom would go red against a
   *correct* build here, since `Subtype`/`StopReason`/`TerminalReason` are
   carried through `Trailer` by design and published verbatim downstream;
-  bounding that publication surface is #1358's. Key names themselves are
-  not bounded — `trailScanResult` is published by nothing, so there is no
-  rendering surface at this tier to bound; the per-name cap is deferred
-  to #1358, the tier that publishes. Purely additive, one new 435-line
+  bounding that publication surface is #1362's. Key names themselves were
+  not bounded at this tier — `trailScanResult` is published by nothing, so
+  there was no rendering surface here to bound — and the per-name cap
+  landed one tier up instead, at `finSighting`/`finTrailerRecord`
+  (`finBoundKeyNames`, #1363). Purely additive, one new 435-line
   file, zero production files touched, two-line extension of #1266's
   file (the field plus the wiring); 0 SKIP on `-run '^TestTrail'`. First
   code-review pass FAILed on an incomplete inbound-citation sweep (bare
   and chained pointers into #1266's file, which this ticket's field
   addition shifted) rather than on the implementation; the implementation
   itself passed clean on both rounds. See
-  [`codebase/1357.md`](../codebase/1357.md).
+  [`codebase/1357.md`](../codebase/1357.md) and, for the field's carriage
+  onto both publishing tiers and its bounds, [`codebase/1363.md`](../codebase/1363.md).
 
 - `trailer_admissibility_test.go` (#1270) — **offline instrument, not a
   probe**; two pure predicates that decide whether #1266's trailer scan and
@@ -1003,12 +1005,20 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   named to mirror `TestFinGatherSightingScalarsComeFromTheFullLineDecode`, the
   two halves of one agreement obligation that a grep now returns together.
   Purely additive at #1290, one new file, 697 lines, zero production change, zero
-  consumer call sites. See [`codebase/1290.md`](../codebase/1290.md) for the
+  consumer call sites. **#1363 added a fifth trailer *field*, deliberately not a
+  fifth decoded scalar** — `KeyNames []string` (`json:"trailer_keys"`, no
+  `omitempty`), copied through `finTrailerBuild` from a different reader
+  (`trailKeyNames` over the full line) than the four scalars above, bounded by
+  `finBoundKeyNames` at the fill sites rather than in this builder (which copies
+  and computes nothing). Every "ten scalars" / "the four decoded scalars"
+  sentence in this file stays true as written; only the record's total field
+  count moved. See [`codebase/1290.md`](../codebase/1290.md) for the
   original implementation, [`codebase/1320.md`](../codebase/1320.md) for the
   move onto the carrier, [`codebase/1325.md`](../codebase/1325.md) for the
-  retirement, and [`codebase/1316.md`](../codebase/1316.md) for the row that
+  retirement, [`codebase/1316.md`](../codebase/1316.md) for the row that
   joins this file's `Bounded` derivation to a poll that genuinely measured it
-  (`finding_run_gather_test.go`'s `TestFinGatherRecordPublishesTheMeasuredMissBound`).
+  (`finding_run_gather_test.go`'s `TestFinGatherRecordPublishesTheMeasuredMissBound`),
+  and [`codebase/1363.md`](../codebase/1363.md) for the key-names field.
 
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
@@ -1089,10 +1099,17 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   holds one tier down, at `TestFinGatherReturnsNoCapturedBytes`
   (`finding_run_gather_test.go`), which sweeps the carrier. Purely
   additive, one new file, 966 lines then trimmed by #1326's prose-and-guard
-  rewrite, zero production change, zero consumer call sites. See
+  rewrite, zero production change, zero consumer call sites. **The fixed
+  safety-claim constant (`finWriteSafetyClaim`) was repaired by #1363** when
+  the trailer's key names — claude-authored strings, not "a string this rig
+  authored" — became a published field: the sentence now names that field
+  explicitly and states it is safe because it is bounded and value-free, never
+  because it is rig-authored, while keeping the note's two forbidden
+  review-caveat strings absent. See
   [`codebase/1286.md`](../codebase/1286.md) for the full implementation, the
-  path-vs-name census MUST FIX, and the stale-comment lesson, and
-  [`codebase/1326.md`](../codebase/1326.md) for the channel retirement.
+  path-vs-name census MUST FIX, and the stale-comment lesson,
+  [`codebase/1326.md`](../codebase/1326.md) for the channel retirement, and
+  [`codebase/1363.md`](../codebase/1363.md) for the safety-claim repair.
 
 - `finding_run_gather_test.go` (#1281, `PyryExited`/`ClaudeState` promoted
   #1302, trailer-sighting carrier added #1309, carrier's miss bound proven
