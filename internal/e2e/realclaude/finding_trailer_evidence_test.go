@@ -21,7 +21,7 @@ package realclaude
 // (result_trailer_observation_test.go:108-118), which was chosen over a value
 // type handing back TerminalReason == "" and letting an empty terminal reason
 // pass as a real one. Since #1320 this record reads the four fields from a
-// finSighting (finding_run_gather_test.go:348), which answers the State/nil PAIR
+// finSighting (finding_run_gather_test.go:372), which answers the State/nil PAIR
 // as CarriesTrailer one tier up and hands the four on as scalars — so the
 // optional is discriminated where the pointer still exists, and a run that wrote
 // no trailer carries its void down here with nothing left to dereference.
@@ -101,7 +101,7 @@ import (
 // still exists. finSighting has no pointer field at all, so no two records built
 // from one carrier can alias a shared *resultTrailer: the property is structural
 // now rather than bought at build time, and it is CHECKED by
-// TestFinSightingReachesNoScanType (finding_run_gather_test.go:1916) — which
+// TestFinSightingReachesNoScanType (finding_run_gather_test.go:2043) — which
 // walks the carrier's type for all three scan types, so a later field carrying
 // one of them a level down fails there — rather than asserted in prose.
 //
@@ -135,6 +135,57 @@ import (
 // carried whole; naming it here is what keeps #1286's multi-input sweep from
 // later planting a needle in a field this record must carry verbatim.
 //
+// # The key names, and why they are not a fifth scalar
+//
+// KeyNames comes from a DIFFERENT READER than the four above: trailKeyNames over
+// the full line (trailer_key_names_test.go:87), not resultTrailer's fixed decode.
+// It is the fifth trailer FIELD and deliberately not a fifth decoded scalar,
+// which is what leaves this file's "the four decoded scalars" sentences true.
+//
+// It exists because that fixed decode cannot answer one question. terminal_reason
+// is pyry's own invention — wireFields (emitter.go:428-437) and the idle-stall
+// trailer write it and nothing else does — so claude's own result line, the
+// healthy shape on the headless path, carries no such KEY at all. After the decode
+// an ABSENT terminal_reason and one emitted as "" are the same value, so the NAME
+// is the only thing separating "pyry wrote this trailer, therefore the watchdog
+// fired" from "claude wrote it, therefore the run was healthy". A record
+// publishing a verdict about such a run while withholding that discriminator
+// cannot be audited from the filed artifact alone.
+//
+// Names and never values, structurally rather than by discipline: trailKeyNames
+// returns []string and discards its map[string]json.RawMessage internally, and
+// TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310) plants a distinct
+// needle in every string-valued position of a trailer line and asserts none
+// reaches them. They still come from CLAUDE, which is why the artifact's standing
+// safety sentence names this field rather than leaving it to be discovered
+// (finWriteSafetyClaim, finding_artifact_write_test.go:124).
+//
+// NO OMITEMPTY, for the blanket reason above — and the collapse that rule defends
+// against is unreachable on this field anyway, which is stated here rather than
+// left incidental. trailScan's match return is past tr.Type == "result" and so
+// reachable only from a line that already decoded as a JSON object, so the map
+// decode always succeeds and always carries at least `type`
+// (result_trailer_observation_test.go:199-205). A SEEN trailer therefore cannot
+// produce an empty name set; "no names" is reachable only from the not-seen arm.
+// Measured on this tree rather than reasoned, the three shapes stay distinct: nil
+// renders {"trailer_keys":null}, empty renders {"trailer_keys":[]}, filled renders
+// {"trailer_keys":["type"]}. trailScanResult's own tier uses omitempty (:135) and
+// is not a precedent here.
+//
+// # What the bound does to a reader, stated so it cannot mislead
+//
+// finBoundKeyNames (finding_run_gather_test.go) caps the count and each name's
+// length, so a list at exactly finTrailerMaxKeyNames entries MAY BE AN ALPHABETIC
+// PREFIX — and a name sorting late, terminal_reason among them, could then be
+// absent from a line that carried it. That is unreachable from a real run: no
+// producer emits a result line with more than eleven top-level keys, the keys
+// being the CLI's envelope rather than the model's text, so the bound is a cap on
+// the artifact rather than a live defence. NO NAME IS SPECIAL-CASED to survive the
+// cut, because a hard-coded keep-list would be a second source of truth for what
+// the line carried. Two names sharing a finTrailerMaxKeyNameBytes-byte prefix
+// likewise collapse to one string — both carrying reachTruncationMarker, so the
+// duplication is visibly an artefact rather than a reading.
+//
 // # The Detail's content rule, pinned rather than left to judgement
 //
 // In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:225-232), it MAY
@@ -143,6 +194,14 @@ import (
 // as fields, so the exposure decision is this type's and the Detail adds nothing
 // to it. It may NEVER quote trailScanResult.Line or interpolate any part of it,
 // INCLUDING a length, a byte count derived from it, a prefix or a hash.
+//
+// THE KEY NAMES ARE NOT ON THE PERMITTED LIST, and that is its own decision rather
+// than a consequence of the Line rule: the Detail may name no key and interpolate
+// no COUNT of them, both being derived from the line. The shipped row below cannot
+// detect the violation — its fixture's eleven short names would fit inside the
+// headroom even if the Detail did interpolate them — so the prohibition is stated
+// here and made red by a hostile-name fixture in #1364. A Detail naming the names
+// would hand that ticket a red for THIS ticket's defect.
 //
 // Every Detail must also leave len(trailNeedle) bytes of headroom under
 // reachMaxCommandBytes — under 470 bytes on every row. That is not stylistic:
@@ -166,6 +225,8 @@ type finTrailerRecord struct {
 	TerminalReason string `json:"terminal_reason"`
 	StopReason     string `json:"stop_reason"`
 
+	KeyNames []string `json:"trailer_keys"`
+
 	Detail string `json:"detail"`
 }
 
@@ -181,11 +242,11 @@ type finTrailerRecord struct {
 // mid-turn is a datum to publish, not a reason to abort the turn.
 //
 // LIKE THE RECORD IT RETURNS, THIS FUNCTION IS TRAP-FREE BY CONSTRUCTION. Its
-// input is a finSighting (finding_run_gather_test.go:348), which carries neither
+// input is a finSighting (finding_run_gather_test.go:372), which carries neither
 // trailScanResult.Line nor the *resultTrailer, so the no-captured-bytes property
 // of this builder is held BY THE SHAPE OF THE INPUT — and that shape is checked
 // rather than asserted: TestFinSightingReachesNoScanType
-// (finding_run_gather_test.go:1916) walks the carrier for all three scan types.
+// (finding_run_gather_test.go:2043) walks the carrier for all three scan types.
 // The Detail content rule stated on finTrailerRecord keeps shut the one channel
 // a scalar-only input still leaves open, which is what the Detail may SAY.
 //
@@ -219,16 +280,17 @@ type finTrailerRecord struct {
 // answered the State/nil PAIR as CarriesTrailer, and the ordering argument — the
 // State operand FIRST, Go's && short-circuiting left to right — lives wherever
 // that pair is computed. That is finGatherReadings' fill on the live path
-// (finding_run_gather_test.go:444-455) and finTrailerSighting on the fixture
+// (finding_run_gather_test.go:557-582) and finTrailerSighting on the fixture
 // side, and the two are required to agree.
 //
-// On the false arm the four are ZEROED rather than copied through, and under the
-// carrier that is a choice rather than a consequence: the scalars are separately
-// settable, so a CarriesTrailer: false beside a non-zero Subtype is a reachable
-// input for the first time and is the only shape separating a builder that drops
-// from one that copies through. THE ARGUMENT IS IN THE ARM'S OWN DETAIL, which
-// formats "the four trailer fields hold their zero values" — a builder copying
-// them through would publish a record contradicting itself in the same breath.
+// On the false arm the four AND THE KEY NAMES are ZEROED rather than copied
+// through, and under the carrier that is a choice rather than a consequence: they
+// are separately settable, so a CarriesTrailer: false beside a non-zero Subtype or
+// a filled name list is a reachable input and is the only shape separating a
+// builder that drops from one that copies through. THE ARGUMENT IS IN THE ARM'S
+// OWN DETAIL, which formats "the four trailer fields and the key names hold their
+// zero values" — a builder copying them through would publish a record
+// contradicting itself in the same breath.
 // That wording is load-bearing for this reason, and
 // TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer drives both
 // arms over one carrier and its one flipped bit.
@@ -255,8 +317,8 @@ func finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord {
 
 	if !sighting.CarriesTrailer {
 		rec.Detail = trailDetail("outcome %s over a %s scan carrying no decoded trailer, so the "+
-			"four trailer fields hold their zero values; lateness %s, bounded=%t",
-			outcome, sighting.State, sighting.BoundFrom, rec.Bounded)
+			"four trailer fields and the key names hold their zero values; lateness %s, "+
+			"bounded=%t", outcome, sighting.State, sighting.BoundFrom, rec.Bounded)
 		return rec
 	}
 
@@ -264,6 +326,11 @@ func finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord {
 	rec.IsError = sighting.IsError
 	rec.TerminalReason = sighting.TerminalReason
 	rec.StopReason = sighting.StopReason
+	// A PLAIN COPY, and deliberately not a second bounding call: the carrier's fill
+	// already applied finBoundKeyNames, and a cap written twice is a cap that stops
+	// agreeing with itself. That the assignment shares no backing array with the
+	// scan's own slice is finBoundKeyNames' clause, held at the producer.
+	rec.KeyNames = sighting.KeyNames
 	rec.Detail = trailDetail("outcome %s over a %s scan; subtype=%s is_error=%t "+
 		"terminal_reason=%s stop_reason=%s, read from the decode of the full line; "+
 		"lateness %s, bounded=%t", outcome, sighting.State, rec.Subtype, rec.IsError,
@@ -290,7 +357,7 @@ func finTrailerAbortedScan() trailScanResult {
 }
 
 // finTrailerSighting is the fixture-side stand-in for finGatherReadings' carrier
-// fill, and is a COPY of it (finding_run_gather_test.go:444-455): the same State
+// fill, and is a COPY of it (finding_run_gather_test.go:557-582): the same State
 // operand first, the same four scalars filled only behind the pair.
 //
 // THE AGREEMENT OBLIGATION LANDS HERE. That fill is commented as deliberately
@@ -301,6 +368,12 @@ func finTrailerAbortedScan() trailScanResult {
 // pinScanArgv and pinReadState, and this file forbids exec by its own header.
 // The obligation is held by this comment and by review, exactly as it is on the
 // gather's side.
+//
+// #1363 PUT A SECOND COMPUTATION UNDER THAT SAME OBLIGATION: the key-name fill,
+// which routes through finBoundKeyNames on both sides so the cap exists in one
+// copy rather than two. Its asymmetry runs the dangerous way — every offline test
+// drives THIS side, so bounding here and forgetting the gather's would ship an
+// unbounded field on every live probe run with nothing red.
 //
 // It takes the SHIPPED SCAN rather than a trailObservation, for two reasons. No
 // fixture in this family constructs an observation for the builder again — the
@@ -323,6 +396,7 @@ func finTrailerSighting(scan trailScanResult, staleness time.Duration, boundFrom
 		sighting.IsError = scan.Trailer.IsError
 		sighting.TerminalReason = scan.Trailer.TerminalReason
 		sighting.StopReason = scan.Trailer.StopReason
+		sighting.KeyNames = finBoundKeyNames(scan.KeyNames)
 	}
 	return sighting
 }
@@ -592,9 +666,9 @@ func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 // constructible, because !carriesTrailer implied there was no pointer to read
 // and the zeroes were a consequence. Under the carrier the scalars are
 // separately settable, so the drop is a DECISION — and its argument is the arm's
-// own Detail, which formats "the four trailer fields hold their zero values". A
-// builder copying them through publishes a record contradicting itself in the
-// same breath.
+// own Detail, which formats "the four trailer fields and the key names hold
+// their zero values". A builder copying them through publishes a record
+// contradicting itself in the same breath.
 //
 // The row is DERIVED from the true arm by flipping the single impossible bit
 // rather than typed in: everything a scan could produce still comes from the
@@ -626,11 +700,12 @@ func TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer(t *testing.
 			"true arm below would then assert the very zero values it exists to separate from",
 			scan.State)
 	}
-	if seen.Subtype == "" || seen.TerminalReason == "" || seen.StopReason == "" || !seen.IsError {
-		t.Fatalf("the carrier holds subtype=%q is_error=%t terminal_reason=%q stop_reason=%q: every "+
-			"one must be non-zero, or the false arm's check on the zero-valued one passes against a "+
-			"builder that copied it through", seen.Subtype, seen.IsError, seen.TerminalReason,
-			seen.StopReason)
+	if seen.Subtype == "" || seen.TerminalReason == "" || seen.StopReason == "" || !seen.IsError ||
+		len(seen.KeyNames) == 0 {
+		t.Fatalf("the carrier holds subtype=%q is_error=%t terminal_reason=%q stop_reason=%q and %d "+
+			"key names: every one must be non-zero, or the false arm's check on the zero-valued one "+
+			"passes against a builder that copied it through", seen.Subtype, seen.IsError,
+			seen.TerminalReason, seen.StopReason, len(seen.KeyNames))
 	}
 
 	filled := finTrailerBuild(trailOutcomeVoidBudgetFired, seen)
@@ -669,12 +744,17 @@ func TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer(t *testing.
 					"record contradicting itself in the same breath", f.name, f.got)
 			}
 		}
+		if len(zeroed.KeyNames) != 0 {
+			t.Errorf("trailer_keys: got %q, want none — the key names are dropped with the four and "+
+				"the arm's own Detail says so; a builder copying them through publishes claude's own "+
+				"key names beside a record that says it carries no trailer", zeroed.KeyNames)
+		}
 	})
 
 	t.Run("the rest of the carrier crosses either way", func(t *testing.T) {
 		// The void is carried UNDER THE STATE THAT SAYS SO rather than collapsed
-		// into "there was no trailer": the drop is the four scalars' and reaches
-		// nothing else on the record.
+		// into "there was no trailer": the drop is the four scalars' and the key
+		// names', and reaches nothing else on the record.
 		if zeroed.State != seen.State || zeroed.BoundFrom != seen.BoundFrom ||
 			zeroed.Staleness != seen.Staleness {
 			t.Errorf("state %q, bound %q, staleness %v; want %q, %q, %v — only the four are dropped",
@@ -912,9 +992,9 @@ func TestFinTrailerRecordCarriesNoCapturedBytes(t *testing.T) {
 
 	// The structural half: the record has no field for a line today, and this is
 	// the check that a future field does not quietly add one. The scan is valid
-	// because finTrailerRecord is FLAT — ten scalars — so a top-level key scan
-	// examines every key it has. Lifted onto a record with a struct-valued field
-	// it would never examine the inner keys.
+	// because finTrailerRecord is FLAT — ten scalars and a string slice, which
+	// adds no nested keys — so it examines every key the record has. Lifted onto
+	// a record with a struct-valued field it would never examine the inner keys.
 	var keyed map[string]json.RawMessage
 	if err := json.Unmarshal(encoded, &keyed); err != nil {
 		t.Fatalf("decoding the marshalled trailer record: %v", err)

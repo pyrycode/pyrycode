@@ -55,8 +55,8 @@ package realclaude
 // Bounding the names themselves is deliberately NOT here. They are
 // attacker-influenced in principle — they arrive from claude's output — but
 // trailScanResult is published by nothing (pinned at finding_run_record_test.go:787-812
-// and finding_run_gather_test.go:1916-1932), so there is no rendering surface at
-// this tier to bound. The per-name cap belongs at the tier that publishes: #1358.
+// and finding_run_gather_test.go:2043-2059), so there is no rendering surface at
+// this tier to bound. The per-name cap belongs at the tier that publishes: #1363.
 
 import (
 	"encoding/json"
@@ -301,8 +301,8 @@ func TestTrailKeyNamesSeparatesAbsenceFromZeroValue(t *testing.T) {
 // not decode. Copied here it goes RED AGAINST A CORRECT BUILD: resultTrailer
 // decodes Subtype, StopReason and TerminalReason, so three of the five needles
 // below are carried through Trailer BY DESIGN and published verbatim downstream.
-// The artifact-wide sweep that would catch a leak in those is #1358's, with its
-// own narrower plant list (finding_artifact_write_test.go:244-259 states the
+// The artifact-wide sweep that would catch a leak in those is #1362's, with its
+// own narrower plant list (finding_artifact_write_test.go:274-289 states the
 // plant-only-where-the-pipeline-reduces rule).
 //
 // So this sweeps the names and nothing else. Widening it to the enclosing record
@@ -398,7 +398,7 @@ func TestTrailResultTrailerFieldSetIsPinned(t *testing.T) {
 }
 
 // TestTrailScanResultReachesNoRawMessageMap is AC5's second half, in the shape
-// TestFinSightingReachesNoScanType uses (finding_run_gather_test.go:1916).
+// TestFinSightingReachesNoScanType uses (finding_run_gather_test.go:2043).
 //
 // # The ban names the MAP, never its element
 //

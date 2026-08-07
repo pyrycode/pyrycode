@@ -286,7 +286,7 @@ type finGatherInputs struct {
 // # What it deliberately does not carry
 //
 //   - NO Bounded. lateness_bounded is BoundFrom == trailBoundFromMiss AND NOTHING
-//     ELSE (finding_trailer_evidence_test.go:247-253), and that stays its one
+//     ELSE (finding_trailer_evidence_test.go:309-315), and that stays its one
 //     source; this value supplies the discriminator that derivation reads. A
 //     second source would let a record publish a non-bound wearing a bound's
 //     label.
@@ -298,7 +298,7 @@ type finGatherInputs struct {
 //     by an assertion: with no formatted string here there is no 512-byte budget
 //     for a leak to hide behind, so the sweep below owes no per-row headroom
 //     check. Adding a Detail later would owe it in full
-//     (finding_trailer_evidence_test.go:648-662).
+//     (finding_trailer_evidence_test.go:723-737).
 //
 // # Staleness travels as PUBLISHED EVIDENCE and is not a classifier input
 //
@@ -339,12 +339,36 @@ type finGatherInputs struct {
 // # The json keys, and the absence of omitempty
 //
 // Tagged because encoding/json renders a Duration as a bare nanosecond count and
-// the unit belongs in the key — trailObservation:133-135 and finTrailerRecord:147
+// the unit belongs in the key — trailObservation:133-135 and finTrailerRecord:206
 // both give that reason — and MIRRORING finTrailerRecord's keys, so #1320's move
 // onto this value was a rename-free projection. NO FIELD CARRIES omitempty, for
 // that record's own reason (:102-110): the discriminator must always be present
 // beside the four, and dropping a false IsError or an honest zero Staleness
 // collapses distinctions this type exists to keep.
+//
+// # The key names, and why they are not a fifth scalar
+//
+// KeyNames comes from a DIFFERENT READER than the four above — trailKeyNames over
+// the full line (trailer_key_names_test.go:87), not resultTrailer's fixed decode —
+// so it is the fifth trailer FIELD and deliberately not a fifth decoded scalar.
+// Keeping it in its own group is what leaves every "the four decoded scalars"
+// sentence in this family true. It carries the names ONLY, and structurally rather
+// than by discipline: trailKeyNames returns []string and discards its
+// map[string]json.RawMessage internally, so no VALUE can cross.
+//
+// It is BOUNDED HERE, by finBoundKeyNames below, because this carrier is the
+// first tier either fill site reaches and the names arrive from claude's output
+// rather than from pyry.
+//
+// No omitempty, for the blanket reason above — and the collapse that rule defends
+// against is unreachable on this field anyway. trailScan's match return is past
+// tr.Type == "result" and so reachable only from a line that already decoded as a
+// JSON object, which means the map decode always succeeds and always carries at
+// least `type` (result_trailer_observation_test.go:199-205). A SEEN trailer
+// therefore cannot produce an empty name set: "no names" is reachable only from
+// the not-seen arm, so the byte-identical rendering omitempty would cause cannot
+// occur. trailScanResult's own tier uses omitempty (:135) and is not a precedent
+// here.
 type finSighting struct {
 	State          string        `json:"trailer_state"`
 	BoundFrom      string        `json:"lateness_bound_from"`
@@ -355,6 +379,95 @@ type finSighting struct {
 	IsError        bool   `json:"is_error"`
 	TerminalReason string `json:"terminal_reason"`
 	StopReason     string `json:"stop_reason"`
+
+	KeyNames []string `json:"trailer_keys"`
+}
+
+// The two publication bounds for the trailer's key names. NAMED CONSTANTS rather
+// than inline literals, because the hostile-fixture proofs and the artifact-wide
+// sweeps that follow (#1364, #1362) must assert their own fixtures sit under
+// them, and a fixture pinned against a literal drifts the moment the literal
+// moves.
+//
+// # Why the count bound is 32, and why a much larger one could not be proved
+//
+// The ceiling is not a name count but the SCANNER'S LINE, and quoting the byte
+// figure is what makes the argument shape-independent. trailScan's bufio.Scanner
+// buffer is deliberately NOT raised past the 64 KiB default
+// (result_trailer_observation_test.go:177-179), and a line at or past the limit
+// ABORTS the scan rather than truncating it: KeyNames comes back nil and
+// CarriesTrailer is false. Measured on this tree, 65535 bytes are accepted and
+// 65536 rejected. A fixture proving a count bound bites must carry bound+1 names
+// AND STILL SCAN, which at ordinary `"k000000":"v"` key shapes puts the
+// unprovable floor near 4680 names — 8710 at maximally compact ones, which is a
+// property of the generator rather than of the scanner and is why the byte figure
+// leads. 32 sits two orders of magnitude below that floor, so #1364's 33-name
+// fixture is some 400 bytes and stays readable rather than golfed against the
+// scanner.
+//
+// 32 is also roughly three times the real shape: the trailer carries ELEVEN
+// top-level keys (trailExpectedKeyNames), and they are the claude CLI's envelope
+// rather than the model's text, so no producer emits more.
+//
+// # Why the two values are deliberately different
+//
+// 64 is roughly four times the longest envelope name (terminal_reason, 15 bytes),
+// and it is deliberately not another 32: a fill or a proof that reaches for the
+// wrong constant is then detectable, where two equal values would make a
+// transposition invisible.
+const (
+	finTrailerMaxKeyNames     = 32
+	finTrailerMaxKeyNameBytes = 64
+)
+
+// finBoundKeyNames returns names bounded for publication. Five clauses, each
+// load-bearing:
+//
+//   - NIL for a nil or empty input, and never []string{}. A not-seen record must
+//     render null rather than [], which is the distinction
+//     TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead asserts on the
+//     marshalled bytes.
+//   - AT MOST finTrailerMaxKeyNames entries, in the input's order. trailKeyNames
+//     already sorted them, so the kept set is the alphabetic prefix.
+//   - EACH ENTRY BOUNDED INDIVIDUALLY, NEVER AS A JOINED STRING. A joined cap
+//     would let a leak in a late name be truncated away and turn a containment
+//     sweep green over a record that leaked, which is the defect #1284 shipped
+//     and then had to fix.
+//   - AN OVER-LONG ENTRY IS TRUNCATED AND MARKED, never dropped, mirroring
+//     reachCapCommand (background_reach_probe_test.go:945). Dropping removes
+//     evidence silently; truncating announces itself. Two names sharing a
+//     finTrailerMaxKeyNameBytes-byte prefix therefore collapse to one string —
+//     both carrying the marker, so the duplication is visibly an artefact.
+//   - IT ALLOCATES ITS OWN BACKING ARRAY ON EVERY PATH, INCLUDING WHEN THE INPUT
+//     IS ALREADY UNDER BOTH BOUNDS. An `if there is nothing to do, return names`
+//     fast path looks free and is not: finTrailerBuild copies this field by plain
+//     slice assignment, so a pass-through would make the published
+//     finTrailerRecord.KeyNames alias trailScanResult.KeyNames itself, and the
+//     shipped `dropped := seen` struct copy
+//     (finding_trailer_evidence_test.go:693) would then put two carriers on one
+//     backing array while `go test -race` runs this package's tests in parallel
+//     (trail_run_outcome_test.go:608-610). The builder's plain assignment is safe
+//     ONLY because this clause holds, which is why the clause is stated at the
+//     producer rather than at the consumer.
+//
+// Pure over its input and with no error return, matching this family's builder
+// contract: it never fails a test.
+func finBoundKeyNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	kept := len(names)
+	if kept > finTrailerMaxKeyNames {
+		kept = finTrailerMaxKeyNames
+	}
+	bounded := make([]string, 0, kept)
+	for _, name := range names[:kept] {
+		if len(name) > finTrailerMaxKeyNameBytes {
+			name = name[:finTrailerMaxKeyNameBytes] + reachTruncationMarker
+		}
+		bounded = append(bounded, name)
+	}
+	return bounded
 }
 
 // finGatherReadings assembles a complete trailRunReadings from the
@@ -446,12 +559,26 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// the ordering is a property of the source rather than of this comment. It is
 	// deliberately identical to finTrailerSighting's fill on the fixture side:
 	// finTrailerBuild computes nothing now, and the two computations must agree.
+	//
+	// THE KEY-NAME FILL IS UNDER THAT SAME OBLIGATION, and its asymmetry runs the
+	// dangerous way: every offline test drives the FIXTURE side, so bounding there
+	// and forgetting here would ship an unbounded field on every LIVE probe run
+	// with nothing red. No in-file pin is available for it — this function reaches
+	// ps through pinScanArgv and pinReadState, and the evidence file forbids exec
+	// by its own header — so the obligation is held here and by review, exactly as
+	// the pair's is. Both sides route through finBoundKeyNames and neither carries
+	// its own copy of the arithmetic, because two hand-written copies of a cap is
+	// how two fills required to agree stop agreeing.
 	sighting.CarriesTrailer = obs.State == trailSeen && obs.Trailer != nil
 	if sighting.CarriesTrailer {
 		sighting.Subtype = obs.Trailer.Subtype
 		sighting.IsError = obs.Trailer.IsError
 		sighting.TerminalReason = obs.Trailer.TerminalReason
 		sighting.StopReason = obs.Trailer.StopReason
+		// trailObservation EMBEDS trailScanResult
+		// (result_trailer_observation_test.go:141-142), so the names the scan
+		// already read are in reach here with no new plumbing.
+		sighting.KeyNames = finBoundKeyNames(obs.KeyNames)
 	}
 
 	// The attribution leg, guarded on the gate's certified Reason: the exact
@@ -983,7 +1110,7 @@ func TestFinGatherPyryExitIsObservableAtTheOutcome(t *testing.T) {
 // # Why this is not a finGatherCases row
 //
 // finGatherAssertContract runs on every row of that table and fails any row
-// classifying trailOutcomeOutOfContract (:511-514), which is precisely the
+// classifying trailOutcomeOutOfContract (:638-641), which is precisely the
 // answer the middle row requires. The claim needs a test of its own.
 //
 // # Why the gather validates nothing
@@ -1263,7 +1390,7 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // mirrored rather than reinvented — including the goroutine split, which is not
 // style: probeSyncBuffer.Write returns an error that must be reported with
 // t.Fatalf, and calling t.* from a spawned goroutine after the test function has
-// returned panics. finGatherReadings takes no *testing.T (:424), so the inputs are
+// returned panics. finGatherReadings takes no *testing.T (:537), so the inputs are
 // built on the test goroutine and only the call itself crosses. The increment
 // over that subtest is that the claim is made over the CARRIER the gather returns,
 // one level up, and never over the observation.
@@ -1299,7 +1426,7 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // TestFinGatherSightingComesFromTheClassifiedPoll's, the claim that a staleness
 // covers the true lateness is TestTrailWaitForTrailer's (:584-587 there), and
 // lateness_bounded is derived from this discriminator at one place only
-// (finding_trailer_evidence_test.go:247-253). This row adds a second source of none
+// (finding_trailer_evidence_test.go:309-315). This row adds a second source of none
 // of the three, and plants no needle.
 func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 	var stdout probeSyncBuffer
@@ -1379,7 +1506,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // # The two tiers this joins
 //
 // TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator
-// (finding_trailer_evidence_test.go:339) pins lateness_bounded on
+// (finding_trailer_evidence_test.go:413) pins lateness_bounded on
 // trailBoundFromMiss alone across all three discriminators — but with the
 // discriminator HANDED IN, as every finTrailerBuild call site before this row
 // does: each reaches the builder through finTrailerSighting over a shipped scan,
@@ -1409,11 +1536,11 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // caller's reach and the two the header forbids a message from naming
 // (:114-116). With no observation in scope a later edit CANNOT %v one into a
 // failure. That is also why the second carrier is derived through
-// finTrailerSighting (finding_trailer_evidence_test.go:318) over
+// finTrailerSighting (finding_trailer_evidence_test.go:391) over
 // trailScan(stdout.Bytes()): the shipped derivation, pure over bytes, taking a
 // scan and not an observation, and how every existing call site reaches the
 // builder. NO finSightingFrom CONSTRUCTOR — finGatherReadings' own doc rejects
-// one by name (:440-443), and this row adds no symbol.
+// one by name (:553-556), and this row adds no symbol.
 //
 // # The second carrier's Staleness is handed zero, and that is a decision
 //
@@ -1449,7 +1576,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // Its messages name a finTrailerRecord's fields, which the header's licence does
 // NOT cover: that licence is enumerated over the composition's THREE RETURNS and
 // this record is not one of them. The licence is
-// TestFinTrailerRecordCarriesNoCapturedBytes' (finding_trailer_evidence_test.go:850),
+// TestFinTrailerRecordCarriesNoCapturedBytes' (finding_trailer_evidence_test.go:930),
 // which sweeps this record in the other file — named rather than assumed, and
 // stop_reason's uncapped model-authored exposure is inherited knowingly here as
 // it is there.
@@ -1629,7 +1756,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 			wantCarries: true,
 		},
 		{
-			// finGatherCases()' C4 row (:562-573), for its stated reason: it is the
+			// finGatherCases()' C4 row (:689-700), for its stated reason: it is the
 			// no-decode arm this file already ships and it returns immediately.
 			name:        "an aborted scan, which carries no decoded trailer at all",
 			seed:        trailPaddedTrailer(trailOverlongPad),
@@ -1644,7 +1771,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 			seed := finGatherSeed(t, &stdout, tc.seed)
 
 			// Recomputed through the SHIPPED scanner over the SAME bytes the gather
-			// read, the file's own C2 idiom (:651): the expectation is the decode's
+			// read, the file's own C2 idiom (:778): the expectation is the decode's
 			// and never four typed-in literals. On the no-decode arm want stays the
 			// zero resultTrailer, which makes "their zero values" exact.
 			scan := trailScan(seed)
@@ -1712,7 +1839,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 // Those offsets are a property of the PAD and not an invariant of the fixture, so
 // the test asserts the one it rests on rather than trusting this comment —
 // finWriteTrailerPad makes the same disclaimer for the same reason
-// (finding_artifact_write_test.go:183-184).
+// (finding_artifact_write_test.go:213-214).
 //
 // # The usable window is pad 141 through 366
 //
@@ -1792,7 +1919,7 @@ const finGatherOverCapPad = 200
 // message in this test MAY name scan.State, scan.Detail, len(scan.Line),
 // reachMaxCommandBytes, finGatherOverCapPad, the key being sought, and the four
 // scalars on either side of a comparison. It MAY NEVER render scan.Line, scan,
-// scan.Trailer, or a whole resultTrailer. :1143-1147 is the shipped model for this:
+// scan.Trailer, or a whole resultTrailer. :1270-1274 is the shipped model for this:
 // it reasons about Line and prints only its length.
 //
 // # What this row does not assert
@@ -1804,8 +1931,8 @@ const finGatherOverCapPad = 200
 // Incidental: this row is about the trailer leg, and asserting on either would
 // restate rows the file already ships. That the carrier fill is independent of the
 // gate's verdict holds by DATA DEPENDENCE and not by ordering — the fill reads only
-// obs and never reads readings.Gate, which is computed ABOVE it (:433 against
-// :444-455). Staleness and BoundFrom belong to the two tests above; this row adds no
+// obs and never reads readings.Gate, which is computed ABOVE it (:546 against
+// :557-582). Staleness and BoundFrom belong to the two tests above; this row adds no
 // second source of either.
 //
 // # It costs no wall clock
@@ -1817,7 +1944,7 @@ func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	seed := finGatherSeed(t, &stdout, trailPaddedTrailer(finGatherOverCapPad))
 
 	// Recomputed through the SHIPPED scanner over the SAME bytes the gather is
-	// about to read, the file's own C2 idiom (:651): the expectation is the
+	// about to read, the file's own C2 idiom (:778): the expectation is the
 	// decode's and never four typed-in literals.
 	scan := trailScan(seed)
 	if scan.State != trailSeen || scan.Trailer == nil {

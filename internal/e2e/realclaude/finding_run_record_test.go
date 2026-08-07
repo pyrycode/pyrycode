@@ -655,7 +655,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 // Hand-building costs nothing here because this record CONSUMES the verdicts and
 // never derives them, so a hand-built row can assert nothing the classifier
 // would have refused. It is the position finTrailerOutcomeValues()
-// (finding_trailer_evidence_test.go:476) occupies for #1290's outcome, and the
+// (finding_trailer_evidence_test.go:550) occupies for #1290's outcome, and the
 // rule trailGateCases states: the shipped producer for what it can emit,
 // hand-built for what it cannot (trailer_admissibility_test.go:538-542).
 func TestFinRecordLivenessIsConsumedAsHanded(t *testing.T) {
@@ -768,9 +768,9 @@ func TestFinRecordEmbedsTrailerRecordWhole(t *testing.T) {
 			ClaudeCommand: tdnFixturePtyArgv,
 		})
 
-		// DeepEqual over ten scalars: the whole sub-record, not a field of it,
-		// because "embedded whole" is the claim and picking fields would restate
-		// #1290's own tests instead of pinning this record's carriage.
+		// DeepEqual over ten scalars and a name list: the whole sub-record, not a
+		// field of it, because "embedded whole" is the claim and picking fields
+		// would restate #1290's own tests instead of pinning this record's carriage.
 		if !reflect.DeepEqual(rec.Trailer, sub) {
 			t.Errorf("trailer sub-record: got %+v, want %+v — it is embedded whole, never "+
 				"re-derived and never re-read from the observation", rec.Trailer, sub)
@@ -928,7 +928,7 @@ func TestFinRecordRunnerAgreement(t *testing.T) {
 // BUILT record, and the per-channel naming so a failure says which one leaked.
 //
 // NOT copied: its top-level forbidden-key scan. Its own closing comment says why
-// (finding_trailer_evidence_test.go:686-692) — that scan is valid BECAUSE
+// (finding_trailer_evidence_test.go:766-772) — that scan is valid BECAUSE
 // finTrailerRecord is flat, and "lifted onto a record with a struct-valued field
 // it would never examine the inner keys". finRecordRun has four struct- or
 // slice-valued fields, so the same loop here would inspect ten top-level keys,
@@ -1053,5 +1053,170 @@ func TestFinRecordCarriesNoCapturedBytes(t *testing.T) {
 					"table, in a record destined for a public issue: %s", encoded)
 			}
 		})
+	}
+}
+
+// TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead is #1363's AC1: the key
+// names trailScan read off the line reach the PUBLISHED record, and a record
+// built from a scan carrying no trailer renders that field a way a seen one
+// cannot.
+//
+// # Why it drives the whole chain rather than one tier
+//
+// The names cross four hands — trailScan, finTrailerSighting, finTrailerBuild,
+// finRecordBuild — and after the bounding call every one of them is a plain copy,
+// so a test at any single tier passes against a build where the NEXT one dropped
+// the field. What makes the assertion worth its length is that the expectation is
+// the READER'S OWN OUTPUT over the same bytes (trailKeyNames,
+// trailer_key_names_test.go:87) rather than a hand-written list. A literal
+// expectation would pin the fixture's key set — which trailExpectedKeyNames
+// already does one tier down — and would pass against a carrier that got its
+// names from anywhere other than the line.
+//
+// That indirection is also how the containment already proven reaches the
+// artifact. TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310) plants
+// a distinct needle in every string-valued position of a trailer line and asserts
+// none reaches trailScanResult.KeyNames; equality with that proven-clean output
+// is what stops the proof from ending one tier short of the file an operator
+// pastes.
+//
+// # The bounds precondition, and what it buys
+//
+// finBoundKeyNames caps the count and each name's length, so a fixture over
+// either bound would make the published list a PREFIX or a truncation of the
+// reader's and the equality would be asserting the cap rather than the carriage.
+// Asserting the fixture under both bounds first is what makes "the reader's
+// names" and "the published names" the same list.
+//
+// # The not-seen arm is the distinction this family exists to keep
+//
+// It is asserted on the MARSHALLED bytes rather than on the Go value, because the
+// claim is about the published artifact. A nil slice renders null and a filled
+// one an array; an omitempty tag would render NEITHER, dropping the key — and a
+// seen trailer whose names were empty would then be byte-identical to a record
+// that never had a trailer at all. The key's presence on BOTH records is what
+// catches a later editor adding that tag.
+func TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead(t *testing.T) {
+	// The SHIPPED scanner over a shipped fixture, so this test can never assert
+	// against a scan state trailScan would not return for those bytes. The pad is
+	// the shortest this family plants with: nothing here reads a line.
+	line := trailPaddedTrailer(0)
+	scan := trailScan([]byte(line + "\n"))
+
+	// THE NON-VACUITY PRECONDITION, first and fatal. Against a reader that
+	// recorded no names the equality below compares nil to nil and passes on a
+	// carrier that publishes nothing at all.
+	if scan.State != trailSeen || scan.Trailer == nil || len(scan.KeyNames) == 0 {
+		t.Fatalf("fixture: got state %q carrying a decode %t and %d name(s) (%s); want %q "+
+			"carrying one and at least one name — with no names read there is nothing for the "+
+			"carriage below to be about", scan.State, scan.Trailer != nil, len(scan.KeyNames),
+			scan.Detail, trailSeen)
+	}
+
+	// THE BOUNDS PRECONDITION, which AC1 names explicitly. Over either bound the
+	// published list is a prefix or a truncation of the reader's, and the equality
+	// below would then be asserting finBoundKeyNames' cap rather than the carriage.
+	if len(scan.KeyNames) > finTrailerMaxKeyNames {
+		t.Fatalf("the fixture carries %d name(s) against the %d-name bound: the published list "+
+			"would be an alphabetic PREFIX of the reader's, and the equality below would "+
+			"compare a capped list against a whole one", len(scan.KeyNames), finTrailerMaxKeyNames)
+	}
+	for _, name := range scan.KeyNames {
+		if len(name) > finTrailerMaxKeyNameBytes {
+			t.Fatalf("the fixture carries the %d-byte name %q against the %d-byte bound: it would "+
+				"be published truncated and marked, and the equality below would compare that "+
+				"marking against the whole name", len(name), name, finTrailerMaxKeyNameBytes)
+		}
+	}
+
+	// THE DISCRIMINATOR, asserted by name rather than left to the count.
+	// terminal_reason is the key this whole field exists to carry: pyry invents it
+	// and claude's own result line has no such key, so once the fixed decode has
+	// collapsed an absent key and an emitted "" into the same value, the NAME is
+	// the only thing separating "the watchdog fired" from "the run was healthy".
+	discriminator := false
+	for _, name := range scan.KeyNames {
+		if name == "terminal_reason" {
+			discriminator = true
+		}
+	}
+	if !discriminator {
+		t.Fatalf("the reader's names %q do not include terminal_reason: a fixture without it "+
+			"leaves the carriage asserted over names no reader of the artifact needs",
+			scan.KeyNames)
+	}
+
+	// End to end through the SHIPPED builders, with nothing hand-assembled between
+	// the scan and the record.
+	seen := finRecordBuild(finRecordInputs{
+		ExitCode:    0,
+		Rows:        finRecordMatchedRows(""),
+		Attribution: finRecordProofAttribution(),
+		Trailer: finTrailerBuild(trailOutcomeVoidBudgetFired,
+			finTrailerSighting(scan, 250*time.Millisecond, trailBoundFromMiss)),
+		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
+		ClaudeCommand: tdnFixturePtyArgv,
+	})
+
+	if want := trailKeyNames([]byte(line)); !reflect.DeepEqual(seen.Trailer.KeyNames, want) {
+		t.Errorf("published names: got %q, want %q — the reader's own names for the same line. "+
+			"Every hand between the two is a copy, so a mismatch names the tier that dropped, "+
+			"reordered or re-derived them", seen.Trailer.KeyNames, want)
+	}
+
+	absent := finRecordBuild(finRecordInputs{
+		ExitCode:    0,
+		Rows:        finRecordMatchedRows(""),
+		Attribution: finRecordProofAttribution(),
+		Trailer: finTrailerBuild(trailOutcomeVoidNoTrailer,
+			finTrailerSighting(finTrailerAbsentScan(), 0, trailBoundNone)),
+		RunnerFromEnv: reachRunnerPathFromEnv(finRecordEnvDelta()),
+		ClaudeCommand: tdnFixturePtyArgv,
+	})
+
+	// Read off the MARSHALLED sub-record, because the claim is about the published
+	// artifact rather than about an in-memory struct. The json name is spelled here
+	// rather than derived: a renamed tag makes the presence check below RED, so the
+	// literal defends itself.
+	trailerKeys := func(arm string, rec finTrailerRecord) json.RawMessage {
+		t.Helper()
+		encoded, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshalling %s's trailer sub-record: %v", arm, err)
+		}
+		var keyed map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &keyed); err != nil {
+			t.Fatalf("decoding %s's marshalled trailer sub-record: %v", arm, err)
+		}
+		raw, ok := keyed["trailer_keys"]
+		if !ok {
+			t.Fatalf("%s renders no trailer_keys key at all, only %d other(s): an omitempty tag "+
+				"drops the key on the empty value, which would render a seen trailer carrying no "+
+				"names byte-identically to a record that never had a trailer", arm, len(keyed))
+		}
+		return raw
+	}
+
+	seenKeys := trailerKeys("the seen record", seen.Trailer)
+	absentKeys := trailerKeys("the no-trailer record", absent.Trailer)
+
+	if string(absentKeys) != "null" {
+		t.Errorf("the no-trailer record renders trailer_keys as %s, want null: no names were read "+
+			"off a scan that found no trailer, and a record rendering an empty ARRAY there claims "+
+			"a reading it never took", absentKeys)
+	}
+	var published []string
+	if err := json.Unmarshal(seenKeys, &published); err != nil {
+		t.Fatalf("decoding the seen record's trailer_keys %s: %v", seenKeys, err)
+	}
+	if len(published) == 0 {
+		t.Errorf("the seen record renders trailer_keys as %s: the match return is past "+
+			"tr.Type == \"result\" and so reachable only from a line that already decoded as a "+
+			"JSON object, which is why an empty name set is unreachable from this arm", seenKeys)
+	}
+	if string(seenKeys) == string(absentKeys) {
+		t.Errorf("both records render trailer_keys as %s, so a reader of the artifact cannot tell "+
+			"a trailer that was READ from one that was never there — the distinction this family "+
+			"exists to keep, and the one an omitempty-shaped collapse destroys", seenKeys)
 	}
 }

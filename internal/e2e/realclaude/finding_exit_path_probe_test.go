@@ -266,7 +266,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// because finLivePinReduce separates the populations afterwards, and the
 		// gather has NO SUCH REDUCTION — it calls pinScanArgv(in.Needles, nil) and
 		// fills MatchCount, RowsScanned and one pinReadState per matched pid from
-		// that one call (finding_run_gather_test.go:478). Adding the claude needle
+		// that one call (finding_run_gather_test.go:605). Adding the claude needle
 		// would put claude's own row into the classifier's match-count arms and
 		// into the published liveness list. The FIFO path alone is safe without
 		// exclusions: neither this binary's argv nor pyry's carries it.
@@ -337,7 +337,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	//
 	// EVERY RENDERING BELOW IS FIELD-BY-FIELD OR json.Marshal. NEVER a %v verb applied
 	// to a struct or a slice: that is the content rule the writer's own note line
-	// states (finding_artifact_write_test.go:141-150), and it is the concrete
+	// states (finding_artifact_write_test.go:171-180), and it is the concrete
 	// mechanism by which a %v on h.Pin.Rows would print every matched row's full argv
 	// from a line that reads as ordinary debug formatting.
 	if blob, err := json.Marshal(h.Staging); err != nil {

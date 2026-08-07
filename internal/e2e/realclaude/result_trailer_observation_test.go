@@ -131,7 +131,7 @@ type trailScanResult struct {
 	// Names only, and unlike Line that is structural rather than a discipline:
 	// trailKeyNames returns []string and discards its map[string]json.RawMessage
 	// internally, so no VALUE can cross. The names still come from claude — the
-	// claim is only that the payload is not among them; bounding them is #1358's.
+	// claim is only that the payload is not among them; bounding them is #1363's.
 	KeyNames []string `json:"trailer_keys,omitempty"`
 	Detail   string   `json:"detail"`
 }

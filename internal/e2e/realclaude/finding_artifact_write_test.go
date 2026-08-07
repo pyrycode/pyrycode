@@ -90,13 +90,43 @@ import (
 //
 // It is the claim #1290 made available and this ticket publishes: the record
 // retains no trailer line in any form, capped or otherwise — finTrailerRecord
-// (finding_trailer_evidence_test.go:142) is ten scalars with no Line, and
-// finRecordInputs carries neither a trailObservation nor a trailScanResult
-// (finding_run_record_test.go:214-221) — so there is no field left to mark for
-// review.
-const finWriteSafetyClaim = "This record carries no verbatim model output and no verbatim argv: " +
-	"every field it holds is a count, an integer, an enumerated verdict, a decoded trailer scalar, " +
-	"or a string this rig authored."
+// (finding_trailer_evidence_test.go:193) is ten scalars and a name list with no
+// Line, and finRecordInputs carries neither a trailObservation nor a
+// trailScanResult (finding_run_record_test.go:214-221) — so there is no field
+// left to mark for review.
+//
+// # Why it names the key names rather than resting on the five categories
+//
+// A key name is none of the five. It is a string CLAUDE authored rather than one
+// this rig authored, and #1363 put a field of them on the record. Left unrepaired
+// the sentence would tell an operator that everything in the file is safe to paste
+// unreviewed while standing beside the one field for which that is a claim needing
+// proof rather than a restatement of the record's shape — and NOTHING WOULD CATCH
+// IT, because TestFinWriteArtifactPublishesNoVerbatimModelOutput asserts only that
+// the note CONTAINS this constant and never that it is true. The false version
+// would ship green, which is why the repair could not defer past the field.
+//
+// It describes the names as SAFE rather than as reviewable, and that is forced
+// rather than chosen: the note may carry neither "operator-review-before-paste"
+// nor "OPERATOR-REVIEW", because the record still has no field that obligation
+// attaches to. So both halves of the safety are stated instead — BOUNDED, in count
+// and in length, by finBoundKeyNames' two constants (finding_run_gather_test.go),
+// and VALUE-FREE, proved at the reader tier by
+// TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310), which plants
+// a distinct needle in every string-valued position of a trailer line and asserts
+// none reaches the names. Had the honest wording been "review this before
+// pasting", the right answer would have been not to carry the names at all.
+//
+// It says CLAUDE-authored and not model-authored, which is the accurate word: the
+// eleven top-level names are the CLI serialiser's envelope, so a prompt-injected
+// model influences `result`'s VALUE and cannot add a top-level key. That is what
+// keeps the sentence's opening half — no verbatim model output — true.
+const finWriteSafetyClaim = "This record carries no verbatim model output and no verbatim argv. " +
+	"Every field it holds is a count, an integer, an enumerated verdict, a decoded trailer scalar, " +
+	"or a string this rig authored — with one field named here rather than left to be discovered: " +
+	"the trailer's top-level key NAMES cross verbatim from claude's own output line. They are key " +
+	"names and never values, bounded in count and in length, and no byte of any field's contents " +
+	"can reach them."
 
 const (
 	finWriteRecordFile = "run.json"
@@ -671,12 +701,12 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // # Why zero, and not "once, in a field marked for review"
 //
 // The record carries no trailer line in any form, capped or otherwise:
-// finTrailerRecord (finding_trailer_evidence_test.go:142) is ten scalars with no
-// Line, and finRecordInputs carries neither a trailObservation nor a
-// trailScanResult (finding_run_record_test.go:214-221), so trailScanResult.Line
-// is unreachable from this record at any depth. A SINGLE OCCURRENCE WOULD
-// THEREFORE MEAN A REDUCTION HAD BEEN WIDENED BACK INTO A RETENTION — not that a
-// permitted field needed review.
+// finTrailerRecord (finding_trailer_evidence_test.go:193) is ten scalars and a
+// name list with no Line, and finRecordInputs carries neither a trailObservation
+// nor a trailScanResult (finding_run_record_test.go:214-221), so
+// trailScanResult.Line is unreachable from this record at any depth. A SINGLE
+// OCCURRENCE WOULD THEREFORE MEAN A REDUCTION HAD BEEN WIDENED BACK INTO A
+// RETENTION — not that a permitted field needed review.
 //
 // # RETIRED BY #1326: the trailer channel
 //
@@ -911,7 +941,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 // finding_run_record_test.go:934-944 gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
-// (finding_trailer_evidence_test.go:688, finding_attribution_fanout_test.go:758),
+// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:758),
 // less the redundant trailer_line, which "line" already covers.
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)
@@ -993,7 +1023,7 @@ func TestFinWriteArtifactPublishesNoVerbatimModelOutput(t *testing.T) {
 	t.Run("resultTrailer structurally cannot carry the assistant payload", func(t *testing.T) {
 		// The claim three shipped comments state in prose
 		// (result_trailer_observation_test.go:114,
-		// finding_trailer_evidence_test.go:38 and :616) and none of them checks.
+		// finding_trailer_evidence_test.go:38 and :690) and none of them checks.
 		// The decode is what feeds the four published scalars, so its SHAPE is what
 		// makes them safe.
 		typ := reflect.TypeOf(resultTrailer{})
