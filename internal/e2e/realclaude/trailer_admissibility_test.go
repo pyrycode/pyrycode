@@ -611,11 +611,15 @@ func trailGateCases() []trailGateCase {
 //
 // EVERY VALUE IN THIS MAP HAS AN ARM IN ITS CONSUMER — trailGate and
 // trailAdmitAttribution for the first two spaces, trailClassifyRun for the
-// third. That is a comment and not a check: this test catches a COLLIDING value,
-// never an UNHANDLED one, so a sixth gate or admit value added here and to its
-// membership predicate would pass trailClassifyRun's contract block and then find
-// no arm. Recorded in #1271's spec § Open questions Q2; if the value spaces ever
-// grow, this is the first thing to revisit.
+// third, trailReasonAgainstPath (trailer_terminal_reason_test.go:215) for the
+// fourth. That is a comment and not a check: this test catches a COLLIDING
+// value, never an UNHANDLED one, so a sixth gate or admit value added here and
+// to its membership predicate would pass trailClassifyRun's contract block and
+// then find no arm. Recorded in #1271's spec § Open questions Q2; if the value
+// spaces ever grow, this is the first thing to revisit. #1366's fourth space
+// closes that gap for itself rather than here: TestTrailReasonAgainstPath
+// asserts the set of values its nine rows REACH is exactly the six, which is the
+// unhandled-value check this map cannot make.
 func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 	all := map[string]string{
 		// This ticket's gate values.
@@ -644,6 +648,13 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailOutcomeVoidNoRowsParsed":       trailOutcomeVoidNoRowsParsed,
 		"trailOutcomeVoidLivenessInstrument": trailOutcomeVoidLivenessInstrument,
 		"trailOutcomeOutOfContract":          trailOutcomeOutOfContract,
+		// #1366's terminal-reason-against-path values.
+		"trailReasonAbsentOwesNone":  trailReasonAbsentOwesNone,
+		"trailReasonPresentOwesNone": trailReasonPresentOwesNone,
+		"trailReasonAbsentOwesOne":   trailReasonAbsentOwesOne,
+		"trailReasonBlankOwesOne":    trailReasonBlankOwesOne,
+		"trailReasonNamedOwesOne":    trailReasonNamedOwesOne,
+		"trailReasonPathUnnamed":     trailReasonPathUnnamed,
 		// #1266's shipped spaces, in the same map on purpose: a gate result that
 		// collided with a scan state would be a result and an input wearing one
 		// string, which is the confusion the gate- prefix exists to prevent.
