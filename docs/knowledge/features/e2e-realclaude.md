@@ -786,10 +786,17 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 - `trailer_admissibility_test.go` (#1270) — **offline instrument, not a
   probe**; two pure predicates that decide whether #1266's trailer scan and
   #1253's reap-log attribution can support a claim, so #1271's downstream
-  classifier never has to. `trailGate(trailScanResult) trailGateResult` maps
+  classifier never has to. `trailGate(trailGateInput) trailGateResult` maps
   onto a five-value positive allowlist (`trailGateUsable`/`NoTrailer`/
   `ScanAborted`/`BudgetFired`/`OutOfContract`) and certifies a non-empty
-  terminal reason on the two arms that carry one.
+  terminal reason on the two arms that carry one. **#1373** widened the
+  input from a bare `trailScanResult` to `trailGateInput{Scan, RunnerPath}`
+  so the gate's input can carry which runner produced the trailer line
+  (`terminal_reason` means different things on ptyrunner vs. streamrunner);
+  `RunnerPath` is echoed unread onto a fourth `trailGateResult` field and no
+  arm reads it — proved, not stated, by `TestTrailGateIgnoresTheRunnerPath`
+  (8 rows × 5 readings, byte-identical `Detail`). The decision that consumes
+  it is #1374's. See [`codebase/1373.md`](../codebase/1373.md).
   `trailAdmitAttribution(tdnReapOutcome, certified string) trailAdmitResult`
   maps the reap attribution onto a seven-value allowlist — one admissible
   value (`trailAdmitProof`, requiring verdict `tdnReapHeldPGIDKilled`,

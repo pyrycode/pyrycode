@@ -638,7 +638,8 @@ func trailRunCases() []trailRunCase {
 	// pinned to what the shipped functions emit rather than to a hand-typed
 	// approximation of them — the same reason TestTrailGate routes four rows
 	// through trailScan.
-	realGate := trailGate(trailScan([]byte(trailFixtureTrailer + "\n")))
+	realGate := trailGate(trailGateInput{Scan: trailScan([]byte(trailFixtureTrailer + "\n")),
+		RunnerPath: trailRunnerUnread()})
 	realAdmit := trailAdmitAttribution(
 		tdnClassifyReapLog([]byte(trailReapLine(1, "[7788]")+"\n"), 7788), realGate.Reason)
 	fromProducers := trailRunWellFormed()
