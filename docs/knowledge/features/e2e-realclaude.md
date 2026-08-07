@@ -1020,6 +1020,36 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (`finding_run_gather_test.go`'s `TestFinGatherRecordPublishesTheMeasuredMissBound`),
   and [`codebase/1363.md`](../codebase/1363.md) for the key-names field.
 
+- `finding_key_name_bounds_test.go` (#1364) — **offline instrument, not a
+  probe**; pins all five clauses of `finBoundKeyNames`' doc comment (#1363),
+  none of which shipped pinned. Two tests drive hostile fixtures through the
+  shipped builders (`trailScan` → `finTrailerSighting` → `finTrailerBuild`)
+  and assert both the unbounded reader output and the published, bounded
+  names from shipped code alone; two call the helper directly for the two
+  clauses no fixture can reach (nil-not-`[]string{}` on empty input; its own
+  backing array on every path, including the under-both-bounds fast path a
+  fixture can never exercise). The hostile fixtures are deliberately small —
+  a few hundred bytes — because `trailScan`'s `bufio.Scanner` buffer aborts
+  rather than truncates past its 64 KiB default, and on the aborted arm the
+  names field renders `null`, making "the field is bounded" trivially true
+  over a fixture that produced no names at all; the drive helper asserts
+  `trailer-seen` as a fatal precondition specifically to catch a future
+  fixture that grows into that ceiling. Marker-aware: a truncated name
+  carries `reachTruncationMarker` on top of the kept bytes, so
+  `len(name) <= finTrailerMaxKeyNameBytes` is red against a correct build.
+  Purely additive, one new 382-line file, zero production files touched,
+  zero existing test files touched — the AC that no inbound line-number cite
+  in `internal/` moves holds by construction rather than by argument. Seven
+  mutants of `finBoundKeyNames`, run via `go test -overlay`, all RED; 75 PASS
+  / 0 SKIP on `-run '^TestFin|^TestTrail'` (71 before). Explicitly left for
+  #1362: the Detail-interpolation prohibition (measured and cut — the
+  hostile fixture's names-interpolating mutant reaches 444 of a 470-byte
+  headroom budget and would ship green over the violation it claims to
+  detect) and the artifact-wide containment sweep. See
+  [`codebase/1364.md`](../codebase/1364.md) for the full implementation,
+  the mutation matrix, and a stale comment in
+  `finding_trailer_evidence_test.go:203` left for #1362 to correct.
+
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
   every matched row reduced to `finRecordProc` (`PID`/`PPID`/`PGID` — three
