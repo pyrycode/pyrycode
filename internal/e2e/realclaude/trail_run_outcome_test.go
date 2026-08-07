@@ -1132,7 +1132,7 @@ func TestTrailRunComposesWithGateCases(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:915) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:984) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, and a pinStateOutcome's Detail and ToolStderr —
