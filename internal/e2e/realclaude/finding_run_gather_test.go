@@ -543,7 +543,12 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// than re-scanned, because that is the composition a live probe performs.
 	obs := trailWaitForTrailer(in.Stdout, finGatherTrailerWait)
 	readings.BoundFrom = obs.BoundFrom
-	readings.Gate = trailGate(obs.trailScanResult)
+	// The runner path is the NOT-READ reading in this slice: this gather reads no
+	// argv for it, and tdnRunnerFromArgv's answer to an empty command says
+	// precisely that rather than guessing a path. #1374 replaces it with the
+	// reading derived from this gather's own argv scan.
+	readings.Gate = trailGate(trailGateInput{Scan: obs.trailScanResult,
+		RunnerPath: trailRunnerUnread()})
 
 	// What that sighting MEASURED, copied out of the same obs that just filled
 	// BoundFrom and fed the gate: one poll, no second scan, no second wait and no
@@ -772,10 +777,15 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 
 	// C2 (trail_run_outcome_test.go:377): the gate is fed a REAL SCANNED TRAILER.
 	// Byte for byte against the shipped producers over the same bytes the gather
-	// read — trailGateResult is three strings, so == suffices. A hand-built
+	// read — trailGateResult is four strings, so == suffices. A hand-built
 	// trailGateResult{Value: trailGateUsable} is exactly the fixture C2 exists to
 	// reject, and this equality is what rules it out.
-	if want := trailGate(trailScan(seed)); readings.Gate != want {
+	//
+	// The fourth string is the carried runner path, and both sides go through
+	// trailRunnerUnread(), so this check now also asserts the gather handed the
+	// gate the reading it was supposed to.
+	if want := trailGate(trailGateInput{Scan: trailScan(seed),
+		RunnerPath: trailRunnerUnread()}); readings.Gate != want {
 		t.Fatalf("C2: the gate reads %+v; want %+v — the gate must be trailGate's own output over "+
 			"the scanned trailer, never a value the gather typed in", readings.Gate, want)
 	}

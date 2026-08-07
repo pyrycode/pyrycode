@@ -154,7 +154,11 @@ func trailRigGather(stdout *probeSyncBuffer, needles []string) (trailRunReadings
 	// than re-scanned, because that is the composition a live probe performs.
 	obs := trailWaitForTrailer(stdout, trailRigTrailerWait)
 	readings.BoundFrom = obs.BoundFrom
-	readings.Gate = trailGate(obs.trailScanResult)
+	// The runner path is the NOT-READ reading in this slice: no argv is read here,
+	// and tdnRunnerFromArgv's answer to an empty command says precisely that. #1374
+	// replaces it with the reading derived from this rig's own argv scan below.
+	readings.Gate = trailGate(trailGateInput{Scan: obs.trailScanResult,
+		RunnerPath: trailRunnerUnread()})
 
 	// The attribution leg. The nil is a LITERAL here and never a parameter: there
 	// is no pyry in this rig, so there is no stderr to pass, and making it

@@ -61,6 +61,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -161,6 +162,43 @@ const (
 
 // --- the records -------------------------------------------------------------
 
+// trailGateInput is what the gate decides over: trailScan's output, plus the
+// runner path the run was observed to take. terminal_reason is pyry's invention
+// and the two runner paths owe it differently, so the same trailer shape is a
+// healthy run on one path and a broken record on the other; deciding which needs
+// the path.
+//
+// # The reading is kept OFF trailScanResult
+//
+// That type is trailScan's output over bytes alone, and a runner path is not a
+// property of the line. It is also pinned unreachable from the published record
+// (finding_run_record_test.go:780-812), so widening it would put that pin up for
+// renegotiation for no gain here.
+//
+// # RunnerPath holds the REDUCED answer and never the argv
+//
+// RunnerPath is tdnRunnerFromArgv's OUTPUT — one of its five constant answers —
+// and never its input. That is the rule finRecordInputs.ClaudeCommand states at
+// its own tier (finding_run_record_test.go:235-238): the argv is READ, reduced to
+// one of tdnRunnerFromArgv's constant answers, and NEVER RETAINED anywhere in the
+// record. Nothing on this type gives verbatim argv a place to land, and trailGate
+// itself calls no argv reader at all — not tdnClaudeCommand, not reachProc.Command,
+// not pinScan.Matches, and not reachRunnerPathFromArgv, which keys on
+// --append-system-prompt-file and would label a correctly-wired stream run
+// ptyrunner (teardown_liveness_probe_test.go:759-766).
+//
+// # No arm reads it, in this slice
+//
+// #1373 carries the reading to the gate and changes no arm; the decision that
+// consults it lands in #1374, where trailReasonAgainstPath
+// (trailer_terminal_reason_test.go:215) stops having only its own tests for
+// callers. TestTrailGateIgnoresTheRunnerPath is what makes "no arm reads it" a
+// proof rather than a claim.
+type trailGateInput struct {
+	Scan       trailScanResult
+	RunnerPath string
+}
+
 // trailGateResult is what the gate produces. It is TRAP-FREE BY CONSTRUCTION: no
 // *resultTrailer is reachable from it, directly or through an embedded field, so
 // a consumer that branches on this value holds nothing to dereference.
@@ -185,6 +223,26 @@ type trailGateResult struct {
 	// up, the exact defect the nil Trailer pointer was chosen to prevent.
 	Reason string `json:"terminal_reason,omitempty"`
 	Detail string `json:"detail"`
+	// RunnerPath is the reading the gate was HANDED, copied out unread. No arm
+	// consults it; it is here so that the reading which reached a PURE function is
+	// observable from outside it, which is the only channel a later ticket's
+	// composition test can assert against.
+	//
+	// It ANSWERS the rule above rather than outgrowing it. The value is one of
+	// tdnRunnerFromArgv's five constant answers — source-authored prose reduced
+	// from argv, READ and NEVER RETAINED, exactly as finRecordInputs.ClaudeCommand
+	// states it (finding_run_record_test.go:235-238) — so it is not a copy of an
+	// input's captured bytes, and TestTrailAdmissibilityRecordsCarryNoCapturedBytes
+	// keeps enforcing that over the marshalled record.
+	//
+	// AN UNFILLED READING READS AS "" HERE, which no shipped producer emits:
+	// tdnRunnerFromArgv returns a non-empty string on every branch, including for
+	// "". Because no arm reads the field, an unfilled one cannot misroute a
+	// decision and the worst case is a published record whose runner_path is
+	// absent, which reads as "not recorded". What "" MEANS at a decision is
+	// #1374's question — that is the ticket where an arm first depends on it, and
+	// it inherits the question from here rather than rediscovering it.
+	RunnerPath string `json:"runner_path,omitempty"`
 }
 
 // trailAdmitResult is what the admissibility predicate produces, under the same
@@ -239,21 +297,37 @@ func trailDetail(format string, args ...any) string {
 // (emitter.go:428-437). Consulting all three would introduce a fourth question —
 // what to do when they disagree — for no gain. terminal_reason is the field the
 // teardown path is documented against: one field, one decision.
-func trailGate(res trailScanResult) trailGateResult {
+//
+// # The runner path is CARRIED, never read
+//
+// in.RunnerPath reaches every return site and no branch. Not one of the seven
+// arms consults it, and not one Detail interpolates it: every Detail here is
+// fixed prose over this file's own constants and the scan's own state, which is
+// the doctrine trailReasonAgainstPath states for itself at
+// trailer_terminal_reason_test.go:201-214. Where that function holds the
+// guarantee by review of its source, this one holds it by
+// TestTrailGateIgnoresTheRunnerPath, which drives every fixture row under each of
+// tdnRunnerFromArgv's five distinct answers and requires a BYTE-IDENTICAL Detail
+// across all five.
+//
+// The reading is echoed onto the result unread, so the arriving value stays
+// observable from outside a pure function. #1374 is where an arm first reads it.
+func trailGate(in trailGateInput) trailGateResult {
 	// Contract, first: a State outside the three trailScan documents is not a
 	// reading. Catches the zero trailScanResult, whose State is "".
-	if res.State != trailSeen && res.State != trailAbsent && res.State != trailAborted {
+	if in.Scan.State != trailSeen && in.Scan.State != trailAbsent && in.Scan.State != trailAborted {
 		return trailGateResult{
 			Value: trailGateOutOfContract,
 			Detail: trailDetail("state %q is not one of the three trailScan documents (%s / %s / "+
 				"%s), so this record is not a reading. Reported out of contract rather than as an "+
 				"absence, which would file a caller's bug under \"pyry never finished the turn\"",
-				res.State, trailSeen, trailAbsent, trailAborted),
+				in.Scan.State, trailSeen, trailAbsent, trailAborted),
+			RunnerPath: in.RunnerPath,
 		}
 	}
 
 	// The two states that carry no trailer. Neither touches Trailer.
-	switch res.State {
+	switch in.Scan.State {
 	case trailAbsent:
 		return trailGateResult{
 			Value: trailGateNoTrailer,
@@ -261,6 +335,7 @@ func trailGate(res trailScanResult) trailGateResult {
 				"terminal reason exists to certify and no claim may rest on this run's trailer. "+
 				"Distinct from %s: this is a statement about the bytes, that one is the "+
 				"instrument reporting it could not read them", trailGateScanAborted),
+			RunnerPath: in.RunnerPath,
 		}
 	case trailAborted:
 		return trailGateResult{
@@ -269,6 +344,7 @@ func trailGate(res trailScanResult) trailGateResult {
 				"the instrument's own breakage and never an answer about pyry, which is why it is "+
 				"kept apart from %s — a line past bufio.Scanner's 64 KiB default and a genuine "+
 				"absence are otherwise indistinguishable", trailGateNoTrailer),
+			RunnerPath: in.RunnerPath,
 		}
 	}
 
@@ -276,17 +352,18 @@ func trailGate(res trailScanResult) trailGateResult {
 	// pointer: trailScan sets Trailer on its trailSeen return and on no other
 	// (result_trailer_observation_test.go:180-233), so a nil here is a
 	// hand-built record, not something the producer can emit.
-	if res.Trailer == nil {
+	if in.Scan.Trailer == nil {
 		return trailGateResult{
 			Value: trailGateOutOfContract,
 			Detail: trailDetail("state %s carries a nil trailer, a record trailScan cannot emit. "+
 				"Reported out of contract because both alternatives are worse: calling it usable "+
 				"would dereference nil, and calling it absent would contradict the state the "+
 				"record itself claims", trailSeen),
+			RunnerPath: in.RunnerPath,
 		}
 	}
 
-	reason := res.Trailer.TerminalReason
+	reason := in.Scan.Trailer.TerminalReason
 	if reason == "" {
 		return trailGateResult{
 			Value: trailGateOutOfContract,
@@ -296,6 +373,7 @@ func trailGate(res trailScanResult) trailGateResult {
 				"emitter.go:383-391 is a chokepoint substituting the recorded detail or "+
 				"\"unclassified\" before marshalling — so this is a contract check on a "+
 				"hand-built input and NO LIVE REPRO EXISTS", trailSeen),
+			RunnerPath: in.RunnerPath,
 		}
 	}
 
@@ -308,6 +386,7 @@ func trailGate(res trailScanResult) trailGateResult {
 				"was written. A reap-log attribution on this path is void, not negative. The "+
 				"reason is certified anyway, because the predicate needs it to name that void",
 				reason),
+			RunnerPath: in.RunnerPath,
 		}
 	}
 
@@ -318,6 +397,7 @@ func trailGate(res trailScanResult) trailGateResult {
 			"%q — so emitter.Close() wrote the trailer before the reap defer on this path "+
 			"(runner.go:479-485, :398) and a reap-log attribution can be proof", reason,
 			trailBudgetTerminalReason),
+		RunnerPath: in.RunnerPath,
 	}
 }
 
@@ -520,7 +600,12 @@ func trailIsAdmitValue(v string) bool {
 // over a second, hand-kept list that could drift out of agreement with it.
 type trailGateCase struct {
 	name string
-	in   trailScanResult
+	// in carries the runner path PER ROW rather than the sweep supplying one
+	// beside the call. That is what leaves TestTrailGate's, TestTrailGateThenAdmit's
+	// and TestTrailRunComposesWithGateCases' `trailGate(tc.in)` textually untouched
+	// by #1373, and it is the shape #1374 needs, since the decision it adds
+	// distinguishes rows BY path.
+	in   trailGateInput
 	want string
 	// reason is the terminal reason the gate must certify: non-empty exactly on
 	// trailGateUsable and trailGateBudgetFired.
@@ -535,45 +620,75 @@ func trailReapLine(count int, pgids string) string {
 		tdnReapMessage, count, pgids)
 }
 
+// trailRunnerUnread is the honest reading for "the runner was not read from the
+// process table": tdnRunnerFromArgv's own answer to an empty command, obtained by
+// CALLING the shipped reader rather than by re-typing its prose as a literal.
+//
+// An empty argv is admissible here and is never a staging failure.
+// tdnClaudeCommand returns "" when zero OR SEVERAL rows carry the claude needle
+// (teardown_liveness_probe_test.go:557-575), so emptiness is ambiguity about
+// which row was claude's — never a claim that the run took the other path, which
+// is exactly what tdnRunnerFromArgv answers with its own indeterminate string.
+//
+// Both gathers and all eight fixture rows go through this one function, so the
+// two sides of C2's whole-struct equality (finding_run_gather_test.go:778) cannot
+// drift apart. #1374 replaces the gathers' use of it with the reading derived
+// from each gather's own argv scan; the fixture rows keep it.
+//
+// A function rather than a package-level var, matching trailRigHeldPGID()'s shape
+// in this family (trail_run_rig_test.go:119).
+func trailRunnerUnread() string { return tdnRunnerFromArgv("") }
+
 // trailGateCases returns every gate input under test. The four rows that can be
 // produced by the real scan go through trailScan rather than a hand-built
 // record, so the reachable arms stay pinned to what the shipped producer
 // actually emits; the four that trailScan CANNOT emit are hand-built, because
 // that is precisely what the contract checks exist for.
+//
+// Every row carries the same runner path, because #1373 adds no arm that reads
+// one: a row varying it would suggest a distinction the gate does not make. The
+// sweep that VARIES it is TestTrailGateIgnoresTheRunnerPath, which drives these
+// same eight rows under all five readings.
 func trailGateCases() []trailGateCase {
 	return []trailGateCase{
 		{
-			name:   "an ordinary trailer is usable and certifies its reason",
-			in:     trailScan([]byte(trailFixtureTrailer + "\n")),
+			name: "an ordinary trailer is usable and certifies its reason",
+			in: trailGateInput{Scan: trailScan([]byte(trailFixtureTrailer + "\n")),
+				RunnerPath: trailRunnerUnread()},
 			want:   trailGateUsable,
 			reason: "completed",
 		},
 		{
-			name:   "a max_turns trailer is budget-fired and still certifies its reason",
-			in:     trailScan([]byte(trailPaddedTrailer(2000) + "\n")),
+			name: "a max_turns trailer is budget-fired and still certifies its reason",
+			in: trailGateInput{Scan: trailScan([]byte(trailPaddedTrailer(2000) + "\n")),
+				RunnerPath: trailRunnerUnread()},
 			want:   trailGateBudgetFired,
 			reason: trailBudgetTerminalReason,
 		},
 		{
 			name: "ordinary stream-json with no trailer certifies nothing",
-			in:   trailScan([]byte(trailFixtureNoTrailer)),
+			in: trailGateInput{Scan: trailScan([]byte(trailFixtureNoTrailer)),
+				RunnerPath: trailRunnerUnread()},
 			want: trailGateNoTrailer,
 		},
 		{
 			name: "a line past bufio.Scanner's default aborts the scan and certifies nothing",
-			in:   trailScan([]byte(trailPaddedTrailer(trailOverlongPad) + "\n")),
+			in: trailGateInput{Scan: trailScan([]byte(trailPaddedTrailer(trailOverlongPad) + "\n")),
+				RunnerPath: trailRunnerUnread()},
 			want: trailGateScanAborted,
 		},
 		{
 			name: "a state nobody defined is out of contract, never absent",
-			in:   trailScanResult{State: "some-state-nobody-defined"},
+			in: trailGateInput{Scan: trailScanResult{State: "some-state-nobody-defined"},
+				RunnerPath: trailRunnerUnread()},
 			want: trailGateOutOfContract,
 		},
 		{
 			// Named apart from the row above because the zero value is the
 			// realistic accident, not an invented string.
 			name: "the zero scan result is out of contract",
-			in:   trailScanResult{},
+			in: trailGateInput{Scan: trailScanResult{},
+				RunnerPath: trailRunnerUnread()},
 			want: trailGateOutOfContract,
 		},
 		{
@@ -581,12 +696,14 @@ func trailGateCases() []trailGateCase {
 			// Reaching a value here at all is the assertion — a panic fails the
 			// test by escaping the subtest.
 			name: "a seen state carrying a nil trailer is out of contract and does not panic",
-			in:   trailScanResult{State: trailSeen, Trailer: nil},
+			in: trailGateInput{Scan: trailScanResult{State: trailSeen, Trailer: nil},
+				RunnerPath: trailRunnerUnread()},
 			want: trailGateOutOfContract,
 		},
 		{
 			name: "a seen state whose terminal_reason is empty is out of contract",
-			in:   trailScanResult{State: trailSeen, Trailer: &resultTrailer{Type: "result"}},
+			in: trailGateInput{Scan: trailScanResult{State: trailSeen,
+				Trailer: &resultTrailer{Type: "result"}}, RunnerPath: trailRunnerUnread()},
 			want: trailGateOutOfContract,
 		},
 	}
@@ -757,12 +874,15 @@ func TestTrailGate(t *testing.T) {
 		// Three inputs reach one value, so without this the three arms are
 		// indistinguishable in a published record and a reader cannot tell a
 		// nil pointer from an unfilled reason.
-		nilTrailer := trailGate(trailScanResult{State: trailSeen})
+		nilTrailer := trailGate(trailGateInput{Scan: trailScanResult{State: trailSeen},
+			RunnerPath: trailRunnerUnread()})
 		if !strings.Contains(nilTrailer.Detail, "nil trailer") {
 			t.Errorf("nil-trailer detail: got %q, want it to name the nil trailer",
 				nilTrailer.Detail)
 		}
-		emptyReason := trailGate(trailScanResult{State: trailSeen, Trailer: &resultTrailer{}})
+		emptyReason := trailGate(trailGateInput{
+			Scan:       trailScanResult{State: trailSeen, Trailer: &resultTrailer{}},
+			RunnerPath: trailRunnerUnread()})
 		if !strings.Contains(emptyReason.Detail, "terminal_reason is empty") {
 			t.Errorf("empty-reason detail: got %q, want it to name the empty terminal reason",
 				emptyReason.Detail)
@@ -772,12 +892,142 @@ func TestTrailGate(t *testing.T) {
 				"cannot render a blank terminal_reason today, and a detail implying it can "+
 				"would send a reader hunting for a run that does not exist", emptyReason.Detail)
 		}
-		unknown := trailGate(trailScanResult{State: "some-state-nobody-defined"})
+		unknown := trailGate(trailGateInput{Scan: trailScanResult{State: "some-state-nobody-defined"},
+			RunnerPath: trailRunnerUnread()})
 		if !strings.Contains(unknown.Detail, "some-state-nobody-defined") {
 			t.Errorf("unknown-state detail: got %q, want it to quote the state it rejected",
 				unknown.Detail)
 		}
 	})
+}
+
+// trailGateRunnerReadings returns tdnRunnerFromArgv's five distinct answers, each
+// obtained by DRIVING THE SHIPPED READER over an argv rather than by re-typing
+// its prose as a literal. A re-typed copy would go on passing after the reader
+// reworded itself, which is the vacuity the sweep below exists to avoid.
+//
+// Five and not three. The shipped "three" that finRecordInputs.ClaudeCommand's
+// doc names (finding_run_record_test.go:235-238) counts the LEADING TOKENS
+// finRecordRunnerLabel reduces to — ptyrunner / streamrunner / indeterminate —
+// not the strings the function returns, and TestTdnRunnerFromArgv asserts by
+// strings.HasPrefix against those three tokens over six rows, two of which reach
+// one answer. The function returns five, and the invariance claim is about the
+// five.
+//
+// The argvs are the shipped fixtures where shipped ones exist
+// (teardown_liveness_probe_test.go:897, :902) and mirror TestTdnRunnerFromArgv's
+// own rows otherwise. They are inputs to the READER and reach the gate never.
+func trailGateRunnerReadings() []string {
+	return []string{
+		tdnRunnerFromArgv(tdnFixturePtyArgv),
+		tdnRunnerFromArgv(tdnFixtureStreamArgv),
+		tdnRunnerFromArgv(tdnFixturePtyArgv + " --input-format stream-json"),
+		tdnRunnerFromArgv(`/opt/node/bin/node /opt/claude/cli.js ` +
+			`--append-system-prompt-file /tmp/wd/system.txt`),
+		tdnRunnerFromArgv(""),
+	}
+}
+
+// TestTrailGateIgnoresTheRunnerPath is AC2 made deterministic: #1373 carries the
+// runner path to the gate and NO ARM READS IT. The decision — value, certified
+// reason and Detail — must be identical across every reading, so that #1374's
+// red, when it lands, is a statement about the gate's arms rather than about a
+// signature.
+//
+// # The Detail is compared AS BYTES
+//
+// A Detail that silently acquired the path would pass a value check while
+// changing what the published record says, and Detail is what a reader of the
+// artifact actually reads. Comparing bytes is what makes "the decision did not
+// move" a claim about the published record rather than about the enum alone.
+//
+// # Two clauses keep the sweep from passing vacuously
+//
+//   - The readings are pairwise distinct. Two collapsed answers would silently
+//     shrink 40 comparisons to fewer, and the count is precisely the thing the
+//     ticket had to correct from the shipped "three".
+//   - The arriving reading is READ BACK from outside the gate. A sweep that built
+//     its input without filling the path would otherwise pass forty identical
+//     comparisons while proving nothing about carriage. This assertion is TOTAL
+//     over the gate's seven return sites — the eight rows reach all seven — so an
+//     arm that forgot to carry the field cannot hide behind an arm that did.
+//
+// # The copies alias one *resultTrailer, deliberately not mutated
+//
+// Varying the reading copies each row's trailGateInput, and a struct copy copies
+// the POINTER: all five inputs for a row share one resultTrailer, the same
+// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:610).
+// Only RunnerPath is ever assigned and nothing is ever written through the
+// pointer, which is what keeps that sharing race-free — and it is what would
+// have to hold load-bearingly if these subtests ever took t.Parallel().
+func TestTrailGateIgnoresTheRunnerPath(t *testing.T) {
+	readings := trailGateRunnerReadings()
+
+	// Clause A.
+	for i := range readings {
+		for j := i + 1; j < len(readings); j++ {
+			if readings[i] == readings[j] {
+				t.Fatalf("readings %d and %d are both %q: the sweep claims to drive %d DISTINCT "+
+					"answers, and two that collapsed would make it weaker than it says",
+					i, j, readings[i], len(readings))
+			}
+		}
+	}
+
+	// "every other field is compared" has to stay true under a later edit, so the
+	// field count is pinned rather than trusted — this family's own idiom
+	// (finding_run_record_test.go:780-782).
+	if n := reflect.TypeOf(trailGateResult{}).NumField(); n != 4 {
+		t.Fatalf("trailGateResult has %d fields, want 4: a fifth must either join the compared "+
+			"set below or state its own exemption, and until it does this sweep no longer "+
+			"proves what its name says", n)
+	}
+
+	for _, tc := range trailGateCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			var base trailGateResult
+
+			for i, reading := range readings {
+				in := tc.in
+				in.RunnerPath = reading
+
+				got := trailGate(in)
+
+				// Clause B, on every reading rather than on the baseline alone.
+				if got.RunnerPath != reading {
+					t.Fatalf("the gate was handed reading %d (%q) and carried out %q: the reading "+
+						"that arrived is not the reading that was driven, so nothing below is a "+
+						"statement about this input", i, reading, got.RunnerPath)
+				}
+
+				if i == 0 {
+					base = got
+					// The premise, shared with TestTrailGate and asserted before the
+					// claim: a gate broken into returning one value for everything
+					// would satisfy the invariance vacuously.
+					if base.Value != tc.want || base.Reason != tc.reason {
+						t.Fatalf("premise: the gate reads %q certifying %q (%s), want %q certifying "+
+							"%q — the invariance below says the decision does not move, not that "+
+							"it is right", base.Value, base.Reason, base.Detail, tc.want, tc.reason)
+					}
+					continue
+				}
+
+				if got.Value != base.Value || got.Reason != base.Reason {
+					t.Errorf("the decision differs across readings: under %q the gate reads %q "+
+						"certifying %q, under %q it reads %q certifying %q — no arm may consult "+
+						"the runner path in this slice", readings[0], base.Value, base.Reason,
+						reading, got.Value, got.Reason)
+				}
+				if !bytes.Equal([]byte(got.Detail), []byte(base.Detail)) {
+					t.Errorf("the Detail differs across readings, byte for byte:\n under %q: %s\n"+
+						" under %q: %s\na Detail that acquired the reading would pass a value "+
+						"check while changing what the published record says",
+						readings[0], base.Detail, reading, got.Detail)
+				}
+			}
+		})
+	}
 }
 
 func TestTrailAdmitAttribution(t *testing.T) {
@@ -992,11 +1242,17 @@ func TestTrailGateThenAdmit(t *testing.T) {
 // input's captured string, and neither record does either.
 func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 	t.Run("the gate result carries nothing from the scanned line", func(t *testing.T) {
-		got := trailGate(trailScanResult{
-			State:   trailSeen,
-			Line:    `{"type":"result","result":"` + trailNeedle + `"}`,
-			Trailer: &resultTrailer{Type: "result", TerminalReason: "completed"},
-			Detail:  "a scan detail that also carries " + trailNeedle,
+		got := trailGate(trailGateInput{
+			Scan: trailScanResult{
+				State:   trailSeen,
+				Line:    `{"type":"result","result":"` + trailNeedle + `"}`,
+				Trailer: &resultTrailer{Type: "result", TerminalReason: "completed"},
+				Detail:  "a scan detail that also carries " + trailNeedle,
+			},
+			// One of tdnRunnerFromArgv's constant answers, never argv. The
+			// marshalled result now carries runner_path, and this row is what keeps
+			// the needle sweep honest over it.
+			RunnerPath: trailRunnerUnread(),
 		})
 
 		if got.Value != trailGateUsable {
