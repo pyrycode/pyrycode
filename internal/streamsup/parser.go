@@ -65,6 +65,46 @@ const maxTaskFieldID = 256
 // raise it.
 const maxTaskDescription = 4 << 10
 
+// maxTaskPatch caps the Patch field on a turnevent.BackgroundTaskUpdated —
+// claude's patch object, serialized and carried whole. Applied at CONSTRUCTION,
+// exactly as the caps above are, so an oversized payload never enters the event
+// stream, the push queue, or any log. That the field is decoded permissively
+// (json.RawMessage takes ANY valid JSON value) is what makes this cap
+// load-bearing rather than cosmetic: it is the only shape constraint on the
+// value.
+//
+// Neither existing constant fits. maxTaskFieldID (256) caps machine-generated
+// identifiers, which have a bounded format; a patch has none, and 256 bytes is
+// about three short keys — one prose-ish value (an error string, a status
+// message) would be cut on arrival. And the observation is too weak to multiply:
+// the captured patch is 24 bytes with ONE key, and a single-key patch says
+// nothing about a two-key one. maxTaskDescription could anchor on its
+// observation because a command line's size distribution is something we can
+// reason about; this cannot, so the binding constraint comes from the other
+// side — the envelope.
+//
+// The envelope arithmetic, in maxUnrecognizedRaw's style: worst case one
+// BackgroundTaskUpdated carries 256 + 4096 = 4352 bytes of claude-derived text.
+// That is 6.6% of the v2 application-envelope cap of 65519 bytes
+// (docs/protocol-mobile.md § Application-envelope size cap), deliberately in
+// line with BackgroundTaskStarted's 4864 bytes / 7.4% so the event family has
+// ONE worst case a reader can hold rather than a per-variant number to
+// re-derive. Escaping is mild for maxUnrecognizedRaw's reason, which applies
+// here verbatim: a patch is already JSON text, so its control characters arrive
+// pre-escaped as printable pairs and the growth is quotes and backslashes, not
+// a \u00XX expansion of every byte. Pathological all-quote content roughly
+// doubles it — ~8.7 KB, 13.3% of the envelope, still comfortable.
+//
+// 4096 is a quarter of maxUnrecognizedRaw's whole-line 16 KiB, which is the
+// ordering that must hold: one field of one KNOWN line must not approach the cap
+// on an entire UNKNOWN line.
+//
+// A separate constant even though it currently equals maxTaskDescription: they
+// bound different fields for different reasons, and folding them into one would
+// make a future change to the command-line budget silently move the patch
+// budget.
+const maxTaskPatch = 4 << 10
+
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
 // parser deliberately drops in silence. Membership is what separates "known and
 // deliberately ignored" from "genuinely unrecognized"; getting it wrong in
@@ -268,6 +308,35 @@ type systemTaskStartedLine struct {
 	TaskType    string `json:"task_type"`
 }
 
+// systemTaskUpdatedLine is the decoded payload of one system/task_updated line.
+// Kept separate from streamLine for systemTaskStartedLine's reason, and separate
+// from systemTaskStartedLine because the two subtypes share no payload shape
+// beyond task_id.
+//
+// The field set is exactly what the committed capture shows and nothing
+// invented, and it is the whole mapped set: the same two keys the captured line
+// also carries, uuid and session_id, are deliberately absent — see
+// turnevent.BackgroundTaskUpdated's doc. Absent from the DECODE TARGET is a
+// stronger guarantee than the test's reflection sweep, because a field that is
+// never declared cannot leak.
+//
+// The two fields' types are deliberately asymmetric. TaskID stays a string, so a
+// non-string task_id fails the whole decode and takes the undecodable path.
+// Patch is json.RawMessage, which accepts ANY valid JSON value — an object, a
+// string, a number, null — and carries claude's bytes verbatim. Both halves of
+// that matter: decoding into map[string]any and re-marshalling would normalize
+// key order and round every number through float64 (a large integer id in a
+// future patch would lose precision), and declaring a shape would DISCARD every
+// unknown field, which is streamMessage.Content's reasoning for the same choice.
+// The permissiveness is deliberate — "whatever claude puts there" is the point,
+// and inventing a validation rule for a shape we have one observation of is
+// exactly what #1380 declined to do for missing fields. maxTaskPatch is what
+// makes it safe.
+type systemTaskUpdatedLine struct {
+	TaskID string          `json:"task_id"`
+	Patch  json.RawMessage `json:"patch"`
+}
+
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
 // on demand in emitAssistant / emitUser. streamBlock declares only the fields
 // the mapping reads, so decoding straight into it would DISCARD every unknown
@@ -383,6 +452,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 	switch subtype {
 	case "task_started":
 		return p.emitBackgroundTaskStarted(line)
+	case "task_updated":
+		return p.emitBackgroundTaskUpdated(line)
 	default:
 		return false
 	}
@@ -447,18 +518,89 @@ func (p *Parser) emitBackgroundTaskStarted(line []byte) bool {
 	return true
 }
 
+// emitBackgroundTaskUpdated decodes a system/task_updated line and emits one
+// turnevent.BackgroundTaskUpdated, reporting that it consumed the line either
+// way. Peer of emitBackgroundTaskStarted, and its every structural choice is the
+// same one for the same reason. Field mapping comes from the committed capture
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), never from a
+// hand-built payload.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
+// That is not a call-shape convention: streamLine's doc states the property it
+// preserves, that control shapes are read from the top level only and nested
+// content is never re-scanned, which is what stops a tool result whose text is
+// literally `{"type":"result"}` from forging a turn boundary. Decoding this
+// payload from anywhere else would make a background-task update forgeable out
+// of claude's own tool output.
+//
+// A payload that will not decode into the shape (a numeric task_id, say) is
+// dropped with a content-free Debug and no event — NOT surfaced as an
+// Unrecognized, because keeping system whole on ignoredLineTypes is what makes
+// "no system line reaches the unrecognized lane" structural. An absent patch is
+// not an error either: absence is claude's to choose, so the field lands empty
+// rather than inventing a validation rule.
+func (p *Parser) emitBackgroundTaskUpdated(line []byte) bool {
+	var tl systemTaskUpdatedLine
+	if err := json.Unmarshal(line, &tl); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content. Neither the decoded fields nor the patch is logged, and the patch
+		// is the thing this handler is most tempted to explain itself with.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "task_updated")
+		return true
+	}
+
+	var cut []string
+	bound := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// Sequential statements rather than a composite literal, for
+	// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these
+	// calls, and inside a literal that order would rest on the left-to-right
+	// operand rule rather than on something a reader sees. Neither name is
+	// translated here — claude's keys and the daemon's fields agree.
+	//
+	// string(tl.Patch) is "" when claude omits the key, which is the empty-Patch
+	// contract; json.RawMessage COPIES its input on decode, so this does not alias
+	// p.buf and nothing outlives the buffer it came from.
+	taskID := bound(tl.TaskID, "task_id", maxTaskFieldID)
+	patch := bound(string(tl.Patch), "patch", maxTaskPatch)
+
+	p.emit(turnevent.BackgroundTaskUpdated{
+		TaskID: taskID,
+		Patch:  patch,
+		// nil when nothing was cut: append never ran.
+		TruncatedFields: cut,
+	})
+	return true
+}
+
 // truncateField cuts s to limit bytes, reporting whether it cut. Mirrors
 // truncateRaw: byte-sliced, then scrubbed of any invalid UTF-8 the cut may have
 // produced, because slicing can land mid-rune and the value rides a JSON string
 // field downstream where an invalid sequence would be silently replaced anyway.
 // The boundary is <=, so a field of exactly limit bytes is not truncated.
 //
-// The scrub is unconditional for symmetry with truncateRaw, though on the
-// untruncated path it is a no-op in practice: encoding/json already replaces
-// invalid input bytes with U+FFFD on decode, so our own cut is the only mid-rune
-// hazard. Like truncateRaw the replacement is EMPTY, so a partial rune is deleted
-// rather than replaced — which is why a cut value can come out 1-3 bytes under
-// the limit.
+// The scrub is unconditional for symmetry with truncateRaw. On the untruncated
+// path it is a no-op for every field decoded into a Go STRING: encoding/json
+// replaces invalid input bytes with U+FFFD on decode, so our own cut is the only
+// mid-rune hazard there.
+//
+// CORRECTED 2026-08-07 (#1382): that no-op claim is scoped to string-decoded
+// fields, and BackgroundTaskUpdated.Patch is the first exception. It is sourced
+// from a json.RawMessage, which carries claude's bytes VERBATIM — the decoder
+// does not U+FFFD-replace inside a RawMessage — so an invalid sequence survives
+// the decode and the scrub is load-bearing for it even when nothing is
+// truncated.
+//
+// Like truncateRaw the replacement is EMPTY, so a partial rune is deleted rather
+// than replaced — which is why a cut value can come out 1-3 bytes under the
+// limit, and why a scrub REMOVAL is not reported as a truncation (the bool says
+// only whether the cap cut; see Patch's doc for the consequence).
 func truncateField(s string, limit int) (string, bool) {
 	if len(s) <= limit {
 		return strings.ToValidUTF8(s, ""), false

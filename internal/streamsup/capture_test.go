@@ -45,8 +45,11 @@ type droppedLineCapture struct {
 // should be deliberate.
 //
 // Shared on purpose: #1381 (background_tasks_changed) and #1382 (task_updated)
-// map the sibling subtypes out of the same file, and this package already drives
-// both through the drop table.
+// map the sibling subtypes out of the same file. CORRECTED 2026-08-07 (#1382):
+// this used to add "and this package already drives both through the drop
+// table", which stopped being true the moment task_updated's row moved out of
+// TestParser_IgnoredLineTypesStaySilent and into its mapping test.
+// background_tasks_changed is the one still driven through the drop table.
 func capturedSystemLine(t *testing.T, subtype string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(capturePath)
