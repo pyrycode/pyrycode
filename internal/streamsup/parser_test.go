@@ -502,19 +502,392 @@ func TestParser_UnrecognizedTruncation(t *testing.T) {
 // row per turn and the signal would be worthless.
 func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 	t.Parallel()
-	lines := []string{
-		`{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5"}`,
-		`{"type":"system","subtype":"thinking_tokens","tokens":128}`,
-		`{"type":"system","subtype":"status","status":"ok"}`,
-		// Ignoring `system` wholesale, not per-subtype, is deliberate: it is
-		// claude's catch-all namespace and its highest-rate emitter, so a new
-		// subtype must NOT become a per-turn noise row.
-		`{"type":"system","subtype":"a_subtype_invented_next_year"}`,
-		`{"type":"rate_limit_event","rate_limit":{"status":"allowed"}}`,
+	lines := []struct {
+		name string
+		line string
+	}{
+		{"system/init", `{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5"}`},
+		{"system/thinking_tokens", `{"type":"system","subtype":"thinking_tokens","tokens":128}`},
+		{"system/status", `{"type":"system","subtype":"status","status":"ok"}`},
+		// CORRECTED 2026-08-07 (#1380): `system` maps PER-SUBTYPE now, not
+		// wholesale — emitSystemSubtype enumerates the mapped set. Every subtype it
+		// does not match still stays silent, which is what this table asserts and
+		// why the correction does not weaken it: system is claude's catch-all
+		// namespace and its highest-rate emitter, so a new subtype must NOT become a
+		// per-turn noise row. See ignoredLineTypes for the full statement.
+		//
+		// This row is the never-seen subtype, and it is deliberate rather than an
+		// oversight: surfacing unknown system subtypes would reintroduce that noise
+		// row and would break the live zero-unrecognized gate on the next claude
+		// release that adds a chatty one.
+		{"system/a_subtype_invented_next_year", `{"type":"system","subtype":"a_subtype_invented_next_year"}`},
+		// task_notification is measured ABSENT on this surface — the capture's
+		// expected_absent holds exactly it, and it was seen once on the HEADLESS
+		// surface only. So it has no captured payload and this row is necessarily
+		// synthesized; it invents no field structure beyond the subtype name.
+		{"system/task_notification", `{"type":"system","subtype":"task_notification"}`},
+		// The two siblings, driven from their CAPTURED lines: mapping task_updated
+		// is #1382 and background_tasks_changed is #1381, neither of them here, so
+		// both must still be silent.
+		{"system/task_updated", string(capturedSystemLine(t, "task_updated"))},
+		{"system/background_tasks_changed", string(capturedSystemLine(t, "background_tasks_changed"))},
+		{"rate_limit_event", `{"type":"rate_limit_event","rate_limit":{"status":"allowed"}}`},
 	}
-	for _, line := range lines {
-		if got := collectEvents(line); got != nil {
-			t.Errorf("line %s\n emitted %#v, want silence", line, got)
+	for _, tc := range lines {
+		if got := collectEvents(tc.line); got != nil {
+			t.Errorf("%s: line %s\n emitted %#v, want silence", tc.name, tc.line, got)
+		}
+	}
+}
+
+// taskStartedCapCheat records the two cap values as LITERALS, deliberately not
+// as maxTaskFieldID / maxTaskDescription. Same rule as harnessNudgeFixture: a
+// fixture built from the constant it validates asserts nothing about the number
+// — halve the constant and every row below would follow it green. These literals
+// are what make such an edit go RED.
+const (
+	taskFieldIDCapFixture     = 256
+	taskDescriptionCapFixture = 4096
+)
+
+// taskStartedLineFixture builds a system/task_started line from the four mapped
+// keys. It invents NO field structure — the keys are exactly the capture's — and
+// exists only to vary the VALUES, which is what the cap proof needs and what the
+// capture cannot supply: every captured line is small (235 bytes for
+// task_started, with a 9-byte description), so nothing in it approaches a cap.
+func taskStartedLineFixture(t *testing.T, taskID, toolUseID, description, taskType string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{
+		"type":        "system",
+		"subtype":     "task_started",
+		"task_id":     taskID,
+		"tool_use_id": toolUseID,
+		"description": description,
+		"task_type":   taskType,
+	})
+	if err != nil {
+		t.Fatalf("marshalling task_started fixture: %v", err)
+	}
+	return string(b)
+}
+
+// taskStartedEvent drives one line through the shipped parser and returns the
+// single BackgroundTaskStarted it must emit.
+func taskStartedEvent(t *testing.T, line string) turnevent.BackgroundTaskStarted {
+	t.Helper()
+	got := collectEvents(line)
+	if len(got) != 1 {
+		t.Fatalf("event count: got %d, want 1 (%#v)", len(got), got)
+	}
+	ev, ok := got[0].(turnevent.BackgroundTaskStarted)
+	if !ok {
+		t.Fatalf("event type: got %T, want turnevent.BackgroundTaskStarted", got[0])
+	}
+	return ev
+}
+
+// TestParser_TaskStartedMapsFromCapture is #1380's central assertion: the
+// CAPTURED system/task_started line becomes one turnevent.BackgroundTaskStarted
+// carrying the fields the capture shows.
+//
+// The field assertions are DERIVED from the capture's own payload rather than
+// pinned to literals. The capture is redacted (session_id reads $SESSION_ID and
+// description reads `cat $FIFO`), so a pinned expectation would be pinning the
+// placeholder rather than a real value; a derived one still catches a field
+// swap, which is the failure worth catching. task_type carries the one pinned
+// literal, as a canary that the reader picked the right record at all.
+func TestParser_TaskStartedMapsFromCapture(t *testing.T) {
+	t.Parallel()
+	line := capturedSystemLine(t, "task_started")
+
+	var payload map[string]any
+	if err := json.Unmarshal(line, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+
+	ev := taskStartedEvent(t, string(line))
+
+	routes := []struct {
+		field     string
+		claudeKey string
+		got       string
+	}{
+		{"TaskID", "task_id", ev.TaskID},
+		{"ToolCallID", "tool_use_id", ev.ToolCallID},
+		{"Description", "description", ev.Description},
+		{"TaskType", "task_type", ev.TaskType},
+	}
+	for _, r := range routes {
+		want, _ := payload[r.claudeKey].(string)
+		if want == "" {
+			t.Fatalf("the capture carries no string %q, so the routing of %s cannot be proven against it", r.claudeKey, r.field)
+		}
+		if r.got != want {
+			t.Errorf("%s: got %q, want the capture's %s = %q", r.field, r.got, r.claudeKey, want)
+		}
+	}
+
+	// The canary: proves the reader selected the task_started record rather than
+	// some other system line that happens to decode into the same shape.
+	if ev.TaskType != "local_bash" {
+		t.Errorf("TaskType: got %q, want %q (the capture's one observed value)", ev.TaskType, "local_bash")
+	}
+	if ev.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil — the captured line is far under every cap", ev.TruncatedFields)
+	}
+
+	// The two deliberate drops (see BackgroundTaskStarted's doc): claude's
+	// session_id is NOT the daemon's conversation identity, and uuid has no
+	// reader in the daemon.
+	//
+	// Swept by REFLECTION over every string field on the event rather than over
+	// the four routes above, so a field added later — by #1381 or #1382 extending
+	// this event family — is covered without anyone remembering to extend a list.
+	// That is what makes the drop an enforced property rather than a comment. Both
+	// values are read from the decoded payload rather than pinned, so the
+	// assertion stays honest if the capture is ever re-taken unredacted.
+	rv := reflect.ValueOf(ev)
+	var swept int
+	for _, key := range []string{"session_id", "uuid"} {
+		v, _ := payload[key].(string)
+		if v == "" {
+			t.Fatalf("the capture carries no string %q, so the drop assertion would be vacuous", key)
+		}
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Field(i).Kind() != reflect.String {
+				continue
+			}
+			swept++
+			if rv.Field(i).String() == v {
+				t.Errorf("field %s carries claude's %s (%q); it is deliberately NOT on this event",
+					rv.Type().Field(i).Name, key, v)
+			}
+		}
+	}
+	// The sweep visiting nothing would pass silently, which is the one way this
+	// assertion could rot into decoration.
+	if swept < len(routes)*2 {
+		t.Errorf("the drop sweep visited %d string fields, want at least %d", swept, len(routes)*2)
+	}
+}
+
+// TestParser_TaskStartedFieldCaps pins the construction-time bound. It is
+// applied before the event reaches the sink, so an oversized payload never
+// enters the event stream, a queue, or a log — the same ordering
+// maxUnrecognizedRaw's cap has, and the only thing that makes the bound real
+// rather than cosmetic.
+//
+// The capture proves the mapping and cannot prove the bound: every captured line
+// is far under any cap worth setting. So these lines are SYNTHESIZED, which
+// invents no field structure — the keys are the capture's, only the values are
+// oversized.
+//
+// Exact cut lengths are asserted on ASCII fixtures only. The scrub uses an empty
+// replacement (truncateRaw's precedent), so a mid-rune cut DELETES the partial
+// rune and a multi-byte result is legitimately 1-3 bytes short of the cap; that
+// row asserts validity and the ceiling instead.
+func TestParser_TaskStartedFieldCaps(t *testing.T) {
+	t.Parallel()
+
+	const (
+		smallID   = "bybi8g8i8"
+		smallTool = "toolu_01ENMNP5P4d3pqjTg9LgCxgZ"
+		smallDesc = "cat /tmp/fifo"
+		smallType = "local_bash"
+	)
+	overID := strings.Repeat("i", taskFieldIDCapFixture+1)
+	overTool := strings.Repeat("u", taskFieldIDCapFixture*2)
+	overDesc := strings.Repeat("d", taskDescriptionCapFixture+1)
+	overType := strings.Repeat("k", taskFieldIDCapFixture+64)
+
+	tests := []struct {
+		name                                     string
+		taskID, toolUseID, description, taskType string
+		wantCut                                  []string
+		wantLenTaskID                            int
+		wantLenToolCallID                        int
+		wantLenDescription                       int
+		wantLenTaskType                          int
+	}{
+		{
+			name: "description over cap is cut and reported",
+			// The report names the field that was cut, and the other three are both
+			// intact and unnamed — a cut must not smear across the event.
+			taskID: smallID, toolUseID: smallTool, description: overDesc, taskType: smallType,
+			wantCut:            []string{"description"},
+			wantLenTaskID:      len(smallID),
+			wantLenToolCallID:  len(smallTool),
+			wantLenDescription: taskDescriptionCapFixture,
+			wantLenTaskType:    len(smallType),
+		},
+		{
+			name:   "task_id over cap is cut and reported",
+			taskID: overID, toolUseID: smallTool, description: smallDesc, taskType: smallType,
+			wantCut:            []string{"task_id"},
+			wantLenTaskID:      taskFieldIDCapFixture,
+			wantLenToolCallID:  len(smallTool),
+			wantLenDescription: len(smallDesc),
+			wantLenTaskType:    len(smallType),
+		},
+		{
+			// The row that pins the TRANSLATION: claude's key is tool_use_id, and the
+			// report names the daemon's field, tool_call_id.
+			name:   "tool_use_id over cap is reported as tool_call_id",
+			taskID: smallID, toolUseID: overTool, description: smallDesc, taskType: smallType,
+			wantCut:            []string{"tool_call_id"},
+			wantLenTaskID:      len(smallID),
+			wantLenToolCallID:  taskFieldIDCapFixture,
+			wantLenDescription: len(smallDesc),
+			wantLenTaskType:    len(smallType),
+		},
+		{
+			name:   "task_type over cap is cut and reported",
+			taskID: smallID, toolUseID: smallTool, description: smallDesc, taskType: overType,
+			wantCut:            []string{"task_type"},
+			wantLenTaskID:      len(smallID),
+			wantLenToolCallID:  len(smallTool),
+			wantLenDescription: len(smallDesc),
+			wantLenTaskType:    taskFieldIDCapFixture,
+		},
+		{
+			// Two at once: both named, in DECLARATION order (task_id before
+			// description), which is what makes the value deterministic and pinnable.
+			name:   "two fields over cap are both named in declaration order",
+			taskID: overID, toolUseID: smallTool, description: overDesc, taskType: smallType,
+			wantCut:            []string{"task_id", "description"},
+			wantLenTaskID:      taskFieldIDCapFixture,
+			wantLenToolCallID:  len(smallTool),
+			wantLenDescription: taskDescriptionCapFixture,
+			wantLenTaskType:    len(smallType),
+		},
+		{
+			// The <= boundary: a field of exactly its cap is not truncated, and
+			// nothing is reported.
+			name:               "every field exactly at its cap is not truncated",
+			taskID:             strings.Repeat("i", taskFieldIDCapFixture),
+			toolUseID:          strings.Repeat("u", taskFieldIDCapFixture),
+			description:        strings.Repeat("d", taskDescriptionCapFixture),
+			taskType:           strings.Repeat("k", taskFieldIDCapFixture),
+			wantCut:            nil,
+			wantLenTaskID:      taskFieldIDCapFixture,
+			wantLenToolCallID:  taskFieldIDCapFixture,
+			wantLenDescription: taskDescriptionCapFixture,
+			wantLenTaskType:    taskFieldIDCapFixture,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			line := taskStartedLineFixture(t, tc.taskID, tc.toolUseID, tc.description, tc.taskType)
+			ev := taskStartedEvent(t, line)
+
+			if !reflect.DeepEqual(ev.TruncatedFields, tc.wantCut) {
+				t.Errorf("TruncatedFields: got %#v, want %#v", ev.TruncatedFields, tc.wantCut)
+			}
+			lens := []struct {
+				field string
+				got   int
+				want  int
+			}{
+				{"TaskID", len(ev.TaskID), tc.wantLenTaskID},
+				{"ToolCallID", len(ev.ToolCallID), tc.wantLenToolCallID},
+				{"Description", len(ev.Description), tc.wantLenDescription},
+				{"TaskType", len(ev.TaskType), tc.wantLenTaskType},
+			}
+			for _, l := range lens {
+				if l.got != l.want {
+					t.Errorf("len(%s): got %d, want %d", l.field, l.got, l.want)
+				}
+			}
+		})
+	}
+
+	t.Run("a cut mid-rune yields valid UTF-8", func(t *testing.T) {
+		t.Parallel()
+		// The cap is a BYTE slice, so it can land inside a multi-byte rune. The
+		// value rides a JSON string field downstream, where an invalid sequence
+		// would be silently replaced, so the producer scrubs it here instead.
+		pad := strings.Repeat("d", taskDescriptionCapFixture-1)
+		desc := pad + strings.Repeat("€", 8)
+		line := taskStartedLineFixture(t, smallID, smallTool, desc, smallType)
+		ev := taskStartedEvent(t, line)
+
+		if !reflect.DeepEqual(ev.TruncatedFields, []string{"description"}) {
+			t.Fatalf("TruncatedFields: got %#v, want [description]", ev.TruncatedFields)
+		}
+		if !utf8.ValidString(ev.Description) {
+			t.Errorf("Description is not valid UTF-8 after a mid-rune cut")
+		}
+		// Short of the cap, not at it: the empty replacement DELETES the partial
+		// rune rather than replacing it.
+		if len(ev.Description) > taskDescriptionCapFixture {
+			t.Errorf("len(Description): got %d, want <= %d", len(ev.Description), taskDescriptionCapFixture)
+		}
+	})
+}
+
+// TestParser_TaskStartedDropIsLoggedContentFree is the package's standing rule
+// applied to the new subtype: nothing derived from claude's output reaches a
+// log. The content crosses the wire, not the log — emitUnrecognized's precedent,
+// which records site, type and byte count only.
+//
+// The sweep over EVERY captured record is the load-bearing part. It catches the
+// realistic way this rule gets broken later: someone appending "description",
+// d.Description to a Debug line, on either the success path or the
+// decode-failure path. Both are driven here, because the malformed line is the
+// one whose handler is most tempted to explain itself.
+func TestParser_TaskStartedDropIsLoggedContentFree(t *testing.T) {
+	t.Parallel()
+
+	captured := capturedSystemLine(t, "task_started")
+	var payload map[string]any
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	capturedDesc, _ := payload["description"].(string)
+	if capturedDesc == "" {
+		t.Fatalf("the capture carries no description, so the leak sweep would be vacuous")
+	}
+
+	// A task_started line the new shape cannot decode (task_id is a number), so
+	// the decode-failure path runs. Its description is a distinctive literal, and
+	// the whole point is that it must appear in no log record.
+	const malformedDesc = "rm -rf /tmp/never-log-this-command"
+	malformed := `{"type":"system","subtype":"task_started","task_id":42,` +
+		`"tool_use_id":"toolu_x","description":"` + malformedDesc + `","task_type":"local_bash"}`
+
+	rec := &logRecorder{}
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+	if _, err := p.Write(append(append([]byte(nil), captured...), '\n')); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+	if _, err := p.Write([]byte(malformed + "\n")); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+
+	// The malformed line is dropped, and NOT as an Unrecognized: keeping `system`
+	// whole on ignoredLineTypes is what makes "no system line reaches the
+	// unrecognized lane" structural, and that guarantee outranks surfacing a
+	// malformed line of a subtype we already know.
+	if len(events) != 1 {
+		t.Fatalf("event count: got %d, want 1 (the captured line only) — %#v", len(events), events)
+	}
+	if _, ok := events[0].(turnevent.BackgroundTaskStarted); !ok {
+		t.Fatalf("event type: got %T, want turnevent.BackgroundTaskStarted", events[0])
+	}
+
+	for _, r := range rec.all() {
+		for _, leak := range []string{capturedDesc, malformedDesc} {
+			if strings.Contains(r.msg, leak) {
+				t.Errorf("record message carries a claude-derived description: %q", r.msg)
+			}
+			for k, v := range r.attrs {
+				if strings.Contains(v, leak) {
+					t.Errorf("record %q attr %q carries a claude-derived description; this path logs the subtype only", r.msg, k)
+				}
+			}
 		}
 	}
 }

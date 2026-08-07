@@ -35,6 +35,36 @@ const defaultMaxParseBuf = 4 << 20
 // reason not to raise it.
 const maxUnrecognizedRaw = 16 << 10
 
+// maxTaskFieldID caps each machine-generated identifier on a
+// turnevent.BackgroundTaskStarted — TaskID, ToolCallID, TaskType. Applied at
+// CONSTRUCTION, exactly as maxUnrecognizedRaw is, so an oversized payload never
+// enters the event stream, the push queue, or any log.
+//
+// The longest such field in the committed capture is tool_use_id at 29 bytes
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), so 256 is
+// roughly 9x the observed maximum: room for a format claude has not shipped yet,
+// and still a hard cut on anything that has stopped being an identifier.
+const maxTaskFieldID = 256
+
+// maxTaskDescription caps the Description field, which is model-authored and
+// genuinely variable — for claude's local_bash task type it is the command line
+// itself, so it earns a far larger cap than the identifiers above.
+//
+// The capture's description reads 9 bytes, but it is REDACTED: the record's
+// payload_len_bytes_captured (377) minus payload_len_bytes (235) is 142 bytes of
+// redaction across two sites ($SESSION_ID and $FIFO), which puts the real
+// description at roughly 126 bytes. 4096 is about 32x that.
+//
+// The envelope arithmetic, in maxUnrecognizedRaw's style: worst case one event
+// carries 3*256 + 4096 = 4864 bytes of claude-derived text. That is 7.4% of the
+// v2 application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap) and under a third of maxUnrecognizedRaw's
+// whole-line 16 KiB, which leaves room for the envelope's other fields plus the
+// JSON escaping these strings pick up on the way out. It is also far more command
+// line than a human reads off a timeline row, which is the other reason not to
+// raise it.
+const maxTaskDescription = 4 << 10
+
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
 // parser deliberately drops in silence. Membership is what separates "known and
 // deliberately ignored" from "genuinely unrecognized"; getting it wrong in
@@ -53,11 +83,36 @@ const maxUnrecognizedRaw = 16 << 10
 //	                            thinking_tokens fired ~10 times per turn
 //	rate_limit_event          — once per run
 //
-// system is ignored WHOLESALE rather than per-subtype on purpose. It is
-// claude's catch-all namespace and its highest-rate emitter, so subtype-grained
-// matching would turn every new subtype into a per-turn noise row — the exact
-// failure the two-tier design exists to prevent. A genuinely new MESSAGE TYPE is
-// the alarm worth raising, and that is what the top-level key catches.
+// system is claude's catch-all namespace and its highest-rate emitter (see the
+// per-turn counts above), so subtype-grained matching risks turning every new
+// subtype into a per-turn noise row — the exact failure the two-tier design
+// exists to prevent. Until 2026-08-07, that argument was implemented by ignoring
+// system WHOLESALE.
+//
+// CORRECTED 2026-08-07 (#1380): system is NO LONGER ignored wholesale. The
+// parser matches subtypes INSIDE this list's drop branch — see
+// emitSystemSubtype, whose case arms are the one place the mapped set is
+// enumerated. Do not restate that set here: two siblings extend it (#1381, #1382)
+// and no comment fails a build when it goes stale, so a single enumeration site
+// with pointers to it is worth more than four independent lists.
+//
+// That is a REFINEMENT of the 2026-07-27 measurement, not a reversal. The
+// argument above is about what to DRAW, and it was used to decide what to SEND.
+// Those are separate decisions, and only the second belongs to the daemon's
+// callers: the per-turn noise row the measurement forbade is a rendering choice
+// the client owns. Mapping a measured subtype into the daemon's own vocabulary
+// changes what is sent and leaves the drawing decision — and the measurement
+// behind it — exactly where they were.
+//
+// Still dropped in silence: every system subtype emitSystemSubtype does not
+// match, including never-seen ones and task_notification (measured ABSENT on
+// this surface; seen once on the headless surface only), plus rate_limit_event
+// whole.
+//
+// The list itself is UNCHANGED and stays top-level types only. system stays on
+// it, which is what keeps emitUnrecognized structurally unreachable from any
+// system line whatever its subtype, and keeps a genuinely new MESSAGE TYPE — the
+// alarm worth raising — the thing the top-level key catches.
 //
 // The measurement also settled the open question of whether claude echoes the
 // delivered prompt back as a `user` message holding a `text` block, as it does
@@ -196,6 +251,23 @@ type streamLine struct {
 	Message *streamMessage `json:"message"`
 }
 
+// systemTaskStartedLine is the decoded payload of one system/task_started line.
+// Kept separate from streamLine, which is the line-level SEGMENTATION struct and
+// stays at Type/Subtype/Message; these fields belong to a single subtype and
+// widening the segmentation struct with them would blur that boundary.
+//
+// The field set is exactly what the committed capture shows and nothing
+// invented. Two keys the captured line also carries are deliberately absent:
+// uuid, which nothing in the daemon reads, and session_id, which is claude's
+// session identity and NOT the daemon's conversation identity — see
+// turnevent.BackgroundTaskStarted's doc.
+type systemTaskStartedLine struct {
+	TaskID      string `json:"task_id"`
+	ToolUseID   string `json:"tool_use_id"`
+	Description string `json:"description"`
+	TaskType    string `json:"task_type"`
+}
+
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
 // on demand in emitAssistant / emitUser. streamBlock declares only the fields
 // the mapping reads, so decoding straight into it would DISCARD every unknown
@@ -267,12 +339,22 @@ func (p *Parser) consumeLine(line []byte) {
 		p.emit(turnevent.TurnEnd{Reason: resultTurnEndReason(sl.Subtype)})
 	default:
 		if ignoredLineTypes[sl.Type] {
-			// system (init / thinking_tokens / status) and rate_limit_event:
-			// tolerated and dropped, silently, exactly as before. system/init is a
-			// per-turn marker (spike § 1), not a session-open event — dropping it is
-			// correct because the parser is turn-stateless (there is no session
-			// state to reset). See ignoredLineTypes for the measurement behind the
-			// list.
+			// The subtype match lives INSIDE this branch, which is what keeps
+			// emitUnrecognized below structurally unreachable from any system line.
+			// The sl.Type guard is deliberate: rate_limit_event carries no subtype
+			// today, and the guard keeps that true by construction rather than by
+			// luck if a future entry on the list ever gains a colliding subtype name.
+			if sl.Type == "system" && p.emitSystemSubtype(sl.Subtype, line) {
+				return
+			}
+			// system (init / thinking_tokens / status / any subtype
+			// emitSystemSubtype does not map) and rate_limit_event: tolerated and
+			// dropped, silently. CORRECTED 2026-08-07 (#1380) — it is no longer
+			// "exactly as before": the subtypes emitSystemSubtype maps become events
+			// above. system/init is a per-turn marker (spike § 1), not a session-open
+			// event — dropping it is correct because the parser is turn-stateless
+			// (there is no session state to reset). See ignoredLineTypes for the full
+			// statement and the measurement behind the list.
 			p.log.Debug("streamsup: dropping stdout line", "type", sl.Type)
 			return
 		}
@@ -280,6 +362,108 @@ func (p *Parser) consumeLine(line []byte) {
 		// anyone claude started emitting something new.
 		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
 	}
+}
+
+// emitSystemSubtype maps one system line's subtype, reporting whether it
+// CONSUMED the line. Called from consumeLine's ignoredLineTypes branch, so a
+// subtype the switch does not match (false) falls through to that branch's
+// existing content-free drop.
+//
+// The case arms are the ONE enumeration of the mapped set. Every comment that
+// describes the drop rule points here instead of restating it, because none of
+// them fails a build when it goes stale and adding a subtype IS adding a case.
+//
+// Unknown system subtypes fall through to silence DELIBERATELY, not by
+// oversight. Surfacing them would reintroduce the per-turn noise row the
+// 2026-07-27 measurement forbade — system is claude's highest-rate emitter — and
+// would break the live zero-unrecognized gate
+// (internal/e2e/realclaude/interactive_stream_liveness_test.go:253 fatals on one)
+// the next time a claude release adds a chatty subtype.
+func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
+	switch subtype {
+	case "task_started":
+		return p.emitBackgroundTaskStarted(line)
+	default:
+		return false
+	}
+}
+
+// emitBackgroundTaskStarted decodes a system/task_started line and emits one
+// turnevent.BackgroundTaskStarted, reporting that it consumed the line either
+// way. Field mapping and cap numbers come from the committed capture
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), never from a
+// hand-built payload.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
+// streamLine's doc states the property that makes a tool result whose text is
+// literally `{"type":"result"}` unable to forge a turn boundary: control shapes
+// are read from the top level only, and nested content is never re-scanned.
+// Decoding this payload from anywhere else would make a background task forgeable
+// out of claude's own tool output.
+//
+// A payload that will not decode into the shape (a numeric task_id, say) is
+// dropped with a content-free Debug and no event — NOT surfaced as an
+// Unrecognized. Keeping system whole on ignoredLineTypes is what makes "no system
+// line reaches the unrecognized lane" structural, and that guarantee is worth
+// more than surfacing a malformed line of a subtype we already know. A missing
+// field is not an error either: absence is claude's to choose, there is no
+// captured negative case, so the field lands empty rather than inventing a
+// validation rule.
+func (p *Parser) emitBackgroundTaskStarted(line []byte) bool {
+	var tl systemTaskStartedLine
+	if err := json.Unmarshal(line, &tl); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content. None of the decoded fields is logged.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "task_started")
+		return true
+	}
+
+	var cut []string
+	bound := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// Sequential statements rather than a composite literal: TruncatedFields is
+	// ordered by these calls, and inside a literal that order would rest on the
+	// left-to-right operand rule rather than on something a reader sees. The names
+	// are the DAEMON's — tool_call_id, not claude's tool_use_id.
+	taskID := bound(tl.TaskID, "task_id", maxTaskFieldID)
+	toolCallID := bound(tl.ToolUseID, "tool_call_id", maxTaskFieldID)
+	description := bound(tl.Description, "description", maxTaskDescription)
+	taskType := bound(tl.TaskType, "task_type", maxTaskFieldID)
+
+	p.emit(turnevent.BackgroundTaskStarted{
+		TaskID:      taskID,
+		ToolCallID:  toolCallID,
+		Description: description,
+		TaskType:    taskType,
+		// nil when nothing was cut: append never ran.
+		TruncatedFields: cut,
+	})
+	return true
+}
+
+// truncateField cuts s to limit bytes, reporting whether it cut. Mirrors
+// truncateRaw: byte-sliced, then scrubbed of any invalid UTF-8 the cut may have
+// produced, because slicing can land mid-rune and the value rides a JSON string
+// field downstream where an invalid sequence would be silently replaced anyway.
+// The boundary is <=, so a field of exactly limit bytes is not truncated.
+//
+// The scrub is unconditional for symmetry with truncateRaw, though on the
+// untruncated path it is a no-op in practice: encoding/json already replaces
+// invalid input bytes with U+FFFD on decode, so our own cut is the only mid-rune
+// hazard. Like truncateRaw the replacement is EMPTY, so a partial rune is deleted
+// rather than replaced — which is why a cut value can come out 1-3 bytes under
+// the limit.
+func truncateField(s string, limit int) (string, bool) {
+	if len(s) <= limit {
+		return strings.ToValidUTF8(s, ""), false
+	}
+	return strings.ToValidUTF8(s[:limit], ""), true
 }
 
 // emitUnrecognized builds and emits one turnevent.Unrecognized, truncating raw to
