@@ -21,12 +21,12 @@ package turnevent
 import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
-// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, the internal-only status
-// peers Stall, ApiRetry, and Compacting, and the diagnostic marker
-// Unrecognized. The unexported marker keeps the variant set closed to this
-// package, so external ACP-spec churn cannot inject a variant. The bridge
-// (#608) ranges a stream of Event and the wire adapter (#607) type-switches to
-// map each kind.
+// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted, the
+// internal-only status peers Stall, ApiRetry, and Compacting, and the
+// diagnostic marker Unrecognized. The unexported marker keeps the variant set
+// closed to this package, so external ACP-spec churn cannot inject a variant.
+// The bridge (#608) ranges a stream of Event and the wire adapter (#607)
+// type-switches to map each kind.
 type Event interface{ isTurnEvent() }
 
 // TextChunk is incremental assistant text, grouped by message.
@@ -69,6 +69,59 @@ type ToolUpdate struct {
 // adapter's job, not this model's. Here we just carry the reason.
 type TurnEnd struct {
 	Reason TurnEndReason
+}
+
+// BackgroundTaskStarted announces that claude started a background task — work
+// that outlives the turn that spawned it. It maps claude's system/task_started
+// line (#1380), the first system subtype the parser translates rather than
+// drops.
+//
+// It opens and closes no turn, and that is the point of the variant: a
+// backgrounded command is still alive when the turn ends, which is exactly the
+// #1240 symptom (turn_end/end_turn and state idle while the command runs) that
+// nothing reaching a client could previously separate from a genuine finish.
+//
+// The NAME is the daemon's, not claude's. "Task" alone collides with ACP
+// tool-call vocabulary, so the domain concept ("background task") is the word
+// used here; translating at this boundary is what keeps a claude rename of
+// task_started landing in the parser and nowhere else.
+//
+// Two keys the captured line carries are deliberately NOT fields here:
+//
+//   - session_id — claude's session identity, which is NOT the daemon's
+//     conversation identity. A field of that name would invite a consumer, or
+//     a later wire mapper, to route on it.
+//   - uuid — claude's per-line message id. Nothing in the daemon reads it, and
+//     carrying it would add a fourth claude-derived string to the truncation
+//     surface for no consumer. If a use appears, it is added then with a reason.
+//
+// Every string field is claude-derived and is bounded by the producer AT
+// CONSTRUCTION (streamsup's maxTaskFieldID / maxTaskDescription), following
+// Unrecognized's precedent, so an oversized payload never enters the event
+// stream, a queue, or a log. Like every variant here it carries no conversation
+// identity — the bridge injects that.
+type BackgroundTaskStarted struct {
+	// TaskID is claude's opaque handle for the task. It is the join key the
+	// later lifecycle lines carry.
+	TaskID string
+	// ToolCallID is the tool call that spawned the task: claude's tool_use_id,
+	// which is the same identifier ToolStart and ToolUpdate already carry under
+	// this name — so a consumer joins the two with no vocabulary lookup.
+	ToolCallID string
+	// Description is the task's label. For claude's local_bash task type it is
+	// the literal command line: safe to RENDER as text, never to execute or
+	// re-shell.
+	Description string
+	// TaskType is claude's kind for the task ("local_bash" in the one captured
+	// line). A plain string rather than a closed enum — one observation does not
+	// earn a closed set.
+	TaskType string
+	// TruncatedFields names the fields the producer cut to fit their caps, in
+	// declaration order, using the DAEMON's snake_case names: "task_id",
+	// "tool_call_id" (not claude's tool_use_id — the report names the field it
+	// describes), "description", "task_type". nil when nothing was cut, never an
+	// empty non-nil slice, so a consumer can emit it as absent rather than [].
+	TruncatedFields []string
 }
 
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
@@ -121,10 +174,19 @@ const (
 // output becomes VISIBLE the moment it arrives, instead of vanishing into a
 // debug log the production daemon does not print.
 //
-// It is deliberately NOT the parser's tolerate-and-drop path. Types we
-// knowingly ignore (system/*, rate_limit_event) stay silent exactly as before;
-// only output outside that measured set reaches here. A row per turn would make
-// the feature worthless noise, so the known-ignored list is the whole design.
+// It is deliberately NOT the parser's tolerate-and-drop path. rate_limit_event
+// and every UNMAPPED system subtype stay silent; only output outside that
+// measured set reaches here. A row per turn would make the feature worthless
+// noise, so the known-ignored list is the whole design.
+//
+// CORRECTED 2026-08-07 (#1380): system is no longer ignored WHOLESALE, so this
+// no longer reads "system/*, rate_limit_event … exactly as before". The system
+// subtypes streamsup maps become their own variants instead — BackgroundTaskStarted
+// is the first. That changed what is SENT, not what is DRAWN, so the 2026-07-27
+// noise measurement behind the drop rule stands. streamsup's ignoredLineTypes
+// carries the full statement and its emitSystemSubtype is the one enumeration of
+// the mapped set; a prose pointer, not an import, because turnevent must not
+// depend on streamsup.
 //
 // Raw is a plain string, not json.RawMessage, because the producer truncates it
 // at construction: a truncated blob is no longer valid JSON, so typing it as raw
@@ -151,15 +213,16 @@ type Location struct {
 
 // The events are pure value types, so each marker is implemented on a value
 // receiver: TextChunk{}, not only &TextChunk{}, satisfies Event.
-func (TextChunk) isTurnEvent()    {}
-func (ThoughtChunk) isTurnEvent() {}
-func (ToolStart) isTurnEvent()    {}
-func (ToolUpdate) isTurnEvent()   {}
-func (TurnEnd) isTurnEvent()      {}
-func (Stall) isTurnEvent()        {}
-func (ApiRetry) isTurnEvent()     {}
-func (Compacting) isTurnEvent()   {}
-func (Unrecognized) isTurnEvent() {}
+func (TextChunk) isTurnEvent()             {}
+func (ThoughtChunk) isTurnEvent()          {}
+func (ToolStart) isTurnEvent()             {}
+func (ToolUpdate) isTurnEvent()            {}
+func (TurnEnd) isTurnEvent()               {}
+func (BackgroundTaskStarted) isTurnEvent() {}
+func (Stall) isTurnEvent()                 {}
+func (ApiRetry) isTurnEvent()              {}
+func (Compacting) isTurnEvent()            {}
+func (Unrecognized) isTurnEvent()          {}
 
 var (
 	_ Event = TextChunk{}
@@ -167,6 +230,7 @@ var (
 	_ Event = ToolStart{}
 	_ Event = ToolUpdate{}
 	_ Event = TurnEnd{}
+	_ Event = BackgroundTaskStarted{}
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}
