@@ -198,10 +198,10 @@ import (
 // THE KEY NAMES ARE NOT ON THE PERMITTED LIST, and that is its own decision rather
 // than a consequence of the Line rule: the Detail may name no key and interpolate
 // no COUNT of them, both being derived from the line. The shipped row below cannot
-// detect the violation — its fixture's eleven short names would fit inside the
-// headroom even if the Detail did interpolate them — so the prohibition is stated
-// here and made red by a hostile-name fixture in #1364. A Detail naming the names
-// would hand that ticket a red for THIS ticket's defect.
+// detect either: its fixture's eleven short names fit inside the headroom even if
+// the Detail interpolated them. The NAMES half is made red by #1362's needle sweep,
+// which plants a needle AS a top-level key name and asserts no Detail in the
+// artifact carries it. The COUNT half has no instrument and stays unproven.
 //
 // Every Detail must also leave len(trailNeedle) bytes of headroom under
 // reachMaxCommandBytes — under 470 bytes on every row. That is not stylistic:
