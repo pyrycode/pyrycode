@@ -1088,6 +1088,44 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   that mutation class). See [`codebase/1366.md`](../codebase/1366.md) for the
   full implementation, the AC-by-AC proof, and both code-review findings.
 
+- `finding_key_name_containment_test.go` (#1362) — **offline instrument, not
+  a probe**; proves end to end, over the **files the artifact writer actually
+  wrote**, that no value from a trailer line reaches the artifact through
+  #1363's published `trailer_keys` field — the gap left by #1364, which
+  proved the field's bounds bite but stopped at the reader's own return.
+  Four checks, no one subsuming another, driven through a shared
+  `finContainRender` helper that scans a fixture line, substitutes it as
+  `finWriteInputs().Trailer`, writes the artifact under `t.TempDir()`, and
+  returns only the rendered files plus the reader's `[]string` key names —
+  never the `trailScanResult` or `*resultTrailer` a first draft returned,
+  fixed as a security-review MUST FIX so no failure message in the file can
+  print `scan.Line`. AC1 sweeps every written file for a needle planted past
+  the 512-byte cap inside `result` and as `session_id`'s whole value,
+  excluding the four positions (`subtype`, `is_error`, `terminal_reason`,
+  `stop_reason`) the record publishes verbatim by design — planting there
+  would fail a correct build. AC2 sweeps the published names field alone
+  against a needle in all five string-valued positions (reusing
+  `trailKeyNamesNeedledTrailer` at pad 0, the deliberate inversion of the
+  reader-tier check's pad 600), the only check that can catch a builder
+  copying one of the four by-design positions into the names field. AC3 walks
+  both carriers with `finRecordInputReaches` banning
+  `map[string]json.RawMessage`, paired with a control reaching `[]string`.
+  AC4 plants a needle as a top-level key name and asserts it reaches
+  `trailer_keys` but no Detail anywhere in the artifact — discharging the
+  names half of the Detail prohibition #1364 left open (the count half has no
+  instrument and stays stated-unproven). Also repairs
+  `finding_trailer_evidence_test.go:200-204`, false since #1364 cut the
+  fixture it described; five comment lines for five, line-count-neutral.
+  Purely additive, one new 650-line file, zero production files touched.
+  Four mandated mutants plus two run beyond the mandate (a schema-edit
+  overlay, since M4 has no one-line form) all RED in the direction the
+  matrix predicts; PASS on review with two non-blocking SHOULD FIX (a
+  precondition that preempts AC1's sweep on M1 rather than letting the sweep
+  itself fire — same fix shape as AC2 already uses; a projected Detail-size
+  figure the shipped fixture's own measurement superseded). See
+  [`codebase/1362.md`](../codebase/1362.md) for the full implementation, the
+  mutation table, and both lessons learned.
+
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
   every matched row reduced to `finRecordProc` (`PID`/`PPID`/`PGID` — three
