@@ -1050,6 +1050,44 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   the mutation matrix, and a stale comment in
   `finding_trailer_evidence_test.go:203` left for #1362 to correct.
 
+- `trailer_terminal_reason_test.go` (#1366) — **offline instrument, not a
+  probe**; consumes #1357's `KeyNames` reading and answers a question neither
+  it nor the decoded scalar can answer alone: what a trailer's
+  `terminal_reason` *means*, given the runner path the run was observed to
+  take. `trailReasonAgainstPath(runnerReading string, keyNames []string,
+  decodedReason string) trailReasonResult` maps onto a closed six-value
+  `reason-`-prefixed set — the cross product of {absent, present-and-empty,
+  present-and-non-empty} × {streamrunner, ptyrunner, indeterminate}, since
+  absence means opposite things on the two runner paths (ptyrunner's trailer
+  is pyry's own and owes a non-empty reason by construction; streamrunner
+  passes claude's bytes through unchanged, `streamrunner/runner.go:170-176`,
+  so a healthy run's trailer is claude's own and owes none at all). Presence
+  is read from `keyNames` alone, never from `decodedReason != ""` — taking it
+  from the scalar would merge "absent" and "present-and-empty" on the
+  owes-one path, since both decode to `""`. The reading is reduced with the
+  shipped `finRecordRunnerLabel` (`reachRunnerPathFromArgv` is deliberately
+  not used — it keys on a flag both argv builders pass and has no
+  `streamrunner` answer at all); the default arm
+  (`trailReasonPathUnnamed`) is not the fall-through catch-all
+  `trailGate`/`trailAdmitAttribution`/`trailClassifyRun` each refuse, because
+  its meaning — "the path reading names no runner" — is true of every
+  non-runner label without exception, so there is no out-of-contract case
+  left to guard against. The present-on-owes-none value
+  (`trailReasonPresentOwesNone`) carries a stated claim limit: the line is
+  not that path's documented healthy shape, and *never* that pyry wrote it,
+  since claude can produce the same reading through the passthrough. No
+  input byte interpolates into any `Detail`, at all — stronger than the
+  AC requires, made structural rather than disciplined. Purely additive, one
+  new 643-line file, zero production files touched, zero callers (#1367/#1368
+  wire it in); nine cross-product rows plus a three-variant
+  indeterminate-outranks-a-qualifying-shape sub-test, 0 SKIP on
+  `-run '^TestTrail'`. Code review PASS with one non-blocking SHOULD FIX left
+  unfixed — the table's closure-reached-set loop keys off the *expected*
+  value rather than `got.Value`, so its "catches an unhandled sixth value"
+  doc comment overstates what it does (the per-row assertion already covers
+  that mutation class). See [`codebase/1366.md`](../codebase/1366.md) for the
+  full implementation, the AC-by-AC proof, and both code-review findings.
+
 - `finding_run_record_test.go` (#1291) — **the assembled run record.**
   `finRecordRun` is the record one probe run publishes: pyry's exit code,
   every matched row reduced to `finRecordProc` (`PID`/`PPID`/`PGID` — three
