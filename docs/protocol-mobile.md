@@ -441,6 +441,9 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compacting`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's auto-compaction banner (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`unrecognized_message`** | binary → phone | no | **New in v2** (interactive, capability-gated). The stream parser met claude output it has no mapping for — a gap in our mapping, not a claude sub-state. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`background_task_started`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude started work that outlives the turn that spawned it (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`background_task_updated`** | binary → phone | no | **New in v2** (interactive, capability-gated). A background task claude already started changed (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`background_task_roster`** | binary → phone | no | **New in v2** (interactive, capability-gated). Snapshot of the background tasks claude is tracking; an empty list says nothing is alive (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -515,7 +518,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These eight envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These twelve envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
 
 **Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable, per-conversation id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in emit order per conversation. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
@@ -642,13 +645,15 @@ So the parser has **two tiers**, and the split is the whole design:
   and make the frame worthless noise. As of #1380–#1385 the daemon parser maps
   four `system` subtypes internally (`task_started`, `task_updated`,
   `background_tasks_changed`, `thinking_tokens`) to daemon-owned `turnevent`
-  types — see [streamsup-package.md](knowledge/features/streamsup-package.md)
-  — but none of the four reach this wire today: `turnbridge.MapEvent` has no
-  case for any of them, so each stops at the daemon boundary the same way an
-  unmapped subtype does. Every other `system` subtype is still silently
-  dropped exactly as before, and none of this changes what surfaces as
-  `unrecognized_message` — a subtype the parser doesn't recognize at all still
-  falls through to the silent-drop tier, not this frame.
+  types — see [streamsup-package.md](knowledge/features/streamsup-package.md).
+  Three of the four now reach this wire under their own daemon-owned names
+  (#1394): `background_task_started`, `background_task_updated` and
+  `background_task_roster`, documented below. `thinking_tokens` still stops at
+  the daemon boundary — `turnbridge.MapEvent` has no case for it, so it drops
+  there the same way an unmapped subtype does. Every other `system` subtype is
+  still silently dropped exactly as before, and none of this changes what
+  surfaces as `unrecognized_message` — a subtype the parser doesn't recognize
+  at all still falls through to the silent-drop tier, not this frame.
 - **Genuinely unrecognized** — everything else. Surfaces as this frame.
 
 The ignored list is **measured, not guessed**: claude was driven directly on the
@@ -685,9 +690,155 @@ message type, in the pre-ship gate rather than in front of a user. Red there
 does not mean something broke; it means the measured ignore list needs
 re-deciding.
 
+#### `background_task_started`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose turn spawned the task. |
+| `task_id` | string | claude's opaque handle for the task. The join key every later `background_task_updated` and roster row carries. |
+| `tool_call_id` | string | The tool call that spawned the task — claude's `tool_use_id`, under the name `tool_use` and `tool_result` already use for it. |
+| `description` | string | The task's label. For `task_type: local_bash` this is the **literal command line**. |
+| `task_type` | string | claude's kind for the task (`local_bash` is the only observed value). An open string, not a closed set — one observation does not earn one. |
+| `truncated_fields` | array of string \| null | Names of the fields the daemon cut to fit their caps, using the field names in this table: `task_id`, `tool_call_id`, `description`, `task_type`. `null` when nothing was cut. |
+
+Like every frame in this section it is **binary → phone only**, reaches only a
+phone whose `interactive` capability was echoed in `hello_ack`, and carries an
+envelope-level `event_id` for replay.
+
+`background_task_started` (#1394) announces work that **outlives the turn that
+spawned it**. That is the whole reason the frame exists: a turn can report
+`turn_end` with `stop_reason: end_turn`, and `turn_state` can go `idle`, while a
+command claude started is provably still running. Before this frame nothing
+reaching a phone separated that from a genuine finish.
+
+It carries **no `turn_id`**, and it **opens and closes no turn** — a background
+task's lifecycle is orthogonal to its turn's, so attributing it to one would be a
+claim the daemon cannot honestly make. A client should render it as its own
+thread of activity, not as part of the turn it appeared in.
+
+Because `tool_call_id` is the same identifier `tool_use` and `tool_result` carry,
+a client joins all three with no vocabulary lookup: the `tool_use` that launched
+the command, its `tool_result`, and the background task it left running.
+
+`truncated_fields` is load-bearing, not decoration. A client that ignores it
+presents claude's cut text as complete. Every string here was bounded by the
+daemon **at construction**, so an oversized value never reaches this wire; the
+report is how a client knows which of them lost characters.
+
+**SECURITY.** `description` is, for the `local_bash` task type, the literal
+command line claude ran. It is safe to **render as inert text** and never to
+execute, re-shell, or feed to an HTML sink, an attribute, or a URL. The daemon
+bounds it but does not sanitize it — it stays untrusted, model-influenced text
+all the way to the client.
+
+#### `background_task_updated`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose turn spawned the task. |
+| `task_id` | string | The join key back to the `background_task_started` that opened the task. |
+| `patch` | string | What **changed** about the task: claude's patch object carried whole and unparsed, as a **string**. One key has been observed (`is_backgrounded`). Empty when claude sent none. |
+| `truncated_fields` | array of string \| null | Names of the fields the daemon cut: `task_id`, `patch`. `null` when nothing was cut. |
+
+Like its sibling it is **binary → phone only**, `interactive`-gated, and carries
+an envelope-level `event_id`.
+
+`background_task_updated` (#1394) is the peer of `background_task_started`: that
+frame opens the task, this one reports what happened to it afterwards. Join the
+two on `task_id`. Like its sibling it carries no `turn_id` and opens and closes
+no turn.
+
+`patch` is carried **whole and unparsed** — the daemon enumerates no keys inside
+it, because a mapping that listed the keys it knew would silently discard every
+key claude ships next. A client should treat it the same way: read the keys it
+understands, and pass the rest through or ignore it.
+
+**SECURITY.** `patch` is a **string, not nested JSON, and a client MUST NOT
+assume it parses.** The daemon truncates it at construction to fit a cap, and a
+truncated object is no longer valid JSON — typing it as raw JSON on this wire
+would be a lie that broke decoding. Feed it to a JSON parser only behind an error
+branch that falls back to rendering it as text.
+
+The render-never-execute rule is stated here rather than delegated to the sibling
+section: a patch's structured shape makes it the more tempting thing to feed
+somewhere that runs it, and a patch key may carry command text exactly as
+`description` does. Render it as inert text; never execute, re-shell, or feed it
+to an HTML sink, an attribute, or a URL.
+
+One upstream limitation worth knowing: the daemon also scrubs invalid UTF-8 from
+`patch` by **deleting** the offending bytes, and `truncated_fields` reports the
+cap cut **only**. So `patch` can differ from claude's bytes without appearing in
+`truncated_fields`. It is a display blob whose JSON validity was never guaranteed
+anyway, so a client cannot act differently either way.
+
+#### `background_task_roster`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation the roster belongs to. |
+| `tasks` | array of object | The tasks claude is tracking at this moment, in claude's own order. **Always present, never `null`** — see below. |
+| `dropped_tasks` | int | How many entries claude sent beyond the daemon's entry cap that this frame does **not** carry. `0` when nothing was dropped. |
+
+Each element of `tasks`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `task_id` | string | The join key back to the `background_task_started` that opened the task. |
+| `task_type` | string | claude's kind for the task (`local_bash` is the only observed value). |
+| `description` | string | The task's label, under a **tighter** cap than `background_task_started.description` — here it is one label in a list whose length claude chooses, and the full-length copy already crossed the wire on the `background_task_started` this row joins back to. |
+| `truncated_fields` | array of string \| null | Names of **this row's** cut fields: `task_id`, `task_type`, `description`. `null` when nothing was cut. Each row reports its own; there is no hoisted or flattened list. |
+
+Like its two siblings it is **binary → phone only**, `interactive`-gated, and
+carries an envelope-level `event_id`.
+
+`background_task_roster` (#1394) is the aggregate peer of the two scalar frames:
+they report what happened to **one** task, this reports what is alive. Like them
+it carries no `turn_id` and opens and closes no turn.
+
+Three things a client will otherwise get wrong:
+
+**1. It is a snapshot, not a delta.** The frame's name is the daemon's, not
+claude's — claude's own line is named for the *trigger* (something changed),
+while the payload is a complete picture of one moment. Treat each frame as
+replacing your view of what is running, not as amending it.
+
+**2. `tasks` is always present and never `null`, and an empty `[]` is a positive
+statement that nothing is alive.** That is the signal #1240's symptom needs, so
+the daemon forwards an empty roster rather than filtering it — an empty array
+here is the reassurance that the turn really is finished, not an absence of
+information. A client decoding into a non-optional array type never has to branch
+on `null`.
+
+**3. `dropped_tasks` is the roster's only truncation report.** There is
+deliberately no top-level `truncated_fields` on this frame, so a client grepping
+for that name finds nothing and would silently believe a capped roster is the
+whole roster. The roster's true size is `len(tasks) + dropped_tasks`. A count is
+carried rather than a name because a name-only report loses *how many* were lost;
+per-row text cuts are a property of one row and ride that row's own
+`truncated_fields`.
+
+**There is no terminal, finish, or completion event in this family, and that is
+deliberate.** A task's disappearance from a later roster is the *available*
+finish signal, but that transition has never been observed, and the daemon does
+not report a finish it cannot detect. Diffing successive snapshots is a
+legitimate thing for a **client** to do on its own terms — it is simply not an
+inference the daemon makes on your behalf, so anything a client shows as
+"finished" is the client's own conclusion.
+
+Ordering within a turn is claude's, not the daemon's: a roster can arrive before
+or after the `background_task_started` for a task it lists. Join on `task_id`
+rather than assuming an order.
+
+**SECURITY.** Each row's `description` carries the same literal command line as
+`background_task_started.description`, under a tighter cap. The
+render-never-execute rule is repeated here per row rather than delegated because
+a **list** of command lines is a more tempting shape to feed somewhere structured
+than a single one. Render every row as inert text; never execute, re-shell, or
+feed it to an HTML sink, an attribute, or a URL.
+
 #### `session_transition`
 
-Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the eight turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
+Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the twelve turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1344,6 +1495,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-08-09`: Added the three background-task frames — `background_task_started`, `background_task_updated`, `background_task_roster` (binary → phone, interactive-capability-gated, #1394). The daemon had translated claude's `system/task_started`, `system/task_updated` and `system/background_tasks_changed` lines internally since #1380–#1382 and given them wire types in #1393, but nothing mapped them outbound, so a phone still could not tell #1240's symptom — `turn_end` with `end_turn` and state `idle` while a command claude started is provably still running — from a genuine finish. None of the three carries a `turn_id` or drives any turn lifecycle. The roster is a **snapshot, not a delta**, its `tasks` is always present and never `null` (an empty `[]` positively says nothing is alive), and its `dropped_tasks` count is its **only** truncation report. No terminal/finish event exists in the family, deliberately: that transition has never been observed, so the daemon does not report a finish it cannot detect. Also **corrected two stale counts**: § Interactive events and `session_transition` both said "eight" turn-stream events when there were nine; both now read twelve.
 - `2026-07-27`: Added `unrecognized_message` (binary → phone, interactive-capability-gated). The stream-json parser used to drop any claude output it had no mapping for into a debug log the production daemon does not print, so an unknown message type left no trace anywhere and no client was told. It now splits two ways: a **measured** known-ignored list (`system/*`, `rate_limit_event`) stays silent, and everything else surfaces as this frame carrying the drop site, the offending type, and the raw JSON capped at 16 KiB. Carries no `turn_id` and drives no turn lifecycle. Also **fixed a #1074 omission**: `api_retry` and `compacting` shipped without rows in the application-message-types table above; both are now listed.
 - `2026-07-27`: Added the `request_session_settings` → `session_settings` read pair (#491, #1214), the read half the settings cluster shipped without. A client can now ask what the current run configuration is and which session to address a change to, instead of scraping both off `screen_snapshot`. That side-load is refused with `server.binary_offline` whenever there is no terminal to photograph, which is always on the stream-json interactive runner, so it left the desktop run-configuration UI with no values, no session id and no context figure at all. Corrected the `set_session_settings` claim that a client already knows its session id from the `session_transition` marker: the daemon fires that marker only on a clear or an idle eviction, never on session creation. Also filled in the `screen_snapshot` field table, which never listed the `used_tokens` / `window_tokens` fields shipped with #857.
 - `2026-07-03`: Docs-only drift correction against the deployed code. Marked v2 as shipped and the daemon's current default (v1 is the deprecated `PYRY_MOBILE_V2=0` fallback). Normalised every endpoint reference to `/v1/server` / `/v1/client` — the relay routes only those, and the version lives in the `v` frame field, not the route. Added WS close code `4429` (per-server phone cap). Corrected the envelope `id` row: `id` is a per-connection counter that resets on reconnect and is not a durable dedup key; durable ordering/dedup is via `event_id`. Corrected the token contract: the `x-pyrycode-token` header is still required today and passes through the relay opaquely, so the "header removed / relay never sees the token" end-state is marked not yet implemented.
