@@ -282,10 +282,27 @@ func runAgentRun(stdout io.Writer, args []string) error {
 // runAgentRun body; preserved indefinitely for billing-classification
 // comparison (operator decision 2026-05-19).
 func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agentRunArgs, claudeBin string, promptBytes []byte) error {
+	// Write the same per-spawn deny-default settings file the ptyrunner path
+	// writes, and for the same reason. Without it this path had NO tool
+	// boundary at all: `--dangerously-skip-permissions` defeats
+	// `--allowed-tools`, measured 2026-08-08 (pyrycode#1387). Every agent
+	// dispatched since the 2026-07-25 fleet switch ran unrestricted, which
+	// silently returned architect-only web search and subagent spawning, the
+	// deliberately-excluded Figma write tools, and the three human-only
+	// tools, to every role.
+	//
+	// Mirrors runAgentRunPty's block below, including the deny list, so the
+	// two paths enforce identically rather than approximately.
+	settingsPath, err := settingsWrite(parsed.allowedTools, parsed.disallowedTools)
+	if err != nil {
+		return fmt.Errorf("write per-spawn settings: %w", err)
+	}
+	defer func() { _ = os.Remove(settingsPath) }()
+
 	return streamrunner.Run(ctx, streamrunner.Config{
 		ClaudeBin:   claudeBin,
 		WorkDir:     parsed.workdir,
-		Args:        buildStreamRunnerClaudeArgs(parsed, true, ""),
+		Args:        buildStreamRunnerClaudeArgs(parsed, true, "", settingsPath),
 		PromptBytes: promptBytes,
 		Stdout:      stdout,
 		Stderr:      os.Stderr,
@@ -352,22 +369,53 @@ func runAgentRunPty(ctx context.Context, stdout io.Writer, parsed agentRunArgs, 
 //     assistant message events on stdout under stream-json mode (without
 //     `--verbose`, only the final `result` is emitted).
 //   - `--dangerously-skip-permissions` (YOLO branch) removes the
-//     workspace-trust dialog and the per-spawn settings file (replaced by
-//     `--allowed-tools` as the authoritative tool gate). Acceptable in this
-//     verb because the dispatcher is the sole caller and operates inside an
-//     isolated worktree; the spawn's blast radius is bounded by
-//     `--allowed-tools`, not by the trust dialog.
+//     workspace-trust dialog. It ALSO defeats `--allowed-tools`, which this
+//     comment previously claimed was "the authoritative tool gate" on this
+//     path. That was assumed and never measured, and it is false. Measured
+//     2026-08-08 against claude directly, two cells, same model and prompt:
+//     with `--dangerously-skip-permissions --allowed-tools Read` the agent
+//     wrote the file; with `--allowed-tools Read` alone it refused. So for
+//     two weeks after the 2026-07-25 fleet switch to this path, the
+//     allowlist did nothing (pyrycode#1387).
+//   - `--settings` carries the per-spawn deny-default permissions file and
+//     IS the enforcement on this path, exactly as on the ptyrunner path.
+//     It survives `--dangerously-skip-permissions` where the command-line
+//     allowlist does not. `--allowed-tools` is still passed, because it is
+//     harmless and remains meaningful if the skip flag is ever dropped, but
+//     it must not be relied on as the boundary.
 //   - `--max-turns` is honoured in stream-json mode (interactive mode
 //     ignored it) and bounds runaway-agent turn budget.
 //   - `--allowed-tools` is comma-joined; `splitAllowedTools` already
 //     normalised operator input into a clean slice at parse time.
-func buildStreamRunnerClaudeArgs(parsed agentRunArgs, yolo bool, mcpConfigPath string) []string {
+func buildStreamRunnerClaudeArgs(parsed agentRunArgs, yolo bool, mcpConfigPath, settingsPath string) []string {
 	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 	}
-	args = append(args, permissionArgs(yolo, mcpConfigPath)...)
+	if yolo {
+		// `--permission-mode dontAsk`, NOT `--dangerously-skip-permissions`.
+		// dontAsk is the documented mode for exactly this shape: "auto-denies
+		// every tool call that would otherwise prompt you... use this mode for
+		// CI pipelines or restricted environments where you pre-define exactly
+		// what Claude may do; the session never waits for input."
+		//
+		// The skip flag looked equivalent and is not. It outranks every mode,
+		// including the dontAsk the settings file already asks for, so with it
+		// present the allowlist enforced nothing at all (pyrycode#1387).
+		// Measured 2026-08-08, same settings and allowlist, asking for a curl
+		// no rule covers: with the skip flag it ran and returned 200; under
+		// dontAsk it was denied.
+		args = append(args, "--permission-mode", "dontAsk")
+	} else {
+		args = append(args, permissionArgs(false, mcpConfigPath)...)
+	}
+	// The settings file is the actual tool boundary on this path. Emitted
+	// only when the caller supplies one, so the non-YOLO branch and the
+	// existing unit tables keep their exact shapes.
+	if settingsPath != "" {
+		args = append(args, "--settings", settingsPath)
+	}
 	return append(args,
 		"--append-system-prompt-file", parsed.systemPromptFile,
 		"--model", parsed.model,

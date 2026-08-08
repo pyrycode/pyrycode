@@ -124,7 +124,14 @@ type userTurnContentText struct {
 //   - nil on operator-shutdown teardown (parent ctx cancel) — success.
 //   - nil on an idle-stall watchdog kill — the synthetic result line on
 //     stdout is the signal; pyry exits clean and the dispatcher retries.
-//   - *exec.ExitError on non-zero child exit not triggered by a cancel.
+//   - nil on a non-zero child exit that still produced a complete result
+//     trailer — the trailer is the outcome, and its own is_error / subtype
+//     / terminal_reason fields carry the failure the caller acts on. A
+//     budget stop is the common case: `--max-turns` emits a good trailer
+//     AND exits 1 (pyrycode#1388).
+//   - *exec.ExitError on non-zero child exit with NO result trailer, and
+//     not triggered by a cancel. Here the exit status is the only signal
+//     there is.
 //   - a wrapped error from pre-Start setup (stdin pipe, spawn).
 //
 // On either cancel (operator shutdown of the parent ctx, or the watchdog
@@ -245,6 +252,29 @@ func Run(ctx context.Context, cfg Config) error {
 			if err := writeIdleStallResult(cfg.Stdout, idle, runStart); err != nil {
 				logger.Warn("streamrunner: write idle_stall result failed", "err", err)
 			}
+		}
+		return nil
+	}
+	// A complete result trailer is the outcome, so the child's exit status
+	// is not.
+	//
+	// claude exits non-zero when the trailer carries is_error, and a budget
+	// stop is one such case: `--max-turns` produces a perfectly good trailer
+	// with subtype `error_max_turns` and terminal_reason `max_turns`, AND an
+	// exit status of 1. Propagating that made `pyry agent-run` fail a run
+	// that had in fact reported exactly what it was asked to report
+	// (pyrycode#1388). The ptyrunner path never had the bug because it
+	// synthesises its own trailer and never forwards claude's status at all.
+	//
+	// Nothing is masked by this. Every failure mode the caller acts on is
+	// carried in the trailer's own fields, `is_error`, `subtype` and
+	// `terminal_reason`, which the dispatcher already classifies. A child
+	// that dies WITHOUT emitting a trailer still returns its error below,
+	// which is the case where the exit status is the only signal there is.
+	if parser.hasSeenResult() {
+		if waitErr != nil {
+			logger.Debug("streamrunner: child exited non-zero after a complete result trailer; trailer wins",
+				"err", waitErr)
 		}
 		return nil
 	}
