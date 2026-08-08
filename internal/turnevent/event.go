@@ -22,8 +22,9 @@ import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
 // ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted,
-// BackgroundTaskUpdated, BackgroundTaskRoster, the internal-only status peers
-// Stall, ApiRetry, and Compacting, and the diagnostic marker Unrecognized.
+// BackgroundTaskUpdated, BackgroundTaskRoster, ThinkingProgress, the
+// internal-only status peers Stall, ApiRetry, and Compacting, and the
+// diagnostic marker Unrecognized.
 // The unexported marker
 // keeps the variant set
 // closed to this package, so external ACP-spec churn cannot inject a variant.
@@ -287,6 +288,73 @@ type BackgroundTaskRoster struct {
 	DroppedTasks int
 }
 
+// ThinkingProgress reports that claude is actively reasoning, and roughly how
+// much. It maps claude's system/thinking_tokens line (#1385), the fourth system
+// subtype the parser translates rather than drops.
+//
+// It exists because this is claude's ONLY mid-turn proof of life on the
+// stream-json surface: during a long assistant turn nothing else crosses stdout,
+// so without it a client showing "thinking" cannot separate a slow answer from a
+// wedged one.
+//
+// The NAME is the daemon's, not claude's, for the reason BackgroundTaskStarted's
+// doc gives — but here it also disambiguates, and that is worth stating because
+// the colliding name sits a few lines above in this same file. ThoughtChunk
+// carries the CONTENT of claude's reasoning; this variant carries NONE — only
+// that reasoning is happening and an estimate of its size. A consumer that
+// renders this as text has nothing to render.
+//
+// RATE. The producer emits at most one of these per
+// streamsup.minThinkingTokensPerEvent tokens of accumulated delta, so the event
+// stream carries strictly fewer of them than claude emits lines (33 lines → 8
+// events on the committed capture). Two consequences a consumer must not get
+// wrong: the events do NOT enumerate claude's lines, and — the important one —
+// the ABSENCE of an event within any particular window does NOT mean thinking
+// stopped. It may only mean the accumulated delta has not yet crossed the bound.
+// Do not build a "thinking stalled" inference on the gap between two of these.
+//
+// STALL DETECTION is untouched by this variant, in both directions, and the note
+// is here so a future wiring slice does not re-open the question. turnevent.Stall
+// has exactly one producer — internal/turnbridge/mapper.go, from
+// tuidriver.EventKindStallDetected — on the PTY surface, which never sees this
+// parser. streamsup.Watchdog consumes its own copy of raw stdout via
+// io.MultiWriter and never reads parser events; it already counts every complete
+// line as activity, thinking_tokens included. So this event neither masks nor
+// triggers a stall, and no suppression-avoidance mechanism is needed or wanted.
+//
+// The same two keys the captured line carries are deliberately NOT fields here,
+// for the same reasons (#1380): session_id, which is claude's session identity
+// and NOT the daemon's conversation identity, and uuid, claude's per-line message
+// id, which nothing in the daemon reads.
+//
+// It opens and closes no turn. Unlike every sibling above it carries no
+// claude-authored TEXT at all — both fields are claude's own integers — so it
+// needs no producer-side byte caps and has no TruncatedFields: nothing is ever
+// cut, and a permanently-nil field would claim a bound that does not exist. Like
+// every variant here it carries no conversation identity — the bridge injects
+// that.
+type ThinkingProgress struct {
+	// EstimatedTokens is claude's estimate of the tokens it has spent thinking, as
+	// of the emitting line.
+	//
+	// It is cumulative within ONE INFERENCE REQUEST, not within a turn, and it is
+	// NOT monotonic across a turn: it restarts near zero at every inference-request
+	// boundary. That is measured, not speculative — the committed capture's single
+	// turn contains four such restarts (running 5→184, 4→167, 3→126, 1→197). Treat
+	// it as a progress reading, never as a turn total, and never diff two of them
+	// expecting a non-negative result.
+	EstimatedTokens int
+	// EstimatedTokensDelta is claude's per-line increment, exactly as it appears on
+	// the line that produced this event.
+	//
+	// The deltas a consumer RECEIVES do not sum to the turn's total, because the
+	// rate bound drops most of the lines: on the committed capture the turn's 674
+	// tokens of delta arrive as 243 across 8 events. It is a rate reading, not an
+	// accumulator input. Summing it undercounts by whatever the dropped lines
+	// carried, and no field here reports that residue.
+	EstimatedTokensDelta int
+}
+
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
 // stall_detected signal (no payload, no clearing edge). It carries no fields —
 // onset only, no "cleared" state, and (like every variant here) no
@@ -384,6 +452,7 @@ func (TurnEnd) isTurnEvent()               {}
 func (BackgroundTaskStarted) isTurnEvent() {}
 func (BackgroundTaskUpdated) isTurnEvent() {}
 func (BackgroundTaskRoster) isTurnEvent()  {}
+func (ThinkingProgress) isTurnEvent()      {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
@@ -398,6 +467,7 @@ var (
 	_ Event = BackgroundTaskStarted{}
 	_ Event = BackgroundTaskUpdated{}
 	_ Event = BackgroundTaskRoster{}
+	_ Event = ThinkingProgress{}
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}

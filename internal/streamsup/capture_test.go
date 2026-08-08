@@ -33,26 +33,27 @@ type droppedLineCapture struct {
 	} `json:"dropped_lines"`
 }
 
-// capturedSystemLine returns the one captured system line of the given subtype,
-// as the bytes claude put on the wire.
+// capturedSystemLines returns EVERY captured system line of the given subtype,
+// in stream order, as the bytes claude put on the wire.
 //
-// Every failure is t.Fatalf, never a skip: the capture is committed, so a
-// missing record is a broken premise rather than an unavailable resource. The
-// is_capture assertion is the provenance rule enforced AT THE READER — a
-// hand-built payload file swapped in for this one fails here, before any mapping
-// is read. Exactly one match is required because two would make "the captured
-// line" ambiguous, and silently taking the first is the kind of choice that
-// should be deliberate.
+// This is the package's one capture reader; capturedSystemLine wraps it with the
+// exactly-one rule. The provenance checks live HERE, at the reader, rather than
+// at the callers — the is_capture assertion means a hand-built payload file
+// swapped in for this one fails before any mapping is read, and putting it in one
+// place is what stops a second reader from growing a second, weaker copy of it.
+// For the same reason the path is the capturePath package constant and this
+// function takes NO path parameter: a plural reader is exactly the shape someone
+// later generalizes into "read any capture file", and that generalization is what
+// would put an unchecked file behind these assertions.
 //
-// Shared on purpose, and now by three mapping tests: task_started (#1380),
-// task_updated (#1382) and background_tasks_changed (#1381) all read their
-// subtype out of this one file. CORRECTED 2026-08-08 (#1381): every statement
-// this doc has carried about a caller still driving its line through the drop
-// table is now spent — no captured system subtype remains on
-// TestParser_IgnoredLineTypesStaySilent's table, which since #1381 drives only
-// synthesized lines. That is not a claim that no further caller will exist: a
-// fourth subtype could arrive, and it would read its line from here too.
-func capturedSystemLine(t *testing.T, subtype string) []byte {
+// Every failure is t.Fatalf, never a skip: the capture is committed, so a missing
+// record is a broken premise rather than an unavailable resource. Zero matches
+// fatals here, so no caller can loop over an empty slice and pass vacuously.
+//
+// Stream order is the capture's own record order, which #1385's rate-bound tests
+// depend on: they drive the 33 thinking_tokens lines through ONE parser and the
+// accumulator makes the result order-dependent.
+func capturedSystemLines(t *testing.T, subtype string) [][]byte {
 	t.Helper()
 	raw, err := os.ReadFile(capturePath)
 	if err != nil {
@@ -66,7 +67,7 @@ func capturedSystemLine(t *testing.T, subtype string) []byte {
 		t.Fatalf("%s: is_capture is false — this file must be a genuine claude capture, "+
 			"never a hand-written payload; a guessed line maps fields claude does not send", capturePath)
 	}
-	var found []string
+	var found [][]byte
 	for _, rec := range capture.DroppedLines {
 		if rec.Type != "system" || rec.Subtype != subtype {
 			continue
@@ -75,10 +76,37 @@ func capturedSystemLine(t *testing.T, subtype string) []byte {
 			t.Fatalf("system/%s: payload_encoding = %q, want %q (the payload must be the whole line as a JSON string)",
 				subtype, rec.PayloadEncoding, "json-string")
 		}
-		found = append(found, rec.Payload)
+		found = append(found, []byte(rec.Payload))
 	}
+	if len(found) == 0 {
+		t.Fatalf("system/%s: got 0 captured records in %s, want at least 1", subtype, capturePath)
+	}
+	return found
+}
+
+// capturedSystemLine returns the one captured system line of the given subtype,
+// as the bytes claude put on the wire. Exactly one match is required because two
+// would make "the captured line" ambiguous, and silently taking the first is the
+// kind of choice that should be deliberate.
+//
+// Shared on purpose, and by three mapping tests: task_started (#1380),
+// task_updated (#1382) and background_tasks_changed (#1381) all read their
+// subtype out of this one file. CORRECTED 2026-08-08 (#1381): every statement
+// this doc has carried about a caller still driving its line through the drop
+// table is now spent — no captured system subtype remains on
+// TestParser_IgnoredLineTypesStaySilent's table, which since #1381 drives only
+// synthesized lines.
+//
+// The predicted fourth subtype arrived (#1385, thinking_tokens) and did NOT
+// become a fourth caller of this function: it has 33 captured records, so the
+// exactly-one rule fatals on it by design. It reads capturedSystemLines instead —
+// which is why the singular reader is now a thin wrapper rather than the place
+// the provenance checks live.
+func capturedSystemLine(t *testing.T, subtype string) []byte {
+	t.Helper()
+	found := capturedSystemLines(t, subtype)
 	if len(found) != 1 {
 		t.Fatalf("system/%s: got %d captured records in %s, want exactly 1", subtype, len(found), capturePath)
 	}
-	return []byte(found[0])
+	return found[0]
 }

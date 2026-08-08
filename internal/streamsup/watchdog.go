@@ -57,8 +57,11 @@ func watchdogTickFor(idle time.Duration) time.Duration {
 // stdout to both the #1088 Parser and this tracker with io.MultiWriter (mirrors
 // Parser.Write's full-consume contract).
 //
-// The #1088 Parser is deliberately turn-stateless and holds no awaiting flag, so
-// this tracker carries its own type-tracking state over the same stream. Unlike
+// The #1088 Parser holds no awaiting flag, so this tracker carries its own
+// type-tracking state over the same stream. (Until #1385 this said the Parser was
+// "deliberately turn-stateless"; it now holds one rate-bound token accumulator.
+// The awaiting-flag half — the half this tracker exists for — is unchanged.)
+// Unlike
 // the Parser (which locks nothing, having no second reader), the tracker locks:
 // the poll goroutine reads awaiting/lastEvent via snapshot concurrently with the
 // os/exec forwarder goroutine's Write. Same lock discipline as streamrunner's
