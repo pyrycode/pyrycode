@@ -253,6 +253,24 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// means something is genuinely wrong and you want to see it.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.BackgroundTaskStarted, turnevent.BackgroundTaskUpdated, turnevent.BackgroundTaskRoster:
+		// claude's background-task lifecycle (#1394), taking the same shape as the
+		// status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
+		// transitionTo / endTurn; inTurn, turnID, currentState untouched). A
+		// background task OUTLIVES the turn that spawned it — that is the whole
+		// #1240 point — so it is not turn-scoped, and opening a turn on one would
+		// wedge the conversation exactly as opening one on an unrecognized message
+		// would: no turn end follows work that is orthogonal to the turn.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position
+		// ahead of the frame. An empty roster is FORWARDED, not filtered — it says
+		// nothing is alive, which is the reassurance #1240's symptom needs. Like
+		// turn_state these flow through emit() and are NOT droppable deltas (the
+		// droppable set is assistant_delta only, #610), so a burst holds queue
+		// slots; the producer already caps roster entries, and these only fire on
+		// claude's own lifecycle lines.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -437,6 +455,17 @@ func eventKind(ev turnevent.Event) string {
 		// type string, which is not returned here: this feeds log fields, and the
 		// package rule is that nothing derived from claude's output reaches a log.
 		return "unrecognized"
+	case turnevent.BackgroundTaskStarted:
+		// The variant NAME only, for the arm above's reason. These three carry the
+		// most tempting fields in the package to log — TaskID, ToolCallID,
+		// Description (the literal command line for claude's local_bash task
+		// type), TaskType, Patch, and each roster row's three — and none of them
+		// is returned here.
+		return "background_task_started"
+	case turnevent.BackgroundTaskUpdated:
+		return "background_task_updated"
+	case turnevent.BackgroundTaskRoster:
+		return "background_task_roster"
 	default:
 		return "unknown"
 	}
