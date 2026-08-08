@@ -280,3 +280,37 @@ func TestRun_StdinEnvelopeRoundTrip(t *testing.T) {
 			got.Message.Content[0].Text, string(prompt))
 	}
 }
+
+// TestRun_ResultTrailerBeatsNonZeroExit pins the pyrycode#1388 contract: a
+// child that emits a complete result trailer and THEN exits non-zero is a
+// successful run, because the trailer is the outcome.
+//
+// Real claude does exactly this on a budget stop. `--max-turns` produces a
+// trailer with subtype `error_max_turns` and terminal_reason `max_turns`,
+// which is precisely what the caller asked for, alongside an exit status of
+// 1. Forwarding that status made `pyry agent-run` fail a run that had
+// reported exactly what it was told to report, and the real-claude gate
+// caught it as a red test on the stream path while the ptyrunner path stayed
+// green.
+func TestRun_ResultTrailerBeatsNonZeroExit(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "result_then_exit1", &stdout, &stderr)
+	cfg.PromptBytes = []byte("noop")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run: got %v, want nil — a complete result trailer is the outcome, "+
+			"so the child's exit status must not override it", err)
+	}
+	// The trailer must reach the caller intact; swallowing the exit code is
+	// only correct because this is what the caller reads instead.
+	if !strings.Contains(stdout.String(), `"subtype":"error_max_turns"`) {
+		t.Errorf("stdout missing the result trailer:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"terminal_reason":"max_turns"`) {
+		t.Errorf("stdout missing terminal_reason:\n%s", stdout.String())
+	}
+}
