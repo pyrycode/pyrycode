@@ -526,10 +526,12 @@ func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 		// surface only. So it has no captured payload and this row is necessarily
 		// synthesized; it invents no field structure beyond the subtype name.
 		{"system/task_notification", `{"type":"system","subtype":"task_notification"}`},
-		// The two siblings, driven from their CAPTURED lines: mapping task_updated
-		// is #1382 and background_tasks_changed is #1381, neither of them here, so
-		// both must still be silent.
-		{"system/task_updated", string(capturedSystemLine(t, "task_updated"))},
+		// The remaining sibling, driven from its CAPTURED line: mapping
+		// background_tasks_changed is #1381, not here, so it must still be silent.
+		// CORRECTED 2026-08-07 (#1382): task_updated used to sit beside it with the
+		// same argument, and #1382 is the ticket that made that argument false — its
+		// row moved to TestParser_TaskUpdatedMapsFromCapture, where the captured line
+		// is now asserted to produce an event rather than silence.
 		{"system/background_tasks_changed", string(capturedSystemLine(t, "background_tasks_changed"))},
 		{"rate_limit_event", `{"type":"rate_limit_event","rate_limit":{"status":"allowed"}}`},
 	}
@@ -540,14 +542,20 @@ func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 	}
 }
 
-// taskStartedCapCheat records the two cap values as LITERALS, deliberately not
-// as maxTaskFieldID / maxTaskDescription. Same rule as harnessNudgeFixture: a
-// fixture built from the constant it validates asserts nothing about the number
-// — halve the constant and every row below would follow it green. These literals
-// are what make such an edit go RED.
+// taskStartedCapCheat records the cap values as LITERALS, deliberately not as
+// maxTaskFieldID / maxTaskDescription / maxTaskPatch. Same rule as
+// harnessNudgeFixture: a fixture built from the constant it validates asserts
+// nothing about the number — halve the constant and every row below would follow
+// it green. These literals are what make such an edit go RED.
+//
+// taskPatchCapFixture is a THIRD literal even though it currently equals
+// taskDescriptionCapFixture, mirroring the production split: the two bound
+// different fields for different reasons, and sharing a fixture would let a
+// change to one silently retarget the other's proof.
 const (
 	taskFieldIDCapFixture     = 256
 	taskDescriptionCapFixture = 4096
+	taskPatchCapFixture       = 4096
 )
 
 // taskStartedLineFixture builds a system/task_started line from the four mapped
@@ -886,6 +894,453 @@ func TestParser_TaskStartedDropIsLoggedContentFree(t *testing.T) {
 			for k, v := range r.attrs {
 				if strings.Contains(v, leak) {
 					t.Errorf("record %q attr %q carries a claude-derived description; this path logs the subtype only", r.msg, k)
+				}
+			}
+		}
+	}
+}
+
+// taskUpdatedLineFixture builds a system/task_updated line from the two mapped
+// keys, taking the patch as RAW JSON so a test can hand it a shape or a size the
+// capture does not contain. A nil patch omits the key entirely.
+//
+// It invents NO field structure: the LINE-level keys are exactly the capture's.
+// It claims nothing about the patch's INTERNAL keys either, and that is the
+// point rather than a loophole — the mapping carries the patch unparsed, so a
+// synthesized multi-key patch asserts the opposite of an invented mapping: that
+// keys the daemon knows nothing about survive.
+func taskUpdatedLineFixture(t *testing.T, taskID string, patch json.RawMessage) string {
+	t.Helper()
+	line := map[string]any{
+		"type":    "system",
+		"subtype": "task_updated",
+		"task_id": taskID,
+	}
+	if patch != nil {
+		line["patch"] = patch
+	}
+	b, err := json.Marshal(line)
+	if err != nil {
+		t.Fatalf("marshalling task_updated fixture: %v", err)
+	}
+	return string(b)
+}
+
+// taskUpdatedEvent drives one line through the shipped parser and returns the
+// single BackgroundTaskUpdated it must emit.
+func taskUpdatedEvent(t *testing.T, line string) turnevent.BackgroundTaskUpdated {
+	t.Helper()
+	got := collectEvents(line)
+	if len(got) != 1 {
+		t.Fatalf("event count: got %d, want 1 (%#v)", len(got), got)
+	}
+	ev, ok := got[0].(turnevent.BackgroundTaskUpdated)
+	if !ok {
+		t.Fatalf("event type: got %T, want turnevent.BackgroundTaskUpdated", got[0])
+	}
+	return ev
+}
+
+// TestParser_TaskUpdatedMapsFromCapture is #1382's central assertion: the
+// CAPTURED system/task_updated line becomes one turnevent.BackgroundTaskUpdated
+// carrying task_id and patch.
+//
+// This line used to be a row in TestParser_IgnoredLineTypesStaySilent, asserting
+// the opposite. Moving it here is the change; #1380 put it there deliberately
+// because the subtype was genuinely still dropped between the two tickets.
+//
+// TaskID is DERIVED from the capture's own payload rather than pinned, for
+// TestParser_TaskStartedMapsFromCapture's reason: the capture is redacted
+// (session_id reads $SESSION_ID), so a pinned expectation risks pinning a
+// placeholder, while a derived one still catches a field swap. Patch carries the
+// one pinned literal, as a canary that the reader picked the right record at all.
+func TestParser_TaskUpdatedMapsFromCapture(t *testing.T) {
+	t.Parallel()
+	line := capturedSystemLine(t, "task_updated")
+
+	var payload map[string]any
+	if err := json.Unmarshal(line, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+
+	ev := taskUpdatedEvent(t, string(line))
+
+	routes := []struct {
+		field     string
+		claudeKey string
+		got       string
+	}{
+		{"TaskID", "task_id", ev.TaskID},
+	}
+	for _, r := range routes {
+		want, _ := payload[r.claudeKey].(string)
+		if want == "" {
+			t.Fatalf("the capture carries no string %q, so the routing of %s cannot be proven against it", r.claudeKey, r.field)
+		}
+		if r.got != want {
+			t.Errorf("%s: got %q, want the capture's %s = %q", r.field, r.got, r.claudeKey, want)
+		}
+	}
+
+	// Patch is asserted SEMANTICALLY — re-decoded and compared against the
+	// payload's own patch — so the carriage claim does not rest on key ordering,
+	// which is not ours to control.
+	wantPatch, ok := payload["patch"]
+	if !ok {
+		t.Fatalf("the capture carries no patch, so the carriage assertion would be vacuous")
+	}
+	var gotPatch any
+	if err := json.Unmarshal([]byte(ev.Patch), &gotPatch); err != nil {
+		t.Fatalf("Patch %q does not re-decode as JSON: %v", ev.Patch, err)
+	}
+	if !reflect.DeepEqual(gotPatch, wantPatch) {
+		t.Errorf("Patch: got %#v, want the capture's patch %#v", gotPatch, wantPatch)
+	}
+
+	// The canary: proves the reader selected the task_updated record rather than
+	// some other system line that happens to decode into the same two-field shape.
+	const wantPatchLiteral = `{"is_backgrounded":true}`
+	if ev.Patch != wantPatchLiteral {
+		t.Errorf("Patch: got %q, want %q (the capture's one observed patch)", ev.Patch, wantPatchLiteral)
+	}
+	if ev.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil — the captured line is 170 bytes on the wire, far under every cap", ev.TruncatedFields)
+	}
+
+	// The two deliberate drops (see BackgroundTaskUpdated's doc): claude's
+	// session_id is NOT the daemon's conversation identity, and uuid has no reader
+	// in the daemon. Neither is even declared on systemTaskUpdatedLine, so this
+	// sweep guards the event against a LATER field, which is the failure a fixed
+	// list of field names stops catching the moment someone adds one.
+	//
+	// Swept by REFLECTION over every string field, inherited from
+	// TestParser_TaskStartedMapsFromCapture. Both values are read from the decoded
+	// payload rather than pinned, so the assertion stays honest if the capture is
+	// ever re-taken unredacted.
+	rv := reflect.ValueOf(ev)
+	var swept int
+	for _, key := range []string{"session_id", "uuid"} {
+		v, _ := payload[key].(string)
+		if v == "" {
+			t.Fatalf("the capture carries no string %q, so the drop assertion would be vacuous", key)
+		}
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Field(i).Kind() != reflect.String {
+				continue
+			}
+			swept++
+			if rv.Field(i).String() == v {
+				t.Errorf("field %s carries claude's %s (%q); it is deliberately NOT on this event",
+					rv.Type().Field(i).Name, key, v)
+			}
+		}
+	}
+	// The sweep visiting nothing would pass silently, which is the one way this
+	// assertion could rot into decoration.
+	//
+	// The floor is a LITERAL, not #1380's len(routes)*2. That expression happened
+	// to be exact there because BackgroundTaskStarted has as many routes as string
+	// fields (4 and 4); here there is one route and two string fields, so
+	// len(routes)*2 would be a floor of 2 against an actual 4 — it would pass with
+	// half the sweep missing. 2 string fields x 2 dropped keys = 4. A later ticket
+	// adding a field only raises the count; a field LEAVING string kind drops it
+	// below the floor and goes red, which is exactly the weakening worth catching.
+	const wantSwept = 2 * 2
+	if swept < wantSwept {
+		t.Errorf("the drop sweep visited %d string fields, want at least %d", swept, wantSwept)
+	}
+}
+
+// TestParser_TaskUpdatedCarriesPatchWhole proves the clause the capture cannot:
+// that patch is carried WHOLE rather than key-enumerated.
+//
+// The captured patch has exactly one key, so an implementation that declared
+// `struct{ IsBackgrounded bool }` and re-marshalled would satisfy every
+// capture-derived assertion above. Whole-ness needs a second input — the same
+// shape as the ticket's "the capture proves the mapping and cannot prove the
+// bound" argument, one level down. These lines are SYNTHESIZED and invent no
+// field structure: the line-level keys are the capture's, and the mapping claims
+// nothing about the patch's internal keys, which is precisely what is being
+// asserted here.
+func TestParser_TaskUpdatedCarriesPatchWhole(t *testing.T) {
+	t.Parallel()
+
+	const taskID = "bybi8g8i8"
+
+	t.Run("keys claude has never shown survive un-mapped", func(t *testing.T) {
+		t.Parallel()
+		// A string, a nested object and an array beside the one observed key. A
+		// key-enumerating mapping drops all three and goes red here.
+		raw := json.RawMessage(`{"is_backgrounded":true,"status":"running",` +
+			`"detail":{"exit_code":0,"note":"still going"},"tags":["a","b"]}`)
+		ev := taskUpdatedEvent(t, taskUpdatedLineFixture(t, taskID, raw))
+
+		var got, want any
+		if err := json.Unmarshal([]byte(ev.Patch), &got); err != nil {
+			t.Fatalf("Patch %q does not re-decode as JSON: %v", ev.Patch, err)
+		}
+		if err := json.Unmarshal(raw, &want); err != nil {
+			t.Fatalf("decoding the fixture patch: %v", err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Patch: got %#v, want %#v — every key must survive, including the ones the daemon knows nothing about", got, want)
+		}
+		if ev.TruncatedFields != nil {
+			t.Errorf("TruncatedFields: got %v, want nil", ev.TruncatedFields)
+		}
+	})
+
+	t.Run("a large integer keeps its digits verbatim", func(t *testing.T) {
+		t.Parallel()
+		// The row that falsifies a map[string]any decode-and-re-marshal: that
+		// implementation rounds every number through float64 and this id loses its
+		// low digits. Byte-level, deliberately not DeepEqual, which would compare two
+		// equally-rounded float64s and pass.
+		const big = "12345678901234567890"
+		raw := json.RawMessage(`{"revision":` + big + `}`)
+		ev := taskUpdatedEvent(t, taskUpdatedLineFixture(t, taskID, raw))
+
+		if !strings.Contains(ev.Patch, big) {
+			t.Errorf("Patch: got %q, want it to carry %s verbatim", ev.Patch, big)
+		}
+	})
+
+	t.Run("an absent patch lands empty and is not an error", func(t *testing.T) {
+		t.Parallel()
+		// Absence is claude's to choose; there is no captured negative case, so the
+		// field lands empty rather than inventing a validation rule.
+		ev := taskUpdatedEvent(t, taskUpdatedLineFixture(t, taskID, nil))
+
+		if ev.Patch != "" {
+			t.Errorf("Patch: got %q, want the empty string", ev.Patch)
+		}
+		if ev.TaskID != taskID {
+			t.Errorf("TaskID: got %q, want %q — an absent patch must not disturb the rest", ev.TaskID, taskID)
+		}
+		if ev.TruncatedFields != nil {
+			t.Errorf("TruncatedFields: got %v, want nil", ev.TruncatedFields)
+		}
+	})
+
+	t.Run("a non-object patch is carried as its serialized text", func(t *testing.T) {
+		t.Parallel()
+		// Deliberate permissiveness: json.RawMessage takes any valid JSON value, and
+		// the cap is what makes that safe rather than a shape check. One observation
+		// of an object does not earn a validation rule.
+		raw := json.RawMessage(`"backgrounded"`)
+		ev := taskUpdatedEvent(t, taskUpdatedLineFixture(t, taskID, raw))
+
+		if ev.Patch != string(raw) {
+			t.Errorf("Patch: got %q, want %q", ev.Patch, string(raw))
+		}
+	})
+}
+
+// TestParser_TaskUpdatedFieldCaps pins the construction-time bound, mirroring
+// TestParser_TaskStartedFieldCaps. It is applied before the event reaches the
+// sink, so an oversized payload never enters the event stream, a queue, or a log.
+//
+// The capture proves the mapping and cannot prove the bound: the captured line
+// is 170 bytes on the wire with a 24-byte patch, against caps of 256 and 4096.
+// So these lines are SYNTHESIZED, which invents no field structure — the keys are
+// the capture's, only the values are oversized.
+func TestParser_TaskUpdatedFieldCaps(t *testing.T) {
+	t.Parallel()
+
+	const smallID = "bybi8g8i8"
+	// A one-key patch object, split so the byte arithmetic below is visible: the
+	// cut has to land INSIDE the string value for the typing proof to mean
+	// anything.
+	const patchOpen = `{"note":"`
+	const patchClose = `"}`
+	patchOf := func(value string) json.RawMessage {
+		return json.RawMessage(patchOpen + value + patchClose)
+	}
+	const patchOverhead = len(patchOpen) + len(patchClose)
+
+	smallPatch := patchOf("ok")
+	// Comfortably past the cap, and long enough that the cut at taskPatchCapFixture
+	// lands inside the string value rather than in the trailing `"}`.
+	overPatch := patchOf(strings.Repeat("p", taskPatchCapFixture))
+	atPatch := patchOf(strings.Repeat("p", taskPatchCapFixture-patchOverhead))
+	overID := strings.Repeat("i", taskFieldIDCapFixture+1)
+
+	tests := []struct {
+		name          string
+		taskID        string
+		patch         json.RawMessage
+		wantCut       []string
+		wantLenTaskID int
+		wantLenPatch  int
+		// wantPatchValidJSON is the typing proof, asserted in BOTH directions: an
+		// intact patch is valid JSON, and a CUT one is not — which is why Patch is a
+		// string and not json.RawMessage. Typing a truncated object as raw JSON
+		// would be a lie (turnevent.Unrecognized.Raw's precedent).
+		wantPatchValidJSON bool
+	}{
+		{
+			name: "patch over cap is cut and reported",
+			// The report names the field that was cut, and task_id is both intact and
+			// unnamed — a cut must not smear across the event.
+			taskID: smallID, patch: overPatch,
+			wantCut:            []string{"patch"},
+			wantLenTaskID:      len(smallID),
+			wantLenPatch:       taskPatchCapFixture,
+			wantPatchValidJSON: false,
+		},
+		{
+			name:   "task_id over cap is cut and reported",
+			taskID: overID, patch: smallPatch,
+			wantCut:            []string{"task_id"},
+			wantLenTaskID:      taskFieldIDCapFixture,
+			wantLenPatch:       len(smallPatch),
+			wantPatchValidJSON: true,
+		},
+		{
+			// Two at once: both named, in DECLARATION order (task_id before patch),
+			// which is what makes the value deterministic and pinnable.
+			name:   "two fields over cap are both named in declaration order",
+			taskID: overID, patch: overPatch,
+			wantCut:            []string{"task_id", "patch"},
+			wantLenTaskID:      taskFieldIDCapFixture,
+			wantLenPatch:       taskPatchCapFixture,
+			wantPatchValidJSON: false,
+		},
+		{
+			// The <= boundary: a field of exactly its cap is not truncated, and
+			// nothing is reported.
+			name:   "every field exactly at its cap is not truncated",
+			taskID: strings.Repeat("i", taskFieldIDCapFixture), patch: atPatch,
+			wantCut:            nil,
+			wantLenTaskID:      taskFieldIDCapFixture,
+			wantLenPatch:       taskPatchCapFixture,
+			wantPatchValidJSON: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := taskUpdatedEvent(t, taskUpdatedLineFixture(t, tc.taskID, tc.patch))
+
+			if !reflect.DeepEqual(ev.TruncatedFields, tc.wantCut) {
+				t.Errorf("TruncatedFields: got %#v, want %#v", ev.TruncatedFields, tc.wantCut)
+			}
+			if len(ev.TaskID) != tc.wantLenTaskID {
+				t.Errorf("len(TaskID): got %d, want %d", len(ev.TaskID), tc.wantLenTaskID)
+			}
+			if len(ev.Patch) != tc.wantLenPatch {
+				t.Errorf("len(Patch): got %d, want %d", len(ev.Patch), tc.wantLenPatch)
+			}
+			if got := json.Valid([]byte(ev.Patch)); got != tc.wantPatchValidJSON {
+				t.Errorf("json.Valid(Patch): got %v, want %v — a truncated patch is a STRING that is no longer valid JSON, which is why the field is not typed json.RawMessage",
+					got, tc.wantPatchValidJSON)
+			}
+		})
+	}
+
+	t.Run("a cut mid-rune yields valid UTF-8", func(t *testing.T) {
+		t.Parallel()
+		// The cap is a BYTE slice, so it can land inside a multi-byte rune. The value
+		// rides a JSON string field downstream, where an invalid sequence would be
+		// silently replaced, so the producer scrubs it here instead. The padding puts
+		// the first multi-byte rune so its bytes straddle the cut.
+		pad := strings.Repeat("d", taskPatchCapFixture-len(patchOpen)-1)
+		ev := taskUpdatedEvent(t, taskUpdatedLineFixture(t, smallID, patchOf(pad+strings.Repeat("€", 8))))
+
+		if !reflect.DeepEqual(ev.TruncatedFields, []string{"patch"}) {
+			t.Fatalf("TruncatedFields: got %#v, want [patch]", ev.TruncatedFields)
+		}
+		if !utf8.ValidString(ev.Patch) {
+			t.Errorf("Patch is not valid UTF-8 after a mid-rune cut")
+		}
+		// Short of the cap, not at it: the empty replacement DELETES the partial rune
+		// rather than replacing it.
+		if len(ev.Patch) > taskPatchCapFixture {
+			t.Errorf("len(Patch): got %d, want <= %d", len(ev.Patch), taskPatchCapFixture)
+		}
+	})
+}
+
+// TestParser_TaskUpdatedDropIsLoggedContentFree is the package's standing rule
+// applied to the second subtype: nothing derived from claude's output reaches a
+// log. The content crosses the wire, not the log.
+//
+// The sweep over EVERY captured record is the load-bearing part, and patch is
+// the most attractive thing to log while debugging a malformed line — which is
+// why both the success and the decode-failure path are driven here.
+func TestParser_TaskUpdatedDropIsLoggedContentFree(t *testing.T) {
+	t.Parallel()
+
+	captured := capturedSystemLine(t, "task_updated")
+	var payload map[string]any
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	capturedSession, _ := payload["session_id"].(string)
+	if capturedSession == "" {
+		t.Fatalf("the capture carries no session_id, so the leak sweep would be vacuous")
+	}
+
+	// A task_updated line the shape cannot decode (task_id is a number), so the
+	// decode-failure path runs. Its patch carries a distinctive literal, and the
+	// whole point is that it must appear in no log record.
+	const malformedPatchValue = "rm -rf /tmp/never-log-this-patch"
+	malformed := `{"type":"system","subtype":"task_updated","task_id":42,` +
+		`"patch":{"command":"` + malformedPatchValue + `"}}`
+
+	rec := &logRecorder{}
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+	if _, err := p.Write(append(append([]byte(nil), captured...), '\n')); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+	if _, err := p.Write([]byte(malformed + "\n")); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+
+	// The malformed line is dropped, and NOT as an Unrecognized: keeping `system`
+	// whole on ignoredLineTypes is what makes "no system line reaches the
+	// unrecognized lane" structural, and that guarantee outranks surfacing a
+	// malformed line of a subtype we already know.
+	if len(events) != 1 {
+		t.Fatalf("event count: got %d, want 1 (the captured line only) — %#v", len(events), events)
+	}
+	ev, ok := events[0].(turnevent.BackgroundTaskUpdated)
+	if !ok {
+		t.Fatalf("event type: got %T, want turnevent.BackgroundTaskUpdated", events[0])
+	}
+	// The captured patch as the parser itself carried it, so the leak candidate is
+	// derived from the shipped mapping rather than transcribed.
+	if ev.Patch == "" {
+		t.Fatalf("the mapped Patch is empty, so the leak sweep over it would be vacuous")
+	}
+
+	// The decode-failure path must actually have run, or the half of this sweep
+	// that covers it asserts nothing.
+	const dropMsg = "streamsup: dropping undecodable system line"
+	var sawDrop bool
+	for _, r := range rec.all() {
+		if r.msg != dropMsg {
+			continue
+		}
+		sawDrop = true
+		if !reflect.DeepEqual(r.attrs, map[string]string{"subtype": "task_updated"}) {
+			t.Errorf("the undecodable-drop record carries %#v, want the subtype keyword only", r.attrs)
+		}
+	}
+	if !sawDrop {
+		t.Fatalf("no %q record: the decode-failure path never ran, so its leak sweep is vacuous", dropMsg)
+	}
+
+	for _, r := range rec.all() {
+		for _, leak := range []string{ev.Patch, malformedPatchValue, capturedSession} {
+			if strings.Contains(r.msg, leak) {
+				t.Errorf("record message carries claude-derived content: %q", r.msg)
+			}
+			for k, v := range r.attrs {
+				if strings.Contains(v, leak) {
+					t.Errorf("record %q attr %q carries claude-derived content; this path logs the subtype only", r.msg, k)
 				}
 			}
 		}

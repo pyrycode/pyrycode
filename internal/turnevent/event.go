@@ -21,9 +21,10 @@ package turnevent
 import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
-// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted, the
-// internal-only status peers Stall, ApiRetry, and Compacting, and the
-// diagnostic marker Unrecognized. The unexported marker keeps the variant set
+// ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted,
+// BackgroundTaskUpdated, the internal-only status peers Stall, ApiRetry, and
+// Compacting, and the diagnostic marker Unrecognized. The unexported marker
+// keeps the variant set
 // closed to this package, so external ACP-spec churn cannot inject a variant.
 // The bridge (#608) ranges a stream of Event and the wire adapter (#607)
 // type-switches to map each kind.
@@ -124,6 +125,77 @@ type BackgroundTaskStarted struct {
 	TruncatedFields []string
 }
 
+// BackgroundTaskUpdated announces that a background task claude already started
+// changed state. It maps claude's system/task_updated line (#1382), the second
+// system subtype the parser translates rather than drops, and is the peer of
+// BackgroundTaskStarted: that variant opens the task, this one reports what
+// happened to it afterwards.
+//
+// It exists so a task's state AFTER it starts is representable at all. Without
+// it, everything claude says about a running task is discarded at the parser and
+// a client can only ever know a task began.
+//
+// It opens and closes no turn, exactly as BackgroundTaskStarted does not — a
+// background task's lifecycle is orthogonal to the turn that spawned it, which
+// is the whole #1240 point.
+//
+// The NAME is the daemon's, not claude's, for the reason BackgroundTaskStarted's
+// doc gives: translating at this boundary keeps a claude rename of task_updated
+// landing in the parser and nowhere else.
+//
+// The same two keys the captured line carries are deliberately NOT fields here,
+// for the same reasons (#1380):
+//
+//   - session_id — claude's session identity, which is NOT the daemon's
+//     conversation identity. A field of that name would invite a consumer, or
+//     a later wire mapper, to route on it.
+//   - uuid — claude's per-line message id, which nothing in the daemon reads.
+//
+// Every string field is claude-derived and is bounded by the producer AT
+// CONSTRUCTION (streamsup's maxTaskFieldID / maxTaskPatch), following
+// Unrecognized's precedent, so an oversized payload never enters the event
+// stream, a queue, or a log. Like every variant here it carries no conversation
+// identity — the bridge injects that.
+type BackgroundTaskUpdated struct {
+	// TaskID is claude's opaque handle for the task: the join key back to the
+	// BackgroundTaskStarted that opened it. Same name, no translation.
+	TaskID string
+	// Patch is claude's patch object — what CHANGED about the task — carried
+	// WHOLE and unparsed as its serialized text. One key has been observed
+	// (is_backgrounded), and a mapping that enumerated known patch keys would
+	// silently discard every key claude ships next, so nothing here is declared
+	// about its contents. Empty when claude omits the key; "" and "{}" stay
+	// distinguishable for free.
+	//
+	// A plain string, not json.RawMessage, for Unrecognized.Raw's reason: the
+	// producer truncates it at construction, and a truncated object is no longer
+	// valid JSON, so typing it as raw JSON would be a lie. A consumer must not
+	// assume it parses.
+	//
+	// Safe to RENDER as text, never to execute or re-shell. Its sibling's
+	// Description already carries a literal command line for the local_bash task
+	// type, and a future patch key may carry command text too; a patch's
+	// structured shape makes it the more tempting thing to feed somewhere that
+	// runs it.
+	//
+	// The producer also scrubs invalid UTF-8 with an EMPTY replacement, so
+	// invalid bytes are DELETED rather than replaced, and TruncatedFields reports
+	// the cap cut ONLY — not scrub removals. Patch can therefore differ from
+	// claude's bytes without being listed as truncated. That is a stated
+	// limitation, not an oversight: the value is a display blob whose JSON
+	// validity is already not guaranteed, so a consumer cannot act differently
+	// either way. Unlike a string-decoded field, Patch is the one place the scrub
+	// bites on the UNtruncated path too — see streamsup's truncateField.
+	Patch string
+	// TruncatedFields names the fields the producer cut to fit their caps, in
+	// declaration order, using the DAEMON's snake_case names: "task_id",
+	// "patch". Neither is translated from claude's key here (contrast
+	// BackgroundTaskStarted's tool_use_id -> "tool_call_id"). nil when nothing
+	// was cut, never an empty non-nil slice, so a consumer can emit it as absent
+	// rather than [].
+	TruncatedFields []string
+}
+
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
 // stall_detected signal (no payload, no clearing edge). It carries no fields —
 // onset only, no "cleared" state, and (like every variant here) no
@@ -219,6 +291,7 @@ func (ToolStart) isTurnEvent()             {}
 func (ToolUpdate) isTurnEvent()            {}
 func (TurnEnd) isTurnEvent()               {}
 func (BackgroundTaskStarted) isTurnEvent() {}
+func (BackgroundTaskUpdated) isTurnEvent() {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
@@ -231,6 +304,7 @@ var (
 	_ Event = ToolUpdate{}
 	_ Event = TurnEnd{}
 	_ Event = BackgroundTaskStarted{}
+	_ Event = BackgroundTaskUpdated{}
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}
