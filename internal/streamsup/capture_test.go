@@ -44,12 +44,14 @@ type droppedLineCapture struct {
 // line" ambiguous, and silently taking the first is the kind of choice that
 // should be deliberate.
 //
-// Shared on purpose: #1381 (background_tasks_changed) and #1382 (task_updated)
-// map the sibling subtypes out of the same file. CORRECTED 2026-08-07 (#1382):
-// this used to add "and this package already drives both through the drop
-// table", which stopped being true the moment task_updated's row moved out of
-// TestParser_IgnoredLineTypesStaySilent and into its mapping test.
-// background_tasks_changed is the one still driven through the drop table.
+// Shared on purpose, and now by three mapping tests: task_started (#1380),
+// task_updated (#1382) and background_tasks_changed (#1381) all read their
+// subtype out of this one file. CORRECTED 2026-08-08 (#1381): every statement
+// this doc has carried about a caller still driving its line through the drop
+// table is now spent — no captured system subtype remains on
+// TestParser_IgnoredLineTypesStaySilent's table, which since #1381 drives only
+// synthesized lines. That is not a claim that no further caller will exist: a
+// fourth subtype could arrive, and it would read its line from here too.
 func capturedSystemLine(t *testing.T, subtype string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(capturePath)
