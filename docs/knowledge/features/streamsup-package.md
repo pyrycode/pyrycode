@@ -164,7 +164,9 @@ forge a turn boundary:
 | `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other block surfaces as `Unrecognized{Site: user_block}` **except one exact 100-byte payload** (#1247, below), dropped in silence |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
 | `system` (unmapped subtypes), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
-| `system/task_started` | one `BackgroundTaskStarted` (#1380, below) — the one mapped `system` subtype so far |
+| `system/task_started` | one `BackgroundTaskStarted` (#1380, below) |
+| `system/task_updated` | one `BackgroundTaskUpdated` (#1382, below) |
+| `system/background_tasks_changed` | one `BackgroundTaskRoster` (#1381, below) — the family's one **aggregate** variant; with this the three captured `system` subtypes are all mapped |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
@@ -214,11 +216,16 @@ measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fa
 unrecognized frame, so every stream spec is a sentinel: it goes red the day claude adds a message type,
 in the pre-ship gate rather than in front of a user.
 
-**`system` maps per-subtype since 2026-08-07 (#1380) — the first crack in the wholesale-drop design.**
-`system/init`/`thinking_tokens`/`status` and any subtype never seen stay silent exactly as before, but
-`system/task_started` now produces one `turnevent.BackgroundTaskStarted` (`TaskID`, `ToolCallID` —
-claude's `tool_use_id`, renamed to match `ToolStart`/`ToolUpdate`'s field name for the same identifier —
-`Description`, `TaskType`, `TruncatedFields`). This is the fix for #1240's symptom: previously a
+**`system` maps per-subtype since 2026-08-07 (#1380), and the mapped set is complete as of 2026-08-08
+(#1381) — the wholesale-drop design's first crack, now closed out.** `system/init`/`thinking_tokens`/
+`status` and any never-seen subtype stay silent exactly as before. The three subtypes the committed
+capture (#1260) holds a payload for are each mapped: `system/task_started` → `turnevent.
+BackgroundTaskStarted` (`TaskID`, `ToolCallID` — claude's `tool_use_id`, renamed to match `ToolStart`/
+`ToolUpdate`'s field name for the same identifier — `Description`, `TaskType`, `TruncatedFields`);
+`system/task_updated` → `turnevent.BackgroundTaskUpdated` (`TaskID`, `Patch`, `TruncatedFields`);
+`system/background_tasks_changed` → `turnevent.BackgroundTaskRoster` (`Tasks []BackgroundTask`,
+`DroppedTasks`) — the family's one **aggregate** variant, snapshotting every task claude is tracking at
+that moment rather than reporting what happened to one. This fixes #1240's symptom: previously a
 backgrounded command's lifecycle was indistinguishable from a genuine turn end (`turn_end`/`end_turn`,
 state `idle`) because the whole `system` family was dropped regardless of subtype.
 
@@ -227,13 +234,34 @@ than beside it — `system` stays on the list unchanged, so `emitUnrecognized` (
 structurally unreachable from any `system` line whatever its subtype, and `TestParser_
 IgnoredLineTypesIsTheMeasuredSet` above is unaffected. `emitSystemSubtype`'s `case` arms are the single
 enumeration of the mapped set; every comment describing the drop rule (this file included) points there
-rather than restating it, since two siblings — `task_updated` (#1382) and `background_tasks_changed`
-(#1381) — extend the same mapped set and event family. Every claude-derived field on the new event is
-truncated **at construction** (`maxTaskFieldID = 256`, `maxTaskDescription = 4 << 10`, mirroring
-`maxUnrecognizedRaw`'s cap-at-construction precedent), with the cut named in `TruncatedFields`. claude's
-`session_id` and `uuid` are deliberately not carried — `session_id` is not the daemon's conversation
-identity. Field mapping and cap arithmetic are built from the committed capture (#1260), never a
-hand-built line. See [codebase/1380.md](../codebase/1380.md).
+rather than restating it. As of #1381 that set is closed at three — a fourth captured subtype is a new
+case arm there, not a new sibling ticket.
+
+Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
+cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
+`maxTaskFieldID` (256) / `maxTaskDescription` (4096) / `maxTaskPatch` (4096). `BackgroundTaskRoster`
+needed a second, genuinely new dimension: the `tasks` array's **length** is claude's to choose, so a
+per-entry text cap alone leaves the event's total size unbounded. It is bounded in both dimensions —
+`maxTaskRosterEntries` (8) on the entry count, with overflow reported as `DroppedTasks` on the event
+rather than a per-entry field, and `maxTaskFieldID`/`maxTaskRosterDescription` (512 — a smaller budget
+than the scalar `Description`'s 4096, because this is the one field in the family whose budget is
+multiplied by a count claude chooses) on each entry's text, reported per entry in that entry's
+`TruncatedFields`. That forced a qualification of the family's stated single-worst-case doctrine
+(`maxTaskPatch`'s comment: one number a reader can hold) — an aggregate variant cannot share a scalar
+variant's worst case unless its cardinality is 1, so the doctrine now reads one worst case **per shape**:
+the scalar pair ≤ ~4.9 KB, the roster ≤ 8 KiB (12.5% of the 65519-byte v2 application-envelope cap),
+rather than forced to fit or silently abandoned.
+
+claude's `session_id` and `uuid` are deliberately not carried by any of the three — absent from the
+decode targets themselves (a field never declared cannot leak), enforced further by a reflection sweep
+in each mapping test. No terminal/finish event is ever synthesized for a background task: the parser
+stays turn-stateless, and a task's disappearance from a later roster — the only available finish signal —
+has never been observed, so `BackgroundTaskRoster` reports the snapshot and nothing more. Field mapping
+and cap arithmetic for all three are built from the same committed capture (#1260), never a hand-built
+line; the two bounds `BackgroundTaskRoster` needs are proven by lines synthesized to exceed them, since
+the capture's single 212-byte, one-entry roster is far under either cap. See
+[codebase/1380.md](../codebase/1380.md), [codebase/1382.md](../codebase/1382.md),
+[codebase/1381.md](../codebase/1381.md).
 
 **Content blocks are held as `[]json.RawMessage`, decoded per block.** This is load-bearing rather than
 tidying: `streamBlock` declares only the fields the mapping reads, so decoding straight into it would

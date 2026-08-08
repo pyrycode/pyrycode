@@ -105,6 +105,77 @@ const maxTaskDescription = 4 << 10
 // budget.
 const maxTaskPatch = 4 << 10
 
+// maxTaskRosterEntries caps how many entries a turnevent.BackgroundTaskRoster
+// carries. It is the family's first CARDINALITY bound and the one dimension with
+// no precedent in this package: every cap above bounds text on a fixed field
+// set, and a per-entry text cap alone would leave a roster's total size a
+// function of a number claude chooses. Applied at CONSTRUCTION like the others,
+// so an oversized payload never enters the event stream, the push queue, or any
+// log. Overflow is REPORTED (BackgroundTaskRoster.DroppedTasks), not silent, so
+// an under-sized count is visible rather than a lie.
+//
+// It QUALIFIES the family's single-worst-case doctrine stated at maxTaskPatch,
+// which does not survive an aggregate variant unexamined. Reusing
+// maxTaskDescription here would put one entry at 256 + 256 + 4096 = 4608 bytes,
+// so only a ONE-entry roster could match the scalar pair's ~4.9 KB — and a
+// one-entry roster is not a roster; at 14 entries a single event would consume
+// 98.5% of the envelope and at 15 exceed it. The doctrine's purpose is
+// legibility, so it is qualified rather than forced: ONE worst case per SHAPE,
+// not per variant. A scalar background-task event is <= ~4.9 KB; the roster is
+// <= 8 KiB. Two numbers, one per shape, both a small fraction of the envelope.
+// maxTaskPatch's own sentence is left unedited — it describes the scalar pair
+// accurately and still does.
+//
+// The arithmetic, in maxUnrecognizedRaw's style:
+//
+//   - One entry: maxTaskFieldID + maxTaskFieldID + maxTaskRosterDescription =
+//     256 + 256 + 512 = 1024 bytes exactly, a unit a reader can hold.
+//   - Worst case one event: 8 * 1024 = 8192 bytes, 12.5% of the v2
+//     application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+//     Application-envelope size cap). Larger than the scalar pair's 7.4% and
+//     6.6%, per the qualification above, and still a fraction.
+//   - 8192 is exactly HALF of maxUnrecognizedRaw's whole-line 16 KiB, which
+//     preserves the package's ordering one level up: a whole KNOWN event must
+//     not approach the cap on an entire UNKNOWN line.
+//   - Escaping is mild for maxUnrecognizedRaw's reason, verbatim: these are JSON
+//     string values, so control characters arrive pre-escaped as printable pairs
+//     and the growth is quotes and backslashes, not a \u00XX expansion of every
+//     byte. Pathological all-quote content roughly doubles it — ~16 KB, ~25% of
+//     the envelope, still comfortable.
+//   - The count itself: the observed roster holds ONE entry, so 8 is 8x the
+//     observation — the same multiple-of-observation form maxTaskFieldID uses,
+//     and the number that makes the product land on a clean 8 KiB.
+//
+// The cap is applied AFTER json.Unmarshal, so a hostile array is materialised in
+// transient memory before it is shortened. That is bounded, not unbounded:
+// defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees it,
+// the densest legal entry is ~55 bytes of input for a ~64-byte struct, so the
+// amplification is linear and near 1. This cap bounds what is RETAINED and what
+// crosses the wire, which is the property that matters.
+const maxTaskRosterEntries = 8
+
+// maxTaskRosterDescription caps each roster entry's Description — the same
+// model-authored field maxTaskDescription bounds on a
+// turnevent.BackgroundTaskStarted, deliberately given a smaller budget here.
+//
+// Not thrift: the MULTIPLICATION. This is the one field in the family whose
+// budget is multiplied by a count claude chooses, and a multiplied field earns a
+// smaller unit budget than the same field carried once. It is also a different
+// ROLE: on task_started the description is the event's payload, the one thing
+// the event is about; in a roster it is a label in a list whose authoritative
+// full-length copy already crossed the wire on the BackgroundTaskStarted this
+// entry's task_id joins back to. A cut here loses nothing a consumer holding
+// that event cannot recover, and TruncatedFields says it happened.
+//
+// 512 is ~4x the ~126-byte real description the capture's redaction arithmetic
+// implies (payload_len_bytes_captured 354 - payload_len_bytes 212 = 142 bytes
+// across $SESSION_ID and $FIFO). A thinner multiple than maxTaskFieldID's 9x or
+// maxTaskDescription's 32x, and deliberately so, for the multiplication reason
+// above. The weak point is a consumer that never saw the BackgroundTaskStarted —
+// connected mid-session, or the task predates the connection — for which 512
+// bytes is all there is; TruncatedFields is what will surface that if it bites.
+const maxTaskRosterDescription = 512
+
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
 // parser deliberately drops in silence. Membership is what separates "known and
 // deliberately ignored" from "genuinely unrecognized"; getting it wrong in
@@ -132,9 +203,10 @@ const maxTaskPatch = 4 << 10
 // CORRECTED 2026-08-07 (#1380): system is NO LONGER ignored wholesale. The
 // parser matches subtypes INSIDE this list's drop branch — see
 // emitSystemSubtype, whose case arms are the one place the mapped set is
-// enumerated. Do not restate that set here: two siblings extend it (#1381, #1382)
-// and no comment fails a build when it goes stale, so a single enumeration site
-// with pointers to it is worth more than four independent lists.
+// enumerated. Do not restate that set here: no comment fails a build when it
+// goes stale, so a single enumeration site with pointers to it is worth more
+// than four independent lists. As of #1381 all three subtypes the capture holds
+// a payload for are mapped, and any fourth is a new case arm there.
 //
 // That is a REFINEMENT of the 2026-07-27 measurement, not a reversal. The
 // argument above is about what to DRAW, and it was used to decide what to SEND.
@@ -337,6 +409,36 @@ type systemTaskUpdatedLine struct {
 	Patch  json.RawMessage `json:"patch"`
 }
 
+// systemBackgroundTasksLine is the decoded payload of one
+// system/background_tasks_changed line. Kept separate from streamLine for
+// systemTaskStartedLine's reason, and separate from both scalar targets because
+// this subtype's payload is an ARRAY — the shape difference the whole ticket
+// sits on.
+//
+// The two keys the captured line also carries, uuid and session_id, are
+// deliberately absent — see turnevent.BackgroundTaskRoster's doc. Absent from
+// the DECODE TARGET is a stronger guarantee than the test's reflection sweep,
+// because a field that is never declared cannot leak.
+type systemBackgroundTasksLine struct {
+	Tasks []systemBackgroundTaskEntry `json:"tasks"`
+}
+
+// systemBackgroundTaskEntry is one element of that array. The field set is
+// exactly what the committed capture shows and nothing invented: no tool_use_id
+// and no patch, which the scalar siblings' targets carry because their LINES do,
+// and mirroring either here would invent a key claude does not send.
+//
+// All three are plain strings, which is why truncateField's json.RawMessage
+// exception does not reach this subtype: encoding/json has already
+// U+FFFD-replaced invalid input on decode, so our own cut is the only mid-rune
+// hazard. A non-string value for any of them fails the whole decode and takes
+// the undecodable path, exactly as systemTaskUpdatedLine.TaskID does.
+type systemBackgroundTaskEntry struct {
+	TaskID      string `json:"task_id"`
+	TaskType    string `json:"task_type"`
+	Description string `json:"description"`
+}
+
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
 // on demand in emitAssistant / emitUser. streamBlock declares only the fields
 // the mapping reads, so decoding straight into it would DISCARD every unknown
@@ -454,6 +556,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitBackgroundTaskStarted(line)
 	case "task_updated":
 		return p.emitBackgroundTaskUpdated(line)
+	case "background_tasks_changed":
+		return p.emitBackgroundTaskRoster(line)
 	default:
 		return false
 	}
@@ -575,6 +679,100 @@ func (p *Parser) emitBackgroundTaskUpdated(line []byte) bool {
 		Patch:  patch,
 		// nil when nothing was cut: append never ran.
 		TruncatedFields: cut,
+	})
+	return true
+}
+
+// emitBackgroundTaskRoster decodes a system/background_tasks_changed line and
+// emits one turnevent.BackgroundTaskRoster, reporting that it consumed the line
+// either way. Peer of emitBackgroundTaskUpdated, and its every structural choice
+// is the same one for the same reason. Field mapping comes from the committed
+// capture (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), never
+// from a hand-built payload; both bounds come from lines synthesized to exceed
+// them, which the capture's single 212-byte entry cannot.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, and
+// the reason matters more on this subtype than on either sibling. streamLine's
+// doc states the property it preserves: control shapes are read from the top
+// level only and nested content is never re-scanned, which is what stops a tool
+// result whose text is literally `{"type":"result"}` from forging a turn
+// boundary. Decoding this payload from anywhere else would make a whole
+// background-task roster forgeable out of claude's own tool output — and this is
+// the most valuable variant to forge, because it is the one that claims what is
+// ALIVE.
+//
+// A payload that will not decode into the shape (tasks as an object, say) is
+// dropped with a content-free Debug and no event — NOT surfaced as an
+// Unrecognized, because keeping system whole on ignoredLineTypes is what makes
+// "no system line reaches the unrecognized lane" structural. An absent or empty
+// tasks array is not an error either: an EMPTY roster is the signal that nothing
+// is alive, so the event is still emitted rather than dropped.
+//
+// No terminal, finish, or completion event is synthesized here or anywhere —
+// see turnevent.BackgroundTaskRoster's doc. The parser holding no cross-line
+// state is that refusal's enforcement mechanism, not an incidental property:
+// detecting a task's disappearance would require remembering the previous
+// roster.
+func (p *Parser) emitBackgroundTaskRoster(line []byte) bool {
+	var tl systemBackgroundTasksLine
+	if err := json.Unmarshal(line, &tl); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content. Nothing decoded is logged, and neither is the entry COUNT: a
+		// roster is a list, lists read as diagnostics, and "just the length" is the
+		// leak a content-free rule is most often bent for.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "background_tasks_changed")
+		return true
+	}
+
+	// The COUNT bound runs before the loop, and truncation is FROM THE TAIL:
+	// claude's order is preserved because no ranking is invented, its ordering
+	// semantics being unobserved.
+	entries := tl.Tasks
+	var dropped int
+	if len(entries) > maxTaskRosterEntries {
+		dropped = len(entries) - maxTaskRosterEntries
+		entries = entries[:maxTaskRosterEntries]
+	}
+
+	// nil for an empty or absent array: append never runs, which is the contract
+	// BackgroundTaskRoster.Tasks states.
+	var tasks []turnevent.BackgroundTask
+	for _, entry := range entries {
+		// The TEXT bound is per entry, so `cut` is per entry — which is the whole
+		// reason this closure cannot be hoisted out of the loop.
+		var cut []string
+		bound := func(value, name string, limit int) string {
+			out, truncated := truncateField(value, limit)
+			if truncated {
+				cut = append(cut, name)
+			}
+			return out
+		}
+		// Sequential statements rather than a composite literal, for
+		// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these
+		// calls, and inside a literal that order would rest on the left-to-right
+		// operand rule rather than on something a reader sees. No name is translated
+		// — claude's keys and the daemon's fields agree on this subtype.
+		taskID := bound(entry.TaskID, "task_id", maxTaskFieldID)
+		taskType := bound(entry.TaskType, "task_type", maxTaskFieldID)
+		description := bound(entry.Description, "description", maxTaskRosterDescription)
+
+		tasks = append(tasks, turnevent.BackgroundTask{
+			TaskID:      taskID,
+			TaskType:    taskType,
+			Description: description,
+			// nil when nothing was cut: append never ran.
+			TruncatedFields: cut,
+		})
+	}
+
+	// Each dimension reports where it happens: the text cut rides its entry, the
+	// count rides the event. A count folded into a top-level TruncatedFields
+	// naming "tasks" would lose HOW MANY were lost.
+	p.emit(turnevent.BackgroundTaskRoster{
+		Tasks:        tasks,
+		DroppedTasks: dropped,
 	})
 	return true
 }

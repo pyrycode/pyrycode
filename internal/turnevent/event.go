@@ -22,8 +22,9 @@ import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
 // ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted,
-// BackgroundTaskUpdated, the internal-only status peers Stall, ApiRetry, and
-// Compacting, and the diagnostic marker Unrecognized. The unexported marker
+// BackgroundTaskUpdated, BackgroundTaskRoster, the internal-only status peers
+// Stall, ApiRetry, and Compacting, and the diagnostic marker Unrecognized.
+// The unexported marker
 // keeps the variant set
 // closed to this package, so external ACP-spec churn cannot inject a variant.
 // The bridge (#608) ranges a stream of Event and the wire adapter (#607)
@@ -196,6 +197,96 @@ type BackgroundTaskUpdated struct {
 	TruncatedFields []string
 }
 
+// BackgroundTask is one entry of a BackgroundTaskRoster: the roster's element
+// type, NOT an Event, so it carries no marker. Its three fields are exactly the
+// per-entry keys claude's system/background_tasks_changed line shows and nothing
+// invented — in particular there is no tool_use_id and no patch, which the
+// scalar siblings carry because their LINES do.
+type BackgroundTask struct {
+	// TaskID is claude's opaque handle for the task: the join key back to the
+	// BackgroundTaskStarted that opened it and every BackgroundTaskUpdated since.
+	// Same name, no translation.
+	TaskID string
+	// TaskType is claude's kind for the task ("local_bash" in the one captured
+	// roster). A plain string rather than a closed enum, for
+	// BackgroundTaskStarted.TaskType's reason.
+	TaskType string
+	// Description is the task's label. For claude's local_bash task type it is
+	// the literal command line: safe to RENDER as text, never to execute or
+	// re-shell. A roster carries these once per entry, and a LIST of command
+	// lines is a more tempting shape to feed somewhere structured than a single
+	// one, which is why the warning is repeated here rather than delegated.
+	//
+	// It is bounded by a tighter cap than BackgroundTaskStarted.Description
+	// (streamsup's maxTaskRosterDescription, not maxTaskDescription): here the
+	// value is a label in a list whose length claude chooses, and the
+	// authoritative full-length copy already crossed the wire on the
+	// BackgroundTaskStarted this entry's TaskID joins back to.
+	Description string
+	// TruncatedFields names THIS entry's fields the producer cut to fit their
+	// caps, in declaration order, using the DAEMON's snake_case names: "task_id",
+	// "task_type", "description". No name is translated — claude's keys and these
+	// fields agree. nil when nothing was cut, never an empty non-nil slice.
+	TruncatedFields []string
+}
+
+// BackgroundTaskRoster carries the complete set of background tasks claude is
+// tracking at one moment. It maps claude's system/background_tasks_changed line
+// (#1381), the third and last captured system subtype the parser translates
+// rather than drops, and it is the aggregate peer of the two scalar variants
+// above: they report what happened to ONE task, this reports what is alive.
+//
+// The NAME is the daemon's, not claude's, and this is the one place in the
+// family where the translation earns more than insulation against a claude
+// rename. claude's background_tasks_changed names the TRIGGER; the payload is a
+// SNAPSHOT. A variant called "…Changed" invites a consumer to read it as a
+// delta, and a consumer reading a snapshot as a delta is one short step from
+// inferring a finish the daemon has never observed.
+//
+// No terminal, finish, or completion event exists in this family, deliberately.
+// The capturing probe ended its turn with the task still alive, so nothing on
+// record shows a task finishing; a task's disappearance from a later roster is
+// the AVAILABLE finish signal, but that transition has never been observed and
+// the daemon does not report a finish it cannot detect. Diffing successive
+// snapshots is a legitimate thing for a CONSUMER to do on its own terms — it is
+// not the daemon's inference to make.
+//
+// It opens and closes no turn, exactly as its two siblings do not.
+//
+// The same two keys the captured line carries are deliberately NOT fields here,
+// for the same reasons (#1380): session_id, which is claude's session identity
+// and NOT the daemon's conversation identity, and uuid, claude's per-line
+// message id, which nothing in the daemon reads.
+//
+// Every string is claude-derived and bounded by the producer AT CONSTRUCTION in
+// BOTH dimensions — the entry COUNT (streamsup's maxTaskRosterEntries) as well
+// as the text inside each entry (maxTaskFieldID / maxTaskRosterDescription) — so
+// an oversized payload never enters the event stream, a queue, or a log. The
+// count bound is what a per-entry text cap alone cannot supply: the array's
+// length is claude's to choose. Like every variant here it carries no
+// conversation identity — the bridge injects that.
+type BackgroundTaskRoster struct {
+	// Tasks is the roster in claude's own order, truncated FROM THE TAIL when it
+	// exceeds the producer's entry cap — no ranking is invented, because claude's
+	// ordering semantics are unobserved. nil for an empty roster and nil when
+	// claude omits the key, never an empty non-nil slice.
+	//
+	// An empty roster is MEANINGFUL and is still emitted: it says nothing is
+	// alive, which is exactly the signal a consumer of #1240's symptom needs.
+	Tasks []BackgroundTask
+	// DroppedTasks is how many entries claude sent beyond the producer's cap that
+	// this event does NOT carry; 0 when nothing was dropped. The roster's true
+	// size is len(Tasks) + DroppedTasks.
+	//
+	// The count dimension reports HERE rather than in a top-level TruncatedFields
+	// naming "tasks", and that is why this variant has no top-level
+	// TruncatedFields at all: a name-only report loses how many were lost, and
+	// the count is the strictly more informative signal. Each dimension reports
+	// at the level where it happens — a text cut is a property of one entry and
+	// rides that entry.
+	DroppedTasks int
+}
+
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
 // stall_detected signal (no payload, no clearing edge). It carries no fields —
 // onset only, no "cleared" state, and (like every variant here) no
@@ -292,6 +383,7 @@ func (ToolUpdate) isTurnEvent()            {}
 func (TurnEnd) isTurnEvent()               {}
 func (BackgroundTaskStarted) isTurnEvent() {}
 func (BackgroundTaskUpdated) isTurnEvent() {}
+func (BackgroundTaskRoster) isTurnEvent()  {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
@@ -305,6 +397,7 @@ var (
 	_ Event = TurnEnd{}
 	_ Event = BackgroundTaskStarted{}
 	_ Event = BackgroundTaskUpdated{}
+	_ Event = BackgroundTaskRoster{}
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}
