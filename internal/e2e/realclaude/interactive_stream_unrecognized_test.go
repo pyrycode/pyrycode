@@ -5,11 +5,15 @@ package realclaude
 // TestInteractiveStreamNoUnrecognizedOnToolTurn is a NEGATIVE test, and it is the
 // most valuable assertion in the unrecognized-message feature.
 //
-// The stream parser splits claude's output two ways. Types we knowingly ignore
-// (system/*, rate_limit_event) stay silent. Anything else surfaces to the client
-// as an unrecognized_message frame, so a claude version that moves something
-// meaningful into a new message type becomes visible the moment it arrives instead
-// of vanishing into a debug log the production daemon does not print.
+// The stream parser splits claude's output two ways. What we knowingly ignore
+// stays silent: rate_limit_event whole, and every `system` subtype the parser
+// does not map — which since #1380/#1381 is every subtype but the handful
+// streamsup.emitSystemSubtype carves out into background-task events (that
+// switch is the one enumeration site; restating the set here would only go
+// stale). Anything else surfaces to the client as an unrecognized_message frame,
+// so a claude version that moves something meaningful into a new message type
+// becomes visible the moment it arrives instead of vanishing into a debug log
+// the production daemon does not print.
 //
 // That split rests on a MEASUREMENT, not a guess: streamsup.ignoredLineTypes was
 // seeded by driving claude directly on the bare stream-json surface on 2026-07-27,
