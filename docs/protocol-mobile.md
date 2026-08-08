@@ -634,12 +634,21 @@ nothing, everywhere, with nothing saying why.
 
 So the parser has **two tiers**, and the split is the whole design:
 
-- **Known and deliberately ignored** — `system` (every subtype) and
-  `rate_limit_event`. Silent, as before. `system` is ignored wholesale rather
-  than per-subtype because it is claude's catch-all namespace and its
-  highest-rate emitter; `system/init` fires **once per turn** and
-  `system/thinking_tokens` roughly ten times per turn, so a subtype-grained rule
-  would put a row on every turn and make the frame worthless noise.
+- **Known and deliberately ignored, from this frame's perspective** — `system`
+  and `rate_limit_event` never produce `unrecognized_message`. `system` is
+  claude's catch-all namespace and its highest-rate emitter (`system/init`
+  fires once per turn, `system/thinking_tokens` roughly ten times), so treating
+  every subtype as surfacing-worthy by default would put a row on every turn
+  and make the frame worthless noise. As of #1380–#1385 the daemon parser maps
+  four `system` subtypes internally (`task_started`, `task_updated`,
+  `background_tasks_changed`, `thinking_tokens`) to daemon-owned `turnevent`
+  types — see [streamsup-package.md](knowledge/features/streamsup-package.md)
+  — but none of the four reach this wire today: `turnbridge.MapEvent` has no
+  case for any of them, so each stops at the daemon boundary the same way an
+  unmapped subtype does. Every other `system` subtype is still silently
+  dropped exactly as before, and none of this changes what surfaces as
+  `unrecognized_message` — a subtype the parser doesn't recognize at all still
+  falls through to the silent-drop tier, not this frame.
 - **Genuinely unrecognized** — everything else. Surfaces as this frame.
 
 The ignored list is **measured, not guessed**: claude was driven directly on the
