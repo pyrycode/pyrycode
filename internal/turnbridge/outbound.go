@@ -126,6 +126,66 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Raw:            e.Raw,
 			Truncated:      e.Truncated,
 		}, true
+	case turnevent.BackgroundTaskStarted:
+		// Conversation identity only, like the status peers above: tc.TurnID and
+		// tc.Seq are ignored, and the payload has no field for either. A
+		// background task OUTLIVES the turn that spawned it — that is the whole
+		// #1240 point — so attributing it to a turn would be a claim we cannot
+		// honestly make. Every string crosses verbatim: the producer bounded them
+		// at construction (streamsup's maxTaskFieldID / maxTaskDescription) and
+		// this adapter is pure and re-caps nothing. TruncatedFields rides along
+		// because a payload that dropped it would present claude's cut text to a
+		// phone as complete.
+		return protocol.TypeBackgroundTaskStarted, protocol.BackgroundTaskStartedPayload{
+			ConversationID:  tc.ConversationID,
+			TaskID:          e.TaskID,
+			ToolCallID:      e.ToolCallID,
+			Description:     e.Description,
+			TaskType:        e.TaskType,
+			TruncatedFields: e.TruncatedFields,
+		}, true
+	case turnevent.BackgroundTaskUpdated:
+		// The peer of BackgroundTaskStarted, same posture: not turn-scoped, so
+		// tc.TurnID and tc.Seq are ignored. Patch crosses WHOLE and unparsed —
+		// nothing here reads, validates, or re-serialises it, because a mapping
+		// that enumerated known patch keys would silently discard every key
+		// claude ships next.
+		return protocol.TypeBackgroundTaskUpdated, protocol.BackgroundTaskUpdatedPayload{
+			ConversationID:  tc.ConversationID,
+			TaskID:          e.TaskID,
+			Patch:           e.Patch,
+			TruncatedFields: e.TruncatedFields,
+		}, true
+	case turnevent.BackgroundTaskRoster:
+		// The aggregate peer, same posture again: not turn-scoped, tc.TurnID and
+		// tc.Seq ignored.
+		//
+		// A nil Tasks is FORWARDED, not filtered: an empty roster says nothing is
+		// alive, which is precisely the reassurance #1240's symptom needs, so
+		// suppressing it would delete the payoff of the whole feature. The nil is
+		// passed straight through and BackgroundTaskRosterPayload.MarshalJSON
+		// (#1393) normalises it to "tasks":[] on the wire — deliberately not
+		// pre-allocated here, which would produce the same bytes while hiding the
+		// normalisation that type owns.
+		//
+		// DroppedTasks is the roster's ONLY truncation report — it is not called
+		// truncated_fields and the payload has no top-level field of that name —
+		// so losing it would tell a phone that a capped roster is the whole
+		// roster.
+		var tasks []protocol.BackgroundTask
+		for _, t := range e.Tasks {
+			tasks = append(tasks, protocol.BackgroundTask{
+				TaskID:          t.TaskID,
+				TaskType:        t.TaskType,
+				Description:     t.Description,
+				TruncatedFields: t.TruncatedFields,
+			})
+		}
+		return protocol.TypeBackgroundTaskRoster, protocol.BackgroundTaskRosterPayload{
+			ConversationID: tc.ConversationID,
+			Tasks:          tasks,
+			DroppedTasks:   e.DroppedTasks,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false

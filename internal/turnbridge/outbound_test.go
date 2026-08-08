@@ -217,6 +217,111 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			// Like the status peers above, a background-task frame carries
+			// conversation identity only: tc's non-empty TurnID and non-zero Seq are
+			// ignored, and the payload has no turn_id/seq field for one to leak
+			// into. Every claude-derived string crosses verbatim — the producer
+			// bounded them at construction and this adapter re-caps nothing.
+			name: "BackgroundTaskStarted -> background_task_started, every field verbatim",
+			ev: turnevent.BackgroundTaskStarted{
+				TaskID:          "task-1",
+				ToolCallID:      "tool-9",
+				Description:     "sleep 300 && echo done",
+				TaskType:        "local_bash",
+				TruncatedFields: []string{"description", "task_type"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskStarted,
+			wantPayload: protocol.BackgroundTaskStartedPayload{
+				ConversationID:  "c1",
+				TaskID:          "task-1",
+				ToolCallID:      "tool-9",
+				Description:     "sleep 300 && echo done",
+				TaskType:        "local_bash",
+				TruncatedFields: []string{"description", "task_type"},
+			},
+			wantOK: true,
+		},
+		{
+			name: "BackgroundTaskUpdated -> background_task_updated, patch whole and unparsed",
+			ev: turnevent.BackgroundTaskUpdated{
+				TaskID:          "task-1",
+				Patch:           `{"is_backgrounded":true}`,
+				TruncatedFields: []string{"patch"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskUpdated,
+			wantPayload: protocol.BackgroundTaskUpdatedPayload{
+				ConversationID:  "c1",
+				TaskID:          "task-1",
+				Patch:           `{"is_backgrounded":true}`,
+				TruncatedFields: []string{"patch"},
+			},
+			wantOK: true,
+		},
+		{
+			// The non-zero DroppedTasks is the load-bearing part of this row: it is
+			// a truncation report NOT called truncated_fields, and the roster
+			// deliberately has no top-level truncated_fields for a grep to land on.
+			// A row carrying 0 would pass against a mapping that never reads the
+			// field, and a phone would then be told a capped roster is the whole
+			// roster.
+			name: "BackgroundTaskRoster -> background_task_roster, entries in order + dropped_tasks",
+			ev: turnevent.BackgroundTaskRoster{
+				Tasks: []turnevent.BackgroundTask{
+					{TaskID: "task-1", TaskType: "local_bash", Description: "sleep 300"},
+					{TaskID: "task-2", TaskType: "local_bash", Description: "tail -f log"},
+				},
+				DroppedTasks: 3,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskRoster,
+			wantPayload: protocol.BackgroundTaskRosterPayload{
+				ConversationID: "c1",
+				Tasks: []protocol.BackgroundTask{
+					{TaskID: "task-1", TaskType: "local_bash", Description: "sleep 300"},
+					{TaskID: "task-2", TaskType: "local_bash", Description: "tail -f log"},
+				},
+				DroppedTasks: 3,
+			},
+			wantOK: true,
+		},
+		{
+			// A row's truncation report rides THAT row: populated on the second
+			// entry and nil on the first, neither hoisted to the top level nor
+			// flattened across entries.
+			name: "BackgroundTaskRoster per-entry truncated_fields rides its own entry",
+			ev: turnevent.BackgroundTaskRoster{
+				Tasks: []turnevent.BackgroundTask{
+					{TaskID: "task-1", TaskType: "local_bash", Description: "short"},
+					{TaskID: "task-2", TaskType: "local_bash", Description: "cut…", TruncatedFields: []string{"description"}},
+				},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskRoster,
+			wantPayload: protocol.BackgroundTaskRosterPayload{
+				ConversationID: "c1",
+				Tasks: []protocol.BackgroundTask{
+					{TaskID: "task-1", TaskType: "local_bash", Description: "short"},
+					{TaskID: "task-2", TaskType: "local_bash", Description: "cut…", TruncatedFields: []string{"description"}},
+				},
+				DroppedTasks: 0,
+			},
+			wantOK: true,
+		},
+		{
+			// Empty is forwarded, not treated as absent: a zero-value event still
+			// maps, carrying the conversation id and empty strings.
+			name:    "BackgroundTaskUpdated zero value maps rather than dropping",
+			ev:      turnevent.BackgroundTaskUpdated{},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskUpdated,
+			wantPayload: protocol.BackgroundTaskUpdatedPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{
@@ -246,6 +351,76 @@ func TestMapEventOutbound(t *testing.T) {
 			}
 			if !ok && payload != nil {
 				t.Fatalf("dropped event must yield nil payload, got %#v", payload)
+			}
+		})
+	}
+}
+
+// An empty roster is a SIGNAL, not an absence: the mapping forwards it (ok is
+// true — it suppresses nothing) and the bytes it produces carry "tasks":[],
+// never "tasks":null. Suppressing or nulling it would delete the payoff of the
+// whole feature, since "nothing is alive" is precisely the reassurance #1240's
+// symptom needs.
+//
+// The assertion runs on json.Marshal of the value MapEvent RETURNED, not on a
+// payload the test built: turnevent.BackgroundTaskRoster.Tasks is nil both for
+// an empty roster and when claude omits the key, so a test-constructed payload
+// would only prove protocol's MarshalJSON works, not that the mapping reached
+// it with the nil intact.
+func TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	tc := TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7}
+
+	tests := []struct {
+		name    string
+		ev      turnevent.BackgroundTaskRoster
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "empty roster forwards as tasks:[]",
+			ev:      turnevent.BackgroundTaskRoster{},
+			want:    []string{`"tasks":[]`, `"dropped_tasks":0`},
+			notWant: []string{`"tasks":null`},
+		},
+		{
+			// The control: [] is not what the marshaller emits for everything, so
+			// the empty case above passes for the right reason.
+			name: "one-entry roster carries the entry",
+			ev: turnevent.BackgroundTaskRoster{
+				Tasks: []turnevent.BackgroundTask{
+					{TaskID: "task-1", TaskType: "local_bash", Description: "sleep 300"},
+				},
+			},
+			want:    []string{`"task_id":"task-1"`, `"description":"sleep 300"`},
+			notWant: []string{`"tasks":[]`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			typ, payload, ok := MapEvent(tt.ev, tc)
+			if !ok {
+				t.Fatal("empty/small roster was suppressed by the mapping; it must be forwarded")
+			}
+			if typ != protocol.TypeBackgroundTaskRoster {
+				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeBackgroundTaskRoster)
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal mapped payload: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(string(b), want) {
+					t.Fatalf("mapped bytes missing %s:\n%s", want, b)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(string(b), notWant) {
+					t.Fatalf("mapped bytes carry %s:\n%s", notWant, b)
+				}
 			}
 		})
 	}
