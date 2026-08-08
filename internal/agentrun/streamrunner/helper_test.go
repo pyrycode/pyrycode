@@ -81,6 +81,14 @@ func TestStreamRunnerHelperProcess(t *testing.T) {
 		go func() { _, _ = io.Copy(io.Discard, os.Stdin) }()
 		time.Sleep(50 * time.Millisecond)
 		os.Exit(1)
+	case "result_then_exit1":
+		// Real claude's budget-stop shape: a COMPLETE result trailer on
+		// stdout, then a non-zero exit. `--max-turns` does exactly this
+		// (pyrycode#1388). The trailer is the outcome; the status is not.
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stdout, `{"type":"system","subtype":"init"}`)
+		fmt.Fprintln(os.Stdout, `{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":3,"terminal_reason":"max_turns"}`)
+		os.Exit(1)
 	case "sleep":
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM)
