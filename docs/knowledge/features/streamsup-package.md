@@ -166,7 +166,8 @@ forge a turn boundary:
 | `system` (unmapped subtypes), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
 | `system/task_started` | one `BackgroundTaskStarted` (#1380, below) |
 | `system/task_updated` | one `BackgroundTaskUpdated` (#1382, below) |
-| `system/background_tasks_changed` | one `BackgroundTaskRoster` (#1381, below) — the family's one **aggregate** variant; with this the three captured `system` subtypes are all mapped |
+| `system/background_tasks_changed` | one `BackgroundTaskRoster` (#1381, below) — the family's one **aggregate** variant |
+| `system/thinking_tokens` | **at most one** `ThinkingProgress` per `minThinkingTokensPerEvent` (64) tokens of accumulated `estimated_tokens_delta` (#1385, below) — the family's one **rate-bounded** variant; most lines emit nothing |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
@@ -216,26 +217,42 @@ measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fa
 unrecognized frame, so every stream spec is a sentinel: it goes red the day claude adds a message type,
 in the pre-ship gate rather than in front of a user.
 
-**`system` maps per-subtype since 2026-08-07 (#1380), and the mapped set is complete as of 2026-08-08
-(#1381) — the wholesale-drop design's first crack, now closed out.** `system/init`/`thinking_tokens`/
-`status` and any never-seen subtype stay silent exactly as before. The three subtypes the committed
-capture (#1260) holds a payload for are each mapped: `system/task_started` → `turnevent.
-BackgroundTaskStarted` (`TaskID`, `ToolCallID` — claude's `tool_use_id`, renamed to match `ToolStart`/
-`ToolUpdate`'s field name for the same identifier — `Description`, `TaskType`, `TruncatedFields`);
-`system/task_updated` → `turnevent.BackgroundTaskUpdated` (`TaskID`, `Patch`, `TruncatedFields`);
-`system/background_tasks_changed` → `turnevent.BackgroundTaskRoster` (`Tasks []BackgroundTask`,
-`DroppedTasks`) — the family's one **aggregate** variant, snapshotting every task claude is tracking at
-that moment rather than reporting what happened to one. This fixes #1240's symptom: previously a
-backgrounded command's lifecycle was indistinguishable from a genuine turn end (`turn_end`/`end_turn`,
-state `idle`) because the whole `system` family was dropped regardless of subtype.
+**`system` maps per-subtype since 2026-08-07 (#1380) — the wholesale-drop design's first crack.** `status`
+and any never-seen subtype stay silent exactly as before. Four subtypes are now mapped:
+`system/task_started` → `turnevent.BackgroundTaskStarted` (`TaskID`, `ToolCallID` — claude's
+`tool_use_id`, renamed to match `ToolStart`/`ToolUpdate`'s field name for the same identifier —
+`Description`, `TaskType`, `TruncatedFields`); `system/task_updated` → `turnevent.BackgroundTaskUpdated`
+(`TaskID`, `Patch`, `TruncatedFields`); `system/background_tasks_changed` → `turnevent.
+BackgroundTaskRoster` (`Tasks []BackgroundTask`, `DroppedTasks`) — the aggregate variant, snapshotting
+every task claude is tracking at that moment rather than reporting what happened to one; and
+`system/thinking_tokens` → `turnevent.ThinkingProgress` (`EstimatedTokens`, `EstimatedTokensDelta`,
+**no** `TruncatedFields` — two `int`s cannot grow) — the one **rate-bounded** variant, described below.
+The first three mappings fix #1240's symptom: previously a backgrounded command's lifecycle was
+indistinguishable from a genuine turn end (`turn_end`/`end_turn`, state `idle`) because the whole
+`system` family was dropped regardless of subtype. `thinking_tokens` fixes a different gap: it is
+claude's only mid-turn proof of life on this surface, so mapping it gives a client watching a long turn
+something to distinguish "slow" from "wedged."
 
 The match (`emitSystemSubtype`) sits **inside** `consumeLine`'s existing `ignoredLineTypes` branch rather
 than beside it — `system` stays on the list unchanged, so `emitUnrecognized` (the surfaced tier) stays
 structurally unreachable from any `system` line whatever its subtype, and `TestParser_
 IgnoredLineTypesIsTheMeasuredSet` above is unaffected. `emitSystemSubtype`'s `case` arms are the single
 enumeration of the mapped set; every comment describing the drop rule (this file included) points there
-rather than restating it. As of #1381 that set is closed at three — a fourth captured subtype is a new
-case arm there, not a new sibling ticket.
+rather than restating it — a fifth captured subtype is a new case arm there, not a new sibling ticket.
+
+**`system/thinking_tokens` → `turnevent.ThinkingProgress` is rate-bounded, not 1:1 (#1385).** claude's
+`estimated_tokens_delta` is accumulated in a new unexported `Parser.thinkingSinceEmit int` field and an
+event is emitted once the accumulated delta crosses `minThinkingTokensPerEvent` (64) — most lines
+consume silently. The bound keys on the per-line **delta**, not the cumulative `estimated_tokens`
+counter, because that counter restarts near zero at every inference-request boundary within one turn: a
+high-water-mark rule over the cumulative counter goes silent for a whole burst (the committed capture's
+burst 2 never exceeds burst 1's peak), while a delta-accumulator only ever grows and so is immune by
+construction. The crossing test is written subtracted (`d >= bound - acc`), never additive (`acc +=
+d; if acc >= bound`) — the additive form overflows on an extreme `estimated_tokens_delta` and silently
+kills the turn's liveness signal for the rest of the turn; subtracted, both operands stay in `[1, bound]`
+by the invariant `acc ∈ [0, bound-1]`, so the failure is unrepresentable. `thinkingSinceEmit` resets
+unconditionally on `consumeLine`'s `result` arm (both result subtypes) — the parser's one turn boundary.
+See [codebase/1385.md](../codebase/1385.md).
 
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
@@ -252,16 +269,20 @@ variant's worst case unless its cardinality is 1, so the doctrine now reads one 
 the scalar pair ≤ ~4.9 KB, the roster ≤ 8 KiB (12.5% of the 65519-byte v2 application-envelope cap),
 rather than forced to fit or silently abandoned.
 
-claude's `session_id` and `uuid` are deliberately not carried by any of the three — absent from the
+claude's `session_id` and `uuid` are deliberately not carried by any of the four — absent from the
 decode targets themselves (a field never declared cannot leak), enforced further by a reflection sweep
 in each mapping test. No terminal/finish event is ever synthesized for a background task: the parser
-stays turn-stateless, and a task's disappearance from a later roster — the only available finish signal —
-has never been observed, so `BackgroundTaskRoster` reports the snapshot and nothing more. Field mapping
-and cap arithmetic for all three are built from the same committed capture (#1260), never a hand-built
-line; the two bounds `BackgroundTaskRoster` needs are proven by lines synthesized to exceed them, since
-the capture's single 212-byte, one-entry roster is far under either cap. See
-[codebase/1380.md](../codebase/1380.md), [codebase/1382.md](../codebase/1382.md),
-[codebase/1381.md](../codebase/1381.md).
+holds no roster and no per-task memory, and a task's disappearance from a later roster — the only
+available finish signal — has never been observed, so `BackgroundTaskRoster` reports the snapshot and
+nothing more. (`thinkingSinceEmit`, #1385's token counter, doesn't change this refusal — it remembers no
+task and no roster, only a count reset at the turn boundary.) Field mapping and cap arithmetic for the
+three text-bearing events are built from the same committed capture (#1260), never a hand-built line; the
+two bounds `BackgroundTaskRoster` needs are proven by lines synthesized to exceed them, since the
+capture's single 212-byte, one-entry roster is far under either cap. `thinking_tokens`' bound is proven
+the same way — the capture's bursts (126–197 tokens of delta) prove the bound's *ceiling*, but crossing
+it repeatedly needs synthesized lines. See [codebase/1380.md](../codebase/1380.md),
+[codebase/1382.md](../codebase/1382.md), [codebase/1381.md](../codebase/1381.md),
+[codebase/1385.md](../codebase/1385.md).
 
 **Content blocks are held as `[]json.RawMessage`, decoded per block.** This is load-bearing rather than
 tidying: `streamBlock` declares only the fields the mapping reads, so decoding straight into it would
@@ -279,13 +300,19 @@ preserving order; (2) `tool_use` input is carried through as claude's already-de
 `json.RawMessage` verbatim (`ToolStart.RawInput`) rather than `mapper.go`'s map-re-marshal — one fewer
 parse, and it preserves the original key order for what is an opaque pass-through field.
 
-**Turn-stateless by design.** The parser holds no turn counter, no `awaiting` flag, no per-session
-accumulator — only the partial-line byte buffer. The *only* turn boundary is a `result` line, and no
-other line type can create, reset, or leak state across one — this is what makes zero cross-turn bleed
-structural rather than tracked, proven by a headline round-trip test driving 3 turns with distinct
-per-turn markers over one held-open `Stdin()` handle. Per the T1 spike (#1075): `system/init` fires
-**once per turn**, not once per session (dropping it is correct precisely because there's no session
-state for a mistaken init to reset), and the session id is constant across turns of one process.
+**Turn-stateless in everything that describes claude's output; one token counter as of #1385.** The
+parser holds no turn counter, no `awaiting` flag, no transcript, and remembers nothing any line *said* —
+every mapping but one is a pure function of the line it reads. The one exception is
+`thinkingSinceEmit` (above), a plain accumulated-delta counter, not a memory of content. The *only* turn
+boundary is a `result` line: it is where `thinkingSinceEmit` resets, unconditionally, and no other line
+type can create, reset, or leak state across one — this is what keeps zero cross-turn bleed structural
+rather than tracked, proven by a headline round-trip test driving 3 turns with distinct per-turn markers
+over one held-open `Stdin()` handle. Per the T1 spike (#1075): `system/init` fires **once per turn**, not
+once per session, and the session id is constant across turns of one process — `init` is still correctly
+left out of the reset logic; giving one accumulator two reset boundaries to keep agreeing would cost more
+than the single `result` boundary already buys. A child that dies without a `result` leaves a residual
+`< minThinkingTokensPerEvent` behind on a long-lived parser (one per session, not per turn) — bounded and
+named, not a second reset path.
 
 **Concurrency — no mutex.** `os/exec` drives a non-`*os.File` `Config.Stdout` through exactly one
 internal `io.Copy` goroutine, so `Parser.Write` is only ever invoked serially from that goroutine.
@@ -372,7 +399,9 @@ func (w *Watchdog) Wait()                       // blocks until the poll gorouti
 
 **Two pieces, additive, zero `runner.go`/`parser.go` diff.** An unexported `stallTracker` (`io.Writer`)
 carries its own type-tracking state over the same stdout stream the #1088 `Parser` already reads —
-deliberately, since the `Parser` is turn-stateless by design and holds no `awaiting` flag. The caller fans
+deliberately, since the `Parser` holds no `awaiting` flag (the half of "turn-stateless" #1385 left
+unchanged; the `Parser` does now hold one rate-bound token counter, `thinkingSinceEmit`, unrelated to
+what this tracker needs). The caller fans
 stdout to both with `io.MultiWriter(parser, wd.Writer())` (deferred to the wiring slice). The tracker
 reads only each line's top-level `type` — never event content (AC3) — to track whether claude *owes an
 assistant turn*: `assistant`→not-awaiting (a tool run's silence that follows is expected and never trips
@@ -1019,6 +1048,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1295.md`](../codebase/1295.md) — forced-ordering test proving this seam's hold is released by the `new_session` rotation's `clearForSession` and delivers to the post-rotation child; eliminates one M4-stall hypothesis, leaves the straggler-re-mark hypothesis ([#1298](https://github.com/pyrycode/pyrycode/issues/1298)) open and named the clear-before-`RestartFresh` window as an undecided Open question 4, closed by #1330.
 - [`codebase/1330.md`](../codebase/1330.md) — the rotation-delivery gate (`BeginRotation`/`turnTarget`, `rotating`/`rotateGen` under `mu`) that closes #1295's Open question 4: no turn accepted once a `new_session` rotation has begun is written into the outgoing child.
 - [`codebase/1380.md`](../codebase/1380.md) — the `system` subtype dispatch mechanism (`emitSystemSubtype`) and its first mapping, `system/task_started` → `turnevent.BackgroundTaskStarted`; fixes #1240's symptom. `task_updated` (#1382) and `background_tasks_changed` (#1381) extend the same mapped set.
+- [`codebase/1385.md`](../codebase/1385.md) — the fourth arm, `system/thinking_tokens` → `turnevent.ThinkingProgress`, and the parser's first rate-bounded mapping / first piece of cross-line state.
 - [`codebase/1240.md`](../codebase/1240.md) — the symptom #1380 fixes the cause of: `turn_end`/`end_turn` and state `idle` while a backgrounded command claude started is provably still alive.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).

@@ -176,6 +176,38 @@ const maxTaskRosterEntries = 8
 // bytes is all there is; TruncatedFields is what will surface that if it bites.
 const maxTaskRosterDescription = 512
 
+// minThinkingTokensPerEvent is the accumulated estimated_tokens_delta that earns
+// one turnevent.ThinkingProgress. It is the package's first constant bounding
+// FREQUENCY rather than SIZE, and a `min` rather than a `max` because it is the
+// smallest quantum that earns an event — the max* naming above would read
+// backwards.
+//
+// There is deliberately NO envelope arithmetic here, and its absence is the
+// point rather than an omission: every constant above bounds claude-derived TEXT,
+// whose length claude chooses, against the v2 application-envelope cap. This
+// event carries two ints, which cannot grow, so the size argument has no term to
+// compute. What needs bounding instead is how OFTEN the event fires —
+// system/thinking_tokens is the highest-rate subtype claude puts on this surface
+// (~10 lines/turn on the 2026-07-27 measurement, 33 in the committed capture's
+// one turn), and a 1:1 mapping would put every one of them on the event stream.
+//
+// The CEILING is measured, not chosen. In the committed capture
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json) the turn's 33
+// lines fall into four bursts — claude's counter restarts at each inference
+// request — totalling 184, 167, 126 and 197 tokens of delta. The smallest is 126,
+// so any bound above it lets a whole burst go silent: at 127 burst 3 emits
+// nothing while the other three still do, and a visibly-thinking turn falls quiet
+// for a stretch. 126 is therefore a hard ceiling from the data.
+//
+// 64 is roughly half of it, and the multiple is the safety margin exactly as
+// maxTaskFieldID's 9x and maxTaskDescription's 32x are: a future burst HALF the
+// size of the smallest one ever observed still emits, from a zero residual. It is
+// also a real reduction — 33 lines become 8 events on the capture, ~4x — and at
+// the 2026-07-27 measurement's ~10 lines/turn and ~20 tokens/line it implies
+// roughly 1-2 events on a typical turn. Power of two, matching the package's
+// other constants.
+const minThinkingTokensPerEvent = 64
+
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
 // parser deliberately drops in silence. Membership is what separates "known and
 // deliberately ignored" from "genuinely unrecognized"; getting it wrong in
@@ -205,8 +237,11 @@ const maxTaskRosterDescription = 512
 // emitSystemSubtype, whose case arms are the one place the mapped set is
 // enumerated. Do not restate that set here: no comment fails a build when it
 // goes stale, so a single enumeration site with pointers to it is worth more
-// than four independent lists. As of #1381 all three subtypes the capture holds
-// a payload for are mapped, and any fourth is a new case arm there.
+// than four independent lists. Adding a subtype IS adding a case arm there, and
+// this comment carries no count of them — a count is the smallest possible
+// restatement of the set, and #1385 falsified the previous one (which said
+// "all three subtypes the capture holds a payload for", already loose: the
+// capture holds payloads for init and thinking_tokens too).
 //
 // That is a REFINEMENT of the 2026-07-27 measurement, not a reversal. The
 // argument above is about what to DRAW, and it was used to decide what to SEND.
@@ -288,11 +323,19 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // (→ TurnEnd); no transcript file is opened, watched, or resolved (AC4) — the
 // only input is the Write bytes.
 //
-// Turn-stateless. The parser holds no turn counter, no awaiting flag, no
-// per-session accumulator — only the partial-line byte buffer. Each line maps
-// independently, which makes zero cross-turn bleed structural: the only turn
-// boundary is a `result` line, and no other line type can create, reset, or leak
-// state across a boundary.
+// Turn-stateless in everything that describes claude's output. The parser holds
+// no turn counter, no awaiting flag, no transcript, and remembers nothing any
+// line SAID: every mapping is a pure function of the line it reads.
+//
+// AMENDED 2026-08-09 (#1385): it holds exactly one piece of cross-line state, and
+// the absolute phrasing this paragraph used to carry ("no per-session
+// accumulator") is now false. thinkingSinceEmit is a token COUNTER — not a memory
+// of anything claude said — and it exists because the thinking_tokens mapping is
+// rate-bounded and so cannot be a function of one line alone. Zero cross-turn
+// bleed stays structural, but by the RESET rather than by the absence of state:
+// consumeLine's `result` arm zeroes it unconditionally, both result subtypes go
+// through that arm, and it is the only cross-line state besides the partial-line
+// buffer. No other line type can create, reset, or leak state across a boundary.
 //
 // Single-writer invariant: os/exec drives a non-*os.File Config.Stdout through
 // exactly one internal goroutine (io.Copy of the child's stdout pipe into this
@@ -306,6 +349,25 @@ type Parser struct {
 	log    *slog.Logger
 	maxBuf int
 	buf    []byte
+	// thinkingSinceEmit accumulates estimated_tokens_delta since the last
+	// ThinkingProgress. Reset to 0 on every `result` line; see emitThinkingProgress
+	// for the rule.
+	//
+	// INVARIANT: thinkingSinceEmit ∈ [0, minThinkingTokensPerEvent-1] after every
+	// line. The only way to reach the bound is to emit, which resets to 0, and
+	// negative deltas are refused before they are added. Two things depend on it,
+	// and neither survives it being relaxed: a zero-delta line can never trigger an
+	// emit even if the guard were removed, and — the load-bearing one —
+	// `bound - thinkingSinceEmit` stays in [1, bound], which is what makes the
+	// crossing test unable to overflow whatever claude sends. Do not "simplify" the
+	// crossing test back into its additive form; see emitThinkingProgress.
+	//
+	// NO LOCK, and this is the first field for which Parser's single-writer
+	// invariant does real work rather than describing a buffer: os/exec drives
+	// Write from exactly one goroutine and nothing else reads parser state, so the
+	// read-modify-write here needs no mutex. If a future slice adds a concurrent
+	// reader, this is the first field its guard has to cover.
+	thinkingSinceEmit int
 }
 
 var _ io.Writer = (*Parser)(nil)
@@ -439,6 +501,28 @@ type systemBackgroundTaskEntry struct {
 	Description string `json:"description"`
 }
 
+// systemThinkingTokensLine is the decoded payload of one system/thinking_tokens
+// line. Kept separate from streamLine for systemTaskStartedLine's reason, and
+// separate from the three background-task targets because it shares no key with
+// any of them.
+//
+// The field set is exactly what the committed capture shows and nothing invented:
+// all 33 captured records carry the identical key set, and these are the two of
+// them the mapping reads. The other two, uuid and session_id, are deliberately
+// absent — see turnevent.ThinkingProgress's doc. Absent from the DECODE TARGET is
+// a stronger guarantee than the test's reflection sweep, because a field that is
+// never declared cannot leak.
+//
+// Plain int, not *int: absence and an explicit zero are treated IDENTICALLY
+// because the rule's response to both is the same — accumulate nothing, emit
+// nothing — so a pointer would buy a distinction nothing acts on. A non-numeric
+// value, or one too large for int, fails the whole decode and takes the
+// undecodable path, exactly as systemTaskUpdatedLine.TaskID does.
+type systemThinkingTokensLine struct {
+	EstimatedTokens      int `json:"estimated_tokens"`
+	EstimatedTokensDelta int `json:"estimated_tokens_delta"`
+}
+
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
 // on demand in emitAssistant / emitUser. streamBlock declares only the fields
 // the mapping reads, so decoding straight into it would DISCARD every unknown
@@ -507,6 +591,17 @@ func (p *Parser) consumeLine(line []byte) {
 		// (subtype error_during_execution, spike T1 #1075) → cancelled; a clean
 		// turn and every other subtype → end_turn. Richer max_tokens/refusal
 		// classification remains future work (resultTurnEndReason's default).
+		//
+		// Also the ONE reset point for the parser's only accumulator (#1385).
+		// Unconditional and before the emit, so both result subtypes reset and a
+		// cancelled turn leaks no residual into the next one. A child that dies
+		// WITHOUT a result leaves a residual behind on a long-lived parser
+		// (cmd/pyry builds one per session, not per turn); that is bounded by the
+		// invariant at the field — the next turn's first event can arrive at most
+		// minThinkingTokensPerEvent-1 tokens early — and a second reset path for it
+		// would buy a second boundary to keep correct, which is what having one
+		// boundary avoids.
+		p.thinkingSinceEmit = 0
 		p.emit(turnevent.TurnEnd{Reason: resultTurnEndReason(sl.Subtype)})
 	default:
 		if ignoredLineTypes[sl.Type] {
@@ -518,14 +613,26 @@ func (p *Parser) consumeLine(line []byte) {
 			if sl.Type == "system" && p.emitSystemSubtype(sl.Subtype, line) {
 				return
 			}
-			// system (init / thinking_tokens / status / any subtype
-			// emitSystemSubtype does not map) and rate_limit_event: tolerated and
-			// dropped, silently. CORRECTED 2026-08-07 (#1380) — it is no longer
-			// "exactly as before": the subtypes emitSystemSubtype maps become events
-			// above. system/init is a per-turn marker (spike § 1), not a session-open
-			// event — dropping it is correct because the parser is turn-stateless
-			// (there is no session state to reset). See ignoredLineTypes for the full
-			// statement and the measurement behind the list.
+			// system (init / status / any subtype emitSystemSubtype does not map) and
+			// rate_limit_event: tolerated and dropped, silently. CORRECTED 2026-08-07
+			// (#1380) — it is no longer "exactly as before": the subtypes
+			// emitSystemSubtype maps become events above.
+			//
+			// CORRECTED 2026-08-09 (#1385): thinking_tokens is no longer among the
+			// examples here — it is MAPPED now (→ turnevent.ThinkingProgress), so
+			// naming it as dropped became false the moment that arm landed. The list
+			// above is illustrative and the authority is emitSystemSubtype's case
+			// arms; init and status are named because both are measured and neither is
+			// mapped.
+			//
+			// system/init is a per-turn marker (spike § 1), not a session-open event,
+			// and dropping it is still correct — but not for the reason this comment
+			// used to give. The parser is no longer wholly turn-stateless: it holds one
+			// accumulator (#1385), whose boundary is the `result` arm above, NOT init.
+			// Resetting on init as well would give one piece of state two boundaries to
+			// keep agreeing, which is the cost having a single boundary avoids. See
+			// ignoredLineTypes for the full statement and the measurement behind the
+			// list.
 			p.log.Debug("streamsup: dropping stdout line", "type", sl.Type)
 			return
 		}
@@ -558,6 +665,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitBackgroundTaskUpdated(line)
 	case "background_tasks_changed":
 		return p.emitBackgroundTaskRoster(line)
+	case "thinking_tokens":
+		return p.emitThinkingProgress(line)
 	default:
 		return false
 	}
@@ -709,10 +818,18 @@ func (p *Parser) emitBackgroundTaskUpdated(line []byte) bool {
 // is alive, so the event is still emitted rather than dropped.
 //
 // No terminal, finish, or completion event is synthesized here or anywhere —
-// see turnevent.BackgroundTaskRoster's doc. The parser holding no cross-line
-// state is that refusal's enforcement mechanism, not an incidental property:
-// detecting a task's disappearance would require remembering the previous
-// roster.
+// see turnevent.BackgroundTaskRoster's doc. The parser holding no ROSTER and no
+// per-task memory is that refusal's enforcement mechanism, not an incidental
+// property: detecting a task's disappearance would require remembering the
+// previous roster.
+//
+// CORRECTED 2026-08-09 (#1385): the enforcement is stated above in terms of what
+// the parser remembers about TASKS, because the broader claim this sentence used
+// to make — that the parser holds no cross-line state at all — is no longer
+// literally true. It now holds one int, thinkingSinceEmit, a token counter reset
+// at the turn boundary. That does not weaken the refusal by a step: the counter
+// remembers no task, no roster, and nothing any line said, so nothing about it
+// brings a synthesized finish event any closer to being derivable.
 func (p *Parser) emitBackgroundTaskRoster(line []byte) bool {
 	var tl systemBackgroundTasksLine
 	if err := json.Unmarshal(line, &tl); err != nil {
@@ -773,6 +890,109 @@ func (p *Parser) emitBackgroundTaskRoster(line []byte) bool {
 	p.emit(turnevent.BackgroundTaskRoster{
 		Tasks:        tasks,
 		DroppedTasks: dropped,
+	})
+	return true
+}
+
+// emitThinkingProgress decodes a system/thinking_tokens line and emits at most
+// one turnevent.ThinkingProgress, reporting that it consumed the line either way.
+// Field mapping and the bound come from the committed capture
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), never from a
+// hand-built payload.
+//
+// Unlike its three siblings this mapping is NOT a pure function of one line: it
+// is rate-bounded, so most lines accumulate and emit nothing. The rule is
+//
+//	d <= 0                -> consume, no event               (guard)
+//	d >= bound - acc      -> emit the line's two values; acc = 0
+//	otherwise             -> acc += d
+//
+// with acc reset at the `result` arm in consumeLine. >= rather than > because a
+// line landing exactly on the bound has delivered the full quantum.
+//
+// WRITE THE CROSSING TEST SUBTRACTED, NEVER ADDITIVELY. `acc += d; if acc >=
+// bound` is arithmetically identical for every value that fits and OVERFLOWS for
+// one that does not: estimated_tokens_delta 9223372036854775807 decodes into int
+// cleanly, and on a nonzero residual acc+d wraps to roughly -2^63. The comparison
+// then reads false, the accumulator lands where no realistic delta climbs out of,
+// and the turn's liveness signal is silently dead until the next `result` — an
+// unrecoverable state in the one feature whose purpose is making a wedged turn
+// visible, from a single malformed or version-drifted line. Subtracted, both
+// operands of `bound - acc` are in [1, bound] by the field's invariant, so no
+// expression here can overflow at all: the failure is unrepresentable rather than
+// guarded against. This is the obvious refactor to get wrong, which is why
+// TestParser_ThinkingAccumulatorSurvivesAnExtremeDelta pins it — and why its
+// discriminating assertion is the SECOND event after the extreme line, not the
+// first.
+//
+// The d <= 0 guard is not a defence against an unobserved claude bug. A negative
+// delta would drive the accumulator down and could leave the bound uncrossable
+// for the rest of the turn — SILENCE, which is the single outcome the no-silent-
+// burst property forbids. One comparison keeps that property true for inputs the
+// capture does not constrain.
+//
+// NO SILENT BURST, by construction rather than by tuning. claude's cumulative
+// counter restarts at every inference request, so a rule keyed on its high-water
+// mark emits nothing for a burst that never exceeds an earlier peak (the
+// capture's burst 2 tops out below burst 1's). Keying on the DELTA is immune: the
+// accumulator only ever grows within a turn, so any burst whose own delta total
+// reaches the bound emits at least once regardless of the residual it inherited —
+// a residual can only bring the emit FORWARD. Every observed burst clears the
+// bound with roughly 2x to spare.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, and
+// the reason is sharper here than on any sibling. streamLine's doc states the
+// property it preserves: control shapes are read from the top level only and
+// nested content is never re-scanned, which is what stops a tool result whose
+// text is literally `{"type":"result"}` from forging a turn boundary. This event
+// is a LIVENESS CLAIM, so decoding it from anywhere else would let claude's own
+// tool output assert that the daemon is alive while it is wedged.
+//
+// A payload that will not decode into the shape (a string estimated_tokens, say,
+// or a number too large for int) is dropped with a content-free Debug and no
+// event — NOT surfaced as an Unrecognized, because keeping system whole on
+// ignoredLineTypes is what makes "no system line reaches the unrecognized lane"
+// structural. NOTHING NUMERIC IS LOGGED on either path: the package rule is that
+// nothing derived from claude's output reaches a log, and a token count is
+// exactly the "it's just a number" exception that rule gets bent for first —
+// emitBackgroundTaskRoster's doc refuses the identical bend for the roster's
+// entry count.
+func (p *Parser) emitThinkingProgress(line []byte) bool {
+	var tl systemThinkingTokensLine
+	if err := json.Unmarshal(line, &tl); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content. Neither token number is logged, and the count is the thing this
+		// handler is most tempted to explain itself with.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "thinking_tokens")
+		return true
+	}
+
+	// Absent, zero and negative all land here and are treated identically: no
+	// progress to report, and nothing accumulated.
+	if tl.EstimatedTokensDelta <= 0 {
+		return true
+	}
+	// The COMPLEMENT of the doc's `d >= bound - acc -> emit`, written this way so
+	// the accumulate branch returns early and the emit is the function's tail.
+	// Subtracted, never additive — see the doc above. `bound - acc` is in
+	// [1, bound] by the invariant at thinkingSinceEmit, so it cannot overflow
+	// whatever claude sends; and the addition below is reached only when
+	// d < bound - acc, which is exactly the condition making acc + d < bound, so
+	// it cannot overflow either and the invariant is restored on the way out.
+	if tl.EstimatedTokensDelta < minThinkingTokensPerEvent-p.thinkingSinceEmit {
+		p.thinkingSinceEmit += tl.EstimatedTokensDelta
+		return true
+	}
+
+	p.thinkingSinceEmit = 0
+	// The line's OWN values, not the accumulated total: the event stays a pure
+	// function of the line that produced it, and the accumulator's residue is a
+	// documented consumer hazard on turnevent.ThinkingProgress rather than a
+	// number invented here. No caps — two ints cannot blow the envelope.
+	p.emit(turnevent.ThinkingProgress{
+		EstimatedTokens:      tl.EstimatedTokens,
+		EstimatedTokensDelta: tl.EstimatedTokensDelta,
 	})
 	return true
 }
