@@ -1,0 +1,1 @@
+{"id":707,"type":"background_task_roster","ts":"2026-05-08T10:33:20Z","payload":{"conversation_id":"c1","tasks":[{"task_id":"task_01ABC","task_type":"local_bash","description":"grep -rn 'a\u003cb\u0026c' .","truncated_fields":["description"]},{"task_id":"task_02DEF","task_type":"local_bash","description":"sleep 300","truncated_fields":null}],"dropped_tasks":3}}

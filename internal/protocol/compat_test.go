@@ -54,6 +54,11 @@ func TestIsKnownAppType(t *testing.T) {
 		{"api_retry-rejected", TypeApiRetry, false, ErrUnknownType},
 		{"compacting-rejected", TypeCompacting, false, ErrUnknownType},
 		{"unrecognized_message-rejected", TypeUnrecognizedMessage, false, ErrUnknownType},
+		// the v2-only background-task frames: outbound binary → phone events an
+		// old phone never receives, so IsKnownAppType must reject all three.
+		{"background_task_started-rejected", TypeBackgroundTaskStarted, false, ErrUnknownType},
+		{"background_task_updated-rejected", TypeBackgroundTaskUpdated, false, ErrUnknownType},
+		{"background_task_roster-rejected", TypeBackgroundTaskRoster, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -187,6 +192,10 @@ var v2OnlyTypes = map[string]bool{
 	TypeSessionSettings:        true,
 	// v2 session-error frame.
 	TypeSessionError: true,
+	// v2 background-task vocabulary.
+	TypeBackgroundTaskStarted: true,
+	TypeBackgroundTaskUpdated: true,
+	TypeBackgroundTaskRoster:  true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -243,6 +252,9 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestSessionSettings, TypeSessionSettings,
 		// v2 session-error frame.
 		TypeSessionError,
+		// v2 background-task vocabulary.
+		TypeBackgroundTaskStarted, TypeBackgroundTaskUpdated,
+		TypeBackgroundTaskRoster,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

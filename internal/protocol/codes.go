@@ -222,6 +222,42 @@ const (
 	TypeUnrecognizedMessage = "unrecognized_message" // binary → phone, outbound v2 parser-gap diagnostic
 )
 
+// Mobile Protocol v2 background-task types. These three are the first frames in
+// the vocabulary whose subject is work that OUTLIVES the turn that started it —
+// claude backgrounds a shell command and it keeps running after the assistant
+// reports end_turn. That gap is #1240's symptom exactly: the daemon reported
+// turn_end carrying end_turn and went idle while a command claude started was
+// provably still alive, and nothing reaching a phone separated that from a
+// genuine finish.
+//
+// Grouped alone rather than with api_retry/compacting or with the
+// turn-lifecycle six: those describe a live turn's sub-states and its
+// lifecycle, and neither cluster's subject is turn-independent work.
+//
+// The NAMES are the daemon's, not claude's. internal/streamsup/parser.go
+// translates claude's system/task_started, system/task_updated and
+// system/background_tasks_changed subtypes into internal/turnevent variants, and
+// the wire follows the VARIANTS. The daemon is the single place a claude rename
+// lands; if every client read claude's vocabulary directly, one claude release
+// could break all of them at once with nothing in between to absorb it. In
+// particular background_task_roster is named for what the frame IS (a snapshot)
+// rather than for claude's trigger (…_changed), which would invite a consumer to
+// read it as a delta and infer a finish the daemon has never observed.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: these
+// are outbound binary → phone events an old phone never receives. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants
+// between inboundAppTypeSet and v2OnlyTypes; these three live in the latter.
+//
+// This ticket (#1393) is wire vocabulary only. internal/turnbridge's MapEvent
+// still returns ok == false for all three variants, so nothing emits these
+// frames yet; the mapping and the docs/protocol-mobile.md section are #1394.
+const (
+	TypeBackgroundTaskStarted = "background_task_started" // binary → phone, outbound v2 background-task open
+	TypeBackgroundTaskUpdated = "background_task_updated" // binary → phone, outbound v2 background-task change
+	TypeBackgroundTaskRoster  = "background_task_roster"  // binary → phone, outbound v2 background-task snapshot
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the

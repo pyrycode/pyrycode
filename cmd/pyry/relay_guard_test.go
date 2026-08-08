@@ -131,6 +131,14 @@ var excludedTypes = map[string]string{
 	"TypeDebugBundleChunk":    "push",
 	"TypeDebugBundleDone":     "push",
 	"TypeSessionError":        "push",
+
+	// outbound push — v2 background-task frames (#1393). Nothing emits them
+	// yet (the turnbridge mapping is #1394), but TestEveryInboundV2TypeHasHandler
+	// enumerates every Type* constant in internal/protocol/codes.go, so an
+	// outbound-only type must be excluded here from the moment it exists.
+	"TypeBackgroundTaskStarted": "push",
+	"TypeBackgroundTaskUpdated": "push",
+	"TypeBackgroundTaskRoster":  "push",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

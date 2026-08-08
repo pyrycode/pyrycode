@@ -1,0 +1,1 @@
+{"id":705,"type":"background_task_started","ts":"2026-05-08T10:33:18Z","payload":{"conversation_id":"c1","task_id":"task_01ABC","tool_call_id":"toolu_01XYZ","description":"grep -rn 'a\u003cb\u0026c' . \u003e /tmp/out.txt \u0026","task_type":"local_bash","truncated_fields":["description"]}}
