@@ -1508,7 +1508,7 @@ func TestDropcapClassification(t *testing.T) {
 		{
 			name: "system/init", line: `{"type":"system","subtype":"init","session_id":"s"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
-			why: "system is ignored wholesale (parser.go:80-83)",
+			why: "system/init's subtype is not one streamsup.emitSystemSubtype maps, so the line is dropped — NOT because `system` is ignored wholesale, which it no longer is (#1380/#1381)",
 		},
 		{
 			name: "system/thinking_tokens", line: `{"type":"system","subtype":"thinking_tokens"}`,

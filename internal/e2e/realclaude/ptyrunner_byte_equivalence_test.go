@@ -122,27 +122,88 @@ var expectedPtyRunnerOnly = additiveDriftAllowlist{
 	ResultTrailerFields: map[string]struct{}{},
 }
 
-// parserIgnoredTypes mirrors internal/streamsup.ignoredLineTypes: the top-level
-// stream-json types the shipped parser drops in silence. It is deliberately a
-// THIRD table rather than entries in the two additiveDriftAllowlist tables
-// above, because it answers a different question. Those tables answer "is this
-// one-sided emission tolerated?" and govern the SET check as well as the
-// sequence filter; this one answers "does the shipped parser map anything from
-// this type?" and governs the SEQUENCE filter ONLY. A member here is dropped
-// from the sequence comparison and stays fully policed by
-// additiveDriftViolations — so a genuinely one-sided divergence (one runner
-// stops emitting system/init while the other still does) still fires (#1218).
+// parserMappedSubtypes is the set of subtypes the shipped parser MAPS out of an
+// otherwise-dropped top-level type — the EXCEPTIONS that escape that type's
+// drop, never the drops themselves. nil means no exceptions: the whole type is
+// dropped.
+type parserMappedSubtypes map[string]struct{}
+
+// parserIgnoredTypes mirrors the shipped internal/streamsup parser's EFFECTIVE
+// drop behaviour: which stream-json lines it consumes in silence, mapping
+// nothing. It does NOT mirror the SHAPE of streamsup.ignoredLineTypes — read as
+// a table-shape claim it would point at the wrong file, since that table is
+// top-level-keyed and deliberately stays that way (see below).
 //
-// Putting `system` in either one-sided table instead would be factually false —
-// both runners emit system/init — and, because additiveDriftViolations reads
-// those same tables, would pre-authorise exactly that future divergence.
+// GRANULARITY. Keyed by top-level type; each value is the set of subtypes the
+// parser MAPS out of that type. That reproduces the parser's own shape — the
+// top-level gate first, then the mapped subtypes carved out from INSIDE it. The
+// ignored side stays an OPEN set: a subtype in no table at all is DROPPED, and a
+// subtype escapes only by being enumerated. Enumerating the ignored side instead
+// would invert that default and let every unwritten `system` subtype through.
+// streamsup.emitSystemSubtype's case arms are the one enumeration site.
+//
+// WHY IT IS NO LONGER TOP-LEVEL-ONLY. Since #1380/#1381 the parser maps three
+// `system` subtypes into background-task events. A top-level `system` key drops
+// those mapped envelopes from the sequence comparison along with the ignored
+// ones, so the two runners could diverge on any of the three with this gate
+// green (#1379).
+//
+// WHY streamsup.ignoredLineTypes NONETHELESS STAYS TOP-LEVEL-KEYED. Different
+// table, different job. Keeping `system` whole on that list is what makes the
+// parser's emitUnrecognized structurally unreachable from any system line
+// whatever its subtype; subtype granularity there would put unknown `system`
+// subtypes back on the unrecognized lane and break the live zero-unrecognized
+// gate. This mirror carries no such job — it only decides what is worth
+// comparing — so the two tables can differ in shape while agreeing on behaviour.
+//
+// WHY THIS IS A THIRD TABLE, AND WHY THE TWO ONE-SIDED TABLES ABOVE STAY
+// TOP-LEVEL-KEYED. Those answer "is this one-sided emission tolerated?" and
+// govern the SET check as well as the sequence filter; this one answers "does
+// the shipped parser map anything out of this line?" and governs the SEQUENCE
+// filter ONLY. One-sidedness is a property of the TYPE, so subtype granularity
+// would buy those tables nothing. A member here is dropped from the sequence
+// comparison and stays fully policed by additiveDriftViolations — so a genuinely
+// one-sided divergence (one runner stops emitting system/init while the other
+// still does) still fires (#1218). Putting `system` in either one-sided table
+// instead would be factually false — both runners emit system/init — and,
+// because additiveDriftViolations reads those same tables, would pre-authorise
+// exactly that future divergence.
 //
 // TestParserIgnoredTypesMatchesStreamsupParser pins the mirror against the real
-// parser. map[string]struct{} rather than parser.go's map[string]bool to match
-// the surrounding file; the mirrored content is the KEY SET.
-var parserIgnoredTypes = map[string]struct{}{
-	"system":           {}, // #1218: claude's catch-all namespace and its highest-rate emitter (~10 thinking_tokens/turn vs exactly 1 init/turn, measured 2026-07-27). The parser ignores the family wholesale; see streamsup/parser.go ignoredLineTypes for the measurement.
-	"rate_limit_event": {}, // #1218: parser-ignored too. Also in expectedStreamRunnerOnly.Events — independently true (streamrunner emits it, ptyrunner cannot) and that entry still governs the SET check. Set union is idempotent, so carrying it twice does not change the filter.
+// parser in both directions, and that pin is what makes restating the mapped set
+// here legitimate where the prose comments in this package must merely point at
+// streamsup.emitSystemSubtype: the enumeration site is unexported and in another
+// package, so this mirror necessarily duplicates it — but unlike a comment, this
+// duplicate fails a build when it drifts. map[string]struct{} for the inner set
+// rather than parser.go's map[string]bool, to match the surrounding file; the
+// mirrored content is the KEY SET at both levels.
+var parserIgnoredTypes = map[string]parserMappedSubtypes{
+	// #1218: claude's catch-all namespace and its highest-rate emitter (~10
+	// thinking_tokens/turn vs exactly 1 init/turn, measured 2026-07-27) — the
+	// measurement that makes a silent drop the right default for every subtype not
+	// carved out below. #1379: the parser no longer drops the family wholesale, so
+	// the carve-out is enumerated here; every other subtype, named or never seen,
+	// is still dropped. Enumeration site: streamsup.emitSystemSubtype.
+	"system": {"task_started": {}, "task_updated": {}, "background_tasks_changed": {}},
+	// #1218: parser-ignored whole — nil, i.e. no mapped subtypes, no exceptions.
+	// Also in expectedStreamRunnerOnly.Events — independently true (streamrunner
+	// emits it, ptyrunner cannot) and that entry still governs the SET check.
+	// shapeFilterDrops consults the one-sided tables first, so carrying it twice
+	// does not change the filter.
+	"rate_limit_event": nil,
+}
+
+// parserDropsShape reports whether the shipped streamsup parser drops a line of
+// this top-level type and subtype in silence. Mirrors consumeLine's drop branch:
+// the top-level gate first, then the mapped-subtype carve-out from inside it. A
+// subtype in no table at all is DROPPED — the ignored side is an open set.
+func parserDropsShape(typ, subtype string) bool {
+	mapped, ignored := parserIgnoredTypes[typ]
+	if !ignored {
+		return false
+	}
+	_, isMapped := mapped[subtype]
+	return !isMapped
 }
 
 // TestPtyRunnerArgvFlagsExistInClaudeHelp asserts every flag ptyrunner.buildArgs
@@ -185,9 +246,9 @@ func TestPtyRunnerArgvFlagsExistInClaudeHelp(t *testing.T) {
 // by agent-dispatcher; they are all log-preview-only.
 //
 // extractShapes reads ONLY `type` + `subtype`, and drops both the one-sided
-// allowlisted types and the parser-ignored types (see shapeFilterTypes) so the
-// compared sequence is the cross-runner intersection over the alphabet the
-// shipped parser actually maps. Field-level invariants (init.cwd / .tools /
+// allowlisted types and the lines the shipped parser drops in silence (see
+// shapeFilterDrops) so the compared sequence is the cross-runner intersection
+// over the alphabet the shipped parser actually maps. Field-level invariants (init.cwd / .tools /
 // .model / .session_id, user prompt text, result.is_error / result.num_turns)
 // are asserted via targeted decodes below; this struct never materialises a
 // normalised form.
@@ -196,33 +257,35 @@ type envelopeShape struct {
 	Subtype string
 }
 
-// shapeFilterTypes is the union of three tables: the two additive-drift event
-// allowlists (the envelope types one runner emits but the other does not) and
-// parserIgnoredTypes (the types the shipped parser maps nothing from).
-// extractShapes drops all of them so compareShapes sees only the cross-runner
-// intersection sequence over the alphabet production actually consumes.
+// shapeFilterDrops reports whether extractShapes drops this (type, subtype) from
+// the compared sequence, so that compareShapes sees only the cross-runner
+// intersection sequence over the alphabet production actually consumes. Three
+// tables feed it, answering two different questions.
+//
+// The two additive-drift event allowlists (the envelope types one runner emits
+// but the other does not) are looked up by TYPE ALONE, and that is correct:
+// they answer "is this one-sided emission tolerated?", one-sidedness is a
+// property of the type, and they govern the SET check as well as this filter.
+// parserIgnoredTypes answers "does the shipped parser map anything out of this
+// line?" — only that question has a subtype-dependent answer, and only that
+// table is consulted with the subtype.
 //
 // Keeping the allowlists as the single source of truth for one-sidedness means
 // a new un-allowlisted one-sided type is still caught independently by
 // additiveDriftViolations (the SET check), not silently swallowed here — and
 // that holds for parser-ignored types too, since additiveDriftViolations does
 // not consult parserIgnoredTypes.
-func shapeFilterTypes() map[string]struct{} {
-	filter := make(map[string]struct{}, len(expectedPtyRunnerOnly.Events)+len(expectedStreamRunnerOnly.Events)+len(parserIgnoredTypes))
-	for ev := range expectedPtyRunnerOnly.Events {
-		filter[ev] = struct{}{}
+func shapeFilterDrops(typ, subtype string) bool {
+	if _, ok := expectedPtyRunnerOnly.Events[typ]; ok {
+		return true
 	}
-	for ev := range expectedStreamRunnerOnly.Events {
-		filter[ev] = struct{}{}
+	if _, ok := expectedStreamRunnerOnly.Events[typ]; ok {
+		return true
 	}
-	for ev := range parserIgnoredTypes {
-		filter[ev] = struct{}{}
-	}
-	return filter
+	return parserDropsShape(typ, subtype)
 }
 
 func extractShapes(stream []byte) ([]envelopeShape, error) {
-	filter := shapeFilterTypes()
 	var out []envelopeShape
 	for i, line := range bytes.Split(stream, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -235,7 +298,7 @@ func extractShapes(stream []byte) ([]envelopeShape, error) {
 		if err := json.Unmarshal(line, &env); err != nil {
 			return nil, fmt.Errorf("extractShapes: line %d: %w (raw: %s)", i, err, truncatePrefix(line, 256))
 		}
-		if _, skip := filter[env.Type]; skip {
+		if shapeFilterDrops(env.Type, env.Subtype) {
 			continue
 		}
 		out = append(out, envelopeShape{Type: env.Type, Subtype: env.Subtype})
@@ -918,10 +981,14 @@ func TestAdditiveDriftAssertion_SelfCheck(t *testing.T) {
 func TestExtractShapes_FiltersParserIgnoredTypes(t *testing.T) {
 	// Mirrors the observed 2026-07-27 streamrunner side of the RED run: one
 	// init, a burst of thinking_tokens, the model output, the once-per-run
-	// rate_limit_event, then the result trailer.
+	// rate_limit_event, then the result trailer. Two #1379 additions carry the
+	// subtype granularity: a MAPPED system subtype, which must survive, and a
+	// subtype in no table at all, which must not.
 	const stream = `{"type":"system","subtype":"init","session_id":"abc"}
 {"type":"system","subtype":"thinking_tokens"}
 {"type":"system","subtype":"thinking_tokens"}
+{"type":"system","subtype":"task_started"}
+{"type":"system","subtype":"some_unmapped_future_thing"}
 {"type":"assistant","message":{"id":"m1"}}
 {"type":"rate_limit_event"}
 {"type":"result","subtype":"success","is_error":false}
@@ -932,18 +999,26 @@ func TestExtractShapes_FiltersParserIgnoredTypes(t *testing.T) {
 		t.Fatalf("extractShapes: %v", err)
 	}
 	want := []envelopeShape{
+		{Type: "system", Subtype: "task_started"},
 		{Type: "assistant"},
 		{Type: "result", Subtype: "success"},
 	}
 	if !reflect.DeepEqual(shapes, want) {
 		t.Fatalf("extractShapes =\n%swant:\n%s", formatShapes(shapes), formatShapes(want))
 	}
-	// Belt-and-braces on the family drop: a subtype-grained filter would leave
-	// system/init standing, which is the mistake this test exists to catch.
+	// Belt-and-braces on the drop rule, and specifically on its OPEN-SET default:
+	// keying the filter on a composite type/subtype would invert that default and
+	// leave every `system` subtype nobody wrote down standing — system/thinking_tokens
+	// alone fires ~10x/turn, so that failure is noisy as well as wrong. The
+	// never-seen subtype in the fixture above is what trips this loop if it ever
+	// happens. (Until #1379 this comment claimed the opposite, that a
+	// subtype-grained filter was itself the mistake; subtype granularity is now the
+	// requirement — what must stay type-grained is the DEFAULT, not the lookup. The
+	// mapped set is enumerated at streamsup.emitSystemSubtype.)
 	for i, sh := range shapes {
-		if _, ignored := parserIgnoredTypes[sh.Type]; ignored {
-			t.Errorf("shape[%d] = (%q,%q) survived the filter but %q is in parserIgnoredTypes",
-				i, sh.Type, sh.Subtype, sh.Type)
+		if parserDropsShape(sh.Type, sh.Subtype) {
+			t.Errorf("shape[%d] = (%q,%q) survived the filter but the shipped parser drops that type/subtype in silence",
+				i, sh.Type, sh.Subtype)
 		}
 	}
 
@@ -974,46 +1049,107 @@ func TestExtractShapes_FiltersParserIgnoredTypes(t *testing.T) {
 // parserIgnoredTypeFixtures maps each parserIgnoredTypes member to
 // representative wire lines, fed to a real streamsup.Parser by
 // TestParserIgnoredTypesMatchesStreamsupParser. A table member with no fixture
-// here fails that test, so adding a member forces adding a line to exercise it.
+// here fails that test, and so does a MAPPED subtype no fixture line declares —
+// so growing either level of the mirror forces adding a line to exercise it.
+//
+// Each line's expectation is DERIVED, not declared: the test decodes the
+// subtype and asks parserDropsShape. Dropped lines must emit zero events, mapped
+// lines at least one. The mapped fixtures are deliberately bare `type` +
+// `subtype` — each emits exactly one event on the shipped parser (measured
+// 2026-08-08), and every field beyond those two is a chance to trip the
+// emitters' undecodable arm, which returns consumed-with-zero-events and would
+// make the fixture prove nothing.
 var parserIgnoredTypeFixtures = map[string][]string{
 	"system": {
 		`{"type":"system","subtype":"init","session_id":"abc","cwd":"/tmp","model":"claude-haiku-4-5","tools":[]}`,
 		`{"type":"system","subtype":"thinking_tokens"}`,
 		`{"type":"system","subtype":"status"}`,
+		`{"type":"system","subtype":"task_started"}`,
+		`{"type":"system","subtype":"task_updated"}`,
+		`{"type":"system","subtype":"background_tasks_changed"}`,
 	},
 	"rate_limit_event": {
 		`{"type":"rate_limit_event"}`,
 	},
 }
 
-// TestParserIgnoredTypesMatchesStreamsupParser guards the dangerous direction of
-// the mirror: parserIgnoredTypes listing a type the shipped parser actually
-// MAPS would silently drop a meaningful envelope from the sequence comparison,
-// and the comparison would keep passing while the two runners diverged on it.
+// fixtureShape decodes one fixture line the same two-field way extractShapes
+// reads the wire, and returns its subtype. Also pins the line under the map key
+// it is filed under: a `system` fixture that declares some other type would
+// exercise the wrong half of the mirror.
+func fixtureShape(t *testing.T, typ, line string) string {
+	t.Helper()
+	var env struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+	}
+	if err := json.Unmarshal([]byte(line), &env); err != nil {
+		t.Fatalf("parserIgnoredTypeFixtures[%q]: fixture line does not decode: %s: %v", typ, line, err)
+	}
+	if env.Type != typ {
+		t.Fatalf("parserIgnoredTypeFixtures[%q]: fixture line declares type %q: %s", typ, env.Type, line)
+	}
+	return env.Subtype
+}
+
+// TestParserIgnoredTypesMatchesStreamsupParser guards BOTH directions of the
+// mirror against the shipped parser, since #1379 made it subtype-granular.
+//
+// The dangerous direction is the mirror claiming a line is DROPPED that the
+// parser actually MAPS: extractShapes then silently drops a meaningful envelope
+// from the sequence comparison, and the comparison keeps passing while the two
+// runners diverge on it. The other direction — the mirror claiming a MAPPING the
+// parser does not have — lets a genuinely ignored, high-rate line into the
+// compared sequence, which is noise rather than blindness but is still a false
+// statement about the parser.
 //
 // It asserts by construction rather than by reading the parser's unexported
-// table: each fixture line is written to a real streamsup.Parser and must emit
-// ZERO events. A type the parser maps emits at least one; a type it no longer
-// ignores emits a turnevent.Unrecognized. The opposite direction —
+// table: each fixture line is written to a real streamsup.Parser, and what it
+// must emit is DERIVED from the mirror via parserDropsShape — zero events for a
+// line the mirror says is dropped, at least one for a subtype it says is mapped.
+// A type the parser no longer ignores emits a turnevent.Unrecognized, so it
+// fails the dropped arm too. The remaining direction —
 // streamsup.ignoredLineTypes growing past this mirror — already fails loudly in
 // the same pre-ship gate (interactive_stream_liveness_test.go fatals on any
 // unrecognized_message during a normal turn), so it needs no coverage here.
 //
 // Needs no claude and no network.
 func TestParserIgnoredTypesMatchesStreamsupParser(t *testing.T) {
-	for typ := range parserIgnoredTypes {
+	for typ, mapped := range parserIgnoredTypes {
 		lines, ok := parserIgnoredTypeFixtures[typ]
 		if !ok || len(lines) == 0 {
 			t.Errorf("parserIgnoredTypes member %q has no fixture in parserIgnoredTypeFixtures; add one so the mirror is exercised against the real parser", typ)
 			continue
 		}
+		declared := map[string]struct{}{}
 		for i, line := range lines {
-			t.Run(fmt.Sprintf("%s/%d", typ, i), func(t *testing.T) {
-				if got := parseOne(t, line); len(got) != 0 {
-					t.Errorf("streamsup parser emitted %d event(s) for %s, want 0 — %q is in parserIgnoredTypes but the parser maps it; the shape comparison is dropping a meaningful envelope",
-						len(got), line, typ)
+			subtype := fixtureShape(t, typ, line)
+			declared[subtype] = struct{}{}
+			name := typ + "/" + subtype
+			if subtype == "" {
+				name = fmt.Sprintf("%s/%d", typ, i)
+			}
+			t.Run(name, func(t *testing.T) {
+				got := parseOne(t, line)
+				if parserDropsShape(typ, subtype) {
+					if len(got) != 0 {
+						t.Errorf("streamsup parser emitted %d event(s) for %s, want 0 — %q is in parserIgnoredTypes but the parser maps it; the shape comparison is dropping a meaningful envelope",
+							len(got), line, typ)
+					}
+					return
+				}
+				if len(got) == 0 {
+					t.Errorf("streamsup parser emitted 0 events for %s, want at least 1 — either parserIgnoredTypes[%q] claims subtype %q is mapped when the shipped parser drops it (the mirror is wrong), or this fixture line hit an emitter's undecodable arm, which returns consumed-with-zero-events and makes the fixture prove nothing; see streamsup.emitSystemSubtype",
+						line, typ, subtype)
 				}
 			})
+		}
+		// Mirrors the member-has-fixture check one level down: a mapped subtype with
+		// no fixture line is a mapping claim nothing exercises against the parser.
+		for subtype := range mapped {
+			if _, ok := declared[subtype]; !ok {
+				t.Errorf("parserIgnoredTypes[%q] maps subtype %q but no line in parserIgnoredTypeFixtures[%q] declares it; add one so the mapping is exercised against the real parser", typ, subtype, typ)
+			}
 		}
 	}
 	for typ := range parserIgnoredTypeFixtures {
