@@ -439,7 +439,7 @@ func TestParseAgentRunArgs_DisallowedToolsForms(t *testing.T) {
 // streamrunner-specific scope). The security invariants the old
 // PTY/settings argv pinned (`--permission-mode dontAsk` MUST appear,
 // `--allowedTools` MUST NOT appear) are inverted here: `--allowed-tools`
-// IS the authoritative tool gate now, and `--dangerously-skip-permissions`
+// IS the authoritative tool gate now, and `--permission-mode dontAsk`
 // replaces the settings file's deny-default + workspace-trust mark.
 func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 	tests := []struct {
@@ -447,6 +447,7 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 		parsed        agentRunArgs
 		yolo          bool
 		mcpConfigPath string
+		settingsPath  string
 		want          []string
 	}{
 		{
@@ -463,7 +464,7 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 				"--input-format", "stream-json",
 				"--output-format", "stream-json",
 				"--verbose",
-				"--dangerously-skip-permissions",
+				"--permission-mode", "dontAsk",
 				"--append-system-prompt-file", "/tmp/sys.md",
 				"--model", "sonnet-4-6",
 				"--effort", "medium",
@@ -485,12 +486,42 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 				"--input-format", "stream-json",
 				"--output-format", "stream-json",
 				"--verbose",
-				"--dangerously-skip-permissions",
+				"--permission-mode", "dontAsk",
 				"--append-system-prompt-file", "/tmp/x.md",
 				"--model", "opus-4-7",
 				"--effort", "max",
 				"--max-turns", "12",
 				"--allowed-tools", "Read",
+			},
+		},
+		{
+			// pyrycode#1387. --dangerously-skip-permissions DEFEATS
+			// --allowed-tools, measured 2026-08-08 against claude directly.
+			// The settings file is what actually enforces on this path, so
+			// the YOLO branch must carry it. Without it, every agent
+			// dispatched after the 2026-07-25 fleet switch ran with no tool
+			// boundary at all.
+			name: "YOLO carries the per-spawn settings file, which is the real boundary",
+			parsed: agentRunArgs{
+				model:            "sonnet-4-6",
+				systemPromptFile: "/tmp/sys.md",
+				effort:           "medium",
+				maxTurns:         3,
+				allowedTools:     []string{"Read", "Bash"},
+			},
+			yolo:         true,
+			settingsPath: "/tmp/settings.json",
+			want: []string{
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--verbose",
+				"--permission-mode", "dontAsk",
+				"--settings", "/tmp/settings.json",
+				"--append-system-prompt-file", "/tmp/sys.md",
+				"--model", "sonnet-4-6",
+				"--effort", "medium",
+				"--max-turns", "3",
+				"--allowed-tools", "Read,Bash",
 			},
 		},
 		{
@@ -522,7 +553,7 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildStreamRunnerClaudeArgs(tc.parsed, tc.yolo, tc.mcpConfigPath)
+			got := buildStreamRunnerClaudeArgs(tc.parsed, tc.yolo, tc.mcpConfigPath, tc.settingsPath)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("buildStreamRunnerClaudeArgs:\n got  = %v\n want = %v", got, tc.want)
 			}
@@ -531,8 +562,11 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 			// preserve slices.Equal against a stale `want` still trips a
 			// clear-named guard. The permission slot swaps on the YOLO toggle.
 			if tc.yolo {
-				if !slices.Contains(got, "--dangerously-skip-permissions") {
-					t.Errorf("YOLO: missing --dangerously-skip-permissions in %v", got)
+				if slices.Contains(got, "--dangerously-skip-permissions") {
+					t.Errorf("--dangerously-skip-permissions must never be passed: it outranks dontAsk and disables the allowlist entirely (pyrycode#1387). Got %v", got)
+				}
+				if !nextValueEquals(got, "--permission-mode", "dontAsk") {
+					t.Errorf("YOLO: missing `--permission-mode dontAsk` in %v", got)
 				}
 				if slices.Contains(got, "--permission-prompt-tool") {
 					t.Errorf("YOLO: unexpected --permission-prompt-tool in %v", got)
@@ -566,12 +600,34 @@ func TestBuildStreamRunnerClaudeArgs_Shape(t *testing.T) {
 				t.Errorf("missing `--max-turns %s` in %v", wantMaxTurns, got)
 			}
 
-			// Negative pins: the load-bearing PTY/settings-mode flags must
-			// never reappear under the stream-json pipeline. (--permission-mode
-			// is legal in the non-YOLO branch, so it is excluded from this set.)
-			for _, banned := range []string{"--settings", "--session-id"} {
+			// Negative pins: PTY-specific flags must never reappear under the
+			// stream-json pipeline. (--permission-mode is legal in the
+			// non-YOLO branch, so it is excluded from this set.)
+			//
+			// `--settings` was on this list until 2026-08-08 and has been
+			// REMOVED deliberately. It was banned as argv-shape hygiene, on
+			// the premise that `--allowed-tools` was the authoritative tool
+			// gate here and a settings file was therefore PTY-only clutter.
+			// That premise was never measured and is false:
+			// `--dangerously-skip-permissions` defeats `--allowed-tools`, so
+			// the settings file is the ONLY boundary on this path
+			// (pyrycode#1387). Keeping the ban would have kept the hole.
+			//
+			// `--session-id` stays banned: minting a session UUID is genuinely
+			// PTY-only, and it is what the stream path must not do.
+			for _, banned := range []string{"--session-id"} {
 				if slices.Contains(got, banned) {
 					t.Errorf("banned flag %q present in %v", banned, got)
+				}
+			}
+
+			// Positive pin, replacing half of the ban above: under YOLO the
+			// settings file must be present whenever the caller supplies one,
+			// because it is the only thing standing between a dispatched
+			// agent and every tool on the machine.
+			if tc.yolo && tc.settingsPath != "" {
+				if !nextValueEquals(got, "--settings", tc.settingsPath) {
+					t.Errorf("YOLO: missing `--settings %s` in %v — the tool boundary is gone", tc.settingsPath, got)
 				}
 			}
 		})
