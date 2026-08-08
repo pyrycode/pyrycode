@@ -184,7 +184,17 @@ var parserIgnoredTypes = map[string]parserMappedSubtypes{
 	// carved out below. #1379: the parser no longer drops the family wholesale, so
 	// the carve-out is enumerated here; every other subtype, named or never seen,
 	// is still dropped. Enumeration site: streamsup.emitSystemSubtype.
-	"system": {"task_started": {}, "task_updated": {}, "background_tasks_changed": {}},
+	//
+	// CORRECTED 2026-08-09 (#1385): thinking_tokens is now carved out too, so the
+	// ~10/turn rate above is no longer the reason it is DROPPED — it is the reason
+	// its mapping is RATE-BOUNDED (streamsup.minThinkingTokensPerEvent), which is a
+	// statement about how many events the parser emits, not about whether it maps
+	// the line. The rate still argues for the silent-drop default on every subtype
+	// NOT carved out, which is what the paragraph above says and what stands.
+	// Carving it out has a consequence the other three do not:
+	// expectedStreamRunnerOnlySubtypes below, without which the live sequence
+	// comparison goes RED.
+	"system": {"task_started": {}, "task_updated": {}, "background_tasks_changed": {}, "thinking_tokens": {}},
 	// #1218: parser-ignored whole — nil, i.e. no mapped subtypes, no exceptions.
 	// Also in expectedStreamRunnerOnly.Events — independently true (streamrunner
 	// emits it, ptyrunner cannot) and that entry still governs the SET check.
@@ -204,6 +214,60 @@ func parserDropsShape(typ, subtype string) bool {
 	}
 	_, isMapped := mapped[subtype]
 	return !isMapped
+}
+
+// expectedStreamRunnerOnlySubtypes enumerates (top-level type, subtype) pairs
+// that streamrunner emits but ptyrunner does not, and which are accepted as
+// documented one-sided emissions rather than drift. Consulted by
+// shapeFilterDrops ONLY — it governs the SEQUENCE filter and nothing else.
+//
+// WHY IT IS NOT A FIELD ON expectedStreamRunnerOnly. That struct is read by
+// additiveDriftViolations, which governs the SET check — the check whose whole
+// job is to catch a one-sided divergence. Widening it would pre-authorise, in
+// that check, exactly the class of divergence it exists to fire on. It would
+// also be factually false at the granularity that struct works at: it is keyed
+// by TYPE, both runners emit system/init, so putting `system` in it would
+// mis-state the runners' behaviour and silently tolerate a future one-sided
+// system divergence. additiveDriftViolations compares top-level types only, and
+// `system` is emitted by both runners, so keeping this table out of it loses
+// nothing.
+//
+// WHY IT IS NOT AN ENTRY IN parserIgnoredTypes. That table states a fact about
+// the SHIPPED PARSER — "does it map anything out of this line?" — and since
+// #1385 the answer for system/thinking_tokens is YES. This table states a fact
+// about the TWO RUNNERS — "do both of them emit this?" — and the answer is NO.
+// Two different facts; conflating them would force a false statement into one
+// table or the other. Before #1385 they agreed by accident (the parser dropped
+// the subtype AND ptyrunner never emitted it), so one table could carry both
+// jobs; mapping the subtype is what pulled them apart.
+//
+// THE MEASUREMENT, so a future reader re-checks it rather than inheriting it:
+// #1218, 2026-07-28, claude 2.1.220 — streamrunner emits system/thinking_tokens
+// ~10 times per turn, ptyrunner exactly 0 (ptyrunner synthesises its stream from
+// claude's local session JSONL, which carries no thinking_tokens record).
+// Without this table TestPtyRunnerVsStreamRunner_StructuralEquivalence compares
+// ~10 streamrunner shapes against zero on the ptyrunner side and fails on the
+// live pre-ship gate — which is a real-claude run's worth of wall clock to
+// discover. TestShapeFilterKeepsThinkingTokensOutOfTheSequence is the offline
+// pin that fires first.
+//
+// The failure direction is QUIET: if a future claude release makes ptyrunner
+// emit the subtype too, this table becomes a false statement that hides a real
+// divergence instead of tolerating a known one. Re-measure whenever the
+// byte-equivalence suite is re-baselined against a new claude version.
+var expectedStreamRunnerOnlySubtypes = map[string]map[string]struct{}{
+	"system": {"thinking_tokens": {}}, // #1218 2026-07-28: streamrunner ~10/turn, ptyrunner exactly 0.
+}
+
+// streamRunnerOnlySubtype reports whether (typ, subtype) is a documented
+// one-sided streamrunner emission at subtype granularity.
+func streamRunnerOnlySubtype(typ, subtype string) bool {
+	subtypes, ok := expectedStreamRunnerOnlySubtypes[typ]
+	if !ok {
+		return false
+	}
+	_, oneSided := subtypes[subtype]
+	return oneSided
 }
 
 // TestPtyRunnerArgvFlagsExistInClaudeHelp asserts every flag ptyrunner.buildArgs
@@ -259,27 +323,40 @@ type envelopeShape struct {
 
 // shapeFilterDrops reports whether extractShapes drops this (type, subtype) from
 // the compared sequence, so that compareShapes sees only the cross-runner
-// intersection sequence over the alphabet production actually consumes. Three
-// tables feed it, answering two different questions.
+// intersection sequence over the alphabet production actually consumes. Four
+// tables feed it, answering three different questions.
 //
 // The two additive-drift event allowlists (the envelope types one runner emits
 // but the other does not) are looked up by TYPE ALONE, and that is correct:
 // they answer "is this one-sided emission tolerated?", one-sidedness is a
-// property of the type, and they govern the SET check as well as this filter.
-// parserIgnoredTypes answers "does the shipped parser map anything out of this
-// line?" — only that question has a subtype-dependent answer, and only that
-// table is consulted with the subtype.
+// property of the type at that granularity, and they govern the SET check as
+// well as this filter.
 //
-// Keeping the allowlists as the single source of truth for one-sidedness means
-// a new un-allowlisted one-sided type is still caught independently by
-// additiveDriftViolations (the SET check), not silently swallowed here — and
-// that holds for parser-ignored types too, since additiveDriftViolations does
-// not consult parserIgnoredTypes.
+// parserIgnoredTypes answers a different question — "does the shipped parser map
+// anything out of this line?" — and that one has a subtype-dependent answer, so
+// it is the table consulted with the subtype.
+//
+// expectedStreamRunnerOnlySubtypes (#1385) answers the FIRST question again but
+// at SUBTYPE granularity: "is this one-sided emission tolerated, for a type whose
+// one-sidedness is not a property of the whole type?" It exists because
+// system/thinking_tokens is one-sided while system/init is not, so no
+// type-keyed table can state the fact without lying. Unlike the two allowlists
+// it governs this filter ONLY, never the SET check — see its doc for why
+// widening additiveDriftViolations' input would defeat that check's purpose.
+//
+// Keeping the allowlists as the single source of truth for TYPE-level
+// one-sidedness means a new un-allowlisted one-sided type is still caught
+// independently by additiveDriftViolations (the SET check), not silently
+// swallowed here — and that holds for parser-ignored types too, since
+// additiveDriftViolations does not consult parserIgnoredTypes.
 func shapeFilterDrops(typ, subtype string) bool {
 	if _, ok := expectedPtyRunnerOnly.Events[typ]; ok {
 		return true
 	}
 	if _, ok := expectedStreamRunnerOnly.Events[typ]; ok {
+		return true
+	}
+	if streamRunnerOnlySubtype(typ, subtype) {
 		return true
 	}
 	return parserDropsShape(typ, subtype)
@@ -1046,6 +1123,47 @@ func TestExtractShapes_FiltersParserIgnoredTypes(t *testing.T) {
 	})
 }
 
+// TestShapeFilterKeepsThinkingTokensOutOfTheSequence pins the one place where
+// two of shapeFilterDrops' tables deliberately DISAGREE, and it is the only
+// assertion in this package that fires if someone "simplifies"
+// expectedStreamRunnerOnlySubtypes away.
+//
+// The two answers are opposite ON PURPOSE:
+//
+//   - parserDropsShape says FALSE — the shipped parser MAPS system/thinking_tokens
+//     since #1385 (→ turnevent.ThinkingProgress). Saying otherwise would be the
+//     "dangerous direction" TestParserIgnoredTypesMatchesStreamsupParser's doc
+//     names: a mirror claiming a drop the parser does not perform.
+//   - shapeFilterDrops says TRUE — the SEQUENCE comparison must still exclude it,
+//     because #1218 measured the subtype one-sided (streamrunner ~10/turn,
+//     ptyrunner exactly 0, claude 2.1.220, 2026-07-28).
+//
+// Removing either half re-opens a RED on the LIVE gate
+// (TestPtyRunnerVsStreamRunner_StructuralEquivalence, in make e2e-realclaude and
+// therefore in make preship): ~10 streamrunner shapes compared against zero.
+// That costs a real-claude run to discover, which is why this offline pin exists.
+// Verified by construction while building #1385: with the mapped-set entry added
+// and this table absent, TestExtractShapes_FiltersParserIgnoredTypes goes RED
+// with both thinking_tokens lines surviving the filter.
+//
+// Needs no claude and no network.
+func TestShapeFilterKeepsThinkingTokensOutOfTheSequence(t *testing.T) {
+	if parserDropsShape("system", "thinking_tokens") {
+		t.Error("parserDropsShape(system/thinking_tokens) = true, want false — the shipped parser MAPS this subtype (streamsup.emitSystemSubtype); a mirror claiming it is dropped hides a real cross-runner divergence from the sequence comparison")
+	}
+	if !shapeFilterDrops("system", "thinking_tokens") {
+		t.Error("shapeFilterDrops(system/thinking_tokens) = false, want true — the subtype is one-sided (#1218: streamrunner ~10/turn, ptyrunner 0), so letting it into the compared sequence turns the live structural-equivalence gate RED")
+	}
+
+	// The disagreement must be NARROW: a sibling system subtype that both runners
+	// emit stays outside expectedStreamRunnerOnlySubtypes, so a broadened table
+	// (say, one keyed by type alone) fails here rather than silently blinding the
+	// sequence check to every system envelope.
+	if streamRunnerOnlySubtype("system", "init") {
+		t.Error("streamRunnerOnlySubtype(system/init) = true, want false — both runners emit system/init; tolerating it as one-sided would blind the sequence comparison to a real divergence")
+	}
+}
+
 // parserIgnoredTypeFixtures maps each parserIgnoredTypes member to
 // representative wire lines, fed to a real streamsup.Parser by
 // TestParserIgnoredTypesMatchesStreamsupParser. A table member with no fixture
@@ -1059,10 +1177,25 @@ func TestExtractShapes_FiltersParserIgnoredTypes(t *testing.T) {
 // 2026-08-08), and every field beyond those two is a chance to trip the
 // emitters' undecodable arm, which returns consumed-with-zero-events and would
 // make the fixture prove nothing.
+//
+// thinking_tokens is a DELIBERATE EXCEPTION to that convention (#1385), and it
+// carries a payload on purpose. The convention rests on the three background-task
+// subtypes emitting UNCONDITIONALLY once decoded, so for them the bare line is
+// both minimal and sufficient. thinking_tokens is mapped by a RATE-BOUNDED rule:
+// it emits only once claude's accumulated estimated_tokens_delta crosses
+// streamsup.minThinkingTokensPerEvent, so a payload-free line emits ZERO — which
+// is not a defect to work around but a required property of the mapping
+// (streamsup's TestParser_ThinkingProgressSilentWithoutPayload pins it, and the
+// daemon must make no liveness claim for a line carrying no evidence of
+// thinking). Leaving the bare line here while listing the subtype as mapped
+// therefore drives TestParserIgnoredTypesMatchesStreamsupParser RED on its "want
+// at least 1" arm — verified, not predicted. The delta is 16x the bound rather
+// than just over it, so a later change to the bound cannot silently un-arm this
+// fixture. The keys are the committed capture's; no field structure is invented.
 var parserIgnoredTypeFixtures = map[string][]string{
 	"system": {
 		`{"type":"system","subtype":"init","session_id":"abc","cwd":"/tmp","model":"claude-haiku-4-5","tools":[]}`,
-		`{"type":"system","subtype":"thinking_tokens"}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":1024,"estimated_tokens_delta":1024}`,
 		`{"type":"system","subtype":"status"}`,
 		`{"type":"system","subtype":"task_started"}`,
 		`{"type":"system","subtype":"task_updated"}`,
