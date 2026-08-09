@@ -223,7 +223,7 @@ const (
 //
 // #1373 carried the reading to the gate and left every arm as it was. #1420 is
 // where a decision consults it: the ABSENCE arm calls trailReasonAgainstPath
-// (trailer_terminal_reason_test.go:229) to say which of the three absence cases
+// (trailer_terminal_reason_test.go:222) to say which of the three absence cases
 // fired, which is where that function stopped having only its own tests for
 // callers. Every other arm ignores the field, and
 // TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm is what makes that
@@ -254,9 +254,10 @@ type trailGateInput struct {
 type trailGateResult struct {
 	Value string `json:"value"`
 	// Reason is the CERTIFIED terminal reason: a plain, non-empty string exactly
-	// on the two arms that certify (usable and budget-fired), empty on the other
-	// three. A certification that could certify "" would reintroduce, one layer
-	// up, the exact defect the nil Trailer pointer was chosen to prevent.
+	// on the two arms that certify (usable and budget-fired), empty on the four
+	// that do not — counted off the space above rather than adjusted by one, since
+	// #1417 grew it. A certification that could certify "" would reintroduce, one
+	// layer up, the exact defect the nil Trailer pointer was chosen to prevent.
 	Reason string `json:"terminal_reason,omitempty"`
 	Detail string `json:"detail"`
 	// RunnerPath is the reading the gate was HANDED, copied onto the result. The
@@ -350,7 +351,7 @@ func trailDetail(format string, args ...any) string {
 // site count itself is unchanged. Not one Detail interpolates the reading even
 // there: the absence sites embed trailReasonAgainstPath's answer, and every arm
 // of that function is fixed prose over its own file's constants and file cites
-// (trailer_terminal_reason_test.go:215-221). Every Detail here stays fixed prose
+// (trailer_terminal_reason_test.go:208-221). Every Detail here stays fixed prose
 // over this file's own constants, the scan's own state, and that function's
 // answer.
 //
@@ -420,7 +421,7 @@ func trailGate(in trailGateInput) trailGateResult {
 		// readings it is not are both live mistakes rather than invented ones:
 		//
 		//   - NEVER decodedReason != "". That is the collapse #1357's reading was
-		//     landed to prevent (trailer_terminal_reason_test.go:210-213), and
+		//     landed to prevent (trailer_terminal_reason_test.go:203-206), and
 		//     inside this block it is always false — so it would route every input
 		//     to the absence arm SILENTLY.
 		//   - NEVER len(KeyNames) > 0. A scan-produced absence carries the six
@@ -439,7 +440,7 @@ func trailGate(in trailGateInput) trailGateResult {
 		// that does.
 		if !slices.Contains(in.Scan.KeyNames, trailReasonKeyName) {
 			// WHICH absence comes from the shipped reduction, CALLED rather than
-			// re-switched: trailReasonAgainstPath (trailer_terminal_reason_test.go:229)
+			// re-switched: trailReasonAgainstPath (trailer_terminal_reason_test.go:222)
 			// already closes over the six meanings a terminal_reason has against a
 			// path, and its three ABSENCE answers are exactly the three cases here.
 			// Embedding its Detail is safe because every arm of it is fixed prose
@@ -973,7 +974,7 @@ func trailGateCases() []trailGateCase {
 //
 // EVERY VALUE IN THIS MAP HAS AN ARM IN ITS CONSUMER — trailGate and
 // trailAdmitAttribution for the first two spaces, trailClassifyRun for the
-// third, trailReasonAgainstPath (trailer_terminal_reason_test.go:229) for the
+// third, trailReasonAgainstPath (trailer_terminal_reason_test.go:222) for the
 // fourth. That is a comment and not a check: this test catches a COLLIDING
 // value, never an UNHANDLED one, so a NEW gate or admit value added here and to
 // its membership predicate would pass trailClassifyRun's contract block and then
@@ -1284,7 +1285,7 @@ func trailGateAbsenceCaseMarkers() []string {
 // VALUE each produces, which is why the failure message names got-vs-want and
 // never "is / is not the path-unnamed case" — a coarser assertion loses that
 // distinction in the output. That is TestTrailReasonAgainstPath's own rule
-// (trailer_terminal_reason_test.go:344-351), inherited here because these rows
+// (trailer_terminal_reason_test.go:337-344), inherited here because these rows
 // are the first decision-path consumer of that function. M5 shares R3 with them
 // and is told apart the same way, by the GATE value R3 reaches rather than the
 // case marker it names.

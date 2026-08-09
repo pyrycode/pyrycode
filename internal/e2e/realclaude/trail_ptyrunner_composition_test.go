@@ -53,7 +53,7 @@ import (
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
 // (trailer_admissibility_test.go:363), and clause B of
-// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm (:1468-1473) requires it
+// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm (:1584-1589) requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
 // CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420: the
 // absence arm embeds trailReasonAgainstPath's answer, whose prose interpolates no
@@ -110,7 +110,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	// Premise. The reading carries no VALUE from the argv it was driven over.
 	// This is the first test to drive a real runner argv into
 	// trailGateInput.RunnerPath, a field that IS marshalled into the published
-	// gate record (trailer_admissibility_test.go:1340-1255), and the boundary
+	// gate record (trailer_admissibility_test.go:262-287), and the boundary
 	// keeping a command string out of it is that tdnRunnerFromArgv returns
 	// constant literals and interpolates nothing from its argument. The reader
 	// may name the flag --session-id in its answer; it may never echo what
@@ -127,7 +127,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 
 	// Premise. The reap record is CLASSIFIED by the real producer rather than
 	// typed, which pins the proof arm to a record tdnClassifyReapLog actually
-	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:1039)
+	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:1714)
 	// and its reason.
 	classified := tdnClassifyReapLog([]byte(trailReapLine(1, "[7788]")+"\n"), heldPGID)
 	if classified.Verdict != tdnReapHeldPGIDKilled || classified.LineCount != 1 {
@@ -171,7 +171,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	//
 	// A gate-VALUE premise is deliberately not among the premises above. Any
 	// mutation to trailGate's usable arm's value cascades: a different in-space
-	// value trips C5 (trail_run_outcome_test.go:437-422), an out-of-space one
+	// value trips C5 (trail_run_outcome_test.go:437-443), an out-of-space one
 	// trips C1, and either way the run-level outcome moves too — so it could never
 	// be the sole red for anything, and it would be an assertion this test owes a
 	// mutation for and cannot have. "Reached through trailGateUsable and

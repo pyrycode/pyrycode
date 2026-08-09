@@ -32,7 +32,7 @@ package realclaude
 // MatchCount is at least 2 and the same composition lands on Step 7
 // (trailOutcomeMatchedUnattributed). That move is the increment, not an
 // inconsistency with the blocker. The FINDING arm is unchanged, because Step 2
-// (trail_run_outcome_test.go:565) outranks Step 7.
+// (trail_run_outcome_test.go:523) outranks Step 7.
 //
 // # The staged command must lead a process group of its own
 //
@@ -354,7 +354,7 @@ func finStageHeldGroup(t *testing.T, body func(finStageSubject)) {
 //
 // The count is 1 because trailAdmitAttribution answers a named group across more
 // than one anchored line with trailAdmitVoidNotOneReapLine
-// (trailer_admissibility_test.go:520-527) rather than with trailAdmitProof.
+// (trailer_admissibility_test.go:477-484) rather than with trailAdmitProof.
 func finStageReapLine(pgid int) []byte {
 	return []byte(trailReapLine(1, fmt.Sprintf("[%d]", pgid)) + "\n")
 }

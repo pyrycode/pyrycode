@@ -53,7 +53,7 @@ package realclaude
 //
 //   - the trailer's and the attribution's admissibility enter as #1270's two
 //     results WHOLE, because both are documented trap-free by construction
-//     (trailer_admissibility_test.go:191-206, :190-197);
+//     (trailer_admissibility_test.go:238-253, :290-293);
 //   - the trailer's lateness enters as the BoundFrom discriminator alone and
 //     never as a trailObservation, which EMBEDS trailScanResult
 //     (result_trailer_observation_test.go:141-142) and would therefore promote
@@ -536,13 +536,12 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// written and the record IS a reading, which is why this is neither
 		// trailOutcomeVoidNoTrailer nor trailOutcomeOutOfContract.
 		return decide(trailOutcomeVoidPathOwesNoReason, "the trailer carries no terminal_reason "+
-			"and the observed runner path owes none, so the gate read %s: a reading of the "+
-			"trailer rather than a defect in it. Nothing is certified, so there is no "+
-			"declared-finished instant for this run to be about. Kept apart from %s, which "+
-			"reports that no trailer line was written at all, and from %s, which would file a "+
-			"measurement as the caller's bug. The path named here is the one this run was "+
-			"OBSERVED to take", trailGateAbsentOwesNone, trailOutcomeVoidNoTrailer,
-			trailOutcomeOutOfContract)
+			"and the runner path this run was OBSERVED to take owes none, so the gate read %s: "+
+			"a reading of the trailer rather than a defect in it. Nothing is certified, so "+
+			"there is no declared-finished instant for this run to be about. Kept apart from "+
+			"%s, which reports that no trailer line was written at all, and from %s, which "+
+			"would file a measurement as the caller's bug", trailGateAbsentOwesNone,
+			trailOutcomeVoidNoTrailer, trailOutcomeOutOfContract)
 	case trailGateOutOfContract:
 		// Not a collapse: the gate already said "this record is not a reading",
 		// and the run-level answer is that same sentence. What may never share a
@@ -1326,7 +1325,7 @@ func TestTrailRunComposesUnderAnAbsentReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:1038) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:1948) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, and a pinStateOutcome's Detail and ToolStderr —
