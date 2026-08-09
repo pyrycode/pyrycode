@@ -621,17 +621,28 @@ func replyIntID(t *testing.T, id json.RawMessage) int {
 func TestACPConformance_DialectLock(t *testing.T) {
 	t.Parallel()
 
-	// session/update method + the four generic variant discriminants (ADR 027 §
-	// "ACP taxonomy reference"): agent_message_chunk / agent_thought_chunk /
-	// tool_call / tool_call_update — not opencode aliases.
+	// session/update method + all seven variant discriminants, which have two
+	// different homes in ADR 027. The four generic ones — agent_message_chunk /
+	// agent_thought_chunk / tool_call / tool_call_update — are ACP wire strings
+	// from § "ACP taxonomy reference", and are locked here against opencode
+	// aliases. The three pyry EXTENSIONS are deliberately NOT in that section
+	// (it is a port of the external spec, so a pyry-invented string listed there
+	// would read as spec truth); their home is divergence 7, and they are locked
+	// against its literal strings.
 	if acpbridge.MethodSessionUpdate != "session/update" {
 		t.Errorf("MethodSessionUpdate = %q, want session/update", acpbridge.MethodSessionUpdate)
 	}
 	for _, d := range []struct{ got, want string }{
+		// Generic ACP variants (§ "ACP taxonomy reference").
 		{acpbridge.SessionUpdateAgentMessageChunk, "agent_message_chunk"},
 		{acpbridge.SessionUpdateAgentThoughtChunk, "agent_thought_chunk"},
 		{acpbridge.SessionUpdateToolCall, "tool_call"},
 		{acpbridge.SessionUpdateToolCallUpdate, "tool_call_update"},
+
+		// pyry extensions (divergence 7, #1401) — namespaced on purpose.
+		{acpbridge.SessionUpdateBackgroundTaskStarted, "pyry/background_task_started"},
+		{acpbridge.SessionUpdateBackgroundTaskUpdated, "pyry/background_task_updated"},
+		{acpbridge.SessionUpdateBackgroundTaskRoster, "pyry/background_task_roster"},
 	} {
 		if d.got != d.want {
 			t.Errorf("session/update discriminant = %q, want %q", d.got, d.want)
