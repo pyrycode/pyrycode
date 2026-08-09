@@ -47,7 +47,7 @@ func TestRunStreamJSON_SingleTurn(t *testing.T) {
 
 	const prompt = "hello over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false, false)
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false, false, "")
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -85,7 +85,7 @@ func TestRunStreamJSON_MultipleTurns(t *testing.T) {
 		in.WriteString(userTurnLine(p) + "\n")
 	}
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, false, false)
+	runStreamJSON(strings.NewReader(in.String()), &buf, false, false, "")
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2*len(prompts) {
@@ -119,7 +119,7 @@ func TestRunStreamJSON_NonUserLinesIgnored(t *testing.T) {
 	const ctrl = `{"type":"control_request","request_id":"r1","request":{"subtype":"interrupt"}}`
 	input := ctrl + "\n" + "\n" + "not json at all\n"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(input), &buf, false, false)
+	runStreamJSON(strings.NewReader(input), &buf, false, false, "")
 
 	if buf.Len() != 0 {
 		t.Fatalf("non-user lines produced %d bytes of output, want 0: %q", buf.Len(), buf.String())
@@ -144,7 +144,7 @@ func TestRunStreamJSON_InterruptMode_UserTurnStaysInFlight(t *testing.T) {
 
 	const prompt = "in-flight over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true, false)
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true, false, "")
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -167,7 +167,7 @@ func TestRunStreamJSON_InterruptMode_InterruptEndsTurnCancelled(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true, false)
+	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true, false, "")
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -193,7 +193,7 @@ func TestRunStreamJSON_InterruptMode_InFlightThenInterrupt(t *testing.T) {
 	in.WriteString(userTurnLine(prompt) + "\n")
 	in.WriteString(interruptControlRequestLine("r1") + "\n")
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, true, false)
+	runStreamJSON(strings.NewReader(in.String()), &buf, true, false, "")
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -272,7 +272,7 @@ func TestWriteStreamResponse_Shape(t *testing.T) {
 // normal reply still arrives intact.
 func TestRunStreamJSON_BogusRider(t *testing.T) {
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, true)
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, true, "")
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 4 {
@@ -309,8 +309,8 @@ func TestRunStreamJSON_BogusRider(t *testing.T) {
 // untouched path always wrote.
 func TestRunStreamJSON_BogusRiderOffIsByteIdentical(t *testing.T) {
 	var on, off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false)
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, true)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, true, "")
 
 	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
 	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
@@ -319,6 +319,130 @@ func TestRunStreamJSON_BogusRiderOffIsByteIdentical(t *testing.T) {
 	}
 	// The rider only PREPENDS; the tail must match the untouched output.
 	if got, want := strings.Join(onLines[2:], "\n"), strings.Join(offLines, "\n"); got != want {
+		t.Errorf("rider changed the normal reply:\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestRunStreamJSON_RateLimitRider pins the rate-limit rider at the cheapest tier:
+// with a status set, one turn prepends exactly one rate_limit_event line carrying
+// the captured rate_limit_info object with that status substituted, and the normal
+// reply still arrives intact.
+//
+// Table-driven over the two statuses the hermetic e2e drives IS the point. The whole
+// design of the knob rests on "the benign case and its arrival control differ in
+// exactly one string"; this is where that claim is cheapest to check, and a row that
+// produced a different shape for one of the two statuses would break the e2e pair's
+// only argument for being a controlled comparison.
+func TestRunStreamJSON_RateLimitRider(t *testing.T) {
+	t.Parallel()
+
+	// The e2e's two statuses: the captured measured-benign value the daemon's gate
+	// answers with silence, and the synthetic non-benign control it answers with one
+	// frame. Written as literals here for the same reason the e2e writes them as
+	// literals — the fake must not import the daemon's unexported constant, so a
+	// rename of streamsup.benignRateLimitStatus SHOULD show up as a red test.
+	for _, tc := range []struct {
+		name   string
+		status string
+	}{
+		{name: "measured-benign status", status: "allowed"},
+		{name: "non-benign control status", status: "e2e-not-allowed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, tc.status)
+
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if len(lines) != 3 {
+				t.Fatalf("line count: got %d, want 3 (rate_limit_event, echo, result)\n%s",
+					len(lines), buf.String())
+			}
+
+			var got struct {
+				Type string `json:"type"`
+				Info struct {
+					Status                string `json:"status"`
+					ResetsAt              int64  `json:"resetsAt"`
+					LimitType             string `json:"rateLimitType"`
+					OverageStatus         string `json:"overageStatus"`
+					OverageDisabledReason string `json:"overageDisabledReason"`
+					IsUsingOverage        bool   `json:"isUsingOverage"`
+				} `json:"rate_limit_info"`
+				UUID      string `json:"uuid"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+				t.Fatalf("unmarshal rate_limit_event line: %v\n%s", err, lines[0])
+			}
+			if got.Type != "rate_limit_event" {
+				t.Errorf("line type: got %q, want %q", got.Type, "rate_limit_event")
+			}
+			// Verbatim: the knob's value is the gate's sole discriminator, so the fake
+			// must not normalise, trim, or fold it on the way through.
+			if got.Info.Status != tc.status {
+				t.Errorf("rate_limit_info.status: got %q, want %q (verbatim)", got.Info.Status, tc.status)
+			}
+			// The rest of the object is the capture's, identical across both rows.
+			if got.Info.LimitType != rateLimitLimitType {
+				t.Errorf("rateLimitType: got %q, want %q", got.Info.LimitType, rateLimitLimitType)
+			}
+			if got.Info.ResetsAt != rateLimitResetsAt {
+				t.Errorf("resetsAt: got %d, want %d", got.Info.ResetsAt, rateLimitResetsAt)
+			}
+			// The three overage keys the daemon's decode target deliberately omits.
+			// Carried so "match the capture" is literally true, and so the line feeds
+			// the parser keys it must ignore.
+			if got.Info.OverageStatus != "rejected" {
+				t.Errorf("overageStatus: got %q, want %q", got.Info.OverageStatus, "rejected")
+			}
+			if got.Info.OverageDisabledReason != "org_level_disabled" {
+				t.Errorf("overageDisabledReason: got %q, want %q",
+					got.Info.OverageDisabledReason, "org_level_disabled")
+			}
+			if got.Info.IsUsingOverage {
+				t.Error("isUsingOverage: got true, want false (the capture's value)")
+			}
+			// The envelope identifiers are the fake's own, not the capture's templated
+			// placeholders. Neither reaches the gate.
+			if got.UUID != rateLimitUUID {
+				t.Errorf("uuid: got %q, want %q", got.UUID, rateLimitUUID)
+			}
+			if got.SessionID != streamSessionID {
+				t.Errorf("session_id: got %q, want %q", got.SessionID, streamSessionID)
+			}
+
+			// The real reply must survive the rider untouched.
+			if !strings.Contains(lines[1], `"text":"hello"`) {
+				t.Errorf("assistant echo: got %s, want the prompt echoed", lines[1])
+			}
+			if !strings.Contains(lines[2], `"subtype":"success"`) {
+				t.Errorf("result line: got %s, want subtype success", lines[2])
+			}
+		})
+	}
+}
+
+// TestRunStreamJSON_RateLimitRiderOffIsByteIdentical pins that the rate-limit rider
+// is default-off and additive: with an empty status, output is exactly the two lines
+// the untouched path always wrote. Empty is the OFF value rather than a status the
+// rider forwards, which is why the parser's "absent or empty rate_limit_info" rung is
+// unreachable through this seam by construction.
+func TestRunStreamJSON_RateLimitRiderOffIsByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	var on, off bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "")
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "allowed")
+
+	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
+	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
+	if len(offLines) != 2 {
+		t.Fatalf("rider-off line count: got %d, want 2", len(offLines))
+	}
+	// The rider only PREPENDS one line; the tail must match the untouched output.
+	if got, want := strings.Join(onLines[1:], "\n"), strings.Join(offLines, "\n"); got != want {
 		t.Errorf("rider changed the normal reply:\n got %s\nwant %s", got, want)
 	}
 }
