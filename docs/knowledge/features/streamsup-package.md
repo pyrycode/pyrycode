@@ -285,9 +285,12 @@ version-variable across claude 2.1.158/2.1.199/2.1.220. The drop site logs one m
 (`rateLimitDropMsg`) with a `reason` drawn from a closed keyword set — `Status` never reaches a log, since
 it is the one claude-authored value on this line and the field a drop site is most tempted to explain
 itself with. `cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a fifth mapped arm
-(`turnevent.RateLimited → "rate_limited"`, name only); `turnbridge.MapEvent`, `acpbridge.MapUpdate`, and
-`stream_turn_busy.go`'s opener whitelist all correctly drop it through their existing `default:` arms — no
-protocol type and no bridge route exist yet, that is #1405. See [codebase/1404.md](../codebase/1404.md).
+(`turnevent.RateLimited → "rate_limited"`, name only); `acpbridge.MapUpdate` and `stream_turn_busy.go`'s
+opener whitelist correctly drop it through their existing `default:` arms — the ACP/desktop lane is
+deliberately untouched (#1262) and a usage-limit report opens no turn. `turnbridge.MapEvent` no longer
+drops it: the wire type landed in #1405 and the mapping arm in #1410, so the variant now reaches an
+interactive v2 mobile client instead of falling to `default:`. See [codebase/1404.md](../codebase/1404.md),
+[codebase/1405.md](../codebase/1405.md), [codebase/1410.md](../codebase/1410.md).
 
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
