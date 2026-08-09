@@ -39,7 +39,7 @@ import (
 // The two shipped tests that come closest state neither claim.
 // TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1148) drives the
 // whole chain, but every trailGateCases() row carries trailRunnerUnread(), the
-// indeterminate answer. TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm
+// indeterminate answer. TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt
 // (trailer_admissibility_test.go:1552) does drive all five readings, but only over
 // trailGate, and it compares each row AGAINST ITSELF: an edit that moved a Detail
 // under all five readings alike passes it untouched.
@@ -53,7 +53,7 @@ import (
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
 // (trailer_admissibility_test.go:364), and clause B of
-// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm (:1585-1590) requires it
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:1585-1590) requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
 // CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420: the
 // absence arm embeds trailReasonAgainstPath's answer, whose prose interpolates no
@@ -196,9 +196,9 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 
 	// The no-echo pair. The gate is handed the reading directly.
 	if strings.Contains(gate.Detail, reading) {
-		t.Errorf("the gate's Detail carries the runner reading %q verbatim: %s\nno arm reads the "+
-			"path today, so a Detail that interpolated it would publish a decision reading as "+
-			"path-dependent while the value beside it is not", reading, gate.Detail)
+		t.Errorf("the gate's Detail carries the runner reading %q verbatim: %s\nthe reading is "+
+			"carried in trailGateResult's own RunnerPath field, which clause B requires to "+
+			"arrive intact; a Detail that also interpolates it republishes it", reading, gate.Detail)
 	}
 
 	// The classifier is handed the same reading inside readings.Gate.RunnerPath.

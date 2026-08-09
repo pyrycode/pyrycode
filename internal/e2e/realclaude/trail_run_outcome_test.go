@@ -1213,7 +1213,7 @@ func TestTrailRunComposesWithGateCases(t *testing.T) {
 // # Why it is not a row of trailGateCases()
 //
 // Every row of that slice carries one runner path and is swept under all five
-// readings by TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm, which
+// readings by TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, which
 // checks each row's declared want at reading 0 — ptyrunner. An absence-shaped row
 // wanting the new value would fail that premise there, where it correctly reaches
 // trailGateOutOfContract. trailGateCase.want is ONE value and the new value is
