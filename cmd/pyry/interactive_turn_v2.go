@@ -293,6 +293,25 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// second cap is imposed here.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.RateLimited:
+		// claude's usage-limit report (#1410), taking the same shape as the status
+		// peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
+		// transitionTo / endTurn; inTurn, turnID, currentState untouched).
+		//
+		// The reason is specific to this variant. A usage limit is a condition of
+		// the ACCOUNT, not of the turn: claude emits its rate_limit_event line once
+		// per run whatever the turn state, so the frame may legitimately arrive with
+		// no turn open at all. Opening one here would wedge the conversation exactly
+		// as opening one on an unrecognized message would — no turn end follows a
+		// fact orthogonal to the turn.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position
+		// ahead of the report. Like turn_state this flows through emit() and is NOT
+		// a droppable delta (the droppable set is assistant_delta only, #610), so it
+		// holds a queue slot; that is bounded by the producer rather than here —
+		// emitRateLimit's gate fires at most once per run.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -372,9 +391,9 @@ func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
 }
 
 // emitMapped maps a content event to its wire envelope via the pure #627
-// adapter and emits it. ok==false is defensive — unreachable for
-// TextChunk/ToolStart/ToolUpdate/TurnEnd/Stall/ApiRetry/Compacting (only
-// ThoughtChunk and nil drop, and neither reaches here).
+// adapter and emits it. ok==false is defensive — unreachable for every variant
+// Handle routes here, since only ThoughtChunk and a nil event drop in MapEvent
+// and neither reaches this function.
 func (e *interactiveTurnEmitterV2) emitMapped(ctx context.Context, convID string, ev turnevent.Event) {
 	typ, payload, ok := turnbridge.MapEvent(ev, turnbridge.TurnContext{
 		ConversationID: convID,

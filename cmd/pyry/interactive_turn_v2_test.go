@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1996,6 +1997,203 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *te
 	for _, reading := range []string{"184", "37"} {
 		if strings.Contains(logs, reading) {
 			t.Fatalf("claude-authored reading %q leaked into the kind log:\n%s", reading, logs)
+		}
+	}
+}
+
+// The claude-authored fixture values the three rate-limited tests below share.
+// They are conspicuous sentinels rather than natural-looking values on purpose:
+// the AC#3 test asserts its negative with a strings.Contains over the whole
+// captured log, and that log carries the literal kind=rate_limited. A natural
+// Status of "limited", "limit", "rate" or "rate_limited" is a substring of it, so
+// the negative would be RED against a correct implementation. Every value here is
+// therefore a substring of neither the frame name, nor the log's own event name
+// and message, nor any other value — and none contains a character encoding/json
+// escapes, so the byte assertions in internal/turnbridge can be written literally.
+const (
+	rateLimitedStatusFixture    = "qq-status-sentinel"
+	rateLimitedLimitTypeFixture = "zz-limittype-sentinel"
+	rateLimitedResetsAtFixture  = 4102444800 // 2100-01-01Z: not a plausible instant
+)
+
+var rateLimitedTruncatedFixture = []string{"tf-alpha-sentinel", "tf-beta-sentinel"}
+
+// AC#2: a rate-limited frame opens and closes no turn. It is handled bare before
+// any turn and emits only its own frame — no turn_state, no turn_end — and the
+// tracker's inTurn/turnID/currentState are asserted directly, then a following
+// content event is driven through to prove a fresh turn still opens.
+func TestInteractiveTurnEmitterV2_RateLimitedNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.RateLimited{
+		Status:          rateLimitedStatusFixture,
+		LimitType:       rateLimitedLimitTypeFixture,
+		ResetsAt:        rateLimitedResetsAtFixture,
+		TruncatedFields: rateLimitedTruncatedFixture,
+	})
+
+	// A turn_state anywhere in the sequence is the observable signature of a
+	// transitionTo call, so the exact single-frame sequence is the assertion.
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeRateLimited}) {
+		t.Fatalf("bare rate_limited envelopes: got %v, want [%s]", got, protocol.TypeRateLimited)
+	}
+	if e.inTurn {
+		t.Error("rate_limited opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("rate_limited minted a turn id: got %q, want empty", e.turnID)
+	}
+	if e.currentState != "" {
+		t.Errorf("rate_limited set currentState: got %q, want empty", e.currentState)
+	}
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeRateLimited,
+		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-rate_limited envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after rate_limited: got %v, want [responding]", got)
+	}
+}
+
+// AC#2: mid-turn, buffered assistant text keeps its wire position AHEAD of the
+// frame, and the open turn survives the interleave untouched.
+//
+// The load-bearing part is the event driven PAST the frame. A frame-local check
+// passes even if the handler called endTurn, because an endTurn on an already-open
+// turn only shows its damage on the NEXT event, when a fresh turn gets minted. So
+// the second delta's turn_id and seq are what actually bite here.
+func TestInteractiveTurnEmitterV2_RateLimitedMidTurnDoesNotDisturbOpenTurn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
+	beforeTurnID, beforeState := e.turnID, e.currentState
+	if !e.inTurn {
+		t.Fatal("precondition: a turn must be open before the interleave")
+	}
+
+	e.Handle(context.Background(), turnevent.RateLimited{
+		Status:          rateLimitedStatusFixture,
+		LimitType:       rateLimitedLimitTypeFixture,
+		ResetsAt:        rateLimitedResetsAtFixture,
+		TruncatedFields: rateLimitedTruncatedFixture,
+	})
+
+	if !e.inTurn {
+		t.Error("rate_limited closed the open turn; inTurn must stay true")
+	}
+	if e.turnID != beforeTurnID {
+		t.Errorf("rate_limited changed turnID: got %q, want %q", e.turnID, beforeTurnID)
+	}
+	if e.currentState != beforeState {
+		t.Errorf("rate_limited changed currentState: got %q, want %q", e.currentState, beforeState)
+	}
+
+	// Drive one event past the frame: this is what catches an endTurn.
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m2", Text: "a2"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // a1, flushed AHEAD of the frame
+		protocol.TypeRateLimited,    // no surrounding turn_state
+		protocol.TypeAssistantDelta, // a2, flushed by turn_end
+		protocol.TypeTurnEnd,        //
+		protocol.TypeTurnState,      // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn rate_limited envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
+	}
+	if deltas[0].TurnID != beforeTurnID || deltas[1].TurnID != beforeTurnID {
+		t.Fatalf("rate_limited split the turn: %q, %q want both %q", deltas[0].TurnID, deltas[1].TurnID, beforeTurnID)
+	}
+	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("rate_limited disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
+	}
+}
+
+// AC#3: eventKind's rate-limited arm is live code and content-free. The arm
+// (#1404) shipped untested; this is the test. It exists for eventKind's OTHER
+// call sites — acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go —
+// where the variant is dropped and the kind logged; without the arm those logs
+// read kind=unknown for a variant the daemon does recognize. The empty-cursor
+// drop is the reachable eventKind call site on this lane.
+//
+// The negative is the half that discriminates. Status is precisely the field a
+// log line wants to explain itself with, and an arm returning "rate_limited:" +
+// Status leaves strings.Contains(logs, "kind=rate_limited") TRUE — so the
+// positive assertion alone does not catch it and the per-value negative does.
+func TestInteractiveTurnEmitterV2_RateLimitedEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Drop slog's own time= attr. The negative below is a strings.Contains
+		// over the WHOLE captured log, and the timestamp is a host-dependent
+		// source of digits a numeric needle can collide with — measured on the
+		// ThinkingProgress test above, whose "37" needle hits the timestamp in
+		// ~2% of runs on this host, and whose safety for a "-1"-shaped needle
+		// depends on the host's UTC offset. Removing the attr deletes the
+		// false-positive source outright rather than choosing needles around it.
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+
+	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), turnevent.RateLimited{
+		Status:          rateLimitedStatusFixture,
+		LimitType:       rateLimitedLimitTypeFixture,
+		ResetsAt:        rateLimitedResetsAtFixture,
+		TruncatedFields: rateLimitedTruncatedFixture,
+	})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=rate_limited") {
+		t.Fatalf("log does not name the variant (want kind=rate_limited):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for rate_limited:\n%s", logs)
+	}
+	// Every claude-authored value on the event, including the instant: none may
+	// reach a log, whether as a kind suffix or as a stray field.
+	leakable := append([]string{
+		rateLimitedStatusFixture,
+		rateLimitedLimitTypeFixture,
+		strconv.FormatInt(rateLimitedResetsAtFixture, 10),
+	}, rateLimitedTruncatedFixture...)
+	for _, value := range leakable {
+		if strings.Contains(logs, value) {
+			t.Fatalf("claude-authored value %q leaked into the kind log:\n%s", value, logs)
 		}
 	}
 }
