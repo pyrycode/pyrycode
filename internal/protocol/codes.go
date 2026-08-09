@@ -286,6 +286,43 @@ const (
 	TypeThinkingProgress = "thinking_progress" // binary → phone, outbound v2 thinking-progress reading
 )
 
+// Mobile Protocol v2 usage-limit report. claude's usage-limit window is in a
+// state other than the one measured-benign one, so a turn that stops making
+// progress because of a limit has something on the wire that says why. Before
+// #1404 the daemon dropped claude's rate_limit_event line whole and the
+// information existed nowhere in pyrycode, let alone on a phone
+// (docs/protocol-mobile.md § rate_limited).
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state
+// with two edges, not turn-independent work, and not a periodic reading. It is a
+// CONDITION report about a usage-limit window that is orthogonal to any turn —
+// whichever turn happened to observe it neither owns it nor bounds it.
+//
+// The NAME is the daemon's, not claude's, for the reason the two blocks above
+// give: the wire follows internal/turnevent's VARIANT (turnevent.RateLimited),
+// so a claude rename lands in one place instead of breaking every client at
+// once. claude's line type is rate_limit_event; the discriminating word is
+// "event" — claude's, describing its line — where ours names the condition. It
+// is also not a third vocabulary word: rate_limited is already the daemon's own
+// name for this variant on its logging surface (cmd/pyry/interactive_turn_v2.go's
+// eventKind returns exactly this string), so the wire agrees with the daemon.
+// That agreement is prose here rather than a test because internal/protocol
+// cannot import cmd/pyry.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone event an old phone never receives, and a leak
+// into that set would let a phone send one into dispatch.Route. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this lives in the latter.
+//
+// This ticket (#1405) is wire vocabulary only. internal/turnbridge's MapEvent has
+// no case for turnevent.RateLimited, so nothing emits this frame yet; the mapping
+// is #1406. Unlike #1393 the docs/protocol-mobile.md section lands with the shape
+// rather than with the producer, because #1406 disclaims the file.
+const (
+	TypeRateLimited = "rate_limited" // binary → phone, outbound v2 usage-limit report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the

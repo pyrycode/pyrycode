@@ -1,0 +1,1 @@
+{"id":710,"type":"rate_limited","ts":"2026-08-09T10:33:25Z","payload":{"conversation_id":"c1","status":"\u003cunmeasured\u003e","limit_type":"five_hour","resets_at":1786012405,"truncated_fields":["status","limit_type"]}}

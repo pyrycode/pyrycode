@@ -144,6 +144,12 @@ var excludedTypes = map[string]string{
 	// like the three above, so it must be excluded here from the moment the
 	// constant exists or Assertion #3 reports it unclassified.
 	"TypeThinkingProgress": "push",
+
+	// outbound push — the v2 usage-limit report (#1405). Outbound-only like the
+	// four above, and mandatory here from the moment the constant exists rather
+	// than from the moment something emits it (the turnbridge mapping is #1406) —
+	// Assertion #3 reports an unclassified constant, not an unemitted one.
+	"TypeRateLimited": "push",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

@@ -334,3 +334,64 @@ type BackgroundTask struct {
 	Description     string   `json:"description"`
 	TruncatedFields []string `json:"truncated_fields"`
 }
+
+// RateLimitedPayload is the body of an Envelope whose Type == TypeRateLimited
+// (docs/protocol-mobile.md § rate_limited, #1405). Binary → phone direction; the
+// wire form of turnevent.RateLimited, which reports that claude's usage-limit
+// window is in a state other than the one measured-benign one.
+//
+// Like ThinkingProgressPayload it is conversation-scoped rather than turn-scoped,
+// so there is no turn_id, and receiving one neither opens nor closes a turn: a
+// usage-limit window is orthogonal to whichever turn happened to observe it
+// (turnevent.RateLimited's own doc). The bridge (#1406) supplies ConversationID
+// because the internal event carries none. claude's session_id and uuid are
+// deliberately absent for BackgroundTaskStartedPayload's reason plus #1380's —
+// they are claude's session identity and claude's per-line message id, neither of
+// which is the daemon's conversation identity, and the parser never decodes them
+// so this payload cannot carry them even by accident.
+//
+// Status is the field that says WHY the frame fired, and its value set beyond the
+// benign one is UNMEASURED — no capture of a limit actually in force exists. A
+// plain string, not a closed enum, so the set gets measured the first time a real
+// limit fires rather than the daemon inventing one it has no evidence for. The
+// producer's gate is deliberately loud in the same direction: the one
+// measured-benign status is silent and any other non-empty status emits, so an
+// unrecognised status surfaces and a human looks rather than a real limit
+// vanishing. Dropping Status from this payload would silence that one layer later.
+//
+// LimitType is WHICH limit is in force ("five_hour" in all three captures), a
+// plain string for Status's reason. ResetsAt is when claude says it lifts, as
+// unix seconds, 0 when claude did not report it. Neither wire name tracks
+// claude's key: claude's are rateLimitType and resetsAt under rate_limit_info,
+// while these are turnevent.RateLimited's own field names in snake_case, so a
+// claude rename does not move them. status coincides with claude's spelling but
+// is the daemon's chosen name for the field — it is what the producer's bound()
+// reports it as — and a generic English word rather than a vocabulary import.
+//
+// TruncatedFields names the fields the producer cut to fit its cap, using these
+// wire names ("status", "limit_type", in that order); it is null when nothing was
+// cut, never an empty array, which is why this type has no MarshalJSON. The
+// nil-normalising guard above is BackgroundTaskRosterPayload.Tasks's and does not
+// generalise: an empty roster is a positive statement, whereas nothing-was-cut is
+// an absence. It is load-bearing, not decoration — a payload that dropped it
+// would present claude's truncated text to a phone as complete.
+//
+// SECURITY: Status and LimitType are claude-authored strings that crossed the
+// subprocess trust boundary. They are safe to RENDER as inert text and must never
+// be fed to an HTML sink, an attribute, or a URL; the daemon bounds them but does
+// not sanitize them, so they stay untrusted, model-influenced text all the way to
+// the client. Their bound is the producer's, decided at construction
+// (internal/streamsup/parser.go's maxRateLimitField), so this struct re-decides no
+// maximum: a second cap here would be a second place the limit is decided, and the
+// two could disagree silently. The constraint on turnevent.RateLimited follows the
+// data onto the wire — it is a REPORT, never a control input, so a client MUST NOT
+// branch security-relevant behaviour on Status, and ResetsAt is CLAUDE's number,
+// unvalidated in both directions: a consumer must not assume it lies in the
+// future, or in a sane range at all.
+type RateLimitedPayload struct {
+	ConversationID  string   `json:"conversation_id"`
+	Status          string   `json:"status"`
+	LimitType       string   `json:"limit_type"`
+	ResetsAt        int64    `json:"resets_at"`
+	TruncatedFields []string `json:"truncated_fields"`
+}

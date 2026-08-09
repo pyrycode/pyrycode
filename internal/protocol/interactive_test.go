@@ -569,6 +569,162 @@ func TestThinkingProgressType_IsNotClaudesSubtype(t *testing.T) {
 	}
 }
 
+func TestRateLimitedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "rate_limited.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeRateLimited {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeRateLimited)
+	}
+
+	var payload RateLimitedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	// The fixture's status is deliberately NOT a value any capture carries.
+	// Every capture on record reads "allowed", which is the one value the
+	// producer's gate silences, so a realistic-looking alternative here would be
+	// an invention a client author could copy as if it were measured. The angle
+	// brackets double as the escaping pin: encoding/json emits '<' and '>' in
+	// their six-byte \uXXXX form, so a claude-authored string survives the trip
+	// byte-exactly.
+	if payload.Status != "<unmeasured>" {
+		t.Errorf("Status: got %q, want %q", payload.Status, "<unmeasured>")
+	}
+	// status and limit_type carry DIFFERENT fixture values on purpose: equal ones
+	// would let a struct that wired both wire keys to the same field pass.
+	if payload.LimitType != "five_hour" {
+		t.Errorf("LimitType: got %q, want %q", payload.LimitType, "five_hour")
+	}
+	if payload.ResetsAt != 1786012405 {
+		t.Errorf("ResetsAt: got %d, want %d", payload.ResetsAt, 1786012405)
+	}
+	// Joined rather than compared as a set: the producer appends these names in
+	// declaration order (internal/streamsup/parser.go's two bound() calls), and a
+	// swapped order must go red.
+	if got, want := strings.Join(payload.TruncatedFields, ","), "status,limit_type"; got != want {
+		t.Errorf("TruncatedFields: got %q, want %q", got, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestRateLimitedPayload_ZeroValue_RoundTrip pins the encoding of every field's
+// zero value, which is what this stream's no-omitempty rule
+// (docs/protocol-mobile.md § Interactive events) actually asserts: adding
+// omitempty to any one of the five fields turns this round trip red, and no
+// realistic fixture can make that claim for all five.
+//
+// The frame itself is one the bridge will never emit — Status is never empty
+// (the producer's gate does not emit on an empty status) and the bridge always
+// supplies a conversation id. It exists for the encoding, not for the scenario.
+//
+// Unlike the empty roster's fixture, this one DOES reach the path that matters:
+// unmarshalling "truncated_fields":null yields nil, marshalling nil yields null,
+// so a MarshalJSON normalising nil→[] here — the guard BackgroundTaskRosterPayload
+// needs and this payload must not have — would diverge the round-trip bytes.
+// That makes this test the enforcement mechanism for the no-guard decision,
+// which is why no separate construct-and-marshal test is owed.
+func TestRateLimitedPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "rate_limited_zero.json")
+
+	// Both guards are load-bearing rather than decoration. Edited to
+	// "truncated_fields":[] the round trip alone would still pass — unmarshalling
+	// [] yields a non-nil empty slice that marshals back to [] — so the round trip
+	// pins the TYPE's behaviour only once the fixture is pinned to null. The
+	// resets_at guard is what makes "explicit 0, not elided" checkable at all.
+	if !bytes.Contains(canonical(t, raw), []byte(`"truncated_fields":null`)) {
+		t.Errorf("fixture must carry the truncation report as null, got: %s", raw)
+	}
+	if !bytes.Contains(canonical(t, raw), []byte(`"resets_at":0`)) {
+		t.Errorf("fixture must carry the reset timestamp explicitly as 0, got: %s", raw)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeRateLimited {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeRateLimited)
+	}
+
+	var payload RateLimitedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "")
+	}
+	if payload.Status != "" {
+		t.Errorf("Status: got %q, want %q", payload.Status, "")
+	}
+	if payload.LimitType != "" {
+		t.Errorf("LimitType: got %q, want %q", payload.LimitType, "")
+	}
+	if payload.ResetsAt != 0 {
+		t.Errorf("ResetsAt: got %d, want 0", payload.ResetsAt)
+	}
+	// Explicitly nil, not len() == 0: len is 0 for both nil and [], and [] is the
+	// value this payload must never produce.
+	if payload.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil", payload.TruncatedFields)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestRateLimitedType_IsNotClaudesVocabulary pins the translation layer this
+// frame exists to preserve, as its thinking_progress sibling above does. The
+// daemon is the ONE place a claude rename lands; naming the wire type after
+// claude's own `rate_limit_event` line type would undo that.
+//
+// The sibling's exact form does not transfer: strings.Contains("rate_limited",
+// "rate_limit") is TRUE, so a check on "rate_limit" would be red against the
+// correct name. The discriminating word here is "event" — claude's, describing
+// its line — where ours names the CONDITION the daemon reports.
+func TestRateLimitedType_IsNotClaudesVocabulary(t *testing.T) {
+	if TypeRateLimited == "rate_limit_event" {
+		t.Errorf("wire type is claude's line type %q; it must be the daemon's own name", TypeRateLimited)
+	}
+	if strings.Contains(TypeRateLimited, "event") {
+		t.Errorf("wire type %q is derived from claude's line type (contains %q)", TypeRateLimited, "event")
+	}
+	// The exact pin, and the string cmd/pyry/interactive_turn_v2.go's eventKind
+	// already returns for this variant — internal/protocol cannot import cmd/pyry,
+	// so the agreement between the two is pinned here rather than by a test that
+	// reads both.
+	if TypeRateLimited != "rate_limited" {
+		t.Errorf("wire type: got %q, want %q", TypeRateLimited, "rate_limited")
+	}
+
+	// The payload's own bytes, not the envelope's — the envelope carries its own
+	// id/ts and would dilute the check. These are regression pins: non-discriminating
+	// today by construction, their job is to go red the day someone "helpfully"
+	// adds claude's keys back. conversation_id is "c1" rather than a uuid-shaped
+	// value so the uuid pin cannot pass by accident on the field's content.
+	body, err := json.Marshal(RateLimitedPayload{
+		ConversationID:  "c1",
+		Status:          "<unmeasured>",
+		LimitType:       "five_hour",
+		ResetsAt:        1786012405,
+		TruncatedFields: []string{"status", "limit_type"},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	for _, key := range []string{"rateLimitType", "resetsAt", "rate_limit_info", "session_id", "uuid"} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("payload carries claude's key or an excluded identity field %q: %s", key, body)
+		}
+	}
+}
+
 // maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
 // (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
 // purpose: nothing in internal/protocol enforces the cap — the transport does —
