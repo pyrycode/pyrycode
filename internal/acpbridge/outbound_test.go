@@ -256,3 +256,101 @@ func TestMapUpdate_WireShape(t *testing.T) {
 		})
 	}
 }
+
+// TestBackgroundTaskPayloadWireShape locks the wire shape of the three
+// background-task payloads and the roster's entry type (#1401). It marshals each
+// payload VALUE directly rather than driving MapUpdate: the three neutral
+// variants have no MapUpdate arm until #1402, so there is no mapper to reach
+// them through, which is also why they are absent from TestMapUpdate_WireShape.
+//
+// Every field in every row is distinct and non-zero (except row 4, whose point IS
+// the zero values) and no value repeats across rows, so a renamed JSON tag, a
+// dropped field, a field swap, a cross-row copy or a wrong discriminant fails a
+// row. Inputs contain no <>&, so default json.Marshal HTML-escaping is a no-op.
+func TestBackgroundTaskPayloadWireShape(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		payload any
+		want    string
+	}{
+		{
+			name: "background_task_started carries the spawning toolCallId",
+			payload: BackgroundTaskStarted{
+				SessionUpdate:   SessionUpdateBackgroundTaskStarted,
+				TaskID:          "task_01ABC",
+				ToolCallID:      "toolu_01XYZ",
+				Description:     "npm run build -- --watch",
+				TaskType:        "local_bash",
+				TruncatedFields: []string{"description"},
+			},
+			want: `{"sessionUpdate":"pyry/background_task_started","taskId":"task_01ABC","toolCallId":"toolu_01XYZ","description":"npm run build -- --watch","taskType":"local_bash","truncatedFields":["description"]}`,
+		},
+		{
+			// Patch is deliberately a truncated, INVALID-JSON blob (the producer
+			// cuts it at maxTaskPatch, and a cut object no longer parses). This
+			// row is the guard on Patch being a plain string: retyped as
+			// json.RawMessage, encoding/json rejects it and the whole payload
+			// fails to marshal.
+			name: "background_task_updated carries a truncated, unparseable patch",
+			payload: BackgroundTaskUpdated{
+				SessionUpdate:   SessionUpdateBackgroundTaskUpdated,
+				TaskID:          "task_02DEF",
+				Patch:           `{"is_backgrounded":tr`,
+				TruncatedFields: []string{"patch"},
+			},
+			want: `{"sessionUpdate":"pyry/background_task_updated","taskId":"task_02DEF","patch":"{\"is_backgrounded\":tr","truncatedFields":["patch"]}`,
+		},
+		{
+			// The second entry's taskType is a fixture value, not an observed
+			// one — only local_bash has ever been captured. The field is a plain
+			// string precisely so an unobserved kind rides through unchanged.
+			name: "background_task_roster with entries reports droppedTasks",
+			payload: BackgroundTaskRoster{
+				SessionUpdate: SessionUpdateBackgroundTaskRoster,
+				Tasks: []BackgroundTask{
+					{
+						TaskID:          "task_03GHI",
+						TaskType:        "local_bash",
+						Description:     "sleep 300",
+						TruncatedFields: []string{"description"},
+					},
+					{
+						TaskID:      "task_04JKL",
+						TaskType:    "unobserved_kind",
+						Description: "tail -f /var/log/app.log",
+					},
+				},
+				DroppedTasks: 3,
+			},
+			want: `{"sessionUpdate":"pyry/background_task_roster","tasks":[{"taskId":"task_03GHI","taskType":"local_bash","description":"sleep 300","truncatedFields":["description"]},{"taskId":"task_04JKL","taskType":"unobserved_kind","description":"tail -f /var/log/app.log"}],"droppedTasks":3}`,
+		},
+		{
+			// Tasks is left NIL on purpose: nil is the only thing the mapper will
+			// ever hand this type for an empty roster (turnevent's Tasks is nil
+			// both for an empty roster and when claude omits the key, never an
+			// empty non-nil slice). A hand-built []BackgroundTask{} marshals to
+			// [] with no device involved and would pin nothing. droppedTasks is
+			// likewise left at 0, the positive "nothing was dropped".
+			name: "empty background_task_roster marshals tasks as [] and keeps droppedTasks",
+			payload: BackgroundTaskRoster{
+				SessionUpdate: SessionUpdateBackgroundTaskRoster,
+			},
+			want: `{"sessionUpdate":"pyry/background_task_roster","tasks":[],"droppedTasks":0}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			b, err := json.Marshal(tt.payload)
+			if err != nil {
+				t.Fatalf("json.Marshal(%#v): %v", tt.payload, err)
+			}
+			if got := string(b); got != tt.want {
+				t.Fatalf("wire shape:\n got %s\nwant %s", got, tt.want)
+			}
+		})
+	}
+}

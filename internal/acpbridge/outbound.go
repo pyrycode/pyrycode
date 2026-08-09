@@ -35,6 +35,38 @@ const (
 	SessionUpdateToolCallUpdate    = "tool_call_update"
 )
 
+// Background-task session/update discriminants. Unlike the four above these are
+// pyry EXTENSIONS, not ACP wire strings: ACP's sessionUpdate taxonomy has no
+// background-task variant (ADR 027 "ACP taxonomy reference" lists all ten of
+// them), so the facts have no in-spec home. Their own const block for exactly
+// that reason — the comment above must stay true of the four it covers. ADR 027
+// divergence 7 records the choice.
+//
+// Reusing one of the four over a background-task body was rejected, not merely
+// passed over: an ACP tool_call body requires toolCallId/title/kind/status, so a
+// strict host rejects the notification just as hard as it rejects an unknown
+// discriminant, while a lenient host BELIEVES it and grows a phantom tool call
+// in its tool view. That is strictly worse than the facts being dropped. A
+// conforming body is not available either — it has no destination for TaskType,
+// TruncatedFields or DroppedTasks, and no shape at all for an EMPTY roster,
+// which is the feature's payoff.
+//
+// The "pyry/" prefix is load-bearing. A bare background_task_started is shaped
+// exactly like the ten spec strings, so a future spec-added variant of that name
+// would collide with a different body, and a reader of a wire log could not tell
+// ours from spec truth where the ADR is not available. The namespace/name shape
+// matches ACP's own method names (session/update, fs/read_text_file), so it
+// reads as in-protocol rather than malformed.
+//
+// Residual risk, recorded in divergence 7: a strict sessionUpdate enum decoder
+// may reject the whole notification. Nothing emits these yet — #1402 owns the
+// MapUpdate arms and the gating decision that risk feeds.
+const (
+	SessionUpdateBackgroundTaskStarted = "pyry/background_task_started"
+	SessionUpdateBackgroundTaskUpdated = "pyry/background_task_updated"
+	SessionUpdateBackgroundTaskRoster  = "pyry/background_task_roster"
+)
+
 // MethodSessionUpdate is the JSON-RPC notification method the consumer (#750)
 // sends carrying one of the payloads below. Defined here for the consumer's
 // convenience; the {sessionId, update} params wrapper is the consumer's.
@@ -105,6 +137,179 @@ type ToolCallContent struct {
 	OldText    string        `json:"oldText,omitempty"`    // Type == "diff"
 	NewText    string        `json:"newText,omitempty"`    // Type == "diff"
 	TerminalID string        `json:"terminalId,omitempty"` // Type == "terminal"
+}
+
+// BackgroundTaskStarted is the session/update payload announcing that claude
+// started work that outlives the turn which spawned it — the ACP form of
+// turnevent.BackgroundTaskStarted, riding the extension discriminant
+// SessionUpdateBackgroundTaskStarted (ADR 027 divergence 7). Without it a desktop
+// client cannot separate a turn that ended with work still running from a genuine
+// finish, which is #1240's symptom.
+//
+// The types in this file are named for the ACP VARIANT rather than the neutral
+// event. Here the two names coincide, because the extension discriminant was
+// derived FROM the neutral name — the rule is invisible at this one site, so it
+// is stated rather than left to be inferred.
+//
+// None of the three background payloads carries a session or conversation
+// identifier. The mobile payloads carry ConversationID because the mobile
+// envelope has no session addressing; on ACP the session id is the consumer's
+// wrapper field (sessionUpdateParams.SessionID, cmd/pyry/acp_turn_stream.go), and
+// every payload above omits it for the same reason.
+//
+// ToolCallID is the tool call that spawned the task: the same identifier a
+// ToolCall payload already carried under this name, so a host correlates the two
+// for free. Its two siblings carry none because their neutral events carry none,
+// and synthesising one would need a stateful TaskID -> ToolCallID join table this
+// package is forbidden to hold.
+//
+// TruncatedFields names the fields the producer cut to fit their caps, using the
+// DAEMON's snake_case names ("task_id", "tool_call_id", "description",
+// "task_type"); it is load-bearing, not decoration — a payload that dropped it
+// would present claude's truncated text to a host as complete. It is omitempty
+// on all four types here, so both nil and [] vanish from the wire. That is a
+// DELIBERATE divergence from the mobile lane's tag (which ships null for nil and
+// [] for empty): nil and [] say the identical thing there ("nothing was cut") and
+// no consumer branches on the difference, so omitting both is a stronger
+// realisation of the same call, and it matches this package's own optional-list
+// convention (locations,omitempty). Contrast Tasks below, whose empty value IS
+// the signal and which is therefore normalised rather than omitted.
+//
+// SECURITY: Description is claude's label for the task, and for the local_bash
+// task type it is the LITERAL command line. It is safe to RENDER as inert text
+// and never to execute, re-shell, or feed to an HTML sink, an attribute, or a
+// URL. Its bound is the producer's, decided at construction
+// (internal/streamsup/parser.go's maxTaskFieldID / maxTaskDescription), so this
+// struct re-decides no maximum: a second cap here would be a second place the
+// limit is decided, and the two could disagree silently.
+type BackgroundTaskStarted struct {
+	SessionUpdate   string   `json:"sessionUpdate"`
+	TaskID          string   `json:"taskId"`
+	ToolCallID      string   `json:"toolCallId"`
+	Description     string   `json:"description"`
+	TaskType        string   `json:"taskType"`
+	TruncatedFields []string `json:"truncatedFields,omitempty"`
+}
+
+// BackgroundTaskUpdated is the session/update payload reporting what happened to
+// a task BackgroundTaskStarted already opened — the ACP form of
+// turnevent.BackgroundTaskUpdated, riding SessionUpdateBackgroundTaskUpdated (ADR
+// 027 divergence 7). TaskID is the join key back to that payload; there is no
+// toolCallId, for BackgroundTaskStarted's stated reason.
+//
+// Patch has no omitempty: "" (claude omitted the key) and "{}" (an empty patch
+// object) say different things and must stay distinguishable on the wire, which
+// is the neutral type's stated property.
+//
+// SECURITY: Patch is claude's patch object — what CHANGED about the task —
+// carried WHOLE and unparsed as its serialized text, so nothing here is declared
+// about its contents and no key is enumerated. It is a plain string and NEVER
+// json.RawMessage: the producer truncates it at construction
+// (internal/streamsup/parser.go's maxTaskPatch) and a truncated object is no
+// longer valid JSON, so raw-JSON typing would be a lie AND would break
+// marshalling — encoding/json rejects an invalid RawMessage, so json.Marshal of
+// the whole payload would fail and the consumer's failure path would drop the
+// notification, turning a truncation claude's output length alone can trigger
+// into a silent loss of the entire update. A consumer MUST NOT assume it parses,
+// must render it as inert text, and must never execute it, re-shell it, or feed
+// it to an HTML sink, an attribute, or a URL — a patch's structured shape makes
+// it the more tempting thing to feed somewhere that runs it, and its sibling's
+// Description already carries a literal command line.
+type BackgroundTaskUpdated struct {
+	SessionUpdate   string   `json:"sessionUpdate"`
+	TaskID          string   `json:"taskId"`
+	Patch           string   `json:"patch"`
+	TruncatedFields []string `json:"truncatedFields,omitempty"`
+}
+
+// BackgroundTaskRoster is the session/update payload carrying the complete set of
+// background tasks claude is tracking at one moment — the ACP form of
+// turnevent.BackgroundTaskRoster, riding SessionUpdateBackgroundTaskRoster (ADR
+// 027 divergence 7). A SNAPSHOT, not a delta: a task's disappearance from a later
+// roster is the available finish signal, but diffing successive snapshots is the
+// HOST's call to make on its own terms, not a finish the daemon reports.
+//
+// Tasks is in claude's own order, truncated from the tail by the producer. The
+// key is always present and never null — see MarshalJSON. An EMPTY roster is
+// meaningful and is still a positive statement, "nothing is alive", which is
+// exactly the signal a consumer of #1240's symptom needs.
+//
+// DroppedTasks is how many entries claude sent beyond the producer's entry cap
+// (maxTaskRosterEntries) that this payload does NOT carry, so the roster's true
+// size is len(Tasks) + DroppedTasks. It has no omitempty: 0 is the positive
+// statement "nothing was dropped", not an absence. It is also this payload's ONLY
+// truncation report — the type has no TruncatedFields, deliberately, mirroring
+// the neutral type: a name-only report loses HOW MANY were lost, and each
+// dimension reports where it is decided, a text cut being a property of one entry
+// and riding that entry.
+type BackgroundTaskRoster struct {
+	SessionUpdate string           `json:"sessionUpdate"`
+	Tasks         []BackgroundTask `json:"tasks"`
+	DroppedTasks  int              `json:"droppedTasks"`
+}
+
+// MarshalJSON normalises a nil Tasks to an empty array, so an empty roster always
+// serialises as "tasks":[] and never as "tasks":null. It is this package's only
+// custom marshaller, and three properties are load-bearing.
+//
+// omitempty is NOT the alternative, and dropping it is not a sufficient device
+// either. Go marshals a nil slice as null whether or not the tag is set, so the
+// tag alone only moves the failure from "key absent" to "key present, value
+// null" — the same "no roster information" reading on the host side, when what
+// the empty roster states is the opposite. The tag is absent AND this method
+// exists; neither alone would do. Between null and [], [] is the better contract:
+// it reads as an empty list where null reads as absent, and a host decoding into
+// a non-optional array type never has to branch.
+//
+// The type is the only place this can live. turnevent's Tasks is nil both for an
+// empty roster and when claude omits the key, so #1402's mapper passing it
+// straight through hands this type a nil slice; pre-allocating in the mapper
+// instead would produce identical bytes while hiding the normalisation the type
+// owns, which is the call the mobile lane already made and stated
+// (internal/protocol/interactive.go, internal/turnbridge/outbound.go).
+//
+// Value receiver, not pointer. MapUpdate returns payloads as values into an any,
+// and json.Marshal on a value boxed in an interface finds only value-receiver
+// methods — a pointer receiver would silently never fire. The copy also means the
+// substitution never touches the caller's slice header. The type alias is the
+// standard indirection that keeps json.Marshal from recursing back into here.
+//
+// TruncatedFields is deliberately NOT normalised the same way, on any of the four
+// types: nil and [] say the identical thing there, whereas Tasks is this
+// payload's subject and its empty value is the signal.
+func (u BackgroundTaskRoster) MarshalJSON() ([]byte, error) {
+	if u.Tasks == nil {
+		u.Tasks = []BackgroundTask{}
+	}
+	type alias BackgroundTaskRoster
+	return json.Marshal(alias(u))
+}
+
+// BackgroundTask is one entry of a BackgroundTaskRoster: an element shape, not a
+// payload, so it carries no sessionUpdate discriminant. Its fields are exactly
+// the per-entry keys claude's roster line shows and nothing invented — in
+// particular there is no toolCallId and no patch, which the two scalar payloads
+// carry because their LINES do.
+//
+// TaskType is a plain string rather than a closed enum (only local_bash has been
+// observed, and one observation does not earn a closed set), matching the neutral
+// type and BackgroundTaskStarted above.
+//
+// SECURITY: Description is the task's label, and for claude's local_bash task
+// type it is the LITERAL command line — safe to RENDER as inert text, never to
+// execute, re-shell, or feed to an HTML sink, an attribute, or a URL. The warning
+// is repeated here rather than delegated to BackgroundTaskStarted's because a
+// roster carries a LIST of command lines, which is a more tempting shape to feed
+// somewhere structured than a single one. It is bounded by a tighter producer cap
+// than its scalar counterpart (maxTaskRosterDescription, not maxTaskDescription):
+// here the value is a label in a list whose length claude chooses, and the
+// full-length copy already crossed the wire on the BackgroundTaskStarted this
+// entry's TaskID joins back to.
+type BackgroundTask struct {
+	TaskID          string   `json:"taskId"`
+	TaskType        string   `json:"taskType"`
+	Description     string   `json:"description"`
+	TruncatedFields []string `json:"truncatedFields,omitempty"`
 }
 
 // MapUpdate maps one neutral turnevent.Event to its ACP session/update payload,
