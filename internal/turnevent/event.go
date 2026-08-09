@@ -355,6 +355,100 @@ type ThinkingProgress struct {
 	EstimatedTokensDelta int
 }
 
+// RateLimited reports that claude's usage-limit window is in a state other than
+// the one measured-benign one. It maps claude's top-level rate_limit_event line
+// (#1404) — the fifth claude line-type the parser translates rather than drops,
+// and the first that is not a `system` subtype.
+//
+// It exists so a turn that stops making progress because of a usage limit is
+// representable inside the daemon at all. Until #1404 the line was dropped whole
+// and the information existed nowhere in pyrycode.
+//
+// The NAME is the daemon's, not claude's, for the reason BackgroundTaskStarted's
+// doc gives — and, as with BackgroundTaskRoster, the translation earns more here
+// than insulation from a rename. claude emits rate_limit_event ONCE PER RUN
+// whatever the window's state (status read "allowed" in all three captures on
+// record, i.e. every run that produced one hit no limit at all), so a variant
+// called RateLimitEvent or RateLimitStatus would read as a periodic report and
+// invite a consumer to draw one row per healthy turn. This variant fires only
+// when the producer's gate says a limit is in force; the name states that
+// condition, and it sits with the family's other condition-named variants
+// (Stall, Compacting, ApiRetry).
+//
+// It is a REPORT, never a control input. Nothing in the daemon may key a
+// behaviour on it: no backoff, no throttle, no retry, no turn suspension, no
+// reconnect delay. Every field is claude-authored text or a claude-authored
+// integer crossing the subprocess trust boundary, and the only thing downstream
+// of it is display (#1405). That is what keeps a wrong — or hostile — status
+// value costing at most one misleading row, rather than a resource action the
+// daemon takes on itself. A slice that wants the daemon to ACT on a rate limit is
+// re-opening that trust analysis, not extending this one.
+//
+// It opens and closes no turn, exactly as the background-task variants do not: a
+// usage-limit window is orthogonal to whichever turn happened to observe it.
+//
+// The same two keys the captured line carries are deliberately NOT fields here,
+// for the same reasons (#1380): session_id, which is claude's session identity
+// and NOT the daemon's conversation identity, and uuid, claude's per-line message
+// id, which nothing in the daemon reads. So are the payload's four overage keys —
+// overageStatus and isUsingOverage are org-policy detail nothing in the daemon or
+// in the user story reads, and overageResetsAt / overageDisabledReason are
+// MEASURED version-variable (claude 2.1.158 carries the first and not the second;
+// 2.1.199 and 2.1.220 the reverse). Declaring a version-variable key would be
+// exactly the field-structure invention this family's decode targets each refuse.
+//
+// Both string fields are claude-derived and bounded by the producer AT
+// CONSTRUCTION (streamsup's maxRateLimitField), following Unrecognized's
+// precedent, so an oversized payload never enters the event stream, a queue, or a
+// log. Like every variant here it carries no conversation identity — the bridge
+// injects that.
+type RateLimited struct {
+	// Status is claude's own rate_limit_info.status, verbatim.
+	//
+	// It is on the event because it is the only field that says WHY the event
+	// fired, and its value set beyond the benign one is UNMEASURED: no capture of
+	// a limit actually in force exists. Carrying claude's raw string is how that
+	// set gets measured the first time a real limit fires, instead of the daemon
+	// inventing an enum it has no evidence for — so a plain string rather than a
+	// closed enum, for BackgroundTaskStarted.TaskType's reason taken one step
+	// further. Never empty: the producer's gate does not emit on an empty status.
+	Status string
+	// LimitType is WHICH limit is in force: claude's rateLimitType ("five_hour" in
+	// all three captures). The name is translated because RateLimitType inside a
+	// type called RateLimited stutters; the daemon's snake_case name for
+	// TruncatedFields purposes is "limit_type". A plain string, not a closed enum,
+	// for Status's reason.
+	LimitType string
+	// ResetsAt is when claude says the limit lifts, as UNIX SECONDS. 0 when claude
+	// did not report it — and the event still fires, because absence of the detail
+	// is claude's to choose and the status is the report.
+	//
+	// It is CLAUDE's number, not the daemon's clock, and it is unvalidated in BOTH
+	// directions: a consumer must not assume it lies in the future, and must not
+	// assume it lies in a sane range at all. Negative, zero and year-40000 values
+	// are all representable and none is rejected here, because rejecting one would
+	// be a validation rule with no captured negative case behind it. Formatting it
+	// as a date without a range check is the realistic bug.
+	//
+	// Not a time.Time: converting would invent a claim the bytes do not make (that
+	// the number is a valid instant), create a second absent-value question
+	// (time.Time{} versus 0), and drag in the project's time.Time round-trip
+	// discipline for a field that is only ever a number on a wire. int64 rather
+	// than int because a unix timestamp is a 64-bit quantity by nature.
+	ResetsAt int64
+	// TruncatedFields names the fields the producer cut to fit its cap, in
+	// declaration order, using the DAEMON's snake_case names: "status",
+	// "limit_type" (not claude's rateLimitType — the report names the field it
+	// describes). nil when nothing was cut, never an empty non-nil slice, so a
+	// consumer can emit it as absent rather than [].
+	//
+	// Unlike ThinkingProgress this variant DOES carry one: two of its three
+	// payload fields are claude-authored strings that can be cut, so the report
+	// describes a bound that exists. ResetsAt is absent from it and needs no cap —
+	// an int64 cannot grow.
+	TruncatedFields []string
+}
+
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
 // stall_detected signal (no payload, no clearing edge). It carries no fields —
 // onset only, no "cleared" state, and (like every variant here) no
@@ -405,10 +499,17 @@ const (
 // output becomes VISIBLE the moment it arrives, instead of vanishing into a
 // debug log the production daemon does not print.
 //
-// It is deliberately NOT the parser's tolerate-and-drop path. rate_limit_event
-// and every UNMAPPED system subtype stay silent; only output outside that
-// measured set reaches here. A row per turn would make the feature worthless
-// noise, so the known-ignored list is the whole design.
+// It is deliberately NOT the parser's tolerate-and-drop path. Every UNMAPPED
+// system subtype stays silent; only output outside that measured set reaches
+// here. A row per turn would make the feature worthless noise, so the
+// known-ignored list is the whole design.
+//
+// CORRECTED 2026-08-09 (#1404): rate_limit_event is no longer named among the
+// silent set, because it is no longer ON the known-ignored list — it has its own
+// arm in the parser's main switch (→ RateLimited above). A rate_limit_event line
+// the parser's gate does not map is still silent, but now because that arm
+// CONSUMES it rather than because a list says to, which makes this lane
+// unreachable for the type by matching rather than by list membership.
 //
 // CORRECTED 2026-08-07 (#1380): system is no longer ignored WHOLESALE, so this
 // no longer reads "system/*, rate_limit_event … exactly as before". The system
@@ -453,6 +554,7 @@ func (BackgroundTaskStarted) isTurnEvent() {}
 func (BackgroundTaskUpdated) isTurnEvent() {}
 func (BackgroundTaskRoster) isTurnEvent()  {}
 func (ThinkingProgress) isTurnEvent()      {}
+func (RateLimited) isTurnEvent()           {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
@@ -468,6 +570,7 @@ var (
 	_ Event = BackgroundTaskUpdated{}
 	_ Event = BackgroundTaskRoster{}
 	_ Event = ThinkingProgress{}
+	_ Event = RateLimited{}
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}

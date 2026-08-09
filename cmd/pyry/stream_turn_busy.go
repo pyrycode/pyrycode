@@ -133,11 +133,22 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 // since its readers run anywhere.
 //
 // The opener set is a WHITELIST, not "anything that is not a TurnEnd". The
-// evidence is the producer's growth path rather than a stray event: streamsup's
-// parser tolerates-and-drops rate_limit_event today (parser.go:158-163), and that
-// is exactly the line that becomes an ApiRetry the day someone wires it — a
-// blacklist would wedge a conversation on it. TurnEnd on a conversation that is
-// not busy is a plain no-op delete.
+// evidence was the producer's growth path rather than a stray event: streamsup's
+// parser tolerated-and-dropped rate_limit_event, and that was exactly the line
+// that would grow an event of its own the day someone wired it — a blacklist would
+// have wedged a conversation on it. TurnEnd on a conversation that is not busy is
+// a plain no-op delete.
+//
+// DISCHARGED 2026-08-09 (#1404): that day came, and the whitelist held with no
+// code change here. The line now maps to turnevent.RateLimited — not the ApiRetry
+// this comment used to predict, which is the second reason a blacklist would have
+// been wrong — and the variant lands in the default arm below, a no-op for this
+// tracker. That is the CORRECT answer rather than an omission: a usage limit is
+// orthogonal to turn lifecycle, so opening a turn on one would wedge the
+// conversation exactly as opening one on an Unrecognized would. streamsup's
+// ignoredLineTypes — the cite this comment carried pointed at parser.go:158-163,
+// which the list left long ago — is at parser.go:384-386 and is down to `system`
+// alone.
 //
 // A nil receiver is a no-op, so a caller with no tracker (the drain's own tests)
 // needs no construction. The drain's parameter is deliberately the concrete

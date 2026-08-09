@@ -208,6 +208,92 @@ const maxTaskRosterDescription = 512
 // other constants.
 const minThinkingTokensPerEvent = 64
 
+// maxRateLimitField caps each claude-authored string on a turnevent.RateLimited —
+// Status and LimitType. Applied at CONSTRUCTION, exactly as the caps above are,
+// so an oversized payload never enters the event stream, the push queue, or any
+// log.
+//
+// One constant for two fields, as maxTaskFieldID serves three: both are short,
+// enum-ish values claude chooses out of a set it does not publish.
+//
+// The MULTIPLE is wide on purpose. The observed values run 7-9 bytes ("allowed",
+// "rejected", "five_hour" across the three captures), so 256 is roughly 28x the
+// observation — wider than maxTaskFieldID's 9x, and deliberately so: the value
+// set beyond the one benign status is UNMEASURED, so on the side that matters
+// there is no distribution to reason about and the binding constraint has to come
+// from the envelope instead.
+//
+// The envelope arithmetic, in maxUnrecognizedRaw's style: worst case one
+// RateLimited carries 256 + 256 = 512 bytes of claude-derived text. That is 0.8%
+// of the v2 application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap), an order of magnitude under the scalar
+// background-task pair's 7.4% and 6.6%. Escaping is mild for maxUnrecognizedRaw's
+// reason. ResetsAt contributes NO term and gets no cap: an int64 cannot grow, and
+// its absence here is a statement rather than an oversight.
+//
+// The amplification from input to retained bytes is linear and near zero:
+// rateLimitEventLine holds three scalars and no array, so a 4 MiB line
+// (defaultMaxParseBuf) yields at most 512 bytes of retained text plus one
+// integer.
+//
+// There is also no RATE bound, and its absence is deliberate:
+// minThinkingTokensPerEvent exists because thinking_tokens fires ~10 times per
+// turn, whereas rate_limit_event fires once per RUN (the capture's census) and
+// under the gate below a healthy run emits ZERO. There is nothing to bound in
+// frequency, so do not go looking for the constant that would. The exposure that
+// leaves is named rather than mechanised, per evidence-based fix selection:
+// once-per-run is MEASURED, not enforced, so a claude emitting thousands of
+// non-benign rate_limit_event lines would produce thousands of events, none of
+// them a droppable delta (the droppable set is assistant_delta only, #610),
+// holding queue slots. That is the same accepted cost the three background-task
+// variants already carry, bounded by the same existing backpressure. Revisit on
+// an OBSERVED rate, as #1385 did.
+//
+// A separate constant even though it currently equals maxTaskFieldID:
+// maxTaskPatch's paragraph applies verbatim — they bound different fields for
+// different reasons, and folding them into one would make a future change to the
+// task-id budget silently move this one.
+const maxRateLimitField = 256
+
+// benignRateLimitStatus is the ONE rate_limit_info.status value that produces no
+// event. claude emits rate_limit_event once per run whatever the state of the
+// usage-limit window, so without this gate a 1:1 mapping would put one "you are
+// rate limited" event on every healthy turn.
+//
+// MEASURED, not chosen: "allowed" in all three captures on record
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json and
+// permission_protocol_v2.1.158.json / _v2.1.199.json — three claude versions).
+// What is NOT measured is the rest of the value set: no capture of a limit
+// actually in force exists, so emitRateLimit is designed for that openly and
+// anything else emits.
+//
+// Matched by byte-exact equality — no trim, no fold, no prefix — which is the
+// tolerance three observations earn, exactly as one observation earns it for
+// harnessNoOutputNudge. Unlike that constant, though, the failure direction here
+// is NOT the safe one, and the trade is accepted deliberately rather than
+// inherited: if claude recapitalises or renames the benign value, this event
+// fires once per run on healthy runs — loud and wrong, and one constant edit to
+// fix. A folded or prefix match would instead swallow a genuinely new benign-ish
+// value and suppress a REAL limit in silence, which is the same wrong with no way
+// to notice it.
+const benignRateLimitStatus = "allowed"
+
+// rateLimitDropMsg is emitRateLimit's ONE drop message, and the constants below
+// are the closed set of reasons it carries. Daemon-authored keywords, never
+// claude's values: Status in particular must never reach a log, and it is the
+// field a drop site is most tempted to explain itself with.
+//
+// One message with a closed reason set rather than three messages: it mirrors the
+// dropcapReason* shape the realclaude package already uses, and it gives the
+// tests one string to filter on.
+const (
+	rateLimitDropMsg = "streamsup: dropping rate_limit_event"
+
+	rateLimitDropUndecodable = "undecodable"
+	rateLimitDropBenign      = "benign"
+	rateLimitDropNoInfo      = "no_rate_limit_info"
+)
+
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
 // parser deliberately drops in silence. Membership is what separates "known and
 // deliberately ignored" from "genuinely unrecognized"; getting it wrong in
@@ -225,6 +311,13 @@ const minThinkingTokensPerEvent = 64
 //	                            the #1088 spike); init fires ONCE PER TURN, and
 //	                            thinking_tokens fired ~10 times per turn
 //	rate_limit_event          — once per run
+//
+// MAPPED since 2026-08-09 (#1404): the rate_limit_event row above is a statement
+// about what CLAUDE emits and still holds exactly, but the type is no longer on
+// the list below — see the correction under "Still dropped in silence". The
+// census row is left unedited so the 2026-07-27 measurement stays legible; this
+// pointer is what keeps a reader from taking the census for the drop list, which
+// is the way a list and its rationale come to disagree.
 //
 // system is claude's catch-all namespace and its highest-rate emitter (see the
 // per-turn counts above), so subtype-grained matching risks turning every new
@@ -253,13 +346,22 @@ const minThinkingTokensPerEvent = 64
 //
 // Still dropped in silence: every system subtype emitSystemSubtype does not
 // match, including never-seen ones and task_notification (measured ABSENT on
-// this surface; seen once on the headless surface only), plus rate_limit_event
-// whole.
+// this surface; seen once on the headless surface only).
 //
-// The list itself is UNCHANGED and stays top-level types only. system stays on
-// it, which is what keeps emitUnrecognized structurally unreachable from any
-// system line whatever its subtype, and keeps a genuinely new MESSAGE TYPE — the
-// alarm worth raising — the thing the top-level key catches.
+// CORRECTED 2026-08-09 (#1404): rate_limit_event is no longer on this list and no
+// longer dropped whole. The census row above measures it as a TOP-LEVEL type
+// carrying no subtype, so mapping it was never an emitSystemSubtype-shaped
+// change: it has its own arm in consumeLine's main switch, alongside
+// assistant/user/result, and emitRateLimit's gate decides what it produces. A
+// line reporting the measured-benign status, and a line carrying no decodable
+// rate_limit_info, are both still silent — but by that ARM consuming them, not by
+// membership here.
+//
+// The list is therefore down to ONE member, and it stays top-level types only.
+// system stays on it, which is what keeps emitUnrecognized structurally
+// unreachable from any system line whatever its subtype, and keeps a genuinely
+// new MESSAGE TYPE — the alarm worth raising — the thing the top-level key
+// catches. One member is a transient state, not the design.
 //
 // The measurement also settled the open question of whether claude echoes the
 // delivered prompt back as a `user` message holding a `text` block, as it does
@@ -280,8 +382,7 @@ const minThinkingTokensPerEvent = 64
 // A real-claude test asserts a normal turn produces zero unrecognized events, so
 // this list going stale fails the pre-ship gate rather than reaching a client.
 var ignoredLineTypes = map[string]bool{
-	"system":           true,
-	"rate_limit_event": true,
+	"system": true,
 }
 
 // harnessNoOutputNudge is the ONE user/text block the parser drops in silence.
@@ -523,6 +624,43 @@ type systemThinkingTokensLine struct {
 	EstimatedTokensDelta int `json:"estimated_tokens_delta"`
 }
 
+// rateLimitEventLine is the decoded payload of one top-level rate_limit_event
+// line. Kept separate from streamLine for systemTaskStartedLine's reason, and it
+// is the family's first NESTED target: claude carries this payload one level
+// down, under rate_limit_info.
+//
+// The container is a plain struct, not a *rateLimitInfo. Absence and a
+// present-but-empty object are treated IDENTICALLY — both leave Status empty,
+// which emitRateLimit's gate reads as "no report was made" and answers with
+// silence — so a pointer would buy a distinction nothing acts on. Same argument
+// systemThinkingTokensLine makes for int over *int.
+//
+// The two keys the captured line also carries, uuid and session_id, are
+// deliberately absent — see turnevent.RateLimited's doc — and so are the
+// payload's four overage keys, two of which are measured version-variable across
+// the three captures. Absent from the DECODE TARGET is a stronger guarantee than
+// the test's reflection sweep, because a field that is never declared cannot
+// leak.
+type rateLimitEventLine struct {
+	Info rateLimitInfo `json:"rate_limit_info"`
+}
+
+// rateLimitInfo is claude's rate_limit_info object reduced to the three keys the
+// mapping reads. All three are present in all three captures on record, across
+// three claude versions.
+//
+// Both strings are plain strings, which is why truncateField's json.RawMessage
+// exception does not reach this shape: encoding/json has already U+FFFD-replaced
+// invalid input on decode, so our own cut is the only mid-rune hazard. A
+// non-string value for either, a non-numeric resetsAt, or a resetsAt too large
+// for int64, fails the WHOLE-LINE decode and takes emitRateLimit's undecodable
+// arm — exactly as systemTaskUpdatedLine.TaskID does for a numeric task id.
+type rateLimitInfo struct {
+	Status    string `json:"status"`
+	LimitType string `json:"rateLimitType"`
+	ResetsAt  int64  `json:"resetsAt"`
+}
+
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
 // on demand in emitAssistant / emitUser. streamBlock declares only the fields
 // the mapping reads, so decoding straight into it would DISCARD every unknown
@@ -603,20 +741,38 @@ func (p *Parser) consumeLine(line []byte) {
 		// boundary avoids.
 		p.thinkingSinceEmit = 0
 		p.emit(turnevent.TurnEnd{Reason: resultTurnEndReason(sl.Subtype)})
+	case "rate_limit_event":
+		// Its own arm rather than an ignoredLineTypes member with a subtype
+		// carve-out (#1404). ignoredLineTypes is documented as top-level types only,
+		// and its own census measures this one as carrying no subtype at all, so
+		// there is nothing for emitSystemSubtype's dispatch to match on. Two
+		// consequences worth naming: emitUnrecognized stays unreachable for this type
+		// BY MATCHING rather than by list membership, which is the stronger of the
+		// two guarantees; and emitRateLimit needs no bool return, unlike the
+		// emitSystemSubtype family, because matching this case IS consuming the line
+		// and there is no "did you handle it?" to report back.
+		p.emitRateLimit(line)
 	default:
 		if ignoredLineTypes[sl.Type] {
 			// The subtype match lives INSIDE this branch, which is what keeps
 			// emitUnrecognized below structurally unreachable from any system line.
-			// The sl.Type guard is deliberate: rate_limit_event carries no subtype
-			// today, and the guard keeps that true by construction rather than by
-			// luck if a future entry on the list ever gains a colliding subtype name.
+			//
+			// CORRECTED 2026-08-09 (#1404): the sl.Type guard's stated reason used to
+			// be rate_limit_event — the one list member carrying no subtype — and that
+			// member now has its own case arm above. The guard STAYS, and its reason is
+			// the general one it always really was: it scopes the subtype match to
+			// `system` BY CONSTRUCTION, so a future list member whose payload happens
+			// to carry a colliding subtype name cannot reach the wrong emitter.
+			// Deleting it while the list has one member would make that property rest
+			// on the list's current size, and a one-member list is a transient state,
+			// not the design.
 			if sl.Type == "system" && p.emitSystemSubtype(sl.Subtype, line) {
 				return
 			}
-			// system (init / status / any subtype emitSystemSubtype does not map) and
-			// rate_limit_event: tolerated and dropped, silently. CORRECTED 2026-08-07
-			// (#1380) — it is no longer "exactly as before": the subtypes
-			// emitSystemSubtype maps become events above.
+			// system (init / status / any subtype emitSystemSubtype does not map):
+			// tolerated and dropped, silently. CORRECTED 2026-08-07 (#1380) — it is no
+			// longer "exactly as before": the subtypes emitSystemSubtype maps become
+			// events above.
 			//
 			// CORRECTED 2026-08-09 (#1385): thinking_tokens is no longer among the
 			// examples here — it is MAPPED now (→ turnevent.ThinkingProgress), so
@@ -995,6 +1151,122 @@ func (p *Parser) emitThinkingProgress(line []byte) bool {
 		EstimatedTokensDelta: tl.EstimatedTokensDelta,
 	})
 	return true
+}
+
+// emitRateLimit decodes one top-level rate_limit_event line and emits at most one
+// turnevent.RateLimited. It never emits an Unrecognized, and it returns nothing:
+// consumeLine's case arm consumes the line by MATCHING, so unlike the
+// emitSystemSubtype family there is no "did you handle it?" to report back. Field
+// mapping comes from the committed captures, never from a hand-built payload.
+//
+// THE GATE is the substance of this mapping; the field copying is routine. claude
+// emits this line ONCE PER RUN whatever the state of the usage-limit window —
+// status read "allowed" in all three captures on record, i.e. every run that
+// produced one hit no limit at all — so a 1:1 mapping would put one "you are rate
+// limited" event on every healthy turn. status is the discriminator, and it has
+// three reachable readings:
+//
+//  1. status == benignRateLimitStatus → SILENCE. The measured healthy case.
+//
+//  2. status non-empty and not the benign value → ONE RateLimited. Emit for
+//     anything that is not the one measured-benign value, because the failure
+//     direction is the safe one: an unrecognised status surfaces and a human
+//     looks, rather than a real limit vanishing. Same doctrine ignoredLineTypes
+//     already carries — "too wide and a real new message type stays invisible".
+//
+//  3. rate_limit_info absent, empty, or the line will not decode into the shape →
+//     SILENCE. This rung is NOT settled by rung 2, and it is decided AGAINST the
+//     naive reading of it. "Emit unless status is allowed" answers an absent
+//     container with emit, because an absent object decodes to an empty status.
+//     Three reasons it does not. The event would be a claim with no evidence
+//     behind it: Status "", LimitType "", ResetsAt 0 names no limit and no reset
+//     time, so it cannot serve the purpose the variant exists for, and emitting it
+//     is the daemon reporting a rate limit it never observed — the same inference
+//     turnevent.BackgroundTaskRoster's doc refuses to make about a task finishing.
+//     Its failure mode is the worse of the two available: if a future claude
+//     renames or drops the container, rung-3-emits produces one content-free "you
+//     are rate limited" row on EVERY healthy run forever, indistinguishable from a
+//     real limit and actionable in the wrong direction — exactly the per-turn
+//     noise row ignoredLineTypes' doctrine ranks as the outcome to avoid — while
+//     rung-3-silent produces a false NEGATIVE on a condition that has never fired
+//     once in three captures. And it is this package's own precedent for an absent
+//     field: emitBackgroundTaskStarted lands the field empty rather than inventing
+//     a validation rule, and landing empty on the GATE INPUT means the gate reads
+//     "no report was made", which is silence.
+//
+// The cost of rung 3 is real and is stated here rather than buried: a container
+// RENAME goes undetected by any automatic test. The available detector is the live
+// drop census — a renamed-container line is still dropped, so it still lands in
+// internal/e2e/realclaude's per-type census WITH its payload, which is exactly how
+// #1260 discovered this payload in the first place. A MAPPED line does not appear
+// there, so the census cleanly separates "claude reported benign" from "claude
+// changed shape".
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
+// streamLine's doc states the property that preserves: control shapes are read
+// from the top level only and nested content is never re-scanned, which is what
+// stops a tool result whose text is literally `{"type":"result"}` from forging a
+// turn boundary. Decoding this payload from anywhere else would make a usage-limit
+// report forgeable out of claude's own tool output.
+//
+// A payload that will not decode is dropped with a content-free Debug and no event
+// — NOT surfaced as an Unrecognized. The family's standing answer
+// (emitBackgroundTaskStarted's doc) is that surfacing a malformed line of a type
+// we already know is worth less than the structural guarantee that the type never
+// reaches the unrecognized lane. Here that guarantee is STRONGER than it was — the
+// type is claimed by a case arm rather than by list membership — and breaking it
+// would put a bad payload in front of the live zero-unrecognized gate
+// (internal/e2e/realclaude/interactive_stream_liveness_test.go) for a line the
+// daemon does in fact recognise.
+//
+// NOTHING FROM THE PAYLOAD IS LOGGED, on any path. The one drop message carries a
+// `reason` drawn from the closed keyword set at rateLimitDropMsg, and Status never
+// reaches it: that is the field a drop site is most tempted to explain itself
+// with, and the one value on this line a future claude could make arbitrarily long
+// or arbitrarily revealing.
+func (p *Parser) emitRateLimit(line []byte) {
+	var rl rateLimitEventLine
+	if err := json.Unmarshal(line, &rl); err != nil {
+		p.log.Debug(rateLimitDropMsg, "reason", rateLimitDropUndecodable)
+		return
+	}
+	switch rl.Info.Status {
+	case benignRateLimitStatus:
+		p.log.Debug(rateLimitDropMsg, "reason", rateLimitDropBenign)
+		return
+	case "":
+		// Rung 3. An absent container, a present-but-empty one, and a container
+		// carrying no status all land here and are answered identically — which is
+		// what makes the plain-struct decode target sufficient.
+		p.log.Debug(rateLimitDropMsg, "reason", rateLimitDropNoInfo)
+		return
+	}
+
+	var cut []string
+	bound := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// Sequential statements rather than a composite literal, for
+	// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these calls,
+	// and inside a literal that order would rest on the left-to-right operand rule
+	// rather than on something a reader sees. The second name is the DAEMON's —
+	// limit_type, not claude's rateLimitType.
+	status := bound(rl.Info.Status, "status", maxRateLimitField)
+	limitType := bound(rl.Info.LimitType, "limit_type", maxRateLimitField)
+
+	p.emit(turnevent.RateLimited{
+		Status:    status,
+		LimitType: limitType,
+		// Passed through unbounded and unvalidated in both directions: an int64
+		// cannot grow, and see the field's doc for why no range check belongs here.
+		ResetsAt: rl.Info.ResetsAt,
+		// nil when nothing was cut: append never ran.
+		TruncatedFields: cut,
+	})
 }
 
 // truncateField cuts s to limit bytes, reporting whether it cut. Mirrors
