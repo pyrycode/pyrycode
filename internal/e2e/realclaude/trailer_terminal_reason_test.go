@@ -25,7 +25,7 @@ package realclaude
 //     detail or "unclassified" before marshalling. On that path the field is
 //     present and non-empty BY CONSTRUCTION, so absence is a departure.
 //   - streamrunner.Run tees claude's stdout for the watchdog and passes the
-//     bytes through UNCHANGED (streamrunner/runner.go:170-176), synthesising a
+//     bytes through UNCHANGED (streamrunner/runner.go:177-179), synthesising a
 //     trailer of its own only when the idle-stall watchdog fired and claude
 //     emitted no result. So on every healthy run of that path the trailer is
 //     claude's OWN result line and carries no terminal_reason at all, and
@@ -94,7 +94,7 @@ const (
 	// THE CLAIM LIMIT IS THE POINT OF THIS VALUE. It says the line is not that
 	// path's documented healthy shape, and it never says pyry wrote it. Because
 	// streamrunner.Run passes claude's bytes through unchanged
-	// (internal/agentrun/streamrunner/runner.go:170-176), a terminal_reason on a
+	// (internal/agentrun/streamrunner/runner.go:177-179), a terminal_reason on a
 	// line from that path could equally be one CLAUDE emitted, and no reading of
 	// the line can tell the two apart. Pyry's own synthesis there is
 	// unconditional when it happens (streamrunner/watchdog.go:253, :280), but
@@ -229,7 +229,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 				Value: trailReasonAbsentOwesNone,
 				Detail: trailDetail("%s: the argv reduced to streamrunner and terminal_reason is "+
 					"off the line. That path passes claude's bytes through unchanged "+
-					"(streamrunner/runner.go:170-176), so a healthy run's trailer is claude's own "+
+					"(streamrunner/runner.go:177-179), so a healthy run's trailer is claude's own "+
 					"result line and owes no terminal_reason", trailReasonAbsentOwesNone),
 			}
 		}
@@ -239,7 +239,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 				"terminal_reason, and the line carries one anyway. The claim is only that the "+
 				"line is NOT that path's documented healthy shape, and never that pyry wrote it "+
 				"— the path passes claude's bytes through unchanged "+
-				"(streamrunner/runner.go:170-176), so claude can produce the same reading. Empty "+
+				"(streamrunner/runner.go:177-179), so claude can produce the same reading. Empty "+
 				"or named, both land here", trailReasonPresentOwesNone),
 		}
 	case "ptyrunner":
