@@ -48,22 +48,22 @@ package realclaude
 //
 // # The proof outranks every match-count arm
 //
-// trailClassifyRun's Step 2 (:523) returns trailOutcomeRunningAtTrailer on
-// Admit.Value == trailAdmitProof BEFORE Step 4 (ArgvScanErrored), Step 5
-// (RowsScanned == 0), Step 7 (MatchCount > 0) or Step 8 are consulted. That is
-// what makes this file's rows cheap: with no subject staged EVERY row runs at
-// MatchCount == 0, and the finding and the negative still separate. Stretching a
-// hold past the reap to force a post-trailer match would destroy the very
-// ordering the proof rests on.
+// trailClassifyRun's Step 2 (trail_run_outcome_test.go:564) returns
+// trailOutcomeRunningAtTrailer on Admit.Value == trailAdmitProof BEFORE Step 4
+// (ArgvScanErrored), Step 5 (RowsScanned == 0), Step 7 (MatchCount > 0) or
+// Step 8 are consulted. That is what makes this file's rows cheap: with no
+// subject staged EVERY row runs at MatchCount == 0, and the finding and the
+// negative still separate. Stretching a hold past the reap to force a
+// post-trailer match would destroy the very ordering the proof rests on.
 //
 // # An empty match set under a certifying gate IS the documented healthy negative
 //
-// trailRunWellFormed() (:611) — the classifier's own canonical well-formed input
-// — is trailGateUsable + "completed" + MatchCount 0 + RowsScanned 12 +
-// trailAdmitVoidGroupUnnamed, and it reaches trailOutcomeNoRowMatched, whose
-// Detail says that value is "A statement about THE SCAN and NOT A STATEMENT THAT
-// THE COMMAND HAD EXITED". Reaching for a run-void-* to make the negative arm
-// "assert a void" would vary two dimensions at once.
+// trailRunWellFormed() (trail_run_outcome_test.go:652) — the classifier's own
+// canonical well-formed input — is trailGateUsable + "completed" + MatchCount 0 +
+// RowsScanned 12 + trailAdmitVoidGroupUnnamed, and it reaches
+// trailOutcomeNoRowMatched, whose Detail says that value is "A statement about THE
+// SCAN and NOT A STATEMENT THAT THE COMMAND HAD EXITED". Reaching for a run-void-*
+// to make the negative arm "assert a void" would vary two dimensions at once.
 //
 // # Two caller-supplied strings cross into the readings VERBATIM, by design
 //

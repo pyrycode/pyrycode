@@ -145,7 +145,7 @@ const (
 // finOutcomeResult crosses into publishable space. The asymmetry is load-bearing
 // rather than incidental — every sibling record in this family states its content
 // rule at the type (trailRunReadings:192-195, trailRunOutcome:240-251,
-// trailGateResult:191-206) and this one states the converse for the same reason.
+// trailGateResult:238-253) and this one states the converse for the same reason.
 // Adding tags here "for symmetry" is the first step toward publishing two
 // captured strings into a public issue.
 //
