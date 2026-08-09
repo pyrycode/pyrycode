@@ -163,6 +163,111 @@ Both pure, both mirroring `turnbridge.resultSummary`'s sealed-switch discipline:
   `{Path,Line}`; returns `nil` for empty input so the payload's `locations` field
   is omitted.
 
+## Background-task payload shapes — declared, not yet wired ([#1401](https://github.com/pyrycode/pyrycode/issues/1401))
+
+claude's background-task lifecycle (`system/task_started` / `task_updated` /
+`background_tasks_changed`, modelled neutrally as `turnevent.BackgroundTaskStarted`
+/ `BackgroundTaskUpdated` / `BackgroundTaskRoster`) already reaches a **mobile**
+client ([turnbridge-package.md](turnbridge-package.md), #1393/#1394) but had no
+ACP shape at all until #1401. Four new exported types in `outbound.go`, still
+**unreferenced by `MapUpdate`** — the three neutral variants keep falling to
+`default:` / `ok == false` until [#1402](https://github.com/pyrycode/pyrycode/issues/1402)
+adds the arms, and nothing produces them on the ACP lane until
+[#1400](https://github.com/pyrycode/pyrycode/issues/1400). This is the same
+declare-then-wire split #1393 (types) → #1394 (consumer) used on the mobile lane.
+
+**No in-taxonomy discriminant fits.** ACP's ten `sessionUpdate` variants have no
+background-task shape, and reusing one of the four generic ones was rejected on a
+dominance argument, not passed over: a **strict** host (serde internally-tagged
+enum, zod discriminated union) rejects a `tool_call` body missing `toolCallId`/
+`title`/`kind`/`status` just as hard as it rejects an unknown discriminant, while a
+**lenient** host *believes* it — a phantom tool call appears in its tool view with
+an empty, cross-variant-colliding `toolCallId`, which is strictly worse than the
+facts being dropped. So `outbound.go` declares three **pyry extension**
+discriminants in their own `const` block (the package-doc claim that the existing
+four "ARE the ACP wire strings" must stay true of only the four it covers):
+
+```go
+const (
+    SessionUpdateBackgroundTaskStarted = "pyry/background_task_started"
+    SessionUpdateBackgroundTaskUpdated = "pyry/background_task_updated"
+    SessionUpdateBackgroundTaskRoster  = "pyry/background_task_roster"
+)
+```
+
+The `pyry/` prefix is deliberate, not decoration: a bare `background_task_started`
+is shaped exactly like the ten spec strings, so it would collide silently with any
+future spec-added variant of that name and be indistinguishable from spec truth in
+a wire log. `namespace/name` mirrors ACP's own method shape (`session/update`,
+`fs/read_text_file`), reading as in-protocol rather than malformed. [ADR 027
+divergence 7](../decisions/027-acp-mapping.md) records the full argument
+(including the residual, unmeasured risk that a strict host rejects — or tears
+down the connection over — an unknown discriminant) and is these strings' only
+home; they are deliberately **absent** from § "ACP taxonomy reference", which is a
+verbatim port of the external spec.
+
+```go
+type BackgroundTaskStarted struct { SessionUpdate, TaskID, ToolCallID, Description, TaskType string; TruncatedFields []string `json:"truncatedFields,omitempty"` }
+type BackgroundTaskUpdated struct { SessionUpdate, TaskID, Patch string; TruncatedFields []string `json:"truncatedFields,omitempty"` }
+type BackgroundTaskRoster  struct { SessionUpdate string; Tasks []BackgroundTask `json:"tasks"`; DroppedTasks int `json:"droppedTasks"` }
+type BackgroundTask        struct { TaskID, TaskType, Description string; TruncatedFields []string `json:"truncatedFields,omitempty"` } // roster entry, no discriminant
+```
+
+Notable divergences from the mobile lane's equivalent types
+(`protocol.BackgroundTask*Payload`, `interactive.go:149-280`): **no
+`ConversationID`** on any of the three (ACP session addressing is the consumer's
+`sessionUpdateParams.SessionID`, not the payload's), and `TruncatedFields` carries
+`omitempty` here (mobile ships `null` for nil / `[]` for empty on the same field;
+both readings mean "nothing was cut" and no consumer branches on the difference,
+so `omitempty`'s "both vanish" is a *stronger* realisation of that equivalence,
+and matches this package's own optional-list convention, e.g. `locations`).
+
+**`Tasks` is normalised, `TruncatedFields` is not.** `BackgroundTaskRoster` has a
+value-receiver `MarshalJSON` that substitutes a nil `Tasks` for `[]BackgroundTask{}`
+before marshalling (via a `type alias` indirection, to avoid recursion), so an
+empty roster always serialises as `"tasks":[]` — never an omitted key, never
+`"tasks":null`. That empty array **is the payoff of the feature**: it is the
+positive "nothing is alive" signal a desktop client needs to distinguish a turn
+that ended with background work still running from a genuine finish (#1240's
+symptom). Two things that would look like the fix but aren't: dropping
+`omitempty` from the `tasks` tag alone still ships `null` for a nil slice (the
+tag decides key-presence, not nil-vs-empty rendering); and `turnevent.
+BackgroundTaskRoster.Tasks` is nil both for an empty roster and when claude omits
+the key, never an empty non-nil slice, so `MarshalJSON` is the *only* place this
+normalisation can live — a `MapUpdate` arm that pre-allocated an empty slice
+instead would produce identical bytes while hiding the guarantee inside a mapper
+branch (the same call [turnbridge](turnbridge-package.md) already made on the
+mobile side). The receiver must stay a **value** receiver: `MapUpdate` will box
+payloads into an `any`, and `json.Marshal` on a value boxed in an interface only
+finds value-receiver methods.
+
+**Three `SECURITY:` doc-comment paragraphs**, one per site that carries claude's
+raw text onto the wire — `BackgroundTaskStarted.Description`,
+`BackgroundTask.Description` (the roster entry, repeated rather than delegated: a
+roster is a *list* of command lines, a more tempting shape to feed somewhere
+structured than a single one), and `BackgroundTaskUpdated.Patch`. `Description`
+is claude's literal command line for its `local_bash` task type; `Patch` is an
+unparsed blob **with no guarantee of being valid JSON** — the producer
+(`streamsup`'s `maxTaskPatch` cap) truncates it, and a truncated JSON object no
+longer parses, which is exactly why `Patch` is a plain `string` and never
+`json.RawMessage` (that typing would make `json.Marshal` of the whole payload
+*fail* on a truncated blob, turning a length-triggered truncation into total
+loss of the update). All three: safe to render as inert text, never to execute,
+re-shell, or feed to an HTML sink, an attribute, or a URL. `acpbridge` re-caps
+nothing — every string is already bounded at construction by `streamsup`
+(`maxTaskFieldID`, `maxTaskDescription`, `maxTaskPatch`, `maxTaskRosterEntries`,
+`maxTaskRosterDescription`); a second cap here would be a second place the limit
+is decided.
+
+`TestBackgroundTaskPayloadWireShape` (`outbound_test.go`) locks all four types by
+marshalling payload values directly — there is no `MapUpdate` arm to drive them
+through yet, which is also why they're absent from `TestMapUpdate_WireShape`.
+Four rows, every field distinct and non-zero except the deliberate all-zero empty
+roster row, which leaves `Tasks` nil (never a hand-built `[]BackgroundTask{}`,
+which would marshal to `[]` without exercising `MarshalJSON` at all).
+
+See [codebase/1401.md](../codebase/1401.md).
+
 ## Design decisions
 
 ### Message-id placement — out-of-band, not a wire field
@@ -256,5 +361,10 @@ since `MapUpdate` collapses both to `ok == false`. Producer wiring (the
 - Consumer: [codebase/750.md](../codebase/750.md) (the streaming adapter, built);
   T7 held-`session/prompt` primitive
   [#751](https://github.com/pyrycode/pyrycode/issues/751).
+- [codebase/1401.md](../codebase/1401.md) — background-task payload shapes
+  (`BackgroundTaskStarted`/`Updated`/`Roster`, ADR 027 divergence 7); consumed by
+  the still-pending `MapUpdate` arms
+  ([#1402](https://github.com/pyrycode/pyrycode/issues/1402)) and producer
+  ([#1400](https://github.com/pyrycode/pyrycode/issues/1400)).
 </content>
 </invoke>
