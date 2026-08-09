@@ -123,9 +123,26 @@ func MapUpdate(ev turnevent.Event) (update any, msgID string, ok bool)
 | `ThoughtChunk{MessageID,Text}` | `AgentThoughtChunk{…, Content:{Type:"text", Text}}` | `MessageID` | `true` |
 | `ToolStart{…}` | `ToolCall{…, Kind:string(e.Kind), Status:"pending", RawInput, Locations}` | `""` | `true` |
 | `ToolUpdate{…}` | `ToolCallUpdate{…, Status:string(e.Status), Content:mapToolContent(e.Content)}` | `""` | `true` |
+| `BackgroundTaskStarted{…}` | `BackgroundTaskStarted{…, TaskID, ToolCallID, Description, TaskType, TruncatedFields}` (#1402) | `""` | `true` |
+| `BackgroundTaskUpdated{…}` | `BackgroundTaskUpdated{…, TaskID, Patch, TruncatedFields}` (#1402) | `""` | `true` |
+| `BackgroundTaskRoster{…}` | `BackgroundTaskRoster{…, Tasks:mapBackgroundTasks(e.Tasks), DroppedTasks}` (#1402) | `""` | `true` |
 | `TurnEnd` | `nil` | `""` | `false` |
 | `Stall` | `nil` | `""` | `false` |
-| `nil` / unknown (`default`) | `nil` | `""` | `false` |
+| `ThinkingProgress` / `ApiRetry` / `Compacting` / `Unrecognized` / `PermissionRequest` (`default`) | `nil` | `""` | `false` |
+| `nil` | `nil` | `""` | `false` |
+
+`turnevent.Event` is a sealed sum of **14** variants (`PermissionRequest`'s marker
+sits in `internal/turnevent/permission.go`, outside `event.go`'s own — stale —
+enumeration). After #1402, `MapUpdate` names **9**: 7 return `ok == true` (the
+four original plus the three background-task arms above), and `TurnEnd`/`Stall`
+are matched by name for a documented reason and return `ok == false`. The other
+**5** named, existing variants fall to `default:` — `ThinkingProgress`,
+`ApiRetry`, `Compacting`, `Unrecognized` (all built by `streamsup`'s parser) and
+`PermissionRequest` (built in `internal/modalbridge`, travelling the **modal**
+path rather than the `Event` stream, divergence 2 / #752) — plus a nil `Event`,
+which is not itself a variant. None of the five is future or impossible; the
+`default` arm stays explicit only so a genuinely *new* producer variant surfaces
+as a visible drop rather than silently vanishing.
 
 - **`update` is `any`** — the payload structs share no marker interface; the
   consumer `json.Marshal`s it directly under the `session/update` params. The
@@ -143,10 +160,9 @@ func MapUpdate(ev turnevent.Event) (update any, msgID string, ok bool)
   new `tool_call` is emitted with the ACP default `pending`
   (`turnevent.ToolStatusPending`), and no content (a new invocation has no result
   yet — content first appears via a `ToolCallUpdate`).
-- **Zero-value / nil-safe.** A nil `ev` (or any impossible future sealed variant)
-  falls to `default → (nil, "", false)`. The `default` arm is kept explicit so a
-  new producer variant surfaces as a visible drop rather than silently vanishing —
-  the same posture as the `turnbridge` template.
+- **Zero-value / nil-safe.** A nil `ev` falls to `default → (nil, "", false)`
+  alongside the five named variants above — see the `default:` set right after
+  the mapping table.
 
 ### Two exhaustive helpers
 
@@ -163,18 +179,24 @@ Both pure, both mirroring `turnbridge.resultSummary`'s sealed-switch discipline:
   `{Path,Line}`; returns `nil` for empty input so the payload's `locations` field
   is omitted.
 
-## Background-task payload shapes — declared, not yet wired ([#1401](https://github.com/pyrycode/pyrycode/issues/1401))
+## Background-task payload shapes — declared and wired ([#1401](https://github.com/pyrycode/pyrycode/issues/1401), [#1402](https://github.com/pyrycode/pyrycode/issues/1402))
 
 claude's background-task lifecycle (`system/task_started` / `task_updated` /
 `background_tasks_changed`, modelled neutrally as `turnevent.BackgroundTaskStarted`
 / `BackgroundTaskUpdated` / `BackgroundTaskRoster`) already reaches a **mobile**
 client ([turnbridge-package.md](turnbridge-package.md), #1393/#1394) but had no
-ACP shape at all until #1401. Four new exported types in `outbound.go`, still
-**unreferenced by `MapUpdate`** — the three neutral variants keep falling to
-`default:` / `ok == false` until [#1402](https://github.com/pyrycode/pyrycode/issues/1402)
-adds the arms, and nothing produces them on the ACP lane until
-[#1400](https://github.com/pyrycode/pyrycode/issues/1400). This is the same
-declare-then-wire split #1393 (types) → #1394 (consumer) used on the mobile lane.
+ACP shape at all until #1401. #1401 declared four new exported types in
+`outbound.go`; #1402 wired the three `MapUpdate` arms (§ above) plus a
+`mapBackgroundTasks` helper (§ below) that maps each roster entry. This was the
+same declare-then-wire split #1393 (types) → #1394 (consumer) used on the mobile
+lane.
+
+**The remaining gap is the producer, not the mapper.** Nothing on the ACP lane
+emits any of the three neutral events yet — `turnbridge.mapEvent`
+(`internal/turnbridge/mapper.go`) has no background-task arm, so a desktop client
+still sees nothing until [#1400](https://github.com/pyrycode/pyrycode/issues/1400)
+gives this lane a producer. `MapUpdate` having an arm is not the lane having a
+producer; the two facts stay separate (ADR 027 divergence 7).
 
 **No in-taxonomy discriminant fits.** ACP's ten `sessionUpdate` variants have no
 background-task shape, and reusing one of the four generic ones was rejected on a
@@ -259,14 +281,34 @@ nothing — every string is already bounded at construction by `streamsup`
 `maxTaskRosterDescription`); a second cap here would be a second place the limit
 is decided.
 
-`TestBackgroundTaskPayloadWireShape` (`outbound_test.go`) locks all four types by
-marshalling payload values directly — there is no `MapUpdate` arm to drive them
-through yet, which is also why they're absent from `TestMapUpdate_WireShape`.
-Four rows, every field distinct and non-zero except the deliberate all-zero empty
-roster row, which leaves `Tasks` nil (never a hand-built `[]BackgroundTask{}`,
-which would marshal to `[]` without exercising `MarshalJSON` at all).
+**`mapBackgroundTasks` — the roster-entry helper (#1402).** Mirrors `mapLocations`
+exactly: `if len(tasks) == 0 { return nil }`, else `make([]BackgroundTask,
+len(tasks))` and an index copy of the four fields. Returning nil for an empty
+input is this helper's **contract**, not an implementation convenience — a
+`[]BackgroundTask{}` built here would be **byte-indistinguishable** from the
+correct mapper (the normalisation above happens in `MarshalJSON`, downstream of
+either choice) and would pass any wire-shape golden while silently moving the
+nil → `[]` guarantee out of the type that owns it. That is why the property is
+asserted twice, on two different subjects: `TestMapUpdate_WireShape`'s empty-roster
+row marshals `MapUpdate`'s actual return and checks the **bytes**
+(`"tasks":[]`), and `TestMapUpdate_EmptyRosterForwardsNilTasks` checks the
+**value** `MapUpdate` hands back has `Tasks == nil`. Neither rung alone covers the
+other's failure mode.
 
-See [codebase/1401.md](../codebase/1401.md).
+`TestBackgroundTaskPayloadWireShape` (`outbound_test.go`) locks all four types by
+marshalling payload values directly, with no mapper in the path. Since #1402 wired
+the three arms, the three payload types are *also* driven through `MapUpdate` by
+`TestMapUpdate_WireShape`, over different fixture values — but
+`TestBackgroundTaskPayloadWireShape` keeps a job of its own: **`BackgroundTask`,
+the roster's entry type, is never a `MapUpdate` return**, so this is its only
+coverage, and pinning all four types independently of the mapper keeps a mapper
+change from masking a renamed tag. Four rows, every field distinct and non-zero
+except the deliberate all-zero empty roster row, which leaves `Tasks` nil (never a
+hand-built `[]BackgroundTask{}`, which would marshal to `[]` without exercising
+`MarshalJSON` at all).
+
+See [codebase/1401.md](../codebase/1401.md) (types) and
+[codebase/1402.md](../codebase/1402.md) (the arms + helper above).
 
 ## Design decisions
 
@@ -307,13 +349,15 @@ struct.
 
 ## Concurrency model
 
-**None.** `MapUpdate`, `mapToolContent`, and `mapLocations` are pure functions —
-no goroutine, no channel, no mutex, no clock read, no shared state. Reentrant and
-race-free by construction; `go test -race` has nothing to catch. `context.Context`
-is correctly absent (no long-running operation). Marshalling happens in the
-consumer, not here, so a marshal failure is the consumer's concern; `RawInput` is
-opaque `json.RawMessage` pass-through, never parsed, so a malformed blob cannot
-fault the mapper. The function is total — no input is rejected, nothing panics.
+**None.** `MapUpdate`, `mapToolContent`, `mapLocations`, and `mapBackgroundTasks`
+(#1402) are pure functions — no goroutine, no channel, no mutex, no clock read, no
+shared state. Reentrant and race-free by construction; `go test -race` has
+nothing to catch. `context.Context` is correctly absent (no long-running
+operation). Marshalling happens in the consumer, not here, so a marshal failure
+is the consumer's concern; `RawInput` is opaque `json.RawMessage` pass-through,
+never parsed, so a malformed blob cannot fault the mapper. The function is
+total — no input is rejected, nothing panics. `mapBackgroundTasks` allocates a
+fresh slice and copies fields; it never retains or mutates the caller's slice.
 
 ## Not `security-sensitive`
 
@@ -323,6 +367,26 @@ streaming I/O and any dispatch decision live in the consumer (#750). Labelling
 this package would track data lineage rather than a security-relevant design
 decision — the same posture as [`turnbridge`](turnbridge-package.md#not-security-sensitive)'s
 outbound half.
+
+**Re-checked for #1402** (labelled `security-sensitive` at the ticket level,
+because the new arms widen the *reach* of two hazardous strings — architect
+security pass PASS, `docs/specs/architecture/1402-acp-background-task-arms.md`
+§ Security review). The conclusion holds, and the reasoning is narrower than "no
+untrusted-party input" alone: claude's output is untrusted-**content**, not
+untrusted-**party** — it runs as the daemon's own child under this system's
+threat model — and the trust boundary where that content is bounded is the
+**producer**, `internal/streamsup/parser.go`, which caps every background-task
+string at construction (`maxTaskFieldID`, `maxTaskDescription`, `maxTaskPatch`,
+`maxTaskRosterDescription`, `maxTaskRosterEntries`). `BackgroundTaskStarted.Description`
+(claude's literal command line) and `BackgroundTaskUpdated.Patch` (an unparsed,
+not-necessarily-valid-JSON blob) become reachable by a third-party ACP host for
+the first time through these arms, but the mapper re-caps neither — a second cap
+here would be a second place the limit is decided, and the two could disagree
+silently. Both are safe to render as inert text; the rendering obligation belongs
+to the **host**, per the `SECURITY:` doc comments #1401 put on the declarations
+(deliberately not restated at the arms, so there is only one copy to keep in
+sync). The package still contains no `exec.Command`, no `sh -c`, and no call
+reaching one — its import set stays `encoding/json` + `internal/turnevent` only.
 
 ## Consumer (built — #750)
 
@@ -343,9 +407,10 @@ since `MapUpdate` collapses both to `ok == false`. Producer wiring (the
 ## Related
 
 - [ADR 027](../decisions/027-acp-mapping.md) — the internal turn-event ↔ ACP
-  mapping contract: § Outbound table (the four mapped variants + `TurnEnd`/`Stall`
+  mapping contract: § Outbound table (the seven mapped variants + `TurnEnd`/`Stall`
   drops), § ACP taxonomy reference (`sessionUpdate` discriminants, tool
-  kinds/statuses, content shapes), § Divergences 1 & 5.
+  kinds/statuses, content shapes), § Divergences 1, 5 & 7 (the background-task
+  extension discriminants and the #1402 gating decision).
 - [turnevent-package.md](turnevent-package.md) (#606) — the neutral pivot model
   `MapUpdate` maps OUT of; its `ToolKind`/`ToolStatus`/`TurnEndReason` values ARE
   the ACP strings, which is why kind/status is identity.
@@ -362,9 +427,7 @@ since `MapUpdate` collapses both to `ok == false`. Producer wiring (the
   T7 held-`session/prompt` primitive
   [#751](https://github.com/pyrycode/pyrycode/issues/751).
 - [codebase/1401.md](../codebase/1401.md) — background-task payload shapes
-  (`BackgroundTaskStarted`/`Updated`/`Roster`, ADR 027 divergence 7); consumed by
-  the still-pending `MapUpdate` arms
-  ([#1402](https://github.com/pyrycode/pyrycode/issues/1402)) and producer
-  ([#1400](https://github.com/pyrycode/pyrycode/issues/1400)).
-</content>
-</invoke>
+  (`BackgroundTaskStarted`/`Updated`/`Roster`, ADR 027 divergence 7).
+- [codebase/1402.md](../codebase/1402.md) — the `MapUpdate` arms +
+  `mapBackgroundTasks` + the six comment-site corrections above; still no
+  ACP-lane producer ([#1400](https://github.com/pyrycode/pyrycode/issues/1400)).

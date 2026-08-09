@@ -57,9 +57,16 @@ func newACPTurnStream(transport *acp.Transport, sessionID string, onTurnEnd func
 // Handle is the turnbridge OnEvent sink: one event maps to at most one
 // session/update notification. TurnEnd and Stall are matched explicitly BEFORE
 // MapUpdate, because MapUpdate collapses both to ok==false and the adapter must
-// distinguish them (a turn-end signal vs a stderr drop). MapUpdate is therefore
-// only ever reached for the four emit-able variants, where ok is always true;
-// the !ok guard below is defensive against a future sealed-Event variant.
+// distinguish them (a turn-end signal vs a stderr drop).
+//
+// Every other event reaches MapUpdate, and two separate counts apply there.
+// MapUpdate has SEVEN ok==true arms (#1402 added the three background-task ones).
+// This lane's producer emits only FOUR of the seven — agent_message_chunk,
+// agent_thought_chunk, tool_call and tool_call_update — because
+// turnbridge.mapEvent has no background-task arm; giving this lane a producer for
+// the other three is #1400. The producer also emits two variants MapUpdate maps
+// to nothing at all, so the !ok branch below is a live drop path rather than a
+// defensive one; see there.
 //
 // Not safe for concurrent use — designed for the producer's single Run goroutine.
 func (a *acpTurnStream) Handle(ev turnevent.Event) {
@@ -94,9 +101,14 @@ func (a *acpTurnStream) Handle(ev turnevent.Event) {
 	// MessageID-keyed delta coalescing, #609, which ACP neither needs nor supports).
 	update, _, ok := acpbridge.MapUpdate(ev)
 	if !ok {
-		// Defensive: unreachable for the four emit-able variants (TurnEnd/Stall are
-		// handled above). A future sealed-Event variant surfaces as a visible drop
-		// rather than silently vanishing.
+		// A LIVE drop path, not a defensive one. turnbridge.mapEvent emits ApiRetry
+		// and Compacting (internal/turnbridge/mapper.go), this lane's producer is
+		// turnbridge.New over that same mapEvent (acp_turn_streams.go), and the
+		// switch above pre-handles only TurnEnd and Stall — so both reach MapUpdate
+		// and return ok==false on every API retry and every compaction. Log and
+		// drop is the whole behaviour. A future sealed-Event variant with no
+		// mapping lands here too and surfaces as the same visible drop rather than
+		// silently vanishing.
 		a.logger.Debug("acp: no session/update mapping; dropped",
 			"event", "acp_turn.unmapped",
 			"kind", eventKind(ev))

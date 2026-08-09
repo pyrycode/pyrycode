@@ -59,8 +59,18 @@ const (
 // reads as in-protocol rather than malformed.
 //
 // Residual risk, recorded in divergence 7: a strict sessionUpdate enum decoder
-// may reject the whole notification. Nothing emits these yet — #1402 owns the
-// MapUpdate arms and the gating decision that risk feeds.
+// may reject the whole notification. The gating decision that risk fed is MADE
+// (#1402): the MapUpdate arms below emit unconditionally, with no gate in this
+// package. There is nothing to gate on — ACP's handshake receives the host's
+// clientCapabilities and ignores them by design (divergence 5) — and this package
+// is stateless by contract, so a gate could not live here anyway; if one is ever
+// wanted it belongs in the consumer.
+//
+// The risk is nevertheless still UNREALISED on this lane, for a narrower reason
+// that must not be conflated with the arms existing: no ACP-lane PRODUCER emits
+// the three neutral events until #1400 (turnbridge.mapEvent has no
+// background-task arm). The mapper having an arm is not the lane having a
+// producer.
 const (
 	SessionUpdateBackgroundTaskStarted = "pyry/background_task_started"
 	SessionUpdateBackgroundTaskUpdated = "pyry/background_task_updated"
@@ -327,10 +337,16 @@ type BackgroundTask struct {
 // field): non-empty only for the two chunk variants, so the consumer can group
 // chunks by message. All stateful grouping is the consumer's (#750).
 //
-// ok is false for the two events with no session/update representation — TurnEnd
-// (it maps to the session/prompt stopReason return, divergence 1) and Stall
-// (internal-only; the consumer writes it to stderr) — and for a nil/unknown
-// Event. What to do with a no-notification outcome is the consumer's job.
+// ok is false for SEVEN of the sealed Event's fourteen variants. Two are matched
+// by name here for a documented reason — TurnEnd (it maps to the session/prompt
+// stopReason return, divergence 1) and Stall (internal-only; the consumer writes
+// it to stderr). The other five reach the default arm: ThinkingProgress,
+// ApiRetry, Compacting, Unrecognized and PermissionRequest — see there for why
+// each. Unrecognized in particular is a NAMED variant this switch does not match,
+// not an unknown type.
+//
+// A nil Event also yields ok == false, but nil is not a variant and is not one of
+// the seven. What to do with a no-notification outcome is the consumer's job.
 func MapUpdate(ev turnevent.Event) (update any, msgID string, ok bool) {
 	switch e := ev.(type) {
 	case turnevent.TextChunk:
@@ -368,6 +384,42 @@ func MapUpdate(ev turnevent.Event) (update any, msgID string, ok bool) {
 			Status:        string(e.Status),
 			Content:       mapToolContent(e.Content),
 		}, "", true
+	case turnevent.BackgroundTaskStarted:
+		// Every claude-derived string on these three arms crosses VERBATIM: the
+		// producer bounded each one at construction (streamsup's maxTaskFieldID,
+		// maxTaskDescription, maxTaskPatch, maxTaskRosterDescription, and
+		// maxTaskRosterEntries for the roster's length), so re-capping here would
+		// be a second place the limit is decided and the two could disagree
+		// silently. The mobile arm makes the same call for the same reason.
+		return BackgroundTaskStarted{
+			SessionUpdate:   SessionUpdateBackgroundTaskStarted,
+			TaskID:          e.TaskID,
+			ToolCallID:      e.ToolCallID,
+			Description:     e.Description,
+			TaskType:        e.TaskType,
+			TruncatedFields: e.TruncatedFields,
+		}, "", true
+	case turnevent.BackgroundTaskUpdated:
+		return BackgroundTaskUpdated{
+			SessionUpdate:   SessionUpdateBackgroundTaskUpdated,
+			TaskID:          e.TaskID,
+			Patch:           e.Patch,
+			TruncatedFields: e.TruncatedFields,
+		}, "", true
+	case turnevent.BackgroundTaskRoster:
+		// Tasks is FORWARDED nil and all (see mapBackgroundTasks): MarshalJSON
+		// above owns the nil -> [] normalisation, and pre-allocating here would
+		// produce identical bytes while hiding it.
+		//
+		// DroppedTasks rides because it is the roster's ONLY truncation report —
+		// the neutral type has no TruncatedFields field at all — so an arm written
+		// by analogy with the two scalar variants above would drop the roster's
+		// whole truncation signal.
+		return BackgroundTaskRoster{
+			SessionUpdate: SessionUpdateBackgroundTaskRoster,
+			Tasks:         mapBackgroundTasks(e.Tasks),
+			DroppedTasks:  e.DroppedTasks,
+		}, "", true
 	case turnevent.TurnEnd:
 		// Divergence 1: end-of-turn is the stopReason RETURN of session/prompt,
 		// not a session/update notification. The consumer resolves the held
@@ -378,10 +430,19 @@ func MapUpdate(ev turnevent.Event) (update any, msgID string, ok bool) {
 		// table). The consumer surfaces it on stderr. Not a session/update.
 		return nil, "", false
 	default:
-		// nil, or any impossible future variant of the sealed Event: no
-		// notification. Kept explicit so a new producer variant surfaces as a
-		// visible drop rather than silently vanishing (same posture as the
-		// template's default arm).
+		// FIVE named, existing variants land here, plus nil: ThinkingProgress,
+		// ApiRetry, Compacting, Unrecognized and PermissionRequest. None of the
+		// five is future and none is impossible. Four have producers that put them
+		// on an Event stream — ApiRetry and Compacting reach here on the ACP lane's
+		// every API retry and every compaction (internal/turnbridge/mapper.go), and
+		// ThinkingProgress and Unrecognized are built by streamsup's parser. The
+		// fifth, PermissionRequest, is a sealed member built in internal/modalbridge
+		// that travels the MODAL path rather than the Event stream (ADR 027
+		// divergence 2 / #752). No notification for any of them.
+		//
+		// Still kept explicit for the forward-looking reason as well: a NEW producer
+		// variant surfaces as a visible drop rather than silently vanishing (same
+		// posture as the template's default arm).
 		return nil, "", false
 	}
 }
@@ -413,6 +474,36 @@ func mapLocations(locs []turnevent.Location) []ToolCallLocation {
 	out := make([]ToolCallLocation, len(locs))
 	for i, l := range locs {
 		out[i] = ToolCallLocation{Path: l.Path, Line: l.Line}
+	}
+	return out
+}
+
+// mapBackgroundTasks maps each turnevent.BackgroundTask to its ACP roster-entry
+// shape, returning nil for an empty input.
+//
+// Returning nil is this helper's CONTRACT, not an implementation convenience —
+// unlike mapLocations above, where nil merely lets an omitempty tag drop the key.
+// BackgroundTaskRoster.MarshalJSON owns the nil -> [] normalisation, and building
+// a []BackgroundTask{} here would produce byte-identical output while moving that
+// normalisation out of the type that owns it. No wire-shape golden can see the
+// difference, which is why the empty case is asserted on the returned VALUE
+// (TestMapUpdate_EmptyRosterForwardsNilTasks) rather than on bytes.
+//
+// The len == 0 prologue is reached only via nil in practice: turnevent's Tasks is
+// documented nil both for an empty roster and when claude omits the key, never an
+// empty non-nil slice. Either input returns nil.
+func mapBackgroundTasks(tasks []turnevent.BackgroundTask) []BackgroundTask {
+	if len(tasks) == 0 {
+		return nil
+	}
+	out := make([]BackgroundTask, len(tasks))
+	for i, t := range tasks {
+		out[i] = BackgroundTask{
+			TaskID:          t.TaskID,
+			TaskType:        t.TaskType,
+			Description:     t.Description,
+			TruncatedFields: t.TruncatedFields,
+		}
 	}
 	return out
 }
