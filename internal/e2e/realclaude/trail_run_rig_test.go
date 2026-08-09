@@ -154,10 +154,10 @@ func trailRigGather(stdout *probeSyncBuffer, needles []string) (trailRunReadings
 	// than re-scanned, because that is the composition a live probe performs.
 	obs := trailWaitForTrailer(stdout, trailRigTrailerWait)
 	readings.BoundFrom = obs.BoundFrom
-	// The runner path is the NOT-READ reading in this slice: no argv is read here,
-	// and tdnRunnerFromArgv's answer to an empty command says precisely that.
-	// Deriving it from this rig's own argv scan below is UNOWNED — no ticket holds
-	// it — so the gate's absence arm reaches only its path-unnamed case here.
+	// The runner path is CONSTANT by construction and FORBIDDEN to close: no
+	// caller's needles carry tdnClaudeNeedle, and this rig runs no claude at all
+	// (:40) — staging one to be read would change what this rig is.
+	// Full reason: trail_ptyrunner_composition_test.go:19-26.
 	readings.Gate = trailGate(trailGateInput{Scan: obs.trailScanResult,
 		RunnerPath: trailRunnerUnread()})
 

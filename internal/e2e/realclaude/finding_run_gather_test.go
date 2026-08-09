@@ -543,11 +543,11 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// than re-scanned, because that is the composition a live probe performs.
 	obs := trailWaitForTrailer(in.Stdout, finGatherTrailerWait)
 	readings.BoundFrom = obs.BoundFrom
-	// The runner path is the NOT-READ reading in this slice: this gather reads no
-	// argv for it, and tdnRunnerFromArgv's answer to an empty command says
-	// precisely that rather than guessing a path. Deriving it from this gather's
-	// own argv scan is UNOWNED — no ticket holds it — so the gate's absence arm
-	// reaches only its path-unnamed case here.
+	// The runner path is the NOT-READ reading here, CONSTANT by construction
+	// rather than an open gap: this gather's needles are the FIFO path alone, and
+	// finding_exit_path_probe_test.go:264-272 forbids adding tdnClaudeNeedle to
+	// them. The gate's absence arm reaches only its path-unnamed case here; full
+	// reason: trail_ptyrunner_composition_test.go:19-26.
 	readings.Gate = trailGate(trailGateInput{Scan: obs.trailScanResult,
 		RunnerPath: trailRunnerUnread()})
 
