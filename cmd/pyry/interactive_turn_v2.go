@@ -271,6 +271,28 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// claude's own lifecycle lines.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ThinkingProgress:
+		// claude's mid-turn proof of life (#1386), taking the same shape as the
+		// status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
+		// transitionTo / endTurn; inTurn, turnID, currentState untouched).
+		//
+		// The reason is specific to this variant. Thinking progress is a READING,
+		// not a state transition — the turn's thinking state is already reported
+		// by turn_state: thinking, driven by ThoughtChunk above. Opening a turn
+		// here would be worse than redundant: the parser emits these during an
+		// inference request that may not have produced any assistant content yet,
+		// so a turn opened on one has no guaranteed end and would wedge the
+		// conversation exactly as opening one on an unrecognized message would.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position
+		// ahead of the reading. Like turn_state these flow through emit() and are
+		// NOT droppable deltas (the droppable set is assistant_delta only, #610),
+		// so they hold queue slots; the producer's rate bound
+		// (streamsup.minThinkingTokensPerEvent, one per 64 tokens of accumulated
+		// delta) is what keeps the count to roughly 1–2 per typical turn, and no
+		// second cap is imposed here.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -466,6 +488,16 @@ func eventKind(ev turnevent.Event) string {
 		return "background_task_updated"
 	case turnevent.BackgroundTaskRoster:
 		return "background_task_roster"
+	case turnevent.ThinkingProgress:
+		// The variant NAME only, for the arms above's reason — though here there
+		// is nothing claude-derived to be tempted by in the first place: both
+		// fields are ints, and neither is returned. The arm exists for the OTHER
+		// call sites (acp_turn_stream.go, stream_turn_busy.go,
+		// stream_turn_drain.go), not for this file's default: the handler case
+		// above claims the variant on this lane, but the ACP surface drops it via
+		// acpbridge's own default and logs the kind, which would otherwise read
+		// "unknown" for a variant the daemon does recognize.
+		return "thinking_progress"
 	default:
 		return "unknown"
 	}

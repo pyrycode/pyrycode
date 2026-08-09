@@ -258,6 +258,34 @@ const (
 	TypeBackgroundTaskRoster  = "background_task_roster"  // binary → phone, outbound v2 background-task snapshot
 )
 
+// Mobile Protocol v2 thinking-progress reading. claude's mid-turn proof of life:
+// during a long assistant turn nothing else crosses the stream-json surface, so
+// a client showing "thinking" cannot separate a slow answer from a wedged one.
+// This frame carries the daemon's translation of claude's system/thinking_tokens
+// line (docs/protocol-mobile.md § thinking_progress).
+//
+// Grouped alone rather than with api_retry/compacting or with the background-task
+// three: it is not a show/clear sub-state with two edges, and its subject is
+// neither the turn's lifecycle nor turn-independent work — it is a periodic
+// READING of work in progress, with no edges at all.
+//
+// The NAME is the daemon's, not claude's, for the reason the background-task
+// block above gives: the wire follows internal/turnevent's VARIANT
+// (turnevent.ThinkingProgress), so a claude rename lands in one place instead of
+// breaking every client at once. The discriminating word is "progress" — what the
+// daemon reports — not "tokens", which is claude's subtype. It also disambiguates
+// against ThoughtChunk, which carries the CONTENT of claude's reasoning and is
+// never forwarded (ADR 025): this frame carries none, so a client that renders it
+// as text has nothing to render.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone event an old phone never receives. The drift
+// detector in internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this lives in the latter.
+const (
+	TypeThinkingProgress = "thinking_progress" // binary → phone, outbound v2 thinking-progress reading
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the

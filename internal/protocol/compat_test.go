@@ -59,6 +59,9 @@ func TestIsKnownAppType(t *testing.T) {
 		{"background_task_started-rejected", TypeBackgroundTaskStarted, false, ErrUnknownType},
 		{"background_task_updated-rejected", TypeBackgroundTaskUpdated, false, ErrUnknownType},
 		{"background_task_roster-rejected", TypeBackgroundTaskRoster, false, ErrUnknownType},
+		// the v2-only thinking-progress reading: an outbound binary → phone event
+		// an old phone never receives, so IsKnownAppType must reject it.
+		{"thinking_progress-rejected", TypeThinkingProgress, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -196,6 +199,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeBackgroundTaskStarted: true,
 	TypeBackgroundTaskUpdated: true,
 	TypeBackgroundTaskRoster:  true,
+	// v2 thinking-progress reading.
+	TypeThinkingProgress: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -255,6 +260,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 background-task vocabulary.
 		TypeBackgroundTaskStarted, TypeBackgroundTaskUpdated,
 		TypeBackgroundTaskRoster,
+		// v2 thinking-progress reading.
+		TypeThinkingProgress,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

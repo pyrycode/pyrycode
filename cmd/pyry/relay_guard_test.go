@@ -139,6 +139,11 @@ var excludedTypes = map[string]string{
 	"TypeBackgroundTaskStarted": "push",
 	"TypeBackgroundTaskUpdated": "push",
 	"TypeBackgroundTaskRoster":  "push",
+
+	// outbound push — the v2 thinking-progress reading (#1386). Outbound-only
+	// like the three above, so it must be excluded here from the moment the
+	// constant exists or Assertion #3 reports it unclassified.
+	"TypeThinkingProgress": "push",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {
