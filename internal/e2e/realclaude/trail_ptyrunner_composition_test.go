@@ -17,8 +17,8 @@ import (
 // It reproduces the composition GIVEN a ptyrunner reading. It does NOT reproduce
 // the path a live run reports, and nothing here may be read as claiming it does:
 // both shipped gathers fill the gate's runner-path field with trailRunnerUnread()
-// by construction (finding_run_gather_test.go:551, :788;
-// trail_run_rig_test.go:161), because tdnClaudeCommand skips any row whose
+// by construction (finding_run_gather_test.go:552, :789;
+// trail_run_rig_test.go:162), because tdnClaudeCommand skips any row whose
 // matched-needle list lacks tdnClaudeNeedle (teardown_liveness_probe_test.go:561-575)
 // and finding_exit_path_probe_test.go:264-272 forbids adding that needle to that
 // gather's scan — it has no finLivePinReduce, so claude's row would land in the
@@ -27,19 +27,22 @@ import (
 //
 // # Why it is green the day it lands
 //
-// No arm reads the runner path, so the composition cannot vary by it — which is
-// the property being pinned rather than a gap. A green pin is worth exactly what
-// it discriminates, so every assertion below is the sole red for one enumerated
+// The chain here is driven over trailFixtureTrailer, which reaches
+// trailGateUsable — an arm that ignores the runner path — so THIS composition
+// cannot vary by it, which is the property being pinned rather than a gap. The
+// general claim that no arm reads the path is gone: #1420's absence arm reads it,
+// and reaches three different cases by it. A green pin is worth exactly what it
+// discriminates, so every assertion below is the sole red for one enumerated
 // mis-implementation, each one demonstrated under `go test -overlay` rather than
 // asserted.
 //
 // The two shipped tests that come closest state neither claim.
 // TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1074) drives the
 // whole chain, but every trailGateCases() row carries trailRunnerUnread(), the
-// indeterminate answer. TestTrailGateIgnoresTheRunnerPath (:963) does drive all
-// five readings, but only over trailGate, and it compares each row AGAINST
-// ITSELF: an edit that moved a Detail under all five readings alike passes it
-// untouched.
+// indeterminate answer. TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm
+// (trailer_admissibility_test.go:1435) does drive all five readings, but only over
+// trailGate, and it compares each row AGAINST ITSELF: an edit that moved a Detail
+// under all five readings alike passes it untouched.
 //
 // # The needle is the whole constant answer, and the sweep is over Detail alone
 //
@@ -48,10 +51,13 @@ import (
 // The needle is the whole string the shipped reader returned.
 //
 // The sweep is over the Detail STRING and never over the marshalled record.
-// trailGateResult carries the reading in its own RunnerPath field by design,
-// echoed unread (trailer_admissibility_test.go:314), and clause B of
-// TestTrailGateIgnoresTheRunnerPath (:996-1000) requires it to arrive intact — so
-// a whole-record sweep for this needle is RED AGAINST A CORRECT BUILD.
+// trailGateResult carries the reading in its own RunnerPath field by design
+// (trailer_admissibility_test.go:333), and clause B of
+// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm (:1468-1473) requires it
+// to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
+// CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420: the
+// absence arm embeds trailReasonAgainstPath's answer, whose prose interpolates no
+// reading, so no arm puts the reading into a Detail.
 //
 // # Two Details carry the no-echo claim, not three
 //

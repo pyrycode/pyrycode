@@ -545,8 +545,9 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	readings.BoundFrom = obs.BoundFrom
 	// The runner path is the NOT-READ reading in this slice: this gather reads no
 	// argv for it, and tdnRunnerFromArgv's answer to an empty command says
-	// precisely that rather than guessing a path. #1374 replaces it with the
-	// reading derived from this gather's own argv scan.
+	// precisely that rather than guessing a path. Deriving it from this gather's
+	// own argv scan is UNOWNED — no ticket holds it — so the gate's absence arm
+	// reaches only its path-unnamed case here.
 	readings.Gate = trailGate(trailGateInput{Scan: obs.trailScanResult,
 		RunnerPath: trailRunnerUnread()})
 

@@ -155,8 +155,9 @@ func trailRigGather(stdout *probeSyncBuffer, needles []string) (trailRunReadings
 	obs := trailWaitForTrailer(stdout, trailRigTrailerWait)
 	readings.BoundFrom = obs.BoundFrom
 	// The runner path is the NOT-READ reading in this slice: no argv is read here,
-	// and tdnRunnerFromArgv's answer to an empty command says precisely that. #1374
-	// replaces it with the reading derived from this rig's own argv scan below.
+	// and tdnRunnerFromArgv's answer to an empty command says precisely that.
+	// Deriving it from this rig's own argv scan below is UNOWNED — no ticket holds
+	// it — so the gate's absence arm reaches only its path-unnamed case here.
 	readings.Gate = trailGate(trailGateInput{Scan: obs.trailScanResult,
 		RunnerPath: trailRunnerUnread()})
 

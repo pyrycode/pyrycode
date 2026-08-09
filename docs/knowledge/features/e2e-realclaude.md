@@ -793,10 +793,12 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   input from a bare `trailScanResult` to `trailGateInput{Scan, RunnerPath}`
   so the gate's input can carry which runner produced the trailer line
   (`terminal_reason` means different things on ptyrunner vs. streamrunner);
-  `RunnerPath` is echoed unread onto a fourth `trailGateResult` field and no
-  arm reads it — proved, not stated, by `TestTrailGateIgnoresTheRunnerPath`
-  (9 rows × 5 readings, byte-identical `Detail`, since #1419's added row).
-  The decision that consumes it is #1374's. See
+  `RunnerPath` is echoed onto a fourth `trailGateResult` field. Until #1420
+  no arm read it; since #1420 exactly one does — the absence arm — and the
+  narrower claim is proved, not stated, by
+  `TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm` (9 rows × 5
+  readings, byte-identical `Detail` on every row but that one, whose variance
+  the same test proves positively). See
   [`codebase/1373.md`](../codebase/1373.md). **#1419** split the
   out-of-contract arm that fires on an empty `terminal_reason` into two: the
   key absent from the line, and the key present with a blank value —
@@ -1095,8 +1097,9 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   since claude can produce the same reading through the passthrough. No
   input byte interpolates into any `Detail`, at all — stronger than the
   AC requires, made structural rather than disciplined. Purely additive, one
-  new 643-line file, zero production files touched, zero callers (#1367/#1368
-  wire it in); nine cross-product rows plus a three-variant
+  new 643-line file, zero production files touched, zero callers on landing —
+  **#1420 is its first decision-path caller**, from `trailGate`'s absence
+  branch; nine cross-product rows plus a three-variant
   indeterminate-outranks-a-qualifying-shape sub-test, 0 SKIP on
   `-run '^TestTrail'`. Code review PASS with one non-blocking SHOULD FIX left
   unfixed — the table's closure-reached-set loop keys off the *expected*
