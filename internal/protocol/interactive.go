@@ -279,6 +279,37 @@ func (p BackgroundTaskRosterPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(p))
 }
 
+// ThinkingProgressPayload is the body of an Envelope whose Type ==
+// TypeThinkingProgress (docs/protocol-mobile.md § thinking_progress, #1386).
+// Binary → phone direction; the wire form of turnevent.ThinkingProgress, the
+// daemon's translation of claude's system/thinking_tokens line. It reports that
+// claude is actively reasoning and roughly how much — claude's only mid-turn
+// proof of life on the stream-json surface.
+//
+// Like turn_state it is a coarse conversation-level signal, NOT turn-scoped, so
+// there is no turn_id, and receiving one neither opens nor closes a turn. The
+// bridge supplies ConversationID because the internal event carries none;
+// claude's own session_id is deliberately absent for BackgroundTaskStartedPayload's
+// reason, and the parser drops it before the event exists (#1380/#1385).
+//
+// Both fields are claude's own integer readings, carried verbatim. There is no
+// TruncatedFields, and its absence is a decision rather than an omission: unlike
+// every sibling above this payload carries no claude-authored TEXT at all, so
+// nothing is ever cut, and a permanently-nil field would claim a bound that does
+// not exist. For the same reason there is no producer byte cap to mirror here.
+//
+// Two consumer hazards ride these numbers and are NOT restated here, because
+// turnevent.ThinkingProgress's field comments are their single source of truth
+// (with the measured numbers): EstimatedTokens is not monotonic across a turn,
+// and the EstimatedTokensDelta values a client receives do not sum to the turn's
+// total. A consumer-facing statement of both, plus the two reasons absence proves
+// nothing, is in docs/protocol-mobile.md § thinking_progress.
+type ThinkingProgressPayload struct {
+	ConversationID       string `json:"conversation_id"`
+	EstimatedTokens      int    `json:"estimated_tokens"`
+	EstimatedTokensDelta int    `json:"estimated_tokens_delta"`
+}
+
 // BackgroundTask is one row of a BackgroundTaskRosterPayload
 // (docs/protocol-mobile.md § background_task_roster, #1394). Its fields are
 // exactly the per-entry keys claude's roster line carries and nothing invented —

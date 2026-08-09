@@ -513,6 +513,62 @@ func TestBackgroundTaskRosterPayload_NilTasksNormalises(t *testing.T) {
 	}
 }
 
+func TestThinkingProgressPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "thinking_progress.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeThinkingProgress {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeThinkingProgress)
+	}
+
+	var payload ThinkingProgressPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	// The two readings carry DIFFERENT fixture values on purpose: equal ones
+	// would let a struct that wired both wire keys to the same field pass.
+	if payload.EstimatedTokens != 184 {
+		t.Errorf("EstimatedTokens: got %d, want %d", payload.EstimatedTokens, 184)
+	}
+	if payload.EstimatedTokensDelta != 37 {
+		t.Errorf("EstimatedTokensDelta: got %d, want %d", payload.EstimatedTokensDelta, 37)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestThinkingProgressType_IsNotClaudesSubtype pins the translation layer this
+// frame exists to preserve. The daemon is the ONE place a claude rename lands;
+// naming the wire type after claude's own `system/thinking_tokens` subtype would
+// undo that, letting a single claude release break every client at once with
+// nothing in between to absorb it. So the constant is the daemon's variant name
+// (turnevent.ThinkingProgress), and the discriminating word is "progress" — what
+// the daemon reports — not "tokens", which is claude's.
+//
+// The substring check is what makes this non-vacuous rather than a restatement
+// of the constant: it goes red for "thinking_tokens", for "thinking_tokens_
+// progress", and for any other name derived from claude's subtype, not just for
+// the exact literal. It is scoped to the TYPE constant only — the payload's
+// FIELD names legitimately contain "tokens", because those are readings of
+// tokens and no client dispatches on them.
+func TestThinkingProgressType_IsNotClaudesSubtype(t *testing.T) {
+	if TypeThinkingProgress == "thinking_tokens" {
+		t.Errorf("wire type is claude's subtype %q; it must be the daemon's own name", TypeThinkingProgress)
+	}
+	if strings.Contains(TypeThinkingProgress, "tokens") {
+		t.Errorf("wire type %q is derived from claude's subtype (contains %q)", TypeThinkingProgress, "tokens")
+	}
+	if TypeThinkingProgress != "thinking_progress" {
+		t.Errorf("wire type: got %q, want %q", TypeThinkingProgress, "thinking_progress")
+	}
+}
+
 // maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
 // (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
 // purpose: nothing in internal/protocol enforces the cap — the transport does —
