@@ -1518,7 +1518,11 @@ func TestDropcapClassification(t *testing.T) {
 		{
 			name: "rate_limit_event", line: `{"type":"rate_limit_event"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
-			why: "the second ignoredLineTypes member; AC2 covers it on the same terms",
+			why: "CORRECTED (#1404): no longer the second ignoredLineTypes member — the type is " +
+				"MAPPED now, from its own arm in streamsup's consumeLine. The verdict is unchanged " +
+				"and is derived rather than declared: this line carries no decodable rate_limit_info, " +
+				"which is emitRateLimit's rung 3, so the shipped parser makes no rate-limit claim for " +
+				"it and dropcapClassify's default arm still reads it as a drop",
 		},
 		{
 			name: "user with no mappable block", line: `{"type":"user","message":{"role":"user","content":[]}}`,

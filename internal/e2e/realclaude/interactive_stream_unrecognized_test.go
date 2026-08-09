@@ -6,11 +6,20 @@ package realclaude
 // most valuable assertion in the unrecognized-message feature.
 //
 // The stream parser splits claude's output two ways. What we knowingly ignore
-// stays silent: rate_limit_event whole, and every `system` subtype the parser
-// does not map — which since #1380/#1381 is every subtype but the handful
-// streamsup.emitSystemSubtype carves out into background-task events (that
-// switch is the one enumeration site; restating the set here would only go
-// stale). Anything else surfaces to the client as an unrecognized_message frame,
+// stays silent: every `system` subtype the parser does not map — which since
+// #1380/#1381 is every subtype but the handful streamsup.emitSystemSubtype carves
+// out into background-task events (that switch is the one enumeration site;
+// restating the set here would only go stale).
+//
+// CORRECTED 2026-08-09 (#1404): rate_limit_event is no longer part of that
+// knowingly-ignored half. It is MAPPED, from its own arm in
+// streamsup.consumeLine, and a line that arm does not turn into a
+// turnevent.RateLimited is still silent — but by that arm consuming it, not by
+// streamsup.ignoredLineTypes, which is down to `system` alone. Either way it
+// still reaches no client as an unrecognized_message, which is what this test
+// asserts and why the correction does not weaken it.
+//
+// Anything else surfaces to the client as an unrecognized_message frame,
 // so a claude version that moves something meaningful into a new message type
 // becomes visible the moment it arrives instead of vanishing into a debug log
 // the production daemon does not print.

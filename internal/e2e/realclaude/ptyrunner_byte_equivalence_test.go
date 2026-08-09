@@ -85,6 +85,18 @@ type additiveDriftAllowlist struct {
 // API-only, and none is read by agent-dispatcher.
 var expectedStreamRunnerOnly = additiveDriftAllowlist{
 	Events: map[string]struct{}{
+		// RELOCATED HERE 2026-08-09 (#1404), from the parserIgnoredTypes entry that
+		// ticket deleted, and it must not be "cleaned up": shapeFilterDrops consults
+		// the one-sided tables BEFORE parserDropsShape, so this entry is now the ONLY
+		// thing keeping rate_limit_event out of the cross-runner SEQUENCE comparison.
+		// It used to be belt-and-braces with the parserIgnoredTypes entry; the belt is
+		// gone. Deleting this line would put a streamrunner-only envelope into a
+		// sequence compared against zero on the ptyrunner side, which is #1218's
+		// measured RED and costs a real-claude run to discover.
+		//
+		// The fact below is independent of, and unchanged by, the parser mapping the
+		// line: whether pyrycode's parser makes an event out of rate_limit_event says
+		// nothing about whether ptyrunner can emit the envelope.
 		"rate_limit_event": {}, // #503 audit 2026-05-23: API-stream event, structurally unreachable from claude's local JSONL (which ptyrunner tails). Dispatcher default-case preview log only — no semantic consumption.
 	},
 	ResultTrailerFields: map[string]struct{}{
@@ -195,12 +207,16 @@ var parserIgnoredTypes = map[string]parserMappedSubtypes{
 	// expectedStreamRunnerOnlySubtypes below, without which the live sequence
 	// comparison goes RED.
 	"system": {"task_started": {}, "task_updated": {}, "background_tasks_changed": {}, "thinking_tokens": {}},
-	// #1218: parser-ignored whole — nil, i.e. no mapped subtypes, no exceptions.
-	// Also in expectedStreamRunnerOnly.Events — independently true (streamrunner
-	// emits it, ptyrunner cannot) and that entry still governs the SET check.
-	// shapeFilterDrops consults the one-sided tables first, so carrying it twice
-	// does not change the filter.
-	"rate_limit_event": nil,
+	// CORRECTED 2026-08-09 (#1404): rate_limit_event's entry is GONE. It was
+	// `nil` — parser-ignored whole, no exceptions — and the shipped parser now maps
+	// the type (→ turnevent.RateLimited) from its own arm in consumeLine's main
+	// switch, so the entry became a false statement about the parser and
+	// TestParserIgnoredTypesMatchesStreamsupParser's dropped arm would fail on it.
+	// Its fixture in parserIgnoredTypeFixtures went with it, forced by that test's
+	// orphan check. The fact the deleted comment carried — that shapeFilterDrops
+	// consults the one-sided tables first — moved to
+	// expectedStreamRunnerOnly.Events' entry, which is now the only thing keeping
+	// the type out of the sequence comparison.
 }
 
 // parserDropsShape reports whether the shipped streamsup parser drops a line of
@@ -1201,9 +1217,14 @@ var parserIgnoredTypeFixtures = map[string][]string{
 		`{"type":"system","subtype":"task_updated"}`,
 		`{"type":"system","subtype":"background_tasks_changed"}`,
 	},
-	"rate_limit_event": {
-		`{"type":"rate_limit_event"}`,
-	},
+	// CORRECTED 2026-08-09 (#1404): the rate_limit_event entry is GONE, forced by
+	// TestParserIgnoredTypesMatchesStreamsupParser's orphan check — every key here
+	// must have a parserIgnoredTypes member, and that member left when the parser
+	// started mapping the type. The line is NOT relocated elsewhere in this file:
+	// its purpose was to exercise the mirror's claim against the shipped parser, and
+	// the mirror no longer makes a claim about this type, so there is nothing left
+	// for it to exercise. Its VERDICT is preserved by TestDropcapClassification's
+	// rate_limit_event row, which drives the same bytes through the same parser.
 }
 
 // fixtureShape decodes one fixture line the same two-field way extractShapes
