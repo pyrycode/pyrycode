@@ -163,11 +163,12 @@ forge a turn boundary:
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
 | `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other block surfaces as `Unrecognized{Site: user_block}` **except one exact 100-byte payload** (#1247, below), dropped in silence |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
-| `system` (unmapped subtypes), `rate_limit_event` | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
+| `system` (unmapped subtypes) | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
 | `system/task_started` | one `BackgroundTaskStarted` (#1380, below) |
 | `system/task_updated` | one `BackgroundTaskUpdated` (#1382, below) |
 | `system/background_tasks_changed` | one `BackgroundTaskRoster` (#1381, below) — the family's one **aggregate** variant |
 | `system/thinking_tokens` | **at most one** `ThinkingProgress` per `minThinkingTokensPerEvent` (64) tokens of accumulated `estimated_tokens_delta` (#1385, below) — the family's one **rate-bounded** variant; most lines emit nothing |
+| `rate_limit_event` | one `turnevent.RateLimited` **unless** `rate_limit_info.status` is the one measured-benign value or the line carries no decodable `rate_limit_info` (#1404, below) — the family's **first non-`system` mapping**, and the one whose gate suppresses the common case rather than the rare one |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
@@ -186,7 +187,9 @@ bare stream-json surface on 2026-07-27, three turns each on two models, one call
   prevent. Until 2026-08-07 that argument was implemented by ignoring `system` **wholesale**; #1380
   refines it (below) rather than reversing it — `system` stays on `ignoredLineTypes` unchanged, and one
   measured subtype is now mapped inside that same ignored branch.
-- `rate_limit_event` is ignored, ~1 per run.
+- `rate_limit_event` fires ~1 per run. **MAPPED since 2026-08-09 (#1404)** — it is no longer a member of
+  `ignoredLineTypes` (the map is down to `{"system": true}`); it has its own arm in `consumeLine`'s main
+  switch, gated on `status`, below.
 - The measurement also settled a standing question: claude does **not** echo the delivered prompt back
   as a `user`/`text` message on this surface, though it does on the agent-run surface. So `user`/`text`
   needs no ignore entry, and one appearing in future is a real change that surfaces.
@@ -253,6 +256,38 @@ kills the turn's liveness signal for the rest of the turn; subtracted, both oper
 by the invariant `acc ∈ [0, bound-1]`, so the failure is unrepresentable. `thinkingSinceEmit` resets
 unconditionally on `consumeLine`'s `result` arm (both result subtypes) — the parser's one turn boundary.
 See [codebase/1385.md](../codebase/1385.md).
+
+**`rate_limit_event` → `turnevent.RateLimited` is the fifth mapping, the first that is not a `system`
+subtype, and its substance is a gate rather than the field copy (#1404).** claude emits this line **once
+per run** whatever the state of the usage-limit window — `status` reads `"allowed"` in all three captures
+on record (three claude versions), i.e. every run that produced one hit no limit at all — so a 1:1
+mapping would put one "you are rate limited" event on every healthy turn. `status` is the discriminator,
+with three reachable readings, all decided and stated at `emitRateLimit`: (1) `status ==
+benignRateLimitStatus` ("allowed") → silence; (2) `status` non-empty and not the benign value → one
+`RateLimited`, because the failure direction is the safe one — an unrecognised status surfaces and a human
+looks, rather than a real limit vanishing; (3) `rate_limit_info` absent, present-but-empty, or the line
+fails to decode → silence, **not** emit — the naive "emit unless status is allowed" reading is rejected,
+because an absent container answered with "emit" turns a container rename into a per-run noise row on
+every healthy run forever (the worse failure), whereas answering it with silence produces a false negative
+on a condition that has never fired once in three captures. The cost is named rather than hidden: a
+container rename is undetected by any automatic test, and the only backstop is the live drop census (the
+same one that surfaced this payload in the first place, #1260) still recording the dropped line's shape.
+`RateLimited{Status, LimitType, ResetsAt int64, TruncatedFields}` — `Status`/`LimitType` bounded by
+`maxRateLimitField` (256, ~28× the observed 7–9 byte values — wide because the value set beyond the one
+benign status is unmeasured); `ResetsAt` is claude's unix-seconds number passed through **unbounded and
+unvalidated in both directions** (not `time.Time` — converting would invent a claim the bytes do not
+make). No rate bound: once-per-run is measured, not enforced, so an adversarial or buggy claude emitting
+many non-benign lines produces many events (an accepted, named exposure, not a mechanised one, per
+evidence-based fix selection). The variant is a **report, never a control input** — nothing in the daemon
+may key a behaviour on it. `session_id`/`uuid` are absent from the decode target itself, as with the
+background-task family; so are the payload's four `overage*` keys, two of which are measured
+version-variable across claude 2.1.158/2.1.199/2.1.220. The drop site logs one message
+(`rateLimitDropMsg`) with a `reason` drawn from a closed keyword set — `Status` never reaches a log, since
+it is the one claude-authored value on this line and the field a drop site is most tempted to explain
+itself with. `cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a fifth mapped arm
+(`turnevent.RateLimited → "rate_limited"`, name only); `turnbridge.MapEvent`, `acpbridge.MapUpdate`, and
+`stream_turn_busy.go`'s opener whitelist all correctly drop it through their existing `default:` arms — no
+protocol type and no bridge route exist yet, that is #1405. See [codebase/1404.md](../codebase/1404.md).
 
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
@@ -1049,6 +1084,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1330.md`](../codebase/1330.md) — the rotation-delivery gate (`BeginRotation`/`turnTarget`, `rotating`/`rotateGen` under `mu`) that closes #1295's Open question 4: no turn accepted once a `new_session` rotation has begun is written into the outgoing child.
 - [`codebase/1380.md`](../codebase/1380.md) — the `system` subtype dispatch mechanism (`emitSystemSubtype`) and its first mapping, `system/task_started` → `turnevent.BackgroundTaskStarted`; fixes #1240's symptom. `task_updated` (#1382) and `background_tasks_changed` (#1381) extend the same mapped set.
 - [`codebase/1385.md`](../codebase/1385.md) — the fourth arm, `system/thinking_tokens` → `turnevent.ThinkingProgress`, and the parser's first rate-bounded mapping / first piece of cross-line state.
+- [`codebase/1404.md`](../codebase/1404.md) — the fifth arm and the first non-`system` mapping, `rate_limit_event` → `turnevent.RateLimited`, gated on `status` so a once-per-run report doesn't become a per-turn noise row; `ignoredLineTypes` is down to `{"system": true}`.
 - [`codebase/1240.md`](../codebase/1240.md) — the symptom #1380 fixes the cause of: `turn_end`/`end_turn` and state `idle` while a backgrounded command claude started is provably still alive.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
