@@ -249,9 +249,10 @@ const (
 // detector in internal/protocol/compat_test.go partitions Type* constants
 // between inboundAppTypeSet and v2OnlyTypes; these three live in the latter.
 //
-// This ticket (#1393) is wire vocabulary only. internal/turnbridge's MapEvent
-// still returns ok == false for all three variants, so nothing emits these
-// frames yet; the mapping and the docs/protocol-mobile.md section are #1394.
+// The declaring ticket (#1393) was wire vocabulary only; #1394 added
+// internal/turnbridge's MapEvent cases for all three variants and the
+// docs/protocol-mobile.md section, so these frames now reach an interactive v2
+// mobile client.
 const (
 	TypeBackgroundTaskStarted = "background_task_started" // binary → phone, outbound v2 background-task open
 	TypeBackgroundTaskUpdated = "background_task_updated" // binary → phone, outbound v2 background-task change
@@ -315,10 +316,11 @@ const (
 // detector in internal/protocol/compat_test.go partitions Type* constants between
 // inboundAppTypeSet and v2OnlyTypes; this lives in the latter.
 //
-// This ticket (#1405) is wire vocabulary only. internal/turnbridge's MapEvent has
-// no case for turnevent.RateLimited, so nothing emits this frame yet; the mapping
-// is #1406. Unlike #1393 the docs/protocol-mobile.md section lands with the shape
-// rather than with the producer, because #1406 disclaims the file.
+// The declaring ticket (#1405) was wire vocabulary only; #1410 added
+// internal/turnbridge's MapEvent case for turnevent.RateLimited and cmd/pyry's
+// handler case, so this frame now reaches an interactive v2 mobile client. Unlike
+// #1393 the docs/protocol-mobile.md section landed with the shape rather than with
+// the producer, because #1410 disclaimed the file.
 const (
 	TypeRateLimited = "rate_limited" // binary → phone, outbound v2 usage-limit report
 )

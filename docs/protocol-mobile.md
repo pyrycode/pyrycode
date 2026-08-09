@@ -445,7 +445,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`background_task_updated`** | binary → phone | no | **New in v2** (interactive, capability-gated). A background task claude already started changed (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`background_task_roster`** | binary → phone | no | **New in v2** (interactive, capability-gated). Snapshot of the background tasks claude is tracking; an empty list says nothing is alive (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`thinking_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude is actively reasoning, and roughly how much — its only mid-turn proof of life on the stream-json surface (#1386). Rate-bounded; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`rate_limited`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's usage-limit window is in a state other than the one measured-benign one — why, which limit, and when claude says it lifts (#1405). Shape declared by #1405, emitted from #1406; nothing produces it today. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`rate_limited`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's usage-limit window is in a state other than the one measured-benign one — why, which limit, and when claude says it lifts (#1405). Shape declared by #1405, emitted since #1410. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -928,9 +928,10 @@ Like every frame in this section it is **binary → phone only**, reaches only a
 phone whose `interactive` capability was echoed in `hello_ack`, and carries an
 envelope-level `event_id` for replay.
 
-**Not emitted yet.** The shape is declared by #1405 so a client can be written
-against it; #1406 wires the producer. Nothing in the daemon maps
-`turnevent.RateLimited` outbound today, so no live traffic carries this frame.
+**Emitted since #1410.** The shape was declared by #1405 so a client could be
+written against it; #1410 wired the producer — `internal/turnbridge`'s `MapEvent`
+maps `turnevent.RateLimited` outbound and `cmd/pyry`'s interactive turn emitter
+pushes the frame, so live traffic carries it.
 
 `rate_limited` exists because a turn that stops making progress because of a
 usage limit otherwise says nothing about why. claude reports the usage-limit
