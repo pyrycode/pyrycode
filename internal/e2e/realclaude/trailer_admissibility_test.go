@@ -62,6 +62,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -120,8 +121,11 @@ const (
 	// admissibility predicate needs that reason to name the void.
 	trailGateBudgetFired = "gate-budget-fired"
 	// trailGateOutOfContract: the input is not a reading. Reporting any of its
-	// three sub-cases as absent would file a caller's bug under "pyry never
-	// finished the turn".
+	// four sub-cases as absent would file a caller's bug under "pyry never
+	// finished the turn". Four rather than three since #1419: the empty
+	// terminal_reason split into the key being ABSENT from the line and the key
+	// being PRESENT AND BLANK, which are one decoded "" and two different
+	// records. Same value, same uncertified reason — only the Detail says which.
 	trailGateOutOfContract = "gate-out-of-contract"
 )
 
@@ -300,7 +304,7 @@ func trailDetail(format string, args ...any) string {
 //
 // # The runner path is CARRIED, never read
 //
-// in.RunnerPath reaches every return site and no branch. Not one of the seven
+// in.RunnerPath reaches every return site and no branch. Not one of the eight
 // arms consults it, and not one Detail interpolates it: every Detail here is
 // fixed prose over this file's own constants and the scan's own state, which is
 // the doctrine trailReasonAgainstPath states for itself at
@@ -365,14 +369,44 @@ func trailGate(in trailGateInput) trailGateResult {
 
 	reason := in.Scan.Trailer.TerminalReason
 	if reason == "" {
+		// The decode collapses two shapes here and the key names separate them
+		// (trailer_key_names_test.go:14-24). PRESENCE IS MEMBERSHIP, and the two
+		// readings it is not are both live mistakes rather than invented ones:
+		//
+		//   - NEVER decodedReason != "". That is the collapse #1357's reading was
+		//     landed to prevent (trailer_terminal_reason_test.go:196-199), and
+		//     inside this block it is always false — so it would route every input
+		//     to the absence arm SILENTLY.
+		//   - NEVER len(KeyNames) > 0. A scan-produced absence carries the six
+		//     names the line did have, merely missing this one, so cardinality
+		//     reads it as PRESENT.
+		//
+		// Both arms answer trailGateOutOfContract and certify nothing, so no closed
+		// set grows and no consumer gains an arm; what is added is WHICH SHAPE
+		// ARRIVED. Neither reads in.RunnerPath, and neither Detail interpolates a
+		// key name — see the no-echo argument at trailGateResult and the check at
+		// TestTrailAdmissibilityRecordsCarryNoCapturedBytes.
+		if !slices.Contains(in.Scan.KeyNames, trailReasonKeyName) {
+			return trailGateResult{
+				Value: trailGateOutOfContract,
+				Detail: trailDetail("state %s carries a trailer with NO terminal_reason key on the "+
+					"line. Nothing is certified. Unlike a present-and-empty one this shape HAS a "+
+					"live repro: on PYRY_USE_STREAMJSON=1 streamrunner passes claude's bytes "+
+					"through unchanged (runner.go:177-179) and synthesises one only when the "+
+					"idle-stall watchdog fired and claude emitted no result (:250-253), so a "+
+					"healthy run's trailer is claude's own result line. WHICH absence — owed or "+
+					"not owed — is NOT DECIDED AT THIS ARM", trailSeen),
+				RunnerPath: in.RunnerPath,
+			}
+		}
 		return trailGateResult{
 			Value: trailGateOutOfContract,
-			Detail: trailDetail("state %s carries a trailer whose terminal_reason is empty. "+
-				"Certifying it would reintroduce, one layer up, the defect the nil Trailer "+
-				"pointer was chosen to prevent. Today's pyry cannot render a blank one — "+
-				"emitter.go:383-391 is a chokepoint substituting the recorded detail or "+
-				"\"unclassified\" before marshalling — so this is a contract check on a "+
-				"hand-built input and NO LIVE REPRO EXISTS", trailSeen),
+			Detail: trailDetail("state %s carries a trailer whose terminal_reason is empty — the "+
+				"key IS on the line and its value is blank. Certifying it would reintroduce, one "+
+				"layer up, the defect the nil Trailer pointer was chosen to prevent. Today's pyry "+
+				"cannot render a blank one — emitter.go:383-391 is a chokepoint substituting the "+
+				"recorded detail or \"unclassified\" before marshalling — so for this shape, and "+
+				"not for an absent key, NO LIVE REPRO EXISTS", trailSeen),
 			RunnerPath: in.RunnerPath,
 		}
 	}
@@ -630,7 +664,7 @@ func trailReapLine(count int, pgids string) string {
 // which row was claude's — never a claim that the run took the other path, which
 // is exactly what tdnRunnerFromArgv answers with its own indeterminate string.
 //
-// Both gathers and all eight fixture rows go through this one function, so the
+// Both gathers and all nine fixture rows go through this one function, so the
 // two sides of C2's whole-struct equality (finding_run_gather_test.go:778) cannot
 // drift apart. #1374 replaces the gathers' use of it with the reading derived
 // from each gather's own argv scan; the fixture rows keep it.
@@ -639,16 +673,54 @@ func trailReapLine(count int, pgids string) string {
 // in this family (trail_run_rig_test.go:119).
 func trailRunnerUnread() string { return tdnRunnerFromArgv("") }
 
-// trailGateCases returns every gate input under test. The four rows that can be
+// trailGateAbsentReasonScan is the ABSENCE shape the gate's #1419 arm decides:
+// trailScan over a line carrying "type":"result" and no terminal_reason key at
+// all — claude's own result line, the healthy trailer on the headless
+// PYRY_USE_STREAMJSON=1 path.
+//
+// # Going through trailScan is a REQUIREMENT, not a preference
+//
+// The scan yields KeyNames of the SIX names the line did carry, merely missing
+// terminal_reason. A hand-built trailScanResult with KeyNames nil is the natural
+// copy-paste from the sibling below and looks equivalent, and it is not: an
+// implementation reading presence as `len(KeyNames) > 0` reads nil as absent
+// too, answers such a row CORRECTLY, and is left red nowhere. That mutation is
+// the second of the two #1419 enumerates, and this fixture is the only reason it
+// can fire at all.
+//
+// A function rather than a package-level var, for trailExpectedKeyNames()' own
+// reason (trailer_key_names_test.go:115-117): the value holds a []string and a
+// *resultTrailer, go test -race runs this package's tests in parallel, and a
+// shared backing array would let one row's mutation reach another's.
+func trailGateAbsentReasonScan() trailScanResult {
+	return trailScan([]byte(trailKeyNamesNoTerminalReason() + "\n"))
+}
+
+// trailGateEmptyReasonScan is the PRESENT-AND-EMPTY shape: the same line with
+// "terminal_reason":"" on it. It differs from the fixture above in exactly one
+// key (trailer_key_names_test.go:158-161), and the two decode to an identical
+// "" — which is the premise TestTrailKeyNamesSeparatesAbsenceFromZeroValue
+// already asserts and this file inherits rather than re-derives.
+//
+// It replaces the hand-built trailScanResult{State: trailSeen, Trailer:
+// &resultTrailer{Type: "result"}} this row used to carry. Under a key-name
+// reading that record was ABSENT, not present-and-empty, so left unrepaired the
+// present-and-empty arm would be unreachable from this suite and both of the
+// sub-test's Detail assertions would pass against the absence arm instead.
+func trailGateEmptyReasonScan() trailScanResult {
+	return trailScan([]byte(trailKeyNamesEmptyTerminalReason() + "\n"))
+}
+
+// trailGateCases returns every gate input under test. The six rows that can be
 // produced by the real scan go through trailScan rather than a hand-built
 // record, so the reachable arms stay pinned to what the shipped producer
-// actually emits; the four that trailScan CANNOT emit are hand-built, because
+// actually emits; the three that trailScan CANNOT emit are hand-built, because
 // that is precisely what the contract checks exist for.
 //
 // Every row carries the same runner path, because #1373 adds no arm that reads
 // one: a row varying it would suggest a distinction the gate does not make. The
 // sweep that VARIES it is TestTrailGateIgnoresTheRunnerPath, which drives these
-// same eight rows under all five readings.
+// same nine rows under all five readings.
 func trailGateCases() []trailGateCase {
 	return []trailGateCase{
 		{
@@ -701,9 +773,23 @@ func trailGateCases() []trailGateCase {
 			want: trailGateOutOfContract,
 		},
 		{
-			name: "a seen state whose terminal_reason is empty is out of contract",
-			in: trailGateInput{Scan: trailScanResult{State: trailSeen,
-				Trailer: &resultTrailer{Type: "result"}}, RunnerPath: trailRunnerUnread()},
+			name: "a seen state whose terminal_reason is present and empty is out of contract",
+			in: trailGateInput{Scan: trailGateEmptyReasonScan(),
+				RunnerPath: trailRunnerUnread()},
+			want: trailGateOutOfContract,
+		},
+		{
+			// #1419's added row, and the one that keeps clause B of
+			// TestTrailGateIgnoresTheRunnerPath TOTAL: after the repair above no
+			// other row is absence-shaped, so without this one the absence arm is
+			// the single return site no fixture reaches and an arm that forgot
+			// RunnerPath: in.RunnerPath there could hide behind the seven that
+			// carried it. It carries trailRunnerUnread() like every other row,
+			// which is what keeps trail_ptyrunner_composition_test.go:38's
+			// totality claim true and untouched.
+			name: "a seen state whose terminal_reason is absent from the line is out of contract",
+			in: trailGateInput{Scan: trailGateAbsentReasonScan(),
+				RunnerPath: trailRunnerUnread()},
 			want: trailGateOutOfContract,
 		},
 	}
@@ -871,26 +957,67 @@ func TestTrailGate(t *testing.T) {
 	}
 
 	t.Run("the out-of-contract details name their own sub-case", func(t *testing.T) {
-		// Three inputs reach one value, so without this the three arms are
-		// indistinguishable in a published record and a reader cannot tell a
-		// nil pointer from an unfilled reason.
+		// Four inputs reach one value, so without this the four arms are
+		// indistinguishable in a published record: a reader cannot tell a nil
+		// pointer from a state nobody defined, nor — since #1419 — a
+		// terminal_reason that is ON the line and blank from one that is not on
+		// the line at all. The last two decode identically to "", so the Detail
+		// is the ONLY channel that says which record arrived.
+		//
+		// Each of the two #1419 arms asserts its OWN markers and the OTHER's
+		// ABSENCE. That is what makes a row red on its own when its own case
+		// misroutes, rather than merely detecting that the two Details differ —
+		// which a swap of the two arms would leave green.
 		nilTrailer := trailGate(trailGateInput{Scan: trailScanResult{State: trailSeen},
 			RunnerPath: trailRunnerUnread()})
 		if !strings.Contains(nilTrailer.Detail, "nil trailer") {
 			t.Errorf("nil-trailer detail: got %q, want it to name the nil trailer",
 				nilTrailer.Detail)
 		}
-		emptyReason := trailGate(trailGateInput{
-			Scan:       trailScanResult{State: trailSeen, Trailer: &resultTrailer{}},
+		emptyReason := trailGate(trailGateInput{Scan: trailGateEmptyReasonScan(),
 			RunnerPath: trailRunnerUnread()})
 		if !strings.Contains(emptyReason.Detail, "terminal_reason is empty") {
 			t.Errorf("empty-reason detail: got %q, want it to name the empty terminal reason",
 				emptyReason.Detail)
 		}
-		if !strings.Contains(emptyReason.Detail, "NO LIVE REPRO EXISTS") {
-			t.Errorf("empty-reason detail: got %q, want it to say no live repro exists — pyry "+
-				"cannot render a blank terminal_reason today, and a detail implying it can "+
-				"would send a reader hunting for a run that does not exist", emptyReason.Detail)
+		if !strings.Contains(emptyReason.Detail, "not for an absent key, NO LIVE REPRO EXISTS") {
+			t.Errorf("empty-reason detail: got %q, want the no-live-repro claim SCOPED to this "+
+				"shape — emitter.go:383-391 is a chokepoint so pyry cannot render a blank "+
+				"terminal_reason, but that says nothing about an ABSENT one, which every "+
+				"healthy PYRY_USE_STREAMJSON=1 run produces. Unscoped, the claim sends a "+
+				"reader hunting for a run that does not exist while mis-describing the one "+
+				"that does", emptyReason.Detail)
+		}
+		if strings.Contains(emptyReason.Detail, "NOT DECIDED AT THIS ARM") {
+			t.Errorf("empty-reason detail: got %q, want it NOT to carry the absence arm's marker "+
+				"— this input's terminal_reason IS on the line, and reaching the absence arm "+
+				"would publish the wrong record about it", emptyReason.Detail)
+		}
+		absentReason := trailGate(trailGateInput{Scan: trailGateAbsentReasonScan(),
+			RunnerPath: trailRunnerUnread()})
+		if !strings.Contains(absentReason.Detail, "NO terminal_reason key on the line") {
+			t.Errorf("absent-reason detail: got %q, want it to name the key as off the line",
+				absentReason.Detail)
+		}
+		// The tail phrase of that Detail, so an overlong reword goes red HERE
+		// rather than shipping a record reachCapCommand silently truncated.
+		if !strings.Contains(absentReason.Detail, "NOT DECIDED AT THIS ARM") {
+			t.Errorf("absent-reason detail: got %q, want it to say WHICH absence is not decided "+
+				"here — a path that owes a terminal_reason and one that owes none are opposite "+
+				"readings, and this arm sees only the scan", absentReason.Detail)
+		}
+		if strings.Contains(absentReason.Detail, "terminal_reason is empty") {
+			t.Errorf("absent-reason detail: got %q, want it NOT to describe the key as empty — "+
+				"the key is not on the line at all, and \"empty\" is the other arm's record",
+				absentReason.Detail)
+		}
+		if strings.Contains(absentReason.Detail, "NO LIVE REPRO EXISTS") {
+			t.Errorf("absent-reason detail: got %q, want it NOT to claim no live repro exists — "+
+				"that claim is TRUE of a present-and-empty terminal_reason and FALSE of an "+
+				"absent one, whose live repro is every healthy PYRY_USE_STREAMJSON=1 run "+
+				"(streamrunner passes claude's bytes through unchanged, runner.go:177-179). "+
+				"This is the assertion that catches the old prose copy-pasted onto the new arm",
+				absentReason.Detail)
 		}
 		unknown := trailGate(trailGateInput{Scan: trailScanResult{State: "some-state-nobody-defined"},
 			RunnerPath: trailRunnerUnread()})
@@ -944,13 +1071,21 @@ func trailGateRunnerReadings() []string {
 // # Two clauses keep the sweep from passing vacuously
 //
 //   - The readings are pairwise distinct. Two collapsed answers would silently
-//     shrink 40 comparisons to fewer, and the count is precisely the thing the
-//     ticket had to correct from the shipped "three".
+//     shrink forty-five comparisons to fewer, and the count is precisely the
+//     thing the ticket had to correct from the shipped "three".
 //   - The arriving reading is READ BACK from outside the gate. A sweep that built
-//     its input without filling the path would otherwise pass forty identical
+//     its input without filling the path would otherwise pass forty-five identical
 //     comparisons while proving nothing about carriage. This assertion is TOTAL
-//     over the gate's seven return sites — the eight rows reach all seven — so an
+//     over the gate's eight return sites — the nine rows reach all eight — so an
 //     arm that forgot to carry the field cannot hide behind an arm that did.
+//
+// Totality is restored by COVERAGE rather than narrowed. #1419 split the empty
+// terminal_reason into an absent-key arm and a present-and-empty one, and after
+// its fixture repair no other row is absence-shaped — trailFixtureTrailer and
+// trailPaddedTrailer both carry a named terminal_reason and the other five rows
+// return before the reason check. The absence arm would therefore have been the
+// one return site no row reached, so #1419 added the row that reaches it rather
+// than softening this clause to "reach most of".
 //
 // # The copies alias one *resultTrailer, deliberately not mutated
 //
@@ -1032,7 +1167,7 @@ func TestTrailGateIgnoresTheRunnerPath(t *testing.T) {
 
 func TestTrailAdmitAttribution(t *testing.T) {
 	// One anchored line naming the held group, classified by the real producer
-	// rather than hand-built — the same reason TestTrailGate routes four rows
+	// rather than hand-built — the same reason TestTrailGate routes six rows
 	// through trailScan. It pins the proof arm to a record tdnClassifyReapLog
 	// actually emits.
 	const heldPGID = 7788
@@ -1240,6 +1375,23 @@ func TestTrailGateThenAdmit(t *testing.T) {
 // they can be published unreviewed. Both assertions are deterministic: the
 // needle can only reach either record by a field copy or by a Detail quoting the
 // input's captured string, and neither record does either.
+//
+// # The key NAMES are a third surface, and the first two rungs cannot see it
+//
+// #1419's arms decide on trailScanResult.KeyNames, so the most natural Detail
+// for the absence arm is one saying which keys the line DID carry. Those names
+// come from claude, they are deliberately unbounded at their own tier
+// (trailer_key_names_test.go:55-59 defers the per-name cap to #1363 BECAUSE
+// trailScanResult is published by nothing), and trailGateResult IS published.
+//
+// Two separate things stop the rung above from covering it. Its input leaves
+// KeyNames nil and carries TerminalReason "completed", so it reaches
+// trailGateUsable and neither #1419 arm — a Detail interpolating a name would
+// pass it untouched. And the shipped rule "no VALUE from the trailer enters the
+// record" does not forbid it either: A KEY NAME IS NOT A VALUE, which is exactly
+// the distinction trailKeyNames was built on. The third sub-test is therefore a
+// rung of its own rather than a widening of the first, whose premise is a
+// well-formed input reaching the usable arm.
 func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 	t.Run("the gate result carries nothing from the scanned line", func(t *testing.T) {
 		got := trailGate(trailGateInput{
@@ -1290,6 +1442,74 @@ func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 		if bytes.Contains(encoded, []byte(trailNeedle)) {
 			t.Errorf("the marshalled admissibility result carries pyry's captured stderr: %s",
 				encoded)
+		}
+	})
+
+	t.Run("the gate result carries no key name from the line", func(t *testing.T) {
+		// Both rows are hand-built rather than scan-produced, deliberately: the
+		// needle has to BE a key name, and trailScan reads the names off real
+		// JSON. That is admissible here because the rows assert nothing about
+		// what the producer emits — only about what the gate renders from what it
+		// is handed. The reachability of the two arms is proven from the
+		// scan-produced fixtures in TestTrailGate.
+		tests := []struct {
+			name     string
+			keyNames []string
+			want     string
+			marker   string
+		}{
+			{
+				name: "the absent-key arm",
+				// No trailReasonKeyName, so the arm decides ABSENT.
+				keyNames: []string{"result", trailNeedle, "type"},
+				want:     trailGateOutOfContract,
+				marker:   "NO terminal_reason key on the line",
+			},
+			{
+				name:     "the present-and-empty arm",
+				keyNames: []string{"result", trailNeedle, trailReasonKeyName, "type"},
+				want:     trailGateOutOfContract,
+				marker:   "terminal_reason is empty",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				got := trailGate(trailGateInput{
+					Scan: trailScanResult{
+						State:    trailSeen,
+						Line:     `{"type":"result","` + trailNeedle + `":1}`,
+						Trailer:  &resultTrailer{Type: "result"},
+						KeyNames: tc.keyNames,
+						Detail:   "a scan detail that also carries " + trailNeedle,
+					},
+					RunnerPath: trailRunnerUnread(),
+				})
+
+				// THE NON-VACUITY PRECONDITION, in two parts. The value alone is
+				// not enough: four arms answer trailGateOutOfContract, so a row
+				// that reached a different one would sweep the wrong Detail and
+				// report clean about an arm it never ran.
+				if got.Value != tc.want {
+					t.Fatalf("value: got %q (%s), want %q", got.Value, got.Detail, tc.want)
+				}
+				if !strings.Contains(got.Detail, tc.marker) {
+					t.Fatalf("detail: got %q, want it to carry %q — this row must reach the arm it "+
+						"is named for, or the sweep below says nothing about that arm",
+						got.Detail, tc.marker)
+				}
+
+				encoded, err := json.Marshal(got)
+				if err != nil {
+					t.Fatalf("marshalling the gate result: %v", err)
+				}
+				if bytes.Contains(encoded, []byte(trailNeedle)) {
+					t.Errorf("the marshalled gate result carries a key name read off claude's "+
+						"line: %s — the names are attacker-influenced in principle and unbounded "+
+						"at this tier, and every arm's Detail must stay fixed prose over this "+
+						"file's own constants and file cites", encoded)
+				}
+			})
 		}
 	})
 }

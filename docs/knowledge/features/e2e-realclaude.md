@@ -795,8 +795,18 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   (`terminal_reason` means different things on ptyrunner vs. streamrunner);
   `RunnerPath` is echoed unread onto a fourth `trailGateResult` field and no
   arm reads it — proved, not stated, by `TestTrailGateIgnoresTheRunnerPath`
-  (8 rows × 5 readings, byte-identical `Detail`). The decision that consumes
-  it is #1374's. See [`codebase/1373.md`](../codebase/1373.md).
+  (9 rows × 5 readings, byte-identical `Detail`, since #1419's added row).
+  The decision that consumes it is #1374's. See
+  [`codebase/1373.md`](../codebase/1373.md). **#1419** split the
+  out-of-contract arm that fires on an empty `terminal_reason` into two: the
+  key absent from the line, and the key present with a blank value —
+  discriminated by scan-produced `KeyNames` membership
+  (`slices.Contains(keyNames, trailReasonKeyName)`), never by the decoded
+  value or by cardinality, both of which collapse the two shapes. Both
+  arms still answer `trailGateOutOfContract` with an empty `Reason`, so the
+  five-value gate allowlist and every downstream consumer are unchanged; only
+  the published `Detail` — and which of the gate's now-eight return sites a
+  given input reaches — changed. See [`codebase/1419.md`](../codebase/1419.md).
   `trailAdmitAttribution(tdnReapOutcome, certified string) trailAdmitResult`
   maps the reap attribution onto a seven-value allowlist — one admissible
   value (`trailAdmitProof`, requiring verdict `tdnReapHeldPGIDKilled`,
@@ -1697,3 +1707,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1337](https://github.com/pyrycode/pyrycode/issues/1337) — live entry point measuring whether `pyry agent-run`'s ptyrunner default reaches its normal exit path while a claude-auto-backgrounded command is still running; composes #1338/#1340/#1342/#1343 without re-deriving any of them, adds `ExitStatus` to #1340's `finLiveRunHandle`; split from #1305, blocked by #1340; codebase note at [`codebase/1337.md`](../codebase/1337.md).
 - Ticket [#1349](https://github.com/pyrycode/pyrycode/issues/1349) — parameterises #1340's `finLiveRunStage` with the staging delta (previously hardcoded) and ships `finLiveStageStreamEnvDelta()`, the `PYRY_USE_STREAMJSON=1` sibling of #1342's delta, so #1353 can stage a probe on the headless stream path through the existing rig; re-derives the driver's doc comment site by site for a caller passing either delta, correcting the `cmd.Wait` goroutine's fd argument in the process; no live turn staged, no production code touched; split from #1237; codebase note at [`codebase/1349.md`](../codebase/1349.md).
 - Ticket [#1415](https://github.com/pyrycode/pyrycode/issues/1415) — offline pin of the composition `trailGate` → `trailAdmitAttribution` → `trailClassifyRun` under a ptyrunner reading, closing the gap between #1373's `RunnerPath` field and the two shipped tests that come close but don't claim this (`TestTrailRunComposesWithGateCases` runs every row on the indeterminate reading; `TestTrailGateIgnoresTheRunnerPath` drives all five readings but only over `trailGate`, comparing each row against itself); nine assertions, nine `go test -overlay` mutations, 1:1; zero production files; split from #1368 ← #1351 ← #1237; codebase note at [`codebase/1415.md`](../codebase/1415.md).
+- Ticket [#1419](https://github.com/pyrycode/pyrycode/issues/1419) — splits `trailGate`'s empty-`terminal_reason` arm into an absent-key arm and a present-and-empty arm, so the published `Detail`'s scoped `NO LIVE REPRO EXISTS` claim stops being false of the shape every healthy `PYRY_USE_STREAMJSON=1` run produces (claude's own `result` line, no `terminal_reason` key at all); presence is read from scan-produced `KeyNames` membership, never the decoded value or cardinality — both mandated mutations verified sole-red under `go test -overlay`; repairs the two shipped empty-reason fixtures (were hand-built with `KeyNames` unset, i.e. absence-shaped under the new reading) to scan-produced records and adds a ninth `trailGateCases()` row so `TestTrailGateIgnoresTheRunnerPath`'s carriage totality is restored by coverage; adds a key-name leak rung to the no-captured-bytes sweep (the security review's MUST FIX) — SHOULD FIX left open, sole-red truncation blind spot when an echo lands in the last ~32 bytes of the absence Detail's 512-byte cap; no closed set grows, no consumer gains an arm; split from #1416; codebase note at [`codebase/1419.md`](../codebase/1419.md).
