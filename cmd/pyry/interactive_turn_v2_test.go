@@ -1766,3 +1766,236 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksEventKindNamesTheVariant(t *tes
 		})
 	}
 }
+
+// AC#1: a turnevent.ThinkingProgress reaches a mobile client as a
+// thinking_progress frame carrying conversation identity and both of the event's
+// integer readings — and only a phone that negotiated `interactive` receives it.
+// The two readings differ in the fixture so a handler that wired one field to
+// both wire keys goes red here.
+func TestInteractiveTurnEmitterV2_ThinkingProgressFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.ThinkingProgress{EstimatedTokens: 184, EstimatedTokensDelta: 37})
+
+	if got := len(bcast.pushes); got != 1 {
+		t.Fatalf("pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	}
+	p := bcast.pushes[0]
+	if p.connID != "a" {
+		t.Fatalf("pushed to conn %q; want interactive conn %q", p.connID, "a")
+	}
+	if p.env.Type != protocol.TypeThinkingProgress {
+		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeThinkingProgress)
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatalf("non-interactive conn b received the %s frame", protocol.TypeThinkingProgress)
+	}
+
+	var got protocol.ThinkingProgressPayload
+	if err := json.Unmarshal(p.env.Payload, &got); err != nil {
+		t.Fatalf("decode thinking_progress payload: %v", err)
+	}
+	want := protocol.ThinkingProgressPayload{
+		ConversationID:       testConvID,
+		EstimatedTokens:      184,
+		EstimatedTokensDelta: 37,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload:\n got %#v\nwant %#v", got, want)
+	}
+	// The wire literal is the daemon's own name for the event, never claude's
+	// system/thinking_tokens subtype nor anything derived from it. Asserted on
+	// the envelope BYTES reaching the conn, which a constant splice cannot
+	// launder; internal/protocol's TestThinkingProgressType_IsNotClaudesSubtype
+	// pins the constant itself.
+	if bytes.Contains([]byte(p.env.Type), []byte("tokens")) {
+		t.Fatalf("wire type %q is derived from claude's subtype", p.env.Type)
+	}
+	if p.env.Type != "thinking_progress" {
+		t.Fatalf("wire type literal: got %q, want %q", p.env.Type, "thinking_progress")
+	}
+}
+
+// AC#2: a thinking-progress frame opens and closes no turn. It is handled bare
+// before any turn and emits only its own frame — no turn_state, no turn_end —
+// and the tracker's inTurn/turnID/currentState are asserted directly, then a
+// following content event is driven through to prove a fresh turn still opens.
+func TestInteractiveTurnEmitterV2_ThinkingProgressNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.ThinkingProgress{EstimatedTokens: 5, EstimatedTokensDelta: 5})
+
+	// A turn_state anywhere in the sequence is the observable signature of a
+	// transitionTo call, so the exact single-frame sequence is the assertion.
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeThinkingProgress}) {
+		t.Fatalf("bare thinking_progress envelopes: got %v, want [%s]", got, protocol.TypeThinkingProgress)
+	}
+	if e.inTurn {
+		t.Error("thinking_progress opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("thinking_progress minted a turn id: got %q, want empty", e.turnID)
+	}
+	if e.currentState != "" {
+		t.Errorf("thinking_progress set currentState: got %q, want empty", e.currentState)
+	}
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeThinkingProgress,
+		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-thinking_progress envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after thinking_progress: got %v, want [responding]", got)
+	}
+}
+
+// AC#2: mid-turn, buffered assistant text keeps its wire position AHEAD of the
+// frame, and the open turn survives the interleave untouched.
+//
+// The load-bearing part is the event driven PAST the frame. A frame-local check
+// passes even if the handler called endTurn, because the damage only shows on
+// the NEXT event, when a fresh turn gets minted — the same unpinned-guard shape
+// #1385 hit. So the second delta's turn_id and seq are what actually bite here.
+func TestInteractiveTurnEmitterV2_ThinkingProgressMidTurnDoesNotDisturbOpenTurn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
+	beforeTurnID, beforeState := e.turnID, e.currentState
+	if !e.inTurn {
+		t.Fatal("precondition: a turn must be open before the interleave")
+	}
+
+	e.Handle(context.Background(), turnevent.ThinkingProgress{EstimatedTokens: 184, EstimatedTokensDelta: 37})
+
+	if !e.inTurn {
+		t.Error("thinking_progress closed the open turn; inTurn must stay true")
+	}
+	if e.turnID != beforeTurnID {
+		t.Errorf("thinking_progress changed turnID: got %q, want %q", e.turnID, beforeTurnID)
+	}
+	if e.currentState != beforeState {
+		t.Errorf("thinking_progress changed currentState: got %q, want %q", e.currentState, beforeState)
+	}
+
+	// Drive one event past the frame: this is what catches an endTurn.
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m2", Text: "a2"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,        // responding
+		protocol.TypeAssistantDelta,   // a1, flushed AHEAD of the frame
+		protocol.TypeThinkingProgress, // no surrounding turn_state
+		protocol.TypeAssistantDelta,   // a2, flushed by turn_end
+		protocol.TypeTurnEnd,          //
+		protocol.TypeTurnState,        // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn thinking_progress envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
+	}
+	if deltas[0].TurnID != beforeTurnID || deltas[1].TurnID != beforeTurnID {
+		t.Fatalf("thinking_progress split the turn: %q, %q want both %q", deltas[0].TurnID, deltas[1].TurnID, beforeTurnID)
+	}
+	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("thinking_progress disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
+	}
+}
+
+// AC#3: a turn producing no ThinkingProgress produces no such frames, so an
+// ordinary turn gains no traffic. The EXACT pushed sequence is asserted, not
+// merely "no thinking_progress present" — an emit accidentally made
+// unconditional shows up as an extra frame anywhere in the sequence, which an
+// absence check placed on the wrong property would miss.
+func TestInteractiveTurnEmitterV2_OrdinaryTurnEmitsNoThinkingProgressFrames(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.ThoughtChunk{Text: "reasoning"},
+		turnevent.TextChunk{Text: "hello"},
+		turnevent.ToolStart{ToolCallID: "t1", Title: "Bash", RawInput: json.RawMessage(`{"command":"ls"}`)},
+		turnevent.ToolUpdate{ToolCallID: "t1", Status: turnevent.ToolStatusCompleted, Content: turnevent.TextContent{Text: "ok"}},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	// Unchanged from main: a thinking turn's frames are exactly these six.
+	wantTypes := []string{
+		protocol.TypeTurnState,      // thinking
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // hello
+		protocol.TypeToolUse,        // Bash
+		protocol.TypeToolResult,     // ok
+		protocol.TypeTurnEnd,        // end_turn
+		protocol.TypeTurnState,      // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("ordinary-turn envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+}
+
+// eventKind's thinking-progress arm is live code and content-free. The arm is
+// NOT for this emitter's default (the handler case above claims the variant
+// first) but for eventKind's other call sites — acp_turn_stream.go,
+// stream_turn_busy.go, stream_turn_drain.go — where the ACP surface drops the
+// variant via acpbridge's own default and logs the kind. Without the arm those
+// logs read kind=unknown for a variant the daemon does recognize. The
+// empty-cursor drop is the reachable eventKind call site on this lane.
+func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), turnevent.ThinkingProgress{EstimatedTokens: 184, EstimatedTokensDelta: 37})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=thinking_progress") {
+		t.Fatalf("log does not name the variant (want kind=thinking_progress):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for thinking_progress:\n%s", logs)
+	}
+	// Both readings are claude's own integers; neither ever reaches a log.
+	for _, reading := range []string{"184", "37"} {
+		if strings.Contains(logs, reading) {
+			t.Fatalf("claude-authored reading %q leaked into the kind log:\n%s", reading, logs)
+		}
+	}
+}

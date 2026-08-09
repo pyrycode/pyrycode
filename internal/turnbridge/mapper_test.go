@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
@@ -425,6 +426,56 @@ func TestMapEvent(t *testing.T) {
 				t.Fatalf("event:\n got %#v\nwant %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+// AC#4: on the PTY surface a mobile client receives no thinking-progress frames
+// at all. mapEvent is the SOLE entry into turnevent on that surface — a
+// tui-driver Event is the only input a ptyrunner-driven session has — so proving
+// that no EventKind yields a ThinkingProgress proves that no thinking_progress
+// frame can reach a phone attached to one.
+//
+// The premise is already pinned live upstream and needs no re-measuring here:
+// internal/e2e/realclaude/ptyrunner_byte_equivalence_test.go's
+// expectedStreamRunnerOnlySubtypes records that ptyrunner emits ZERO
+// system/thinking_tokens lines (#1218 measured it twice, #1385 committed it) and
+// the pre-ship gate enforces it. This test is the daemon-side half: even if such
+// a line did appear, the PTY path has no route to this event.
+//
+// The loop bound is deliberately NOT load-bearing, which is why this sweeps the
+// enum instead of adding one explicit drop row per kind: mapEvent's own
+// `default: return nil, false` means any kind outside the range — including one
+// tui-driver adds tomorrow — drops, and dropping IS AC#4's outcome. The sweep is
+// also a strict improvement on TestMapEvent's explicit drop rows, which today
+// miss EventKindPtyMidResponseErrorShown/Hidden and EventKindError.
+//
+// "Every other frame it receives is unchanged" is discharged structurally: this
+// change is additive, so TestMapEvent's existing rows stay byte-identical and
+// green above.
+func TestMapEvent_PtySurfaceNeverProducesThinkingProgress(t *testing.T) {
+	t.Parallel()
+
+	tc := TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7}
+	mapped := 0
+	for k := tuidriver.EventKindUnknown; k <= tuidriver.EventKindError; k++ {
+		ev, ok := mapEvent(kindEvent(k))
+		if _, isProgress := ev.(turnevent.ThinkingProgress); isProgress {
+			t.Errorf("EventKind %d mapped to turnevent.ThinkingProgress; the PTY surface must never produce it", k)
+		}
+		if !ok {
+			continue
+		}
+		mapped++
+		typ, _, wireOK := MapEvent(ev, tc)
+		if wireOK && typ == protocol.TypeThinkingProgress {
+			t.Errorf("EventKind %d reached the wire as %q; the PTY surface must never produce it", k, typ)
+		}
+	}
+	// Non-vacuity: a mapEvent that dropped EVERYTHING would satisfy every
+	// assertion above while proving nothing, so pin that the sweep really did
+	// carry events through to MapEvent.
+	if mapped == 0 {
+		t.Fatal("no EventKind mapped at all; the sweep proved nothing — did mapEvent move?")
 	}
 }
 

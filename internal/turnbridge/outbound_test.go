@@ -322,6 +322,49 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			// The two readings differ, so a mapping that wired one field to both
+			// wire keys goes red here rather than passing on a symmetric fixture.
+			name:    "ThinkingProgress -> thinking_progress, both readings verbatim",
+			ev:      turnevent.ThinkingProgress{EstimatedTokens: 184, EstimatedTokensDelta: 37},
+			tc:      tc,
+			wantTyp: protocol.TypeThinkingProgress,
+			wantPayload: protocol.ThinkingProgressPayload{
+				ConversationID: "c1", EstimatedTokens: 184, EstimatedTokensDelta: 37,
+			},
+			wantOK: true,
+		},
+		{
+			// The "not turn-scoped" claim under TEST, not merely under comment: tc
+			// here carries a non-empty TurnID and a non-zero Seq, and the expected
+			// payload has no field either could land in. reflect.DeepEqual against
+			// this literal is what makes it bite — a payload that grew a turn_id
+			// field and populated it from tc would differ from the want value.
+			// TestThinkingProgressPayloadHasNoTurnAddressing below covers the wire
+			// bytes, which a struct comparison alone cannot.
+			name:    "ThinkingProgress ignores turn addressing (not turn-scoped)",
+			ev:      turnevent.ThinkingProgress{EstimatedTokens: 5, EstimatedTokensDelta: 5},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeThinkingProgress,
+			wantPayload: protocol.ThinkingProgressPayload{
+				ConversationID: "c1", EstimatedTokens: 5, EstimatedTokensDelta: 5,
+			},
+			wantOK: true,
+		},
+		{
+			// {0,0} is a legitimate reading, exactly as ApiRetry's {0,0} counter is
+			// a legitimate "count unknown". No suppression branch: the producer's
+			// rate bound already governs which lines earn an event, and a second,
+			// differently-shaped filter here would silently diverge from it.
+			name:    "ThinkingProgress zero value maps rather than dropping",
+			ev:      turnevent.ThinkingProgress{},
+			tc:      tc,
+			wantTyp: protocol.TypeThinkingProgress,
+			wantPayload: protocol.ThinkingProgressPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{
@@ -423,6 +466,47 @@ func TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The frame is conversation-scoped, and the assertion runs on the BYTES
+// json.Marshal produces from the value MapEvent returned — not on a struct
+// comparison. A struct comparison cannot see a turn id that arrived through an
+// embedded field or a marshaller, and "carries no turn_id" is a claim about what
+// a phone decodes, so it is checked where a phone would see it. The turn context
+// fed in is deliberately conspicuous: both its TurnID and its Seq would be
+// greppable in the output if either leaked.
+func TestMapEventThinkingProgressCarriesNoTurnAddressing(t *testing.T) {
+	t.Parallel()
+
+	typ, payload, ok := MapEvent(
+		turnevent.ThinkingProgress{EstimatedTokens: 184, EstimatedTokensDelta: 37},
+		TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+	)
+	if !ok {
+		t.Fatal("ThinkingProgress was dropped by the mapping; it must reach the wire")
+	}
+	if typ != protocol.TypeThinkingProgress {
+		t.Fatalf("typ: got %q, want %q", typ, protocol.TypeThinkingProgress)
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal mapped payload: %v", err)
+	}
+	got := string(b)
+	for _, want := range []string{
+		`"conversation_id":"c1"`,
+		`"estimated_tokens":184`,
+		`"estimated_tokens_delta":37`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("mapped bytes missing %s:\n%s", want, got)
+		}
+	}
+	for _, notWant := range []string{`turn_id`, `t-must-not-appear`, `"seq"`, `42`} {
+		if strings.Contains(got, notWant) {
+			t.Errorf("mapped bytes carry turn addressing %q:\n%s", notWant, got)
+		}
 	}
 }
 

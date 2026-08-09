@@ -186,6 +186,28 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Tasks:          tasks,
 			DroppedTasks:   e.DroppedTasks,
 		}, true
+	case turnevent.ThinkingProgress:
+		// Conversation identity only, like the status peers above: tc.TurnID and
+		// tc.Seq are ignored and the payload has no field for either. It is a
+		// periodic READING of an inference request in flight, not a turn-scoped
+		// fact — claude restarts the cumulative count at every inference-request
+		// boundary, so attributing a reading to a turn would misdescribe it.
+		//
+		// Both ints cross verbatim, including a zero-value {0,0}: that is a
+		// legitimate reading exactly as ApiRetry's {0,0} counter is a legitimate
+		// "count unknown". No suppression branch here — the producer's rate bound
+		// (streamsup.minThinkingTokensPerEvent) already decides which of claude's
+		// lines earn an event, and a second, differently-shaped filter in this
+		// adapter would silently diverge from it.
+		//
+		// There is nothing to cap or truncate: the event carries no
+		// claude-authored text at all, which is why it has no TruncatedFields to
+		// carry across (see turnevent.ThinkingProgress).
+		return protocol.TypeThinkingProgress, protocol.ThinkingProgressPayload{
+			ConversationID:       tc.ConversationID,
+			EstimatedTokens:      e.EstimatedTokens,
+			EstimatedTokensDelta: e.EstimatedTokensDelta,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false

@@ -444,6 +444,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`background_task_started`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude started work that outlives the turn that spawned it (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`background_task_updated`** | binary → phone | no | **New in v2** (interactive, capability-gated). A background task claude already started changed (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`background_task_roster`** | binary → phone | no | **New in v2** (interactive, capability-gated). Snapshot of the background tasks claude is tracking; an empty list says nothing is alive (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`thinking_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude is actively reasoning, and roughly how much — its only mid-turn proof of life on the stream-json surface (#1386). Rate-bounded; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -518,7 +519,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These twelve envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These thirteen envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
 
 **Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable, per-conversation id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in emit order per conversation. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
@@ -646,12 +647,11 @@ So the parser has **two tiers**, and the split is the whole design:
   four `system` subtypes internally (`task_started`, `task_updated`,
   `background_tasks_changed`, `thinking_tokens`) to daemon-owned `turnevent`
   types — see [streamsup-package.md](knowledge/features/streamsup-package.md).
-  Three of the four now reach this wire under their own daemon-owned names
-  (#1394): `background_task_started`, `background_task_updated` and
-  `background_task_roster`, documented below. `thinking_tokens` still stops at
-  the daemon boundary — `turnbridge.MapEvent` has no case for it, so it drops
-  there the same way an unmapped subtype does. Every other `system` subtype is
-  still silently dropped exactly as before, and none of this changes what
+  All four now reach this wire under their own daemon-owned names, and all
+  four are documented below: `background_task_started`,
+  `background_task_updated` and `background_task_roster` (#1394), and
+  `thinking_tokens` as `thinking_progress` (#1386). Every other `system`
+  subtype is still silently dropped exactly as before, and none of this changes what
   surfaces as `unrecognized_message` — a subtype the parser doesn't recognize
   at all still falls through to the silent-drop tier, not this frame.
 - **Genuinely unrecognized** — everything else. Surfaces as this frame.
@@ -836,9 +836,82 @@ a **list** of command lines is a more tempting shape to feed somewhere structure
 than a single one. Render every row as inert text; never execute, re-shell, or
 feed it to an HTML sink, an attribute, or a URL.
 
+#### `thinking_progress`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose turn is reasoning. |
+| `estimated_tokens` | int | claude's estimate of the tokens it has spent thinking as of the emitting line. Cumulative within **one inference request**, not within a turn — see below. |
+| `estimated_tokens_delta` | int | claude's per-line increment, exactly as it appeared on the line that produced this frame. |
+
+Like every frame in this section it is **binary → phone only**, reaches only a
+phone whose `interactive` capability was echoed in `hello_ack`, and carries an
+envelope-level `event_id` for replay.
+
+`thinking_progress` (#1386) exists because it is claude's **only** mid-turn proof
+of life on the stream-json surface: during a long assistant turn nothing else
+crosses the wire, so a client showing "thinking" for three minutes cannot
+otherwise separate a slow answer from a wedged session. The frame's name is the
+daemon's, not claude's — claude's line is `system/thinking_tokens`, and the
+daemon translates it so that a claude rename lands in one place rather than
+breaking every client at once. Do not key a client on claude's vocabulary.
+
+It carries **no reasoning text**. The frame says only *that* claude is reasoning
+and roughly how much; the content of claude's thinking is never forwarded on this
+wire (ADR 025). A client that tries to render it as text has nothing to render.
+
+Five things a client will otherwise get wrong. Each is measured, not inferred,
+and the numbers below come from one committed capture of a single turn.
+
+**1. It is conversation-scoped, not turn-scoped.** There is no `turn_id`, and
+receiving one **neither opens nor closes a turn** — it drives no turn lifecycle
+at all. It is a *reading*, not a state transition: the turn's thinking state is
+already reported by `turn_state: thinking`. The daemon emits these during an
+inference request that may not have produced any assistant content yet, so a turn
+opened on one would have no guaranteed end.
+
+**2. The frames are rate-bounded and do not enumerate claude's lines.** The
+daemon emits at most one frame per **64 tokens of accumulated delta**, so strictly
+fewer frames cross this wire than claude emits lines: on the committed capture,
+**33 lines became 8 frames**. Do not treat a frame as "claude produced one line",
+and do not count frames to count anything of claude's.
+
+**3. `estimated_tokens` is not monotonic.** It restarts near zero at **every
+inference-request boundary**, which happens repeatedly inside a single turn — the
+committed capture's one turn contains **four restarts**: the reading ran 5→184,
+then 4→167, then 3→126, then 1→197. Two readings must therefore **never be
+subtracted expecting a non-negative result**. Treat it as a progress reading, not
+as a turn total, and not as a counter you can difference.
+
+**4. The `estimated_tokens_delta` values a client receives do not sum to the
+turn's total.** The rate bound in point 2 drops most of claude's lines, and their
+increments go with them: on the committed capture the turn's **674 tokens of
+delta arrived as 243 across 8 frames**. **No field reports the residue** — there
+is no "dropped tokens" count on this frame, deliberately, because it is a rate
+reading rather than an accumulator input. Summing the deltas undercounts by an
+amount the wire does not disclose.
+
+**5. Absence proves nothing, for two distinct reasons — both of them apply.**
+
+- **The surface may not emit them at all.** Only the stream-json parser produces
+  this event. On the PTY surface claude emits **zero** `thinking_tokens` lines
+  (measured, and enforced by the daemon's pre-ship gate), so a phone attached to a
+  PTY-driven session will **never** receive one, no matter how long claude thinks.
+- **Even on the emitting surface, a gap between two frames may mean nothing is
+  wrong.** The rate bound means a quiet window may only be one in which the
+  accumulated delta has not yet crossed 64 tokens. The gap is not evidence that
+  thinking stopped.
+
+A client MUST NOT infer a stall from either. **This frame is proof of life when
+present and says nothing when absent** — it is not a universal liveness
+indicator, and a "thinking stalled" inference built on the gap between two frames
+is invalid on both surfaces. The daemon's separate stall signal is
+[`stall`](#stall), which has its own producer and is untouched by this frame in
+both directions.
+
 #### `session_transition`
 
-Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the twelve turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
+Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the thirteen turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1495,6 +1568,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-08-09`: Added `thinking_progress` (binary → phone, interactive-capability-gated, #1386). The daemon had translated claude's `system/thinking_tokens` line into a `turnevent` variant since #1385, but `turnbridge.MapEvent` had no case for it, so it stopped at the daemon boundary and a client showing "thinking" for three minutes still could not separate a slow answer from a wedged session. It is conversation-scoped, carries no `turn_id`, drives no turn lifecycle, and carries **no reasoning text** — only two of claude's integer readings. Four consumer hazards are stated in the section because a client gets each wrong by default: the frames are **rate-bounded** (one per 64 tokens of accumulated delta — 33 lines became 8 frames on the committed capture) and do not enumerate claude's lines; `estimated_tokens` is **not monotonic** (four restarts in the capture's single turn), so two readings must never be subtracted; the deltas received **do not sum** to the turn's total (674 arrived as 243) and no field reports the residue; and **absence proves nothing** for two separate reasons — the PTY surface emits none at all, and on the emitting surface a gap may only mean the bound has not been crossed. Also **corrected two stale counts**: § Interactive events and `session_transition` both said "twelve" turn-stream events; both now read thirteen.
 - `2026-08-09`: Added the three background-task frames — `background_task_started`, `background_task_updated`, `background_task_roster` (binary → phone, interactive-capability-gated, #1394). The daemon had translated claude's `system/task_started`, `system/task_updated` and `system/background_tasks_changed` lines internally since #1380–#1382 and given them wire types in #1393, but nothing mapped them outbound, so a phone still could not tell #1240's symptom — `turn_end` with `end_turn` and state `idle` while a command claude started is provably still running — from a genuine finish. None of the three carries a `turn_id` or drives any turn lifecycle. The roster is a **snapshot, not a delta**, its `tasks` is always present and never `null` (an empty `[]` positively says nothing is alive), and its `dropped_tasks` count is its **only** truncation report. No terminal/finish event exists in the family, deliberately: that transition has never been observed, so the daemon does not report a finish it cannot detect. Also **corrected two stale counts**: § Interactive events and `session_transition` both said "eight" turn-stream events when there were nine; both now read twelve.
 - `2026-07-27`: Added `unrecognized_message` (binary → phone, interactive-capability-gated). The stream-json parser used to drop any claude output it had no mapping for into a debug log the production daemon does not print, so an unknown message type left no trace anywhere and no client was told. It now splits two ways: a **measured** known-ignored list (`system/*`, `rate_limit_event`) stays silent, and everything else surfaces as this frame carrying the drop site, the offending type, and the raw JSON capped at 16 KiB. Carries no `turn_id` and drives no turn lifecycle. Also **fixed a #1074 omission**: `api_retry` and `compacting` shipped without rows in the application-message-types table above; both are now listed.
 - `2026-07-27`: Added the `request_session_settings` → `session_settings` read pair (#491, #1214), the read half the settings cluster shipped without. A client can now ask what the current run configuration is and which session to address a change to, instead of scraping both off `screen_snapshot`. That side-load is refused with `server.binary_offline` whenever there is no terminal to photograph, which is always on the stream-json interactive runner, so it left the desktop run-configuration UI with no values, no session id and no context figure at all. Corrected the `set_session_settings` claim that a client already knows its session id from the `session_transition` marker: the daemon fires that marker only on a clear or an idle eviction, never on session creation. Also filled in the `screen_snapshot` field table, which never listed the `used_tokens` / `window_tokens` fields shipped with #857.
