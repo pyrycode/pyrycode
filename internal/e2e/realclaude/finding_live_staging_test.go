@@ -64,7 +64,7 @@ package realclaude
 // The prompt and the command are captured-string class on a live run — the
 // command embeds a t.TempDir()-derived path. This file writes no artifact, logs
 // nothing, and formats no Detail at all, so trailDetail's reachMaxCommandBytes cap
-// (trailer_admissibility_test.go:206) never applies here. Failure messages COMPARE
+// (trailer_admissibility_test.go:233) never applies here. Failure messages COMPARE
 // the two strings and report LENGTHS, following finding_staging_fill_test.go:556-562.
 //
 // No struct is declared, so finTranscriptReading's no-json-tags rule

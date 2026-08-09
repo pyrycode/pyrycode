@@ -37,10 +37,10 @@ import (
 // asserted.
 //
 // The two shipped tests that come closest state neither claim.
-// TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1074) drives the
+// TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1149) drives the
 // whole chain, but every trailGateCases() row carries trailRunnerUnread(), the
 // indeterminate answer. TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm
-// (trailer_admissibility_test.go:1435) does drive all five readings, but only over
+// (trailer_admissibility_test.go:1551) does drive all five readings, but only over
 // trailGate, and it compares each row AGAINST ITSELF: an edit that moved a Detail
 // under all five readings alike passes it untouched.
 //
@@ -52,7 +52,7 @@ import (
 //
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
-// (trailer_admissibility_test.go:333), and clause B of
+// (trailer_admissibility_test.go:363), and clause B of
 // TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm (:1468-1473) requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
 // CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420: the
@@ -63,7 +63,7 @@ import (
 //
 // trailGate is handed the reading directly through trailGateInput.RunnerPath, and
 // trailClassifyRun is handed it inside readings.Gate.RunnerPath, because
-// trailRunReadings.Gate is the whole trailGateResult (trail_run_outcome_test.go:180).
+// trailRunReadings.Gate is the whole trailGateResult (trail_run_outcome_test.go:199).
 // trailAdmitAttribution(reap tdnReapOutcome, certified string) is handed NO
 // runner path at all, so a byte assertion on its Detail would be green by
 // construction whatever that arm did — a rung no mutation can redden. It is
@@ -110,7 +110,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	// Premise. The reading carries no VALUE from the argv it was driven over.
 	// This is the first test to drive a real runner argv into
 	// trailGateInput.RunnerPath, a field that IS marshalled into the published
-	// gate record (trailer_admissibility_test.go:1252-1255), and the boundary
+	// gate record (trailer_admissibility_test.go:1340-1255), and the boundary
 	// keeping a command string out of it is that tdnRunnerFromArgv returns
 	// constant literals and interpolates nothing from its argument. The reader
 	// may name the flag --session-id in its answer; it may never echo what
@@ -171,7 +171,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	//
 	// A gate-VALUE premise is deliberately not among the premises above. Any
 	// mutation to trailGate's usable arm's value cascades: a different in-space
-	// value trips C5 (trail_run_outcome_test.go:416-422), an out-of-space one
+	// value trips C5 (trail_run_outcome_test.go:437-422), an out-of-space one
 	// trips C1, and either way the run-level outcome moves too — so it could never
 	// be the sole red for anything, and it would be an assertion this test owes a
 	// mutation for and cannot have. "Reached through trailGateUsable and

@@ -242,7 +242,7 @@ const finWriteTrailerPad = 0
 // because trailScan is deterministic over the bytes it is handed and
 // trailPaddedTrailer renders the same line for the same pad. What would NOT be
 // safe is hoisting the result to a package-level var to avoid the second scan:
-// that is the fixture rule trail_run_outcome_test.go:608-610 states for this whole
+// that is the fixture rule trail_run_outcome_test.go:608-652 states for this whole
 // package, whose reason is that `go test -race` runs these tests in parallel.
 func finWritePlantedTrailerScan() trailScanResult {
 	return trailScan([]byte(trailPaddedTrailer(finWriteTrailerPad) + "\n"))
@@ -268,7 +268,7 @@ func finWritePlantedReapLog() []byte {
 // on TestFinWriteArtifactsCarryNoCapturedBytes.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:608-610): a shared backing array is reachable
+// reason (trail_run_outcome_test.go:608-652): a shared backing array is reachable
 // from every test in this package, and `go test -race` runs them in parallel.
 //
 // # Plant only where the pipeline reduces
@@ -321,7 +321,7 @@ func finWritePlantedReapLog() []byte {
 // # The certified reason is "completed" and not the budget one
 //
 // trailAdmitAttribution returns trailAdmitVoidBudgetFired the moment certified ==
-// trailBudgetTerminalReason (trailer_admissibility_test.go:425), ahead of every
+// trailBudgetTerminalReason (trailer_admissibility_test.go:457), ahead of every
 // reap-side arm. AC2's premise is that the entry reads trailAdmitProof — reachable
 // only from a needle-bearing line that was recognised, parsed and matched — so a
 // budget reason here would defuse the non-vacuity check into a Fatalf about the
@@ -806,7 +806,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// them renders every Admit.Detail, and the rule is to name the count, the path
 	// and the length rather than the string (security review item [7]). The Values
 	// are safe to print because trailAdmitAttribution returns one of a closed set
-	// (trailer_admissibility_test.go:190-197); the Details beside them are not.
+	// (trailer_admissibility_test.go:217-224); the Details beside them are not.
 	first := "<no entries>"
 	if len(in.Attribution.Entries) > 0 {
 		first = in.Attribution.Entries[0].Admit.Value
