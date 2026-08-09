@@ -47,13 +47,20 @@ package realclaude
 //
 // # Scope
 //
-// Nothing here touches trailGate or trailClassifyRun, and nothing consumes this
-// predicate yet. That is deliberate rather than unfinished: trailClassifyRun's
-// switch over gate values has NO default arm, so a sixth gate value registered
-// in trailIsGateValue but unhandled there would fall through to step 2 — where a
-// proof is awarded — rather than be caught (trail_run_outcome_test.go:476-484).
-// Wiring this predicate in is #1368's; carrying the path reading to the gate's
-// callers is #1367's.
+// Nothing here touches trailGate or trailClassifyRun; both consume this
+// predicate from their own side. #1420 wired it into trailGate's absence branch,
+// where its three ABSENCE answers decide which Detail the arm publishes, and
+// #1417 took the owes-none answer further: on that reading the gate now answers
+// trailGateAbsentOwesNone rather than trailGateOutOfContract, and
+// trailClassifyRun's step-1 switch gained the matching arm in the same commit.
+// The hazard the shipped paragraph here held open — a new gate value registered
+// in trailIsGateValue but unhandled in that switch, which no closure test
+// catches — is therefore discharged rather than deferred, and it is recorded at
+// the switch itself (trail_run_outcome_test.go:497-553) rather than here.
+//
+// This file's own six values are unchanged by either: they say what a
+// terminal_reason MEANS against a path, and what a consumer does with that
+// meaning is the consumer's decision.
 
 import (
 	"bytes"
@@ -139,7 +146,7 @@ const trailReasonKeyName = "terminal_reason"
 // --- the record ---------------------------------------------------------------
 
 // trailReasonResult is what the predicate produces, in trailAdmitResult's shape
-// (trailer_admissibility_test.go:194): two fields, no pointer into any input,
+// (trailer_admissibility_test.go:295-298): two fields, no pointer into any input,
 // and no quote of any captured string.
 //
 // It deliberately carries no certified reason, unlike trailGateResult: copying
@@ -274,7 +281,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 // --- membership helper ----------------------------------------------------------
 
 // trailIsReasonValue reports whether v is one of the recorded terminal-reason
-// values, in trailIsGateValue's shape (trailer_admissibility_test.go:493) and
+// values, in trailIsGateValue's shape (trailer_admissibility_test.go:732) and
 // for the family's stated reason: a value a reader of the published record
 // cannot look up is a verdict they cannot interpret.
 //
