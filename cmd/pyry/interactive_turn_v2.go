@@ -498,6 +498,15 @@ func eventKind(ev turnevent.Event) string {
 		// acpbridge's own default and logs the kind, which would otherwise read
 		// "unknown" for a variant the daemon does recognize.
 		return "thinking_progress"
+	case turnevent.RateLimited:
+		// The variant NAME only, for the arms above's reason — and here the
+		// temptation is real again: Status and LimitType are claude-authored strings,
+		// and Status is precisely the field a log line wants to explain itself with.
+		// Neither is returned. The arm exists for the OTHER call sites
+		// (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go), which
+		// would otherwise log "unknown" for a variant the daemon does recognize —
+		// exactly the ThinkingProgress arm's reason.
+		return "rate_limited"
 	default:
 		return "unknown"
 	}

@@ -147,7 +147,15 @@ func TestParser_LineMapping(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "rate_limit_event tolerated",
+			// CORRECTED 2026-08-09 (#1404): the verdict is unchanged, the REASON is
+			// new, and until this ticket it was undecided. rate_limit_event is no
+			// longer tolerated-and-dropped as a type — it has its own arm in
+			// consumeLine — and this payload carries no decodable rate_limit_info
+			// (there is no retry_after in anything claude sends), so it is emitRateLimit
+			// RUNG 3: no report was made, so the daemon makes no rate-limit claim. See
+			// TestParser_RateLimitSilentRungsLogTheirReason, which pins the same line
+			// with its logged reason.
+			name: "rate_limit_event with no decodable rate_limit_info stays silent",
 			line: `{"type":"rate_limit_event","retry_after":10}`,
 			want: nil,
 		},
@@ -513,6 +521,18 @@ func TestParser_UnrecognizedTruncation(t *testing.T) {
 //     33 records needed. Rows here stay SYNTHESIZED anyway — but because no
 //     captured system subtype is dropped any more, not because the reader cannot
 //     express it.
+//
+// CORRECTED 2026-08-09 (#1404), the same shape one level up: the rate_limit_event
+// row is GONE from this table, because the TYPE is no longer on
+// ignoredLineTypes — it has its own arm in consumeLine and maps to
+// turnevent.RateLimited. The line stayed silent under this table only by accident
+// of its payload (its container key is `rate_limit`, not claude's
+// `rate_limit_info`), so leaving it here would assert list membership this type no
+// longer has. It moved verbatim into TestParser_RateLimitSilentRungsLogTheirReason,
+// where the same silence holds for a visible and newly DECIDED reason — rung 3, no
+// decodable rate_limit_info — and where the logged reason is asserted too, which
+// is what separates silent-for-the-right-rung from silent-by-accident. This table
+// is now what its name says: `system` alone.
 func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 	t.Parallel()
 	lines := []struct {
@@ -538,7 +558,6 @@ func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 		// surface only. So it has no captured payload and this row is necessarily
 		// synthesized; it invents no field structure beyond the subtype name.
 		{"system/task_notification", `{"type":"system","subtype":"task_notification"}`},
-		{"rate_limit_event", `{"type":"rate_limit_event","rate_limit":{"status":"allowed"}}`},
 	}
 	for _, tc := range lines {
 		if got := collectEvents(tc.line); got != nil {
@@ -2532,6 +2551,488 @@ func TestParser_ThinkingProgressDropIsLoggedContentFree(t *testing.T) {
 	}
 }
 
+// rateLimitFieldCapFixture records maxRateLimitField as a LITERAL, deliberately
+// not as the constant, for taskStartedCapCheat's reason: a fixture built from the
+// constant it validates asserts nothing about the number — halve the constant and
+// every cap row below would follow it green.
+const rateLimitFieldCapFixture = 256
+
+// rateLimitBenignFixture is claude's measured-benign status as a LITERAL, for
+// harnessNudgeFixture's reason. The whole gate turns on this one value, so a
+// fixture written as benignRateLimitStatus would follow a rename or a
+// recapitalisation of the constant green — which is precisely the edit the
+// byte-exact match exists to make visible.
+const rateLimitBenignFixture = "allowed"
+
+// rateLimitDropMsgFixture is the Debug message emitRateLimit's drop site emits, as
+// a literal for the same reason.
+const rateLimitDropMsgFixture = "streamsup: dropping rate_limit_event"
+
+// rateLimitLineFixture builds a rate_limit_event line from the three mapped keys.
+// It invents NO field structure — the keys are exactly the captures' — and exists
+// only to vary the VALUES, which is what the gate and cap proofs need and what the
+// captures cannot supply: all three carry the benign status, and every value in
+// them is under ten bytes.
+func rateLimitLineFixture(t *testing.T, status, limitType string, resetsAt int64) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"type": "rate_limit_event",
+		"rate_limit_info": map[string]any{
+			"status":        status,
+			"rateLimitType": limitType,
+			"resetsAt":      resetsAt,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshalling rate_limit_event fixture: %v", err)
+	}
+	return string(b)
+}
+
+// rateLimitEvent drives one line through the shipped parser and returns the single
+// turnevent.RateLimited it must emit.
+func rateLimitEvent(t *testing.T, line string) turnevent.RateLimited {
+	t.Helper()
+	got := collectEvents(line)
+	if len(got) != 1 {
+		t.Fatalf("event count: got %d, want 1 (%#v)", len(got), got)
+	}
+	ev, ok := got[0].(turnevent.RateLimited)
+	if !ok {
+		t.Fatalf("event type: got %T, want turnevent.RateLimited", got[0])
+	}
+	return ev
+}
+
+// TestParser_RateLimitCapturedBenignLineIsSilent is #1404's rung-1 assertion, and
+// it is a REGRESSION test rather than an example: the captured line is what claude
+// actually puts on the wire once per run, its status is the measured-benign value,
+// and every healthy run must therefore produce nothing at all. A parser that
+// mapped this line 1:1 would put one "you are rate limited" event on every turn.
+//
+// The two failure modes are called out separately even though a zero-event check
+// covers both, because they mean different things: a RateLimited here says the
+// gate is gone, an Unrecognized here says the type stopped being claimed by
+// consumeLine's own case arm.
+func TestParser_RateLimitCapturedBenignLineIsSilent(t *testing.T) {
+	t.Parallel()
+	line := capturedLine(t, "rate_limit_event", "")
+
+	// The premise, checked rather than assumed: if the capture's status were
+	// anything but the benign value, this test would pin the wrong rung and pass for
+	// the wrong reason.
+	var payload struct {
+		Info struct {
+			Status string `json:"status"`
+		} `json:"rate_limit_info"`
+	}
+	if err := json.Unmarshal(line, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	if payload.Info.Status != rateLimitBenignFixture {
+		t.Fatalf("the captured line's rate_limit_info.status is %q, want %q — this test pins rung 1 and the capture no longer carries it",
+			payload.Info.Status, rateLimitBenignFixture)
+	}
+
+	got := collectEvents(string(line))
+	for _, ev := range got {
+		switch ev.(type) {
+		case turnevent.RateLimited:
+			t.Errorf("the captured rate_limit_event produced %#v; its status is the measured-benign value, so a healthy run must emit no RateLimited", ev)
+		case turnevent.Unrecognized:
+			t.Errorf("the captured rate_limit_event produced %#v; the type is claimed by consumeLine's own case arm and must never reach the unrecognized lane", ev)
+		}
+	}
+	if len(got) != 0 {
+		t.Errorf("event count: got %d, want 0 — %#v", len(got), got)
+	}
+
+	// The control, and it is load-bearing for TestDropcapClassification's reason:
+	// without a line that must NOT be silent, the zero-event assertion above passes
+	// vacuously against a mis-wired sink or a parser that consumes the line before
+	// ever reaching the gate.
+	if got := collectEvents(rateLimitLineFixture(t, "exceeded", "five_hour", 1785699000)); len(got) != 1 {
+		t.Fatalf("control: a non-benign rate_limit_event emitted %d events, want 1 — the silence above proves nothing", len(got))
+	}
+}
+
+// TestParser_RateLimitEmitsForNonBenignStatus pins rung 2: anything that is not the
+// one measured-benign status becomes exactly one turnevent.RateLimited carrying
+// claude's own values.
+//
+// The value set beyond "allowed" is UNMEASURED — no capture of a limit actually in
+// force exists — so the rows deliberately do not pin one hypothetical alternative.
+// Two different non-benign values are what assert "anything but the benign value",
+// and the case-differing row is the byte-exact match made visible.
+func TestParser_RateLimitEmitsForNonBenignStatus(t *testing.T) {
+	t.Parallel()
+	const (
+		limitType = "five_hour"
+		resetsAt  = int64(1785699000)
+	)
+	tests := []struct {
+		name   string
+		status string
+		why    string
+	}{
+		{
+			name: "a plausible limited status emits", status: "exceeded",
+			why: "the direction the gate exists for",
+		},
+		{
+			name: "a second, different non-benign status emits", status: "rejected",
+			why: "pins `anything but the benign value` rather than one hardcoded alternative",
+		},
+		{
+			name: "a status differing from the benign value only in case emits", status: "Allowed",
+			why: "benignRateLimitStatus is matched byte-exact — no fold, no trim, no prefix. This row " +
+				"is the accepted failure direction made visible: a claude that recapitalises the " +
+				"benign value makes this event fire once per healthy run, loudly and wrongly, which " +
+				"is one constant edit to fix, where a folded match would suppress a real limit in silence",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ev := rateLimitEvent(t, rateLimitLineFixture(t, tt.status, limitType, resetsAt))
+			if ev.Status != tt.status {
+				t.Errorf("Status: got %q, want claude's value %q verbatim (%s)", ev.Status, tt.status, tt.why)
+			}
+			if ev.LimitType != limitType {
+				t.Errorf("LimitType: got %q, want the captures' rateLimitType %q", ev.LimitType, limitType)
+			}
+			if ev.ResetsAt != resetsAt {
+				t.Errorf("ResetsAt: got %d, want claude's resetsAt %d", ev.ResetsAt, resetsAt)
+			}
+			if ev.TruncatedFields != nil {
+				t.Errorf("TruncatedFields: got %v, want nil — every value here is far under the cap", ev.TruncatedFields)
+			}
+		})
+	}
+
+	t.Run("a non-benign status with no detail still emits", func(t *testing.T) {
+		t.Parallel()
+		// Absence of the detail is claude's to choose and the status IS the report,
+		// so a missing rateLimitType/resetsAt lands empty and 0 rather than becoming
+		// a validation rule. Written as a raw line rather than through the fixture
+		// because the fixture always supplies all three keys.
+		ev := rateLimitEvent(t, `{"type":"rate_limit_event","rate_limit_info":{"status":"exceeded"}}`)
+		if ev.Status != "exceeded" || ev.LimitType != "" || ev.ResetsAt != 0 {
+			t.Errorf("got %#v, want Status \"exceeded\" with LimitType empty and ResetsAt 0", ev)
+		}
+	})
+}
+
+// TestParser_RateLimitSilentRungsLogTheirReason pins every silent rung, and it pins
+// the logged REASON as well as the silence. Three rungs that all produce zero
+// events are otherwise indistinguishable from one another and from a dead arm, so
+// the reason is what separates "silent for the right rung" from "silent by
+// accident".
+//
+// The rung-3 rows are AC2 case (c) — a line carrying no decodable rate_limit_info
+// — which #1404 had to DECIDE rather than fall into. Every rate_limit_event shape
+// this repo's tests carried before #1404 had exactly that shape, which is why the
+// decision moved those rows rather than the other way round; two of them are here
+// verbatim (the `rate_limit` wrong-container line from
+// TestParser_IgnoredLineTypesStaySilent, and the `retry_after` line still in
+// TestParser_LineMapping).
+func TestParser_RateLimitSilentRungsLogTheirReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		line       string
+		wantReason string
+		why        string
+	}{
+		{
+			name: "rung 1: the measured-benign status", line: rateLimitLineFixture(t, rateLimitBenignFixture, "five_hour", 1785699000),
+			wantReason: rateLimitDropBenign,
+			why:        "claude reports the window once per run whatever its state; this is the healthy one",
+		},
+		{
+			name: "rung 3: no container at all", line: `{"type":"rate_limit_event"}`,
+			wantReason: rateLimitDropNoInfo,
+			why:        "the shape the realclaude mirror and dropcap rows drive",
+		},
+		{
+			name: "rung 3: the wrong container key", line: `{"type":"rate_limit_event","rate_limit":{"status":"allowed"}}`,
+			wantReason: rateLimitDropNoInfo,
+			why:        "claude's key is rate_limit_info; a status under any other key was never reported",
+		},
+		{
+			name: "rung 3: an unrelated payload", line: `{"type":"rate_limit_event","retry_after":10}`,
+			wantReason: rateLimitDropNoInfo,
+			why:        "there is no retry_after in anything claude sends on this line",
+		},
+		{
+			name: "rung 3: container present, status absent", line: `{"type":"rate_limit_event","rate_limit_info":{}}`,
+			wantReason: rateLimitDropNoInfo,
+			why:        "an empty container and an absent one are answered identically, which is what makes the plain-struct decode target sufficient",
+		},
+		{
+			name: "the container is not an object", line: `{"type":"rate_limit_event","rate_limit_info":"nope"}`,
+			wantReason: rateLimitDropUndecodable,
+			why:        "the WHOLE-LINE decode fails, so this takes the undecodable arm — same visible outcome as rung 3, different logged reason",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &logRecorder{}
+			var events []turnevent.Event
+			p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+			if _, err := p.Write([]byte(tt.line + "\n")); err != nil {
+				t.Fatalf("Write err = %v, want nil", err)
+			}
+
+			if len(events) != 0 {
+				t.Errorf("event count: got %d, want 0 (%s) — %#v", len(events), tt.why, events)
+			}
+			drops := rec.withMessage(rateLimitDropMsgFixture)
+			if len(drops) != 1 {
+				t.Fatalf("records with message %q: got %d, want 1 (all records: %+v)", rateLimitDropMsgFixture, len(drops), rec.all())
+			}
+			wantAttrs := map[string]string{"reason": tt.wantReason}
+			if !reflect.DeepEqual(drops[0].attrs, wantAttrs) {
+				t.Errorf("drop attrs: got %v, want exactly %v (%s)", drops[0].attrs, wantAttrs, tt.why)
+			}
+		})
+	}
+
+	// The control: without a line that must NOT be silent, every assertion above
+	// passes against a parser whose arm does nothing at all.
+	t.Run("control_a_non_benign_line_emits_and_logs_no_drop", func(t *testing.T) {
+		t.Parallel()
+		rec := &logRecorder{}
+		var events []turnevent.Event
+		p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+		if _, err := p.Write([]byte(rateLimitLineFixture(t, "exceeded", "five_hour", 1785699000) + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("event count: got %d, want 1 — the silent rows above prove nothing", len(events))
+		}
+		if drops := rec.withMessage(rateLimitDropMsgFixture); len(drops) != 0 {
+			t.Errorf("the emit path logged %d drop record(s), want 0: %+v", len(drops), drops)
+		}
+	})
+}
+
+// TestParser_RateLimitFieldCaps pins the construction-time bound. It is applied
+// before the event reaches the sink, so an oversized payload never enters the event
+// stream, a queue, or a log — the same ordering maxUnrecognizedRaw's cap has, and
+// the only thing that makes the bound real rather than cosmetic.
+//
+// Every row's status is non-benign on purpose: the gate runs BEFORE any cap, so a
+// benign status would be swallowed and the row would prove nothing about the bound.
+func TestParser_RateLimitFieldCaps(t *testing.T) {
+	t.Parallel()
+	over := strings.Repeat("x", rateLimitFieldCapFixture+10)
+	const (
+		shortStatus    = "exceeded"
+		shortLimitType = "five_hour"
+	)
+	tests := []struct {
+		name          string
+		status        string
+		limitType     string
+		wantStatusLen int
+		wantLimitLen  int
+		wantCut       []string
+	}{
+		{
+			name:   "nothing over the cap reports nil, not an empty slice",
+			status: shortStatus, limitType: shortLimitType,
+			wantStatusLen: len(shortStatus), wantLimitLen: len(shortLimitType),
+			wantCut: nil,
+		},
+		{
+			name:   "status over the cap is cut and named",
+			status: over, limitType: shortLimitType,
+			wantStatusLen: rateLimitFieldCapFixture, wantLimitLen: len(shortLimitType),
+			wantCut: []string{"status"},
+		},
+		{
+			name:   "limit_type over the cap is cut and named with the DAEMON's name",
+			status: shortStatus, limitType: over,
+			wantStatusLen: len(shortStatus), wantLimitLen: rateLimitFieldCapFixture,
+			wantCut: []string{"limit_type"},
+		},
+		{
+			name:   "both over the cap report in bound() call order",
+			status: over, limitType: over,
+			wantStatusLen: rateLimitFieldCapFixture, wantLimitLen: rateLimitFieldCapFixture,
+			// The ORDER is the contract, not an accident: TruncatedFields is ordered by
+			// emitRateLimit's sequential bound() calls.
+			wantCut: []string{"status", "limit_type"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ev := rateLimitEvent(t, rateLimitLineFixture(t, tt.status, tt.limitType, 1785699000))
+			if len(ev.Status) != tt.wantStatusLen {
+				t.Errorf("len(Status): got %d, want %d", len(ev.Status), tt.wantStatusLen)
+			}
+			if len(ev.LimitType) != tt.wantLimitLen {
+				t.Errorf("len(LimitType): got %d, want %d", len(ev.LimitType), tt.wantLimitLen)
+			}
+			// DeepEqual and not a length check: it pins the ORDER, the NAMES, and the
+			// nil-not-empty contract in one assertion.
+			if !reflect.DeepEqual(ev.TruncatedFields, tt.wantCut) {
+				t.Errorf("TruncatedFields: got %#v, want %#v", ev.TruncatedFields, tt.wantCut)
+			}
+			if ev.ResetsAt != 1785699000 {
+				t.Errorf("ResetsAt: got %d, want 1785699000 — it carries no cap and must survive a cut on its neighbours", ev.ResetsAt)
+			}
+		})
+	}
+}
+
+// TestParser_RateLimitIsLoggedContentFree is the assertion the per-rung `reason`
+// checks do NOT cover: an implementation that sets reason correctly AND also logs
+// "status", rl.Info.Status passes every one of them.
+//
+// It sweeps every record's message and every attribute value for the fixture's own
+// distinctive values, on the EMIT path as well as the three drop rungs. Status is
+// the field a drop site is most tempted to explain itself with, and the one value
+// on this line a future claude could make arbitrarily long or arbitrarily
+// revealing. Mirrors TestParser_HarnessNudgeDropIsLoggedContentFree.
+func TestParser_RateLimitIsLoggedContentFree(t *testing.T) {
+	t.Parallel()
+	const (
+		emitStatus      = "rl-status-70141"
+		emitLimitType   = "rl-limit-70143"
+		benignLimitType = "rl-limit-70147"
+		undecodableMark = "rl-undecodable-70149"
+	)
+	captured := capturedLine(t, "rate_limit_event", "")
+	var payload map[string]any
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	capturedSession, _ := payload["session_id"].(string)
+	capturedUUID, _ := payload["uuid"].(string)
+	if capturedSession == "" || capturedUUID == "" {
+		t.Fatalf("the capture carries no string session_id/uuid, so half this sweep would be vacuous")
+	}
+
+	rec := &logRecorder{}
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+	lines := []string{
+		// The emit path, first: it must produce the event and log nothing at all.
+		rateLimitLineFixture(t, emitStatus, emitLimitType, 1785699000),
+		rateLimitLineFixture(t, rateLimitBenignFixture, benignLimitType, 1785699000),
+		string(captured),
+		`{"type":"rate_limit_event","rate_limit_info":"` + undecodableMark + `"}`,
+	}
+	for _, line := range lines {
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("event count: got %d, want 1 (the non-benign line only) — %#v", len(events), events)
+	}
+	if _, ok := events[0].(turnevent.RateLimited); !ok {
+		t.Fatalf("event type: got %T, want turnevent.RateLimited", events[0])
+	}
+	// Three drops and not four: the emit path logs nothing, which is the half of
+	// this test the drop-rung assertions cannot see.
+	if drops := rec.withMessage(rateLimitDropMsgFixture); len(drops) != 3 {
+		t.Errorf("drop records: got %d, want 3 (two benign, one undecodable): %+v", len(drops), drops)
+	}
+
+	leaks := []string{
+		emitStatus, emitLimitType, benignLimitType, undecodableMark,
+		rateLimitBenignFixture, "five_hour", capturedSession, capturedUUID,
+	}
+	for _, r := range rec.all() {
+		for _, leak := range leaks {
+			if strings.Contains(r.msg, leak) {
+				t.Errorf("record message carries claude-derived content (%q): %q", leak, r.msg)
+			}
+			for k, v := range r.attrs {
+				if strings.Contains(v, leak) {
+					t.Errorf("record %q attr %q carries claude-derived content (%q); this path logs a daemon-authored reason keyword only",
+						r.msg, k, leak)
+				}
+			}
+		}
+	}
+}
+
+// TestParser_RateLimitDropsSessionAndUUID sweeps the family's two standing drops off
+// the emitted event, by REFLECTION over its string fields rather than over a list,
+// so a field added to the event later is covered without anyone remembering to
+// extend one.
+//
+// It cannot drive the captured line as-is: every capture on record carries the
+// benign status, so the captured line emits NOTHING by design (rung 1). The line
+// here is DERIVED from the capture — its status flipped to a non-benign value and
+// every other key, uuid and session_id included, left exactly as claude sent them —
+// which is what keeps this a statement about the real payload rather than about a
+// hand-built one. Both values are read out of the capture rather than pinned: the
+// capture is redacted (session_id reads $SESSION_ID), so a literal would pin the
+// placeholder and stop being honest the day the capture is re-taken unredacted.
+func TestParser_RateLimitDropsSessionAndUUID(t *testing.T) {
+	t.Parallel()
+	captured := capturedLine(t, "rate_limit_event", "")
+
+	var payload map[string]any
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	capturedSession, _ := payload["session_id"].(string)
+	capturedUUID, _ := payload["uuid"].(string)
+	if capturedSession == "" || capturedUUID == "" {
+		t.Fatalf("the capture carries no string session_id/uuid, so the drop assertion would be vacuous")
+	}
+	info, ok := payload["rate_limit_info"].(map[string]any)
+	if !ok {
+		t.Fatalf("the capture's rate_limit_info is not a JSON object; the derivation below would silently change the shape under test")
+	}
+	if info["status"] != rateLimitBenignFixture {
+		t.Fatalf("the capture's status is %v, want %q — the flip below assumes it starts benign", info["status"], rateLimitBenignFixture)
+	}
+	info["status"] = "exceeded"
+	derived, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("re-marshalling the derived line: %v", err)
+	}
+
+	ev := rateLimitEvent(t, string(derived))
+	// The canary: proves the derivation carried claude's own detail through rather
+	// than producing some other shape that happens to emit.
+	if want, _ := info["rateLimitType"].(string); ev.LimitType != want {
+		t.Errorf("LimitType: got %q, want the capture's rateLimitType %q", ev.LimitType, want)
+	}
+
+	rv := reflect.ValueOf(ev)
+	var swept int
+	for _, key := range []string{"session_id", "uuid"} {
+		v, _ := payload[key].(string)
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Field(i).Kind() != reflect.String {
+				continue
+			}
+			swept++
+			if rv.Field(i).String() == v {
+				t.Errorf("field %s carries claude's %s (%q); it is deliberately NOT on this event",
+					rv.Type().Field(i).Name, key, v)
+			}
+		}
+	}
+	// Two string fields times two keys. The sweep visiting nothing would pass
+	// silently, which is the one way this assertion could rot into decoration.
+	const wantSwept = 4
+	if swept < wantSwept {
+		t.Errorf("the drop sweep visited %d string fields, want at least %d", swept, wantSwept)
+	}
+}
+
 // logRecorder is a slog.Handler that captures every record it is handed —
 // message plus attr key/value pairs — so a test can assert both what IS logged
 // and, the harder half, what is NOT. Mirrors runner_test.go's spawnArgsRecorder:
@@ -2636,7 +3137,12 @@ func TestParser_HarnessNudgeDropIsLoggedContentFree(t *testing.T) {
 // it must be a deliberate edit with a measurement behind it, never a drive-by.
 func TestParser_IgnoredLineTypesIsTheMeasuredSet(t *testing.T) {
 	t.Parallel()
-	want := map[string]bool{"system": true, "rate_limit_event": true}
+	// CORRECTED 2026-08-09 (#1404): down to one member. rate_limit_event left the
+	// list when it gained its own arm in consumeLine's main switch — the type is
+	// mapped now, not tolerated. Shrinking the list is as deliberate an edit as
+	// growing it, which is why this pin moves with the change rather than being
+	// loosened to a subset check.
+	want := map[string]bool{"system": true}
 	if !reflect.DeepEqual(ignoredLineTypes, want) {
 		t.Errorf("ignoredLineTypes: got %v, want %v\n"+
 			"Growing this list hides a claude message type from every client. "+

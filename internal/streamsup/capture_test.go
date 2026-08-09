@@ -33,18 +33,25 @@ type droppedLineCapture struct {
 	} `json:"dropped_lines"`
 }
 
-// capturedSystemLines returns EVERY captured system line of the given subtype,
-// in stream order, as the bytes claude put on the wire.
+// capturedLines returns EVERY captured line of the given top-level type and
+// subtype, in stream order, as the bytes claude put on the wire. A type that
+// carries no subtype at all — rate_limit_event — is read with subtype "".
 //
-// This is the package's one capture reader; capturedSystemLine wraps it with the
-// exactly-one rule. The provenance checks live HERE, at the reader, rather than
-// at the callers — the is_capture assertion means a hand-built payload file
-// swapped in for this one fails before any mapping is read, and putting it in one
-// place is what stops a second reader from growing a second, weaker copy of it.
-// For the same reason the path is the capturePath package constant and this
-// function takes NO path parameter: a plural reader is exactly the shape someone
-// later generalizes into "read any capture file", and that generalization is what
-// would put an unchecked file behind these assertions.
+// This is the package's one capture reader; capturedLine wraps it with the
+// exactly-one rule, and capturedSystemLines / capturedSystemLine fix the type to
+// `system`. The provenance checks live HERE, at the reader, rather than at the
+// callers — the is_capture assertion means a hand-built payload file swapped in
+// for this one fails before any mapping is read, and putting it in one place is
+// what stops a second reader from growing a second, weaker copy of it.
+//
+// GENERALIZED 2026-08-09 (#1404) on the TYPE axis, and on that axis only. The
+// sentence this doc has always carried is repeated here VERBATIM, because
+// widening the reader is precisely the moment it is most likely to be dropped as
+// no longer applying and precisely the moment it applies most: the path is the
+// capturePath package constant and this function takes NO path parameter — a
+// plural reader is exactly the shape someone later generalizes into "read any
+// capture file", and that generalization is what would put an unchecked file
+// behind these assertions.
 //
 // Every failure is t.Fatalf, never a skip: the capture is committed, so a missing
 // record is a broken premise rather than an unavailable resource. Zero matches
@@ -53,8 +60,12 @@ type droppedLineCapture struct {
 // Stream order is the capture's own record order, which #1385's rate-bound tests
 // depend on: they drive the 33 thinking_tokens lines through ONE parser and the
 // accumulator makes the result order-dependent.
-func capturedSystemLines(t *testing.T, subtype string) [][]byte {
+func capturedLines(t *testing.T, typ, subtype string) [][]byte {
 	t.Helper()
+	shape := typ
+	if subtype != "" {
+		shape = typ + "/" + subtype
+	}
 	raw, err := os.ReadFile(capturePath)
 	if err != nil {
 		t.Fatalf("reading capture %s: %v", capturePath, err)
@@ -69,25 +80,50 @@ func capturedSystemLines(t *testing.T, subtype string) [][]byte {
 	}
 	var found [][]byte
 	for _, rec := range capture.DroppedLines {
-		if rec.Type != "system" || rec.Subtype != subtype {
+		if rec.Type != typ || rec.Subtype != subtype {
 			continue
 		}
 		if rec.PayloadEncoding != "json-string" {
-			t.Fatalf("system/%s: payload_encoding = %q, want %q (the payload must be the whole line as a JSON string)",
-				subtype, rec.PayloadEncoding, "json-string")
+			t.Fatalf("%s: payload_encoding = %q, want %q (the payload must be the whole line as a JSON string)",
+				shape, rec.PayloadEncoding, "json-string")
 		}
 		found = append(found, []byte(rec.Payload))
 	}
 	if len(found) == 0 {
-		t.Fatalf("system/%s: got 0 captured records in %s, want at least 1", subtype, capturePath)
+		t.Fatalf("%s: got 0 captured records in %s, want at least 1", shape, capturePath)
 	}
 	return found
 }
 
-// capturedSystemLine returns the one captured system line of the given subtype,
-// as the bytes claude put on the wire. Exactly one match is required because two
+// capturedSystemLines is capturedLines fixed to the `system` type — the only
+// shape any caller needed before #1404, kept as a wrapper so those call sites are
+// untouched by the generalization.
+func capturedSystemLines(t *testing.T, subtype string) [][]byte {
+	t.Helper()
+	return capturedLines(t, "system", subtype)
+}
+
+// capturedLine returns the ONE captured line of the given type and subtype, as
+// the bytes claude put on the wire. Exactly one match is required because two
 // would make "the captured line" ambiguous, and silently taking the first is the
 // kind of choice that should be deliberate.
+func capturedLine(t *testing.T, typ, subtype string) []byte {
+	t.Helper()
+	shape := typ
+	if subtype != "" {
+		shape = typ + "/" + subtype
+	}
+	found := capturedLines(t, typ, subtype)
+	if len(found) != 1 {
+		t.Fatalf("%s: got %d captured records in %s, want exactly 1", shape, len(found), capturePath)
+	}
+	return found[0]
+}
+
+// capturedSystemLine is capturedLine fixed to the `system` type — the exactly-one
+// reader every caller before #1404 used, kept as a wrapper so those call sites are
+// untouched. The exactly-one rule itself now lives one level down, at capturedLine,
+// so #1404's rate_limit_event reader inherits it rather than copying it.
 //
 // Shared on purpose, and by three mapping tests: task_started (#1380),
 // task_updated (#1382) and background_tasks_changed (#1381) all read their
@@ -104,9 +140,5 @@ func capturedSystemLines(t *testing.T, subtype string) [][]byte {
 // the provenance checks live.
 func capturedSystemLine(t *testing.T, subtype string) []byte {
 	t.Helper()
-	found := capturedSystemLines(t, subtype)
-	if len(found) != 1 {
-		t.Fatalf("system/%s: got %d captured records in %s, want exactly 1", subtype, len(found), capturePath)
-	}
-	return found[0]
+	return capturedLine(t, "system", subtype)
 }
