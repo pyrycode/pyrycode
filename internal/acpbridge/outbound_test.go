@@ -130,6 +130,97 @@ func TestMapUpdate(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		// Background-task variants (#1402). Every field in every row below is
+		// distinct and non-zero, and no value repeats across rows or across the
+		// other tests in this file, so a field swap, a dropped field, a
+		// zero-value default and a cross-test copy each fail a row. The taskType
+		// values are fixture strings rather than observed kinds — only local_bash
+		// has ever been captured, and the field is a plain string precisely so an
+		// unobserved kind rides through unchanged.
+		{
+			name: "BackgroundTaskStarted -> pyry/background_task_started, all five fields",
+			ev: turnevent.BackgroundTaskStarted{
+				TaskID:          "task_05MNO",
+				ToolCallID:      "toolu_05STU",
+				Description:     "go build ./cmd/pyry",
+				TaskType:        "kind_started",
+				TruncatedFields: []string{"tool_call_id"},
+			},
+			wantMsgID: "",
+			wantUpdate: BackgroundTaskStarted{
+				SessionUpdate:   SessionUpdateBackgroundTaskStarted,
+				TaskID:          "task_05MNO",
+				ToolCallID:      "toolu_05STU",
+				Description:     "go build ./cmd/pyry",
+				TaskType:        "kind_started",
+				TruncatedFields: []string{"tool_call_id"},
+			},
+			wantOK: true,
+		},
+		{
+			// Patch is a truncated, INVALID-JSON blob on purpose: the producer
+			// cuts it at maxTaskPatch and a cut object no longer parses, so a
+			// fixture that happened to parse would let a future json.RawMessage
+			// retyping slip past this row.
+			name: "BackgroundTaskUpdated -> pyry/background_task_updated, unparseable patch crosses verbatim",
+			ev: turnevent.BackgroundTaskUpdated{
+				TaskID:          "task_06VWX",
+				Patch:           `{"status":"running","exit_c`,
+				TruncatedFields: []string{"task_id", "patch"},
+			},
+			wantMsgID: "",
+			wantUpdate: BackgroundTaskUpdated{
+				SessionUpdate:   SessionUpdateBackgroundTaskUpdated,
+				TaskID:          "task_06VWX",
+				Patch:           `{"status":"running","exit_c`,
+				TruncatedFields: []string{"task_id", "patch"},
+			},
+			wantOK: true,
+		},
+		{
+			// Two entries, so per-entry carriage is provable rather than inferred
+			// from a single row, and one carries TruncatedFields while the other
+			// leaves it nil — a mapper that hard-codes either state fails.
+			// DroppedTasks is non-zero because it is the roster's ONLY truncation
+			// report (the neutral type has no TruncatedFields at all), so an arm
+			// written by analogy with the two scalar variants drops it silently.
+			name: "BackgroundTaskRoster -> pyry/background_task_roster with entries and droppedTasks",
+			ev: turnevent.BackgroundTaskRoster{
+				Tasks: []turnevent.BackgroundTask{
+					{
+						TaskID:          "task_07YZA",
+						TaskType:        "kind_alpha",
+						Description:     "make check",
+						TruncatedFields: []string{"task_type"},
+					},
+					{
+						TaskID:      "task_08BCD",
+						TaskType:    "kind_beta",
+						Description: "watchexec -- go vet ./...",
+					},
+				},
+				DroppedTasks: 7,
+			},
+			wantMsgID: "",
+			wantUpdate: BackgroundTaskRoster{
+				SessionUpdate: SessionUpdateBackgroundTaskRoster,
+				Tasks: []BackgroundTask{
+					{
+						TaskID:          "task_07YZA",
+						TaskType:        "kind_alpha",
+						Description:     "make check",
+						TruncatedFields: []string{"task_type"},
+					},
+					{
+						TaskID:      "task_08BCD",
+						TaskType:    "kind_beta",
+						Description: "watchexec -- go vet ./...",
+					},
+				},
+				DroppedTasks: 7,
+			},
+			wantOK: true,
+		},
 		// Drop cases: no session/update representation.
 		{
 			name: "TurnEnd -> no notification (stopReason is a session/prompt return)",
@@ -237,6 +328,60 @@ func TestMapUpdate_WireShape(t *testing.T) {
 			},
 			want: `{"sessionUpdate":"tool_call_update","toolCallId":"tool-4","status":"in_progress","content":[{"type":"terminal","terminalId":"term-9"}]}`,
 		},
+		{
+			name: "pyry/background_task_started",
+			ev: turnevent.BackgroundTaskStarted{
+				TaskID:          "task_05MNO",
+				ToolCallID:      "toolu_05STU",
+				Description:     "go build ./cmd/pyry",
+				TaskType:        "kind_started",
+				TruncatedFields: []string{"tool_call_id"},
+			},
+			want: `{"sessionUpdate":"pyry/background_task_started","taskId":"task_05MNO","toolCallId":"toolu_05STU","description":"go build ./cmd/pyry","taskType":"kind_started","truncatedFields":["tool_call_id"]}`,
+		},
+		{
+			name: "pyry/background_task_updated carries the patch blob as a string",
+			ev: turnevent.BackgroundTaskUpdated{
+				TaskID:          "task_06VWX",
+				Patch:           `{"status":"running","exit_c`,
+				TruncatedFields: []string{"task_id", "patch"},
+			},
+			want: `{"sessionUpdate":"pyry/background_task_updated","taskId":"task_06VWX","patch":"{\"status\":\"running\",\"exit_c","truncatedFields":["task_id","patch"]}`,
+		},
+		{
+			name: "pyry/background_task_roster with entries",
+			ev: turnevent.BackgroundTaskRoster{
+				Tasks: []turnevent.BackgroundTask{
+					{
+						TaskID:          "task_07YZA",
+						TaskType:        "kind_alpha",
+						Description:     "make check",
+						TruncatedFields: []string{"task_type"},
+					},
+					{
+						TaskID:      "task_08BCD",
+						TaskType:    "kind_beta",
+						Description: "watchexec -- go vet ./...",
+					},
+				},
+				DroppedTasks: 7,
+			},
+			want: `{"sessionUpdate":"pyry/background_task_roster","tasks":[{"taskId":"task_07YZA","taskType":"kind_alpha","description":"make check","truncatedFields":["task_type"]},{"taskId":"task_08BCD","taskType":"kind_beta","description":"watchexec -- go vet ./..."}],"droppedTasks":7}`,
+		},
+		{
+			// An EMPTY roster is still emitted and its emptiness survives to the
+			// bytes: "roster observed, nothing alive" stays distinguishable from
+			// "no roster information". This marshals the value MapUpdate actually
+			// RETURNS, which is what makes it different from
+			// TestBackgroundTaskPayloadWireShape's hand-built row — it proves the
+			// type's nil -> [] normaliser fires through the mapper's return path,
+			// and it catches a mapper that substitutes or drops the roster. It
+			// cannot catch a mapper that pre-allocates []BackgroundTask{}; that is
+			// TestMapUpdate_EmptyRosterForwardsNilTasks's job.
+			name: "empty pyry/background_task_roster keeps tasks:[] through the mapper",
+			ev:   turnevent.BackgroundTaskRoster{},
+			want: `{"sessionUpdate":"pyry/background_task_roster","tasks":[],"droppedTasks":0}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -257,11 +402,45 @@ func TestMapUpdate_WireShape(t *testing.T) {
 	}
 }
 
+// TestMapUpdate_EmptyRosterForwardsNilTasks asserts on the returned VALUE that
+// an empty roster's Tasks is FORWARDED as nil rather than pre-allocated. This is
+// the rung the bytes cannot reach: BackgroundTaskRoster.MarshalJSON owns the nil
+// -> [] normalisation, and its own comment states that pre-allocating in the
+// mapper "would produce identical bytes while hiding the normalisation the type
+// owns" — so an arm building []BackgroundTask{} is byte-INDISTINGUISHABLE from
+// the correct one and passes every golden in this file, including
+// TestMapUpdate_WireShape's empty-roster row. Without this assertion the
+// normalisation can migrate silently out of the type that owns it.
+//
+// Do NOT answer a failure here by writing Tasks: []BackgroundTask{} into a
+// TestMapUpdate wantUpdate literal. reflect.DeepEqual does distinguish nil from
+// an empty slice, so corrupting the row and the arm together turns the suite
+// green with the property gone — which is why this is a separate, named
+// assertion rather than an implication of a table row.
+func TestMapUpdate_EmptyRosterForwardsNilTasks(t *testing.T) {
+	t.Parallel()
+
+	update, msgID, ok := MapUpdate(turnevent.BackgroundTaskRoster{})
+	if !ok || msgID != "" {
+		t.Fatalf("MapUpdate(empty roster): got (ok=%v, msgID=%q), want (true, \"\")", ok, msgID)
+	}
+	roster, isRoster := update.(BackgroundTaskRoster)
+	if !isRoster {
+		t.Fatalf("update: got %T, want acpbridge.BackgroundTaskRoster", update)
+	}
+	if roster.Tasks != nil {
+		t.Fatalf("Tasks: got %#v, want nil (forwarded, not pre-allocated)", roster.Tasks)
+	}
+}
+
 // TestBackgroundTaskPayloadWireShape locks the wire shape of the three
 // background-task payloads and the roster's entry type (#1401). It marshals each
-// payload VALUE directly rather than driving MapUpdate: the three neutral
-// variants have no MapUpdate arm until #1402, so there is no mapper to reach
-// them through, which is also why they are absent from TestMapUpdate_WireShape.
+// payload VALUE directly rather than driving MapUpdate, and it keeps a job of its
+// own now that the mapper has arms (#1402): BackgroundTask, the roster's ENTRY
+// type, is never a MapUpdate return, so this is its only coverage — and pinning
+// all four types independently of the mapper keeps a mapper change from masking a
+// renamed tag. The three payloads are additionally driven through MapUpdate by
+// TestMapUpdate_WireShape, over different fixture values.
 //
 // Every field in every row is distinct and non-zero (except row 4, whose point IS
 // the zero values) and no value repeats across rows, so a renamed JSON tag, a
