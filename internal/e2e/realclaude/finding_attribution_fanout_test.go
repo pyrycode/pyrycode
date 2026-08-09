@@ -341,7 +341,8 @@ func finAttributeCases() []finAttributeCase {
 	// No line carrying tdnReapMessage at all, so LineCount == 0 for every group.
 	noLine := []byte(`time=2026-08-03T09:00:00.000Z level=INFO msg="agentrun: nothing here"` + "\n")
 	// An anchored line whose pgids= value does not open with a bracket, so
-	// tdnParsePGIDs errors (:252-255) and every group reads instrument-failed.
+	// tdnParsePGIDs errors (teardown_liveness_test.go:242-245) and every group
+	// reads instrument-failed.
 	unparseable := []byte(trailReapLine(1, "not-a-bracketed-list") + "\n")
 
 	return []finAttributeCase{

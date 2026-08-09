@@ -250,7 +250,7 @@ func finWritePlantedTrailerScan() trailScanResult {
 
 // finWritePlantedReapLog renders pyry's own captured stderr with the needle on an
 // ANCHORED line, reusing #1280's plant verbatim
-// (finding_attribution_fanout_test.go:730) for its stated reason: trailReapLine
+// (finding_attribution_fanout_test.go:731) for its stated reason: trailReapLine
 // splices its pgids argument raw and tdnParsePGIDs stops at the first ]
 // (teardown_liveness_test.go:246-254), so the list still parses and the needle
 // lands in tdnReapOutcome.Line — the channel the fan-out drops. A needle on a
@@ -798,7 +798,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 		t.Fatalf("channel 3 (reap stderr): the synthetic reap log carries no needle")
 	}
 	// The premise doubles as the non-vacuity proof, following
-	// finding_attribution_fanout_test.go:737-741: trailAdmitProof is reachable only
+	// finding_attribution_fanout_test.go:738-742: trailAdmitProof is reachable only
 	// if the needle-bearing line was recognised as anchored, parsed and found to
 	// name the held group. A plant that stopped being anchored lands here.
 	//
@@ -941,7 +941,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 // finding_run_record_test.go:934-944 gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
-// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:758),
+// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:759),
 // less the redundant trailer_line, which "line" already covers.
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)

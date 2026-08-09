@@ -88,7 +88,7 @@ package realclaude
 // stop publishing a field the operator reads to interpret the run — the
 // certified reason, or the corroboration verdict. #1280 met the first one layer
 // down and resolved it by planting only in the stderr
-// (finding_attribution_fanout_test.go:730-731). THE NEEDLE'S HOME HERE IS THE
+// (finding_attribution_fanout_test.go:731-732). THE NEEDLE'S HOME HERE IS THE
 // TRAILER'S `result` FIELD AND THE REAP-LOG STDERR; it may enter neither
 // terminal_reason nor ClaudeState. That plant is the STRONGER test, not a
 // weakened one: resultTrailer has no `result` member so trailScanResult.Trailer
@@ -823,7 +823,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	} else {
 		// C4 (:423): Admit is left ZERO when the gate certified nothing. This is
 		// the zero-value comparison the package uses for "not classified"
-		// (trail_run_outcome_test.go:729, finding_attribution_fanout_test.go:667) —
+		// (trail_run_outcome_test.go:729, finding_attribution_fanout_test.go:668) —
 		// a comparison against an existing consumer's idiom, not a reading the
 		// gather produced by literal.
 		if readings.Admit != (trailAdmitResult{}) {
