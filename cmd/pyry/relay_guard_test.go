@@ -132,8 +132,8 @@ var excludedTypes = map[string]string{
 	"TypeDebugBundleDone":     "push",
 	"TypeSessionError":        "push",
 
-	// outbound push — v2 background-task frames (#1393). Nothing emits them
-	// yet (the turnbridge mapping is #1394), but TestEveryInboundV2TypeHasHandler
+	// outbound push — v2 background-task frames (#1393; the turnbridge mapping
+	// landed in #1394). TestEveryInboundV2TypeHasHandler
 	// enumerates every Type* constant in internal/protocol/codes.go, so an
 	// outbound-only type must be excluded here from the moment it exists.
 	"TypeBackgroundTaskStarted": "push",
@@ -147,7 +147,7 @@ var excludedTypes = map[string]string{
 
 	// outbound push — the v2 usage-limit report (#1405). Outbound-only like the
 	// four above, and mandatory here from the moment the constant exists rather
-	// than from the moment something emits it (the turnbridge mapping is #1406) —
+	// than from the moment something emits it (the turnbridge mapping is #1410) —
 	// Assertion #3 reports an unclassified constant, not an unemitted one.
 	"TypeRateLimited": "push",
 }

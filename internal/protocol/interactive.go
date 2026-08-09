@@ -343,7 +343,7 @@ type BackgroundTask struct {
 // Like ThinkingProgressPayload it is conversation-scoped rather than turn-scoped,
 // so there is no turn_id, and receiving one neither opens nor closes a turn: a
 // usage-limit window is orthogonal to whichever turn happened to observe it
-// (turnevent.RateLimited's own doc). The bridge (#1406) supplies ConversationID
+// (turnevent.RateLimited's own doc). The bridge (#1410) supplies ConversationID
 // because the internal event carries none. claude's session_id and uuid are
 // deliberately absent for BackgroundTaskStartedPayload's reason plus #1380's —
 // they are claude's session identity and claude's per-line message id, neither of

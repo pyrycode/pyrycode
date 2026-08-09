@@ -208,6 +208,48 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			EstimatedTokens:      e.EstimatedTokens,
 			EstimatedTokensDelta: e.EstimatedTokensDelta,
 		}, true
+	case turnevent.RateLimited:
+		// Conversation identity only, like the status peers above: tc.TurnID and
+		// tc.Seq are ignored and the payload has no field for either. A usage-limit
+		// window is a condition of the ACCOUNT, not of the turn — claude reports it
+		// once per run whatever the turn state — so attributing it to whichever turn
+		// happened to observe it would misdescribe it.
+		//
+		// Every field crosses VERBATIM and nothing is invented: this is translation,
+		// not policy. The decision "is this worth telling a person" was already made
+		// upstream by emitRateLimit's three-rung gate (a benign status produces no
+		// event at all), so a second, differently-shaped filter here would silently
+		// diverge from the producer's — the hazard the ThinkingProgress arm above
+		// names. Hence no filtering, no defaulting, and specifically:
+		//
+		//   - ResetsAt is NOT clamped or range-checked in either direction. It is
+		//     claude's number, not the daemon's clock: not necessarily in the future,
+		//     not necessarily in a sane range, and 0 means claude did not report it
+		//     rather than "now" (turnevent.RateLimited.ResetsAt, and
+		//     RateLimitedPayload's SECURITY paragraph).
+		//   - Neither string is re-capped. The producer bounded both at construction
+		//     (streamsup's maxRateLimitField), following Unrecognized's precedent, so
+		//     a second cap here would be a second place the limit is decided and the
+		//     two could disagree silently.
+		//   - A nil TruncatedFields is passed straight through, and HERE that nil is
+		//     what puts "truncated_fields":null on the wire. The roster arm above
+		//     looks identical and means the OPPOSITE: BackgroundTaskRosterPayload
+		//     owns a nil→[] MarshalJSON, and RateLimitedPayload deliberately has none
+		//     (protocol/interactive.go), because nothing-was-cut is an ABSENCE. A
+		//     mapper that helpfully allocated an empty slice would put [] on the wire
+		//     and tell a phone that claude's cut text is complete.
+		//
+		// Status is the one field that says WHY the report fired, and the producer's
+		// gate is deliberately loud in that direction — any non-benign status emits,
+		// so an unrecognised one surfaces and a human looks. Dropping it here would
+		// silence that one layer later.
+		return protocol.TypeRateLimited, protocol.RateLimitedPayload{
+			ConversationID:  tc.ConversationID,
+			Status:          e.Status,
+			LimitType:       e.LimitType,
+			ResetsAt:        e.ResetsAt,
+			TruncatedFields: e.TruncatedFields,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false

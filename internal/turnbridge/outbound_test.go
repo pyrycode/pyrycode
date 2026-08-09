@@ -365,6 +365,83 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			// Every string field carries a DISTINCT sentinel: status, limit_type and
+			// conversation_id are same-typed neighbours, so placeholder repeats would
+			// let a mapping that swapped two of them pass. ResetsAt is deliberately
+			// not a plausible instant — a clamp, an abs() or an absent-means-now
+			// rewrite all go red here rather than shipping.
+			name: "RateLimited -> rate_limited, every field verbatim",
+			ev: turnevent.RateLimited{
+				Status:          "qq-status-sentinel",
+				LimitType:       "zz-limittype-sentinel",
+				ResetsAt:        -1,
+				TruncatedFields: []string{"tf-alpha-sentinel", "tf-beta-sentinel"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeRateLimited,
+			wantPayload: protocol.RateLimitedPayload{
+				ConversationID:  "c1",
+				Status:          "qq-status-sentinel",
+				LimitType:       "zz-limittype-sentinel",
+				ResetsAt:        -1,
+				TruncatedFields: []string{"tf-alpha-sentinel", "tf-beta-sentinel"},
+			},
+			wantOK: true,
+		},
+		{
+			// The far-future instant crosses unreformatted, and the nil truncation
+			// stays NIL: reflect.DeepEqual distinguishes a nil []string from an empty
+			// one, so a mapper that allocated []string{} fails here as well as on the
+			// bytes (TestMapEventRateLimitedTruncatedFieldsOnTheWire below).
+			name: "RateLimited far-future instant and nil truncation stay as claude left them",
+			ev: turnevent.RateLimited{
+				Status:    "qq-status-sentinel",
+				LimitType: "zz-limittype-sentinel",
+				ResetsAt:  4102444800,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeRateLimited,
+			wantPayload: protocol.RateLimitedPayload{
+				ConversationID: "c1",
+				Status:         "qq-status-sentinel",
+				LimitType:      "zz-limittype-sentinel",
+				ResetsAt:       4102444800,
+			},
+			wantOK: true,
+		},
+		{
+			// The "not turn-scoped" claim under TEST: tc carries a conspicuous TurnID
+			// and a non-zero Seq, and the expected payload has no field either could
+			// land in. Mirrors the ThinkingProgress row above.
+			name: "RateLimited ignores turn addressing (not turn-scoped)",
+			ev: turnevent.RateLimited{
+				Status:    "qq-status-sentinel",
+				LimitType: "zz-limittype-sentinel",
+			},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeRateLimited,
+			wantPayload: protocol.RateLimitedPayload{
+				ConversationID: "c1",
+				Status:         "qq-status-sentinel",
+				LimitType:      "zz-limittype-sentinel",
+			},
+			wantOK: true,
+		},
+		{
+			// Zero value maps rather than dropping. This is where an absent-means-now
+			// rewrite of ResetsAt shows: 0 means claude did not report the instant,
+			// not the epoch and not the current time. The gate that decides whether an
+			// event exists at all is the producer's, not this adapter's.
+			name:    "RateLimited zero value maps rather than dropping",
+			ev:      turnevent.RateLimited{},
+			tc:      tc,
+			wantTyp: protocol.TypeRateLimited,
+			wantPayload: protocol.RateLimitedPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{
@@ -450,6 +527,105 @@ func TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire(t *testing.T) {
 			}
 			if typ != protocol.TypeBackgroundTaskRoster {
 				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeBackgroundTaskRoster)
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal mapped payload: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(string(b), want) {
+					t.Fatalf("mapped bytes missing %s:\n%s", want, b)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(string(b), notWant) {
+					t.Fatalf("mapped bytes carry %s:\n%s", notWant, b)
+				}
+			}
+		})
+	}
+}
+
+// truncated_fields is pinned in BOTH of its states, on the bytes, because the
+// nil is the part that has to survive the mapping: RateLimitedPayload
+// deliberately has no MarshalJSON (internal/protocol/interactive.go), so nothing
+// normalises a nil afterwards — nothing-was-cut is an ABSENCE and must reach the
+// wire as null. A mapper that allocated an empty slice would emit [] and tell a
+// phone that claude's truncated text is complete, and nothing else in the tree
+// would notice.
+//
+// The SHAPE is TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire's above, with
+// the assertion deliberately INVERTED: that test demands "tasks":[] and forbids
+// "tasks":null, because BackgroundTaskRosterPayload owns a nil→[] MarshalJSON.
+// Copying its polarity here would want "truncated_fields":[] — green against
+// exactly the allocating mapper this test exists to catch.
+//
+// The assertion runs on json.Marshal of the value MapEvent RETURNED, never on a
+// test-built payload. That discipline matters more here than in the roster test:
+// with no MarshalJSON at all, a test-built payload proves nothing whatever about
+// whether the mapping preserved the nil.
+//
+// Needles are the full "key":"value" pairs, never the bare values — a bare-value
+// needle passes against a mapping that swapped two same-typed neighbours.
+func TestMapEventRateLimitedTruncatedFieldsOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	tc := TurnContext{ConversationID: "cc-conv-sentinel", TurnID: "t1", Seq: 7}
+
+	tests := []struct {
+		name    string
+		ev      turnevent.RateLimited
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "nil truncation reaches the wire as null",
+			ev: turnevent.RateLimited{
+				Status:    "qq-status-sentinel",
+				LimitType: "zz-limittype-sentinel",
+				ResetsAt:  4102444800,
+			},
+			want: []string{
+				`"truncated_fields":null`,
+				`"conversation_id":"cc-conv-sentinel"`,
+				`"status":"qq-status-sentinel"`,
+				`"limit_type":"zz-limittype-sentinel"`,
+				`"resets_at":4102444800`,
+			},
+			notWant: []string{`"truncated_fields":[]`},
+		},
+		{
+			// The control: null is not what the mapping emits for everything, so the
+			// nil row above passes for the right reason. Both members in ONE needle
+			// pins member ORDER, not merely membership. The negative instant crosses
+			// verbatim too, so a clamp or a reformat to RFC3339 goes red.
+			name: "populated truncation crosses verbatim and in order",
+			ev: turnevent.RateLimited{
+				Status:          "qq-status-sentinel",
+				LimitType:       "zz-limittype-sentinel",
+				ResetsAt:        -1,
+				TruncatedFields: []string{"tf-alpha-sentinel", "tf-beta-sentinel"},
+			},
+			want: []string{
+				`"truncated_fields":["tf-alpha-sentinel","tf-beta-sentinel"]`,
+				`"conversation_id":"cc-conv-sentinel"`,
+				`"status":"qq-status-sentinel"`,
+				`"limit_type":"zz-limittype-sentinel"`,
+				`"resets_at":-1`,
+			},
+			notWant: []string{`"truncated_fields":null`, `"truncated_fields":[]`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			typ, payload, ok := MapEvent(tt.ev, tc)
+			if !ok {
+				t.Fatal("the mapping suppressed a rate-limited event; it must be forwarded")
+			}
+			if typ != protocol.TypeRateLimited {
+				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeRateLimited)
 			}
 			b, err := json.Marshal(payload)
 			if err != nil {
