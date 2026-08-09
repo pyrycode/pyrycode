@@ -64,7 +64,7 @@ package realclaude
 // re-derived. reachMaxCommandBytes and reachCapCommand
 // (background_reach_probe_test.go:123, :945) are the single-sourced cap.
 //
-// trailDetail (trailer_admissibility_test.go:233) is reused rather than given a
+// trailDetail (trailer_admissibility_test.go:243) is reused rather than given a
 // finDetail twin, for the reason merged code has settled twice
 // (finding_attribution_fanout_test.go:37-44, finding_staging_gate_test.go:73-81):
 // it carries no decision — fmt.Sprintf plus reachCapCommand's 512-byte cap — and

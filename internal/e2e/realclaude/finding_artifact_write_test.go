@@ -321,7 +321,7 @@ func finWritePlantedReapLog() []byte {
 // # The certified reason is "completed" and not the budget one
 //
 // trailAdmitAttribution returns trailAdmitVoidBudgetFired the moment certified ==
-// trailBudgetTerminalReason (trailer_admissibility_test.go:458), ahead of every
+// trailBudgetTerminalReason (trailer_admissibility_test.go:482), ahead of every
 // reap-side arm. AC2's premise is that the entry reads trailAdmitProof — reachable
 // only from a needle-bearing line that was recognised, parsed and matched — so a
 // budget reason here would defuse the non-vacuity check into a Fatalf about the
@@ -806,7 +806,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// them renders every Admit.Detail, and the rule is to name the count, the path
 	// and the length rather than the string (security review item [7]). The Values
 	// are safe to print because trailAdmitAttribution returns one of a closed set
-	// (trailer_admissibility_test.go:217-224); the Details beside them are not.
+	// (trailer_admissibility_test.go:225-232); the Details beside them are not.
 	first := "<no entries>"
 	if len(in.Attribution.Entries) > 0 {
 		first = in.Attribution.Entries[0].Admit.Value

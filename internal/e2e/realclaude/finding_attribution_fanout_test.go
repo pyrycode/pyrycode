@@ -14,7 +14,7 @@ package realclaude
 //
 // # Why a fan-out exists at all
 //
-// trailAdmitAttribution (trailer_admissibility_test.go:387) takes ONE
+// trailAdmitAttribution (trailer_admissibility_test.go:411) takes ONE
 // tdnReapOutcome, which is the classification of pyry's reap log against ONE
 // held group. The probe does not have one group: pinScanArgv returns Matches as
 // a SLICE (process_pin_liveness_test.go:130-135), deliberately refusing to
@@ -28,9 +28,9 @@ package realclaude
 //
 // tdnClassifyReapLog (teardown_liveness_test.go:144) is the reap-log reader;
 // pyry's stderr is NOT re-parsed here. trailAdmitAttribution
-// (trailer_admissibility_test.go:387) is the attribution predicate, and
-// trailIsAdmitValue (:548) its membership predicate — called, never re-switched.
-// trailReapLine (:579) renders one anchored line in reap.go:65's slog shape.
+// (trailer_admissibility_test.go:411) is the attribution predicate, and
+// trailIsAdmitValue (:679) its membership predicate — called, never re-switched.
+// trailReapLine (:710) renders one anchored line in reap.go:65's slog shape.
 // trailClassifyRun / trailRunWellFormed (trail_run_outcome_test.go:363, :652)
 // are the downstream consumer and its vary-one-thing base.
 //
@@ -83,7 +83,7 @@ const (
 // background_reach_probe_test.go:162-168), no command string. That is what makes
 // the no-captured-bytes property true BY CONSTRUCTION rather than by an ordering
 // discipline a later edit can break; trailAdmitResult is itself documented
-// trap-free (trailer_admissibility_test.go:217-224), so carrying it whole is
+// trap-free (trailer_admissibility_test.go:225-232), so carrying it whole is
 // safe. TestFinAttributeRecordCarriesNoCapturedBytes is the enforcing test.
 type finAttributeEntry struct {
 	PGID  int              `json:"pgid"`
@@ -138,8 +138,8 @@ type finAttributeRecord struct {
 // # The argument for this order
 //
 // Only the first three can ever CO-OCCUR in one fan-out. For one (stderr,
-// certified), trailAdmitOutOfContract (trailer_admissibility_test.go:446) and
-// trailAdmitVoidBudgetFired (:458) fire before the verdict is read at all, so
+// certified), trailAdmitOutOfContract (trailer_admissibility_test.go:470) and
+// trailAdmitVoidBudgetFired (:482) fire before the verdict is read at all, so
 // they are decided by certified alone and are identical for every group.
 // trailAdmitVoidNoLine and trailAdmitVoidInstrument are decided by the stderr
 // alone — the line count, and whether the pgids= list parsed — and are likewise
@@ -324,7 +324,7 @@ type finAttributeCase struct {
 // finAttributeCases returns every fan-out input under test.
 //
 // EVERY ROW PASSES A NON-EMPTY certified. trailAdmitAttribution's contract block
-// rejects an empty one out of hand (trailer_admissibility_test.go:446), so a row
+// rejects an empty one out of hand (trailer_admissibility_test.go:470), so a row
 // passing "" would measure that contract block instead of this selection rule.
 //
 // A function rather than a package-level var, matching trailGateCases() and
@@ -341,7 +341,7 @@ func finAttributeCases() []finAttributeCase {
 	// No line carrying tdnReapMessage at all, so LineCount == 0 for every group.
 	noLine := []byte(`time=2026-08-03T09:00:00.000Z level=INFO msg="agentrun: nothing here"` + "\n")
 	// An anchored line whose pgids= value does not open with a bracket, so
-	// tdnParsePGIDs errors (:242-245) and every group reads instrument-failed.
+	// tdnParsePGIDs errors (:252-255) and every group reads instrument-failed.
 	unparseable := []byte(trailReapLine(1, "not-a-bracketed-list") + "\n")
 
 	return []finAttributeCase{
@@ -697,7 +697,7 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 // TestFinAttributeRecordCarriesNoCapturedBytes makes the
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:1039) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:1203) and reusing the shipped trailNeedle.
 //
 // # The plant position is the whole test
 //
@@ -716,7 +716,7 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 // #1271's own test plants it in every string-bearing input, and following that
 // here would put it into certified — which CROSSES VERBATIM BY DESIGN:
 // trailAdmitAttribution splices certified with %q into two of its Details
-// (trailer_admissibility_test.go:461, :513). It is trailGate's certified Reason,
+// (trailer_admissibility_test.go:485, :548). It is trailGate's certified Reason,
 // i.e. the trailer's terminal_reason, which shipped code already treats as publishable
 // (trailClassifyRun puts it into its own Details at trail_run_outcome_test.go:521
 // and :571, and TestTrailRunOutcomeCarriesNoCapturedBytes deliberately leaves Reason

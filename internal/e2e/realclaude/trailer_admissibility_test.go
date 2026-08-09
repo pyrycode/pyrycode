@@ -134,8 +134,12 @@ const (
 	// and it says no more than what was read. Not that any process was alive:
 	// there is no certified instant here for such a claim to be about, which is
 	// why the run-level arm it reaches is a named void. Not anything about a
-	// trailer that DOES carry a reason on that path — that is #1369's sibling
-	// shape, reaching trailGateUsable today. And not that this gate decides
+	// trailer that DOES carry a reason on that path — that sibling shape has an arm
+	// of its own since #1433, answering trailGateOutOfContract under a streamrunner
+	// reading and reaching trailGateUsable only under a ptyrunner or an
+	// indeterminate one; #1434 is where it may get a value of its own. (It was
+	// #1369's until that issue was closed NOT_PLANNED and re-filed as #1427, which
+	// split into those two.) And not that this gate decides
 	// against the path a LIVE run took: both shipped gathers fill RunnerPath with
 	// trailRunnerUnread() (finding_run_gather_test.go:552, :789;
 	// trail_run_rig_test.go:162), so over a live run the reading names no runner
@@ -147,13 +151,17 @@ const (
 	// the turn". Counted off the arms rather than adjusted by one: a state
 	// outside the three trailScan documents, a nil Trailer under a seen state, an
 	// absent terminal_reason on a path that OWES one, an absent one under a
-	// reading that names NO runner, and a present-and-blank one — FIVE. #1419 had
-	// split the empty terminal_reason into the key being ABSENT from the line and
-	// the key being PRESENT AND BLANK — one decoded "" and two different records —
-	// #1420 split the absent one three ways again by what the observed runner path
-	// owes, and #1417 took the owes-none case out of this value entirely, because
-	// absence there is a reading. Same value, same uncertified reason for the five
-	// that remain — only the Detail says which.
+	// reading that names NO runner, a present-and-blank one, and a
+	// present-and-named one on a path that owes NONE — SIX. #1419 had split the
+	// empty terminal_reason into the key being ABSENT from the line and the key
+	// being PRESENT AND BLANK — one decoded "" and two different records — #1420
+	// split the absent one three ways again by what the observed runner path owes,
+	// #1417 took the owes-none case out of this value entirely because absence
+	// there is a reading, and #1433 added the last of them. That one is the FIRST
+	// PRESENCE case this value carries: every sub-case before it is a record whose
+	// terminal_reason is missing, blank or moot, and this one has the key on the
+	// line naming a reason from a path that owes none. Same value, same uncertified
+	// reason for all six — only the Detail says which.
 	trailGateOutOfContract = "gate-out-of-contract"
 )
 
@@ -219,17 +227,19 @@ const (
 // --append-system-prompt-file and would label a correctly-wired stream run
 // ptyrunner (teardown_liveness_probe_test.go:759-766).
 //
-// # Exactly one arm reads it
+// # Two arms read it
 //
 // #1373 carried the reading to the gate and left every arm as it was. #1420 is
 // where a decision consults it: the ABSENCE arm calls trailReasonAgainstPath
 // (trailer_terminal_reason_test.go:222) to say which of the three absence cases
 // fired, which is where that function stopped having only its own tests for
-// callers. Every other arm ignores the field today, which is an inference from
-// today's row set: what TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt
-// proves is the row-scoped property that an undeclared row is invariant across
-// the readings, and its companion sub-test proves the one declaring row DOES
-// vary, so the sweep is not silent about what it exempts.
+// callers. #1433 added the second reader, on the PRESENCE side, calling the same
+// reduction and diverting on one of its answers. Every other arm ignores the
+// field today, which is an inference from today's row set: what
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt proves is the row-scoped
+// property that an undeclared row is invariant across the readings, and one
+// companion sub-test per declaring row proves that row DOES vary, so the sweep is
+// not silent about what it exempts.
 type trailGateInput struct {
 	Scan       trailScanResult
 	RunnerPath string
@@ -261,7 +271,8 @@ type trailGateResult struct {
 	Reason string `json:"terminal_reason,omitempty"`
 	Detail string `json:"detail"`
 	// RunnerPath is the reading the gate was HANDED, copied onto the result. The
-	// ABSENCE arm consults it since #1420 and no other arm does; it is on the
+	// ABSENCE arm consults it since #1420 and the PRESENCE arm since #1433; no
+	// other arm does, and no Detail interpolates it anywhere. It is on the
 	// result so that the reading which reached a PURE function is observable from
 	// outside it, which is the only channel a composition test can assert against.
 	//
@@ -341,25 +352,38 @@ func trailDetail(format string, args ...any) string {
 // what to do when they disagree — for no gain. terminal_reason is the field the
 // teardown path is documented against: one field, one decision.
 //
-// # The runner path is CARRIED to all ten return sites and READ at three
+// # The runner path is CARRIED to all eleven return sites and READ at four
 //
-// in.RunnerPath reaches every return site. Seven of the ten are decided without
-// consulting it at all; the three the ABSENCE arm answers with are decided BY it,
-// which is #1420's whole change. Since #1417 one of those three answers
-// trailGateAbsentOwesNone rather than trailGateOutOfContract, so the reading now
-// decides the VALUE at one of the ten sites and the DETAIL at three of them; the
-// site count itself is unchanged. Not one Detail interpolates the reading even
-// there: the absence sites embed trailReasonAgainstPath's answer, and every arm
-// of that function is fixed prose over its own file's constants and file cites
+// in.RunnerPath reaches every return site. SEVEN of the eleven are decided
+// without consulting it at all, and that seven did NOT move when this ticket
+// added a site: the site it added is a fourth that IS decided by the path. The
+// four are the three the ABSENCE arm answers with, which is #1420's whole change,
+// and the PRESENCE arm this ticket added. The DETAIL is decided by the reading at
+// exactly those four.
+//
+// The VALUE is decided by the reading for TWO INPUT SHAPES, across three of those
+// four sites — stated as shapes rather than as a bare numeral, because a numeral
+// here has gone stale twice already. On the ABSENCE shape, #1417 made one of the
+// three sites answer trailGateAbsentOwesNone where its two siblings answer
+// trailGateOutOfContract. On the PRESENT-AND-NAMED shape, this ticket makes the
+// reading pick between the presence site and the usable one. And THE SITE COUNT
+// ITSELF MOVED: it was ten from #1419 through #1417, and this is the ticket that
+// changed it.
+//
+// Not one Detail interpolates the reading even there: the absence sites embed
+// trailReasonAgainstPath's answer, the presence site cites that function's case
+// constant rather than embedding its Detail, and every arm of that function is
+// fixed prose over its own file's constants and file cites
 // (trailer_terminal_reason_test.go:208-221). Every Detail here stays fixed prose
 // over this file's own constants, the scan's own state, and that function's
-// answer.
+// answer or the name of it.
 //
 // Where that function holds its guarantee by review of its source, this one holds
 // it by TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, which drives every
 // fixture row under each of tdnRunnerFromArgv's five distinct answers and requires
 // a BYTE-IDENTICAL Detail across all five on every row that does not declare
-// pathVaries — the declaring row's variance the same test then proves positively.
+// pathVaries — and the variance on the rows that DO declare it is then proven
+// positively, by one companion sub-test per declaring arm.
 //
 // The reading is echoed onto the result, so the arriving value stays observable
 // from outside a pure function.
@@ -436,8 +460,8 @@ func trailGate(in trailGateInput) trailGateResult {
 		// argument at trailGateResult and the check at
 		// TestTrailAdmissibilityRecordsCarryNoCapturedBytes. The present-and-empty
 		// arm is #1419's and stays path-invariant; the absence branch is where
-		// #1420 reads in.RunnerPath, and it is the ONLY branch in this function
-		// that does.
+		// #1420 reads in.RunnerPath, and since #1433 the non-empty path below reads
+		// it too — those TWO branches in this function, and no others.
 		if !slices.Contains(in.Scan.KeyNames, trailReasonKeyName) {
 			// WHICH absence comes from the shipped reduction, CALLED rather than
 			// re-switched: trailReasonAgainstPath (trailer_terminal_reason_test.go:222)
@@ -464,8 +488,15 @@ func trailGate(in trailGateInput) trailGateResult {
 			// fourth site for "some value outside the three" would be a return site
 			// no fixture row can reach, and clause B of
 			// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt would have to
-			// weaken from "the nine rows reach all ten" to "reach most of". That is
-			// why the count is ten and not eleven.
+			// weaken from "the nine rows reach all of them" to "reach most of".
+			//
+			// THE COUNT IS ELEVEN SINCE #1433 AND THE ARGUMENT IS UNCHANGED, because
+			// it was never an argument about the total. That ticket added a return
+			// site below and clause B stayed TOTAL, since trailGateCases()' usable
+			// row reaches the new site under readings[1]. The rule is "every site a
+			// fixture row reaches", not "ten sites": a site a row reaches pays for
+			// itself, and a fourth site HERE still would not — which is why this
+			// switch still has no default guard.
 			//
 			// One site interpolating against.Detail would compile and pass, and is
 			// refused: the sweep's totality argument rests on this arm being three
@@ -491,8 +522,12 @@ func trailGate(in trailGateInput) trailGateResult {
 			// other two still answer out of contract — absence where a reason is
 			// owed is a departure from what that path constructs, and absence under a
 			// reading naming no runner is a shape nothing here can judge. The sibling
-			// shape, a terminal_reason that IS on the line from a path owing none, is
-			// #1369's; these arms stay silent about it rather than half-answering it.
+			// shape, a terminal_reason that IS on the line from a path owing none,
+			// has an arm of its own below since #1433, and #1434 is where it may get
+			// a value of its own; these arms stay silent about it rather than
+			// half-answering it, which is still the right shape now that it is
+			// answered elsewhere. It was #1369's until that issue was closed
+			// NOT_PLANNED and re-filed as #1427, which split into those two.
 			against := trailReasonAgainstPath(in.RunnerPath, in.Scan.KeyNames, reason)
 			switch against.Value {
 			case trailReasonAbsentOwesOne:
@@ -543,6 +578,102 @@ func trailGate(in trailGateInput) trailGateResult {
 				"was written. A reap-log attribution on this path is void, not negative. The "+
 				"reason is certified anyway, because the predicate needs it to name that void",
 				reason),
+			RunnerPath: in.RunnerPath,
+		}
+	}
+
+	// The PRESENCE side of the reading #1420 wired in at the absence branch:
+	// terminal_reason IS on the line, and the observed path owes none. Same
+	// reduction, CALLED rather than re-switched — trailReasonAgainstPath
+	// (trailer_terminal_reason_test.go:222) owns the six meanings a terminal_reason
+	// has against a path, and this arm consults exactly one of its answers. An `if`
+	// and not a `switch` because exactly one answer diverts: the other two
+	// reachable here — trailReasonNamedOwesOne under a ptyrunner reading and
+	// trailReasonPathUnnamed under a reading naming no runner — fall through to the
+	// usable return below, which stays the FALL-THROUGH rather than becoming a
+	// default arm. trailReasonBlankOwesOne cannot be reached from here at all,
+	// since reason != "" by the enclosing flow, so no site is spent on it.
+	//
+	// It answers the shipped trailGateOutOfContract and CERTIFIES NOTHING. That is
+	// what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:398-409) green
+	// unamended and lets C4 (:423-431) force Admit empty, so such a run lands on
+	// trailOutcomeOutOfContract with no arm added to the classifier and no value
+	// added to either closed set. Promoting this shape to a value of its own is
+	// #1434's step, in exactly the shape #1417 took the owes-none absence out of
+	// trailGateOutOfContract; until it lands, a READING is filed as a caller's bug,
+	// which is a stated residual rather than an oversight.
+	//
+	// What the arm may say is bounded by what was read. The line is not that path's
+	// documented healthy shape, and no verdict rests on it. NEVER that pyry wrote
+	// it: streamrunner.Run passes claude's bytes through unchanged
+	// (internal/agentrun/streamrunner/runner.go:177-179), so claude's own output
+	// produces the same reading and a value claiming more would let it name pyry as
+	// its author. And it is a statement about WHAT THE TRAILER CARRIED, never about
+	// whether a process was alive — there is no certified instant here for such a
+	// claim to be about.
+	//
+	// # Two orderings, both decided here rather than left to return order
+	//
+	// THE BUDGET ARM WINS, which is why this site sits after it. A max_turns trailer
+	// from a path that owes none has two candidate arms — the budget arm keys on
+	// terminal_reason alone, deliberately, for the reason this function's own
+	// "# The budget arm keys on terminal_reason alone" heading gives — and the
+	// reduction answers trailReasonPresentOwesNone for it. The budget void is
+	// STRUCTURAL and outranks every reap-side void (trailAdmitVoidBudgetFired's own
+	// comment, and trailAdmitAttribution's ordering argument), so it keeps its
+	// trailer. The other order is not merely unmotivated, it is more expensive:
+	// measured both ways, placing this site FIRST makes trailGateCases()' max_turns
+	// row vary by the reading too, so a THIRD row would have to declare pathVaries
+	// and the sweep would stop comparing what the budget arm certifies.
+	//
+	// THE PRESENT-AND-BLANK ARM KEEPS WINNING, and that divergence is deliberate
+	// rather than an accident of return order. The reason == "" branch above returns
+	// before this site is reached, so a blank terminal_reason from a path owing none
+	// is answered PATH-INVARIANTLY as out of contract. The reduction disagrees:
+	// trailReasonPresentOwesNone absorbs both — "Empty or named, both land here"
+	// (trailer_terminal_reason_test.go:105-108) — and its Detail is byte-identical
+	// for the named and the blank input. #1419's arm is kept winning because it
+	// publishes what the one absorbing value cannot: the NO LIVE REPRO EXISTS claim,
+	// which is TRUE of a blank key and FALSE of an absent one.
+	//
+	// # The constant is CITED, and the reduction's Detail is NOT embedded
+	//
+	// The three absence sites embed against.Detail because their three cases are
+	// otherwise indistinguishable in prose. Here that neither fits nor is needed.
+	// trailReasonPresentOwesNone's Detail is 395 B, which would leave 75 B of own
+	// prose under the 470 B ceiling the leak row imposes — the 512 B cap less the
+	// 42 B trailNeedle it asserts would still have fitted. And the marker assertions
+	// key on the CONSTANT: trailGateAbsenceCaseMarkers() returns the constants
+	// themselves and every assertion is a strings.Contains against one, so citing
+	// the 32 B constant preserves all of them, needs no trim to the shipped
+	// reduction, and creates no severed-sentence hazard. Measured at 445 B, 25 B
+	// spare, and TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone asserts that
+	// headroom ON THE OUTPUT so a reword that overflows is red here rather than
+	// shipping a Detail cut past its own marker.
+	//
+	// The decoded reason is deliberately NOT interpolated, unlike the two arms that
+	// certify it. This one certifies nothing, so putting the scalar into its Detail
+	// would put a value from the trailer into a record that certifies none, and
+	// would make the byte budget a function of untrusted input.
+	//
+	// PRESENCE IS THE REDUCTION'S OWN KEY-NAME READ (trailer_terminal_reason_test.go:223)
+	// and never decodedReason != "", which inside this block is constantly true. A
+	// hand-built record whose decoded reason is non-empty while KeyNames lacks the
+	// key therefore reduces to an ABSENCE answer and reaches the usable return
+	// below. That record is one trailScan cannot emit — it derives both from the
+	// same line — and it is outside this arm's stated shape, so giving it a site
+	// would spend a return site no fixture row reaches. Recorded, not defended: the
+	// same argument the absence switch makes about its missing default.
+	against := trailReasonAgainstPath(in.RunnerPath, in.Scan.KeyNames, reason)
+	if against.Value == trailReasonPresentOwesNone {
+		return trailGateResult{
+			Value: trailGateOutOfContract,
+			Detail: trailDetail("%s: terminal_reason is on the line and the path owes none, so the "+
+				"line is not that path's healthy shape and nothing is certified. NEVER that pyry "+
+				"wrote it — the path passes claude's bytes through unchanged "+
+				"(streamrunner/runner.go:177-179), so claude produces the same reading. About what "+
+				"the trailer CARRIED, never whether a process was alive. The presence side of the "+
+				"absence reading; a value of its own is #1434", trailReasonPresentOwesNone),
 			RunnerPath: in.RunnerPath,
 		}
 	}
@@ -770,9 +901,12 @@ type trailGateCase struct {
 	// trailGateUsable and trailGateBudgetFired.
 	reason string
 	// pathVaries declares that this row's own arm reads the runner path, so its
-	// VALUE and its DETAIL may both differ across the readings. It is what scopes
-	// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt's comparisons, and
-	// it is DECLARED rather than detected: re-deriving the gate's branch condition
+	// VALUE, its CERTIFIED REASON and its DETAIL may all differ across the
+	// readings. The certified reason joined that list at #1433, whose arm is the
+	// first in the tree whose CERTIFICATION moves with the reading: every
+	// path-varying arm before it certified nothing on every reading. It is what
+	// scopes TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt's comparisons,
+	// and it is DECLARED rather than detected: re-deriving the gate's branch condition
 	// inside the sweep would restate the thing under test, and detecting it from
 	// the Details differing would exempt precisely the rows that fail. A later
 	// absence-shaped row that forgets to declare it goes red, which is the
@@ -851,6 +985,26 @@ func trailGateEmptyReasonScan() trailScanResult {
 	return trailScan([]byte(trailKeyNamesEmptyTerminalReason() + "\n"))
 }
 
+// trailGateUsableScan is the PRESENT-AND-NAMED shape: one ordinary trailer whose
+// terminal_reason is on the line and names a reason other than max_turns. Under a
+// ptyrunner or an indeterminate reading it reaches the usable arm; under a
+// streamrunner one it reaches the presence arm this ticket added, which is the
+// whole of that arm's divergence.
+//
+// It exists so the usable row of trailGateCases(),
+// TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone and the presence companion
+// in TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt drive ONE fixture, and
+// so that companion drives a helper rather than indexing the row slice — the same
+// discipline the absence companion already states.
+//
+// A function rather than a package-level var, for trailGateAbsentReasonScan()'s
+// own reason: the value holds a *resultTrailer and a []string, go test -race runs
+// this package's tests in parallel, and a shared backing array would let one row's
+// mutation reach another's.
+func trailGateUsableScan() trailScanResult {
+	return trailScan([]byte(trailFixtureTrailer + "\n"))
+}
+
 // trailGateCases returns every gate input under test. The six rows that can be
 // produced by the real scan go through trailScan rather than a hand-built
 // record, so the reachable arms stay pinned to what the shipped producer
@@ -858,23 +1012,31 @@ func trailGateEmptyReasonScan() trailScanResult {
 // that is precisely what the contract checks exist for.
 //
 // Every row carries the same runner path, and since #1420 that is a CHOICE
-// rather than a consequence — the gate's absence arm does read the path now. A
-// row varying it would land inside TestTrailGate, TestTrailGateThenAdmit and
-// TestTrailRunComposesWithGateCases at once — three of this slice's four
-// consumers, and the three that do NOT vary the path themselves — so holding the
-// path fixed is what keeps those three comparable with one another. The
-// per-case proof therefore lives in its own driver
-// (TestTrailGateNamesWhichAbsenceCaseFired), and the sweep that VARIES the path is
+// rather than a consequence — the gate's absence arm has read the path since
+// then, and its presence arm since #1433. A row varying it would land inside
+// TestTrailGate, TestTrailGateThenAdmit and TestTrailRunComposesWithGateCases at
+// once — three of this slice's four consumers, and the three that do NOT vary the
+// path themselves — so holding the path fixed is what keeps those three
+// comparable with one another. The per-case proof therefore lives in a driver of
+// its own PER ARM (TestTrailGateNamesWhichAbsenceCaseFired and
+// TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone), and the sweep that
+// VARIES the path is
 // TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, which drives these same
 // nine rows under all five readings.
 func trailGateCases() []trailGateCase {
 	return []trailGateCase{
 		{
-			name: "an ordinary trailer is usable and certifies its reason",
-			in: trailGateInput{Scan: trailScan([]byte(trailFixtureTrailer + "\n")),
-				RunnerPath: trailRunnerUnread()},
-			want:   trailGateUsable,
-			reason: "completed",
+			// Declares pathVaries since this ticket: its arm is the one the presence
+			// arm diverts from, so under a streamrunner reading this same input
+			// reaches trailGateOutOfContract instead. It is the FIRST row in the tree
+			// whose CERTIFIED REASON moves with the reading — "completed" under the
+			// baseline reading, nothing under the streamrunner one — which is what
+			// widened the sweep's exemption beyond the value and the Detail.
+			name:       "an ordinary trailer is usable and certifies its reason",
+			in:         trailGateInput{Scan: trailGateUsableScan(), RunnerPath: trailRunnerUnread()},
+			want:       trailGateUsable,
+			reason:     "completed",
+			pathVaries: true,
 		},
 		{
 			name: "a max_turns trailer is budget-fired and still certifies its reason",
@@ -929,19 +1091,21 @@ func trailGateCases() []trailGateCase {
 			// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt TOTAL: no other
 			// row is absence-shaped, so without this one the absence arm's THREE
 			// return sites are the ones no fixture reaches, and an arm that forgot
-			// RunnerPath: in.RunnerPath there could hide behind the seven that
-			// carried it. Three of ten rather than one of eight since this ticket
-			// split the arm, which is why the exemption below is scoped to the byte
-			// comparison and clause B keeps running on every reading.
+			// RunnerPath: in.RunnerPath there could hide behind the sites that
+			// carried it. Three of eleven rather than one of eight since #1420 split
+			// the arm, which is why the exemption below is scoped BY DECLARATION and
+			// clause B keeps running on every reading. What the exemption covers is
+			// not what this comment used to say: it was scoped to the byte comparison
+			// until #1417 added the value to it, and #1433 added the certified reason.
 			//
-			// It is the ONE row whose Detail depends on the reading, and the sweep
-			// drives it under all five: it reaches trailReasonAbsentOwesOne,
-			// trailReasonAbsentOwesNone and trailReasonPathUnnamed across them, so
-			// this single row is also the sweep's positive proof that the exempted
-			// arm DOES vary. Its own RunnerPath stays trailRunnerUnread() like
-			// every other row's, which is what keeps the slice's uniform-path
-			// premise — and with it the three consumers that do not vary the path —
-			// unchanged by the split.
+			// It is ONE OF TWO rows whose Detail depends on the reading — the usable
+			// row above is the other, since #1433 — and the sweep drives it under all
+			// five: it reaches trailReasonAbsentOwesOne, trailReasonAbsentOwesNone
+			// and trailReasonPathUnnamed across them, so this single row is also the
+			// sweep's positive proof that its own exempted arm DOES vary. Its own
+			// RunnerPath stays trailRunnerUnread() like every other row's, which is
+			// what keeps the slice's uniform-path premise — and with it the three
+			// consumers that do not vary the path — unchanged by either split.
 			name: "a seen state whose terminal_reason is absent from the line is out of contract",
 			in: trailGateInput{Scan: trailGateAbsentReasonScan(),
 				RunnerPath: trailRunnerUnread()},
@@ -1122,21 +1286,25 @@ func TestTrailGate(t *testing.T) {
 	}
 
 	t.Run("the out-of-contract details name their own sub-case", func(t *testing.T) {
-		// Four inputs reach one value, and FIVE arms answer it — a state outside
+		// Four inputs reach one value, and SIX arms answer it — a state outside
 		// the three trailScan documents, a nil Trailer, an absent terminal_reason
 		// on a path that owes one, an absent one under a reading naming no runner,
-		// and a present-and-blank one. Without this they are indistinguishable in a
+		// a present-and-blank one, and a present-and-named one on a path that owes
+		// none. Without this they are indistinguishable in a
 		// published record: a reader cannot tell a nil pointer from a state nobody
 		// defined, nor a terminal_reason that is ON the line and blank from one
 		// that is not on the line at all. The last two decode identically to "", so
 		// the Detail is the ONLY channel that says which record arrived.
 		//
-		// Four of the five are covered here; the one that is not is the OWES-ONE
-		// absence, which needs a reading naming ptyrunner while every input in this
-		// sub-test carries trailRunnerUnread(). It is covered by
-		// TestTrailGateNamesWhichAbsenceCaseFired, which drives its own readings.
-		// Five rather than #1420's six because #1417 moved the owes-none absence to
-		// trailGateAbsentOwesNone — the same driver proves that arm.
+		// Four of the six are covered here; the TWO that are not both need a reading
+		// that names a runner, while every input in this sub-test carries
+		// trailRunnerUnread(). The OWES-ONE absence needs a ptyrunner reading and is
+		// covered by TestTrailGateNamesWhichAbsenceCaseFired; the PRESENT-AND-NAMED
+		// case needs a streamrunner one and is covered by
+		// TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone. Both drive their own
+		// readings. The count moved twice: #1420 left six, #1417 moved the owes-none
+		// absence out to trailGateAbsentOwesNone leaving five — the same driver
+		// proves that arm — and #1433 added the presence case, making six again.
 		//
 		// Each of the two #1419 arms asserts its OWN markers and the OTHER's
 		// ABSENCE. That is what makes a row red on its own when its own case
@@ -1240,8 +1408,8 @@ func trailGateAbsenceCaseMarkers() []string {
 //
 // # The value is a precondition on three rows and THE DISCRIMINATOR on one
 //
-// Five arms answer trailGateOutOfContract, so on R1, R3 and R4 got.Value says
-// nothing about WHICH one ran. It is asserted there anyway, as the non-vacuity
+// Six arms answer trailGateOutOfContract since #1433, so on R1, R3 and R4
+// got.Value says nothing about WHICH one ran. It is asserted there anyway, as the non-vacuity
 // precondition — a row that reached a different arm would sweep the wrong Detail
 // and report clean about an arm it never ran — and the case marker is what names
 // the arm. On R2 it is the assertion itself: #1417 gave the owes-none absence a
@@ -1393,7 +1561,7 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 
 			if got.Value != tc.wantValue {
 				t.Fatalf("value: got %q (%s), want %q. On the rows wanting %s this is the "+
-					"non-vacuity precondition — five arms answer it, so a row reaching a "+
+					"non-vacuity precondition — six arms answer it, so a row reaching a "+
 					"different one would sweep the wrong Detail and report clean about an arm it "+
 					"never ran. On the row wanting %s it is the ASSERTION: absence on a path that "+
 					"owes none is that path's documented healthy shape, and #1417 gave it a value "+
@@ -1453,6 +1621,221 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 	}
 }
 
+// TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone is this ticket's AC1 and
+// AC3 made deterministic, in TestTrailGateNamesWhichAbsenceCaseFired's shape: the
+// PRESENCE side of the same reading, plus the two ordering decisions the arm
+// records, each driven by a row rather than left to return order.
+//
+// # The value is a precondition on two rows and never the discriminator
+//
+// SIX arms answer trailGateOutOfContract since this ticket, so on P1 and P3 the
+// value says nothing about which one ran — unlike the absence driver, where #1417
+// had given one case a value of its own. Both rows assert it anyway as the
+// non-vacuity precondition, and the case marker is what names the arm.
+//
+// That is exactly why P3 asserts the MARKER and not the value. The
+// present-and-empty arm and this ticket's arm answer the SAME value, so a mutant
+// that let present-and-empty fall into the presence arm would leave a value
+// assertion green; only "the Detail names no presence case" catches it. The
+// max_turns pair is the easier case — a swap there moves the value from
+// gate-budget-fired to gate-out-of-contract — so P2 asserts the value and needs no
+// marker to discriminate.
+//
+// # The mutant x row matrix, each demonstrated under `go test -overlay`
+//
+// Every row is the SOLE RED AMONG THESE ROWS for at least one mutant. Reds
+// elsewhere in the suite are named beside it rather than omitted — a mutant caught
+// in two places is caught in two places, and a table that hid the second would
+// misdescribe what this driver is worth:
+//
+//	P2  the arm placed BEFORE the budget arm     sole row here; also the sweep's max_turns row
+//	P3  the arm swallowing present-and-empty     sole row here; also the sweep's present-and-empty row
+//	P1  the arm certifying a reason              sole row here (Reason); also the presence companion
+//	P1  the arm's Detail outgrowing the ceiling  sole row here (headroom); also the leak sweep's presence row
+//
+// P1 carries two mutants because its two assertions fail independently: a
+// certifying arm leaves the length alone and an overgrown Detail leaves Reason
+// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:398-409) would reject
+// the certifying pair a layer up, but no shipped fixture drives this arm into that
+// classifier, so C2 is a contract here rather than an observed red.
+//
+// The remaining mutant — the new answer awarded on a PTYRUNNER reading — reddens
+// NO row here, because every row is driven at a streamrunner reading and the
+// mutant only moves the ptyrunner one. It belongs to the presence companion in
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, at reading 0, which is
+// also where rows carrying trailRunnerUnread() are covered; measured, it reddens
+// that companion, that sweep's usable-row premise, and
+// TestTrailComposesUnderAPtyrunnerReading.
+//
+// Deferred to #1434's matrix ticket, named here so the gap is stated rather than
+// implied: discriminating on the literal "idle_stall" rather than on the path, and
+// the two indeterminate-reading confusions.
+//
+// # Headroom is asserted ON THE OUTPUT, per row
+//
+// Same reason as the absence driver's: reachCapCommand TRUNCATES AND MARKS rather
+// than failing, so a Detail that outgrew the cap keeps its case marker and loses
+// every clause explaining it. The arm's real ceiling is 470 B and not 512 — the
+// leak row asserts the 42 B trailNeedle would still have fitted — so the length
+// check adds the needle rather than comparing against the cap alone. Measured, the
+// three rows publish 445 / 298 / 442 B.
+func TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone(t *testing.T) {
+	// The premise the marker assertions rest on, in the shape the absence driver
+	// already uses, and asserted rather than inherited from the ticket that
+	// measured it. The presence constant shares the whole `on-owes-none-path`
+	// suffix with one absence constant, so containment is a live risk here rather
+	// than a formality — and it is checked in BOTH directions, since a marker
+	// contained BY another is as bad as one containing it.
+	for _, absence := range trailGateAbsenceCaseMarkers() {
+		if strings.Contains(trailReasonPresentOwesNone, absence) {
+			t.Fatalf("the presence marker %q contains the absence marker %q: every assertion that "+
+				"an absence Detail names no presence case, or the reverse, would report the wrong "+
+				"case as present", trailReasonPresentOwesNone, absence)
+		}
+		if strings.Contains(absence, trailReasonPresentOwesNone) {
+			t.Fatalf("the absence marker %q contains the presence marker %q: the sub-test asserting "+
+				"an empty-reason Detail carries no absence marker would then also have to answer "+
+				"for this one, and the two spaces would stop being separable in a record",
+				absence, trailReasonPresentOwesNone)
+		}
+	}
+
+	// Every row is driven under a reading that reduces to streamrunner, because
+	// that is the reading the arm is about. What separates them is the trailer.
+	streamrunner := tdnRunnerFromArgv(tdnFixtureStreamArgv)
+
+	tests := []struct {
+		name string
+		scan trailScanResult
+		// wantValue is the gate value the row must reach.
+		wantValue string
+		// wantReason is what the row must certify: empty on both out-of-contract
+		// rows, and the budget literal on the row the budget arm keeps.
+		wantReason string
+		// wantMarker is the presence case marker the Detail must carry, and ""
+		// means it must NOT carry it.
+		wantMarker string
+		// alsoCarries are phrases this row's Detail must keep.
+		alsoCarries []string
+	}{
+		{
+			// The headline: the shape that was certified usable under ptyrunner's
+			// justification until this ticket, and the only shape a live
+			// watchdog-killed stream run puts on the line
+			// (streamrunner/watchdog.go:280, reached from
+			// streamrunner/runner.go:250-253).
+			name:       "P1 a named terminal_reason from a path that owes none",
+			scan:       trailGateUsableScan(),
+			wantValue:  trailGateOutOfContract,
+			wantReason: "",
+			wantMarker: trailReasonPresentOwesNone,
+			alsoCarries: []string{
+				// The claim limit, and the cite that is the REASON for it: claude's
+				// own output reaches the same reading, so the arm may never say pyry
+				// wrote the line.
+				"NEVER that pyry wrote it",
+				"streamrunner/runner.go:177-179",
+				// What the record is about, stated so a reader cannot take it for a
+				// statement about a live process.
+				"never whether a process was alive",
+			},
+		},
+		{
+			// ORDERING 1, driven rather than argued: max_turns has two candidate
+			// arms and the budget arm wins, because the budget void is STRUCTURAL
+			// and outranks every reap-side void. A swap of the two arms moves this
+			// row's value to trailGateOutOfContract and its reason to "", so the
+			// row is red on both.
+			name:       "P2 a max_turns terminal_reason reaches the budget arm, not this one",
+			scan:       trailScan([]byte(trailPaddedTrailer(2000) + "\n")),
+			wantValue:  trailGateBudgetFired,
+			wantReason: trailBudgetTerminalReason,
+			wantMarker: "",
+		},
+		{
+			// ORDERING 2: present-and-blank keeps reaching #1419's path-invariant
+			// arm, even though the reduction absorbs it into the presence answer.
+			// The alsoCarries phrases are the record that answer publishes and this
+			// one cannot — NO LIVE REPRO EXISTS is true of a blank key and false of
+			// an absent one — so they are what a swallowed case loses.
+			name:        "P3 a present-and-blank terminal_reason keeps reaching the path-invariant arm",
+			scan:        trailGateEmptyReasonScan(),
+			wantValue:   trailGateOutOfContract,
+			wantReason:  "",
+			wantMarker:  "",
+			alsoCarries: []string{"terminal_reason is empty", "NO LIVE REPRO EXISTS"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := trailGate(trailGateInput{Scan: tc.scan, RunnerPath: streamrunner})
+
+			if got.Value != tc.wantValue {
+				t.Fatalf("value: got %q (%s), want %q. On the rows wanting %s this is the "+
+					"non-vacuity precondition and never the answer — six arms answer it since "+
+					"this ticket, so a row reaching a different one would sweep the wrong Detail "+
+					"and report clean about an arm it never ran. On the row wanting %s it IS the "+
+					"assertion: the budget arm keys on terminal_reason alone and wins, because a "+
+					"budget void is structural and outranks every reap-side void", got.Value,
+					got.Detail, tc.wantValue, trailGateOutOfContract, trailGateBudgetFired)
+			}
+			if !trailIsGateValue(got.Value) {
+				t.Errorf("value: %q is outside the recorded gate space", got.Value)
+			}
+			if got.Reason != tc.wantReason {
+				t.Errorf("certified reason: got %q, want %q — the presence arm certifies NOTHING, "+
+					"which is what keeps trailClassifyRun's C2 green unamended and lets C4 force "+
+					"an empty Admit; the budget arm keeps certifying, because the predicate needs "+
+					"that reason to name the void", got.Reason, tc.wantReason)
+			}
+
+			if named := strings.Contains(got.Detail, trailReasonPresentOwesNone); named !=
+				(tc.wantMarker != "") {
+				t.Errorf("the Detail names case %s = %t, want %t. On the rows wanting it absent "+
+					"this is the whole assertion: two of the three rows reach %s, so the value "+
+					"cannot tell an arm that swallowed this row's shape from the arm that should "+
+					"have answered it. Detail: %s", trailReasonPresentOwesNone, named,
+					tc.wantMarker != "", trailGateOutOfContract, got.Detail)
+			}
+			// The presence case is not an absence case, so no absence marker may
+			// appear on any of these rows — the mirror of the assertion
+			// trailGateAbsenceCaseMarkers() already carries on the empty-reason
+			// Detail, and what keeps the new constant OUT of that set honest.
+			for _, absence := range trailGateAbsenceCaseMarkers() {
+				if strings.Contains(got.Detail, absence) {
+					t.Errorf("the Detail carries the absence marker %q: every input here has its "+
+						"terminal_reason ON the line, so no absence case applies to any of them. "+
+						"Detail: %s", absence, got.Detail)
+				}
+			}
+
+			for _, phrase := range tc.alsoCarries {
+				if !strings.Contains(got.Detail, phrase) {
+					t.Errorf("the Detail dropped %q. Detail: %s", phrase, got.Detail)
+				}
+			}
+
+			// Headroom, on the output, against the arm's real 470 B ceiling rather
+			// than the 512 B cap.
+			if strings.Contains(got.Detail, reachTruncationMarker) {
+				t.Errorf("the Detail was TRUNCATED at %d bytes and marked: the case marker "+
+					"asserted above survives the cut while every clause explaining it is "+
+					"amputated, so this row would otherwise pass against a severed sentence. "+
+					"Detail: %s", reachMaxCommandBytes, got.Detail)
+			}
+			if n := len(got.Detail); n+len(trailNeedle) > reachMaxCommandBytes {
+				t.Errorf("the Detail is %d bytes and the needle is %d, so the two do not fit "+
+					"inside the %d byte cap: had this arm leaked the needle it would have been "+
+					"truncated away and the leak sweep's row for it would be VACUOUS. The arm "+
+					"cites the %d byte case constant rather than embedding the reduction's 395 B "+
+					"Detail precisely to keep this margin — rewrite its prose rather than growing "+
+					"it", n, len(trailNeedle), reachMaxCommandBytes, len(trailReasonPresentOwesNone))
+			}
+		})
+	}
+}
+
 // trailGateRunnerReadings returns tdnRunnerFromArgv's five distinct answers, each
 // obtained by DRIVING THE SHIPPED READER over an argv rather than by re-typing
 // its prose as a literal. A re-typed copy would go on passing after the reader
@@ -1481,10 +1864,11 @@ func trailGateRunnerReadings() []string {
 }
 
 // TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt is AC2 made
-// deterministic, under the claim that is true after #1420 and stays true when a
-// second arm reads the path: the runner path reaches every return site, and a
-// row's DECISION — value, certified reason and Detail — may move with the
-// reading only where that row declares pathVaries, and nowhere else.
+// deterministic, under the claim #1420 landed and #1433 exercised — a second arm
+// reads the path now, and the claim held across that without weakening: the runner
+// path reaches every return site, and a row's DECISION — value, certified reason
+// and Detail — may move with the reading only where that row declares pathVaries,
+// and nowhere else.
 //
 // # The Detail is compared AS BYTES
 //
@@ -1503,42 +1887,62 @@ func trailGateRunnerReadings() []string {
 //   - The arriving reading is READ BACK from outside the gate. A sweep that built
 //     its input without filling the path would otherwise pass forty-five identical
 //     comparisons while proving nothing about carriage. This assertion is TOTAL
-//     over the gate's ten return sites — the nine rows reach all ten, but only
-//     when driven across the five readings; at any single reading they reach
-//     eight, because "a state nobody defined" and "the zero scan result" share one
-//     site and the absence row reaches exactly one of the three absence sites — so
+//     over the gate's ELEVEN return sites — the nine rows reach all eleven, but
+//     only when driven across the five readings. At any single reading they still
+//     reach EIGHT, which is derived rather than moved with the total: "a state
+//     nobody defined" and "the zero scan result" share one site, the absence row
+//     reaches exactly one of the three absence sites, and since #1433 the usable
+//     row reaches exactly one of the presence site and the usable site. Three
+//     sites go unreached at any one reading and eleven minus three is eight — so
 //     an arm that forgot to carry the field cannot hide behind an arm that did.
 //
-// # The exemption covers the Detail AND the value, on one row, and it is EXERCISED
+// # The exemption covers the whole DECISION, on two rows, and both are EXERCISED
 //
 // #1420 split the absence arm three ways, so row nine's Detail varies across the
 // readings and all four of its byte comparisons against the baseline go red —
 // under readings 1 through 4 it names a different case. #1417 then took one of
 // those three cases out of trailGateOutOfContract, so row nine's VALUE varies
 // too: trailGateAbsentOwesNone under reading 1, trailGateOutOfContract under the
-// other four. The shipped sweep compared values unconditionally and would now go
-// red against a CORRECT build, so the exemption widens by exactly that one field
-// on exactly the rows that declare pathVaries. What it must not become is the
+// other four. #1433 then gave the usable row an arm to divert to, so its Detail
+// and its value vary as well — and, for the first time in the tree, so does what
+// it CERTIFIES: "completed" under readings 0 and 2 through 4, nothing under
+// reading 1. Each of the three would go red against a CORRECT build, so the
+// exemption covers value, certified reason and Detail together, on exactly the
+// rows that declare pathVaries and nowhere else. What it must not become is the
 // whole point of how it is scoped:
 //
 //   - Clause B runs UNCONDITIONALLY, on every row under every reading. Skipping
 //     the row wholesale — the natural way to fix a red row — would withdraw clause
 //     B from three return sites, each of which must echo RunnerPath, and row nine
 //     is the only row that reaches any of them.
-//   - The CERTIFIED-REASON comparison also keeps running unconditionally, the
-//     exempted row included. All three absence cases certify nothing whatever the
-//     reading — including the one that now answers a value of its own — so it is
-//     green there, and it is what keeps a path-varying arm from quietly starting
-//     to certify. Narrowing it to match the value's exemption would be under-
-//     delivery: nothing in the tree forces it.
+//   - The CERTIFIED-REASON comparison used to keep running unconditionally, the
+//     exempted row included, on the argument that all three absence cases certify
+//     nothing whatever the reading and that NOTHING IN THE TREE FORCED a narrower
+//     scope. #1433's arm is the first thing in the tree that forces it: every
+//     path-varying arm before it certified nothing on every reading, and that one
+//     certifies "completed" under a ptyrunner reading and nothing under a
+//     streamrunner one. So the comparison now sits BELOW the guard, and what the
+//     sweep no longer covers on a declaring row is precisely "this arm's
+//     certification does not move with the reading". That is paid for, per
+//     declaring row, in the companions below — positively, and per reading, which
+//     is a stronger statement than the invariance it replaced. It has a second
+//     detector of different fabric one layer up: trailClassifyRun's C2
+//     (trail_run_outcome_test.go:398-409) rejects a non-certifying gate value that
+//     carries a reason.
 //
-// A green sweep that had simply stopped covering one arm would be silent about
-// the only arm it no longer covers, so the final sub-test drives that arm
-// POSITIVELY: row nine's own fixture under all five readings, asserting per
-// reading BOTH the gate value it reaches and the case it names —
-// trailReasonAbsentOwesOne, trailReasonAbsentOwesNone and trailReasonPathUnnamed
-// — with the distinct-Detail count pinned at exactly three so a degenerate arm
-// cannot satisfy the markers vacuously.
+// A green sweep that had simply stopped covering an arm would be silent about the
+// arms it no longer covers, so ONE COMPANION PER DECLARING ROW drives its arm
+// POSITIVELY, over that row's own fixture helper under all five readings:
+//
+//   - row nine's, asserting per reading the gate value it reaches and the case it
+//     names — trailReasonAbsentOwesOne, trailReasonAbsentOwesNone and
+//     trailReasonPathUnnamed — with the distinct-Detail count pinned at exactly
+//     three so a degenerate arm cannot satisfy the markers vacuously.
+//   - the usable row's, asserting per reading the value, the CERTIFIED REASON and
+//     whether the Detail names trailReasonPresentOwesNone, with the distinct-Detail
+//     count pinned at exactly two. That pin is what replaces the byte comparison
+//     the exemption withdrew: it proves the usable arm still publishes ONE fixed
+//     string across the four readings that reach it.
 //
 // # The copies alias one *resultTrailer, deliberately not mutated
 //
@@ -1602,25 +2006,24 @@ func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 					continue
 				}
 
-				// NOT exempted on pathVaries rows, deliberately: all three absence
-				// cases certify nothing whatever the reading, including the one
-				// #1417 gave a value of its own, so this stays green there and is
-				// what keeps a path-varying arm from starting to certify.
+				if tc.pathVaries {
+					// The whole DECISION is exempt here and only here: the value, the
+					// certified reason and the bytes together. The certified reason
+					// joined them in this ticket, because its arm is the first in the
+					// tree whose certification moves with the reading — "completed"
+					// under the baseline reading and nothing under the streamrunner
+					// one — so an unconditional comparison now goes red against a
+					// CORRECT build. Every declaring row's variance is proven
+					// positively per reading by a companion below, value and certified
+					// reason both, so an exempted arm is proven rather than merely
+					// uncovered.
+					continue
+				}
 				if got.Reason != base.Reason {
 					t.Errorf("the certified reason differs across readings: under %q the gate "+
-						"certifies %q, under %q it certifies %q — NO arm may vary what it "+
-						"certifies by the runner path, the absence arm included", readings[0],
-						base.Reason, reading, got.Reason)
-				}
-				if tc.pathVaries {
-					// The value is exempt HERE and only here, alongside the bytes.
-					// Since #1417 this row reaches trailGateAbsentOwesNone under the
-					// streamrunner reading and trailGateOutOfContract under the other
-					// four, so an unconditional comparison would go red against a
-					// correct build. The companion sub-test below asserts that
-					// variance positively, per reading, so the arm is proven rather
-					// than merely uncovered.
-					continue
+						"certifies %q, under %q it certifies %q — this row does not declare "+
+						"pathVaries, so its arm ignores the path entirely and cannot vary what it "+
+						"certifies", readings[0], base.Reason, reading, got.Reason)
 				}
 				if got.Value != base.Value {
 					t.Errorf("the value differs across readings: under %q the gate reads %q, "+
@@ -1708,6 +2111,88 @@ func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 			t.Errorf("the absence arm produced %d distinct Details across %d readings, want 3 — "+
 				"one per case, with the three indeterminate readings sharing one", n,
 				len(readings))
+		}
+	})
+
+	// The second companion, and the one this ticket's exemption is paid for by:
+	// the usable arm DIVERTS under exactly one reading, proven positively rather
+	// than left as an arm the sweep above stopped comparing.
+	//
+	// It carries the certified reason as a per-reading EXPECTATION, which is what
+	// replaces the invariance the widened exemption withdrew — and it is the
+	// stronger of the two, since it says what each reading certifies rather than
+	// only that the five agree. trailClassifyRun's C2
+	// (trail_run_outcome_test.go:398-409) rejects a non-certifying gate value
+	// carrying a reason at a different layer again, so the property has two
+	// detectors of different fabric rather than one.
+	//
+	// Same discipline as its neighbour: it drives the row's own fixture helper
+	// rather than indexing the slice, takes the scan ONCE, and assigns only
+	// RunnerPath per reading, never writing through the aliased pointer.
+	t.Run("the usable arm diverts to the presence case under one reading", func(t *testing.T) {
+		// Per reading, the TRIPLE: the value reached, the reason certified, and the
+		// case the Detail names — "" meaning the presence marker must be ABSENT.
+		//
+		// Derived from the reduction rather than copied: trailFixtureTrailer carries
+		// a present, non-empty terminal_reason, so trailReasonAgainstPath answers
+		// trailReasonNamedOwesOne under reading 0, trailReasonPresentOwesNone under
+		// reading 1 and trailReasonPathUnnamed under 2 through 4. Only the second
+		// matches the presence arm's key, so only reading 1 diverts.
+		want := map[int]struct {
+			value  string
+			reason string
+			marker string
+		}{
+			0: {trailGateUsable, "completed", ""},
+			1: {trailGateOutOfContract, "", trailReasonPresentOwesNone},
+			2: {trailGateUsable, "completed", ""},
+			3: {trailGateUsable, "completed", ""},
+			4: {trailGateUsable, "completed", ""},
+		}
+		if len(want) != len(readings) {
+			t.Fatalf("the companion expects %d readings and the sweep drives %d: a reading added "+
+				"to trailGateRunnerReadings() must state which value it reaches, what it "+
+				"certifies and whether it names the presence case", len(want), len(readings))
+		}
+
+		scan := trailGateUsableScan()
+		details := make(map[string]struct{}, len(readings))
+
+		for i, reading := range readings {
+			got := trailGate(trailGateInput{Scan: scan, RunnerPath: reading})
+
+			if got.Value != want[i].value {
+				t.Errorf("reading %d (%q): the gate reads %q, want %q — this is the arm the sweep "+
+					"above exempts, so the exemption is paid for here, per reading. Detail: %s",
+					i, reading, got.Value, want[i].value, got.Detail)
+			}
+			if got.Reason != want[i].reason {
+				t.Errorf("reading %d (%q): the gate certifies %q, want %q. This assertion is what "+
+					"the widened exemption bought: the sweep above no longer compares the "+
+					"certified reason on a declaring row, so a path-varying arm that quietly "+
+					"started to certify — or stopped — is caught HERE and nowhere else in this "+
+					"test", i, reading, got.Reason, want[i].reason)
+			}
+			if named := strings.Contains(got.Detail, trailReasonPresentOwesNone); named !=
+				(want[i].marker != "") {
+				t.Errorf("reading %d (%q): the Detail names case %s = %t, want %t. The value alone "+
+					"cannot discriminate on the diverting reading — the presence arm answers the "+
+					"same %s five other arms answer — so the case marker is what says which arm "+
+					"ran. Detail: %s", i, reading, trailReasonPresentOwesNone, named,
+					want[i].marker != "", trailGateOutOfContract, got.Detail)
+			}
+			details[got.Detail] = struct{}{}
+		}
+
+		// Exactly two, and this pin is what replaces the byte comparison the
+		// exemption withdrew: one Detail shared by the four readings that reach the
+		// usable arm — so that arm is still proven to publish ONE fixed string
+		// across them — and one for the reading that diverts. A third would be an
+		// arm that had started to vary where nothing says it may.
+		if n := len(details); n != 2 {
+			t.Errorf("the usable fixture produced %d distinct Details across %d readings, want 2 — "+
+				"one for the four readings that reach the usable arm and one for the reading "+
+				"that diverts to the presence arm", n, len(readings))
 		}
 	})
 }
@@ -2016,16 +2501,40 @@ func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 		// the only site that can fire, and its value is the unique precondition
 		// for it.
 		//
+		// # The DECODED REASON is declared per row too, and the fourth row is why
+		//
+		// The three rows above all hand a trailer whose TerminalReason is "", so
+		// every one of them routes into the empty-reason branch and NO row could
+		// reach the presence arm this ticket added, whatever its reading. The
+		// fourth row carries a decoded reason and the key name that makes the
+		// reduction read PRESENT, at a streamrunner reading, which is the only
+		// combination that site fires on.
+		//
+		// That reason is a plain source literal and DELIBERATELY NOT trailNeedle.
+		// The needle's job on these rows is the KEY-NAME channel; planted in the
+		// decoded reason instead it would exercise a channel the shipped usable
+		// arm legitimately publishes — trailGateResult.Reason — so a mutant that
+		// made the presence arm certify would redden this sweep rather than the
+		// Reason assertion in
+		// TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone, and lose its sole
+		// red.
+		//
 		// Because reachCapCommand TRUNCATES AND MARKS rather than failing, the two
 		// OUTPUT assertions below are load-bearing rather than belt-and-braces: a
 		// Detail cut at the cap could have lost the needle in the cut rather than
 		// by never quoting it, and the sweep would read clean for a reason it does
-		// not claim. The margin is thin by construction — the new arm's Detail is
-		// 464 B against the 512 B cap and trailNeedle is 42 B — so a reword of that
-		// arm goes red HERE rather than shipping a vacuous sweep.
+		// not claim. The margin is thin by construction — #1417's arm publishes
+		// 464 B and this ticket's presence arm 445 B against the 512 B cap, with
+		// trailNeedle at 42 B — so a reword of either goes red HERE rather than
+		// shipping a vacuous sweep.
 		tests := []struct {
 			name     string
 			keyNames []string
+			// reason is the decoded terminal_reason the hand-built trailer carries,
+			// declared per row for the fourth row's sake: "" routes into the
+			// empty-reason branch, and only a non-empty one can reach the arm past
+			// it. Never trailNeedle — see the paragraph above.
+			reason string
 			// reading is declared per row rather than shared, which is what makes
 			// the third row reach a different arm from the first on an identical
 			// key-name plant.
@@ -2057,6 +2566,17 @@ func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 				want:     trailGateAbsentOwesNone,
 				marker:   trailReasonAbsentOwesNone,
 			},
+			{
+				// This ticket's arm. The key-name plant is the same needle again,
+				// joined by trailReasonKeyName so the reduction reads PRESENT, and
+				// the decoded reason is a source literal that is not the needle.
+				name:     "the presence arm on a path that owes no reason",
+				keyNames: []string{"result", trailNeedle, trailReasonKeyName, "type"},
+				reason:   "completed",
+				reading:  tdnRunnerFromArgv(tdnFixtureStreamArgv),
+				want:     trailGateOutOfContract,
+				marker:   trailReasonPresentOwesNone,
+			},
 		}
 
 		for _, tc := range tests {
@@ -2065,7 +2585,7 @@ func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 					Scan: trailScanResult{
 						State:    trailSeen,
 						Line:     `{"type":"result","` + trailNeedle + `":1}`,
-						Trailer:  &resultTrailer{Type: "result"},
+						Trailer:  &resultTrailer{Type: "result", TerminalReason: tc.reason},
 						KeyNames: tc.keyNames,
 						Detail:   "a scan detail that also carries " + trailNeedle,
 					},
@@ -2073,9 +2593,9 @@ func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 				})
 
 				// THE NON-VACUITY PRECONDITION, in two parts. The value alone is
-				// not enough on the two out-of-contract rows: five of trailGate's
-				// ten return sites answer it, so a row that reached a different one
-				// would sweep the wrong Detail and report clean about an arm it
+				// not enough on the three out-of-contract rows: six of trailGate's
+				// eleven return sites answer it, so a row that reached a different
+				// one would sweep the wrong Detail and report clean about an arm it
 				// never ran.
 				if got.Value != tc.want {
 					t.Fatalf("value: got %q (%s), want %q", got.Value, got.Detail, tc.want)
