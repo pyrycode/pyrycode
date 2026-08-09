@@ -350,6 +350,7 @@ const (
 	envStreamHold        = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
 	envStreamApprove     = "PYRY_FAKE_CLAUDE_STREAM_APPROVE"
 	envStreamBogus       = "PYRY_FAKE_CLAUDE_STREAM_BOGUS"
+	envStreamRateLimit   = "PYRY_FAKE_CLAUDE_STREAM_RATE_LIMIT"
 	envApproveSocketFile = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	assistantMaxBytes    = 64 * 1024
 	pollInterval         = 50 * time.Millisecond
@@ -625,7 +626,17 @@ func main() {
 		// exists to surface, so the e2e can assert they reach a client instead of
 		// vanishing. Passed as a value so runStreamJSON stays a pure I/O seam;
 		// unset ⟹ byte-identical to prior behaviour.
-		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "")
+		//
+		// Rate-limit rider (envStreamRateLimit, default-off): prepend one top-level
+		// rate_limit_event line — the payload claude emits once per run whatever the
+		// state of the usage-limit window — ahead of the normal per-turn reply, so an
+		// e2e can drive the daemon's gate on it end-to-end. Unlike the bogus rider
+		// this knob carries a VALUE, not a boolean: the value IS the line's
+		// rate_limit_info.status, which is the gate's sole discriminator, so the
+		// benign case and its arrival control differ in exactly that one string and
+		// are provably on the same path. Empty ⟹ off ⟹ byte-identical.
+		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
+			os.Getenv(envStreamRateLimit))
 		return
 	}
 
@@ -1462,7 +1473,13 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // With honorInterrupt false the control_request is ignored (the default the send /
 // new_session / queue riders depend on staying byte-identical). The mode is stateless:
 // it emits an interrupted result on each interrupt control_request.
-func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool) {
+//
+// rateLimitStatus selects the rate-limit rider (#1411, default-off): non-empty
+// prepends one top-level rate_limit_event line carrying that string as its
+// rate_limit_info.status, ahead of the normal reply. Empty means off — which is why
+// the parser's third rung (an absent or empty rate_limit_info) is deliberately not
+// reachable through this seam and stays parser-tier.
+func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1480,6 +1497,15 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool) {
 				// seen them — no ordering race to tune.
 				if emitBogus {
 					if werr := writeBogusLines(w, msgID); werr != nil {
+						return
+					}
+				}
+				// The rate-limit rider writes on the same terms and for the same
+				// reason: BEFORE the reply, so turn_end reaching a client implies the
+				// fed line has already been through the parser — no sleep, no poll,
+				// no ordering race to tune.
+				if rateLimitStatus != "" {
+					if werr := writeRateLimitEvent(w, rateLimitStatus); werr != nil {
 						return
 					}
 				}
@@ -1612,6 +1638,51 @@ const (
 	bogusLineNeedle  = "bogus-line-needle"
 	bogusBlockType   = "fake_future_block"
 	bogusBlockNeedle = "bogus-block-needle"
+)
+
+// writeRateLimitEvent writes one top-level rate_limit_event line carrying the
+// captured rate_limit_info object with `status` substituted for the caller's value.
+// It is the fake half of #1411's two-tier proof: the daemon's gate reads status and
+// nothing else, so one writer driven at two statuses puts the benign case and its
+// arrival control on one path, differing in exactly that string.
+//
+// The object is transcribed from the committed capture
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json, claude 2.1.220) —
+// ALL SIX keys, not just the three streamsup.rateLimitInfo declares. Carrying the
+// three overage keys costs nothing and makes "match the capture" literally true,
+// while also feeding the parser keys its decode target deliberately omits.
+//
+// uuid and session_id are the capture's ENVELOPE identifiers, templated there
+// ($SESSION_ID) rather than values to copy: the fake supplies its own. Neither is in
+// the parser's decode target, so neither can reach the gate.
+//
+// A map[string]any like writeBogusLines: keys marshal sorted, so the line is
+// deterministic without declaring a struct for a shape nothing else reads. Returns
+// the first marshal/write error.
+func writeRateLimitEvent(w io.Writer, status string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "rate_limit_event",
+		"rate_limit_info": map[string]any{
+			"status":                status,
+			"resetsAt":              rateLimitResetsAt,
+			"rateLimitType":         rateLimitLimitType,
+			"overageStatus":         "rejected",
+			"overageDisabledReason": "org_level_disabled",
+			"isUsingOverage":        false,
+		},
+		"uuid":       rateLimitUUID,
+		"session_id": streamSessionID,
+	})
+}
+
+// The captured rate_limit_info values the rate-limit rider writes verbatim, plus the
+// synthetic uuid it stamps in place of the capture's. Constants rather than inline
+// literals for the bogus needles' reason: the e2e asserts against the same values the
+// fake writes, across a main-package boundary it cannot import.
+const (
+	rateLimitResetsAt  = int64(1785699000)
+	rateLimitLimitType = "five_hour"
+	rateLimitUUID      = "44444444-4444-4444-8444-444444444444"
 )
 
 // writeInterruptedResult writes a single result{subtype:"error_during_execution"}
