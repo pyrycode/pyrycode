@@ -1101,7 +1101,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   present-and-non-empty} × {streamrunner, ptyrunner, indeterminate}, since
   absence means opposite things on the two runner paths (ptyrunner's trailer
   is pyry's own and owes a non-empty reason by construction; streamrunner
-  passes claude's bytes through unchanged, `streamrunner/runner.go:170-176`,
+  passes claude's bytes through unchanged, `streamrunner/runner.go:177-179`,
   so a healthy run's trailer is claude's own and owes none at all). Presence
   is read from `keyNames` alone, never from `decodedReason != ""` — taking it
   from the scalar would merge "absent" and "present-and-empty" on the
