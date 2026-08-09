@@ -1071,8 +1071,8 @@ func trailGateRunnerReadings() []string {
 // # Two clauses keep the sweep from passing vacuously
 //
 //   - The readings are pairwise distinct. Two collapsed answers would silently
-//     shrink 40 comparisons to fewer, and the count is precisely the thing the
-//     ticket had to correct from the shipped "three".
+//     shrink forty-five comparisons to fewer, and the count is precisely the
+//     thing the ticket had to correct from the shipped "three".
 //   - The arriving reading is READ BACK from outside the gate. A sweep that built
 //     its input without filling the path would otherwise pass forty-five identical
 //     comparisons while proving nothing about carriage. This assertion is TOTAL
