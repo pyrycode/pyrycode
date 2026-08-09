@@ -450,9 +450,9 @@ func trailGate(in trailGateInput) trailGateResult {
 			//
 			// PRESENCE IS STILL THE GATE'S OWN READ, from the membership test
 			// above, exactly as #1419 landed it. It is NOT taken from the answer
-			// below: that function computes presence at :216 and then falls through
+			// below: that function computes presence at :223 and then falls through
 			// to trailReasonPathUnnamed on any label naming neither runner WITHOUT
-			// CONSULTING IT (:265-271), so on an indeterminate reading an absent key
+			// CONSULTING IT (:272-278), so on an indeterminate reading an absent key
 			// and a present-and-empty one reach one value — and an indeterminate
 			// reading is precisely what both shipped gathers supply. Sourcing
 			// presence there could not tell those two apart on the only reading
@@ -1544,7 +1544,7 @@ func trailGateRunnerReadings() []string {
 //
 // Varying the reading copies each row's trailGateInput, and a struct copy copies
 // the POINTER: all five inputs for a row share one resultTrailer, the same
-// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:652).
+// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:651).
 // Only RunnerPath is ever assigned and nothing is ever written through the
 // pointer — which holds for the companion sub-test too — and that is what keeps
 // the sharing race-free, and what would have to hold load-bearingly if these

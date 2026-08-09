@@ -53,7 +53,7 @@ package realclaude
 //
 //   - the trailer's and the attribution's admissibility enter as #1270's two
 //     results WHOLE, because both are documented trap-free by construction
-//     (trailer_admissibility_test.go:238-253, :290-293);
+//     (trailer_admissibility_test.go:238-253, :291-294);
 //   - the trailer's lateness enters as the BoundFrom discriminator alone and
 //     never as a trailObservation, which EMBEDS trailScanResult
 //     (result_trailer_observation_test.go:141-142) and would therefore promote
@@ -1325,7 +1325,7 @@ func TestTrailRunComposesUnderAnAbsentReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:1948) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:1949) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, and a pinStateOutcome's Detail and ToolStderr —
