@@ -802,12 +802,12 @@ func trailReapLine(count int, pgids string) string {
 // two sides of C2's whole-struct equality (finding_run_gather_test.go:778) cannot
 // drift apart.
 //
-// Replacing the gathers' use of it with a reading derived from each gather's own
-// argv scan is UNOWNED: no ticket holds it, and #1420 reads the path at the gate
-// without needing a live one. So over a live run today the reading always names
-// no runner, and the gate's absence arm can only reach its path-unnamed case —
-// the gate is correct about WHICH absence fired when the path is known, and the
-// shipped gathers do not know it. The fixture rows keep this helper regardless.
+// The gathers' use of it is CONSTANT by construction and FORBIDDEN to close:
+// neither gather's needle set carries tdnClaudeNeedle, and
+// finding_exit_path_probe_test.go:264-272 forbids adding it to the finding
+// gather's scan. So a live run reads no runner and the gate's absence arm
+// reaches only its path-unnamed case, while #1420 reads it at the gate with no
+// live run needed. Full reason: trail_ptyrunner_composition_test.go:19-26.
 //
 // A function rather than a package-level var, matching trailRigHeldPGID()'s shape
 // in this family (trail_run_rig_test.go:119).
