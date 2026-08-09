@@ -225,11 +225,11 @@ const (
 // where a decision consults it: the ABSENCE arm calls trailReasonAgainstPath
 // (trailer_terminal_reason_test.go:222) to say which of the three absence cases
 // fired, which is where that function stopped having only its own tests for
-// callers. Every other arm ignores the field, and
-// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm is what makes that
-// narrower claim a proof rather than a claim — its companion sub-test proves the
-// one exempted arm DOES vary, so the sweep is not silent about what it stopped
-// covering.
+// callers. Every other arm ignores the field today, which is an inference from
+// today's row set: what TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt
+// proves is the row-scoped property that an undeclared row is invariant across
+// the readings, and its companion sub-test proves the one declaring row DOES
+// vary, so the sweep is not silent about what it exempts.
 type trailGateInput struct {
 	Scan       trailScanResult
 	RunnerPath string
@@ -356,10 +356,10 @@ func trailDetail(format string, args ...any) string {
 // answer.
 //
 // Where that function holds its guarantee by review of its source, this one holds
-// it by TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm, which drives every
+// it by TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, which drives every
 // fixture row under each of tdnRunnerFromArgv's five distinct answers and requires
-// a BYTE-IDENTICAL Detail across all five on every row but the absence one — whose
-// variance the same test then proves positively rather than leaving uncovered.
+// a BYTE-IDENTICAL Detail across all five on every row that does not declare
+// pathVaries — the declaring row's variance the same test then proves positively.
 //
 // The reading is echoed onto the result, so the arriving value stays observable
 // from outside a pure function.
@@ -463,7 +463,7 @@ func trailGate(in trailGateInput) trailGateResult {
 			// trailReasonPathUnnamed is the FALL-THROUGH rather than a catch-all: a
 			// fourth site for "some value outside the three" would be a return site
 			// no fixture row can reach, and clause B of
-			// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm would have to
+			// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt would have to
 			// weaken from "the nine rows reach all ten" to "reach most of". That is
 			// why the count is ten and not eleven.
 			//
@@ -769,9 +769,9 @@ type trailGateCase struct {
 	// reason is the terminal reason the gate must certify: non-empty exactly on
 	// trailGateUsable and trailGateBudgetFired.
 	reason string
-	// pathVaries declares that this row's DETAIL depends on the runner path, which
-	// is true of exactly the rows reaching the absence arm. It is what scopes
-	// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm's byte comparison, and
+	// pathVaries declares that this row's own arm reads the runner path, so its
+	// VALUE and its DETAIL may both differ across the readings. It is what scopes
+	// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt's comparisons, and
 	// it is DECLARED rather than detected: re-deriving the gate's branch condition
 	// inside the sweep would restate the thing under test, and detecting it from
 	// the Details differing would exempt precisely the rows that fail. A later
@@ -865,7 +865,7 @@ func trailGateEmptyReasonScan() trailScanResult {
 // path fixed is what keeps those three comparable with one another. The
 // per-case proof therefore lives in its own driver
 // (TestTrailGateNamesWhichAbsenceCaseFired), and the sweep that VARIES the path is
-// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm, which drives these same
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, which drives these same
 // nine rows under all five readings.
 func trailGateCases() []trailGateCase {
 	return []trailGateCase{
@@ -926,7 +926,7 @@ func trailGateCases() []trailGateCase {
 		},
 		{
 			// #1419's added row, and the one that keeps clause B of
-			// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm TOTAL: no other
+			// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt TOTAL: no other
 			// row is absence-shaped, so without this one the absence arm's THREE
 			// return sites are the ones no fixture reaches, and an arm that forgot
 			// RunnerPath: in.RunnerPath there could hide behind the seven that
@@ -1353,7 +1353,7 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 			// #1417's row: the ONE absence case that is a reading rather than a
 			// caller's bug, so the value is what says so. The marker is asserted
 			// too — strictly stronger, and the companion sweep in
-			// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm needs it present.
+			// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt needs it present.
 			name:      "R2 absent from a path that owes none",
 			scan:      trailGateAbsentReasonScan(),
 			reading:   tdnRunnerFromArgv(tdnFixtureStreamArgv),
@@ -1480,11 +1480,11 @@ func trailGateRunnerReadings() []string {
 	}
 }
 
-// TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm is AC2 made
-// deterministic, under the NARROWER claim that is true after #1420: the runner
-// path reaches every return site, and EVERY ARM EXCEPT THE ABSENCE ONE ignores
-// it. The decision — value, certified reason and Detail — must be identical
-// across every reading on every other row.
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt is AC2 made
+// deterministic, under the claim that is true after #1420 and stays true when a
+// second arm reads the path: the runner path reaches every return site, and a
+// row's DECISION — value, certified reason and Detail — may move with the
+// reading only where that row declares pathVaries, and nowhere else.
 //
 // # The Detail is compared AS BYTES
 //
@@ -1549,7 +1549,7 @@ func trailGateRunnerReadings() []string {
 // pointer — which holds for the companion sub-test too — and that is what keeps
 // the sharing race-free, and what would have to hold load-bearingly if these
 // subtests ever took t.Parallel().
-func TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm(t *testing.T) {
+func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 	readings := trailGateRunnerReadings()
 
 	// Clause A.

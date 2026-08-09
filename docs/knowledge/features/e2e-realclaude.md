@@ -794,11 +794,11 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   so the gate's input can carry which runner produced the trailer line
   (`terminal_reason` means different things on ptyrunner vs. streamrunner);
   `RunnerPath` is echoed onto a fourth `trailGateResult` field. Until #1420
-  no arm read it; since #1420 exactly one does — the absence arm — and the
-  narrower claim is proved, not stated, by
-  `TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm` (9 rows × 5
-  readings, byte-identical `Detail` on every row but that one, whose variance
-  the same test proves positively). See
+  no arm read it; since #1420 exactly one does — the absence arm. What
+  `TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt` proves is the
+  per-row declaration (9 rows × 5 readings): a row that does not declare
+  it has a byte-identical `Detail` across them, and the declaring row's
+  variance is proved positively by the same test. See
   [`codebase/1373.md`](../codebase/1373.md). **#1419** split the
   out-of-contract arm that fires on an empty `terminal_reason` into two: the
   key absent from the line, and the key present with a blank value —
