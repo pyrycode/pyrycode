@@ -1891,9 +1891,10 @@ func TestTrailAdmissibilityRecordsCarryNoCapturedBytes(t *testing.T) {
 				})
 
 				// THE NON-VACUITY PRECONDITION, in two parts. The value alone is
-				// not enough: four arms answer trailGateOutOfContract, so a row
-				// that reached a different one would sweep the wrong Detail and
-				// report clean about an arm it never ran.
+				// not enough: six of trailGate's ten return sites answer
+				// trailGateOutOfContract, so a row that reached a different one
+				// would sweep the wrong Detail and report clean about an arm it
+				// never ran.
 				if got.Value != tc.want {
 					t.Fatalf("value: got %q (%s), want %q", got.Value, got.Detail, tc.want)
 				}
