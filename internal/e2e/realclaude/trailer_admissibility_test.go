@@ -1172,18 +1172,23 @@ func trailGateCases() []trailGateCase {
 // distinctness in a single loop. Its size is READ OFF THE MAP rather than
 // printed here: the shipped comment said twenty-nine while the map already held
 // thirty-five, having gone stale when #1366 added six reason values; #1417's two
-// made thirty-seven and #1434's two make thirty-nine. A number kept by hand beside
-// a set is a number that drifts, so the loop below counts.
+// made thirty-seven, #1434's two made thirty-nine, and #1439's four make
+// forty-three. A number kept by hand beside a set is a number that drifts, so the
+// loop below counts.
 //
 // #1271's run-level outcomes joined the map rather than starting a third closure
-// test, for the same reason: three spaces now mean nearly the same words (an
-// input state, the gate's view of it, and the run's view of it), and only a
-// union can see a copy-paste across them.
+// test, and #1439's ordering-premise values joined it rather than starting a
+// fifth, for the same reason: four spaces now mean nearly the same words (an
+// input state, the gate's view of it, the run's view of it, and the ordering
+// premises' view of the same events one layer under the run), and only a union
+// can see a copy-paste across them. The near-collision that makes the point:
+// order-void-pyry-did-not-exit sits one word from run-void-pyry-did-not-exit.
 //
 // EVERY VALUE IN THIS MAP HAS AN ARM IN ITS CONSUMER — trailGate and
 // trailAdmitAttribution for the first two spaces, trailClassifyRun for the
 // third, trailReasonAgainstPath (trailer_terminal_reason_test.go:222) for the
-// fourth. That is a comment and not a check: this test catches a COLLIDING
+// fourth, and trailCertifyOrdering (trail_ordering_premises_test.go) for the
+// fifth. That is a comment and not a check: this test catches a COLLIDING
 // value, never an UNHANDLED one, so a NEW gate or admit value added here and to
 // its membership predicate would pass trailClassifyRun's contract block and then
 // find no arm. That is not hypothetical — #1417 added trailGateAbsentOwesNone,
@@ -1234,6 +1239,15 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailReasonBlankOwesOne":    trailReasonBlankOwesOne,
 		"trailReasonNamedOwesOne":    trailReasonNamedOwesOne,
 		"trailReasonPathUnnamed":     trailReasonPathUnnamed,
+		// #1439's ordering-premise values: one certification and one void per
+		// premise. order-void-pyry-did-not-exit is the reason they are here rather
+		// than in a closure test of their own — it sits one word from #1271's
+		// trailOutcomeVoidPyryDidNotExit, and a per-space helper is scoped to one
+		// space per call and could not see the pair.
+		"trailOrderCertified":     trailOrderCertified,
+		"trailOrderVoidUnsighted": trailOrderVoidUnsighted,
+		"trailOrderVoidNoExit":    trailOrderVoidNoExit,
+		"trailOrderVoidUnheld":    trailOrderVoidUnheld,
 		// #1266's shipped spaces, in the same map on purpose: a gate result that
 		// collided with a scan state would be a result and an input wearing one
 		// string, which is the confusion the gate- prefix exists to prevent.
@@ -1267,6 +1281,7 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 	var zeroGate trailGateResult
 	var zeroAdmit trailAdmitResult
 	var zeroRun trailRunOutcome
+	var zeroOrder trailOrderResult
 	for name, value := range all {
 		if zeroGate.Value == value {
 			t.Errorf("the zero trailGateResult reads as %s (%q)", name, value)
@@ -1276,6 +1291,9 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		}
 		if zeroRun.Value == value {
 			t.Errorf("the zero trailRunOutcome reads as %s (%q)", name, value)
+		}
+		if zeroOrder.Value == value {
+			t.Errorf("the zero trailOrderResult reads as %s (%q)", name, value)
 		}
 	}
 	if zeroGate.Reason != "" {
