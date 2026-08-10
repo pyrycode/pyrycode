@@ -44,7 +44,7 @@ import (
 // is precisely why it belongs. It is the one arm in the run space that publishes a
 // POSITIVE finding from a gate that certified nothing, so it is the one a reader
 // could mistake for an aliveness-at-declared-finish claim. Carrying the clause on
-// three voids and omitting it from the single value the misreading is live for
+// the four voids and omitting it from the single value the misreading is live for
 // would invert the point of the clause. Its own Detail says the same thing twice
 // over, naming the SIGHTING as the instant its verdict is about; the shared
 // constant is the checked half of that, and hand-written prose is not.

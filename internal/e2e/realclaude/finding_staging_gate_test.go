@@ -15,11 +15,11 @@ package realclaude
 //
 // # Why an unstaged run must never reach the classifier
 //
-// trailClassifyRun (trail_run_outcome_test.go:518) owns one probe run's outcome
+// trailClassifyRun (trail_run_outcome_test.go:572) owns one probe run's outcome
 // over a closed set of fifteen values, and it ASSUMES THE RUN STAGED: that a Bash
 // call was issued, that it was the rig's hold command, that the rendezvous
 // completed. Two conditions this probe can hit have no value among the fifteen and
-// no field in its input record trailRunReadings (:309) — the model never issued
+// no field in its input record trailRunReadings (:354) — the model never issued
 // the Bash call, and the trigger did not fire.
 //
 // Handing such a run over is not a neutral act. On an unstaged run the argv scan
@@ -65,8 +65,8 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailIsRunOutcome (trail_run_outcome_test.go:422) and trailRunOutcomeValues
-// (:1987) are the fifteen and their membership predicate — called, never
+// trailIsRunOutcome (trail_run_outcome_test.go:475) and trailRunOutcomeValues
+// (:2124) are the fifteen and their membership predicate — called, never
 // re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
 // is the shipped needle.
 //
@@ -105,7 +105,7 @@ import (
 // (result_trailer_observation_test.go:345) fails any closed-space value that is
 // the empty string because "a zero-valued field reads as it", and
 // trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way"
-// (trail_run_outcome_test.go:336-339).
+// (trail_run_outcome_test.go:381-384).
 //
 // There is no out-of-contract value here and none is to be added. Seven is
 // seven: the two inputs that could otherwise want one are closed by the two
@@ -144,7 +144,7 @@ const (
 // embedded in, marshalled into, or quoted by any published record. Only
 // finOutcomeResult crosses into publishable space. The asymmetry is load-bearing
 // rather than incidental — every sibling record in this family states its content
-// rule at the type (trailRunReadings:305-308, trailRunOutcome:376-390,
+// rule at the type (trailRunReadings:350-353, trailRunOutcome:421-435,
 // trailGateResult:271-286) and this one states the converse for the same reason.
 // Adding tags here "for symmetry" is the first step toward publishing two
 // captured strings into a public issue.
@@ -175,7 +175,7 @@ type finOutcomeStaging struct {
 	RendezvousDone bool
 	// PinScanErrored records THAT the during-turn pin scan failed, never what it
 	// said, mirroring trailRunReadings.ArgvScanErrored
-	// (trail_run_outcome_test.go:318-325). ps stderr is a captured string on the
+	// (trail_run_outcome_test.go:363-370). ps stderr is a captured string on the
 	// same footing as argv.
 	PinScanErrored bool
 	// PinMatchCount and PinWantCount are the scan's match count and the count the
@@ -203,7 +203,7 @@ type finOutcomeResult struct {
 // --- membership helper ---------------------------------------------------------
 
 // finOutcomeIsValue reports whether v is one of the seven staging outcomes. It
-// mirrors trailIsRunOutcome (trail_run_outcome_test.go:422) and its siblings
+// mirrors trailIsRunOutcome (trail_run_outcome_test.go:475) and its siblings
 // trailIsGateValue, trailIsAdmitValue, pinIsVerdict and tdnIsReapVerdict, and
 // exists for the same reason: a value a reader of a published record cannot look
 // up is a verdict they cannot interpret.
@@ -387,7 +387,7 @@ type finOutcomeGateCase struct {
 }
 
 // finOutcomeStagedBase is the fully-staged input each case varies ONE thing from,
-// mirroring trailRunWellFormed (trail_run_outcome_test.go:884): a row that
+// mirroring trailRunWellFormed (trail_run_outcome_test.go:983): a row that
 // changes two conditions at once proves nothing about which one its arm keyed on.
 // The four rows that must vary two — the two guard holes and the two order
 // checks — say so in their own names, because varying two is exactly their point.
@@ -576,7 +576,7 @@ func TestFinOutcomeConstantsAreClosed(t *testing.T) {
 // TestFinOutcomeValuesAgreeWithThePredicate keeps finOutcomeValues from drifting
 // away from the predicate a published record is read through, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2010). Without it, an eighth outcome added to the
+// (trail_run_outcome_test.go:2148). Without it, an eighth outcome added to the
 // predicate but not to the list would make the coverage loop in
 // TestFinOutcomeStagingGate silently stop covering it.
 func TestFinOutcomeValuesAgreeWithThePredicate(t *testing.T) {
@@ -681,7 +681,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // against a leaking implementation. trailNeedle is placed past the cap
 // deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
 // for the opposite kind of test; here that placement would be the defect. These
-// mirror the ~73-byte planted strings at trail_run_outcome_test.go:1872-1873, :1912-1915.
+// mirror the ~73-byte planted strings at trail_run_outcome_test.go:1995-1996, :2035-2038.
 const (
 	finOutcomePlantedStaged = "a staged hold command that also carries " + trailNeedle
 	finOutcomePlantedIssued = "a different issued command that also carries " + trailNeedle
@@ -689,7 +689,7 @@ const (
 
 // TestFinOutcomeResultCarriesNoCapturedBytes makes the redaction rule checkable
 // rather than advisory, in TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1865) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:1988) and reusing the shipped trailNeedle.
 //
 // The needle goes into BOTH string-bearing inputs the gate can see — the command
 // claude issued and the staged hold command it is compared against — because the

@@ -56,7 +56,7 @@ package realclaude
 // The hazard the shipped paragraph here held open — a new gate value registered
 // in trailIsGateValue but unhandled in that switch, which no closure test
 // catches — is therefore discharged rather than deferred, and it is recorded at
-// the switch itself (trail_run_outcome_test.go:676-780) rather than here.
+// the switch itself (trail_run_outcome_test.go:730-879) rather than here.
 //
 // This file's own six values are unchanged by either: they say what a
 // terminal_reason MEANS against a path, and what a consumer does with that

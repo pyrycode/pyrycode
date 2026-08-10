@@ -44,7 +44,7 @@ package realclaude
 // model chose, and its own doc marks it OPERATOR-REVIEW-BEFORE-PASTE
 // (result_trailer_observation_test.go:100-107). Every published record in this
 // family already excludes a captured line for that reason: trailRunOutcome is
-// "COUNTS, NEVER ROWS" (trail_run_outcome_test.go:377), finAttributeEntry states
+// "COUNTS, NEVER ROWS" (trail_run_outcome_test.go:422), finAttributeEntry states
 // the exclusion as its own construction (finding_attribution_fanout_test.go:80-88),
 // and finOutcomeResult is a value and a detail and nothing else
 // (finding_staging_gate_test.go:198-201). This record's trailer evidence is its
@@ -58,7 +58,7 @@ package realclaude
 // the shipped plants — a second scanner over the same bytes that disagreed would
 // be worse than either. The three scan states (:57-71) and the three lateness
 // discriminators (:75-90) are shipped closed spaces, called and never restated.
-// trailIsRunOutcome (trail_run_outcome_test.go:422) and trailRunOutcomeValues
+// trailIsRunOutcome (trail_run_outcome_test.go:475) and trailRunOutcomeValues
 // (:1987) are the fifteen; finOutcomeIsValue (finding_staging_gate_test.go:210)
 // and finOutcomeValues (:223) the staging tier's seven — called, never
 // re-derived. reachMaxCommandBytes and reachCapCommand
@@ -188,7 +188,7 @@ import (
 //
 // # The Detail's content rule, pinned rather than left to judgement
 //
-// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:380-390), it MAY
+// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:425-435), it MAY
 // name the outcome value, the scan state, BoundFrom, Bounded as a boolean and
 // the four decoded fields — permitted because the record already publishes them
 // as fields, so the exposure decision is this type's and the Detail adds nothing
@@ -258,7 +258,7 @@ type finTrailerRecord struct {
 // # The outcome is consumed, never decided
 //
 // The value comes from one of two closed sets built elsewhere: trailClassifyRun's
-// fifteen (trail_run_outcome_test.go:518) and the staging-gate tier's seven
+// fifteen (trail_run_outcome_test.go:572) and the staging-gate tier's seven
 // (finding_staging_gate_test.go). Both are caller-supplied and carried AS
 // RETURNED — not validated, not renamed, not re-derived, and never cross-checked
 // against State. "A no-trailer run records trailOutcomeVoidNoTrailer" is a
@@ -269,7 +269,7 @@ type finTrailerRecord struct {
 // out of scope.
 //
 // Nor is the field asked to reject a non-member: no builder in this family
-// validates its value — trailRunOutcome:391 and finOutcomeResult (:198) are
+// validates its value — trailRunOutcome:436 and finOutcomeResult (:201) are
 // plain structs — because membership lives in the reader-facing predicates,
 // whose job is that "a value a reader of a published record cannot look up is a
 // verdict they cannot interpret".
@@ -311,7 +311,7 @@ func finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord {
 		// first poll already matched, so the trailer may have been visible before
 		// the loop began) and trailBoundNone is the honest no-bound, so a record
 		// deriving this from Staleness != 0 would publish a non-bound wearing a
-		// bound's label — trailRunOutcome:406-410's rule, unchanged.
+		// bound's label — trailRunOutcome:459-463's rule, unchanged.
 		Bounded: sighting.BoundFrom == trailBoundFromMiss,
 	}
 
@@ -385,7 +385,7 @@ func finTrailerAbortedScan() trailScanResult {
 // synthetic where it is used.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:881-883): a shared backing value is
+// reason (trail_run_outcome_test.go:980-982): a shared backing value is
 // reachable from every test in this package and `go test -race` runs them in
 // parallel.
 func finTrailerSighting(scan trailScanResult, staleness time.Duration, boundFrom string) finSighting {
@@ -883,7 +883,7 @@ func TestFinTrailerRecordOutcomeIsConsumedAsHanded(t *testing.T) {
 				t.Errorf("outcome: got %q, want %q", rec.Outcome, v)
 			}
 			// The field is deliberately NOT asked to reject a non-member: no
-			// builder in this family validates its value (trailRunOutcome:391,
+			// builder in this family validates its value (trailRunOutcome:436,
 			// finOutcomeResult:198), because membership lives in the two
 			// reader-facing predicates called above.
 			if !trailIsRunOutcome(rec.Outcome) && !finOutcomeIsValue(rec.Outcome) {

@@ -799,14 +799,25 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 			// the sighting: the re-read is late BY CONSTRUCTION, so it rules the
 			// earlier instant neither in nor out. That limit is the route value's
 			// own and is inherited rather than re-derived here.
+			//
+			// BUDGETED AGAINST THE LONGER REASON, and measured on the shipped format
+			// string rather than on a draft of it. Two reasons reach this arm, and
+			// sighting-reason-pid-reaped-pending is 10 bytes longer than
+			// sighting-reason-pid-gone, so the worst case is the only figure worth
+			// keeping: 492 of trailDetail's 512 bytes, against 482 on the shorter
+			// one. reachCapCommand truncates SILENTLY, and what it would cut is the
+			// tail — where both claim limits live — so the prose is written as tight
+			// as it is deliberately. An earlier draft phrased the same five
+			// obligations at 536 bytes and lost its closing clause to the cap; the
+			// row beside this arm's is what turned that into a red build rather than
+			// a quiet truncation.
 			out.Route = trailRouteSighting
 			return decide(trailOutcomeVoidPinnedPidDidNotEstablish, "the gate read %s, and the "+
-				"pinned-pid sighting route MEASURED a pid and answered %s (%s): this route does "+
-				"not establish that the command was alive at the trailer's sighting, and NEVER "+
-				"that it had exited before it — the re-read is late by construction. "+
-				trailDeclaredFinishInstantClause+" Kept apart from %s, where the route measured "+
-				"nothing at all", trailGateAbsentOwesNone, sighting.Value, sighting.Reason,
-				trailOutcomeVoidPathOwesNoReason)
+				"pinned-pid sighting route MEASURED a pid, answering %s (%s): no establishment "+
+				"of aliveness at the trailer's sighting, and NEVER an it-exited verdict — the "+
+				"re-read is late by construction. "+trailDeclaredFinishInstantClause+" Kept "+
+				"apart from %s, where the route measured nothing", trailGateAbsentOwesNone,
+				sighting.Value, sighting.Reason, trailOutcomeVoidPathOwesNoReason)
 		}
 		// trailSightingVoid, reached as the FALL-THROUGH rather than as a third
 		// explicit case: trailEstablishSighting returns one of exactly three values,
@@ -1939,7 +1950,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:2537) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:2539) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, a pinStateOutcome's Detail and ToolStderr, and since
@@ -1961,7 +1972,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // needle-bearing input left the SUITE GREEN for PinnedPid.ToolStderr — the field the
 // trust boundary runs through — and green for PinnedPid.Detail. Only Ordering.Detail
 // reddened, and not on the needle: it is long enough to overrun trailDetail's cap, so
-// the truncation-marker check at :1345-1348 caught it. A BUDGET kill, not a leak kill,
+// the truncation-marker check at :1347-1350 caught it. A BUDGET kill, not a leak kill,
 // and different fabric — the sweep below is the only check on this arm that fails on
 // the needle itself. Each block premise-asserts first, so none passes on garbage.
 //
@@ -2206,7 +2217,7 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // This declaration sits at the END of the file rather than beside the arms that use
 // it, and that placement is deliberate rather than careless: sixteen other files in
 // this package carry a hundred line-number cites into this one, the highest at
-// trail_run_outcome_test.go:2011, and a declaration inserted anywhere above that
+// trail_run_outcome_test.go:2149, and a declaration inserted anywhere above that
 // displaces every cite below it. The filename is spelled there rather than left as
 // a bare `:NNN` on #1434's evidence: a bare ref inherits the LAST-NAMED FILE, which
 // two paragraphs up is trail_sighting_liveness_test.go, and it reads clean under
