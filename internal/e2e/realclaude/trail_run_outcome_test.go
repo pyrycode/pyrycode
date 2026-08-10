@@ -129,9 +129,9 @@ const (
 	trailOutcomeNoRowMatched = "run-scan-matched-no-row"
 	// trailOutcomeVoidBudgetFired: the trailer reports a budget-fired run. The
 	// Terminate hook reaped INSIDE the hook (runner.go:492-503), BEFORE the
-	// trailer, so no attribution on that path could prove aliveness-at-trailer.
-	// Not a negative: reporting a scan-side answer here would imply a better
-	// instrument could have proved something.
+	// trailer, so no attribution on that path could prove aliveness-at-trailer,
+	// at either instant. Not a negative: reporting a scan-side answer here would
+	// imply a better instrument could have proved something.
 	trailOutcomeVoidBudgetFired = "run-void-budget-fired"
 	// trailOutcomeVoidNoTrailer: no trailer line was written, so there is no
 	// "when the turn was declared finished" instant to speak of.
@@ -165,8 +165,8 @@ const (
 	// and the observed runner path owes none, so the gate read
 	// trailGateAbsentOwesNone. A READING of the trailer rather than a defect in
 	// it — and still a void, because nothing was certified: with no terminal
-	// reason there is no "when the turn was declared finished" instant for a
-	// claim about aliveness-at-trailer to be about.
+	// reason there is no "when the turn was declared finished" instant for an
+	// aliveness-at-declared-finish claim to be about.
 	//
 	// Deliberately NOT trailOutcomeVoidNoTrailer. A trailer WAS written on this
 	// path — it is claude's own result line — and that value's doc reads "no
@@ -187,7 +187,7 @@ const (
 	// (internal/agentrun/streamrunner/runner.go:177-179), so the line is genuinely
 	// what the run produced — and still a void, because nothing was certified:
 	// with no certified terminal reason there is no "when the turn was declared
-	// finished" instant for a claim about aliveness-at-trailer to be about.
+	// finished" instant for an aliveness-at-declared-finish claim to be about.
 	//
 	// It says the line is not that path's documented healthy shape and NEVER that
 	// pyry wrote it, inheriting the claim limit the gate value's own doc states
@@ -358,9 +358,9 @@ func trailIsBoundFrom(v string) bool {
 // # Then decide, in this order
 //
 //  1. A GATE THAT IS NOT USABLE ANSWERS FIRST, and that ordering is forced rather
-//     than chosen: without a usable trailer there is no certified instant for any
-//     claim to be about, and C5 has already made a proof unreachable from every
-//     one of those values.
+//     than chosen: without a usable trailer there is no certified
+//     declared-finished instant for any claim to be about, and C5 has already
+//     made a proof unreachable from every one of those values.
 //  2. AN ADMISSIBLE ATTRIBUTION IS THE FINDING, consulted BEFORE any
 //     point-in-time reading, because those readings are expected to be late and
 //     must never be what the verdict rests on.
@@ -528,19 +528,19 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	// --- the decision ---
 
 	// Step 1: the trailer-side answers. Structural, so they outrank everything —
-	// without a usable trailer there is no certified instant for a claim to be
-	// about. No default arm: C1 proved membership, so these seven cases are total,
-	// and a NEW gate value registered in trailIsGateValue but not handled here
-	// would not be caught by a bottom-of-function catch-all — the shape this file
-	// exists to refuse. #1417 is what turned that open question into a landed
-	// change, and it also corrects the shipped shorthand for where such a value
-	// FALLS: not step 2. For any value that certifies nothing, C4 has already
-	// rejected an admissibility value arriving beside it, so Admit is forced empty
-	// and step 2's trailAdmitProof test cannot fire. An unhandled arm falls
-	// through to steps 3-8 and awards a SCAN-SIDE ANSWER ABOUT PYRY from a record
-	// the gate says certifies nothing — the same hazard class, one step further
-	// down. Every value in TestTrailAdmissibilityConstantsAreClosed's union map
-	// has an arm here, and that map catches a colliding value rather than an
+	// without a usable trailer there is no certified declared-finished instant for
+	// a claim to be about. No default arm: C1 proved membership, so these seven
+	// cases are total, and a NEW gate value registered in trailIsGateValue but not
+	// handled here would not be caught by a bottom-of-function catch-all — the
+	// shape this file exists to refuse. #1417 is what turned that open question
+	// into a landed change, and it also corrects the shipped shorthand for where
+	// such a value FALLS: not step 2. For any value that certifies nothing, C4 has
+	// already rejected an admissibility value arriving beside it, so Admit is
+	// forced empty and step 2's trailAdmitProof test cannot fire. An unhandled arm
+	// falls through to steps 3-8 and awards a SCAN-SIDE ANSWER ABOUT PYRY from a
+	// record the gate says certifies nothing — the same hazard class, one step
+	// further down. Every value in TestTrailAdmissibilityConstantsAreClosed's union
+	// map has an arm here, and that map catches a colliding value rather than an
 	// unhandled one, so this comment is the only place the obligation is written.
 	switch readings.Gate.Value {
 	case trailGateUsable:
@@ -549,14 +549,14 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	case trailGateBudgetFired:
 		return decide(trailOutcomeVoidBudgetFired, "the trailer certifies terminal reason %q, so "+
 			"the Terminate hook reaped INSIDE the hook (runner.go:492-503) BEFORE the trailer was "+
-			"written and no attribution on that path could prove aliveness-at-trailer. A "+
-			"STRUCTURAL void, not a negative: reporting a scan-side answer here would imply a "+
-			"better instrument could have proved something", readings.Gate.Reason)
+			"written and no attribution on that path could prove aliveness-at-trailer, at either "+
+			"instant. A STRUCTURAL void, not a negative: reporting a scan-side answer here would "+
+			"imply a better instrument could have proved something", readings.Gate.Reason)
 	case trailGateNoTrailer:
-		return decide(trailOutcomeVoidNoTrailer, "no trailer line was written, so there is no "+
-			"instant at which pyry declared the turn finished for this run to be about. Kept "+
-			"apart from %s: this is a statement about the bytes, that one is the instrument "+
-			"reporting it could not read them", trailOutcomeVoidTrailerScanAborted)
+		return decide(trailOutcomeVoidNoTrailer, "no trailer line was written. "+
+			trailDeclaredFinishInstantClause+" Kept apart from %s: this is a statement about "+
+			"the bytes, that one is the instrument reporting it could not read them",
+			trailOutcomeVoidTrailerScanAborted)
 	case trailGateScanAborted:
 		return decide(trailOutcomeVoidTrailerScanAborted, "the trailer scan aborted, so the bytes "+
 			"were unreadable. The instrument's own breakage and never an answer about pyry, which "+
@@ -565,31 +565,31 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	case trailGateAbsentOwesNone:
 		// A reading, and still a void. The gate read an absent terminal_reason
 		// from a path that owes none, so nothing was certified and there is no
-		// declared-finished instant for a claim to be about — but the trailer was
-		// written and the record IS a reading, which is why this is neither
-		// trailOutcomeVoidNoTrailer nor trailOutcomeOutOfContract.
+		// declared-finished instant for an aliveness-at-declared-finish claim —
+		// but the trailer was written and the record IS a reading, which is why
+		// this is neither trailOutcomeVoidNoTrailer nor trailOutcomeOutOfContract.
 		return decide(trailOutcomeVoidPathOwesNoReason, "the trailer carries no terminal_reason "+
 			"and the runner path this run was OBSERVED to take owes none, so the gate read %s: "+
-			"a reading of the trailer rather than a defect in it. Nothing is certified, so "+
-			"there is no declared-finished instant for this run to be about. Kept apart from "+
-			"%s, which reports that no trailer line was written at all, and from %s, which "+
-			"would file a measurement as the caller's bug", trailGateAbsentOwesNone,
-			trailOutcomeVoidNoTrailer, trailOutcomeOutOfContract)
+			"a reading of the trailer rather than a defect in it. "+
+			trailDeclaredFinishInstantClause+" Kept apart from %s, which reports that no "+
+			"trailer line was written at all, and from %s, which would file a measurement as "+
+			"the caller's bug", trailGateAbsentOwesNone, trailOutcomeVoidNoTrailer,
+			trailOutcomeOutOfContract)
 	case trailGatePresentOwesNone:
 		// #1434's arm, and the mirror of the one above it. The gate read a
-		// terminal_reason that IS on the line from a path owing none, so the
-		// record is a reading and not a caller's bug — but nothing was certified,
-		// so there is no declared-finished instant for a claim to be about. The
-		// two readings are kept apart because one is that path's documented
+		// terminal_reason that IS on the line from a path owing none, so the record
+		// is a reading, not a caller's bug — but nothing was certified, so there is
+		// no declared-finished instant for an aliveness-at-declared-finish claim.
+		// The two readings are kept apart because one is that path's documented
 		// healthy shape and the other is not, and a record collapsing them would
 		// publish the expected shape and the unexpected one under one name.
 		return decide(trailOutcomeVoidReasonNotOwedByPath, "the trailer CARRIES a terminal_reason "+
 			"and the runner path OBSERVED for this run owes none, so the gate read %s: a READING "+
-			"of the trailer, and never a claim that pyry wrote the line. Nothing is certified, so "+
-			"there is no declared-finished instant for this run to be about. Kept apart from %s, "+
-			"that path with NO reason and its healthy shape, and from %s, which would file a "+
-			"measurement as the caller's bug", trailGatePresentOwesNone,
-			trailOutcomeVoidPathOwesNoReason, trailOutcomeOutOfContract)
+			"of the trailer, and never a claim that pyry wrote the line. "+
+			trailDeclaredFinishInstantClause+" Kept apart from %s, that path with NO reason and "+
+			"its healthy shape, and from %s, which would file a measurement as the caller's "+
+			"bug", trailGatePresentOwesNone, trailOutcomeVoidPathOwesNoReason,
+			trailOutcomeOutOfContract)
 	case trailGateOutOfContract:
 		// Not a collapse: the gate already said "this record is not a reading",
 		// and the run-level answer is that same sentence. What may never share a
@@ -1676,3 +1676,44 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 		}
 	}
 }
+
+// --- the shared clause ----------------------------------------------------------
+
+// trailDeclaredFinishInstantClause is the fixed sentence every step-1 arm that
+// forecloses a claim on CERTIFIES-NOTHING grounds makes that argument with. It
+// names the instant that does not exist on those arms, and naming it is the whole
+// point: a SECOND instant now exists in this family. trailEstablishSighting
+// (trail_sighting_liveness_test.go:350) establishes aliveness at the trailer's
+// SIGHTING on pyry's stdout from a certified ordering and a pinned pid, on exactly
+// the paths these three arms answer. A Detail foreclosing "a claim" unqualified
+// would forbid that finding from a file that cannot see it.
+//
+// A shared constant rather than three hand-written copies so the arms cannot DRIFT
+// in how they name the instant — trailSightingInstantClause's shape
+// (trail_sighting_liveness_test.go:216), and its doctrine too: sharing it is not
+// on its own what makes "every
+// certifies-nothing arm names the instant" true, because an arm can still omit it
+// from its own format string. What makes the rule checkable is
+// TestTrailRunCertifiesNothingArmsNameTheInstant, which requires exactly these
+// three arms' Details to carry it and every other row's not to.
+//
+// Deliberately NOT trailSightingInstantClause, which names the OTHER instant: that
+// one says a verdict IS about the sighting, this one says no verdict here is about
+// the declared finish. It is likewise NOT a member of any value space and so does
+// not join TestTrailAdmissibilityConstantsAreClosed's union map — it is prose, and
+// a clause in that map would assert a membership no consumer can hold.
+//
+// It costs 117 bytes of trailDetail's 512-byte cap and leaks nothing: it
+// interpolates no input at all. The three arms SPLICE it in place of the sentence
+// each wrote by hand rather than APPENDING it, and that is arithmetic rather than
+// taste — trailGatePresentOwesNone renders 472 bytes today, so appending 118 (the
+// clause plus its separating space) overflows the cap, and reachCapCommand
+// truncates SILENTLY, cutting off the closing argument the Detail exists to make.
+//
+// This declaration sits at the END of the file rather than beside the arms that use
+// it, and that placement is deliberate rather than careless: sixteen other files in
+// this package carry a hundred line-number cites into this one, the highest at
+// :1655, and a declaration inserted anywhere above that displaces every cite below
+// it. The identifier is one grep away in the same file; a hundred stale cites are
+// not.
+const trailDeclaredFinishInstantClause = "Nothing is certified, so there is no declared-finished instant for an aliveness-at-declared-finish claim to be about."
