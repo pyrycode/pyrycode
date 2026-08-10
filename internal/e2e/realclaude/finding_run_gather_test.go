@@ -799,7 +799,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	}
 
 	if tc.wantReason != "" {
-		// C3 (:444): the attribution predicate is called EXACTLY WHEN the gate
+		// C3 (:566): the attribution predicate is called EXACTLY WHEN the gate
 		// certified a reason, and what it produced is what reached Admit. The
 		// fan-out is pure over its three arguments, so this recomputation is
 		// deterministic: a gather that passed a different certified string, or that
@@ -821,7 +821,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 				"pinned %v", readings.Admit.Value, tc.wantAdmit, finGatherNamedPGID, tc.pinned)
 		}
 	} else {
-		// C4 (:456): Admit is left ZERO when the gate certified nothing. This is
+		// C4 (:578): Admit is left ZERO when the gate certified nothing. This is
 		// the zero-value comparison the package uses for "not classified"
 		// (trail_run_outcome_test.go:1015, finding_attribution_fanout_test.go:668) —
 		// a comparison against an existing consumer's idiom, not a reading the
