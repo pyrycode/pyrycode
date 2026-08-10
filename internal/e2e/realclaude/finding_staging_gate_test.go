@@ -25,7 +25,7 @@ package realclaude
 // Handing such a run over is not a neutral act. On an unstaged run the argv scan
 // still runs over a healthy process table, parses rows and matches nothing, so
 // the classifier falls past Steps 1-7 to trailOutcomeNoRowMatched (:150) — one of
-// its three ANSWERS, whose own comment calls it "a statement about THE SCAN, not
+// its four ANSWERS, whose own comment calls it "a statement about THE SCAN, not
 // about the command having exited" and notes there is "deliberately no 'exited
 // normally' value in this space for it to decay into". Both statements are true
 // of a run where a command existed. Published about a run where none ever did,
@@ -66,7 +66,7 @@ package realclaude
 // # Reused, not rebuilt
 //
 // trailIsRunOutcome (trail_run_outcome_test.go:422) and trailRunOutcomeValues
-// (:1948) are the fourteen and their membership predicate — called, never
+// (:1987) are the fourteen and their membership predicate — called, never
 // re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
 // is the shipped needle.
 //
@@ -576,7 +576,7 @@ func TestFinOutcomeConstantsAreClosed(t *testing.T) {
 // TestFinOutcomeValuesAgreeWithThePredicate keeps finOutcomeValues from drifting
 // away from the predicate a published record is read through, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:1971). Without it, an eighth outcome added to the
+// (trail_run_outcome_test.go:2010). Without it, an eighth outcome added to the
 // predicate but not to the list would make the coverage loop in
 // TestFinOutcomeStagingGate silently stop covering it.
 func TestFinOutcomeValuesAgreeWithThePredicate(t *testing.T) {
@@ -681,7 +681,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // against a leaking implementation. trailNeedle is placed past the cap
 // deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
 // for the opposite kind of test; here that placement would be the defect. These
-// mirror the ~73-byte planted strings at trail_run_outcome_test.go:1862-1863, :1902-1905.
+// mirror the ~73-byte planted strings at trail_run_outcome_test.go:1872-1873, :1912-1915.
 const (
 	finOutcomePlantedStaged = "a staged hold command that also carries " + trailNeedle
 	finOutcomePlantedIssued = "a different issued command that also carries " + trailNeedle
@@ -689,7 +689,7 @@ const (
 
 // TestFinOutcomeResultCarriesNoCapturedBytes makes the redaction rule checkable
 // rather than advisory, in TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1855) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:1865) and reusing the shipped trailNeedle.
 //
 // The needle goes into BOTH string-bearing inputs the gate can see — the command
 // claude issued and the staged hold command it is compared against — because the

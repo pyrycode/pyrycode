@@ -143,7 +143,7 @@ const finExitPyryExitDeadline = 120 * time.Second
 // CLASSIFIER AT ALL. That is not a tidiness rule: on an unstaged run the post-trailer
 // argv scan still runs over a healthy process table, parses rows and matches nothing,
 // which reaches trailClassifyRun's final fall-through arm — trailOutcomeNoRowMatched,
-// one of its three ANSWERS — published about a run in which no command ever existed.
+// one of its four ANSWERS — published about a run in which no command ever existed.
 //
 // finTrailerBuild's first parameter is a bare string fed from EITHER closed set (the
 // classifier's fourteen, trail_run_outcome_test.go:518, and the staging tier's seven,
@@ -330,7 +330,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	// classifier's Detail, ClaudeState, LivenessSummary, gate value and match counts
 	// reach no field of finRecordRun, and the staging result reaches no artifact at
 	// all. So this channel is t.Logf, which is PROVABLY SAFE for both values —
-	// TestTrailRunOutcomeCarriesNoCapturedBytes (trail_run_outcome_test.go:1855) and
+	// TestTrailRunOutcomeCarriesNoCapturedBytes (trail_run_outcome_test.go:1865) and
 	// TestFinOutcomeResultCarriesNoCapturedBytes (finding_staging_gate_test.go:705) —
 	// and keeps the two proven artifact files exactly as the shipped writer produces
 	// them rather than growing a second file-writing surface no sweep covers.

@@ -273,8 +273,8 @@ const (
 	trailRouteSighting = "run-route-pinned-pid-sighting"
 )
 
-// trailRunRouteValues is the closed set as data, so a coverage loop and the union
-// map can assert over it.
+// trailRunRouteValues is the closed set as data, and its one consumer is the
+// predicate below — which is the whole point; see that predicate's own doc.
 func trailRunRouteValues() []string {
 	return []string{trailRouteReapLog, trailRouteSighting}
 }
@@ -394,8 +394,8 @@ type trailRunOutcome struct {
 	Gate   string `json:"gate_value"`
 	Admit  string `json:"admit_value,omitempty"`
 	// Route names the EVIDENCE CLASS that produced the verdict, so a reader never
-	// infers it from the outcome value — the two answers this record can carry
-	// state nearly the same English sentence from evidence the other path lacks.
+	// infers it from the outcome value — the two answers that carry a route state
+	// nearly the same English sentence from evidence the other path lacks.
 	// "" on every arm that reached no evidence route, exactly as Admit is "" where
 	// the predicate was owed no call.
 	Route string `json:"evidence_route,omitempty"`
@@ -1835,23 +1835,33 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // rule being enforced is not "do not copy the one field the ticket named" but "no
 // Detail here quotes any input's captured string".
 //
-// # Two blocks, because one fixture cannot reach both routes
+// # Three blocks, because the unit a fixture reaches is an OUTCOME, not an arm
 //
-// A record is classified once and lands on ONE arm, so a sweep that plants needles
-// everywhere and drives a single fixture only ever exercises the arm it lands on.
-// The proof block below reaches run-running-at-trailer and can never travel #1446's
-// two inputs; the sighting block reaches run-alive-at-sighting-by-ordering and is
-// the only shape that can. Each asserts its own premise first, so neither can pass
-// by classifying garbage.
+// A record is classified once, but the arm that reads #1446's two inputs has TWO
+// reachable outcomes and the fixture decides which — so covering the arm once
+// covers half of it. The proof block reaches run-running-at-trailer and can never
+// travel the new inputs; the sighting block reaches run-alive-at-sighting-by-ordering;
+// and the refuted block reaches run-void-path-owes-no-reason FROM THE SAME ARM,
+// reading the same two fields and rendering a different Detail from them.
 //
-// # What the sighting block IS, stated rather than overclaimed
+// The third block is here because its absence was measured rather than argued. On
+// the two-block tree, substituting this arm's sighting.Value operand for a
+// needle-bearing input left the SUITE GREEN for PinnedPid.ToolStderr — the field the
+// trust boundary runs through — and green for PinnedPid.Detail. Only Ordering.Detail
+// reddened, and not on the needle: it is long enough to overrun trailDetail's cap, so
+// the truncation-marker check at :1345-1348 caught it. A BUDGET kill, not a leak kill,
+// and different fabric — the sweep below is the only check on this arm that fails on
+// the needle itself. Each block premise-asserts first, so none passes on garbage.
 //
-// THERE IS NO LIVE LEAK ROUTE THROUGH THE NEW INPUTS TODAY. The arm reads
-// sighting.Value and sighting.Reason and nothing else, and trailClassifyRun renders
-// Liveness through tdnVerdictSummary but never renders PinnedPid at all. The plant
-// is a discipline against a FUTURE edit that interpolates pin.Detail for a better
-// failure message — the natural mistake, and the same framing #1440 used for its
-// own trailOrderResult plant. It is not a claim that a leak exists to be caught.
+// # What the two new-input blocks ARE, stated rather than overclaimed
+//
+// THERE IS NO LIVE LEAK ROUTE THROUGH THE NEW INPUTS TODAY, on either outcome. The
+// arm reads sighting.Value and sighting.Reason and nothing else, and trailClassifyRun
+// renders Liveness through tdnVerdictSummary but never renders PinnedPid at all. The
+// plant is a discipline against a FUTURE edit that interpolates pin.Detail or
+// pin.ToolStderr for a better failure message — the natural mistake, and the same
+// framing #1440 used for its own trailOrderResult plant. It is not a claim that a
+// leak exists to be caught.
 func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 	// The needle-planted per-pid read both blocks use. Shared as a function rather
 	// than a value for trailRunWellFormed()'s reason.
@@ -1937,6 +1947,35 @@ func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 			t.Fatalf("route: got %q, want %q — the key walk below is over this record's published "+
 				"key set, and the route key is the one this ticket adds to it", got.Route,
 				trailRouteSighting)
+		}
+		sweep(t, got)
+	})
+
+	t.Run("the same route consulted and REFUTED republishes none of its inputs", func(t *testing.T) {
+		in := trailRunSightingEstablishedReadings()
+		in.PinnedPid = trailSightingPin(pinStateNoSuchProcess)
+		in.Gate.Detail = "a gate detail that also carries " + trailNeedle
+		in.Liveness = []pinStateOutcome{plantedPin()}
+		// The same three plants as the block above, on the SAME arm's other
+		// outcome. The ordering keeps its certified value here too, and that is
+		// what makes this the void the route REACHED rather than the void it was
+		// never consulted for: without a certified ordering trailEstablishSighting
+		// answers from its first guard (trail_sighting_liveness_test.go:358-367)
+		// and never reads the pin at all, so the refusal has to come from the pid.
+		in.Ordering.Detail = "an ordering detail that also carries " + trailNeedle
+		in.PinnedPid.Detail = "a pinned-pid detail that also carries " + trailNeedle
+		in.PinnedPid.ToolStderr = "ps wrote " + trailNeedle
+
+		got := trailClassifyRun(in)
+		if got.Value != trailOutcomeVoidPathOwesNoReason {
+			t.Fatalf("value: got %q (%s), want %q — the premise is the OTHER outcome of the arm "+
+				"the block above covers, which reads the same two inputs and renders a different "+
+				"Detail from them", got.Value, got.Detail, trailOutcomeVoidPathOwesNoReason)
+		}
+		if got.Route != "" {
+			t.Fatalf("route: got %q, want \"\" — this arm established nothing, so the key walk "+
+				"below runs over the record's OTHER published key set, the one with no route "+
+				"key in it", got.Route)
 		}
 		sweep(t, got)
 	})
@@ -2036,7 +2075,7 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // This declaration sits at the END of the file rather than beside the arms that use
 // it, and that placement is deliberate rather than careless: sixteen other files in
 // this package carry a hundred line-number cites into this one, the highest at
-// trail_run_outcome_test.go:1972, and a declaration inserted anywhere above that
+// trail_run_outcome_test.go:2011, and a declaration inserted anywhere above that
 // displaces every cite below it. The filename is spelled there rather than left as
 // a bare `:NNN` on #1434's evidence: a bare ref inherits the LAST-NAMED FILE, which
 // two paragraphs up is trail_sighting_liveness_test.go, and it reads clean under

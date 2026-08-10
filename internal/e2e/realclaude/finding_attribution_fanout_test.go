@@ -132,7 +132,7 @@ type finAttributeRecord struct {
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
 // reason (trail_run_outcome_test.go:882-883): a shared backing array is
 // reachable from every test in this package, and this slice is read on every
-// fan-out call. trailRunOutcomeValues (:1948) is the same shape for the same
+// fan-out call. trailRunOutcomeValues (:1987) is the same shape for the same
 // reason.
 //
 // # The argument for this order
@@ -617,7 +617,7 @@ func finAttributeAssert(t *testing.T, tc finAttributeCase, got finAttributeRecor
 // TestFinAttributeOrderCoversTheAdmitSpace is the deterministic guard against an
 // eighth admissibility value ranking silently last, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:1971).
+// (trail_run_outcome_test.go:2010).
 func TestFinAttributeOrderCoversTheAdmitSpace(t *testing.T) {
 	order := finAttributeOrder()
 	if len(order) != 7 {
@@ -749,7 +749,7 @@ func TestFinAttributeRecordCarriesNoCapturedBytes(t *testing.T) {
 		t.Errorf("the marshalled record carries pyry's captured stderr: %s", encoded)
 	}
 
-	// The structural half, following trail_run_outcome_test.go:1875-1897. line
+	// The structural half, following trail_run_outcome_test.go:1885-1907. line
 	// and stderr join #1271's list because the channel THIS record is exposed to
 	// is tdnReapOutcome.Line, not a ps column.
 	var keyed map[string]json.RawMessage

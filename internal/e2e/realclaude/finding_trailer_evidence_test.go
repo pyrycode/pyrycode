@@ -59,7 +59,7 @@ package realclaude
 // be worse than either. The three scan states (:57-71) and the three lateness
 // discriminators (:75-90) are shipped closed spaces, called and never restated.
 // trailIsRunOutcome (trail_run_outcome_test.go:422) and trailRunOutcomeValues
-// (:1948) are the fourteen; finOutcomeIsValue (finding_staging_gate_test.go:210)
+// (:1987) are the fourteen; finOutcomeIsValue (finding_staging_gate_test.go:210)
 // and finOutcomeValues (:223) the staging tier's seven — called, never
 // re-derived. reachMaxCommandBytes and reachCapCommand
 // (background_reach_probe_test.go:123, :945) are the single-sourced cap.

@@ -71,7 +71,7 @@ package realclaude
 // and a pgid the reap log does not name reaches tdnReapHeldPGIDAbsent ->
 // trailAdmitVoidGroupUnnamed. Neither produces a VOID OUTCOME: with a certifying
 // gate, PyryExited true, a clean scan and MatchCount > 0, trailClassifyRun falls
-// past Steps 3-6 to Step 7, an ANSWER in the three-answer set
+// past Steps 3-6 to Step 7, an ANSWER in the four-answer set
 // (trail_run_outcome_test.go:118-150). Reaching for one of the eight run-void-*
 // outcomes to make the trap "assert a void" would require breaking a DIFFERENT
 // input and would vary two dimensions at once.

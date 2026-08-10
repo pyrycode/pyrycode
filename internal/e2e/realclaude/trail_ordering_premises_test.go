@@ -457,7 +457,7 @@ func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 //
 // Each subtest asserts the all-true base certifies BEFORE flipping anything —
 // the premise assertion is what stops the test passing by classifying garbage,
-// the discipline trail_run_outcome_test.go:1908-1914 states.
+// the discipline trail_run_outcome_test.go:1919-1924 states.
 //
 // These three are also the anti-swap check: any pairwise swap of the three
 // parameters at trailCertifyOrdering's definition reddens at least two of them,
@@ -513,7 +513,7 @@ func TestTrailOrderEachPremiseHasItsOwnVoid(t *testing.T) {
 
 // TestTrailOrderValuesAgreeWithThePredicate is AC4 made executable, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:1972): the list and the predicate agree in BOTH
+// (trail_run_outcome_test.go:2011): the list and the predicate agree in BOTH
 // directions, the count is asserted against the ticket's own enumeration, and the
 // predicate rejects the values of the adjacent spaces.
 //
@@ -571,7 +571,7 @@ func TestTrailOrderValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailOrderResultCarriesNoCapturedBytes is AC5's structural half, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1876-1897): marshal the record, decode to
+// (trail_run_outcome_test.go:1886-1907): marshal the record, decode to
 // map[string]json.RawMessage, and refuse any command/args/comm/argv-shaped key.
 //
 // THE trailNeedle BYTE-SWEEP IS GENUINELY ABSENT HERE, NOT DEFERRED BY
