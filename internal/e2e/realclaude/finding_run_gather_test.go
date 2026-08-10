@@ -1121,7 +1121,7 @@ func TestFinGatherPyryExitIsObservableAtTheOutcome(t *testing.T) {
 // # Why this is not a finGatherCases row
 //
 // finGatherAssertContract runs on every row of that table and fails any row
-// classifying trailOutcomeOutOfContract (:638-641), which is precisely the
+// classifying trailOutcomeOutOfContract (:692-695), which is precisely the
 // answer the middle row requires. The claim needs a test of its own.
 //
 // # Why the gather validates nothing

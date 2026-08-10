@@ -698,7 +698,7 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 // TestFinAttributeRecordCarriesNoCapturedBytes makes the
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:1266) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:1271) and reusing the shipped trailNeedle.
 //
 // # The plant position is the whole test
 //

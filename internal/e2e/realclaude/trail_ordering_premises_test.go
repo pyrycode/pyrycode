@@ -66,7 +66,7 @@ package realclaude
 // and never the objects themselves — see the parameter list's own note for why
 // the narrow type is the enforcement rather than a convention. trailDetail
 // (trailer_admissibility_test.go:352) formats and caps every Detail, and
-// TestTrailAdmissibilityConstantsAreClosed (trailer_admissibility_test.go:1208)
+// TestTrailAdmissibilityConstantsAreClosed (trailer_admissibility_test.go:1213)
 // is where these four values are checked against every other value this tree
 // ships.
 

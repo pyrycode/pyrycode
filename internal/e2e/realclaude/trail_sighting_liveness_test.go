@@ -88,7 +88,7 @@ package realclaude
 // Prose cannot enforce either. A per-space membership predicate is scoped to one
 // space per call and CANNOT SEE A PAIR, so all eight values below join the union
 // map in TestTrailAdmissibilityConstantsAreClosed
-// (trailer_admissibility_test.go:1208) — the sixth space to do so, and #1439's
+// (trailer_admissibility_test.go:1213) — the sixth space to do so, and #1439's
 // precedent for the same reason one layer down.
 //
 // # THERE IS DELIBERATELY NO sighting-out-of-contract VALUE

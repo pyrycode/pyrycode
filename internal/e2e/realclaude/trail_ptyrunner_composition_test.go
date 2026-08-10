@@ -49,7 +49,7 @@ import (
 // TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1613) drives the
 // whole chain, but every trailGateCases() row carries trailRunnerUnread(), the
 // indeterminate answer. TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt
-// (trailer_admissibility_test.go:2057) does drive all five readings, but only over
+// (trailer_admissibility_test.go:2062) does drive all five readings, but only over
 // trailGate, and it compares each row AGAINST ITSELF: an edit that moved a Detail
 // under all five readings alike passes it untouched.
 //
@@ -62,7 +62,7 @@ import (
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
 // (trailer_admissibility_test.go:425), and clause B of
-// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:2090-2095) requires it
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:2095-2100) requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
 // CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420 and
 // after #1433: the absence arm embeds trailReasonAgainstPath's answer and the
@@ -137,7 +137,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 
 	// Premise. The reap record is CLASSIFIED by the real producer rather than
 	// typed, which pins the proof arm to a record tdnClassifyReapLog actually
-	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2303)
+	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2308)
 	// and its reason.
 	classified := tdnClassifyReapLog([]byte(trailReapLine(1, "[7788]")+"\n"), heldPGID)
 	if classified.Verdict != tdnReapHeldPGIDKilled || classified.LineCount != 1 {

@@ -1219,7 +1219,7 @@ func trailRunCases() []trailRunCase {
 	// The SECOND refuting verdict, which reaches the same run-level value through
 	// the same sighting value under a DIFFERENT reason. Two things come from it and
 	// neither is available without a row: the truncation-marker check in
-	// TestTrailClassifyRun runs on sighting-reason-pid-reaped-pending, nine bytes
+	// TestTrailClassifyRun runs on sighting-reason-pid-reaped-pending, ten bytes
 	// longer than its sibling's reason and therefore the arm's Detail worst case;
 	// and the arm is pinned to key on sighting.Value rather than on the pin verdict,
 	// which a build reading the verdict directly would pass on the row above alone.
@@ -1950,7 +1950,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:2539) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:2544) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, a pinStateOutcome's Detail and ToolStderr, and since
@@ -1967,14 +1967,14 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // and the refuted block reaches run-void-pinned-pid-did-not-establish FROM THE SAME
 // ARM, reading the same two fields and rendering a different Detail from them.
 //
-// The third block is here because its absence was measured rather than argued. On
-// the two-block tree, substituting this arm's sighting.Value operand for a
-// needle-bearing input left the SUITE GREEN for PinnedPid.ToolStderr — the field the
-// trust boundary runs through — and green for PinnedPid.Detail. Only Ordering.Detail
-// reddened, and not on the needle: it is long enough to overrun trailDetail's cap, so
-// the truncation-marker check at :1347-1350 caught it. A BUDGET kill, not a leak kill,
-// and different fabric — the sweep below is the only check on this arm that fails on
-// the needle itself. Each block premise-asserts first, so none passes on garbage.
+// The third block is here because its absence was measured rather than argued. On the
+// two-block tree, substituting this arm's sighting.Value operand for a needle-bearing
+// input left the SUITE GREEN for PinnedPid.ToolStderr — the field the trust boundary
+// runs through — and green for PinnedPid.Detail. Only Ordering.Detail reddened, and
+// not on the needle: it overruns trailDetail's cap, so the truncation-marker check at
+// TestTrailClassifyRun:1468-1471 caught it. A BUDGET kill, not a leak kill, and
+// different fabric — the sweep below is this arm's only check that fails on the needle
+// itself. Each block premise-asserts first, so none passes on garbage.
 //
 // # What the two new-input blocks ARE, stated rather than overclaimed
 //
