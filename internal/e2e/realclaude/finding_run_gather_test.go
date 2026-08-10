@@ -48,7 +48,7 @@ package realclaude
 //
 // # The proof outranks every match-count arm
 //
-// trailClassifyRun's Step 2 (trail_run_outcome_test.go:890) returns
+// trailClassifyRun's Step 2 (trail_run_outcome_test.go:1009) returns
 // trailOutcomeRunningAtTrailer on Admit.Value == trailAdmitProof BEFORE Step 4
 // (ArgvScanErrored), Step 5 (RowsScanned == 0), Step 7 (MatchCount > 0) or
 // Step 8 are consulted. That is what makes this file's rows cheap: with no
@@ -58,7 +58,7 @@ package realclaude
 //
 // # An empty match set under a certifying gate IS the documented healthy negative
 //
-// trailRunWellFormed() (trail_run_outcome_test.go:983) — the classifier's own
+// trailRunWellFormed() (trail_run_outcome_test.go:1114) — the classifier's own
 // canonical well-formed input — is trailGateUsable + "completed" + MatchCount 0 +
 // RowsScanned 12 + trailAdmitVoidGroupUnnamed, and it reaches
 // trailOutcomeNoRowMatched, whose Detail says that value is "A statement about THE
@@ -79,8 +79,8 @@ package realclaude
 //     and the proof arm (:588); readings.Admit takes that result whole too;
 //   - finGatherInputs.ClaudeState is copied into readings.ClaudeState whole,
 //     trailClassifyRun republishes it as claude_state
-//     (trail_run_outcome_test.go:466, :584), and C7 quotes an out-of-contract
-//     value %q into the published Detail (:674-679).
+//     (trail_run_outcome_test.go:532, :650), and C7 quotes an out-of-contract
+//     value %q into the published Detail (:740-745).
 //
 // So a needle in terminal_reason lands in readings.Gate.Detail and, on the
 // finding row, in readings.Admit.Detail as well; a needle in the claude verdict
@@ -169,7 +169,7 @@ const (
 	// finGatherUndocumentedState is a claude liveness verdict nobody defined:
 	// neither one of pinReadState's four nor "" for not-read. Deliberately NOT
 	// the classifier layer's own "some-verdict-nobody-defined"
-	// (trail_run_outcome_test.go:1199), so a failure names which layer produced
+	// (trail_run_outcome_test.go:1388), so a failure names which layer produced
 	// the value that reached C7.
 	finGatherUndocumentedState = "fin-gather-verdict-nobody-defined"
 )
@@ -217,7 +217,7 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 // differ in one field. Across six positional arguments that identity is a
 // discipline retyped at each call site and checkable only by reading; over a
 // struct it is `copy the value, set one field` — the package's own
-// vary-one-dimension idiom (trailRunWellFormed, trail_run_outcome_test.go:983) —
+// vary-one-dimension idiom (trailRunWellFormed, trail_run_outcome_test.go:1114) —
 // and it holds BY CONSTRUCTION. Same doctrine either way: prefer the shape that
 // cannot be got wrong over the discipline that must not be. Secondarily, a
 // reader of finGatherReadings(&stdout, needles, stderr, pinned, true, "") has no
@@ -228,10 +228,10 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 //   - PyryExited's zero is false, which reads as "did not exit" and reaches Step
 //     3's void. That is the SAFE direction, and it is the identical argument
 //     trailRunReadings.PyryExited makes for itself
-//     (trail_run_outcome_test.go:381-384): a caller who omits the field gets a
+//     (trail_run_outcome_test.go:421-424): a caller who omits the field gets a
 //     void, never a finding.
-//   - ClaudeState's zero is "", which is C7's shipped "not read" (:392-395,
-//     :674) — an honest report rather than an unfilled field.
+//   - ClaudeState's zero is "", which is C7's shipped "not read" (:432-435,
+//     :740) — an honest report rather than an unfilled field.
 //
 // Because the two zeros land where the readings' own zeros land, an
 // incompletely-filled finGatherInputs degrades to a named nothing-was-measured
@@ -303,7 +303,7 @@ type finGatherInputs struct {
 // # Staleness travels as PUBLISHED EVIDENCE and is not a classifier input
 //
 // trailRunReadings deliberately has no field for it
-// (trail_run_outcome_test.go:388-391): trailBoundFromStart carries a real duration
+// (trail_run_outcome_test.go:428-431): trailBoundFromStart carries a real duration
 // that bounds nothing, so a classifier able to read a staleness could be tempted
 // to discriminate on it. Carrying it HERE does not admit it THERE, and the two
 // types stay separate for exactly that reason.
@@ -321,7 +321,7 @@ type finGatherInputs struct {
 //
 // Its zero is false, which routes to the no-decoded-trailer arm where the four
 // scalars are zeroes — an honest nothing-was-measured, the same argument
-// finGatherInputs.PyryExited makes for itself (:367-371). An incompletely-filled
+// finGatherInputs.PyryExited makes for itself (:407-411). An incompletely-filled
 // sighting degrades to a named nothing rather than to a claim.
 //
 // # What the four decoded scalars are worth
@@ -446,7 +446,7 @@ const (
 //     shipped `dropped := seen` struct copy
 //     (finding_trailer_evidence_test.go:693) would then put two carriers on one
 //     backing array while `go test -race` runs this package's tests in parallel
-//     (trail_run_outcome_test.go:980-982). The builder's plain assignment is safe
+//     (trail_run_outcome_test.go:1111-1113). The builder's plain assignment is safe
 //     ONLY because this clause holds, which is why the clause is stated at the
 //     producer rather than at the consumer.
 //
@@ -506,7 +506,7 @@ func finBoundKeyNames(names []string) []string {
 // the observation and copies out what a reader needs. Staleness travels from
 // #1309 onward, ON THE CARRIER AND AS PUBLISHED EVIDENCE. It is still NOT a
 // classifier input and must not be used as one, which is why trailRunReadings
-// still has no field for it (trail_run_outcome_test.go:388-391) and why the two
+// still has no field for it (trail_run_outcome_test.go:428-431) and why the two
 // types stay separate.
 //
 // The second return is #1280's own finAttributeRecord, returned WHOLE. It is
@@ -523,14 +523,14 @@ func finBoundKeyNames(names []string) []string {
 //
 // # Which contract check shapes which leg
 //
-//   - C2 (trail_run_outcome_test.go:607) requires a trailGateUsable value to carry
+//   - C2 (trail_run_outcome_test.go:673) requires a trailGateUsable value to carry
 //     a non-empty Reason. The gate is fed a real scanned trailer, so the reason
 //     arrives filled; a hand-built trailGateResult{Value: trailGateUsable} is
 //     exactly the fixture C2 exists to reject.
-//   - C3/C4 (:620, :632) make the Admit guard MANDATORY rather than defensive.
+//   - C3/C4 (:686, :698) make the Admit guard MANDATORY rather than defensive.
 //     Calling the predicate unconditionally fails C4 on every non-certifying gate;
 //     skipping it unconditionally fails C3 on every certifying one.
-//   - C8/C9 (:681, :693) require the counts and the errored flag to be one
+//   - C8/C9 (:747, :759) require the counts and the errored flag to be one
 //     pinScanArgv call's own, which is why nothing here types one in. pinScanArgv
 //     returns the ZERO pinScan on error, so the three are consistent by
 //     construction.
@@ -630,8 +630,8 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// attribution that is not proof, PyryExited false now reaches Step 3's
 	// staging void where the constant reported a scan-side answer or a Step 4-6
 	// void. A proof-carrying run is unchanged — Step 2 sits above Step 3 by
-	// design (trail_run_outcome_test.go:551-562) and proofPyryLive pins it
-	// (:1145-1146, :1337-1338) — and so is a run whose gate is not usable, which Step
+	// design (trail_run_outcome_test.go:617-628) and proofPyryLive pins it
+	// (:1334-1335, :1562-1563) — and so is a run whose gate is not usable, which Step
 	// 1 answers first.
 	readings.PyryExited = in.PyryExited
 	readings.ClaudeState = in.ClaudeState
@@ -660,7 +660,7 @@ type finGatherCase struct {
 // finGatherCases returns every composition under test.
 //
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:981-982): the rows carry slices, and a shared
+// reason (trail_run_outcome_test.go:1112-1113): the rows carry slices, and a shared
 // backing array is reachable from every test in this package.
 //
 // The first two rows differ in EXACTLY ONE DIMENSION — the pinned pgid. Same
@@ -776,7 +776,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	readings trailRunReadings, record finAttributeRecord) {
 	t.Helper()
 
-	// C2 (trail_run_outcome_test.go:607): the gate is fed a REAL SCANNED TRAILER.
+	// C2 (trail_run_outcome_test.go:673): the gate is fed a REAL SCANNED TRAILER.
 	// Byte for byte against the shipped producers over the same bytes the gather
 	// read — trailGateResult is four strings, so == suffices. A hand-built
 	// trailGateResult{Value: trailGateUsable} is exactly the fixture C2 exists to
@@ -799,7 +799,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	}
 
 	if tc.wantReason != "" {
-		// C3 (:620): the attribution predicate is called EXACTLY WHEN the gate
+		// C3 (:686): the attribution predicate is called EXACTLY WHEN the gate
 		// certified a reason, and what it produced is what reached Admit. The
 		// fan-out is pure over its three arguments, so this recomputation is
 		// deterministic: a gather that passed a different certified string, or that
@@ -821,9 +821,9 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 				"pinned %v", readings.Admit.Value, tc.wantAdmit, finGatherNamedPGID, tc.pinned)
 		}
 	} else {
-		// C4 (:632): Admit is left ZERO when the gate certified nothing. This is
+		// C4 (:698): Admit is left ZERO when the gate certified nothing. This is
 		// the zero-value comparison the package uses for "not classified"
-		// (trail_run_outcome_test.go:1114, finding_attribution_fanout_test.go:668) —
+		// (trail_run_outcome_test.go:1303, finding_attribution_fanout_test.go:668) —
 		// a comparison against an existing consumer's idiom, not a reading the
 		// gather produced by literal.
 		if readings.Admit != (trailAdmitResult{}) {
@@ -864,7 +864,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 
 	// AC2's ordering claim, asserted rather than described. No subject is staged
 	// anywhere in this file, so every row runs at zero matches and the finding
-	// row STILL reports the finding: Step 2 (trail_run_outcome_test.go:880) is
+	// row STILL reports the finding: Step 2 (trail_run_outcome_test.go:999) is
 	// consulted before Step 7 and Step 8 are. On a live run the same thing happens
 	// for a different reason — the reaper has already killed the group by the time
 	// the post-trailer scan runs — which is why nothing may be done to the hold or
@@ -1029,10 +1029,10 @@ func finGatherNegativeInputs(t *testing.T, stdout *probeSyncBuffer) finGatherInp
 // gate, attribution NOT proof. A run whose gate is not usable is answered by
 // Step 1 before the reading is consulted, and a PROOF-CARRYING run is answered
 // by Step 2 — which sits above Step 3 BY DESIGN
-// (trail_run_outcome_test.go:551-562, "Voiding it for a staging failure would
+// (trail_run_outcome_test.go:617-628, "Voiding it for a staging failure would
 // SUPPRESS A FINDING THE RUN GENUINELY ESTABLISHED") and is pinned by
 // proofPyryLive, a proof carrying PyryExited false that wants
-// trailOutcomeRunningAtTrailer (:1145-1146, :1337-1338). Building this pair on the
+// trailOutcomeRunningAtTrailer (:1334-1335, :1562-1563). Building this pair on the
 // proof arm would require reordering the classifier, which is a defect and not
 // a fix.
 //
@@ -1126,7 +1126,7 @@ func TestFinGatherPyryExitIsObservableAtTheOutcome(t *testing.T) {
 //
 // # Why the gather validates nothing
 //
-// C7 (trail_run_outcome_test.go:674-679) is the classifier's check over this
+// C7 (trail_run_outcome_test.go:740-745) is the classifier's check over this
 // field and it is already shipped. A pinIsVerdict call in the gather would
 // repair exactly the record C7 exists to reject, putting the out-of-contract
 // answer out of reach through this composition — and it would break the LAST row
@@ -1135,7 +1135,7 @@ func TestFinGatherPyryExitIsObservableAtTheOutcome(t *testing.T) {
 //
 // The first and last rows want the SAME outcome, and that is the point: the
 // verdict is corroboration, and corroboration never moves the answer
-// (trail_run_outcome_test.go:564-571).
+// (trail_run_outcome_test.go:630-637).
 func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 	var stdout probeSyncBuffer
 	base := finGatherNegativeInputs(t, &stdout)
@@ -1196,7 +1196,7 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 			outcome := trailClassifyRun(readings)
 
 			// The second half of "carried exactly as handed in": the classifier
-			// republishes the field verbatim (trail_run_outcome_test.go:584).
+			// republishes the field verbatim (trail_run_outcome_test.go:650).
 			if outcome.ClaudeState != tc.claudeState {
 				t.Fatalf("the published claude_state reads %q; want the %q that was handed in",
 					outcome.ClaudeState, tc.claudeState)
@@ -1260,7 +1260,7 @@ func TestFinGatherReturnsNoCapturedBytes(t *testing.T) {
 		// discipline at the plant site, the way finGatherNeedleTrailer does for
 		// terminal_reason, and it proves the field introduces no forbidden key —
 		// which "" would not. It does not move the outcome, because a verdict is
-		// corroboration (trail_run_outcome_test.go:564-571).
+		// corroboration (trail_run_outcome_test.go:630-637).
 		ClaudeState: pinStateRunning,
 	})
 
@@ -1347,7 +1347,7 @@ func TestFinGatherReturnsNoCapturedBytes(t *testing.T) {
 // other than the poll whose scan result was classified.
 //
 // Staleness has no counterpart on the readings to agree with — trailRunReadings
-// deliberately carries no staleness field (trail_run_outcome_test.go:388-391) — so
+// deliberately carries no staleness field (trail_run_outcome_test.go:428-431) — so
 // it is pinned as FILLED FROM THIS SIGHTING RATHER THAN LEFT BEHIND: non-zero and
 // under the poll's own timeout. A left-behind field is exactly zero, which is why
 // the weakened >= 0 form would be vacuous rather than merely lenient.
@@ -2048,7 +2048,7 @@ func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 // second traversal.
 //
 // Scope is the carrier alone. trailRunReadings argues its own non-reachability at
-// trail_run_outcome_test.go:385-391 and finRecordRun's is pinned by
+// trail_run_outcome_test.go:425-431 and finRecordRun's is pinned by
 // TestFinRecordEmbedsTrailerRecordWhole; restating either here would be scope
 // creep.
 func TestFinSightingReachesNoScanType(t *testing.T) {
@@ -2084,10 +2084,10 @@ func finGatherForbiddenKeys() []string {
 func finGatherExemptKeys() map[string]string {
 	return map[string]string{
 		// ArgvScanErrored is a bool discriminator recording THAT the scan failed
-		// and never what it said (trail_run_outcome_test.go:363-370).
+		// and never what it said (trail_run_outcome_test.go:403-410).
 		"argvscanerrored": "the errored discriminator, which records that the scan failed",
 		// pinStateOutcome.ToolStderr. #1271 admits pinStateOutcome into the
-		// readings WHOLE (trail_run_outcome_test.go:377-380) because it carries no
+		// readings WHOLE (trail_run_outcome_test.go:417-420) because it carries no
 		// command column by construction — pinStateColumns is `pid=,ppid=,stat=`
 		// with an enforcing test. Named here rather than left to fire later: this
 		// file's rows match nothing, so Liveness is empty today and the first row

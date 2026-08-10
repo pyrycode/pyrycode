@@ -15,11 +15,11 @@ package realclaude
 //
 // # Why an unstaged run must never reach the classifier
 //
-// trailClassifyRun (trail_run_outcome_test.go:572) owns one probe run's outcome
-// over a closed set of fifteen values, and it ASSUMES THE RUN STAGED: that a Bash
+// trailClassifyRun (trail_run_outcome_test.go:638) owns one probe run's outcome
+// over a closed set of sixteen values, and it ASSUMES THE RUN STAGED: that a Bash
 // call was issued, that it was the rig's hold command, that the rendezvous
-// completed. Two conditions this probe can hit have no value among the fifteen and
-// no field in its input record trailRunReadings (:354) — the model never issued
+// completed. Two conditions this probe can hit have no value among the sixteen and
+// no field in its input record trailRunReadings (:394) — the model never issued
 // the Bash call, and the trigger did not fire.
 //
 // Handing such a run over is not a neutral act. On an unstaged run the argv scan
@@ -33,7 +33,7 @@ package realclaude
 // to prevent a false negative becomes the thing that publishes one.
 //
 // So two tiers, kept apart: rig-side outcomes decided BEFORE the classifier is
-// consulted, and the classifier's fifteen consumed as returned, neither
+// consulted, and the classifier's sixteen consumed as returned, neither
 // re-derived nor renamed. This file is the lower tier and the gate that enforces
 // the separation.
 //
@@ -65,8 +65,8 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailIsRunOutcome (trail_run_outcome_test.go:475) and trailRunOutcomeValues
-// (:2124) are the fifteen and their membership predicate — called, never
+// trailIsRunOutcome (trail_run_outcome_test.go:541) and trailRunOutcomeValues
+// (:2468) are the sixteen and their membership predicate — called, never
 // re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
 // is the shipped needle.
 //
@@ -105,7 +105,7 @@ import (
 // (result_trailer_observation_test.go:345) fails any closed-space value that is
 // the empty string because "a zero-valued field reads as it", and
 // trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way"
-// (trail_run_outcome_test.go:381-384).
+// (trail_run_outcome_test.go:421-424).
 //
 // There is no out-of-contract value here and none is to be added. Seven is
 // seven: the two inputs that could otherwise want one are closed by the two
@@ -144,8 +144,8 @@ const (
 // embedded in, marshalled into, or quoted by any published record. Only
 // finOutcomeResult crosses into publishable space. The asymmetry is load-bearing
 // rather than incidental — every sibling record in this family states its content
-// rule at the type (trailRunReadings:350-353, trailRunOutcome:421-435,
-// trailGateResult:271-286) and this one states the converse for the same reason.
+// rule at the type (trailRunReadings:390-393, trailRunOutcome:461-475,
+// trailGateResult:311-326) and this one states the converse for the same reason.
 // Adding tags here "for symmetry" is the first step toward publishing two
 // captured strings into a public issue.
 //
@@ -175,7 +175,7 @@ type finOutcomeStaging struct {
 	RendezvousDone bool
 	// PinScanErrored records THAT the during-turn pin scan failed, never what it
 	// said, mirroring trailRunReadings.ArgvScanErrored
-	// (trail_run_outcome_test.go:363-370). ps stderr is a captured string on the
+	// (trail_run_outcome_test.go:403-410). ps stderr is a captured string on the
 	// same footing as argv.
 	PinScanErrored bool
 	// PinMatchCount and PinWantCount are the scan's match count and the count the
@@ -203,7 +203,7 @@ type finOutcomeResult struct {
 // --- membership helper ---------------------------------------------------------
 
 // finOutcomeIsValue reports whether v is one of the seven staging outcomes. It
-// mirrors trailIsRunOutcome (trail_run_outcome_test.go:475) and its siblings
+// mirrors trailIsRunOutcome (trail_run_outcome_test.go:541) and its siblings
 // trailIsGateValue, trailIsAdmitValue, pinIsVerdict and tdnIsReapVerdict, and
 // exists for the same reason: a value a reader of a published record cannot look
 // up is a verdict they cannot interpret.
@@ -387,7 +387,7 @@ type finOutcomeGateCase struct {
 }
 
 // finOutcomeStagedBase is the fully-staged input each case varies ONE thing from,
-// mirroring trailRunWellFormed (trail_run_outcome_test.go:983): a row that
+// mirroring trailRunWellFormed (trail_run_outcome_test.go:1114): a row that
 // changes two conditions at once proves nothing about which one its arm keyed on.
 // The four rows that must vary two — the two guard holes and the two order
 // checks — say so in their own names, because varying two is exactly their point.
@@ -576,7 +576,7 @@ func TestFinOutcomeConstantsAreClosed(t *testing.T) {
 // TestFinOutcomeValuesAgreeWithThePredicate keeps finOutcomeValues from drifting
 // away from the predicate a published record is read through, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2148). Without it, an eighth outcome added to the
+// (trail_run_outcome_test.go:2493). Without it, an eighth outcome added to the
 // predicate but not to the list would make the coverage loop in
 // TestFinOutcomeStagingGate silently stop covering it.
 func TestFinOutcomeValuesAgreeWithThePredicate(t *testing.T) {
@@ -605,10 +605,10 @@ func TestFinOutcomeSpacesAreDisjoint(t *testing.T) {
 	for _, v := range finOutcomeValues() {
 		if trailIsRunOutcome(v) {
 			t.Errorf("trailIsRunOutcome accepts the staging value %q — the run classifier's "+
-				"fifteen have absorbed a value that means \"this run never staged\"", v)
+				"sixteen have absorbed a value that means \"this run never staged\"", v)
 		}
 	}
-	// The shipped list, not a hand-copy: re-deriving the fifteen here is exactly the
+	// The shipped list, not a hand-copy: re-deriving the sixteen here is exactly the
 	// drift this test exists to catch.
 	for _, v := range trailRunOutcomeValues() {
 		if finOutcomeIsValue(v) {
@@ -660,14 +660,14 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 		if trailIsRunOutcome(got.Value) {
 			t.Errorf("%s: the staging gate returned %q, which trailIsRunOutcome accepts — a run "+
 				"that never staged would then be published carrying one of the classifier's "+
-				"fifteen, so \"not observed\" could arrive at %s and an unpinnable or unreadable "+
+				"sixteen, so \"not observed\" could arrive at %s and an unpinnable or unreadable "+
 				"command could arrive at a value meaning the command had exited",
 				tc.name, got.Value, trailOutcomeNoRowMatched)
 		}
 	}
 	// The pass-through explicitly, and not only as one row of the sweep above: it
 	// is a STAGING value, not a run outcome, and this is what stops a later edit
-	// from aliasing it onto one of the fifteen.
+	// from aliasing it onto one of the sixteen.
 	if trailIsRunOutcome(finOutcomeReadyToClassify) {
 		t.Errorf("trailIsRunOutcome accepts %q — the signal to CONSULT the classifier has become "+
 			"one of the answers the classifier returns", finOutcomeReadyToClassify)
@@ -681,7 +681,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // against a leaking implementation. trailNeedle is placed past the cap
 // deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
 // for the opposite kind of test; here that placement would be the defect. These
-// mirror the ~73-byte planted strings at trail_run_outcome_test.go:1995-1996, :2035-2038.
+// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2255-2256, :2295-2298.
 const (
 	finOutcomePlantedStaged = "a staged hold command that also carries " + trailNeedle
 	finOutcomePlantedIssued = "a different issued command that also carries " + trailNeedle
@@ -689,7 +689,7 @@ const (
 
 // TestFinOutcomeResultCarriesNoCapturedBytes makes the redaction rule checkable
 // rather than advisory, in TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1988) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:2248) and reusing the shipped trailNeedle.
 //
 // The needle goes into BOTH string-bearing inputs the gate can see — the command
 // claude issued and the staged hold command it is compared against — because the

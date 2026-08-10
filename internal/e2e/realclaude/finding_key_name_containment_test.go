@@ -180,7 +180,7 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 //     needle and the shipped pad measurement still holds.
 //
 // A function and not a package-level var, for trailRunWellFormed's stated reason
-// (trail_run_outcome_test.go:980-982): `go test -race` runs this package's tests
+// (trail_run_outcome_test.go:1111-1113): `go test -race` runs this package's tests
 // in parallel.
 //
 // # The plant list, and why it stops where it does
@@ -528,7 +528,7 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 // rather than pinned as a literal.
 //
 // A const and not a var: the parallel-tests rule
-// (trail_run_outcome_test.go:980-982) is about shared BACKING ARRAYS, and a string
+// (trail_run_outcome_test.go:1111-1113) is about shared BACKING ARRAYS, and a string
 // constant has none.
 const finContainNeedleKeyName = "PYRY-PROBE-KEY-NAME-NEEDLE-MUST-NOT-REACH-A-DETAIL"
 
