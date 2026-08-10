@@ -15,11 +15,11 @@ package realclaude
 // # Why an ordering argument at all: the top-ranked evidence is EMPTY here
 //
 // trailClassifyRun ranks an admissible reap-log attribution second, above every
-// point-in-time reading (trail_run_outcome_test.go:364-365), and argues at the
-// point of use (:602-606) that those readings "are expected to be late — the reap
+// point-in-time reading (trail_run_outcome_test.go:486-487), and argues at the
+// point of use (:781-785) that those readings "are expected to be late — the reap
 // completes in the time of one ps exec while the observation of the trailer trails
 // the write by up to a poll interval — so resting a verdict on them manufactures a
-// systematic false negative". :845-847 makes that executable.
+// systematic false negative". :1056-1058 makes that executable.
 //
 // That route is structurally unavailable on PYRY_USE_STREAMJSON=1. The two runners
 // reap in different places:
@@ -57,7 +57,7 @@ package realclaude
 // NOT establish "alive when pyry declared the turn finished": on this path no
 // terminal reason is certified, so no such instant exists at all, and the shipped
 // classifier says exactly that at each of its void arms
-// (trail_run_outcome_test.go:557, :568-576, :582-591).
+// (trail_run_outcome_test.go:703, :751-756, :761-770).
 //
 // Every value here is named after the SIGHTING, every Detail ends with
 // trailSightingInstantClause, and TestTrailSightingVoidsNeverReadAsNegative
@@ -80,7 +80,7 @@ package realclaude
 // collision is about. The second, subtler pair is handled the same way:
 // sighting-reason-pid-read-failed rather than …-liveness-instrument-failed,
 // because the shipped trailOutcomeVoidLivenessInstrument
-// (trail_run_outcome_test.go:159-163) is "run-void-liveness-instrument-failed" and
+// (trail_run_outcome_test.go:180-184) is "run-void-liveness-instrument-failed" and
 // a reason ending in the same four words would be distinct to a map and confusable
 // to a reader. Naming it after THE PID READ keeps the run space's phrasing out of
 // this one.
@@ -88,7 +88,7 @@ package realclaude
 // Prose cannot enforce either. A per-space membership predicate is scoped to one
 // space per call and CANNOT SEE A PAIR, so all eight values below join the union
 // map in TestTrailAdmissibilityConstantsAreClosed
-// (trailer_admissibility_test.go:1201) — the sixth space to do so, and #1439's
+// (trailer_admissibility_test.go:1208) — the sixth space to do so, and #1439's
 // precedent for the same reason one layer down.
 //
 // # THERE IS DELIBERATELY NO sighting-out-of-contract VALUE
@@ -104,12 +104,15 @@ package realclaude
 //
 // This file ships the value spaces, the record, the predicate, its fixtures, its
 // tests and its own no-captured-bytes sweep, plus the join to the shared union
-// map. It changes trailClassifyRun not at all, grows no run-level outcome, and
-// does not touch the step-1 gate switch: that switch answers
-// trailGateAbsentOwesNone with an unconditional return
-// (trail_run_outcome_test.go:565-576), so a route wired below it would not fire on
-// the one gate value it would exist to serve. Reaching it is #1437's work; here
-// the predicate stands alone and is driven from fixtures.
+// map. It changed trailClassifyRun not at all, grew no run-level outcome, and did
+// not touch the step-1 gate switch: that switch ANSWERED trailGateAbsentOwesNone
+// with an unconditional return, so a route wired below it would not have fired on
+// the one gate value it exists to serve. #1446 reached it — by consulting this
+// predicate INSIDE that arm (trail_run_outcome_test.go:711-756), which is the only
+// placement that does not award a scan-side answer to a record the gate says
+// certifies nothing, and by publishing the finding under an evidence route of its
+// own. Nothing here changed for it: the predicate still stands alone, is still
+// pure over its input, and is still driven from fixtures.
 //
 // THE OBSERVATION: the stream path leaves a backgrounded group unreaped where
 // ptyrunner kills it. That is worth recording and is NOT chased here — what
@@ -190,7 +193,7 @@ const (
 	//
 	// Deliberately NOT …-liveness-instrument-failed: the shipped
 	// trailOutcomeVoidLivenessInstrument is "run-void-liveness-instrument-failed"
-	// (trail_run_outcome_test.go:163), and a reason ending in those four words would
+	// (trail_run_outcome_test.go:184), and a reason ending in those four words would
 	// be distinct to the union map and confusable to a reader. This one is named
 	// after THE PID READ.
 	trailSightingReasonPidReadFailed = "sighting-reason-pid-read-failed"
@@ -295,7 +298,7 @@ type trailSightingResult struct {
 //     negative may be read from it.
 //  2. AN INSTRUMENT FAILURE NEVER READS AS A CLEAN NEGATIVE. Void, never
 //     unestablished — the same collapse trailOutcomeVoidLivenessInstrument's doc
-//     (trail_run_outcome_test.go:159-163) refuses one layer up: folding it into a
+//     (trail_run_outcome_test.go:180-184) refuses one layer up: folding it into a
 //     soft negative "would manufacture a clean negative out of the instrument's
 //     breakage".
 //
@@ -415,7 +418,7 @@ func trailSightingValues() []string {
 }
 
 // trailIsSightingValue reports whether v is one of the three recorded outcomes. It
-// mirrors trailIsRunOutcome (trail_run_outcome_test.go:309) and trailIsOrderValue
+// mirrors trailIsRunOutcome (trail_run_outcome_test.go:422) and trailIsOrderValue
 // and exists for the same reason: a value a reader of the published record cannot
 // look up is a verdict they cannot interpret.
 func trailIsSightingValue(v string) bool {
@@ -843,7 +846,7 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailSightingResultCarriesNoCapturedBytes is AC5 made executable, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1571-1627) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:1827-1943) and reusing the shipped trailNeedle.
 //
 // THIS SWEEP IS LOAD-BEARING HERE IN A WAY IT COULD NOT BE FOR #1439, and the
 // family's existing sweeps prove nothing about this record: they are

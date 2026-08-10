@@ -32,7 +32,7 @@ package realclaude
 // MatchCount is at least 2 and the same composition lands on Step 7
 // (trailOutcomeMatchedUnattributed). That move is the increment, not an
 // inconsistency with the blocker. The FINDING arm is unchanged, because Step 2
-// (trail_run_outcome_test.go:612) outranks Step 7.
+// (trail_run_outcome_test.go:791) outranks Step 7.
 //
 // # The staged command must lead a process group of its own
 //
@@ -72,7 +72,7 @@ package realclaude
 // trailAdmitVoidGroupUnnamed. Neither produces a VOID OUTCOME: with a certifying
 // gate, PyryExited true, a clean scan and MatchCount > 0, trailClassifyRun falls
 // past Steps 3-6 to Step 7, an ANSWER in the three-answer set
-// (trail_run_outcome_test.go:118-129). Reaching for one of the eight run-void-*
+// (trail_run_outcome_test.go:118-150). Reaching for one of the eight run-void-*
 // outcomes to make the trap "assert a void" would require breaking a DIFFERENT
 // input and would vary two dimensions at once.
 //

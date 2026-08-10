@@ -120,7 +120,7 @@ func finOverlongKeyNameTrailer() string {
 //
 // A function rather than a package-level var: it returns a slice, go test -race
 // runs this package's tests in parallel, and a shared backing array would let one
-// row's mutation reach another's (trail_run_outcome_test.go:697-699).
+// row's mutation reach another's (trail_run_outcome_test.go:881-883).
 func finManyShortNames(n int) []string {
 	names := make([]string, 0, n)
 	for i := 0; i < n; i++ {

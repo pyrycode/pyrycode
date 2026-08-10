@@ -130,7 +130,7 @@ const (
 	// constructs.
 	//
 	// It CERTIFIES NOTHING — Reason stays empty, which is what keeps
-	// trailClassifyRun's C2 (trail_run_outcome_test.go:431-442) green unamended —
+	// trailClassifyRun's C2 (trail_run_outcome_test.go:553-564) green unamended —
 	// and it says no more than what was read. Not that any process was alive:
 	// there is no certified instant here for such a claim to be about, which is
 	// why the run-level arm it reaches is a named void. Not anything about a
@@ -156,8 +156,8 @@ const (
 	//
 	// What it says is that the line is NOT that path's documented healthy shape —
 	// absence is — and no more than that. It CERTIFIES NOTHING: Reason stays empty,
-	// which is what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:431-442)
-	// green unamended and lets C4 (:456-464) force Admit empty.
+	// which is what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:553-564)
+	// green unamended and lets C4 (:578-586) force Admit empty.
 	//
 	// NEVER THAT PYRY WROTE IT, and the passthrough cite above is the REASON rather
 	// than a decoration. Pyry's own synthesis on that path is unconditional WHEN IT
@@ -638,7 +638,7 @@ func trailGate(in trailGateInput) trailGateResult {
 	// owes-none absence, and for the same reason: the record IS a reading, so
 	// answering "the input is not a reading" filed a measurement as a caller's bug.
 	// Certifying nothing is what keeps trailClassifyRun's C2
-	// (trail_run_outcome_test.go:431-442) green unamended and lets C4 (:456-464)
+	// (trail_run_outcome_test.go:553-564) green unamended and lets C4 (:578-586)
 	// force Admit empty, so the run-level answer is decided at step 1 alone — by
 	// trailOutcomeVoidReasonNotOwedByPath, the arm added to that switch IN THE SAME
 	// COMMIT, because a gate value registered in trailIsGateValue with no arm there
@@ -1173,27 +1173,34 @@ func trailGateCases() []trailGateCase {
 // printed here: the shipped comment said twenty-nine while the map already held
 // thirty-five, having gone stale when #1366 added six reason values; #1417's two
 // made thirty-seven, #1434's two made thirty-nine, #1439's four made forty-three,
-// and #1440's eight make fifty-one. A number kept by hand beside a set is a number
-// that drifts, so the loop below counts.
+// #1440's eight made fifty-one, and #1446's three make fifty-four. A number kept
+// by hand beside a set is a number that drifts, so the loop below counts.
 //
 // #1271's run-level outcomes joined the map rather than starting a third closure
 // test, #1439's ordering-premise values joined it rather than starting a fifth,
-// and #1440's sighting values joined it rather than starting a sixth, for the same
-// reason: five spaces now mean nearly the same words (an input state, the gate's
-// view of it, the run's view of it, the ordering premises' view of the same events
-// one layer under the run, and the sighting's view of them from a different
-// evidence class), and only a union can see a copy-paste across them. Two
-// near-collisions make the point, and the second is the sharper one:
-// order-void-pyry-did-not-exit sits one word from run-void-pyry-did-not-exit — one
-// word apart in a VOID value — while #1440's sighting-alive-by-ordering states the
-// same English sentence as run-running-at-trailer, which is the same claim in the
-// POSITIVE value, differing only in the evidence class it rests on.
+// #1440's sighting values joined it rather than starting a sixth, and #1446's
+// route values joined it rather than starting a seventh, for the same reason: five
+// spaces now mean nearly the same words (an input state, the gate's view of it,
+// the run's view of it, the ordering premises' view of the same events one layer
+// under the run, and the sighting's view of them from a different evidence class),
+// and only a union can see a copy-paste across them. Two near-collisions make the
+// point, and the second is the sharper one: order-void-pyry-did-not-exit sits one
+// word from run-void-pyry-did-not-exit — one word apart in a VOID value — while
+// #1440's sighting-alive-by-ordering states the same English sentence as
+// run-running-at-trailer, which is the same claim in the POSITIVE value, differing
+// only in the evidence class it rests on. #1446 made that pair BOTH run-level
+// answers, which is what its route values name apart.
 //
 // EVERY VALUE IN THIS MAP HAS AN ARM IN ITS CONSUMER — trailGate and
 // trailAdmitAttribution for the first two spaces, trailClassifyRun for the
 // third, trailReasonAgainstPath (trailer_terminal_reason_test.go:222) for the
 // fourth, trailCertifyOrdering (trail_ordering_premises_test.go) for the fifth,
 // and trailEstablishSighting (trail_sighting_liveness_test.go) for the sixth.
+// #1446's two evidence-route values are the one exception in shape rather than in
+// substance: they are not a predicate's answers but a FIELD trailClassifyRun sets
+// beside them, so what they have in that function is an assignment rather than an
+// arm — one per run-level answer, and TestTrailClassifyRun's per-row check is
+// where their coverage lives.
 // That is a comment and not a check: this test catches a COLLIDING
 // value, never an UNHANDLED one, so a NEW gate or admit value added here and to
 // its membership predicate would pass trailClassifyRun's contract block and then
@@ -1222,22 +1229,29 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailAdmitVoidGroupUnnamed":   trailAdmitVoidGroupUnnamed,
 		"trailAdmitVoidNotOneReapLine": trailAdmitVoidNotOneReapLine,
 		"trailAdmitOutOfContract":      trailAdmitOutOfContract,
-		// #1271's run-level outcomes: three answers and ten named voids since #1434
-		// added trailOutcomeVoidReasonNotOwedByPath beside #1417's
-		// trailOutcomeVoidPathOwesNoReason.
-		"trailOutcomeRunningAtTrailer":        trailOutcomeRunningAtTrailer,
-		"trailOutcomeMatchedUnattributed":     trailOutcomeMatchedUnattributed,
-		"trailOutcomeNoRowMatched":            trailOutcomeNoRowMatched,
-		"trailOutcomeVoidBudgetFired":         trailOutcomeVoidBudgetFired,
-		"trailOutcomeVoidNoTrailer":           trailOutcomeVoidNoTrailer,
-		"trailOutcomeVoidTrailerScanAborted":  trailOutcomeVoidTrailerScanAborted,
-		"trailOutcomeVoidPyryDidNotExit":      trailOutcomeVoidPyryDidNotExit,
-		"trailOutcomeVoidArgvScanErrored":     trailOutcomeVoidArgvScanErrored,
-		"trailOutcomeVoidNoRowsParsed":        trailOutcomeVoidNoRowsParsed,
-		"trailOutcomeVoidLivenessInstrument":  trailOutcomeVoidLivenessInstrument,
-		"trailOutcomeVoidPathOwesNoReason":    trailOutcomeVoidPathOwesNoReason,
-		"trailOutcomeVoidReasonNotOwedByPath": trailOutcomeVoidReasonNotOwedByPath,
-		"trailOutcomeOutOfContract":           trailOutcomeOutOfContract,
+		// #1271's run-level outcomes: four answers and ten named voids since #1446
+		// gave the arm that reaches trailOutcomeVoidPathOwesNoReason a finding of
+		// its own, beside #1434's trailOutcomeVoidReasonNotOwedByPath and #1417's
+		// trailOutcomeVoidPathOwesNoReason. Its two evidence-route values follow,
+		// in the same map for this map's whole reason: the two run-level ANSWERS
+		// state nearly the same English sentence, so the strings that separate
+		// their evidence classes must be as distinct as the answers are.
+		"trailOutcomeRunningAtTrailer":          trailOutcomeRunningAtTrailer,
+		"trailOutcomeAliveAtSightingByOrdering": trailOutcomeAliveAtSightingByOrdering,
+		"trailRouteReapLog":                     trailRouteReapLog,
+		"trailRouteSighting":                    trailRouteSighting,
+		"trailOutcomeMatchedUnattributed":       trailOutcomeMatchedUnattributed,
+		"trailOutcomeNoRowMatched":              trailOutcomeNoRowMatched,
+		"trailOutcomeVoidBudgetFired":           trailOutcomeVoidBudgetFired,
+		"trailOutcomeVoidNoTrailer":             trailOutcomeVoidNoTrailer,
+		"trailOutcomeVoidTrailerScanAborted":    trailOutcomeVoidTrailerScanAborted,
+		"trailOutcomeVoidPyryDidNotExit":        trailOutcomeVoidPyryDidNotExit,
+		"trailOutcomeVoidArgvScanErrored":       trailOutcomeVoidArgvScanErrored,
+		"trailOutcomeVoidNoRowsParsed":          trailOutcomeVoidNoRowsParsed,
+		"trailOutcomeVoidLivenessInstrument":    trailOutcomeVoidLivenessInstrument,
+		"trailOutcomeVoidPathOwesNoReason":      trailOutcomeVoidPathOwesNoReason,
+		"trailOutcomeVoidReasonNotOwedByPath":   trailOutcomeVoidReasonNotOwedByPath,
+		"trailOutcomeOutOfContract":             trailOutcomeOutOfContract,
 		// #1366's terminal-reason-against-path values.
 		"trailReasonAbsentOwesNone":  trailReasonAbsentOwesNone,
 		"trailReasonPresentOwesNone": trailReasonPresentOwesNone,
@@ -1521,8 +1535,8 @@ func trailGateAbsenceCaseMarkers() []string {
 //
 // The certified reason stays empty on all four rows: naming which case fired,
 // and taking one of them out of the out-of-contract value, still certifies
-// nothing — so trailClassifyRun's C1 and C2 (trail_run_outcome_test.go:418-429,
-// :431-442) stay green with C1's enumeration widened by one and C2 unamended.
+// nothing — so trailClassifyRun's C1 and C2 (trail_run_outcome_test.go:540-551,
+// :553-564) stay green with C1's enumeration widened by one and C2 unamended.
 //
 // # Markers are matched WHOLE, never as fragments
 //
@@ -1765,9 +1779,9 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 // P1 carries three mutants because its three assertions fail independently: an arm
 // left answering the shipped value moves neither the reason nor the length, a
 // certifying arm leaves the length alone, and an overgrown Detail leaves Reason
-// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:431-442) rejects the
+// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:553-564) rejects the
 // certifying pair a layer up, and since #1434 trailRunCases()' new row
-// (trail_run_outcome_test.go:966-976) drives this arm into that classifier WITHOUT
+// (trail_run_outcome_test.go:1203-1213) drives this arm into that classifier WITHOUT
 // pre-asserting, so C2's own Detail is quoted verbatim in a red TestTrailClassifyRun.
 // Measured, this mutant reddens four tests rather than two.
 //
@@ -2050,7 +2064,7 @@ func trailGateRunnerReadings() []string {
 //     declaring row, in the companions below — positively, and per reading, which
 //     is a stronger statement than the invariance it replaced. It has a second
 //     detector of different fabric one layer up: trailClassifyRun's C2
-//     (trail_run_outcome_test.go:431-442) rejects a non-certifying gate value that
+//     (trail_run_outcome_test.go:553-564) rejects a non-certifying gate value that
 //     carries a reason.
 //
 // A green sweep that had simply stopped covering an arm would be silent about the
@@ -2071,7 +2085,7 @@ func trailGateRunnerReadings() []string {
 //
 // Varying the reading copies each row's trailGateInput, and a struct copy copies
 // the POINTER: all five inputs for a row share one resultTrailer, the same
-// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:699).
+// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:883).
 // Only RunnerPath is ever assigned and nothing is ever written through the
 // pointer — which holds for the companion sub-test too — and that is what keeps
 // the sharing race-free, and what would have to hold load-bearingly if these
@@ -2245,7 +2259,7 @@ func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 	// replaces the invariance the widened exemption withdrew — and it is the
 	// stronger of the two, since it says what each reading certifies rather than
 	// only that the five agree. trailClassifyRun's C2
-	// (trail_run_outcome_test.go:431-442) rejects a non-certifying gate value
+	// (trail_run_outcome_test.go:553-564) rejects a non-certifying gate value
 	// carrying a reason at a different layer again, so the property has two
 	// detectors of different fabric rather than one.
 	//

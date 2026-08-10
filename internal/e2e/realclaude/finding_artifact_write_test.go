@@ -242,7 +242,7 @@ const finWriteTrailerPad = 0
 // because trailScan is deterministic over the bytes it is handed and
 // trailPaddedTrailer renders the same line for the same pad. What would NOT be
 // safe is hoisting the result to a package-level var to avoid the second scan:
-// that is the fixture rule trail_run_outcome_test.go:697-699 states for this whole
+// that is the fixture rule trail_run_outcome_test.go:881-883 states for this whole
 // package, whose reason is that `go test -race` runs these tests in parallel.
 func finWritePlantedTrailerScan() trailScanResult {
 	return trailScan([]byte(trailPaddedTrailer(finWriteTrailerPad) + "\n"))
@@ -268,7 +268,7 @@ func finWritePlantedReapLog() []byte {
 // on TestFinWriteArtifactsCarryNoCapturedBytes.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:697-699): a shared backing array is reachable
+// reason (trail_run_outcome_test.go:881-883): a shared backing array is reachable
 // from every test in this package, and `go test -race` runs them in parallel.
 //
 // # Plant only where the pipeline reduces
