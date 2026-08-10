@@ -63,13 +63,13 @@ import (
 // recorded here rather than defended with a guard. It would need two distinct
 // producer tags resolving to one conversation at the same time: a /clear re-keys
 // ONE pool entry in place, and the Parser's sink tag is fixed at runner
-// construction (streamsup_runner.go:105) while RestartFresh rotates only the
+// construction (`newStreamRunnerFactory`) while RestartFresh rotates only the
 // runner's internal spawn id — so every id reachable through
 // conversationForSession's SessionHistory match belongs to the SAME runner that
 // continues under the successor id, tagging its events identically either way.
 // Eviction cannot supply a second producer either: being binding-neutral, an
 // evicted id never enters SessionHistory (conversations/registry.go:241 is its
-// only production writer, reached solely from sessions/transition.go:59).
+// only production writer, reached solely from sessions/`notifyTransition`).
 //
 // SECURITY: content-free. The only fields ever logged are the event discriminant
 // (eventKind) and the producing session id, matching the drain's existing drop
@@ -165,7 +165,7 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 	case turnevent.ThoughtChunk, turnevent.TextChunk, turnevent.ToolStart, turnevent.ToolUpdate:
 		opens = true
 	case turnevent.TurnEnd:
-		// Both stop reasons close the turn; resultTurnEndReason (parser.go:173)
+		// Both stop reasons close the turn; resultTurnEndReason (`maxTaskRosterDescription`)
 		// only picks the reason field, so there is one code path upstream too.
 		opens = false
 	default:

@@ -98,7 +98,7 @@ func TestTurnBusyTracker_OpenerWhitelist(t *testing.T) {
 }
 
 // AC4: an open turn clears on TurnEnd for either stop reason. Both reasons
-// traverse one arm in the producer (resultTurnEndReason, parser.go:173, only
+// traverse one arm in the producer (resultTurnEndReason, `maxTaskRosterDescription`, only
 // picks the reason field), so this asserts one code path twice — the AC names
 // both reasons, so both are asserted.
 func TestTurnBusyTracker_ClearsOnBothStopReasons(t *testing.T) {

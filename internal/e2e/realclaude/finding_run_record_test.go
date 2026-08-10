@@ -21,7 +21,7 @@ package realclaude
 // execs the binary, which is why the version here is a caller-supplied string;
 // the claude-binary resolver (`resolveClaudeBin`) skips when claude is
 // absent, and a skip that exits 0 reads as a pass under `make e2e-realclaude`;
-// the worktree credentials gate (fixtures.go:96) is AC5's "no credentials"; the
+// the worktree credentials gate (`WithWorktreeAuthenticated`) is AC5's "no credentials"; the
 // per-pid state read (`pinReadState`) execs `ps` at :293; the
 // exit-1 borrow (:1088) execs `false` to obtain an *os.ProcessState Go cannot
 // synthesize; and the argv scan (:191), the process snapshot
@@ -335,7 +335,7 @@ func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
 // The evidential read is tdnRunnerFromArgv and never reachRunnerPathFromArgv
 // (:1118): the latter keys on --append-system-prompt-file and calls it "the
 // ptyrunner-shape marker", but buildStreamRunnerClaudeArgs
-// (cmd/pyry/agent_run.go:372) emits the identical flag alongside ptyrunner's
+// (cmd/pyry/`buildStreamRunnerClaudeArgs`) emits the identical flag alongside ptyrunner's
 // buildArgs (internal/agentrun/ptyrunner/runner.go:621), so it answers
 // "ptyrunner" on BOTH paths and a silent switch to the other runner reads as a
 // correct label with nothing going red.

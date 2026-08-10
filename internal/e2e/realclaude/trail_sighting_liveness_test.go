@@ -171,7 +171,7 @@ const (
 // The reason space: one per per-pid verdict, plus the ordering pass-through.
 //
 // A reason is a FIELD on the record rather than prose in the Detail, in
-// trailGateResult's Value+Reason+Detail shape (trailer_admissibility_test.go:305),
+// trailGateResult's Value+Reason+Detail shape,
 // so a consumer tells an exited-but-not-yet-reaped from a no-such-process, and
 // either from an instrument failure, WITHOUT PARSING PROSE. Two of the three land
 // on the same value, and the value alone therefore cannot separate them.

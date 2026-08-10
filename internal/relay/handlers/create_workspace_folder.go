@@ -102,7 +102,7 @@ type WorkspaceFolderResolver func(parent, name string) (created string, err erro
 // Only conn_id + a static `event` name. Two traps a future editor will hit by
 // pattern-matching the siblings — do NOT "fix" them back:
 //
-//   - Malformed branch: do NOT log the decode `err` (create_conversation.go:122
+//   - Malformed branch: do NOT log the decode `err` (`CreateConversation`
 //     and rename_conversation do). Go's json.Unmarshal errors can embed the
 //     offending input bytes.
 //   - Rejected branch: do NOT log the confine `err` or the path

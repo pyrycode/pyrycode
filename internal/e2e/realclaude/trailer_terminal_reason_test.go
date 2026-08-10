@@ -42,7 +42,7 @@ package realclaude
 // and three distinct indeterminate answers for both-or-neither-or-unread.
 // reachRunnerPathFromArgv is deliberately
 // NOT used — it keys on --append-system-prompt-file, which BOTH argv builders
-// pass (cmd/pyry/agent_run.go:372, ptyrunner/runner.go:621), so it labels a
+// pass (cmd/pyry/`buildStreamRunnerClaudeArgs`, ptyrunner/runner.go:621), so it labels a
 // correctly-wired stream run "ptyrunner" and has no streamrunner answer at all.
 //
 // # Scope

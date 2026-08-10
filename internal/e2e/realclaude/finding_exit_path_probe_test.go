@@ -68,7 +68,7 @@ package realclaude
 // own: os.MkdirTemp failing. Three abort paths are INHERITED from finLiveRunStage
 // and are not re-guarded here — pyry never spawning a claude child, no system/init
 // session id (finding_live_run_test.go:331-341), and ReadJSONL's fatal on a
-// transcript it cannot open or parse (fixtures.go:152, :163) reached through the
+// transcript it cannot open or parse (`ReadJSONL`, :163) reached through the
 // assembly. Every other failure mode is RECORDED, because a probe that turns an
 // unexpected reading into a red test loses the reading.
 //

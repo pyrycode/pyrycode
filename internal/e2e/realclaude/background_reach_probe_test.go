@@ -595,7 +595,7 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 	}
 	rec.PyryPGID = pyryRow.PGID
 	rec.PyryIsGroupLeader = pyryRow.PGID == pyryRow.PID
-	// spawnProbePyry sets Setpgid (background_trigger_probe_test.go:640), so
+	// spawnProbePyry sets Setpgid, so
 	// under this probe pyry is its own group leader. An operator-launched pyry
 	// inherits its shell's job-control group instead. The verdict is unaffected
 	// only if the held pgid differs from BOTH candidate values, which the

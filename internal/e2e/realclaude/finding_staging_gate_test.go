@@ -394,7 +394,7 @@ type finOutcomeGateCase struct {
 //
 // PinMatchCount is 2 rather than 1 because a live run matches more than one row
 // for a single held command — a shell wrapper and its forked cat
-// (TestTrailRigCarriesMoreThanOneMatchedRow, trail_run_rig_test.go:506).
+// (TestTrailRigCarriesMoreThanOneMatchedRow).
 func finOutcomeStagedBase() finOutcomeStaging {
 	return finOutcomeStaging{
 		BashIssued:     true,

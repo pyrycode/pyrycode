@@ -73,7 +73,7 @@ import (
 //
 // trailGate is handed the reading directly through trailGateInput.RunnerPath, and
 // trailClassifyRun is handed it inside readings.Gate.RunnerPath, because
-// trailRunReadings.Gate is the whole trailGateResult (trail_run_outcome_test.go:397).
+// trailRunReadings.Gate is the whole trailGateResult.
 // trailAdmitAttribution(reap tdnReapOutcome, certified string) is handed NO
 // runner path at all, so a byte assertion on its Detail would be green by
 // construction whatever that arm did — a rung no mutation can redden. It is

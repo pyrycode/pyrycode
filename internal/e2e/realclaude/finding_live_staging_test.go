@@ -226,7 +226,7 @@ func finLiveStageEnvDelta() []string {
 // Recorded HERE because here is where the choice is made; finLiveRunStage carries
 // the same paragraph for the reader who arrives from the driver's side.
 // runAgentRunStreamRunner is the stream path's sole production caller and passes
-// yolo=true (agent_run.go:288), which emits --dangerously-skip-permissions
+// yolo=true (`runAgentRunStreamRunner`), which emits --dangerously-skip-permissions
 // (permissionArgs, mcp_config.go:35-38). The ptyrunner default instead trust-marks
 // the workdir and writes a per-spawn deny-default settings JSON (runAgentRunPty,
 // agent_run.go:300-317). A caller passing THIS delta stages its live turn under
@@ -236,7 +236,7 @@ func finLiveStageEnvDelta() []string {
 // fresh claim asserted: agent_run.go:354-359 records --allowed-tools as the
 // authoritative tool gate under YOLO, with the blast radius bounded by it rather
 // than by the trust dialog — and this rig passes --allowed-tools=Bash
-// (spawnProbePyry, background_trigger_probe_test.go:627). So the flip changes the
+// (spawnProbePyry). So the flip changes the
 // gate's MECHANISM; on the repo's position it does not change its WIDTH. That is
 // not a claim of equivalence, and it is not a claim that the stream path is
 // ungated.
@@ -337,7 +337,7 @@ func TestFinLiveStagePromptStagesTheDeclaredCommand(t *testing.T) {
 		name   string
 		prompt string
 	}{
-		// bgIdlePrompt's undelimited form (interactive_background_idle_probe_test.go:456):
+		// bgIdlePrompt's undelimited form:
 		// no backtick at all, and the sentence period abuts the path.
 		{name: "no delimiter", prompt: "Use the Bash tool to run cat /tmp/x/hold. Do nothing else."},
 		{name: "one backtick", prompt: "Use the Bash tool to run `cat /tmp/x/hold. Do nothing else."},
