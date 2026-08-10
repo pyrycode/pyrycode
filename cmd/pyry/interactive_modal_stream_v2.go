@@ -13,7 +13,7 @@ import (
 )
 
 // screenSnapshotter is the bound host's rendered-screen seam. *supervisor.Supervisor
-// satisfies it (supervisor.go:446); asserted from turnbridge.SessionHost so the
+// satisfies it (`readyForDelivery`); asserted from turnbridge.SessionHost so the
 // shared turnbridge interface stays screen-free. Mirrors relay.ScreenSnapshotter
 // (v2session.go:433), which the manager consumes for request_snapshot.
 type screenSnapshotter interface {
@@ -126,7 +126,7 @@ func boundScreenText(active *activeConversation, boundHost boundHostFunc, bootst
 // tuidriver.Events (no turnbridge.Producer, no mapper). It is the SOLE caller of
 // emitter.Handle, so the emitter's unguarded counters (nextID, outstandingID,
 // outstandingClass) never race — the single-Run-goroutine invariant the emitter
-// documents (interactive_modal_v2.go:22). The one field a second goroutine touches
+// documents (`interactiveModalEmitterV2`). The one field a second goroutine touches
 // is the modal registry (shared with the inbound resolver), which carries its own
 // mutex (#717/#706, unchanged).
 //

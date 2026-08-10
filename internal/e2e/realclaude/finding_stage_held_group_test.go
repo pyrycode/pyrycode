@@ -21,7 +21,7 @@ package realclaude
 // HAND-PASSED PGID INTEGERS. Hand-passed integers prove the composition; they do
 // not prove the parameters can be FILLED. A live probe fills pinned from a real
 // pinScanArgv over a real process table,
-// taking each matched row's .PGID (reachProc, background_reach_probe_test.go:162)
+// taking each matched row's .PGID (reachProc)
 // as the join key into pyry's reap log. This file is that conversion site, and
 // the obligation finGatherReadings' own doc (:279-283) names as #1282's.
 //

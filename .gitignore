@@ -2,6 +2,7 @@
 /pyry
 /dist/
 /substrate-guard
+/cite-guard
 *.test
 *.out
 

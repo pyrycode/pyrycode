@@ -217,7 +217,7 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 // differ in one field. Across six positional arguments that identity is a
 // discipline retyped at each call site and checkable only by reading; over a
 // struct it is `copy the value, set one field` — the package's own
-// vary-one-dimension idiom (trailRunWellFormed, trail_run_outcome_test.go:1114) —
+// vary-one-dimension idiom (trailRunWellFormed) —
 // and it holds BY CONSTRUCTION. Same doctrine either way: prefer the shape that
 // cannot be got wrong over the discipline that must not be. Secondarily, a
 // reader of finGatherReadings(&stdout, needles, stderr, pinned, true, "") has no

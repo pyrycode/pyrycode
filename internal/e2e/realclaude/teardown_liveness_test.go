@@ -31,7 +31,7 @@ package realclaude
 //
 // The first is slog.NewTextHandler (cmd/pyry/main.go:743). The second is
 // slog.Default(), and it is the one that matters: runAgentRunPty
-// (cmd/pyry/agent_run.go:299) sets no Logger on ptyrunner.Config, so
+// (cmd/pyry/`runAgentRunStreamRunner`) sets no Logger on ptyrunner.Config, so
 // ptyrunner.Run falls back to slog.Default() (runner.go:289-292), and every
 // probe in this package spawns `pyry agent-run` and captures its stderr. A
 // matcher anchored on `msg="agentrun: reaped…"` finds nothing on the live path

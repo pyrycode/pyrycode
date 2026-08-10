@@ -158,7 +158,7 @@ import (
 // needle in every string-valued position of a trailer line and asserts none
 // reaches them. They still come from CLAUDE, which is why the artifact's standing
 // safety sentence names this field rather than leaving it to be discovered
-// (finWriteSafetyClaim, finding_artifact_write_test.go:124).
+// (finWriteSafetyClaim).
 //
 // NO OMITEMPTY, for the blanket reason above — and the collapse that rule defends
 // against is unreachable on this field anyway, which is stated here rather than

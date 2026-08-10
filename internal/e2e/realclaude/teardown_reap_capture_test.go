@@ -152,7 +152,7 @@ func TestTdnReapTreeHelperProcess(t *testing.T) {
 // It starts TDN_REAP_TREE_FRESH leaves each leading its own process group and
 // TDN_REAP_TREE_SAME leaves sharing this process's group, writes one
 // "<kind> <pid>" line per leaf to TDN_REAP_TREE_REPORT in a single 0600 write
-// (reap_test.go:264), then blocks. Report first, block second: every child pid
+// (`spawnGrandchildAndBlock`), then blocks. Report first, block second: every child pid
 // must be in the process table before ReapDescendantGroups takes its ps
 // snapshot, and the test blocks on the report to know that it is.
 func tdnRunParentRole() {
@@ -328,7 +328,7 @@ func tdnKillTree(pid int) {
 // syscall.Kill target and one becomes a reap walk root, and a short read is
 // syntactically valid but incomplete: accepting it yields a tdnTree with a
 // missing Fresh entry — an index panic at best, a subtest silently asserting
-// about the wrong process at worst. waitReport (reap_test.go:164) can treat a
+// about the wrong process at worst. waitReport can treat a
 // partial read as "not ready yet" because it reads exactly one pid; with N lines
 // that is no longer a safe reading.
 func tdnWaitTreeReport(t *testing.T, path string, fresh, same int, timeout time.Duration) tdnTree {

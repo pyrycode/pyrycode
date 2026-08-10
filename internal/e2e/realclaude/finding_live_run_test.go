@@ -257,7 +257,7 @@ type finLiveRunHandle struct {
 //
 // ONE INHERITED ABORT PATH, named so a live caller knows about it:
 // finLiveAssembleStaging inherits ReadJSONL's t.Fatalf on a transcript it cannot
-// open or parse (fixtures.go:152, :163). A MISSING file is not fatal —
+// open or parse (`ReadJSONL`, :163). A MISSING file is not fatal —
 // probeWaitForBashToolUse guards with os.Stat first
 // (`probeWaitForBashToolUse`), so it times out to "no Bash call
 // issued", the safe direction.
@@ -288,7 +288,7 @@ type finLiveRunHandle struct {
 //
 // SITE C — THE BOUND REACHES CLAUDE BY A DIFFERENT ROUTE ON EACH PATH, and the
 // conclusion is what survives, not the mechanism. On the stream path --max-turns
-// is IN CLAUDE'S ARGV (buildStreamRunnerClaudeArgs, cmd/pyry/agent_run.go:375);
+// is IN CLAUDE'S ARGV (buildStreamRunnerClaudeArgs);
 // on ptyrunner it is ABSENT from claude's argv (buildArgs,
 // ptyrunner/runner.go:616-625, whose own doc records the omission as deliberate
 // at :612-615) and the pyry-side budget Counter enforces the same 6 instead.
@@ -354,7 +354,7 @@ type finLiveRunHandle struct {
 // SITE F — THE DELTA CHOOSES A PERMISSION POSTURE FOR THE STAGED RUN, and a
 // caller reading this doc should not have to discover that downstream. Under
 // finLiveStageStreamEnvDelta() the sole production caller of the stream path
-// passes yolo=true (agent_run.go:288), which emits --dangerously-skip-permissions
+// passes yolo=true (`runAgentRunStreamRunner`), which emits --dangerously-skip-permissions
 // (permissionArgs, mcp_config.go:35-38). Under finLiveStageEnvDelta() pyry instead
 // trust-marks the workdir and writes a per-spawn deny-default settings JSON
 // (runAgentRunPty, agent_run.go:300-317). On the tool surface the repo's own
@@ -374,7 +374,7 @@ type finLiveRunHandle struct {
 // joined into a filename by finLiveAssembleStaging's transcript read:
 // jsonlPathFor → tuidriver.SessionJSONLPath →
 // filepath.Join(home, ".claude", "projects", EncodeCwd(cwd), sessionID+".jsonl").
-// On ptyrunner pyry MINTS the id itself (newSessionID(), agent_run.go:311) and
+// On ptyrunner pyry MINTS the id itself (newSessionID(), `runAgentRunPty`) and
 // passes it as --session-id (ptyrunner/runner.go:618), so the value is
 // pyry-controlled. On the stream path claude's argv carries no --session-id
 // (buildStreamRunnerClaudeArgs, agent_run.go:364-378), so CLAUDE mints it and the
@@ -416,7 +416,7 @@ type finLiveRunHandle struct {
 //   - The transcript reads (finLiveAssembleStaging, probeWaitForBashToolUse): the
 //     rig computes the path from the workdir IT owns, on both paths. ONE
 //     ASYMMETRY, recorded because it points the safe way: pyry hands claude the
-//     trust-marked realpath on ptyrunner (agent_run.go:300, :318) and the raw
+//     trust-marked realpath on ptyrunner (`runAgentRunStreamRunner`, :318) and the raw
 //     parsed.workdir on the stream path (streamrunner cmd.Dir). The rig's own
 //     derivation uses the raw workdir, so the stream path is the CLOSER match and
 //     the conclusion holds a fortiori. The ptyrunner side additionally carries
@@ -523,7 +523,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// path: it is the PTY slave on ptyrunner and a PYRY-created pipe on the stream
 	// path (streamrunner/runner.go:176). But claude's fd 2 IS pyry's fd 2 — the
 	// rig's stderr write end — ON BOTH PATHS, because cmd.Stderr is os.Stderr for
-	// both (agent_run.go:291 stream, :328 pty) and creack/pty fills stdin/stdout/
+	// both (`runAgentRunStreamRunner` stream, :328 pty) and creack/pty fills stdin/stdout/
 	// stderr with the tty ONLY WHEN NIL (run.go:38-50), so the PTY never displaces
 	// the Stderr ptyrunner already set at ptyrunner/runner.go:296. The PTY
 	// therefore covers the one fd claude never shares, and the fd it does share is
@@ -681,7 +681,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// THE 3 IS RE-DERIVED FOR BOTH DELTAS RATHER THAN INHERITED. It holds because
 	// tdnClaudeNeedle is --append-system-prompt-file
 	// (`tdnProbeTicket`) and BOTH argv builders emit it —
-	// ptyrunner/runner.go:621 and cmd/pyry/agent_run.go:372 — so claude's row is
+	// ptyrunner/runner.go:621 and cmd/pyry/`buildStreamRunnerClaudeArgs` — so claude's row is
 	// matched on either path. Do NOT rest this on reachRunnerPathFromArgv's framing
 	// of that flag as "the ptyrunner-shape marker"
 	// (background_reach_probe_test.go:1116-1117): the flag names NO runner, as

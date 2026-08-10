@@ -12,7 +12,7 @@ package realclaude
 //
 // # Where it taps, and why that is structural
 //
-// cmd/pyry/streamsup_runner.go:117 installs streamsup.NewParser(...) as
+// cmd/pyry/`newStreamRunnerFactory` installs streamsup.NewParser(...) as
 // scfg.Stdout. dropcapRecorder takes that exact slot on an in-process
 // streamsup.Runner, so "upstream of the parser" is a fact about the wiring
 // rather than an argument. #1240's bgIdleRecordTurn is the WRONG recorder for
@@ -21,7 +21,7 @@ package realclaude
 // as a measured absence.
 //
 // The Unrecognized lane cannot carry these bytes either: an ignored type
-// returns at parser.go:277 before emitUnrecognized is reached, and truncateRaw
+// returns at `benignRateLimitStatus` before emitUnrecognized is reached, and truncateRaw
 // (:311) caps at 16 KiB AND runs strings.ToValidUTF8(…, ""), which deletes
 // invalid UTF-8 while reporting only the length cap.
 //
@@ -235,7 +235,7 @@ type dropcapCaps struct {
 //
 // Mutex-guarded because os/exec drives Stdout from one internal copier
 // goroutine while the test goroutine reads the accumulated lines; that is a
-// race under -race (probeSyncBuffer, background_trigger_probe_test.go:722, is
+// race under -race (probeSyncBuffer is
 // the local precedent). It does NOT forward to a live parser: the turn needs
 // none, and classification runs later on the test goroutine, where parseOne's
 // *testing.T is legal to use.
@@ -1031,7 +1031,7 @@ func dropcapClassifyOutcome(rec *dropcapRecord, pre, turnEnd fifoLiveOutcome) {
 // dropcapClassifyAll asks the SHIPPED parser which captured lines it drops.
 // "Zero events emitted" and "dropped" are the same predicate by construction:
 // emitUnrecognized is reached only AFTER the ignored-type return at
-// parser.go:277, so a line the parser tolerates emits nothing and a line it does
+// `benignRateLimitStatus`, so a line the parser tolerates emits nothing and a line it does
 // not recognise emits a turnevent.Unrecognized.
 //
 // A fresh parser per line is licensed by the documented turn-statelessness

@@ -103,7 +103,7 @@ package realclaude
 //     ANTHROPIC_API_KEY.
 //   - spawnProbePyry, holdProbeFIFO — spawn pyry, create a real FIFO. #1340's
 //     job, explicitly out of scope here.
-//   - WithWorktreeAuthenticated (fixtures.go:96) — it t.Skipf's when neither
+//   - WithWorktreeAuthenticated — it t.Skipf's when neither
 //     ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set (:100-107), AND A SKIP
 //     EXITS 0. Reaching for it would silently convert an offline test into one
 //     that never runs on a credential-free machine and still reports green.
@@ -127,10 +127,10 @@ package realclaude
 //
 //   - write: writeFixtureLines → os.UserHomeDir() →
 //     tuidriver.SessionJSONLPath(home, workdir, sessionID)
-//   - read: finTranscriptFill → ReadJSONL (fixtures.go:148) →
+//   - read: finTranscriptFill → ReadJSONL →
 //     resolveAndOpenJSONL → os.UserHomeDir() (:397)
 //
-// WithWorktree's t.Setenv("HOME", t.TempDir()) (fixtures.go:59) is what makes
+// WithWorktree's t.Setenv("HOME", t.TempDir()) is what makes
 // both resolve inside this test's own temp dir. Omit it and writeFixtureLines
 // writes a synthetic transcript into the OPERATOR'S REAL ~/.claude/projects/…
 // tree at testSessionID — a write into live session storage, from a test still
@@ -268,7 +268,7 @@ type finLiveAssembleFacts struct {
 // abort a turn, and every wrong or missing reading already has a named home among
 // the gate's seven outcomes. It adds no t.Fatal and no t.Error. It inherits
 // exactly one abort path — ReadJSONL t.Fatalf's on a transcript it cannot open or
-// parse (fixtures.go:152, :163) — which is #1304's shipped behaviour, named here
+// parse (`ReadJSONL`, :163) — which is #1304's shipped behaviour, named here
 // so a live caller knows this call can abort a turn on an unreadable transcript.
 // A MISSING file is not fatal: probeWaitForBashToolUse guards with os.Stat first
 // (`probeWaitForBashToolUse`), so it times out to "no Bash call

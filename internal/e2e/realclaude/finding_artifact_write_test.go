@@ -40,7 +40,7 @@ package realclaude
 // version here is a caller-supplied string; the claude-binary resolver
 // (`resolveClaudeBin`) skips when claude is absent, and a skip that exits 0
 // reads as a pass under `make e2e-realclaude`; the worktree credentials gate
-// (fixtures.go:96) is the "no credentials" rule; the per-pid state read
+// (`WithWorktreeAuthenticated`) is the "no credentials" rule; the per-pid state read
 // (`pinReadState`) execs `ps` at :293, which is why the
 // liveness fixture below is hand-built; the exit-1 borrow (:1088) execs `false`
 // to obtain an *os.ProcessState Go cannot synthesize; and the argv scan (:191),
@@ -309,7 +309,7 @@ func finWritePlantedReapLog() []byte {
 //
 // # The liveness outcome is hand-built, and it is not a shortcut
 //
-// pinReadState execs `ps` (process_pin_liveness_test.go:293), which this file
+// pinReadState execs `ps`, which this file
 // forbids, so no shipped producer is available. Nor would one serve: NO SINGLE ARM
 // OF pinClassifyState FILLS ALL SEVEN FIELDS — the running arm fills StateColumn
 // and leaves ToolStderr empty, and the instrument-failed-with-stderr arm (:347)

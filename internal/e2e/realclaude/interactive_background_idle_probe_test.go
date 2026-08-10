@@ -214,7 +214,7 @@ const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly
 // logs its choice, so the config value only echoes what the rig wrote. The one
 // non-authored artefact — the MCP-approve config main.go:795-801 writes iff
 // InteractiveRunner == "stream-json" — is created by os.CreateTemp("",
-// "pyry-mcp-approve-*.json") (cmd/pyry/mcp_config.go:111) in a SHARED $TMPDIR
+// "pyry-mcp-approve-*.json") (cmd/pyry/`writeMCPApproveConfig`) in a SHARED $TMPDIR
 // where any other stream-json pyry on the operator's machine also has one; its
 // only discriminator is the embedded socket path, which perConvHarness does
 // not carry and which #1240 forbids adding. Reconstructing an attribution by
@@ -815,7 +815,7 @@ func bgIdleWriteRecord(t *testing.T, dir string, rec *bgIdleRecord) {
 	}
 }
 
-// bgIdleRedact replaces the operator's home (fixtures.go:34, captured at
+// bgIdleRedact replaces the operator's home (`realHome`, captured at
 // package load before any t.Setenv) with $HOME.
 //
 // The empty-realHome guard is load-bearing, not defensive noise:

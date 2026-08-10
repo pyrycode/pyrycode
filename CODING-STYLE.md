@@ -85,6 +85,16 @@ Follow stdlib conventions:
 - **Pin versions.** `go.sum` provides integrity checking. Don't use `latest` in `go.mod`.
 - **Audit new deps** for maintenance status, license compatibility (MIT/BSD/Apache OK), and transitive dependency count.
 
+## Comments — Citing Other Code
+
+- **Cite the symbol, not the line.** Write ``see `trailGate` `` rather than `trailer_admissibility_test.go:315`. codegraph indexes this repo, including files behind the `e2e_realclaude` build tag, so a symbol name resolves on demand and never rots. A line number is stale the moment anything above it moves.
+- **For a spot inside a function, name the enclosing symbol and describe the spot.** ``the nil-PID guard in `probeAnnotateCommands` `` beats a line number, and survives every insertion.
+- **A line number is fine when it points somewhere a name cannot reach** — deep inside a long declaration, or at a specific line whose position is itself the point. That is the exact boundary `make cite-guard` enforces: it flags a citation whose target is a declaration, or sits within 20 lines of one, and allows anything deeper.
+- **Never use a bare `:NNN`.** It inherits the last-named file in the comment rather than the current one, which reads as this file and is not. It has already produced wrong references.
+- **Ranges are fine** (`:2063-2107`) where the span is the information.
+
+Why this is a build gate and not just guidance: comments are the one thing no test covers, so a wrong one is silent. Before the 2026-08-10 cleanup this package carried ~800 line citations, 22 of them already dead, and pure renumbering accounted for 35-49% of the added lines in some commits — enough to exhaust two developer budgets. See `cmd/cite-guard`.
+
 ## Git Conventions
 
 - **Commit messages:** imperative mood, concise subject line. E.g., "Extract backoff timer into testable type".

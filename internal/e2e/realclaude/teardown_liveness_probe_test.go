@@ -149,7 +149,7 @@ const (
 	// this run's content match.
 	tdnFIFOName = "teardown-hold"
 	// tdnClaudeNeedle pins claude's own row for the runner label. BOTH runners
-	// emit it (ptyrunner/runner.go:620, cmd/pyry/agent_run.go:372), which is
+	// emit it (ptyrunner/runner.go:620, cmd/pyry/`buildStreamRunnerClaudeArgs`), which is
 	// exactly why it identifies claude and never the runner — see
 	// tdnRunnerFromArgv.
 	//
@@ -759,7 +759,7 @@ func tdnDecideAfter(rec *tdnRecord) {
 // reachRunnerPathFromArgv is deliberately
 // NOT reused: it keys on --append-system-prompt-file and its comment calls that
 // "the ptyrunner-shape marker", but buildStreamRunnerClaudeArgs
-// (cmd/pyry/agent_run.go:372) emits the identical flag, so it answers
+// (cmd/pyry/`buildStreamRunnerClaudeArgs`) emits the identical flag, so it answers
 // "ptyrunner" on the streamrunner path too. That is harmless in #1230, which
 // skips outright under PYRY_USE_STREAMJSON=1; this rig deliberately does not
 // copy that gate, so reusing the helper would mislabel the record on the stream
@@ -767,7 +767,7 @@ func tdnDecideAfter(rec *tdnRecord) {
 //
 // The two discriminating markers, each emitted by exactly one argv builder:
 // --session-id by ptyrunner.buildArgs (runner.go:618) and --input-format by
-// buildStreamRunnerClaudeArgs (agent_run.go:366). Both or neither is
+// buildStreamRunnerClaudeArgs. Both or neither is
 // indeterminate rather than a guess.
 func tdnRunnerFromArgv(claudeCommand string) string {
 	if strings.TrimSpace(claudeCommand) == "" {

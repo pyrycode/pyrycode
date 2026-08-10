@@ -38,7 +38,7 @@ BIN         ?= ./pyry
 DIST        ?= ./dist
 
 .PHONY: check
-check: vet test staticcheck substrate-guard e2e
+check: vet test staticcheck substrate-guard cite-guard e2e
 
 .PHONY: vet
 vet:
@@ -108,6 +108,15 @@ staticcheck:
 .PHONY: substrate-guard
 substrate-guard:
 	$(GO) run ./cmd/substrate-guard
+
+# Bans a comment citation by file and line where a symbol name would do —
+# see cmd/cite-guard. Line numbers rot on every insertion and nothing
+# maintained them; codegraph resolves a symbol on demand. Same fabric-of-a-
+# different-kind argument as substrate-guard above: a style-guide rule cannot
+# police a style-guide rule. Fast (a file walk); no network or install needed.
+.PHONY: cite-guard
+cite-guard:
+	$(GO) run ./cmd/cite-guard
 
 .PHONY: build
 build:
