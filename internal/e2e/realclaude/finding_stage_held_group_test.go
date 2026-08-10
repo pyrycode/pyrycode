@@ -32,7 +32,7 @@ package realclaude
 // MatchCount is at least 2 and the same composition lands on Step 7
 // (trailOutcomeMatchedUnattributed). That move is the increment, not an
 // inconsistency with the blocker. The FINDING arm is unchanged, because Step 2
-// (trail_run_outcome_test.go:890) outranks Step 7.
+// (trail_run_outcome_test.go:1009) outranks Step 7.
 //
 // # The staged command must lead a process group of its own
 //

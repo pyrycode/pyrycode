@@ -114,7 +114,7 @@ func trailKeyNames(line []byte) []string {
 //
 // A function rather than a package-level var: it returns a slice, go test -race
 // runs this package's tests in parallel, and a shared backing array would let one
-// row's mutation reach another's (trail_run_outcome_test.go:980-982).
+// row's mutation reach another's (trail_run_outcome_test.go:1111-1113).
 func trailExpectedKeyNames() []string {
 	return []string{
 		"duration_ms", "is_error", "num_turns", "result", "session_id",

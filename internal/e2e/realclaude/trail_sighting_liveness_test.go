@@ -15,11 +15,11 @@ package realclaude
 // # Why an ordering argument at all: the top-ranked evidence is EMPTY here
 //
 // trailClassifyRun ranks an admissible reap-log attribution second, above every
-// point-in-time reading (trail_run_outcome_test.go:540-541), and argues at the
-// point of use (:880-884) that those readings "are expected to be late — the reap
+// point-in-time reading (trail_run_outcome_test.go:606-607), and argues at the
+// point of use (:999-1003) that those readings "are expected to be late — the reap
 // completes in the time of one ps exec while the observation of the trailer trails
 // the write by up to a poll interval — so resting a verdict on them manufactures a
-// systematic false negative". :1155-1157 makes that executable.
+// systematic false negative". :1344-1346 makes that executable.
 //
 // That route is structurally unavailable on PYRY_USE_STREAMJSON=1. The two runners
 // reap in different places:
@@ -57,7 +57,7 @@ package realclaude
 // NOT establish "alive when pyry declared the turn finished": on this path no
 // terminal reason is certified, so no such instant exists at all, and the shipped
 // classifier says exactly that at each of its void arms
-// (trail_run_outcome_test.go:757, :850-855, :860-869).
+// (trail_run_outcome_test.go:834, :969-974, :979-988).
 //
 // Every value here is named after the SIGHTING, every Detail ends with
 // trailSightingInstantClause, and TestTrailSightingVoidsNeverReadAsNegative
@@ -108,7 +108,7 @@ package realclaude
 // not touch the step-1 gate switch: that switch ANSWERED trailGateAbsentOwesNone
 // with an unconditional return, so a route wired below it would not have fired on
 // the one gate value it exists to serve. #1446 reached it — by consulting this
-// predicate INSIDE that arm (trail_run_outcome_test.go:765-855), which is the only
+// predicate INSIDE that arm (trail_run_outcome_test.go:842-974), which is the only
 // placement that does not award a scan-side answer to a record the gate says
 // certifies nothing, and by publishing the finding under an evidence route of its
 // own. Nothing here changed for it: the predicate still stands alone, is still
@@ -418,7 +418,7 @@ func trailSightingValues() []string {
 }
 
 // trailIsSightingValue reports whether v is one of the three recorded outcomes. It
-// mirrors trailIsRunOutcome (trail_run_outcome_test.go:475) and trailIsOrderValue
+// mirrors trailIsRunOutcome (trail_run_outcome_test.go:541) and trailIsOrderValue
 // and exists for the same reason: a value a reader of the published record cannot
 // look up is a verdict they cannot interpret.
 func trailIsSightingValue(v string) bool {
@@ -846,7 +846,7 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailSightingResultCarriesNoCapturedBytes is AC5 made executable, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1950-2119) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:2207-2473) and reusing the shipped trailNeedle.
 //
 // THIS SWEEP IS LOAD-BEARING HERE IN A WAY IT COULD NOT BE FOR #1439, and the
 // family's existing sweeps prove nothing about this record: they are

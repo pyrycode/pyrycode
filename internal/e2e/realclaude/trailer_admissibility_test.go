@@ -130,7 +130,7 @@ const (
 	// constructs.
 	//
 	// It CERTIFIES NOTHING — Reason stays empty, which is what keeps
-	// trailClassifyRun's C2 (trail_run_outcome_test.go:607-618) green unamended —
+	// trailClassifyRun's C2 (trail_run_outcome_test.go:673-684) green unamended —
 	// and it says no more than what was read. Not that any process was alive:
 	// there is no certified instant here for such a claim to be about, which is
 	// why the run-level arm it reaches is a named void. Not anything about a
@@ -156,8 +156,8 @@ const (
 	//
 	// What it says is that the line is NOT that path's documented healthy shape —
 	// absence is — and no more than that. It CERTIFIES NOTHING: Reason stays empty,
-	// which is what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:607-618)
-	// green unamended and lets C4 (:632-640) force Admit empty.
+	// which is what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:673-684)
+	// green unamended and lets C4 (:698-706) force Admit empty.
 	//
 	// NEVER THAT PYRY WROTE IT, and the passthrough cite above is the REASON rather
 	// than a decoration. Pyry's own synthesis on that path is unconditional WHEN IT
@@ -638,7 +638,7 @@ func trailGate(in trailGateInput) trailGateResult {
 	// owes-none absence, and for the same reason: the record IS a reading, so
 	// answering "the input is not a reading" filed a measurement as a caller's bug.
 	// Certifying nothing is what keeps trailClassifyRun's C2
-	// (trail_run_outcome_test.go:607-618) green unamended and lets C4 (:632-640)
+	// (trail_run_outcome_test.go:673-684) green unamended and lets C4 (:698-706)
 	// force Admit empty, so the run-level answer is decided at step 1 alone — by
 	// trailOutcomeVoidReasonNotOwedByPath, the arm added to that switch IN THE SAME
 	// COMMIT, because a gate value registered in trailIsGateValue with no arm there
@@ -1234,10 +1234,11 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailAdmitVoidGroupUnnamed":   trailAdmitVoidGroupUnnamed,
 		"trailAdmitVoidNotOneReapLine": trailAdmitVoidNotOneReapLine,
 		"trailAdmitOutOfContract":      trailAdmitOutOfContract,
-		// #1271's run-level outcomes: four answers and eleven named voids since
-		// #1447 took the MEASURED refutation off the blanket #1446 left it under —
-		// #1446 gave the arm that reaches trailOutcomeVoidPathOwesNoReason a finding
-		// of its own, beside #1434's trailOutcomeVoidReasonNotOwedByPath and #1417's
+		// #1271's run-level outcomes: four answers and twelve named voids since #1448
+		// took the NEVER-STAGED route off the same blanket #1447 took the measured
+		// refutation off — #1446 gave the arm that reaches
+		// trailOutcomeVoidPathOwesNoReason a finding of its own, beside #1434's
+		// trailOutcomeVoidReasonNotOwedByPath and #1417's
 		// trailOutcomeVoidPathOwesNoReason. Its two evidence-route values follow,
 		// in the same map for this map's whole reason: the two run-level ANSWERS
 		// state nearly the same English sentence, so the strings that separate
@@ -1257,6 +1258,7 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailOutcomeVoidLivenessInstrument":       trailOutcomeVoidLivenessInstrument,
 		"trailOutcomeVoidPathOwesNoReason":         trailOutcomeVoidPathOwesNoReason,
 		"trailOutcomeVoidPinnedPidDidNotEstablish": trailOutcomeVoidPinnedPidDidNotEstablish,
+		"trailOutcomeVoidSightingRouteNotStaged":   trailOutcomeVoidSightingRouteNotStaged,
 		"trailOutcomeVoidReasonNotOwedByPath":      trailOutcomeVoidReasonNotOwedByPath,
 		"trailOutcomeOutOfContract":                trailOutcomeOutOfContract,
 		// #1366's terminal-reason-against-path values.
@@ -1346,6 +1348,14 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		if zeroSighting.Reason == value {
 			t.Errorf("the zero trailSightingResult's reason reads as %s (%q)", name, value)
 		}
+		// #1448's field on #1271's record, walked for the reason the sighting reason
+		// beside it is: the consumer this field exists for is one that BRANCHES on it
+		// to tell a pid read that did not answer from a measured ordering whose
+		// premise failed, and an unfilled reason reading as either would let it branch
+		// on nothing.
+		if zeroRun.RouteReason == value {
+			t.Errorf("the zero trailRunOutcome's route reason reads as %s (%q)", name, value)
+		}
 	}
 	if zeroGate.Reason != "" {
 		t.Errorf("the zero trailGateResult certifies %q — an uncertified record must never read "+
@@ -1358,6 +1368,14 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 	if zeroSighting.Reason != "" {
 		t.Errorf("the zero trailSightingResult names reason %q — an unfilled reason must never "+
 			"read as one a consumer can branch on", zeroSighting.Reason)
+	}
+	// The same failure mode on the run-level record, which since #1448 is the third
+	// in the family to carry a Reason and the first to carry one it did not measure
+	// itself. Its consumer is the reader of a published artifact, who has no other
+	// way to tell a pid read that did not answer from an ordering premise that failed.
+	if zeroRun.RouteReason != "" {
+		t.Errorf("the zero trailRunOutcome names route reason %q — an unfilled reason must "+
+			"never read as one a consumer can branch on", zeroRun.RouteReason)
 	}
 	// The same failure mode on #1271's record: an unfilled field reading as a
 	// filled one. trailBoundFromStart carries a real duration that bounds
@@ -1542,8 +1560,8 @@ func trailGateAbsenceCaseMarkers() []string {
 //
 // The certified reason stays empty on all four rows: naming which case fired,
 // and taking one of them out of the out-of-contract value, still certifies
-// nothing — so trailClassifyRun's C1 and C2 (trail_run_outcome_test.go:594-605,
-// :607-618) stay green with C1's enumeration widened by one and C2 unamended.
+// nothing — so trailClassifyRun's C1 and C2 (trail_run_outcome_test.go:660-671,
+// :673-684) stay green with C1's enumeration widened by one and C2 unamended.
 //
 // # Markers are matched WHOLE, never as fragments
 //
@@ -1786,9 +1804,9 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 // P1 carries three mutants because its three assertions fail independently: an arm
 // left answering the shipped value moves neither the reason nor the length, a
 // certifying arm leaves the length alone, and an overgrown Detail leaves Reason
-// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:607-618) rejects the
+// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:673-684) rejects the
 // certifying pair a layer up, and since #1434 trailRunCases()' new row
-// (trail_run_outcome_test.go:1323-1333) drives this arm into that classifier WITHOUT
+// (trail_run_outcome_test.go:1548-1558) drives this arm into that classifier WITHOUT
 // pre-asserting, so C2's own Detail is quoted verbatim in a red TestTrailClassifyRun.
 // Measured, this mutant reddens four tests rather than two.
 //
@@ -2071,7 +2089,7 @@ func trailGateRunnerReadings() []string {
 //     declaring row, in the companions below — positively, and per reading, which
 //     is a stronger statement than the invariance it replaced. It has a second
 //     detector of different fabric one layer up: trailClassifyRun's C2
-//     (trail_run_outcome_test.go:607-618) rejects a non-certifying gate value that
+//     (trail_run_outcome_test.go:673-684) rejects a non-certifying gate value that
 //     carries a reason.
 //
 // A green sweep that had simply stopped covering an arm would be silent about the
@@ -2092,7 +2110,7 @@ func trailGateRunnerReadings() []string {
 //
 // Varying the reading copies each row's trailGateInput, and a struct copy copies
 // the POINTER: all five inputs for a row share one resultTrailer, the same
-// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:982).
+// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:1113).
 // Only RunnerPath is ever assigned and nothing is ever written through the
 // pointer — which holds for the companion sub-test too — and that is what keeps
 // the sharing race-free, and what would have to hold load-bearingly if these
@@ -2266,7 +2284,7 @@ func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 	// replaces the invariance the widened exemption withdrew — and it is the
 	// stronger of the two, since it says what each reading certifies rather than
 	// only that the five agree. trailClassifyRun's C2
-	// (trail_run_outcome_test.go:607-618) rejects a non-certifying gate value
+	// (trail_run_outcome_test.go:673-684) rejects a non-certifying gate value
 	// carrying a reason at a different layer again, so the property has two
 	// detectors of different fabric rather than one.
 	//

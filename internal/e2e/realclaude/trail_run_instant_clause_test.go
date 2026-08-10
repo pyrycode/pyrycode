@@ -27,9 +27,16 @@ import (
 	"testing"
 )
 
-// trailRunCertifiesNothingArms is the five step-1 outcomes whose Detail argues
+// trailRunCertifiesNothingArms is the six step-1 outcomes whose Detail argues
 // from the gate having certified nothing, and which therefore carry
 // trailDeclaredFinishInstantClause.
+//
+// #1448's member is the sixth, and it joins on the list's own grounds rather than
+// by adjacency to the arm it split from: the gate certified nothing there too, so
+// there is no declared-finished instant for a claim to be about — and it forecloses
+// that claim while a reader's likeliest misreading is the opposite one, that a route
+// was consulted and came back empty. It carries the clause because the argument
+// applies, not because its neighbour carries it.
 //
 // #1447's member is the fifth, and it joins for the reason the list exists rather
 // than by inheriting its neighbour's place: its arm forecloses a claim on exactly
@@ -64,14 +71,15 @@ func trailRunCertifiesNothingArms() []string {
 		trailOutcomeVoidNoTrailer,
 		trailOutcomeVoidPathOwesNoReason,
 		trailOutcomeVoidPinnedPidDidNotEstablish,
+		trailOutcomeVoidSightingRouteNotStaged,
 		trailOutcomeVoidReasonNotOwedByPath,
 		trailOutcomeAliveAtSightingByOrdering,
 	}
 }
 
-// TestTrailRunCertifiesNothingArmsNameTheInstant makes "exactly these five arms
+// TestTrailRunCertifiesNothingArmsNameTheInstant makes "exactly these six arms
 // name the declared-finished instant" checkable rather than a convention the format
-// strings happen to follow. Sharing one constant stops the five DRIFTING in how
+// strings happen to follow. Sharing one constant stops the six DRIFTING in how
 // they name the instant, but an arm can still omit it from its own format string
 // and nothing else in this package would notice.
 //
@@ -79,11 +87,11 @@ func trailRunCertifiesNothingArms() []string {
 //
 // trail_sighting_liveness_test.go:579-588 requires trailSightingInstantClause on
 // EVERY row, and is right to: every arm of that one predicate is about the sighting
-// instant, so the clause is universal there. Here it is five outcomes out of
-// fifteen, so an unconditional per-row check would redden the other ten.
+// instant, so the clause is universal there. Here it is six outcomes out of
+// sixteen, so an unconditional per-row check would redden the other ten.
 //
-// The absence half is not filler. It is what makes the claim "only these five"
-// rather than "at least these five", and it is the executable half of the
+// The absence half is not filler. It is what makes the claim "only these six"
+// rather than "at least these six", and it is the executable half of the
 // budget-fired carve-out: trailOutcomeVoidBudgetFired forecloses BOTH instants from
 // a gate that CERTIFIED a terminal reason, so a certifies-nothing clause on it
 // would be false. Its row goes red here if someone adds one.
@@ -128,7 +136,7 @@ func TestTrailRunCertifiesNothingArmsNameTheInstant(t *testing.T) {
 		})
 	}
 
-	// The second premise: a table that stopped producing one of the five would
+	// The second premise: a table that stopped producing one of the six would
 	// make the conditional above vacuously true for it.
 	for _, value := range trailRunCertifiesNothingArms() {
 		if reached[value] == 0 {
