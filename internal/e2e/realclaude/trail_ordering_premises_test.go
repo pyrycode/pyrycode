@@ -44,7 +44,7 @@ package realclaude
 // measured when one fired — so no verdict may be read from it. Reporting a soft
 // negative out of the rig's own breakage is the collapse this family already
 // refuses in code: trailOutcomeVoidLivenessInstrument's doc
-// (trail_run_outcome_test.go:159-163) says that folding an instrument failure
+// (trail_run_outcome_test.go:180-184) says that folding an instrument failure
 // into "no row matched" "would manufacture a clean negative out of the
 // instrument's breakage". The same reasoning applies one layer up, to the
 // premises themselves.
@@ -66,7 +66,7 @@ package realclaude
 // and never the objects themselves — see the parameter list's own note for why
 // the narrow type is the enforcement rather than a convention. trailDetail
 // (trailer_admissibility_test.go:352) formats and caps every Detail, and
-// TestTrailAdmissibilityConstantsAreClosed (trailer_admissibility_test.go:1201)
+// TestTrailAdmissibilityConstantsAreClosed (trailer_admissibility_test.go:1208)
 // is where these four values are checked against every other value this tree
 // ships.
 
@@ -84,7 +84,7 @@ import (
 //
 // Every value carries an `order-` prefix, and the fourth sub-namespace is
 // load-bearing rather than cosmetic. order-void-pyry-did-not-exit and the
-// shipped run-void-pyry-did-not-exit (trail_run_outcome_test.go:147) mean nearly
+// shipped run-void-pyry-did-not-exit (trail_run_outcome_test.go:168) mean nearly
 // the same words one layer apart, so a copy-paste between them must be a visible
 // mistake in a published record rather than a plausible line — the same argument
 // trail_run_outcome_test.go:108-113 makes for `run-`.
@@ -116,7 +116,7 @@ const (
 	// trailOrderVoidNoExit: pyry did not exit within its deadline, so the later
 	// read is not later than anything and the "then" in the ordering argument is
 	// unearned. Deliberately NOT trailOutcomeVoidPyryDidNotExit
-	// (trail_run_outcome_test.go:147), which is the RUN's view of the same event
+	// (trail_run_outcome_test.go:168), which is the RUN's view of the same event
 	// one layer up; this one says only that an ordering premise is missing.
 	trailOrderVoidNoExit = "order-void-pyry-did-not-exit"
 	// trailOrderVoidUnheld: the hold was not held for the whole of the wait, so
@@ -191,7 +191,7 @@ type trailOrderResult struct {
 // No shipped gather records "the hold was still held for the whole of the wait":
 // finStageSubject (finding_stage_held_group_test.go:175-188) carries needles,
 // pinned pids, a group and a row count, and trailRunReadings
-// (trail_run_outcome_test.go:228-270) has no such field either. So the fact is a
+// (trail_run_outcome_test.go:309-374) has no such field either. So the fact is a
 // parameter a caller hands in — and it is nonetheless CHECKABLE rather than
 // assumed: holdProbeFIFO (background_trigger_probe_test.go:663) keeps the write
 // end, hands the caller a receive-only channel with no release path of its own,
@@ -300,7 +300,7 @@ func trailOrderValues() []string {
 
 // trailIsOrderValue reports whether v is one of the four recorded ordering
 // values. It mirrors trailIsGateValue (trailer_admissibility_test.go:906) and
-// trailIsRunOutcome (trail_run_outcome_test.go:309) and exists for the same
+// trailIsRunOutcome (trail_run_outcome_test.go:422) and exists for the same
 // reason: a value a reader of the published record cannot look up is a verdict
 // they cannot interpret.
 func trailIsOrderValue(v string) bool {
@@ -457,7 +457,7 @@ func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 //
 // Each subtest asserts the all-true base certifies BEFORE flipping anything —
 // the premise assertion is what stops the test passing by classifying garbage,
-// the discipline trail_run_outcome_test.go:1594-1599 states.
+// the discipline trail_run_outcome_test.go:1919-1924 states.
 //
 // These three are also the anti-swap check: any pairwise swap of the three
 // parameters at trailCertifyOrdering's definition reddens at least two of them,
@@ -513,7 +513,7 @@ func TestTrailOrderEachPremiseHasItsOwnVoid(t *testing.T) {
 
 // TestTrailOrderValuesAgreeWithThePredicate is AC4 made executable, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:1655): the list and the predicate agree in BOTH
+// (trail_run_outcome_test.go:2011): the list and the predicate agree in BOTH
 // directions, the count is asserted against the ticket's own enumeration, and the
 // predicate rejects the values of the adjacent spaces.
 //
@@ -571,7 +571,7 @@ func TestTrailOrderValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailOrderResultCarriesNoCapturedBytes is AC5's structural half, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1609-1626): marshal the record, decode to
+// (trail_run_outcome_test.go:1886-1907): marshal the record, decode to
 // map[string]json.RawMessage, and refuse any command/args/comm/argv-shaped key.
 //
 // THE trailNeedle BYTE-SWEEP IS GENUINELY ABSENT HERE, NOT DEFERRED BY

@@ -27,9 +27,18 @@ import (
 	"testing"
 )
 
-// trailRunCertifiesNothingArms is the three step-1 outcomes whose Detail argues
+// trailRunCertifiesNothingArms is the four step-1 outcomes whose Detail argues
 // from the gate having certified nothing, and which therefore carry
 // trailDeclaredFinishInstantClause.
+//
+// #1446's finding is a member, and it is the only one that is not a void — which
+// is precisely why it belongs. It is the one arm in the run space that publishes a
+// POSITIVE finding from a gate that certified nothing, so it is the one a reader
+// could mistake for an aliveness-at-declared-finish claim. Carrying the clause on
+// three voids and omitting it from the single value the misreading is live for
+// would invert the point of the clause. Its own Detail says the same thing twice
+// over, naming the SIGHTING as the instant its verdict is about; the shared
+// constant is the checked half of that, and hand-written prose is not.
 //
 // The other two arms reached by a gate that certifies nothing are deliberately NOT
 // here, and the exclusion is a reading of what each Detail argues rather than an
@@ -46,10 +55,11 @@ func trailRunCertifiesNothingArms() []string {
 		trailOutcomeVoidNoTrailer,
 		trailOutcomeVoidPathOwesNoReason,
 		trailOutcomeVoidReasonNotOwedByPath,
+		trailOutcomeAliveAtSightingByOrdering,
 	}
 }
 
-// TestTrailRunCertifiesNothingArmsNameTheInstant makes "exactly these three arms
+// TestTrailRunCertifiesNothingArmsNameTheInstant makes "exactly these four arms
 // name the declared-finished instant" checkable rather than a convention the format
 // strings happen to follow. Sharing one constant stops the three DRIFTING in how
 // they name the instant, but an arm can still omit it from its own format string
@@ -57,13 +67,13 @@ func trailRunCertifiesNothingArms() []string {
 //
 // # Why the check is CONDITIONAL where #1440's is unconditional
 //
-// trail_sighting_liveness_test.go:576-585 requires trailSightingInstantClause on
+// trail_sighting_liveness_test.go:579-588 requires trailSightingInstantClause on
 // EVERY row, and is right to: every arm of that one predicate is about the sighting
-// instant, so the clause is universal there. Here it is three outcomes out of
-// thirteen, so an unconditional per-row check would redden the other ten.
+// instant, so the clause is universal there. Here it is four outcomes out of
+// fourteen, so an unconditional per-row check would redden the other ten.
 //
-// The absence half is not filler. It is what makes the claim "only these three"
-// rather than "at least these three", and it is the executable half of the
+// The absence half is not filler. It is what makes the claim "only these four"
+// rather than "at least these four", and it is the executable half of the
 // budget-fired carve-out: trailOutcomeVoidBudgetFired forecloses BOTH instants from
 // a gate that CERTIFIED a terminal reason, so a certifies-nothing clause on it
 // would be false. Its row goes red here if someone adds one.
@@ -129,7 +139,7 @@ func TestTrailRunCertifiesNothingArmsNameTheInstant(t *testing.T) {
 // Every other statement in that file which forecloses a claim on certifies-nothing
 // grounds was amended to name the DECLARED-FINISHED instant, because a
 // sighting-instant claim survives there (#1440's trailEstablishSighting,
-// trail_sighting_liveness_test.go:350). The budget-fired arm argues from the
+// trail_sighting_liveness_test.go:353). The budget-fired arm argues from the
 // opposite premise: its gate CERTIFIES max_turns, and the Terminate hook reaped
 // INSIDE the hook (runner.go:492-503) BEFORE the trailer was written. The reap
 // provably precedes the trailer, so NEITHER instant can be proved from that path —
