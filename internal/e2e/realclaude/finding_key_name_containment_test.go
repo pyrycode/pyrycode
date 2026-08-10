@@ -180,7 +180,7 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 //     needle and the shipped pad measurement still holds.
 //
 // A function and not a package-level var, for trailRunWellFormed's stated reason
-// (trail_run_outcome_test.go:881-883): `go test -race` runs this package's tests
+// (trail_run_outcome_test.go:980-982): `go test -race` runs this package's tests
 // in parallel.
 //
 // # The plant list, and why it stops where it does
@@ -203,7 +203,7 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 // TestFinWriteArtifactPublishesNoVerbatimModelOutput pins.
 func finContainValuePlantedTrailer(pad int) string {
 	return `{"type":"result","subtype":"error_max_turns","is_error":true,` +
-		`"duration_ms":9001,"num_turns":6,"result":"` + strings.Repeat("x", pad) + trailNeedle + `",` +
+		`"duration_ms":9002,"num_turns":6,"result":"` + strings.Repeat("x", pad) + trailNeedle + `",` +
 		`"stop_reason":"end_turn","session_id":"` + trailNeedle + `",` +
 		`"total_cost_usd":0.42,"usage":{"input_tokens":120,"output_tokens":45,` +
 		`"cache_creation_input_tokens":0,"cache_read_input_tokens":0},` +
@@ -528,7 +528,7 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 // rather than pinned as a literal.
 //
 // A const and not a var: the parallel-tests rule
-// (trail_run_outcome_test.go:881-883) is about shared BACKING ARRAYS, and a string
+// (trail_run_outcome_test.go:980-982) is about shared BACKING ARRAYS, and a string
 // constant has none.
 const finContainNeedleKeyName = "PYRY-PROBE-KEY-NAME-NEEDLE-MUST-NOT-REACH-A-DETAIL"
 
@@ -559,7 +559,7 @@ func finContainNeedleKeyTrailer() string {
 // trailer Detail is 225 bytes, and a Detail interpolating sighting.KeyNames INSIDE
 // the trailDetail format is 426 — leaving 86 bytes of the 512-byte cap against the
 // 42-byte trailNeedle yardstick, so it PASSES the shipped per-row headroom check
-// (finding_trailer_evidence_test.go:979-987), observed green under exactly that
+// (finding_trailer_evidence_test.go:980-988), observed green under exactly that
 // mutation while this row went red. #1364's best hostile-name fixture put its own
 // mutant at 444 bytes against a 470-byte budget, 27 short of red, which is why
 // that ticket measured it, cut it and handed the obligation here. A needle has no

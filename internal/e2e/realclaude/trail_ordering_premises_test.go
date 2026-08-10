@@ -66,7 +66,7 @@ package realclaude
 // and never the objects themselves — see the parameter list's own note for why
 // the narrow type is the enforcement rather than a convention. trailDetail
 // (trailer_admissibility_test.go:352) formats and caps every Detail, and
-// TestTrailAdmissibilityConstantsAreClosed (trailer_admissibility_test.go:1208)
+// TestTrailAdmissibilityConstantsAreClosed (trailer_admissibility_test.go:1213)
 // is where these four values are checked against every other value this tree
 // ships.
 
@@ -191,7 +191,7 @@ type trailOrderResult struct {
 // No shipped gather records "the hold was still held for the whole of the wait":
 // finStageSubject (finding_stage_held_group_test.go:175-188) carries needles,
 // pinned pids, a group and a row count, and trailRunReadings
-// (trail_run_outcome_test.go:309-374) has no such field either. So the fact is a
+// (trail_run_outcome_test.go:354-419) has no such field either. So the fact is a
 // parameter a caller hands in — and it is nonetheless CHECKABLE rather than
 // assumed: holdProbeFIFO (background_trigger_probe_test.go:663) keeps the write
 // end, hands the caller a receive-only channel with no release path of its own,
@@ -300,7 +300,7 @@ func trailOrderValues() []string {
 
 // trailIsOrderValue reports whether v is one of the four recorded ordering
 // values. It mirrors trailIsGateValue (trailer_admissibility_test.go:906) and
-// trailIsRunOutcome (trail_run_outcome_test.go:422) and exists for the same
+// trailIsRunOutcome (trail_run_outcome_test.go:475) and exists for the same
 // reason: a value a reader of the published record cannot look up is a verdict
 // they cannot interpret.
 func trailIsOrderValue(v string) bool {
@@ -457,7 +457,7 @@ func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 //
 // Each subtest asserts the all-true base certifies BEFORE flipping anything —
 // the premise assertion is what stops the test passing by classifying garbage,
-// the discipline trail_run_outcome_test.go:1919-1924 states.
+// the discipline trail_run_outcome_test.go:2042-2047 states.
 //
 // These three are also the anti-swap check: any pairwise swap of the three
 // parameters at trailCertifyOrdering's definition reddens at least two of them,
@@ -513,7 +513,7 @@ func TestTrailOrderEachPremiseHasItsOwnVoid(t *testing.T) {
 
 // TestTrailOrderValuesAgreeWithThePredicate is AC4 made executable, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2011): the list and the predicate agree in BOTH
+// (trail_run_outcome_test.go:2149): the list and the predicate agree in BOTH
 // directions, the count is asserted against the ticket's own enumeration, and the
 // predicate rejects the values of the adjacent spaces.
 //
@@ -571,7 +571,7 @@ func TestTrailOrderValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailOrderResultCarriesNoCapturedBytes is AC5's structural half, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:1886-1907): marshal the record, decode to
+// (trail_run_outcome_test.go:2009-2030): marshal the record, decode to
 // map[string]json.RawMessage, and refuse any command/args/comm/argv-shaped key.
 //
 // THE trailNeedle BYTE-SWEEP IS GENUINELY ABSENT HERE, NOT DEFERRED BY

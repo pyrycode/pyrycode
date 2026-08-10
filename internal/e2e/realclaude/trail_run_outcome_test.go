@@ -99,8 +99,8 @@ import (
 
 // --- the run's value space ----------------------------------------------------
 
-// What one probe run can conclude, as a POSITIVE ALLOWLIST of fourteen: four
-// answers and ten named voids. NOTHING is the catch-all for "everything else"
+// What one probe run can conclude, as a POSITIVE ALLOWLIST of fifteen: four
+// answers and eleven named voids. NOTHING is the catch-all for "everything else"
 // — trailOutcomeOutOfContract is a named answer about the CALLER's record,
 // reached by a guard at the top of trailClassifyRun, never by exhausting a
 // switch.
@@ -189,12 +189,15 @@ const (
 	// reason there is no "when the turn was declared finished" instant for an
 	// aliveness-at-declared-finish claim to be about.
 	//
-	// Reached only AFTER the pinned-pid sighting route has been consulted and did
-	// NOT establish aliveness — it refuted, it measured nothing, or it was never
-	// staged. Since #1446 this value is what remains of that arm once the route
-	// has answered, never an answer handed out before any evidence was examined.
-	// Which of the three it was is named in the Detail as the route's own value,
-	// and separating them into values of their own is #1447's work.
+	// Reached only AFTER the pinned-pid sighting route has been consulted and
+	// MEASURED NOTHING — a pid read that did not answer, or an ordering never
+	// staged. Since #1446 this value is what remains of that arm once the route has
+	// answered, never an answer handed out before any evidence was examined, and
+	// since #1447 it is no longer the blanket over everything the route failed to
+	// establish: the case where the route DID measure a pinned pid and did not
+	// establish has trailOutcomeVoidPinnedPidDidNotEstablish below. Which of the two
+	// remaining cases it was is named in the Detail as the route's own value, and
+	// separating THOSE into values of their own is #1448's work.
 	//
 	// Deliberately NOT trailOutcomeVoidNoTrailer. A trailer WAS written on this
 	// path — it is claude's own result line — and that value's doc reads "no
@@ -208,6 +211,42 @@ const (
 	// headless stream run as one files a genuine measurement as an instrument
 	// defect.
 	trailOutcomeVoidPathOwesNoReason = "run-void-path-owes-no-reason"
+	// trailOutcomeVoidPinnedPidDidNotEstablish: the gate read
+	// trailGateAbsentOwesNone, and #1440's pinned-pid sighting route MEASURED a
+	// pinned pid — the ordering was certified and the pid was re-read after pyry
+	// exited — and did not establish that the command was alive when the trailer was
+	// SIGHTED. A READING, and still a void: nothing was certified, so there is no
+	// "when the turn was declared finished" instant for a claim to be about.
+	//
+	// NEVER AN IT-EXITED VERDICT, and the claim limit is inherited VERBATIM from the
+	// route's own value rather than restated loosely. trailSightingUnestablished
+	// (trail_sighting_liveness_test.go, the sighting space's second value) is "a
+	// statement about THIS EVIDENCE ROUTE, not about the command having been dead at
+	// the sighting — the read is late by construction, so it cannot rule the earlier
+	// instant out. There is deliberately no 'exited before the sighting' value in
+	// this space for it to decay into." Neither is there one here, and the run-level
+	// space already keeps that discipline: trailOutcomeNoRowMatched above is a
+	// statement about THE SCAN and explicitly not about the command having exited.
+	// This value joins that group.
+	//
+	// Deliberately NOT trailOutcomeVoidPathOwesNoReason, the sibling it forks from.
+	// That one is the route having measured NOTHING; this one is a pid that WAS
+	// read. Same void-ness, two different readings — and publishing a MEASURED
+	// refutation of this route under a value whose Detail says the route was
+	// consulted and answered would file a measurement under the name of one that
+	// never happened.
+	//
+	// Deliberately NOT a `run-`-prefixed transform of trailSightingUnestablished,
+	// for the reason trailOutcomeAliveAtSightingByOrdering states above:
+	// "run-sighting-not-established" would CONTAIN the route's own value, and the
+	// union map in TestTrailAdmissibilityConstantsAreClosed compares for EQUALITY
+	// and is blind to containment — distinct to the map and a duplicate to a reader.
+	//
+	// Deliberately NOT trailOutcomeVoidLivenessInstrument, which is the argv scan's
+	// per-pid read failing AS AN INSTRUMENT. Here the read ANSWERED; it simply did
+	// not establish. Landing a working instrument's answer on that value would
+	// report it as a broken one, the mirror of the collapse it exists to prevent.
+	trailOutcomeVoidPinnedPidDidNotEstablish = "run-void-pinned-pid-did-not-establish"
 	// trailOutcomeVoidReasonNotOwedByPath: the trailer CARRIES a terminal_reason
 	// and the observed runner path owes none, so the gate read
 	// trailGatePresentOwesNone. A READING of the trailer rather than a defect in
@@ -249,8 +288,11 @@ const (
 
 // --- the evidence route's value space -------------------------------------------
 
-// WHICH EVIDENCE CLASS PRODUCED A FINDING, as a closed set of two, so that a
-// reader never has to infer it from the outcome value.
+// WHICH EVIDENCE CLASS PRODUCED A VERDICT, as a closed set of two, so that a
+// reader never has to infer it from the outcome value. A verdict rather than a
+// finding since #1447: the sighting route's own MEASURED NON-ESTABLISHMENT reaches
+// a void that names this route too, and a reader who could not tell that
+// refutation from the reap-log route's would be back to decoding the value string.
 //
 // The two answers this space names state NEARLY THE SAME ENGLISH SENTENCE from
 // evidence the other path does not have: the reap log proves the group was alive
@@ -269,7 +311,10 @@ const (
 	trailRouteReapLog = "run-route-reap-log"
 	// trailRouteSighting: a certified ordering plus a pid pinned while the command
 	// was still reachable and re-read after pyry exited. Set on
-	// trailOutcomeAliveAtSightingByOrdering alone.
+	// trailOutcomeAliveAtSightingByOrdering, where that read established aliveness,
+	// and since #1447 on trailOutcomeVoidPinnedPidDidNotEstablish, where the same
+	// read MEASURED the pid and did not. One route, two verdicts — which is the
+	// whole reason the class lives in a field rather than in the value.
 	trailRouteSighting = "run-route-pinned-pid-sighting"
 )
 
@@ -394,10 +439,18 @@ type trailRunOutcome struct {
 	Gate   string `json:"gate_value"`
 	Admit  string `json:"admit_value,omitempty"`
 	// Route names the EVIDENCE CLASS that produced the verdict, so a reader never
-	// infers it from the outcome value — the two answers that carry a route state
+	// infers it from the outcome value — the two ANSWERS that carry a route state
 	// nearly the same English sentence from evidence the other path lacks.
-	// "" on every arm that reached no evidence route, exactly as Admit is "" where
-	// the predicate was owed no call.
+	//
+	// Published exactly where THE ROUTE'S OWN MEASUREMENT DECIDED THE VALUE, which
+	// since #1447 is the rule rather than "wherever a route was consulted": the
+	// gate-absent-owes-none arm consults the sighting route on every run it reaches,
+	// and on trailOutcomeVoidPinnedPidDidNotEstablish a pinned-pid read is what the
+	// verdict rests on, so the route is named there — while on the fall-through
+	// beside it the route contributed no measurement and the verdict rests on the
+	// gate reading alone, so "" is the honest answer and stays. #1448 owns whether
+	// those remaining cases ever name a route. Same shape as Admit, which is ""
+	// where the predicate was owed no call.
 	Route string `json:"evidence_route,omitempty"`
 	// MatchCount and RowsScanned are the argv scan's provenance. Counts only: the
 	// matched rows themselves stay out of every published record.
@@ -415,7 +468,7 @@ type trailRunOutcome struct {
 
 // --- membership helpers -------------------------------------------------------
 
-// trailIsRunOutcome reports whether v is one of the fourteen recorded outcomes. It
+// trailIsRunOutcome reports whether v is one of the fifteen recorded outcomes. It
 // mirrors trailIsGateValue / trailIsAdmitValue / pinIsVerdict / tdnIsReapVerdict
 // and exists for the same reason: a value a reader of the published record
 // cannot look up is a verdict they cannot interpret.
@@ -426,7 +479,8 @@ func trailIsRunOutcome(v string) bool {
 		trailOutcomeVoidBudgetFired, trailOutcomeVoidNoTrailer, trailOutcomeVoidTrailerScanAborted,
 		trailOutcomeVoidPyryDidNotExit, trailOutcomeVoidArgvScanErrored,
 		trailOutcomeVoidNoRowsParsed, trailOutcomeVoidLivenessInstrument,
-		trailOutcomeVoidPathOwesNoReason, trailOutcomeVoidReasonNotOwedByPath,
+		trailOutcomeVoidPathOwesNoReason, trailOutcomeVoidPinnedPidDidNotEstablish,
+		trailOutcomeVoidReasonNotOwedByPath,
 		trailOutcomeOutOfContract:
 		return true
 	}
@@ -734,20 +788,65 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 				"evidence route field, not this value, is what keeps it apart from %s",
 				sighting.Value, sighting.Reason, trailOutcomeRunningAtTrailer)
 		}
-		// A reading, and still a void. The gate read an absent terminal_reason
-		// from a path that owes none, so nothing was certified and there is no
-		// declared-finished instant for an aliveness-at-declared-finish claim —
-		// but the trailer was written and the record IS a reading, which is why
-		// this is neither trailOutcomeVoidNoTrailer nor trailOutcomeOutOfContract.
-		// The route is named because it was consulted: this void now means the
-		// evidence was examined and did not establish, never that none was sought.
+		if sighting.Value == trailSightingUnestablished {
+			// #1447's arm, and the second verdict this one route produces. The
+			// route MEASURED a pinned pid — the ordering certified and the pid was
+			// re-read after pyry exited — and did not establish aliveness at the
+			// sighting. A reading, and still a void; the route is named because the
+			// route's own measurement is what decided the value.
+			//
+			// The Detail may NOT say, or imply, that the command had exited before
+			// the sighting: the re-read is late BY CONSTRUCTION, so it rules the
+			// earlier instant neither in nor out. That limit is the route value's
+			// own and is inherited rather than re-derived here.
+			//
+			// BUDGETED AGAINST THE LONGER REASON, and measured on the shipped format
+			// string rather than on a draft of it. Two reasons reach this arm, and
+			// sighting-reason-pid-reaped-pending is 10 bytes longer than
+			// sighting-reason-pid-gone, so the worst case is the only figure worth
+			// keeping: 492 of trailDetail's 512 bytes, against 482 on the shorter
+			// one. reachCapCommand truncates SILENTLY, and what it would cut is the
+			// tail — where both claim limits live — so the prose is written as tight
+			// as it is deliberately. An earlier draft phrased the same five
+			// obligations at 536 bytes and lost its closing clause to the cap; the
+			// row beside this arm's is what turned that into a red build rather than
+			// a quiet truncation.
+			out.Route = trailRouteSighting
+			return decide(trailOutcomeVoidPinnedPidDidNotEstablish, "the gate read %s, and the "+
+				"pinned-pid sighting route MEASURED a pid, answering %s (%s): no establishment "+
+				"of aliveness at the trailer's sighting, and NEVER an it-exited verdict — the "+
+				"re-read is late by construction. "+trailDeclaredFinishInstantClause+" Kept "+
+				"apart from %s, where the route measured nothing", trailGateAbsentOwesNone,
+				sighting.Value, sighting.Reason, trailOutcomeVoidPathOwesNoReason)
+		}
+		// trailSightingVoid, reached as the FALL-THROUGH rather than as a third
+		// explicit case: trailEstablishSighting returns one of exactly three values,
+		// so the two tests above leave this arm total with no return site a fixture
+		// cannot reach. An explicit case plus a defensive tail would add an
+		// unreachable return and break that totality — the same reason the switch
+		// around this arm has no default.
 		//
-		// The out-of-contract half of this Detail's closing pair was EXCHANGED for
-		// the route clause rather than added beside it. The arm rendered 490 of
-		// trailDetail's 512 bytes before #1446 and reachCapCommand truncates
-		// SILENTLY, so an added clause would have cut off the argument the Detail
-		// exists to make; the argument it gives up is preserved in
-		// trailOutcomeVoidPathOwesNoReason's own doc.
+		// A reading, and still a void. The gate read an absent terminal_reason from a
+		// path that owes none, so nothing was certified and there is no
+		// declared-finished instant for an aliveness-at-declared-finish claim — but
+		// the trailer was written and the record IS a reading, which is why this is
+		// neither trailOutcomeVoidNoTrailer nor trailOutcomeOutOfContract. Since
+		// #1447 the route having been consulted is no longer what this value means:
+		// the route was consulted and MEASURED NOTHING, either because the pid read
+		// did not answer or because the ordering was never staged.
+		//
+		// It does NOT grow a clause naming its new neighbour, and that is measured
+		// rather than preferred: the arm renders 461 of trailDetail's 512 bytes, the
+		// shortest honest clause naming a 37-byte value costs 60-80 more, and
+		// reachCapCommand truncates SILENTLY — a draft that appended one rendered 541
+		// bytes and cut off the argument the Detail exists to make. The separation is
+		// discharged where it costs nothing: in the two values' own docs and in the
+		// neighbour's Detail, which names THIS value. The format string still
+		// interpolates sighting.Value, which is now always trailSightingVoid and is
+		// carried rather than spelled so a future sighting value cannot be
+		// mislabelled here. The same exchange arithmetic held at #1446, which traded
+		// this Detail's out-of-contract closing clause for its route clause rather
+		// than adding one beside it.
 		return decide(trailOutcomeVoidPathOwesNoReason, "the trailer carries no terminal_reason "+
 			"and the runner path this run was OBSERVED to take owes none, so the gate read %s: "+
 			"a reading of the trailer rather than a defect in it. The pinned-pid sighting route "+
@@ -772,7 +871,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	case trailGateOutOfContract:
 		// Not a collapse: the gate already said "this record is not a reading",
 		// and the run-level answer is that same sentence. What may never share a
-		// value is two MEASURED nothings, and none of the ten voids does.
+		// value is two MEASURED nothings, and none of the eleven voids does.
 		return decide(trailOutcomeOutOfContract, "the trailer gate itself reported %s, so the "+
 			"input it was handed is not a reading and no instant is certified. The gate's own "+
 			"Detail names which of its sub-cases fired", trailGateOutOfContract)
@@ -1117,6 +1216,15 @@ func trailRunCases() []trailRunCase {
 	// ordering certified would pass every other row in this table.
 	sightingRefuted := trailRunSightingEstablishedReadings()
 	sightingRefuted.PinnedPid = trailSightingPin(pinStateNoSuchProcess)
+	// The SECOND refuting verdict, which reaches the same run-level value through
+	// the same sighting value under a DIFFERENT reason. Two things come from it and
+	// neither is available without a row: the truncation-marker check in
+	// TestTrailClassifyRun runs on sighting-reason-pid-reaped-pending, ten bytes
+	// longer than its sibling's reason and therefore the arm's Detail worst case;
+	// and the arm is pinned to key on sighting.Value rather than on the pin verdict,
+	// which a build reading the verdict directly would pass on the row above alone.
+	sightingRefutedPending := trailRunSightingEstablishedReadings()
+	sightingRefutedPending.PinnedPid = trailSightingPin(pinStateExitedNotReaped)
 
 	return []trailRunCase{
 		// --- the four answers ---
@@ -1145,7 +1253,7 @@ func trailRunCases() []trailRunCase {
 			want: trailOutcomeNoRowMatched,
 		},
 
-		// --- the ten voids ---
+		// --- the eleven voids ---
 		{
 			name: "a budget-fired trailer voids the run structurally, never negatively",
 			in:   budget,
@@ -1195,10 +1303,22 @@ func trailRunCases() []trailRunCase {
 			// above cannot show: there both inputs are unstaged, so the route's own
 			// ordering guard answers and the verdict is never reached. This row is
 			// the one that separates "the arm consulted the route" from "the arm
-			// answers whenever the ordering certifies".
-			name: "a certified ordering and a pinned pid that is gone establish nothing and stay a void",
+			// answers whenever the ordering certifies" — and since #1447 what it
+			// separates is finer: the route's MEASURED refusal from the arm's
+			// unmeasured one, which the row above now holds alone.
+			name: "a certified ordering and a pinned pid that is gone measure a refusal of their own",
 			in:   sightingRefuted,
-			want: trailOutcomeVoidPathOwesNoReason,
+			want: trailOutcomeVoidPinnedPidDidNotEstablish,
+		},
+		{
+			// The other verdict that refutes. Both reach the same run-level value
+			// through the same sighting value, so the arm cannot be keying on the
+			// pin verdict; and this one renders the LONGER of the two reasons,
+			// which is what makes the Detail's worst case fail the build rather
+			// than truncate quietly.
+			name: "a pinned pid awaiting its reap refutes under the arm's longer reason",
+			in:   sightingRefutedPending,
+			want: trailOutcomeVoidPinnedPidDidNotEstablish,
 		},
 		{
 			// #1434's arm, and its sibling above is why the row is worth having
@@ -1313,12 +1433,15 @@ func TestTrailClassifyRun(t *testing.T) {
 
 	// The third provenance field, as an INVARIANT over the classifier rather than a
 	// second want column that could drift from it: a route is published on exactly
-	// the two values reached through an evidence route, and names that route. The
+	// the three values a route's own measurement decided, and names that route. The
 	// zero value of a map lookup is "", which is also the answer required of every
-	// other row, so one comparison carries both halves of the claim.
+	// other row, so one comparison carries both halves of the claim — including on
+	// the fall-through beside #1447's arm, where the route was consulted, measured
+	// nothing, and must therefore publish none.
 	wantRoute := map[string]string{
-		trailOutcomeRunningAtTrailer:          trailRouteReapLog,
-		trailOutcomeAliveAtSightingByOrdering: trailRouteSighting,
+		trailOutcomeRunningAtTrailer:             trailRouteReapLog,
+		trailOutcomeAliveAtSightingByOrdering:    trailRouteSighting,
+		trailOutcomeVoidPinnedPidDidNotEstablish: trailRouteSighting,
 	}
 
 	for _, tc := range trailRunCases() {
@@ -1827,7 +1950,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:2537) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:2544) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, a pinStateOutcome's Detail and ToolStderr, and since
@@ -1841,17 +1964,17 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // reachable outcomes and the fixture decides which — so covering the arm once
 // covers half of it. The proof block reaches run-running-at-trailer and can never
 // travel the new inputs; the sighting block reaches run-alive-at-sighting-by-ordering;
-// and the refuted block reaches run-void-path-owes-no-reason FROM THE SAME ARM,
-// reading the same two fields and rendering a different Detail from them.
+// and the refuted block reaches run-void-pinned-pid-did-not-establish FROM THE SAME
+// ARM, reading the same two fields and rendering a different Detail from them.
 //
-// The third block is here because its absence was measured rather than argued. On
-// the two-block tree, substituting this arm's sighting.Value operand for a
-// needle-bearing input left the SUITE GREEN for PinnedPid.ToolStderr — the field the
-// trust boundary runs through — and green for PinnedPid.Detail. Only Ordering.Detail
-// reddened, and not on the needle: it is long enough to overrun trailDetail's cap, so
-// the truncation-marker check at :1345-1348 caught it. A BUDGET kill, not a leak kill,
-// and different fabric — the sweep below is the only check on this arm that fails on
-// the needle itself. Each block premise-asserts first, so none passes on garbage.
+// The third block is here because its absence was measured rather than argued. On the
+// two-block tree, substituting this arm's sighting.Value operand for a needle-bearing
+// input left the SUITE GREEN for PinnedPid.ToolStderr — the field the trust boundary
+// runs through — and green for PinnedPid.Detail. Only Ordering.Detail reddened, and
+// not on the needle: it overruns trailDetail's cap, so the truncation-marker check at
+// TestTrailClassifyRun:1468-1471 caught it. A BUDGET kill, not a leak kill, and
+// different fabric — the sweep below is this arm's only check that fails on the needle
+// itself. Each block premise-asserts first, so none passes on garbage.
 //
 // # What the two new-input blocks ARE, stated rather than overclaimed
 //
@@ -1967,15 +2090,29 @@ func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 		in.PinnedPid.ToolStderr = "ps wrote " + trailNeedle
 
 		got := trailClassifyRun(in)
-		if got.Value != trailOutcomeVoidPathOwesNoReason {
+		if got.Value != trailOutcomeVoidPinnedPidDidNotEstablish {
 			t.Fatalf("value: got %q (%s), want %q — the premise is the OTHER outcome of the arm "+
 				"the block above covers, which reads the same two inputs and renders a different "+
-				"Detail from them", got.Value, got.Detail, trailOutcomeVoidPathOwesNoReason)
+				"Detail from them", got.Value, got.Detail,
+				trailOutcomeVoidPinnedPidDidNotEstablish)
 		}
-		if got.Route != "" {
-			t.Fatalf("route: got %q, want \"\" — this arm established nothing, so the key walk "+
-				"below runs over the record's OTHER published key set, the one with no route "+
-				"key in it", got.Route)
+		// RE-POINTED at #1447 rather than deleted, and the distinction is
+		// load-bearing. This assertion is not decoration: it is what guarantees the
+		// key walk below runs over the record's ROUTE-BEARING key set, so an arm
+		// that later dropped the route would shrink the swept set without reddening
+		// anything. Deleting it — the tempting move once "" stopped being the
+		// expected value — is the shape of hole #1446 was reworked for.
+		//
+		// No fourth block is added to recover the route-ABSENT key set, and that is
+		// checked rather than waved through: Route is the only field that differs
+		// between the pre- and post-#1447 refuted records and it is omitempty, so
+		// the set walked here is a strict SUPERSET of the one it replaces. A
+		// command/args/comm/argv-shaped key cannot hide in the difference, and
+		// coverage is preserved rather than lost.
+		if got.Route != trailRouteSighting {
+			t.Fatalf("route: got %q, want %q — this arm's own MEASUREMENT decided the value, so "+
+				"the record names the route and the key walk below runs over the published key "+
+				"set that has the route key in it", got.Route, trailRouteSighting)
 		}
 		sweep(t, got)
 	})
@@ -1999,6 +2136,7 @@ func trailRunOutcomeValues() []string {
 		trailOutcomeVoidNoRowsParsed,
 		trailOutcomeVoidLivenessInstrument,
 		trailOutcomeVoidPathOwesNoReason,
+		trailOutcomeVoidPinnedPidDidNotEstablish,
 		trailOutcomeVoidReasonNotOwedByPath,
 		trailOutcomeOutOfContract,
 	}
@@ -2010,13 +2148,14 @@ func trailRunOutcomeValues() []string {
 // TestTrailClassifyRun's coverage loop silently stop covering it.
 func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 	values := trailRunOutcomeValues()
-	if len(values) != 14 {
-		t.Errorf("the closed set holds %d value(s), want 14 — the count is the ticket's own "+
-			"enumeration and a change to it is a change to what the run can conclude. Fourteen "+
-			"rather than thirteen since #1446 gave %s a value of its own, because the arm that "+
-			"reaches %s now consults an evidence route first and a finding it establishes may "+
-			"not share the reap log's value", len(values),
-			trailOutcomeAliveAtSightingByOrdering, trailOutcomeVoidPathOwesNoReason)
+	if len(values) != 15 {
+		t.Errorf("the closed set holds %d value(s), want 15 — the count is the ticket's own "+
+			"enumeration and a change to it is a change to what the run can conclude. Fifteen "+
+			"rather than fourteen since #1447 gave %s a value of its own: the same arm that "+
+			"reaches %s consults an evidence route, and a route that MEASURED a pinned pid and "+
+			"did not establish is a refutation this run made, not the nothing a route that was "+
+			"never staged reports", len(values),
+			trailOutcomeVoidPinnedPidDidNotEstablish, trailOutcomeVoidPathOwesNoReason)
 	}
 	for _, v := range values {
 		if !trailIsRunOutcome(v) {
@@ -2041,20 +2180,23 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // point: a SECOND instant now exists in this family. trailEstablishSighting
 // (trail_sighting_liveness_test.go:353) establishes aliveness at the trailer's
 // SIGHTING on pyry's stdout from a certified ordering and a pinned pid, on exactly
-// the paths these four arms answer. A Detail foreclosing "a claim" unqualified
+// the paths these five arms answer. A Detail foreclosing "a claim" unqualified
 // would forbid that finding from a file that cannot see it — and since #1446 one
-// of the four carriers IS that finding, which is the sharpest form of the same
+// of the five carriers IS that finding, which is the sharpest form of the same
 // argument: the arm most easily misread as an aliveness-at-declared-finish claim is
-// the one that must say in these words that it is not one.
+// the one that must say in these words that it is not one. #1447's carrier is that
+// same route's other verdict, and it must say it for the mirror reason: an arm that
+// forecloses a claim on certifies-nothing grounds while ALSO refusing to claim the
+// command had exited has two limits to state, and only one of them is checkable.
 //
-// A shared constant rather than four hand-written copies so the arms cannot DRIFT
+// A shared constant rather than five hand-written copies so the arms cannot DRIFT
 // in how they name the instant — trailSightingInstantClause's shape
 // (trail_sighting_liveness_test.go:219), and its doctrine too: sharing it is not
 // on its own what makes "every
 // certifies-nothing arm names the instant" true, because an arm can still omit it
 // from its own format string. What makes the rule checkable is
 // TestTrailRunCertifiesNothingArmsNameTheInstant, which requires exactly these
-// four arms' Details to carry it and every other row's not to.
+// five arms' Details to carry it and every other row's not to.
 //
 // Deliberately NOT trailSightingInstantClause, which names the OTHER instant: that
 // one says a verdict IS about the sighting, this one says no verdict here is about
@@ -2075,7 +2217,7 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // This declaration sits at the END of the file rather than beside the arms that use
 // it, and that placement is deliberate rather than careless: sixteen other files in
 // this package carry a hundred line-number cites into this one, the highest at
-// trail_run_outcome_test.go:2011, and a declaration inserted anywhere above that
+// trail_run_outcome_test.go:2149, and a declaration inserted anywhere above that
 // displaces every cite below it. The filename is spelled there rather than left as
 // a bare `:NNN` on #1434's evidence: a bare ref inherits the LAST-NAMED FILE, which
 // two paragraphs up is trail_sighting_liveness_test.go, and it reads clean under
