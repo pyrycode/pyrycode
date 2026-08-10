@@ -14,7 +14,7 @@ package realclaude
 //
 // # What this closes that #1268's rig structurally cannot
 //
-// trailRigGather (trail_run_rig_test.go:150) is the correct composition wired to
+// trailRigGather is the correct composition wired to
 // the wrong two inputs. It passes a nil LITERAL as the reap-log stderr and keys
 // the attribution on the TEST PROCESS's own group. tdnClassifyReapLog(nil, ...)
 // can only reach tdnReapNoLine (LineCount == 0), which trailAdmitAttribution
@@ -58,7 +58,7 @@ package realclaude
 //
 // # An empty match set under a certifying gate IS the documented healthy negative
 //
-// trailRunWellFormed() (trail_run_outcome_test.go:1114) — the classifier's own
+// trailRunWellFormed() (`trailRunWellFormed`) — the classifier's own
 // canonical well-formed input — is trailGateUsable + "completed" + MatchCount 0 +
 // RowsScanned 12 + trailAdmitVoidGroupUnnamed, and it reaches
 // trailOutcomeNoRowMatched, whose Detail says that value is "A statement about THE
@@ -255,8 +255,8 @@ type finGatherInputs struct {
 	// ClaudeState is the claude child's liveness verdict, as its caller read it.
 	//
 	// ITS ADMISSIBLE PRODUCER IS pinReadState's Verdict
-	// (process_pin_liveness_test.go:275) over the pid probeWaitForDirectChild
-	// returns (background_trigger_probe_test.go:975) — a CLOSED four-value set
+	// (`pinReadState`) over the pid probeWaitForDirectChild
+	// returns (`probeWaitForDirectChild`) — a CLOSED four-value set
 	// whose pinStateColumns is `pid=,ppid=,stat=` and carries no command column
 	// by construction. NEVER a raw ps column. This value crosses the gather
 	// unvalidated, is republished as claude_state and is quoted into a published
@@ -349,7 +349,7 @@ type finGatherInputs struct {
 // # The key names, and why they are not a fifth scalar
 //
 // KeyNames comes from a DIFFERENT READER than the four above — trailKeyNames over
-// the full line (trailer_key_names_test.go:87), not resultTrailer's fixed decode —
+// the full line (`trailKeyNames`), not resultTrailer's fixed decode —
 // so it is the fifth trailer FIELD and deliberately not a fifth decoded scalar.
 // Keeping it in its own group is what leaves every "the four decoded scalars"
 // sentence in this family true. It carries the names ONLY, and structurally rather
@@ -434,7 +434,7 @@ const (
 //     sweep green over a record that leaked, which is the defect #1284 shipped
 //     and then had to fix.
 //   - AN OVER-LONG ENTRY IS TRUNCATED AND MARKED, never dropped, mirroring
-//     reachCapCommand (background_reach_probe_test.go:945). Dropping removes
+//     reachCapCommand. Dropping removes
 //     evidence silently; truncating announces itself. Two names sharing a
 //     finTrailerMaxKeyNameBytes-byte prefix therefore collapse to one string —
 //     both carrying the marker, so the duplication is visibly an artefact.
@@ -444,7 +444,7 @@ const (
 //     slice assignment, so a pass-through would make the published
 //     finTrailerRecord.KeyNames alias trailScanResult.KeyNames itself, and the
 //     shipped `dropped := seen` struct copy
-//     (finding_trailer_evidence_test.go:693) would then put two carriers on one
+//     (`TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer`) would then put two carriers on one
 //     backing array while `go test -race` runs this package's tests in parallel
 //     (trail_run_outcome_test.go:1111-1113). The builder's plain assignment is safe
 //     ONLY because this clause holds, which is why the clause is stated at the
@@ -489,7 +489,7 @@ func finBoundKeyNames(names []string) []string {
 // stand. .Line is verbatim model output marked OPERATOR-REVIEW-BEFORE-PASTE,
 // roughly 415 of its retained 512 bytes being the trailer's `result` field, which
 // is the assistant's last message. .Trailer is a *resultTrailer, which carries
-// PermissionDenials *[]json.RawMessage (tool_loop_test.go:199) — raw bytes no cap
+// PermissionDenials *[]json.RawMessage (`resultTrailer`) — raw bytes no cap
 // applies to — behind a pointer whose unchecked deref panics by design. COPYING
 // SCALARS OUT is what keeps both out of reach, and it is the whole point of the
 // third return.
@@ -823,7 +823,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	} else {
 		// C4 (:698): Admit is left ZERO when the gate certified nothing. This is
 		// the zero-value comparison the package uses for "not classified"
-		// (trail_run_outcome_test.go:1303, finding_attribution_fanout_test.go:668) —
+		// (trail_run_outcome_test.go:1303, `TestFinAttributeEmptySetAlternativesArePublishedFalsehoods`) —
 		// a comparison against an existing consumer's idiom, not a reading the
 		// gather produced by literal.
 		if readings.Admit != (trailAdmitResult{}) {
@@ -1042,7 +1042,7 @@ func finGatherNegativeInputs(t *testing.T, stdout *probeSyncBuffer) finGatherInp
 // so the stdout buffer, the needle slice, the stderr and the pinned set are the
 // same values rather than equal-looking rebuilds. Sharing one buffer is sound:
 // trailWaitForTrailer only ever calls stdout.Bytes()
-// (result_trailer_observation_test.go:276), which returns a COPY of an
+// (`trailWaitForTrailer`), which returns a COPY of an
 // append-only buffer (background_trigger_probe_test.go:736-742), so the read is
 // non-destructive, both arms observe the same bytes on their first poll and both
 // take BoundFrom trailBoundFromStart. Rebuilding the needles instead of sharing
@@ -1196,7 +1196,7 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 			outcome := trailClassifyRun(readings)
 
 			// The second half of "carried exactly as handed in": the classifier
-			// republishes the field verbatim (trail_run_outcome_test.go:650).
+			// republishes the field verbatim (`trailClassifyRun`).
 			if outcome.ClaudeState != tc.claudeState {
 				t.Fatalf("the published claude_state reads %q; want the %q that was handed in",
 					outcome.ClaudeState, tc.claudeState)
@@ -1517,7 +1517,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // # The two tiers this joins
 //
 // TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator
-// (finding_trailer_evidence_test.go:413) pins lateness_bounded on
+// (`TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator`) pins lateness_bounded on
 // trailBoundFromMiss alone across all three discriminators — but with the
 // discriminator HANDED IN, as every finTrailerBuild call site before this row
 // does: each reaches the builder through finTrailerSighting over a shipped scan,
@@ -1547,7 +1547,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // caller's reach and the two the header forbids a message from naming
 // (:114-116). With no observation in scope a later edit CANNOT %v one into a
 // failure. That is also why the second carrier is derived through
-// finTrailerSighting (finding_trailer_evidence_test.go:391) over
+// finTrailerSighting over
 // trailScan(stdout.Bytes()): the shipped derivation, pure over bytes, taking a
 // scan and not an observation, and how every existing call site reaches the
 // builder. NO finSightingFrom CONSTRUCTOR — finGatherReadings' own doc rejects
@@ -1565,7 +1565,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // poll, a record whose staleness_ns and lateness_bound_from came from different
 // polls. Zero is the no-measurement value, so the second record is SYNTHETIC IN
 // THAT ONE DIMENSION — a real start-bound poll stamps a positive now.Sub(start)
-// (result_trailer_observation_test.go:282).
+// (`trailWaitForTrailer`).
 //
 // The consequence, stated so it is not read as a hole: carrying a zero Staleness
 // beside a false Bounded, this row does NOT discriminate a builder deriving
@@ -1587,7 +1587,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // Its messages name a finTrailerRecord's fields, which the header's licence does
 // NOT cover: that licence is enumerated over the composition's THREE RETURNS and
 // this record is not one of them. The licence is
-// TestFinTrailerRecordCarriesNoCapturedBytes' (finding_trailer_evidence_test.go:933),
+// TestFinTrailerRecordCarriesNoCapturedBytes' (`TestFinTrailerRecordCarriesNoCapturedBytes`),
 // which sweeps this record in the other file — named rather than assumed, and
 // stop_reason's uncapped model-authored exposure is inherited knowingly here as
 // it is there.
@@ -2041,7 +2041,7 @@ func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 // carries any of the three ONE LEVEL DOWN fails too, which asserting over a single
 // instance would never catch.
 //
-// finRecordInputReaches (finding_run_record_test.go:731) is the family's walker —
+// finRecordInputReaches is the family's walker —
 // same package, same build tag — and it follows struct fields, slice and array
 // elements, pointers and map keys and values, so naming resultTrailer catches a
 // *resultTrailer as well. The increment here is the third forbidden type, not a

@@ -16,7 +16,7 @@ package realclaude
 //
 // # Why the reduction is separable from the scan
 //
-// pinScan is already a value: pinMatchArgvExcluding (process_pin_liveness_test.go:173)
+// pinScan is already a value: pinMatchArgvExcluding
 // turns a ps table's BYTES into one, and the live wrapper pinScanArgv (:191) does
 // the same over a real exec. So the reduction is separable from the exec, and a
 // synthetic table drives exactly the matching the live path uses. That is the
@@ -75,11 +75,11 @@ import (
 //
 // Rows and RowCount mirror pinScan.Matches / pinScan.MatchCount — the same
 // pairing, and RowCount is assigned exactly ONCE, as len(Rows), in the same place
-// pinPartition (process_pin_liveness_test.go:167) assigns its own. One producer
+// pinPartition assigns its own. One producer
 // for the number; it is never computed a second way.
 //
 // PGIDs is a []int and never a []reachProc. Its consumer finAttributeFanOut
-// (finding_attribution_fanout_test.go:209) takes []int precisely because that
+// (`finAttributeFanOut`) takes []int precisely because that
 // signature closes the credential channel structurally rather than by a check
 // inside the function (:195-202). The conversion happens HERE, in the reduction,
 // so a downstream record has an []int to hand and never reaches into Rows for it
@@ -113,7 +113,7 @@ type finLivePinReading struct {
 // — but its subject is a rig-staged `sh -c` rather than a claude-staged Bash
 // call, so it is corroboration and not the primary basis.
 //
-// TestTrailRigCarriesMoreThanOneMatchedRow (trail_run_rig_test.go:506) is NOT
+// TestTrailRigCarriesMoreThanOneMatchedRow is NOT
 // cited: it fails on MatchCount <= 1 (:563), i.e. it asserts MORE THAN ONE and
 // never EXACTLY TWO. finding_staging_gate_test.go:395-397 already cites it for
 // its own PinMatchCount: 2, and that citation is weaker than the number it
@@ -148,7 +148,7 @@ const finLivePinWantRows = 2
 // One pass over scan.Matches. It mutates nothing it does not allocate, so it is
 // safe to call concurrently by construction.
 //
-// MEMBERSHIP IS reachMatchedNeedle (background_reach_probe_test.go:955), NEVER a
+// MEMBERSHIP IS reachMatchedNeedle, NEVER a
 // re-scan of .Command. reachMatchArgvRows matches against the UNCAPPED command
 // line (:913) and stores the CAPPED one (:924), so a row whose FIFO path sits
 // past reachMaxCommandBytes is genuinely matched — its Needles list records the
@@ -161,7 +161,7 @@ const finLivePinWantRows = 2
 // reachMatchArgvRows already produced — the same relationship pinPartition has to
 // it and for the same stated reason (process_pin_liveness_test.go:137-148:
 // "reachMatchArgvRows is this package's one full-argv matcher and #1235 must not
-// grow a second"). probeHasCommand (background_trigger_probe_test.go:963) is
+// grow a second"). probeHasCommand is
 // doubly wrong here besides: probeAnnotateCommands (:930) stores only
 // filepath.Base(argv[0]), so the held command's Command is `cat` and it would
 // match any unrelated `cat` on the machine, and it is scoped to descendants.
@@ -172,7 +172,7 @@ const finLivePinWantRows = 2
 // its own comment explains that the sort is what makes the record a pure function
 // of the SET rather than of ps output order; pre-reducing here would duplicate
 // that work and destroy the raw evidence. tdnPinHeld
-// (teardown_liveness_probe_test.go:521) is the shipped FIFO filter but the WRONG
+// (`tdnPinHeld`) is the shipped FIFO filter but the WRONG
 // SHAPE to copy: it dedupes pids and collapses to a single pgid, returning 0 when
 // the rows do not resolve to exactly one group (:538-541).
 //

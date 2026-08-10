@@ -157,7 +157,7 @@ func TestTrailRunCertifiesNothingArmsNameTheInstant(t *testing.T) {
 // Every other statement in that file which forecloses a claim on certifies-nothing
 // grounds was amended to name the DECLARED-FINISHED instant, because a
 // sighting-instant claim survives there (#1440's trailEstablishSighting,
-// trail_sighting_liveness_test.go:353). The budget-fired arm argues from the
+// `trailEstablishSighting`). The budget-fired arm argues from the
 // opposite premise: its gate CERTIFIES max_turns, and the Terminate hook reaped
 // INSIDE the hook (runner.go:492-503) BEFORE the trailer was written. The reap
 // provably precedes the trailer, so NEITHER instant can be proved from that path —

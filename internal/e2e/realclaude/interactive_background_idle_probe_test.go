@@ -344,7 +344,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 	t.Logf("#1240 probe artifacts: %s", bgIdleRedact(artifactDir))
 
 	// MUST precede the harness: spawnBootstrapDaemon snapshots os.Environ() at
-	// interactive_bootstrap_liveness_test.go:403, so a later Setenv never
+	// `spawnBootstrapDaemon`, so a later Setenv never
 	// reaches the daemon — and the daemon passes its environment to claude
 	// verbatim.
 	t.Setenv(bgIdleBashTimeoutEnv, bgIdleBashTimeoutMS)
@@ -444,7 +444,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 // and #1223's system prompt was deliberately silent on it for the same reason.
 // "Exactly once, verbatim, nothing else" is setup, not measurement. This is the
 // opposite posture from runningTurnPrompt
-// (interactive_stream_running_turn_test.go:225), which steers claude AWAY from
+// (`runningTurnPrompt`), which steers claude AWAY from
 // backgrounding and must never be reused or edited here.
 //
 // Only two values are interpolated: fifoPath, a t.TempDir()-derived absolute

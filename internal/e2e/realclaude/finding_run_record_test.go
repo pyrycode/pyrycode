@@ -17,17 +17,17 @@ package realclaude
 // A grep for the os/exec package selector is NOT sufficient on its own: every
 // route off this offline path runs through a SHIPPED HELPER that execs
 // internally rather than through a visible call to that package. The version
-// probe (background_trigger_probe_test.go:606)
+// probe (`probeClaudeVersion`)
 // execs the binary, which is why the version here is a caller-supplied string;
-// the claude-binary resolver (resilience_test.go:282) skips when claude is
+// the claude-binary resolver (`resolveClaudeBin`) skips when claude is
 // absent, and a skip that exits 0 reads as a pass under `make e2e-realclaude`;
 // the worktree credentials gate (fixtures.go:96) is AC5's "no credentials"; the
-// per-pid state read (process_pin_liveness_test.go:275) execs `ps` at :293; the
+// per-pid state read (`pinReadState`) execs `ps` at :293; the
 // exit-1 borrow (:1088) execs `false` to obtain an *os.ProcessState Go cannot
 // synthesize; and the argv scan (:191), the process snapshot
-// (background_trigger_probe_test.go:867), the teardown scan
-// (teardown_liveness_probe_test.go:482) and the FIFO hold
-// (background_trigger_probe_test.go:663) each reach a process or the table.
+// (`probeProcessSnapshot`), the teardown scan
+// (`tdnScan`) and the FIFO hold
+// (`holdProbeFIFO`) each reach a process or the table.
 //
 // EVERY ONE OF THEM IS REFERENCED ABOVE BY FILE AND LINE RATHER THAN BY NAME, so
 // that the forbidden-symbol grep reports on this file's CODE and cannot be
@@ -37,14 +37,14 @@ package realclaude
 //
 // Pure over bytes and therefore admissible if ever needed, though this design
 // needs none of them: pinMatchArgvExcluding (:173), probeDescendantsFromPS
-// (background_trigger_probe_test.go:891), pinClassifyState (:332).
+// (`probeDescendantsFromPS`), pinClassifyState (:332).
 //
 // # Two properties, and only one of them is structural
 //
 // THE RECORD IS TRAP-FREE BY CONSTRUCTION. No field can hold an argv —
 // finRecordProc is three ints — and trailScanResult.Trailer is unreachable
 // because finRecordInputs carries neither a trailObservation
-// (result_trailer_observation_test.go:141) nor a trailScanResult (:98). That is
+// (`trailObservation`) nor a trailScanResult (:98). That is
 // the property trailRunReadings.BoundFrom's comment states as its own reason for
 // taking a plain value (trail_run_outcome_test.go:425-431): taking the
 // observation "would promote that pointer back into reach". It is the STRONGER
@@ -63,16 +63,16 @@ package realclaude
 // and finAttributeFanOut / finAttributeRecord (#1280) are embedded WHOLE: the
 // trailer observation is never re-read, the outcome union is never re-derived,
 // and pyry's stderr is never re-parsed — tdnClassifyReapLog
-// (teardown_liveness_test.go:144) owns that read and the fan-out is its
-// consumer. tdnRunnerFromArgv (teardown_liveness_probe_test.go:772) is the argv
+// (`tdnClassifyReapLog`) owns that read and the fan-out is its
+// consumer. tdnRunnerFromArgv is the argv
 // read, with tdnFixturePtyArgv (:897) and tdnFixtureStreamArgv (:902) its
-// shipped fixtures; reachRunnerPathFromEnv (background_reach_probe_test.go:1102)
-// is the env read. trailReapLine (trailer_admissibility_test.go:753) renders the
-// synthetic reap stderr, trailNeedle (result_trailer_observation_test.go:325) is
+// shipped fixtures; reachRunnerPathFromEnv
+// is the env read. trailReapLine (`trailAdmitAttribution`) renders the
+// synthetic reap stderr, trailNeedle is
 // the plant, and reachMaxCommandBytes / reachCapCommand
-// (background_reach_probe_test.go:123, :945) are the single-sourced cap.
+// (`reachEnableEnv`, :945) are the single-sourced cap.
 //
-// trailDetail (trailer_admissibility_test.go:276) is reused rather than given a
+// trailDetail (`trailGateInput`) is reused rather than given a
 // finDetail twin, for the reason merged code has settled twice
 // (finding_attribution_fanout_test.go:37-44, finding_staging_gate_test.go:73-81):
 // it carries no decision — fmt.Sprintf plus reachCapCommand's 512-byte cap — and
@@ -127,7 +127,7 @@ type finRecordProc struct {
 // is the load-bearing one: 0 is a REAL SUCCESSFUL EXIT, so under omitempty a
 // clean run would render byte-identically to a run whose exit was never
 // observed. A caller with no observed exit hands pinExitStatusUnknown
-// (process_pin_liveness_test.go:236) instead — a documented caller obligation,
+// (`pinExitStatusUnknown`) instead — a documented caller obligation,
 // not a validated one, because no builder in this family validates its inputs
 // and no such miswrite has been observed. If a live run ever publishes
 // exit_code: 0 for a pyry that did not exit, the fix is a PyryExited bool beside
@@ -277,9 +277,9 @@ func finRecordRunnerLabel(reading string) string {
 //
 // The two readings do not share a vocabulary, and that decides how they are
 // compared. The env read answers "ptyrunner (interactive TUI, the agent-run
-// default)" (background_reach_probe_test.go:1112) while an AGREEING argv read
+// default)" (`reachRunnerPathFromEnv`) while an AGREEING argv read
 // answers "ptyrunner (claude argv carries --session-id)"
-// (teardown_liveness_probe_test.go:784). The two full strings are therefore
+// (`tdnRunnerFromArgv`). The two full strings are therefore
 // NEVER EQUAL, not even when both name the same runner — so a record comparing
 // them whole would report a disagreement on every run, and AC3's disagreement
 // row would pass while discriminating nothing.
@@ -346,7 +346,7 @@ func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
 // (trailer_admissibility_test.go:262-265), and this is the one such string the
 // record would otherwise retain uncapped. The live caller is the version probe,
 // whose error path returns fmt.Sprintf("<unavailable: %v>", err)
-// (background_trigger_probe_test.go:611) — an exec error interpolating the
+// (`probeClaudeVersion`) — an exec error interpolating the
 // RESOLVED BINARY PATH, i.e. an operator's home directory, into a record
 // destined for a public issue. Capping is one call and costs no API.
 //
@@ -586,7 +586,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 
 	// THE VERSION'S CAP, which the assertion above cannot reach with a short
 	// string. The live caller's error path returns fmt.Sprintf("<unavailable:
-	// %v>", err) (background_trigger_probe_test.go:611) — an exec error
+	// %v>", err) (`probeClaudeVersion`) — an exec error
 	// interpolating the RESOLVED BINARY PATH, i.e. an operator's home directory,
 	// into a record destined for a public issue. It is the one retained
 	// operator-visible string this record would otherwise hold uncapped, against
@@ -647,7 +647,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 // # The inputs are hand-built, and that is the correct answer rather than a concession
 //
 // AC5's no-exec rule closes both shipped producers: the per-pid state read execs
-// `ps` (process_pin_liveness_test.go:293), and pinClassifyState (:332) is pure
+// `ps` (`pinReadState`), and pinClassifyState (:332) is pure
 // but its pinStateNoSuchProcess arm needs an err that is a real ExitError from
 // os/exec carrying a normal-exit status, which Go cannot synthesize — the
 // shipped helper that borrows one (:1088) execs `false`.
@@ -1068,13 +1068,13 @@ func TestFinRecordCarriesNoCapturedBytes(t *testing.T) {
 // so a test at any single tier passes against a build where the NEXT one dropped
 // the field. What makes the assertion worth its length is that the expectation is
 // the READER'S OWN OUTPUT over the same bytes (trailKeyNames,
-// trailer_key_names_test.go:87) rather than a hand-written list. A literal
+// `trailKeyNames`) rather than a hand-written list. A literal
 // expectation would pin the fixture's key set — which trailExpectedKeyNames
 // already does one tier down — and would pass against a carrier that got its
 // names from anywhere other than the line.
 //
 // That indirection is also how the containment already proven reaches the
-// artifact. TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310) plants
+// artifact. TestTrailKeyNamesCarryNoValues plants
 // a distinct needle in every string-valued position of a trailer line and asserts
 // none reaches trailScanResult.KeyNames; equality with that proven-clean output
 // is what stops the proof from ending one tier short of the file an operator

@@ -13,7 +13,7 @@ package realclaude
 //
 // # What the fixed decode cannot answer
 //
-// resultTrailer (tool_loop_test.go:194) is eight fixed fields, and
+// resultTrailer is eight fixed fields, and
 // TerminalReason is a plain string with omitempty — so an ABSENT
 // terminal_reason and one emitted as "" both decode to "". That distinction is
 // not academic: terminal_reason is a pyry invention (streamjson/emitter.go:428-437,
@@ -26,7 +26,7 @@ package realclaude
 // # The ordering is the whole difficulty
 //
 // trailScanResult.Line is not the line: it is reachCapCommand of it
-// (result_trailer_observation_test.go:107), 512 bytes plus a marker. A capped
+// (`trailScanResult`), 512 bytes plus a marker. A capped
 // realistic trailer is TRUNCATED JSON, because `result` is sixth on the wire and
 // the cap lands inside it — so a reader fed Line answers correctly on every short
 // fixture and silently answers NOTHING on every realistic one. Measured on this
@@ -50,7 +50,7 @@ package realclaude
 // discarded inside trailKeyNames and the signature carries []string, so no value
 // can cross the boundary. The hazard is live rather than hypothetical: this
 // package already formats a whole trailer sub-record with %+v
-// (finding_run_record_test.go:775), and json.RawMessage values are the raw bytes.
+// (`TestFinRecordEmbedsTrailerRecordWhole`), and json.RawMessage values are the raw bytes.
 //
 // Bounding the names themselves is deliberately NOT here. They are
 // attacker-influenced in principle — they arrive from claude's output — but
@@ -398,13 +398,13 @@ func TestTrailResultTrailerFieldSetIsPinned(t *testing.T) {
 }
 
 // TestTrailScanResultReachesNoRawMessageMap is AC5's second half, in the shape
-// TestFinSightingReachesNoScanType uses (finding_run_gather_test.go:2043).
+// TestFinSightingReachesNoScanType uses (`TestFinSightingReachesNoScanType`).
 //
 // # The ban names the MAP, never its element
 //
 // Re-derived on this tree with the same walk: trailScanResult ALREADY reaches
 // json.RawMessage, through Trailer *resultTrailer → PermissionDenials
-// *[]json.RawMessage (tool_loop_test.go:199). A ban naming the element type would
+// *[]json.RawMessage (`resultTrailer`). A ban naming the element type would
 // therefore be red against correct shipped code on the day it was written. The
 // map type is green today and is a live guard against the field that would change
 // that — which is exactly the field trailKeyNames was tempted to return.

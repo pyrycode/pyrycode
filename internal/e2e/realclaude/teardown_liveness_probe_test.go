@@ -756,7 +756,7 @@ func tdnDecideAfter(rec *tdnRecord) {
 
 // tdnRunnerFromArgv names the runner from claude's own command line.
 //
-// reachRunnerPathFromArgv (background_reach_probe_test.go:1118) is deliberately
+// reachRunnerPathFromArgv is deliberately
 // NOT reused: it keys on --append-system-prompt-file and its comment calls that
 // "the ptyrunner-shape marker", but buildStreamRunnerClaudeArgs
 // (cmd/pyry/agent_run.go:372) emits the identical flag, so it answers

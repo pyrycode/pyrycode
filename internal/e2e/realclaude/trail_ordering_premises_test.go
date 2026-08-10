@@ -60,13 +60,13 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// holdProbeFIFO (background_trigger_probe_test.go:663) supplies the hold and
-// trailWaitForTrailer (result_trailer_observation_test.go:267) supplies the
+// holdProbeFIFO supplies the hold and
+// trailWaitForTrailer supplies the
 // sighting. This predicate consumes FACTS ABOUT those, as three plain booleans,
 // and never the objects themselves — see the parameter list's own note for why
 // the narrow type is the enforcement rather than a convention. trailDetail
-// (trailer_admissibility_test.go:352) formats and caps every Detail, and
-// TestTrailAdmissibilityConstantsAreClosed (trailer_admissibility_test.go:1213)
+// (`trailDetail`) formats and caps every Detail, and
+// TestTrailAdmissibilityConstantsAreClosed
 // is where these four values are checked against every other value this tree
 // ships.
 
@@ -193,7 +193,7 @@ type trailOrderResult struct {
 // pinned pids, a group and a row count, and trailRunReadings
 // (trail_run_outcome_test.go:394-459) has no such field either. So the fact is a
 // parameter a caller hands in — and it is nonetheless CHECKABLE rather than
-// assumed: holdProbeFIFO (background_trigger_probe_test.go:663) keeps the write
+// assumed: holdProbeFIFO keeps the write
 // end, hands the caller a receive-only channel with no release path of its own,
 // and closes its release channel only in the t.Cleanup it registers itself, which
 // by construction runs after the subtest body. A wait taken in that body is
@@ -235,7 +235,7 @@ type trailOrderResult struct {
 // MUST end with trailOrderPremiseClause, which is what carries the co-failures on
 // the four multi-failure inputs without a second field or a per-row judgement
 // call. All four go through trailDetail, so all inherit the 512-byte cap
-// (background_reach_probe_test.go:123), which truncates SILENTLY — and
+// (`reachEnableEnv`), which truncates SILENTLY — and
 // TestTrailOrderAllEightPremiseCombinations asserts the truncation marker is
 // absent from every row, so a Detail whose argument would be cut off reddens here
 // rather than reaching an operator's artifact.
@@ -299,8 +299,8 @@ func trailOrderValues() []string {
 }
 
 // trailIsOrderValue reports whether v is one of the four recorded ordering
-// values. It mirrors trailIsGateValue (trailer_admissibility_test.go:906) and
-// trailIsRunOutcome (trail_run_outcome_test.go:541) and exists for the same
+// values. It mirrors trailIsGateValue and
+// trailIsRunOutcome and exists for the same
 // reason: a value a reader of the published record cannot look up is a verdict
 // they cannot interpret.
 func trailIsOrderValue(v string) bool {
@@ -513,7 +513,7 @@ func TestTrailOrderEachPremiseHasItsOwnVoid(t *testing.T) {
 
 // TestTrailOrderValuesAgreeWithThePredicate is AC4 made executable, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2504): the list and the predicate agree in BOTH
+// (`TestTrailRunOutcomeValuesAgreeWithThePredicate`): the list and the predicate agree in BOTH
 // directions, the count is asserted against the ticket's own enumeration, and the
 // predicate rejects the values of the adjacent spaces.
 //
@@ -584,7 +584,7 @@ func TestTrailOrderValuesAgreeWithThePredicate(t *testing.T) {
 //
 // What remains checkable, and is checked here, is the structural claim: the
 // record has no field for a command string today, and a future field must not
-// quietly add one. pinStateColumns (process_pin_liveness_test.go:232) refuses a
+// quietly add one. pinStateColumns refuses a
 // `command` column at the source for the same reason — those columns route the
 // operator's CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY into an artifact
 // destined for a public issue.

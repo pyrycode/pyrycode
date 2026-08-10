@@ -16,9 +16,9 @@ package realclaude
 // # What was already proved, and what was not
 //
 // #1363 published the names on finSighting and finTrailerRecord, bounded by
-// finBoundKeyNames (finding_run_gather_test.go:455), reaching the written file
+// finBoundKeyNames, reaching the written file
 // through finRecordRun.Trailer. #1364 proved both bounds bite.
-// TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310) proves no value
+// TestTrailKeyNamesCarryNoValues proves no value
 // reaches the names AT THE READER'S OWN RETURN.
 //
 // Nothing checked that the TWO BUILDERS between that return and the file, and the
@@ -121,7 +121,7 @@ import (
 // plants stay live: a matched row's argv, ClaudeCommand and the reap stderr, all
 // of which the pipeline reduces or drops. Keeping them makes AC1's sweep strictly
 // stronger at zero cost, and nothing but the trailer line then differs from what
-// finWriteRender (finding_artifact_write_test.go:369) renders.
+// finWriteRender renders.
 //
 // ONE CONSTRUCTION SITE for both callers, because they render the same pipeline
 // over different fixture lines and two copies could disagree about which hands
@@ -174,7 +174,7 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 //   - inside `result`, behind pad bytes of padding, so the cap cuts it MID-VALUE
 //     rather than dropping it whole;
 //   - AS session_id's whole value. trailPaddedTrailer hard-codes that field to a
-//     UUID (result_trailer_observation_test.go:334), which is why this is a
+//     UUID (`trailPaddedTrailer`), which is why this is a
 //     separate renderer and never a repad of the shipped fixture. session_id sits
 //     AFTER `result` on the wire, so substituting it does not move `result`'s
 //     needle and the shipped pad measurement still holds.
@@ -334,7 +334,7 @@ func TestFinContainArtifactCarriesNoTrailerValue(t *testing.T) {
 // finContainNeedlePad is 0, and it is the DELIBERATE INVERSION of the pad the
 // shipped reader-tier check uses.
 //
-// TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310) calls
+// TestTrailKeyNamesCarryNoValues calls
 // trailKeyNamesNeedledTrailer(600) and asserts `result`'s needle lands PAST the
 // 512-byte cap, because its claim is about which COPY of the line the reader read.
 // This check's claim is about which BYTES a builder copied into a bounded field,
@@ -463,8 +463,8 @@ func TestFinContainPublishedNamesCarryNoValue(t *testing.T) {
 //
 // No fixture, no scan, no artifact — a type-level property no fixture can
 // exercise, in TestTrailScanResultReachesNoRawMessageMap's shape
-// (trailer_key_names_test.go:414) and TestFinSightingReachesNoScanType's
-// (finding_run_gather_test.go:2043).
+// (`TestTrailScanResultReachesNoRawMessageMap`) and TestFinSightingReachesNoScanType's
+// (`TestFinSightingReachesNoScanType`).
 //
 // # The control is what makes the negative a property of the record
 //

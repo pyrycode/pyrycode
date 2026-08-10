@@ -14,10 +14,10 @@ package realclaude
 //
 // # What is pinned, and where each clause lands
 //
-// finBoundKeyNames (finding_run_gather_test.go:455) states FIVE clauses in its
+// finBoundKeyNames states FIVE clauses in its
 // doc comment and shipped with none of them pinned — so "bounded" in the
 // artifact's standing safety sentence (finWriteSafetyClaim,
-// finding_artifact_write_test.go:124) was a claim rather than a checked property.
+// `finWriteSafetyClaim`) was a claim rather than a checked property.
 // Every clause is now some row's sole red:
 //
 //	clause                                          pinned by
@@ -36,7 +36,7 @@ package realclaude
 // # The bound is on what is KEPT FROM THE LINE, not on the published string
 //
 // Clause 4 truncates an over-long name to finTrailerMaxKeyNameBytes and then
-// appends reachTruncationMarker (background_reach_probe_test.go:124, 29 bytes),
+// appends reachTruncationMarker (`reachEnableEnv`, 29 bytes),
 // so a published over-long name is 93 bytes and not 64. `len(name) <=
 // finTrailerMaxKeyNameBytes` is therefore RED AGAINST A CORRECT BUILD and is not
 // the assertion here; the marker is this rig's own bytes, added on top of the
@@ -67,7 +67,7 @@ package realclaude
 // This family's convention is to name the enforcing test at the contract it
 // enforces, as finTrailerRecord does at finding_trailer_evidence_test.go:214-215.
 // It is NOT followed here, and this paragraph exists so a later editor does not
-// "fix" that. finBoundKeyNames sits at finding_run_gather_test.go:455 with its
+// "fix" that. finBoundKeyNames sits at `finBoundKeyNames` with its
 // doc comment above it and inbound line-number cites pointing at and past it from
 // four files; a sentence added to that comment shifts every one of them and
 // re-opens the three-form cite sweep (filename-anchored, bare `(:NNN)` inheriting
@@ -159,10 +159,10 @@ func finManyKeyNamesTrailer(extra int) string {
 // reader is what makes these proofs measurable rather than tautological.
 //
 // It stops at finTrailerBuild deliberately. The remaining hands are already
-// pinned: TestFinRecordEmbedsTrailerRecordWhole (finding_run_record_test.go:757)
+// pinned: TestFinRecordEmbedsTrailerRecordWhole
 // pins that finRecordRun embeds the sub-record whole, and
 // TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead
-// (finding_run_record_test.go:1099) pins the carriage through finRecordBuild. A
+// (`TestFinRecordPublishesTheTrailerKeyNamesTheReaderRead`) pins the carriage through finRecordBuild. A
 // fourth hand adds cost and no discrimination.
 //
 // THE FATAL PRECONDITION IS THE CEILING DEFENCE, and it names the state it is
