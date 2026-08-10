@@ -31,11 +31,13 @@ import (
 // trailGateUsable BECAUSE THE READING REDUCES TO PTYRUNNER. That was not the
 // reason when this pin landed: until #1433 the usable arm ignored the runner path
 // entirely, so this composition could not vary by it under any reading. Since
-// #1433 the same fixture under a streamrunner reading reaches the presence arm and
-// trailGateOutOfContract instead, so the ptyrunner premise asserted below is
-// load-bearing for the value this chain composes over rather than only for the
-// test's name. The assertions themselves are unamended by that ticket, and are
-// still what this pin is worth.
+// #1433 the same fixture under a streamrunner reading reaches the presence arm, and
+// since #1434 that arm answers trailGatePresentOwesNone — a value of its own — so
+// the ptyrunner premise asserted below is load-bearing for the value this chain
+// composes over rather than only for the test's name, and it is more load-bearing
+// than it was: the reading now picks between two DIFFERENT gate values rather than
+// between two sites answering one. The assertions themselves are unamended by
+// either ticket, and are still what this pin is worth.
 //
 // The general claim that no arm reads the path is gone: #1420's absence arm reads
 // it and reaches three different cases by it, and #1433's presence arm reads it
@@ -44,10 +46,10 @@ import (
 // demonstrated under `go test -overlay` rather than asserted.
 //
 // The two shipped tests that come closest state neither claim.
-// TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1148) drives the
+// TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1234) drives the
 // whole chain, but every trailGateCases() row carries trailRunnerUnread(), the
 // indeterminate answer. TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt
-// (trailer_admissibility_test.go:1956) does drive all five readings, but only over
+// (trailer_admissibility_test.go:2023) does drive all five readings, but only over
 // trailGate, and it compares each row AGAINST ITSELF: an edit that moved a Detail
 // under all five readings alike passes it untouched.
 //
@@ -59,8 +61,8 @@ import (
 //
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
-// (trailer_admissibility_test.go:388), and clause B of
-// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:1989-1994) requires it
+// (trailer_admissibility_test.go:425), and clause B of
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:2056-2061) requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
 // CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420 and
 // after #1433: the absence arm embeds trailReasonAgainstPath's answer and the
@@ -71,7 +73,7 @@ import (
 //
 // trailGate is handed the reading directly through trailGateInput.RunnerPath, and
 // trailClassifyRun is handed it inside readings.Gate.RunnerPath, because
-// trailRunReadings.Gate is the whole trailGateResult (trail_run_outcome_test.go:199).
+// trailRunReadings.Gate is the whole trailGateResult (trail_run_outcome_test.go:231).
 // trailAdmitAttribution(reap tdnReapOutcome, certified string) is handed NO
 // runner path at all, so a byte assertion on its Detail would be green by
 // construction whatever that arm did — a rung no mutation can redden. It is
@@ -118,7 +120,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	// Premise. The reading carries no VALUE from the argv it was driven over.
 	// This is the first test to drive a real runner argv into
 	// trailGateInput.RunnerPath, a field that IS marshalled into the published
-	// gate record (trailer_admissibility_test.go:264-300), and the boundary
+	// gate record (trailer_admissibility_test.go:297-334), and the boundary
 	// keeping a command string out of it is that tdnRunnerFromArgv returns
 	// constant literals and interpolates nothing from its argument. The reader
 	// may name the flag --session-id in its answer; it may never echo what
@@ -135,7 +137,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 
 	// Premise. The reap record is CLASSIFIED by the real producer rather than
 	// typed, which pins the proof arm to a record tdnClassifyReapLog actually
-	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2200)
+	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2269)
 	// and its reason.
 	classified := tdnClassifyReapLog([]byte(trailReapLine(1, "[7788]")+"\n"), heldPGID)
 	if classified.Verdict != tdnReapHeldPGIDKilled || classified.LineCount != 1 {
@@ -179,7 +181,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	//
 	// A gate-VALUE premise is deliberately not among the premises above. Any
 	// mutation to trailGate's usable arm's value cascades: a different in-space
-	// value trips C5 (trail_run_outcome_test.go:437-443), an out-of-space one
+	// value trips C5 (trail_run_outcome_test.go:470-476), an out-of-space one
 	// trips C1, and either way the run-level outcome moves too — so it could never
 	// be the sole red for anything, and it would be an assertion this test owes a
 	// mutation for and cannot have. "Reached through trailGateUsable and

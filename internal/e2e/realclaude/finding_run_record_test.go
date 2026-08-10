@@ -46,7 +46,7 @@ package realclaude
 // because finRecordInputs carries neither a trailObservation
 // (result_trailer_observation_test.go:141) nor a trailScanResult (:98). That is
 // the property trailRunReadings.BoundFrom's comment states as its own reason for
-// taking a plain value (trail_run_outcome_test.go:227-233): taking the
+// taking a plain value (trail_run_outcome_test.go:259-265): taking the
 // observation "would promote that pointer back into reach". It is the STRONGER
 // property #1290 could not buy; #1320 bought it — finTrailerBuild's input is now a
 // finSighting carrying neither .Line nor the pointer, as finTrailerBuild's doc says.
@@ -67,12 +67,12 @@ package realclaude
 // consumer. tdnRunnerFromArgv (teardown_liveness_probe_test.go:772) is the argv
 // read, with tdnFixturePtyArgv (:897) and tdnFixtureStreamArgv (:902) its
 // shipped fixtures; reachRunnerPathFromEnv (background_reach_probe_test.go:1102)
-// is the env read. trailReapLine (trailer_admissibility_test.go:710) renders the
+// is the env read. trailReapLine (trailer_admissibility_test.go:753) renders the
 // synthetic reap stderr, trailNeedle (result_trailer_observation_test.go:325) is
 // the plant, and reachMaxCommandBytes / reachCapCommand
 // (background_reach_probe_test.go:123, :945) are the single-sourced cap.
 //
-// trailDetail (trailer_admissibility_test.go:243) is reused rather than given a
+// trailDetail (trailer_admissibility_test.go:276) is reused rather than given a
 // finDetail twin, for the reason merged code has settled twice
 // (finding_attribution_fanout_test.go:37-44, finding_staging_gate_test.go:73-81):
 // it carries no decision — fmt.Sprintf plus reachCapCommand's 512-byte cap — and
@@ -107,9 +107,9 @@ import (
 // parent, which is exactly what distinguishes wrapper from command. A reader of
 // the issue can check that from the integers; they could not check it from the
 // bare count 2, which is all trailRunOutcome.MatchCount publishes
-// (trail_run_outcome_test.go:257-260). Widening this type to the argv would put
+// (trail_run_outcome_test.go:289-292). Widening this type to the argv would put
 // model-chosen text into the artifact and contradict the rule that comment and
-// trailRunReadings.MatchCount (:213-216) both state.
+// trailRunReadings.MatchCount (:245-248) both state.
 type finRecordProc struct {
 	PID  int `json:"pid"`
 	PPID int `json:"ppid"`
@@ -131,7 +131,7 @@ type finRecordProc struct {
 // not a validated one, because no builder in this family validates its inputs
 // and no such miswrite has been observed. If a live run ever publishes
 // exit_code: 0 for a pyry that did not exit, the fix is a PyryExited bool beside
-// it, mirroring trailRunReadings.PyryExited (trail_run_outcome_test.go:223-226)
+// it, mirroring trailRunReadings.PyryExited (trail_run_outcome_test.go:255-258)
 // whose zero value points the safe way — not validation inside the builder.
 //
 // # What is carried whole, and why that is safe
@@ -140,7 +140,7 @@ type finRecordProc struct {
 // trap-free by their own enforcing tests (TestFinAttributeRecordCarriesNoCapturedBytes,
 // TestFinTrailerRecordCarriesNoCapturedBytes). Neither is re-derived and neither
 // is re-read. Liveness is []pinStateOutcome carried whole for
-// trailRunReadings.Liveness' stated reason (:219-222): "pinStateOutcome carries
+// trailRunReadings.Liveness' stated reason (:251-254): "pinStateOutcome carries
 // no command column by construction" — pinStateColumns is `pid=,ppid=,stat=` and
 // carries an explicit never-add-command/args/comm prohibition with an enforcing
 // test (process_pin_liveness_test.go:221-232). Its PID and PPID are what tie
@@ -152,7 +152,7 @@ type finRecordProc struct {
 //
 // # The Detail's content rule, pinned rather than left to judgement
 //
-// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:244-251) and
+// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:276-283) and
 // finAttributeRecord.Detail's (finding_attribution_fanout_test.go:116-124), it
 // MAY name: the exit code, the row and liveness COUNTS, the three runner
 // readings and their agreement verdict, the attribution's selected admissibility
@@ -343,7 +343,7 @@ func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
 // # ClaudeVersion is capped on the way in
 //
 // The family's rule is that every retained operator-visible string is capped
-// (trailer_admissibility_test.go:229-232), and this is the one such string the
+// (trailer_admissibility_test.go:262-265), and this is the one such string the
 // record would otherwise retain uncapped. The live caller is the version probe,
 // whose error path returns fmt.Sprintf("<unavailable: %v>", err)
 // (background_trigger_probe_test.go:611) — an exec error interpolating the
@@ -413,7 +413,7 @@ const (
 // drops.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:649-651): a shared backing array is
+// reason (trail_run_outcome_test.go:697-699): a shared backing array is
 // reachable from every test in this package, and `go test -race` runs them in
 // parallel.
 func finRecordMatchedRows(suffix string) []reachProc {
@@ -591,7 +591,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 	// into a record destined for a public issue. It is the one retained
 	// operator-visible string this record would otherwise hold uncapped, against
 	// the family's rule that every one of them is capped
-	// (trailer_admissibility_test.go:229-232).
+	// (trailer_admissibility_test.go:262-265).
 	overlong := "<unavailable: exec: " + strings.Repeat("/home/operator/a/long/path", 40) + ">"
 	if len(overlong) <= reachMaxCommandBytes {
 		t.Fatalf("the overlong version fixture is %d bytes, inside the %d-byte cap, so the check "+
@@ -657,7 +657,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 // would have refused. It is the position finTrailerOutcomeValues()
 // (finding_trailer_evidence_test.go:550) occupies for #1290's outcome, and the
 // rule trailGateCases states: the shipped producer for what it can emit,
-// hand-built for what it cannot (trailer_admissibility_test.go:715-719).
+// hand-built for what it cannot (trailer_admissibility_test.go:758-762).
 func TestFinRecordLivenessIsConsumedAsHanded(t *testing.T) {
 	values := finRecordLivenessValues()
 	if len(values) != 4 {
@@ -783,7 +783,7 @@ func TestFinRecordEmbedsTrailerRecordWhole(t *testing.T) {
 		// is nil unless State == trailSeen and a consumer dereferencing it without
 		// checking panics loudly (result_trailer_observation_test.go:108-118); this
 		// record's builder never has the chance, which is the stronger property
-		// trailRunReadings.BoundFrom's comment describes (trail_run_outcome_test.go:227-233).
+		// trailRunReadings.BoundFrom's comment describes (trail_run_outcome_test.go:259-265).
 		inputs := reflect.TypeOf(finRecordInputs{})
 		for _, forbidden := range []reflect.Type{
 			reflect.TypeOf(trailObservation{}),
