@@ -56,7 +56,7 @@ package realclaude
 // The hazard the shipped paragraph here held open — a new gate value registered
 // in trailIsGateValue but unhandled in that switch, which no closure test
 // catches — is therefore discharged rather than deferred, and it is recorded at
-// the switch itself (trail_run_outcome_test.go:497-553) rather than here.
+// the switch itself (trail_run_outcome_test.go:530-601) rather than here.
 //
 // This file's own six values are unchanged by either: they say what a
 // terminal_reason MEANS against a path, and what a consumer does with that
@@ -146,7 +146,7 @@ const trailReasonKeyName = "terminal_reason"
 // --- the record ---------------------------------------------------------------
 
 // trailReasonResult is what the predicate produces, in trailAdmitResult's shape
-// (trailer_admissibility_test.go:306-309): two fields, no pointer into any input,
+// (trailer_admissibility_test.go:340-343): two fields, no pointer into any input,
 // and no quote of any captured string.
 //
 // It deliberately carries no certified reason, unlike trailGateResult: copying
@@ -281,7 +281,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 // --- membership helper ----------------------------------------------------------
 
 // trailIsReasonValue reports whether v is one of the recorded terminal-reason
-// values, in trailIsGateValue's shape (trailer_admissibility_test.go:863) and
+// values, in trailIsGateValue's shape (trailer_admissibility_test.go:906) and
 // for the family's stated reason: a value a reader of the published record
 // cannot look up is a verdict they cannot interpret.
 //
