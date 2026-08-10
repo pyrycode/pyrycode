@@ -72,11 +72,11 @@ package realclaude
 // needle in every string-bearing input" makes it red against shipped code:
 //
 //   - trailGate fills Reason from res.Trailer.TerminalReason and splices it %q
-//     into Detail on BOTH certifying arms (trailer_admissibility_test.go:334,
-//     :345); readings.Gate takes that result whole;
+//     into Detail on BOTH certifying arms (trailer_admissibility_test.go:345,
+//     :356); readings.Gate takes that result whole;
 //   - the gather hands the same Reason to the fan-out as certified, and
-//     trailAdmitAttribution splices it %q into Detail on the budget arm (:461)
-//     and the proof arm (:514); readings.Admit takes that result whole too;
+//     trailAdmitAttribution splices it %q into Detail on the budget arm (:485)
+//     and the proof arm (:549); readings.Admit takes that result whole too;
 //   - finGatherInputs.ClaudeState is copied into readings.ClaudeState whole,
 //     trailClassifyRun republishes it as claude_state
 //     (trail_run_outcome_test.go:268, :375), and C7 quotes an out-of-contract
@@ -88,7 +88,7 @@ package realclaude
 // stop publishing a field the operator reads to interpret the run — the
 // certified reason, or the corroboration verdict. #1280 met the first one layer
 // down and resolved it by planting only in the stderr
-// (finding_attribution_fanout_test.go:730-731). THE NEEDLE'S HOME HERE IS THE
+// (finding_attribution_fanout_test.go:731-732). THE NEEDLE'S HOME HERE IS THE
 // TRAILER'S `result` FIELD AND THE REAP-LOG STDERR; it may enter neither
 // terminal_reason nor ClaudeState. That plant is the STRONGER test, not a
 // weakened one: resultTrailer has no `result` member so trailScanResult.Trailer
@@ -589,7 +589,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 
 	// The attribution leg, guarded on the gate's certified Reason: the exact
 	// condition C3 and C4 split on, and the one trailAdmitAttribution's own
-	// contract block (trailer_admissibility_test.go:446) rejects the negation of.
+	// contract block (trailer_admissibility_test.go:470) rejects the negation of.
 	// Outside the guard the fan-out is not called at all and record stays zero.
 	//
 	// Selected is copied in ONLY when the fan-out attributed a group. Its doc
@@ -823,7 +823,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	} else {
 		// C4 (:423): Admit is left ZERO when the gate certified nothing. This is
 		// the zero-value comparison the package uses for "not classified"
-		// (trail_run_outcome_test.go:729, finding_attribution_fanout_test.go:667) —
+		// (trail_run_outcome_test.go:729, finding_attribution_fanout_test.go:668) —
 		// a comparison against an existing consumer's idiom, not a reading the
 		// gather produced by literal.
 		if readings.Admit != (trailAdmitResult{}) {
@@ -851,7 +851,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	// pinScanArgv returns the ZERO pinScan on error, so the three are consistent
 	// by construction — what is pinned here is that invariant. The errored arm has
 	// NO LIVE REPRO in an offline rig, which is this package's own idiom for an
-	// unproducible contract arm (trailer_admissibility_test.go:321-327).
+	// unproducible contract arm (trailer_admissibility_test.go:332-338).
 	if readings.ArgvScanErrored && (readings.MatchCount != 0 || readings.RowsScanned != 0) {
 		t.Fatalf("C9: the argv scan is recorded as errored yet reports %d match(es) across %d "+
 			"row(s), a pair pinScanArgv cannot emit", readings.MatchCount, readings.RowsScanned)
@@ -864,7 +864,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 
 	// AC2's ordering claim, asserted rather than described. No subject is staged
 	// anywhere in this file, so every row runs at zero matches and the finding row
-	// STILL reports the finding: Step 2 (:567) is consulted before Step 7 and Step
+	// STILL reports the finding: Step 2 (:698) is consulted before Step 7 and Step
 	// 8 are. On a live run the same thing happens for a different reason — the
 	// reaper has already killed the group by the time the post-trailer scan runs —
 	// which is why nothing may be done to the hold or the scan timing to "make the
@@ -1225,8 +1225,8 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // field, which is what trailNeedle already stands in for
 // (result_trailer_observation_test.go:322-325). IT MAY NOT GO INTO
 // terminal_reason: trailGate and trailAdmitAttribution both quote the certified
-// reason %q into their Details BY DESIGN (trailer_admissibility_test.go:334,
-// :345, :461, :514), and readings.Gate and readings.Admit take those results
+// reason %q into their Details BY DESIGN (trailer_admissibility_test.go:345,
+// :356, :485, :549), and readings.Gate and readings.Admit take those results
 // whole — so such a plant would be red against shipped code whose only fix
 // deletes the field the operator reads to interpret the gate. The exclusion is
 // stated here and made structural by finGatherNeedleTrailer, which renders
@@ -1937,13 +1937,13 @@ const finGatherOverCapPad = 200
 //
 // The gate and the attribution. terminal_reason "max_turns" makes trailGate answer
 // trailGateBudgetFired carrying a NON-EMPTY Reason
-// (trailer_admissibility_test.go:330-340), so the gather's attribution guard is
+// (trailer_admissibility_test.go:341-351), so the gather's attribution guard is
 // satisfied and that leg RUNS here, returning a structural void for the budget path.
 // Incidental: this row is about the trailer leg, and asserting on either would
 // restate rows the file already ships. That the carrier fill is independent of the
 // gate's verdict holds by DATA DEPENDENCE and not by ordering — the fill reads only
-// obs and never reads readings.Gate, which is computed ABOVE it (:592 against
-// :603-628). Staleness and BoundFrom belong to the two tests above; this row adds no
+// obs and never reads readings.Gate, which is computed ABOVE it (:723 against
+// :734-759). Staleness and BoundFrom belong to the two tests above; this row adds no
 // second source of either.
 //
 // # It costs no wall clock
@@ -1955,7 +1955,7 @@ func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	seed := finGatherSeed(t, &stdout, trailPaddedTrailer(finGatherOverCapPad))
 
 	// Recomputed through the SHIPPED scanner over the SAME bytes the gather is
-	// about to read, the file's own C2 idiom (:824): the expectation is the
+	// about to read, the file's own C2 idiom (:958): the expectation is the
 	// decode's and never four typed-in literals.
 	scan := trailScan(seed)
 	if scan.State != trailSeen || scan.Trailer == nil {

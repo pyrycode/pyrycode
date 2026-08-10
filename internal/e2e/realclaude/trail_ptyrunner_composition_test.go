@@ -25,22 +25,29 @@ import (
 // classifier's match-count arms and in the published liveness list. Over a live
 // run today the reading always names no runner.
 //
-// # Why it is green the day it lands
+// # Why it is green, and why the reason changed at #1433
 //
-// The chain here is driven over trailFixtureTrailer, which reaches
-// trailGateUsable — an arm that ignores the runner path — so THIS composition
-// cannot vary by it, which is the property being pinned rather than a gap. The
-// general claim that no arm reads the path is gone: #1420's absence arm reads it,
-// and reaches three different cases by it. A green pin is worth exactly what it
-// discriminates, so every assertion below is the sole red for one enumerated
-// mis-implementation, each one demonstrated under `go test -overlay` rather than
-// asserted.
+// The chain here is driven over trailFixtureTrailer, and it reaches
+// trailGateUsable BECAUSE THE READING REDUCES TO PTYRUNNER. That was not the
+// reason when this pin landed: until #1433 the usable arm ignored the runner path
+// entirely, so this composition could not vary by it under any reading. Since
+// #1433 the same fixture under a streamrunner reading reaches the presence arm and
+// trailGateOutOfContract instead, so the ptyrunner premise asserted below is
+// load-bearing for the value this chain composes over rather than only for the
+// test's name. The assertions themselves are unamended by that ticket, and are
+// still what this pin is worth.
+//
+// The general claim that no arm reads the path is gone: #1420's absence arm reads
+// it and reaches three different cases by it, and #1433's presence arm reads it
+// too. A green pin is worth exactly what it discriminates, so every assertion
+// below is the sole red for one enumerated mis-implementation, each one
+// demonstrated under `go test -overlay` rather than asserted.
 //
 // The two shipped tests that come closest state neither claim.
 // TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1148) drives the
 // whole chain, but every trailGateCases() row carries trailRunnerUnread(), the
 // indeterminate answer. TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt
-// (trailer_admissibility_test.go:1552) does drive all five readings, but only over
+// (trailer_admissibility_test.go:1956) does drive all five readings, but only over
 // trailGate, and it compares each row AGAINST ITSELF: an edit that moved a Detail
 // under all five readings alike passes it untouched.
 //
@@ -52,12 +59,13 @@ import (
 //
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
-// (trailer_admissibility_test.go:364), and clause B of
-// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:1585-1590) requires it
+// (trailer_admissibility_test.go:388), and clause B of
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:1989-1994) requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
-// CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420: the
-// absence arm embeds trailReasonAgainstPath's answer, whose prose interpolates no
-// reading, so no arm puts the reading into a Detail.
+// CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420 and
+// after #1433: the absence arm embeds trailReasonAgainstPath's answer and the
+// presence arm cites that function's case constant, and that function's prose
+// interpolates no reading either, so no arm puts the reading into a Detail.
 //
 // # Two Details carry the no-echo claim, not three
 //
@@ -110,7 +118,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	// Premise. The reading carries no VALUE from the argv it was driven over.
 	// This is the first test to drive a real runner argv into
 	// trailGateInput.RunnerPath, a field that IS marshalled into the published
-	// gate record (trailer_admissibility_test.go:254-289), and the boundary
+	// gate record (trailer_admissibility_test.go:264-300), and the boundary
 	// keeping a command string out of it is that tdnRunnerFromArgv returns
 	// constant literals and interpolates nothing from its argument. The reader
 	// may name the flag --session-id in its answer; it may never echo what
@@ -127,7 +135,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 
 	// Premise. The reap record is CLASSIFIED by the real producer rather than
 	// typed, which pins the proof arm to a record tdnClassifyReapLog actually
-	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:1715)
+	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2200)
 	// and its reason.
 	classified := tdnClassifyReapLog([]byte(trailReapLine(1, "[7788]")+"\n"), heldPGID)
 	if classified.Verdict != tdnReapHeldPGIDKilled || classified.LineCount != 1 {

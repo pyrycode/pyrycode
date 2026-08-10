@@ -67,12 +67,12 @@ package realclaude
 // consumer. tdnRunnerFromArgv (teardown_liveness_probe_test.go:772) is the argv
 // read, with tdnFixturePtyArgv (:897) and tdnFixtureStreamArgv (:902) its
 // shipped fixtures; reachRunnerPathFromEnv (background_reach_probe_test.go:1102)
-// is the env read. trailReapLine (trailer_admissibility_test.go:579) renders the
+// is the env read. trailReapLine (trailer_admissibility_test.go:710) renders the
 // synthetic reap stderr, trailNeedle (result_trailer_observation_test.go:325) is
 // the plant, and reachMaxCommandBytes / reachCapCommand
 // (background_reach_probe_test.go:123, :945) are the single-sourced cap.
 //
-// trailDetail (trailer_admissibility_test.go:233) is reused rather than given a
+// trailDetail (trailer_admissibility_test.go:243) is reused rather than given a
 // finDetail twin, for the reason merged code has settled twice
 // (finding_attribution_fanout_test.go:37-44, finding_staging_gate_test.go:73-81):
 // it carries no decision — fmt.Sprintf plus reachCapCommand's 512-byte cap — and
@@ -657,7 +657,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 // would have refused. It is the position finTrailerOutcomeValues()
 // (finding_trailer_evidence_test.go:550) occupies for #1290's outcome, and the
 // rule trailGateCases states: the shipped producer for what it can emit,
-// hand-built for what it cannot (trailer_admissibility_test.go:584-588).
+// hand-built for what it cannot (trailer_admissibility_test.go:715-719).
 func TestFinRecordLivenessIsConsumedAsHanded(t *testing.T) {
 	values := finRecordLivenessValues()
 	if len(values) != 4 {

@@ -250,7 +250,7 @@ func finWritePlantedTrailerScan() trailScanResult {
 
 // finWritePlantedReapLog renders pyry's own captured stderr with the needle on an
 // ANCHORED line, reusing #1280's plant verbatim
-// (finding_attribution_fanout_test.go:730) for its stated reason: trailReapLine
+// (finding_attribution_fanout_test.go:731) for its stated reason: trailReapLine
 // splices its pgids argument raw and tdnParsePGIDs stops at the first ]
 // (teardown_liveness_test.go:246-254), so the list still parses and the needle
 // lands in tdnReapOutcome.Line — the channel the fan-out drops. A needle on a
@@ -321,7 +321,7 @@ func finWritePlantedReapLog() []byte {
 // # The certified reason is "completed" and not the budget one
 //
 // trailAdmitAttribution returns trailAdmitVoidBudgetFired the moment certified ==
-// trailBudgetTerminalReason (trailer_admissibility_test.go:458), ahead of every
+// trailBudgetTerminalReason (trailer_admissibility_test.go:482), ahead of every
 // reap-side arm. AC2's premise is that the entry reads trailAdmitProof — reachable
 // only from a needle-bearing line that was recognised, parsed and matched — so a
 // budget reason here would defuse the non-vacuity check into a Fatalf about the
@@ -798,7 +798,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 		t.Fatalf("channel 3 (reap stderr): the synthetic reap log carries no needle")
 	}
 	// The premise doubles as the non-vacuity proof, following
-	// finding_attribution_fanout_test.go:737-741: trailAdmitProof is reachable only
+	// finding_attribution_fanout_test.go:738-742: trailAdmitProof is reachable only
 	// if the needle-bearing line was recognised as anchored, parsed and found to
 	// name the held group. A plant that stopped being anchored lands here.
 	//
@@ -806,7 +806,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// them renders every Admit.Detail, and the rule is to name the count, the path
 	// and the length rather than the string (security review item [7]). The Values
 	// are safe to print because trailAdmitAttribution returns one of a closed set
-	// (trailer_admissibility_test.go:217-224); the Details beside them are not.
+	// (trailer_admissibility_test.go:225-232); the Details beside them are not.
 	first := "<no entries>"
 	if len(in.Attribution.Entries) > 0 {
 		first = in.Attribution.Entries[0].Admit.Value
@@ -941,7 +941,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 // finding_run_record_test.go:934-944 gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
-// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:758),
+// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:759),
 // less the redundant trailer_line, which "line" already covers.
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)

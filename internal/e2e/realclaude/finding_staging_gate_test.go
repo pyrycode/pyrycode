@@ -70,7 +70,7 @@ package realclaude
 // re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
 // is the shipped needle.
 //
-// trailDetail (trailer_admissibility_test.go:233) is reused rather than given a
+// trailDetail (trailer_admissibility_test.go:243) is reused rather than given a
 // finDetail twin, for the reason #1280 already settled in merged code
 // (finding_attribution_fanout_test.go:37-44): trailDetail's own "the trail*
 // family stays out of the tdn* teardown classifier's reach" argument does not

@@ -354,7 +354,7 @@ func finStageHeldGroup(t *testing.T, body func(finStageSubject)) {
 //
 // The count is 1 because trailAdmitAttribution answers a named group across more
 // than one anchored line with trailAdmitVoidNotOneReapLine
-// (trailer_admissibility_test.go:521-528) rather than with trailAdmitProof.
+// (trailer_admissibility_test.go:556-563) rather than with trailAdmitProof.
 func finStageReapLine(pgid int) []byte {
 	return []byte(trailReapLine(1, fmt.Sprintf("[%d]", pgid)) + "\n")
 }
