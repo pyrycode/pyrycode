@@ -787,9 +787,10 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   probe**; two pure predicates that decide whether #1266's trailer scan and
   #1253's reap-log attribution can support a claim, so #1271's downstream
   classifier never has to. `trailGate(trailGateInput) trailGateResult` maps
-  onto a six-value positive allowlist (`trailGateUsable`/`NoTrailer`/
-  `ScanAborted`/`BudgetFired`/`AbsentOwesNone`/`OutOfContract`) and certifies a non-empty
-  terminal reason on the two arms that carry one. **#1373** widened the
+  onto a seven-value positive allowlist (`trailGateUsable`/`NoTrailer`/
+  `ScanAborted`/`BudgetFired`/`AbsentOwesNone`/`PresentOwesNone`/`OutOfContract`)
+  and certifies a non-empty terminal reason on the two arms that carry one.
+  **#1373** widened the
   input from a bare `trailScanResult` to `trailGateInput{Scan, RunnerPath}`
   so the gate's input can carry which runner produced the trailer line
   (`terminal_reason` means different things on ptyrunner vs. streamrunner);
@@ -851,7 +852,28 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   per-reading companion sub-test rather than left as withdrawn coverage. No
   closed set grows; promoting the shape to a gate value of its own,
   mirroring #1417's move for absence, is **#1434**. See
-  [`codebase/1433.md`](../codebase/1433.md).
+  [`codebase/1433.md`](../codebase/1433.md). **#1434** then makes that
+  promotion: the presence arm answers `trailGatePresentOwesNone` — a
+  seventh gate value — instead of `trailGateOutOfContract`, and still
+  certifies nothing (`Reason` stays empty). `trailGateOutOfContract`'s
+  enumerated sub-cases drop from six to five; `trailGate` still has eleven
+  return sites, but only five answer `trailGateOutOfContract` (was six). The
+  Detail keeps citing the case constant rather than the reduction's Detail
+  (427 B measured, against the same 470 B ceiling — down from #1433's 445 B
+  after the closing "a value of its own is #1434" clause came out).
+  `trailClassifyRun` (#1271, below) gains a matching step-1 arm,
+  `trailOutcomeVoidReasonNotOwedByPath` — a thirteenth run outcome and a
+  void, distinct from its `trailOutcomeVoidPathOwesNoReason` sibling (same
+  void-ness, opposite reading: absent-on-owes-none is that path's healthy
+  shape, present-on-owes-none is not) and from `trailOutcomeOutOfContract`
+  (a genuine reading, not a caller's bug). Both closed sets grew in one
+  commit, since step 1's switch has no default arm and an unhandled value
+  would fall through to steps 3-8 and award a scan-side answer about pyry
+  from a record the gate says certifies nothing. Two code-review FAIL/PASS
+  rounds on the family's repeat failure mode — bare `(:NNN)` cites resolved
+  by last-named-file instead of by symbol, both correct on `main` and moved
+  anyway — fixed by re-deriving bare cites from their named symbol first.
+  See [`codebase/1434.md`](../codebase/1434.md).
   `trailAdmitAttribution(tdnReapOutcome, certified string) trailAdmitResult`
   maps the reap attribution onto a seven-value allowlist — one admissible
   value (`trailAdmitProof`, requiring verdict `tdnReapHeldPGIDKilled`,
@@ -880,8 +902,11 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
 - `trail_run_outcome_test.go` (#1271) — the **run-level classifier**:
   `trailClassifyRun(trailRunReadings) trailRunOutcome` maps one probe run's raw
-  observations onto exactly one of twelve outcomes (three answers, nine named
-  voids — the ninth, `trailOutcomeVoidPathOwesNoReason`, is #1417's) so a run
+  observations onto exactly one of thirteen outcomes (three answers, ten named
+  voids — `trailOutcomeVoidPathOwesNoReason` is #1417's, and
+  `trailOutcomeVoidReasonNotOwedByPath` — a `terminal_reason` present on a
+  runner path that owes none, a genuine reading rather than a caller's bug —
+  is #1434's) so a run
   that measured nothing is recorded as having measured nothing
   rather than falling through to a finding. Consumes #1270's two admissibility
   results; a nine-check contract block (C1–C9) guards the top, calling
@@ -966,7 +991,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   conditions alone, one of six failure outcomes or the pass-through
   (`finOutcomeReadyToClassify`, deliberately not the zero value — an unfilled
   result must never read as "staged, go classify"), all seven in their own
-  `stage-` sub-namespace apart from the twelve's `run-`. The structural
+  `stage-` sub-namespace apart from the thirteen's `run-`. The structural
   closure is the signature itself: neither type mentions `trailRunReadings`,
   so a failure arm holds nothing a classifier call could be made from — the
   forbidden call is unwritable, not discouraged. Two guard conditions close
@@ -1759,3 +1784,4 @@ After landing, `make test 2>&1 | grep realclaude` should be empty (or only an `o
 - Ticket [#1420](https://github.com/pyrycode/pyrycode/issues/1420) — splits `trailGate`'s absence arm three ways (absent on a path that owes one, absent on a path that owes none, absent on a path naming no runner) by calling the shipped `trailReasonAgainstPath` on the branch the gate's own key-name read has already decided is absent — its first decision-path caller; all three still answer `trailGateOutOfContract` certifying nothing, so `trailGate` moves from eight return sites (four out-of-contract) to ten (six out-of-contract) with no closed set growing; the gate's own prose is rewritten rather than appended to, since 480 B (shipped) + 264–286 B (embedded) overflows the 512-byte cap and truncates 1–5 bytes past each case's value marker — the three rewritten Details land at 461/460/468 B, each checked for both length and absence of the truncation marker on the output; `TestTrailGateIgnoresTheRunnerPathExceptAtTheAbsenceArm` (renamed) exempts only the one absence-shaped row's `Detail` byte comparison via a declared `pathVaries` field, keeps clause B and the value/`Reason` comparison running unconditionally, and a companion sub-test proves the exempted arm positively varies across all five readings; four mutants of `trailReasonAgainstPath`'s label switch each sole-red under `go test -overlay`; nine doc blocks (plus a tenth in a sibling file) asserting "no arm reads the runner path" corrected, and six `#1374` attributions repointed to "unowned" now that #1374 is closed NOT_PLANNED; split from #1416, blocked by #1419; codebase note at [`codebase/1420.md`](../codebase/1420.md).
 - Ticket [#1417](https://github.com/pyrycode/pyrycode/issues/1417) — admits the one absence sub-case (#1420's split) that is a healthy reading rather than a caller's bug: absent `terminal_reason` on a path the observed reading reduces to `streamrunner` now reaches `trailGateAbsentOwesNone`, a sixth gate value certifying no reason; the owes-one and path-unnamed absence sub-cases and present-and-empty are unchanged and still `trailGateOutOfContract`; `trailClassifyRun` gains a matching step-1 arm, `trailOutcomeVoidPathOwesNoReason` (a twelfth outcome, a void — distinct from `trailOutcomeVoidNoTrailer` because a trailer *was* written, and from `trailOutcomeOutOfContract` because this is a reading, not a defect); both closed sets (union map, membership predicates, every switch over the gate's values including the non-certifying-value fatal in `TestTrailGateThenAdmit`) grow in the same commit, since an unhandled gate value would fall through step 1's default-less switch to steps 3–8 and award a scan-side answer about pyry from a record the gate says certifies nothing; `TestTrailGateNamesWhichAbsenceCaseFired`'s R2 row is amended from a shared precondition into the discriminator, gaining mutants M5–M9 (each a sole-red row, verified under `go test -overlay`); the new gate arm's prose is rewritten within a 470-byte ceiling (512 − the 42-byte leak needle) rather than appended to; unreachable from either shipped live gather today (both fill `RunnerPath` with `trailRunnerUnread()`), and no comment added claims otherwise; two code-review FAIL rounds on an abandoned then partial cross-file cite-renumbering sweep (79 then 2 stale cites, unrelated to the ticket's substance) before a clean PASS; split from #1368 ← #1351 ← #1237, blocked by #1419 and #1420; security-sensitive (architect self-review PASS, two SHOULD FIX both discharged); codebase note at [`codebase/1417.md`](../codebase/1417.md).
 - Ticket [#1433](https://github.com/pyrycode/pyrycode/issues/1433) — the #1420 step for the **presence** side: a `terminal_reason` present and non-empty on a path the observed reading reduces to `streamrunner` (owes none) now reaches an eleventh return site answering the shipped `trailGateOutOfContract` and certifying nothing, instead of falling through to `trailGateUsable` under a Detail that cited ptyrunner's `emitter.Close()`/reap defer on a path where neither exists; `trailGate` moves from ten return sites (five out-of-contract) to eleven (six); called via `trailReasonAgainstPath`'s `trailReasonPresentOwesNone` answer (the reduction's second decision-path caller), placed after the budget arm (structural priority: a `max_turns` trailer keeps reaching it) and before the present-and-empty branch (kept path-invariant deliberately — the reduction's one absorbing value can't express the blank-vs-absent `NO LIVE REPRO EXISTS` distinction); Detail cites the 32 B case constant rather than embedding the reduction's 395 B Detail (445 B measured against a 470 B ceiling); `TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt`'s `pathVaries` exemption widens to cover the certified `Reason` — the usable row is the first whose certification itself moves with the reading — repaid by a positive per-reading companion; no closed set grows, no amendment to `trailClassifyRun`; one code-review FAIL/rework round on a cite regression the sweep itself introduced (fixed by naming the file explicitly rather than leaving a bare line-number cite); split from #1427 ← #1369 (closed NOT_PLANNED); security-sensitive (architect self-review PASS); follow-up **#1434** promotes the shape to a gate value of its own; codebase note at [`codebase/1433.md`](../codebase/1433.md).
+- Ticket [#1434](https://github.com/pyrycode/pyrycode/issues/1434) — the #1417 step for the **presence** side: promotes #1433's arm from certifying nothing under the shipped `trailGateOutOfContract` to a gate value of its own, `trailGatePresentOwesNone` (a seventh gate value, still certifying no reason), and gives `trailClassifyRun` a matching step-1 arm and run outcome, `trailOutcomeVoidReasonNotOwedByPath` (a thirteenth outcome, a tenth void) — because the presence-side reading, like the absence-side one #1417 promoted, is genuinely what `streamrunner.Run`'s tee-parse passthrough produced (`internal/agentrun/streamrunner/runner.go:177-179`) and not a caller's bug; `trailGateOutOfContract`'s enumerated sub-cases drop six → five and `trailGate`'s eleven return sites now split five/six instead of six/five; both closed sets (union map 37 → 39, membership predicates, every switch over the gate's values) grow in the same commit, since step 1's default-less switch would otherwise fall an unhandled value through to steps 3-8 and award a scan-side answer about pyry from a record the gate says certifies nothing; the new value's doc carries the same claim limit #1433 already wrote — **never** that pyry wrote the line, cited to the passthrough as the reason claude's own output can produce the same reading, and never a claim about whether a process was alive; the composition test's vacuity guard is a controlled experiment (two tails that provably disagree under a usable gate both collapse to the new outcome once the gate answer is swapped), demonstrated rather than asserted, and the "arm deleted" mutant is shown under `go test -overlay` reaching `run-matched-not-attributed` — a scan-side answer about pyry from a record certifying nothing; Detail re-measured at 427 B against the same 470 B ceiling (down from #1433's 445 B once its "a value of its own is #1434" closing clause came out); two code-review rounds (FAIL → PASS) on the family's repeat failure mode, bare `(:NNN)` cites resolved by last-named-file instead of by named symbol — both misses were correct on `main` and moved anyway; no production files touched; split from #1427 ← #1369 (closed NOT_PLANNED), blocks #1428 (the reason × reading matrix); security-sensitive (architect self-review PASS); codebase note at [`codebase/1434.md`](../codebase/1434.md).
