@@ -28,7 +28,7 @@ package realclaude
 // stage-command-not-staged, with the rig looking correct and one live claude turn
 // spent per attempt. The same equality is load-bearing one layer down:
 // finTranscriptFill only reads the trigger result when call.Command == staged
-// (finding_staging_fill_test.go:260), so a mismatched literal ALSO silently zeroes
+// (`finTranscriptFill`), so a mismatched literal ALSO silently zeroes
 // TriggerFired, which is a second failure arm from the same defect. That is why
 // these declarations ship with offline traps: everything that can be made to go
 // red offline should be, rather than on a burned turn.
@@ -49,7 +49,7 @@ package realclaude
 //     finding_staging_gate_test.go:370-375. The fixture path below is a synthetic
 //     const instead.
 //   - os.Getenv, os.Environ, os.Setenv — the only environment READ is the one
-//     inside reachRunnerPathFromEnv (background_reach_probe_test.go:1103), and the
+//     inside reachRunnerPathFromEnv, and the
 //     only WRITES are the one t.Setenv each hostile-ambient trap needs. THIS BAN
 //     IS A CREDENTIAL GUARD, not tidiness: the two runner traps are the only tests
 //     in this family whose SUBJECT is the ambient environment, so they are where a
@@ -64,7 +64,7 @@ package realclaude
 // The prompt and the command are captured-string class on a live run — the
 // command embeds a t.TempDir()-derived path. This file writes no artifact, logs
 // nothing, and formats no Detail at all, so trailDetail's reachMaxCommandBytes cap
-// (trailer_admissibility_test.go:276) never applies here. Failure messages COMPARE
+// (`trailGateInput`) never applies here. Failure messages COMPARE
 // the two strings and report LENGTHS, following finding_staging_fill_test.go:556-562.
 //
 // No struct is declared, so finTranscriptReading's no-json-tags rule
@@ -96,7 +96,7 @@ import (
 // Derived at 26d83b7 from `rg -n 'FIFOName *=|FIFOPath *=' internal/e2e/realclaude/`
 // — eight taken names, and this one is disjoint from all eight both ways. Note the
 // near miss the second alternative was added for: finLivePinFIFOPath
-// (finding_live_pin_test.go:225) is a FIFOPath const, so the older FIFOName-only
+// (`finLivePinFIFOPath`) is a FIFOPath const, so the older FIFOName-only
 // recipe misses it. RE-RUN the two-alternative recipe at your own HEAD before
 // adding a ninth name — a blocker landing between refinement and implementation is
 // how the seven-name list went stale in the first place.
@@ -112,7 +112,7 @@ const finLiveStageFIFOName = "fin-live-stage-hold"
 // NOT comment, and do NOT do anything else" (background_trigger_probe_test.go:163-166).
 //
 // It is declared here because the consuming driver hands spawnProbePyry BOTH a
-// prompt path and a system path (background_trigger_probe_test.go:621): declaring
+// prompt path and a system path (`spawnProbePyry`): declaring
 // only the user half would leave #1340 to invent the other. It carries NO trap —
 // an assertion that it equals its own definition would prove nothing, and saying
 // so is more honest than shipping one.
@@ -133,7 +133,7 @@ const finLiveStageSystemPrompt = probeSystemPrompt
 // verb follows #1223's — and it was chosen rather than inherited: the alternative
 // is that the staged literal and the liveness read drift apart with no symptom.
 //
-// It is NOT finOutcomeHoldCommand (finding_staging_gate_test.go:375). That is a
+// It is NOT finOutcomeHoldCommand. That is a
 // gate fixture, deliberately the wrong shape: its `sh -c … ; exit 0` carries a `;`
 // into a string the model is asked to reproduce byte-for-byte, against a system
 // prompt that forbids chaining.
@@ -174,11 +174,11 @@ func finLiveStagePrompt(fifoPath string) string {
 //     measured live against claude 2.1.220 as firing on every run carrying it.
 //     Both runners hand claude pyry's own environment verbatim, so setting it on
 //     the parent is the whole plumbing story: no production change, no forwarding
-//     list. Shipped siblings: reachEnvDelta (background_reach_probe_test.go:130),
-//     tdnEnvDelta (teardown_liveness_probe_test.go:166) — neither names a runner.
+//     list. Shipped siblings: reachEnvDelta,
+//     tdnEnvDelta — neither names a runner.
 //   - PYRY_USE_STREAMJSON=0 — named EXPLICITLY rather than left unset, because
 //     reachRunnerPathFromEnv reads the ambient os.Getenv FIRST
-//     (background_reach_probe_test.go:1103) and only then lets the delta override
+//     (`reachRunnerPathFromEnv`) and only then lets the delta override
 //     it, so an empty delta makes the downstream env-side runner reading a reading
 //     of the OPERATOR'S SHELL. Shipped sibling: finRecordEnvDelta()
 //     (finding_run_record_test.go:437-439) — which carries no trigger.
@@ -188,7 +188,7 @@ func finLiveStagePrompt(fifoPath string) string {
 // follow two other tickets' edits. The trap asserts containment against both
 // shipped identifiers instead, so an edit to either goes red here loudly.
 //
-// A FUNC, not a var, following finRecordEnvDelta (finding_run_record_test.go:437):
+// A FUNC, not a var, following finRecordEnvDelta:
 // a package-level []string is mutable by every test in the package, and this one
 // is read by two downstream tickets.
 func finLiveStageEnvDelta() []string {
@@ -207,7 +207,7 @@ func finLiveStageEnvDelta() []string {
 //     runAgentRunStreamRunner on (cmd/pyry/agent_run.go:266). Named EXPLICITLY
 //     for exactly the reason its =0 sibling is, and that reason SURVIVES THE FLIP
 //     unchanged: reachRunnerPathFromEnv reads the ambient os.Getenv FIRST
-//     (background_reach_probe_test.go:1103) and only then lets the delta override
+//     (`reachRunnerPathFromEnv`) and only then lets the delta override
 //     it, so an empty delta makes the downstream env-side runner reading a reading
 //     of the OPERATOR'S SHELL. Only the value differs.
 //
@@ -379,7 +379,7 @@ func TestFinLiveStagePromptStagesTheDeclaredCommand(t *testing.T) {
 	// commands with && or ;", so a staged literal carrying one asks the model to
 	// break the instruction whose verbatim echo the byte equality compares.
 	// finOutcomeHoldCommand's `sh -c … ; exit 0` shape
-	// (finding_staging_gate_test.go:375) is the thing being avoided here — it is a
+	// (`finOutcomeHoldCommand`) is the thing being avoided here — it is a
 	// gate fixture, deliberately the wrong shape, and is NOT asserted against:
 	// staged != finOutcomeHoldCommand is trivially true and would prove nothing.
 	for _, bad := range []string{";", "&&", "|", "sh -c"} {
@@ -490,7 +490,7 @@ func TestFinLiveStageEnvDeltaNamesTheRunner(t *testing.T) {
 
 	// THE CLAIM. Compared like with like: reachRunnerPathFromEnv returns the FULL
 	// reading "ptyrunner (interactive TUI, the agent-run default)"
-	// (background_reach_probe_test.go:1112), and the bare label comes from the
+	// (`reachRunnerPathFromEnv`), and the bare label comes from the
 	// shipped finRecordRunnerLabel (finding_run_record_test.go:267-272), which
 	// truncates at " (". Comparing the raw return to "ptyrunner" would be red
 	// against a correct implementation, and growing a second truncator here would
@@ -553,7 +553,7 @@ func TestFinLiveStageEnvDeltaNamesTheRunner(t *testing.T) {
 func TestFinLiveStageStreamEnvDeltaNamesTheRunner(t *testing.T) {
 	// The hostile ambient — and WHAT IT BUYS IS NOT THE SHIPPED TRAP'S ARGUMENT.
 	// THE TRUTHINESS RULE IS ONE-SIDED: only the exact string "1" is truthy
-	// (background_reach_probe_test.go:1103, matching cmd/pyry/agent_run.go:266),
+	// (`reachRunnerPathFromEnv`, matching cmd/pyry/agent_run.go:266),
 	// and every other value falls through to ptyrunner exactly as unset does. So
 	// an ambient of "0" is INDISTINGUISHABLE FROM UNSET here.
 	//
@@ -589,7 +589,7 @@ func TestFinLiveStageStreamEnvDeltaNamesTheRunner(t *testing.T) {
 	// a =0 entry and a =true entry all read ptyrunner here.
 	//
 	// Compared like with like: the helper returns the FULL reading "streamrunner
-	// (headless stream-json)" (background_reach_probe_test.go:1110) and the bare
+	// (headless stream-json)" (`reachRunnerPathFromEnv`) and the bare
 	// label comes from the shipped finRecordRunnerLabel
 	// (finding_run_record_test.go:267-272), which truncates at " (". Comparing the
 	// raw return to "streamrunner" would be red against a correct implementation,

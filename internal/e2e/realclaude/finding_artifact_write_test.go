@@ -16,7 +16,7 @@ package realclaude
 //
 // # The gap this closes is a DIRECTORY, not a record
 //
-// writeReachArtifacts (background_reach_probe_test.go:823) marshals a clean
+// writeReachArtifacts marshals a clean
 // record into reach.json and then writes rec.rawPS — the verbatim process table,
 // full argv, every operator command line — into reach.ps.txt beside it. A clean
 // JSON blob next to a raw-bytes sidecar publishes the raw bytes. THE RECORD'S
@@ -36,17 +36,17 @@ package realclaude
 // A grep for the os/exec package selector is NOT sufficient on its own: every
 // route off this offline path runs through a SHIPPED HELPER that execs internally
 // rather than through a visible call to that package. The version probe
-// (background_trigger_probe_test.go:606) execs the binary, which is why the
+// (`probeClaudeVersion`) execs the binary, which is why the
 // version here is a caller-supplied string; the claude-binary resolver
-// (resilience_test.go:282) skips when claude is absent, and a skip that exits 0
+// (`resolveClaudeBin`) skips when claude is absent, and a skip that exits 0
 // reads as a pass under `make e2e-realclaude`; the worktree credentials gate
 // (fixtures.go:96) is the "no credentials" rule; the per-pid state read
-// (process_pin_liveness_test.go:275) execs `ps` at :293, which is why the
+// (`pinReadState`) execs `ps` at :293, which is why the
 // liveness fixture below is hand-built; the exit-1 borrow (:1088) execs `false`
 // to obtain an *os.ProcessState Go cannot synthesize; and the argv scan (:191),
-// the process snapshot (background_trigger_probe_test.go:867), the teardown scan
-// (teardown_liveness_probe_test.go:482) and the FIFO hold
-// (background_trigger_probe_test.go:663) each reach a process or the table.
+// the process snapshot (`probeProcessSnapshot`), the teardown scan
+// (`tdnScan`) and the FIFO hold
+// (`holdProbeFIFO`) each reach a process or the table.
 //
 // EVERY ONE OF THEM IS REFERENCED ABOVE BY FILE AND LINE RATHER THAN BY NAME, so
 // that the forbidden-symbol grep reports on this file's CODE and cannot be
@@ -90,7 +90,7 @@ import (
 //
 // It is the claim #1290 made available and this ticket publishes: the record
 // retains no trailer line in any form, capped or otherwise — finTrailerRecord
-// (finding_trailer_evidence_test.go:193) is ten scalars and a name list with no
+// (`finTrailerRecord`) is ten scalars and a name list with no
 // Line, and finRecordInputs carries neither a trailObservation nor a
 // trailScanResult (finding_run_record_test.go:214-221) — so there is no field
 // left to mark for review.
@@ -112,7 +112,7 @@ import (
 // attaches to. So both halves of the safety are stated instead — BOUNDED, in count
 // and in length, by finBoundKeyNames' two constants (finding_run_gather_test.go),
 // and VALUE-FREE, proved at the reader tier by
-// TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310), which plants
+// TestTrailKeyNamesCarryNoValues, which plants
 // a distinct needle in every string-valued position of a trailer line and asserts
 // none reaches the names. Had the honest wording been "review this before
 // pasting", the right answer would have been not to carry the names at all.
@@ -144,7 +144,7 @@ const (
 // # The note does not carry the caveat it is the absence of
 //
 // It must not contain "operator-review-before-paste" or "OPERATOR-REVIEW"
-// (result_trailer_observation_test.go:106 is where that obligation lives, on the
+// (`trailScanResult` is where that obligation lives, on the
 // field this record does not carry). A note explaining the absent caveat in the
 // caveat's own words would train a reader to go looking for a field that is not
 // there. The explanation belongs HERE and in the test — neither of which is
@@ -250,7 +250,7 @@ func finWritePlantedTrailerScan() trailScanResult {
 
 // finWritePlantedReapLog renders pyry's own captured stderr with the needle on an
 // ANCHORED line, reusing #1280's plant verbatim
-// (finding_attribution_fanout_test.go:731) for its stated reason: trailReapLine
+// (`TestFinAttributeRecordCarriesNoCapturedBytes`) for its stated reason: trailReapLine
 // splices its pgids argument raw and tdnParsePGIDs stops at the first ]
 // (teardown_liveness_test.go:246-254), so the list still parses and the needle
 // lands in tdnReapOutcome.Line — the channel the fan-out drops. A needle on a
@@ -285,7 +285,7 @@ func finWritePlantedReapLog() []byte {
 //  1. each matched row's Command — verbatim argv, reduced to finRecordProc's
 //     three integers (finding_run_record_test.go:372-374)
 //  2. ClaudeCommand — reduced to one of tdnRunnerFromArgv's three constants (:379)
-//  3. the reap stderr — pyry's own captured bytes (teardown_liveness_test.go:126),
+//  3. the reap stderr — pyry's own captured bytes (`tdnReapOutcome`),
 //     dropped by finAttributeFanOut
 //
 // The trailer fixture's line carries the needle as well, by construction of
@@ -701,7 +701,7 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // # Why zero, and not "once, in a field marked for review"
 //
 // The record carries no trailer line in any form, capped or otherwise:
-// finTrailerRecord (finding_trailer_evidence_test.go:193) is ten scalars and a
+// finTrailerRecord is ten scalars and a
 // name list with no Line, and finRecordInputs carries neither a trailObservation
 // nor a trailScanResult (finding_run_record_test.go:214-221), so
 // trailScanResult.Line is unreachable from this record at any depth. A SINGLE
@@ -963,7 +963,7 @@ func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	// genuinely named for a captured column still trips this scan.
 	exempt := map[string]string{
 		// A shipped and permitted key on the carried pinStateOutcome
-		// (process_pin_liveness_test.go:252). finding_run_record_test.go:148-151
+		// (`pinStateOutcome`). finding_run_record_test.go:148-151
 		// names this sweep as the place to exempt it rather than as a reason to
 		// strip the field: the value is the ps tool's own stderr about a lookup,
 		// not a process's argv or a model's output.
@@ -1022,7 +1022,7 @@ func TestFinWriteArtifactPublishesNoVerbatimModelOutput(t *testing.T) {
 
 	t.Run("resultTrailer structurally cannot carry the assistant payload", func(t *testing.T) {
 		// The claim three shipped comments state in prose
-		// (result_trailer_observation_test.go:114,
+		// (`trailScanResult`,
 		// finding_trailer_evidence_test.go:38 and :690) and none of them checks.
 		// The decode is what feeds the four published scalars, so its SHAPE is what
 		// makes them safe.
@@ -1104,7 +1104,7 @@ func TestFinWriteArtifactPublishesNoVerbatimModelOutput(t *testing.T) {
 		// explain the absent caveat using the caveat's own words. A reader meeting
 		// "operator-review-before-paste" in the note would go looking for the field
 		// that obligation attaches to (trailScanResult.Line,
-		// result_trailer_observation_test.go:106) and find no such field, which is
+		// `trailScanResult`) and find no such field, which is
 		// the opposite of what the artifact is for. The explanation lives in
 		// finWriteArtifacts' doc comment and here — neither of which is written into
 		// the artifact.

@@ -64,7 +64,7 @@ package realclaude
 // environment column, or BSD eww, all of which print each process's full
 // environment, which on an operator machine means CLAUDE_CODE_OAUTH_TOKEN and
 // ANTHROPIC_API_KEY in a public issue. pinStateColumns
-// (process_pin_liveness_test.go:232) records that prohibition as a constant with
+// (`pinStateColumns`) records that prohibition as a constant with
 // an enforcing test; it is inherited here, not weakened. Liveness in this file
 // is signal-zero only. Nothing here writes an artifact.
 //
@@ -106,7 +106,7 @@ const (
 	// tdnRoleParent is the only role. Leaves need no role of their own: whether
 	// a leaf leads a fresh group is decided by its SPAWNER's SysProcAttr, not by
 	// the leaf, so a leaf needs no logic at all and routes through the package's
-	// existing fake-pyry sleep mode (fixtures_test.go:366).
+	// existing fake-pyry sleep mode (`runFakePyry`).
 	tdnRoleParent = "parent"
 
 	// tdnRoleFilter admits exactly one test in the re-exec'd child, which plays

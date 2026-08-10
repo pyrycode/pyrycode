@@ -21,7 +21,7 @@ package realclaude
 // (result_trailer_observation_test.go:108-118), which was chosen over a value
 // type handing back TerminalReason == "" and letting an empty terminal reason
 // pass as a real one. Since #1320 this record reads the four fields from a
-// finSighting (finding_run_gather_test.go:372), which answers the State/nil PAIR
+// finSighting, which answers the State/nil PAIR
 // as CarriesTrailer one tier up and hands the four on as scalars — so the
 // optional is discriminated where the pointer still exists, and a run that wrote
 // no trailer carries its void down here with nothing left to dereference.
@@ -44,7 +44,7 @@ package realclaude
 // model chose, and its own doc marks it OPERATOR-REVIEW-BEFORE-PASTE
 // (result_trailer_observation_test.go:100-107). Every published record in this
 // family already excludes a captured line for that reason: trailRunOutcome is
-// "COUNTS, NEVER ROWS" (trail_run_outcome_test.go:462), finAttributeEntry states
+// "COUNTS, NEVER ROWS" (`trailRunOutcome`), finAttributeEntry states
 // the exclusion as its own construction (finding_attribution_fanout_test.go:80-88),
 // and finOutcomeResult is a value and a detail and nothing else
 // (finding_staging_gate_test.go:198-201). This record's trailer evidence is its
@@ -52,19 +52,19 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailScan (result_trailer_observation_test.go:180) and its fixtures
+// trailScan and its fixtures
 // trailFixtureTrailer (:307), trailFixtureNoTrailer (:316), trailNeedle (:325),
 // trailPaddedTrailer (:331) and trailOverlongPad (:342) are the shipped scan and
 // the shipped plants — a second scanner over the same bytes that disagreed would
 // be worse than either. The three scan states (:57-71) and the three lateness
 // discriminators (:75-90) are shipped closed spaces, called and never restated.
-// trailIsRunOutcome (trail_run_outcome_test.go:541) and trailRunOutcomeValues
-// (:2468) are the sixteen; finOutcomeIsValue (finding_staging_gate_test.go:210)
+// trailIsRunOutcome and trailRunOutcomeValues
+// (:2468) are the sixteen; finOutcomeIsValue
 // and finOutcomeValues (:223) the staging tier's seven — called, never
 // re-derived. reachMaxCommandBytes and reachCapCommand
-// (background_reach_probe_test.go:123, :945) are the single-sourced cap.
+// (`reachEnableEnv`, :945) are the single-sourced cap.
 //
-// trailDetail (trailer_admissibility_test.go:276) is reused rather than given a
+// trailDetail (`trailGateInput`) is reused rather than given a
 // finDetail twin, for the reason merged code has settled twice
 // (finding_attribution_fanout_test.go:37-44, finding_staging_gate_test.go:73-81):
 // it carries no decision — fmt.Sprintf plus reachCapCommand's 512-byte cap — and
@@ -101,7 +101,7 @@ import (
 // still exists. finSighting has no pointer field at all, so no two records built
 // from one carrier can alias a shared *resultTrailer: the property is structural
 // now rather than bought at build time, and it is CHECKED by
-// TestFinSightingReachesNoScanType (finding_run_gather_test.go:2043) — which
+// TestFinSightingReachesNoScanType — which
 // walks the carrier's type for all three scan types, so a later field carrying
 // one of them a level down fails there — rather than asserted in prose.
 //
@@ -138,7 +138,7 @@ import (
 // # The key names, and why they are not a fifth scalar
 //
 // KeyNames comes from a DIFFERENT READER than the four above: trailKeyNames over
-// the full line (trailer_key_names_test.go:87), not resultTrailer's fixed decode.
+// the full line (`trailKeyNames`), not resultTrailer's fixed decode.
 // It is the fifth trailer FIELD and deliberately not a fifth decoded scalar,
 // which is what leaves this file's "the four decoded scalars" sentences true.
 //
@@ -154,7 +154,7 @@ import (
 //
 // Names and never values, structurally rather than by discipline: trailKeyNames
 // returns []string and discards its map[string]json.RawMessage internally, and
-// TestTrailKeyNamesCarryNoValues (trailer_key_names_test.go:310) plants a distinct
+// TestTrailKeyNamesCarryNoValues plants a distinct
 // needle in every string-valued position of a trailer line and asserts none
 // reaches them. They still come from CLAUDE, which is why the artifact's standing
 // safety sentence names this field rather than leaving it to be discovered
@@ -242,11 +242,11 @@ type finTrailerRecord struct {
 // mid-turn is a datum to publish, not a reason to abort the turn.
 //
 // LIKE THE RECORD IT RETURNS, THIS FUNCTION IS TRAP-FREE BY CONSTRUCTION. Its
-// input is a finSighting (finding_run_gather_test.go:372), which carries neither
+// input is a finSighting, which carries neither
 // trailScanResult.Line nor the *resultTrailer, so the no-captured-bytes property
 // of this builder is held BY THE SHAPE OF THE INPUT — and that shape is checked
 // rather than asserted: TestFinSightingReachesNoScanType
-// (finding_run_gather_test.go:2043) walks the carrier for all three scan types.
+// (`TestFinSightingReachesNoScanType`) walks the carrier for all three scan types.
 // The Detail content rule stated on finTrailerRecord keeps shut the one channel
 // a scalar-only input still leaves open, which is what the Detail may SAY.
 //
@@ -258,7 +258,7 @@ type finTrailerRecord struct {
 // # The outcome is consumed, never decided
 //
 // The value comes from one of two closed sets built elsewhere: trailClassifyRun's
-// sixteen (trail_run_outcome_test.go:638) and the staging-gate tier's seven
+// sixteen (`trailClassifyRun`) and the staging-gate tier's seven
 // (finding_staging_gate_test.go). Both are caller-supplied and carried AS
 // RETURNED — not validated, not renamed, not re-derived, and never cross-checked
 // against State. "A no-trailer run records trailOutcomeVoidNoTrailer" is a

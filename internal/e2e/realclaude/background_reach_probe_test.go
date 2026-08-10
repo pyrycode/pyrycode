@@ -464,7 +464,7 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 	//
 	// Discarding it is not free: on success probeProcessSnapshot also runs a
 	// second, narrow `ps -o pid=,command= -p <pids>` internally to annotate
-	// those descendants (background_trigger_probe_test.go:930), so one extra
+	// those descendants (`probeAnnotateCommands`), so one extra
 	// exec lands between the two load-bearing snapshots. "Immediately
 	// following" in step (2) therefore means the next statement, not the next
 	// syscall. Harmless — the held process cannot exit while the FIFO write end
