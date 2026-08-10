@@ -72,6 +72,7 @@ package realclaude
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -127,9 +128,17 @@ const (
 )
 
 // trailOrderPremiseClause is the fixed tail every Detail below ends with. It is
-// a shared constant rather than four hand-written copies so that "every Detail
-// carries all three premises" is structural: an arm cannot report its own
-// decision and quietly drop the co-failures that did not decide.
+// a shared constant rather than four hand-written copies so that the four arms
+// cannot DRIFT from one another in how they render the premises.
+//
+// Sharing the constant is not on its own what makes "every Detail carries all
+// three premises" true: an arm can still omit the tail from its own format
+// string, and deleting it from one arm leaves every other test here green. What
+// makes the rule checkable is TestTrailOrderAllEightPremiseCombinations, which
+// renders this clause from each row's own three booleans and requires the
+// Detail to contain it — so an arm that reports its decision and quietly drops
+// the co-failures that did not decide reddens, as does one that fills the
+// clause in the wrong order.
 //
 // It costs ~65 bytes of the 512-byte cap and leaks nothing: three booleans the
 // caller already holds.
@@ -339,12 +348,19 @@ func trailOrderCertifiedPremises() trailOrderPremises {
 // finding_staging_gate_test.go:500-508's style; the booleans are in the fixture
 // beside them.
 //
-// Each row also asserts the Detail is non-empty and carries no truncation
-// marker. The MARKER and not a length against 512: reachCapCommand returns its
-// input unchanged at exactly reachMaxCommandBytes and appends the marker only
-// past it (background_reach_probe_test.go:945-950), so a len < 512 check both
+// Each row also asserts the Detail is non-empty, carries no truncation marker,
+// and contains trailOrderPremiseClause rendered from that row's own booleans.
+//
+// The MARKER and not a length against 512: reachCapCommand returns its input
+// unchanged at exactly reachMaxCommandBytes and appends the marker only past it
+// (background_reach_probe_test.go:945-950), so a len < 512 check both
 // false-fails at the boundary and pins a literal that drifts when the constant
 // moves. The marker test is the property itself.
+//
+// The CLAUSE assertion is what makes the Detail content rule's MUST checkable
+// rather than a convention the arms happen to follow. Sharing one constant
+// across the four format strings stops them drifting from one another, but an
+// arm can still omit the tail entirely, and nothing else here would notice.
 func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 	cases := []struct {
 		name string
@@ -392,10 +408,19 @@ func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 			want: trailOrderVoidUnheld,
 		},
 	}
-	if len(cases) != 8 {
-		t.Fatalf("the table holds %d row(s), want 8 — three booleans admit exactly eight inputs "+
-			"and a row set short of that leaves the precedence pinned somewhere and assumed "+
-			"elsewhere", len(cases))
+	// The DISTINCT triples and not len(cases): three booleans admit exactly eight
+	// inputs, so eight distinct ones is the same statement as "every combination
+	// appears". A cardinality check alone passes a table that duplicates one row
+	// and drops another, which silently unpins whichever rule the dropped row
+	// carried.
+	seen := make(map[trailOrderPremises]bool, len(cases))
+	for _, tc := range cases {
+		seen[tc.in] = true
+	}
+	if len(seen) != 8 {
+		t.Fatalf("the table's %d row(s) cover %d distinct input(s), want all 8 — three booleans "+
+			"admit exactly eight inputs and a set short of that leaves the precedence pinned "+
+			"somewhere and assumed elsewhere", len(cases), len(seen))
 	}
 
 	for _, tc := range cases {
@@ -412,6 +437,15 @@ func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 			if strings.Contains(got.Detail, reachTruncationMarker) {
 				t.Errorf("the Detail was truncated at the %d-byte cap, so its argument reaches an "+
 					"operator cut off: %q", reachMaxCommandBytes, got.Detail)
+			}
+			// The clause carries the co-failures that did NOT decide, which is the
+			// design's substitute for a second field on the four multi-failure
+			// rows. Rendered from this row's own booleans, so an arm that drops the
+			// clause and one that fills it in the wrong order both redden here.
+			wantClause := fmt.Sprintf(trailOrderPremiseClause, tc.in.Sighted, tc.in.Exited, tc.in.Held)
+			if !strings.Contains(got.Detail, wantClause) {
+				t.Errorf("the Detail omits %q, so it reports the premise that decided while "+
+					"dropping the co-failures that did not: %q", wantClause, got.Detail)
 			}
 		})
 	}
