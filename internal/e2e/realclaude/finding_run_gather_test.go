@@ -863,12 +863,12 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, seed []byte,
 	}
 
 	// AC2's ordering claim, asserted rather than described. No subject is staged
-	// anywhere in this file, so every row runs at zero matches and the finding row
-	// STILL reports the finding: Step 2 (:740) is consulted before Step 7 and Step
-	// 8 are. On a live run the same thing happens for a different reason — the
-	// reaper has already killed the group by the time the post-trailer scan runs —
-	// which is why nothing may be done to the hold or the scan timing to "make the
-	// match survive".
+	// anywhere in this file, so every row runs at zero matches and the finding
+	// row STILL reports the finding: Step 2 (trail_run_outcome_test.go:602) is
+	// consulted before Step 7 and Step 8 are. On a live run the same thing happens
+	// for a different reason — the reaper has already killed the group by the time
+	// the post-trailer scan runs — which is why nothing may be done to the hold or
+	// the scan timing to "make the match survive".
 	if readings.MatchCount != 0 {
 		t.Fatalf("the argv scan matched %d of %d row(s) although no subject is staged; want 0 — "+
 			"these rows exist to show the outcome separates with an EMPTY match set, and a row that "+
@@ -1942,8 +1942,8 @@ const finGatherOverCapPad = 200
 // Incidental: this row is about the trailer leg, and asserting on either would
 // restate rows the file already ships. That the carrier fill is independent of the
 // gate's verdict holds by DATA DEPENDENCE and not by ordering — the fill reads only
-// obs and never reads readings.Gate, which is computed ABOVE it (:766 against
-// :777-802). Staleness and BoundFrom belong to the two tests above; this row adds no
+// obs and never reads readings.Gate, which is computed ABOVE it (:723 against
+// :734-759). Staleness and BoundFrom belong to the two tests above; this row adds no
 // second source of either.
 //
 // # It costs no wall clock
@@ -1955,7 +1955,7 @@ func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	seed := finGatherSeed(t, &stdout, trailPaddedTrailer(finGatherOverCapPad))
 
 	// Recomputed through the SHIPPED scanner over the SAME bytes the gather is
-	// about to read, the file's own C2 idiom (:1002): the expectation is the
+	// about to read, the file's own C2 idiom (:958): the expectation is the
 	// decode's and never four typed-in literals.
 	scan := trailScan(seed)
 	if scan.State != trailSeen || scan.Trailer == nil {

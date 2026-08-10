@@ -34,13 +34,13 @@ package realclaude
 // trailClassifyRun / trailRunWellFormed (trail_run_outcome_test.go:396, :700)
 // are the downstream consumer and its vary-one-thing base.
 //
-// trailDetail (:265) is reused rather than given a finDetail twin. Its own
-// comment explains it is deliberately not tdnDetail because "the trail* family
-// stays out of the tdn* teardown classifier's reach" — that argument does not
-// transfer. trailDetail carries no decision (it is fmt.Sprintf plus
-// reachCapCommand), and this file is BY DESIGN inside the trail family's reach:
-// it embeds trailAdmitResult, calls trailAdmitAttribution and calls
-// trailIsAdmitValue. Reusing it keeps the 512-byte cap single-sourced.
+// trailDetail (trailer_admissibility_test.go:352) is reused rather than given a
+// finDetail twin. Its own comment explains it is deliberately not tdnDetail
+// because "the trail* family stays out of the tdn* teardown classifier's reach"
+// — that argument does not transfer. trailDetail carries no decision (it is
+// fmt.Sprintf plus reachCapCommand), and this file is BY DESIGN inside the trail
+// family's reach: it embeds trailAdmitResult, calls trailAdmitAttribution and
+// calls trailIsAdmitValue. Reusing it keeps the 512-byte cap single-sourced.
 
 import (
 	"bytes"

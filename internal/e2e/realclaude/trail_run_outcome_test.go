@@ -957,7 +957,7 @@ func trailRunCases() []trailRunCase {
 		{
 			// #1417's arm. Not named by the ticket and mandatory anyway: the
 			// coverage loop in TestTrailClassifyRun errors on any value of
-			// trailRunOutcomeValues() no row reaches, so the twelfth outcome
+			// trailRunOutcomeValues() no row reaches, so #1417's own outcome
 			// without a row is red there.
 			name: "an absent terminal_reason from a path that owes none is a reading and a void",
 			in:   trailRunAbsentOwesNoneReadings(),

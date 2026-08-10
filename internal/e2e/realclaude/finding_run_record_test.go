@@ -886,7 +886,7 @@ func TestFinRecordRunnerAgreement(t *testing.T) {
 					"cannot show a disagreement at all", rec.RunnerFromEnv, rec.RunnerFromArgv)
 			}
 			// The argv read is one of tdnRunnerFromArgv's three answers and carries
-			// its reason (:1042), so a reader sees what the label was read off.
+			// its reason (:956), so a reader sees what the label was read off.
 			if !strings.Contains(rec.RunnerFromArgv, "(") {
 				t.Errorf("argv reading %q has no parenthesised reason", rec.RunnerFromArgv)
 			}

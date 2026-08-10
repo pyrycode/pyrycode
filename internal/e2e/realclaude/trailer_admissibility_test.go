@@ -1703,17 +1703,17 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 //	P1  the arm still answering out of contract  sole row here (value); also the presence companion
 //	P2  the arm placed BEFORE the budget arm     sole row here; also the sweep's max_turns row
 //	P3  the arm swallowing present-and-empty     sole row here (value AND marker); also the sweep's row
-//	P1  the arm certifying a reason              sole row here (Reason); also the presence companion
+//	P1  the arm certifying a reason              sole row here (Reason); also the presence companion and both classifier reds
 //	P1  the arm's Detail outgrowing the ceiling  sole row here (headroom); also the leak sweep's presence row
 //
 // P1 carries three mutants because its three assertions fail independently: an arm
 // left answering the shipped value moves neither the reason nor the length, a
 // certifying arm leaves the length alone, and an overgrown Detail leaves Reason
-// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:431-442) would reject
-// the certifying pair a layer up, and since #1434 a fixture DOES drive this arm
-// into that classifier — TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone
-// — but that test asserts the gate certifies nothing before composing, so C2 is
-// still a contract here rather than an observed red.
+// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:431-442) rejects the
+// certifying pair a layer up, and since #1434 trailRunCases()' new row
+// (trail_run_outcome_test.go:966-976) drives this arm into that classifier WITHOUT
+// pre-asserting, so C2's own Detail is quoted verbatim in a red TestTrailClassifyRun.
+// Measured, this mutant reddens four tests rather than two.
 //
 // The remaining mutant — the new answer awarded on a PTYRUNNER reading — reddens
 // NO row here, because every row is driven at a streamrunner reading and the

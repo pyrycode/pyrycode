@@ -269,7 +269,7 @@ type finTrailerRecord struct {
 // out of scope.
 //
 // Nor is the field asked to reject a non-member: no builder in this family
-// validates its value — trailRunOutcome (:284) and finOutcomeResult (:230) are
+// validates its value — trailRunOutcome (:284) and finOutcomeResult (:198) are
 // plain structs — because membership lives in the reader-facing predicates,
 // whose job is that "a value a reader of a published record cannot look up is a
 // verdict they cannot interpret".
