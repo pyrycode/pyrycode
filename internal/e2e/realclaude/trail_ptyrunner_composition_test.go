@@ -31,11 +31,13 @@ import (
 // trailGateUsable BECAUSE THE READING REDUCES TO PTYRUNNER. That was not the
 // reason when this pin landed: until #1433 the usable arm ignored the runner path
 // entirely, so this composition could not vary by it under any reading. Since
-// #1433 the same fixture under a streamrunner reading reaches the presence arm and
-// trailGateOutOfContract instead, so the ptyrunner premise asserted below is
-// load-bearing for the value this chain composes over rather than only for the
-// test's name. The assertions themselves are unamended by that ticket, and are
-// still what this pin is worth.
+// #1433 the same fixture under a streamrunner reading reaches the presence arm, and
+// since #1434 that arm answers trailGatePresentOwesNone — a value of its own — so
+// the ptyrunner premise asserted below is load-bearing for the value this chain
+// composes over rather than only for the test's name, and it is more load-bearing
+// than it was: the reading now picks between two DIFFERENT gate values rather than
+// between two sites answering one. The assertions themselves are unamended by
+// either ticket, and are still what this pin is worth.
 //
 // The general claim that no arm reads the path is gone: #1420's absence arm reads
 // it and reaches three different cases by it, and #1433's presence arm reads it

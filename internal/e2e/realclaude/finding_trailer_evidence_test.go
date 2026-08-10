@@ -59,7 +59,7 @@ package realclaude
 // be worse than either. The three scan states (:57-71) and the three lateness
 // discriminators (:75-90) are shipped closed spaces, called and never restated.
 // trailIsRunOutcome (trail_run_outcome_test.go:277) and trailRunOutcomeValues
-// (:1386) are the twelve; finOutcomeIsValue (finding_staging_gate_test.go:210)
+// (:1386) are the thirteen; finOutcomeIsValue (finding_staging_gate_test.go:210)
 // and finOutcomeValues (:223) the staging tier's seven — called, never
 // re-derived. reachMaxCommandBytes and reachCapCommand
 // (background_reach_probe_test.go:123, :945) are the single-sourced cap.
@@ -258,7 +258,7 @@ type finTrailerRecord struct {
 // # The outcome is consumed, never decided
 //
 // The value comes from one of two closed sets built elsewhere: trailClassifyRun's
-// twelve (trail_run_outcome_test.go:363) and the staging-gate tier's seven
+// thirteen (trail_run_outcome_test.go:363) and the staging-gate tier's seven
 // (finding_staging_gate_test.go). Both are caller-supplied and carried AS
 // RETURNED — not validated, not renamed, not re-derived, and never cross-checked
 // against State. "A no-trailer run records trailOutcomeVoidNoTrailer" is a
@@ -862,11 +862,12 @@ func TestFinTrailerRecordOutcomeIsConsumedAsHanded(t *testing.T) {
 		for _, v := range finTrailerOutcomeValues() {
 			distinct[v] = true
 		}
-		if len(distinct) != 19 {
-			t.Errorf("the union holds %d distinct value(s), want 19 — twelve run outcomes and "+
+		if len(distinct) != 20 {
+			t.Errorf("the union holds %d distinct value(s), want 20 — thirteen run outcomes and "+
 				"seven staging values, and it is their disjointness that makes ONE field safe "+
-				"for TWO sources. Twelve rather than eleven since #1417 added a run-level void "+
-				"for an absent terminal_reason on a path that owes none", len(distinct))
+				"for TWO sources. Thirteen rather than twelve since #1434 added a run-level void "+
+				"for a NAMED terminal_reason on a path that owes none, beside #1417's for an "+
+				"absent one", len(distinct))
 		}
 	})
 

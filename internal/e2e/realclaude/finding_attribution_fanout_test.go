@@ -20,7 +20,7 @@ package realclaude
 // a SLICE (process_pin_liveness_test.go:130-135), deliberately refusing to
 // resolve "the" pid. Reducing that set to one value is new logic, and it is
 // where a wrong rule silently costs the probe its only finding — exactly one of
-// the twelve run outcomes is one (trail_run_outcome_test.go:118), and it is
+// the thirteen run outcomes is one (trail_run_outcome_test.go:118), and it is
 // returned only on Admit.Value == trailAdmitProof. finAttributeOrder states the
 // ranking that reduction uses and argues for it.
 //
