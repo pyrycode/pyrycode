@@ -2363,12 +2363,12 @@ func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 		// anything. Deleting it — the tempting move once "" stopped being the
 		// expected value — is the shape of hole #1446 was reworked for.
 		//
-		// No fourth block is added to recover the route-ABSENT key set, and that is
+		// The route-ABSENT key set kept its coverage when #1447 filled Route here,
 		// checked rather than waved through: Route is the only field that differs
 		// between the pre- and post-#1447 refuted records and it is omitempty, so
-		// the set walked here is a strict SUPERSET of the one it replaces. A
-		// command/args/comm/argv-shaped key cannot hide in the difference, and
-		// coverage is preserved rather than lost.
+		// the set walked here is a strict SUPERSET of the one it replaced. #1448's
+		// never-staged block below walks a route-absent record but INHERITS that
+		// coverage rather than supplying it: its own set is a strict SUBSET.
 		if got.Route != trailRouteSighting {
 			t.Fatalf("route: got %q, want %q — this arm's own MEASUREMENT decided the value, so "+
 				"the record names the route and the key walk below runs over the published key "+
@@ -2392,19 +2392,19 @@ func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 		in.Ordering.Detail = "an ordering detail that also carries " + trailNeedle
 		in.PinnedPid.Detail = "a pinned-pid detail that also carries " + trailNeedle
 		in.PinnedPid.ToolStderr = "ps wrote " + trailNeedle
-		// AND IN THE VERDICT ITSELF, which is possible on this arm alone and is the
-		// deterministic half of a prohibition that would otherwise be prose over
-		// prose. The guard fires on Ordering.Value REGARDLESS of the verdict, so this
-		// arm is reachable carrying an arbitrary verdict string; PinnedPid is the one
-		// input the classifier has no contract check over (the no-C10 note says so
-		// deliberately, and C7 validates only Liveness); and trailRunOutcome's content
-		// rule PERMITS naming "verdicts", which was written when pinReadState's four
-		// constants were the only producer. The natural sentence to write here with
-		// bytes to spare — "the pair is unstaged, the pinned pid read %q" — would make
-		// this the first run-level arm to publish an unvalidated string. This plant is
-		// what reddens if someone writes it. The needle is short enough that it fails
-		// on the needle rather than on trailDetail's cap, which would be a budget kill
-		// and different fabric.
+		// AND IN THE VERDICT ITSELF, the deterministic half of a prohibition that
+		// would otherwise be prose over prose. The guard fires on Ordering.Value
+		// REGARDLESS of the verdict, so this arm is reachable carrying an arbitrary
+		// verdict string; PinnedPid is the one input the classifier has no contract
+		// check over (the no-C10 note says so deliberately, and C7 validates only
+		// Liveness); and trailRunOutcome's content rule PERMITS naming "verdicts",
+		// which was written when pinReadState's four constants were the only
+		// producer. The natural sentence to write here with bytes to spare — "the
+		// pair is unstaged, the pinned pid read %q" — would make this the first
+		// run-level arm to publish an unvalidated string. This plant is what reddens
+		// if someone writes it, and the needle is short enough that it fails on the
+		// needle rather than on trailDetail's cap — a budget kill, different fabric.
+		// The fall-through below carries the same plant, for a reason of its own.
 		in.PinnedPid.Verdict = trailNeedle
 
 		got := trailClassifyRun(in)
@@ -2439,6 +2439,16 @@ func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 		in.Ordering.Detail = "an ordering detail that also carries " + trailNeedle
 		in.PinnedPid.Detail = "a pinned-pid detail that also carries " + trailNeedle
 		in.PinnedPid.ToolStderr = "ps wrote " + trailNeedle
+		// AND IN THE VERDICT ITSELF, which is sharper here than on the block above
+		// rather than a copy of it. There the classifier answered BEFORE any route
+		// ran, so no sighting Detail existed to leak from; here the route DID run and
+		// folded the verdict VERBATIM into its own Detail
+		// (trail_sighting_liveness_test.go:358-367), so this is the one arm where the
+		// captured string is already sitting one dereference away. The ordering guard
+		// fires whatever the pin reads, so the arm is reachable carrying an arbitrary
+		// verdict string, and this plant is what reddens if a later edit interpolates
+		// sighting.Detail for a better failure message.
+		in.PinnedPid.Verdict = trailNeedle
 
 		got := trailClassifyRun(in)
 		if got.Value != trailOutcomeVoidPathOwesNoReason {
@@ -2524,23 +2534,23 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // point: a SECOND instant now exists in this family. trailEstablishSighting
 // (trail_sighting_liveness_test.go:353) establishes aliveness at the trailer's
 // SIGHTING on pyry's stdout from a certified ordering and a pinned pid, on exactly
-// the paths these five arms answer. A Detail foreclosing "a claim" unqualified
+// the paths these six arms answer. A Detail foreclosing "a claim" unqualified
 // would forbid that finding from a file that cannot see it — and since #1446 one
-// of the five carriers IS that finding, which is the sharpest form of the same
+// of the six carriers IS that finding, which is the sharpest form of the same
 // argument: the arm most easily misread as an aliveness-at-declared-finish claim is
 // the one that must say in these words that it is not one. #1447's carrier is that
 // same route's other verdict, and it must say it for the mirror reason: an arm that
 // forecloses a claim on certifies-nothing grounds while ALSO refusing to claim the
 // command had exited has two limits to state, and only one of them is checkable.
 //
-// A shared constant rather than five hand-written copies so the arms cannot DRIFT
+// A shared constant rather than six hand-written copies so the arms cannot DRIFT
 // in how they name the instant — trailSightingInstantClause's shape
 // (trail_sighting_liveness_test.go:219), and its doctrine too: sharing it is not
 // on its own what makes "every
 // certifies-nothing arm names the instant" true, because an arm can still omit it
 // from its own format string. What makes the rule checkable is
 // TestTrailRunCertifiesNothingArmsNameTheInstant, which requires exactly these
-// five arms' Details to carry it and every other row's not to.
+// six arms' Details to carry it and every other row's not to.
 //
 // Deliberately NOT trailSightingInstantClause, which names the OTHER instant: that
 // one says a verdict IS about the sighting, this one says no verdict here is about
@@ -2561,7 +2571,7 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // This declaration sits at the END of the file rather than beside the arms that use
 // it, and that placement is deliberate rather than careless: sixteen other files in
 // this package carry a hundred line-number cites into this one, the highest at
-// trail_run_outcome_test.go:2494, and a declaration inserted anywhere above that
+// trail_run_outcome_test.go:2504, and a declaration inserted anywhere above that
 // displaces every cite below it. The filename is spelled there rather than left as
 // a bare `:NNN` on #1434's evidence: a bare ref inherits the LAST-NAMED FILE, which
 // two paragraphs up is trail_sighting_liveness_test.go, and it reads clean under

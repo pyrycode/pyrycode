@@ -846,7 +846,7 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailSightingResultCarriesNoCapturedBytes is AC5 made executable, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:2207-2463) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:2207-2473) and reusing the shipped trailNeedle.
 //
 // THIS SWEEP IS LOAD-BEARING HERE IN A WAY IT COULD NOT BE FOR #1439, and the
 // family's existing sweeps prove nothing about this record: they are

@@ -90,8 +90,8 @@ func trailRunCertifiesNothingArms() []string {
 // instant, so the clause is universal there. Here it is six outcomes out of
 // sixteen, so an unconditional per-row check would redden the other ten.
 //
-// The absence half is not filler. It is what makes the claim "only these five"
-// rather than "at least these five", and it is the executable half of the
+// The absence half is not filler. It is what makes the claim "only these six"
+// rather than "at least these six", and it is the executable half of the
 // budget-fired carve-out: trailOutcomeVoidBudgetFired forecloses BOTH instants from
 // a gate that CERTIFIED a terminal reason, so a certifies-nothing clause on it
 // would be false. Its row goes red here if someone adds one.
@@ -136,7 +136,7 @@ func TestTrailRunCertifiesNothingArmsNameTheInstant(t *testing.T) {
 		})
 	}
 
-	// The second premise: a table that stopped producing one of the five would
+	// The second premise: a table that stopped producing one of the six would
 	// make the conditional above vacuously true for it.
 	for _, value := range trailRunCertifiesNothingArms() {
 		if reached[value] == 0 {

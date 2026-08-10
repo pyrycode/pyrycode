@@ -513,7 +513,7 @@ func TestTrailOrderEachPremiseHasItsOwnVoid(t *testing.T) {
 
 // TestTrailOrderValuesAgreeWithThePredicate is AC4 made executable, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2494): the list and the predicate agree in BOTH
+// (trail_run_outcome_test.go:2504): the list and the predicate agree in BOTH
 // directions, the count is asserted against the ticket's own enumeration, and the
 // predicate rejects the values of the adjacent spaces.
 //

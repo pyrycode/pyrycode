@@ -66,7 +66,7 @@ package realclaude
 // # Reused, not rebuilt
 //
 // trailIsRunOutcome (trail_run_outcome_test.go:541) and trailRunOutcomeValues
-// (:2468) are the sixteen and their membership predicate — called, never
+// (:2478) are the sixteen and their membership predicate — called, never
 // re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
 // is the shipped needle.
 //
@@ -576,7 +576,7 @@ func TestFinOutcomeConstantsAreClosed(t *testing.T) {
 // TestFinOutcomeValuesAgreeWithThePredicate keeps finOutcomeValues from drifting
 // away from the predicate a published record is read through, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2493). Without it, an eighth outcome added to the
+// (trail_run_outcome_test.go:2503). Without it, an eighth outcome added to the
 // predicate but not to the list would make the coverage loop in
 // TestFinOutcomeStagingGate silently stop covering it.
 func TestFinOutcomeValuesAgreeWithThePredicate(t *testing.T) {

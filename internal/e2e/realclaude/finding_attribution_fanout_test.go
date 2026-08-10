@@ -132,7 +132,7 @@ type finAttributeRecord struct {
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
 // reason (trail_run_outcome_test.go:1112-1113): a shared backing array is
 // reachable from every test in this package, and this slice is read on every
-// fan-out call. trailRunOutcomeValues (:2468) is the same shape for the same
+// fan-out call. trailRunOutcomeValues (:2478) is the same shape for the same
 // reason.
 //
 // # The argument for this order
@@ -617,7 +617,7 @@ func finAttributeAssert(t *testing.T, tc finAttributeCase, got finAttributeRecor
 // TestFinAttributeOrderCoversTheAdmitSpace is the deterministic guard against an
 // eighth admissibility value ranking silently last, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2493).
+// (trail_run_outcome_test.go:2503).
 func TestFinAttributeOrderCoversTheAdmitSpace(t *testing.T) {
 	order := finAttributeOrder()
 	if len(order) != 7 {
