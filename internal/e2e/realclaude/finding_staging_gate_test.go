@@ -16,9 +16,9 @@ package realclaude
 // # Why an unstaged run must never reach the classifier
 //
 // trailClassifyRun (trail_run_outcome_test.go:518) owns one probe run's outcome
-// over a closed set of fourteen values, and it ASSUMES THE RUN STAGED: that a Bash
+// over a closed set of fifteen values, and it ASSUMES THE RUN STAGED: that a Bash
 // call was issued, that it was the rig's hold command, that the rendezvous
-// completed. Two conditions this probe can hit have no value among the fourteen and
+// completed. Two conditions this probe can hit have no value among the fifteen and
 // no field in its input record trailRunReadings (:309) — the model never issued
 // the Bash call, and the trigger did not fire.
 //
@@ -33,7 +33,7 @@ package realclaude
 // to prevent a false negative becomes the thing that publishes one.
 //
 // So two tiers, kept apart: rig-side outcomes decided BEFORE the classifier is
-// consulted, and the classifier's fourteen consumed as returned, neither
+// consulted, and the classifier's fifteen consumed as returned, neither
 // re-derived nor renamed. This file is the lower tier and the gate that enforces
 // the separation.
 //
@@ -66,7 +66,7 @@ package realclaude
 // # Reused, not rebuilt
 //
 // trailIsRunOutcome (trail_run_outcome_test.go:422) and trailRunOutcomeValues
-// (:1987) are the fourteen and their membership predicate — called, never
+// (:1987) are the fifteen and their membership predicate — called, never
 // re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
 // is the shipped needle.
 //
@@ -605,10 +605,10 @@ func TestFinOutcomeSpacesAreDisjoint(t *testing.T) {
 	for _, v := range finOutcomeValues() {
 		if trailIsRunOutcome(v) {
 			t.Errorf("trailIsRunOutcome accepts the staging value %q — the run classifier's "+
-				"fourteen have absorbed a value that means \"this run never staged\"", v)
+				"fifteen have absorbed a value that means \"this run never staged\"", v)
 		}
 	}
-	// The shipped list, not a hand-copy: re-deriving the fourteen here is exactly the
+	// The shipped list, not a hand-copy: re-deriving the fifteen here is exactly the
 	// drift this test exists to catch.
 	for _, v := range trailRunOutcomeValues() {
 		if finOutcomeIsValue(v) {
@@ -660,14 +660,14 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 		if trailIsRunOutcome(got.Value) {
 			t.Errorf("%s: the staging gate returned %q, which trailIsRunOutcome accepts — a run "+
 				"that never staged would then be published carrying one of the classifier's "+
-				"fourteen, so \"not observed\" could arrive at %s and an unpinnable or unreadable "+
+				"fifteen, so \"not observed\" could arrive at %s and an unpinnable or unreadable "+
 				"command could arrive at a value meaning the command had exited",
 				tc.name, got.Value, trailOutcomeNoRowMatched)
 		}
 	}
 	// The pass-through explicitly, and not only as one row of the sweep above: it
 	// is a STAGING value, not a run outcome, and this is what stops a later edit
-	// from aliasing it onto one of the fourteen.
+	// from aliasing it onto one of the fifteen.
 	if trailIsRunOutcome(finOutcomeReadyToClassify) {
 		t.Errorf("trailIsRunOutcome accepts %q — the signal to CONSULT the classifier has become "+
 			"one of the answers the classifier returns", finOutcomeReadyToClassify)

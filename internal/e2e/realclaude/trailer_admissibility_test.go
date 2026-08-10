@@ -1229,29 +1229,31 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailAdmitVoidGroupUnnamed":   trailAdmitVoidGroupUnnamed,
 		"trailAdmitVoidNotOneReapLine": trailAdmitVoidNotOneReapLine,
 		"trailAdmitOutOfContract":      trailAdmitOutOfContract,
-		// #1271's run-level outcomes: four answers and ten named voids since #1446
-		// gave the arm that reaches trailOutcomeVoidPathOwesNoReason a finding of
-		// its own, beside #1434's trailOutcomeVoidReasonNotOwedByPath and #1417's
+		// #1271's run-level outcomes: four answers and eleven named voids since
+		// #1447 took the MEASURED refutation off the blanket #1446 left it under —
+		// #1446 gave the arm that reaches trailOutcomeVoidPathOwesNoReason a finding
+		// of its own, beside #1434's trailOutcomeVoidReasonNotOwedByPath and #1417's
 		// trailOutcomeVoidPathOwesNoReason. Its two evidence-route values follow,
 		// in the same map for this map's whole reason: the two run-level ANSWERS
 		// state nearly the same English sentence, so the strings that separate
 		// their evidence classes must be as distinct as the answers are.
-		"trailOutcomeRunningAtTrailer":          trailOutcomeRunningAtTrailer,
-		"trailOutcomeAliveAtSightingByOrdering": trailOutcomeAliveAtSightingByOrdering,
-		"trailRouteReapLog":                     trailRouteReapLog,
-		"trailRouteSighting":                    trailRouteSighting,
-		"trailOutcomeMatchedUnattributed":       trailOutcomeMatchedUnattributed,
-		"trailOutcomeNoRowMatched":              trailOutcomeNoRowMatched,
-		"trailOutcomeVoidBudgetFired":           trailOutcomeVoidBudgetFired,
-		"trailOutcomeVoidNoTrailer":             trailOutcomeVoidNoTrailer,
-		"trailOutcomeVoidTrailerScanAborted":    trailOutcomeVoidTrailerScanAborted,
-		"trailOutcomeVoidPyryDidNotExit":        trailOutcomeVoidPyryDidNotExit,
-		"trailOutcomeVoidArgvScanErrored":       trailOutcomeVoidArgvScanErrored,
-		"trailOutcomeVoidNoRowsParsed":          trailOutcomeVoidNoRowsParsed,
-		"trailOutcomeVoidLivenessInstrument":    trailOutcomeVoidLivenessInstrument,
-		"trailOutcomeVoidPathOwesNoReason":      trailOutcomeVoidPathOwesNoReason,
-		"trailOutcomeVoidReasonNotOwedByPath":   trailOutcomeVoidReasonNotOwedByPath,
-		"trailOutcomeOutOfContract":             trailOutcomeOutOfContract,
+		"trailOutcomeRunningAtTrailer":             trailOutcomeRunningAtTrailer,
+		"trailOutcomeAliveAtSightingByOrdering":    trailOutcomeAliveAtSightingByOrdering,
+		"trailRouteReapLog":                        trailRouteReapLog,
+		"trailRouteSighting":                       trailRouteSighting,
+		"trailOutcomeMatchedUnattributed":          trailOutcomeMatchedUnattributed,
+		"trailOutcomeNoRowMatched":                 trailOutcomeNoRowMatched,
+		"trailOutcomeVoidBudgetFired":              trailOutcomeVoidBudgetFired,
+		"trailOutcomeVoidNoTrailer":                trailOutcomeVoidNoTrailer,
+		"trailOutcomeVoidTrailerScanAborted":       trailOutcomeVoidTrailerScanAborted,
+		"trailOutcomeVoidPyryDidNotExit":           trailOutcomeVoidPyryDidNotExit,
+		"trailOutcomeVoidArgvScanErrored":          trailOutcomeVoidArgvScanErrored,
+		"trailOutcomeVoidNoRowsParsed":             trailOutcomeVoidNoRowsParsed,
+		"trailOutcomeVoidLivenessInstrument":       trailOutcomeVoidLivenessInstrument,
+		"trailOutcomeVoidPathOwesNoReason":         trailOutcomeVoidPathOwesNoReason,
+		"trailOutcomeVoidPinnedPidDidNotEstablish": trailOutcomeVoidPinnedPidDidNotEstablish,
+		"trailOutcomeVoidReasonNotOwedByPath":      trailOutcomeVoidReasonNotOwedByPath,
+		"trailOutcomeOutOfContract":                trailOutcomeOutOfContract,
 		// #1366's terminal-reason-against-path values.
 		"trailReasonAbsentOwesNone":  trailReasonAbsentOwesNone,
 		"trailReasonPresentOwesNone": trailReasonPresentOwesNone,

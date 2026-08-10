@@ -59,7 +59,7 @@ package realclaude
 // be worse than either. The three scan states (:57-71) and the three lateness
 // discriminators (:75-90) are shipped closed spaces, called and never restated.
 // trailIsRunOutcome (trail_run_outcome_test.go:422) and trailRunOutcomeValues
-// (:1987) are the fourteen; finOutcomeIsValue (finding_staging_gate_test.go:210)
+// (:1987) are the fifteen; finOutcomeIsValue (finding_staging_gate_test.go:210)
 // and finOutcomeValues (:223) the staging tier's seven — called, never
 // re-derived. reachMaxCommandBytes and reachCapCommand
 // (background_reach_probe_test.go:123, :945) are the single-sourced cap.
@@ -258,7 +258,7 @@ type finTrailerRecord struct {
 // # The outcome is consumed, never decided
 //
 // The value comes from one of two closed sets built elsewhere: trailClassifyRun's
-// fourteen (trail_run_outcome_test.go:518) and the staging-gate tier's seven
+// fifteen (trail_run_outcome_test.go:518) and the staging-gate tier's seven
 // (finding_staging_gate_test.go). Both are caller-supplied and carried AS
 // RETURNED — not validated, not renamed, not re-derived, and never cross-checked
 // against State. "A no-trailer run records trailOutcomeVoidNoTrailer" is a
@@ -862,12 +862,13 @@ func TestFinTrailerRecordOutcomeIsConsumedAsHanded(t *testing.T) {
 		for _, v := range finTrailerOutcomeValues() {
 			distinct[v] = true
 		}
-		if len(distinct) != 21 {
-			t.Errorf("the union holds %d distinct value(s), want 21 — fourteen run outcomes and "+
+		if len(distinct) != 22 {
+			t.Errorf("the union holds %d distinct value(s), want 22 — fifteen run outcomes and "+
 				"seven staging values, and it is their disjointness that makes ONE field safe "+
-				"for TWO sources. Fourteen rather than thirteen since #1446 gave the arm that "+
-				"reads an absent terminal_reason on a path that owes none a finding of its own, "+
-				"reached through the pinned-pid sighting route", len(distinct))
+				"for TWO sources. Fifteen rather than fourteen since #1447 gave the arm that "+
+				"reads an absent terminal_reason on a path that owes none a SECOND value off the "+
+				"pinned-pid sighting route: one where that route measured a pid and did not "+
+				"establish, beside #1446's where it did", len(distinct))
 		}
 	})
 
