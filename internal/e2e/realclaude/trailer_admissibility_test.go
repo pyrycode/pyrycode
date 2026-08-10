@@ -1172,23 +1172,29 @@ func trailGateCases() []trailGateCase {
 // distinctness in a single loop. Its size is READ OFF THE MAP rather than
 // printed here: the shipped comment said twenty-nine while the map already held
 // thirty-five, having gone stale when #1366 added six reason values; #1417's two
-// made thirty-seven, #1434's two made thirty-nine, and #1439's four make
-// forty-three. A number kept by hand beside a set is a number that drifts, so the
-// loop below counts.
+// made thirty-seven, #1434's two made thirty-nine, #1439's four made forty-three,
+// and #1440's eight make fifty-one. A number kept by hand beside a set is a number
+// that drifts, so the loop below counts.
 //
 // #1271's run-level outcomes joined the map rather than starting a third closure
-// test, and #1439's ordering-premise values joined it rather than starting a
-// fifth, for the same reason: four spaces now mean nearly the same words (an
-// input state, the gate's view of it, the run's view of it, and the ordering
-// premises' view of the same events one layer under the run), and only a union
-// can see a copy-paste across them. The near-collision that makes the point:
-// order-void-pyry-did-not-exit sits one word from run-void-pyry-did-not-exit.
+// test, #1439's ordering-premise values joined it rather than starting a fifth,
+// and #1440's sighting values joined it rather than starting a sixth, for the same
+// reason: five spaces now mean nearly the same words (an input state, the gate's
+// view of it, the run's view of it, the ordering premises' view of the same events
+// one layer under the run, and the sighting's view of them from a different
+// evidence class), and only a union can see a copy-paste across them. Two
+// near-collisions make the point, and the second is the sharper one:
+// order-void-pyry-did-not-exit sits one word from run-void-pyry-did-not-exit — one
+// word apart in a VOID value — while #1440's sighting-alive-by-ordering states the
+// same English sentence as run-running-at-trailer, which is the same claim in the
+// POSITIVE value, differing only in the evidence class it rests on.
 //
 // EVERY VALUE IN THIS MAP HAS AN ARM IN ITS CONSUMER — trailGate and
 // trailAdmitAttribution for the first two spaces, trailClassifyRun for the
 // third, trailReasonAgainstPath (trailer_terminal_reason_test.go:222) for the
-// fourth, and trailCertifyOrdering (trail_ordering_premises_test.go) for the
-// fifth. That is a comment and not a check: this test catches a COLLIDING
+// fourth, trailCertifyOrdering (trail_ordering_premises_test.go) for the fifth,
+// and trailEstablishSighting (trail_sighting_liveness_test.go) for the sixth.
+// That is a comment and not a check: this test catches a COLLIDING
 // value, never an UNHANDLED one, so a NEW gate or admit value added here and to
 // its membership predicate would pass trailClassifyRun's contract block and then
 // find no arm. That is not hypothetical — #1417 added trailGateAbsentOwesNone,
@@ -1248,6 +1254,23 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		"trailOrderVoidUnsighted": trailOrderVoidUnsighted,
 		"trailOrderVoidNoExit":    trailOrderVoidNoExit,
 		"trailOrderVoidUnheld":    trailOrderVoidUnheld,
+		// #1440's sighting values: three outcomes and five reasons.
+		// run-running-at-trailer is the reason they are here rather than in a
+		// closure test of their own — trailOutcomeRunningAtTrailer's doc says an
+		// admissible attribution "proves the process group was alive when the trailer
+		// was written", which is the same English sentence trailSightingEstablished
+		// states from the ORDERING evidence class, and a per-space helper is scoped
+		// to one space per call and could not see the pair. Its reasons are in the
+		// map too, on #1366's precedent: a reason value collides exactly as an
+		// outcome value does.
+		"trailSightingEstablished":               trailSightingEstablished,
+		"trailSightingUnestablished":             trailSightingUnestablished,
+		"trailSightingVoid":                      trailSightingVoid,
+		"trailSightingReasonPidRunning":          trailSightingReasonPidRunning,
+		"trailSightingReasonPidReapedPending":    trailSightingReasonPidReapedPending,
+		"trailSightingReasonPidGone":             trailSightingReasonPidGone,
+		"trailSightingReasonPidReadFailed":       trailSightingReasonPidReadFailed,
+		"trailSightingReasonOrderingUncertified": trailSightingReasonOrderingUncertified,
 		// #1266's shipped spaces, in the same map on purpose: a gate result that
 		// collided with a scan state would be a result and an input wearing one
 		// string, which is the confusion the gate- prefix exists to prevent.
@@ -1282,6 +1305,7 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 	var zeroAdmit trailAdmitResult
 	var zeroRun trailRunOutcome
 	var zeroOrder trailOrderResult
+	var zeroSighting trailSightingResult
 	for name, value := range all {
 		if zeroGate.Value == value {
 			t.Errorf("the zero trailGateResult reads as %s (%q)", name, value)
@@ -1295,10 +1319,24 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 		if zeroOrder.Value == value {
 			t.Errorf("the zero trailOrderResult reads as %s (%q)", name, value)
 		}
+		if zeroSighting.Value == value {
+			t.Errorf("the zero trailSightingResult reads as %s (%q)", name, value)
+		}
+		if zeroSighting.Reason == value {
+			t.Errorf("the zero trailSightingResult's reason reads as %s (%q)", name, value)
+		}
 	}
 	if zeroGate.Reason != "" {
 		t.Errorf("the zero trailGateResult certifies %q — an uncertified record must never read "+
 			"as certified", zeroGate.Reason)
+	}
+	// The same failure mode on #1440's record, which is the second in the family to
+	// carry a Reason: an unfilled reason reading as a filled one would let a
+	// consumer that branches on the reason — the whole point of the field, since two
+	// verdicts share one value — branch on nothing.
+	if zeroSighting.Reason != "" {
+		t.Errorf("the zero trailSightingResult names reason %q — an unfilled reason must never "+
+			"read as one a consumer can branch on", zeroSighting.Reason)
 	}
 	// The same failure mode on #1271's record: an unfilled field reading as a
 	// filled one. trailBoundFromStart carries a real duration that bounds
