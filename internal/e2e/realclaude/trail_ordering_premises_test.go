@@ -147,7 +147,7 @@ const trailOrderPremiseClause = "premises: trailer-sighted=%t pyry-exited=%t hol
 // --- the record ----------------------------------------------------------------
 
 // trailOrderResult is what the ordering predicate produces, in trailAdmitResult's
-// exact shape (trailer_admissibility_test.go:340-343). No third field: there is
+// exact shape (trailer_admissibility_test.go:349-352). No third field: there is
 // no reason to certify here, and the three input booleans reach a reader through
 // the Detail's fixed clause rather than as fields.
 //
@@ -174,7 +174,7 @@ type trailOrderResult struct {
 //
 // # Three booleans, and the parameter type IS the enforcement
 //
-// finSighting (finding_run_gather_test.go:372-384) is the nearest existing
+// finSighting is the nearest existing
 // reduction of a sighting and is the WRONG input here: it carries TerminalReason,
 // StopReason, Subtype and KeyNames — trailer values that have no business in this
 // record. What this predicate needs from the sighting is THAT IT HAPPENED, not
@@ -210,7 +210,7 @@ type trailOrderResult struct {
 // other two failures leave the subject intact and remove one endpoint of the
 // ordering. Same structural-outranks-situational rule trailAdmitAttribution
 // applies when it puts trailAdmitVoidBudgetFired above every reap-side void
-// (trailer_admissibility_test.go:212-215).
+// (trailer_admissibility_test.go:221-224).
 //
 // SIGHTING OUTRANKS EXIT because it is the earlier instant: with no earlier
 // instant, whether the later one completed is moot.
@@ -457,7 +457,7 @@ func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 //
 // Each subtest asserts the all-true base certifies BEFORE flipping anything —
 // the premise assertion is what stops the test passing by classifying garbage,
-// the discipline trail_run_outcome_test.go:2302-2307 states.
+// the discipline trail_run_outcome_test.go:2304-2309 states.
 //
 // These three are also the anti-swap check: any pairwise swap of the three
 // parameters at trailCertifyOrdering's definition reddens at least two of them,
@@ -571,7 +571,7 @@ func TestTrailOrderValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailOrderResultCarriesNoCapturedBytes is AC5's structural half, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:2269-2290): marshal the record, decode to
+// (trail_run_outcome_test.go:2271-2292): marshal the record, decode to
 // map[string]json.RawMessage, and refuse any command/args/comm/argv-shaped key.
 //
 // THE trailNeedle BYTE-SWEEP IS GENUINELY ABSENT HERE, NOT DEFERRED BY

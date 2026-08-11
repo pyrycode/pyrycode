@@ -139,12 +139,18 @@ const (
 	// trailGatePresentOwesNone, which it answers under a streamrunner reading; it
 	// reaches trailGateUsable only under a ptyrunner or an indeterminate one. (It
 	// was #1369's until that issue was closed NOT_PLANNED and re-filed as #1427,
-	// which split into those two.) And not that this gate decides
-	// against the path a LIVE run took: both shipped gathers fill RunnerPath with
-	// trailRunnerUnread() (`finGatherReadings`, :789;
-	// `trailRigGather`), so over a live run the reading names no runner
-	// and this value is unreachable. The gate is correct about absence when the
-	// path is known, and the shipped gathers do not know it.
+	// which split into those two.) And not that this gate READ the path a live run
+	// took: the path arrives as a reading its caller staged, and this value says
+	// what an absence means GIVEN that reading rather than deciding the path
+	// itself.
+	//
+	// IT IS REACHABLE FROM A LIVE RUN SINCE #1452, which is the whole of that
+	// ticket: finGatherReadings takes the runner path from its caller, and
+	// finExitRunProbe reduces Pin.ClaudeCommand with tdnRunnerFromArgv at its own
+	// call site — so a healthy headless stream run, whose trailer is claude's own
+	// result line, reaches this value rather than the path-unnamed answer that
+	// says nobody could tell. trailRigGather still supplies trailRunnerUnread(),
+	// because it runs no claude and has no producer for a reading.
 	trailGateAbsentOwesNone = "gate-absent-reason-owes-none"
 	// trailGatePresentOwesNone: the trailer carries a terminal_reason ON the line,
 	// and the observed runner path owes none. A READING rather than a caller's bug,
@@ -172,12 +178,15 @@ const (
 	// Not that any process was alive, either: this is a statement about WHAT THE
 	// TRAILER CARRIED, and nothing is certified here, so there is no
 	// declared-finished instant for such a claim to be about — which is why the
-	// run-level arm it reaches is a named void. And not that this gate decides
-	// against the path a LIVE run took: both shipped gathers fill RunnerPath with
-	// trailRunnerUnread() (`finGatherReadings`, :789;
-	// `trailRigGather`), so over a live run the reading names no runner and
-	// this value is unreachable. The gate is correct about presence when the path is
-	// known, and the shipped gathers do not know it.
+	// run-level arm it reaches is a named void. And not that this gate READ the
+	// path a live run took: the path arrives as a reading its caller staged, and
+	// this value says what a PRESENT terminal_reason means given that reading.
+	//
+	// IT TOO IS REACHABLE FROM A LIVE RUN SINCE #1452, on a stream run whose
+	// trailer carries a reason anyway — the sibling above's route, one shape
+	// along: finGatherReadings takes the reading from its caller, and
+	// finExitRunProbe reduces Pin.ClaudeCommand with tdnRunnerFromArgv.
+	// trailRigGather still supplies trailRunnerUnread(), because it runs no claude.
 	trailGatePresentOwesNone = "gate-present-reason-owes-none"
 	// trailGateOutOfContract: the input is not a reading. Reporting any of its
 	// sub-cases as absent would file a caller's bug under "pyry never finished
@@ -517,9 +526,10 @@ func trailGate(in trailGateInput) trailGateResult {
 			// to trailReasonPathUnnamed on any label naming neither runner WITHOUT
 			// CONSULTING IT (:272-278), so on an indeterminate reading an absent key
 			// and a present-and-empty one reach one value — and an indeterminate
-			// reading is precisely what both shipped gathers supply. Sourcing
-			// presence there could not tell those two apart on the only reading
-			// live code produces.
+			// reading is what trailRigGather supplies, and what the finding gather
+			// falls back to when its caller stages none. Sourcing presence there
+			// could not tell those two apart on that reading, which #1452 left
+			// reachable rather than removed.
 			//
 			// Three return sites, and NO default guard. presence is false by the
 			// enclosing branch, so only the three absence values are reachable and
@@ -976,16 +986,20 @@ func trailReapLine(count int, pgids string) string {
 // which row was claude's — never a claim that the run took the other path, which
 // is exactly what tdnRunnerFromArgv answers with its own indeterminate string.
 //
-// Both gathers and all nine fixture rows go through this one function, so the
-// two sides of C2's whole-struct equality (`finGatherAssertContract`) cannot
-// drift apart.
+// trailRigGather, all nine fixture rows and the finding gather's own fallback go
+// through this one function, so the spellings of "nothing was read" cannot drift
+// apart. The finding gather reaches it through finGatherRunnerPath, and both
+// sides of C2's whole-struct equality (`finGatherAssertContract`) take that same
+// route.
 //
-// The gathers' use of it is CONSTANT by construction and FORBIDDEN to close:
-// neither gather's needle set carries tdnClaudeNeedle, and
-// finding_exit_path_probe_test.go:264-272 forbids adding it to the finding
-// gather's scan. So a live run reads no runner and the gate's absence arm
-// reaches only its path-unnamed case, while #1420 reads it at the gate with no
-// live run needed. Full reason: trail_ptyrunner_composition_test.go:19-26.
+// IT IS NO LONGER WHAT A LIVE RUN READS. Neither gather's needle set carries
+// tdnClaudeNeedle and the needle prohibition at finExitRunProbe's Needles field
+// still forbids adding it to the finding gather's scan — but since #1452 the
+// reading does not come from that scan at all: the caller reduces claude's own
+// argv with tdnRunnerFromArgv and hands the answer in, so a live run reaches
+// whichever case its path earns. This value stays the answer for trailRigGather,
+// which runs no claude, and for any caller that stages nothing. Full reason:
+// TestTrailComposesUnderAPtyrunnerReading's header.
 //
 // A function rather than a package-level var, matching trailRigHeldPGID()'s shape
 // in this family (`trailRigHeldPGID`).
@@ -1670,12 +1684,13 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 			want:      trailReasonAbsentOwesNone,
 		},
 		{
-			// trailRunnerUnread() is the reading BOTH shipped gathers supply
-			// (`finGatherReadings`, :789; `trailRigGather`), so
-			// this row is the only one of the three a live run reaches today — and
-			// with it the only absence answer a live run can reach, which is why
-			// #1417's value is unreachable from a live gather and no comment here
-			// claims otherwise.
+			// trailRunnerUnread() is what trailRigGather supplies and what the
+			// finding gather falls back to when its caller stages no reading. Until
+			// #1452 it was the only reading a live run could produce, which made
+			// this the only one of the three a live run reached; that ticket routed
+			// the caller's own reading to the gate, so R1 and R2 are reachable from
+			// a live run too, each on the path that earns it. This row is now the
+			// answer for a run whose claude row could not be pinned.
 			name:      "R3 absent from a path naming no runner",
 			scan:      trailGateAbsentReasonScan(),
 			reading:   trailRunnerUnread(),
@@ -1806,7 +1821,7 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 // certifying arm leaves the length alone, and an overgrown Detail leaves Reason
 // alone. trailClassifyRun's C2 (trail_run_outcome_test.go:673-684) rejects the
 // certifying pair a layer up, and since #1434 trailRunCases()' new row
-// (trail_run_outcome_test.go:1548-1558) drives this arm into that classifier WITHOUT
+// (trail_run_outcome_test.go:1550-1560) drives this arm into that classifier WITHOUT
 // pre-asserting, so C2's own Detail is quoted verbatim in a red TestTrailClassifyRun.
 // Measured, this mutant reddens four tests rather than two.
 //

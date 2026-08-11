@@ -14,16 +14,30 @@ import (
 //
 // # What this pin is about, and what it is NOT
 //
-// It reproduces the composition GIVEN a ptyrunner reading. It does NOT reproduce
-// the path a live run reports, and nothing here may be read as claiming it does:
-// both shipped gathers fill the gate's runner-path field with trailRunnerUnread()
-// by construction (`finGatherReadings`, :789;
-// `trailRigGather`), because tdnClaudeCommand skips any row whose
-// matched-needle list lacks tdnClaudeNeedle (teardown_liveness_probe_test.go:561-575)
-// and finding_exit_path_probe_test.go:264-272 forbids adding that needle to that
-// gather's scan — it has no finLivePinReduce, so claude's row would land in the
-// classifier's match-count arms and in the published liveness list. Over a live
-// run today the reading always names no runner.
+// It reproduces the composition GIVEN a ptyrunner reading, driven from fixtures
+// and taking no measurement — so it is evidence about the CHAIN and never about a
+// run, and nothing here may be read as a verdict on one.
+//
+// # What a live run reads, and what #1452 changed about it
+//
+// Until #1452 both shipped gathers filled the gate's runner-path field with
+// trailRunnerUnread() by construction, so over a live run the reading always
+// named no runner and this composition was one no live run could report. The
+// reason it cannot come from the finding gather's OWN SCAN still stands:
+// tdnClaudeCommand skips any row whose matched-needle list lacks tdnClaudeNeedle
+// (teardown_liveness_probe_test.go:561-575) and the needle prohibition at
+// finExitRunProbe's Needles field forbids adding that needle to that gather's
+// scan — it has no finLivePinReduce, so claude's row would land in the
+// classifier's match-count arms and in the published liveness list.
+//
+// What #1452 found is that the reading never had to come from there. The CALLER
+// already holds one: finLivePinReduce fills Pin.ClaudeCommand from the driver's
+// own two-needle scan during the turn, and finExitRunProbe reduces it with
+// tdnRunnerFromArgv at its own call site before handing it to finGatherReadings.
+// So a live ptyrunner run now reports THIS composition, and a live stream run
+// reports the sibling one. trailRigGather still fills trailRunnerUnread() and is
+// expected to: it runs no claude process at all, so it has no producer for any
+// reading.
 //
 // # Why it is green, and why the reason changed at #1433
 //
@@ -120,7 +134,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	// Premise. The reading carries no VALUE from the argv it was driven over.
 	// This is the first test to drive a real runner argv into
 	// trailGateInput.RunnerPath, a field that IS marshalled into the published
-	// gate record (trailer_admissibility_test.go:297-334), and the boundary
+	// gate record (trailer_admissibility_test.go:306-343), and the boundary
 	// keeping a command string out of it is that tdnRunnerFromArgv returns
 	// constant literals and interpolates nothing from its argument. The reader
 	// may name the flag --session-id in its answer; it may never echo what
@@ -137,7 +151,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 
 	// Premise. The reap record is CLASSIFIED by the real producer rather than
 	// typed, which pins the proof arm to a record tdnClassifyReapLog actually
-	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2326)
+	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2341)
 	// and its reason.
 	classified := tdnClassifyReapLog([]byte(trailReapLine(1, "[7788]")+"\n"), heldPGID)
 	if classified.Verdict != tdnReapHeldPGIDKilled || classified.LineCount != 1 {

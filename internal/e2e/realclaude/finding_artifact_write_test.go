@@ -242,7 +242,7 @@ const finWriteTrailerPad = 0
 // because trailScan is deterministic over the bytes it is handed and
 // trailPaddedTrailer renders the same line for the same pad. What would NOT be
 // safe is hoisting the result to a package-level var to avoid the second scan:
-// that is the fixture rule trail_run_outcome_test.go:1111-1113 states for this whole
+// that is the fixture rule trail_run_outcome_test.go:1113-1115 states for this whole
 // package, whose reason is that `go test -race` runs these tests in parallel.
 func finWritePlantedTrailerScan() trailScanResult {
 	return trailScan([]byte(trailPaddedTrailer(finWriteTrailerPad) + "\n"))
@@ -268,7 +268,7 @@ func finWritePlantedReapLog() []byte {
 // on TestFinWriteArtifactsCarryNoCapturedBytes.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1111-1113): a shared backing array is reachable
+// reason (trail_run_outcome_test.go:1113-1115): a shared backing array is reachable
 // from every test in this package, and `go test -race` runs them in parallel.
 //
 // # Plant only where the pipeline reduces
@@ -304,7 +304,7 @@ func finWritePlantedReapLog() []byte {
 // pinStateOutcome's seven keys; that gap is precisely what this census closes.
 // Passing pgid 1 alongside the real group is what fills Conditions and
 // Unreportable in one call: finAttributeFanOut partitions pgid <= 1 as
-// unreportable (finding_attribution_fanout_test.go:237-247) while 7788 still
+// unreportable (finding_attribution_fanout_test.go:238-248) while 7788 still
 // produces the entry AC2's premise reads.
 //
 // # The liveness outcome is hand-built, and it is not a shortcut
@@ -321,9 +321,9 @@ func finWritePlantedReapLog() []byte {
 // # The certified reason is "completed" and not the budget one
 //
 // trailAdmitAttribution returns trailAdmitVoidBudgetFired the moment certified ==
-// trailBudgetTerminalReason (trailer_admissibility_test.go:521), ahead of every
-// reap-side arm. AC2's premise is that the entry reads trailAdmitProof — reachable
-// only from a needle-bearing line that was recognised, parsed and matched — so a
+// trailBudgetTerminalReason, ahead of every reap-side arm. AC2's premise is that
+// the entry reads trailAdmitProof — reachable only from a needle-bearing line
+// that was recognised, parsed and matched — so a
 // budget reason here would defuse the non-vacuity check into a Fatalf about the
 // wrong thing.
 func finWriteInputs() finRecordInputs {
@@ -798,7 +798,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 		t.Fatalf("channel 3 (reap stderr): the synthetic reap log carries no needle")
 	}
 	// The premise doubles as the non-vacuity proof, following
-	// finding_attribution_fanout_test.go:738-742: trailAdmitProof is reachable only
+	// finding_attribution_fanout_test.go:739-743: trailAdmitProof is reachable only
 	// if the needle-bearing line was recognised as anchored, parsed and found to
 	// name the held group. A plant that stopped being anchored lands here.
 	//
@@ -806,7 +806,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// them renders every Admit.Detail, and the rule is to name the count, the path
 	// and the length rather than the string (security review item [7]). The Values
 	// are safe to print because trailAdmitAttribution returns one of a closed set
-	// (trailer_admissibility_test.go:258-265); the Details beside them are not.
+	// (trailer_admissibility_test.go:267-274); the Details beside them are not.
 	first := "<no entries>"
 	if len(in.Attribution.Entries) > 0 {
 		first = in.Attribution.Entries[0].Admit.Value
@@ -941,7 +941,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 // finding_run_record_test.go:934-944 gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
-// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:759),
+// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:760),
 // less the redundant trailer_line, which "line" already covers.
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)

@@ -53,7 +53,7 @@ package realclaude
 //
 //   - the trailer's and the attribution's admissibility enter as #1270's two
 //     results WHOLE, because both are documented trap-free by construction
-//     (trailer_admissibility_test.go:281-296, :336-339);
+//     (trailer_admissibility_test.go:290-305, :345-348);
 //   - the trailer's lateness enters as the BoundFrom discriminator alone and
 //     never as a trailObservation, which EMBEDS trailScanResult
 //     (result_trailer_observation_test.go:141-142) and would therefore promote
@@ -775,13 +775,15 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	// the obvious next line.
 	//
 	// It would answer run-out-of-contract ON EVERY RUN THAT EXISTS TODAY. No
-	// shipped gather stages either input: both fill the gate's runner-path field
-	// with trailRunnerUnread() by construction (`finGatherReadings`,
-	// :789; `trailRigGather`). A zero pinStateOutcome carries Verdict ""
-	// and a zero trailOrderResult carries Value "", neither a member of its own
-	// closed space — and an UNSTAGED PAIR IS A ROUTINE READING, not a caller's
-	// bug. Filing it as one is the collapse #1417 exists to prevent, one value
-	// along.
+	// shipped gather stages either input: trailRigGather assembles neither, and
+	// finGatherInputs carries no field either one could arrive on. The
+	// runner-path premise this paragraph used to argue from is gone — #1452 gave
+	// the finding gather a RunnerPath its caller fills — but the conclusion never
+	// rested on that field and is unchanged. A zero pinStateOutcome carries
+	// Verdict "" and a zero trailOrderResult carries Value "", neither a member of
+	// its own closed space — and an UNSTAGED PAIR IS A ROUTINE READING, not a
+	// caller's bug. Filing it as one is the collapse #1417 exists to prevent, one
+	// value along.
 	//
 	// Nothing is lost on the PIN side, because the consumed predicate already decides
 	// it safely and says so: trailSightingReasonPidReadFailed's own doc names "the
@@ -2207,7 +2209,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:2562) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:2577) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, a pinStateOutcome's Detail and ToolStderr, and since

@@ -168,7 +168,7 @@ const finLivePinWantRows = 2
 //
 // NOTHING IS DEDUPED, anywhere — not Rows, not PGIDs. The projection handed on is
 // EVERY matched row's .PGID, in scan order, duplicates intact. finAttributeFanOut
-// dedupes and sorts internally (finding_attribution_fanout_test.go:220-229), and
+// dedupes and sorts internally (finding_attribution_fanout_test.go:221-230), and
 // its own comment explains that the sort is what makes the record a pure function
 // of the SET rather than of ps output order; pre-reducing here would duplicate
 // that work and destroy the raw evidence. tdnPinHeld

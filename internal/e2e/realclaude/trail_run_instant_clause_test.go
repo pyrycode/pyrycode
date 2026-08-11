@@ -176,7 +176,7 @@ func TestTrailRunCertifiesNothingArmsNameTheInstant(t *testing.T) {
 // occurrences as the sweep spells.
 //
 // It deliberately asserts NO count of "aliveness-at-declared-finish". A number kept
-// by hand beside a set drifts — trailer_admissibility_test.go:1172-1178 is this
+// by hand beside a set drifts — trailer_admissibility_test.go:1186-1192 is this
 // family's own record of a shipped comment saying twenty-nine while the map already
 // held thirty-five.
 func TestTrailRunBareAlivenessAtTrailerIsBudgetFiredOnly(t *testing.T) {

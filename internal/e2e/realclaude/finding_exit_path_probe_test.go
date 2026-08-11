@@ -67,8 +67,8 @@ package realclaude
 // t.Fatalf fires only on structural failure, and this file adds exactly ONE of its
 // own: os.MkdirTemp failing. Three abort paths are INHERITED from finLiveRunStage
 // and are not re-guarded here — pyry never spawning a claude child, no system/init
-// session id (finding_live_run_test.go:331-341), and ReadJSONL's fatal on a
-// transcript it cannot open or parse (`ReadJSONL`, :163) reached through the
+// session id (finding_live_run_test.go:335-345), and ReadJSONL's fatal on a
+// transcript it cannot open or parse (`ReadJSONL`, :165) reached through the
 // assembly. Every other failure mode is RECORDED, because a probe that turns an
 // unexpected reading into a red test loses the reading.
 //
@@ -78,7 +78,7 @@ package realclaude
 // so `make e2e-realclaude` skips this probe by default and a skip is the NORMAL
 // outcome, saying nothing about pyry's behaviour.
 //
-// The reach probe's second gate (PYRY_USE_STREAMJSON=1, :296-306) is deliberately
+// The reach probe's second gate (PYRY_USE_STREAMJSON=1, :300-310) is deliberately
 // NOT copied, because neither of its two reasons transfers and copying it would skip
 // a run that would have been correct. (1) Its delta does not name the variable;
 // finLiveStageEnvDelta names PYRY_USE_STREAMJSON=0 EXPLICITLY
@@ -87,7 +87,7 @@ package realclaude
 // the delta wins over the operator's shell. (2) Its content-first root pinning keys
 // on --session-id, which only ptyrunner emits; this rig pins nothing content-first,
 // resolving claude through probeWaitForDirectChild's descendant walk. #1340 states
-// the same conclusion for the same reason (finding_live_run_test.go:242-246). The
+// the same conclusion for the same reason (finding_live_run_test.go:246-250). The
 // observed-path reading below is the real guard and is strictly stronger than an env
 // check.
 //
@@ -120,7 +120,7 @@ const finExitEnableEnv = "PYRY_PROBE_EXIT_PATH"
 // IT IS THIS FILE'S OWN CONSTANT AND IT IS NOT probePyryExitGrace, which the two are
 // easy to conflate. That one (20s, background_trigger_probe_test.go:134) measures the
 // driver's defence-in-depth cleanup waiting AFTER THE FIFO RELEASE before SIGKILLing
-// (finding_live_run_test.go:455-487) — a mechanical unblock. This one measures a turn
+// (finding_live_run_test.go:459-491) — a mechanical unblock. This one measures a turn
 // COMPLETING with the hold still on: claude receiving the tool_result, producing a
 // final assistant message, emitter.Close() writing the trailer, teardown, exit. That
 // is a model round-trip plus teardown. Reusing the other constant would name one
@@ -262,14 +262,18 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// mutex, so this is non-destructive.
 		Stdout: h.Stdout,
 		// THE FIFO PATH ALONE. Not the driver's two-needle list
-		// (finding_live_run_test.go:411-416): that scan carries tdnClaudeNeedle
+		// (finding_live_run_test.go:415-420): that scan carries tdnClaudeNeedle
 		// because finLivePinReduce separates the populations afterwards, and the
-		// gather has NO SUCH REDUCTION — it calls pinScanArgv(in.Needles, nil) and
-		// fills MatchCount, RowsScanned and one pinReadState per matched pid from
-		// that one call (finding_run_gather_test.go:605). Adding the claude needle
+		// gather has NO SUCH REDUCTION — its argv leg calls
+		// pinScanArgv(in.Needles, nil) and fills MatchCount, RowsScanned and one
+		// pinReadState per matched pid from that one call. Adding the claude needle
 		// would put claude's own row into the classifier's match-count arms and
 		// into the published liveness list. The FIFO path alone is safe without
 		// exclusions: neither this binary's argv nor pyry's carries it.
+		//
+		// #1452 did NOT reopen this: the runner-path reading below reaches the
+		// gather as a REDUCED STRING and never as a needle, so the needle set is
+		// what it always was.
 		Needles: []string{h.FIFOPath},
 		// READ AFTER THE EXIT WAIT, which is why the handle carries live buffers
 		// rather than a snapshot: pyry's reap log — the primary evidence — lands on
@@ -281,6 +285,25 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		Pinned:      h.Pin.PGIDs,
 		PyryExited:  pyryExited,
 		ClaudeState: claudeState,
+		// THE RUNNER-PATH READING, REDUCED HERE AND NEVER INSIDE THE GATHER. The
+		// gather takes tdnRunnerFromArgv's answer — one of five source-authored
+		// constants — and never h.Pin.ClaudeCommand itself, which is verbatim argv
+		// marked INPUT ONLY — NEVER PUBLISHED on finLivePinReading. This value is
+		// republished as runner_path, so handing the argv over and reducing it
+		// inside the gather would put an operator's CLAUDE_CODE_OAUTH_TOKEN or
+		// ANTHROPIC_API_KEY one field away from an artifact destined for a public
+		// issue — the same conversion-site rule Pinned above obeys.
+		//
+		// Never reachRunnerPathFromArgv: it keys on --append-system-prompt-file,
+		// which BOTH argv builders emit, so it would label a correctly-wired stream
+		// run ptyrunner.
+		//
+		// An EMPTY ClaudeCommand is admissible and lands on the shipped
+		// indeterminate answer, exactly as it does at ClaudeCommand below. This is
+		// what makes trailGateAbsentOwesNone reachable from a live headless stream
+		// run, where a healthy trailer is claude's own result line and carries no
+		// terminal_reason at all.
+		RunnerPath: tdnRunnerFromArgv(h.Pin.ClaudeCommand),
 	})
 
 	// 5. Staging first; the classifier only on the pass-through.
@@ -319,6 +342,14 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// disagreement. Not gated on, not defaulted, not repaired with a second
 		// argv read. The builder computes both the argv label and the agreement;
 		// this rig computes neither.
+		//
+		// SO THIS FUNCTION REDUCES THE SAME ARGV TWICE since #1452 — once at its
+		// own call site for the gather's gate, and once inside finRecordBuild for
+		// the record's RunnerFromArgv — and the two are deliberately NOT hoisted
+		// into one. tdnRunnerFromArgv is pure over this string, so they agree by
+		// construction; sharing a value would mean changing one of the two
+		// signatures, since finRecordInputs takes the ARGV and the gather takes the
+		// LABEL, and that is scope neither ticket has.
 		ClaudeCommand: h.Pin.ClaudeCommand,
 		ClaudeVersion: h.ClaudeVersion,
 	})

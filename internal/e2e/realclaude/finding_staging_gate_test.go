@@ -55,7 +55,7 @@ package realclaude
 // staged, so the gate reads a string the model chose. BOTH OPERANDS COUNT, not
 // only the issued one: the staged command looks rig-authored and therefore safe,
 // but the rig builds it around a t.TempDir() path and a binary resolved by
-// exec.LookPath (trail_run_rig_test.go:506-556), so on a live run it embeds an
+// exec.LookPath (trail_run_rig_test.go:509-559), so on a live run it embeds an
 // operator filesystem path — the same leak class pinStateColumns
 // (`pinStateColumns`) refuses a command column for. These records
 // are pasted into public issues, so no Detail here quotes either one, and
@@ -65,8 +65,8 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailIsRunOutcome and trailRunOutcomeValues
-// (:2478) are the sixteen and their membership predicate — called, never
+// trailIsRunOutcome and trailRunOutcomeValues are the sixteen and their
+// membership predicate — called, never
 // re-derived or hand-copied. trailNeedle
 // is the shipped needle.
 //
@@ -276,7 +276,7 @@ func finOutcomeStagingGate(s finOutcomeStaging) finOutcomeResult {
 	// BELOW and the sentence has no interpolation site for one — the only verbs it
 	// carries take outcome values. The issued command is verbatim model output; the
 	// staged one embeds a t.TempDir() path and an exec.LookPath result
-	// (trail_run_rig_test.go:506-556), which is the same operator-filesystem-path
+	// (trail_run_rig_test.go:509-559), which is the same operator-filesystem-path
 	// leak class pinStateColumns refuses a command column for. The rule covers both
 	// operands, so a Detail naming "which operand differed" is also out — it is one
 	// edit away from naming its bytes.
@@ -681,7 +681,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // against a leaking implementation. trailNeedle is placed past the cap
 // deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
 // for the opposite kind of test; here that placement would be the defect. These
-// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2255-2256, :2295-2298.
+// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2257-2258, :2297-2300.
 const (
 	finOutcomePlantedStaged = "a staged hold command that also carries " + trailNeedle
 	finOutcomePlantedIssued = "a different issued command that also carries " + trailNeedle

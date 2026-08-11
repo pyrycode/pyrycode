@@ -343,7 +343,7 @@ func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
 // # ClaudeVersion is capped on the way in
 //
 // The family's rule is that every retained operator-visible string is capped
-// (trailer_admissibility_test.go:262-265), and this is the one such string the
+// (trailer_admissibility_test.go:271-274), and this is the one such string the
 // record would otherwise retain uncapped. The live caller is the version probe,
 // whose error path returns fmt.Sprintf("<unavailable: %v>", err)
 // (`probeClaudeVersion`) — an exec error interpolating the
@@ -413,7 +413,7 @@ const (
 // drops.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1111-1113): a shared backing array is
+// reason (trail_run_outcome_test.go:1113-1115): a shared backing array is
 // reachable from every test in this package, and `go test -race` runs them in
 // parallel.
 func finRecordMatchedRows(suffix string) []reachProc {
@@ -591,7 +591,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 	// into a record destined for a public issue. It is the one retained
 	// operator-visible string this record would otherwise hold uncapped, against
 	// the family's rule that every one of them is capped
-	// (trailer_admissibility_test.go:262-265).
+	// (trailer_admissibility_test.go:271-274).
 	overlong := "<unavailable: exec: " + strings.Repeat("/home/operator/a/long/path", 40) + ">"
 	if len(overlong) <= reachMaxCommandBytes {
 		t.Fatalf("the overlong version fixture is %d bytes, inside the %d-byte cap, so the check "+
@@ -657,7 +657,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 // would have refused. It is the position finTrailerOutcomeValues()
 // (finding_trailer_evidence_test.go:550) occupies for #1290's outcome, and the
 // rule trailGateCases states: the shipped producer for what it can emit,
-// hand-built for what it cannot (trailer_admissibility_test.go:758-762).
+// hand-built for what it cannot (trailer_admissibility_test.go:768-772).
 func TestFinRecordLivenessIsConsumedAsHanded(t *testing.T) {
 	values := finRecordLivenessValues()
 	if len(values) != 4 {

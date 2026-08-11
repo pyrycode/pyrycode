@@ -154,10 +154,13 @@ func trailRigGather(stdout *probeSyncBuffer, needles []string) (trailRunReadings
 	// than re-scanned, because that is the composition a live probe performs.
 	obs := trailWaitForTrailer(stdout, trailRigTrailerWait)
 	readings.BoundFrom = obs.BoundFrom
-	// The runner path is CONSTANT by construction and FORBIDDEN to close: no
-	// caller's needles carry tdnClaudeNeedle, and this rig runs no claude at all
-	// (:40) — staging one to be read would change what this rig is.
-	// Full reason: trail_ptyrunner_composition_test.go:19-26.
+	// The runner path is CONSTANT by construction and FORBIDDEN to close, and
+	// since #1452 the reason is THIS RIG'S OWN rather than a delegation: this rig
+	// runs no claude process at all — see the header's "The two staged values, and
+	// why they are the only two" — so it has no producer for any reading, and
+	// staging one to be read would change what this rig is. A parameter would be
+	// an argument none of its callers could fill. #1452 gave the FINDING gather a
+	// caller-supplied reading; no such caller exists here.
 	readings.Gate = trailGate(trailGateInput{Scan: obs.trailScanResult,
 		RunnerPath: trailRunnerUnread()})
 

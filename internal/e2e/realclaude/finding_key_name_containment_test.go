@@ -133,8 +133,8 @@ import (
 // text, marked OPERATOR-REVIEW-BEFORE-PASTE
 // (result_trailer_observation_test.go:100-107) — and the *resultTrailer into the
 // reach of every test in this file, where a later %+v in a failure message prints
-// it. That is the reach finGatherReadings deliberately refuses to hand back
-// (finding_run_gather_test.go:483-489) and that finSighting exists to sever. Both
+// it. That is the reach finGatherReadings deliberately refuses to hand back and
+// that finSighting exists to sever. Both
 // callers' preconditions are about THE NAMES THE READER READ; neither needs Line,
 // Trailer or Detail, so the narrow return costs nothing and closes the door by
 // SHAPE rather than by a prose rule that must not be got wrong — this family's own
@@ -180,7 +180,7 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 //     needle and the shipped pad measurement still holds.
 //
 // A function and not a package-level var, for trailRunWellFormed's stated reason
-// (trail_run_outcome_test.go:1111-1113): `go test -race` runs this package's tests
+// (trail_run_outcome_test.go:1113-1115): `go test -race` runs this package's tests
 // in parallel.
 //
 // # The plant list, and why it stops where it does
@@ -528,7 +528,7 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 // rather than pinned as a literal.
 //
 // A const and not a var: the parallel-tests rule
-// (trail_run_outcome_test.go:1111-1113) is about shared BACKING ARRAYS, and a string
+// (trail_run_outcome_test.go:1113-1115) is about shared BACKING ARRAYS, and a string
 // constant has none.
 const finContainNeedleKeyName = "PYRY-PROBE-KEY-NAME-NEEDLE-MUST-NOT-REACH-A-DETAIL"
 
