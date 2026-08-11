@@ -40,7 +40,7 @@
 //     that this guard does not do. A cleanup script that assumed self-file
 //     produced confidently wrong symbols; trail_run_outcome_test.go documents
 //     the same hazard on #1434's evidence.
-//   - Line RANGES (`:2063-2107`). A range carries information a symbol name
+//   - Line RANGES (`:2103-2147`). A range carries information a symbol name
 //     does not.
 //   - Anything outside a `//` comment. String literals and code are not this
 //     guard's business.

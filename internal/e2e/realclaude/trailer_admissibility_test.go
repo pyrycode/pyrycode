@@ -130,7 +130,7 @@ const (
 	// constructs.
 	//
 	// It CERTIFIES NOTHING — Reason stays empty, which is what keeps
-	// trailClassifyRun's C2 (trail_run_outcome_test.go:673-684) green unamended —
+	// trailClassifyRun's C2 (trail_run_outcome_test.go:681-692) green unamended —
 	// and it says no more than what was read. Not that any process was alive:
 	// there is no certified instant here for such a claim to be about, which is
 	// why the run-level arm it reaches is a named void. Not anything about a
@@ -162,8 +162,8 @@ const (
 	//
 	// What it says is that the line is NOT that path's documented healthy shape —
 	// absence is — and no more than that. It CERTIFIES NOTHING: Reason stays empty,
-	// which is what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:673-684)
-	// green unamended and lets C4 (:698-706) force Admit empty.
+	// which is what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:681-692)
+	// green unamended and lets C4 (:706-714) force Admit empty.
 	//
 	// NEVER THAT PYRY WROTE IT, and the passthrough cite above is the REASON rather
 	// than a decoration. Pyry's own synthesis on that path is unconditional WHEN IT
@@ -648,7 +648,7 @@ func trailGate(in trailGateInput) trailGateResult {
 	// owes-none absence, and for the same reason: the record IS a reading, so
 	// answering "the input is not a reading" filed a measurement as a caller's bug.
 	// Certifying nothing is what keeps trailClassifyRun's C2
-	// (trail_run_outcome_test.go:673-684) green unamended and lets C4 (:698-706)
+	// (trail_run_outcome_test.go:681-692) green unamended and lets C4 (:706-714)
 	// force Admit empty, so the run-level answer is decided at step 1 alone — by
 	// trailOutcomeVoidReasonNotOwedByPath, the arm added to that switch IN THE SAME
 	// COMMIT, because a gate value registered in trailIsGateValue with no arm there
@@ -1574,8 +1574,8 @@ func trailGateAbsenceCaseMarkers() []string {
 //
 // The certified reason stays empty on all four rows: naming which case fired,
 // and taking one of them out of the out-of-contract value, still certifies
-// nothing — so trailClassifyRun's C1 and C2 (trail_run_outcome_test.go:660-671,
-// :673-684) stay green with C1's enumeration widened by one and C2 unamended.
+// nothing — so trailClassifyRun's C1 and C2 (trail_run_outcome_test.go:668-679,
+// :681-692) stay green with C1's enumeration widened by one and C2 unamended.
 //
 // # Markers are matched WHOLE, never as fragments
 //
@@ -1819,9 +1819,9 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 // P1 carries three mutants because its three assertions fail independently: an arm
 // left answering the shipped value moves neither the reason nor the length, a
 // certifying arm leaves the length alone, and an overgrown Detail leaves Reason
-// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:673-684) rejects the
+// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:681-692) rejects the
 // certifying pair a layer up, and since #1434 trailRunCases()' new row
-// (trail_run_outcome_test.go:1550-1560) drives this arm into that classifier WITHOUT
+// (trail_run_outcome_test.go:1588-1598) drives this arm into that classifier WITHOUT
 // pre-asserting, so C2's own Detail is quoted verbatim in a red TestTrailClassifyRun.
 // Measured, this mutant reddens four tests rather than two.
 //
@@ -2104,7 +2104,7 @@ func trailGateRunnerReadings() []string {
 //     declaring row, in the companions below — positively, and per reading, which
 //     is a stronger statement than the invariance it replaced. It has a second
 //     detector of different fabric one layer up: trailClassifyRun's C2
-//     (trail_run_outcome_test.go:673-684) rejects a non-certifying gate value that
+//     (trail_run_outcome_test.go:681-692) rejects a non-certifying gate value that
 //     carries a reason.
 //
 // A green sweep that had simply stopped covering an arm would be silent about the
@@ -2299,7 +2299,7 @@ func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 	// replaces the invariance the widened exemption withdrew — and it is the
 	// stronger of the two, since it says what each reading certifies rather than
 	// only that the five agree. trailClassifyRun's C2
-	// (trail_run_outcome_test.go:673-684) rejects a non-certifying gate value
+	// (trail_run_outcome_test.go:681-692) rejects a non-certifying gate value
 	// carrying a reason at a different layer again, so the property has two
 	// detectors of different fabric rather than one.
 	//

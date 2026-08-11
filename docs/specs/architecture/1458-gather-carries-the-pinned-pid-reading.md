@@ -404,7 +404,23 @@ Carry these so the survivors are a checked result rather than an omission. A swe
 
 Both were measured, not assumed. Both change what the developer should spend turns on.
 
-### 1. The cite tail is **empty**. Do not budget for it.
+### 1. `finding_run_gather_test.go`'s **inbound** cite tail is empty — but that is one file, not the change.
+
+> **Amended after code-review of PR #1460 (2026-08-11).** The measurement below is sound
+> and is kept. Its **scope** was wrong as headlined: it measures the inbound tail of
+> `finding_run_gather_test.go`, the file gaining the *field*. The file the AC4 comment
+> sweep actually *grows* is `trail_run_outcome_test.go` — the most-cited file in the
+> package — and its inbound tail was never measured. It is **not** empty: the shipped
+> change grows it by +51 lines cumulative across 11 hunks, displacing **182 citation
+> endpoints across 93 comment lines in 18 files** (16 in `internal/e2e/realclaude/`, plus
+> a bare range in `cmd/cite-guard/main.go`). `finding_live_run_test.go`'s +1 hunk is in
+> that count.
+>
+> **The rule to carry forward:** measure the inbound tail of *every* file the change
+> grows, chosen by which file the diff adds lines to — not by which file the ticket is
+> named after. `cite-guard` does not close this gap: it bans *new* symbol-replaceable
+> cites, it does not detect existing cites going stale, so a displaced tail reaches
+> review green.
 
 The ticket's Technical Notes say the `finGatherInputs` doc edit "grows a comment mid-file"
 and that "14 live-scope cites (shipped comments plus `docs/knowledge/`) point into that

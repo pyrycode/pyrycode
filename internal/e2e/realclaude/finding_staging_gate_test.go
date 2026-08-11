@@ -105,7 +105,7 @@ import (
 // (`TestTrailConstantsAreClosed`) fails any closed-space value that is
 // the empty string because "a zero-valued field reads as it", and
 // trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way"
-// (trail_run_outcome_test.go:421-424).
+// (trail_run_outcome_test.go:429-432).
 //
 // There is no out-of-contract value here and none is to be added. Seven is
 // seven: the two inputs that could otherwise want one are closed by the two
@@ -144,7 +144,7 @@ const (
 // embedded in, marshalled into, or quoted by any published record. Only
 // finOutcomeResult crosses into publishable space. The asymmetry is load-bearing
 // rather than incidental — every sibling record in this family states its content
-// rule at the type (trailRunReadings:390-393, trailRunOutcome:461-475,
+// rule at the type (trailRunReadings:398-401, trailRunOutcome:469-483,
 // trailGateResult:311-326) and this one states the converse for the same reason.
 // Adding tags here "for symmetry" is the first step toward publishing two
 // captured strings into a public issue.
@@ -175,7 +175,7 @@ type finOutcomeStaging struct {
 	RendezvousDone bool
 	// PinScanErrored records THAT the during-turn pin scan failed, never what it
 	// said, mirroring trailRunReadings.ArgvScanErrored
-	// (trail_run_outcome_test.go:403-410). ps stderr is a captured string on the
+	// (trail_run_outcome_test.go:411-418). ps stderr is a captured string on the
 	// same footing as argv.
 	PinScanErrored bool
 	// PinMatchCount and PinWantCount are the scan's match count and the count the
@@ -681,7 +681,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // against a leaking implementation. trailNeedle is placed past the cap
 // deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
 // for the opposite kind of test; here that placement would be the defect. These
-// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2257-2258, :2297-2300.
+// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2308-2309, :2348-2351.
 const (
 	finOutcomePlantedStaged = "a staged hold command that also carries " + trailNeedle
 	finOutcomePlantedIssued = "a different issued command that also carries " + trailNeedle

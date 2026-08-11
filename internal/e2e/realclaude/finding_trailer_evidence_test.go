@@ -188,7 +188,7 @@ import (
 //
 // # The Detail's content rule, pinned rather than left to judgement
 //
-// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:465-475), it MAY
+// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:473-483), it MAY
 // name the outcome value, the scan state, BoundFrom, Bounded as a boolean and
 // the four decoded fields — permitted because the record already publishes them
 // as fields, so the exposure decision is this type's and the Detail adds nothing
@@ -269,7 +269,7 @@ type finTrailerRecord struct {
 // out of scope.
 //
 // Nor is the field asked to reject a non-member: no builder in this family
-// validates its value — trailRunOutcome:476 and finOutcomeResult (:198) are
+// validates its value — trailRunOutcome:484 and finOutcomeResult (:198) are
 // plain structs — because membership lives in the reader-facing predicates,
 // whose job is that "a value a reader of a published record cannot look up is a
 // verdict they cannot interpret".
@@ -311,7 +311,7 @@ func finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord {
 		// first poll already matched, so the trailer may have been visible before
 		// the loop began) and trailBoundNone is the honest no-bound, so a record
 		// deriving this from Staleness != 0 would publish a non-bound wearing a
-		// bound's label — trailRunOutcome:459-463's rule, unchanged.
+		// bound's label — trailRunOutcome:467-471's rule, unchanged.
 		Bounded: sighting.BoundFrom == trailBoundFromMiss,
 	}
 
@@ -385,7 +385,7 @@ func finTrailerAbortedScan() trailScanResult {
 // synthetic where it is used.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1113-1115): a shared backing value is
+// reason (trail_run_outcome_test.go:1139-1141): a shared backing value is
 // reachable from every test in this package and `go test -race` runs them in
 // parallel.
 func finTrailerSighting(scan trailScanResult, staleness time.Duration, boundFrom string) finSighting {
@@ -883,7 +883,7 @@ func TestFinTrailerRecordOutcomeIsConsumedAsHanded(t *testing.T) {
 				t.Errorf("outcome: got %q, want %q", rec.Outcome, v)
 			}
 			// The field is deliberately NOT asked to reject a non-member: no
-			// builder in this family validates its value (trailRunOutcome:436,
+			// builder in this family validates its value (trailRunOutcome:444,
 			// finOutcomeResult:198), because membership lives in the two
 			// reader-facing predicates called above.
 			if !trailIsRunOutcome(rec.Outcome) && !finOutcomeIsValue(rec.Outcome) {

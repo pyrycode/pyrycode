@@ -798,10 +798,10 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	// trailSightingReasonPidReadFailed's own doc names "the zero \"\" of an unfilled
 	// pinStateOutcome" among the shapes it answers for, so an unfilled pin has an
 	// argued home INSIDE the route and no guard is owed here. What a C10 over the
-	// pin would now reject is narrower and worse: it would fire on the EMPTY-SET
-	// case the caller answers with the zero — a run whose pin scan found nothing to
-	// read — filing that as the caller's bug when the route already has a reason
-	// for it.
+	// pin would now reject is narrower and worse, and it is TWO shapes rather than
+	// one: every trailRigGather run, which stages no pin, and the EMPTY-SET case the
+	// caller answers with the zero — a pin scan that found nothing to read. Both are
+	// readings, and the route already carries a reason for each.
 	//
 	// The consequence is stated plainly rather than left implicit: PinnedPid is THE
 	// ONE CLASSIFIER INPUT WITH NO CONTRACT CHECK OVER IT, so nothing downstream
@@ -2274,7 +2274,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // input left the SUITE GREEN for PinnedPid.ToolStderr — the field the trust boundary
 // runs through — and green for PinnedPid.Detail. Only Ordering.Detail reddened, and
 // not on the needle: it overruns trailDetail's cap, so the truncation-marker check at
-// TestTrailClassifyRun:1486-1489 caught it. A BUDGET kill, not a leak kill, and
+// TestTrailClassifyRun:1521-1524 caught it. A BUDGET kill, not a leak kill, and
 // different fabric — the sweep below is this arm's only check that fails on the needle
 // itself. Each block premise-asserts first, so none passes on garbage.
 //

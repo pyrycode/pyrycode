@@ -67,7 +67,7 @@ package realclaude
 // t.Fatalf fires only on structural failure, and this file adds exactly ONE of its
 // own: os.MkdirTemp failing. Three abort paths are INHERITED from finLiveRunStage
 // and are not re-guarded here — pyry never spawning a claude child, no system/init
-// session id (finding_live_run_test.go:335-345), and ReadJSONL's fatal on a
+// session id (finding_live_run_test.go:336-346), and ReadJSONL's fatal on a
 // transcript it cannot open or parse (`ReadJSONL`, :165) reached through the
 // assembly. Every other failure mode is RECORDED, because a probe that turns an
 // unexpected reading into a red test loses the reading.
@@ -87,7 +87,7 @@ package realclaude
 // the delta wins over the operator's shell. (2) Its content-first root pinning keys
 // on --session-id, which only ptyrunner emits; this rig pins nothing content-first,
 // resolving claude through probeWaitForDirectChild's descendant walk. #1340 states
-// the same conclusion for the same reason (finding_live_run_test.go:246-250). The
+// the same conclusion for the same reason (finding_live_run_test.go:247-251). The
 // observed-path reading below is the real guard and is strictly stronger than an env
 // check.
 //
@@ -120,7 +120,7 @@ const finExitEnableEnv = "PYRY_PROBE_EXIT_PATH"
 // IT IS THIS FILE'S OWN CONSTANT AND IT IS NOT probePyryExitGrace, which the two are
 // easy to conflate. That one (20s, background_trigger_probe_test.go:134) measures the
 // driver's defence-in-depth cleanup waiting AFTER THE FIFO RELEASE before SIGKILLing
-// (finding_live_run_test.go:459-491) — a mechanical unblock. This one measures a turn
+// (finding_live_run_test.go:460-492) — a mechanical unblock. This one measures a turn
 // COMPLETING with the hold still on: claude receiving the tool_result, producing a
 // final assistant message, emitter.Close() writing the trailer, teardown, exit. That
 // is a model round-trip plus teardown. Reusing the other constant would name one
@@ -294,7 +294,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// mutex, so this is non-destructive.
 		Stdout: h.Stdout,
 		// THE FIFO PATH ALONE. Not the driver's two-needle list
-		// (finding_live_run_test.go:415-420): that scan carries tdnClaudeNeedle
+		// (finding_live_run_test.go:416-421): that scan carries tdnClaudeNeedle
 		// because finLivePinReduce separates the populations afterwards, and the
 		// gather has NO SUCH REDUCTION — its argv leg calls
 		// pinScanArgv(in.Needles, nil) and fills MatchCount, RowsScanned and one
