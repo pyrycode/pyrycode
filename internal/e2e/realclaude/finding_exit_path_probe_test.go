@@ -82,7 +82,7 @@ package realclaude
 // NOT copied, because neither of its two reasons transfers and copying it would skip
 // a run that would have been correct. (1) Its delta does not name the variable;
 // finLiveStageEnvDelta names PYRY_USE_STREAMJSON=0 EXPLICITLY
-// (finding_live_staging_test.go:179-184, :198-200) and spawnProbePyry appends the
+// (finding_live_staging_test.go:179-184, :194-196) and spawnProbePyry appends the
 // delta to os.Environ(), which os/exec resolves in favour of the later value — so
 // the delta wins over the operator's shell. (2) Its content-first root pinning keys
 // on --session-id, which only ptyrunner emits; this rig pins nothing content-first,

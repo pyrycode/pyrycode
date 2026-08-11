@@ -79,7 +79,7 @@ package realclaude
 //     and the proof arm (:598); readings.Admit takes that result whole too;
 //   - finGatherInputs.ClaudeState is copied into readings.ClaudeState whole,
 //     trailClassifyRun republishes it as claude_state
-//     (trail_run_outcome_test.go:532, :660), and C7 quotes an out-of-contract
+//     (trail_run_outcome_test.go:532, :650), and C7 quotes an out-of-contract
 //     value %q into the published Detail (:740-745).
 //
 // So a needle in terminal_reason lands in readings.Gate.Detail and, on the

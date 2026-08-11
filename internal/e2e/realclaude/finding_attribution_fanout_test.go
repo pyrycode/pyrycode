@@ -718,7 +718,7 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 // #1271's own test plants it in every string-bearing input, and following that
 // here would put it into certified — which CROSSES VERBATIM BY DESIGN:
 // trailAdmitAttribution splices certified with %q into two of its Details
-// (trailer_admissibility_test.go:534, :587). It is trailGate's certified Reason,
+// (trailer_admissibility_test.go:534, :597). It is trailGate's certified Reason,
 // i.e. the trailer's terminal_reason, which shipped code already treats as publishable
 // (trailClassifyRun puts it into its own Details at trail_run_outcome_test.go:833
 // and :1023, and TestTrailRunOutcomeCarriesNoCapturedBytes deliberately leaves Reason

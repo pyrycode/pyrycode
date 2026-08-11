@@ -53,7 +53,7 @@ package realclaude
 //
 //   - the trailer's and the attribution's admissibility enter as #1270's two
 //     results WHOLE, because both are documented trap-free by construction
-//     (trailer_admissibility_test.go:290-305, :336-339);
+//     (trailer_admissibility_test.go:290-305, :345-348);
 //   - the trailer's lateness enters as the BoundFrom discriminator alone and
 //     never as a trailObservation, which EMBEDS trailScanResult
 //     (result_trailer_observation_test.go:141-142) and would therefore promote

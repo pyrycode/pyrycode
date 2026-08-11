@@ -57,7 +57,7 @@ package realclaude
 // NOT establish "alive when pyry declared the turn finished": on this path no
 // terminal reason is certified, so no such instant exists at all, and the shipped
 // classifier says exactly that at each of its void arms
-// (trail_run_outcome_test.go:836, :969-974, :979-988).
+// (trail_run_outcome_test.go:836, :971-976, :981-990).
 //
 // Every value here is named after the SIGHTING, every Detail ends with
 // trailSightingInstantClause, and TestTrailSightingVoidsNeverReadAsNegative
