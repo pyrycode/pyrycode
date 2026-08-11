@@ -304,7 +304,7 @@ func finWritePlantedReapLog() []byte {
 // pinStateOutcome's seven keys; that gap is precisely what this census closes.
 // Passing pgid 1 alongside the real group is what fills Conditions and
 // Unreportable in one call: finAttributeFanOut partitions pgid <= 1 as
-// unreportable (finding_attribution_fanout_test.go:237-247) while 7788 still
+// unreportable (finding_attribution_fanout_test.go:238-248) while 7788 still
 // produces the entry AC2's premise reads.
 //
 // # The liveness outcome is hand-built, and it is not a shortcut
@@ -798,7 +798,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 		t.Fatalf("channel 3 (reap stderr): the synthetic reap log carries no needle")
 	}
 	// The premise doubles as the non-vacuity proof, following
-	// finding_attribution_fanout_test.go:738-742: trailAdmitProof is reachable only
+	// finding_attribution_fanout_test.go:739-743: trailAdmitProof is reachable only
 	// if the needle-bearing line was recognised as anchored, parsed and found to
 	// name the held group. A plant that stopped being anchored lands here.
 	//
@@ -941,7 +941,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 // finding_run_record_test.go:934-944 gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
-// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:759),
+// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:760),
 // less the redundant trailer_line, which "line" already covers.
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)

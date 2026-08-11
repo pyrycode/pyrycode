@@ -41,7 +41,7 @@ package realclaude
 //     per-pid corroboration.
 //
 // pinned is []int and NEVER []reachProc or []pinMatch. finAttributeFanOut's own
-// doc (finding_attribution_fanout_test.go:195-202) states why: reachProc.Command
+// doc (finding_attribution_fanout_test.go:196-203) states why: reachProc.Command
 // is verbatim argv read off the ambient process table, and a []reachProc
 // signature that recorded only .PGID would pass every test in this file while
 // reopening the credential channel. The signature is the enforcement.

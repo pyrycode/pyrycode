@@ -31,8 +31,8 @@ package realclaude
 // (trailer_admissibility_test.go:457) is the attribution predicate, and
 // trailIsAdmitValue (:731) its membership predicate — called, never re-switched.
 // trailReapLine (:763) renders one anchored line in reap.go:65's slog shape.
-// trailClassifyRun / trailRunWellFormed (`trailClassifyRun`, :1114)
-// are the downstream consumer and its vary-one-thing base.
+// trailClassifyRun / trailRunWellFormed are the downstream consumer and its
+// vary-one-thing base.
 //
 // trailDetail is reused rather than given a
 // finDetail twin. Its own comment explains it is deliberately not tdnDetail

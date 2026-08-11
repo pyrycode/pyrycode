@@ -108,7 +108,7 @@ package realclaude
 // It may also never print a WHOLE trailRunReadings or a whole
 // finAttributeRecord — %v or %+v on either value. Name scalar fields. This
 // deliberately diverges from the neighbouring file, which licenses the whole
-// struct (finding_run_gather_test.go:105-113) "and only because
+// struct (finding_run_gather_test.go:116-124) "and only because
 // TestFinGatherReturnsNoCapturedBytes proves it": THAT PROOF DOES NOT COVER THIS
 // FILE'S VALUES. Every row in the blocker's file runs at MatchCount == 0, so
 // readings.Liveness is empty on every value it marshals, and this file is the
@@ -170,7 +170,7 @@ const (
 // read off the ambient process table, and a ps column is how an operator's
 // CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY reaches an artifact destined for
 // a public issue. The type is the enforcement, in finAttributeFanOut's own
-// []int shape (finding_attribution_fanout_test.go:195-202): nothing here is a
+// []int shape (finding_attribution_fanout_test.go:196-203): nothing here is a
 // value from which a command string is reachable.
 type finStageSubject struct {
 	// Needles is this run's argv needle set — one t.TempDir()-derived FIFO path.
