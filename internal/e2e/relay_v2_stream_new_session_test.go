@@ -518,10 +518,10 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 			"BUT the hold arm is structurally UNREACHABLE on this harness, so pending/holds: 0 is the "+
 			"expected reading rather than an empirical one, and a NON-zero count is a finding about the "+
 			"delivery path (something changed under this test), not about the stall: cmd/pyry wires exactly "+
-			"one Pending classifier, errors.Is(err, supervisor.ErrTrustModalPending) (main.go:997), and that "+
+			"one Pending classifier, errors.Is(err, supervisor.ErrTrustModalPending) (main.go:932), and that "+
 			"sentinel's only production producer is the PTY delivery gate — whereas this harness runs "+
 			"interactive_runner:\"stream-json\", whose WriteUserTurn returns only ErrNoLiveChild, "+
-			"turncommit.ErrDropped or nil (internal/streamsup/runner.go:291). The count is kept as a CONTRACT "+
+			"turncommit.ErrDropped or nil (internal/streamsup/runner.go:283). The count is kept as a CONTRACT "+
 			"check on that chain, which is worth knowing on sight.\n"+
 			"BOTH counts 0 narrows the field to exactly two states — and NO log level makes either visible, "+
 			"because they emit nothing at any level: parked in Activate (bounded by inboundActivateTimeout, "+

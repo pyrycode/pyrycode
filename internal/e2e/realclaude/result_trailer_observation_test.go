@@ -101,7 +101,7 @@ type trailScanResult struct {
 	// the record. Empty unless State == trailSeen.
 	//
 	// It holds verbatim model output: the trailer's `result` field is the last
-	// assistant message, sixth on emitter.go:503-515's pinned wire order, so
+	// assistant message, sixth on emitter.go:456-468's pinned wire order, so
 	// roughly 415 of the retained 512 bytes are text the model chose. Treat this
 	// field as OPERATOR-REVIEW-BEFORE-PASTE. Trailer below is not — see there.
 	Line string `json:"trailer_line,omitempty"`
@@ -300,8 +300,8 @@ func trailWaitForTrailer(stdout *probeSyncBuffer, timeout time.Duration) trailOb
 
 // --- fixtures ----------------------------------------------------------------
 
-// trailFixtureTrailer is one ordinary trailer in emitter.go:503-515's pinned
-// wire order, carrying the values wireFields (emitter.go:475-484) renders for a
+// trailFixtureTrailer is one ordinary trailer in emitter.go:456-468's pinned
+// wire order, carrying the values wireFields (emitter.go:428-437) renders for a
 // clean completion. Short enough to survive the cap intact, which is what lets
 // the seen rows assert Line verbatim.
 const trailFixtureTrailer = `{"type":"result","subtype":"success","is_error":false,` +

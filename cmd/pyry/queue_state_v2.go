@@ -168,7 +168,7 @@ func (e *queueStateEmitterV2) broadcast(ctx context.Context, bcast interactiveBr
 // QueuedMessage{ID,Text,TS} becomes a QueuedItem{QueuedMsgID,Text,TS},
 // preserving FIFO order. Queued is initialised to a non-nil zero-length slice so
 // an empty/unknown backlog (Snapshot → nil) marshals to [], not null (AC-1;
-// protocol note messaging.go:174-177 — the leaf type cannot force non-nil).
+// protocol note messaging.go:173-176 — the leaf type cannot force non-nil).
 func toQueueStatePayload(convID string, items []msgqueue.QueuedMessage) protocol.QueueStatePayload {
 	queued := make([]protocol.QueuedItem, 0, len(items))
 	for _, m := range items {

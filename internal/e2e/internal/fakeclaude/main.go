@@ -524,7 +524,7 @@ var trustAcceptPending atomic.Bool
 //
 //   - NO top-level "permissionMode" key. isInterruptMarker requires
 //     !userAuthored(e), and userAuthored is the PRESENCE of that key
-//     (mapper.go:164-167). One extra key and the line reads as a human prompt.
+//     (mapper.go:163-166). One extra key and the line reads as a human prompt.
 //   - NO tool_result content block. mapEntry's ParseToolResult branch precedes the
 //     marker check and returns (mapper.go:80-86), so any entry carrying one becomes
 //     a ToolUpdate and never reaches the prose matcher.

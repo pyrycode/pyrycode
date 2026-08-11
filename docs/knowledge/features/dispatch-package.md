@@ -59,7 +59,7 @@ func Route(ctx context.Context, logger *slog.Logger, conn *Conn,
 `Conn.auth` is now write-once at construction (`NewConn` / `NewTestConn`)
 — there is no post-construction mutator. The v2 session manager passes
 the handshake-matched `*devices.Device` directly
-(`v2session.go:1116` → `dispatch.NewConn(s.connID, outbound, s.device)`);
+(`v2session.go:1051` → `dispatch.NewConn(s.connID, outbound, s.device)`);
 the live production reader is `internal/relay/handlers/register_push_token.go`'s
 `c.Auth()` call.
 

@@ -656,7 +656,7 @@ does (`env.sessionID`, tagged at parser construction, vs. the cursor `Handle` re
 before the gate is what lets a turn on a *non-active* conversation still report busy — feeding after it
 would make the tracker just as cursor-blind as the emitter it's replacing. `observe` resolves
 `sessionID → conversationID` via an injected closure (production passes `conversationForSession(w.convReg,
-sid)` — the same resolver `session_transition` frames use, `relay.go:849`), keyed by conversation (not
+sid)` — the same resolver `session_transition` frames use, `relay.go:784`), keyed by conversation (not
 session) so a `/clear`-rotated session's late events still land under `SessionHistory`'s match. An
 unresolvable or empty-string conversation id is simply not tracked (never under an empty key — that would
 both wedge and collide with the "unknown conversation" answer).
@@ -688,7 +688,7 @@ code path.
 parameter instead of each constructing a tracker. That is no longer true: #1199 (below) is the
 inbound-delivery consumer both readers were built for. The parameter stays the concrete `*turnBusyTracker`,
 never an interface (a typed-nil in an interface field would be non-nil at the interface level and route
-past the nil guard into a nil-map read — the `screenSnapshotterOrNil` hazard, `relay.go:453-468`).
+past the nil guard into a nil-map read — the `screenSnapshotterOrNil` hazard, `relay.go:406-421`).
 
 **Known gap, recorded in the tracker's own doc comment, not just here:** #1201 shipped with the clear
 event-driven only (`TurnEnd` on the fan-in). #1202 (below) closed the session-teardown half of that gap.
@@ -752,7 +752,7 @@ Parser's sink tag is fixed at **runner construction** (`cfg.SessionID`, `streams
 `RestartFresh` only rotates the runner's internal *spawn* id. Every id reachable via `SessionHistory`
 therefore belongs to the same runner that continues under the successor id, tagging its events identically
 either way. `SessionHistory`'s only production writer is `RebindSession`
-(`internal/conversations/registry.go:243`), reached solely from `ReasonClear`
+(`internal/conversations/registry.go:241`), reached solely from `ReasonClear`
 (`internal/sessions/transition.go:59,78`) — so eviction can't supply a second producer either, being
 binding-neutral. One benign, non-bug case survives: between an eviction and the conversation's next
 binding, the evicted id is still `CurrentSessionID`, so a late `TurnEnd` from the dying child resolves and
@@ -811,7 +811,7 @@ couldn't reach. See [codebase/1206.md](../codebase/1206.md).
 
 Split from #1207 (itself the last child of the #1203/#1198 crash-clear lineage), alongside open sibling
 #1210. #1206's `Config.OnChildExit` is explicitly *not* a drain barrier: `cmd.Wait` joins the stdout
-copier goroutine and `Parser.emit` calls its sink synchronously (`parser.go:233-237`), so by the time the
+copier goroutine and `Parser.emit` calls its sink synchronously (`parser.go:231-235`), so by the time the
 callback fires, every event the dead child produced has been **pushed** onto `streamTurnSink.ch` — but not
 necessarily **drained** by the separate drain goroutine reading that 256-slot buffer. A clear delivered on
 any lane other than that channel could land before the drain processes buffered openers the crashed child
@@ -820,7 +820,7 @@ This slice closes that ordering hole by putting the clear signal **on the fan-in
 single reader, so it cannot be overtaken.
 
 `streamTurnEnvelope` gains an explicit `exit bool` field — never a nil `turnevent.Event` used as a
-sentinel, since `eventKind(nil)` returns `"unknown"` rather than failing (`interactive_turn_v2.go:466-468`),
+sentinel, since `eventKind(nil)` returns `"unknown"` rather than failing (`interactive_turn_v2.go:419-421`),
 which would make a missed nil-check silent rather than loud, and would make the exit signal a value of the
 same type `Handle` accepts, retiring "Handle cannot receive a non-event" as a type-level fact.
 `streamTurnSink.exitFor(sessionID string) func()` mirrors `sinkFor`'s non-blocking `select`/`default` send
@@ -837,7 +837,7 @@ The drain's `sink.ch` arm handles `env.exit` as its **first** statement —
 route through the event path; before the gate, for the same reason the tracker itself is fed before it —
 the gate would otherwise drop a background conversation's exit, and background is the common case for a
 crash; before `Handle`, which (combined with the explicit field) keeps `Handle` structurally unable to
-receive a non-event. `clearForSession` (`stream_turn_busy.go:242`, extended in #1202) is called **as-is** —
+receive a non-event. `clearForSession` (`stream_turn_busy.go:240`, extended in #1202) is called **as-is** —
 no second session→conversation resolution, no second copy of the membership-mutation protocol — so it
 inherits the nil-receiver no-op and the fail-closed `clear_unresolved` skip on an unresolvable session for
 free; that is why this slice's own drop diagnostic withholds the conversation id (the sink closure holds no
@@ -865,7 +865,7 @@ for the lane itself.
 
 The first — and, as of this ticket, only — production reader of `Busy`/`WaitIdle`. It closes the actual
 regression #1201 was built for: on `interactive_runner: stream-json`, `streamsup.Runner.WriteUserTurn`
-returns as soon as the user-turn envelope is in the child's stdin pipe (`runner.go:291-293`), so
+returns as soon as the user-turn envelope is in the child's stdin pipe (`runner.go:283-285`), so
 `internal/msgqueue`'s serial drain emptied as fast as it could write bytes instead of pacing on turn-end
 the way `msgqueue.DeliverFunc`'s contract requires ("MUST block while claude is busy … that blocking IS
 the drain's turn-end pacing", `msgqueue/queue.go:87-92`). The queued-backlog UI and the drop-before-drain
@@ -886,7 +886,7 @@ order, both between `Activate` and `WriteUserTurn`: `waitIdleForDelivery` first 
 subsequent write fails. Two placement facts make this a **guarantee**, not a better race:
 
 - **Before the write, therefore before `WriteTurn`'s `turncommit` claim.** `msgqueue.commitGate`'s own
-  doc says the seam calls it "after the idle-gate wait and before the write" (`queue.go:466-472`) —
+  doc says the seam calls it "after the idle-gate wait and before the write" (`queue.go:419-425`) —
   holding the wait *outside* that claim is what keeps the queued head `draining && !committing` for the
   whole wait, the only window in which `msgqueue.Remove` drops it. The drop-before-drain control is
   delivered by placement, not by new removal logic.
@@ -969,7 +969,7 @@ disarm that only takes effect if no later arm has landed — the same generation
 as `openForDelivery`'s undo (#1199, above). This is load-bearing, not defensive padding: two
 overlapping `new_session` frames are an ordinary sequence (the e2e's own retry loop re-sends
 every ~250 ms), and the loser's `rotate()` ordinarily fails `ErrSessionNotFound`
-(`sessions/transition.go:121-124`) and runs its `abort()`. Unstamped, that would clear the
+(`sessions/transition.go:120-123`) and runs its `abort()`. Unstamped, that would clear the
 *winner's* arm while the winner's outgoing child is still alive, reproducing the defect on
 demand from two frames. `setStdin` clears `rotating` in the same acquisition that publishes
 the new handle; `takeStdin` deliberately leaves it alone, since the teardown it performs is the

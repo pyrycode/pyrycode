@@ -28,7 +28,7 @@ package realclaude
 // # What "dropped" means here
 //
 // Zero events emitted by a real streamsup.Parser (via parseOne). The parser is
-// documented turn-stateless (parser.go:125-129), which is the licence to
+// documented turn-stateless (parser.go:124-128), which is the licence to
 // classify each line with a fresh parser. Nothing in this file reads
 // streamsup's unexported tables.
 //
@@ -164,7 +164,7 @@ var dropcapExpectedSubtypes = []string{
 var dropcapArgs = []string{"--model", dropcapModel, "--dangerously-skip-permissions"}
 
 const dropcapSpawnShapeDelta = "This is the YOLO interactive shape. Production's stream path adds, via " +
-	"withApprovalArgs (cmd/pyry/streamsup_runner.go:117) and internal/sessions.claudeSettingsArgs, a " +
+	"withApprovalArgs (cmd/pyry/streamsup_runner.go:116) and internal/sessions.claudeSettingsArgs, a " +
 	"--permission-prompt-tool / --mcp-config pair on NON-yolo spawns plus a per-session --settings. " +
 	"This capture passes none of them: it uses --dangerously-skip-permissions, a real production shape " +
 	"(the YOLO session bit, internal/sessions/session.go) and precisely the arm on which withApprovalArgs " +
@@ -185,7 +185,7 @@ const dropcapRedactionRationale = "The primary defence is by construction: the w
 	"and os.Environ() is never read into the record. On top of that, dropcapRedactor substitutes a " +
 	"declared table of path/identifier classes into EVERY string that enters the record, and " +
 	"dropcapScanner is a fail-closed deny-scan over the whole marshalled record. " +
-	"bgIdleRedact (interactive_background_idle_probe_test.go:889) is NOT sufficient here: it substitutes " +
+	"bgIdleRedact (interactive_background_idle_probe_test.go:824) is NOT sufficient here: it substitutes " +
 	"one value (the operator's home) into a SUMMARY that turnbridge/outbound.go had already capped at 200 " +
 	"runes, so the exposure was structurally bounded before redaction ran. Here the input is an uncapped " +
 	"raw payload that can carry cwd, tool output, file contents, branch names and prompt text, and it " +
@@ -491,7 +491,7 @@ func (r *dropcapRedactor) redact(b []byte) []byte {
 
 // str is redact for a string field. Every field assigned into the record, every
 // t.Logf and both fifoLiveOutcome values go through it — fifoLiveOutcome carries
-// the FIFO path in BOTH Path and Detail (fifo_reader_liveness_test.go:137-157),
+// the FIFO path in BOTH Path and Detail (fifo_reader_liveness_test.go:136-156),
 // so those two fields leak an absolute path with no payload involved.
 func (r *dropcapRedactor) str(s string) string { return string(r.redact([]byte(s))) }
 
@@ -751,11 +751,11 @@ func (rec *dropcapRecord) set(outcome, format string, args ...any) {
 // --- the argv observer -------------------------------------------------------
 
 // dropcapArgvHandler is a slog.Handler that WRITES NOTHING and keeps only the
-// argv from the runner's own "spawning claude" record (streamsup/runner.go:520).
+// argv from the runner's own "spawning claude" record (streamsup/runner.go:473).
 // spawn_shape is therefore OBSERVED from production's buildArgs output rather
 // than transcribed into this file, where it could drift from the shape it claims
 // to measure. It doubles as the explicit discard handler the runner needs:
-// Config.Logger == nil falls back to slog.Default() (runner.go:234-236), which
+// Config.Logger == nil falls back to slog.Default() (runner.go:233-235), which
 // would put the runner's lifecycle lines into CI output.
 type dropcapArgvHandler struct {
 	mu   *sync.Mutex
@@ -867,7 +867,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 	t.Cleanup(func() { dropcapWriteRecord(t, artifactDir, red, scanner, rec) })
 
 	// MUST precede the runner: Config.Env stays nil so cmd.Env is nil and the
-	// child inherits this process's environment verbatim (runner.go:602-604).
+	// child inherits this process's environment verbatim (runner.go:555-557).
 	t.Setenv(dropcapBashTimeoutEnv, dropcapBashTimeoutMS)
 
 	rendezvous := holdProbeFIFO(t, fifoPath)
@@ -901,7 +901,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 		_ = runner.Run(ctx)
 	}()
 	// Registered after holdProbeFIFO, so it runs BEFORE the FIFO release: the
-	// descendant reap on ctx cancel (runner.go:613-616) kills the backgrounded
+	// descendant reap on ctx cancel (runner.go:566-569) kills the backgrounded
 	// `cat`, and closing the last write end is the backstop if the reap missed.
 	t.Cleanup(func() {
 		cancel()
@@ -919,7 +919,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 	// default arm. It is not what unblocks the receive: `rendezvous` is closed by
 	// holdProbeFIFO's HOLD goroutine once its open(O_WRONLY) returns, which the
 	// helper's cleanup arranges by opening the read end non-blockingly
-	// (background_trigger_probe_test.go:743-757) — and which does not happen at
+	// (background_trigger_probe_test.go:689-703) — and which does not happen at
 	// all if that open errored, leaving this goroutine parked on the receive for
 	// the rest of the binary. One parked, non-writing goroutine is the bounded
 	// residue; a racing field write would not be.
@@ -983,7 +983,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 }
 
 // dropcapWaitForChild polls Runner.Stdin() until a child is live. WriteTurn maps
-// a nil writer to ErrNoLiveChild (envelope.go:150-153), so this is the pre-spawn
+// a nil writer to ErrNoLiveChild (envelope.go:149-152), so this is the pre-spawn
 // window the turn has to poll through.
 func dropcapWaitForChild(runner *streamsup.Runner) io.Writer {
 	deadline := time.Now().Add(dropcapSpawnWait)
@@ -1035,7 +1035,7 @@ func dropcapClassifyOutcome(rec *dropcapRecord, pre, turnEnd fifoLiveOutcome) {
 // not recognise emits a turnevent.Unrecognized.
 //
 // A fresh parser per line is licensed by the documented turn-statelessness
-// (parser.go:125-129): the only cross-line state is the partial-line buffer,
+// (parser.go:124-128): the only cross-line state is the partial-line buffer,
 // which a complete line never uses.
 func dropcapClassifyAll(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) []dropcapEntry {
 	t.Helper()

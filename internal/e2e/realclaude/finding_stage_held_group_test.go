@@ -32,12 +32,12 @@ package realclaude
 // MatchCount is at least 2 and the same composition lands on Step 7
 // (trailOutcomeMatchedUnattributed). That move is the increment, not an
 // inconsistency with the blocker. The FINDING arm is unchanged, because Step 2
-// (trail_run_outcome_test.go:1101) outranks Step 7.
+// (trail_run_outcome_test.go:1011) outranks Step 7.
 //
 // # The staged command must lead a process group of its own
 //
 // The rig offers two subject stagings and only one is usable here. The flip
-// test's subject (trail_run_rig_test.go:288) sets no SysProcAttr, so it inherits
+// test's subject (trail_run_rig_test.go:280) sets no SysProcAttr, so it inherits
 // the test process's group — and the pinned group would then BE
 // syscall.Getpgrp(), which is exactly what trailRigHeldPGID() (:119) returns. A
 // synthetic stderr naming the pinned group would classify as
@@ -72,7 +72,7 @@ package realclaude
 // trailAdmitVoidGroupUnnamed. Neither produces a VOID OUTCOME: with a certifying
 // gate, PyryExited true, a clean scan and MatchCount > 0, trailClassifyRun falls
 // past Steps 3-6 to Step 7, an ANSWER in the four-answer set
-// (trail_run_outcome_test.go:119-151). Reaching for one of the eight run-void-*
+// (trail_run_outcome_test.go:118-150). Reaching for one of the eight run-void-*
 // outcomes to make the trap "assert a void" would require breaking a DIFFERENT
 // input and would vary two dimensions at once.
 //
@@ -108,12 +108,12 @@ package realclaude
 // It may also never print a WHOLE trailRunReadings or a whole
 // finAttributeRecord — %v or %+v on either value. Name scalar fields. This
 // deliberately diverges from the neighbouring file, which licenses the whole
-// struct (finding_run_gather_test.go:117-125) "and only because
+// struct (finding_run_gather_test.go:116-124) "and only because
 // TestFinGatherReturnsNoCapturedBytes proves it": THAT PROOF DOES NOT COVER THIS
 // FILE'S VALUES. Every row in the blocker's file runs at MatchCount == 0, so
 // readings.Liveness is empty on every value it marshals, and this file is the
 // first to fill it — introducing pinStateOutcome's three string fields (Detail,
-// StateColumn, ToolStderr, process_pin_liveness_test.go:247-255) the proof never
+// StateColumn, ToolStderr, process_pin_liveness_test.go:245-253) the proof never
 // examined. Those fields are in fact safe, because pinStateArgs is
 // `-p <pid> -o pid=,ppid=,stat=` with an enforcing never-add-`command`
 // prohibition (:221-232) — but that is an argument from the SHIPPED COLUMN LIST
@@ -170,7 +170,7 @@ const (
 // read off the ambient process table, and a ps column is how an operator's
 // CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY reaches an artifact destined for
 // a public issue. The type is the enforcement, in finAttributeFanOut's own
-// []int shape (finding_attribution_fanout_test.go:197-204): nothing here is a
+// []int shape (finding_attribution_fanout_test.go:196-203): nothing here is a
 // value from which a command string is reachable.
 type finStageSubject struct {
 	// Needles is this run's argv needle set — one t.TempDir()-derived FIFO path.
@@ -354,13 +354,13 @@ func finStageHeldGroup(t *testing.T, body func(finStageSubject)) {
 //
 // The count is 1 because trailAdmitAttribution answers a named group across more
 // than one anchored line with trailAdmitVoidNotOneReapLine
-// (trailer_admissibility_test.go:652-659) rather than with trailAdmitProof.
+// (trailer_admissibility_test.go:605-612) rather than with trailAdmitProof.
 func finStageReapLine(pgid int) []byte {
 	return []byte(trailReapLine(1, fmt.Sprintf("[%d]", pgid)) + "\n")
 }
 
 // finStageAssertLiveness pins the per-matched-pid reads Step 6 makes
-// load-bearing, mirroring trail_run_rig_test.go:622-636.
+// load-bearing, mirroring trail_run_rig_test.go:575-589.
 //
 // It runs on EVERY arm. Step 6 (trailOutcomeVoidLivenessInstrument) is consulted
 // before Step 7, so a single pinStateInstrumentFailed diverts every arm except
@@ -573,7 +573,7 @@ func TestFinStageRigHardcodingsCannotReachTheFinding(t *testing.T) {
 
 		if noLine.Admit.Value != trailAdmitVoidNoLine {
 			t.Fatalf("the attribution over trailRigGather's nil stderr literal "+
-				"(trail_run_rig_test.go:160-172) reads %q; want %q — tdnClassifyReapLog over nil "+
+				"(trail_run_rig_test.go:159-171) reads %q; want %q — tdnClassifyReapLog over nil "+
 				"can only reach tdnReapNoLine, and a gather wired to that un-passable input reports "+
 				"a clean negative on every run, forever, with no symptom in the answer: %s",
 				noLine.Admit.Value, trailAdmitVoidNoLine, noLine.Admit.Detail)

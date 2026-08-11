@@ -48,7 +48,7 @@ against live code):
 
 A third fact shapes the standup but is not itself a decision point:
 **foreground mode clobbers stdout.** `supervisor.runOnce` in foreground mode
-(`Bridge == nil`) copies claude's PTY output to `os.Stdout` (supervisor.go:836-840),
+(`Bridge == nil`) copies claude's PTY output to `os.Stdout` (supervisor.go:771-775),
 which ACP owns for the JSON-RPC frame stream — so the ACP-hosted claude must run
 in **service mode** (`Bridge` set), where output routes to the Bridge (discarded
 when nothing attaches). This is settled by construction, not a fork.

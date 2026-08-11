@@ -18,7 +18,7 @@ package realclaude
 // (tool_loop_test.go:194-203), reachable only through trailScanResult.Trailer —
 // a pointer that is nil unless State == trailSeen, and deliberately so: a
 // consumer that dereferences it without checking State panics loudly
-// (result_trailer_observation_test.go:108-119), which was chosen over a value
+// (result_trailer_observation_test.go:108-118), which was chosen over a value
 // type handing back TerminalReason == "" and letting an empty terminal reason
 // pass as a real one. Since #1320 this record reads the four fields from a
 // finSighting, which answers the State/nil PAIR
@@ -30,7 +30,7 @@ package realclaude
 //
 // Line is the matched line as scanned but CAPPED: trailScan records
 // `Line: reachCapCommand(string(scanner.Bytes()))` (:182), 512 bytes. On the
-// emitter's pinned wire order (emitter.go:503-515) terminal_reason is LAST and
+// emitter's pinned wire order (emitter.go:456-468) terminal_reason is LAST and
 // result sixth, so any truncation takes terminal_reason first — the exact defect
 // #1266's decode-then-cap design exists to prevent. Trailer is the decode of the
 // FULL line.
@@ -40,7 +40,7 @@ package realclaude
 // resultTrailer has no `result` member, so the decode structurally cannot carry
 // the assistant payload — a property to preserve, not an omission to fix. Line
 // does carry it: the trailer's `result` field is the last assistant message
-// (emitter.go:213-227), roughly 415 of the retained 512 bytes being text the
+// (emitter.go:212-225), roughly 415 of the retained 512 bytes being text the
 // model chose, and its own doc marks it OPERATOR-REVIEW-BEFORE-PASTE
 // (result_trailer_observation_test.go:100-107). Every published record in this
 // family already excludes a captured line for that reason: trailRunOutcome is
@@ -112,7 +112,7 @@ import (
 // rendered JSON rather than by convention.
 //
 // NO FIELD CARRIES omitempty, and that is a decision. wireFields' default arm
-// (emitter.go:481-482) returns terminal_reason == "" on a genuinely SEEN
+// (emitter.go:434-435) returns terminal_reason == "" on a genuinely SEEN
 // trailer; under omitempty such a record would render byte-identically to a
 // trailAbsent record's zero, collapsing "the trailer was read and its terminal
 // reason is empty" into "there was no trailer" — precisely the collapse the nil
@@ -124,12 +124,12 @@ import (
 // # What the four trailer fields are worth
 //
 // Not visible from the names, so the type says it. wireFields
-// (emitter.go:475-484) derives Subtype, IsError and TerminalReason from a SINGLE
+// (emitter.go:428-437) derives Subtype, IsError and TerminalReason from a SINGLE
 // ExitReason, so their agreement is one value rendered three ways and not three
 // corroborating reads. TerminalReason is pyry's OWN SYNTHESIS on this path —
 // claude never emitted it. Only StopReason is independently sourced, forwarded
 // from the model's last message unvalidated (`e.lastStopReason =
-// entry.Message.StopReason`, emitter.go:211): it is the one model-influenced
+// entry.Message.StopReason`, emitter.go:210): it is the one model-influenced
 // field crossing into this record uncapped, bounded by the wire's own shape and
 // by nothing this record does. Capping it is out of scope and AC2 requires it be
 // carried whole; naming it here is what keeps #1286's multi-input sweep from
@@ -143,7 +143,7 @@ import (
 // which is what leaves this file's "the four decoded scalars" sentences true.
 //
 // It exists because that fixed decode cannot answer one question. terminal_reason
-// is pyry's own invention — wireFields (emitter.go:475-484) and the idle-stall
+// is pyry's own invention — wireFields (emitter.go:428-437) and the idle-stall
 // trailer write it and nothing else does — so claude's own result line, the
 // healthy shape on the headless path, carries no such KEY at all. After the decode
 // an ABSENT terminal_reason and one emitted as "" are the same value, so the NAME
@@ -165,7 +165,7 @@ import (
 // left incidental. trailScan's match return is past tr.Type == "result" and so
 // reachable only from a line that already decoded as a JSON object, so the map
 // decode always succeeds and always carries at least `type`
-// (result_trailer_observation_test.go:200-206). A SEEN trailer therefore cannot
+// (result_trailer_observation_test.go:199-205). A SEEN trailer therefore cannot
 // produce an empty name set; "no names" is reachable only from the not-seen arm.
 // Measured on this tree rather than reasoned, the three shapes stay distinct: nil
 // renders {"trailer_keys":null}, empty renders {"trailer_keys":[]}, filled renders
@@ -188,7 +188,7 @@ import (
 //
 // # The Detail's content rule, pinned rather than left to judgement
 //
-// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:520-530), it MAY
+// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:465-475), it MAY
 // name the outcome value, the scan state, BoundFrom, Bounded as a boolean and
 // the four decoded fields — permitted because the record already publishes them
 // as fields, so the exposure decision is this type's and the Detail adds nothing
@@ -269,7 +269,7 @@ type finTrailerRecord struct {
 // out of scope.
 //
 // Nor is the field asked to reject a non-member: no builder in this family
-// validates its value — trailRunOutcome:484 and finOutcomeResult (:198) are
+// validates its value — trailRunOutcome:476 and finOutcomeResult (:198) are
 // plain structs — because membership lives in the reader-facing predicates,
 // whose job is that "a value a reader of a published record cannot look up is a
 // verdict they cannot interpret".
@@ -311,7 +311,7 @@ func finTrailerBuild(outcome string, sighting finSighting) finTrailerRecord {
 		// first poll already matched, so the trailer may have been visible before
 		// the loop began) and trailBoundNone is the honest no-bound, so a record
 		// deriving this from Staleness != 0 would publish a non-bound wearing a
-		// bound's label — trailRunOutcome:467-471's rule, unchanged.
+		// bound's label — trailRunOutcome:459-463's rule, unchanged.
 		Bounded: sighting.BoundFrom == trailBoundFromMiss,
 	}
 
@@ -385,7 +385,7 @@ func finTrailerAbortedScan() trailScanResult {
 // synthetic where it is used.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1203-1205): a shared backing value is
+// reason (trail_run_outcome_test.go:1113-1115): a shared backing value is
 // reachable from every test in this package and `go test -race` runs them in
 // parallel.
 func finTrailerSighting(scan trailScanResult, staleness time.Duration, boundFrom string) finSighting {
@@ -453,7 +453,7 @@ func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 			boundFrom: trailBoundNone,
 			wantState: trailAborted,
 			synthetic: "both trailBoundNone return sites — the aborted arm at " +
-				"result_trailer_observation_test.go:297-298 and the deadline arm at :295 — leave " +
+				"result_trailer_observation_test.go:289-290 and the deadline arm at :295 — leave " +
 				"Staleness at zero, so NO RUN PRODUCES THIS PAIRING. The row is kept as a " +
 				"contract check on a builder pure over its inputs, and it is what kills a " +
 				"Bounded derived from Staleness != 0 on the no-bound discriminator",
@@ -606,7 +606,7 @@ func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 // copy carries padded stand-in payload, and no sweep covers this row's fixture.
 func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	// Pad 2000 is the plant this family already uses at
-	// result_trailer_observation_test.go:554. Any pad from 142 up satisfies the
+	// result_trailer_observation_test.go:507. Any pad from 142 up satisfies the
 	// precondition; it is ASSERTED below rather than assumed, so a later fixture
 	// change surfaces as a failed precondition instead of as a silently weaker
 	// test.
@@ -636,7 +636,7 @@ func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	}
 
 	// Pinned ON THE CARRIER. The scan result's own survival of the cap is already
-	// pinned at result_trailer_observation_test.go:503-531 and is not restated
+	// pinned at result_trailer_observation_test.go:502-530 and is not restated
 	// here; what is new is that the HELPER reads Trailer and not Line.
 	for _, f := range []struct{ name, got, want string }{
 		{"subtype", sighting.Subtype, "error_max_turns"},
@@ -645,7 +645,7 @@ func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	} {
 		if f.got != f.want {
 			t.Errorf("%s: got %q, want %q — terminal_reason is LAST on the pinned wire order "+
-				"(emitter.go:503-515) and ~2 KiB past the cap here, so a carrier filled from the "+
+				"(emitter.go:456-468) and ~2 KiB past the cap here, so a carrier filled from the "+
 				"capped Line could not have recovered it", f.name, f.got, f.want)
 		}
 	}
@@ -883,7 +883,7 @@ func TestFinTrailerRecordOutcomeIsConsumedAsHanded(t *testing.T) {
 				t.Errorf("outcome: got %q, want %q", rec.Outcome, v)
 			}
 			// The field is deliberately NOT asked to reject a non-member: no
-			// builder in this family validates its value (trailRunOutcome:444,
+			// builder in this family validates its value (trailRunOutcome:436,
 			// finOutcomeResult:198), because membership lives in the two
 			// reader-facing predicates called above.
 			if !trailIsRunOutcome(rec.Outcome) && !finOutcomeIsValue(rec.Outcome) {

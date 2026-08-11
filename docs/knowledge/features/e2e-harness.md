@@ -1045,7 +1045,7 @@ packages`.
 
 ### Production diff is zero
 
-`-pyry-idle-timeout` already existed (`cmd/pyry/main.go:259`). The
+`-pyry-idle-timeout` already existed (`cmd/pyry/main.go:257`). The
 state machine, persistence, and control-plane Activate-before-Attach
 all shipped in #40. #115 adds binary-boundary coverage. Test diff
 ~125 LOC (single new file) plus the variadic-flags signature change in
@@ -1408,7 +1408,7 @@ StartRotation(t, home, sessionsDir, initialUUID, trigger)
 ### Why env vars on pyry, not flags
 
 `supervisor.runOnce` does `cmd.Env = append(os.Environ(), s.cfg.helperEnv...)`
-(`internal/supervisor/supervisor.go:236`). Setting the three
+(`internal/supervisor/supervisor.go:234`). Setting the three
 `PYRY_FAKE_CLAUDE_*` vars on pyry's `cmd.Env` flows them through to
 fake-claude unchanged — no `helperEnv` knob, no supervisor changes. The
 fake-claude binary's input surface is env-only by design (see
@@ -1452,7 +1452,7 @@ Without `-pyry-workdir`, pyry's supervisor inherits the test process's
 cwd; the supervised child's relative paths (and any production code that
 encodes cwd into a path) drift away from the test's HOME. Pinning it to
 `home` makes the test's view match pyry's view of "where the supervised
-child is rooted." The flag exists today (`cmd/pyry/main.go:175-181`); no
+child is rooted." The flag exists today (`cmd/pyry/main.go:174-180`); no
 production change.
 
 ### Test scope: primitive only
@@ -1978,7 +1978,7 @@ detailed design record.
 
 ### Why this supplements (does not yet retire) `TestPool_Run_StartsWatcher`
 
-The unit test at `internal/sessions/pool_test.go:850` substitutes the
+The unit test at `internal/sessions/pool_test.go:785` substitutes the
 real probe with a `dirProbe` that just returns the most-recent jsonl
 in dir. It exercises the watcher's event loop and `RotateID` plumbing
 but not the real `/proc`-or-`lsof` probe path; it has been observed
@@ -2102,7 +2102,7 @@ end. `sync.Once`-wrapped, runs via `t.Cleanup` and / or explicit `Close`:
 |---|---|
 | `os.Pipe()` returns error | `t.Skipf` — same gating shape as #125's `pty.Open` skip; only fires in heavily sandboxed containers |
 | Daemon spawn / readiness / `sessions.new` failure | `t.Fatalf` with daemon stderr |
-| Attach client exits within 500ms of Start | `t.Fatalf` with attach client's exit code + captured `Stderr` (handshake-failure detector — same shape as `attach_pty.go:138-147`) |
+| Attach client exits within 500ms of Start | `t.Fatalf` with attach client's exit code + captured `Stderr` (handshake-failure detector — same shape as `attach_pty.go:137-146`) |
 | `c.Write` error | Surfaced to caller; test `t.Fatalf`s on the spot |
 | `c.ReadUntil` deadline | `fmt.Errorf("timeout after %s; seen %d bytes: %q", …)` — caller wraps with captured `Stderr` for diagnostics |
 | Cleanup partial failure | `t.Logf` only, never `t.Fatal` from a `t.Cleanup` |
@@ -2382,7 +2382,7 @@ above).
 `startForegroundAutoAttach` cannot reuse `spawnAttachableDaemon`
 verbatim. Reason: `Pool.Create` appends `--session-id <uuid>` to the
 supervised claude's argv on every non-bootstrap session
-(`internal/sessions/pool.go:917`). `control.SessionsNew` (called by
+(`internal/sessions/pool.go:852`). `control.SessionsNew` (called by
 the harness to mint the test's UUID) drives `Pool.Create`, which means
 the supervised "claude" is invoked as `<bin> -test.run=TestHelperProcess
 --session-id <uuid>`. Go's `flag.Parse()` rejects the unknown

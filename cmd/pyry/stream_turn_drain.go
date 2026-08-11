@@ -31,7 +31,7 @@ const streamTurnSinkBuf = 256
 //
 // It is an explicit field, never a nil ev used as a sentinel. A nil sentinel would
 // have to be re-checked at every consumer and would make eventKind(nil) reachable
-// — that returns "unknown" rather than failing (interactive_turn_v2.go:466-468),
+// — that returns "unknown" rather than failing (interactive_turn_v2.go:419-421),
 // so a missed check would be silent. More to the point, a nil sentinel IS a value
 // of the type interactiveTurnEmitterV2.Handle accepts; with a separate field
 // "Handle cannot receive a non-event" stays a type-level fact rather than a
@@ -101,7 +101,7 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 
 // exitFor returns the per-runner child-exit closure for the runner constructed
 // with sessionID. Its func() type is exactly that of streamsup's child-exit seam
-// (internal/streamsup/runner.go:105-144), so the wiring binds it at the same
+// (internal/streamsup/runner.go:105-143), so the wiring binds it at the same
 // construction point as sinkFor — newStreamRunnerFactory (streamsup_runner.go,
 // #1210), one line below the sinkFor install — and the two lanes carry identical
 // session tags by construction. Production installs it on every stream runner
@@ -121,7 +121,7 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 // whole diagnostic value of this branch. A dropped event is a lost delta; a
 // dropped exit is a conversation that stays busy forever once a producer is wired,
 // which is degraded operation and must be visible at the daemon's default
-// LevelInfo (Debug is not — main.go:735-738).
+// LevelInfo (Debug is not — main.go:734-737).
 //
 // The select is deliberately NOT factored into a helper shared with sinkFor: the
 // common part is one statement while the divergent part is the entire diagnostic
@@ -135,7 +135,7 @@ func (s *streamTurnSink) exitFor(sessionID string) func() {
 			// SECURITY: content-free, and no "kind" — there is no event to name.
 			// The resolved conversation id is absent because this closure holds no
 			// resolver and structurally cannot name one; the conversation-id
-			// discipline lives on the clear path (stream_turn_busy.go:250-256).
+			// discipline lives on the clear path (stream_turn_busy.go:248-254).
 			s.logger.Warn("relay: stream-turn exit drop; sink full",
 				"event", "stream_turn.exit_sink_full",
 				"session_id", sessionID)
@@ -210,7 +210,7 @@ func startStreamTurnDrainV2(
 					// a deferred clear could land after a turn opened by the RESPAWNED
 					// child and report a live turn idle. clearForSession is reused as-is
 					// — no second session→conversation resolution and no second copy of
-					// the membership-mutation protocol (stream_turn_busy.go:274-310) —
+					// the membership-mutation protocol (stream_turn_busy.go:266-302) —
 					// and it is a nil-receiver no-op, so a drain with no tracker is
 					// unaffected.
 					busy.clearForSession(env.sessionID)

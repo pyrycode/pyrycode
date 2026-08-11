@@ -999,11 +999,11 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error)
 ```
 
-**`XxxIn` siblings, not functional options.** `Create` / `GetOrCreate` keep byte-identical signatures and shrink to one-line delegators (`=> CreateIn(ctx, label, "")` / `=> GetOrCreateIn(ctx, id, label, "")`); the create/persist/supervise body moves into the `In` variant unchanged. The mechanism mirrors the existing `StartIn` idiom (`internal/e2e/harness.go:201`) — the codebase has zero functional-options precedent, so a framework for one optional string was rejected. Every existing caller (`sessionMinter` `cmd/pyry/main.go:721`, the `sessions.new` verb, `GetOrCreate` in the control server, the `create_conversation` interface caller, all tests) compiles and behaves unchanged with zero churn.
+**`XxxIn` siblings, not functional options.** `Create` / `GetOrCreate` keep byte-identical signatures and shrink to one-line delegators (`=> CreateIn(ctx, label, "")` / `=> GetOrCreateIn(ctx, id, label, "")`); the create/persist/supervise body moves into the `In` variant unchanged. The mechanism mirrors the existing `StartIn` idiom (`internal/e2e/harness.go:201`) — the codebase has zero functional-options precedent, so a framework for one optional string was rejected. Every existing caller (`sessionMinter` `cmd/pyry/main.go:667`, the `sessions.new` verb, `GetOrCreate` in the control server, the `create_conversation` interface caller, all tests) compiles and behaves unchanged with zero churn.
 
 **Spawn-seam conditional.** `buildSession(id, label, spawnDir)` (the seam shared by both public entry points) resolves `workDir := tpl.WorkDir; if spawnDir != "" { workDir = spawnDir }` and sets `supervisor.Config.WorkDir = workDir`. Empty `spawnDir` is byte-identical to today's behaviour (the AC-2 default-fallback). Exposing the option on the shared seam makes it available to whichever public entry point #685 ends up using.
 
-**Survives respawn with no new state.** The workdir lives only in `supervisor.Config`, which the supervisor reads as `cmd.Dir` on **every** (re)spawn (`supervisor.go:691-692`, `spawn.go:40-41`), so a custom spawn dir survives child crash-respawns automatically — no new `Session` field, no registry-schema change. It is **not** persisted to `sessions.json` (a spawn-time input only); surviving a daemon *process* restart would be a separate slice if ever needed.
+**Survives respawn with no new state.** The workdir lives only in `supervisor.Config`, which the supervisor reads as `cmd.Dir` on **every** (re)spawn (`supervisor.go:638-639`, `spawn.go:40-41`), so a custom spawn dir survives child crash-respawns automatically — no new `Session` field, no registry-schema change. It is **not** persisted to `sessions.json` (a spawn-time input only); surviving a daemon *process* restart would be a separate slice if ever needed.
 
 **Opaque path — deliberately not `security-sensitive`.** The pool does **not** `os.Stat`, validate, canonicalise, or trust-check `spawnDir`; it is passed verbatim. An inaccessible directory surfaces at spawn time via the supervisor's existing chdir-failure → backoff path, not here. No untrusted input reaches this slice and its only caller after it still passes the default, so the trust / canonicalisation / `$HOME`-containment work (and the `security-sensitive` label) lives in the consumer #685.
 
@@ -1049,7 +1049,7 @@ boundary stays at `internal/sessions`.
 (`rotation.Config.OnRotate`, `supervisor.Config.ValidateConversation`).
 
 **Post-construction setter, set-once-before-`Run`.** The pool is built via
-`sessions.New` at `cmd/pyry/main.go:507`; the consumer/emitter (#657) comes up
+`sessions.New` at `cmd/pyry/main.go:460`; the consumer/emitter (#657) comes up
 later (`startRelay`), so the observer cannot be a `Config` field. `SetTransitionObserver`
 writes `Pool.transitionObserver`; the field is then **read-only**, read lock-free
 by the lifecycle + watcher goroutines (both spawned by `Run`) via `Run`'s

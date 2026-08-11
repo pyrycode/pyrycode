@@ -29,7 +29,7 @@ package realclaude
 // probeWaitForBashToolUse returns the
 // FIRST Bash tool_use regardless of input.command — a #1223 code-review SHOULD
 // FIX that shipped unfixed, guarded caller-side by #1230
-// (background_reach_probe_test.go:480-495) rather than by editing the shared
+// (background_reach_probe_test.go:433-448) rather than by editing the shared
 // rig. This file generalises that guard, and it guards a PAIR:
 //
 //   - Value-side: a decoy Bash call the model makes first captures the whole
@@ -46,7 +46,7 @@ package realclaude
 // # Nothing here normalises
 //
 // The gate compares IssuedCommand against StagedCommand as opaque bytes
-// (finding_staging_gate_test.go:153-158). A fill that trimmed, unquoted or
+// (finding_staging_gate_test.go:152-157). A fill that trimmed, unquoted or
 // canonicalised what the model issued would make a real mismatch compare equal
 // and reach the pass-through — defeating the arm the gate ranks first precisely
 // so that "the model ran the wrong thing" is not filed under "our trigger is
@@ -79,7 +79,7 @@ import (
 // every downstream reading pointing at the first call.
 //
 // NO JSON TAGS, for the reason finOutcomeStaging states at itself
-// (finding_staging_gate_test.go:142-158): Command is verbatim model output, and
+// (finding_staging_gate_test.go:141-157): Command is verbatim model output, and
 // a tag is the first step toward publishing it into a public issue.
 type finTranscriptBashCall struct{ ToolUseID, Command string }
 
@@ -206,7 +206,7 @@ func finTranscriptSelectBash(t *testing.T, workdir, sessionID, staged string,
 // finTranscriptTriggerFired reports whether the trigger fired for ONE tool_use
 // id: timedOutAfterMs present on that id's tool_result. A nil result is the
 // deadline expiring with the call still open, which IS the did-not-fire signal
-// (background_trigger_probe_test.go:855-858).
+// (background_trigger_probe_test.go:790-793).
 //
 // Two deliberate omissions:
 //
@@ -273,7 +273,7 @@ const finTranscriptTestDeadline = 10 * time.Millisecond
 // The three commands the rows issue. All stand-ins: nothing here is parsed,
 // resolved or executed, so no fixture needs a real path — and one carrying a
 // real path would put an operator filesystem path into a test file for nothing
-// (finding_staging_gate_test.go:417-422).
+// (finding_staging_gate_test.go:370-375).
 const (
 	// finTranscriptDecoyCommand is the Bash call the model makes that the rig never
 	// staged — the first-match defect's payload.
@@ -325,7 +325,7 @@ func finTranscriptAssistantLine(t *testing.T, blocks ...map[string]any) string {
 }
 
 // finTranscriptResultLine builds the tool_result user line, with toolUseResult
-// as a SIBLING of message (background_reach_probe_test.go:1490-1499).
+// as a SIBLING of message (background_reach_probe_test.go:1412-1421).
 // timedOutAfterMs is omitted when the argument is "" — the model-set path — and
 // emitted as a JSON number otherwise, which is the shape reachBackgroundHandle
 // decodes.
@@ -421,7 +421,7 @@ func TestFinTranscriptSelect(t *testing.T) {
 					got.ToolUseID, tc.want.ToolUseID)
 			}
 			// Commands are compared, never printed: both are captured-string class
-			// (finding_staging_gate_test.go:142-158).
+			// (finding_staging_gate_test.go:141-157).
 			if got.Command != tc.want.Command {
 				t.Errorf("selected command differs from the row's expectation (got %d byte(s), "+
 					"want %d); neither string is printed", len(got.Command), len(tc.want.Command))
@@ -554,7 +554,7 @@ func TestFinTranscriptFill(t *testing.T) {
 					"false statement about the run", r.BashIssued, tc.wantBashIssued)
 			}
 			// Compared, never printed: both operands are captured-string class
-			// (finding_staging_gate_test.go:142-158). Lengths only.
+			// (finding_staging_gate_test.go:141-157). Lengths only.
 			if r.IssuedCommand != tc.wantCommand {
 				t.Errorf("IssuedCommand differs from the row's expectation (got %d byte(s), want "+
 					"%d); neither string is printed — a fill that trims, unquotes or "+

@@ -182,7 +182,7 @@ func writeStreamInteractiveConfig(t *testing.T, home string) {
 // go stale. See that arm for the two readings a red run carries.
 //
 // It mirrors the fake-side two-milestone drain (#1141,
-// relay_v2_stream_send_test.go:150-218) with the real-claude adaptation: NO
+// relay_v2_stream_send_test.go:149-217) with the real-claude adaptation: NO
 // content/echo assertion — real claude's words are non-deterministic, so M1
 // asserts only non-empty text. A leading turn_state{responding} precedes the
 // delta; turn_states are ignored until sawDelta. On the deadline, a milestone-

@@ -63,7 +63,7 @@ package realclaude
 // THE WRITER NEVER FAILS A TEST. It is the instrument under measurement, and an
 // instrument failure is a datum: a marshal error or a lost file is t.Errorf and
 // the remaining write still happens, mirroring writeReachArtifacts:827-853 and
-// the family's pure-builder contract (finding_run_record_test.go:328-372).
+// the family's pure-builder contract (finding_run_record_test.go:320-325).
 //
 // THE SWEEP'S OWN READS FAIL LOUDLY. finWriteReadDir and every decode below are
 // t.Fatalf, because a sweep that silently skipped a file it could not read would
@@ -92,7 +92,7 @@ import (
 // retains no trailer line in any form, capped or otherwise — finTrailerRecord
 // (`finTrailerRecord`) is ten scalars and a name list with no
 // Line, and finRecordInputs carries neither a trailObservation nor a
-// trailScanResult (finding_run_record_test.go:215-223) — so there is no field
+// trailScanResult (finding_run_record_test.go:214-221) — so there is no field
 // left to mark for review.
 //
 // # Why it names the key names rather than resting on the five categories
@@ -170,7 +170,7 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 
 	// Counts, an enumerated agreement verdict, an admissibility value and a
 	// carried outcome — the same content rule finRecordRun.Detail states
-	// (finding_run_record_test.go:154-174). Never an input, never a Detail, and
+	// (finding_run_record_test.go:153-173). Never an input, never a Detail, and
 	// never a %v verb applied to a struct or a slice.
 	note := fmt.Sprintf("# pyry agent-run background-reach probe: one run's record\n\n"+
 		"%s\n\n```json\n%s```\n\n"+
@@ -199,7 +199,7 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 // of the directory sweep.
 //
 // trailNeedle's own comment says it is "placed PAST the cap"
-// (result_trailer_observation_test.go:330-372). Against trailPaddedTrailer(0)
+// (result_trailer_observation_test.go:322-325). Against trailPaddedTrailer(0)
 // that is not what happens: the line renders 385 bytes and the needle ends at
 // byte 146, comfortably inside reachCapCommand's 512-byte cap, so trailScan
 // records it into Line INTACT (:192-206).
@@ -242,7 +242,7 @@ const finWriteTrailerPad = 0
 // because trailScan is deterministic over the bytes it is handed and
 // trailPaddedTrailer renders the same line for the same pad. What would NOT be
 // safe is hoisting the result to a package-level var to avoid the second scan:
-// that is the fixture rule trail_run_outcome_test.go:1203-1205 states for this whole
+// that is the fixture rule trail_run_outcome_test.go:1113-1115 states for this whole
 // package, whose reason is that `go test -race` runs these tests in parallel.
 func finWritePlantedTrailerScan() trailScanResult {
 	return trailScan([]byte(trailPaddedTrailer(finWriteTrailerPad) + "\n"))
@@ -252,7 +252,7 @@ func finWritePlantedTrailerScan() trailScanResult {
 // ANCHORED line, reusing #1280's plant verbatim
 // (`TestFinAttributeRecordCarriesNoCapturedBytes`) for its stated reason: trailReapLine
 // splices its pgids argument raw and tdnParsePGIDs stops at the first ]
-// (teardown_liveness_test.go:248-256), so the list still parses and the needle
+// (teardown_liveness_test.go:246-254), so the list still parses and the needle
 // lands in tdnReapOutcome.Line — the channel the fan-out drops. A needle on a
 // NON-anchored line would be skipped before any field was filled
 // (:161-163) and the sweep would go green over a record that kept the whole
@@ -268,7 +268,7 @@ func finWritePlantedReapLog() []byte {
 // on TestFinWriteArtifactsCarryNoCapturedBytes.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1203-1205): a shared backing array is reachable
+// reason (trail_run_outcome_test.go:1113-1115): a shared backing array is reachable
 // from every test in this package, and `go test -race` runs them in parallel.
 //
 // # Plant only where the pipeline reduces
@@ -277,13 +277,13 @@ func finWritePlantedReapLog() []byte {
 // build. The record carries several inputs verbatim BY DESIGN — Liveness whole
 // including its Detail, StateColumn and ToolStderr; Attribution whole; Trailer
 // whole including the four decoded scalars; RunnerFromEnv; ClaudeVersion (capped)
-// — and finding_run_record_test.go:138-152 states it while
+// — and finding_run_record_test.go:137-151 states it while
 // TestFinRecordEmbedsTrailerRecordWhole pins it. A needle in any of those WILL
 // appear in the artifact, correctly. The three plants are therefore exactly the
 // inputs that are reduced or dropped:
 //
 //  1. each matched row's Command — verbatim argv, reduced to finRecordProc's
-//     three integers (finding_run_record_test.go:419-421)
+//     three integers (finding_run_record_test.go:372-374)
 //  2. ClaudeCommand — reduced to one of tdnRunnerFromArgv's three constants (:379)
 //  3. the reap stderr — pyry's own captured bytes (`tdnReapOutcome`),
 //     dropped by finAttributeFanOut
@@ -304,7 +304,7 @@ func finWritePlantedReapLog() []byte {
 // pinStateOutcome's seven keys; that gap is precisely what this census closes.
 // Passing pgid 1 alongside the real group is what fills Conditions and
 // Unreportable in one call: finAttributeFanOut partitions pgid <= 1 as
-// unreportable (finding_attribution_fanout_test.go:239-249) while 7788 still
+// unreportable (finding_attribution_fanout_test.go:238-248) while 7788 still
 // produces the entry AC2's premise reads.
 //
 // # The liveness outcome is hand-built, and it is not a shortcut
@@ -380,7 +380,7 @@ func finWriteRender(t *testing.T) map[string][]byte {
 // os.ReadDir rather than the two names the writer wrote, and that is the whole
 // point: a later edit that adds a third file inherits the sweep for free.
 // reach.ps.txt is the proof that "a later edit adds a third file" is a thing that
-// happens (background_reach_probe_test.go:899-909).
+// happens (background_reach_probe_test.go:834-844).
 //
 // Fatal on any read error: a sweep that silently skipped a file it could not read
 // would report clean on the one file that leaked.
@@ -429,7 +429,7 @@ func finWriteReadDir(t *testing.T, dir string) map[string][]byte {
 // The TYPE walk to finWriteObservedPaths' VALUE walk. finRecordRun has four
 // struct- or slice-valued fields, so a top-level scan inspects ten keys, misses
 // every nested one, and reads as a structural guarantee it is not providing —
-// "vacuous coverage is worse than none" (finding_run_record_test.go:999-1009).
+// "vacuous coverage is worse than none" (finding_run_record_test.go:934-944).
 // Same shape as finRecordInputReaches (:731), which answers a different question
 // and is called directly by AC4 rather than reimplemented.
 //
@@ -552,7 +552,7 @@ func finWriteLeafKey(path string) string {
 // has to name WHICH Detail overran and the key scan deliberately discards the
 // path. It names the path and the byte length and never the string itself:
 // printing the content of a Detail that just failed a leak check would write the
-// leak into CI logs, which is the shape finding_run_record_test.go:1101-1106
+// leak into CI logs, which is the shape finding_run_record_test.go:1036-1041
 // already follows.
 func finWriteObservedDetails(raw json.RawMessage, into map[string]string) error {
 	var value any
@@ -703,7 +703,7 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // The record carries no trailer line in any form, capped or otherwise:
 // finTrailerRecord is ten scalars and a
 // name list with no Line, and finRecordInputs carries neither a trailObservation
-// nor a trailScanResult (finding_run_record_test.go:215-223), so
+// nor a trailScanResult (finding_run_record_test.go:214-221), so
 // trailScanResult.Line is unreachable from this record at any depth. A SINGLE
 // OCCURRENCE WOULD THEREFORE MEAN A REDUCTION HAD BEEN WIDENED BACK INTO A
 // RETENTION — not that a permitted field needed review.
@@ -758,7 +758,7 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // RED and reverted:
 //
 //   - M1 — the pipeline sweep is live. In finRecordBuild
-//     (finding_run_record_test.go:433-437) the Detail format was changed to
+//     (finding_run_record_test.go:386-390) the Detail format was changed to
 //     interpolate in.Rows[0].Command — the %v-on-an-input slip finRecordRun's own
 //     comment names at :168-173 — INSIDE the format string rather than appended
 //     after trailDetail returns. Appended, reachCapCommand has already run and the
@@ -798,7 +798,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 		t.Fatalf("channel 3 (reap stderr): the synthetic reap log carries no needle")
 	}
 	// The premise doubles as the non-vacuity proof, following
-	// finding_attribution_fanout_test.go:803-808: trailAdmitProof is reachable only
+	// finding_attribution_fanout_test.go:739-743: trailAdmitProof is reachable only
 	// if the needle-bearing line was recognised as anchored, parsed and found to
 	// name the held group. A plant that stopped being anchored lands here.
 	//
@@ -806,7 +806,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// them renders every Admit.Detail, and the rule is to name the count, the path
 	// and the length rather than the string (security review item [7]). The Values
 	// are safe to print because trailAdmitAttribution returns one of a closed set
-	// (trailer_admissibility_test.go:275-282); the Details beside them are not.
+	// (trailer_admissibility_test.go:267-274); the Details beside them are not.
 	first := "<no entries>"
 	if len(in.Attribution.Entries) > 0 {
 		first = in.Attribution.Entries[0].Admit.Value
@@ -818,7 +818,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	}
 
 	// The two embedded sub-records asserted CLEAN before the build, per
-	// finding_run_record_test.go:1061-1079, so a red sweep below names THIS ticket's
+	// finding_run_record_test.go:996-1014, so a red sweep below names THIS ticket's
 	// writer rather than a sibling's builder. Both are built from planted inputs;
 	// what is asserted is that the plant did not survive the sub-builder — and the
 	// two sub-builders are different functions. The attribution's is
@@ -938,10 +938,10 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 //
 // The walk must be recursive because a top-level scan on finRecordRun inspects
 // ten keys and misses every nested one — the reason
-// finding_run_record_test.go:999-1009 gives for deferring this scan to this
+// finding_run_record_test.go:934-944 gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
-// (finding_trailer_evidence_test.go:833, finding_attribution_fanout_test.go:825),
+// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:760),
 // less the redundant trailer_line, which "line" already covers.
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)
@@ -963,14 +963,14 @@ func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	// genuinely named for a captured column still trips this scan.
 	exempt := map[string]string{
 		// A shipped and permitted key on the carried pinStateOutcome
-		// (`pinStateOutcome`). finding_run_record_test.go:149-152
+		// (`pinStateOutcome`). finding_run_record_test.go:148-151
 		// names this sweep as the place to exempt it rather than as a reason to
 		// strip the field: the value is the ps tool's own stderr about a lookup,
 		// not a process's argv or a model's output.
 		"tool_stderr": "a permitted field on the carried pinStateOutcome",
 		// Matches the substring "argv" and its reason is a DIFFERENT one: the key
 		// names the READING, not the argv. Every arm of tdnRunnerFromArgv returns a
-		// constant (teardown_liveness_probe_test.go:838-854), so no input byte
+		// constant (teardown_liveness_probe_test.go:773-789), so no input byte
 		// reaches its value and the field's space is the closed set {ptyrunner ...,
 		// streamrunner ..., indeterminate ...}. AC2's second plant is the enforcing
 		// proof. Without this exemption the family's shipped list fails on a field

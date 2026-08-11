@@ -29,10 +29,10 @@ package realclaude
 //	time=… level=INFO msg="agentrun: reaped claude descendant process groups" count=2 pgids="[4242 77]"
 //	2026/07/30 23:18:29 INFO agentrun: reaped claude descendant process groups count=2 pgids="[4242 77]"
 //
-// The first is slog.NewTextHandler (cmd/pyry/main.go:808). The second is
+// The first is slog.NewTextHandler (cmd/pyry/main.go:743). The second is
 // slog.Default(), and it is the one that matters: runAgentRunPty
 // (cmd/pyry/`runAgentRunStreamRunner`) sets no Logger on ptyrunner.Config, so
-// ptyrunner.Run falls back to slog.Default() (runner.go:297-300), and every
+// ptyrunner.Run falls back to slog.Default() (runner.go:289-292), and every
 // probe in this package spawns `pyry agent-run` and captures its stderr. A
 // matcher anchored on `msg="agentrun: reaped…"` finds nothing on the live path
 // and answers "no line" — read as "the reaper never fired" — with nothing going

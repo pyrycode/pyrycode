@@ -282,7 +282,7 @@ func TestRealClaude_BackgroundReachability(t *testing.T) {
 			reachEnableEnv, reachEnableEnv)
 	}
 	// Content-first root pinning keys on `--session-id <uuid>` in claude's
-	// argv, which only the ptyrunner path emits (ptyrunner/runner.go:665);
+	// argv, which only the ptyrunner path emits (ptyrunner/runner.go:618);
 	// under PYRY_USE_STREAMJSON=1 claude mints its own id and the needle would
 	// never match, so the run would spend a live turn to reach a guaranteed
 	// root-disagreement. The streamrunner path is out of scope for this ticket
@@ -356,7 +356,7 @@ func runReachProbe(t *testing.T, artifactDir string) {
 	// gets a real chance to finish the turn and exit on its own.
 	pyryExited := make(chan struct{})
 	t.Cleanup(func() {
-		// LOAD-BEARING (background_trigger_probe_test.go:490). Without this
+		// LOAD-BEARING (background_trigger_probe_test.go:443). Without this
 		// guard a failure before cmd.Start reaches syscall.Kill(-0, SIGKILL),
 		// and kill(0, sig) is defined as "send to every process in the CALLER's
 		// own process group" — the test binary would SIGKILL itself and its
@@ -552,7 +552,7 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 	// The integer snapshot's own error is a GATE, not a footnote — everything
 	// from here down reads off snap.raw. probeProcessSnapshot returns
 	// exec.Cmd.Output()'s partial stdout ALONGSIDE the error
-	// (background_trigger_probe_test.go:936-938), so on a 5 s context timeout —
+	// (background_trigger_probe_test.go:871-873), so on a 5 s context timeout —
 	// a loaded machine is this probe's expected condition, not the exotic one —
 	// snap.raw is a CUT process table. A cut that drops an intermediate hop
 	// while keeping the held row makes the up-walk and the down-BFS agree on
@@ -723,7 +723,7 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 // (:975) returns pyry's first direct child by position with no content check,
 // whereas the reaper's actual argument is the pid of the claude command pyry
 // spawned. So the content evidence is the argv row carrying this run's session
-// UUID (pyry passes `--session-id <uuid>`, ptyrunner/runner.go:665): unique on
+// UUID (pyry passes `--session-id <uuid>`, ptyrunner/runner.go:618): unique on
 // the machine, and it survives shebang rewriting, which matching on the
 // resolved claude binary path does not — the CLI may execute as `node …/cli.js`.
 //
@@ -1092,7 +1092,7 @@ func reachToolUseCommand(input json.RawMessage) string {
 // just the delta this probe sets: PYRY_USE_STREAMJSON may already be exported
 // in the operator's shell (it was, on 2026-07-25, and that silently invalidated
 // a #1223 gate). Only the exact string "1" is truthy, matching
-// cmd/pyry/agent_run.go:274.
+// cmd/pyry/agent_run.go:266.
 //
 // Its streamrunner branch is unreachable in any run that produces a record: the
 // PYRY_USE_STREAMJSON gate in TestRealClaude_BackgroundReachability returns
@@ -1114,7 +1114,7 @@ func reachRunnerPathFromEnv(delta []string) string {
 
 // reachRunnerPathFromArgv corroborates the runner path from the process table
 // rather than from the env this test set. --append-system-prompt-file is the
-// ptyrunner-shape marker from ptyrunner's buildArgs (runner.go:617-626).
+// ptyrunner-shape marker from ptyrunner's buildArgs (runner.go:616-625).
 func reachRunnerPathFromArgv(command string) string {
 	if strings.Contains(command, "--append-system-prompt-file") {
 		return "ptyrunner (claude argv carries --append-system-prompt-file)"

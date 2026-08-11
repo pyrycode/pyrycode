@@ -16,8 +16,8 @@ package realclaude
 // resultTrailer is eight fixed fields, and
 // TerminalReason is a plain string with omitempty — so an ABSENT
 // terminal_reason and one emitted as "" both decode to "". That distinction is
-// not academic: terminal_reason is a pyry invention (streamjson/emitter.go:475-484,
-// streamrunner/watchdog.go:255), so on the headless PYRY_USE_STREAMJSON=1 path
+// not academic: terminal_reason is a pyry invention (streamjson/emitter.go:428-437,
+// streamrunner/watchdog.go:253), so on the headless PYRY_USE_STREAMJSON=1 path
 // the trailer on a healthy run is claude's OWN result line and carries no
 // terminal_reason at all. Telling claude's line from pyry's synthesised one is
 // therefore a question about WHICH KEYS the line carried, not about any field's
@@ -54,7 +54,7 @@ package realclaude
 //
 // Bounding the names themselves is deliberately NOT here. They are
 // attacker-influenced in principle — they arrive from claude's output — but
-// trailScanResult is published by nothing (pinned at finding_run_record_test.go:852-877
+// trailScanResult is published by nothing (pinned at finding_run_record_test.go:787-812
 // and `TestFinSightingReachesNoScanType`), so there is no rendering surface at
 // this tier to bound. The per-name cap belongs at the tier that publishes: #1363.
 
@@ -114,7 +114,7 @@ func trailKeyNames(line []byte) []string {
 //
 // A function rather than a package-level var: it returns a slice, go test -race
 // runs this package's tests in parallel, and a shared backing array would let one
-// row's mutation reach another's (trail_run_outcome_test.go:1203-1205).
+// row's mutation reach another's (trail_run_outcome_test.go:1113-1115).
 func trailExpectedKeyNames() []string {
 	return []string{
 		"duration_ms", "is_error", "num_turns", "result", "session_id",
@@ -142,7 +142,7 @@ func trailKeyNamesNeedles() map[string]string {
 //
 // `result`'s needle sits behind pad bytes of padding so it lands PAST the
 // 512-byte cap, which is trailNeedle's own rule for a plant
-// (result_trailer_observation_test.go:330-372): a hit on that needle could then
+// (result_trailer_observation_test.go:322-325): a hit on that needle could then
 // only have come from the full line and never from the recorded copy. The test
 // asserts the offset rather than trusting this comment.
 func trailKeyNamesNeedledTrailer(pad int) string {
@@ -296,13 +296,13 @@ func TestTrailKeyNamesSeparatesAbsenceFromZeroValue(t *testing.T) {
 //
 // The obvious idiom is forty lines above the field this ticket adds:
 // TestTrailScan's padded sub-test marshals the WHOLE trailScanResult and sweeps
-// the bytes (result_trailer_observation_test.go:589-596). That is correct there,
+// the bytes (result_trailer_observation_test.go:542-549). That is correct there,
 // because trailPaddedTrailer plants only in `result` — a field resultTrailer does
 // not decode. Copied here it goes RED AGAINST A CORRECT BUILD: resultTrailer
 // decodes Subtype, StopReason and TerminalReason, so three of the five needles
 // below are carried through Trailer BY DESIGN and published verbatim downstream.
 // The artifact-wide sweep that would catch a leak in those is #1362's, with its
-// own narrower plant list (finding_artifact_write_test.go:282-297 states the
+// own narrower plant list (finding_artifact_write_test.go:274-289 states the
 // plant-only-where-the-pipeline-reduces rule).
 //
 // So this sweeps the names and nothing else. Widening it to the enclosing record
@@ -418,7 +418,7 @@ func TestTrailScanResultReachesNoRawMessageMap(t *testing.T) {
 	if finRecordInputReaches(carrier, forbidden, map[reflect.Type]bool{}) {
 		t.Errorf("%s is reachable from trailScanResult: its values are the RAW BYTES of the "+
 			"line, so a %%v on the map — or on any struct transitively holding it, as this "+
-			"package already does at finding_run_record_test.go:840 — prints the whole assistant "+
+			"package already does at finding_run_record_test.go:775 — prints the whole assistant "+
 			"`result` field. trailKeyNames discards the map inside itself and returns []string, "+
 			"which is what keeps this true by construction", forbidden)
 	}

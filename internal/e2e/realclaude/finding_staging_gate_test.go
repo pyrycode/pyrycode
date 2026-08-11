@@ -55,7 +55,7 @@ package realclaude
 // staged, so the gate reads a string the model chose. BOTH OPERANDS COUNT, not
 // only the issued one: the staged command looks rig-authored and therefore safe,
 // but the rig builds it around a t.TempDir() path and a binary resolved by
-// exec.LookPath (trail_run_rig_test.go:556-606), so on a live run it embeds an
+// exec.LookPath (trail_run_rig_test.go:509-559), so on a live run it embeds an
 // operator filesystem path — the same leak class pinStateColumns
 // (`pinStateColumns`) refuses a command column for. These records
 // are pasted into public issues, so no Detail here quotes either one, and
@@ -105,7 +105,7 @@ import (
 // (`TestTrailConstantsAreClosed`) fails any closed-space value that is
 // the empty string because "a zero-valued field reads as it", and
 // trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way"
-// (trail_run_outcome_test.go:476-479).
+// (trail_run_outcome_test.go:421-424).
 //
 // There is no out-of-contract value here and none is to be added. Seven is
 // seven: the two inputs that could otherwise want one are closed by the two
@@ -144,7 +144,7 @@ const (
 // embedded in, marshalled into, or quoted by any published record. Only
 // finOutcomeResult crosses into publishable space. The asymmetry is load-bearing
 // rather than incidental — every sibling record in this family states its content
-// rule at the type (trailRunReadings:398-401, trailRunOutcome:469-483,
+// rule at the type (trailRunReadings:390-393, trailRunOutcome:461-475,
 // trailGateResult:311-326) and this one states the converse for the same reason.
 // Adding tags here "for symmetry" is the first step toward publishing two
 // captured strings into a public issue.
@@ -157,9 +157,9 @@ const (
 // spawn.
 type finOutcomeStaging struct {
 	// BashIssued records THAT a Bash call was issued. findBashToolUse
-	// (sigterm_mid_tool_use_test.go:1566-1578) returns a tool_use ID and an event
+	// (sigterm_mid_tool_use_test.go:1488-1500) returns a tool_use ID and an event
 	// index and no command — the decoder behind it, contentBlock
-	// (tool_loop_test.go:161-169), has no `input` member — so "was a call issued"
+	// (tool_loop_test.go:160-168), has no `input` member — so "was a call issued"
 	// and "what was it" are genuinely two separate readings.
 	BashIssued bool
 	// IssuedCommand is what claude actually issued: VERBATIM MODEL OUTPUT, supplied
@@ -175,7 +175,7 @@ type finOutcomeStaging struct {
 	RendezvousDone bool
 	// PinScanErrored records THAT the during-turn pin scan failed, never what it
 	// said, mirroring trailRunReadings.ArgvScanErrored
-	// (trail_run_outcome_test.go:458-465). ps stderr is a captured string on the
+	// (trail_run_outcome_test.go:403-410). ps stderr is a captured string on the
 	// same footing as argv.
 	PinScanErrored bool
 	// PinMatchCount and PinWantCount are the scan's match count and the count the
@@ -254,7 +254,7 @@ func finOutcomeValues() []string {
 //     something else, reporting "the trigger did not fire" is true but files "the
 //     model ran the wrong thing" under "our trigger is broken".
 //   - INSTRUMENT FAILURE BEFORE ITS RESULT (arm 5 before arm 6). pinScanArgv
-//     returns the ZERO pinScan on error (process_pin_liveness_test.go:192-197), so
+//     returns the ZERO pinScan on error (process_pin_liveness_test.go:191-196), so
 //     an errored scan arrives with PinMatchCount == 0. Checking the count first
 //     would report "matched an unexpected count" about a scan that never ran — the
 //     same defect trailOutcomeVoidArgvScanErrored is kept distinct from
@@ -276,7 +276,7 @@ func finOutcomeStagingGate(s finOutcomeStaging) finOutcomeResult {
 	// BELOW and the sentence has no interpolation site for one — the only verbs it
 	// carries take outcome values. The issued command is verbatim model output; the
 	// staged one embeds a t.TempDir() path and an exec.LookPath result
-	// (trail_run_rig_test.go:556-606), which is the same operator-filesystem-path
+	// (trail_run_rig_test.go:509-559), which is the same operator-filesystem-path
 	// leak class pinStateColumns refuses a command column for. The rule covers both
 	// operands, so a Detail naming "which operand differed" is also out — it is one
 	// edit away from naming its bytes.
@@ -679,9 +679,9 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // reachMaxCommandBytes, so a Detail that did wrongly interpolate a command would
 // be truncated before a needle sitting past the cap, and this test would pass
 // against a leaking implementation. trailNeedle is placed past the cap
-// deliberately in trailPaddedTrailer (result_trailer_observation_test.go:373-384)
+// deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
 // for the opposite kind of test; here that placement would be the defect. These
-// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2665-2666, :2347-2350.
+// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2257-2258, :2297-2300.
 const (
 	finOutcomePlantedStaged = "a staged hold command that also carries " + trailNeedle
 	finOutcomePlantedIssued = "a different issued command that also carries " + trailNeedle

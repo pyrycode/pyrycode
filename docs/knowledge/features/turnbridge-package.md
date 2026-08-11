@@ -597,7 +597,7 @@ ships the mechanism; #633 supplies the original production resolver + the wiring
   tail may open a rotated file B, and the stat-time offset lands wrong), the warm
   branch now passes `tuidriver.TailFromEnd` (`-1`) so `TailJSONL` (tui-driver
   v1.12.0) resolves the seek against its **own** fd. `startOffset` is still
-  forwarded unchanged through `producer.go:374` → `Session.Events` → `TailJSONL`;
+  forwarded unchanged through `producer.go:327` → `Session.Events` → `TailJSONL`;
   only the value the resolvers compute changed. See [codebase/1152.md](../codebase/1152.md).
 - **`/clear` survival is restart-driven (#633).** A `/clear` rotates claude's on-disk
   session UUID **without** restarting the supervised process, so the Events channel

@@ -36,7 +36,7 @@ reporting/removal handlers map onto (`Snapshot`, `Remove`, `OnChange`).
 ## Why a new store
 
 Before #721, `send_message` delivered **synchronously**: the handler called
-`Supervisor.WriteUserTurn` (`internal/supervisor/supervisor.go:210-261`), whose
+`Supervisor.WriteUserTurn` (`internal/supervisor/supervisor.go:209-259`), whose
 `WaitReady` idle-gate blocked the per-conn goroutine while claude was busy and
 which failed (bounded by `sendMessageDeliverTimeout`, 30s) if claude stayed busy
 past the cap (#594). So a message typed mid-turn either **blocked** the handler or

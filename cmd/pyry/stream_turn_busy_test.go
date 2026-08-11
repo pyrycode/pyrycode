@@ -128,7 +128,7 @@ func TestTurnBusyTracker_ClearsOnBothStopReasons(t *testing.T) {
 // ids all report idle, and WaitIdle returns promptly for each. A foreign id
 // traverses the identical map lookup as an idle one, so the two are
 // indistinguishable in value and in code path — the #1101 posture
-// screenSnapshotterOrNil records (relay.go:453-468).
+// screenSnapshotterOrNil records (relay.go:406-421).
 func TestTurnBusyTracker_UnknownConversationReportsIdle(t *testing.T) {
 	t.Parallel()
 

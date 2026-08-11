@@ -3,7 +3,7 @@
 //
 // # Why this exists
 //
-// Comments used to reference code as `foo_test.go:323`. Nothing declared that
+// Comments used to reference code as `foo_test.go:315`. Nothing declared that
 // convention; it propagated by each author copying its neighbours. It is
 // expensive, because any insertion displaces an unknown subset of the
 // citations and nothing maintains them. Measured over 25 commits touching
