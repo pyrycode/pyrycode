@@ -3,6 +3,10 @@
 **Size:** S · **Offline throughout** — no live claude, no credentials, no `make e2e-realclaude`.
 **Build tag:** everything here is behind `e2e_realclaude`, which `make check` does not compile.
 
+> **Convention change since this spec was written (2026-08-11).** Comments cite the **symbol**, not the file and line. `make cite-guard` fails the build on a comment citing a line whose target is a declaration, or which sits within 20 lines of one; deeper is still allowed, and ranges are fine. **It scans every `.go` file as text, so the `e2e_realclaude` tag above does NOT exempt your comments from it** — the tag only keeps the tests out of the compile.
+>
+> The citations left in this spec are ranges or deep targets, both of which the guard permits. Use `codegraph_search` to get a name. Do not copy older `file.go:NNN` comments from the surrounding files; those were cleaned up on `main` and the gate now rejects that style. See `CODING-STYLE.md` § "Comments — Citing Other Code".
+
 ---
 
 ## Files to read first
@@ -71,7 +75,7 @@ RunnerPath string
 cannot tell a reduced label from verbatim argv, so the prohibition lives in the doc
 and is checked by the AC4 sweep. It must state: the only admissible producer is
 `tdnRunnerFromArgv`; **never** `Pin.ClaudeCommand` itself, which is verbatim argv and
-is marked INPUT ONLY — NEVER PUBLISHED (`finding_live_pin_test.go:68`); this value
+is marked INPUT ONLY — NEVER PUBLISHED (`finLivePinReading`); this value
 crosses the gather unvalidated and is republished as `runner_path`, so raw argv here
 would put an operator's `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` into an
 artifact destined for a public issue — the channel `Pinned` is `[]int` to keep shut.
@@ -88,10 +92,10 @@ stays shut *structurally* rather than by a check. A design that took
 with it an operator's `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` — into
 `finGatherInputs`, one struct field away from an artifact destined for a public
 issue. Rejected on those grounds; `Pin.ClaudeCommand` is marked INPUT ONLY — NEVER
-PUBLISHED at `finding_live_pin_test.go:68`.
+PUBLISHED at `finLivePinReading`.
 
 The only admissible producer is `tdnRunnerFromArgv`
-(`teardown_liveness_probe_test.go:772`): streamrunner-positive on `--input-format`,
+(`tdnRunnerFromArgv`): streamrunner-positive on `--input-format`,
 ptyrunner-positive on `--session-id`, indeterminate for both-or-neither, five fixed
 answers that echo no argv. **Do not reach for `reachRunnerPathFromArgv`** — it keys
 on `--append-system-prompt-file`, which both argv builders emit, so it labels a
@@ -180,7 +184,7 @@ finExitRunProbe (live)                     finStageRun / trailRigGather (fixture
   `:2052`, `:2063-2107`, `:2210`, `:2536`, `:2663` and
   `trail_ptyrunner_composition_test.go:50`.
 - **`finGatherCases()`** does not grow either — past three rows its own cardinality
-  and ordinal claims move (`finding_run_gather_test.go:666`, `:751`, `:762-765`,
+  and ordinal claims move (`finGatherCases`, `:751`, `:762-765`,
   `:1000`, `:1770`). The new rows go in a **new table** whose cardinality is fresh and
   has no claims to sweep.
 - **`finRecordBuild`'s** own `tdnRunnerFromArgv(h.Pin.ClaudeCommand)` at
@@ -280,7 +284,7 @@ Per-row assertions: `ArgvScanErrored == false`, `RowsScanned > 0`, `MatchCount =
 **Do NOT use `os.Args[0]` as the gather's needle and compare `MatchCount` across
 rows.** That is the shape this design rejects, and the reason is measured: this
 package makes 29 `t.Parallel()` calls and re-execs itself at
-`fixtures_test.go:119`, `:228`, `:478` and `teardown_reap_capture_test.go:219`, `:254`.
+`TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet`, `:228`, `:478` and `tdnSpawnLeaf`, `:254`.
 Those children carry `os.Args[0]` as their own argv[0], and `reachMatchArgvRows`
 matches any needle as a substring of the **full** command line
 (`background_reach_probe_test.go:884-895`). A sibling test's child appearing or
@@ -328,7 +332,7 @@ Three rungs, in order — the middle one is what stops the sweep being vacuous:
    `readings.Admit.Detail`.
 5. **A second fabric, against argv generally rather than the planted needle.** Also
    assert `/opt/node/bin/node` — the leading substring **both** argv fixtures carry
-   (`teardown_liveness_probe_test.go:897`, `:902`) and which appears in none of
+   (`tdnOrNone`, `:902`) and which appears in none of
    `tdnRunnerFromArgv`'s five constant answers — is absent from the marshalled
    `readings`. The needle rung catches a reduction that echoed the *tail* it was
    handed; this one catches one that echoed the *head*, and it fires even against a
@@ -390,7 +394,7 @@ this change; both stay true for `trailRigGather`.
 | `trailer_admissibility_test.go:143-147` | `trailGateAbsentOwesNone` "is unreachable" over a live run. It is now the value this ticket makes reachable. |
 | `trailer_admissibility_test.go:176-180` | same claim for `trailGatePresentOwesNone` — also now reachable, on a stream run whose trailer carries a reason. |
 | `trailer_admissibility_test.go:519-522` | "an indeterminate reading is precisely what both shipped gathers supply". |
-| `trailer_admissibility_test.go:979-981` | "Both gathers … go through this one function" — **and its cite is wrong**: it says `finding_run_gather_test.go:778` for C2's whole-struct equality; `:778` is blank and the equality is at `:788-789`. The block is being rewritten; correct it rather than carry it forward. |
+| `trailer_admissibility_test.go:979-981` | "Both gathers … go through this one function" — **and its cite is wrong**: it says `finGatherAssertContract` for C2's whole-struct equality; `:778` is blank and the equality is at `:788-789`. The block is being rewritten; correct it rather than carry it forward. |
 | `trailer_admissibility_test.go:983-988` | **the second paragraph of the same doc**, below `:979-981`, and the one that actually writes "a live run reads no runner and the gate's absence arm reaches only its path-unnamed case". A sweep that stops at the first paragraph misses it. |
 | `trailer_admissibility_test.go:1673-1678` | R3's row comment: "the only one of the three a live run reaches today". |
 | `trail_run_outcome_test.go:778-780` | "both fill the gate's runner-path field with `trailRunnerUnread()` by construction". The *surrounding* claim — that no shipped gather stages `Ordering` or `PinnedPid` — **stays true**; change only the runner-path premise, and re-derive the no-C10 conclusion from `trailRigGather` alone. |
@@ -399,18 +403,18 @@ this change; both stay true for `trailRigGather`.
 | `trail_run_rig_test.go:157-160` | states the rig's own fill and **delegates its full reason** to `trail_ptyrunner_composition_test.go:19-26`. Stale by delegation even though the rig's code does not move — give it its own structural reason (`:40`: this rig runs no claude). |
 
 **Verified as staying true — do not touch:** `trail_ptyrunner_composition_test.go:50`
-and `trailer_admissibility_test.go:1817`, `:2536`, `:2663` all speak about
+and `TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone`, `:2536`, `:2663` all speak about
 `trailGateCases()` rows or the sweep's own rows, and neither table grows.
-`trail_run_outcome_test.go:1183` and `trail_ordering_premises_test.go:191` are the
+`trailRunSightingEstablishedReadings` and `trail_ordering_premises_test.go:191` are the
 `Ordering`/`PinnedPid` staging claim, which this ticket does not touch.
 
 ### Population B — the derived set whose cardinality moves
 
 `finGatherInputs` goes from six fields to seven. Three shipped comments count them:
 
-- `finding_live_run_test.go:111` — "finGatherInputs' six fields need neither"
+- `finLiveRunHandle` — "finGatherInputs' six fields need neither"
 - `finding_run_gather_test.go:206-208` — "#1281's four values, plus the two #1282 left staged"
-- `finding_run_gather_test.go:217` — "Across six positional arguments"
+- `finGatherInputs` — "Across six positional arguments"
 
 The new field also owes the zero-polarity argument its two predecessors make at
 `finding_run_gather_test.go:226-238` — that is where the "a caller that supplies
@@ -533,8 +537,8 @@ cites and nothing else. Treat the cite pass as a deliverable, not as cleanup:
 - **[Concurrency] MUST FIX — found and fixed in the first pass.** The spec originally
   prescribed `os.Args[0]` as the *gather's* needle with `MatchCount` compared across
   rows. That is unsound in this package: it makes 29 `t.Parallel()` calls and re-execs
-  itself at `fixtures_test.go:119`, `:228`, `:478` and
-  `teardown_reap_capture_test.go:219`, `:254`; those children carry `os.Args[0]` as
+  itself at `TestWithWorktreeAuthenticated_SkipsAndNamesBothEnvVarsWhenNeitherSet`, `:228`, `:478` and
+  `tdnSpawnLeaf`, `:254`; those children carry `os.Args[0]` as
   their own argv[0], and `reachMatchArgvRows` matches needles as a substring of the
   full command line. A sibling's child appearing or exiting between two gather calls
   moves the count, so the test would have been flaky *and* weaker. § Testing 2 now
@@ -549,7 +553,7 @@ cites and nothing else. Treat the cite pass as a deliverable, not as cleanup:
 - **[Threat model alignment] Aligned.** The governing threat here is the family's own
   — a value published into an artifact destined for a public issue must carry no
   captured bytes (`finding_run_gather_test.go:518-522`, `:260-268`;
-  `finding_live_pin_test.go:68`; `finding_attribution_fanout_test.go:195-202`). The
+  `finLivePinReading`; `finding_attribution_fanout_test.go:195-202`). The
   design keeps the reduction at the call site, which is where that family already puts
   the `pinScan.Matches` → `[]int` conversion for the same reason. No relay or network
   surface is touched, so `docs/protocol-mobile.md` § Security model does not apply to
