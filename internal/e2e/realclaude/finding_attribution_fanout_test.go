@@ -26,15 +26,15 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// tdnClassifyReapLog (teardown_liveness_test.go:144) is the reap-log reader;
+// tdnClassifyReapLog is the reap-log reader;
 // pyry's stderr is NOT re-parsed here. trailAdmitAttribution
 // (trailer_admissibility_test.go:448) is the attribution predicate, and
 // trailIsAdmitValue (:721) its membership predicate — called, never re-switched.
 // trailReapLine (:753) renders one anchored line in reap.go:65's slog shape.
-// trailClassifyRun / trailRunWellFormed (trail_run_outcome_test.go:638, :1114)
+// trailClassifyRun / trailRunWellFormed (`trailClassifyRun`, :1114)
 // are the downstream consumer and its vary-one-thing base.
 //
-// trailDetail (trailer_admissibility_test.go:352) is reused rather than given a
+// trailDetail is reused rather than given a
 // finDetail twin. Its own comment explains it is deliberately not tdnDetail
 // because "the trail* family stays out of the tdn* teardown classifier's reach"
 // — that argument does not transfer. trailDetail carries no decision (it is
@@ -78,7 +78,7 @@ const (
 
 // finAttributeEntry is one distinct group's attribution: the pgid it was decided
 // for, and the shipped predicate's result. NOTHING ELSE — no tdnReapOutcome (its
-// Line is pyry's own stderr, teardown_liveness_test.go:126), no reachProc (its
+// Line is pyry's own stderr, `tdnReapOutcome`), no reachProc (its
 // Command is verbatim argv read off the ambient process table,
 // background_reach_probe_test.go:162-168), no command string. That is what makes
 // the no-captured-bytes property true BY CONSTRUCTION rather than by an ordering
@@ -617,7 +617,7 @@ func finAttributeAssert(t *testing.T, tc finAttributeCase, got finAttributeRecor
 // TestFinAttributeOrderCoversTheAdmitSpace is the deterministic guard against an
 // eighth admissibility value ranking silently last, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2503).
+// (`TestTrailRunOutcomeValuesAgreeWithThePredicate`).
 func TestFinAttributeOrderCoversTheAdmitSpace(t *testing.T) {
 	order := finAttributeOrder()
 	if len(order) != 7 {

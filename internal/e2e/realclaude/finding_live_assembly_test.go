@@ -3,7 +3,7 @@
 package realclaude
 
 // The join: the one place the run's transcript reading and the rig's own facts
-// meet, filling all eight finOutcomeStaging fields (finding_staging_gate_test.go:158)
+// meet, filling all eight finOutcomeStaging fields (`finOutcomeStaging`)
 // and returning finOutcomeStagingGate's decision (:262) as returned.
 //
 // This file reaches no verdict about pyry and takes no measurement. It ships the
@@ -17,7 +17,7 @@ package realclaude
 //
 // # Three from the transcript, five from the rig
 //
-// finTranscriptReading (finding_staging_fill_test.go:94) is the three
+// finTranscriptReading is the three
 // transcript-side fields as a type, and its doc states why: the composition
 // returns a value from which the other five are unreachable, so "the fill neither
 // reads nor invents them" is structural rather than asserted.
@@ -32,7 +32,7 @@ package realclaude
 // which is the failure class this whole file family exists to move offline.
 //
 // It is deliberately NOT a partial finOutcomeStaging (the shape
-// finTranscriptStagedCaller returns, finding_staging_fill_test.go:355): that
+// finTranscriptStagedCaller returns, `finTranscriptStagedCaller`): that
 // would hand the assembly a value on which BashIssued, IssuedCommand and
 // TriggerFired are settable, and "the three transcript fields come from the
 // transcript" would stop being structural and become a convention.
@@ -44,7 +44,7 @@ package realclaude
 //   - finOutcomeStagingGate's identity arm compares StagedCommand against
 //     IssuedCommand (finding_staging_gate_test.go:299).
 //   - finTranscriptFill only reads the trigger result when call.Command == staged
-//     (finding_staging_fill_test.go:260).
+//     (`finTranscriptFill`).
 //
 // Arriving as two independent parameters they can drift, and drift there is
 // doubly silent: the identity arm reports stage-command-not-staged AND
@@ -55,10 +55,10 @@ package realclaude
 //
 // # What this file does NOT prove, because it is already proven
 //
-// #1304's TestFinTranscriptFill (finding_staging_fill_test.go:541) already ships
+// #1304's TestFinTranscriptFill already ships
 // the transcript → fill → gate route and reaches the pass-through, with its
 // three-field reading mapping, its decoy row and its caller-side-outcomes-absent
-// sweep. #1284's finOutcomeGateCases (finding_staging_gate_test.go:411) already
+// sweep. #1284's finOutcomeGateCases already
 // ships the count mapping — 2/2 → ready, 1/2 → unexpected, 0/0 → unexpected.
 // Re-asserting either would be a second copy under a new prefix.
 //
@@ -103,18 +103,18 @@ package realclaude
 //     ANTHROPIC_API_KEY.
 //   - spawnProbePyry, holdProbeFIFO — spawn pyry, create a real FIFO. #1340's
 //     job, explicitly out of scope here.
-//   - WithWorktreeAuthenticated (fixtures.go:96) — it t.Skipf's when neither
+//   - WithWorktreeAuthenticated — it t.Skipf's when neither
 //     ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set (:100-107), AND A SKIP
 //     EXITS 0. Reaching for it would silently convert an offline test into one
 //     that never runs on a credential-free machine and still reports green.
 //   - os.Getenv, os.Environ, os.Setenv — no DIRECT environment call is made here.
 //     That is not the same as "no environment is read"; see the next section.
-//   - finTranscriptStagedCaller (finding_staging_fill_test.go:355) — the fixture
+//   - finTranscriptStagedCaller — the fixture
 //     to contrast against, never to call. Its PinMatchCount: 1, PinWantCount: 1
 //     (:360-361) is exactly the poison the assembly must not inherit.
-//   - finOutcomeStagedBase, finOutcomeGateCases (finding_staging_gate_test.go:398,
+//   - finOutcomeStagedBase, finOutcomeGateCases (`finOutcomeStagedBase`,
 //     :411) — gate-side fixtures; calling either makes this a copy of the gate test.
-//   - finLivePinReduce, finLivePinWantRows (finding_live_pin_test.go:202, :140) IN
+//   - finLivePinReduce, finLivePinWantRows (`finLivePinReduce`, :140) IN
 //     THE ASSEMBLY'S BODY. Both are the driver's to call. finLivePinWantRows is
 //     permitted below as a ROW VALUE — the rule is scoped by layer, not by file.
 //
@@ -125,12 +125,12 @@ package realclaude
 // no filesystem. This file must write a transcript and read it back through the
 // fill, and BOTH ends of that I/O resolve HOME:
 //
-//   - write: writeFixtureLines (fixtures_test.go:553) → os.UserHomeDir() →
+//   - write: writeFixtureLines → os.UserHomeDir() →
 //     tuidriver.SessionJSONLPath(home, workdir, sessionID)
-//   - read: finTranscriptFill → ReadJSONL (fixtures.go:148) →
+//   - read: finTranscriptFill → ReadJSONL →
 //     resolveAndOpenJSONL → os.UserHomeDir() (:397)
 //
-// WithWorktree's t.Setenv("HOME", t.TempDir()) (fixtures.go:59) is what makes
+// WithWorktree's t.Setenv("HOME", t.TempDir()) is what makes
 // both resolve inside this test's own temp dir. Omit it and writeFixtureLines
 // writes a synthetic transcript into the OPERATOR'S REAL ~/.claude/projects/…
 // tree at testSessionID — a write into live session storage, from a test still
@@ -147,7 +147,7 @@ package realclaude
 // The staged and issued commands cross as captured strings because the shipped
 // gate needs them as inputs and reduces them itself. This file writes none of
 // them to an artifact, logs none of them, and formats NO Detail at all, so
-// trailDetail's reachMaxCommandBytes cap (background_reach_probe_test.go:945)
+// trailDetail's reachMaxCommandBytes cap (`reachCapCommand`)
 // never applies here. No matched-row reachProc.Command value crosses this file:
 // the pin reduction is #1338's and is not called. Should a later edit bring one
 // in, it crosses as the CAPPED Command the shipped matcher already produces —
@@ -171,7 +171,7 @@ package realclaude
 // issue.
 //
 // The published-Detail obligation is discharged by
-// TestFinOutcomeResultCarriesNoCapturedBytes (finding_staging_gate_test.go:705)
+// TestFinOutcomeResultCarriesNoCapturedBytes
 // rather than by a second sweep here: it plants a needle into BOTH command
 // operands, sweeps every finOutcomeGateCases row, asserts the planted row still
 // reaches its original arm, pins the per-row Detail headroom so a leak cannot be
@@ -182,7 +182,7 @@ package realclaude
 //
 // # Not env-gated, and must not become so
 //
-// Nothing here needs a Claude login. TestMain (fixtures_test.go:348) branches
+// Nothing here needs a Claude login. TestMain branches
 // only on GO_TEST_HELPER_PROCESS and otherwise runs m.Run(), so a regression here
 // is red under `make e2e-realclaude` on a credential-free machine. Note that
 // `go vet` and `staticcheck` in `make check` run WITHOUT -tags e2e_realclaude, so
@@ -260,7 +260,7 @@ type finLiveAssembleFacts struct {
 // finOutcomeResult is the one publishable type in this family; handing a caller
 // the record too would hand it a value carrying two captured strings for no
 // stated need, undoing the asymmetry finOutcomeStaging's own doc establishes
-// ("INPUT ONLY — NEVER PUBLISHED", finding_staging_gate_test.go:142). If #1340
+// ("INPUT ONLY — NEVER PUBLISHED", `finOutcomeStaging`). If #1340
 // needs more, that is #1340's argument to make.
 //
 // NO ERROR RETURN AND NO FAILURE ARM OF ITS OWN, matching every gate and
@@ -268,10 +268,10 @@ type finLiveAssembleFacts struct {
 // abort a turn, and every wrong or missing reading already has a named home among
 // the gate's seven outcomes. It adds no t.Fatal and no t.Error. It inherits
 // exactly one abort path — ReadJSONL t.Fatalf's on a transcript it cannot open or
-// parse (fixtures.go:152, :163) — which is #1304's shipped behaviour, named here
+// parse (`ReadJSONL`, :163) — which is #1304's shipped behaviour, named here
 // so a live caller knows this call can abort a turn on an unreadable transcript.
 // A MISSING file is not fatal: probeWaitForBashToolUse guards with os.Stat first
-// (background_trigger_probe_test.go:767), so it times out to "no Bash call
+// (`probeWaitForBashToolUse`), so it times out to "no Bash call
 // issued", which is the safe direction.
 func finLiveAssembleStaging(t *testing.T, workdir, sessionID string, facts finLiveAssembleFacts,
 	toolUseTimeout, resultTimeout time.Duration) finOutcomeResult {
@@ -327,7 +327,7 @@ type finLiveAssembleCountCase struct {
 // literal rather than asserted, and means there is no write-during-read to make
 // atomic. The staged literal is the blocker's finLiveStageCommand over its
 // synthetic fixture path — NOT finOutcomeHoldCommand
-// (finding_staging_gate_test.go:375), which is a gate fixture deliberately of the
+// (`finOutcomeHoldCommand`), which is a gate fixture deliberately of the
 // wrong shape: its `sh -c … ; exit 0` carries a `;` into a string the model is
 // asked to reproduce byte-for-byte against a system prompt that forbids chaining
 // (finding_live_staging_test.go:136-139).

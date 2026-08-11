@@ -31,7 +31,7 @@ package realclaude
 //
 // The first is slog.NewTextHandler (cmd/pyry/main.go:743). The second is
 // slog.Default(), and it is the one that matters: runAgentRunPty
-// (cmd/pyry/agent_run.go:299) sets no Logger on ptyrunner.Config, so
+// (cmd/pyry/`runAgentRunStreamRunner`) sets no Logger on ptyrunner.Config, so
 // ptyrunner.Run falls back to slog.Default() (runner.go:289-292), and every
 // probe in this package spawns `pyry agent-run` and captures its stderr. A
 // matcher anchored on `msg="agentrun: reaped…"` finds nothing on the live path
@@ -436,7 +436,7 @@ func (r *tdnRecord) note(format string, args ...any) {
 }
 
 // decide sets the disposition and the sentence that earns it, mirroring
-// reachRecord.decide (background_reach_probe_test.go:261). The detail is capped
+// reachRecord.decide. The detail is capped
 // like every other string in this record: it lands in an artifact an operator
 // pastes into a public issue and can quote a classifier Detail that already
 // carries `ps` stderr.
@@ -447,7 +447,7 @@ func (r *tdnRecord) decide(verdict, format string, args ...any) {
 
 // writeTdnArtifacts persists the record as ONE JSON file, mode 0600, in dir.
 //
-// It follows writeReachArtifacts (background_reach_probe_test.go:823) and
+// It follows writeReachArtifacts and
 // diverges in exactly one way: that writer emits a second file holding a
 // verbatim three-integer ps snapshot, and this one emits nothing besides the
 // record. This ticket takes no wide integer snapshot, and its one wide read
@@ -937,7 +937,7 @@ func tdnCandidateArgs(c tdnPIDCandidate) (args []string, classifyPID int) {
 }
 
 // tdnRunPS execs one ps and returns exactly what pinReadState's own call
-// returns (process_pin_liveness_test.go:293).
+// returns (`pinReadState`).
 //
 // .Output() and nothing else. It populates *exec.ExitError.Stderr ONLY because
 // it owns cmd.Stderr; a helper that set cmd.Stderr = &buf to "capture stderr

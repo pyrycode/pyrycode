@@ -850,7 +850,7 @@ func (s *blockedSpy) notify(convID, reason string) {
 
 // emittingResolver builds a resolver with the #1014 emit seams set: activeConv
 // returns knownConvID and notifyBlocked records into spy. This is the single
-// production construction (relay.go:479) — the 18 other test constructions leave
+// production construction (`startRelayV2`) — the 18 other test constructions leave
 // both fields nil (emit disabled).
 func emittingResolver(reg *modalbridge.Registry, kb modalKeystroker, logger *slog.Logger, knownConvID string) (*modalResolverV2, *blockedSpy) {
 	spy := &blockedSpy{}

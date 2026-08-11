@@ -80,7 +80,7 @@ func helperPoolWithSleepArgs(t *testing.T) *Pool {
 
 // waitBootstrapReady blocks until the pool's bootstrap supervisor has a live
 // PTY, using the same deterministic readiness signal Session.Activate waits on
-// (supervisor.WaitForPTY, session.go:354). This replaces the wall-clock
+// (supervisor.WaitForPTY, `Activate` in session.go). This replaces the wall-clock
 // ChildPID>0 poll that intermittently tripped under -race when pty.Start
 // stretched past a fixed 2s deadline (#1116). Readiness fires from setSession,
 // one step after onSpawn sets ChildPID, so it implies a live, non-zero PID.

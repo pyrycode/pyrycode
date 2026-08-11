@@ -88,7 +88,7 @@ package realclaude
 // Prose cannot enforce either. A per-space membership predicate is scoped to one
 // space per call and CANNOT SEE A PAIR, so all eight values below join the union
 // map in TestTrailAdmissibilityConstantsAreClosed
-// (trailer_admissibility_test.go:1213) — the sixth space to do so, and #1439's
+// (`TestTrailAdmissibilityConstantsAreClosed`) — the sixth space to do so, and #1439's
 // precedent for the same reason one layer down.
 //
 // # THERE IS DELIBERATELY NO sighting-out-of-contract VALUE
@@ -120,10 +120,10 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// pinReadState (process_pin_liveness_test.go:275) supplies the per-pid verdicts,
-// trailCertifyOrdering (trail_ordering_premises_test.go:242) the ordering,
-// trailDetail (trailer_admissibility_test.go:352) the capped formatting, and
-// trailNeedle (result_trailer_observation_test.go:325) the sweep's needle. No
+// pinReadState supplies the per-pid verdicts,
+// trailCertifyOrdering the ordering,
+// trailDetail the capped formatting, and
+// trailNeedle the sweep's needle. No
 // second descendant walk, no second FIFO-hold helper, no second liveness reader,
 // no second trailer parser.
 
@@ -171,7 +171,7 @@ const (
 // The reason space: one per per-pid verdict, plus the ordering pass-through.
 //
 // A reason is a FIELD on the record rather than prose in the Detail, in
-// trailGateResult's Value+Reason+Detail shape (trailer_admissibility_test.go:305),
+// trailGateResult's Value+Reason+Detail shape,
 // so a consumer tells an exited-but-not-yet-reaped from a no-such-process, and
 // either from an instrument failure, WITHOUT PARSING PROSE. Two of the three land
 // on the same value, and the value alone therefore cannot separate them.
@@ -232,7 +232,7 @@ const trailSightingInstantClause = "the instant this verdict is about is the tra
 //
 // Unlike trailOrderResult, this record's producer CAN see captured bytes: a
 // pinStateOutcome carries subprocess stderr in ToolStderr
-// (process_pin_liveness_test.go:341) and folds it into Detail (:348-349). That is
+// (`pinClassifyState`) and folds it into Detail (:348-349). That is
 // why TestTrailSightingResultCarriesNoCapturedBytes ships both halves — the needle
 // sweep AND the structural key walk — where #1439 could honestly ship only the
 // second (trail_ordering_premises_test.go:577-583).
@@ -263,7 +263,7 @@ type trailSightingResult struct {
 //
 //   - pinStateOutcome must arrive whole because its Detail, StateColumn and
 //     ToolStderr are string-bearing and ToolStderr takes raw ps stderr verbatim
-//     (process_pin_liveness_test.go:341). Narrowing this parameter to a bare
+//     (`pinClassifyState`). Narrowing this parameter to a bare
 //     verdict string would leave no route for a needle to travel, which would make
 //     the sweep below UNBUILDABLE AS SPECIFIED — and a sweep that cannot fail
 //     measures nothing. #1439's three bools were the enforcement precisely BECAUSE
@@ -346,7 +346,7 @@ type trailSightingResult struct {
 // it catches.
 //
 // All five arms go through trailDetail, so all inherit the 512-byte cap
-// (background_reach_probe_test.go:123), which truncates SILENTLY — and the coverage
+// (`reachEnableEnv`), which truncates SILENTLY — and the coverage
 // test asserts the truncation marker is absent from every row, so a Detail whose
 // argument would be cut off reddens here rather than reaching an operator's
 // artifact.
@@ -418,7 +418,7 @@ func trailSightingValues() []string {
 }
 
 // trailIsSightingValue reports whether v is one of the three recorded outcomes. It
-// mirrors trailIsRunOutcome (trail_run_outcome_test.go:541) and trailIsOrderValue
+// mirrors trailIsRunOutcome and trailIsOrderValue
 // and exists for the same reason: a value a reader of the published record cannot
 // look up is a verdict they cannot interpret.
 func trailIsSightingValue(v string) bool {
@@ -482,7 +482,7 @@ func trailSightingPin(verdict string) pinStateOutcome {
 // trailSightingVerdicts is the four per-pid verdicts, spelled. There is no
 // pinVerdicts() list shipped and adding one would grow the edit to
 // process_pin_liveness_test.go for no gain here — pinIsVerdict
-// (process_pin_liveness_test.go:1142) is the space's own membership predicate, and
+// (`pinIsVerdict`) is the space's own membership predicate, and
 // TestTrailSightingValuesAgreeWithThePredicate feeds all four through it.
 func trailSightingVerdicts() []string {
 	return []string{
@@ -694,7 +694,7 @@ func trailSightingVerdictName(v string) string {
 // Driven from #1439's own producer rather than a hand-built value —
 // trailOrderCertifiedPremises(), one field cleared, then .certify() — which is the
 // premise-removal shape TestTrailOrderEachPremiseHasItsOwnVoid
-// (trail_ordering_premises_test.go:465) already ships. THIS IS WHAT KEEPS THE
+// (`TestTrailOrderEachPremiseHasItsOwnVoid`) already ships. THIS IS WHAT KEEPS THE
 // HOLD-AS-PRECONDITION ARGUMENT FROM BEING BYPASSED by a caller that fabricates a
 // certification: a struct literal carrying trailOrderCertified would satisfy this
 // predicate while resting on nothing.
@@ -759,7 +759,7 @@ func TestTrailSightingPremiseRemovalNeverEstablishes(t *testing.T) {
 
 // TestTrailSightingValuesAgreeWithThePredicate is AC4 made executable, in
 // TestTrailOrderValuesAgreeWithThePredicate's shape
-// (trail_ordering_premises_test.go:529): each list and its predicate agree in BOTH
+// (`TestTrailOrderValuesAgreeWithThePredicate`): each list and its predicate agree in BOTH
 // directions, each count is asserted against this ticket's own enumeration, and
 // each predicate rejects the values of the adjacent spaces.
 //
@@ -856,12 +856,12 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 // The two LIVE capture routes are pinStateOutcome's Detail and ToolStderr:
 // pinClassifyState's branch 1 is "err != nil, stderr non-empty -> instrument-failed,
 // naming exit status + stderr", so raw ps stderr reaches ToolStderr verbatim
-// (process_pin_liveness_test.go:341) and is folded into Detail (:348-349).
+// (`pinClassifyState`) and is folded into Detail (:348-349).
 // StateColumn is string-bearing too and costs one line to include.
 //
 // ordering.Detail is planted as well, and it is worth naming what that plant IS AND
 // IS NOT: #1439 pinned its predicate's inputs to three booleans and builds its
-// Detail through trailOrderPremiseClause (trail_ordering_premises_test.go:145), so
+// Detail through trailOrderPremiseClause, so
 // no captured byte can reach it THROUGH ITS PRODUCER — which is why the plant there
 // has to be a struct literal. It is a discipline against a future field rather than
 // a live route, and it must not be allowed to stand in for the two that are.
@@ -899,7 +899,7 @@ func TestTrailSightingResultCarriesNoCapturedBytes(t *testing.T) {
 
 	// The structural half: the record has no field for a command string today, and
 	// this is the check that a future field does not quietly add one. pinStateColumns
-	// (process_pin_liveness_test.go:232) refuses a `command` column at the source for
+	// (`pinStateColumns`) refuses a `command` column at the source for
 	// the same reason — those columns route the operator's CLAUDE_CODE_OAUTH_TOKEN /
 	// ANTHROPIC_API_KEY into an artifact destined for a public issue.
 	var keyed map[string]json.RawMessage

@@ -20,7 +20,7 @@ import (
 // TestRelayV2_CreateWorkspaceFolder proves create_workspace_folder at the daemon
 // boundary: a paired phone completes the Noise_IK handshake against a real spawned
 // daemon and drives create_workspace_folder over the encrypted channel with the
-// production resolveWorkspaceFolder resolver wired at cmd/pyry/relay.go:413. It
+// production resolveWorkspaceFolder resolver wired at cmd/pyry/`screenSnapshotterOrNil`. It
 // closes the same gap shape #949 (promote), #974–#976 (rename/delete/archive), and
 // #980 (change_workspace) closed for their verbs — a handler nothing exercised
 // end-to-end — carrying #980's security twist: this verb WRITES TO THE HOST

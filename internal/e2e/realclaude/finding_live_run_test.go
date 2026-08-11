@@ -22,7 +22,7 @@ package realclaude
 // process, and it is exercised end-to-end only by the live entry point in #1337.
 //
 // So finLiveRunStage's ONLY caller is that entry point
-// (finding_exit_path_probe_test.go:216), which is itself behind an opt-in env
+// (`finExitRunProbe`), which is itself behind an opt-in env
 // gate and a credential skip — nothing offline reaches this function. Do NOT
 // invent a second caller to silence a lint that does not run, and do NOT add an
 // offline test that spawns pyry or a real claude.
@@ -34,7 +34,7 @@ package realclaude
 //
 // The FIFO-name distinctness rule is NOT re-declared here. It shipped in #1342
 // as TestFinLiveStageFIFONameIsDisjointFromEveryShippedName
-// (finding_live_staging_test.go:420), which pins finLiveStageFIFOName
+// (`TestFinLiveStageFIFONameIsDisjointFromEveryShippedName`), which pins finLiveStageFIFOName
 // substring-disjoint in both directions against every other shipped name. This
 // file CONSUMES the name; it does not declare it, so it owes no trap for it.
 //
@@ -51,7 +51,7 @@ package realclaude
 // NO `ps -E` AND NO `-Eww`, anywhere. Those dump CLAUDE_CODE_OAUTH_TOKEN and
 // ANTHROPIC_API_KEY, and this driver needs no environment read of any process at
 // all. Its one content scan is pinScanArgv → reachScanArgv's
-// `ps -axww -o pid=,ppid=,pgid=,command=` (background_reach_probe_test.go:876) —
+// `ps -axww -o pid=,ppid=,pgid=,command=` (`reachScanArgv`) —
 // `-ww` widens output without touching the environment.
 //
 // Matched rows and claude's argv cross the handle as the CAPPED reachProc.Command
@@ -70,7 +70,7 @@ package realclaude
 // `zsh -c` wrapper and its `cat` are found by argv content — and only its MATCHED
 // rows are recorded. No tree snapshot is recorded at all: probeWaitForDirectChild's
 // internal walk is the narrow descendant walk rooted at pyry's pid
-// (background_trigger_probe_test.go:870) and only the int pid it returns is kept.
+// (`probeProcessSnapshot`) and only the int pid it returns is kept.
 
 import (
 	"os"
@@ -91,7 +91,7 @@ import (
 // than invented: Pin.Rows[i].Command and Pin.ClaudeCommand are verbatim argv read
 // off the AMBIENT process table, so finLivePinReading
 // (finding_live_pin_test.go:66-74) and finOutcomeStaging
-// (finding_staging_gate_test.go:142) both carry the same prohibition for the same
+// (`finOutcomeStaging`) both carry the same prohibition for the same
 // reason. Adding tags "for symmetry" is the first step toward a published record
 // quoting captured bytes into a public issue.
 //
@@ -145,7 +145,7 @@ type finLiveRunHandle struct {
 	// PyryPID cannot recover it — cmd.Wait has already reaped pyry, and a second wait
 	// on a reaped child returns ECHILD.
 	//
-	// Initialised to pinExitStatusUnknown (process_pin_liveness_test.go:236) rather
+	// Initialised to pinExitStatusUnknown rather
 	// than left at the int zero, because finRecordRun.ExitCode documents 0 as A REAL
 	// SUCCESSFUL EXIT (finding_run_record_test.go:126-135): an unwritten field would
 	// publish a clean exit for a run that never exited. Same zero-polarity doctrine
@@ -257,9 +257,9 @@ type finLiveRunHandle struct {
 //
 // ONE INHERITED ABORT PATH, named so a live caller knows about it:
 // finLiveAssembleStaging inherits ReadJSONL's t.Fatalf on a transcript it cannot
-// open or parse (fixtures.go:152, :163). A MISSING file is not fatal —
+// open or parse (`ReadJSONL`, :163). A MISSING file is not fatal —
 // probeWaitForBashToolUse guards with os.Stat first
-// (background_trigger_probe_test.go:767), so it times out to "no Bash call
+// (`probeWaitForBashToolUse`), so it times out to "no Bash call
 // issued", the safe direction.
 //
 // NEITHER MESSAGE MAY PRINT envDelta, and no message added later may either. The
@@ -288,7 +288,7 @@ type finLiveRunHandle struct {
 //
 // SITE C — THE BOUND REACHES CLAUDE BY A DIFFERENT ROUTE ON EACH PATH, and the
 // conclusion is what survives, not the mechanism. On the stream path --max-turns
-// is IN CLAUDE'S ARGV (buildStreamRunnerClaudeArgs, cmd/pyry/agent_run.go:375);
+// is IN CLAUDE'S ARGV (buildStreamRunnerClaudeArgs);
 // on ptyrunner it is ABSENT from claude's argv (buildArgs,
 // ptyrunner/runner.go:616-625, whose own doc records the omission as deliberate
 // at :612-615) and the pyry-side budget Counter enforces the same 6 instead.
@@ -354,7 +354,7 @@ type finLiveRunHandle struct {
 // SITE F — THE DELTA CHOOSES A PERMISSION POSTURE FOR THE STAGED RUN, and a
 // caller reading this doc should not have to discover that downstream. Under
 // finLiveStageStreamEnvDelta() the sole production caller of the stream path
-// passes yolo=true (agent_run.go:288), which emits --dangerously-skip-permissions
+// passes yolo=true (`runAgentRunStreamRunner`), which emits --dangerously-skip-permissions
 // (permissionArgs, mcp_config.go:35-38). Under finLiveStageEnvDelta() pyry instead
 // trust-marks the workdir and writes a per-spawn deny-default settings JSON
 // (runAgentRunPty, agent_run.go:300-317). On the tool surface the repo's own
@@ -362,7 +362,7 @@ type finLiveRunHandle struct {
 // agent_run.go:354-359 records --allowed-tools as the authoritative tool gate
 // under YOLO, bounding the blast radius rather than the trust dialog, and this rig
 // passes --allowed-tools=Bash (spawnProbePyry,
-// background_trigger_probe_test.go:627). So the flip changes the gate's
+// `spawnProbePyry`). So the flip changes the gate's
 // MECHANISM; on the repo's position it does not change its WIDTH. That is not a
 // claim of equivalence and not a claim that the stream path is ungated. The same
 // paragraph sits on the delta itself, because that is where the choice is made.
@@ -374,7 +374,7 @@ type finLiveRunHandle struct {
 // joined into a filename by finLiveAssembleStaging's transcript read:
 // jsonlPathFor → tuidriver.SessionJSONLPath →
 // filepath.Join(home, ".claude", "projects", EncodeCwd(cwd), sessionID+".jsonl").
-// On ptyrunner pyry MINTS the id itself (newSessionID(), agent_run.go:311) and
+// On ptyrunner pyry MINTS the id itself (newSessionID(), `runAgentRunPty`) and
 // passes it as --session-id (ptyrunner/runner.go:618), so the value is
 // pyry-controlled. On the stream path claude's argv carries no --session-id
 // (buildStreamRunnerClaudeArgs, agent_run.go:364-378), so CLAUDE mints it and the
@@ -416,7 +416,7 @@ type finLiveRunHandle struct {
 //   - The transcript reads (finLiveAssembleStaging, probeWaitForBashToolUse): the
 //     rig computes the path from the workdir IT owns, on both paths. ONE
 //     ASYMMETRY, recorded because it points the safe way: pyry hands claude the
-//     trust-marked realpath on ptyrunner (agent_run.go:300, :318) and the raw
+//     trust-marked realpath on ptyrunner (`runAgentRunStreamRunner`, :318) and the raw
 //     parsed.workdir on the stream path (streamrunner cmd.Dir). The rig's own
 //     derivation uses the raw workdir, so the stream path is the CLOSER match and
 //     the conclusion holds a fortiori. The ptyrunner side additionally carries
@@ -523,7 +523,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// path: it is the PTY slave on ptyrunner and a PYRY-created pipe on the stream
 	// path (streamrunner/runner.go:176). But claude's fd 2 IS pyry's fd 2 — the
 	// rig's stderr write end — ON BOTH PATHS, because cmd.Stderr is os.Stderr for
-	// both (agent_run.go:291 stream, :328 pty) and creack/pty fills stdin/stdout/
+	// both (`runAgentRunStreamRunner` stream, :328 pty) and creack/pty fills stdin/stdout/
 	// stderr with the tty ONLY WHEN NIL (run.go:38-50), so the PTY never displaces
 	// the Stderr ptyrunner already set at ptyrunner/runner.go:296. The PTY
 	// therefore covers the one fd claude never shares, and the fd it does share is
@@ -618,7 +618,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// from the same transcript.
 	//
 	// The empty-id guard is not decoration: probeWaitForToolResult matches on
-	// ToolUseID EQUALITY (background_trigger_probe_test.go:806), so an empty id
+	// ToolUseID EQUALITY (`probeWaitForToolResult`), so an empty id
 	// would poll a full probeToolResultDeadline for a match it cannot make.
 	//
 	// NAMED LIMITATION, ACCEPTED. probeWaitForBashToolUse returns the FIRST Bash
@@ -667,7 +667,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	scan, scanErr := pinScanArgv(needles, exclude)
 
 	// Handed to the reduction UNCHANGED: nothing here filters, counts or dedupes
-	// it. On error the value is the zero pinScan (process_pin_liveness_test.go:194),
+	// it. On error the value is the zero pinScan (`pinScanArgv`),
 	// which reduces to the zero reading, and the error itself has its own named
 	// arm ranked above the count arm — so it is carried as PinScanErrored below
 	// rather than becoming a second error channel here.
@@ -680,8 +680,8 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	//
 	// THE 3 IS RE-DERIVED FOR BOTH DELTAS RATHER THAN INHERITED. It holds because
 	// tdnClaudeNeedle is --append-system-prompt-file
-	// (teardown_liveness_probe_test.go:160) and BOTH argv builders emit it —
-	// ptyrunner/runner.go:621 and cmd/pyry/agent_run.go:372 — so claude's row is
+	// (`tdnProbeTicket`) and BOTH argv builders emit it —
+	// ptyrunner/runner.go:621 and cmd/pyry/`buildStreamRunnerClaudeArgs` — so claude's row is
 	// matched on either path. Do NOT rest this on reachRunnerPathFromArgv's framing
 	// of that flag as "the ptyrunner-shape marker"
 	// (background_reach_probe_test.go:1116-1117): the flag names NO runner, as

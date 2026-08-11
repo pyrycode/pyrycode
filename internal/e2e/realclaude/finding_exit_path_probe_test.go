@@ -49,7 +49,7 @@ package realclaude
 // the operator's CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY. This rig needs no
 // environment read of any process at all and runs no ps of its own — pinReadState's
 // pid-pinned lookup is `pid=,ppid=,stat=` by construction
-// (process_pin_liveness_test.go:232) and is the only one it reaches.
+// (`pinStateColumns`) and is the only one it reaches.
 //
 // It HOLDS verbatim argv (h.Pin.Rows[i].Command, h.Pin.ClaudeCommand) and forwards
 // both to finRecordBuild UNEXAMINED AND UNFORMATTED, which reduces the rows to three
@@ -68,13 +68,13 @@ package realclaude
 // own: os.MkdirTemp failing. Three abort paths are INHERITED from finLiveRunStage
 // and are not re-guarded here — pyry never spawning a claude child, no system/init
 // session id (finding_live_run_test.go:331-341), and ReadJSONL's fatal on a
-// transcript it cannot open or parse (fixtures.go:152, :163) reached through the
+// transcript it cannot open or parse (`ReadJSONL`, :163) reached through the
 // assembly. Every other failure mode is RECORDED, because a probe that turns an
 // unexpected reading into a red test loses the reading.
 //
 // # One skip gate, not two
 //
-// finExitEnableEnv follows reachEnableEnv's shape (background_reach_probe_test.go:273),
+// finExitEnableEnv follows reachEnableEnv's shape (`TestRealClaude_BackgroundReachability`),
 // so `make e2e-realclaude` skips this probe by default and a skip is the NORMAL
 // outcome, saying nothing about pyry's behaviour.
 //
@@ -146,7 +146,7 @@ const finExitPyryExitDeadline = 120 * time.Second
 // one of its four ANSWERS — published about a run in which no command ever existed.
 //
 // finTrailerBuild's first parameter is a bare string fed from EITHER closed set (the
-// classifier's sixteen, trail_run_outcome_test.go:638, and the staging tier's seven,
+// classifier's sixteen, `trailClassifyRun`, and the staging tier's seven,
 // finding_staging_gate_test.go:113-134) precisely so the staging value can be carried
 // straight through, so no adapter is needed and none is added.
 //
@@ -330,8 +330,8 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	// classifier's Detail, ClaudeState, LivenessSummary, gate value and match counts
 	// reach no field of finRecordRun, and the staging result reaches no artifact at
 	// all. So this channel is t.Logf, which is PROVABLY SAFE for both values —
-	// TestTrailRunOutcomeCarriesNoCapturedBytes (trail_run_outcome_test.go:2248) and
-	// TestFinOutcomeResultCarriesNoCapturedBytes (finding_staging_gate_test.go:705) —
+	// TestTrailRunOutcomeCarriesNoCapturedBytes and
+	// TestFinOutcomeResultCarriesNoCapturedBytes —
 	// and keeps the two proven artifact files exactly as the shipped writer produces
 	// them rather than growing a second file-writing surface no sweep covers.
 	//

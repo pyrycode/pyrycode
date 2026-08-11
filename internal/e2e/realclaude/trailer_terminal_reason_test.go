@@ -37,12 +37,12 @@ package realclaude
 //
 // # The path reading, and the one that must NOT be used
 //
-// tdnRunnerFromArgv (teardown_liveness_probe_test.go:772) is the reading:
+// tdnRunnerFromArgv is the reading:
 // streamrunner-positive on --input-format, ptyrunner-positive on --session-id,
 // and three distinct indeterminate answers for both-or-neither-or-unread.
-// reachRunnerPathFromArgv (background_reach_probe_test.go:1118) is deliberately
+// reachRunnerPathFromArgv is deliberately
 // NOT used — it keys on --append-system-prompt-file, which BOTH argv builders
-// pass (cmd/pyry/agent_run.go:372, ptyrunner/runner.go:621), so it labels a
+// pass (cmd/pyry/`buildStreamRunnerClaudeArgs`, ptyrunner/runner.go:621), so it labels a
 // correctly-wired stream run "ptyrunner" and has no streamrunner answer at all.
 //
 // # Scope
@@ -133,7 +133,7 @@ const (
 )
 
 // trailReasonKeyName is resultTrailer.TerminalReason's json tag name
-// (tool_loop_test.go:201), i.e. the top-level key trailKeyNames reports.
+// (`resultTrailer`), i.e. the top-level key trailKeyNames reports.
 //
 // No reflect pin against the struct tag guards this, and that is a decision
 // rather than an omission: TestTrailReasonPresenceComesFromTheKeyNames drives
@@ -197,8 +197,8 @@ type trailReasonResult struct {
 //     allows (finding_run_record_test.go:294-300): a reduced label compared
 //     against a KNOWN-EXPECTED literal, not two unknowns prefix-matched. The two
 //     runner labels are bare string literals, following the five shipped
-//     comparison sites (finding_live_staging_test.go:485, :498, :576, :597 and
-//     finding_run_record_test.go:823); this ticket introduces no constants for
+//     comparison sites (`TestFinLiveStageEnvDeltaNamesTheRunner`, :498, :576, :597 and
+//     `TestFinRecordRunnerAgreement`); this ticket introduces no constants for
 //     them.
 //   - Presence comes from the KEY NAMES ALONE. Taking it from decodedReason != ""
 //     would merge "absent" and "present-and-empty" on the owes-one path, because
@@ -281,7 +281,7 @@ func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReas
 // --- membership helper ----------------------------------------------------------
 
 // trailIsReasonValue reports whether v is one of the recorded terminal-reason
-// values, in trailIsGateValue's shape (trailer_admissibility_test.go:906) and
+// values, in trailIsGateValue's shape (`trailIsGateValue`) and
 // for the family's stated reason: a value a reader of the published record
 // cannot look up is a verdict they cannot interpret.
 //

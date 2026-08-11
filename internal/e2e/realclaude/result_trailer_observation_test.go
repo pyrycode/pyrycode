@@ -28,9 +28,9 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// resultTrailer (tool_loop_test.go:194) is the decode, reachCapCommand
-// (background_reach_probe_test.go:945) the cap, probeSyncBuffer and
-// probePollInterval (background_trigger_probe_test.go:722, :131) the buffer and
+// resultTrailer is the decode, reachCapCommand
+// (`reachCapCommand`) the cap, probeSyncBuffer and
+// probePollInterval (`probeSyncBuffer`, :131) the buffer and
 // the tick. parseResultTrailer and its nine call sites are NOT edited: all nine
 // want today's two-valued behaviour, so widening its error contract for this
 // instrument's benefit would be a nine-site cascade that gains none of them
@@ -118,7 +118,7 @@ type trailScanResult struct {
 	// consumer branches on.
 	Trailer *resultTrailer `json:"trailer,omitempty"`
 	// KeyNames is the sorted list of the FULL line's top-level JSON key NAMES,
-	// read by trailKeyNames (trailer_key_names_test.go:87) before the cap and
+	// read by trailKeyNames before the cap and
 	// carrying no value from the line. Empty unless State == trailSeen.
 	//
 	// It exists because the fixed decode above cannot answer one question: with

@@ -47,7 +47,7 @@ const perConvMidTurnLine = `{"type":"assistant","message":{"id":"m-1191","conten
 // internal/ dir, so the const cannot be imported; this needles its shape instead.
 //
 // It is deliberately the EXACT string the mapper keys on
-// (interruptMarkerSentinel, internal/turnbridge/mapper.go:108), which is what
+// (interruptMarkerSentinel), which is what
 // keeps needle-drift and mapper-drift from diverging: if the fake's line ever
 // stops carrying it, the mapper stops matching, no turn_end arrives, and the run
 // dies loudly at the AC1 fatal IN THE SAME RUN. So the Phase-5 absence check
@@ -91,7 +91,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 //     is the answer to "the stdin log is not a discriminator": the TRANSCRIPTS
 //     are, because they are per-child where the shared log is not.
 //   - The bare-ESC count over the shared stdin log is the AC4 oracle. Useless for
-//     attribution (one file, every child appends — harness.go:336) but sound for
+//     attribution (one file, every child appends — `StartRotationWithRelay`) but sound for
 //     global ABSENCE: zero means no child received an ESC, whoever they are.
 //
 // STRUCTURAL CAUSALITY is what ties them together, and it is the attribution shape
@@ -108,7 +108,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 // turnevent.TurnEnd{ is constructed at three sites in the repo; two are reachable
 // from a PTY session:
 //
-//   - internal/turnbridge/mapper.go:30 (EventKindJsonlEndOfTurn) is now UNREACHABLE
+//   - internal/turnbridge/`mapEvent` (EventKindJsonlEndOfTurn) is now UNREACHABLE
 //     in this test. tuidriver.IsEndTurn requires all three of assistant,
 //     stop_reason=="end_turn", non-empty text; and the minted transcript's line set
 //     is closed: "{}" from the pre-created file, "{}" per turn from appendTurnGrowth,
@@ -119,7 +119,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 //     "permissionMode" key, and text prefixed interruptMarkerNeedle. Of the four
 //     line kinds above only the marker is a user entry at all — the fake never
 //     writes the delivered prompt into the transcript.
-//   - internal/streamsup/parser.go:267 is the stream-json path, which a PTY session
+//   - internal/streamsup/`benignRateLimitStatus` is the stream-json path, which a PTY session
 //     never enters.
 //
 // So the invariant holds in the same shape by the MIRROR of its old argument: the
@@ -569,7 +569,7 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 // 0x5b ('[') — appear in b. Every bracketed-paste marker tui-driver writes is
 // 0x1b 0x5b and a delivered prompt's content is raw-ESC-free (#749), so each bare
 // 0x1b in fakeclaude's stdin log is one supervisor.SendEsc actuation. The counting
-// form of hasBareESC (relay_v2_interrupt_test.go:352).
+// form of hasBareESC.
 //
 // hasBareESC is deliberately left alone rather than re-expressed over this
 // function: it lives in #794's shipped live capstone, and editing that file to

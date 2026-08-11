@@ -3,7 +3,7 @@
 package realclaude
 
 // The fill: how the three transcript-side fields of finOutcomeStaging
-// (finding_staging_gate_test.go:158) are read out of a run's own JSONL, and the
+// (`finOutcomeStaging`) are read out of a run's own JSONL, and the
 // content guard that keeps the reading about the command the rig staged rather
 // than about whichever Bash call the model happened to make first.
 //
@@ -26,7 +26,7 @@ package realclaude
 //
 // # The defect this guards, on both sides
 //
-// probeWaitForBashToolUse (background_trigger_probe_test.go:762) returns the
+// probeWaitForBashToolUse returns the
 // FIRST Bash tool_use regardless of input.command — a #1223 code-review SHOULD
 // FIX that shipped unfixed, guarded caller-side by #1230
 // (background_reach_probe_test.go:433-448) rather than by editing the shared
@@ -57,9 +57,9 @@ package realclaude
 // # Reused, not rebuilt
 //
 // Every projection off an envelope is shipped and called, never re-derived:
-// parseContentBlocks (tool_loop_test.go:173) for the ordered blocks,
-// probeToolUseInput (background_trigger_probe_test.go:827) + reachToolUseCommand
-// (background_reach_probe_test.go:1076) for the command, reachBackgroundHandle
+// parseContentBlocks for the ordered blocks,
+// probeToolUseInput + reachToolUseCommand
+// (`reachToolUseCommand`) for the command, reachBackgroundHandle
 // (:1051) for timedOutAfterMs, and both shipped waiters for the polling. The
 // ordered scan across calls is the only new reading.
 

@@ -49,13 +49,13 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailScan / trailScanResult (result_trailer_observation_test.go:180, :98) is
+// trailScan / trailScanResult (`trailScan`, :98) is
 // the trailer input, shipped by #1266, including its aborted state and its
 // fixtures. tdnClassifyReapLog / tdnReapOutcome / tdnIsReapVerdict
-// (teardown_liveness_test.go:144, :116, :1176) is the attribution input, shipped
+// (`tdnClassifyReapLog`, :116, :1176) is the attribution input, shipped
 // by #1253; pyry's stderr is NOT re-parsed here. resultTrailer
-// (tool_loop_test.go:194) is the decode, reachCapCommand
-// (background_reach_probe_test.go:945) the cap.
+// (`resultTrailer`) is the decode, reachCapCommand
+// (`reachCapCommand`) the cap.
 
 import (
 	"bytes"
@@ -141,8 +141,8 @@ const (
 	// was #1369's until that issue was closed NOT_PLANNED and re-filed as #1427,
 	// which split into those two.) And not that this gate decides
 	// against the path a LIVE run took: both shipped gathers fill RunnerPath with
-	// trailRunnerUnread() (finding_run_gather_test.go:552, :789;
-	// trail_run_rig_test.go:162), so over a live run the reading names no runner
+	// trailRunnerUnread() (`finGatherReadings`, :789;
+	// `trailRigGather`), so over a live run the reading names no runner
 	// and this value is unreachable. The gate is correct about absence when the
 	// path is known, and the shipped gathers do not know it.
 	trailGateAbsentOwesNone = "gate-absent-reason-owes-none"
@@ -174,8 +174,8 @@ const (
 	// declared-finished instant for such a claim to be about — which is why the
 	// run-level arm it reaches is a named void. And not that this gate decides
 	// against the path a LIVE run took: both shipped gathers fill RunnerPath with
-	// trailRunnerUnread() (finding_run_gather_test.go:552, :789;
-	// trail_run_rig_test.go:162), so over a live run the reading names no runner and
+	// trailRunnerUnread() (`finGatherReadings`, :789;
+	// `trailRigGather`), so over a live run the reading names no runner and
 	// this value is unreachable. The gate is correct about presence when the path is
 	// known, and the shipped gathers do not know it.
 	trailGatePresentOwesNone = "gate-present-reason-owes-none"
@@ -264,7 +264,7 @@ const (
 //
 // #1373 carried the reading to the gate and left every arm as it was. #1420 is
 // where a decision consults it: the ABSENCE arm calls trailReasonAgainstPath
-// (trailer_terminal_reason_test.go:222) to say which of the three absence cases
+// (`trailReasonAgainstPath`) to say which of the three absence cases
 // fired, which is where that function stopped having only its own tests for
 // callers. #1433 added the second reader, on the PRESENCE side, calling the same
 // reduction and diverting on one of its answers. Every other arm ignores the
@@ -284,7 +284,7 @@ type trailGateInput struct {
 //
 // That is the property worth pinning, and it is the one that is true. The gate
 // cannot make itself the pointer trap's LAST consumer: trailObservation embeds
-// trailScanResult (result_trailer_observation_test.go:142), so anything holding
+// trailScanResult (`trailObservation`), so anything holding
 // an observation reaches .Trailer by field promotion, and shipped code already
 // does exactly that (:588, :638). What the gate can guarantee is its own output.
 //
@@ -503,7 +503,7 @@ func trailGate(in trailGateInput) trailGateResult {
 		// it too — those TWO branches in this function, and no others.
 		if !slices.Contains(in.Scan.KeyNames, trailReasonKeyName) {
 			// WHICH absence comes from the shipped reduction, CALLED rather than
-			// re-switched: trailReasonAgainstPath (trailer_terminal_reason_test.go:222)
+			// re-switched: trailReasonAgainstPath
 			// already closes over the six meanings a terminal_reason has against a
 			// path, and its three ABSENCE answers are exactly the three cases here.
 			// Embedding its Detail is safe because every arm of it is fixed prose
@@ -624,7 +624,7 @@ func trailGate(in trailGateInput) trailGateResult {
 	// The PRESENCE side of the reading #1420 wired in at the absence branch:
 	// terminal_reason IS on the line, and the observed path owes none. Same
 	// reduction, CALLED rather than re-switched — trailReasonAgainstPath
-	// (trailer_terminal_reason_test.go:222) owns the six meanings a terminal_reason
+	// (`trailReasonAgainstPath`) owns the six meanings a terminal_reason
 	// has against a path, and this arm consults exactly one of its answers. An `if`
 	// and not a `switch` because exactly one answer diverts: the other two
 	// reachable here — trailReasonNamedOwesOne under a ptyrunner reading and
@@ -698,7 +698,7 @@ func trailGate(in trailGateInput) trailGateResult {
 	// would put a value from the trailer into a record that certifies none, and
 	// would make the byte budget a function of untrusted input.
 	//
-	// PRESENCE IS THE REDUCTION'S OWN KEY-NAME READ (trailer_terminal_reason_test.go:223)
+	// PRESENCE IS THE REDUCTION'S OWN KEY-NAME READ (`trailReasonAgainstPath`)
 	// and never decodedReason != "", which inside this block is constantly true. A
 	// hand-built record whose decoded reason is non-empty while KeyNames lacks the
 	// key therefore reduces to an ABSENCE answer and reaches the usable return
@@ -900,7 +900,7 @@ func trailAdmitAttribution(reap tdnReapOutcome, certified string) trailAdmitResu
 // --- membership helpers ------------------------------------------------------
 
 // trailIsGateValue reports whether v is one of the recorded gate values. It
-// mirrors tdnIsReapVerdict (teardown_liveness_test.go:1176) and exists for the
+// mirrors tdnIsReapVerdict and exists for the
 // same reason: a value a reader of the published record cannot look up is a
 // verdict they cannot interpret.
 func trailIsGateValue(v string) bool {
@@ -977,7 +977,7 @@ func trailReapLine(count int, pgids string) string {
 // is exactly what tdnRunnerFromArgv answers with its own indeterminate string.
 //
 // Both gathers and all nine fixture rows go through this one function, so the
-// two sides of C2's whole-struct equality (finding_run_gather_test.go:778) cannot
+// two sides of C2's whole-struct equality (`finGatherAssertContract`) cannot
 // drift apart.
 //
 // The gathers' use of it is CONSTANT by construction and FORBIDDEN to close:
@@ -988,7 +988,7 @@ func trailReapLine(count int, pgids string) string {
 // live run needed. Full reason: trail_ptyrunner_composition_test.go:19-26.
 //
 // A function rather than a package-level var, matching trailRigHeldPGID()'s shape
-// in this family (trail_run_rig_test.go:119).
+// in this family (`trailRigHeldPGID`).
 func trailRunnerUnread() string { return tdnRunnerFromArgv("") }
 
 // trailGateAbsentReasonScan is the ABSENCE shape the gate's #1419 arm decides:
@@ -1163,7 +1163,7 @@ func trailGateCases() []trailGateCase {
 
 // TestTrailAdmissibilityConstantsAreClosed is AC5's structural claim made
 // executable, following TestTrailConstantsAreClosed's shape
-// (result_trailer_observation_test.go:351) and EXTENDED TO CHECK ACROSS SPACES.
+// (`TestTrailConstantsAreClosed`) and EXTENDED TO CHECK ACROSS SPACES.
 //
 // #1266's helper is scoped to one space per call, so it cannot see a new value
 // colliding with a shipped one — and that collision is the realistic mistake
@@ -1194,7 +1194,7 @@ func trailGateCases() []trailGateCase {
 //
 // EVERY VALUE IN THIS MAP HAS AN ARM IN ITS CONSUMER — trailGate and
 // trailAdmitAttribution for the first two spaces, trailClassifyRun for the
-// third, trailReasonAgainstPath (trailer_terminal_reason_test.go:222) for the
+// third, trailReasonAgainstPath for the
 // fourth, trailCertifyOrdering (trail_ordering_premises_test.go) for the fifth,
 // and trailEstablishSighting (trail_sighting_liveness_test.go) for the sixth.
 // #1446's two evidence-route values are the one exception in shape rather than in
@@ -1671,7 +1671,7 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 		},
 		{
 			// trailRunnerUnread() is the reading BOTH shipped gathers supply
-			// (finding_run_gather_test.go:552, :789; trail_run_rig_test.go:162), so
+			// (`finGatherReadings`, :789; `trailRigGather`), so
 			// this row is the only one of the three a live run reaches today — and
 			// with it the only absence answer a live run can reach, which is why
 			// #1417's value is unreachable from a live gather and no comment here
@@ -2012,7 +2012,7 @@ func TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone(t *testing.T) {
 // five.
 //
 // The argvs are the shipped fixtures where shipped ones exist
-// (teardown_liveness_probe_test.go:897, :902) and mirror TestTdnRunnerFromArgv's
+// (`tdnOrNone`, :902) and mirror TestTdnRunnerFromArgv's
 // own rows otherwise. They are inputs to the READER and reach the gate never.
 func trailGateRunnerReadings() []string {
 	return []string{
@@ -2110,7 +2110,7 @@ func trailGateRunnerReadings() []string {
 //
 // Varying the reading copies each row's trailGateInput, and a struct copy copies
 // the POINTER: all five inputs for a row share one resultTrailer, the same
-// aliasing trailRunWellFormed's doc warns about (trail_run_outcome_test.go:1113).
+// aliasing trailRunWellFormed's doc warns about (`trailRunWellFormed`).
 // Only RunnerPath is ever assigned and nothing is ever written through the
 // pointer — which holds for the companion sub-test too — and that is what keeps
 // the sharing race-free, and what would have to hold load-bearingly if these

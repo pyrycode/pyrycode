@@ -177,7 +177,7 @@ func TestActiveConversation_ConcurrentSetWatchNoRace(t *testing.T) {
 // TestActiveConversation_EmitterStampsCursor (AC#2): the production holder
 // satisfies cursorReader, so injecting it as the emitter's cursor makes the
 // emitted envelope carry the stamped conversation_id — the injection swap this
-// ticket relies on (interactive_turn_v2.go:131 reads through the interface).
+// ticket relies on (`flushC` reads through the interface).
 // An unstamped holder drops every event, exactly as the empty bootstrap cursor
 // did after #678.
 func TestActiveConversation_EmitterStampsCursor(t *testing.T) {

@@ -1693,8 +1693,8 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 // activeConversation holds the id of the conversation the operator is currently
 // interacting with — the one most recently resolved by sessionRouter.Route. It
 // is the structured turn stream's cursor source (#687): the emitter
-// (interactive_turn_v2.go:131) and the #647 reconnect-replay source
-// (interactive_turn_stream_v2.go:60) read it instead of the bootstrap
+// (`flushC`) and the #647 reconnect-replay source
+// (`startInteractiveTurnStreamV2`) read it instead of the bootstrap
 // supervisor's CurrentConversation(), which #678 emptied for routed turns —
 // those commit on bound-session supervisors and never touch the bootstrap cursor
 // (docs/knowledge/codebase/678.md). Before any route the zero value is "", the

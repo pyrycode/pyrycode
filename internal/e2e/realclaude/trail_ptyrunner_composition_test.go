@@ -17,8 +17,8 @@ import (
 // It reproduces the composition GIVEN a ptyrunner reading. It does NOT reproduce
 // the path a live run reports, and nothing here may be read as claiming it does:
 // both shipped gathers fill the gate's runner-path field with trailRunnerUnread()
-// by construction (finding_run_gather_test.go:552, :789;
-// trail_run_rig_test.go:162), because tdnClaudeCommand skips any row whose
+// by construction (`finGatherReadings`, :789;
+// `trailRigGather`), because tdnClaudeCommand skips any row whose
 // matched-needle list lacks tdnClaudeNeedle (teardown_liveness_probe_test.go:561-575)
 // and finding_exit_path_probe_test.go:264-272 forbids adding that needle to that
 // gather's scan — it has no finLivePinReduce, so claude's row would land in the
@@ -46,10 +46,10 @@ import (
 // demonstrated under `go test -overlay` rather than asserted.
 //
 // The two shipped tests that come closest state neither claim.
-// TestTrailRunComposesWithGateCases (trail_run_outcome_test.go:1866) drives the
+// TestTrailRunComposesWithGateCases drives the
 // whole chain, but every trailGateCases() row carries trailRunnerUnread(), the
 // indeterminate answer. TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt
-// (trailer_admissibility_test.go:2080) does drive all five readings, but only over
+// (`TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt`) does drive all five readings, but only over
 // trailGate, and it compares each row AGAINST ITSELF: an edit that moved a Detail
 // under all five readings alike passes it untouched.
 //
@@ -61,7 +61,7 @@ import (
 //
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
-// (trailer_admissibility_test.go:425), and clause B of
+// (`trailGate`), and clause B of
 // TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:2113-2118) requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
 // CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420 and
@@ -73,7 +73,7 @@ import (
 //
 // trailGate is handed the reading directly through trailGateInput.RunnerPath, and
 // trailClassifyRun is handed it inside readings.Gate.RunnerPath, because
-// trailRunReadings.Gate is the whole trailGateResult (trail_run_outcome_test.go:397).
+// trailRunReadings.Gate is the whole trailGateResult.
 // trailAdmitAttribution(reap tdnReapOutcome, certified string) is handed NO
 // runner path at all, so a byte assertion on its Detail would be green by
 // construction whatever that arm did — a rung no mutation can redden. It is

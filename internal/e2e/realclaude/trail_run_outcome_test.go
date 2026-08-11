@@ -35,7 +35,7 @@ package realclaude
 //     probe exists to catch, it reports "not late". Both stay in the record as
 //     corroboration; neither certifies anything.
 //  3. EVERY WAY OF MEASURING NOTHING NEEDS ITS OWN NAME. tdnDecideAfter
-//     (teardown_liveness_probe_test.go:645) is the counter-example: nine distinct
+//     (`tdnDecideAfter`) is the counter-example: nine distinct
 //     nothing-was-measured conditions in that one function — twenty across its
 //     file — all return tdnDispositionSkipped, separated only by a prose
 //     DispositionDetail. Prose is decorative; the enum value is what a consumer
@@ -62,7 +62,7 @@ package realclaude
 //     recipe — a fixed-string grep, which cannot tell a dereference from a
 //     comment — means what it says;
 //   - the argv scan enters as two counts and an errored bool. pinScan.Matches
-//     holds verbatim argv, which is why pinStateColumns (process_pin_liveness_test.go:232)
+//     holds verbatim argv, which is why pinStateColumns
 //     refuses a `command` column at all; a record whose whole value is that it can
 //     be published unreviewed must not inherit the operator-review-before-paste
 //     obligation by copying one in. The scan's ERROR is taken as a discriminator
@@ -87,7 +87,7 @@ package realclaude
 // (result_trailer_observation_test.go, #1266) are the lateness discriminator and
 // the needle. pinStateOutcome / pinIsVerdict / pinScan's two counts
 // (process_pin_liveness_test.go, #1235) are the liveness inputs.
-// tdnVerdictSummary (teardown_liveness_probe_test.go:858) is the corroboration
+// tdnVerdictSummary is the corroboration
 // renderer.
 
 import (
@@ -118,7 +118,7 @@ const (
 	trailOutcomeRunningAtTrailer = "run-running-at-trailer"
 	// trailOutcomeAliveAtSightingByOrdering: the gate read an absent
 	// terminal_reason from a path that owes none, and #1440's pinned-pid sighting
-	// route (trail_sighting_liveness_test.go:353) established the command was alive
+	// route (`trailEstablishSighting`) established the command was alive
 	// when the trailer was SIGHTED on pyry's stdout. THE SECOND ANSWER, and the only
 	// one resting on an evidence class other than the reap log — which is why the
 	// published record names its route in a field rather than leaving a reader to
@@ -450,7 +450,7 @@ type trailRunReadings struct {
 	//
 	// Taken WHOLE for the opposite reason to Ordering's: its Detail, StateColumn
 	// and ToolStderr ARE string-bearing, and ToolStderr takes raw ps stderr
-	// verbatim (process_pin_liveness_test.go:341). Narrowing it to a bare verdict
+	// verbatim (`pinClassifyState`). Narrowing it to a bare verdict
 	// string would leave no route for a needle to travel, which would make
 	// TestTrailRunOutcomeCarriesNoCapturedBytes' sighting block unbuildable — and
 	// a sweep that cannot fail measures nothing. The parameter shape is what makes
@@ -776,8 +776,8 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	//
 	// It would answer run-out-of-contract ON EVERY RUN THAT EXISTS TODAY. No
 	// shipped gather stages either input: both fill the gate's runner-path field
-	// with trailRunnerUnread() by construction (finding_run_gather_test.go:552,
-	// :789; trail_run_rig_test.go:162). A zero pinStateOutcome carries Verdict ""
+	// with trailRunnerUnread() by construction (`finGatherReadings`,
+	// :789; `trailRigGather`). A zero pinStateOutcome carries Verdict ""
 	// and a zero trailOrderResult carries Value "", neither a member of its own
 	// closed space — and an UNSTAGED PAIR IS A ROUTINE READING, not a caller's
 	// bug. Filing it as one is the collapse #1417 exists to prevent, one value
@@ -2532,7 +2532,7 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // forecloses a claim on CERTIFIES-NOTHING grounds makes that argument with. It
 // names the instant that does not exist on those arms, and naming it is the whole
 // point: a SECOND instant now exists in this family. trailEstablishSighting
-// (trail_sighting_liveness_test.go:353) establishes aliveness at the trailer's
+// (`trailEstablishSighting`) establishes aliveness at the trailer's
 // SIGHTING on pyry's stdout from a certified ordering and a pinned pid, on exactly
 // the paths these six arms answer. A Detail foreclosing "a claim" unqualified
 // would forbid that finding from a file that cannot see it — and since #1446 one
@@ -2545,7 +2545,7 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 //
 // A shared constant rather than six hand-written copies so the arms cannot DRIFT
 // in how they name the instant — trailSightingInstantClause's shape
-// (trail_sighting_liveness_test.go:219), and its doctrine too: sharing it is not
+// (`trailSightingInstantClause`), and its doctrine too: sharing it is not
 // on its own what makes "every
 // certifies-nothing arm names the instant" true, because an arm can still omit it
 // from its own format string. What makes the rule checkable is
@@ -2571,7 +2571,7 @@ func TestTrailRunOutcomeValuesAgreeWithThePredicate(t *testing.T) {
 // This declaration sits at the END of the file rather than beside the arms that use
 // it, and that placement is deliberate rather than careless: sixteen other files in
 // this package carry a hundred line-number cites into this one, the highest at
-// trail_run_outcome_test.go:2504, and a declaration inserted anywhere above that
+// `TestTrailRunOutcomeValuesAgreeWithThePredicate`, and a declaration inserted anywhere above that
 // displaces every cite below it. The filename is spelled there rather than left as
 // a bare `:NNN` on #1434's evidence: a bare ref inherits the LAST-NAMED FILE, which
 // two paragraphs up is trail_sighting_liveness_test.go, and it reads clean under

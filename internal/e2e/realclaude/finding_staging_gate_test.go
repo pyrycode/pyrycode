@@ -15,7 +15,7 @@ package realclaude
 //
 // # Why an unstaged run must never reach the classifier
 //
-// trailClassifyRun (trail_run_outcome_test.go:638) owns one probe run's outcome
+// trailClassifyRun owns one probe run's outcome
 // over a closed set of sixteen values, and it ASSUMES THE RUN STAGED: that a Bash
 // call was issued, that it was the rig's hold command, that the rendezvous
 // completed. Two conditions this probe can hit have no value among the sixteen and
@@ -57,7 +57,7 @@ package realclaude
 // but the rig builds it around a t.TempDir() path and a binary resolved by
 // exec.LookPath (trail_run_rig_test.go:506-556), so on a live run it embeds an
 // operator filesystem path — the same leak class pinStateColumns
-// (process_pin_liveness_test.go:232) refuses a command column for. These records
+// (`pinStateColumns`) refuses a command column for. These records
 // are pasted into public issues, so no Detail here quotes either one, and
 // TestFinOutcomeResultCarriesNoCapturedBytes plants the needle in both precisely
 // so that a developer reading the rule as covering only the model's string cannot
@@ -65,12 +65,12 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailIsRunOutcome (trail_run_outcome_test.go:541) and trailRunOutcomeValues
+// trailIsRunOutcome and trailRunOutcomeValues
 // (:2478) are the sixteen and their membership predicate — called, never
-// re-derived or hand-copied. trailNeedle (result_trailer_observation_test.go:325)
+// re-derived or hand-copied. trailNeedle
 // is the shipped needle.
 //
-// trailDetail (trailer_admissibility_test.go:276) is reused rather than given a
+// trailDetail (`trailGateInput`) is reused rather than given a
 // finDetail twin, for the reason #1280 already settled in merged code
 // (finding_attribution_fanout_test.go:37-44): trailDetail's own "the trail*
 // family stays out of the tdn* teardown classifier's reach" argument does not
@@ -102,7 +102,7 @@ import (
 // read as "this run staged fine, go classify it" — the unsafe direction, and
 // precisely the collapse this tier exists to prevent. The family already argues
 // the point twice: TestTrailConstantsAreClosed
-// (result_trailer_observation_test.go:345) fails any closed-space value that is
+// (`TestTrailConstantsAreClosed`) fails any closed-space value that is
 // the empty string because "a zero-valued field reads as it", and
 // trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way"
 // (trail_run_outcome_test.go:421-424).
@@ -203,7 +203,7 @@ type finOutcomeResult struct {
 // --- membership helper ---------------------------------------------------------
 
 // finOutcomeIsValue reports whether v is one of the seven staging outcomes. It
-// mirrors trailIsRunOutcome (trail_run_outcome_test.go:541) and its siblings
+// mirrors trailIsRunOutcome and its siblings
 // trailIsGateValue, trailIsAdmitValue, pinIsVerdict and tdnIsReapVerdict, and
 // exists for the same reason: a value a reader of a published record cannot look
 // up is a verdict they cannot interpret.
@@ -387,14 +387,14 @@ type finOutcomeGateCase struct {
 }
 
 // finOutcomeStagedBase is the fully-staged input each case varies ONE thing from,
-// mirroring trailRunWellFormed (trail_run_outcome_test.go:1114): a row that
+// mirroring trailRunWellFormed: a row that
 // changes two conditions at once proves nothing about which one its arm keyed on.
 // The four rows that must vary two — the two guard holes and the two order
 // checks — say so in their own names, because varying two is exactly their point.
 //
 // PinMatchCount is 2 rather than 1 because a live run matches more than one row
 // for a single held command — a shell wrapper and its forked cat
-// (TestTrailRigCarriesMoreThanOneMatchedRow, trail_run_rig_test.go:506).
+// (TestTrailRigCarriesMoreThanOneMatchedRow).
 func finOutcomeStagedBase() finOutcomeStaging {
 	return finOutcomeStaging{
 		BashIssued:     true,
@@ -517,7 +517,7 @@ func finOutcomeGateCases() []finOutcomeGateCase {
 // --- tests ----------------------------------------------------------------------
 
 // TestFinOutcomeConstantsAreClosed is AC1's structural claim made executable, in
-// TestTrailConstantsAreClosed's shape (result_trailer_observation_test.go:345).
+// TestTrailConstantsAreClosed's shape (`TestTrailConstantsAreClosed`).
 func TestFinOutcomeConstantsAreClosed(t *testing.T) {
 	values := map[string]string{
 		"finOutcomeNoBashCall":           finOutcomeNoBashCall,
@@ -576,7 +576,7 @@ func TestFinOutcomeConstantsAreClosed(t *testing.T) {
 // TestFinOutcomeValuesAgreeWithThePredicate keeps finOutcomeValues from drifting
 // away from the predicate a published record is read through, in
 // TestTrailRunOutcomeValuesAgreeWithThePredicate's shape
-// (trail_run_outcome_test.go:2503). Without it, an eighth outcome added to the
+// (`TestTrailRunOutcomeValuesAgreeWithThePredicate`). Without it, an eighth outcome added to the
 // predicate but not to the list would make the coverage loop in
 // TestFinOutcomeStagingGate silently stop covering it.
 func TestFinOutcomeValuesAgreeWithThePredicate(t *testing.T) {
@@ -689,7 +689,7 @@ const (
 
 // TestFinOutcomeResultCarriesNoCapturedBytes makes the redaction rule checkable
 // rather than advisory, in TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:2248) and reusing the shipped trailNeedle.
+// (`TestTrailRunOutcomeCarriesNoCapturedBytes`) and reusing the shipped trailNeedle.
 //
 // The needle goes into BOTH string-bearing inputs the gate can see — the command
 // claude issued and the staged hold command it is compared against — because the

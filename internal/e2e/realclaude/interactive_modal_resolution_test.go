@@ -50,7 +50,7 @@ package realclaude
 // (spawnPermissionDaemon), a Type-only broadcast drain (drainForControlEvent — the
 // modal_shown/modal_dismissed broadcasts are EventID==nil, uncorrelated), and the
 // shared permission-trigger scaffold. The --dangerously-skip-permissions flag the
-// three shipped gates hardcode (interactive_bootstrap_liveness_test.go:398) is the
+// three shipped gates hardcode (`spawnBootstrapDaemon`) is the
 // one line spawnPermissionDaemon drops — that flag suppresses permission modals
 // entirely, so this gate needs a daemon without it.
 //

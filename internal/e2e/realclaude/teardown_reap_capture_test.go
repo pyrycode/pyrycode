@@ -64,7 +64,7 @@ package realclaude
 // environment column, or BSD eww, all of which print each process's full
 // environment, which on an operator machine means CLAUDE_CODE_OAUTH_TOKEN and
 // ANTHROPIC_API_KEY in a public issue. pinStateColumns
-// (process_pin_liveness_test.go:232) records that prohibition as a constant with
+// (`pinStateColumns`) records that prohibition as a constant with
 // an enforcing test; it is inherited here, not weakened. Liveness in this file
 // is signal-zero only. Nothing here writes an artifact.
 //
@@ -106,7 +106,7 @@ const (
 	// tdnRoleParent is the only role. Leaves need no role of their own: whether
 	// a leaf leads a fresh group is decided by its SPAWNER's SysProcAttr, not by
 	// the leaf, so a leaf needs no logic at all and routes through the package's
-	// existing fake-pyry sleep mode (fixtures_test.go:366).
+	// existing fake-pyry sleep mode (`runFakePyry`).
 	tdnRoleParent = "parent"
 
 	// tdnRoleFilter admits exactly one test in the re-exec'd child, which plays
@@ -152,7 +152,7 @@ func TestTdnReapTreeHelperProcess(t *testing.T) {
 // It starts TDN_REAP_TREE_FRESH leaves each leading its own process group and
 // TDN_REAP_TREE_SAME leaves sharing this process's group, writes one
 // "<kind> <pid>" line per leaf to TDN_REAP_TREE_REPORT in a single 0600 write
-// (reap_test.go:264), then blocks. Report first, block second: every child pid
+// (`spawnGrandchildAndBlock`), then blocks. Report first, block second: every child pid
 // must be in the process table before ReapDescendantGroups takes its ps
 // snapshot, and the test blocks on the report to know that it is.
 func tdnRunParentRole() {
@@ -328,7 +328,7 @@ func tdnKillTree(pid int) {
 // syscall.Kill target and one becomes a reap walk root, and a short read is
 // syntactically valid but incomplete: accepting it yields a tdnTree with a
 // missing Fresh entry — an index panic at best, a subtest silently asserting
-// about the wrong process at worst. waitReport (reap_test.go:164) can treat a
+// about the wrong process at worst. waitReport can treat a
 // partial read as "not ready yet" because it reads exactly one pid; with N lines
 // that is no longer a safe reading.
 func tdnWaitTreeReport(t *testing.T, path string, fresh, same int, timeout time.Duration) tdnTree {

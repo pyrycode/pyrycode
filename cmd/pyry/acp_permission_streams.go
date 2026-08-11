@@ -11,7 +11,7 @@ import (
 
 // acpPermissionTimeout bounds each outbound session/request_permission Call: a
 // host that never answers denies-and-unblocks after this window rather than
-// wedging claude. Mirrors the daemon's modalDenyTimeout (relay/v2session.go:81)
+// wedging claude. Mirrors the daemon's modalDenyTimeout (relay/`ErrTransportDown`)
 // for policy consistency across the mobile and ACP permission legs. A package
 // const, not a constructor param — the value is fixed policy, so plumbing it
 // through newACPTurnStreams would be churn for no configurability.

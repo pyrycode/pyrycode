@@ -214,7 +214,7 @@ const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly
 // logs its choice, so the config value only echoes what the rig wrote. The one
 // non-authored artefact — the MCP-approve config main.go:795-801 writes iff
 // InteractiveRunner == "stream-json" — is created by os.CreateTemp("",
-// "pyry-mcp-approve-*.json") (cmd/pyry/mcp_config.go:111) in a SHARED $TMPDIR
+// "pyry-mcp-approve-*.json") (cmd/pyry/`writeMCPApproveConfig`) in a SHARED $TMPDIR
 // where any other stream-json pyry on the operator's machine also has one; its
 // only discriminator is the embedded socket path, which perConvHarness does
 // not carry and which #1240 forbids adding. Reconstructing an attribution by
@@ -344,7 +344,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 	t.Logf("#1240 probe artifacts: %s", bgIdleRedact(artifactDir))
 
 	// MUST precede the harness: spawnBootstrapDaemon snapshots os.Environ() at
-	// interactive_bootstrap_liveness_test.go:403, so a later Setenv never
+	// `spawnBootstrapDaemon`, so a later Setenv never
 	// reaches the daemon — and the daemon passes its environment to claude
 	// verbatim.
 	t.Setenv(bgIdleBashTimeoutEnv, bgIdleBashTimeoutMS)
@@ -444,7 +444,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 // and #1223's system prompt was deliberately silent on it for the same reason.
 // "Exactly once, verbatim, nothing else" is setup, not measurement. This is the
 // opposite posture from runningTurnPrompt
-// (interactive_stream_running_turn_test.go:225), which steers claude AWAY from
+// (`runningTurnPrompt`), which steers claude AWAY from
 // backgrounding and must never be reused or edited here.
 //
 // Only two values are interpolated: fifoPath, a t.TempDir()-derived absolute
@@ -815,7 +815,7 @@ func bgIdleWriteRecord(t *testing.T, dir string, rec *bgIdleRecord) {
 	}
 }
 
-// bgIdleRedact replaces the operator's home (fixtures.go:34, captured at
+// bgIdleRedact replaces the operator's home (`realHome`, captured at
 // package load before any t.Setenv) with $HOME.
 //
 // The empty-realHome guard is load-bearing, not defensive noise:
