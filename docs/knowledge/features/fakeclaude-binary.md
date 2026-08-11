@@ -72,7 +72,7 @@ rotation-watcher test relies on the platform probe (`/proc/<pid>/fd` on
 Linux, `lsof` on macOS) seeing exactly one path on the PID's fd table at
 the instant the watcher's CREATE-driven probe runs. If the binary held
 both fds open across the rotation, the probe could match either path and
-the watcher's exact-match gate (`watcher.go:167`) would race.
+the watcher's exact-match gate (`watcher.go:168`) would race.
 
 ## Configuration — env
 
@@ -317,7 +317,7 @@ When `PYRY_FAKE_CLAUDE_IDLE_TRIGGER` is set:
   mirroring the sibling `emit*` helpers.
 - **Per-turn commit relies on `STDIN_LOG`, not on this mode.** Idle-trigger does
   **not** itself open the stdin reader (the gate is still `logPath != "" || tui`,
-  `main.go:692`). The #792 consumer sets `PYRY_FAKE_CLAUDE_STDIN_LOG` (via
+  `main.go:746`). The #792 consumer sets `PYRY_FAKE_CLAUDE_STDIN_LOG` (via
   `StartRotationWithRelay`), so the reader runs, `turnPending` fires, and the
   existing `appendTurnGrowth(f)` grows the JSONL that the supervisor's
   `confirmViaTranscriptGrowth` (#668/#673) observes as the commit. No spinner is
@@ -393,7 +393,7 @@ When `PYRY_FAKE_CLAUDE_ESC_ENDS_TURN` is set:
   session-identity fields (`parentUuid`, `promptId`, `uuid`, `timestamp`, `cwd`,
   `sessionId`, `gitBranch`) substituted with shape-preserving canned values. Two
   absences are load-bearing and silent if broken — no top-level `permissionMode`
-  key (`userAuthored`'s presence check, `mapper.go:163-166`) and no `tool_result`
+  key (`userAuthored`'s presence check, `mapper.go:164-167`) and no `tool_result`
   block (`ParseToolResult` precedes the marker check and would intercept it,
   `mapper.go:80-86`) — either one makes the mapper produce no `turn_end` at all. It
   is inert JSONL data, **not** a TUI substrate glyph, so the `cmd/substrate-guard`
@@ -678,7 +678,7 @@ per-write `Sync`.
 literal file every child appends to, unchanged. On the stream path (since #1331) the
 value is a path *stem*, not a file: each child tees to `<stem>.<the session id its
 own argv was pinned to>`, derived by the pure helper `streamStdinLogPath(stem, args)`
-on top of `argvSessionID`'s existing stem guard (`main.go:1181`, rejects `/`, `\`,
+on top of `argvSessionID`'s existing stem guard (`main.go:1246`, rejects `/`, `\`,
 `.`) — reused rather than re-implemented, which is what makes splicing the raw argv
 value into a path safe. A child whose argv carries no usable id (unreachable via
 `streamsup.buildArgs`, which always appends `--session-id`/`--resume`) falls back to
@@ -971,7 +971,7 @@ single-writer-of-`f` invariant** (only the main goroutine writes `f`):
   *after* `deliver`, so a grow always lands strictly past the baseline.
 
 **Blast radius is exactly the TUI tests.** The stdin reader runs only when
-`logPath != "" || tui` (`main.go:692`), so the grow fires only there — the other e2e
+`logPath != "" || tui` (`main.go:746`), so the grow fires only there — the other e2e
 callers (`StartRotation`, the fakeclaude primitive, attach-stdio) set neither and are
 unperturbed.
 

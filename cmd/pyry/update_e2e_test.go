@@ -744,7 +744,7 @@ func TestUpdate_VerifyFailure_E2E(t *testing.T) {
 // docs/specs/architecture/187-update-atomic-replace.md.
 //
 // This e2e case mirrors the error contract pinned by the unit test
-// TestUpdate_RestartFailure at cmd/pyry/update_test.go:438-460, end-to-end
+// TestUpdate_RestartFailure at cmd/pyry/update_test.go:485-507, end-to-end
 // against a real spawned-and-immediately-dead child process.
 func TestUpdate_BrokenNewBinary_E2E(t *testing.T) {
 	s := installPreUpdateDaemonE2E(t)

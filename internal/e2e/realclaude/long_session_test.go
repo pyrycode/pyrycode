@@ -133,7 +133,7 @@ func TestRealClaude_LongSessionJSONLIntegrity(t *testing.T) {
 	// catches the day someone introduces one without bumping the buffer.
 	if bytes.Contains(result.Stderr, []byte("bufio.Scanner: token too long")) {
 		t.Fatalf("stderr contains \"bufio.Scanner: token too long\" — a Scanner in pyry's stdout/stderr "+
-			"path hit a long claude line; bump its buffer to 1 MiB (see tool_loop_test.go:210 note)\n"+
+			"path hit a long claude line; bump its buffer to 1 MiB (see tool_loop_test.go:211 note)\n"+
 			"stderr:\n%s", truncate(result.Stderr))
 	}
 }

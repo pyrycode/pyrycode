@@ -15,7 +15,7 @@ import (
 // screenSnapshotter is the bound host's rendered-screen seam. *supervisor.Supervisor
 // satisfies it (`readyForDelivery`); asserted from turnbridge.SessionHost so the
 // shared turnbridge interface stays screen-free. Mirrors relay.ScreenSnapshotter
-// (v2session.go:433), which the manager consumes for request_snapshot.
+// (v2session.go:480), which the manager consumes for request_snapshot.
 type screenSnapshotter interface {
 	ScreenSnapshot() (text string, live bool)
 }
@@ -34,7 +34,7 @@ type screenSnapshotter interface {
 // blocks until that goroutine exits.
 //
 // This opens a SECOND Session.Events() subscription on the bound *tuidriver.Session
-// alongside the turn stream's; tui-driver blesses that explicitly (events.go:159 —
+// alongside the turn stream's; tui-driver blesses that explicitly (events.go:160 —
 // two Events() calls spawn two independent merge loops, each over its own JSONL
 // tail + poll loop, sharing no mutable state). The modal drain ignores every
 // non-modal event, so the extra JSONL tail bytes are never inspected.

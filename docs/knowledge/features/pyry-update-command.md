@@ -142,7 +142,7 @@ If a future ticket adds Ctrl-C handling, swap `context.Background()` for `signal
 
 ## Error contract
 
-All errors propagate up through `main()`'s wrapper at `cmd/pyry/main.go:141-144`, which prints `pyry: <err>` to stderr and exits 1.
+All errors propagate up through `main()`'s wrapper at `cmd/pyry/main.go:142-145`, which prints `pyry: <err>` to stderr and exits 1.
 
 | `errors.Is` predicate | Behaviour |
 |-----------------------|-----------|
@@ -233,7 +233,7 @@ Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tes
 | `TestUpdate_VerifyFailure_E2E` | `checksums.txt` body lists 64-zero digest for the real tarball | `VerifySHA256` (before AtomicReplace) | Binary unchanged, daemon 1 still answering, success line absent. |
 | `TestUpdate_BrokenNewBinary_E2E` | Served tarball contains the `internal/brokenpyry` helper bytes | `runRestart` (AFTER AtomicReplace) | Error message contains `"binary replaced to "` AND `"daemon restart failed"` (version-agnostic, same shape as `TestUpdate_RestartFailure`), inode changed, on-disk bytes equal the broken bytes, broken-pyry stderr contains `BROKEN_PYRY_TOKEN`, success line absent. |
 
-**The broken-binary case is an asserts-the-current-design test, not a rollback test.** Per [Out of scope](#out-of-scope-handled-in-follow-up-tickets-or-deferred) above and `docs/specs/architecture/187-update-atomic-replace.md`: once `AtomicReplace` swaps in the new bytes, the old binary is gone — operator intervention is the only recovery. The error contract pinned by the unit-shaped `TestUpdate_RestartFailure` (`cmd/pyry/update_test.go:438-460`) extends end-to-end here against a real spawned-and-immediately-dead child process.
+**The broken-binary case is an asserts-the-current-design test, not a rollback test.** Per [Out of scope](#out-of-scope-handled-in-follow-up-tickets-or-deferred) above and `docs/specs/architecture/187-update-atomic-replace.md`: once `AtomicReplace` swaps in the new bytes, the old binary is gone — operator intervention is the only recovery. The error contract pinned by the unit-shaped `TestUpdate_RestartFailure` (`cmd/pyry/update_test.go:485-507`) extends end-to-end here against a real spawned-and-immediately-dead child process.
 
 **`runRestart`-as-sentinel for paths that shouldn't reach it.** Fetch-failure and verify-failure return errors from `doUpdate` BEFORE AtomicReplace, so `runRestart` is structurally unreachable. The tests register a `t.Fatalf`-on-call closure (mirroring `TestUpdate_Success`'s shape at `cmd/pyry/update_test.go:113-116`) — a regression that DID reach `runRestart` on these paths fails loud at the wrong-path-reached moment, instead of producing a misleading "daemon 1 dead" failure several assertions later.
 

@@ -811,7 +811,7 @@ func (p *Parser) consumeLine(line []byte) {
 // oversight. Surfacing them would reintroduce the per-turn noise row the
 // 2026-07-27 measurement forbade — system is claude's highest-rate emitter — and
 // would break the live zero-unrecognized gate
-// (internal/e2e/realclaude/interactive_stream_liveness_test.go:253 fatals on one)
+// (internal/e2e/realclaude/interactive_stream_liveness_test.go:255 fatals on one)
 // the next time a claude release adds a chatty subtype.
 func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 	switch subtype {

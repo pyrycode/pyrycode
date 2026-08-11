@@ -20,7 +20,7 @@ import (
 )
 
 // wantSettingsMalformedMsg is the fixed reject message handleSetSessionSettings
-// emits for an invalid model/effort (internal/relay/v2session.go:2709,
+// emits for an invalid model/effort (internal/relay/v2session.go:3067,
 // msgSettingsMalformed). That constant is package-private to internal/relay, so
 // this e2e asserts the literal string.
 const wantSettingsMalformedMsg = "malformed set_session_settings request"

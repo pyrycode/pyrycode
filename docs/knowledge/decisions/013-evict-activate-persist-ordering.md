@@ -18,7 +18,7 @@ return s.pool.persist() // disk write runs AFTER lcMu releases
 
 `Session.Evict` and `Session.Activate` blocked on the channel close, so they woke the moment the in-memory flip was observable but **before** the registry had been persisted. A caller that performed `sess.Evict(ctx); reg, _ := loadRegistry(regPath)` could read pre-eviction state from disk. Phase 1.3b's `TestPool_GetOrCreate_PersistsPostDetach` (PR #166) tripped this race and was `t.Skip("blocked on #169")`.
 
-The naive fix — move `pool.persist()` inside `transitionTo`'s `lcMu` critical section — re-introduces the lock-order violation the comment at the old `session.go:347-349` explicitly avoided: `pool.persist` → `saveLocked` re-acquires every session's `lcMu` when building the registry snapshot, deadlocking against the holder.
+The naive fix — move `pool.persist()` inside `transitionTo`'s `lcMu` critical section — re-introduces the lock-order violation the comment at the old `session.go:394-396` explicitly avoided: `pool.persist` → `saveLocked` re-acquires every session's `lcMu` when building the registry snapshot, deadlocking against the holder.
 
 The design space had three options (per the ticket):
 

@@ -159,4 +159,4 @@ Unit tests in `internal/supervisor/bridge_test.go` cover the plain Read/Write pa
 
 - Lessons: [§ Bridge input pump must be scoped per-iteration to survive child restart](../../lessons.md)
 - Feature: [e2e-harness § Attach Restart Pattern](../features/e2e-harness.md)
-- Code: `internal/supervisor/bridge.go`, `internal/supervisor/supervisor.go:246-280`
+- Code: `internal/supervisor/bridge.go`, `internal/supervisor/supervisor.go:248-288`

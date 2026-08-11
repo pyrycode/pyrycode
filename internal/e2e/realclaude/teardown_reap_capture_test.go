@@ -7,7 +7,7 @@ package realclaude
 //
 // #1250's fixtures are hand-written string constants headed "measured
 // 2026-07-30 on Darwin 25.5 against Go's log/slog"
-// (teardown_liveness_test.go:378-401). Someone observed the rendering and typed
+// (teardown_liveness_test.go:425-448). Someone observed the rendering and typed
 // it into a const; nothing executing asserts that the real reaper still emits
 // those bytes. That matters because of the shape of the drift: a matcher that
 // finds nothing answers no-reap-line, a consumer reads "the reaper never
@@ -113,7 +113,7 @@ const (
 	// its role and never returns to the framework — so the recursion is bounded
 	// by construction. Without it the child reaches m.Run() and runs the suite:
 	// the 2026-05-16 fork bomb TestMain's own comment records
-	// (fixtures_test.go:338-347).
+	// (fixtures_test.go:384-393).
 	tdnRoleFilter = "-test.run=^TestTdnReapTreeHelperProcess$"
 
 	// The two line kinds in the report file.
@@ -206,7 +206,7 @@ func tdnRunParentRole() {
 // os/exec dedups env keeping the LAST occurrence, so the role vars are appended
 // AFTER os.Environ() and an operator's pre-set PYRY_E2E_FAKE_MODE cannot
 // redirect a leaf into runFakePyry's argv mode — which would echo the inherited
-// environment, tokens included. reap_test.go:252-254 records the same ordering
+// environment, tokens included. reap_test.go:254-256 records the same ordering
 // rule. Clearing TDN_REAP_TREE_ROLE is belt and braces: a leaf never reaches
 // m.Run() to read it.
 //
@@ -214,7 +214,7 @@ func tdnRunParentRole() {
 // no Wait lingers in the process table with its pgid intact, and both
 // kill(pid, 0) and kill(-pgid, 0) still succeed on a corpse — which would make a
 // reaped-group check pass on one, and make a killed spared leaf read as still
-// alive. reap_test.go:117-119 records the same rule in its own package.
+// alive. reap_test.go:118-120 records the same rule in its own package.
 func tdnSpawnLeaf(ownGroup bool) (int, error) {
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(),
@@ -274,7 +274,7 @@ func tdnStartTree(t *testing.T, fresh, same int) tdnTree {
 	go func() { _ = cmd.Wait() }()
 	// Registered BEFORE the leaves' cleanups so LIFO kills the leaves first: a
 	// parent killed first orphans them to init, where a fresh-group leaf outlives
-	// the test until its own backstop. reap_test.go:141-157 is the pattern.
+	// the test until its own backstop. reap_test.go:142-158 is the pattern.
 	t.Cleanup(func() { tdnKillTree(rootPID) })
 
 	tree := tdnWaitTreeReport(t, reportPath, fresh, same, 10*time.Second)
@@ -409,8 +409,8 @@ func tdnParseTreeReport(t *testing.T, path string, fresh, same int) (tdnTree, bo
 // the bytes slog.Default() emitted while it ran.
 //
 // Why log.SetOutput captures it: runAgentRunPty sets no Logger on
-// ptyrunner.Config (cmd/pyry/agent_run.go:316-329), so ptyrunner.Run falls back
-// to slog.Default() (runner.go:289-291) and no non-test code calls
+// ptyrunner.Config (cmd/pyry/agent_run.go:324-376), so ptyrunner.Run falls back
+// to slog.Default() (runner.go:297-299) and no non-test code calls
 // slog.SetDefault — so every `pyry agent-run`, which is what this package's
 // probes spawn, renders reap.go:65 through Go's BUILT-IN default handler, which
 // writes through the log package. slog.Default() is therefore passed explicitly
@@ -670,7 +670,7 @@ func TestTdnRealReapCapture(t *testing.T) {
 // hazard read together.
 //
 // Held 77 against pgids=[7788] is the PREFIX direction, already covered by the
-// fixture row at teardown_liveness_test.go:470-481 and duplicated here for six
+// fixture row at teardown_liveness_test.go:517-528 and duplicated here for six
 // lines so neither half can be dropped without the other being findable. Held 88
 // is the SUFFIX direction and is the new coverage: it is a substring of the same
 // rendered list in the other direction, and a substring matcher satisfies every

@@ -42,7 +42,7 @@ package realclaude
 // The staged command has TWO consumers and they must be the same bytes:
 //
 //   - finOutcomeStagingGate's identity arm compares StagedCommand against
-//     IssuedCommand (finding_staging_gate_test.go:299).
+//     IssuedCommand (finding_staging_gate_test.go:307).
 //   - finTranscriptFill only reads the trigger result when call.Command == staged
 //     (`finTranscriptFill`).
 //
@@ -88,7 +88,7 @@ package realclaude
 //     TestFinTranscriptFill's rows 2 and 3 — the assertions AC2 forbids
 //     reproducing. Held by the no-literal-on-any-right-hand-side rule and by
 //     review; the fill's own route to those outcomes is proven at
-//     finding_staging_fill_test.go:577-587.
+//     finding_staging_fill_test.go:624-634.
 //
 // # This file execs nothing, and the check is the symbol list
 //
@@ -156,16 +156,16 @@ package realclaude
 //
 // Two sinks, two rules, deliberately not conflated. A published Detail may never
 // carry either command IN ANY FORM, including a length or a prefix
-// (finding_staging_gate_test.go:192-197); this file formats none, so that rule
+// (finding_staging_gate_test.go:193-198); this file formats none, so that rule
 // holds structurally. A test t.Errorf is not a published record, and its house
-// form is LENGTHS ONLY (finding_staging_fill_test.go:556-562) — the two counts
+// form is LENGTHS ONLY (finding_staging_fill_test.go:603-609) — the two counts
 // and the two outcome values are named freely below, and no command is printed
 // in any form. If ever unsure which sink applies, print neither: the one
 // resolution that is always wrong is printing the command itself.
 //
 // NO JSON TAGS on finLiveAssembleFacts, the rule finTranscriptReading
 // (finding_staging_fill_test.go:92-93) and finOutcomeStaging
-// (finding_staging_gate_test.go:141-157) both state at themselves: IssuedCommand
+// (finding_staging_gate_test.go:142-158) both state at themselves: IssuedCommand
 // is verbatim model output and StagedCommand embeds a t.TempDir()-derived path on
 // a live run, so a tag is the first step toward publishing either into a public
 // issue.
@@ -205,7 +205,7 @@ import (
 // and a count swap is the one mis-assembly no value-only test can catch.
 //
 // NO JSON TAGS, the rule finTranscriptReading (finding_staging_fill_test.go:92-93)
-// and finOutcomeStaging (finding_staging_gate_test.go:141-157) both state at
+// and finOutcomeStaging (finding_staging_gate_test.go:142-158) both state at
 // themselves: it carries StagedCommand, which embeds a t.TempDir()-derived path
 // on a live run.
 type finLiveAssembleFacts struct {
@@ -238,7 +238,7 @@ type finLiveAssembleFacts struct {
 // the environment directly or writes an artifact.
 //
 // The deadlines are parameters for finTranscriptFill's own stated reason
-// (finding_staging_fill_test.go:238-241): both waiters poll to expiry before
+// (finding_staging_fill_test.go:239-242): both waiters poll to expiry before
 // returning empty, so a live caller passes probeToolUseDeadline /
 // probeToolResultDeadline and an offline row passes milliseconds for a result
 // already on disk.
@@ -248,7 +248,7 @@ type finLiveAssembleFacts struct {
 //   - ALL EIGHT KEYS PRESENT. This is "no field is left at its zero value by
 //     accident" made auditable: a missing key is a field silently at its zero, and
 //     four of the eight zero into failure arms while PinWantCount: 0 zeroes into
-//     the gate's guard (finding_staging_gate_test.go:347).
+//     the gate's guard (finding_staging_gate_test.go:394).
 //   - NO LITERAL ON ANY RIGHT-HAND SIDE. Every one is r.X or facts.X and nothing
 //     else. This single rule is what forbids finTranscriptStagedCaller's poison
 //     PinMatchCount: 1, forbids PinWantCount: finLivePinWantRows (the driver's job
@@ -303,7 +303,7 @@ func finLiveAssembleStaging(t *testing.T, workdir, sessionID string, facts finLi
 // finLivePinWantRows would delete the only check that the want travels at all.
 //
 // Non-producible by design and stating its reason at itself, following the house
-// form at finding_staging_gate_test.go:433-436.
+// form at finding_staging_gate_test.go:480-483.
 const finLiveAssembleContractWant = finLivePinWantRows + 1
 
 // --- the trap -------------------------------------------------------------------------
@@ -330,7 +330,7 @@ type finLiveAssembleCountCase struct {
 // (`finOutcomeHoldCommand`), which is a gate fixture deliberately of the
 // wrong shape: its `sh -c … ; exit 0` carries a `;` into a string the model is
 // asked to reproduce byte-for-byte against a system prompt that forbids chaining
-// (finding_live_staging_test.go:136-139).
+// (finding_live_staging_test.go:137-140).
 //
 // One `staged` local feeds both the transcript block and every row's
 // facts.StagedCommand, so a mismatch is impossible by construction.
@@ -386,7 +386,7 @@ func TestFinLiveAssembleStagingForwardsTheCounts(t *testing.T) {
 		},
 		{
 			// This row pins the gate's `|| PinWantCount < 1` guard
-			// (finding_staging_gate_test.go:347) SURVIVING THE COMPOSITION, which kills
+			// (finding_staging_gate_test.go:394) SURVIVING THE COMPOSITION, which kills
 			// an assembly substituting its own count == want test for the gate's
 			// decision. It is not the row that catches a forgotten fill.
 			name:       "both counts at zero",

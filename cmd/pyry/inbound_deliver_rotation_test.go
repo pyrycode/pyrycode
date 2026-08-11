@@ -276,7 +276,7 @@ func (w *rotatingWriter) snapshot() []childSnapshot {
 //
 // rekey ADDS the new id and KEEPS the old one, because that is what RebindSession
 // does: CurrentSessionID moves to the new id and the old id is appended to
-// SessionHistory, and conversationForSession (relay.go:845-855) matches either.
+// SessionHistory, and conversationForSession (relay.go:910-920) matches either.
 // Keeping the old id is what leaves the child-exit lane's clear — keyed to the
 // runner's CONSTRUCTION-time session id, which RestartFresh does not rotate —
 // resolvable after a rotation; dropping it would turn that lane into a
@@ -521,7 +521,7 @@ func TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild(t *testin
 // STEPS 6 AND 7 RUN IN THE OPPOSITE ORDER TO PRODUCTION, and the cost is stated
 // rather than hidden. Production runs rotate() — which includes the whole
 // transition fan-out and therefore the clear — to completion, and only then calls
-// RestartFresh (main.go:1447-1478). Left in that order, whether the woken delivery
+// RestartFresh (main.go:1525-1556). Left in that order, whether the woken delivery
 // finds the doomed child still live or already nil is a RACE, and AC2 forbids
 // deciding this by luck. Pulling the teardown ahead of the clear removes the race
 // while preserving the property under test: the clear is still the sole release,

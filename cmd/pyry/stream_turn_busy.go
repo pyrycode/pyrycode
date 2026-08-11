@@ -30,7 +30,7 @@ import (
 // Never the event, its content, a turn id, a timestamp, or a count. Absent key ≡
 // idle ≡ unknown ≡ unbound ≡ never seen, all through one map lookup, which is what
 // keeps Busy from becoming a "does conversation X exist" oracle (#1101, the posture
-// screenSnapshotterOrNil records at relay.go:406-421). The map is bounded by the
+// screenSnapshotterOrNil records at relay.go:453-468). The map is bounded by the
 // conversations currently mid-turn, not by every conversation ever seen.
 //
 // THREE FEEDS close a turn here, and between them no reachable sequence leaves a
@@ -68,7 +68,7 @@ import (
 // conversationForSession's SessionHistory match belongs to the SAME runner that
 // continues under the successor id, tagging its events identically either way.
 // Eviction cannot supply a second producer either: being binding-neutral, an
-// evicted id never enters SessionHistory (conversations/registry.go:241 is its
+// evicted id never enters SessionHistory (conversations/registry.go:243 is its
 // only production writer, reached solely from sessions/`notifyTransition`).
 //
 // SECURITY: content-free. The only fields ever logged are the event discriminant
@@ -146,8 +146,8 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 // tracker. That is the CORRECT answer rather than an omission: a usage limit is
 // orthogonal to turn lifecycle, so opening a turn on one would wedge the
 // conversation exactly as opening one on an Unrecognized would. streamsup's
-// ignoredLineTypes — the cite this comment carried pointed at parser.go:158-163,
-// which the list left long ago — is at parser.go:384-386 and is down to `system`
+// ignoredLineTypes — the cite this comment carried pointed at parser.go:159-164,
+// which the list left long ago — is at parser.go:431-433 and is down to `system`
 // alone.
 //
 // A nil receiver is a no-op, so a caller with no tracker (the drain's own tests)
@@ -213,7 +213,7 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 // leave the conversation busy forever. It has TWO callers:
 //
 //   - the teardown feed (#1202), driven from the pool's TransitionObserver on a
-//     /clear rotation or an idle/cap eviction (session_transition_v2.go:274-281);
+//     /clear rotation or an idle/cap eviction (session_transition_v2.go:282-289);
 //   - the drain's exit arm (#1209), reached when a child-exit signal rides the
 //     fan-in ahead of the tracker feed (stream_turn_drain.go). That lane is fired
 //     in production by the per-runner producer newStreamRunnerFactory installs

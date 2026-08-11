@@ -35,7 +35,7 @@ package realclaude
 // That pairing is what makes four checks the right number rather than one. The
 // artifact carries four of the trailer's own values VERBATIM BY DESIGN —
 // subtype, is_error, terminal_reason and stop_reason — and
-// finding_artifact_write_test.go:274-289 states the rule: plant only where the
+// finding_artifact_write_test.go:282-297 states the rule: plant only where the
 // pipeline reduces. A single artifact-wide sweep planting in every value position
 // the line carries is therefore RED AGAINST A CORRECT BUILD. So the artifact-wide
 // sweep excludes those four (AC1), and the sweep that plants in all five
@@ -56,7 +56,7 @@ package realclaude
 //	                                                       padding with no needle in it and
 //	                                                       session_id's does not, which is why
 //	                                                       the plant list needs BOTH
-//	M3  a record re-admitting the CAPPED                   shipped, finding_artifact_write_test.go:1084-1087
+//	M3  a record re-admitting the CAPPED                   shipped, finding_artifact_write_test.go:1149-1152
 //	    trailScanResult.Line                               — needs an IN-CAP needle, which AC1's
 //	                                                       past-the-cap pad cannot see
 //	M4  a record re-admitting the FULL, uncapped line      AC1 — needs a PAST-THE-CAP needle,
@@ -93,12 +93,12 @@ package realclaude
 // Name the FILE, the JSON PATH, a BYTE LENGTH, an OFFSET, a COUNT or a
 // rig-chosen FIELD NAME. Never a file's contents, never a Detail's string, never
 // scan.Line, never a needle-bearing value. That is finWriteSorted's own rule
-// (finding_artifact_write_test.go:591-599), inherited whole: printing what a file
+// (finding_artifact_write_test.go:638-646), inherited whole: printing what a file
 // or a detail HOLDS after it just failed a leak check writes the leak into CI
 // logs. The one knowing residual is that the non-vacuity Fatalfs print key NAMES,
 // which under M1 would be values — but they are fixture constants on a
 // fixture-only path, and the shipped precedent is TestTrailKeyNamesCarryNoValues'
-// own non-vacuity report (trailer_key_names_test.go:342-345).
+// own non-vacuity report (trailer_key_names_test.go:389-392).
 
 import (
 	"bytes"
@@ -141,7 +141,7 @@ import (
 // doctrine (finding_artifact_write_test.go:28-32).
 //
 // THE FATAL PRECONDITION IS THE 64 KiB CEILING DEFENCE, in finPublishedKeyNames'
-// words (finding_key_name_bounds_test.go:168-173): past bufio.Scanner's default a
+// words (finding_key_name_bounds_test.go:169-174): past bufio.Scanner's default a
 // line ABORTS the scan rather than truncating it, KeyNames comes back nil, the
 // published field renders null and every assertion downstream is vacuously green.
 // It reports the scan's own Detail — this instrument's prose, carrying no byte of
@@ -180,7 +180,7 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 //     needle and the shipped pad measurement still holds.
 //
 // A function and not a package-level var, for trailRunWellFormed's stated reason
-// (trail_run_outcome_test.go:1113-1115): `go test -race` runs this package's tests
+// (trail_run_outcome_test.go:1203-1205): `go test -race` runs this package's tests
 // in parallel.
 //
 // # The plant list, and why it stops where it does
@@ -190,8 +190,8 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 // decode and finTrailerRecord publishes them as fields, so a needle in any of them
 // appears in the artifact CORRECTLY and a sweep planting there would be red
 // against a correct build. That is the plant-only-where-the-pipeline-reduces rule
-// (finding_artifact_write_test.go:274-289), and stop_reason is named a second time
-// at finding_trailer_evidence_test.go:129-136 as the one model-influenced field
+// (finding_artifact_write_test.go:282-297), and stop_reason is named a second time
+// at finding_trailer_evidence_test.go:130-137 as the one model-influenced field
 // crossing this record uncapped. The check those four need is AC2's, which sweeps
 // the names field alone.
 //
@@ -231,14 +231,14 @@ func TestFinContainArtifactCarriesNoTrailerValue(t *testing.T) {
 
 	// OFFSET PRECONDITION A (M4), fatal: `result`'s needle — the FIRST occurrence,
 	// session_id's being later on the wire — must sit PAST the cap. An in-cap plant
-	// here would duplicate the shipped row at finding_artifact_write_test.go:1084-1087
+	// here would duplicate the shipped row at finding_artifact_write_test.go:1149-1152
 	// instead of complementing it, and this check would then be blind to the mutant
 	// that row cannot see.
 	at := strings.Index(line, trailNeedle)
 	if at <= reachMaxCommandBytes {
 		t.Fatalf("`result`'s needle sits at offset %d of %d bytes, inside the %d-byte cap: this "+
 			"check's plant must land PAST it, or it catches only what the shipped in-cap row at "+
-			"finding_artifact_write_test.go:1084 already catches and nothing re-admitting the FULL "+
+			"finding_artifact_write_test.go:1149 already catches and nothing re-admitting the FULL "+
 			"line", at, len(line), reachMaxCommandBytes)
 	}
 
@@ -491,12 +491,12 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 		{"finTrailerRecord", reflect.TypeOf(finTrailerRecord{})},
 	} {
 		// The walk descends into struct fields, map keys AND values, slices, arrays
-		// and pointers (finding_run_record_test.go:727-752), so "no type transitively
+		// and pointers (finding_run_record_test.go:781-817), so "no type transitively
 		// holding one" is proved by this single call rather than aspirational.
 		if finRecordInputReaches(carrier.typ, forbidden, map[reflect.Type]bool{}) {
 			t.Errorf("%s is reachable from %s: its values are the RAW BYTES of the line, so a %%v on "+
 				"the map — or on any struct transitively holding it, as this package already does at "+
-				"finding_run_record_test.go:775 — prints the whole assistant `result` field into a "+
+				"finding_run_record_test.go:840 — prints the whole assistant `result` field into a "+
 				"failure message. trailKeyNames discards that map inside itself and returns []string, "+
 				"which is what keeps this true by construction", forbidden, carrier.name)
 		}
@@ -528,7 +528,7 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 // rather than pinned as a literal.
 //
 // A const and not a var: the parallel-tests rule
-// (trail_run_outcome_test.go:1113-1115) is about shared BACKING ARRAYS, and a string
+// (trail_run_outcome_test.go:1203-1205) is about shared BACKING ARRAYS, and a string
 // constant has none.
 const finContainNeedleKeyName = "PYRY-PROBE-KEY-NAME-NEEDLE-MUST-NOT-REACH-A-DETAIL"
 
@@ -551,7 +551,7 @@ func finContainNeedleKeyTrailer() string {
 //
 // This discharges the NAMES half of finTrailerRecord's prohibition that the Detail
 // "may name no key and interpolate no COUNT of them"
-// (finding_trailer_evidence_test.go:198-200), inherited from #1363 via #1364.
+// (finding_trailer_evidence_test.go:199-201), inherited from #1363 via #1364.
 //
 // # Why a needle sweep and not a second headroom row
 //
@@ -559,7 +559,7 @@ func finContainNeedleKeyTrailer() string {
 // trailer Detail is 225 bytes, and a Detail interpolating sighting.KeyNames INSIDE
 // the trailDetail format is 426 — leaving 86 bytes of the 512-byte cap against the
 // 42-byte trailNeedle yardstick, so it PASSES the shipped per-row headroom check
-// (finding_trailer_evidence_test.go:980-988), observed green under exactly that
+// (finding_trailer_evidence_test.go:1045-1053), observed green under exactly that
 // mutation while this row went red. #1364's best hostile-name fixture put its own
 // mutant at 444 bytes against a 470-byte budget, 27 short of red, which is why
 // that ticket measured it, cut it and handed the obligation here. A needle has no
@@ -636,7 +636,7 @@ func TestFinContainNoDetailNamesAKeyName(t *testing.T) {
 			len(details), finWriteSorted(details))
 	}
 	// PATH AND BYTE LENGTH ONLY, never the Detail's string: finWriteSorted's rule
-	// (finding_artifact_write_test.go:591-599). The needle is a rig-chosen constant
+	// (finding_artifact_write_test.go:638-646). The needle is a rig-chosen constant
 	// and naming the path is what makes the failure diagnosable.
 	for _, path := range finWriteSorted(details) {
 		if strings.Contains(details[path], finContainNeedleKeyName) {

@@ -13,7 +13,7 @@ package realclaude
 //
 //  2. `pyry agent-run --max-turns=N` actually caps a run at N turns against
 //     the real `claude` CLI. Pinned unit-side at
-//     internal/agentrun/streamjson/emitter_test.go:225 and
+//     internal/agentrun/streamjson/emitter_test.go:227 and
 //     internal/agentrun/budget/budget_test.go; this is the missing
 //     end-to-end pin against the real upstream.
 //
@@ -204,7 +204,7 @@ func TestRealClaude_MaxTurnsHonored(t *testing.T) {
 
 // truncateStdout caps stdout in failure messages at 1 KiB so a large
 // stream-json transcript does not bury the assertion. Mirrors the pattern
-// at tool_loop_test.go:127.
+// at tool_loop_test.go:128.
 func truncateStdout(stdout []byte) string {
 	if len(stdout) > 1024 {
 		return string(stdout[:1024]) + "... (truncated)"

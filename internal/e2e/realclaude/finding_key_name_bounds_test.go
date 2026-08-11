@@ -46,7 +46,7 @@ package realclaude
 //
 // This is the one thing here that would ship green while proving nothing.
 // trailScan's bufio.Scanner buffer is deliberately not raised past the 64 KiB
-// default (result_trailer_observation_test.go:177-179), and a line at or past the
+// default (result_trailer_observation_test.go:178-180), and a line at or past the
 // limit ABORTS the scan rather than truncating it: KeyNames comes back nil and
 // CarriesTrailer is false, so the published field renders null — and "the
 // rendered field is bounded" is trivially true over a fixture that produced not
@@ -65,7 +65,7 @@ package realclaude
 // # The reference to finBoundKeyNames is ONE-DIRECTIONAL, deliberately
 //
 // This family's convention is to name the enforcing test at the contract it
-// enforces, as finTrailerRecord does at finding_trailer_evidence_test.go:214-215.
+// enforces, as finTrailerRecord does at finding_trailer_evidence_test.go:215-216.
 // It is NOT followed here, and this paragraph exists so a later editor does not
 // "fix" that. finBoundKeyNames sits at `finBoundKeyNames` with its
 // doc comment above it and inbound line-number cites pointing at and past it from
@@ -120,7 +120,7 @@ func finOverlongKeyNameTrailer() string {
 //
 // A function rather than a package-level var: it returns a slice, go test -race
 // runs this package's tests in parallel, and a shared backing array would let one
-// row's mutation reach another's (trail_run_outcome_test.go:1113-1115).
+// row's mutation reach another's (trail_run_outcome_test.go:1203-1205).
 func finManyShortNames(n int) []string {
 	names := make([]string, 0, n)
 	for i := 0; i < n; i++ {
@@ -282,7 +282,7 @@ func TestFinPublishedKeyNamesBoundTheNameCount(t *testing.T) {
 
 	// The kept set is the reader's ALPHABETIC PREFIX, in its order. What this
 	// fixture makes observable is the consequence finTrailerRecord's comment warns
-	// a reader about (finding_trailer_evidence_test.go:178-183): `type` sorts last
+	// a reader about (finding_trailer_evidence_test.go:179-184): `type` sorts last
 	// of the set, so `type` is the name the cut removes.
 	if want := read[:finTrailerMaxKeyNames]; !reflect.DeepEqual(published, want) {
 		t.Errorf("published names: got %q, want %q — the reader's own first %d names, in the order "+
@@ -368,7 +368,7 @@ func TestFinBoundKeyNamesAllocatesItsOwnBackingArray(t *testing.T) {
 			}
 			if &got[0] == &in[0] {
 				t.Errorf("the result shares its backing array with the input. finTrailerBuild copies " +
-					"this field by PLAIN SLICE ASSIGNMENT (finding_trailer_evidence_test.go:333) and " +
+					"this field by PLAIN SLICE ASSIGNMENT (finding_trailer_evidence_test.go:380) and " +
 					"says in its own comment that the assignment is safe only because this clause " +
 					"holds — so a pass-through puts two carriers on one array while `go test -race` " +
 					"runs this package's tests in parallel")

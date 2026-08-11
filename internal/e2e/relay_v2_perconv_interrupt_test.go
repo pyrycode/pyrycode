@@ -142,7 +142,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 //     child. Under the pre-#1121 wiring that count would be 1. Phase 0 exercises
 //     the no_active_conv guard rather than no_bound_runner because that is the
 //     unresolvable state reachable OVER THE WIRE — the cursor is stamped only on
-//     sessionRouter.Route's success path (cmd/pyry/main.go:1248), so a conversation
+//     sessionRouter.Route's success path (cmd/pyry/main.go:1313), so a conversation
 //     cannot become active without a resolvable binding. Both guards return
 //     (nil, false) into the same inert path; the property under test — inert, and
 //     never the bootstrap — is identical.
@@ -216,7 +216,7 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	//
 	// TUI mode and Esc-ends-turn coexist by design — they touch different bytes:
 	// TUI emits the startup glyph + spinner, the ESC detector scans stdin for the
-	// bare interrupt ESC (fakeclaude/main.go:120-124).
+	// bare interrupt ESC (fakeclaude/main.go:121-125).
 	StartRotationWithRelay(t, home, sessionsDir, initialUUID, neverRotate, stdinLog,
 		fr.URL()+"/v2/server",
 		"PYRY_MOBILE_V2=1",
@@ -374,7 +374,7 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	//
 	// Since #1244 the kicker is MORE than a vacuous-pass guard — it is a
 	// PRECONDITION for the turn_end below to reach the wire at all. The emitter drops
-	// a TurnEnd when no turn is open (cmd/pyry/interactive_turn_v2.go:208-213, debug
+	// a TurnEnd when no turn is open (cmd/pyry/interactive_turn_v2.go:209-214, debug
 	// event interactive_turn.turn_end_no_turn, nothing on the wire). The fake's old
 	// canned line was self-sufficient — an assistant end_turn entry produced BOTH a
 	// TextChunk (which opened the turn via startTurnIfNeeded) and a TurnEnd. The
@@ -546,7 +546,7 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	// now report exactly ONE bare ESC — the one this test sent. The turn_end
 	// happens-after the ESC was read, so it is already on disk; the short bounded
 	// poll only closes the residual cross-process fsync-visibility window (the #794
-	// sibling's pattern, relay_v2_interrupt_test.go:331-339).
+	// sibling's pattern, relay_v2_interrupt_test.go:378-386).
 	after := 0
 	escDeadline := time.Now().Add(2 * time.Second)
 	for {

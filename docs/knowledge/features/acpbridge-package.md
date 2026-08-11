@@ -236,7 +236,7 @@ type BackgroundTask        struct { TaskID, TaskType, Description string; Trunca
 ```
 
 Notable divergences from the mobile lane's equivalent types
-(`protocol.BackgroundTask*Payload`, `interactive.go:149-280`): **no
+(`protocol.BackgroundTask*Payload`, `interactive.go:150-288`): **no
 `ConversationID`** on any of the three (ACP session addressing is the consumer's
 `sessionUpdateParams.SessionID`, not the payload's), and `TruncatedFields` carries
 `omitempty` here (mobile ships `null` for nil / `[]` for empty on the same field;

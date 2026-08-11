@@ -226,7 +226,7 @@ func toWirePayload(t sessions.SessionTransition) (protocol.SessionTransitionPayl
 // NewSessionID rather than PreviousID is deliberate. It is the conversation's
 // CurrentSessionID for both reasons (the rotated id post-#739-rebind for clear;
 // the mirrored evicted id for the binding-neutral eviction), which is
-// conversationForSession's PRIMARY match (relay.go:845). PreviousID would also
+// conversationForSession's PRIMARY match (relay.go:910). PreviousID would also
 // resolve today — via RebindSession's SessionHistory append — but only for as
 // long as notifyTransition keeps driving the rebind ahead of the observer fan-out.
 func transitionClearsTurn(t sessions.SessionTransition) (sessionID string, ok bool) {
@@ -246,7 +246,7 @@ func transitionClearsTurn(t sessions.SessionTransition) (sessionID string, ok bo
 // their own: the wire emitter, and #1202's turn-busy clear.
 //
 // SetTransitionObserver MUST run before Pool.Run; the call site (startRelayV2 ←
-// startRelay at main.go:1003) is strictly before pool.Run (main.go:1086), so the
+// startRelay at main.go:1068) is strictly before pool.Run (main.go:1151), so the
 // observer field is installed once and read-only thereafter (#659's
 // install-before-Run contract, race-free).
 //

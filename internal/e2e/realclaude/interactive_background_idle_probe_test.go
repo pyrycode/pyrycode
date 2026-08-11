@@ -13,7 +13,7 @@ package realclaude
 //
 // # The question, and why the code does not answer it
 //
-// cmd/pyry/interactive_turn_v2.go:208-217 emits turn_end and then transitions
+// cmd/pyry/interactive_turn_v2.go:209-218 emits turn_end and then transitions
 // to idle in the turnevent.TurnEnd arm, unconditionally — nothing consults
 // whether the tool left work behind. Since claude returns a tool_result the
 // moment a Bash command's timeout expires and leaves the command running in
@@ -39,7 +39,7 @@ package realclaude
 //
 // Two hops carry the lever, both os.Environ()-based, so it reaches claude with
 // no production change: test -> daemon (interactive_bootstrap_liveness_test.go
-// :403) -> claude (internal/streamsup/runner.go:555). The second hop's append
+// :403) -> claude (internal/streamsup/runner.go:602). The second hop's append
 // sits inside `if r.cfg.Env != nil`, which LOOKS like a broken chain, but
 // passthrough survives both arms — non-nil appends to os.Environ(), and nil
 // leaves cmd.Env nil, which makes os/exec inherit the parent environment
@@ -84,7 +84,7 @@ package realclaude
 // # Why the recorded idle belongs to THIS turn (AC3(b))
 //
 // turn_state{idle} reaches the wire from exactly one site:
-// interactive_turn_v2.go:216, inside the turnevent.TurnEnd arm, which is
+// interactive_turn_v2.go:217, inside the turnevent.TurnEnd arm, which is
 // entered only when inTurn is true (:209) and which immediately calls
 // endTurn(). inTurn is set only by startTurnIfNeeded (:267), which every
 // content arm calls together with a transitionTo(thinking|responding) — so no
@@ -200,7 +200,7 @@ const (
 // an earlier turn or another conversation. Carried in the artefact so the
 // published evidence states it, rather than leaving it to the reader.
 const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly one site — " +
-	"cmd/pyry/interactive_turn_v2.go:216, inside the turnevent.TurnEnd arm, which is entered " +
+	"cmd/pyry/interactive_turn_v2.go:217, inside the turnevent.TurnEnd arm, which is entered " +
 	"only when inTurn is true (:209) and which immediately calls endTurn(). inTurn is set only " +
 	"by startTurnIfNeeded (:267), which every content arm calls together with a " +
 	"transitionTo(thinking|responding), so no idle can reach the wire without a preceding " +
@@ -210,9 +210,9 @@ const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly
 	"is ordered by receive time, so this is refuted by the record itself rather than assumed."
 
 // The runner path and its attribution status (AC4), taken deliberately on the
-// criterion's SECOND arm. selectInteractiveRunner (cmd/pyry/main.go:667) never
+// criterion's SECOND arm. selectInteractiveRunner (cmd/pyry/main.go:721) never
 // logs its choice, so the config value only echoes what the rig wrote. The one
-// non-authored artefact — the MCP-approve config main.go:795-801 writes iff
+// non-authored artefact — the MCP-approve config main.go:860-866 writes iff
 // InteractiveRunner == "stream-json" — is created by os.CreateTemp("",
 // "pyry-mcp-approve-*.json") (cmd/pyry/`writeMCPApproveConfig`) in a SHARED $TMPDIR
 // where any other stream-json pyry on the operator's machine also has one; its
@@ -224,11 +224,11 @@ const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly
 const (
 	bgIdleRunnerPath        = "stream-json"
 	bgIdleRunnerAttribution = "RIG-AUTHORED, no non-authored corroboration recorded: " +
-		"writeStreamInteractiveConfig (interactive_stream_liveness_test.go:155) wrote " +
+		"writeStreamInteractiveConfig (interactive_stream_liveness_test.go:156) wrote " +
 		`{"interactive_runner":"stream-json"} into <home>/.pyry/config.json before the daemon ` +
-		"spawned. selectInteractiveRunner (cmd/pyry/main.go:667) never logs its choice, so " +
+		"spawned. selectInteractiveRunner (cmd/pyry/main.go:721) never logs its choice, so " +
 		"citing the config value merely echoes the rig. The daemon starting at all is NOT " +
-		"corroboration either: an unrecognised value fails fast (main.go:675, no silent PTY " +
+		"corroboration either: an unrecognised value fails fast (main.go:729, no silent PTY " +
 		"fallback), but both \"pty\" and \"stream-json\" start fine, so a clean start proves " +
 		"only that the value parsed."
 )
@@ -392,7 +392,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 	// that race, and it prevents a goroutine leak past test end. If the
 	// rendezvous never fires, this goroutine stays parked until holdProbeFIFO's
 	// cleanup opens the read end non-blockingly to release its own parked
-	// writer, which CLOSES rendezvous (background_trigger_probe_test.go:684,
+	// writer, which CLOSES rendezvous (background_trigger_probe_test.go:738,
 	// closed rather than sent on, so a second receiver is safe); the send then
 	// lands in the buffer with no reader left and the goroutine retires.
 	rendezvousAt := make(chan time.Time, 1)
@@ -462,7 +462,7 @@ func bgIdlePrompt(fifoPath string, nonce int64) string {
 // conditions and records every one it decrypts.
 //
 // The decrypt discipline is transcribed from drainForResponding
-// (interactive_stream_running_turn_test.go:242-290) and is load-bearing: the
+// (interactive_stream_running_turn_test.go:243-291) and is load-bearing: the
 // receive nonce is sequential, so EVERY noise_msg must be decrypted in receive
 // order or the CipherState desyncs, while a non-noise_msg control frame must be
 // skipped WITHOUT decrypting so it does not advance the nonce. Getting that
@@ -546,7 +546,7 @@ func bgIdleRecordTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherSta
 // a default that records the envelope type and its conversation id and stops. A
 // field that is not extracted here can never reach the published artefact —
 // which is the property that keeps unrecognized_message.Raw (claude's verbatim
-// offending message, protocol/interactive.go:118-145) and assistant_delta.text
+// offending message, protocol/interactive.go:119-146) and assistant_delta.text
 // out of a public issue by construction rather than by care.
 func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 	f := bgIdleFrame{Type: env.Type}

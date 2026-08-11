@@ -33,7 +33,7 @@ lcState = stateActive
 _ = entry.LifecycleState // intentionally ignored
 ```
 
-The two-line change is the entire production-code fix (`internal/sessions/pool.go:275`).
+The two-line change is the entire production-code fix (`internal/sessions/pool.go:283`).
 
 ## Rationale
 

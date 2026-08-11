@@ -20,8 +20,8 @@ package realclaude
 // refuses that collapse.
 //
 //  1. THE ATTRIBUTION IS ASYMMETRIC AND IS THE ONLY THING THAT CAN PROVE YES.
-//     ptyrunner's pinned teardown order (runner.go:479-485) writes the trailer
-//     before the reap defer (:398) SIGKILLs claude's descendant groups, so a
+//     ptyrunner's pinned teardown order (runner.go:526-532) writes the trailer
+//     before the reap defer (:406) SIGKILLs claude's descendant groups, so a
 //     group named in pyry's reap log was alive strictly after the trailer was
 //     written. A HIT PROVES ALIVENESS; A MISS PROVES NOTHING. #1270 owns deciding
 //     when a hit is admissible; this file owns never inverting that asymmetry.
@@ -53,10 +53,10 @@ package realclaude
 //
 //   - the trailer's and the attribution's admissibility enter as #1270's two
 //     results WHOLE, because both are documented trap-free by construction
-//     (trailer_admissibility_test.go:290-305, :345-348);
+//     (trailer_admissibility_test.go:298-313, :345-348);
 //   - the trailer's lateness enters as the BoundFrom discriminator alone and
 //     never as a trailObservation, which EMBEDS trailScanResult
-//     (result_trailer_observation_test.go:141-142) and would therefore promote
+//     (result_trailer_observation_test.go:142-143) and would therefore promote
 //     the trailer pointer straight back into reach. The dotted selector for that
 //     field is spelled nowhere in this file, in code OR in prose, so the census
 //     recipe — a fixed-string grep, which cannot tell a dereference from a
@@ -149,7 +149,7 @@ const (
 	// to decay into.
 	trailOutcomeNoRowMatched = "run-scan-matched-no-row"
 	// trailOutcomeVoidBudgetFired: the trailer reports a budget-fired run. The
-	// Terminate hook reaped INSIDE the hook (runner.go:492-503), BEFORE the
+	// Terminate hook reaped INSIDE the hook (runner.go:539-550), BEFORE the
 	// trailer, so no attribution on that path could prove aliveness-at-trailer,
 	// at either instant. Not a negative: reporting a scan-side answer here would
 	// imply a better instrument could have proved something.
@@ -172,7 +172,7 @@ const (
 	trailOutcomeVoidArgvScanErrored = "run-void-argv-scan-errored"
 	// trailOutcomeVoidNoRowsParsed: the scan ran and parsed no well-formed rows
 	// at all. Distinct from the value above AND from trailOutcomeNoRowMatched:
-	// pinScanArgv returns the ZERO pinScan on error (process_pin_liveness_test.go:191-196),
+	// pinScanArgv returns the ZERO pinScan on error (process_pin_liveness_test.go:192-197),
 	// so RowsScanned == 0 cannot by itself separate "the scan never ran" from
 	// "the scan ran and parsed nothing", and all three would otherwise read as an
 	// empty match set.
@@ -203,7 +203,7 @@ const (
 	// WAS measured and whose premise failed — and they are separated in the published
 	// record by the RouteReason field rather than by a value each, because the route
 	// returns one value for both and only its reason tells them apart. A reason is a
-	// field for exactly that purpose (trail_sighting_liveness_test.go:171-177), so
+	// field for exactly that purpose (trail_sighting_liveness_test.go:172-178), so
 	// the separation lives in the published bytes rather than in the Detail's prose.
 	//
 	// Deliberately NOT trailOutcomeVoidNoTrailer. A trailer WAS written on this
@@ -257,9 +257,17 @@ const (
 	// trailOutcomeVoidSightingRouteNotStaged: the gate read trailGateAbsentOwesNone
 	// and #1440's pinned-pid sighting route was NEVER STAGED — the ordering input
 	// carries "", the zero of trailOrderResult and not a member of its own closed
-	// space (trail_ordering_premises_test.go:158-161). No instrument was there to
-	// answer, which is the shape EVERY run reaching this arm produces today: no
-	// shipped gather fills either of the route's two inputs.
+	// space (trail_ordering_premises_test.go:159-162). No instrument was there to
+	// answer, which is the shape EVERY run reaching this arm produces today.
+	//
+	// SINCE #1458 THAT IS TRUE OF THE ORDERING INPUT ALONE. The finding gather now
+	// carries a PinnedPid its caller stages, so what a live run brings here is a
+	// HALF-STAGED pair — pin filled, ordering unfilled — rather than an empty one,
+	// and this value is still the answer: the arm's guard reads the ordering and
+	// answers before the route is consulted, so a route missing the half it cannot
+	// run without was never staged. No shipped gather fills the ordering (#1457 is
+	// the ticket that stages it), and until it does, every run reaching this arm
+	// lands here.
 	//
 	// THE ABSENCE OF AN INSTRUMENT, never a reading one produced. Still a void, for
 	// its neighbours' reason — nothing was certified, so there is no "when the turn
@@ -277,10 +285,10 @@ const (
 	// them.
 	//
 	// Deliberately NOT trailOutcomeOutOfContract, for the reason #1417 exists. An
-	// unfilled input on a gather that never stages it is a routine reading rather
-	// than the caller's bug that value names, and no contract check fires on it: the
-	// no-C10 note inside trailClassifyRun carries that argument in full, and this
-	// value is what lets the note stay true.
+	// input no shipped gather stages — since #1458 the ordering rather than both —
+	// is a routine reading rather than the caller's bug that value names, and no
+	// contract check fires on it: the no-C10 note inside trailClassifyRun carries
+	// that argument in full, and this value is what lets the note stay true.
 	//
 	// Deliberately NOT a `run-`-prefixed transform of any value in the sighting
 	// space, for the containment reason trailOutcomeAliveAtSightingByOrdering's doc
@@ -291,7 +299,7 @@ const (
 	// and the observed runner path owes none, so the gate read
 	// trailGatePresentOwesNone. A READING of the trailer rather than a defect in
 	// it — streamrunner.Run passes claude's bytes through unchanged
-	// (internal/agentrun/streamrunner/runner.go:177-179), so the line is genuinely
+	// (internal/agentrun/streamrunner/runner.go:178-180), so the line is genuinely
 	// what the run produced — and still a void, because nothing was certified:
 	// with no certified terminal reason there is no "when the turn was declared
 	// finished" instant for an aliveness-at-declared-finish claim to be about.
@@ -435,7 +443,7 @@ type trailRunReadings struct {
 	ClaudeState string
 	// Ordering is #1439's certified-ordering result, taken WHOLE for the reason
 	// Gate is: it is documented trap-free by construction
-	// (trail_ordering_premises_test.go:154-157), and the predicate that consumes
+	// (trail_ordering_premises_test.go:155-158), and the predicate that consumes
 	// it reads ordering.Value and nothing else. Its zero Value is "" — not a
 	// member of its own space, and deliberately NOT a contract violation here; see
 	// the note above C7.
@@ -445,7 +453,7 @@ type trailRunReadings struct {
 	// be folded into it: Liveness is the argv scan's per-pid set, it feeds
 	// tdnVerdictSummary into the published record and step 6's instrument-failure
 	// void, and it goes blind once claude exits and the group re-parents to init
-	// (process_pin_liveness_test.go:268-271). A pinned pid landing in either would
+	// (process_pin_liveness_test.go:276-279). A pinned pid landing in either would
 	// change answers on runs that have nothing to do with this route.
 	//
 	// Taken WHOLE for the opposite reason to Ordering's: its Detail, StateColumn
@@ -469,7 +477,7 @@ type trailRunReadings struct {
 // StateColumn or its ToolStderr, or the sighting result's Detail — that last one
 // is swept at its own producer and is a budget and a duplication risk rather than
 // a leak. That is the rule most easily broken by copying
-// tdnDecideAfter, which does quote out.Detail (teardown_liveness_probe_test.go:678)
+// tdnDecideAfter, which does quote out.Detail (teardown_liveness_probe_test.go:732)
 // — legitimately, because its record is not this one.
 // TestTrailRunOutcomeCarriesNoCapturedBytes is the enforcing test, and it is why
 // the needle goes into four inputs rather than one.
@@ -504,7 +512,7 @@ type trailRunOutcome struct {
 	// field for exactly this — "a FIELD on the record rather than prose in the
 	// Detail, in trailGateResult's Value+Reason+Detail shape, so a consumer tells an
 	// exited-but-not-yet-reaped from a no-such-process, and either from an instrument
-	// failure, WITHOUT PARSING PROSE" (trail_sighting_liveness_test.go:171-177) — and
+	// failure, WITHOUT PARSING PROSE" (trail_sighting_liveness_test.go:172-178) — and
 	// one layer up the need is the same one: trailOutcomeVoidPathOwesNoReason is
 	// reached both by a pid read that did not answer and by a MEASURED ordering whose
 	// premise failed, and the route returns one value for both. Without this field
@@ -617,7 +625,7 @@ func trailIsBoundFrom(v string) bool {
 // # Why the proof outranks the pyry-exit void, against the neighbouring rig
 //
 // tdnDecideAfter's rig skips the run when pyry misses its exit grace
-// (teardown_liveness_probe_test.go:430-437, "any after-reading would be about a
+// (teardown_liveness_probe_test.go:477-484, "any after-reading would be about a
 // live pyry") — and it is right to, because ITS verdict rests on the
 // after-snapshot. This classifier's proof does not: it rests on an ordering
 // argument internal to the run's own logs, that the trailer was written and then
@@ -757,7 +765,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	}
 
 	// C9. pinScanArgv returns the ZERO pinScan on error
-	// (process_pin_liveness_test.go:191-196), so an errored scan reporting counts
+	// (process_pin_liveness_test.go:192-197), so an errored scan reporting counts
 	// is a hand-built inconsistency — the one that would escape the safe
 	// void-to-void landing an unfilled ArgvScanErrored produces.
 	if readings.ArgvScanErrored && (readings.MatchCount != 0 || readings.RowsScanned != 0) {
@@ -774,26 +782,38 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	// PinnedPid the same way — or Ordering against trailIsOrderValue — reads as
 	// the obvious next line.
 	//
-	// It would answer run-out-of-contract ON EVERY RUN THAT EXISTS TODAY. No
-	// shipped gather stages either input: trailRigGather assembles neither, and
-	// finGatherInputs carries no field either one could arrive on. The
-	// runner-path premise this paragraph used to argue from is gone — #1452 gave
-	// the finding gather a RunnerPath its caller fills — but the conclusion never
-	// rested on that field and is unchanged. A zero pinStateOutcome carries
-	// Verdict "" and a zero trailOrderResult carries Value "", neither a member of
-	// its own closed space — and an UNSTAGED PAIR IS A ROUTINE READING, not a
-	// caller's bug. Filing it as one is the collapse #1417 exists to prevent, one
-	// value along.
+	// OVER Ordering it would answer run-out-of-contract ON EVERY RUN THAT EXISTS
+	// TODAY. No shipped gather stages it: trailRigGather assembles neither input,
+	// and finGatherInputs still carries no field the ordering could arrive on. A
+	// zero trailOrderResult carries Value "", not a member of its own closed space
+	// — and an UNSTAGED INPUT IS A ROUTINE READING, not a caller's bug. Filing it
+	// as one is the collapse #1417 exists to prevent, one value along.
 	//
-	// Nothing is lost on the PIN side, because the consumed predicate already decides
-	// it safely and says so: trailSightingReasonPidReadFailed's own doc names "the
-	// zero \"\" of an unfilled pinStateOutcome" among the shapes it answers for, so
-	// an unfilled pin has an argued home INSIDE the route and no guard is owed here.
+	// ON THE PIN SIDE THE PREMISE HAS MOVED AND THE CONCLUSION HAS NOT. #1458 gave
+	// the finding gather a PinnedPid its caller stages, so an unfilled pin is no
+	// longer what every run produces and the every-run argument is no longer
+	// available on that side — the same way #1452 took the runner-path premise this
+	// paragraph once argued from. It was never what the conclusion rested on. The
+	// consumed predicate already decides the pin safely and says so:
+	// trailSightingReasonPidReadFailed's own doc names "the zero \"\" of an unfilled
+	// pinStateOutcome" among the shapes it answers for, so an unfilled pin has an
+	// argued home INSIDE the route and no guard is owed here. What a C10 over the pin
+	// would now reject is narrower and worse: it would fire on the EMPTY-SET case the
+	// caller answers with the zero — a run whose pin scan found nothing to read —
+	// filing that as the caller's bug when the route already has a reason for it.
+	//
+	// The consequence is stated plainly rather than left implicit: PinnedPid is THE
+	// ONE CLASSIFIER INPUT WITH NO CONTRACT CHECK OVER IT, so nothing downstream
+	// catches a reading that arrives malformed. What stands in place of a check is
+	// the producer rule on finGatherInputs.PinnedPid — pinReadState and nothing else
+	// — and the two offline tests that pin the pass-through's shape,
+	// TestFinGatherPinnedPidDoesNotReachTheLiveness and
+	// TestFinGatherHalfStagedRouteMovesNoOutcome.
 	//
 	// The ORDERING side is not safe, and since #1448 it is decided in the step-1 arm
 	// rather than here. trailEstablishSighting answers on a non-certified ordering
 	// REGARDLESS of the verdict, so an unfilled pair reaches that function's own
-	// first guard (trail_sighting_liveness_test.go:358-367) and comes back under
+	// first guard (trail_sighting_liveness_test.go:405-414) and comes back under
 	// trailSightingReasonOrderingUncertified — a reason whose doc names only #1439's
 	// three trailOrderVoid* values. "" is not one of them, so a record published
 	// straight off that answer would claim a premise was MEASURED and failed on a run
@@ -827,7 +847,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// certifies the instant the rest of the decision is about.
 	case trailGateBudgetFired:
 		return decide(trailOutcomeVoidBudgetFired, "the trailer certifies terminal reason %q, so "+
-			"the Terminate hook reaped INSIDE the hook (runner.go:492-503) BEFORE the trailer was "+
+			"the Terminate hook reaped INSIDE the hook (runner.go:539-550) BEFORE the trailer was "+
 			"written and no attribution on that path could prove aliveness-at-trailer, at either "+
 			"instant. A STRUCTURAL void, not a negative: reporting a scan-side answer here would "+
 			"imply a better instrument could have proved something", readings.Gate.Reason)
@@ -858,7 +878,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// it is made BEFORE the route is consulted rather than by re-reading what the
 		// route returned — re-deriving a premise the predicate did not measure would
 		// be reading the ordering result as something other than whole
-		// (trail_sighting_liveness_test.go:305-316). An unstaged ordering is not an
+		// (trail_sighting_liveness_test.go:313-324). An unstaged ordering is not an
 		// uncertified premise, and the route cannot say so: its own first guard fires
 		// on anything that is not trailOrderCertified and answers under a reason whose
 		// doc names only #1439's three trailOrderVoid* values, so "" — the zero of
@@ -872,7 +892,12 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// Testing both fields with && would be worse than redundant: on a half-staged
 		// pair — ordering unfilled, pin filled — an && guard falls through and
 		// publishes the exact false claim this guard exists to remove, one shape
-		// along.
+		// along. SINCE #1458 THAT PAIR IS NOT A SHAPE REASONED ABOUT. It is what
+		// every live run through finGatherReadings produces, because that gather
+		// stages the pin and #1457 has not yet staged the ordering — so this guard is
+		// doing live work rather than standing by for a hypothetical.
+		// TestFinGatherHalfStagedRouteMovesNoOutcome drives the pair through the
+		// shipped gather and this classifier, which is what keeps it that way.
 		//
 		// Narrower than !trailIsOrderValue(readings.Ordering.Value) on purpose. "" is
 		// what an UNFILLED field carries and is the only shape any producer emits; a
@@ -1016,7 +1041,7 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		out.Route = trailRouteReapLog
 		return decide(trailOutcomeRunningAtTrailer, "pyry's own reap log names the held group on "+
 			"exactly one anchored line under certified terminal reason %q, and emitter.Close() "+
-			"wrote the trailer (runner.go:479-485) before the reap defer (:398) SIGKILLed it. The "+
+			"wrote the trailer (runner.go:526-532) before the reap defer (:398) SIGKILLed it. The "+
 			"group was alive strictly AFTER the trailer was written, and therefore alive when it "+
 			"was written. The point-in-time readings recorded alongside this answer are "+
 			"corroboration and are EXPECTED to be late, so they do not move it",
@@ -1144,12 +1169,20 @@ func trailRunProofReadings() trailRunReadings {
 //
 // SINCE #1448 THIS IS THE NEVER-STAGED FIXTURE, and the name it inherited from
 // #1417 no longer says the whole of what it is. Ordering and PinnedPid are both
-// left ZERO, which is not an omission but the shape every shipped gather produces:
-// neither field is filled anywhere, so the route is not merely unhelpful here, it
+// left ZERO, which is not an omission: the route is not merely unhelpful here, it
 // is absent. It therefore reaches trailOutcomeVoidSightingRouteNotStaged rather
 // than the fall-through beside it, and the two fixtures below are what drive that
 // fall-through. A row here retargeted at either of them is a mistake rather than a
 // refinement.
+//
+// SINCE #1458 IT IS NO LONGER THE SHAPE A LIVE RUN PRODUCES, and it is kept as it
+// is deliberately. The finding gather stages a PinnedPid its caller fills, so a
+// live run reaches this value HALF-STAGED — pin filled, ordering unfilled — and
+// reaches it for the same reason, since the arm's guard reads the ordering alone.
+// What this fixture pins is that an absent ROUTE is a reading rather than a
+// caller's bug; the half-staged pair is driven through the shipped gather by
+// TestFinGatherHalfStagedRouteMovesNoOutcome, which is where it belongs, because
+// only a gather can show what a gather produces.
 //
 // Admit is left ZERO deliberately, and that is not a shortcut: it is exactly what
 // a correct consumer leaves behind when the gate certified no reason to hand the
@@ -1182,8 +1215,9 @@ func trailRunAbsentOwesNoneReadings() trailRunReadings {
 //
 // Admit stays ZERO, inherited from the fixture this builds on and required by C4
 // for the same reason: a gate certifying nothing was owed no call to the
-// attribution predicate. No shipped gather stages either field, so this shape is a
-// fixture rather than a reading any run produces today — which is the whole reason
+// attribution predicate. No shipped gather stages the ORDERING — #1458 gave the
+// finding gather the pin half and #1457 owes the other — so this shape is still a
+// fixture rather than a reading any run produces today, which is the whole reason
 // the arm is safe to land alone.
 //
 // A function rather than a package-level var, for trailRunWellFormed()'s reason:
@@ -1492,13 +1526,16 @@ func trailRunCases() []trailRunCase {
 			want: trailOutcomeVoidLivenessInstrument,
 		},
 		{
-			// #1417's arm with #1448's answer, and the ONLY shape any shipped gather
-			// produces: both of the route's inputs are unfilled, so the guard answers
-			// before the route is consulted. The row is what proves an unstaged pair
-			// is a reading rather than a caller's bug — it must reach a named void and
-			// never trailOutcomeOutOfContract — and what proves it never reports a
-			// premise as having been measured and failed, since its wantReason is ""
-			// and the biconditional below forbids a reason beside an unnamed route.
+			// #1417's arm with #1448's answer: both of the route's inputs are
+			// unfilled, so the guard answers before the route is consulted. The row is
+			// what proves an unstaged pair is a reading rather than a caller's bug —
+			// it must reach a named void and never trailOutcomeOutOfContract — and
+			// what proves it never reports a premise as having been measured and
+			// failed, since its wantReason is "" and the biconditional below forbids a
+			// reason beside an unnamed route. Since #1458 this pair is no longer the
+			// only shape a shipped gather produces — the finding gather stages the pin
+			// — and the row deliberately keeps the empty pair, which is the one that
+			// separates an absent route from a staged one.
 			name: "an unstaged sighting route is the absence of an instrument, not a reading it produced",
 			in:   trailRunAbsentOwesNoneReadings(),
 			want: trailOutcomeVoidSightingRouteNotStaged,
@@ -1929,10 +1966,12 @@ func TestTrailRunComposesWithGateCases(t *testing.T) {
 // tdnRunnerFromArgv reading that reduces to streamrunner, the real gate, and the
 // real classifier — reaching trailGateAbsentOwesNone and then, since #1448,
 // trailOutcomeVoidSightingRouteNotStaged: the fixture leaves the sighting route's
-// two inputs unstaged, which is what every shipped gather produces, so the arm
-// answers before consulting the route. The FIXTURE is unchanged and deliberately
-// so — this test's subject is the GATE reading, which #1448 did not touch, and
-// swapping in a staged pair would make it a test of the route instead.
+// two inputs unstaged, so the arm answers before consulting the route. Since #1458
+// that pair is no longer what a live run produces — the finding gather stages the
+// pin half — but the arm's answer is unchanged, because the guard reads the
+// ordering alone. The FIXTURE is unchanged and deliberately so — this test's
+// subject is the GATE reading, which neither #1448 nor #1458 touched, and swapping
+// in a staged pair would make it a test of the route instead.
 //
 // # Why it is not a row of trailGateCases()
 //
@@ -2085,7 +2124,7 @@ func TestTrailRunComposesUnderAnAbsentReasonOnAPathThatOwesNone(t *testing.T) {
 //
 // # Two shapes are refused
 //
-// It must NOT hand the classifier a proof. C4 (:456-464) and C5 (:466-476) reject a
+// It must NOT hand the classifier a proof. C4 (:464-472) and C5 (:474-484) reject a
 // non-certifying gate value arriving with any admissibility value, upstream of step
 // 1, so a test pairing trailAdmitProof with the new value would answer at the
 // contract block and say nothing about the arm — which is why
@@ -2209,7 +2248,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:2577) and reusing the shipped trailNeedle.
+// (trailer_admissibility_test.go:2935) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, a pinStateOutcome's Detail and ToolStderr, and since
@@ -2234,19 +2273,30 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // input left the SUITE GREEN for PinnedPid.ToolStderr — the field the trust boundary
 // runs through — and green for PinnedPid.Detail. Only Ordering.Detail reddened, and
 // not on the needle: it overruns trailDetail's cap, so the truncation-marker check at
-// TestTrailClassifyRun:1486-1489 caught it. A BUDGET kill, not a leak kill, and
+// TestTrailClassifyRun:1520-1523 caught it. A BUDGET kill, not a leak kill, and
 // different fabric — the sweep below is this arm's only check that fails on the needle
 // itself. Each block premise-asserts first, so none passes on garbage.
 //
 // # What the two new-input blocks ARE, stated rather than overclaimed
 //
-// THERE IS NO LIVE LEAK ROUTE THROUGH THE NEW INPUTS TODAY, on either outcome. The
-// arm reads sighting.Value and sighting.Reason and nothing else, and trailClassifyRun
-// renders Liveness through tdnVerdictSummary but never renders PinnedPid at all. The
-// plant is a discipline against a FUTURE edit that interpolates pin.Detail or
-// pin.ToolStderr for a better failure message — the natural mistake, and the same
-// framing #1440 used for its own trailOrderResult plant. It is not a claim that a
-// leak exists to be caught.
+// NO LIVE LEAK ROUTE REACHES A PUBLISHED RECORD THROUGH THE NEW INPUTS, on either
+// outcome. The arm reads sighting.Value and sighting.Reason and nothing else, and
+// trailClassifyRun renders Liveness through tdnVerdictSummary but never renders
+// PinnedPid at all. The plant is a discipline against a FUTURE edit that
+// interpolates pin.Detail or pin.ToolStderr for a better failure message — the
+// natural mistake, and the same framing #1440 used for its own trailOrderResult
+// plant.
+//
+// WHAT #1458 MOVED IS THE CLAIM'S BASIS AND NOT THE CLAIM. Until that ticket the
+// sentence was free: no shipped gather filled either input, so no live ps bytes
+// could reach them whatever this classifier did. Now the finding gather carries a
+// PinnedPid its caller fills from pinReadState, whose instrument-failed arm puts
+// RAW ps STDERR into ToolStderr and folds it into Detail — so on a live run those
+// bytes genuinely enter trailRunReadings, and the only thing standing between them
+// and a published record is the non-rendering above. THE ROUTE IS OPEN AND IS NOT
+// YET SWEPT AT THE GATHER TIER, which is #1459's: until it lands, this block is the
+// whole of the coverage, one tier above where the channel opens. #1459 re-points
+// this paragraph once its own sweep exists.
 func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 	// The needle-planted per-pid read both blocks use. Shared as a function rather
 	// than a value for trailRunWellFormed()'s reason.
@@ -2345,7 +2395,7 @@ func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 		// outcome. The ordering keeps its certified value here too, and that is
 		// what makes this the void the route REACHED rather than the void it was
 		// never consulted for: without a certified ordering trailEstablishSighting
-		// answers from its first guard (trail_sighting_liveness_test.go:358-367)
+		// answers from its first guard (trail_sighting_liveness_test.go:405-414)
 		// and never reads the pin at all, so the refusal has to come from the pid.
 		in.Ordering.Detail = "an ordering detail that also carries " + trailNeedle
 		in.PinnedPid.Detail = "a pinned-pid detail that also carries " + trailNeedle
@@ -2445,7 +2495,7 @@ func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 		// rather than a copy of it. There the classifier answered BEFORE any route
 		// ran, so no sighting Detail existed to leak from; here the route DID run and
 		// folded the verdict VERBATIM into its own Detail
-		// (trail_sighting_liveness_test.go:358-367), so this is the one arm where the
+		// (trail_sighting_liveness_test.go:405-414), so this is the one arm where the
 		// captured string is already sitting one dereference away. The ordering guard
 		// fires whatever the pin reads, so the arm is reachable carrying an arbitrary
 		// verdict string, and this plant is what reddens if a later edit interpolates

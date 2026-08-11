@@ -364,7 +364,7 @@ The wiring reuses the turn stream's follow-active machinery **wholesale** —
 `resolveTarget` + `turnbridge.NewTargetSubscriber`, which yield **raw** `tuidriver.Event`s
 (the modal-dropping mapper lives downstream in `turnbridge.Producer.drain`, which the modal
 stream does **not** use). So it is a *second, independent* `Session.Events()` subscription
-(blessed by tui-driver `events.go:159`) driven by a bespoke **mapper-free** drain loop, **not**
+(blessed by tui-driver `events.go:160`) driven by a bespoke **mapper-free** drain loop, **not**
 an `OnModal` callback on `turnbridge.Config` and **not** a second `turnbridge.Producer`. The
 paired screen is reached by type-asserting the follow-active host to a `cmd/pyry`-local
 `screenSnapshotter` interface (satisfied by `*supervisor.Supervisor`), keeping the shared

@@ -27,11 +27,11 @@ Transcript resolution rides two existing daemon functions; the live rung changes
 neither. They are the SSOT a future contributor should read before touching this
 setup:
 
-- `resolveClaudeSessionsDir(workdir)` (`cmd/pyry/main.go:114-131`) — computes
+- `resolveClaudeSessionsDir(workdir)` (`cmd/pyry/main.go:115-132`) — computes
   `<HOME>/.claude/projects/encode(workdir)` from `-pyry-workdir` (an empty workdir
   resolves to the process cwd, matching claude). **Computed once at startup** and
   threaded to the relay.
-- `resolveLatestSessionJSONL(dir)` (`cmd/pyry/interactive_turn_stream_v2.go:98-155`)
+- `resolveLatestSessionJSONL(dir)` (`cmd/pyry/interactive_turn_stream_v2.go:98-156`)
   — scans `dir` for `<uuid>.jsonl` files and returns the **most-recently-modified**
   one plus its size as the tail start offset. Returns `no session jsonl found in
   <dir>` when the dir holds no matching file. The resolver is **conversation-
@@ -44,7 +44,7 @@ setup:
   dir doubles the dash (`/foo/.bar` → `-foo--bar`).
 
 In normal service-mode operation the relay wires the producer behind the gate
-`if bridge != nil && claudeSessionsDir != ""` (`cmd/pyry/relay.go:339`); an
+`if bridge != nil && claudeSessionsDir != ""` (`cmd/pyry/relay.go:386`); an
 unresolvable dir disables the stream (logged `interactive_turn_stream.no_sessions_dir`).
 So a real workdir plus a real claude is sufficient — no special harness path.
 
@@ -59,7 +59,7 @@ workspace or conversation:
 2. No real claude session ever ran in `/tmp`, so that dir is **empty**.
 3. `resolveLatestSessionJSONL` returns `no session jsonl found in ~/.claude/projects/-tmp`.
 4. The producer Warn-logs and retries every `subscribeRetryDelay`
-   (`internal/turnbridge/producer.go:182`) instead of opening its events stream:
+   (`internal/turnbridge/producer.go:183`) instead of opening its events stream:
 
    ```
    WARN turnbridge: resolve session jsonl, retrying  error="no session jsonl found in ~/.claude/projects/-tmp"
@@ -103,7 +103,7 @@ Each step names the existing feature it leans on.
 4. **Start the daemon** with `-pyry-workdir=W` and `PYRY_MOBILE_V2=1` (plus the
    operator's normal relay flags). The producer then computes
    `claudeSessionsDir = ~/.claude/projects/encode(W)`, the gate
-   `bridge != nil && claudeSessionsDir != ""` fires (`cmd/pyry/relay.go:339`), and
+   `bridge != nil && claudeSessionsDir != ""` fires (`cmd/pyry/relay.go:386`), and
    the producer tails the resolved transcript.
 
 ## How the setup removes the retry loop — and how to confirm it
@@ -142,8 +142,8 @@ becomes permanent.
 - [`e2e-harness.md`](e2e-harness.md) and [`e2e-realclaude.md`](e2e-realclaude.md) —
   the automated Go suites this manual runbook is the sibling of (fakeclaude harness
   and the real-`claude` trust-boundary suite, respectively).
-- `resolveClaudeSessionsDir` (`cmd/pyry/main.go:114-131`) and
-  `resolveLatestSessionJSONL` (`cmd/pyry/interactive_turn_stream_v2.go:98-155`) —
+- `resolveClaudeSessionsDir` (`cmd/pyry/main.go:115-132`) and
+  `resolveLatestSessionJSONL` (`cmd/pyry/interactive_turn_stream_v2.go:98-156`) —
   the two resolution functions; the live rung resolves a real transcript on the
   **same** machinery #642 aligns against, changing only the transcript's author.
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § Phase 2

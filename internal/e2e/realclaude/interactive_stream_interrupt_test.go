@@ -13,7 +13,7 @@ package realclaude
 // Why this gate exists: the production interrupt path is shipped and unit-tested
 // independently — the streamsup.Runner.Interrupt() primitive (#1120), per-conversation
 // routing (activeInterrupter → resolveBoundRunner, #1121), and the parser's
-// error_during_execution → cancelled classification (#1120, parser.go:154-178) — but
+// error_during_execution → cancelled classification (#1120, parser.go:155-179) — but
 // whether an interrupt envelope actually stops a REAL claude turn mid-stream, with the
 // parser classifying real claude's interrupt-terminated result as cancelled, was
 // unproven live. This is the recurring fake-green/real-red risk (#949) applied to the
@@ -134,7 +134,7 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 // as drainForResponding, retargeted from turn_state{responding} to turn_end.
 //
 // The StopReason check is the vacuous-pass guard (mirrors the fakeclaude analog
-// relay_v2_stream_interrupt_test.go:288-296): the FIRST terminal event of the running
+// relay_v2_stream_interrupt_test.go:296-304): the FIRST terminal event of the running
 // turn must be cancelled, not a spontaneous natural end. A running-turn loop that
 // completes naturally at ~40s reports "end_turn"; only the interrupt's
 // error_during_execution path reports "cancelled". A non-cancelled first turn_end →

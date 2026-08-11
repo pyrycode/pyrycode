@@ -129,7 +129,7 @@ var denialKeywords = []string{
 // failure message can quote the search width.
 //
 // JSON unmarshal errors skip the line silently (mirroring the existing
-// bashInvokedInRaw loop's selfcheck.go:283 policy).
+// bashInvokedInRaw loop's selfcheck.go:291 policy).
 func assistantTextRefusalHit(events []JSONLEntry) (bool, int) {
 	assistantCount := 0
 	for _, e := range events {
@@ -194,7 +194,7 @@ func structuredDenialHit(stdout []byte) (bool, int) {
 	return false, lines
 }
 
-// bashInvokedInRaw mirrors internal/agentrun/selfcheck/selfcheck.go:284
+// bashInvokedInRaw mirrors internal/agentrun/selfcheck/selfcheck.go:292
 // exactly. If selfcheck's shape changes (e.g. claude renames `tool_use`
 // → `tool_invocation`), both must move in lockstep.
 func bashInvokedInRaw(raw json.RawMessage) (bool, error) {

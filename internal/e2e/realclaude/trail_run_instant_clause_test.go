@@ -85,7 +85,7 @@ func trailRunCertifiesNothingArms() []string {
 //
 // # Why the check is CONDITIONAL where #1440's is unconditional
 //
-// trail_sighting_liveness_test.go:579-588 requires trailSightingInstantClause on
+// trail_sighting_liveness_test.go:626-635 requires trailSightingInstantClause on
 // EVERY row, and is right to: every arm of that one predicate is about the sighting
 // instant, so the clause is universal there. Here it is six outcomes out of
 // sixteen, so an unconditional per-row check would redden the other ten.
@@ -159,7 +159,7 @@ func TestTrailRunCertifiesNothingArmsNameTheInstant(t *testing.T) {
 // sighting-instant claim survives there (#1440's trailEstablishSighting,
 // `trailEstablishSighting`). The budget-fired arm argues from the
 // opposite premise: its gate CERTIFIES max_turns, and the Terminate hook reaped
-// INSIDE the hook (runner.go:492-503) BEFORE the trailer was written. The reap
+// INSIDE the hook (runner.go:539-550) BEFORE the trailer was written. The reap
 // provably precedes the trailer, so NEITHER instant can be proved from that path —
 // the declared-finish one and the sighting one alike. The phrase is deliberately
 // unqualified there, which is why qualifying it would be a regression rather than
@@ -176,7 +176,7 @@ func TestTrailRunCertifiesNothingArmsNameTheInstant(t *testing.T) {
 // occurrences as the sweep spells.
 //
 // It deliberately asserts NO count of "aliveness-at-declared-finish". A number kept
-// by hand beside a set drifts — trailer_admissibility_test.go:1186-1192 is this
+// by hand beside a set drifts — trailer_admissibility_test.go:1251-1257 is this
 // family's own record of a shipped comment saying twenty-nine while the map already
 // held thirty-five.
 func TestTrailRunBareAlivenessAtTrailerIsBudgetFiredOnly(t *testing.T) {

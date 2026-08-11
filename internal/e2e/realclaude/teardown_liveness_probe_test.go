@@ -47,8 +47,8 @@ package realclaude
 // ESRCH BEFORE the append — membership in that list proves kill(2) succeeded.
 //
 // RUNNER-INDEPENDENCE IS AN ARGUMENT FROM THE CODE, NOT A MEASUREMENT.
-// ptyrunner (runner.go:314,398,499), streamrunner (runner.go:201) and streamsup
-// (runner.go:567) each route teardown through the identical
+// ptyrunner (runner.go:322,398,499), streamrunner (runner.go:201) and streamsup
+// (runner.go:614) each route teardown through the identical
 // agentrun.ReapDescendantGroups behind a reapDescendantGroupsFn seam. Strong
 // argument; still an argument. This rig measures ONE runner per run and the
 // record names which — from the process table (RunnerFromArgv), not from the
@@ -58,7 +58,7 @@ package realclaude
 //
 // runReachProbe registers its cleanups so the FIFO is released FIRST,
 // deliberately, "so pyry gets a real chance to finish the turn and exit on its
-// own" (background_reach_probe_test.go:355-356). Copying that structure here
+// own" (background_reach_probe_test.go:402-403). Copying that structure here
 // silently destroys the measurement: `cat` reaches EOF and exits by itself, and
 // the after-snapshot still reads "dead" — producing exactly the clean-but-
 // unearned reading (2) describes.
@@ -149,7 +149,7 @@ const (
 	// this run's content match.
 	tdnFIFOName = "teardown-hold"
 	// tdnClaudeNeedle pins claude's own row for the runner label. BOTH runners
-	// emit it (ptyrunner/runner.go:620, cmd/pyry/`buildStreamRunnerClaudeArgs`), which is
+	// emit it (ptyrunner/runner.go:667, cmd/pyry/`buildStreamRunnerClaudeArgs`), which is
 	// exactly why it identifies claude and never the runner — see
 	// tdnRunnerFromArgv.
 	//
@@ -167,12 +167,12 @@ var tdnEnvDelta = []string{"BASH_DEFAULT_TIMEOUT_MS=5000"}
 
 // tdnTeardownPath names the teardown this rig exercises, in the record, because
 // the reading is only about the path that produced it. `pyry agent-run` installs
-// signal.NotifyContext(SIGTERM, SIGINT) at cmd/pyry/agent_run.go:258, so a
+// signal.NotifyContext(SIGTERM, SIGINT) at cmd/pyry/agent_run.go:260, so a
 // SIGTERM to its PID cancels the run context and runs the real teardown, reap
 // included. A SIGTERM to its GROUP or a SIGKILL would measure a leak pyry's real
 // teardown never produces.
 const tdnTeardownPath = "operator SIGTERM to the `pyry agent-run` pid " +
-	"(signal.NotifyContext, cmd/pyry/agent_run.go:258) — not the budget-hit teardown " +
+	"(signal.NotifyContext, cmd/pyry/agent_run.go:260) — not the budget-hit teardown " +
 	"and not the watchdog teardown"
 
 // TestRealClaude_TeardownLiveness stages one live turn, waits for claude to
@@ -462,8 +462,8 @@ func tdnSeedNotes(rec *tdnRecord) {
 		"died alongside claude rather than by the reaper's hand")
 	rec.note("NOT measured by this run: the terminal/PTY path FOR TEARDOWN; " +
 		"internal/streamsup's daemon lifecycle; and runner-independence, which is an " +
-		"ARGUMENT from the shared reapDescendantGroupsFn seam (ptyrunner runner.go:314," +
-		"398,499; streamrunner runner.go:201; streamsup runner.go:567 all call " +
+		"ARGUMENT from the shared reapDescendantGroupsFn seam (ptyrunner runner.go:322," +
+		"398,499; streamrunner runner.go:201; streamsup runner.go:614 all call " +
 		"agentrun.ReapDescendantGroups) and NOT a measurement — this record's " +
 		"runner_from_argv names the one runner that actually ran")
 	rec.note("runner_from_env is DOCUMENTATION, not corroboration: it reads the effective " +
@@ -766,7 +766,7 @@ func tdnDecideAfter(rec *tdnRecord) {
 // path with nothing going red.
 //
 // The two discriminating markers, each emitted by exactly one argv builder:
-// --session-id by ptyrunner.buildArgs (runner.go:618) and --input-format by
+// --session-id by ptyrunner.buildArgs (runner.go:665) and --input-format by
 // buildStreamRunnerClaudeArgs. Both or neither is
 // indeterminate rather than a guess.
 func tdnRunnerFromArgv(claudeCommand string) string {
@@ -890,7 +890,7 @@ func tdnOrNone(s string) string {
 
 // tdnFixturePtyArgv and tdnFixtureStreamArgv are the two runners' real claude
 // command lines, built from their actual argv builders — ptyrunner.buildArgs
-// (runner.go:616-625) and buildStreamRunnerClaudeArgs (agent_run.go:364-378).
+// (runner.go:617-626) and buildStreamRunnerClaudeArgs (agent_run.go:411-425).
 // Both carry --append-system-prompt-file, which is precisely why that flag
 // cannot name a runner.
 const (

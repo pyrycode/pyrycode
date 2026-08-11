@@ -66,7 +66,7 @@ func (e *Emitter) Close() error
 | `model` | string | `Config.Model` (in ptyrunner: `cfg.Model`) |
 | `session_id` | string | `Config.SessionID` |
 
-Key order in the marshalled struct is fixed (pinned by `TestNew_InitLineKeyOrderMatchesFixture` byte-comparing against the captured fixture). The unexported `initLine` struct (`emitter.go:296-309`) declares the six fields in this order; reordering breaks byte-equivalence even though the resulting JSON stays semantically valid. Same convention `trailer` uses.
+Key order in the marshalled struct is fixed (pinned by `TestNew_InitLineKeyOrderMatchesFixture` byte-comparing against the captured fixture). The unexported `initLine` struct (`emitter.go:304-317`) declares the six fields in this order; reordering breaks byte-equivalence even though the resulting JSON stays semantically valid. Same convention `trailer` uses.
 
 The synthesis lives in `streamjson`, not `ptyrunner`, because the package already owns the wire shape for the trailer; siblings of one wire contract belong in one place. The init write happens synchronously inside `New` before any other goroutine can observe the Emitter, so the leading-line invariant is structural (no mu, no race).
 
