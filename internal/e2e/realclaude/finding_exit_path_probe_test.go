@@ -22,7 +22,7 @@ package realclaude
 //
 // ptyrunner.Run pins its teardown order in its own comment — emitter.Close() writes
 // the trailer, then cancel(), then the reap defer, then sess.Close()'s SIGTERM
-// (runner.go:526-532, the defer at :398). So at trailer time claude is alive and
+// (runner.go:479-485, the defer at :398). So at trailer time claude is alive and
 // unsignalled and any auto-backgrounded command is still a descendant of pyry.
 //
 // The instant of interest is that write, and it is NOT directly observable: a rig
@@ -67,7 +67,7 @@ package realclaude
 // t.Fatalf fires only on structural failure, and this file adds exactly ONE of its
 // own: os.MkdirTemp failing. Three abort paths are INHERITED from finLiveRunStage
 // and are not re-guarded here — pyry never spawning a claude child, no system/init
-// session id (finding_live_run_test.go:382-392), and ReadJSONL's fatal on a
+// session id (finding_live_run_test.go:335-345), and ReadJSONL's fatal on a
 // transcript it cannot open or parse (`ReadJSONL`, :165) reached through the
 // assembly. Every other failure mode is RECORDED, because a probe that turns an
 // unexpected reading into a red test loses the reading.
@@ -78,16 +78,16 @@ package realclaude
 // so `make e2e-realclaude` skips this probe by default and a skip is the NORMAL
 // outcome, saying nothing about pyry's behaviour.
 //
-// The reach probe's second gate (PYRY_USE_STREAMJSON=1, :332-349) is deliberately
+// The reach probe's second gate (PYRY_USE_STREAMJSON=1, :300-310) is deliberately
 // NOT copied, because neither of its two reasons transfers and copying it would skip
 // a run that would have been correct. (1) Its delta does not name the variable;
 // finLiveStageEnvDelta names PYRY_USE_STREAMJSON=0 EXPLICITLY
-// (finding_live_staging_test.go:180-185, :194-196) and spawnProbePyry appends the
+// (finding_live_staging_test.go:179-184, :194-196) and spawnProbePyry appends the
 // delta to os.Environ(), which os/exec resolves in favour of the later value — so
 // the delta wins over the operator's shell. (2) Its content-first root pinning keys
 // on --session-id, which only ptyrunner emits; this rig pins nothing content-first,
 // resolving claude through probeWaitForDirectChild's descendant walk. #1340 states
-// the same conclusion for the same reason (finding_live_run_test.go:248-252). The
+// the same conclusion for the same reason (finding_live_run_test.go:246-250). The
 // observed-path reading below is the real guard and is strictly stronger than an env
 // check.
 //
@@ -118,9 +118,9 @@ const finExitEnableEnv = "PYRY_PROBE_EXIT_PATH"
 // write end STILL HELD.
 //
 // IT IS THIS FILE'S OWN CONSTANT AND IT IS NOT probePyryExitGrace, which the two are
-// easy to conflate. That one (20s, background_trigger_probe_test.go:135) measures the
+// easy to conflate. That one (20s, background_trigger_probe_test.go:134) measures the
 // driver's defence-in-depth cleanup waiting AFTER THE FIFO RELEASE before SIGKILLing
-// (finding_live_run_test.go:506-538) — a mechanical unblock. This one measures a turn
+// (finding_live_run_test.go:459-491) — a mechanical unblock. This one measures a turn
 // COMPLETING with the hold still on: claude receiving the tool_result, producing a
 // final assistant message, emitter.Close() writing the trailer, teardown, exit. That
 // is a model round-trip plus teardown. Reusing the other constant would name one
@@ -241,7 +241,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// The unexited path simply leaves pinExitStatusUnknown in place, which is
 		// what keeps a non-exiting run from publishing exit_code: 0 — a value
 		// finRecordRun.ExitCode documents as A REAL SUCCESSFUL EXIT
-		// (finding_run_record_test.go:127-136).
+		// (finding_run_record_test.go:126-135).
 	}
 
 	// 3. The claude-still-alive corroboration. pinReadState's Verdict and NOTHING
@@ -294,7 +294,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// mutex, so this is non-destructive.
 		Stdout: h.Stdout,
 		// THE FIFO PATH ALONE. Not the driver's two-needle list
-		// (finding_live_run_test.go:462-467): that scan carries tdnClaudeNeedle
+		// (finding_live_run_test.go:415-420): that scan carries tdnClaudeNeedle
 		// because finLivePinReduce separates the populations afterwards, and the
 		// gather has NO SUCH REDUCTION — its argv leg calls
 		// pinScanArgv(in.Needles, nil) and fills MatchCount, RowsScanned and one
@@ -368,13 +368,13 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// not a cost.
 		Trailer: finTrailerBuild(outcome, sighting),
 		// The REAL delta. reachRunnerPathFromEnv reads ambient os.Getenv first and
-		// only then lets the delta override (background_reach_probe_test.go:1167-1173),
+		// only then lets the delta override (background_reach_probe_test.go:1102-1108),
 		// so an empty or partial delta would make this a reading of the operator's
 		// shell rather than of this run.
 		RunnerFromEnv: reachRunnerPathFromEnv(h.EnvDelta),
 		// WHOLE AND UNEXAMINED. An EMPTY value is ADMISSIBLE and is not a staging
 		// failure: tdnClaudeCommand returns "" when zero OR SEVERAL rows carry the
-		// claude needle (teardown_liveness_probe_test.go:618-620), so emptiness is
+		// claude needle (teardown_liveness_probe_test.go:571-573), so emptiness is
 		// ambiguity about which row was claude's, never a claim that the run took
 		// the other path. It reaches tdnRunnerFromArgv inside the builder and lands
 		// on the shipped indeterminate verdict — the THIRD ANSWER, never a
@@ -407,7 +407,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	//
 	// EVERY RENDERING BELOW IS FIELD-BY-FIELD OR json.Marshal. NEVER a %v verb applied
 	// to a struct or a slice: that is the content rule the writer's own note line
-	// states (finding_artifact_write_test.go:172-181), and it is the concrete
+	// states (finding_artifact_write_test.go:171-180), and it is the concrete
 	// mechanism by which a %v on h.Pin.Rows would print every matched row's full argv
 	// from a line that reads as ordinary debug formatting.
 	if blob, err := json.Marshal(h.Staging); err != nil {
@@ -479,13 +479,13 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 			"RUNNING — its own reap log names a pinned group, and emitter.Close() wrote the "+
 			"trailer before the reap defer reached that group, so it was alive when the trailer "+
 			"was written. THE EXIT CODE ALONE CANNOT SEPARATE A COMPLETED RUN FROM A "+
-			"BUDGET-TERMINATED ONE — both exit 0 (cmd/pyry/agent_run.go:279-285) — so the "+
+			"BUDGET-TERMINATED ONE — both exit 0 (cmd/pyry/agent_run.go:271-277) — so the "+
 			"discriminator used is the trailer's terminal_reason, read as %q.",
 			rec.Trailer.TerminalReason)
 	default:
 		t.Logf("#1337 FINDING: this run establishes no such claim — it reached %s, not %s. THE "+
 			"EXIT CODE ALONE CANNOT SEPARATE A COMPLETED RUN FROM A BUDGET-TERMINATED ONE — both "+
-			"exit 0 (cmd/pyry/agent_run.go:279-285) — so the discriminator used is the trailer's "+
+			"exit 0 (cmd/pyry/agent_run.go:271-277) — so the discriminator used is the trailer's "+
 			"terminal_reason, read as %q, over %d post-trailer match(es).",
 			outcome, trailOutcomeRunningAtTrailer, rec.Trailer.TerminalReason, readings.MatchCount)
 	}

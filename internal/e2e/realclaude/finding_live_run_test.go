@@ -55,14 +55,14 @@ package realclaude
 // `-ww` widens output without touching the environment.
 //
 // Matched rows and claude's argv cross the handle as the CAPPED reachProc.Command
-// the shipped matcher already produces (reachCapCommand, :946). Do NOT re-read an
+// the shipped matcher already produces (reachCapCommand, :945). Do NOT re-read an
 // uncapped argv to "repair" a truncation: the cap is the discipline, not a defect,
 // and finLivePinReduce's membership test reads the recorded needle list precisely
-// so a truncated row still counts (finding_live_pin_test.go:152-159).
+// so a truncated row still counts (finding_live_pin_test.go:151-158).
 //
 // This file writes no artifact, logs no captured string and formats no Detail at
 // all. The only Detail on the handle is the gate's, which quotes neither operand
-// of its identity arm by construction (finding_staging_gate_test.go:311). The two
+// of its identity arm by construction (finding_staging_gate_test.go:304). The two
 // t.Fatalf messages below carry a deadline and pyry's own stderr and nothing from
 // the process table; the one t.Logf names a duration.
 //
@@ -98,12 +98,12 @@ import (
 // It is returned as a POINTER, and that is not a style preference: the pyry-exit
 // kill cleanup is registered BEFORE pyry's pid exists (§ the cleanups, below), so
 // its closure must read a pid written later. That is the shape the reach
-// precedent uses with rec.PyryPID (background_reach_probe_test.go:411), and it is
+// precedent uses with rec.PyryPID (background_reach_probe_test.go:364), and it is
 // why the handle is allocated as the driver's first composite literal rather than
 // composed at the end.
 //
 // WHAT IT DELIBERATELY DOES NOT CARRY — #1343 left the question open and this is
-// the answer (finding_live_assembly_test.go:261-272): #1340 does not need more.
+// the answer (finding_live_assembly_test.go:259-264): #1340 does not need more.
 //
 //   - No finOutcomeStaging record. Its own doc says "INPUT ONLY — NEVER
 //     PUBLISHED"; the verdict crosses, the record does not.
@@ -111,7 +111,7 @@ import (
 //     assembly. finGatherInputs' eight fields need neither — six until #1452 added
 //     the runner-path reading and #1458 the pinned-pid read, both of which the
 //     consumer fills by reducing a field this handle already carries
-//     (Pin.ClaudeCommand and Pin.PGIDs).
+//     (Pin.ClaudeCommand and Pin.PGIDs respectively).
 //   - No staged command field. It is not lost, it is DERIVED:
 //     finLiveStageCommand(h.FIFOPath) is a pure function of a field the handle
 //     already carries, from the one source the driver itself used. A second copy
@@ -150,7 +150,7 @@ type finLiveRunHandle struct {
 	//
 	// Initialised to pinExitStatusUnknown rather
 	// than left at the int zero, because finRecordRun.ExitCode documents 0 as A REAL
-	// SUCCESSFUL EXIT (finding_run_record_test.go:127-136): an unwritten field would
+	// SUCCESSFUL EXIT (finding_run_record_test.go:126-135): an unwritten field would
 	// publish a clean exit for a run that never exited. Same zero-polarity doctrine
 	// trailRunReadings.PyryExited and finOutcomeReadyToClassify each argue for
 	// themselves. That makes the VALUE point the safe way; it does NOT make an
@@ -167,12 +167,12 @@ type finLiveRunHandle struct {
 	// driver returns. A []byte here would be a snapshot taken strictly too early,
 	// and #1337's finGatherInputs.Stderr would be filled from a buffer that had not
 	// yet seen the bytes it exists to read. The consumer calls .Bytes() — which
-	// returns a copy (background_trigger_probe_test.go:800-807) — at its own
+	// returns a copy (background_trigger_probe_test.go:736-742) — at its own
 	// reading point.
 	Stdout *probeSyncBuffer
 	Stderr *probeSyncBuffer
 	// FIFOPath is workdir/finLiveStageFIFOName, the join #1342 named at
-	// finding_live_staging_test.go:262-263. It is finGatherInputs.Needles' content
+	// finding_live_staging_test.go:261-262. It is finGatherInputs.Needles' content
 	// join, and the same string the pin was taken on.
 	FIFOPath string
 	// EnvDelta is exactly what was handed to spawnProbePyry, and ClaudeVersion is
@@ -192,14 +192,14 @@ type finLiveRunHandle struct {
 	// fill finGatherInputs.RunnerPath, at its own call site and never here. An EMPTY
 	// Pin.ClaudeCommand is
 	// AMBIGUITY, not a staging failure: tdnClaudeCommand returns "" when zero OR
-	// SEVERAL rows carry the claude needle (teardown_liveness_probe_test.go:618-620).
+	// SEVERAL rows carry the claude needle (teardown_liveness_probe_test.go:571-573).
 	// It is provenance, it is not one of finOutcomeStaging's eight fields, and it
 	// must not be gated on here or downstream.
 	Pin finLivePinReading
 	// Staging is finLiveAssembleStaging's return AS RETURNED — not re-derived, not
 	// renamed, not cross-checked into a new verdict, not inspected to choose a
 	// different code path. The assembly already guarantees that property in its own
-	// body (finding_live_assembly_test.go:230-233); this driver's obligation is to
+	// body (finding_live_assembly_test.go:228-231); this driver's obligation is to
 	// add nothing to it.
 	Staging finOutcomeResult
 }
@@ -218,7 +218,7 @@ type finLiveRunHandle struct {
 // merged with a package-level fallback. A nil delta must therefore read the
 // operator's ambient environment, which is precisely the failure
 // reachRunnerPathFromEnv's doc exists to make visible
-// (background_reach_probe_test.go:1156-1166); a silent default would hide it.
+// (background_reach_probe_test.go:1091-1101); a silent default would hide it.
 //
 // TWO DELTAS ARE SHIPPED, both in finding_live_staging_test.go:
 // finLiveStageEnvDelta() names PYRY_USE_STREAMJSON=0 (the ptyrunner default,
@@ -237,7 +237,7 @@ type finLiveRunHandle struct {
 // THE BODY IS STRAIGHT-LINE: no early return, no disposition of its own, no
 // failure arm. Every staging failure it could branch on already has a named home
 // in finOutcomeStagingGate, and the gate is RANK-ORDERED so the driver need not
-// decide which one to report (finding_staging_gate_test.go:298-413: identity
+// decide which one to report (finding_staging_gate_test.go:290-366: identity
 // outranks trigger outranks rendezvous outranks pin-scan-errored outranks count).
 // An early return on a rendezvous miss would save at most one deadline of wall
 // clock on a run that has already lost a live turn, at the cost of a path that
@@ -262,7 +262,7 @@ type finLiveRunHandle struct {
 //
 // ONE INHERITED ABORT PATH, named so a live caller knows about it:
 // finLiveAssembleStaging inherits ReadJSONL's t.Fatalf on a transcript it cannot
-// open or parse (`ReadJSONL`, :164). A MISSING file is not fatal —
+// open or parse (`ReadJSONL`, :163). A MISSING file is not fatal —
 // probeWaitForBashToolUse guards with os.Stat first
 // (`probeWaitForBashToolUse`), so it times out to "no Bash call
 // issued", the safe direction.
@@ -295,8 +295,8 @@ type finLiveRunHandle struct {
 // conclusion is what survives, not the mechanism. On the stream path --max-turns
 // is IN CLAUDE'S ARGV (buildStreamRunnerClaudeArgs);
 // on ptyrunner it is ABSENT from claude's argv (buildArgs,
-// ptyrunner/runner.go:617-626, whose own doc records the omission as deliberate
-// at :613-616) and the pyry-side budget Counter enforces the same 6 instead.
+// ptyrunner/runner.go:616-625, whose own doc records the omission as deliberate
+// at :612-615) and the pyry-side budget Counter enforces the same 6 instead.
 // Both bound the run at 6 turns, so the headroom conclusion holds on both; a
 // comment naming only one mechanism would be describing one caller's run.
 //
@@ -306,18 +306,18 @@ type finLiveRunHandle struct {
 //
 // On ptyrunner, two independent production reasons. (1) THE EXIT CODE CANNOT
 // SEPARATE THE OUTCOMES: the budget's Terminate hook cancels the run context
-// (ptyrunner/runner.go:503), Run returns nil on a cancelled run context
-// (:601-602) exactly as on normal completion (:607), and runAgentRun maps only a
+// (ptyrunner/runner.go:502), Run returns nil on a cancelled run context
+// (:600-601) exactly as on normal completion (:606), and runAgentRun maps only a
 // non-nil, non-context.Canceled error to a non-zero exit
-// (cmd/pyry/agent_run.go:279-285) — the discriminator is the trailer, not the exit
+// (cmd/pyry/agent_run.go:271-277) — the discriminator is the trailer, not the exit
 // status. (2) THE BUDGET PATH CANNOT ANSWER THE DOWNSTREAM QUESTION AT ALL: its
-// hook reaps INSIDE the hook, before the trailer is written (:493-504, the reap at
-// :500).
+// hook reaps INSIDE the hook, before the trailer is written (:492-503, the reap at
+// :499).
 //
 // NEITHER REASON TRANSFERS: the stream path has no budget hook at all. Its bound
 // is claude's own --max-turns, so claude emits its `result` and exits and that
 // event passes through the parser to pyry's stdout
-// (streamrunner/runner.go:173-177) — a different shape entirely. The conclusion is
+// (streamrunner/runner.go:172-176) — a different shape entirely. The conclusion is
 // the same on both and it is the conclusion that matters: none is staged.
 //
 // # The delta-dependent sites, classified one at a time
@@ -334,7 +334,7 @@ type finLiveRunHandle struct {
 // holds, and for a STRONGER reason than the one-caller version it replaces:
 // whichever shipped delta a caller passes NAMES PYRY_USE_STREAMJSON EXPLICITLY, so
 // the ambient loses either way. The reach probe's guard
-// (background_reach_probe_test.go:304) exists because ITS delta does not name the
+// (background_reach_probe_test.go:296) exists because ITS delta does not name the
 // variable; that contrast is the whole reason this driver needs none. A caller
 // that passed a delta leaving the variable unset would break the requirement and
 // silently stage whatever the operator's shell exports.
@@ -343,7 +343,7 @@ type finLiveRunHandle struct {
 //
 //   - THE RIG'S OWN ENV-SIDE PRECEDENCE — ambient read first, delta entries
 //     override, last entry wins — is reachRunnerPathFromEnv's
-//     (background_reach_probe_test.go:1167-1173) and is PINNED OFFLINE by the two
+//     (background_reach_probe_test.go:1102-1108) and is PINNED OFFLINE by the two
 //     staging traps in finding_live_staging_test.go
 //     (TestFinLiveStageEnvDeltaNamesTheRunner and its Stream sibling).
 //   - os/exec's LAST-WINS DEDUP over cmd.Env, which is what makes the delta beat
@@ -362,9 +362,9 @@ type finLiveRunHandle struct {
 // passes yolo=true (`runAgentRunStreamRunner`), which emits --dangerously-skip-permissions
 // (permissionArgs, mcp_config.go:35-38). Under finLiveStageEnvDelta() pyry instead
 // trust-marks the workdir and writes a per-spawn deny-default settings JSON
-// (runAgentRunPty, agent_run.go:308-325). On the tool surface the repo's own
+// (runAgentRunPty, agent_run.go:300-317). On the tool surface the repo's own
 // recorded position is relayed rather than a fresh claim asserted:
-// agent_run.go:355-360 records --allowed-tools as the authoritative tool gate
+// agent_run.go:354-359 records --allowed-tools as the authoritative tool gate
 // under YOLO, bounding the blast radius rather than the trust dialog, and this rig
 // passes --allowed-tools=Bash (spawnProbePyry,
 // `spawnProbePyry`). So the flip changes the gate's
@@ -374,15 +374,15 @@ type finLiveRunHandle struct {
 //
 // SITE G — THE SESSION ID'S PRODUCER CHANGES WITH THE DELTA, AND IT BECOMES A
 // PATH COMPONENT. probeWaitForSessionID polls pyry's stdout and parseInitSessionID
-// (fixtures.go:424-440) returns the session_id of the first system/init line with
+// (fixtures.go:377-393) returns the session_id of the first system/init line with
 // NO SHAPE VALIDATION — any non-empty string is accepted. That string is then
 // joined into a filename by finLiveAssembleStaging's transcript read:
 // jsonlPathFor → tuidriver.SessionJSONLPath →
 // filepath.Join(home, ".claude", "projects", EncodeCwd(cwd), sessionID+".jsonl").
 // On ptyrunner pyry MINTS the id itself (newSessionID(), `runAgentRunPty`) and
-// passes it as --session-id (ptyrunner/runner.go:665), so the value is
+// passes it as --session-id (ptyrunner/runner.go:618), so the value is
 // pyry-controlled. On the stream path claude's argv carries no --session-id
-// (buildStreamRunnerClaudeArgs, agent_run.go:411-425), so CLAUDE mints it and the
+// (buildStreamRunnerClaudeArgs, agent_run.go:364-378), so CLAUDE mints it and the
 // rig reads claude's bytes passed verbatim through the parser.
 //
 // NO VALIDATION, SANITISER OR GUARD IS ADDED, and that is a decision rather than
@@ -403,10 +403,10 @@ type finLiveRunHandle struct {
 //     by the rig and opened by claude's Bash child. That is claude's behaviour and
 //     it is identical on both paths.
 //   - probeWaitForDirectChild: claude is a DIRECT child of pyry on both paths
-//     (ptyrunner/runner.go:302 through tuidriver.Spawn;
-//     streamrunner/runner.go:175). THE REACH PROBE'S SKIP GUARD IS NOT PRECEDENT
+//     (ptyrunner/runner.go:294 through tuidriver.Spawn;
+//     streamrunner/runner.go:174). THE REACH PROBE'S SKIP GUARD IS NOT PRECEDENT
 //     HERE, and a reader will expect to find it inherited: that guard
-//     (background_reach_probe_test.go:304-310) exists because ITS pin is
+//     (background_reach_probe_test.go:296-302) exists because ITS pin is
 //     content-first on --session-id, which the stream path's argv lacks. This
 //     driver resolves claude's pid by tree walk and pins on the FIFO needle, so
 //     the reason does not reach it.
@@ -421,7 +421,7 @@ type finLiveRunHandle struct {
 //   - The transcript reads (finLiveAssembleStaging, probeWaitForBashToolUse): the
 //     rig computes the path from the workdir IT owns, on both paths. ONE
 //     ASYMMETRY, recorded because it points the safe way: pyry hands claude the
-//     trust-marked realpath on ptyrunner (`runAgentRunStreamRunner`, :319) and the raw
+//     trust-marked realpath on ptyrunner (`runAgentRunStreamRunner`, :318) and the raw
 //     parsed.workdir on the stream path (streamrunner cmd.Dir). The rig's own
 //     derivation uses the raw workdir, so the stream path is the CLOSER match and
 //     the conclusion holds a fortiori. The ptyrunner side additionally carries
@@ -466,9 +466,9 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// releasing, yields a clean-looking run — green, handle populated — in which
 	// the rig, not pyry, produced the exit, and #1337's exit reading silently
 	// measures the rig. Both nearest precedents do exactly this and say so
-	// (background_reach_probe_test.go:402-421, background_trigger_probe_test.go:485-500).
+	// (background_reach_probe_test.go:355-374, background_trigger_probe_test.go:438-453).
 	t.Cleanup(func() {
-		// LOAD-BEARING (background_trigger_probe_test.go:490). Without this
+		// LOAD-BEARING (background_trigger_probe_test.go:443). Without this
 		// guard a failure before cmd.Start reaches syscall.Kill(-0, SIGKILL),
 		// and kill(0, sig) is defined as "send to every process in the CALLER's
 		// own process group" — the test binary would SIGKILL itself and its
@@ -526,11 +526,11 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// which are not *os.File, and sets no WaitDelay — so one held write end blocks
 	// this forever). Claude's fd 1 is never the rig's stdout write end on either
 	// path: it is the PTY slave on ptyrunner and a PYRY-created pipe on the stream
-	// path (streamrunner/runner.go:177). But claude's fd 2 IS pyry's fd 2 — the
+	// path (streamrunner/runner.go:176). But claude's fd 2 IS pyry's fd 2 — the
 	// rig's stderr write end — ON BOTH PATHS, because cmd.Stderr is os.Stderr for
-	// both (`runAgentRunStreamRunner` stream, :329 pty) and creack/pty fills stdin/stdout/
+	// both (`runAgentRunStreamRunner` stream, :328 pty) and creack/pty fills stdin/stdout/
 	// stderr with the tty ONLY WHEN NIL (run.go:38-50), so the PTY never displaces
-	// the Stderr ptyrunner already set at ptyrunner/runner.go:304. The PTY
+	// the Stderr ptyrunner already set at ptyrunner/runner.go:296. The PTY
 	// therefore covers the one fd claude never shares, and the fd it does share is
 	// shared IDENTICALLY on both paths.
 	//
@@ -545,7 +545,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// PTYRUNNER DOES NOT. On ptyrunner claude's stdin/stdout are the tty and its
 	// stderr is os.Stderr — all *os.File, so os/exec creates no pipe and Wait waits
 	// on process exit alone. On the stream path cmd.Stdout = parser
-	// (streamrunner/runner.go:177) is a non-*os.File writer, so os/exec creates a
+	// (streamrunner/runner.go:176) is a non-*os.File writer, so os/exec creates a
 	// pipe and Wait blocks until its copy goroutine reaches EOF — which needs every
 	// dup of CLAUDE's stdout write end closed, including any held by the detached
 	// Bash group #565 measured surviving claude's exit.
@@ -553,8 +553,8 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// IT IS BOUNDED, NOT UNBOUNDED: cmd.WaitDelay = killGrace (5s,
 	// streamrunner/runner.go:44, :204) is exactly the stdlib's "child exited but
 	// left its I/O pipes unclosed" case. If it fires, Wait returns ErrWaitDelay,
-	// Run returns it as waitErr (:232, :252) and runAgentRun maps a non-nil,
-	// non-context.Canceled error to a NON-ZERO EXIT (agent_run.go:279-285).
+	// Run returns it as waitErr (:231, :251) and runAgentRun maps a non-nil,
+	// non-context.Canceled error to a NON-ZERO EXIT (agent_run.go:271-277).
 	//
 	// SO THE MANUFACTURED NEGATIVE, IF IT HAPPENS, IS NOT THE ONE THE FLIP WAS
 	// EXPECTED TO PRODUCE. pyryExited still closes, and closes well inside both
@@ -574,7 +574,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// happens-before edge a consumer has: a write after it is a race that reads
 	// correct on every run nobody is examining. The Wait error itself stays
 	// discarded — it carries no information the status does not — and the
-	// ProcessState guard follows the repo's own shape (internal/e2e/attach_stdio.go:236-239),
+	// ProcessState guard follows the repo's own shape (internal/e2e/attach_stdio.go:234-237),
 	// leaving pinExitStatusUnknown in place when there is no state to read.
 	go func() {
 		_ = cmd.Wait()
@@ -608,7 +608,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// THE DRIVER TAKES THE tool_result WAIT ITSELF, BEFORE PINNING, and skipping
 	// it is the failure this step exists to prevent. finLiveAssembleStaging also
 	// waits for the tool_use and tool_result internally (via finTranscriptFill,
-	// finding_staging_fill_test.go:254-271), but it takes the pin counts as
+	// finding_staging_fill_test.go:252-263), but it takes the pin counts as
 	// INPUTS, so its wait happens strictly after the pin. A driver reasoning "the
 	// assembly does the waiting" pins before the `cat` exists, matches 0 or 1
 	// rows, and fires the gate's count arm reporting stage-pin-count-unexpected on
@@ -617,7 +617,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	//
 	// These waits DECIDE NOTHING; they are TIMING and never SELECTION.
 	// finTranscriptFill selects its Bash call content-first against the staged
-	// command (finTranscriptSelectBash, :256), so both raw envelopes are
+	// command (finTranscriptSelectBash, :255), so both raw envelopes are
 	// discarded here: they are model-controlled bytes with no downstream use, and
 	// every question they could answer is one the assembly answers content-first
 	// from the same transcript.
@@ -651,17 +651,17 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// A scan taken AFTER the observed trailer matches nothing on a healthy run: a
 	// rig sees the trailer only when it polls pyry's stdout, up to one
 	// probePollInterval (200ms) after emitter.Close() writes it, and the
-	// descendant reap at ptyrunner/runner.go:445 starts effectively immediately
+	// descendant reap at ptyrunner/runner.go:398 starts effectively immediately
 	// after that write and finishes in the time of one ps exec (reap.go:75-76).
 	//
 	// ONE scan carrying BOTH needles — the shipped precedent at
-	// teardown_liveness_probe_test.go:424. It saves a second ps:
+	// teardown_liveness_probe_test.go:377. It saves a second ps:
 	// reachMatchArgvRows matches a row carrying ANY needle
-	// (background_reach_probe_test.go:976-981), so one scan yields both
+	// (background_reach_probe_test.go:911-916), so one scan yields both
 	// populations and finLivePinReduce separates them.
 	//
 	// NEITHER EXCLUSION SHOULD EVER FIRE. pinPartition records one only when it
-	// actually matched (process_pin_liveness_test.go:147-149), so an entry
+	// actually matched (process_pin_liveness_test.go:146-148), so an entry
 	// appearing in a record is itself the signal that a needle leaked into a
 	// process it should not have reached.
 	needles := []string{fifoPath, tdnClaudeNeedle}
@@ -686,20 +686,20 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// THE 3 IS RE-DERIVED FOR BOTH DELTAS RATHER THAN INHERITED. It holds because
 	// tdnClaudeNeedle is --append-system-prompt-file
 	// (`tdnProbeTicket`) and BOTH argv builders emit it —
-	// ptyrunner/runner.go:668 and cmd/pyry/`buildStreamRunnerClaudeArgs` — so claude's row is
+	// ptyrunner/runner.go:621 and cmd/pyry/`buildStreamRunnerClaudeArgs` — so claude's row is
 	// matched on either path. Do NOT rest this on reachRunnerPathFromArgv's framing
 	// of that flag as "the ptyrunner-shape marker"
-	// (background_reach_probe_test.go:1181-1182): the flag names NO runner, as
-	// teardown_liveness_probe_test.go:892-896 and finRecordFixtureNeitherArgv's own
+	// (background_reach_probe_test.go:1116-1117): the flag names NO runner, as
+	// teardown_liveness_probe_test.go:891-895 and finRecordFixtureNeitherArgv's own
 	// doc both record. The two builders are the citation. Both wrong fills are argued at
-	// finding_live_pin_test.go:126-140 and both fire the gate's count arm against
+	// finding_live_pin_test.go:125-139 and both fire the gate's count arm against
 	// a want of 2 on a correctly staged run.
 	//
 	// The same live deadlines are passed through to the assembly. ITS SECOND READ
 	// OF THE TRANSCRIPT IS EXPECTED AND IS NOT A DEFECT — the file is already on
 	// disk by then, so both of its waiters return on their first poll, which is
 	// the case its deadline parameters exist for
-	// (finding_live_assembly_test.go:242-246).
+	// (finding_live_assembly_test.go:240-244).
 	h.Staging = finLiveAssembleStaging(t, workdir, sessionID, finLiveAssembleFacts{
 		StagedCommand:  finLiveStageCommand(fifoPath),
 		RendezvousDone: rendezvousDone,
