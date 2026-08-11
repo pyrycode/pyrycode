@@ -64,6 +64,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -196,12 +197,92 @@ func resolve(lines []string, n int) (sym string, offset int, atDecl bool, ok boo
 	return "", 0, false, false
 }
 
+// changedLines reports, per repo-relative path, the set of line numbers this
+// branch ADDED or MODIFIED relative to its merge base. nil means "no base
+// resolvable, or we are the base" — the caller then scans the whole tree.
+//
+// # Why the guard is diff-scoped at all
+//
+// A citation is resolved against its target line AS IT STANDS NOW. So when a
+// developer inserts lines into file A, every citation pointing below that
+// insertion — including citations in OTHER files, which this developer never
+// touched — now addresses different content. One that was legal because it
+// pointed deep inside a long declaration can land on a declaration and become
+// illegal. Full-tree scanning bills that to whoever happened to be editing.
+//
+// Observed on pyrycode#1452 (2026-08-11), which is why this exists: the
+// developer spent the last 8 minutes of a 26-minute run, and was still going
+// when the wall clock killed it, on "the guard caught cites my edit displaced
+// ... this is the renumbering tail". The guard had become an instance of the
+// tax it was built to remove.
+//
+// So the contract is: this guard stops the INFLOW of new citations. It does
+// not continuously revalidate the existing stock. Combined with opportunistic
+// cleanup when someone genuinely touches a comment, the stock only shrinks.
+// A displaced pre-existing citation rots exactly as it did before the guard
+// existed, which is no worse than the status quo it replaced.
+//
+// Note the asymmetry with substrate-guard, which is correctly full-tree: a
+// banned screen literal is always somebody's deliberate act and cannot be
+// created at a distance by an unrelated edit.
+func changedLines(root string) map[string]map[int]bool {
+	base := os.Getenv("CITE_GUARD_BASE")
+	if base == "" {
+		for _, ref := range []string{"origin/main", "main"} {
+			out, err := exec.Command("git", "-C", root, "merge-base", "HEAD", ref).Output()
+			if err == nil {
+				base = strings.TrimSpace(string(out))
+				break
+			}
+		}
+	}
+	if base == "" {
+		return nil // not a git checkout, or no base — scan everything
+	}
+	out, err := exec.Command("git", "-C", root, "diff", "--unified=0", base, "--", "*.go").Output()
+	if err != nil {
+		return nil
+	}
+	changed := map[string]map[int]bool{}
+	hunk := regexp.MustCompile(`^@@ -\S+ \+(\d+)(?:,(\d+))? @@`)
+	var cur string
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(l, "+++ b/") {
+			cur = strings.TrimPrefix(l, "+++ b/")
+			continue
+		}
+		m := hunk.FindStringSubmatch(l)
+		if m == nil || cur == "" {
+			continue
+		}
+		start, _ := strconv.Atoi(m[1])
+		count := 1
+		if m[2] != "" {
+			count, _ = strconv.Atoi(m[2])
+		}
+		if changed[cur] == nil {
+			changed[cur] = map[int]bool{}
+		}
+		for i := 0; i < count; i++ {
+			changed[cur][start+i] = true
+		}
+	}
+	if len(changed) == 0 {
+		// We ARE the base (e.g. on main after a merge). Scanning nothing would
+		// make the gate vacuous exactly where it most needs to hold, so fall
+		// back to the whole tree.
+		return nil
+	}
+	return changed
+}
+
 func main() {
 	root := "."
 	if len(os.Args) > 1 {
 		root = os.Args[1]
 	}
 	ix := newIndex(root)
+	scope := changedLines(root)
 	var hits []string
 
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -222,6 +303,14 @@ func main() {
 		if isAllowlisted(rel) {
 			return nil
 		}
+		// Diff-scoped when a merge base resolved: only lines this branch wrote.
+		var only map[int]bool
+		if scope != nil {
+			only = scope[strings.TrimPrefix(rel, "./")]
+			if only == nil {
+				return nil // file untouched by this branch
+			}
+		}
 		f, rerr := os.Open(path)
 		if rerr != nil {
 			return nil
@@ -230,6 +319,9 @@ func main() {
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 		for lineNo := 1; sc.Scan(); lineNo++ {
+			if only != nil && !only[lineNo] {
+				continue
+			}
 			idx := strings.Index(sc.Text(), "//")
 			if idx < 0 {
 				continue
@@ -274,6 +366,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cite-guard: %d line-number citation(s) a symbol name replaces:\n\n", len(hits))
 		for _, h := range hits {
 			fmt.Fprintln(os.Stderr, "  "+h)
+		}
+		if scope != nil {
+			fmt.Fprintln(os.Stderr, "\nScope: only lines this branch added or modified. A citation displaced by")
+			fmt.Fprintln(os.Stderr, "someone else's edit is not yours to fix and is not reported here.")
+		} else {
+			fmt.Fprintln(os.Stderr, "\nScope: whole tree (no merge base resolved, or this IS the base).")
 		}
 		fmt.Fprintln(os.Stderr, "\nWhy: line numbers rot on every insertion and nothing maintains them.")
 		fmt.Fprintln(os.Stderr, "codegraph resolves a symbol name on demand. A line number is fine when it")
