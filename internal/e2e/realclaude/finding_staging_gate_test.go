@@ -19,7 +19,7 @@ package realclaude
 // over a closed set of sixteen values, and it ASSUMES THE RUN STAGED: that a Bash
 // call was issued, that it was the rig's hold command, that the rendezvous
 // completed. Two conditions this probe can hit have no value among the sixteen and
-// no field in its input record trailRunReadings (:394) — the model never issued
+// no field in its input record trailRunReadings (:402) — the model never issued
 // the Bash call, and the trigger did not fire.
 //
 // Handing such a run over is not a neutral act. On an unstaged run the argv scan
