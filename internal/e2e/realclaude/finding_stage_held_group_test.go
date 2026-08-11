@@ -14,7 +14,7 @@ package realclaude
 //
 // # What this closes that #1281's rows structurally cannot
 //
-// finGatherReadings (finding_run_gather_test.go:298) takes pyry's reap-log
+// finGatherReadings takes pyry's reap-log
 // stderr and the pinned process-group set as PARAMETERS, and proves that both
 // the finding and a genuine negative come out of its own composition. Every row
 // that proves it is driven from a synthetic stdout, a synthetic stderr and
@@ -32,19 +32,19 @@ package realclaude
 // MatchCount is at least 2 and the same composition lands on Step 7
 // (trailOutcomeMatchedUnattributed). That move is the increment, not an
 // inconsistency with the blocker. The FINDING arm is unchanged, because Step 2
-// (trail_run_outcome_test.go:1009) outranks Step 7.
+// (trail_run_outcome_test.go:1011) outranks Step 7.
 //
 // # The staged command must lead a process group of its own
 //
 // The rig offers two subject stagings and only one is usable here. The flip
-// test's subject (trail_run_rig_test.go:277) sets no SysProcAttr, so it inherits
+// test's subject (trail_run_rig_test.go:280) sets no SysProcAttr, so it inherits
 // the test process's group — and the pinned group would then BE
 // syscall.Getpgrp(), which is exactly what trailRigHeldPGID() (:119) returns. A
 // synthetic stderr naming the pinned group would classify as
 // tdnReapHeldPGIDKilled -> trailAdmitProof for the real arm AND for the trap's
 // own-group arm, so the trap would go red asserting the opposite of its claim
 // and #1268's hardcoding would look like it reaches the finding. The wrapper
-// staging (:532-534) is the one copied here.
+// staging (:535-537) is the one copied here.
 //
 // The live shape agrees that a group of its own is what a real held command has:
 // internal/agentrun/reap.go:52 skips `pgid <= 1 || pgid == self || pgid ==
@@ -66,8 +66,8 @@ package realclaude
 // # The trap asserts at the Admit layer, never at the outcome layer
 //
 // The word "void" names two different things one layer apart. Both of
-// trailRigGather's hardcodings produce an Admit VOID: the nil stderr literal
-// (trail_run_rig_test.go:159-171) reaches tdnReapNoLine -> trailAdmitVoidNoLine,
+// trailRigGather's hardcodings produce an Admit VOID: the nil stderr literal in
+// its attribution leg reaches tdnReapNoLine -> trailAdmitVoidNoLine,
 // and a pgid the reap log does not name reaches tdnReapHeldPGIDAbsent ->
 // trailAdmitVoidGroupUnnamed. Neither produces a VOID OUTCOME: with a certifying
 // gate, PyryExited true, a clean scan and MatchCount > 0, trailClassifyRun falls
@@ -354,13 +354,13 @@ func finStageHeldGroup(t *testing.T, body func(finStageSubject)) {
 //
 // The count is 1 because trailAdmitAttribution answers a named group across more
 // than one anchored line with trailAdmitVoidNotOneReapLine
-// (trailer_admissibility_test.go:595-602) rather than with trailAdmitProof.
+// (trailer_admissibility_test.go:605-612) rather than with trailAdmitProof.
 func finStageReapLine(pgid int) []byte {
 	return []byte(trailReapLine(1, fmt.Sprintf("[%d]", pgid)) + "\n")
 }
 
 // finStageAssertLiveness pins the per-matched-pid reads Step 6 makes
-// load-bearing, mirroring trail_run_rig_test.go:572-586.
+// load-bearing, mirroring trail_run_rig_test.go:575-589.
 //
 // It runs on EVERY arm. Step 6 (trailOutcomeVoidLivenessInstrument) is consulted
 // before Step 7, so a single pinStateInstrumentFailed diverts every arm except

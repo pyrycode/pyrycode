@@ -16,10 +16,10 @@ package realclaude
 //
 // trailClassifyRun ranks an admissible reap-log attribution second, above every
 // point-in-time reading (trail_run_outcome_test.go:606-607), and argues at the
-// point of use (:999-1003) that those readings "are expected to be late — the reap
+// point of use (:1001-1005) that those readings "are expected to be late — the reap
 // completes in the time of one ps exec while the observation of the trailer trails
 // the write by up to a poll interval — so resting a verdict on them manufactures a
-// systematic false negative". :1344-1346 makes that executable.
+// systematic false negative". :1346-1348 makes that executable.
 //
 // That route is structurally unavailable on PYRY_USE_STREAMJSON=1. The two runners
 // reap in different places:
@@ -57,7 +57,7 @@ package realclaude
 // NOT establish "alive when pyry declared the turn finished": on this path no
 // terminal reason is certified, so no such instant exists at all, and the shipped
 // classifier says exactly that at each of its void arms
-// (trail_run_outcome_test.go:834, :969-974, :979-988).
+// (trail_run_outcome_test.go:836, :969-974, :979-988).
 //
 // Every value here is named after the SIGHTING, every Detail ends with
 // trailSightingInstantClause, and TestTrailSightingVoidsNeverReadAsNegative
@@ -108,7 +108,7 @@ package realclaude
 // not touch the step-1 gate switch: that switch ANSWERED trailGateAbsentOwesNone
 // with an unconditional return, so a route wired below it would not have fired on
 // the one gate value it exists to serve. #1446 reached it — by consulting this
-// predicate INSIDE that arm (trail_run_outcome_test.go:842-974), which is the only
+// predicate INSIDE that arm (trail_run_outcome_test.go:844-976), which is the only
 // placement that does not award a scan-side answer to a record the gate says
 // certifies nothing, and by publishing the finding under an evidence route of its
 // own. Nothing here changed for it: the predicate still stands alone, is still
@@ -252,7 +252,7 @@ type trailSightingResult struct {
 // arm be driven with no live turn and no credentials. It takes no *testing.T and
 // never fails a test — an instrument failure observed mid-turn is a datum to
 // publish, not a reason to abort the turn, the same contract as trailGate
-// (trailer_admissibility_test.go:362-363), trailCertifyOrdering, trailScan,
+// (trailer_admissibility_test.go:371-372), trailCertifyOrdering, trailScan,
 // tdnClassifyReapLog, pinReadState and fifoLiveRead. It consults no parentage and
 // requires no reap line.
 //
@@ -274,7 +274,7 @@ type trailSightingResult struct {
 //     reason trailClassifyRun takes trailGateResult whole. It is CONSUMED, never
 //     re-derived: this function reads ordering.Value and nothing else from it.
 //
-// finSighting (finding_run_gather_test.go:372-384) is the nearest existing
+// finSighting is the nearest existing
 // reduction of a sighting and is the WRONG input here: it carries TerminalReason,
 // StopReason, Subtype and KeyNames — exactly the trailer values this record keeps
 // out. The family's forbidden-key walk would not catch that on its own, since those
@@ -846,7 +846,7 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailSightingResultCarriesNoCapturedBytes is AC5 made executable, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:2207-2473) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:2209-2475) and reusing the shipped trailNeedle.
 //
 // THIS SWEEP IS LOAD-BEARING HERE IN A WAY IT COULD NOT BE FOR #1439, and the
 // family's existing sweeps prove nothing about this record: they are

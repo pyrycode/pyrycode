@@ -108,7 +108,9 @@ import (
 //   - No finOutcomeStaging record. Its own doc says "INPUT ONLY — NEVER
 //     PUBLISHED"; the verdict crosses, the record does not.
 //   - No workdir and no session id. Both are consumed INSIDE the driver, by the
-//     assembly. finGatherInputs' six fields need neither.
+//     assembly. finGatherInputs' seven fields need neither — six until #1452
+//     added the runner-path reading, which the consumer fills by reducing a
+//     field this handle already carries.
 //   - No staged command field. It is not lost, it is DERIVED:
 //     finLiveStageCommand(h.FIFOPath) is a pure function of a field the handle
 //     already carries, from the one source the driver itself used. A second copy
@@ -123,8 +125,8 @@ import (
 type finLiveRunHandle struct {
 	// PyryPID is the spawned `pyry agent-run` process; ClaudePID is its direct
 	// child, as probeWaitForDirectChild resolved it. ClaudePID is the pid
-	// finGatherInputs.ClaudeState is read over
-	// (finding_run_gather_test.go:256-269).
+	// finGatherInputs.ClaudeState is read over — see that field's own doc for the
+	// closed verdict set it is confined to.
 	PyryPID   int
 	ClaudePID int
 	// PyryExited is closed by the cmd.Wait goroutine. RECEIVE-ONLY, so a consumer
@@ -184,8 +186,10 @@ type finLiveRunHandle struct {
 	// each assign exactly once. Handing the reduction's own type across is what
 	// discharges "neither is re-derived here" structurally.
 	//
-	// Pin.PGIDs is the []int finGatherInputs.Pinned takes, and never a []reachProc
-	// (finding_run_gather_test.go:249-251). An EMPTY Pin.ClaudeCommand is
+	// Pin.PGIDs is the []int finGatherInputs.Pinned takes, and never a []reachProc.
+	// Pin.ClaudeCommand is what that same consumer reduces with tdnRunnerFromArgv to
+	// fill finGatherInputs.RunnerPath, at its own call site and never here. An EMPTY
+	// Pin.ClaudeCommand is
 	// AMBIGUITY, not a staging failure: tdnClaudeCommand returns "" when zero OR
 	// SEVERAL rows carry the claude needle (teardown_liveness_probe_test.go:571-573).
 	// It is provenance, it is not one of finOutcomeStaging's eight fields, and it

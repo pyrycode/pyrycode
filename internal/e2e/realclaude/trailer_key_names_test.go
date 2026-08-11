@@ -55,7 +55,7 @@ package realclaude
 // Bounding the names themselves is deliberately NOT here. They are
 // attacker-influenced in principle — they arrive from claude's output — but
 // trailScanResult is published by nothing (pinned at finding_run_record_test.go:787-812
-// and finding_run_gather_test.go:2043-2059), so there is no rendering surface at
+// and `TestFinSightingReachesNoScanType`), so there is no rendering surface at
 // this tier to bound. The per-name cap belongs at the tier that publishes: #1363.
 
 import (
@@ -114,7 +114,7 @@ func trailKeyNames(line []byte) []string {
 //
 // A function rather than a package-level var: it returns a slice, go test -race
 // runs this package's tests in parallel, and a shared backing array would let one
-// row's mutation reach another's (trail_run_outcome_test.go:1111-1113).
+// row's mutation reach another's (trail_run_outcome_test.go:1113-1115).
 func trailExpectedKeyNames() []string {
 	return []string{
 		"duration_ms", "is_error", "num_turns", "result", "session_id",

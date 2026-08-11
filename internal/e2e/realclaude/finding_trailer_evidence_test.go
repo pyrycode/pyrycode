@@ -279,9 +279,9 @@ type finTrailerRecord struct {
 // There is no pointer here and nothing to dereference: the carrier already
 // answered the State/nil PAIR as CarriesTrailer, and the ordering argument — the
 // State operand FIRST, Go's && short-circuiting left to right — lives wherever
-// that pair is computed. That is finGatherReadings' fill on the live path
-// (finding_run_gather_test.go:557-582) and finTrailerSighting on the fixture
-// side, and the two are required to agree.
+// that pair is computed. That is finGatherReadings' carrier fill on the live
+// path and finTrailerSighting on the fixture side, and the two are required to
+// agree.
 //
 // On the false arm the four AND THE KEY NAMES are ZEROED rather than copied
 // through, and under the carrier that is a choice rather than a consequence: they
@@ -357,8 +357,8 @@ func finTrailerAbortedScan() trailScanResult {
 }
 
 // finTrailerSighting is the fixture-side stand-in for finGatherReadings' carrier
-// fill, and is a COPY of it (finding_run_gather_test.go:557-582): the same State
-// operand first, the same four scalars filled only behind the pair.
+// fill, and is a COPY of it: the same State operand first, the same four scalars
+// filled only behind the pair.
 //
 // THE AGREEMENT OBLIGATION LANDS HERE. That fill is commented as deliberately
 // identical to the builder's guard, because the builder was going to move onto
@@ -385,7 +385,7 @@ func finTrailerAbortedScan() trailScanResult {
 // synthetic where it is used.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1111-1113): a shared backing value is
+// reason (trail_run_outcome_test.go:1113-1115): a shared backing value is
 // reachable from every test in this package and `go test -race` runs them in
 // parallel.
 func finTrailerSighting(scan trailScanResult, staleness time.Duration, boundFrom string) finSighting {
