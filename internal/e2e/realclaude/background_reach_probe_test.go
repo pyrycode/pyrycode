@@ -15,14 +15,14 @@ package realclaude
 // # What is being probed
 //
 // The reaper's entire reach is a BFS from claude's pid over a single
-// `ps -axo pid=,ppid=,pgid=` snapshot (internal/agentrun/reap.go:75). If a
+// `ps -axo pid=,ppid=,pgid=` snapshot (`descendantPGIDs`). If a
 // backgrounded command is not a transitive child of claude's pid — a double
 // fork orphans it to pid 1 — the walk never reaches it, the group is never
 // killed, and the process outlives pyry. Nobody has checked whether the
 // commands claude backgrounds on timeout expiry are inside that reach.
 //
 // THE PREDICTIVE HALF ONLY: would the walk find it, and would its pgid survive
-// `reap.go:52`'s three exclusions. One during-turn snapshot, no teardown.
+// `ReapDescendantGroups`'s three exclusions. One during-turn snapshot, no teardown.
 // Whether the group actually dies, and by whose hand, is #1231's to answer and
 // must not be claimed here.
 //
@@ -183,7 +183,7 @@ type reachHeld struct {
 	Agree     bool        `json:"up_and_down_agree"`
 }
 
-// reachExclusion is reap.go:52's arithmetic for one pgid, carrying every
+// reachExclusion is ReapDescendantGroups' skip arithmetic for one pgid, carrying every
 // integer each comparison is made against so a reader can redo it by eye.
 type reachExclusion struct {
 	HeldPGID       int      `json:"held_pgid"`
@@ -282,7 +282,7 @@ func TestRealClaude_BackgroundReachability(t *testing.T) {
 			reachEnableEnv, reachEnableEnv)
 	}
 	// Content-first root pinning keys on `--session-id <uuid>` in claude's
-	// argv, which only the ptyrunner path emits (ptyrunner/runner.go:618);
+	// argv, which only the ptyrunner path emits (its `buildArgs`);
 	// under PYRY_USE_STREAMJSON=1 claude mints its own id and the needle would
 	// never match, so the run would spend a live turn to reach a guaranteed
 	// root-disagreement. The streamrunner path is out of scope for this ticket
@@ -552,7 +552,7 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 	// The integer snapshot's own error is a GATE, not a footnote — everything
 	// from here down reads off snap.raw. probeProcessSnapshot returns
 	// exec.Cmd.Output()'s partial stdout ALONGSIDE the error
-	// (background_trigger_probe_test.go:871-873), so on a 5 s context timeout —
+	// (`probeProcessSnapshot`), so on a 5 s context timeout —
 	// a loaded machine is this probe's expected condition, not the exotic one —
 	// snap.raw is a CUT process table. A cut that drops an intermediate hop
 	// while keeping the held row makes the up-walk and the down-BFS agree on
@@ -720,10 +720,10 @@ func reachMeasure(rec *reachRecord, resultRaw []byte, pyryExited <-chan struct{}
 // reachPinRoot pins claude's pid content-first (AC2). Both reachability reads
 // are rooted at it, so a mis-identified root makes them AGREE AND BOTH BE
 // WRONG — agreement does not validate the root. #1223's probeWaitForDirectChild
-// (:975) returns pyry's first direct child by position with no content check,
+// returns pyry's first direct child by position with no content check,
 // whereas the reaper's actual argument is the pid of the claude command pyry
 // spawned. So the content evidence is the argv row carrying this run's session
-// UUID (pyry passes `--session-id <uuid>`, ptyrunner/runner.go:618): unique on
+// UUID (pyry passes `--session-id <uuid>` from ptyrunner's `buildArgs`): unique on
 // the machine, and it survives shebang rewriting, which matching on the
 // resolved claude binary path does not — the CLI may execute as `node …/cli.js`.
 //
@@ -963,7 +963,7 @@ func reachMatchedNeedle(p reachProc, needle string) bool {
 
 // reachIndexFromPS parses a `ps -axo pid=,ppid=,pgid=` snapshot into a pid→row
 // index, using the same Fields / len==3 / Atoi discipline as production's
-// descendantPGIDs (internal/agentrun/reap.go:83-96) so this evidence is
+// descendantPGIDs so this evidence is
 // directly comparable with what the reap walk sees.
 func reachIndexFromPS(snapshot []byte) map[int]reachProc {
 	index := make(map[int]reachProc)
@@ -1010,13 +1010,13 @@ func reachChainUp(index map[int]reachProc, from, root int) ([]reachProc, bool) {
 	return hops, false
 }
 
-// reachExclusionVerdict evaluates internal/agentrun/reap.go:52's three
+// reachExclusionVerdict evaluates ReapDescendantGroups' three
 // exclusions. reasons names each one that fires, carrying the integers the
 // comparison was made against.
 //
 // pyryPGID must be the pgid of the process that CALLS ReapDescendantGroups —
 // the `pyry agent-run` process, not the test binary that spawned it.
-// syscall.Getpgrp() is read there (reap.go:49); reading the test's own group
+// syscall.Getpgrp() is read inside ReapDescendantGroups; reading the test's own group
 // would silently compare against the wrong integer.
 func reachExclusionVerdict(heldPGID, pyryPGID, claudePID int) (bool, []string) {
 	var reasons []string
@@ -1114,7 +1114,7 @@ func reachRunnerPathFromEnv(delta []string) string {
 
 // reachRunnerPathFromArgv corroborates the runner path from the process table
 // rather than from the env this test set. --append-system-prompt-file is the
-// ptyrunner-shape marker from ptyrunner's buildArgs (runner.go:616-625).
+// ptyrunner-shape marker from ptyrunner's buildArgs.
 func reachRunnerPathFromArgv(command string) string {
 	if strings.Contains(command, "--append-system-prompt-file") {
 		return "ptyrunner (claude argv carries --append-system-prompt-file)"

@@ -300,8 +300,8 @@ func trailWaitForTrailer(stdout *probeSyncBuffer, timeout time.Duration) trailOb
 
 // --- fixtures ----------------------------------------------------------------
 
-// trailFixtureTrailer is one ordinary trailer in emitter.go:456-468's pinned
-// wire order, carrying the values wireFields (emitter.go:428-437) renders for a
+// trailFixtureTrailer is one ordinary trailer in streamjson.trailer's pinned
+// wire order, carrying the values wireFields renders for a
 // clean completion. Short enough to survive the cap intact, which is what lets
 // the seen rows assert Line verbatim.
 const trailFixtureTrailer = `{"type":"result","subtype":"success","is_error":false,` +

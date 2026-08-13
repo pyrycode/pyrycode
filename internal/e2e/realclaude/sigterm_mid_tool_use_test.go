@@ -168,7 +168,7 @@ package realclaude
 // sign) but named a field that does not exist on this surface: it said
 // `subtype != success`, and Subtype belongs to resultTrailer
 // (`resultTrailer`), the stream-json result trailer, not to
-// contentBlock (tool_loop_test.go:160-168), which is the tool_result surface
+// contentBlock, which is the tool_result surface
 // here. Do not chase it.
 //
 // Where defeat #5 would land. The discriminator is POSITIVE evidence that
@@ -523,7 +523,7 @@ func TestRealClaude_SigtermMidToolUse(t *testing.T) {
 	}
 
 	// Invariant 2: no half-written line. ReadJSONL silently retains trailing
-	// partial bytes (see internal/agentrun/jsonl/reader.go:188-262), so the
+	// partial bytes (see jsonl.Reader's `Next`), so the
 	// only way to surface a half-written tail is an explicit byte-tail check.
 	if len(jsonlBytes) == 0 {
 		t.Fatalf("jsonl %s is empty (claude wrote no events before SIGTERM)", jsonlPath)

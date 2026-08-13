@@ -25,7 +25,7 @@ import (
 // named no runner and this composition was one no live run could report. The
 // reason it cannot come from the finding gather's OWN SCAN still stands:
 // tdnClaudeCommand skips any row whose matched-needle list lacks tdnClaudeNeedle
-// (teardown_liveness_probe_test.go:561-575) and the needle prohibition at
+// (`tdnClaudeCommand`) and the needle prohibition at
 // finExitRunProbe's Needles field forbids adding that needle to that gather's
 // scan — it has no finLivePinReduce, so claude's row would land in the
 // classifier's match-count arms and in the published liveness list.
@@ -76,7 +76,7 @@ import (
 // The sweep is over the Detail STRING and never over the marshalled record.
 // trailGateResult carries the reading in its own RunnerPath field by design
 // (`trailGate`), and clause B of
-// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt (:2113-2118) requires it
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt requires it
 // to arrive intact — so a whole-record sweep for this needle is RED AGAINST A
 // CORRECT BUILD. The Detail-only sweep stays the correct rung after #1420 and
 // after #1433: the absence arm embeds trailReasonAgainstPath's answer and the
@@ -98,7 +98,7 @@ import (
 //
 // The admit and run proof arms close in near-identical prose — both say the group
 // was "alive strictly AFTER the trailer was written", and all three arms cite
-// runner.go:479-485. A bare shared phrase, or an assertion over a joined or
+// ptyrunner.Run's defer-LIFO chain. A bare shared phrase, or an assertion over a joined or
 // concatenated Detail string, would let one deleted sentence redden two rungs and
 // leave neither a sole red. Only the em dash in the admit phrase and the comma in
 // the run phrase separate the two neighbours.
@@ -134,7 +134,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	// Premise. The reading carries no VALUE from the argv it was driven over.
 	// This is the first test to drive a real runner argv into
 	// trailGateInput.RunnerPath, a field that IS marshalled into the published
-	// gate record (trailer_admissibility_test.go:306-343), and the boundary
+	// gate record (`trailGateResult`), and the boundary
 	// keeping a command string out of it is that tdnRunnerFromArgv returns
 	// constant literals and interpolates nothing from its argument. The reader
 	// may name the flag --session-id in its answer; it may never echo what
@@ -195,7 +195,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	//
 	// A gate-VALUE premise is deliberately not among the premises above. Any
 	// mutation to trailGate's usable arm's value cascades: a different in-space
-	// value trips C5 (trail_run_outcome_test.go:712-718), an out-of-space one
+	// value trips C5 of `trailClassifyRun`, an out-of-space one
 	// trips C1, and either way the run-level outcome moves too — so it could never
 	// be the sole red for anything, and it would be an assertion this test owes a
 	// mutation for and cannot have. "Reached through trailGateUsable and

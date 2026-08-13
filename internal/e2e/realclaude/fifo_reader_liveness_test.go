@@ -264,7 +264,7 @@ func fifoLiveRecordErrno(out *fifoLiveOutcome, err error) {
 // answer would say nothing about the first one's reader.
 //
 // No reader-exit cleanup is registered here, unlike
-// TestProbeFIFOHold_HoldsReaderUntilCleanupRelease (:1123): this test reaps its
+// TestProbeFIFOHold_HoldsReaderUntilCleanupRelease: this test reaps its
 // reader mid-body on purpose, so such an assertion would be vacuous. The
 // non-perturbation test owns that shape instead.
 func TestFIFOReaderLiveness_FlipsAcrossOneReaderLifetime(t *testing.T) {
@@ -593,8 +593,8 @@ func TestFIFOReaderLiveness_OpenErrnoArms(t *testing.T) {
 // holds the first one the reader never notices — but a consumer taking this read
 // mid-turn is entitled to see that measured, not asserted.
 //
-// Cleanup ordering follows TestProbeFIFOHold_HoldsReaderUntilCleanupRelease
-// (:1123): the reader-exit assertion is registered BEFORE holdProbeFIFO so
+// Cleanup ordering follows TestProbeFIFOHold_HoldsReaderUntilCleanupRelease:
+// the reader-exit assertion is registered BEFORE holdProbeFIFO so
 // t.Cleanup's LIFO order puts it after the release. Registering it later would
 // run it before the release and fail spuriously; killing the reader after
 // holdProbeFIFO would make it pass vacuously.
