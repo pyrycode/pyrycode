@@ -15,7 +15,7 @@ package realclaude
 // # The four trailer fields sit behind a discriminated optional
 //
 // subtype, terminal_reason, is_error and stop_reason live on resultTrailer
-// (tool_loop_test.go:194-203), reachable only through trailScanResult.Trailer —
+// (`resultTrailer`), reachable only through trailScanResult.Trailer —
 // a pointer that is nil unless State == trailSeen, and deliberately so: a
 // consumer that dereferences it without checking State panics loudly
 // (result_trailer_observation_test.go:108-118), which was chosen over a value
@@ -30,7 +30,7 @@ package realclaude
 //
 // Line is the matched line as scanned but CAPPED: trailScan records
 // `Line: reachCapCommand(string(scanner.Bytes()))` (:182), 512 bytes. On the
-// emitter's pinned wire order (emitter.go:456-468) terminal_reason is LAST and
+// emitter's pinned wire order (`trailer` in emitter.go) terminal_reason is LAST and
 // result sixth, so any truncation takes terminal_reason first — the exact defect
 // #1266's decode-then-cap design exists to prevent. Trailer is the decode of the
 // FULL line.
@@ -45,7 +45,7 @@ package realclaude
 // (result_trailer_observation_test.go:100-107). Every published record in this
 // family already excludes a captured line for that reason: trailRunOutcome is
 // "COUNTS, NEVER ROWS" (`trailRunOutcome`), finAttributeEntry states
-// the exclusion as its own construction (finding_attribution_fanout_test.go:80-88),
+// the exclusion as its own construction (`finAttributeEntry`),
 // and finOutcomeResult is a value and a detail and nothing else
 // (finding_staging_gate_test.go:198-201). This record's trailer evidence is its
 // State and the four decoded fields. Never its bytes.
@@ -85,7 +85,7 @@ import (
 // from which trailScanResult.Line or the trailer pointer is reachable.
 //
 // THE TYPE IS TRAP-FREE BY CONSTRUCTION, in finAttributeEntry's sense
-// (finding_attribution_fanout_test.go:80-88): copying it costs nothing and
+// (`finAttributeEntry`): copying it costs nothing and
 // aliases nothing, so the ticket that embeds it whole needs no ordering
 // discipline a later edit can break. SO IS THE BUILDER since #1320 moved it onto
 // finSighting: the two claims now hold at two tiers rather than one of them
@@ -385,7 +385,7 @@ func finTrailerAbortedScan() trailScanResult {
 // synthetic where it is used.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1113-1115): a shared backing value is
+// reason (`trailRunWellFormed`): a shared backing value is
 // reachable from every test in this package and `go test -race` runs them in
 // parallel.
 func finTrailerSighting(scan trailScanResult, staleness time.Duration, boundFrom string) finSighting {

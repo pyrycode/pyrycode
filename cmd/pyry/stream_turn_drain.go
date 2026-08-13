@@ -135,7 +135,7 @@ func (s *streamTurnSink) exitFor(sessionID string) func() {
 			// SECURITY: content-free, and no "kind" — there is no event to name.
 			// The resolved conversation id is absent because this closure holds no
 			// resolver and structurally cannot name one; the conversation-id
-			// discipline lives on the clear path (stream_turn_busy.go:248-254).
+			// discipline lives on the clear path (`clearForSession`).
 			s.logger.Warn("relay: stream-turn exit drop; sink full",
 				"event", "stream_turn.exit_sink_full",
 				"session_id", sessionID)

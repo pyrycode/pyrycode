@@ -82,7 +82,7 @@ package realclaude
 // NOT copied, because neither of its two reasons transfers and copying it would skip
 // a run that would have been correct. (1) Its delta does not name the variable;
 // finLiveStageEnvDelta names PYRY_USE_STREAMJSON=0 EXPLICITLY
-// (finding_live_staging_test.go:179-184, :194-196) and spawnProbePyry appends the
+// (`finLiveStageEnvDelta`, :194-196) and spawnProbePyry appends the
 // delta to os.Environ(), which os/exec resolves in favour of the later value — so
 // the delta wins over the operator's shell. (2) Its content-first root pinning keys
 // on --session-id, which only ptyrunner emits; this rig pins nothing content-first,
@@ -262,7 +262,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// mutex, so this is non-destructive.
 		Stdout: h.Stdout,
 		// THE FIFO PATH ALONE. Not the driver's two-needle list
-		// (finding_live_run_test.go:415-420): that scan carries tdnClaudeNeedle
+		// (`finLiveRunStage`): that scan carries tdnClaudeNeedle
 		// because finLivePinReduce separates the populations afterwards, and the
 		// gather has NO SUCH REDUCTION — its argv leg calls
 		// pinScanArgv(in.Needles, nil) and fills MatchCount, RowsScanned and one

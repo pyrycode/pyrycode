@@ -156,7 +156,7 @@ package realclaude
 //
 // Two sinks, two rules, deliberately not conflated. A published Detail may never
 // carry either command IN ANY FORM, including a length or a prefix
-// (finding_staging_gate_test.go:192-197); this file formats none, so that rule
+// (`finOutcomeResult`); this file formats none, so that rule
 // holds structurally. A test t.Errorf is not a published record, and its house
 // form is LENGTHS ONLY (finding_staging_fill_test.go:556-562) — the two counts
 // and the two outcome values are named freely below, and no command is printed
@@ -164,8 +164,8 @@ package realclaude
 // resolution that is always wrong is printing the command itself.
 //
 // NO JSON TAGS on finLiveAssembleFacts, the rule finTranscriptReading
-// (finding_staging_fill_test.go:92-93) and finOutcomeStaging
-// (finding_staging_gate_test.go:141-157) both state at themselves: IssuedCommand
+// (`finTranscriptReading`) and finOutcomeStaging
+// (`finOutcomeStaging`) both state at themselves: IssuedCommand
 // is verbatim model output and StagedCommand embeds a t.TempDir()-derived path on
 // a live run, so a tag is the first step toward publishing either into a public
 // issue.
@@ -204,8 +204,8 @@ import (
 // transposition there reads as a visible mistake rather than a plausible line —
 // and a count swap is the one mis-assembly no value-only test can catch.
 //
-// NO JSON TAGS, the rule finTranscriptReading (finding_staging_fill_test.go:92-93)
-// and finOutcomeStaging (finding_staging_gate_test.go:141-157) both state at
+// NO JSON TAGS, the rule finTranscriptReading
+// and finOutcomeStaging both state at
 // themselves: it carries StagedCommand, which embeds a t.TempDir()-derived path
 // on a live run.
 type finLiveAssembleFacts struct {
@@ -238,7 +238,7 @@ type finLiveAssembleFacts struct {
 // the environment directly or writes an artifact.
 //
 // The deadlines are parameters for finTranscriptFill's own stated reason
-// (finding_staging_fill_test.go:238-241): both waiters poll to expiry before
+// (`finTranscriptFill`): both waiters poll to expiry before
 // returning empty, so a live caller passes probeToolUseDeadline /
 // probeToolResultDeadline and an offline row passes milliseconds for a result
 // already on disk.
@@ -330,7 +330,7 @@ type finLiveAssembleCountCase struct {
 // (`finOutcomeHoldCommand`), which is a gate fixture deliberately of the
 // wrong shape: its `sh -c … ; exit 0` carries a `;` into a string the model is
 // asked to reproduce byte-for-byte against a system prompt that forbids chaining
-// (finding_live_staging_test.go:136-139).
+// (`finLiveStageCommand`).
 //
 // One `staged` local feeds both the transcript block and every row's
 // facts.StagedCommand, so a mismatch is impossible by construction.

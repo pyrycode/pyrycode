@@ -170,7 +170,7 @@ const (
 // read off the ambient process table, and a ps column is how an operator's
 // CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY reaches an artifact destined for
 // a public issue. The type is the enforcement, in finAttributeFanOut's own
-// []int shape (finding_attribution_fanout_test.go:196-203): nothing here is a
+// []int shape (`finAttributeFanOut`): nothing here is a
 // value from which a command string is reachable.
 type finStageSubject struct {
 	// Needles is this run's argv needle set — one t.TempDir()-derived FIFO path.

@@ -113,7 +113,7 @@ const (
 	// its role and never returns to the framework — so the recursion is bounded
 	// by construction. Without it the child reaches m.Run() and runs the suite:
 	// the 2026-05-16 fork bomb TestMain's own comment records
-	// (fixtures_test.go:338-347).
+	// (`TestMain` in fixtures_test.go).
 	tdnRoleFilter = "-test.run=^TestTdnReapTreeHelperProcess$"
 
 	// The two line kinds in the report file.
@@ -214,7 +214,7 @@ func tdnRunParentRole() {
 // no Wait lingers in the process table with its pgid intact, and both
 // kill(pid, 0) and kill(-pgid, 0) still succeed on a corpse — which would make a
 // reaped-group check pass on one, and make a killed spared leaf read as still
-// alive. reap_test.go:117-119 records the same rule in its own package.
+// alive. `startReapHelper` records the same rule in its own package.
 func tdnSpawnLeaf(ownGroup bool) (int, error) {
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(),

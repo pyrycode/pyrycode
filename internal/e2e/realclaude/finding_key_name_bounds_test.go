@@ -46,7 +46,7 @@ package realclaude
 //
 // This is the one thing here that would ship green while proving nothing.
 // trailScan's bufio.Scanner buffer is deliberately not raised past the 64 KiB
-// default (result_trailer_observation_test.go:177-179), and a line at or past the
+// default (`trailScan`), and a line at or past the
 // limit ABORTS the scan rather than truncating it: KeyNames comes back nil and
 // CarriesTrailer is false, so the published field renders null — and "the
 // rendered field is bounded" is trivially true over a fixture that produced not
@@ -120,7 +120,7 @@ func finOverlongKeyNameTrailer() string {
 //
 // A function rather than a package-level var: it returns a slice, go test -race
 // runs this package's tests in parallel, and a shared backing array would let one
-// row's mutation reach another's (trail_run_outcome_test.go:1113-1115).
+// row's mutation reach another's (`trailRunWellFormed`).
 func finManyShortNames(n int) []string {
 	names := make([]string, 0, n)
 	for i := 0; i < n; i++ {
@@ -282,7 +282,7 @@ func TestFinPublishedKeyNamesBoundTheNameCount(t *testing.T) {
 
 	// The kept set is the reader's ALPHABETIC PREFIX, in its order. What this
 	// fixture makes observable is the consequence finTrailerRecord's comment warns
-	// a reader about (finding_trailer_evidence_test.go:178-183): `type` sorts last
+	// a reader about (`finTrailerRecord`): `type` sorts last
 	// of the set, so `type` is the name the cut removes.
 	if want := read[:finTrailerMaxKeyNames]; !reflect.DeepEqual(published, want) {
 		t.Errorf("published names: got %q, want %q — the reader's own first %d names, in the order "+

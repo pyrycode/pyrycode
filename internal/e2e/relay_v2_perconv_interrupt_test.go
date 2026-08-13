@@ -71,7 +71,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 // <sharedDir>/<INITIAL_UUID>.jsonl while the daemon tailed
 // <sharedDir>/<mintedID>.jsonl. This test rides #1195's two knobs.
 //
-// WHY MINTED IS THE POINT (the stream sibling's argument, relay_v2_stream_interrupt_test.go:47-56).
+// WHY MINTED IS THE POINT (the stream sibling's argument, `TestRelayV2_StreamInterruptStopsRunningTurn`).
 // Had the target been bootstrap-bound, a correct route and the pre-#1121 bug
 // (Interrupter: w.sup — every interrupt to the bootstrap supervisor) would be
 // indistinguishable. Minting forces the interrupt to reach the minted child.

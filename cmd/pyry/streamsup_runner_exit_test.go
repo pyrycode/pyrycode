@@ -18,7 +18,7 @@ import (
 //
 //   - FIRST spawn: print ONE stream-json assistant line (the turn opener), then
 //     block until goFile appears, then exit 0. No result line is ever printed, so
-//     the parser never yields a TurnEnd (parser.go:152-157) — the turn is
+//     the parser never yields a TurnEnd (`maxTaskRosterEntries`) — the turn is
 //     abandoned exactly as a crash abandons it.
 //   - EVERY LATER spawn: print nothing and block. The two-branch shape is not
 //     incidental: the runner respawns after the exit, and a second assistant line
@@ -27,7 +27,7 @@ import (
 // The release marker is what makes the positive test deterministic rather than
 // timed: the child is provably still alive while "is the conversation busy?" is
 // asserted, so nothing can have cleared it yet. A shell wrapper rather than a
-// TestHelperProcess re-exec, for the reason fakeClaudeScript (acp_test.go:148-166)
+// TestHelperProcess re-exec, for the reason fakeClaudeScript
 // documents — the Go test binary rejects the --session-id <uuid> the spawn carries.
 // argv is ignored entirely. There is no /bin/sh availability skip: sh is POSIX-
 // guaranteed on both supported platforms, and a hard failure beats a silent skip.
@@ -114,7 +114,7 @@ func waitRecord(t *testing.T, recs <-chan slog.Record, want string) slog.Record 
 // at) and the fixture that makes the drain's exit-arm placement discriminating: a
 // clear delivered after the active-session gate would be dropped there and could
 // not produce the result asserted below. Same reasoning as exitLaneDrain
-// (stream_turn_busy_test.go:492-498).
+// (`TestTurnBusyTracker_DeliveryFeedNilAndEmptyAreNoOps`).
 //
 // AC3's discriminant is the resolve map: it maps ONLY "sess-a", the runner's
 // construction-time session id. A clear keyed on anything else — the runner's

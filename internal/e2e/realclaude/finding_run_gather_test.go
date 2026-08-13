@@ -41,7 +41,7 @@ package realclaude
 //     per-pid corroboration.
 //
 // pinned is []int and NEVER []reachProc or []pinMatch. finAttributeFanOut's own
-// doc (finding_attribution_fanout_test.go:196-203) states why: reachProc.Command
+// doc (`finAttributeFanOut`) states why: reachProc.Command
 // is verbatim argv read off the ambient process table, and a []reachProc
 // signature that recorded only .PGID would pass every test in this file while
 // reopening the credential channel. The signature is the enforcement.
@@ -194,7 +194,7 @@ const (
 //   - THE NEEDLE SITS INSIDE reachMaxCommandBytes, so trailScanResult.Line
 //     genuinely carries it and the channel the gather held really was dirty.
 //     trailPaddedTrailer places it PAST the cap deliberately
-//     (result_trailer_observation_test.go:322-325), which would make the stdout
+//     (`trailNeedle`), which would make the stdout
 //     half of TestFinGatherReturnsNoCapturedBytes vacuous: the only leak it could
 //     then catch is a record storing the line IN FULL, and trailRunReadings has no
 //     field that could. That test asserts the premise so a later edit cannot push
@@ -447,7 +447,7 @@ type finSighting struct {
 // The ceiling is not a name count but the SCANNER'S LINE, and quoting the byte
 // figure is what makes the argument shape-independent. trailScan's bufio.Scanner
 // buffer is deliberately NOT raised past the 64 KiB default
-// (result_trailer_observation_test.go:177-179), and a line at or past the limit
+// (`trailScan`), and a line at or past the limit
 // ABORTS the scan rather than truncating it: KeyNames comes back nil and
 // CarriesTrailer is false. Measured on this tree, 65535 bytes are accepted and
 // 65536 rejected. A fixture proving a count bound bites must carry bound+1 names
@@ -499,7 +499,7 @@ const (
 //     shipped `dropped := seen` struct copy
 //     (`TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer`) would then put two carriers on one
 //     backing array while `go test -race` runs this package's tests in parallel
-//     (trail_run_outcome_test.go:1113-1115). The builder's plain assignment is safe
+//     (`trailRunWellFormed`). The builder's plain assignment is safe
 //     ONLY because this clause holds, which is why the clause is stated at the
 //     producer rather than at the consumer.
 //
@@ -734,7 +734,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// attribution that is not proof, PyryExited false now reaches Step 3's
 	// staging void where the constant reported a scan-side answer or a Step 4-6
 	// void. A proof-carrying run is unchanged — Step 2 sits above Step 3 by
-	// design (trail_run_outcome_test.go:617-628) and proofPyryLive pins it
+	// design (`trailClassifyRun`) and proofPyryLive pins it
 	// (:1336-1337, :1564-1565) — and so is a run whose gate is not usable, which Step
 	// 1 answers first.
 	readings.PyryExited = in.PyryExited
@@ -764,7 +764,7 @@ type finGatherCase struct {
 // finGatherCases returns every composition under test.
 //
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1114-1115): the rows carry slices, and a shared
+// reason (`trailRunWellFormed`): the rows carry slices, and a shared
 // backing array is reachable from every test in this package.
 //
 // The first two rows differ in EXACTLY ONE DIMENSION — the pinned pgid. Same
@@ -1151,7 +1151,7 @@ func finGatherNegativeInputs(t *testing.T, stdout *probeSyncBuffer) finGatherInp
 // gate, attribution NOT proof. A run whose gate is not usable is answered by
 // Step 1 before the reading is consulted, and a PROOF-CARRYING run is answered
 // by Step 2 — which sits above Step 3 BY DESIGN
-// (trail_run_outcome_test.go:617-628, "Voiding it for a staging failure would
+// (`trailClassifyRun`, "Voiding it for a staging failure would
 // SUPPRESS A FINDING THE RUN GENUINELY ESTABLISHED") and is pinned by
 // proofPyryLive, a proof carrying PyryExited false that wants
 // trailOutcomeRunningAtTrailer (:1336-1337, :1564-1565). Building this pair on the
@@ -1257,7 +1257,7 @@ func TestFinGatherPyryExitIsObservableAtTheOutcome(t *testing.T) {
 //
 // The first and last rows want the SAME outcome, and that is the point: the
 // verdict is corroboration, and corroboration never moves the answer
-// (trail_run_outcome_test.go:630-637).
+// (`trailClassifyRun`).
 func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 	var stdout probeSyncBuffer
 	base := finGatherNegativeInputs(t, &stdout)
@@ -1345,7 +1345,7 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // The needle goes into the two inputs that could carry captured bytes into the
 // returns: the reap-log stderr, and the stdout buffer at the trailer's `result`
 // field, which is what trailNeedle already stands in for
-// (result_trailer_observation_test.go:322-325). IT MAY NOT GO INTO
+// (`trailNeedle`). IT MAY NOT GO INTO
 // terminal_reason: trailGate and trailAdmitAttribution both quote the certified
 // reason %q into their Details BY DESIGN (`trailDetail`,
 // :399, :534, :598), and readings.Gate and readings.Admit take those results
@@ -1382,7 +1382,7 @@ func TestFinGatherReturnsNoCapturedBytes(t *testing.T) {
 		// discipline at the plant site, the way finGatherNeedleTrailer does for
 		// terminal_reason, and it proves the field introduces no forbidden key —
 		// which "" would not. It does not move the outcome, because a verdict is
-		// corroboration (trail_run_outcome_test.go:630-637).
+		// corroboration (`trailClassifyRun`).
 		ClaudeState: pinStateRunning,
 	})
 
@@ -1483,7 +1483,7 @@ type finGatherRunnerPathCase struct {
 // has, each paired with the reading that earns it.
 //
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1114-1115).
+// reason (`trailRunWellFormed`).
 //
 // A NEW TABLE rather than three more rows on finGatherCases(), whose cardinality
 // and ordinal claims are load-bearing at several sites, and rather than on
@@ -2453,7 +2453,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 // Those offsets are a property of the PAD and not an invariant of the fixture, so
 // the test asserts the one it rests on rather than trusting this comment —
 // finWriteTrailerPad makes the same disclaimer for the same reason
-// (finding_artifact_write_test.go:213-214).
+// (`finWriteTrailerPad`).
 //
 // # The usable window is pad 141 through 366
 //
@@ -2475,7 +2475,7 @@ func TestFinGatherSightingCarriesTheDecodedScalars(t *testing.T) {
 //
 // That is the opposite of trailNeedle's own stated intent, "placed PAST the cap so
 // a record that leaked it could only have done so by recording the line in full"
-// (result_trailer_observation_test.go:322-325). It is safe for the test below,
+// (`trailNeedle`). It is safe for the test below,
 // which plants no needle of its own, marshals nothing and makes no leak claim. It
 // means this pad MUST NOT be reused by a sweep whose argument is "a needle sighting
 // proves the line was recorded in full" — under this pad a needle in Line is

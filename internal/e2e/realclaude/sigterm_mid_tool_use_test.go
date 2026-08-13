@@ -167,7 +167,7 @@ package realclaude
 // paragraph used to carry was directionally right (same surface, opposite
 // sign) but named a field that does not exist on this surface: it said
 // `subtype != success`, and Subtype belongs to resultTrailer
-// (tool_loop_test.go:194-203), the stream-json result trailer, not to
+// (`resultTrailer`), the stream-json result trailer, not to
 // contentBlock (tool_loop_test.go:160-168), which is the tool_result surface
 // here. Do not chase it.
 //
