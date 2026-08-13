@@ -36,7 +36,8 @@ package realclaude
 // # This file execs nothing, and the check is the symbol list
 //
 // An `exec.` grep reads clean here by construction — the import set is fmt,
-// strings and testing — so it proves nothing. The rule is the symbols.
+// strings and testing — so it proves nothing. The rule is the symbols, and
+// TestFinOfflineFilesReachNoExecHelper is what runs it.
 // FORBIDDEN in this file, each because it execs, spawns, blocks or reads the
 // operator's environment INSIDE a helper where no grep of this file would see it:
 //

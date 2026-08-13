@@ -28,12 +28,15 @@ package realclaude
 // scan (`tdnScan`) and the FIFO hold (`holdProbeFIFO`) each reach a process or
 // the table.
 //
-// EVERY ONE OF THEM IS NAMED ABOVE, so the forbidden-symbol grep has to read
-// this file's CODE and must not be run over its comments — this header alone
-// would answer for every name on the list. A check that cannot report clean is
-// as useless as one that cannot fail — #1290's spec wrote a bare `t.Skip` grep
-// that matched that file's own header sentence and so could never come back
-// empty.
+// EVERY ONE OF THEM IS NAMED ABOVE, so a check over this file has to read its
+// CODE and skip its comments — this header alone would answer for every name on
+// the list. A check that cannot report clean is as useless as one that cannot
+// fail: #1290's spec wrote a bare `t.Skip` grep that matched that file's own
+// header sentence and so could never come back empty.
+//
+// TestFinOfflineFilesReachNoExecHelper is that check, and it parses rather than
+// greps, so skipping the comments is a property of how it reads the file rather
+// than an instruction someone has to remember.
 //
 // Pure over bytes and therefore admissible if ever needed, though this design
 // needs none of them: pinMatchArgvExcluding, probeDescendantsFromPS,

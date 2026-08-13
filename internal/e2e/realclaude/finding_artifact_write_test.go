@@ -46,12 +46,14 @@ package realclaude
 // process snapshot (`probeProcessSnapshot`), the teardown scan (`tdnScan`) and
 // the FIFO hold (`holdProbeFIFO`) each reach a process or the table.
 //
-// EVERY ONE OF THEM IS NAMED IN THE PROSE ABOVE, so the forbidden-symbol grep
-// has to read this file's CODE and skip its comments: run over the whole file it
-// matches this paragraph rather than any call. A check that cannot report clean
-// is as useless as one that cannot fail — #1290's spec wrote a bare `t.Skip`
-// grep that matched that file's own header sentence and so could never come
-// back empty.
+// EVERY ONE OF THEM IS NAMED IN THE PROSE ABOVE, so a check over this file has
+// to read its CODE and skip its comments: run over the whole file it matches
+// this paragraph rather than any call. A check that cannot report clean is as
+// useless as one that cannot fail — #1290's spec wrote a bare `t.Skip` grep that
+// matched that file's own header sentence and so could never come back empty.
+//
+// TestFinOfflineFilesReachNoExecHelper is that check. It parses instead of
+// grepping, so the comments are skipped by construction.
 //
 // Writing files under t.TempDir() is expected and is not an exec: os.ReadDir,
 // os.ReadFile and os.WriteFile are pure filesystem calls on a directory the test
