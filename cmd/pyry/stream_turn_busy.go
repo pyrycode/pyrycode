@@ -110,7 +110,7 @@ type turnBusyTracker struct {
 
 // newTurnBusyTracker constructs the tracker. It panics if resolve is nil — a
 // programmer error the type cannot function without, matching eventring.New's
-// panic-on-misconfig (ring.go:78-85). A nil logger falls back to slog.Default,
+// panic-on-misconfig (`New` in ring.go). A nil logger falls back to slog.Default,
 // mirroring newStreamTurnSink.
 func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, ok bool), logger *slog.Logger) *turnBusyTracker {
 	if resolve == nil {
@@ -129,7 +129,7 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 
 // observe feeds one fan-in envelope into the tracker. It is called only from the
 // drain goroutine, so it inherits that goroutine's single-writer invariant
-// (stream_turn_drain.go:103-106) — but the type is self-synchronised regardless,
+// (`exitFor`) — but the type is self-synchronised regardless,
 // since its readers run anywhere.
 //
 // The opener set is a WHITELIST, not "anything that is not a TurnEnd". The
@@ -146,9 +146,8 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 // tracker. That is the CORRECT answer rather than an omission: a usage limit is
 // orthogonal to turn lifecycle, so opening a turn on one would wedge the
 // conversation exactly as opening one on an Unrecognized would. streamsup's
-// ignoredLineTypes — the cite this comment carried pointed at parser.go:158-163,
-// which the list left long ago — is at parser.go:384-386 and is down to `system`
-// alone.
+// ignoredLineTypes — which this comment once cited by line, at a number that had
+// drifted onto an unrelated declaration — is down to `system` alone.
 //
 // A nil receiver is a no-op, so a caller with no tracker (the drain's own tests)
 // needs no construction. The drain's parameter is deliberately the concrete
@@ -186,7 +185,7 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 	// that registry's mutex, so calling it under t.mu would establish a
 	// tracker.mu -> convReg.mu order for no benefit. The scan is O(conversations)
 	// per event, which is comfortably within budget at the post-#609 arrival rate
-	// (~one per JSONL message / ~250ms, stream_turn_drain.go:10-16) over a
+	// (~one per JSONL message / ~250ms, `streamTurnSinkBuf`) over a
 	// human-scale conversation set. A future slice that raises that rate by an
 	// order of magnitude wants a by-session-id read method on the registry, not a
 	// cache here.
@@ -270,7 +269,7 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 		//
 		// SECURITY: content-free, and session_id ONLY. The resolved conversation_id
 		// is deliberately withheld — it is a routing key treated as sensitive
-		// alongside session ids and workspace_cwd (session_transition_v2.go:38-47):
+		// alongside session ids and workspace_cwd (`sessionTransitionEmitterV2`):
 		// resolved daemon-side, stamped on the wire, never logged.
 		t.logger.Debug("relay: stream-turn clear skip; session resolves to no conversation",
 			"event", "stream_turn.clear_unresolved",

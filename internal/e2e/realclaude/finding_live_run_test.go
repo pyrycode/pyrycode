@@ -90,7 +90,7 @@ import (
 // INPUT ONLY — NEVER PUBLISHED, and NO JSON TAGS. The rule is inherited rather
 // than invented: Pin.Rows[i].Command and Pin.ClaudeCommand are verbatim argv read
 // off the AMBIENT process table, so finLivePinReading
-// (finding_live_pin_test.go:66-74) and finOutcomeStaging
+// (`finLivePinReading`) and finOutcomeStaging
 // (`finOutcomeStaging`) both carry the same prohibition for the same
 // reason. Adding tags "for symmetry" is the first step toward a published record
 // quoting captured bytes into a public issue.
@@ -103,7 +103,7 @@ import (
 // composed at the end.
 //
 // WHAT IT DELIBERATELY DOES NOT CARRY — #1343 left the question open and this is
-// the answer (finding_live_assembly_test.go:259-264): #1340 does not need more.
+// the answer (`finLiveAssembleStaging`): #1340 does not need more.
 //
 //   - No finOutcomeStaging record. Its own doc says "INPUT ONLY — NEVER
 //     PUBLISHED"; the verdict crosses, the record does not.
@@ -171,7 +171,7 @@ type finLiveRunHandle struct {
 	Stdout *probeSyncBuffer
 	Stderr *probeSyncBuffer
 	// FIFOPath is workdir/finLiveStageFIFOName, the join #1342 named at
-	// finding_live_staging_test.go:261-262. It is finGatherInputs.Needles' content
+	// `finLiveStageFixtureFIFOPath`. It is finGatherInputs.Needles' content
 	// join, and the same string the pin was taken on.
 	FIFOPath string
 	// EnvDelta is exactly what was handed to spawnProbePyry, and ClaudeVersion is
@@ -217,7 +217,7 @@ type finLiveRunHandle struct {
 // merged with a package-level fallback. A nil delta must therefore read the
 // operator's ambient environment, which is precisely the failure
 // reachRunnerPathFromEnv's doc exists to make visible
-// (background_reach_probe_test.go:1091-1101); a silent default would hide it.
+// (`reachRunnerPathFromEnv`); a silent default would hide it.
 //
 // TWO DELTAS ARE SHIPPED, both in finding_live_staging_test.go:
 // finLiveStageEnvDelta() names PYRY_USE_STREAMJSON=0 (the ptyrunner default,
@@ -363,7 +363,7 @@ type finLiveRunHandle struct {
 // trust-marks the workdir and writes a per-spawn deny-default settings JSON
 // (runAgentRunPty, agent_run.go:300-317). On the tool surface the repo's own
 // recorded position is relayed rather than a fresh claim asserted:
-// agent_run.go:354-359 records --allowed-tools as the authoritative tool gate
+// `buildStreamRunnerClaudeArgs` records --allowed-tools as the authoritative tool gate
 // under YOLO, bounding the blast radius rather than the trust dialog, and this rig
 // passes --allowed-tools=Bash (spawnProbePyry,
 // `spawnProbePyry`). So the flip changes the gate's
@@ -660,7 +660,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// populations and finLivePinReduce separates them.
 	//
 	// NEITHER EXCLUSION SHOULD EVER FIRE. pinPartition records one only when it
-	// actually matched (process_pin_liveness_test.go:146-148), so an entry
+	// actually matched (`pinPartition`), so an entry
 	// appearing in a record is itself the signal that a needle leaked into a
 	// process it should not have reached.
 	needles := []string{fifoPath, tdnClaudeNeedle}
@@ -688,17 +688,17 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// ptyrunner/runner.go:621 and cmd/pyry/`buildStreamRunnerClaudeArgs` — so claude's row is
 	// matched on either path. Do NOT rest this on reachRunnerPathFromArgv's framing
 	// of that flag as "the ptyrunner-shape marker"
-	// (background_reach_probe_test.go:1116-1117): the flag names NO runner, as
+	// (`reachRunnerPathFromArgv`): the flag names NO runner, as
 	// teardown_liveness_probe_test.go:891-895 and finRecordFixtureNeitherArgv's own
 	// doc both record. The two builders are the citation. Both wrong fills are argued at
-	// finding_live_pin_test.go:125-139 and both fire the gate's count arm against
+	// `finLivePinWantRows` and both fire the gate's count arm against
 	// a want of 2 on a correctly staged run.
 	//
 	// The same live deadlines are passed through to the assembly. ITS SECOND READ
 	// OF THE TRANSCRIPT IS EXPECTED AND IS NOT A DEFECT — the file is already on
 	// disk by then, so both of its waiters return on their first poll, which is
 	// the case its deadline parameters exist for
-	// (finding_live_assembly_test.go:240-244).
+	// (`finLiveAssembleStaging`).
 	h.Staging = finLiveAssembleStaging(t, workdir, sessionID, finLiveAssembleFacts{
 		StagedCommand:  finLiveStageCommand(fifoPath),
 		RendezvousDone: rendezvousDone,

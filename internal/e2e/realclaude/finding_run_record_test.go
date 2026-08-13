@@ -97,7 +97,7 @@ import (
 // integers (background_reach_probe_test.go:162-168), and a ps command column is
 // how an operator's CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY reaches an
 // artifact destined for a public issue. finAttributeEntry
-// (finding_attribution_fanout_test.go:80-88) is the precedent: it holds only
+// (`finAttributeEntry`) is the precedent: it holds only
 // what it may publish, so its no-captured-bytes property is true BY CONSTRUCTION
 // rather than by an ordering discipline a later edit can break.
 //
@@ -143,7 +143,7 @@ type finRecordProc struct {
 // trailRunReadings.Liveness' stated reason (:417-420): "pinStateOutcome carries
 // no command column by construction" — pinStateColumns is `pid=,ppid=,stat=` and
 // carries an explicit never-add-command/args/comm prohibition with an enforcing
-// test (process_pin_liveness_test.go:221-232). Its PID and PPID are what tie
+// test (`pinStateColumns`). Its PID and PPID are what tie
 // each verdict to its row, so AC1's "which row it belongs to" needs no new
 // field; do not add a row-index and do not widen the column set. ToolStderr
 // stays on the carried outcome: #1281 settled that a forbidden-key sweep meeting
@@ -321,7 +321,7 @@ func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
 // never fails a test — the same contract as trailScan, trailGate,
 // trailAdmitAttribution, trailClassifyRun, finOutcomeStagingGate,
 // finTrailerBuild, finAttributeFanOut, tdnClassifyReapLog and the per-pid state
-// read (process_pin_liveness_test.go:265-275), because an instrument failure
+// read (`pinReadState`), because an instrument failure
 // observed mid-turn is a datum to publish, not a reason to abort the turn.
 //
 // # The runner path is recorded AS OBSERVED, not as intended
@@ -343,7 +343,7 @@ func finRecordRunnerAgreement(fromEnv, fromArgv string) string {
 // # ClaudeVersion is capped on the way in
 //
 // The family's rule is that every retained operator-visible string is capped
-// (trailer_admissibility_test.go:271-274), and this is the one such string the
+// (`trailGateInput`), and this is the one such string the
 // record would otherwise retain uncapped. The live caller is the version probe,
 // whose error path returns fmt.Sprintf("<unavailable: %v>", err)
 // (`probeClaudeVersion`) — an exec error interpolating the
@@ -409,11 +409,11 @@ const (
 // the same shape.
 //
 // Command is populated because reachProc's content-matched rows carry it
-// (background_reach_probe_test.go:159-168). It is exactly what the conversion
+// (`reachProc`). It is exactly what the conversion
 // drops.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1113-1115): a shared backing array is
+// reason (`trailRunWellFormed`): a shared backing array is
 // reachable from every test in this package, and `go test -race` runs them in
 // parallel.
 func finRecordMatchedRows(suffix string) []reachProc {
@@ -591,7 +591,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 	// into a record destined for a public issue. It is the one retained
 	// operator-visible string this record would otherwise hold uncapped, against
 	// the family's rule that every one of them is capped
-	// (trailer_admissibility_test.go:271-274).
+	// (`trailGateInput`).
 	overlong := "<unavailable: exec: " + strings.Repeat("/home/operator/a/long/path", 40) + ">"
 	if len(overlong) <= reachMaxCommandBytes {
 		t.Fatalf("the overlong version fixture is %d bytes, inside the %d-byte cap, so the check "+
@@ -657,7 +657,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 // would have refused. It is the position finTrailerOutcomeValues()
 // (`TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator`) occupies for #1290's outcome, and the
 // rule trailGateCases states: the shipped producer for what it can emit,
-// hand-built for what it cannot (trailer_admissibility_test.go:768-772).
+// hand-built for what it cannot (`trailAdmitAttribution`).
 func TestFinRecordLivenessIsConsumedAsHanded(t *testing.T) {
 	values := finRecordLivenessValues()
 	if len(values) != 4 {

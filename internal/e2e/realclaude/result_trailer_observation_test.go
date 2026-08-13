@@ -101,7 +101,7 @@ type trailScanResult struct {
 	// the record. Empty unless State == trailSeen.
 	//
 	// It holds verbatim model output: the trailer's `result` field is the last
-	// assistant message, sixth on emitter.go:456-468's pinned wire order, so
+	// assistant message, sixth on `trailer` in emitter.go's pinned wire order, so
 	// roughly 415 of the retained 512 bytes are text the model chose. Treat this
 	// field as OPERATOR-REVIEW-BEFORE-PASTE. Trailer below is not — see there.
 	Line string `json:"trailer_line,omitempty"`

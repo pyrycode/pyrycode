@@ -46,7 +46,7 @@ package realclaude
 //   - WithWorktree, WithWorktreeAuthenticated — filesystem setup and credentials;
 //     nothing here needs either.
 //   - t.TempDir() — yields an operator filesystem path, for the recorded reason at
-//     finding_staging_gate_test.go:370-375. The fixture path below is a synthetic
+//     `finOutcomeHoldCommand`. The fixture path below is a synthetic
 //     const instead.
 //   - os.Getenv, os.Environ, os.Setenv — the only environment READ is the one
 //     inside reachRunnerPathFromEnv, and the
@@ -68,13 +68,13 @@ package realclaude
 // the two strings and report LENGTHS, following finding_staging_fill_test.go:556-562.
 //
 // No struct is declared, so finTranscriptReading's no-json-tags rule
-// (finding_staging_fill_test.go:92-93) is satisfied structurally rather than by
+// (`finTranscriptReading`) is satisfied structurally rather than by
 // inspection — there is nothing here to tag. An edit that adds a type carrying
 // either string inherits that rule.
 //
 // # Not env-gated, and must not become so
 //
-// Nothing here needs a Claude login. TestMain (fixtures_test.go:348-354) branches
+// Nothing here needs a Claude login. TestMain branches
 // only on GO_TEST_HELPER_PROCESS and otherwise runs m.Run(), so a regression here
 // is red under `make e2e-realclaude` on a credential-free machine. Note that
 // `go vet` and `staticcheck` in `make check` run WITHOUT -tags e2e_realclaude, so
@@ -233,7 +233,7 @@ func finLiveStageEnvDelta() []string {
 // the first posture.
 //
 // On the tool surface the repo's own recorded position is relayed rather than a
-// fresh claim asserted: agent_run.go:354-359 records --allowed-tools as the
+// fresh claim asserted: `buildStreamRunnerClaudeArgs` records --allowed-tools as the
 // authoritative tool gate under YOLO, with the blast radius bounded by it rather
 // than by the trust dialog — and this rig passes --allowed-tools=Bash
 // (spawnProbePyry). So the flip changes the
@@ -257,7 +257,7 @@ func finLiveStageStreamEnvDelta() []string {
 //
 // It must not come from t.TempDir() or os.Getenv: either would put an operator
 // filesystem path into a test file for nothing, the recorded reason at
-// finding_staging_gate_test.go:370-375. The live path comes from #1340, which
+// `finOutcomeHoldCommand`. The live path comes from #1340, which
 // joins finLiveStageFIFOName onto its own t.TempDir(). The name is SPLICED here so
 // a rename tracks.
 const finLiveStageFixtureFIFOPath = "/tmp/pyry-fin-live-stage/" + finLiveStageFIFOName
@@ -308,7 +308,7 @@ func TestFinLiveStagePromptStagesTheDeclaredCommand(t *testing.T) {
 			strings.Count(prompt, "`"), len(prompt))
 	}
 	// Compared, never printed: both operands are captured-string class on a live
-	// run (finding_staging_gate_test.go:141-157). Lengths only, following
+	// run (`finOutcomeStaging`). Lengths only, following
 	// finding_staging_fill_test.go:556-562 — the habit has to survive contact
 	// with the first caller that passes a real path.
 	if got != staged {
@@ -475,7 +475,7 @@ func TestFinLiveStageEnvDeltaNamesTheRunner(t *testing.T) {
 	// precedent, finding_run_record_test.go:819-827, argues this independence in
 	// its failure message and never sets the ambient, so it does not prove it —
 	// it is deliberately not copied as-is. That the variable is not always unset
-	// is the point: background_reach_probe_test.go:1092-1094 records it exported
+	// is the point: `reachRunnerPathFromEnv` records it exported
 	// in an operator's shell on 2026-07-25, where it silently invalidated a #1223
 	// gate.
 	t.Setenv("PYRY_USE_STREAMJSON", "1")
@@ -562,7 +562,7 @@ func TestFinLiveStageStreamEnvDeltaNamesTheRunner(t *testing.T) {
 	//	environment rather than by the delta. That is the vacuity that matters, and
 	//	it is the one observed live: PYRY_USE_STREAMJSON was found exported in an
 	//	operator's shell on 2026-07-25, where it silently invalidated a #1223 gate
-	//	(background_reach_probe_test.go:1092-1094).
+	//	(`reachRunnerPathFromEnv`).
 	//
 	//	CANNOT ESTABLISH: non-vacuity BY CONSTRUCTION. The control passes
 	//	identically if this t.Setenv never ran. The shipped trap gets construction

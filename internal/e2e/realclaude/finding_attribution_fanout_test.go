@@ -83,7 +83,7 @@ const (
 // background_reach_probe_test.go:162-168), no command string. That is what makes
 // the no-captured-bytes property true BY CONSTRUCTION rather than by an ordering
 // discipline a later edit can break; trailAdmitResult is itself documented
-// trap-free (trailer_admissibility_test.go:267-274), so carrying it whole is
+// trap-free (`trailGateInput`), so carrying it whole is
 // safe. TestFinAttributeRecordCarriesNoCapturedBytes is the enforcing test.
 type finAttributeEntry struct {
 	PGID  int              `json:"pgid"`
@@ -115,7 +115,7 @@ type finAttributeRecord struct {
 	Selected trailAdmitResult `json:"selected"`
 	// Detail is the record's one operator-visible sentence. Its content rule is
 	// pinned rather than left to judgement, in trailRunOutcome.Detail's shape
-	// (trail_run_outcome_test.go:465-475): it MAY name finAttribute* condition
+	// (`trailRunOutcome`): it MAY name finAttribute* condition
 	// names, admissibility values, pgids and the three counts; it MAY NEVER quote
 	// the stderr, a tdnReapOutcome.Line, an entry's Admit.Detail, or the
 	// certified string. Quoting Selected.Detail is the likeliest slip — it reads
@@ -130,7 +130,7 @@ type finAttributeRecord struct {
 // FIRST. Total over trailIsAdmitValue's space, so a lookup always lands.
 //
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1114-1115): a shared backing array is
+// reason (`trailRunWellFormed`): a shared backing array is
 // reachable from every test in this package, and this slice is read on every
 // fan-out call. trailRunOutcomeValues (:2480) is the same shape for the same
 // reason.
@@ -492,7 +492,7 @@ func TestFinAttributeFanOut(t *testing.T) {
 			// The reversal builds a FRESH slice. Reversing tc.pgids in place would
 			// mutate the row's own fixture and, on a shared value, leak that
 			// mutation into every later test in the binary — trailRunWellFormed's
-			// stated reason (trail_run_outcome_test.go:1114-1115) applied to the
+			// stated reason (`trailRunWellFormed`) applied to the
 			// runner.
 			reversed := make([]int, len(tc.pgids))
 			for i, pgid := range tc.pgids {

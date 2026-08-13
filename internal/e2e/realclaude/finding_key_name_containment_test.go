@@ -93,7 +93,7 @@ package realclaude
 // Name the FILE, the JSON PATH, a BYTE LENGTH, an OFFSET, a COUNT or a
 // rig-chosen FIELD NAME. Never a file's contents, never a Detail's string, never
 // scan.Line, never a needle-bearing value. That is finWriteSorted's own rule
-// (finding_artifact_write_test.go:591-599), inherited whole: printing what a file
+// (`finWriteSorted`), inherited whole: printing what a file
 // or a detail HOLDS after it just failed a leak check writes the leak into CI
 // logs. The one knowing residual is that the non-vacuity Fatalfs print key NAMES,
 // which under M1 would be values — but they are fixture constants on a
@@ -141,7 +141,7 @@ import (
 // doctrine (finding_artifact_write_test.go:28-32).
 //
 // THE FATAL PRECONDITION IS THE 64 KiB CEILING DEFENCE, in finPublishedKeyNames'
-// words (finding_key_name_bounds_test.go:168-173): past bufio.Scanner's default a
+// words (`finPublishedKeyNames`): past bufio.Scanner's default a
 // line ABORTS the scan rather than truncating it, KeyNames comes back nil, the
 // published field renders null and every assertion downstream is vacuously green.
 // It reports the scan's own Detail — this instrument's prose, carrying no byte of
@@ -180,7 +180,7 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 //     needle and the shipped pad measurement still holds.
 //
 // A function and not a package-level var, for trailRunWellFormed's stated reason
-// (trail_run_outcome_test.go:1113-1115): `go test -race` runs this package's tests
+// (`trailRunWellFormed`): `go test -race` runs this package's tests
 // in parallel.
 //
 // # The plant list, and why it stops where it does
@@ -528,7 +528,7 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 // rather than pinned as a literal.
 //
 // A const and not a var: the parallel-tests rule
-// (trail_run_outcome_test.go:1113-1115) is about shared BACKING ARRAYS, and a string
+// (`trailRunWellFormed`) is about shared BACKING ARRAYS, and a string
 // constant has none.
 const finContainNeedleKeyName = "PYRY-PROBE-KEY-NAME-NEEDLE-MUST-NOT-REACH-A-DETAIL"
 
@@ -551,7 +551,7 @@ func finContainNeedleKeyTrailer() string {
 //
 // This discharges the NAMES half of finTrailerRecord's prohibition that the Detail
 // "may name no key and interpolate no COUNT of them"
-// (finding_trailer_evidence_test.go:198-200), inherited from #1363 via #1364.
+// (`finTrailerRecord`), inherited from #1363 via #1364.
 //
 // # Why a needle sweep and not a second headroom row
 //
@@ -636,7 +636,7 @@ func TestFinContainNoDetailNamesAKeyName(t *testing.T) {
 			len(details), finWriteSorted(details))
 	}
 	// PATH AND BYTE LENGTH ONLY, never the Detail's string: finWriteSorted's rule
-	// (finding_artifact_write_test.go:591-599). The needle is a rig-chosen constant
+	// (`finWriteSorted`). The needle is a rig-chosen constant
 	// and naming the path is what makes the failure diagnosable.
 	for _, path := range finWriteSorted(details) {
 		if strings.Contains(details[path], finContainNeedleKeyName) {

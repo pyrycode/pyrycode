@@ -114,7 +114,7 @@ func trailKeyNames(line []byte) []string {
 //
 // A function rather than a package-level var: it returns a slice, go test -race
 // runs this package's tests in parallel, and a shared backing array would let one
-// row's mutation reach another's (trail_run_outcome_test.go:1113-1115).
+// row's mutation reach another's (`trailRunWellFormed`).
 func trailExpectedKeyNames() []string {
 	return []string{
 		"duration_ms", "is_error", "num_turns", "result", "session_id",
@@ -142,7 +142,7 @@ func trailKeyNamesNeedles() map[string]string {
 //
 // `result`'s needle sits behind pad bytes of padding so it lands PAST the
 // 512-byte cap, which is trailNeedle's own rule for a plant
-// (result_trailer_observation_test.go:322-325): a hit on that needle could then
+// (`trailNeedle`): a hit on that needle could then
 // only have come from the full line and never from the recorded copy. The test
 // asserts the offset rather than trusting this comment.
 func trailKeyNamesNeedledTrailer(pad int) string {

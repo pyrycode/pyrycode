@@ -82,7 +82,7 @@ import (
 // or a trailer captured from a real budget-fired run (no such fixture exists;
 // trailPaddedTrailer is hand-built). Recorded as a known limit on what an
 // admissible-vs-void answer rests on. Same discipline as tdnReapMessage
-// (teardown_liveness_test.go:81-89): a rename in production must not be silently
+// (`tdnReapMessage`): a rename in production must not be silently
 // followed.
 const trailBudgetTerminalReason = "max_turns"
 
@@ -267,7 +267,7 @@ const (
 // itself calls no argv reader at all — not tdnClaudeCommand, not reachProc.Command,
 // not pinScan.Matches, and not reachRunnerPathFromArgv, which keys on
 // --append-system-prompt-file and would label a correctly-wired stream run
-// ptyrunner (teardown_liveness_probe_test.go:759-766).
+// ptyrunner (`tdnRunnerFromArgv`).
 //
 // # Two arms read it
 //
@@ -420,7 +420,7 @@ func trailDetail(format string, args ...any) string {
 // trailReasonAgainstPath's answer, the presence site cites that function's case
 // constant rather than embedding its Detail, and every arm of that function is
 // fixed prose over its own file's constants and file cites
-// (trailer_terminal_reason_test.go:208-221). Every Detail here stays fixed prose
+// (`trailReasonAgainstPath`). Every Detail here stays fixed prose
 // over this file's own constants, the scan's own state, and that function's
 // answer or the name of it.
 //
@@ -491,7 +491,7 @@ func trailGate(in trailGateInput) trailGateResult {
 		// readings it is not are both live mistakes rather than invented ones:
 		//
 		//   - NEVER decodedReason != "". That is the collapse #1357's reading was
-		//     landed to prevent (trailer_terminal_reason_test.go:203-206), and
+		//     landed to prevent (`trailReasonAgainstPath`), and
 		//     inside this block it is always false — so it would route every input
 		//     to the absence arm SILENTLY.
 		//   - NEVER len(KeyNames) > 0. A scan-produced absence carries the six
@@ -982,7 +982,7 @@ func trailReapLine(count int, pgids string) string {
 //
 // An empty argv is admissible here and is never a staging failure.
 // tdnClaudeCommand returns "" when zero OR SEVERAL rows carry the claude needle
-// (teardown_liveness_probe_test.go:557-575), so emptiness is ambiguity about
+// (`tdnClaudeCommand`), so emptiness is ambiguity about
 // which row was claude's — never a claim that the run took the other path, which
 // is exactly what tdnRunnerFromArgv answers with its own indeterminate string.
 //
@@ -1021,7 +1021,7 @@ func trailRunnerUnread() string { return tdnRunnerFromArgv("") }
 // can fire at all.
 //
 // A function rather than a package-level var, for trailExpectedKeyNames()' own
-// reason (trailer_key_names_test.go:115-117): the value holds a []string and a
+// reason (`trailExpectedKeyNames`): the value holds a []string and a
 // *resultTrailer, go test -race runs this package's tests in parallel, and a
 // shared backing array would let one row's mutation reach another's.
 func trailGateAbsentReasonScan() trailScanResult {
@@ -1030,7 +1030,7 @@ func trailGateAbsentReasonScan() trailScanResult {
 
 // trailGateEmptyReasonScan is the PRESENT-AND-EMPTY shape: the same line with
 // "terminal_reason":"" on it. It differs from the fixture above in exactly one
-// key (trailer_key_names_test.go:158-161), and the two decode to an identical
+// key (`trailKeyNamesNoTerminalReason`), and the two decode to an identical
 // "" — which is the premise TestTrailKeyNamesSeparatesAbsenceFromZeroValue
 // already asserts and this file inherits rather than re-derives.
 //
@@ -1608,7 +1608,7 @@ func trailGateAbsenceCaseMarkers() []string {
 // VALUE each produces, which is why the failure message names got-vs-want and
 // never "is / is not the path-unnamed case" — a coarser assertion loses that
 // distinction in the output. That is TestTrailReasonAgainstPath's own rule
-// (trailer_terminal_reason_test.go:337-344), inherited here because these rows
+// (`TestTrailReasonAgainstPath`), inherited here because these rows
 // are the first decision-path consumer of that function. M5 shares R3 with them
 // and is told apart the same way, by the GATE value R3 reaches rather than the
 // case marker it names.

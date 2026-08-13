@@ -890,7 +890,7 @@ func tdnOrNone(s string) string {
 
 // tdnFixturePtyArgv and tdnFixtureStreamArgv are the two runners' real claude
 // command lines, built from their actual argv builders — ptyrunner.buildArgs
-// (runner.go:616-625) and buildStreamRunnerClaudeArgs (agent_run.go:364-378).
+// (runner.go:616-625) and buildStreamRunnerClaudeArgs.
 // Both carry --append-system-prompt-file, which is precisely why that flag
 // cannot name a runner.
 const (

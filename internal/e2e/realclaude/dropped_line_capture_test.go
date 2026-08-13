@@ -28,7 +28,7 @@ package realclaude
 // # What "dropped" means here
 //
 // Zero events emitted by a real streamsup.Parser (via parseOne). The parser is
-// documented turn-stateless (parser.go:124-128), which is the licence to
+// documented turn-stateless (`maxTaskRosterEntries`), which is the licence to
 // classify each line with a fresh parser. Nothing in this file reads
 // streamsup's unexported tables.
 //
@@ -111,7 +111,7 @@ const (
 )
 
 // dropcapMaxPartial caps the partial-line accumulator — same value and same
-// reason as streamsup's defaultMaxParseBuf (parser.go:13-19). This is claude's
+// reason as streamsup's defaultMaxParseBuf. This is claude's
 // stdout read into the parent's memory, and the partial is the only unbounded
 // accumulator in the design. dropcapMaxCaptureBytes caps the total; past it
 // WHOLE lines are dropped and counted, never truncated, because AC3 forbids a
@@ -250,7 +250,7 @@ type dropcapRecorder struct {
 	// maxPartial caps the accumulator. Carried as a per-recorder field rather
 	// than read from the constant so a test can shrink it without racing a
 	// shared global — the same reasoning, and the same shape, as the parser's
-	// own maxBuf (parser.go:13-19).
+	// own maxBuf (`defaultMaxParseBuf` in parser.go).
 	maxPartial int
 	// skipUntilNewline is set when the accumulator was discarded at maxPartial.
 	// The TAIL of that over-long line is a FRAGMENT, not a line: appending it
@@ -1035,7 +1035,7 @@ func dropcapClassifyOutcome(rec *dropcapRecord, pre, turnEnd fifoLiveOutcome) {
 // not recognise emits a turnevent.Unrecognized.
 //
 // A fresh parser per line is licensed by the documented turn-statelessness
-// (parser.go:124-128): the only cross-line state is the partial-line buffer,
+// (`maxTaskRosterEntries`): the only cross-line state is the partial-line buffer,
 // which a complete line never uses.
 func dropcapClassifyAll(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) []dropcapEntry {
 	t.Helper()

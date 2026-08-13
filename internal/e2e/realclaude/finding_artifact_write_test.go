@@ -63,7 +63,7 @@ package realclaude
 // THE WRITER NEVER FAILS A TEST. It is the instrument under measurement, and an
 // instrument failure is a datum: a marshal error or a lost file is t.Errorf and
 // the remaining write still happens, mirroring writeReachArtifacts:827-853 and
-// the family's pure-builder contract (finding_run_record_test.go:320-325).
+// the family's pure-builder contract (`finRecordBuild`).
 //
 // THE SWEEP'S OWN READS FAIL LOUDLY. finWriteReadDir and every decode below are
 // t.Fatalf, because a sweep that silently skipped a file it could not read would
@@ -92,7 +92,7 @@ import (
 // retains no trailer line in any form, capped or otherwise — finTrailerRecord
 // (`finTrailerRecord`) is ten scalars and a name list with no
 // Line, and finRecordInputs carries neither a trailObservation nor a
-// trailScanResult (finding_run_record_test.go:214-221) — so there is no field
+// trailScanResult (`finRecordInputs`) — so there is no field
 // left to mark for review.
 //
 // # Why it names the key names rather than resting on the five categories
@@ -170,7 +170,7 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 
 	// Counts, an enumerated agreement verdict, an admissibility value and a
 	// carried outcome — the same content rule finRecordRun.Detail states
-	// (finding_run_record_test.go:153-173). Never an input, never a Detail, and
+	// (`finRecordRun`). Never an input, never a Detail, and
 	// never a %v verb applied to a struct or a slice.
 	note := fmt.Sprintf("# pyry agent-run background-reach probe: one run's record\n\n"+
 		"%s\n\n```json\n%s```\n\n"+
@@ -199,7 +199,7 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 // of the directory sweep.
 //
 // trailNeedle's own comment says it is "placed PAST the cap"
-// (result_trailer_observation_test.go:322-325). Against trailPaddedTrailer(0)
+// (`trailNeedle`). Against trailPaddedTrailer(0)
 // that is not what happens: the line renders 385 bytes and the needle ends at
 // byte 146, comfortably inside reachCapCommand's 512-byte cap, so trailScan
 // records it into Line INTACT (:192-206).
@@ -242,7 +242,7 @@ const finWriteTrailerPad = 0
 // because trailScan is deterministic over the bytes it is handed and
 // trailPaddedTrailer renders the same line for the same pad. What would NOT be
 // safe is hoisting the result to a package-level var to avoid the second scan:
-// that is the fixture rule trail_run_outcome_test.go:1113-1115 states for this whole
+// that is the fixture rule `trailRunWellFormed` states for this whole
 // package, whose reason is that `go test -race` runs these tests in parallel.
 func finWritePlantedTrailerScan() trailScanResult {
 	return trailScan([]byte(trailPaddedTrailer(finWriteTrailerPad) + "\n"))
@@ -268,7 +268,7 @@ func finWritePlantedReapLog() []byte {
 // on TestFinWriteArtifactsCarryNoCapturedBytes.
 //
 // A function rather than a package-level var, for trailRunWellFormed's stated
-// reason (trail_run_outcome_test.go:1113-1115): a shared backing array is reachable
+// reason (`trailRunWellFormed`): a shared backing array is reachable
 // from every test in this package, and `go test -race` runs them in parallel.
 //
 // # Plant only where the pipeline reduces
@@ -429,7 +429,7 @@ func finWriteReadDir(t *testing.T, dir string) map[string][]byte {
 // The TYPE walk to finWriteObservedPaths' VALUE walk. finRecordRun has four
 // struct- or slice-valued fields, so a top-level scan inspects ten keys, misses
 // every nested one, and reads as a structural guarantee it is not providing —
-// "vacuous coverage is worse than none" (finding_run_record_test.go:934-944).
+// "vacuous coverage is worse than none" (`TestFinRecordCarriesNoCapturedBytes`).
 // Same shape as finRecordInputReaches (:731), which answers a different question
 // and is called directly by AC4 rather than reimplemented.
 //
@@ -703,7 +703,7 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // The record carries no trailer line in any form, capped or otherwise:
 // finTrailerRecord is ten scalars and a
 // name list with no Line, and finRecordInputs carries neither a trailObservation
-// nor a trailScanResult (finding_run_record_test.go:214-221), so
+// nor a trailScanResult (`finRecordInputs`), so
 // trailScanResult.Line is unreachable from this record at any depth. A SINGLE
 // OCCURRENCE WOULD THEREFORE MEAN A REDUCTION HAD BEEN WIDENED BACK INTO A
 // RETENTION — not that a permitted field needed review.
@@ -806,7 +806,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// them renders every Admit.Detail, and the rule is to name the count, the path
 	// and the length rather than the string (security review item [7]). The Values
 	// are safe to print because trailAdmitAttribution returns one of a closed set
-	// (trailer_admissibility_test.go:267-274); the Details beside them are not.
+	// (`trailGateInput`); the Details beside them are not.
 	first := "<no entries>"
 	if len(in.Attribution.Entries) > 0 {
 		first = in.Attribution.Entries[0].Admit.Value
@@ -829,7 +829,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	// # Why the trailer row survives a retirement its neighbours did not
 	//
 	// Its ONLY leak channel is the retained Line. resultTrailer has no `result`
-	// member (tool_loop_test.go:194-203, which
+	// member (`resultTrailer`, which
 	// TestFinWriteArtifactPublishesNoVerbatimModelOutput asserts rather than trusts),
 	// so the four decoded scalars cannot carry the needle at ANY pad — and without
 	// the in-cap guard below the row degenerates into asserting the absence of
@@ -938,7 +938,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 //
 // The walk must be recursive because a top-level scan on finRecordRun inspects
 // ten keys and misses every nested one — the reason
-// finding_run_record_test.go:934-944 gives for deferring this scan to this
+// `TestFinRecordCarriesNoCapturedBytes` gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
 // (`TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer`, `TestFinAttributeRecordCarriesNoCapturedBytes`),
@@ -963,7 +963,7 @@ func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	// genuinely named for a captured column still trips this scan.
 	exempt := map[string]string{
 		// A shipped and permitted key on the carried pinStateOutcome
-		// (`pinStateOutcome`). finding_run_record_test.go:148-151
+		// (`pinStateOutcome`). `finRecordRun`
 		// names this sweep as the place to exempt it rather than as a reason to
 		// strip the field: the value is the ps tool's own stderr about a lookup,
 		// not a process's argv or a model's output.
