@@ -66,6 +66,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/agentrun/streamjson"
 )
 
 // --- the wire literal the budget path renders --------------------------------
@@ -75,16 +77,13 @@ import (
 // anything streamjson defines — wireFields is unexported, so no test in this
 // package could reference it even if that were wanted.
 //
-// The failure direction is the bad one, and it is named here rather than papered
-// over. If someone renames the wire value, this gate stops recognising
-// budget-fired runs and reports them as trailGateUsable, so a structural void
-// becomes a FALSE PROOF with nothing going red. Pinning it would need either an
-// exported mapping (a production change, out of scope for a probe-family ticket)
-// or a trailer captured from a real budget-fired run (no such fixture exists;
-// trailPaddedTrailer is hand-built). Recorded as a known limit on what an
-// admissible-vs-void answer rests on. Same discipline as tdnReapMessage
-// (`tdnReapMessage`): a rename in production must not be silently
-// followed.
+// The literal is no longer trusted: TestTrailBudgetTerminalReasonIsTheShippedWireValue
+// drives the exported emitter into a budget-fired trailer and reds if this
+// value stops matching it. That check is what the failure direction needs,
+// because the bad direction is silent — a renamed wire value would leave the
+// gate reporting trailGateUsable, turning a structural void into a false proof.
+// Same discipline as tdnReapMessage (`tdnReapMessage`): a rename in
+// production must not be silently followed.
 const trailBudgetTerminalReason = "max_turns"
 
 // --- the gate's value space --------------------------------------------------
@@ -1413,6 +1412,57 @@ func TestTrailAdmissibilityConstantsAreClosed(t *testing.T) {
 	if trailBudgetTerminalReason == "" {
 		t.Error("trailBudgetTerminalReason is empty, so no run can ever be recognised as " +
 			"budget-fired and every one of them would report as usable")
+	}
+}
+
+// TestTrailBudgetTerminalReasonIsTheShippedWireValue closes the hazard
+// trailBudgetTerminalReason's doc used to record as unfixable. A rename of the
+// wire value would leave this package's copy stale, the budget arm would stop
+// firing, and a structural void would ship as a usable gate with nothing going
+// red.
+//
+// It drives the SHIPPED emitter rather than comparing two literals. A test
+// asserting the constant equals "max_turns" would go green across exactly the
+// rename it exists to catch. streamjson.New, Config and ExitReasonMaxTurns are
+// all exported, so a budget-fired trailer can be produced right here, offline —
+// which is what makes the pin cost nothing and need no production change. The
+// doc's "no such fixture exists" was true only of a CAPTURED one.
+//
+// The trailer is read back with trailScan, this package's own reader, so the
+// claim is about what the gate's real input carries rather than about a
+// hand-built fixture. The gate is then driven over it, because the constant
+// matching is necessary and the arm firing is the property that matters.
+func TestTrailBudgetTerminalReasonIsTheShippedWireValue(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	em, err := streamjson.New(streamjson.Config{
+		Writer:    &buf,
+		SessionID: "11111111-1111-4111-8111-111111111111",
+		Cwd:       "/tmp",
+		Tools:     []string{},
+		Model:     "trail-budget-pin",
+	})
+	if err != nil {
+		t.Fatalf("streamjson.New: %v", err)
+	}
+	em.SetExitReason(streamjson.ExitReasonMaxTurns)
+	if err := em.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	scan := trailScan(buf.Bytes())
+	if scan.State != trailSeen || scan.Trailer == nil {
+		t.Fatalf("scan of a budget-fired emitter: state %q, decoded trailer present %t",
+			scan.State, scan.Trailer != nil)
+	}
+	if got := scan.Trailer.TerminalReason; got != trailBudgetTerminalReason {
+		t.Fatalf("the shipped emitter renders terminal_reason %q and trailBudgetTerminalReason is %q; "+
+			"the budget arm has stopped recognising budget-fired runs", got, trailBudgetTerminalReason)
+	}
+
+	if got := trailGate(trailGateInput{Scan: scan, RunnerPath: trailRunnerUnread()}); got.Value != trailGateBudgetFired {
+		t.Fatalf("gate over a real budget-fired trailer = %q, want %q", got.Value, trailGateBudgetFired)
 	}
 }
 
