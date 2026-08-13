@@ -14,11 +14,11 @@ package realclaude
 // # The claim, and why it is admissible on some paths only
 //
 // The probe's strongest claim rests on pyry's own reap log. ptyrunner's teardown
-// order is pinned in its own comment (runner.go:479-485):
+// order is pinned in its own comment, the defer-LIFO chain in ptyrunner.Run:
 //
 //	cancel() -> wg.Wait() -> counter.Stop() -> emitter.Close() -> cancel() -> [reap] -> sess.Close()
 //
-// emitter.Close() writes the trailer; the reap defer (runner.go:398) SIGKILLs
+// emitter.Close() writes the trailer; the reap defer under it SIGKILLs
 // claude's descendant groups AFTER it. So on that path a process group named in
 // pyry's reap log was alive strictly after the trailer was written, and
 // therefore alive when it was written — a deterministic proof where a
@@ -29,8 +29,9 @@ package realclaude
 // gets its own name, and none of them may read as "the group had exited".
 //
 // But the order is path-conditional. The budget's Terminate hook reaps INSIDE
-// the hook (runner.go:492-503), BEFORE the trailer, and a third reap runs on
-// operator-cancel (runner.go:313-316). The reap line lands on stderr and the
+// the hook (ptyrunner.Run's Terminate hook), BEFORE the trailer, and a third
+// reap runs on operator-cancel (its cmd.Cancel hook). The reap line lands on
+// stderr and the
 // trailer on stdout — separate pipes, separate copier goroutines — so the
 // captured bytes carry no ordering between them. The one signal that tells the
 // paths apart is the trailer's own terminal_reason: a budget-fired run renders
@@ -49,10 +50,10 @@ package realclaude
 //
 // # Reused, not rebuilt
 //
-// trailScan / trailScanResult (`trailScan`, :98) is
-// the trailer input, shipped by #1266, including its aborted state and its
-// fixtures. tdnClassifyReapLog / tdnReapOutcome / tdnIsReapVerdict
-// (`tdnClassifyReapLog`, :116, :1176) is the attribution input, shipped
+// trailScan / trailScanResult is the trailer input, shipped by #1266,
+// including its aborted state and its fixtures.
+// tdnClassifyReapLog / tdnReapOutcome / tdnIsReapVerdict
+// is the attribution input, shipped
 // by #1253; pyry's stderr is NOT re-parsed here. resultTrailer
 // (`resultTrailer`) is the decode, reachCapCommand
 // (`reachCapCommand`) the cap.
@@ -69,7 +70,7 @@ import (
 
 // --- the wire literal the budget path renders --------------------------------
 
-// trailBudgetTerminalReason is emitter.go:429-431's terminal_reason for
+// trailBudgetTerminalReason is wireFields' terminal_reason for
 // ExitReasonMaxTurns, as a STRING LITERAL and deliberately not a reference to
 // anything streamjson defines — wireFields is unexported, so no test in this
 // package could reference it even if that were wanted.
@@ -123,14 +124,14 @@ const (
 	// trailGateAbsentOwesNone: the trailer carries NO terminal_reason key at all,
 	// and the observed runner path owes none. A READING rather than a caller's
 	// bug: streamrunner.Run tees claude's stdout for the watchdog and passes the
-	// bytes through unchanged (internal/agentrun/streamrunner/runner.go:177-179),
+	// bytes through unchanged (its tee-parse of claude's stdout),
 	// synthesising a trailer of its own only when the idle-stall watchdog fired
-	// AND claude emitted no result (:250-253). So on every healthy run of that
+	// AND claude emitted no result. So on every healthy run of that
 	// path the trailer is claude's own result line, and absence is what that path
 	// constructs.
 	//
 	// It CERTIFIES NOTHING — Reason stays empty, which is what keeps
-	// trailClassifyRun's C2 (trail_run_outcome_test.go:673-684) green unamended —
+	// trailClassifyRun's C2 green unamended —
 	// and it says no more than what was read. Not that any process was alive:
 	// there is no certified instant here for such a claim to be about, which is
 	// why the run-level arm it reaches is a named void. Not anything about a
@@ -156,21 +157,21 @@ const (
 	// and the observed runner path owes none. A READING rather than a caller's bug,
 	// for the mirror of the sibling above's reason: streamrunner.Run tees claude's
 	// stdout for the watchdog and passes the bytes through unchanged
-	// (internal/agentrun/streamrunner/runner.go:177-179), so the line is genuinely
+	// (its tee-parse of claude's stdout), so the line is genuinely
 	// what the run produced. Nothing about it is malformed and no caller did
 	// anything wrong.
 	//
 	// What it says is that the line is NOT that path's documented healthy shape —
 	// absence is — and no more than that. It CERTIFIES NOTHING: Reason stays empty,
-	// which is what keeps trailClassifyRun's C2 (trail_run_outcome_test.go:673-684)
-	// green unamended and lets C4 (:698-706) force Admit empty.
+	// which is what keeps trailClassifyRun's C2
+	// green unamended and lets its C4 force Admit empty.
 	//
 	// NEVER THAT PYRY WROTE IT, and the passthrough cite above is the REASON rather
 	// than a decoration. Pyry's own synthesis on that path is unconditional WHEN IT
-	// HAPPENS — writeIdleStallResult sets the field
-	// (internal/agentrun/streamrunner/watchdog.go:280) on one carrying no omitempty
-	// (:253), and Run reaches it only when the idle-stall watchdog fired AND claude
-	// emitted no result (runner.go:250-253) — but that is a statement about what
+	// HAPPENS — writeIdleStallResult sets the field, on a TerminalReason
+	// carrying no omitempty, and streamrunner.Run reaches it only when the
+	// idle-stall watchdog fired AND claude
+	// emitted no result — but that is a statement about what
 	// pyry writes and never about what claude cannot. Because the passthrough puts
 	// claude's own bytes on the same line, a value claiming authorship would let
 	// claude's output name pyry as its author.
@@ -226,7 +227,7 @@ const (
 	// instrument is never a statement about pyry.
 	trailAdmitVoidInstrument = "admit-void-instrument-failed"
 	// trailAdmitVoidNoLine: no reap line at all. AMBIGUOUS by construction
-	// (reap.go:64 guards the emit on len(reaped) > 0), so a void — never
+	// (ReapDescendantGroups guards the emit on len(reaped) > 0), so a void — never
 	// evidence the group had exited.
 	trailAdmitVoidNoLine = "admit-void-no-reap-line"
 	// trailAdmitVoidGroupUnnamed: the reaper ran and did not name the group. A
@@ -254,14 +255,14 @@ const (
 //
 // That type is trailScan's output over bytes alone, and a runner path is not a
 // property of the line. It is also pinned unreachable from the published record
-// (finding_run_record_test.go:780-812), so widening it would put that pin up for
+// (TestFinRecordEmbedsTrailerRecordWhole), so widening it would put that pin up for
 // renegotiation for no gain here.
 //
 // # RunnerPath holds the REDUCED answer and never the argv
 //
 // RunnerPath is tdnRunnerFromArgv's OUTPUT — one of its five constant answers —
 // and never its input. That is the rule finRecordInputs.ClaudeCommand states at
-// its own tier (finding_run_record_test.go:235-238): the argv is READ, reduced to
+// its own tier: the argv is READ, reduced to
 // one of tdnRunnerFromArgv's constant answers, and NEVER RETAINED anywhere in the
 // record. Nothing on this type gives verbatim argv a place to land, and trailGate
 // itself calls no argv reader at all — not tdnClaudeCommand, not reachProc.Command,
@@ -294,8 +295,8 @@ type trailGateInput struct {
 // That is the property worth pinning, and it is the one that is true. The gate
 // cannot make itself the pointer trap's LAST consumer: trailObservation embeds
 // trailScanResult (`trailObservation`), so anything holding
-// an observation reaches .Trailer by field promotion, and shipped code already
-// does exactly that (:588, :638). What the gate can guarantee is its own output.
+// an observation reaches .Trailer by field promotion, and trailGate itself
+// does exactly that, twice. What the gate can guarantee is its own output.
 //
 // It carries neither trailScanResult.Line nor any quote of it. That string is
 // verbatim model output and marked OPERATOR-REVIEW-BEFORE-PASTE; copying it
@@ -322,7 +323,7 @@ type trailGateResult struct {
 	// It ANSWERS the rule above rather than outgrowing it. The value is one of
 	// tdnRunnerFromArgv's five constant answers — source-authored prose reduced
 	// from argv, READ and NEVER RETAINED, exactly as finRecordInputs.ClaudeCommand
-	// states it (finding_run_record_test.go:235-238) — so it is not a copy of an
+	// states it — so it is not a copy of an
 	// input's captured bytes, and TestTrailAdmissibilityRecordsCarryNoCapturedBytes
 	// keeps enforcing that over the marshalled record.
 	//
@@ -330,7 +331,7 @@ type trailGateResult struct {
 	// tdnRunnerFromArgv returns a non-empty string on every branch, including for
 	// "". What "" MEANS at a decision was deferred until an arm depended on it,
 	// and #1420 is that arm, so the answer belongs here rather than in a pointer:
-	// finRecordRunnerLabel("") returns "" (finding_run_record_test.go:267-272),
+	// finRecordRunnerLabel("") returns "",
 	// which matches neither runner label, so an unfilled reading ROUTES — to
 	// trailReasonPathUnnamed, whose meaning IS "the reading names no runner".
 	//
@@ -376,7 +377,7 @@ func trailDetail(format string, args ...any) string {
 // # Nil-safety
 //
 // trailScanResult.Trailer is nil unless State == trailSeen, deliberately
-// (result_trailer_observation_test.go:108-119): a consumer that dereferences it
+// (trailScanResult.Trailer): a consumer that dereferences it
 // without checking State panics loudly, which was chosen over a value type that
 // would hand back TerminalReason == "" and let an empty terminal reason pass as
 // a real one. This function is that trap's first consumer, and it dereferences
@@ -391,7 +392,7 @@ func trailDetail(format string, args ...any) string {
 // # The budget arm keys on terminal_reason alone
 //
 // A max_turns run also renders subtype "error_max_turns" and is_error true
-// (emitter.go:428-437). Consulting all three would introduce a fourth question —
+// (wireFields). Consulting all three would introduce a fourth question —
 // what to do when they disagree — for no gain. terminal_reason is the field the
 // teardown path is documented against: one field, one decision.
 //
@@ -470,9 +471,9 @@ func trailGate(in trailGateInput) trailGateResult {
 	}
 
 	// trailSeen from here. Contract again, before anything reads through the
-	// pointer: trailScan sets Trailer on its trailSeen return and on no other
-	// (result_trailer_observation_test.go:180-233), so a nil here is a
-	// hand-built record, not something the producer can emit.
+	// pointer: trailScan sets Trailer on its trailSeen return and on no
+	// other, so a nil here is a hand-built record, not something the
+	// producer can emit.
 	if in.Scan.Trailer == nil {
 		return trailGateResult{
 			Value: trailGateOutOfContract,
@@ -487,7 +488,8 @@ func trailGate(in trailGateInput) trailGateResult {
 	reason := in.Scan.Trailer.TerminalReason
 	if reason == "" {
 		// The decode collapses two shapes here and the key names separate them
-		// (trailer_key_names_test.go:14-24). PRESENCE IS MEMBERSHIP, and the two
+		// (trailKeyNames' header, § What the fixed decode cannot answer).
+		// PRESENCE IS MEMBERSHIP, and the two
 		// readings it is not are both live mistakes rather than invented ones:
 		//
 		//   - NEVER decodedReason != "". That is the collapse #1357's reading was
@@ -518,13 +520,15 @@ func trailGate(in trailGateInput) trailGateResult {
 			// Embedding its Detail is safe because every arm of it is fixed prose
 			// over its own file's constants and file cites — never the reading,
 			// never a key name, never the decoded scalar — which that function's
-			// doc states structurally at :208-221.
+			// doc states structurally, under § No input byte interpolates into the
+			// output, at all.
 			//
 			// PRESENCE IS STILL THE GATE'S OWN READ, from the membership test
 			// above, exactly as #1419 landed it. It is NOT taken from the answer
-			// below: that function computes presence at :223 and then falls through
-			// to trailReasonPathUnnamed on any label naming neither runner WITHOUT
-			// CONSULTING IT (:272-278), so on an indeterminate reading an absent key
+			// below: that function computes presence from the key names itself and
+			// then falls through to trailReasonPathUnnamed on any label naming
+			// neither runner WITHOUT CONSULTING IT, so on an indeterminate reading an
+			// absent key
 			// and a present-and-empty one reach one value — and an indeterminate
 			// reading is what trailRigGather supplies, and what the finding gather
 			// falls back to when its caller stages none. Sourcing presence there
@@ -552,7 +556,7 @@ func trailGate(in trailGateInput) trailGateResult {
 			// sites that each echo RunnerPath, and each case needs its own byte
 			// budget. trailDetail caps at reachMaxCommandBytes (512) and
 			// reachCapCommand TRUNCATES AND MARKS rather than failing
-			// (background_reach_probe_test.go:945-950), so prose that outgrew the cap
+			// (reachCapCommand), so prose that outgrew the cap
 			// would be cut PAST its embedded value marker and publish a severed
 			// sentence that still satisfies a marker assertion. Measured at #1417 by
 			// driving these three sites: the composed Details are 461 / 464 / 468 B
@@ -648,7 +652,7 @@ func trailGate(in trailGateInput) trailGateResult {
 	// owes-none absence, and for the same reason: the record IS a reading, so
 	// answering "the input is not a reading" filed a measurement as a caller's bug.
 	// Certifying nothing is what keeps trailClassifyRun's C2
-	// (trail_run_outcome_test.go:673-684) green unamended and lets C4 (:698-706)
+	// green unamended and lets its C4
 	// force Admit empty, so the run-level answer is decided at step 1 alone — by
 	// trailOutcomeVoidReasonNotOwedByPath, the arm added to that switch IN THE SAME
 	// COMMIT, because a gate value registered in trailIsGateValue with no arm there
@@ -683,7 +687,7 @@ func trailGate(in trailGateInput) trailGateResult {
 	// before this site is reached, so a blank terminal_reason from a path owing none
 	// is answered PATH-INVARIANTLY as out of contract. The reduction disagrees:
 	// trailReasonPresentOwesNone absorbs both — "Empty or named, both land here"
-	// (trailer_terminal_reason_test.go:105-108) — and its Detail is byte-identical
+	// (trailReasonPresentOwesNone's own doc) — and its Detail is byte-identical
 	// for the named and the blank input. #1419's arm is kept winning because it
 	// publishes what the one absorbing value cannot: the NO LIVE REPRO EXISTS claim,
 	// which is TRUE of a blank key and FALSE of an absent one.
@@ -778,12 +782,12 @@ func trailGate(in trailGateInput) trailGateResult {
 // the same class of defect.
 func trailAdmitAttribution(reap tdnReapOutcome, certified string) trailAdmitResult {
 	// Contract, first. The three checks below are exactly what
-	// tdnClassifyReapLog (teardown_liveness_test.go:144-219) can emit: it
+	// tdnClassifyReapLog can emit: it
 	// reaches tdnReapNoLine only with LineCount == 0, and reaches
 	// tdnReapHeldPGIDKilled / tdnReapHeldPGIDAbsent only after incrementing
 	// LineCount for an anchored line. tdnReapInstrumentFailed carries no such
-	// pairing — its held-pgid guard (:147) returns before any line is counted
-	// while its parse-failure arm (:171) returns after — so no LineCount check
+	// pairing — its held-pgid guard returns before any line is counted
+	// while its parse-failure arm returns after — so no LineCount check
 	// applies to it.
 	//
 	// Only the first check is mandated by the AC; the other two are that rule
@@ -968,7 +972,7 @@ type trailGateCase struct {
 	pathVaries bool
 }
 
-// trailReapLine renders one anchored reap line in reap.go:65's slog shape, for
+// trailReapLine renders one anchored reap line in ReapDescendantGroups' slog shape, for
 // the rows that build their tdnReapOutcome through the real tdnClassifyReapLog
 // rather than by hand.
 func trailReapLine(count int, pgids string) string {
@@ -1550,7 +1554,7 @@ func TestTrailGate(t *testing.T) {
 // Detail must carry exactly one of.
 //
 // A function rather than a package-level var, this family's idiom
-// (trailExpectedKeyNames(), trailer_key_names_test.go:115-117): the value holds a
+// (trailExpectedKeyNames): the value holds a
 // []string, go test -race runs this package's tests in parallel, and a shared
 // backing array would let one caller's mutation reach another's.
 func trailGateAbsenceCaseMarkers() []string {
@@ -1574,8 +1578,8 @@ func trailGateAbsenceCaseMarkers() []string {
 //
 // The certified reason stays empty on all four rows: naming which case fired,
 // and taking one of them out of the out-of-contract value, still certifies
-// nothing — so trailClassifyRun's C1 and C2 (trail_run_outcome_test.go:660-671,
-// :673-684) stay green with C1's enumeration widened by one and C2 unamended.
+// nothing — so trailClassifyRun's C1 and C2 stay green with C1's enumeration
+// widened by one and C2 unamended.
 //
 // # Markers are matched WHOLE, never as fragments
 //
@@ -1623,7 +1627,7 @@ func trailGateAbsenceCaseMarkers() []string {
 // # Headroom is asserted ON THE OUTPUT, per row
 //
 // trailDetail caps at reachMaxCommandBytes and reachCapCommand TRUNCATES AND
-// MARKS rather than failing (background_reach_probe_test.go:945-950). The shipped
+// MARKS rather than failing (reachCapCommand). The shipped
 // single absence Detail was 480 B of the 512 and the embedded Details are
 // 264-286 B, so a Detail that appended rather than rewrote is truncated 1-5 bytes
 // PAST its embedded value marker — the marker survives and every clause
@@ -1819,9 +1823,9 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 // P1 carries three mutants because its three assertions fail independently: an arm
 // left answering the shipped value moves neither the reason nor the length, a
 // certifying arm leaves the length alone, and an overgrown Detail leaves Reason
-// alone. trailClassifyRun's C2 (trail_run_outcome_test.go:673-684) rejects the
+// alone. trailClassifyRun's C2 rejects the
 // certifying pair a layer up, and since #1434 trailRunCases()' new row
-// (trail_run_outcome_test.go:1550-1560) drives this arm into that classifier WITHOUT
+// drives this arm into that classifier WITHOUT
 // pre-asserting, so C2's own Detail is quoted verbatim in a red TestTrailClassifyRun.
 // Measured, this mutant reddens four tests rather than two.
 //
@@ -1891,8 +1895,7 @@ func TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone(t *testing.T) {
 			// The headline: the shape that was certified usable under ptyrunner's
 			// justification until #1433, filed as the caller's bug until #1434, and
 			// the only shape a live watchdog-killed stream run puts on the line
-			// (streamrunner/watchdog.go:280, reached from
-			// streamrunner/runner.go:250-253).
+			// (writeIdleStallResult, reached from streamrunner.Run).
 			name:       "P1 a named terminal_reason from a path that owes none",
 			scan:       trailGateUsableScan(),
 			wantValue:  trailGatePresentOwesNone,
@@ -2019,7 +2022,7 @@ func TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone(t *testing.T) {
 // reworded itself, which is the vacuity the sweep below exists to avoid.
 //
 // Five and not three. The shipped "three" that finRecordInputs.ClaudeCommand's
-// doc names (finding_run_record_test.go:235-238) counts the LEADING TOKENS
+// doc names counts the LEADING TOKENS
 // finRecordRunnerLabel reduces to — ptyrunner / streamrunner / indeterminate —
 // not the strings the function returns, and TestTdnRunnerFromArgv asserts by
 // strings.HasPrefix against those three tokens over six rows, two of which reach
@@ -2027,7 +2030,7 @@ func TestTrailGateNamesThePresenceCaseOnAPathThatOwesNone(t *testing.T) {
 // five.
 //
 // The argvs are the shipped fixtures where shipped ones exist
-// (`tdnOrNone`, :902) and mirror TestTdnRunnerFromArgv's
+// (`tdnOrNone`) and mirror TestTdnRunnerFromArgv's
 // own rows otherwise. They are inputs to the READER and reach the gate never.
 func trailGateRunnerReadings() []string {
 	return []string{
@@ -2104,7 +2107,7 @@ func trailGateRunnerReadings() []string {
 //     declaring row, in the companions below — positively, and per reading, which
 //     is a stronger statement than the invariance it replaced. It has a second
 //     detector of different fabric one layer up: trailClassifyRun's C2
-//     (trail_run_outcome_test.go:673-684) rejects a non-certifying gate value that
+//     rejects a non-certifying gate value that
 //     carries a reason.
 //
 // A green sweep that had simply stopped covering an arm would be silent about the
@@ -2146,7 +2149,7 @@ func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 
 	// "every other field is compared" has to stay true under a later edit, so the
 	// field count is pinned rather than trusted — this family's own idiom
-	// (finding_run_record_test.go:780-782).
+	// (TestFinRecordEmbedsTrailerRecordWhole).
 	if n := reflect.TypeOf(trailGateResult{}).NumField(); n != 4 {
 		t.Fatalf("trailGateResult has %d fields, want 4: a fifth must either join the compared "+
 			"set below or state its own exemption, and until it does this sweep no longer "+
@@ -2299,7 +2302,7 @@ func TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt(t *testing.T) {
 	// replaces the invariance the widened exemption withdrew — and it is the
 	// stronger of the two, since it says what each reading certifies rather than
 	// only that the five agree. trailClassifyRun's C2
-	// (trail_run_outcome_test.go:673-684) rejects a non-certifying gate value
+	// rejects a non-certifying gate value
 	// carrying a reason at a different layer again, so the property has two
 	// detectors of different fabric rather than one.
 	//
@@ -2601,7 +2604,7 @@ func TestTrailGateThenAdmit(t *testing.T) {
 // #1419's arms decide on trailScanResult.KeyNames, so the most natural Detail
 // for the absence arm is one saying which keys the line DID carry. Those names
 // come from claude, they are deliberately unbounded at their own tier
-// (trailer_key_names_test.go:55-59 defers the per-name cap to #1363 BECAUSE
+// (trailKeyNames' header defers the per-name cap to #1363 BECAUSE
 // trailScanResult is published by nothing), and trailGateResult IS published.
 //
 // Two separate things stop the rung above from covering it. Its input leaves
