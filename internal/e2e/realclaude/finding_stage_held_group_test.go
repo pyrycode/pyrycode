@@ -108,7 +108,7 @@ package realclaude
 // It may also never print a WHOLE trailRunReadings or a whole
 // finAttributeRecord — %v or %+v on either value. Name scalar fields. This
 // deliberately diverges from the neighbouring file, which licenses the whole
-// struct (finding_run_gather_test.go:116-124) "and only because
+// struct (that file's header, § Failure messages) "and only because
 // TestFinGatherReturnsNoCapturedBytes proves it": THAT PROOF DOES NOT COVER THIS
 // FILE'S VALUES. Every row in the blocker's file runs at MatchCount == 0, so
 // readings.Liveness is empty on every value it marshals, and this file is the
