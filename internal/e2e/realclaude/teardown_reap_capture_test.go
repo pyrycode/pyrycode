@@ -6,13 +6,13 @@ package realclaude
 // agentrun.ReapDescendantGroups call over a process tree this file builds.
 //
 // #1250's fixtures are hand-written string constants headed "measured
-// 2026-07-30 on Darwin 25.5 against Go's log/slog"
-// (teardown_liveness_test.go:378-401). Someone observed the rendering and typed
-// it into a const; nothing executing asserts that the real reaper still emits
-// those bytes. That matters because of the shape of the drift: a matcher that
-// finds nothing answers no-reap-line, a consumer reads "the reaper never
-// fired", and nothing goes red. Converting the transcription into a capture is
-// what makes that class of drift loud.
+// 2026-07-30 on Darwin 25.5 against Go's log/slog" — tdnFixtureTextOne and its
+// siblings through tdnFixtureOtherLines in teardown_liveness_test.go. Someone
+// observed the rendering and typed it into a const; nothing executing asserts
+// that the real reaper still emits those bytes. That matters because of the
+// shape of the drift: a matcher that finds nothing answers no-reap-line, a
+// consumer reads "the reaper never fired", and nothing goes red. Converting the
+// transcription into a capture is what makes that class of drift loud.
 //
 // Everything here is offline: no live claude, no credentials, no daemon, no env
 // gate, no t.Skip.
@@ -35,14 +35,14 @@ package realclaude
 //
 // # Why the tree is two levels deep
 //
-// descendantPGIDs walks from rootPid's CHILDREN downward, and reap.go:52
-// excludes pgid == rootPid, so a group that actually gets killed must sit two
-// levels below the test:
+// descendantPGIDs walks from rootPid's CHILDREN downward, and
+// ReapDescendantGroups excludes pgid == rootPid, so a group that actually gets
+// killed must sit two levels below the test:
 //
 //	test process         never the walk root — tdnCaptureReap refuses it
 //	└── parent P         Setpgid → leads its own group, pgid == P == rootPid
 //	    ├── leaf F       Setpgid → own group, pgid == F     → REAPED
-//	    └── leaf S       no Setpgid → pgid == P == rootPid  → SPARED by reap.go:52
+//	    └── leaf S       no Setpgid → pgid == P == rootPid  → SPARED
 //
 // The intermediate has to place its own children in fresh groups, which rules
 // out a shell — setsid(1) is absent on macOS, and a background job in a
@@ -206,9 +206,10 @@ func tdnRunParentRole() {
 // os/exec dedups env keeping the LAST occurrence, so the role vars are appended
 // AFTER os.Environ() and an operator's pre-set PYRY_E2E_FAKE_MODE cannot
 // redirect a leaf into runFakePyry's argv mode — which would echo the inherited
-// environment, tokens included. reap_test.go:252-254 records the same ordering
-// rule. Clearing TDN_REAP_TREE_ROLE is belt and braces: a leaf never reaches
-// m.Run() to read it.
+// environment, tokens included. spawnGrandchildAndBlock in
+// internal/agentrun/reap_test.go records the same ordering rule. Clearing
+// TDN_REAP_TREE_ROLE is belt and braces: a leaf never reaches m.Run() to read
+// it.
 //
 // The background Wait is the zombie guard, not hygiene: a SIGKILLed child with
 // no Wait lingers in the process table with its pgid intact, and both
@@ -236,8 +237,8 @@ func tdnSpawnLeaf(ownGroup bool) (int, error) {
 
 // tdnTree is one live process tree this test owns. RootPID is what the reap walk
 // is rooted at — never the test process. Fresh are the group leaders the reaper
-// must kill; Same are the descendants sharing RootPID's group, which reap.go:52
-// must spare.
+// must kill; Same are the descendants sharing RootPID's group, which
+// ReapDescendantGroups must spare.
 type tdnTree struct {
 	RootPID int
 	Fresh   []int
@@ -264,8 +265,8 @@ func tdnStartTree(t *testing.T, fresh, same int) tdnTree {
 		tdnReportEnv+"="+reportPath,
 	)
 	// Setpgid makes the parent its own group leader, so its pgid == its pid ==
-	// the walk root: exactly the shape reap.go:52's rootPid exclusion is written
-	// for, and what puts the same-group leaves into the spared group.
+	// the walk root: exactly the shape ReapDescendantGroups's rootPid exclusion
+	// is written for, and what puts the same-group leaves into the spared group.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start reap-tree parent (fresh=%d same=%d): %v", fresh, same, err)
@@ -274,7 +275,8 @@ func tdnStartTree(t *testing.T, fresh, same int) tdnTree {
 	go func() { _ = cmd.Wait() }()
 	// Registered BEFORE the leaves' cleanups so LIFO kills the leaves first: a
 	// parent killed first orphans them to init, where a fresh-group leaf outlives
-	// the test until its own backstop. reap_test.go:141-157 is the pattern.
+	// the test until its own backstop. startReapHelper in
+	// internal/agentrun/reap_test.go is the pattern.
 	t.Cleanup(func() { tdnKillTree(rootPID) })
 
 	tree := tdnWaitTreeReport(t, reportPath, fresh, same, 10*time.Second)
@@ -289,11 +291,12 @@ func tdnStartTree(t *testing.T, fresh, same int) tdnTree {
 // returns its pid.
 //
 // It is the walk root for the nothing-to-reap arm: rooted at a process with no
-// children at all, descendantPGIDs enumerates nothing, so reap.go:64's
-// len(reaped) > 0 guard suppresses the line entirely. A fresh childless root
-// rather than a second reap of an existing tree, which would race the just-killed
-// leaf's zombie window — ps lists zombies, so a not-yet-reaped corpse's pgid
-// still enumerates and the arm would be timing-dependent.
+// children at all, descendantPGIDs enumerates nothing, so
+// ReapDescendantGroups's len(reaped) > 0 guard suppresses the line entirely. A
+// fresh childless root rather than a second reap of an existing tree, which
+// would race the just-killed leaf's zombie window — ps lists zombies, so a
+// not-yet-reaped corpse's pgid still enumerates and the arm would be
+// timing-dependent.
 func tdnStartLeaf(t *testing.T) int {
 	t.Helper()
 	pid, err := tdnSpawnLeaf(true)
@@ -409,13 +412,12 @@ func tdnParseTreeReport(t *testing.T, path string, fresh, same int) (tdnTree, bo
 // the bytes slog.Default() emitted while it ran.
 //
 // Why log.SetOutput captures it: runAgentRunPty sets no Logger on
-// ptyrunner.Config (cmd/pyry/agent_run.go:316-329), so ptyrunner.Run falls back
-// to slog.Default() (runner.go:289-291) and no non-test code calls
-// slog.SetDefault — so every `pyry agent-run`, which is what this package's
-// probes spawn, renders reap.go:65 through Go's BUILT-IN default handler, which
-// writes through the log package. slog.Default() is therefore passed explicitly
-// rather than a handler constructed here: constructing one would prove nothing
-// about the live path.
+// ptyrunner.Config, so ptyrunner.Run falls back to slog.Default() and no
+// non-test code calls slog.SetDefault — so every `pyry agent-run`, which is
+// what this package's probes spawn, renders ReapDescendantGroups's reap line
+// through Go's BUILT-IN default handler, which writes through the log package.
+// slog.Default() is therefore passed explicitly rather than a handler
+// constructed here: constructing one would prove nothing about the live path.
 //
 // The rootPID guard is code rather than a comment because the blast radius is
 // not proportionate to how unlikely the mistake is: a reap rooted at the test
@@ -618,8 +620,8 @@ func TestTdnRealReapCapture(t *testing.T) {
 					i+1, len(tree.Fresh), held, got.Verdict, got.Detail, tdnReapHeldPGIDKilled)
 			}
 			// Membership as a SET, never an ordered slice or an exact rendered
-			// string: reaped is built by ranging a map (reap.go:51), so the
-			// order inside pgids=[A B] is not deterministic.
+			// string: ReapDescendantGroups builds reaped by ranging a map, so
+			// the order inside pgids=[A B] is not deterministic.
 			if len(got.PGIDs) != len(tree.Fresh) {
 				t.Errorf("pgids: got %v, want the %d reaped groups %v",
 					got.PGIDs, len(tree.Fresh), tree.Fresh)
@@ -669,12 +671,13 @@ func TestTdnRealReapCapture(t *testing.T) {
 // substring hazard, and carries its already-covered twin so both halves of the
 // hazard read together.
 //
-// Held 77 against pgids=[7788] is the PREFIX direction, already covered by the
-// fixture row at teardown_liveness_test.go:470-481 and duplicated here for six
-// lines so neither half can be dropped without the other being findable. Held 88
-// is the SUFFIX direction and is the new coverage: it is a substring of the same
-// rendered list in the other direction, and a substring matcher satisfies every
-// other criterion in this file while inverting its answer here.
+// Held 77 against pgids=[7788] is the PREFIX direction, already covered by
+// TestTdnClassifyReapLog's "a held pgid that is a substring of a reaped one is
+// not a member" case and duplicated here for six lines so neither half can be
+// dropped without the other being findable. Held 88 is the SUFFIX direction and
+// is the new coverage: it is a substring of the same rendered list in the other
+// direction, and a substring matcher satisfies every other criterion in this
+// file while inverting its answer here.
 //
 // The line is a literal rather than a capture because this arm is about
 // membership arithmetic over a rendering, not about the rendering — that the

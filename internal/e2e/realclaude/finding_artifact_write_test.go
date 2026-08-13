@@ -884,7 +884,8 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	files := finWriteReadDir(t, dir)
 
 	// THE HEADROOM, ASSERTED ON WHAT WAS ACTUALLY WRITTEN rather than on the built
-	// record (#1291 asserts that at :1036). trailDetail caps at
+	// record (#1291 asserts it there, in TestFinRecordCarriesNoCapturedBytes).
+	// trailDetail caps at
 	// reachMaxCommandBytes, so a Detail that had wrongly interpolated an argv would
 	// be truncated before the needle if the surrounding prose left no room — and
 	// the sweep below would then pass against a leaking writer. That is the defect

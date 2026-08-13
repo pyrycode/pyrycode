@@ -564,8 +564,9 @@ func TestFinLiveStageStreamEnvDeltaNamesTheRunner(t *testing.T) {
 	//	(`reachRunnerPathFromEnv`).
 	//
 	//	CANNOT ESTABLISH: non-vacuity BY CONSTRUCTION. The control passes
-	//	identically if this t.Setenv never ran. The shipped trap gets construction
-	//	at :470-484 only because ITS ambient is the NON-DEFAULT value; that
+	//	identically if this t.Setenv never ran. The shipped trap in
+	//	TestFinLiveStageEnvDeltaNamesTheRunner gets construction only because ITS
+	//	ambient is the NON-DEFAULT value; that
 	//	argument does not transfer to an ambient of 0 and MUST NOT BE COPIED
 	//	ACROSS. Copying it would ship a false statement of what this test proves.
 	t.Setenv("PYRY_USE_STREAMJSON", "0")
