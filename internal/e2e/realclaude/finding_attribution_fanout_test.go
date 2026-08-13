@@ -14,23 +14,23 @@ package realclaude
 //
 // # Why a fan-out exists at all
 //
-// trailAdmitAttribution (`trailGate`) takes ONE
+// trailAdmitAttribution takes ONE
 // tdnReapOutcome, which is the classification of pyry's reap log against ONE
 // held group. The probe does not have one group: pinScanArgv returns Matches as
-// a SLICE (process_pin_liveness_test.go:130-135), deliberately refusing to
+// a SLICE (pinScan), deliberately refusing to
 // resolve "the" pid. Reducing that set to one value is new logic, and it is
 // where a wrong rule silently costs the probe its only finding — exactly one of
-// the sixteen run outcomes is one (trail_run_outcome_test.go:118), and it is
+// the sixteen run outcomes is one (trailOutcomeRunningAtTrailer), and it is
 // returned only on Admit.Value == trailAdmitProof. finAttributeOrder states the
 // ranking that reduction uses and argues for it.
 //
 // # Reused, not rebuilt
 //
 // tdnClassifyReapLog is the reap-log reader;
-// pyry's stderr is NOT re-parsed here. trailAdmitAttribution
-// (`trailGate`) is the attribution predicate, and
-// trailIsAdmitValue (:731) its membership predicate — called, never re-switched.
-// trailReapLine (:763) renders one anchored line in reap.go:65's slog shape.
+// pyry's stderr is NOT re-parsed here. trailAdmitAttribution is the
+// attribution predicate, and
+// trailIsAdmitValue its membership predicate — called, never re-switched.
+// trailReapLine renders one anchored line in ReapDescendantGroups' slog shape.
 // trailClassifyRun / trailRunWellFormed are the downstream consumer and its
 // vary-one-thing base.
 //
@@ -60,9 +60,9 @@ import (
 // lands every such run on trailOutcomeOutOfContract.
 const (
 	// finAttributeGroupUnreportable: a pinned group the reaper can never report.
-	// reap.go:52 skips pgid <= 1 before it kills anything, so no reap line can
-	// carry one. SURFACED RATHER THAN CLASSIFIED: handing it to
-	// tdnClassifyReapLog would trip that function's own :147 guard and return
+	// ReapDescendantGroups skips pgid <= 1 before it kills anything, so no reap
+	// line can carry one. SURFACED RATHER THAN CLASSIFIED: handing it to
+	// tdnClassifyReapLog would trip that function's own held-pgid guard and return
 	// tdnReapInstrumentFailed, which trailAdmitAttribution answers with
 	// trailAdmitVoidInstrument — blaming the instrument for a consumer that
 	// simply failed to capture a pgid.
@@ -80,10 +80,10 @@ const (
 // for, and the shipped predicate's result. NOTHING ELSE — no tdnReapOutcome (its
 // Line is pyry's own stderr, `tdnReapOutcome`), no reachProc (its
 // Command is verbatim argv read off the ambient process table,
-// background_reach_probe_test.go:162-168), no command string. That is what makes
+// reachProc), no command string. That is what makes
 // the no-captured-bytes property true BY CONSTRUCTION rather than by an ordering
 // discipline a later edit can break; trailAdmitResult is itself documented
-// trap-free (`trailGateInput`), so carrying it whole is
+// trap-free, so carrying it whole is
 // safe. TestFinAttributeRecordCarriesNoCapturedBytes is the enforcing test.
 type finAttributeEntry struct {
 	PGID  int              `json:"pgid"`
@@ -132,8 +132,7 @@ type finAttributeRecord struct {
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
 // reason (`trailRunWellFormed`): a shared backing array is
 // reachable from every test in this package, and this slice is read on every
-// fan-out call. trailRunOutcomeValues (:2480) is the same shape for the same
-// reason.
+// fan-out call. trailRunOutcomeValues is the same shape for the same reason.
 //
 // # The argument for this order
 //
@@ -150,8 +149,8 @@ type finAttributeRecord struct {
 // totality, not for a contested case.
 //
 // PROOF FIRST, and that is the load-bearing half. trailClassifyRun reads Admit.Value
-// for a decision in exactly two places, C5 (`trailClassifyRun`) and Step 2
-// (:1011), both keyed on trailAdmitProof. A rule that let one group's void suppress
+// for a decision in exactly two places, C5 and Step 2 of `trailClassifyRun`,
+// both keyed on trailAdmitProof. A rule that let one group's void suppress
 // another group's proof would cost the probe its only finding, while the order BELOW
 // proof cannot change the run's outcome at all — it changes only what the published
 // record says the reap log showed.
@@ -229,9 +228,10 @@ func finAttributeFanOut(stderr []byte, pgids []int, certified string) finAttribu
 	}
 	sort.Ints(distinct)
 
-	// Step 2: partition. Mirroring ONLY reap.go:52's first clause is deliberate.
-	// That skip is `pgid <= 1 || pgid == self || pgid == rootPid`, but
-	// tdnClassifyReapLog's guard (:147) is `heldPGID <= 1` and nothing more, so
+	// Step 2: partition. Mirroring ONLY the first clause of
+	// ReapDescendantGroups' skip is deliberate. That skip is
+	// `pgid <= 1 || pgid == self || pgid == rootPid`, but
+	// tdnClassifyReapLog's guard is `heldPGID <= 1` and nothing more, so
 	// <= 1 is precisely the set that would trip it. Extending the filter to self
 	// / rootPid would need a process-table read this file forbids, and would be a
 	// second opinion about groups the shipped classifier is willing to answer for.
@@ -342,7 +342,7 @@ func finAttributeCases() []finAttributeCase {
 	// No line carrying tdnReapMessage at all, so LineCount == 0 for every group.
 	noLine := []byte(`time=2026-08-03T09:00:00.000Z level=INFO msg="agentrun: nothing here"` + "\n")
 	// An anchored line whose pgids= value does not open with a bracket, so
-	// tdnParsePGIDs errors (teardown_liveness_test.go:242-245) and every group
+	// tdnParsePGIDs errors and every group
 	// reads instrument-failed.
 	unparseable := []byte(trailReapLine(1, "not-a-bracketed-list") + "\n")
 
@@ -400,7 +400,7 @@ func finAttributeCases() []finAttributeCase {
 		},
 		{
 			// Named apart from the row above so the guard is not read as an == 0
-			// check: reap.go:52 skips everything at or below 1.
+			// check: ReapDescendantGroups skips everything at or below 1.
 			name:           "a negative pgid is unreportable for the same reason zero is",
 			stderr:         oneLine,
 			pgids:          []int{-5, 7788},
@@ -655,7 +655,7 @@ func TestFinAttributeOrderCoversTheAdmitSpace(t *testing.T) {
 // THESE TWO ROWS ARE THE OTHER LAYER. They stage an Admit on a trailRunReadings
 // BY LITERAL and hand it to a DIFFERENT function — they are inputs to
 // trailClassifyRun, not attributions this fan-out produced, exactly as
-// trailRunProofReadings stages one (trail_run_outcome_test.go:1128-1136). The
+// trailRunProofReadings stages one. The
 // no-hand-built rule binds what the fan-out PRODUCES, and the shipped predicate
 // is not a route to either value here anyway: trailAdmitOutOfContract comes out
 // of it only on an empty certified, which no fan-out row may pass.
@@ -698,31 +698,29 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 
 // TestFinAttributeRecordCarriesNoCapturedBytes makes the
 // operator-review-before-paste obligation checkable rather than advisory, in
-// TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (`TestTrailAdmissibilityConstantsAreClosed`) and reusing the shipped trailNeedle.
+// TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape, reusing the
+// shipped trailNeedle.
 //
 // # The plant position is the whole test
 //
 // The needle sits ON AN ANCHORED LINE, after the pgids= list. trailReapLine
 // splices its pgids argument raw, and tdnParsePGIDs stops at the first ] and
-// checks nothing after it on an unquoted value (teardown_liveness_test.go:246-254),
-// so the list still parses. A NEEDLE ON A NON-ANCHORED LINE WOULD MAKE THIS TEST
-// VACUOUS: tdnClassifyReapLog skips every line not carrying tdnReapMessage
-// (:161-163) BEFORE it fills any field, so such a needle enters no field at all
-// and the test goes green over a record that recorded the whole outcome. The
-// anchored line is what Line captures (:165-167), which is the channel this
-// record is exposed to.
+// checks nothing after it on an unquoted value, so the list still parses. A
+// NEEDLE ON A NON-ANCHORED LINE WOULD MAKE THIS TEST VACUOUS:
+// tdnClassifyReapLog skips every line not carrying tdnReapMessage BEFORE it
+// fills any field, so such a needle enters no field at all and the test goes
+// green over a record that recorded the whole outcome. The anchored line is what
+// that function records in Line, which is the channel this record is exposed to.
 //
 // # The needle goes into the stderr ONLY
 //
 // #1271's own test plants it in every string-bearing input, and following that
 // here would put it into certified — which CROSSES VERBATIM BY DESIGN:
-// trailAdmitAttribution splices certified with %q into two of its Details
-// (`trailGate`, :597). It is trailGate's certified Reason,
-// i.e. the trailer's terminal_reason, which shipped code already treats as publishable
-// (trailClassifyRun puts it into its own Details
-// and :1023, and TestTrailRunOutcomeCarriesNoCapturedBytes deliberately leaves Reason
-// alone). Planting it there would go red, and the only fix would be to stop carrying
+// trailAdmitAttribution splices certified with %q into two of its Details. It
+// is trailGate's certified Reason, i.e. the trailer's terminal_reason, which
+// shipped code already treats as publishable (trailClassifyRun puts it into its
+// own Details, and TestTrailRunOutcomeCarriesNoCapturedBytes deliberately leaves
+// Reason alone). Planting it there would go red, and the only fix would be to stop carrying
 // trailAdmitResult whole — which the record's shape requires. The
 // exposure is pre-existing and unchanged in content, but this fan-out
 // MULTIPLIES it by the distinct-group count; each copy is capped at 512 bytes by
@@ -750,7 +748,7 @@ func TestFinAttributeRecordCarriesNoCapturedBytes(t *testing.T) {
 		t.Errorf("the marshalled record carries pyry's captured stderr: %s", encoded)
 	}
 
-	// The structural half, following trail_run_outcome_test.go:2270-2292. line
+	// The structural half, following TestTrailRunOutcomeCarriesNoCapturedBytes. line
 	// and stderr join #1271's list because the channel THIS record is exposed to
 	// is tdnReapOutcome.Line, not a ps column.
 	var keyed map[string]json.RawMessage
