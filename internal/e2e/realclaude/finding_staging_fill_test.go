@@ -28,9 +28,9 @@ package realclaude
 //
 // probeWaitForBashToolUse returns the
 // FIRST Bash tool_use regardless of input.command — a #1223 code-review SHOULD
-// FIX that shipped unfixed, guarded caller-side by #1230
-// (background_reach_probe_test.go:433-448) rather than by editing the shared
-// rig. This file generalises that guard, and it guards a PAIR:
+// FIX that shipped unfixed, guarded caller-side by #1230's content-first check
+// in `runReachProbe` rather than by editing the shared rig. This file generalises
+// that guard, and it guards a PAIR:
 //
 //   - Value-side: a decoy Bash call the model makes first captures the whole
 //     measurement, and the gate answers stage-command-not-staged about a run that
@@ -59,9 +59,9 @@ package realclaude
 // Every projection off an envelope is shipped and called, never re-derived:
 // parseContentBlocks for the ordered blocks,
 // probeToolUseInput + reachToolUseCommand
-// (`reachToolUseCommand`) for the command, reachBackgroundHandle
-// (:1051) for timedOutAfterMs, and both shipped waiters for the polling. The
-// ordered scan across calls is the only new reading.
+// (`reachToolUseCommand`) for the command, reachBackgroundHandle for
+// timedOutAfterMs, and both shipped waiters for the polling. The ordered scan
+// across calls is the only new reading.
 
 import (
 	"encoding/json"
@@ -325,7 +325,7 @@ func finTranscriptAssistantLine(t *testing.T, blocks ...map[string]any) string {
 }
 
 // finTranscriptResultLine builds the tool_result user line, with toolUseResult
-// as a SIBLING of message (background_reach_probe_test.go:1412-1421).
+// as a SIBLING of message, the shape TestReachBackgroundHandle's fixtures pin.
 // timedOutAfterMs is omitted when the argument is "" — the model-set path — and
 // emitted as a JSON number otherwise, which is the shape reachBackgroundHandle
 // decodes.

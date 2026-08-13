@@ -16,13 +16,12 @@ package realclaude
 //
 // # Why the reduction is separable from the scan
 //
-// pinScan is already a value: pinMatchArgvExcluding
-// turns a ps table's BYTES into one, and the live wrapper pinScanArgv (:191) does
-// the same over a real exec. So the reduction is separable from the exec, and a
-// synthetic table drives exactly the matching the live path uses. That is the
-// whole point: the later ticket that stages the live turn has ONE turn to spend,
-// and everything it can be made to get wrong offline should be made to get wrong
-// offline.
+// pinScan is already a value: pinMatchArgvExcluding turns a ps table's BYTES into
+// one, and the live wrapper pinScanArgv does the same over a real exec. So the
+// reduction is separable from the exec, and a synthetic table drives exactly the
+// matching the live path uses. That is the whole point: the later ticket that
+// stages the live turn has ONE turn to spend, and everything it can be made to
+// get wrong offline should be made to get wrong offline.
 //
 // # The count is the whole file
 //
@@ -78,13 +77,12 @@ import (
 // pinPartition assigns its own. One producer
 // for the number; it is never computed a second way.
 //
-// PGIDs is a []int and never a []reachProc. Its consumer finAttributeFanOut
-// (`finAttributeFanOut`) takes []int precisely because that
-// signature closes the credential channel structurally rather than by a check
-// inside the function (:195-202). The conversion happens HERE, in the reduction,
-// so a downstream record has an []int to hand and never reaches into Rows for it
-// — a reduction that returned only Rows would pass every test in this file while
-// pushing the channel one file downstream.
+// PGIDs is a []int and never a []reachProc. Its consumer finAttributeFanOut takes
+// []int precisely because that signature closes the credential channel
+// structurally rather than by a check inside the function. The conversion happens
+// HERE, in the reduction, so a downstream record has an []int to hand and never
+// reaches into Rows for it — a reduction that returned only Rows would pass every
+// test in this file while pushing the channel one file downstream.
 //
 // Rows ALIASES the scan's rows, including their Needles slices; nothing is
 // deep-copied. That is correct rather than overlooked: the scan is a value the
@@ -113,20 +111,18 @@ type finLivePinReading struct {
 // — but its subject is a rig-staged `sh -c` rather than a claude-staged Bash
 // call, so it is corroboration and not the primary basis.
 //
-// TestTrailRigCarriesMoreThanOneMatchedRow is NOT
-// cited: it fails on MatchCount <= 1 (:563), i.e. it asserts MORE THAN ONE and
-// never EXACTLY TWO. `finOutcomeStagedBase` already cites it for
-// its own PinMatchCount: 2, and that citation is weaker than the number it
-// justifies. This constant is therefore strictly stronger than any shipped
-// assertion. A live run reporting a different count is a non-verdict outcome the
-// gate already returns; it is never a silent first-match, and never a reason to
-// loosen the expectation.
+// TestTrailRigCarriesMoreThanOneMatchedRow is NOT cited: it fails on
+// MatchCount <= 1, i.e. it asserts MORE THAN ONE and never EXACTLY TWO.
+// `finOutcomeStagedBase` already cites it for its own PinMatchCount: 2, and that
+// citation is weaker than the number it justifies. This constant is therefore
+// strictly stronger than any shipped assertion. A live run reporting a different
+// count is a non-verdict outcome the gate already returns; it is never a silent
+// first-match, and never a reason to loosen the expectation.
 //
 // PROHIBITION 1 — NEVER fill this from scan.MatchCount. It is 3 on a healthy
 // run: one scan carries BOTH the FIFO needle and tdnClaudeNeedle, because
-// reachMatchArgvRows matches a row on ANY needle
-// (background_reach_probe_test.go:911-916), so claude's own row is in the match
-// set alongside the wrapper and the `cat`.
+// reachMatchArgvRows matches a row on ANY needle, so claude's own row is in the
+// match set alongside the wrapper and the `cat`.
 //
 // PROHIBITION 2 — NEVER fill this from the size of the process-group set. It is
 // 1 on a healthy run (`tdnPinHeld`): claude isolates
@@ -148,11 +144,11 @@ const finLivePinWantRows = 2
 // One pass over scan.Matches. It mutates nothing it does not allocate, so it is
 // safe to call concurrently by construction.
 //
-// MEMBERSHIP IS reachMatchedNeedle, NEVER a
-// re-scan of .Command. reachMatchArgvRows matches against the UNCAPPED command
-// line (:913) and stores the CAPPED one (:924), so a row whose FIFO path sits
-// past reachMaxCommandBytes is genuinely matched — its Needles list records the
-// hit — while its retained Command no longer contains the path at all.
+// MEMBERSHIP IS reachMatchedNeedle, NEVER a re-scan of .Command.
+// reachMatchArgvRows matches against the UNCAPPED command line and stores the
+// CAPPED one, so a row whose FIFO path sits past reachMaxCommandBytes is
+// genuinely matched — its Needles list records the hit — while its retained
+// Command no longer contains the path at all.
 // strings.Contains(m.Command, fifoPath) looks equivalent and silently drops such
 // a row, yielding 1 where the answer is 2. The trap's truncation pair is what
 // makes this rule red rather than decorative.
@@ -161,43 +157,41 @@ const finLivePinWantRows = 2
 // reachMatchArgvRows already produced — the same relationship pinPartition has to
 // it and for the same stated reason (`pinPartition`:
 // "reachMatchArgvRows is this package's one full-argv matcher and #1235 must not
-// grow a second"). probeHasCommand is
-// doubly wrong here besides: probeAnnotateCommands (:930) stores only
-// filepath.Base(argv[0]), so the held command's Command is `cat` and it would
-// match any unrelated `cat` on the machine, and it is scoped to descendants.
+// grow a second"). probeHasCommand is doubly wrong here besides:
+// probeAnnotateCommands stores only filepath.Base(argv[0]), so the held command's
+// Command is `cat` and it would match any unrelated `cat` on the machine, and it
+// is scoped to descendants.
 //
 // NOTHING IS DEDUPED, anywhere — not Rows, not PGIDs. The projection handed on is
 // EVERY matched row's .PGID, in scan order, duplicates intact. finAttributeFanOut
-// dedupes and sorts internally (finding_attribution_fanout_test.go:221-230), and
-// its own comment explains that the sort is what makes the record a pure function
-// of the SET rather than of ps output order; pre-reducing here would duplicate
-// that work and destroy the raw evidence. tdnPinHeld
-// (`tdnPinHeld`) is the shipped FIFO filter but the WRONG
-// SHAPE to copy: it dedupes pids and collapses to a single pgid, returning 0 when
-// the rows do not resolve to exactly one group (:538-541).
+// dedupes and sorts internally, and its own comment explains that the sort is
+// what makes the record a pure function of the SET rather than of ps output
+// order; pre-reducing here would duplicate that work and destroy the raw
+// evidence. tdnPinHeld is the shipped FIFO filter but the WRONG SHAPE to copy: it
+// dedupes pids and collapses to a single pgid, returning 0 when the rows do not
+// resolve to exactly one group.
 //
 // tdnClaudeCommand RUNS OVER scan, NOT OVER Rows. Claude's row carries the claude
 // needle and NOT the FIFO needle — that disjointness is argued at
-// teardown_liveness_probe_test.go:155-160 — so running it over the FIFO-filtered
-// rows would find zero hits, take the n != 1 arm and return "" on every healthy
-// run: a silent wrong answer with a plausible-looking cause.
+// `tdnClaudeNeedle` — so running it over the FIFO-filtered rows would find zero
+// hits, take the n != 1 arm and return "" on every healthy run: a silent wrong
+// answer with a plausible-looking cause.
 //
 // NO ERROR RETURN AND NO FAILURE ARM, deliberately. The ps exec's error is
 // pinScanArgv's and already has a named home in the record —
 // finOutcomeStaging.PinScanErrored → finOutcomePinScanErrored, ranked ABOVE the
-// count arm (finding_staging_gate_test.go:332-341) precisely so a count of 0 the
-// error produced is never reported as a count that was measured. A second error
-// channel here would give that outcome two producers. A ZERO scan reduces to a
-// ZERO reading: nil Rows, RowCount 0, nil PGIDs, empty ClaudeCommand, no panic.
-// An EMPTY fifoPath matches nothing rather than everything, with no code:
-// reachMatchArgvRows never records an empty needle (:913 requires needle != ""),
+// count arm in finOutcomeStagingGate precisely so a count of 0 the error produced
+// is never reported as a count that was measured. A second error channel here
+// would give that outcome two producers. A ZERO scan reduces to a ZERO reading:
+// nil Rows, RowCount 0, nil PGIDs, empty ClaudeCommand, no panic. An EMPTY
+// fifoPath matches nothing rather than everything, with no code:
+// reachMatchArgvRows never records an empty needle — it requires needle != "" —
 // so no row's Needles can contain "". Either way the gate's count arm fires
 // against a want of finLivePinWantRows, which is the correct outcome.
 //
 // An empty ClaudeCommand is AMBIGUITY, not failure: tdnClaudeCommand returns ""
-// when zero or several rows carry the claude needle
-// (teardown_liveness_probe_test.go:571-573). It is provenance, it is not one of
-// finOutcomeStaging's eight fields, and it must not be gated on here or
+// when zero or several rows carry the claude needle. It is provenance, it is not
+// one of finOutcomeStaging's eight fields, and it must not be gated on here or
 // downstream.
 func finLivePinReduce(scan pinScan, fifoPath string) finLivePinReading {
 	var out finLivePinReading

@@ -22,26 +22,27 @@ package realclaude
 //
 // ptyrunner.Run pins its teardown order in its own comment — emitter.Close() writes
 // the trailer, then cancel(), then the reap defer, then sess.Close()'s SIGTERM
-// (runner.go:479-485, the defer at :398). So at trailer time claude is alive and
-// unsignalled and any auto-backgrounded command is still a descendant of pyry.
+// (its defer-LIFO discipline note, and the reap defer it registers right after
+// sess.Close). So at trailer time claude is alive and unsignalled and any
+// auto-backgrounded command is still a descendant of pyry.
 //
 // The instant of interest is that write, and it is NOT directly observable: a rig
 // sees the trailer only when it polls pyry's stdout, up to one probePollInterval
-// (200ms) after the write, and the reap starts effectively immediately after it and
-// finishes in the time of one ps exec (reap.go:76). A liveness read taken at
-// OBSERVATION time therefore finds the held command already reaped on a healthy run,
-// and reporting that as "the command had exited" is a systematic FALSE NEGATIVE on
-// the question this file asks.
+// (200ms) after the write, and the reap starts effectively immediately after it
+// and finishes in the time of one ps exec (`descendantPGIDs`). A liveness read
+// taken at OBSERVATION time therefore finds the held command already reaped on a
+// healthy run, and reporting that as "the command had exited" is a systematic
+// FALSE NEGATIVE on the question this file asks.
 //
 // What answers it is pyry's own reap log. ReapDescendantGroups logs the groups it
-// actually killed and skips those already gone (reap.go:56-57, :65), so a group
-// named there was alive when the reaper ran — strictly after the trailer was
-// written, and therefore alive when it was written. That is an ordering argument
-// internal to the run's own logs and depends on no point-in-time read. The natural
-// alternative witness — "was claude still alive when I read?" — is BLIND to this:
-// the reap runs between the trailer and claude's SIGTERM, so in that window the
-// command is dead-by-reap while claude still reads alive, and such a witness would
-// certify the read as timely over exactly the case this probe exists to catch.
+// actually killed and skips those already gone, so a group named there was alive
+// when the reaper ran — strictly after the trailer was written, and therefore
+// alive when it was written. That is an ordering argument internal to the run's
+// own logs and depends on no point-in-time read. The natural alternative witness
+// — "was claude still alive when I read?" — is BLIND to this: the reap runs
+// between the trailer and claude's SIGTERM, so in that window the command is
+// dead-by-reap while claude still reads alive, and such a witness would certify
+// the read as timely over exactly the case this probe exists to catch.
 //
 // # Captured-bytes discipline
 //
@@ -66,11 +67,11 @@ package realclaude
 //
 // t.Fatalf fires only on structural failure, and this file adds exactly ONE of its
 // own: os.MkdirTemp failing. Three abort paths are INHERITED from finLiveRunStage
-// and are not re-guarded here — pyry never spawning a claude child, no system/init
-// session id (finding_live_run_test.go:335-345), and ReadJSONL's fatal on a
-// transcript it cannot open or parse (`ReadJSONL`, :165) reached through the
-// assembly. Every other failure mode is RECORDED, because a probe that turns an
-// unexpected reading into a red test loses the reading.
+// and are not re-guarded here — pyry never spawning a claude child and no
+// system/init session id, which are its own two t.Fatalf's, and ReadJSONL's fatal
+// on a transcript it cannot open or parse, reached through the assembly. Every
+// other failure mode is RECORDED, because a probe that turns an unexpected reading
+// into a red test loses the reading.
 //
 // # One skip gate, not two
 //
@@ -78,18 +79,17 @@ package realclaude
 // so `make e2e-realclaude` skips this probe by default and a skip is the NORMAL
 // outcome, saying nothing about pyry's behaviour.
 //
-// The reach probe's second gate (PYRY_USE_STREAMJSON=1, :300-310) is deliberately
-// NOT copied, because neither of its two reasons transfers and copying it would skip
-// a run that would have been correct. (1) Its delta does not name the variable;
-// finLiveStageEnvDelta names PYRY_USE_STREAMJSON=0 EXPLICITLY
-// (`finLiveStageEnvDelta`, :194-196) and spawnProbePyry appends the
-// delta to os.Environ(), which os/exec resolves in favour of the later value — so
-// the delta wins over the operator's shell. (2) Its content-first root pinning keys
-// on --session-id, which only ptyrunner emits; this rig pins nothing content-first,
-// resolving claude through probeWaitForDirectChild's descendant walk. #1340 states
-// the same conclusion for the same reason (finding_live_run_test.go:246-250). The
-// observed-path reading below is the real guard and is strictly stronger than an env
-// check.
+// The reach probe's second gate — its PYRY_USE_STREAMJSON=1 skip guard — is
+// deliberately NOT copied, because neither of its two reasons transfers and copying
+// it would skip a run that would have been correct. (1) Its delta does not name the
+// variable; finLiveStageEnvDelta names PYRY_USE_STREAMJSON=0 EXPLICITLY and
+// spawnProbePyry appends the delta to os.Environ(), which os/exec resolves in
+// favour of the later value — so the delta wins over the operator's shell. (2) Its
+// content-first root pinning keys on --session-id, which only ptyrunner emits; this
+// rig pins nothing content-first, resolving claude through
+// probeWaitForDirectChild's descendant walk. #1340 states the same conclusion for
+// the same reason (`finLiveRunStage`'s SITE A, the skip guard). The observed-path
+// reading below is the real guard and is strictly stronger than an env check.
 //
 // # This file ships ONE offline test, and the entry point is not it
 //
@@ -118,9 +118,9 @@ const finExitEnableEnv = "PYRY_PROBE_EXIT_PATH"
 // write end STILL HELD.
 //
 // IT IS THIS FILE'S OWN CONSTANT AND IT IS NOT probePyryExitGrace, which the two are
-// easy to conflate. That one (20s, background_trigger_probe_test.go:134) measures the
-// driver's defence-in-depth cleanup waiting AFTER THE FIFO RELEASE before SIGKILLing
-// (finding_live_run_test.go:459-491) — a mechanical unblock. This one measures a turn
+// easy to conflate. That one (20s) measures the driver's defence-in-depth cleanup
+// waiting AFTER THE FIFO RELEASE before SIGKILLing — the SIGKILL cleanup
+// finLiveRunStage registers — a mechanical unblock. This one measures a turn
 // COMPLETING with the hold still on: claude receiving the tool_result, producing a
 // final assistant message, emitter.Close() writing the trailer, teardown, exit. That
 // is a model round-trip plus teardown. Reusing the other constant would name one
@@ -147,8 +147,9 @@ const finExitPyryExitDeadline = 120 * time.Second
 //
 // finTrailerBuild's first parameter is a bare string fed from EITHER closed set (the
 // classifier's sixteen, `trailClassifyRun`, and the staging tier's seven,
-// finding_staging_gate_test.go:113-134) precisely so the staging value can be carried
-// straight through, so no adapter is needed and none is added.
+// `finOutcomeNoBashCall` through `finOutcomeReadyToClassify`) precisely so the
+// staging value can be carried straight through, so no adapter is needed and none
+// is added.
 //
 // It is a named pure function rather than an inline if for one reason: it is the only
 // decision here that is drivable offline, and the rule above is what its trap is
@@ -159,9 +160,9 @@ const finExitPyryExitDeadline = 120 * time.Second
 // it is not a member. A caller must branch on the third return, not on the second.
 func finExitClassify(staging finOutcomeResult, readings trailRunReadings) (string, trailRunOutcome, bool) {
 	// An identity comparison against a package constant, and the only boundary this
-	// file decides. finOutcomeReadyToClassify is deliberately NOT the zero value
-	// (finding_staging_gate_test.go:100-108), so an unfilled finOutcomeResult lands
-	// on the safe side of this arm rather than reading as "go classify it".
+	// file decides. finOutcomeReadyToClassify is deliberately NOT the zero value, so
+	// an unfilled finOutcomeResult lands on the safe side of this arm rather than
+	// reading as "go classify it".
 	if staging.Value != finOutcomeReadyToClassify {
 		return staging.Value, trailRunOutcome{}, false
 	}
@@ -176,9 +177,9 @@ func finExitClassify(staging finOutcomeResult, readings trailRunReadings) (strin
 // records whether pyry declared the turn finished while that command was running.
 //
 // NO t.Parallel: finLiveRunStage reaches WithWorktreeAuthenticated, which calls
-// t.Setenv (fixtures.go:96-107), and Go's runtime refuses that pairing. That helper
-// also SKIPS when neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set — the
-// credential skip, separate from the opt-in gate below.
+// t.Setenv, and Go's runtime refuses that pairing. That helper also SKIPS when
+// neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set — the credential
+// skip, separate from the opt-in gate below.
 func TestRealClaude_ExitPathWhileCommandRuns(t *testing.T) {
 	if os.Getenv(finExitEnableEnv) != "1" {
 		t.Skipf("#1337 exit-path probe: skipped because %s != 1.\n"+
@@ -240,8 +241,7 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	case <-time.After(finExitPyryExitDeadline):
 		// The unexited path simply leaves pinExitStatusUnknown in place, which is
 		// what keeps a non-exiting run from publishing exit_code: 0 — a value
-		// finRecordRun.ExitCode documents as A REAL SUCCESSFUL EXIT
-		// (finding_run_record_test.go:126-135).
+		// finRecordRun.ExitCode documents as A REAL SUCCESSFUL EXIT.
 	}
 
 	// 3. The claude-still-alive corroboration. pinReadState's Verdict and NOTHING
@@ -329,19 +329,17 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// not a cost.
 		Trailer: finTrailerBuild(outcome, sighting),
 		// The REAL delta. reachRunnerPathFromEnv reads ambient os.Getenv first and
-		// only then lets the delta override (background_reach_probe_test.go:1102-1108),
-		// so an empty or partial delta would make this a reading of the operator's
-		// shell rather than of this run.
+		// only then lets the delta override, so an empty or partial delta would make
+		// this a reading of the operator's shell rather than of this run.
 		RunnerFromEnv: reachRunnerPathFromEnv(h.EnvDelta),
 		// WHOLE AND UNEXAMINED. An EMPTY value is ADMISSIBLE and is not a staging
 		// failure: tdnClaudeCommand returns "" when zero OR SEVERAL rows carry the
-		// claude needle (teardown_liveness_probe_test.go:571-573), so emptiness is
-		// ambiguity about which row was claude's, never a claim that the run took
-		// the other path. It reaches tdnRunnerFromArgv inside the builder and lands
-		// on the shipped indeterminate verdict — the THIRD ANSWER, never a
-		// disagreement. Not gated on, not defaulted, not repaired with a second
-		// argv read. The builder computes both the argv label and the agreement;
-		// this rig computes neither.
+		// claude needle, so emptiness is ambiguity about which row was claude's,
+		// never a claim that the run took the other path. It reaches
+		// tdnRunnerFromArgv inside the builder and lands on the shipped
+		// indeterminate verdict — the THIRD ANSWER, never a disagreement. Not gated
+		// on, not defaulted, not repaired with a second argv read. The builder
+		// computes both the argv label and the agreement; this rig computes neither.
 		//
 		// SO THIS FUNCTION REDUCES THE SAME ARGV TWICE since #1452 — once at its
 		// own call site for the gather's gate, and once inside finRecordBuild for
@@ -368,9 +366,9 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	//
 	// EVERY RENDERING BELOW IS FIELD-BY-FIELD OR json.Marshal. NEVER a %v verb applied
 	// to a struct or a slice: that is the content rule the writer's own note line
-	// states (finding_artifact_write_test.go:171-180), and it is the concrete
-	// mechanism by which a %v on h.Pin.Rows would print every matched row's full argv
-	// from a line that reads as ordinary debug formatting.
+	// states (`finWriteArtifacts`), and it is the concrete mechanism by which a %v on
+	// h.Pin.Rows would print every matched row's full argv from a line that reads as
+	// ordinary debug formatting.
 	if blob, err := json.Marshal(h.Staging); err != nil {
 		t.Logf("#1337 staging result: marshal failed: %v", err)
 	} else {

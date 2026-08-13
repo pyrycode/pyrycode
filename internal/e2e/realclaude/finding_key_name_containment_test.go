@@ -34,13 +34,13 @@ package realclaude
 //
 // That pairing is what makes four checks the right number rather than one. The
 // artifact carries four of the trailer's own values VERBATIM BY DESIGN —
-// subtype, is_error, terminal_reason and stop_reason — and
-// finding_artifact_write_test.go:274-289 states the rule: plant only where the
-// pipeline reduces. A single artifact-wide sweep planting in every value position
-// the line carries is therefore RED AGAINST A CORRECT BUILD. So the artifact-wide
-// sweep excludes those four (AC1), and the sweep that plants in all five
-// string-valued positions looks at the NAMES FIELD ALONE (AC2). The two differ in
-// both halves of the pair, and neither subsumes the other.
+// subtype, is_error, terminal_reason and stop_reason — and `finWriteInputs`
+// states the rule under § Plant only where the pipeline reduces. A single
+// artifact-wide sweep planting in every value position the line carries is
+// therefore RED AGAINST A CORRECT BUILD. So the artifact-wide sweep excludes
+// those four (AC1), and the sweep that plants in all five string-valued positions
+// looks at the NAMES FIELD ALONE (AC2). The two differ in both halves of the
+// pair, and neither subsumes the other.
 //
 // # The mutant matrix: what each check is the sole red for
 //
@@ -56,8 +56,9 @@ package realclaude
 //	                                                       padding with no needle in it and
 //	                                                       session_id's does not, which is why
 //	                                                       the plant list needs BOTH
-//	M3  a record re-admitting the CAPPED                   shipped, finding_artifact_write_test.go:1084-1087
-//	    trailScanResult.Line                               — needs an IN-CAP needle, which AC1's
+//	M3  a record re-admitting the CAPPED                   shipped, in
+//	    trailScanResult.Line                               TestFinWriteArtifactPublishesNoVerbatimModelOutput
+//	                                                       — needs an IN-CAP needle, which AC1's
 //	                                                       past-the-cap pad cannot see
 //	M4  a record re-admitting the FULL, uncapped line      AC1 — needs a PAST-THE-CAP needle,
 //	                                                       which the shipped in-cap row cannot see
@@ -98,7 +99,7 @@ package realclaude
 // logs. The one knowing residual is that the non-vacuity Fatalfs print key NAMES,
 // which under M1 would be values — but they are fixture constants on a
 // fixture-only path, and the shipped precedent is TestTrailKeyNamesCarryNoValues'
-// own non-vacuity report (trailer_key_names_test.go:342-345).
+// own non-vacuity report.
 
 import (
 	"bytes"
@@ -130,15 +131,14 @@ import (
 // # The second return is []string and never the trailScanResult
 //
 // Handing the scan back would promote .Line — up to 512 bytes of model-chosen
-// text, marked OPERATOR-REVIEW-BEFORE-PASTE
-// (result_trailer_observation_test.go:100-107) — and the *resultTrailer into the
-// reach of every test in this file, where a later %+v in a failure message prints
-// it. That is the reach finGatherReadings deliberately refuses to hand back and
-// that finSighting exists to sever. Both
-// callers' preconditions are about THE NAMES THE READER READ; neither needs Line,
-// Trailer or Detail, so the narrow return costs nothing and closes the door by
-// SHAPE rather than by a prose rule that must not be got wrong — this family's own
-// doctrine (finding_artifact_write_test.go:28-32).
+// text, marked OPERATOR-REVIEW-BEFORE-PASTE at `trailScanResult.Line` — and the
+// *resultTrailer into the reach of every test in this file, where a later %+v in
+// a failure message prints it. That is the reach finGatherReadings deliberately
+// refuses to hand back and that finSighting exists to sever. Both callers'
+// preconditions are about THE NAMES THE READER READ; neither needs Line, Trailer
+// or Detail, so the narrow return costs nothing and closes the door by SHAPE
+// rather than by a prose rule that must not be got wrong — this family's own
+// doctrine, stated in finding_artifact_write_test.go's header.
 //
 // THE FATAL PRECONDITION IS THE 64 KiB CEILING DEFENCE, in finPublishedKeyNames'
 // words (`finPublishedKeyNames`): past bufio.Scanner's default a
@@ -190,10 +190,9 @@ func finContainRender(t *testing.T, line string) (files map[string][]byte, read 
 // decode and finTrailerRecord publishes them as fields, so a needle in any of them
 // appears in the artifact CORRECTLY and a sweep planting there would be red
 // against a correct build. That is the plant-only-where-the-pipeline-reduces rule
-// (finding_artifact_write_test.go:274-289), and stop_reason is named a second time
-// at finding_trailer_evidence_test.go:129-136 as the one model-influenced field
-// crossing this record uncapped. The check those four need is AC2's, which sweeps
-// the names field alone.
+// `finWriteInputs` states, and finTrailerRecord's own doc names stop_reason a
+// second time as the one model-influenced field crossing this record uncapped.
+// The check those four need is AC2's, which sweeps the names field alone.
 //
 // WHAT THE LIST DOES CATCH — a reader or a builder that carried the decoded map's
 // VALUES rather than its key names (M1), the same mis-implementation bounded to 64
@@ -231,9 +230,9 @@ func TestFinContainArtifactCarriesNoTrailerValue(t *testing.T) {
 
 	// OFFSET PRECONDITION A (M4), fatal: `result`'s needle — the FIRST occurrence,
 	// session_id's being later on the wire — must sit PAST the cap. An in-cap plant
-	// here would duplicate the shipped row at finding_artifact_write_test.go:1084-1087
-	// instead of complementing it, and this check would then be blind to the mutant
-	// that row cannot see.
+	// here would duplicate the shipped row in
+	// TestFinWriteArtifactPublishesNoVerbatimModelOutput instead of complementing
+	// it, and this check would then be blind to the mutant that row cannot see.
 	at := strings.Index(line, trailNeedle)
 	if at <= reachMaxCommandBytes {
 		t.Fatalf("`result`'s needle sits at offset %d of %d bytes, inside the %d-byte cap: this "+
@@ -491,8 +490,8 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 		{"finTrailerRecord", reflect.TypeOf(finTrailerRecord{})},
 	} {
 		// The walk descends into struct fields, map keys AND values, slices, arrays
-		// and pointers (finding_run_record_test.go:727-752), so "no type transitively
-		// holding one" is proved by this single call rather than aspirational.
+		// and pointers (`finRecordInputReaches`), so "no type transitively holding
+		// one" is proved by this single call rather than aspirational.
 		if finRecordInputReaches(carrier.typ, forbidden, map[reflect.Type]bool{}) {
 			t.Errorf("%s is reachable from %s: its values are the RAW BYTES of the line, so a %%v on "+
 				"the map — or on any struct transitively holding it, as this package already does at "+
@@ -533,10 +532,9 @@ func TestFinContainCarriersReachNoRawMessageMap(t *testing.T) {
 const finContainNeedleKeyName = "PYRY-PROBE-KEY-NAME-NEEDLE-MUST-NOT-REACH-A-DETAIL"
 
 // finContainNeedleKeyTrailer splices that name onto trailFixtureTrailer as ONE
-// extra top-level key, in finOverlongKeyNameTrailer's shape
-// (finding_key_name_bounds_test.go:113-116). Splicing onto a shipped renderer is
-// what makes the other eleven names the REAL ENVELOPE NAMES rather than this
-// fixture's own invention.
+// extra top-level key, in finOverlongKeyNameTrailer's shape. Splicing onto a
+// shipped renderer is what makes the other eleven names the REAL ENVELOPE NAMES
+// rather than this fixture's own invention.
 //
 // trailFixtureTrailer and deliberately not trailPaddedTrailer(0): it carries no
 // trailNeedle, so a red here names this plant and nothing else.
@@ -559,8 +557,8 @@ func finContainNeedleKeyTrailer() string {
 // trailer Detail is 225 bytes, and a Detail interpolating sighting.KeyNames INSIDE
 // the trailDetail format is 426 — leaving 86 bytes of the 512-byte cap against the
 // 42-byte trailNeedle yardstick, so it PASSES the shipped per-row headroom check
-// (finding_trailer_evidence_test.go:980-988), observed green under exactly that
-// mutation while this row went red. #1364's best hostile-name fixture put its own
+// in TestFinTrailerRecordCarriesNoCapturedBytes, observed green under exactly
+// that mutation while this row went red. #1364's best hostile-name fixture put its own
 // mutant at 444 bytes against a 470-byte budget, 27 short of red, which is why
 // that ticket measured it, cut it and handed the obligation here. A needle has no
 // dependence on a byte budget.

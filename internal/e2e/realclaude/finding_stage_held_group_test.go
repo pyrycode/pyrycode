@@ -20,10 +20,9 @@ package realclaude
 // that proves it is driven from a synthetic stdout, a synthetic stderr and
 // HAND-PASSED PGID INTEGERS. Hand-passed integers prove the composition; they do
 // not prove the parameters can be FILLED. A live probe fills pinned from a real
-// pinScanArgv over a real process table,
-// taking each matched row's .PGID (reachProc)
-// as the join key into pyry's reap log. This file is that conversion site, and
-// the obligation finGatherReadings' own doc (:279-283) names as #1282's.
+// pinScanArgv over a real process table, taking each matched row's .PGID
+// (reachProc) as the join key into pyry's reap log. This file is that conversion
+// site, and the obligation finGatherReadings' own doc names as #1282's.
 //
 // The one reading that differs is MatchCount, and it moves the NEGATIVE arm one
 // step earlier. #1281's rows all run at MatchCount == 0 — its negative needle is
@@ -37,17 +36,17 @@ package realclaude
 // # The staged command must lead a process group of its own
 //
 // The rig offers two subject stagings and only one is usable here. The flip
-// test's subject (`TestTrailRigFlipsAcrossOneSubjectLifetime`) sets no SysProcAttr, so it inherits
-// the test process's group — and the pinned group would then BE
-// syscall.Getpgrp(), which is exactly what trailRigHeldPGID() (:119) returns. A
-// synthetic stderr naming the pinned group would classify as
+// test's subject (`TestTrailRigFlipsAcrossOneSubjectLifetime`) sets no
+// SysProcAttr, so it inherits the test process's group — and the pinned group
+// would then BE syscall.Getpgrp(), which is exactly what trailRigHeldPGID()
+// returns. A synthetic stderr naming the pinned group would classify as
 // tdnReapHeldPGIDKilled -> trailAdmitProof for the real arm AND for the trap's
 // own-group arm, so the trap would go red asserting the opposite of its claim
 // and #1268's hardcoding would look like it reaches the finding. The wrapper
-// staging (:535-537) is the one copied here.
+// staging in `TestTrailRigCarriesMoreThanOneMatchedRow` is the one copied here.
 //
 // The live shape agrees that a group of its own is what a real held command has:
-// internal/agentrun/reap.go:52 skips `pgid <= 1 || pgid == self || pgid ==
+// agentrun's ReapDescendantGroups skips `pgid <= 1 || pgid == self || pgid ==
 // rootPid`, so a command sharing pyry's own group is one the reaper can NEVER
 // report.
 //
@@ -72,9 +71,9 @@ package realclaude
 // trailAdmitVoidGroupUnnamed. Neither produces a VOID OUTCOME: with a certifying
 // gate, PyryExited true, a clean scan and MatchCount > 0, trailClassifyRun falls
 // past Steps 3-6 to Step 7, an ANSWER in the four-answer set
-// (trail_run_outcome_test.go:118-150). Reaching for one of the eight run-void-*
-// outcomes to make the trap "assert a void" would require breaking a DIFFERENT
-// input and would vary two dimensions at once.
+// (`trailOutcomeRunningAtTrailer` through `trailOutcomeNoRowMatched`). Reaching
+// for one of the eight run-void-* outcomes to make the trap "assert a void" would
+// require breaking a DIFFERENT input and would vary two dimensions at once.
 //
 // The trap is a test rather than a comment because the failure it guards has NO
 // SYMPTOM IN THE ANSWER: a gather wired to the un-passable stderr still
@@ -99,11 +98,11 @@ package realclaude
 // or a pinStateOutcome. It MAY NEVER name pinScan.Matches or any reachProc
 // (reachProc.Command is verbatim argv read off the ambient process table), a
 // trailObservation's Line, a trailScanResult's trailer, or a pinExclusion's
-// Command — the same rule trail_run_rig_test.go:49-57 states for the same
-// reason. THE RULE STOPS BEING PRECAUTIONARY HERE: this is the first fin* file
-// whose scan matches LIVE ROWS, so pinScan.Matches is non-empty for the first
-// time in the family and .Command on those rows is verbatim argv off the
-// operator's own process table.
+// Command — the same rule trail_run_rig_test.go's header states under § Failure
+// messages, for the same reason. THE RULE STOPS BEING PRECAUTIONARY HERE: this is
+// the first fin* file whose scan matches LIVE ROWS, so pinScan.Matches is
+// non-empty for the first time in the family and .Command on those rows is
+// verbatim argv off the operator's own process table.
 //
 // It may also never print a WHOLE trailRunReadings or a whole
 // finAttributeRecord — %v or %+v on either value. Name scalar fields. This
@@ -113,16 +112,15 @@ package realclaude
 // FILE'S VALUES. Every row in the blocker's file runs at MatchCount == 0, so
 // readings.Liveness is empty on every value it marshals, and this file is the
 // first to fill it — introducing pinStateOutcome's three string fields (Detail,
-// StateColumn, ToolStderr, process_pin_liveness_test.go:245-253) the proof never
-// examined. Those fields are in fact safe, because pinStateArgs is
-// `-p <pid> -o pid=,ppid=,stat=` with an enforcing never-add-`command`
-// prohibition (:221-232) — but that is an argument from the SHIPPED COLUMN LIST
-// and not from the cited test, which is exactly why the licence is not inherited
-// wholesale. Naming scalars costs nothing here: every assertion in this file is
-// about a .Value, a count or a pgid. Closing finGatherExemptKeys' pre-placed
-// tool_stderr exemption against a FILLED Liveness needs a staged-subject row in
-// the blocker's own no-captured-bytes test, which this ticket may not edit;
-// filed as a follow-up.
+// StateColumn, ToolStderr) the proof never examined. Those fields are in fact
+// safe, because pinStateArgs is `-p <pid> -o pid=,ppid=,stat=` with
+// `pinStateColumns`' enforcing never-add-`command` prohibition — but that is an
+// argument from the SHIPPED COLUMN LIST and not from the cited test, which is
+// exactly why the licence is not inherited wholesale. Naming scalars costs
+// nothing here: every assertion in this file is about a .Value, a count or a
+// pgid. Closing finGatherExemptKeys' pre-placed tool_stderr exemption against a
+// FILLED Liveness needs a staged-subject row in the blocker's own
+// no-captured-bytes test, which this ticket may not edit; filed as a follow-up.
 //
 // Enforced structurally rather than by discipline: finStageSubject carries []int
 // and needle paths, so scan.Matches never escapes finStageHeldGroup, and inside
@@ -350,17 +348,18 @@ func finStageHeldGroup(t *testing.T, body func(finStageSubject)) {
 }
 
 // finStageReapLine renders the synthetic reap log naming exactly one group, in
-// reap.go:65's slog shape via the shipped trailReapLine.
+// ReapDescendantGroups' slog shape via the shipped trailReapLine.
 //
 // The count is 1 because trailAdmitAttribution answers a named group across more
-// than one anchored line with trailAdmitVoidNotOneReapLine
-// (trailer_admissibility_test.go:605-612) rather than with trailAdmitProof.
+// than one anchored line with trailAdmitVoidNotOneReapLine rather than with
+// trailAdmitProof.
 func finStageReapLine(pgid int) []byte {
 	return []byte(trailReapLine(1, fmt.Sprintf("[%d]", pgid)) + "\n")
 }
 
 // finStageAssertLiveness pins the per-matched-pid reads Step 6 makes
-// load-bearing, mirroring trail_run_rig_test.go:575-589.
+// load-bearing, mirroring the per-pid liveness assertions in
+// TestTrailRigCarriesMoreThanOneMatchedRow.
 //
 // It runs on EVERY arm. Step 6 (trailOutcomeVoidLivenessInstrument) is consulted
 // before Step 7, so a single pinStateInstrumentFailed diverts every arm except

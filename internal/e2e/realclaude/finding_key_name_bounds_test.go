@@ -62,17 +62,27 @@ package realclaude
 // output genuinely went over the bound it engages. A fixture that later grows
 // past the ceiling fails loudly rather than passing vacuously.
 //
-// # The reference to finBoundKeyNames is ONE-DIRECTIONAL, deliberately
+// # The reference to finBoundKeyNames is ONE-DIRECTIONAL, and no longer has to be
 //
 // This family's convention is to name the enforcing test at the contract it
-// enforces, as finTrailerRecord does at finding_trailer_evidence_test.go:214-215.
-// It is NOT followed here, and this paragraph exists so a later editor does not
-// "fix" that. finBoundKeyNames sits at `finBoundKeyNames` with its
-// doc comment above it and inbound line-number cites pointing at and past it from
-// four files; a sentence added to that comment shifts every one of them and
-// re-opens the three-form cite sweep (filename-anchored, bare `(:NNN)` inheriting
-// the last-named file, and symbol-anchored `<Type>:NNN`) across this package. So
-// this file cites the helper and the helper says nothing about this file.
+// enforces, as finTrailerRecord does for
+// TestFinTrailerRecordCarriesNoCapturedBytes. This file did not follow it, and
+// the reason was the citation scheme rather than the design: four files pointed
+// at and past finBoundKeyNames by line, so a sentence added to its doc comment
+// displaced every one of them and re-opened a sweep across three citation forms
+// at once — filename-anchored, bare `(:NNN)` inheriting the last-named file, and
+// symbol-anchored `<Type>:NNN`.
+//
+// That cost is gone. No comment in this package addresses anything by line any
+// more, so adding a sentence to that helper's doc now costs a sentence. The
+// one-directional shape is left as it is because nothing needs it changed, not
+// because changing it is expensive. A later editor who wants the back-reference
+// should just add it.
+//
+// Recorded rather than deleted because it is the clearest measurement in this
+// package of what the addressing scheme was charging: a convention this family
+// applies everywhere else was skipped in one file purely to avoid displacing
+// four references.
 
 import (
 	"fmt"
