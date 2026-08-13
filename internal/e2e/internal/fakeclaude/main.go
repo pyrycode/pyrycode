@@ -507,7 +507,7 @@ var trustAcceptPending atomic.Bool
 // Esc-ends-turn mode (envEscEndsTurn) detects the remote interrupt keystroke: the
 // interruption marker claude itself records when a turn is interrupted, which
 // turnbridge's mapper maps to turnevent.TurnEnd{cancelled} (#1243,
-// internal/turnbridge/mapper.go:95). It is inert JSONL data, not a TUI substrate
+// internal/turnbridge/`mapEntry`). It is inert JSONL data, not a TUI substrate
 // glyph, so the cmd/substrate-guard allowlist is unaffected.
 //
 // PROVENANCE: arm (b), DERIVED — not captured. The base line is

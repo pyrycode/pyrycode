@@ -79,7 +79,7 @@ func TestRealClaude_ToolLoopIntegrity(t *testing.T) {
 		case "assistant":
 			blocks, err := parseContentBlocks(e.Raw)
 			if err != nil {
-				// Mirrors bashInvokedInRaw / selfcheck.go:283 — a single
+				// Mirrors bashInvokedInRaw / `SelfCheckDenyDefault` — a single
 				// malformed line must not turn a PASS into an inconclusive.
 				continue
 			}

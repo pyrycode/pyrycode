@@ -106,7 +106,7 @@ type WorkspaceFolderResolver func(parent, name string) (created string, err erro
 //     and rename_conversation do). Go's json.Unmarshal errors can embed the
 //     offending input bytes.
 //   - Rejected branch: do NOT log the confine `err` or the path
-//     (create_conversation.go:177 logs the wrapped confine err, which NAMES the
+//     (`CreateConversation` logs the wrapped confine err, which NAMES the
 //     offending path). AC #7.
 //
 // All four reject branches reply with a fixed static string; no supplied bytes

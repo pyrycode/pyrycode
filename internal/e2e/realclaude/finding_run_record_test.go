@@ -655,7 +655,7 @@ func TestFinRecordCarriesEveryMatchedRow(t *testing.T) {
 // Hand-building costs nothing here because this record CONSUMES the verdicts and
 // never derives them, so a hand-built row can assert nothing the classifier
 // would have refused. It is the position finTrailerOutcomeValues()
-// (finding_trailer_evidence_test.go:550) occupies for #1290's outcome, and the
+// (`TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator`) occupies for #1290's outcome, and the
 // rule trailGateCases states: the shipped producer for what it can emit,
 // hand-built for what it cannot (trailer_admissibility_test.go:768-772).
 func TestFinRecordLivenessIsConsumedAsHanded(t *testing.T) {

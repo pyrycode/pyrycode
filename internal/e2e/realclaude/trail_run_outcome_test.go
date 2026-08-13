@@ -469,7 +469,7 @@ type trailRunReadings struct {
 // StateColumn or its ToolStderr, or the sighting result's Detail — that last one
 // is swept at its own producer and is a budget and a duplication risk rather than
 // a leak. That is the rule most easily broken by copying
-// tdnDecideAfter, which does quote out.Detail (teardown_liveness_probe_test.go:678)
+// tdnDecideAfter, which does quote out.Detail
 // — legitimately, because its record is not this one.
 // TestTrailRunOutcomeCarriesNoCapturedBytes is the enforcing test, and it is why
 // the needle goes into four inputs rather than one.
@@ -2209,7 +2209,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:2577) and reusing the shipped trailNeedle.
+// (`TestTrailGateThenAdmit`) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, a pinStateOutcome's Detail and ToolStderr, and since

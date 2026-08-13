@@ -16,22 +16,23 @@
 // codegraph indexes this repo, including files behind the e2e_realclaude
 // build tag, so a symbol name resolves on demand and never rots.
 //
-// # The rule, and why it is not "no line numbers ever"
+// # The rule: name the symbol, at any depth
 //
-// A line number is justified exactly when it points somewhere a symbol name
-// cannot reach. So this guard bans only the citations a symbol name fully
-// replaces:
+// If a citation resolves to a declaration -- because the line IS one, or is a
+// doc comment on one, or sits anywhere inside one -- name that declaration.
 //
-//  1. the cited line IS a top-level declaration, or a doc comment attached to
-//     one -- the symbol identifies it completely; and
-//  2. the cited line sits within maxOffset lines of its enclosing declaration
-//     -- close enough that "look in this function" lands the reader on the
-//     spot, so the number was carrying nothing.
+// An earlier version exempted citations more than 20 lines deep, reasoning
+// that there a line number pointed somewhere a name could not reach. The
+// operator overturned it on 2026-08-13, and the argument is better: if a
+// symbol name is not precise enough to locate something, the problem is the
+// size of the declaration, not the citation. A line number used that way is
+// accommodating a defect rather than describing one.
 //
-// A citation pointing deep inside a long declaration is ALLOWED, because
-// there the number is doing real work. maxOffset is 20, about one screen,
-// chosen from the measured distribution at cleanup time: median 15 lines
-// deep, worst 371.
+// The measurement agrees. All 67 citations the exemption used to permit sit
+// in the biggest declarations in the repo -- trailClassifyRun at 454 lines
+// takes 10 of them, trailRunCases 381, trailGate 343, runProbeRep 170. So a
+// deep citation is a reliable pointer at an oversized function, and the
+// imprecision of naming it is a finding rather than a cost.
 //
 // Deliberately NOT flagged:
 //
@@ -71,10 +72,11 @@ import (
 	"strings"
 )
 
-// maxOffset is how far into a declaration a cited line may sit before the
-// line number is considered to be carrying real information. See the package
-// comment for how this number was chosen.
-const maxOffset = 20
+// deepThreshold is not a permission boundary -- every resolvable citation is
+// banned regardless of depth. It only shapes the message, so a reader is told
+// when a citation is deep enough that the enclosing declaration is itself
+// worth a look.
+const deepThreshold = 20
 
 // allowlist holds path suffixes exempt from the scan. This guard's own source
 // is exempt because it must spell the pattern it bans.
@@ -348,12 +350,15 @@ func main() {
 					hits = append(hits, fmt.Sprintf(
 						"%s:%d: cite `%s` instead of %s:%d — the line IS its declaration",
 						rel, lineNo, sym, target, n))
-				case offset <= maxOffset:
+				case offset <= deepThreshold:
 					hits = append(hits, fmt.Sprintf(
 						"%s:%d: cite `%s` instead of %s:%d — %d lines into that declaration",
 						rel, lineNo, sym, target, n, offset))
+				default:
+					hits = append(hits, fmt.Sprintf(
+						"%s:%d: cite `%s` instead of %s:%d — %d lines deep, so `%s` is probably too big",
+						rel, lineNo, sym, target, n, offset, sym))
 				}
-				// Deeper than maxOffset: allowed, the number earns its keep.
 			}
 		}
 		return nil
@@ -375,7 +380,8 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "\nWhy: line numbers rot on every insertion and nothing maintains them.")
 		fmt.Fprintln(os.Stderr, "codegraph resolves a symbol name on demand. A line number is fine when it")
-		fmt.Fprintf(os.Stderr, "points deeper than %d lines into a declaration, where a name cannot reach.\n", maxOffset)
+		fmt.Fprintln(os.Stderr, "If a name is not precise enough to locate something, that declaration is too big;")
+		fmt.Fprintln(os.Stderr, "the imprecision is the finding, not a reason to keep the line number.")
 		os.Exit(1)
 	}
 }

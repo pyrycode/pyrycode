@@ -246,7 +246,7 @@ func transitionClearsTurn(t sessions.SessionTransition) (sessionID string, ok bo
 // their own: the wire emitter, and #1202's turn-busy clear.
 //
 // SetTransitionObserver MUST run before Pool.Run; the call site (startRelayV2 ←
-// startRelay at main.go:1003) is strictly before pool.Run (main.go:1086), so the
+// startRelay at `runSupervisor`) is strictly before pool.Run (`runSupervisor`), so the
 // observer field is installed once and read-only thereafter (#659's
 // install-before-Run contract, race-free).
 //

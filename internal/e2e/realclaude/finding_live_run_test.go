@@ -62,7 +62,7 @@ package realclaude
 //
 // This file writes no artifact, logs no captured string and formats no Detail at
 // all. The only Detail on the handle is the gate's, which quotes neither operand
-// of its identity arm by construction (finding_staging_gate_test.go:304). The two
+// of its identity arm by construction (`finOutcomeStagingGate`). The two
 // t.Fatalf messages below carry a deadline and pyry's own stderr and nothing from
 // the process table; the one t.Logf names a duration.
 //
@@ -98,7 +98,7 @@ import (
 // It is returned as a POINTER, and that is not a style preference: the pyry-exit
 // kill cleanup is registered BEFORE pyry's pid exists (§ the cleanups, below), so
 // its closure must read a pid written later. That is the shape the reach
-// precedent uses with rec.PyryPID (background_reach_probe_test.go:364), and it is
+// precedent uses with rec.PyryPID (`runReachProbe`), and it is
 // why the handle is allocated as the driver's first composite literal rather than
 // composed at the end.
 //
@@ -333,7 +333,7 @@ type finLiveRunHandle struct {
 // holds, and for a STRONGER reason than the one-caller version it replaces:
 // whichever shipped delta a caller passes NAMES PYRY_USE_STREAMJSON EXPLICITLY, so
 // the ambient loses either way. The reach probe's guard
-// (background_reach_probe_test.go:296) exists because ITS delta does not name the
+// (`TestRealClaude_BackgroundReachability`) exists because ITS delta does not name the
 // variable; that contrast is the whole reason this driver needs none. A caller
 // that passed a delta leaving the variable unset would break the requirement and
 // silently stage whatever the operator's shell exports.
@@ -467,7 +467,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// measures the rig. Both nearest precedents do exactly this and say so
 	// (background_reach_probe_test.go:355-374, background_trigger_probe_test.go:438-453).
 	t.Cleanup(func() {
-		// LOAD-BEARING (background_trigger_probe_test.go:443). Without this
+		// LOAD-BEARING (`runProbeRep`). Without this
 		// guard a failure before cmd.Start reaches syscall.Kill(-0, SIGKILL),
 		// and kill(0, sig) is defined as "send to every process in the CALLER's
 		// own process group" — the test binary would SIGKILL itself and its
@@ -654,7 +654,7 @@ func finLiveRunStage(t *testing.T, envDelta []string) *finLiveRunHandle {
 	// after that write and finishes in the time of one ps exec (reap.go:75-76).
 	//
 	// ONE scan carrying BOTH needles — the shipped precedent at
-	// teardown_liveness_probe_test.go:377. It saves a second ps:
+	// `runTdnProbe`. It saves a second ps:
 	// reachMatchArgvRows matches a row carrying ANY needle
 	// (background_reach_probe_test.go:911-916), so one scan yields both
 	// populations and finLivePinReduce separates them.

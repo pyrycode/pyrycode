@@ -32,12 +32,12 @@ package realclaude
 // MatchCount is at least 2 and the same composition lands on Step 7
 // (trailOutcomeMatchedUnattributed). That move is the increment, not an
 // inconsistency with the blocker. The FINDING arm is unchanged, because Step 2
-// (trail_run_outcome_test.go:1011) outranks Step 7.
+// (`trailClassifyRun`) outranks Step 7.
 //
 // # The staged command must lead a process group of its own
 //
 // The rig offers two subject stagings and only one is usable here. The flip
-// test's subject (trail_run_rig_test.go:280) sets no SysProcAttr, so it inherits
+// test's subject (`TestTrailRigFlipsAcrossOneSubjectLifetime`) sets no SysProcAttr, so it inherits
 // the test process's group — and the pinned group would then BE
 // syscall.Getpgrp(), which is exactly what trailRigHeldPGID() (:119) returns. A
 // synthetic stderr naming the pinned group would classify as

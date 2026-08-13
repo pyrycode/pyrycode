@@ -71,7 +71,7 @@ func TestRealClaude_DoctorPoisoningRegression(t *testing.T) {
 		content, ok := decodeUserContent(e.Raw)
 		if !ok {
 			// Mirror the bashInvokedInRaw policy at
-			// allowed_tools_enforcement_test.go:74 — a malformed line
+			// `TestRealClaude_AllowedToolsEnforcement` — a malformed line
 			// must not turn a PASS into an inconclusive. Skip silently.
 			continue
 		}

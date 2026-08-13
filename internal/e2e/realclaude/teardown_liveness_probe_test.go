@@ -167,7 +167,7 @@ var tdnEnvDelta = []string{"BASH_DEFAULT_TIMEOUT_MS=5000"}
 
 // tdnTeardownPath names the teardown this rig exercises, in the record, because
 // the reading is only about the path that produced it. `pyry agent-run` installs
-// signal.NotifyContext(SIGTERM, SIGINT) at cmd/pyry/agent_run.go:258, so a
+// signal.NotifyContext(SIGTERM, SIGINT) at cmd/pyry/`runAgentRun`, so a
 // SIGTERM to its PID cancels the run context and runs the real teardown, reap
 // included. A SIGTERM to its GROUP or a SIGKILL would measure a leak pyry's real
 // teardown never produces.
