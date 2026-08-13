@@ -95,8 +95,10 @@ package realclaude
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- the run's value space ----------------------------------------------------
@@ -429,7 +431,8 @@ type trailRunReadings struct {
 	// trailScanResult, so taking it would promote that pointer back into reach.
 	// Staleness is deliberately absent: trailBoundFromStart carries a real
 	// duration that bounds NOTHING, so a classifier that could read a staleness
-	// could be tempted to discriminate on it.
+	// could be tempted to discriminate on it. This is the rule's one owner, and
+	// TestTrailRunReadingsReachesNoDuration is what keeps it true.
 	BoundFrom string
 	// ClaudeState is the claude-still-alive reading: a pinIsVerdict value, or ""
 	// for "not read". CORROBORATION ONLY — it is blind to the reap, so in exactly
@@ -1659,6 +1662,31 @@ func trailRunCases() []trailRunCase {
 // TestTrailClassifyRun is AC1's, AC4's and AC5's claim made executable: every
 // outcome in the closed set — including the out-of-contract one — is reached by a
 // table row, and no row reaches a value outside the space.
+// TestTrailRunReadingsReachesNoDuration makes the classifier's no-staleness
+// rule structural. trailRunReadings.BoundFrom's doc states it and three comments
+// in the finding gather restate it, but nothing checked it: a later edit adding
+// a Staleness field would have left four comments describing a type that no
+// longer matched them, and no test would have noticed.
+//
+// The rule's own reason is what makes this RECURSIVE rather than a scan of the
+// top-level fields. trailBoundFromStart carries a real duration that bounds
+// NOTHING, so what must not exist is a duration the CLASSIFIER can reach — and
+// one added a level down, onto the gate result or a liveness row, is exactly as
+// reachable from trailClassifyRun as one added here.
+//
+// It reuses finRecordInputReaches, this family's own walker, so the traversal
+// rule stays single-sourced with the reachability pins in the neighbouring
+// files rather than being retyped with its own bugs.
+func TestTrailRunReadingsReachesNoDuration(t *testing.T) {
+	t.Parallel()
+
+	duration := reflect.TypeOf(time.Duration(0))
+	if finRecordInputReaches(reflect.TypeOf(trailRunReadings{}), duration, map[reflect.Type]bool{}) {
+		t.Fatalf("trailRunReadings reaches %s: a classifier able to read a staleness can be "+
+			"tempted to discriminate on one, which is what BoundFrom's doc forbids", duration)
+	}
+}
+
 func TestTrailClassifyRun(t *testing.T) {
 	reached := make(map[string]bool)
 
