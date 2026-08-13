@@ -48,7 +48,7 @@ package realclaude
 //
 // # The proof outranks every match-count arm
 //
-// trailClassifyRun's Step 2 (trail_run_outcome_test.go:1011) returns
+// trailClassifyRun's Step 2 returns
 // trailOutcomeRunningAtTrailer on Admit.Value == trailAdmitProof BEFORE Step 4
 // (ArgvScanErrored), Step 5 (RowsScanned == 0), Step 7 (MatchCount > 0) or
 // Step 8 are consulted. That is what makes this file's rows cheap: with no
@@ -72,14 +72,14 @@ package realclaude
 // needle in every string-bearing input" makes them red against shipped code:
 //
 //   - trailGate fills Reason from res.Trailer.TerminalReason and splices it %q
-//     into Detail on BOTH certifying arms (trailer_admissibility_test.go:388,
+//     into Detail on BOTH certifying arms (`trailDetail`,
 //     :399); readings.Gate takes that result whole;
 //   - the gather hands the same Reason to the fan-out as certified, and
 //     trailAdmitAttribution splices it %q into Detail on the budget arm (:534)
 //     and the proof arm (:598); readings.Admit takes that result whole too;
 //   - finGatherInputs.ClaudeState is copied into readings.ClaudeState whole,
 //     trailClassifyRun republishes it as claude_state
-//     (trail_run_outcome_test.go:532, :650), and C7 quotes an out-of-contract
+//     (`trailRunOutcome`, :650), and C7 quotes an out-of-contract
 //     value %q into the published Detail (:740-745).
 //
 // So a needle in terminal_reason lands in readings.Gate.Detail and, on the
@@ -181,7 +181,7 @@ const (
 	// finGatherUndocumentedState is a claude liveness verdict nobody defined:
 	// neither one of pinReadState's four nor "" for not-read. Deliberately NOT
 	// the classifier layer's own "some-verdict-nobody-defined"
-	// (trail_run_outcome_test.go:1390), so a failure names which layer produced
+	// (`trailRunCases`), so a failure names which layer produced
 	// the value that reached C7.
 	finGatherUndocumentedState = "fin-gather-verdict-nobody-defined"
 )
@@ -383,7 +383,7 @@ type finGatherInputs struct {
 // a SINGLE ExitReason, so their agreement is one value rendered three ways and not
 // three corroborating reads; TerminalReason is pyry's own synthesis and claude
 // never emitted it. Only StopReason is independently sourced, forwarded from the
-// model's last message unvalidated (emitter.go:210): it is the one
+// model's last message unvalidated (`Emit`): it is the one
 // model-influenced field crossing this value UNCAPPED, exactly as it crosses
 // finTrailerRecord (finding_trailer_evidence_test.go:114-124). Capping it is out
 // of scope there and here; naming it is what keeps a later sweep author from
@@ -622,7 +622,7 @@ func finGatherRunnerPath(reading string) string {
 //
 // # Which contract check shapes which leg
 //
-//   - C2 (trail_run_outcome_test.go:673) requires a trailGateUsable value to carry
+//   - C2 (`trailClassifyRun`) requires a trailGateUsable value to carry
 //     a non-empty Reason. The gate is fed a real scanned trailer, so the reason
 //     arrives filled; a hand-built trailGateResult{Value: trailGateUsable} is
 //     exactly the fixture C2 exists to reject.
@@ -693,7 +693,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 
 	// The attribution leg, guarded on the gate's certified Reason: the exact
 	// condition C3 and C4 split on, and the one trailAdmitAttribution's own
-	// contract block (trailer_admissibility_test.go:518) rejects the negation of.
+	// contract block (`trailGate`) rejects the negation of.
 	// Outside the guard the fan-out is not called at all and record stays zero.
 	//
 	// Selected is copied in ONLY when the fan-out attributed a group. Its doc
@@ -888,7 +888,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, in finGatherInputs,
 	readings trailRunReadings, record finAttributeRecord) {
 	t.Helper()
 
-	// C2 (trail_run_outcome_test.go:673): the gate is fed a REAL SCANNED TRAILER.
+	// C2 (`trailClassifyRun`): the gate is fed a REAL SCANNED TRAILER.
 	// Byte for byte against the shipped producers over the same bytes the gather
 	// read — trailGateResult is four strings, so == suffices. A hand-built
 	// trailGateResult{Value: trailGateUsable} is exactly the fixture C2 exists to
@@ -945,7 +945,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, in finGatherInputs,
 	} else {
 		// C4 (:698): Admit is left ZERO when the gate certified nothing. This is
 		// the zero-value comparison the package uses for "not classified"
-		// (trail_run_outcome_test.go:1305, `TestFinAttributeEmptySetAlternativesArePublishedFalsehoods`) —
+		// (`trailRunCases`, `TestFinAttributeEmptySetAlternativesArePublishedFalsehoods`) —
 		// a comparison against an existing consumer's idiom, not a reading the
 		// gather produced by literal.
 		if readings.Admit != (trailAdmitResult{}) {
@@ -986,7 +986,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, in finGatherInputs,
 
 	// AC2's ordering claim, asserted rather than described. No subject is staged
 	// anywhere in this file, so every row runs at zero matches and the finding
-	// row STILL reports the finding: Step 2 (trail_run_outcome_test.go:1001) is
+	// row STILL reports the finding: Step 2 (`trailClassifyRun`) is
 	// consulted before Step 7 and Step 8 are. On a live run the same thing happens
 	// for a different reason — the reaper has already killed the group by the time
 	// the post-trailer scan runs — which is why nothing may be done to the hold or
@@ -1347,7 +1347,7 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // field, which is what trailNeedle already stands in for
 // (result_trailer_observation_test.go:322-325). IT MAY NOT GO INTO
 // terminal_reason: trailGate and trailAdmitAttribution both quote the certified
-// reason %q into their Details BY DESIGN (trailer_admissibility_test.go:388,
+// reason %q into their Details BY DESIGN (`trailDetail`,
 // :399, :534, :598), and readings.Gate and readings.Admit take those results
 // whole — so such a plant would be red against shipped code whose only fix
 // deletes the field the operator reads to interpret the gate. The exclusion is

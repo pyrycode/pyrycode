@@ -26,7 +26,7 @@ package realclaude
 //
 // # The count is the whole file
 //
-// finOutcomeStagingGate's count arm (finding_staging_gate_test.go:347) returns
+// finOutcomeStagingGate's count arm returns
 // stage-pin-count-unexpected when PinMatchCount != PinWantCount. A mis-fill does
 // not fail loudly in development — it fires on every CORRECTLY staged run,
 // reporting a staging failure while the rig looks correct, and burns a live turn
@@ -134,7 +134,7 @@ type finLivePinReading struct {
 // count=1 on all three reps.
 //
 // EITHER wrong fill has the same consequence and the same cost: it fires
-// finOutcomeStagingGate's count arm (finding_staging_gate_test.go:347) against a
+// finOutcomeStagingGate's count arm against a
 // want of 2 on a CORRECTLY staged run, reporting stage-pin-count-unexpected with
 // no other symptom, and spends one live claude turn finding out.
 const finLivePinWantRows = 2

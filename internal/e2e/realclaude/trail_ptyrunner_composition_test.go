@@ -151,7 +151,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 
 	// Premise. The reap record is CLASSIFIED by the real producer rather than
 	// typed, which pins the proof arm to a record tdnClassifyReapLog actually
-	// emits — TestTrailAdmitAttribution's recipe (trailer_admissibility_test.go:2341)
+	// emits — TestTrailAdmitAttribution's recipe (`TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt`)
 	// and its reason.
 	classified := tdnClassifyReapLog([]byte(trailReapLine(1, "[7788]")+"\n"), heldPGID)
 	if classified.Verdict != tdnReapHeldPGIDKilled || classified.LineCount != 1 {

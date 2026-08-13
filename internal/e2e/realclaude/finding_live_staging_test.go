@@ -16,7 +16,7 @@ package realclaude
 //
 // # The byte-equality trap these declarations exist to satisfy
 //
-// finOutcomeStagingGate's identity arm (finding_staging_gate_test.go:299) is byte
+// finOutcomeStagingGate's identity arm is byte
 // equality over two opaque strings and admits nothing else:
 //
 //	if s.IssuedCommand != s.StagedCommand || s.StagedCommand == ""
@@ -121,13 +121,13 @@ const finLiveStageSystemPrompt = probeSystemPrompt
 // finLiveStageCommand is the run's staged hold command: the BARE command the model
 // is asked to emit verbatim, and the exact bytes the rig reports as
 // finOutcomeStaging.StagedCommand. It is what the gate's identity arm
-// (finding_staging_gate_test.go:299) compares against claude's verbatim
+// (`finOutcomeStagingGate`) compares against claude's verbatim
 // input.command, so it must be the model's side of the contract and not the rig's
 // internal shell form.
 //
 // It splices probeHeldCommandName (background_trigger_probe_test.go:147) rather
 // than re-typing "cat". #1340's liveness read calls probeHasCommand(…,
-// probeHeldCommandName) (background_trigger_probe_test.go:533), so a rig that
+// probeHeldCommandName) (`runProbeRep`), so a rig that
 // staged one verb while the liveness check looked for another would be a silent
 // drift; the splice makes a rename a build break. That is a COUPLING — this rig's
 // verb follows #1223's — and it was chosen rather than inherited: the alternative
@@ -204,7 +204,7 @@ func finLiveStageEnvDelta() []string {
 //     own environment verbatim, so setting it on the parent is the whole plumbing
 //     story.
 //   - PYRY_USE_STREAMJSON=1 — the exact string runAgentRun dispatches
-//     runAgentRunStreamRunner on (cmd/pyry/agent_run.go:266). Named EXPLICITLY
+//     runAgentRunStreamRunner on (cmd/pyry/`runAgentRun`). Named EXPLICITLY
 //     for exactly the reason its =0 sibling is, and that reason SURVIVES THE FLIP
 //     unchanged: reachRunnerPathFromEnv reads the ambient os.Getenv FIRST
 //     (`reachRunnerPathFromEnv`) and only then lets the delta override
@@ -275,7 +275,7 @@ const finLiveStageFixtureFIFOPath = "/tmp/pyry-fin-live-stage/" + finLiveStageFI
 // It fails toward the SAFE direction. A caller that ignored ok and used the zero
 // string would compare "" against the staged command and reach
 // finOutcomeCommandNotStaged via the `|| StagedCommand == ""` guard
-// (finding_staging_gate_test.go:299) — a failure arm, never the pass-through.
+// (`finOutcomeStagingGate`) — a failure arm, never the pass-through.
 func finLiveStageCommandFromPrompt(prompt string) (string, bool) {
 	if strings.Count(prompt, "`") != 2 {
 		return "", false
@@ -469,7 +469,7 @@ func TestFinLiveStageFIFONameIsDisjointFromEveryShippedName(t *testing.T) {
 func TestFinLiveStageEnvDeltaNamesTheRunner(t *testing.T) {
 	// The single environment write this file makes. WITHOUT IT THE CLAIM BELOW IS
 	// VACUOUS: no test in this package t.Setenvs PYRY_USE_STREAMJSON (the
-	// PYRY_USE_STREAMJSON=1 at background_trigger_probe_test.go:255 is a spawned
+	// PYRY_USE_STREAMJSON=1 at `probeRows` is a spawned
 	// row's CHILD env, not the test process's), so wherever the variable is unset
 	// the claim passes identically with an EMPTY delta. The nearest shipped
 	// precedent, finding_run_record_test.go:819-827, argues this independence in
@@ -553,7 +553,7 @@ func TestFinLiveStageEnvDeltaNamesTheRunner(t *testing.T) {
 func TestFinLiveStageStreamEnvDeltaNamesTheRunner(t *testing.T) {
 	// The hostile ambient — and WHAT IT BUYS IS NOT THE SHIPPED TRAP'S ARGUMENT.
 	// THE TRUTHINESS RULE IS ONE-SIDED: only the exact string "1" is truthy
-	// (`reachRunnerPathFromEnv`, matching cmd/pyry/agent_run.go:266),
+	// (`reachRunnerPathFromEnv`, matching cmd/pyry/`runAgentRun`),
 	// and every other value falls through to ptyrunner exactly as unset does. So
 	// an ambient of "0" is INDISTINGUISHABLE FROM UNSET here.
 	//

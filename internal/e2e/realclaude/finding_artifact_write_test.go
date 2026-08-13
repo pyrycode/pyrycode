@@ -941,7 +941,7 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 // finding_run_record_test.go:934-944 gives for deferring this scan to this
 // ticket: "vacuous coverage is worse than none". The forbidden list is the union
 // of the two flat scans this family already ships
-// (finding_trailer_evidence_test.go:768, finding_attribution_fanout_test.go:760),
+// (`TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer`, `TestFinAttributeRecordCarriesNoCapturedBytes`),
 // less the redundant trailer_line, which "line" already covers.
 func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 	files := finWriteRender(t)

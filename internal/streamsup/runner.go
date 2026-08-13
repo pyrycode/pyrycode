@@ -382,7 +382,7 @@ func (r *Runner) turnTarget() (w io.Writer, gated bool) {
 // sentinel: that is already the retryable classification msgqueue and cmd/pyry
 // agree on, and the e2e asserts as a contract check that stream WriteUserTurn
 // returns only ErrNoLiveChild, turncommit.ErrDropped or nil
-// (relay_v2_stream_new_session_test.go:523). The discriminator an operator needs —
+// (`TestRelayV2_StreamNewSessionRotatesAndRestartsFresh`). The discriminator an operator needs —
 // "refused by the rotation gate" vs "no child yet" — is carried by the record
 // below instead. Cost of refusing rather than blocking: the turn lands up to one
 // msgqueue retry interval (1 s) later, against a give-up bound of 2 m.

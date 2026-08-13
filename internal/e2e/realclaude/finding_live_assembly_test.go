@@ -42,7 +42,7 @@ package realclaude
 // The staged command has TWO consumers and they must be the same bytes:
 //
 //   - finOutcomeStagingGate's identity arm compares StagedCommand against
-//     IssuedCommand (finding_staging_gate_test.go:299).
+//     IssuedCommand (`finOutcomeStagingGate`).
 //   - finTranscriptFill only reads the trigger result when call.Command == staged
 //     (`finTranscriptFill`).
 //
@@ -248,7 +248,7 @@ type finLiveAssembleFacts struct {
 //   - ALL EIGHT KEYS PRESENT. This is "no field is left at its zero value by
 //     accident" made auditable: a missing key is a field silently at its zero, and
 //     four of the eight zero into failure arms while PinWantCount: 0 zeroes into
-//     the gate's guard (finding_staging_gate_test.go:347).
+//     the gate's guard (`finOutcomeStagingGate`).
 //   - NO LITERAL ON ANY RIGHT-HAND SIDE. Every one is r.X or facts.X and nothing
 //     else. This single rule is what forbids finTranscriptStagedCaller's poison
 //     PinMatchCount: 1, forbids PinWantCount: finLivePinWantRows (the driver's job
@@ -386,7 +386,7 @@ func TestFinLiveAssembleStagingForwardsTheCounts(t *testing.T) {
 		},
 		{
 			// This row pins the gate's `|| PinWantCount < 1` guard
-			// (finding_staging_gate_test.go:347) SURVIVING THE COMPOSITION, which kills
+			// (`finOutcomeStagingGate`) SURVIVING THE COMPOSITION, which kills
 			// an assembly substituting its own count == want test for the gate's
 			// decision. It is not the row that catches a forgotten fill.
 			name:       "both counts at zero",

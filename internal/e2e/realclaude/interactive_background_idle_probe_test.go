@@ -84,7 +84,7 @@ package realclaude
 // # Why the recorded idle belongs to THIS turn (AC3(b))
 //
 // turn_state{idle} reaches the wire from exactly one site:
-// interactive_turn_v2.go:216, inside the turnevent.TurnEnd arm, which is
+// `Handle` in interactive_turn_v2.go, inside the turnevent.TurnEnd arm, which is
 // entered only when inTurn is true (:209) and which immediately calls
 // endTurn(). inTurn is set only by startTurnIfNeeded (:267), which every
 // content arm calls together with a transitionTo(thinking|responding) — so no
@@ -392,7 +392,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 	// that race, and it prevents a goroutine leak past test end. If the
 	// rendezvous never fires, this goroutine stays parked until holdProbeFIFO's
 	// cleanup opens the read end non-blockingly to release its own parked
-	// writer, which CLOSES rendezvous (background_trigger_probe_test.go:684,
+	// writer, which CLOSES rendezvous (`holdProbeFIFO`,
 	// closed rather than sent on, so a second receiver is safe); the send then
 	// lands in the buffer with no reader left and the goroutine retires.
 	rendezvousAt := make(chan time.Time, 1)

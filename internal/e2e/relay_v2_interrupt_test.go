@@ -53,7 +53,7 @@ import (
 // byte record vs. the daemon's wire report).
 //
 // StopReason fidelity: the turn_end carries StopReason=="cancelled". #1243 taught
-// the mapper to recognise claude's interruption marker (turnbridge/mapper.go:95)
+// the mapper to recognise claude's interruption marker (turnbridge/`mapEntry`)
 // and #1244 restaged fakeclaude's ESC handler to write that marker rather than a
 // canned assistant end_turn line, so the tui-driver limitation this paragraph used
 // to record — EventKindJsonlEndOfTurn cannot distinguish an interrupt-stop from a

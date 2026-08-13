@@ -14,7 +14,7 @@ package realclaude
 //
 // # Why a fan-out exists at all
 //
-// trailAdmitAttribution (trailer_admissibility_test.go:457) takes ONE
+// trailAdmitAttribution (`trailGate`) takes ONE
 // tdnReapOutcome, which is the classification of pyry's reap log against ONE
 // held group. The probe does not have one group: pinScanArgv returns Matches as
 // a SLICE (process_pin_liveness_test.go:130-135), deliberately refusing to
@@ -28,7 +28,7 @@ package realclaude
 //
 // tdnClassifyReapLog is the reap-log reader;
 // pyry's stderr is NOT re-parsed here. trailAdmitAttribution
-// (trailer_admissibility_test.go:457) is the attribution predicate, and
+// (`trailGate`) is the attribution predicate, and
 // trailIsAdmitValue (:731) its membership predicate — called, never re-switched.
 // trailReapLine (:763) renders one anchored line in reap.go:65's slog shape.
 // trailClassifyRun / trailRunWellFormed are the downstream consumer and its
@@ -56,7 +56,7 @@ import (
 // The two ways a pinned group produces no attribution. Both are RECORD-LEVEL
 // CONDITIONS and neither is ever a selectable value: trailRunReadings.Admit
 // accepts only what trailIsAdmitValue accepts (checked by C3,
-// trail_run_outcome_test.go:690), so an eighth locally-invented value there
+// `trailClassifyRun`), so an eighth locally-invented value there
 // lands every such run on trailOutcomeOutOfContract.
 const (
 	// finAttributeGroupUnreportable: a pinned group the reaper can never report.
@@ -150,7 +150,7 @@ type finAttributeRecord struct {
 // totality, not for a contested case.
 //
 // PROOF FIRST, and that is the load-bearing half. trailClassifyRun reads Admit.Value
-// for a decision in exactly two places, C5 (trail_run_outcome_test.go:712) and Step 2
+// for a decision in exactly two places, C5 (`trailClassifyRun`) and Step 2
 // (:1011), both keyed on trailAdmitProof. A rule that let one group's void suppress
 // another group's proof would cost the probe its only finding, while the order BELOW
 // proof cannot change the run's outcome at all — it changes only what the published
@@ -325,7 +325,7 @@ type finAttributeCase struct {
 // finAttributeCases returns every fan-out input under test.
 //
 // EVERY ROW PASSES A NON-EMPTY certified. trailAdmitAttribution's contract block
-// rejects an empty one out of hand (trailer_admissibility_test.go:518), so a row
+// rejects an empty one out of hand (`trailGate`), so a row
 // passing "" would measure that contract block instead of this selection rule.
 //
 // A function rather than a package-level var, matching trailGateCases() and
@@ -590,7 +590,7 @@ func finAttributeAssert(t *testing.T, tc finAttributeCase, got finAttributeRecor
 	}
 
 	// Only what trailIsAdmitValue accepts may reach the selected field: C3 calls
-	// that predicate (trail_run_outcome_test.go:690), so an eighth value there
+	// that predicate (`trailClassifyRun`), so an eighth value there
 	// lands every such run on trailOutcomeOutOfContract.
 	if !empty && !trailIsAdmitValue(got.Selected.Value) {
 		t.Errorf("selected %q is not one of trailIsAdmitValue's seven", got.Selected.Value)
@@ -699,7 +699,7 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 // TestFinAttributeRecordCarriesNoCapturedBytes makes the
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:1287) and reusing the shipped trailNeedle.
+// (`TestTrailAdmissibilityConstantsAreClosed`) and reusing the shipped trailNeedle.
 //
 // # The plant position is the whole test
 //
@@ -718,9 +718,9 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 // #1271's own test plants it in every string-bearing input, and following that
 // here would put it into certified — which CROSSES VERBATIM BY DESIGN:
 // trailAdmitAttribution splices certified with %q into two of its Details
-// (trailer_admissibility_test.go:534, :597). It is trailGate's certified Reason,
+// (`trailGate`, :597). It is trailGate's certified Reason,
 // i.e. the trailer's terminal_reason, which shipped code already treats as publishable
-// (trailClassifyRun puts it into its own Details at trail_run_outcome_test.go:833
+// (trailClassifyRun puts it into its own Details
 // and :1023, and TestTrailRunOutcomeCarriesNoCapturedBytes deliberately leaves Reason
 // alone). Planting it there would go red, and the only fix would be to stop carrying
 // trailAdmitResult whole — which the record's shape requires. The

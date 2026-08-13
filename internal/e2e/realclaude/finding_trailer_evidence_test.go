@@ -129,7 +129,7 @@ import (
 // corroborating reads. TerminalReason is pyry's OWN SYNTHESIS on this path —
 // claude never emitted it. Only StopReason is independently sourced, forwarded
 // from the model's last message unvalidated (`e.lastStopReason =
-// entry.Message.StopReason`, emitter.go:210): it is the one model-influenced
+// entry.Message.StopReason`, `Emit`): it is the one model-influenced
 // field crossing into this record uncapped, bounded by the wire's own shape and
 // by nothing this record does. Capping it is out of scope and AC2 requires it be
 // carried whole; naming it here is what keeps #1286's multi-input sweep from
@@ -606,7 +606,7 @@ func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 // copy carries padded stand-in payload, and no sweep covers this row's fixture.
 func TestFinTrailerSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 	// Pad 2000 is the plant this family already uses at
-	// result_trailer_observation_test.go:507. Any pad from 142 up satisfies the
+	// `TestTrailScan`. Any pad from 142 up satisfies the
 	// precondition; it is ASSERTED below rather than assumed, so a later fixture
 	// change surfaces as a failed precondition instead of as a silently weaker
 	// test.

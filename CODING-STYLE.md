@@ -89,7 +89,7 @@ Follow stdlib conventions:
 
 - **Cite the symbol, not the line.** Write ``see `trailGate` `` rather than `trailer_admissibility_test.go:315`. codegraph indexes this repo, including files behind the `e2e_realclaude` build tag, so a symbol name resolves on demand and never rots. A line number is stale the moment anything above it moves.
 - **For a spot inside a function, name the enclosing symbol and describe the spot.** ``the nil-PID guard in `probeAnnotateCommands` `` beats a line number, and survives every insertion.
-- **A line number is fine when it points somewhere a name cannot reach** — deep inside a long declaration, or at a specific line whose position is itself the point. That is the exact boundary `make cite-guard` enforces: it flags a citation whose target is a declaration, or sits within 20 lines of one, and allows anything deeper.
+- **Name the symbol at any depth. There is no "too deep to name" exemption.** If a symbol name is not precise enough to locate what you mean, the declaration is too big, and that is the finding. A line number used to navigate inside an oversized function accommodates the problem instead of describing it. `make cite-guard` flags every citation that resolves to a declaration, however deep, and says so when the depth suggests the declaration itself needs splitting.
 - **Never use a bare `:NNN`.** It inherits the last-named file in the comment rather than the current one, which reads as this file and is not. It has already produced wrong references.
 - **Ranges are fine** (`:2063-2107`) where the span is the information.
 

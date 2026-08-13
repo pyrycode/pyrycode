@@ -114,7 +114,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 //     is closed: "{}" from the pre-created file, "{}" per turn from appendTurnGrowth,
 //     the kicker's perConvMidTurnLine (assistant text, NO stop_reason — see there),
 //     and the ESC handler's marker (type:"user"). None satisfies IsEndTurn.
-//   - internal/turnbridge/mapper.go:95 (the interruption marker) is reachable ONLY
+//   - internal/turnbridge/`mapEntry` (the interruption marker) is reachable ONLY
 //     from the ESC handler's line. It needs type:"user", no top-level
 //     "permissionMode" key, and text prefixed interruptMarkerNeedle. Of the four
 //     line kinds above only the marker is a user entry at all — the fake never

@@ -356,7 +356,7 @@ func runReachProbe(t *testing.T, artifactDir string) {
 	// gets a real chance to finish the turn and exit on its own.
 	pyryExited := make(chan struct{})
 	t.Cleanup(func() {
-		// LOAD-BEARING (background_trigger_probe_test.go:443). Without this
+		// LOAD-BEARING (`runProbeRep`). Without this
 		// guard a failure before cmd.Start reaches syscall.Kill(-0, SIGKILL),
 		// and kill(0, sig) is defined as "send to every process in the CALLER's
 		// own process group" — the test binary would SIGKILL itself and its
@@ -1092,7 +1092,7 @@ func reachToolUseCommand(input json.RawMessage) string {
 // just the delta this probe sets: PYRY_USE_STREAMJSON may already be exported
 // in the operator's shell (it was, on 2026-07-25, and that silently invalidated
 // a #1223 gate). Only the exact string "1" is truthy, matching
-// cmd/pyry/agent_run.go:266.
+// cmd/pyry/`runAgentRun`.
 //
 // Its streamrunner branch is unreachable in any run that produces a record: the
 // PYRY_USE_STREAMJSON gate in TestRealClaude_BackgroundReachability returns
