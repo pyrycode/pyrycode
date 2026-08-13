@@ -71,6 +71,7 @@ package realclaude
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -117,7 +118,9 @@ import (
 // prevent one tier down. The same argument kills omitempty on IsError (drops
 // false) and on Staleness (drops the honest zero that pairs with
 // trailBoundNone). State is the discriminator a reader consults, and every
-// field is always present beside it.
+// field is always present beside it. TestFinTrailerCarriersDeclareEveryKey is
+// what keeps that true of this record and of finSighting, which defers to this
+// paragraph rather than restating it.
 //
 // # What the four trailer fields are worth
 //
@@ -408,6 +411,37 @@ func finTrailerSighting(scan trailScanResult, staleness time.Duration, boundFrom
 //
 // The carriers come from finTrailerSighting over a shipped scan, with Staleness
 // and BoundFrom handed in — which needs no clock, no poll and no live turn.
+// TestFinTrailerCarriersDeclareEveryKey makes the no-omitempty decision
+// structural. finTrailerRecord's doc argues it at length and finSighting's
+// defers to that argument, but nothing checked either, and the failure is
+// silent: dropping a false is_error or an honest zero staleness leaves a reader
+// of the artifact unable to tell a dropped key from one that was never there.
+//
+// The two carriers are NAMED rather than the rule being made a package-wide
+// ban. omitempty is right on other records here — trailScanResult uses it for
+// its own stated reason, and its doc says so is not a precedent for these two —
+// so a blanket check would be red against shipped code.
+func TestFinTrailerCarriersDeclareEveryKey(t *testing.T) {
+	t.Parallel()
+
+	for _, carrier := range []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"finTrailerRecord", reflect.TypeOf(finTrailerRecord{})},
+		{"finSighting", reflect.TypeOf(finSighting{})},
+	} {
+		for i := 0; i < carrier.typ.NumField(); i++ {
+			f := carrier.typ.Field(i)
+			if strings.Contains(f.Tag.Get("json"), ",omitempty") {
+				t.Errorf("%s.%s carries omitempty: a dropped key reads the same as one that "+
+					"was never there, which is the distinction this record exists to keep",
+					carrier.name, f.Name)
+			}
+		}
+	}
+}
+
 func TestFinTrailerRecordCarriesTheBoundAndItsDiscriminator(t *testing.T) {
 	tests := []struct {
 		name      string
