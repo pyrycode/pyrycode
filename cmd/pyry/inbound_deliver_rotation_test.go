@@ -276,7 +276,7 @@ func (w *rotatingWriter) snapshot() []childSnapshot {
 //
 // rekey ADDS the new id and KEEPS the old one, because that is what RebindSession
 // does: CurrentSessionID moves to the new id and the old id is appended to
-// SessionHistory, and conversationForSession (relay.go:845-855) matches either.
+// SessionHistory, and conversationForSession matches either.
 // Keeping the old id is what leaves the child-exit lane's clear — keyed to the
 // runner's CONSTRUCTION-time session id, which RestartFresh does not rotate —
 // resolvable after a rotation; dropping it would turn that lane into a

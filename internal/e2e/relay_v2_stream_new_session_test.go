@@ -482,7 +482,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		// ok=false conflates missing / unparseable / no bootstrap row, so it renders as
 		// a sentinel — never as "", which would read as "the rotation lost the id" and
 		// fabricate a finding out of a broken instrument. The `e.ID != ""` clause is the
-		// same guard M2's read carries ~200 lines up (:284): readBootstrapIfPresent does
+		// same guard M2's own read carries: readBootstrapIfPresent does
 		// not require a non-empty id, and an empty one would print as a MANUFACTURED
 		// second-rotation proof — flagged in docs/knowledge/codebase/1273.md as a
 		// fold-in for the next ticket touching this file, which is this one.

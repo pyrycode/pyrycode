@@ -15,8 +15,8 @@ import (
 // are safe for concurrent use — and it is fed from the drain's fan-in
 // (startStreamTurnDrainV2), BEFORE that drain's active-session gate: the emitter's
 // own lifecycle state cannot answer this question, being unguarded, scalar rather
-// than per-conversation, and populated only for the conversation the cursor points
-// at (interactive_turn_v2.go:81-86, :141).
+// than per-conversation, and populated only for the conversation the cursor
+// points at (interactiveTurnEmitterV2's lifecycle fields, filled in Handle).
 //
 // That inbound-delivery consumer now EXISTS: newInboundDeliver (main.go) waits on
 // waitIdleForDelivery and then marks with openForDelivery, both between Activate
@@ -29,8 +29,8 @@ import (
 // It stores membership only: a conversation key and the fact that it is mid-turn.
 // Never the event, its content, a turn id, a timestamp, or a count. Absent key ≡
 // idle ≡ unknown ≡ unbound ≡ never seen, all through one map lookup, which is what
-// keeps Busy from becoming a "does conversation X exist" oracle (#1101, the posture
-// screenSnapshotterOrNil records at relay.go:406-421). The map is bounded by the
+// keeps Busy from becoming a "does conversation X exist" oracle (#1101, the
+// posture screenSnapshotterOrNil records). The map is bounded by the
 // conversations currently mid-turn, not by every conversation ever seen.
 //
 // THREE FEEDS close a turn here, and between them no reachable sequence leaves a
@@ -68,12 +68,12 @@ import (
 // conversationForSession's SessionHistory match belongs to the SAME runner that
 // continues under the successor id, tagging its events identically either way.
 // Eviction cannot supply a second producer either: being binding-neutral, an
-// evicted id never enters SessionHistory (conversations/registry.go:241 is its
+// evicted id never enters SessionHistory (`RebindSession` is its
 // only production writer, reached solely from sessions/`notifyTransition`).
 //
 // SECURITY: content-free. The only fields ever logged are the event discriminant
 // (eventKind) and the producing session id, matching the drain's existing drop
-// diagnostics (stream_turn_drain.go:74-79, :143-149).
+// diagnostics in `sinkFor` and `exitFor`.
 //
 // For the two SESSION-keyed feeds — observe and clearForSession — the key is never
 // taken from the wire or the stream bytes: it is resolved daemon-side from the
@@ -169,9 +169,8 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 		opens = false
 	default:
 		// Stall / ApiRetry / Compacting — tui-driver status peers with no turn
-		// lifecycle meaning (the emitter treats them the same way,
-		// interactive_turn_v2.go:218-239) — plus Unrecognized, and any future
-		// variant.
+		// lifecycle meaning (the emitter's `Handle` treats them the same way) —
+		// plus Unrecognized, and any future variant.
 		//
 		// The opener set above is a whitelist, so Unrecognized needs no code
 		// change to land here, and landing here is the CORRECT answer rather than
@@ -212,7 +211,7 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 // leave the conversation busy forever. It has TWO callers:
 //
 //   - the teardown feed (#1202), driven from the pool's TransitionObserver on a
-//     /clear rotation or an idle/cap eviction (session_transition_v2.go:274-281);
+//     /clear rotation or an idle/cap eviction (`startSessionTransitionStreamV2`);
 //   - the drain's exit arm (#1209), reached when a child-exit signal rides the
 //     fan-in ahead of the tracker feed (stream_turn_drain.go). That lane is fired
 //     in production by the per-runner producer newStreamRunnerFactory installs
@@ -233,10 +232,10 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 // requirement is the drain's own, since a stalled clear would wedge the whole
 // fan-in, the coalescing flush timer included. That holds: the work is one resolve
 // (a slice-header copy under the conversations registry's mutex — Save releases
-// that mutex BEFORE any file I/O, conversations/registry.go:79-90), one map delete
+// that mutex BEFORE any file I/O), one map delete
 // and one close, all bounded with no channel receive, no I/O and no callback out.
 // The transition caller already pays a full atomic write including fsync one line
-// earlier on the /clear path (sessions/transition.go:57-64 → rebindConversation →
+// earlier on the /clear path (`notifyTransition` → rebindConversation →
 // Save), so a leaf-mutex membership delete is orders of magnitude cheaper than
 // what it has already spent before the observer is even called.
 //

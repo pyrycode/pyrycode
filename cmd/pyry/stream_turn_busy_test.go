@@ -49,8 +49,8 @@ func requireWaitIdle(t *testing.T, tr *turnBusyTracker, convID string) {
 // AC4: the opener set is a WHITELIST — exactly the four variants that open a turn
 // today, with everything else leaving the conversation idle.
 //
-// Stall, ApiRetry and Compacting are tui-driver signals
-// (turnevent/event.go:73-96) that the stream-json sink's only producer —
+// Stall, ApiRetry and Compacting are tui-driver signals that the stream-json
+// sink's only producer —
 // streamsup.Parser — never emits, so feeding them here by hand pins the type
 // switch rather than simulating a reachable input.
 //
@@ -128,7 +128,7 @@ func TestTurnBusyTracker_ClearsOnBothStopReasons(t *testing.T) {
 // ids all report idle, and WaitIdle returns promptly for each. A foreign id
 // traverses the identical map lookup as an idle one, so the two are
 // indistinguishable in value and in code path — the #1101 posture
-// screenSnapshotterOrNil records (relay.go:406-421).
+// screenSnapshotterOrNil records.
 func TestTurnBusyTracker_UnknownConversationReportsIdle(t *testing.T) {
 	t.Parallel()
 

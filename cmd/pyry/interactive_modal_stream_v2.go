@@ -34,7 +34,7 @@ type screenSnapshotter interface {
 // blocks until that goroutine exits.
 //
 // This opens a SECOND Session.Events() subscription on the bound *tuidriver.Session
-// alongside the turn stream's; tui-driver blesses that explicitly (events.go:159 —
+// alongside the turn stream's; tui-driver blesses that explicitly in Session.Events —
 // two Events() calls spawn two independent merge loops, each over its own JSONL
 // tail + poll loop, sharing no mutable state). The modal drain ignores every
 // non-modal event, so the extra JSONL tail bytes are never inspected.

@@ -103,7 +103,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 // that no longer exists: EventKindJsonlEndOfTurn was the mapper's ONLY turn_end
 // source. #1243 added a second (the interruption marker), which is exactly the
 // hazard S-2 of docs/specs/architecture/1191-minted-perconv-interrupt-oracle.md
-// (:590-609) flagged for whoever extended this file. The set of turn_end sources is
+// flagged for whoever extended this file. The set of turn_end sources is
 // closed and countable, so the re-derivation is checkable rather than rhetorical.
 // turnevent.TurnEnd{ is constructed at three sites in the repo; two are reachable
 // from a PTY session:
@@ -142,7 +142,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 //     child. Under the pre-#1121 wiring that count would be 1. Phase 0 exercises
 //     the no_active_conv guard rather than no_bound_runner because that is the
 //     unresolvable state reachable OVER THE WIRE — the cursor is stamped only on
-//     sessionRouter.Route's success path (cmd/pyry/main.go:1248), so a conversation
+//     sessionRouter.Route's success path, so a conversation
 //     cannot become active without a resolvable binding. Both guards return
 //     (nil, false) into the same inert path; the property under test — inert, and
 //     never the bootstrap — is identical.
@@ -216,7 +216,7 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	//
 	// TUI mode and Esc-ends-turn coexist by design — they touch different bytes:
 	// TUI emits the startup glyph + spinner, the ESC detector scans stdin for the
-	// bare interrupt ESC (fakeclaude/main.go:120-124).
+	// bare interrupt ESC (fakeclaude's envEscEndsTurn knob).
 	StartRotationWithRelay(t, home, sessionsDir, initialUUID, neverRotate, stdinLog,
 		fr.URL()+"/v2/server",
 		"PYRY_MOBILE_V2=1",
@@ -374,15 +374,16 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	//
 	// Since #1244 the kicker is MORE than a vacuous-pass guard — it is a
 	// PRECONDITION for the turn_end below to reach the wire at all. The emitter drops
-	// a TurnEnd when no turn is open (cmd/pyry/interactive_turn_v2.go:208-213, debug
-	// event interactive_turn.turn_end_no_turn, nothing on the wire). The fake's old
+	// a TurnEnd when no turn is open (the TurnEnd arm of the emitter's `Handle`,
+	// debug event interactive_turn.turn_end_no_turn, nothing on the wire). The fake's old
 	// canned line was self-sufficient — an assistant end_turn entry produced BOTH a
 	// TextChunk (which opened the turn via startTurnIfNeeded) and a TurnEnd. The
 	// interruption marker produces ONE event and cannot open its own turn, so the
 	// kicker's TextChunk is what opens it. The turn then stays open until the
-	// interrupt: endTurn() has exactly two call sites (:159, the follow-active
-	// conversation switch — impossible here, one conversation, cursor stamped once;
-	// and :217, the TurnEnd arm itself), and nothing closes a turn on inactivity.
+	// interrupt: endTurn() has exactly two call sites, both inside that same
+	// `Handle` — the follow-active conversation switch, impossible here with one
+	// conversation and the cursor stamped once, and the TurnEnd arm itself — and
+	// nothing closes a turn on inactivity.
 	//
 	// Re-drop rather than write once (#929): the producer waits one
 	// subscribeRetryDelay before subscribing and then tails from EOF, so a
@@ -546,7 +547,7 @@ func TestRelayV2_PerConversationInterruptStopsRunningTurn(t *testing.T) {
 	// now report exactly ONE bare ESC — the one this test sent. The turn_end
 	// happens-after the ESC was read, so it is already on disk; the short bounded
 	// poll only closes the residual cross-process fsync-visibility window (the #794
-	// sibling's pattern, relay_v2_interrupt_test.go:331-339).
+	// sibling's pattern, in `TestRelayV2_InterruptStopsRunningTurn`).
 	after := 0
 	escDeadline := time.Now().Add(2 * time.Second)
 	for {

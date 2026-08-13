@@ -1706,7 +1706,7 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 // hand-off race-free; it is a leaf lock, never held across a call-out. This is
 // the one piece of new synchronisation — it absorbs the hand-off so the
 // emitter's other counters stay unguarded-single-goroutine
-// (interactive_turn_v2.go:42-44). Mirrors the supervisor's own
+// (`interactiveTurnEmitterV2`). Mirrors the supervisor's own
 // convMu+currentConvID cursor.
 //
 // changed is the follow-active switch signal (#679): it is closed-and-replaced

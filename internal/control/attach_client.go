@@ -167,9 +167,9 @@ func writerErr(err error) error {
 type terminalSizeReader func() (cols, rows int, ok bool)
 
 // readTerminalSize is the production reader. It uses os.Stdin directly
-// rather than wrapping a raw fd in a fresh *os.File — see
-// supervisor/winsize.go:40-48 for the finalizer-induced fd reuse race that
-// motivated the same convention there.
+// rather than wrapping a raw fd in a fresh *os.File — see `resizeOnce` in
+// internal/supervisor for the finalizer-induced fd reuse race that motivated
+// the same convention there.
 func readTerminalSize() (cols, rows int, ok bool) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return 0, 0, false

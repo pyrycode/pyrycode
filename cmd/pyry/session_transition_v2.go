@@ -226,7 +226,7 @@ func toWirePayload(t sessions.SessionTransition) (protocol.SessionTransitionPayl
 // NewSessionID rather than PreviousID is deliberate. It is the conversation's
 // CurrentSessionID for both reasons (the rotated id post-#739-rebind for clear;
 // the mirrored evicted id for the binding-neutral eviction), which is
-// conversationForSession's PRIMARY match (relay.go:845). PreviousID would also
+// conversationForSession's PRIMARY match. PreviousID would also
 // resolve today — via RebindSession's SessionHistory append — but only for as
 // long as notifyTransition keeps driving the rebind ahead of the observer fan-out.
 func transitionClearsTurn(t sessions.SessionTransition) (sessionID string, ok bool) {

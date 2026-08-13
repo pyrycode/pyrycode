@@ -545,7 +545,7 @@ func TestRunPairPreflight_EmptyRegistry(t *testing.T) {
 
 // TestRunPairPreflight_ZeroByteRegistry verifies the gate-pass path
 // when devices.json exists but is zero bytes (devices.Load returns
-// empty registry, nil error per internal/devices/registry.go:45-47).
+// empty registry, nil error, per `readDevicesFile`).
 func TestRunPairPreflight_ZeroByteRegistry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
