@@ -314,7 +314,8 @@ func cancelSessionHandler(resolve func(json.RawMessage) (interrupter, error)) ac
 // already parked on a quiet reader cannot be woken by ctx alone (the ctx check
 // only happens between frames). Closing os.Stdin does not fix this: a Read
 // parked in the kernel on the non-pollable os.Stdin fd cannot be interrupted by
-// Close (docs/lessons.md #78, :243) — Close itself would then block on the fd's
+// Close (docs/lessons.md #78, "Closing a fd to interrupt a goroutine's Read
+// requires O_NONBLOCK") — Close itself would then block on the fd's
 // mutex. Instead we bridge real stdin through an in-memory io.Pipe: Serve reads
 // the PipeReader, and pr.CloseWithError synchronously unblocks any blocked
 // PipeReader.Read (io.Pipe is a channel internally), so shutdown is prompt with

@@ -24,8 +24,8 @@ package realclaude
 // the command was alive at that instant rather than killed.
 //
 // TestInteractiveStreamRunningTurn already treats an early idle as a TEST
-// HAZARD and steers around it (runningTurnPrompt, ":225 — do NOT run it in the
-// background"). Whether the same early idle is a defect for real clients has
+// HAZARD and steers around it: runningTurnPrompt says "do NOT run it in the
+// background". Whether the same early idle is a defect for real clients has
 // never been settled. That is what this probe records.
 //
 // # The lever

@@ -441,7 +441,7 @@ func dropcapPathSpellings(path string) []string {
 //
 // The empty-value guard is load-bearing, not defensive noise:
 // strings.ReplaceAll(s, "", x) inserts x between EVERY character
-// (bgIdleRedact:821-823 is the same lesson).
+// (bgIdleRedact is the same lesson).
 func newDropcapRedactor(tempHome, artifactDir, workdir, fifoPath, sessionID string, nonce int64) *dropcapRedactor {
 	r := &dropcapRedactor{counts: map[string]int{}}
 	addPath := func(class, replacement, path string) {

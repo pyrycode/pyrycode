@@ -511,9 +511,9 @@ func (c *Client) realDial(ctx context.Context) (*websocket.Conn, error) {
 
 // serve runs the recv-pump, send-pump, and ping-loop under a single
 // cancellable child context. Pump goroutines are installed BEFORE the
-// live conn is made observable via setConn — see docs/lessons.md:290
-// for the "lifecycle goroutine must be scheduled before the conn is
-// visible to concurrent callers" pattern this mirrors.
+// live conn is made observable via setConn — see docs/lessons.md,
+// "Take-or-create primitives must hold the registry lock across the
+// lifecycle-goroutine schedule", for the pattern this mirrors.
 func (c *Client) serve(parent context.Context, conn *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()

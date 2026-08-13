@@ -30,8 +30,7 @@ package realclaude
 //
 // resultTrailer is the decode, reachCapCommand
 // (`reachCapCommand`) the cap, probeSyncBuffer and
-// probePollInterval (`probeSyncBuffer`, :131) the buffer and
-// the tick. parseResultTrailer and its nine call sites are NOT edited: all nine
+// probePollInterval the buffer and the tick. parseResultTrailer and its nine call sites are NOT edited: all nine
 // want today's two-valued behaviour, so widening its error contract for this
 // instrument's benefit would be a nine-site cascade that gains none of them
 // anything. The new scan lives alongside it and copies its matching rule

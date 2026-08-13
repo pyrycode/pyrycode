@@ -8,7 +8,7 @@ package realclaude
 // # The question, and why ps cannot answer it
 //
 // The probes in background_trigger_probe_test.go stage a live claude turn
-// around a command the test holds open through a FIFO (holdProbeFIFO, :663).
+// around a command the test holds open through a FIFO (holdProbeFIFO).
 // Holding the write end proves the command could not have FINISHED. It does not
 // prove the command is ALIVE: a command that was killed leaves the same held
 // write end and records identically.

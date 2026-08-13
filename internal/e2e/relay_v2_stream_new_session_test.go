@@ -559,7 +559,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// the fresh child produces for turn #2 is dropped at the drain's active-session
 	// gate with a Debug "relay: stream-turn drop; not active session"
 	// (cmd/pyry/stream_turn_drain.go) — the very divergence this file's header
-	// documents at :64-74, and the reason M4 asserts stdin rather than a phone-side
+	// documents, and the reason M4 asserts stdin rather than a phone-side
 	// delta. So on any run where M4 goes green, turn #2's echo owes at least one such
 	// record. The assertion is deliberately the WEAKER "some Debug record exists
 	// anywhere in the capture": the level flip is the thing under test, and pinning a
