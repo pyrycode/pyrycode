@@ -16,12 +16,13 @@ package realclaude
 // resultTrailer is eight fixed fields, and
 // TerminalReason is a plain string with omitempty — so an ABSENT
 // terminal_reason and one emitted as "" both decode to "". That distinction is
-// not academic: terminal_reason is a pyry invention (streamjson/emitter.go:428-437,
-// streamrunner/watchdog.go:253), so on the headless PYRY_USE_STREAMJSON=1 path
-// the trailer on a healthy run is claude's OWN result line and carries no
-// terminal_reason at all. Telling claude's line from pyry's synthesised one is
-// therefore a question about WHICH KEYS the line carried, not about any field's
-// value — which is why the reading is a name set rather than a widened decode.
+// not academic: terminal_reason is a pyry invention (streamjson's `wireFields`
+// and streamrunner's `idleStallResult`), so on the headless
+// PYRY_USE_STREAMJSON=1 path the trailer on a healthy run is claude's OWN result
+// line and carries no terminal_reason at all. Telling claude's line from pyry's
+// synthesised one is therefore a question about WHICH KEYS the line carried, not
+// about any field's value — which is why the reading is a name set rather than a
+// widened decode.
 //
 // # The ordering is the whole difficulty
 //
@@ -54,8 +55,10 @@ package realclaude
 //
 // Bounding the names themselves is deliberately NOT here. They are
 // attacker-influenced in principle — they arrive from claude's output — but
-// trailScanResult is published by nothing (pinned at finding_run_record_test.go:787-812
-// and `TestFinSightingReachesNoScanType`), so there is no rendering surface at
+// trailScanResult is published by nothing (pinned by the
+// observation-is-not-reachable-from-the-inputs sub-test of
+// `TestFinRecordEmbedsTrailerRecordWhole` and by
+// `TestFinSightingReachesNoScanType`), so there is no rendering surface at
 // this tier to bound. The per-name cap belongs at the tier that publishes: #1363.
 
 import (
@@ -294,16 +297,15 @@ func TestTrailKeyNamesSeparatesAbsenceFromZeroValue(t *testing.T) {
 //
 // # The assertion is scoped to KeyNames alone, deliberately
 //
-// The obvious idiom is forty lines above the field this ticket adds:
+// The obvious idiom ships in the same file as the field this ticket adds:
 // TestTrailScan's padded sub-test marshals the WHOLE trailScanResult and sweeps
-// the bytes (result_trailer_observation_test.go:542-549). That is correct there,
-// because trailPaddedTrailer plants only in `result` — a field resultTrailer does
-// not decode. Copied here it goes RED AGAINST A CORRECT BUILD: resultTrailer
-// decodes Subtype, StopReason and TerminalReason, so three of the five needles
-// below are carried through Trailer BY DESIGN and published verbatim downstream.
-// The artifact-wide sweep that would catch a leak in those is #1362's, with its
-// own narrower plant list (finding_artifact_write_test.go:274-289 states the
-// plant-only-where-the-pipeline-reduces rule).
+// the bytes. That is correct there, because trailPaddedTrailer plants only in
+// `result` — a field resultTrailer does not decode. Copied here it goes RED
+// AGAINST A CORRECT BUILD: resultTrailer decodes Subtype, StopReason and
+// TerminalReason, so three of the five needles below are carried through Trailer
+// BY DESIGN and published verbatim downstream. The artifact-wide sweep that would
+// catch a leak in those is #1362's, with its own narrower plant list
+// (`finWriteInputs`'s § Plant only where the pipeline reduces states the rule).
 //
 // So this sweeps the names and nothing else. Widening it to the enclosing record
 // would be weakening a correct containment guard to satisfy a mis-scoped test.
