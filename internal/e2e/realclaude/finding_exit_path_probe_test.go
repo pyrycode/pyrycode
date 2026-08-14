@@ -341,7 +341,8 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// TIMING rather than credentials: the gather's own per-matched-pid loop
 		// reads the argv scan's live matches at gather time, so it answers at an
 		// instant this route is not about. It crosses WHOLE — narrowing it to a
-		// verdict string would leave #1459's gather-tier sweep no route to build.
+		// verdict string would leave TestFinGatherPinnedPidCarriesNoCapturedBytes
+		// no route to build.
 		PinnedPid: pinnedPid,
 	})
 

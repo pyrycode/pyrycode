@@ -357,7 +357,7 @@ type finGatherInputs struct {
 	// where the zero says none was there.
 	//
 	// IT TRAVELS WHOLE. Narrowing it to its Verdict string would leave a planted
-	// needle no route to travel and make the gather-tier sweep #1459 owes
+	// needle no route to travel and make TestFinGatherPinnedPidCarriesNoCapturedBytes
 	// unbuildable — the reason trailRunReadings.PinnedPid's own doc already gives
 	// for taking it whole: its Detail, StateColumn and ToolStderr ARE
 	// string-bearing, and pinClassifyState's instrument-failed branch puts RAW ps
@@ -1418,17 +1418,25 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // stated here and made structural by finGatherNeedleTrailer, which renders
 // terminal_reason "completed".
 //
-// THE THIRD INPUT IS #1458's PinnedPid, AND NO SWEEP COVERS IT YET. Its one
-// admissible producer is pinReadState, whose instrument-failed branch puts raw ps
-// stderr into ToolStderr and folds it into Detail, and the value crosses this
-// gather WHOLE onto a return of this very function — so the channel opens at
-// exactly the tier this test is about. #1459 owes that sweep and re-points this
-// note at it when it lands. NO THIRD PLANT IS ADDED HERE: #1452's precedent is
-// that a new route gets a sibling test of its own
-// (TestFinGatherRunnerPathCarriesNoCapturedBytes) rather than a third plant on
-// this one. Said in the note rather than left for the next reader to notice,
-// because the sentence above would otherwise read as coverage of everything that
-// could carry captured bytes into the returns.
+// THE THIRD INPUT IS #1458's PinnedPid, AND ITS SWEEP IS A SIBLING RATHER THAN A
+// THIRD PLANT HERE. Its one admissible producer is pinReadState, whose
+// instrument-failed branch puts raw ps stderr into ToolStderr and folds it into
+// Detail, and the value crosses this gather WHOLE onto a return of this very
+// function — so the channel opens at exactly the tier this test is about.
+// TestFinGatherPinnedPidCarriesNoCapturedBytes holds it, in
+// TestFinGatherRunnerPathCarriesNoCapturedBytes' shape, which is also #1452's
+// precedent: a new route gets a sibling test of its own.
+//
+// A PinnedPid PLANT ADDED HERE WOULD BE RED AGAINST A CORRECT BUILD, which is the
+// harder reason and the one that matters at this test, because this is where a
+// later reader would reach for the third plant. This sweep marshals READINGS, and
+// finGatherReadings carries the pin onto them WHOLE and unnormalised — the equality
+// TestFinGatherPinnedPidDoesNotReachTheLiveness asserts on purpose — so those bytes
+// ride that value BY DESIGN. The only fix for such a red narrows the pass-through,
+// which leaves a planted needle no route to travel at all. Said in the note rather
+// than left for the next reader to notice, because the sentence above would
+// otherwise read as coverage of everything that could carry captured bytes into the
+// returns.
 //
 // The stderr plant sits ON THE ANCHORED LINE, after the pgids= list, which is
 // #1280's position and the only non-vacuous one: tdnClassifyReapLog skips every
@@ -2031,7 +2039,7 @@ type finGatherPinnedReading struct {
 // crosses. A pass-through narrowed to in.PinnedPid.Verdict satisfies every
 // verdict-only assertion, and the two members it would drop — Detail and
 // ToolStderr, where pinClassifyState's instrument-failed branch puts raw ps stderr
-// — are exactly the route the gather-tier sweep #1459 owes has to travel.
+// — are exactly the route TestFinGatherPinnedPidCarriesNoCapturedBytes travels.
 //
 // FIXTURES AND NOT LIVE pinReadState CALLS. A live read is non-deterministic and
 // the subject here is ROUTING rather than the producer; the
@@ -2107,8 +2115,12 @@ func finGatherPinnedReadings() []finGatherPinnedReading {
 // guard actually needs.
 //
 // NO NEEDLE PLANT AND NO CAPTURED-BYTES SWEEP HERE. The gather tier's sweep over
-// this route is #1459's, and #1452's precedent is that a new route gets a sibling
-// test of its own rather than a third plant on an existing one.
+// this route is TestFinGatherPinnedPidCarriesNoCapturedBytes, immediately below,
+// and #1452's precedent is that a new route gets a sibling test of its own rather
+// than a third plant on an existing one. Named rather than left as a ticket number:
+// a reader of this doc is one declaration from the test they want, and the two are
+// a pair — this one pins that the value crosses WHOLE, which is the premise that
+// sweep's needle needs to have a route at all.
 func TestFinGatherPinnedPidDoesNotReachTheLiveness(t *testing.T) {
 	// ONE buffer, ONE needle slice, ONE stderr and ONE pinned set across the rows,
 	// for the sibling's stated reason: finGatherNeedles calls t.TempDir() and would
@@ -2157,6 +2169,199 @@ func TestFinGatherPinnedPidDoesNotReachTheLiveness(t *testing.T) {
 					readings.MatchCount, readings.RowsScanned)
 			}
 		})
+	}
+}
+
+// TestFinGatherPinnedPidCarriesNoCapturedBytes is the GATHER TIER's half of the
+// fence around the route the sibling above pins the shape of: a needle planted in
+// the caller's pinned-pid read travels the shipped finGatherReadings and reaches
+// none of the six channels a published artifact is built from.
+//
+// # Why a sibling test and not a third plant on TestFinGatherReturnsNoCapturedBytes
+//
+// That test marshals READINGS, and the pass-through onto trailRunReadings.PinnedPid
+// is whole and unnormalised — which the sibling above asserts on purpose. So those
+// bytes ride that value BY DESIGN and a PinnedPid plant added there is red against
+// a correct build, whose only fix narrows the pass-through and leaves the needle no
+// route to travel at all. #1452's precedent — a new route gets a sibling test of
+// its own — points the same way; this is the harder reason.
+//
+// # The marshalled trailRunReadings is DELIBERATELY NOT A ROW BELOW
+//
+// Same reason, stated in its own right so the next reader does not "fix" the
+// omission by adding the row that breaks it. Every subject below is a value the
+// classifier or the gather BUILDS from those readings, never the readings.
+//
+// # The plant fills all three string-bearing members, a shape NO ARM EMITS
+//
+// pinClassifyState's instrument-failed-with-stderr branch puts raw ps stderr into
+// ToolStderr and folds it into Detail, and leaves StateColumn EMPTY — that column
+// is filled only once a row parsed. Filling all three at once is deliberate surface
+// maximisation, because the rule being enforced is "no Detail here quotes any
+// input's captured string" rather than "do not copy the one field the ticket
+// named": an arm that later quoted StateColumn reddens here too. As with
+// finGatherPinnedReadings above, this is a FIXTURE AND NOT A LIVE pinReadState
+// CALL, said so a later reader does not read the shape as a producer claim.
+//
+// # Four of the six channels pass STRUCTURALLY, and are guards not vacuities
+//
+// trailGate and trailAdmitAttribution never see the pin, and the gather touches
+// neither the attribution record nor the sighting with in.PinnedPid. Those four
+// rows are live guards against a FUTURE gather or a future arm folding the read in
+// — the same standing TestFinGatherReturnsNoCapturedBytes gives its own sighting
+// row — and deleting them as vacuous removes the fabric rather than dead weight.
+// The two that can move today are the marshalled outcome and its Detail.
+//
+// NO FORBIDDEN-KEY WALK. This route publishes no key at any of the six subjects,
+// and the key fabric over these exact values is already held by
+// TestFinGatherReturnsNoCapturedBytes for the record and the sighting and by
+// TestTrailRunOutcomeCarriesNoCapturedBytes for the outcome.
+//
+// # The control must die on the NEEDLE and never on the budget
+//
+// A sweep whose needle has no route to travel measures nothing, so the control
+// renders what a republishing arm would have rendered — through the SHIPPED
+// trailDetail, off the SHIPPED outcome.Detail, never off a re-typed copy of the
+// arm's format string — and shows the needle survives UNDER reachMaxCommandBytes
+// with no reachTruncationMarker. That is the discrimination demonstrated rather
+// than asserted: the outcome.Detail row below travels the same rendering path on
+// the same arm against the same budget, and differs only in whether the classifier
+// republished its input. A control that overran the cap would redden on the
+// truncation marker instead — a BUDGET kill wearing a leak kill's clothes, which is
+// the mistake TestTrailRunOutcomeCarriesNoCapturedBytes' own doc records this
+// family having been fooled by once.
+//
+// THE BYTE BUDGET BELONGS TO THE ARM THE PREMISE PINS and to no other. The arms
+// that consult trailEstablishSighting render far more of the 512 by their own
+// documented budgets, so a later fixture change that moved the outcome must
+// re-measure rather than inherit this headroom.
+func TestFinGatherPinnedPidCarriesNoCapturedBytes(t *testing.T) {
+	// A FUNCTION rather than a value, for finGatherPinnedReadings' stated reason.
+	// The DETAIL's prose is kept SHORT deliberately, and the other two members are
+	// not: the control below pays for this one twice out of what the step-8 arm
+	// leaves of the 512-byte cap, once in the rendering it composes on and once in
+	// what it appends. Measured on the arm the premise pins, a Detail past ~50 bytes
+	// makes the mutation run below die on the cap instead of on the needle.
+	plantedPin := func() pinStateOutcome {
+		return pinStateOutcome{
+			Verdict:     pinStateInstrumentFailed,
+			Detail:      "ps: " + trailNeedle,
+			PID:         finGatherPinnedReadPID,
+			ExitStatus:  1,
+			StateColumn: "S " + trailNeedle,
+			ToolStderr:  "ps stderr: " + trailNeedle,
+		}
+	}
+
+	var stdout probeSyncBuffer
+	in := finGatherNegativeInputs(t, &stdout)
+	in.PinnedPid = plantedPin()
+
+	readings, record, sighting := finGatherReadings(in)
+
+	// --- the premises, each of which turns a vacuous sweep into a named failure ---
+
+	for _, member := range []struct {
+		what  string
+		value string
+	}{
+		{"Detail", in.PinnedPid.Detail},
+		{"StateColumn", in.PinnedPid.StateColumn},
+		{"ToolStderr", in.PinnedPid.ToolStderr},
+	} {
+		if !strings.Contains(member.value, trailNeedle) {
+			t.Fatalf("the planted read's %s does not carry the needle, so every negative below "+
+				"passes over a record that never held captured bytes", member.what)
+		}
+	}
+	// The route is real. This is the sibling above's SUBJECT and this test's
+	// PREMISE: against a narrowed pass-through every absence below would be a fact
+	// about the gather having dropped the value rather than about the classifier
+	// not republishing it.
+	if readings.PinnedPid != in.PinnedPid {
+		t.Fatalf("the readings carry pinned-pid read %+v; want the %+v that was handed in — the "+
+			"needle has no route to travel and every negative below is about nothing",
+			readings.PinnedPid, in.PinnedPid)
+	}
+	// The two Details swept below are their arms' own rendered sentences and not
+	// empty strings, which a needle search passes over whatever the gather did.
+	if readings.Gate.Detail == "" || readings.Admit.Detail == "" {
+		t.Fatalf("the gate detail is %d byte(s) and the attribution detail %d; want both "+
+			"non-empty — a needle search over an empty string asserts nothing",
+			len(readings.Gate.Detail), len(readings.Admit.Detail))
+	}
+
+	outcome := trailClassifyRun(readings)
+
+	if outcome.Value != trailOutcomeNoRowMatched {
+		t.Fatalf("the readings classify as %q; want %q — the control's byte budget is THAT arm's, "+
+			"so a fixture that drifted to another one invalidates the control rather than the "+
+			"sweep", outcome.Value, trailOutcomeNoRowMatched)
+	}
+	if strings.Contains(outcome.Detail, reachTruncationMarker) {
+		t.Fatalf("the shipped detail is already truncated at %d bytes, so the control below cannot "+
+			"reproduce the one-shot rendering and its needle check would be measuring the cap "+
+			"rather than the republication", len(outcome.Detail))
+	}
+
+	// --- the negative: six channels, each named so a failure says which leaked ---
+
+	for _, subject := range []struct {
+		what  string
+		value any
+	}{
+		{"run outcome", outcome},
+		{"attribution record", record},
+		{"sighting", sighting},
+	} {
+		encoded, err := json.Marshal(subject.value)
+		if err != nil {
+			t.Fatalf("marshalling the %s: %v", subject.what, err)
+		}
+		if bytes.Contains(encoded, []byte(trailNeedle)) {
+			t.Errorf("the marshalled %s carries captured bytes from the pinned-pid read, whose "+
+				"one admissible producer takes raw ps stderr verbatim up to its cap: %s",
+				subject.what, encoded)
+		}
+	}
+	// The three published Details, named individually rather than left to the
+	// marshal sweep: they are the strings an operator reads, and the ones a future
+	// arm would interpolate the read into for a better failure message.
+	for _, named := range []struct {
+		what  string
+		value string
+	}{
+		{"outcome's Detail", outcome.Detail},
+		{"gate's Detail", readings.Gate.Detail},
+		{"attribution's Detail", readings.Admit.Detail},
+	} {
+		if strings.Contains(named.value, trailNeedle) {
+			t.Errorf("the %s carries captured bytes from the pinned-pid read: %s", named.what,
+				named.value)
+		}
+	}
+
+	// --- the control: the needle WOULD have travelled -------------------------
+
+	// The counterfactual arm, built through the shipped renderer off the shipped
+	// rendering: "step 8 appended the pinned read's Detail for a better failure
+	// message". It composes ON TOP of that rendering, so a build that had ALREADY
+	// republished pays for the plant twice and can redden here as well — in which
+	// case the needle rows above are the diagnosis and this one is a consequence.
+	control := trailDetail("%s pinned read: %s", outcome.Detail, readings.PinnedPid.Detail)
+	if !strings.Contains(control, trailNeedle) {
+		t.Fatalf("a Detail that republished the pinned read carries no needle, so the negative " +
+			"above cannot tell a sealed channel from an unreachable one")
+	}
+	if len(control) >= reachMaxCommandBytes {
+		t.Fatalf("the republishing rendering is %d bytes against the %d-byte cap, so it would be "+
+			"TRUNCATED rather than leaked and the control demonstrates a BUDGET kill instead of a "+
+			"leak kill. Shorten the plant's Detail; never weaken the sweep", len(control),
+			reachMaxCommandBytes)
+	}
+	if strings.Contains(control, reachTruncationMarker) {
+		t.Fatalf("the republishing rendering carries %q, so the needle survived a truncated "+
+			"string by luck: same budget kill as above, and the same fix", reachTruncationMarker)
 	}
 }
 
