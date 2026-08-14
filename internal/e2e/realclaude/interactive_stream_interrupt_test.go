@@ -13,7 +13,7 @@ package realclaude
 // Why this gate exists: the production interrupt path is shipped and unit-tested
 // independently — the streamsup.Runner.Interrupt() primitive (#1120), per-conversation
 // routing (activeInterrupter → resolveBoundRunner, #1121), and the parser's
-// error_during_execution → cancelled classification (#1120, parser.go:154-178) — but
+// error_during_execution → cancelled classification (#1120, `maxTaskRosterEntries`) — but
 // whether an interrupt envelope actually stops a REAL claude turn mid-stream, with the
 // parser classifying real claude's interrupt-terminated result as cancelled, was
 // unproven live. This is the recurring fake-green/real-red risk (#949) applied to the

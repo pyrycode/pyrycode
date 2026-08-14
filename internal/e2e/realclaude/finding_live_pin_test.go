@@ -26,7 +26,7 @@ package realclaude
 //
 // # The count is the whole file
 //
-// finOutcomeStagingGate's count arm (finding_staging_gate_test.go:347) returns
+// finOutcomeStagingGate's count arm returns
 // stage-pin-count-unexpected when PinMatchCount != PinWantCount. A mis-fill does
 // not fail loudly in development — it fires on every CORRECTLY staged run,
 // reporting a staging failure while the rig looks correct, and burns a live turn
@@ -67,7 +67,7 @@ import (
 //
 // INPUT ONLY — NEVER PUBLISHED. Rows[i].Command and ClaudeCommand are verbatim
 // argv read off the AMBIENT process table: any local process's command line, not
-// just this run's. Like finOutcomeStaging (finding_staging_gate_test.go:142-150)
+// just this run's. Like finOutcomeStaging
 // this type deliberately carries NO json tags, so it cannot be embedded in,
 // marshalled into or quoted by a published record by accident. Adding tags "for
 // symmetry" is the first step toward publishing captured bytes into a public
@@ -107,7 +107,7 @@ type finLivePinReading struct {
 // through claude's Bash tool, pinned by FIFO path in full argv — matched TWO rows
 // on the FIFO needle: the `zsh -c` wrapper claude runs Bash through, whose argv
 // carries the whole command string, and the `cat` itself. That measurement is
-// recorded verbatim in shipped code at teardown_liveness_probe_test.go:511-514
+// recorded verbatim in shipped code at `tdnPinHeld`
 // and is this constant's whole basis. #1268 CORROBORATES it and mutation-tested
 // it — dropping the wrapper cut the count 2→1 (docs/knowledge/codebase/1268.md:151-157)
 // — but its subject is a rig-staged `sh -c` rather than a claude-staged Bash
@@ -115,7 +115,7 @@ type finLivePinReading struct {
 //
 // TestTrailRigCarriesMoreThanOneMatchedRow is NOT
 // cited: it fails on MatchCount <= 1 (:563), i.e. it asserts MORE THAN ONE and
-// never EXACTLY TWO. finding_staging_gate_test.go:395-397 already cites it for
+// never EXACTLY TWO. `finOutcomeStagedBase` already cites it for
 // its own PinMatchCount: 2, and that citation is weaker than the number it
 // justifies. This constant is therefore strictly stronger than any shipped
 // assertion. A live run reporting a different count is a non-verdict outcome the
@@ -129,12 +129,12 @@ type finLivePinReading struct {
 // set alongside the wrapper and the `cat`.
 //
 // PROHIBITION 2 — NEVER fill this from the size of the process-group set. It is
-// 1 on a healthy run (teardown_liveness_probe_test.go:516-520): claude isolates
+// 1 on a healthy run (`tdnPinHeld`): claude isolates
 // the whole Bash command into one detached group, and #1230's hand run measured
 // count=1 on all three reps.
 //
 // EITHER wrong fill has the same consequence and the same cost: it fires
-// finOutcomeStagingGate's count arm (finding_staging_gate_test.go:347) against a
+// finOutcomeStagingGate's count arm against a
 // want of 2 on a CORRECTLY staged run, reporting stage-pin-count-unexpected with
 // no other symptom, and spends one live claude turn finding out.
 const finLivePinWantRows = 2
@@ -159,7 +159,7 @@ const finLivePinWantRows = 2
 //
 // NO SECOND FULL-ARGV MATCHER IS GROWN. This is a pure post-filter over what
 // reachMatchArgvRows already produced — the same relationship pinPartition has to
-// it and for the same stated reason (process_pin_liveness_test.go:137-148:
+// it and for the same stated reason (`pinPartition`:
 // "reachMatchArgvRows is this package's one full-argv matcher and #1235 must not
 // grow a second"). probeHasCommand is
 // doubly wrong here besides: probeAnnotateCommands (:930) stores only
@@ -221,7 +221,7 @@ func finLivePinReduce(scan pinScan, fifoPath string) finLivePinReading {
 // and symlink following are structurally inapplicable rather than merely
 // unaddressed. It must not be built from t.TempDir() or os.Getenv — either would
 // put an operator filesystem path into a test file for nothing, the precedent
-// reason at finding_staging_gate_test.go:370-375.
+// reason at `finOutcomeHoldCommand`.
 const finLivePinFIFOPath = "/tmp/pyry-fin-live-pin/live-pin-hold"
 
 // finLivePinClaudeCommand is the fixture's claude row, splicing tdnClaudeNeedle
@@ -255,7 +255,7 @@ const (
 
 // finLivePinTable builds the synthetic four-column `ps -axww -o
 // pid=,ppid=,pgid=,command=` table, following reachArgvFixture's shape
-// (background_reach_probe_test.go:1163-1173) rather than inventing a format. The
+// (`reachArgvFixture`) rather than inventing a format. The
 // table is built as BYTES and turned into a pinScan by the real matcher: a
 // hand-built pinScan would skip reachMatchArgvRows, and the match-uncapped /
 // store-capped asymmetry the truncation pair rests on exists only inside that

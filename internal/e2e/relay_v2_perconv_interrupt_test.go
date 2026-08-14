@@ -71,7 +71,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 // <sharedDir>/<INITIAL_UUID>.jsonl while the daemon tailed
 // <sharedDir>/<mintedID>.jsonl. This test rides #1195's two knobs.
 //
-// WHY MINTED IS THE POINT (the stream sibling's argument, relay_v2_stream_interrupt_test.go:47-56).
+// WHY MINTED IS THE POINT (the stream sibling's argument, `TestRelayV2_StreamInterruptStopsRunningTurn`).
 // Had the target been bootstrap-bound, a correct route and the pre-#1121 bug
 // (Interrupter: w.sup — every interrupt to the bootstrap supervisor) would be
 // indistinguishable. Minting forces the interrupt to reach the minted child.
@@ -114,7 +114,7 @@ const interruptMarkerNeedle = `[Request interrupted by user`
 //     is closed: "{}" from the pre-created file, "{}" per turn from appendTurnGrowth,
 //     the kicker's perConvMidTurnLine (assistant text, NO stop_reason — see there),
 //     and the ESC handler's marker (type:"user"). None satisfies IsEndTurn.
-//   - internal/turnbridge/mapper.go:95 (the interruption marker) is reachable ONLY
+//   - internal/turnbridge/`mapEntry` (the interruption marker) is reachable ONLY
 //     from the ESC handler's line. It needs type:"user", no top-level
 //     "permissionMode" key, and text prefixed interruptMarkerNeedle. Of the four
 //     line kinds above only the marker is a user entry at all — the fake never

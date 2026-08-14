@@ -167,7 +167,7 @@ var tdnEnvDelta = []string{"BASH_DEFAULT_TIMEOUT_MS=5000"}
 
 // tdnTeardownPath names the teardown this rig exercises, in the record, because
 // the reading is only about the path that produced it. `pyry agent-run` installs
-// signal.NotifyContext(SIGTERM, SIGINT) at cmd/pyry/agent_run.go:258, so a
+// signal.NotifyContext(SIGTERM, SIGINT) at cmd/pyry/`runAgentRun`, so a
 // SIGTERM to its PID cancels the run context and runs the real teardown, reap
 // included. A SIGTERM to its GROUP or a SIGKILL would measure a leak pyry's real
 // teardown never produces.
@@ -890,7 +890,7 @@ func tdnOrNone(s string) string {
 
 // tdnFixturePtyArgv and tdnFixtureStreamArgv are the two runners' real claude
 // command lines, built from their actual argv builders — ptyrunner.buildArgs
-// (runner.go:616-625) and buildStreamRunnerClaudeArgs (agent_run.go:364-378).
+// (runner.go:616-625) and buildStreamRunnerClaudeArgs.
 // Both carry --append-system-prompt-file, which is precisely why that flag
 // cannot name a runner.
 const (

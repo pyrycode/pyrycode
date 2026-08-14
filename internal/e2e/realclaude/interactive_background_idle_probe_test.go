@@ -84,7 +84,7 @@ package realclaude
 // # Why the recorded idle belongs to THIS turn (AC3(b))
 //
 // turn_state{idle} reaches the wire from exactly one site:
-// interactive_turn_v2.go:216, inside the turnevent.TurnEnd arm, which is
+// `Handle` in interactive_turn_v2.go, inside the turnevent.TurnEnd arm, which is
 // entered only when inTurn is true (:209) and which immediately calls
 // endTurn(). inTurn is set only by startTurnIfNeeded (:267), which every
 // content arm calls together with a transitionTo(thinking|responding) — so no
@@ -242,7 +242,7 @@ const (
 // omitempty on a plain bool would erase exactly the field AC3(a) needs.
 //
 // assistant_delta.text is NEVER recorded, only its length:
-// interactive_turn_v2.go:70-75 states the package rule that application output
+// `interactiveTurnEmitterV2` states the package rule that application output
 // never reaches a log, and this record is pasted into a public issue.
 type bgIdleFrame struct {
 	Index       int    `json:"index"`
@@ -392,7 +392,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 	// that race, and it prevents a goroutine leak past test end. If the
 	// rendezvous never fires, this goroutine stays parked until holdProbeFIFO's
 	// cleanup opens the read end non-blockingly to release its own parked
-	// writer, which CLOSES rendezvous (background_trigger_probe_test.go:684,
+	// writer, which CLOSES rendezvous (`holdProbeFIFO`,
 	// closed rather than sent on, so a second receiver is safe); the send then
 	// lands in the buffer with no reader left and the goroutine retires.
 	rendezvousAt := make(chan time.Time, 1)
@@ -546,7 +546,7 @@ func bgIdleRecordTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherSta
 // a default that records the envelope type and its conversation id and stops. A
 // field that is not extracted here can never reach the published artefact —
 // which is the property that keeps unrecognized_message.Raw (claude's verbatim
-// offending message, protocol/interactive.go:118-145) and assistant_delta.text
+// offending message, protocol/`UnrecognizedMessagePayload`) and assistant_delta.text
 // out of a public issue by construction rather than by care.
 func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 	f := bgIdleFrame{Type: env.Type}

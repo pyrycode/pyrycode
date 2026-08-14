@@ -53,7 +53,7 @@ package realclaude
 //
 //   - the trailer's and the attribution's admissibility enter as #1270's two
 //     results WHOLE, because both are documented trap-free by construction
-//     (trailer_admissibility_test.go:290-305, :345-348);
+//     (`trailGateResult`, :345-348);
 //   - the trailer's lateness enters as the BoundFrom discriminator alone and
 //     never as a trailObservation, which EMBEDS trailScanResult
 //     (result_trailer_observation_test.go:141-142) and would therefore promote
@@ -443,7 +443,7 @@ type trailRunReadings struct {
 	ClaudeState string
 	// Ordering is #1439's certified-ordering result, taken WHOLE for the reason
 	// Gate is: it is documented trap-free by construction
-	// (trail_ordering_premises_test.go:154-157), and the predicate that consumes
+	// (`trailOrderResult`), and the predicate that consumes
 	// it reads ordering.Value and nothing else. Its zero Value is "" — not a
 	// member of its own space, and deliberately NOT a contract violation here; see
 	// the note above C7.
@@ -453,7 +453,7 @@ type trailRunReadings struct {
 	// be folded into it: Liveness is the argv scan's per-pid set, it feeds
 	// tdnVerdictSummary into the published record and step 6's instrument-failure
 	// void, and it goes blind once claude exits and the group re-parents to init
-	// (process_pin_liveness_test.go:268-271). A pinned pid landing in either would
+	// (`pinReadState`). A pinned pid landing in either would
 	// change answers on runs that have nothing to do with this route.
 	//
 	// Taken WHOLE for the opposite reason to Ordering's: its Detail, StateColumn
@@ -477,7 +477,7 @@ type trailRunReadings struct {
 // StateColumn or its ToolStderr, or the sighting result's Detail — that last one
 // is swept at its own producer and is a budget and a duplication risk rather than
 // a leak. That is the rule most easily broken by copying
-// tdnDecideAfter, which does quote out.Detail (teardown_liveness_probe_test.go:678)
+// tdnDecideAfter, which does quote out.Detail
 // — legitimately, because its record is not this one.
 // TestTrailRunOutcomeCarriesNoCapturedBytes is the enforcing test, and it is why
 // the needle goes into four inputs rather than one.
@@ -2249,7 +2249,7 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // TestTrailRunOutcomeCarriesNoCapturedBytes makes AC2's
 // operator-review-before-paste obligation checkable rather than advisory, in
 // TestTrailAdmissibilityRecordsCarryNoCapturedBytes's shape
-// (trailer_admissibility_test.go:2577) and reusing the shipped trailNeedle.
+// (`TestTrailGateThenAdmit`) and reusing the shipped trailNeedle.
 //
 // The needle goes into EVERY string-bearing input the classifier can see —
 // Gate.Detail, Admit.Detail, a pinStateOutcome's Detail and ToolStderr, and since

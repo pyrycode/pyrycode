@@ -15,8 +15,8 @@ package realclaude
 // # Why an ordering argument at all: the top-ranked evidence is EMPTY here
 //
 // trailClassifyRun ranks an admissible reap-log attribution second, above every
-// point-in-time reading (trail_run_outcome_test.go:614-615), and argues at the
-// point of use (:1027-1031) that those readings "are expected to be late — the reap
+// point-in-time reading (`trailClassifyRun`), and argues at the
+// point of use (:1001-1005) that those readings "are expected to be late — the reap
 // completes in the time of one ps exec while the observation of the trailer trails
 // the write by up to a poll interval — so resting a verdict on them manufactures a
 // systematic false negative". :1381-1383 makes that executable.
@@ -49,7 +49,7 @@ package realclaude
 // The argument keys on a pid pinned while the command was still reachable and
 // re-checks THAT PID ALONE. It never asks whether the command is still a
 // descendant of anything — the reading that goes blind once claude exits and the
-// group re-parents to init (process_pin_liveness_test.go:268-271).
+// group re-parents to init (`pinReadState`).
 //
 // # What this predicate claims, and what it must never claim
 //
@@ -57,7 +57,7 @@ package realclaude
 // NOT establish "alive when pyry declared the turn finished": on this path no
 // terminal reason is certified, so no such instant exists at all, and the shipped
 // classifier says exactly that at each of its void arms
-// (trail_run_outcome_test.go:857, :997-1002, :1007-1016).
+// (`trailClassifyRun`, :971-976, :981-990).
 //
 // Every value here is named after the SIGHTING, every Detail ends with
 // trailSightingInstantClause, and TestTrailSightingVoidsNeverReadAsNegative
@@ -235,7 +235,7 @@ const trailSightingInstantClause = "the instant this verdict is about is the tra
 // (`pinClassifyState`) and folds it into Detail (:348-349). That is
 // why TestTrailSightingResultCarriesNoCapturedBytes ships both halves — the needle
 // sweep AND the structural key walk — where #1439 could honestly ship only the
-// second (trail_ordering_premises_test.go:577-583).
+// second (`TestTrailOrderResultCarriesNoCapturedBytes`).
 type trailSightingResult struct {
 	Value  string `json:"value"`
 	Reason string `json:"reason"`
@@ -270,7 +270,7 @@ type trailSightingResult struct {
 //     no byte could reach them; here the opposite shape is the honest one, and the
 //     sweep is the control.
 //   - trailOrderResult must arrive whole because it is documented trap-free by
-//     construction (trail_ordering_premises_test.go:154-157), which is the same
+//     construction (`trailOrderResult`), which is the same
 //     reason trailClassifyRun takes trailGateResult whole. It is CONSUMED, never
 //     re-derived: this function reads ordering.Value and nothing else from it.
 //

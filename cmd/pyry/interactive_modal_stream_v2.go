@@ -15,7 +15,7 @@ import (
 // screenSnapshotter is the bound host's rendered-screen seam. *supervisor.Supervisor
 // satisfies it (`readyForDelivery`); asserted from turnbridge.SessionHost so the
 // shared turnbridge interface stays screen-free. Mirrors relay.ScreenSnapshotter
-// (v2session.go:433), which the manager consumes for request_snapshot.
+// (`V2SessionManager`), which the manager consumes for request_snapshot.
 type screenSnapshotter interface {
 	ScreenSnapshot() (text string, live bool)
 }

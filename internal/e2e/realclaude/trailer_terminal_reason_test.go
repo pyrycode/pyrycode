@@ -186,7 +186,7 @@ type trailReasonResult struct {
 // runnerReading and decodedReason are both string, so keyNames sits BETWEEN them
 // and the two are never adjacent. The compiler still cannot catch a
 // transposition (unlike finRecordInputs' named fields,
-// finding_run_record_test.go:205-212), but nothing here sits on opposite sides
+// `finRecordInputs`), but nothing here sits on opposite sides
 // of a leak boundary: a transposition produces a wrong value, not a
 // publication. A struct for three parameters would be machinery for no check.
 //
@@ -194,7 +194,7 @@ type trailReasonResult struct {
 //
 //   - The reading is REDUCED with finRecordRunnerLabel and never re-parsed or
 //     prefix-matched. This is the case finRecordRunnerAgreement's doc explicitly
-//     allows (finding_run_record_test.go:294-300): a reduced label compared
+//     allows (`finRecordRunnerAgreement`): a reduced label compared
 //     against a KNOWN-EXPECTED literal, not two unknowns prefix-matched. The two
 //     runner labels are bare string literals, following the five shipped
 //     comparison sites (`TestFinLiveStageEnvDeltaNamesTheRunner`, :498, :576, :597 and

@@ -167,7 +167,7 @@ package realclaude
 // paragraph used to carry was directionally right (same surface, opposite
 // sign) but named a field that does not exist on this surface: it said
 // `subtype != success`, and Subtype belongs to resultTrailer
-// (tool_loop_test.go:194-203), the stream-json result trailer, not to
+// (`resultTrailer`), the stream-json result trailer, not to
 // contentBlock (tool_loop_test.go:160-168), which is the tool_result surface
 // here. Do not chase it.
 //
@@ -242,7 +242,7 @@ package realclaude
 // made the rejection unarguable: the backgrounding envelope carries
 // `is_error: false`, while BOTH accepting shapes carry `is_error: true` (the
 // teardown abort's "Exit code 1" and the interruption artifact). Reading it
-// would have inverted the guard, not merely weakened it. resilience_test.go:126
+// would have inverted the guard, not merely weakened it. `TestRealClaude_BashTool_NonZeroExit`
 // makes the same point from the other side — it asserts is_error == true on a
 // Bash tool_result for a command that RAN TO COMPLETION and exited non-zero.
 // (This package already reads is_error with three different meanings across

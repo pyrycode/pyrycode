@@ -1636,7 +1636,7 @@ func approvalTimeout() time.Duration {
 //     between Activate and the write — see the placement note below;
 //   - writes the turn with the RAW lifecycle ctx — no deliver timeout, because
 //     that blocking IS the drain's turn-end pacing (DeliverFunc must return nil
-//     only on a confirmed commit, queue.go:65-70).
+//     only on a confirmed commit, `defaultRetryInterval`).
 //
 // PLACEMENT of the hold, all three constraints load-bearing. It sits BEFORE
 // WriteUserTurn, therefore before the turncommit claim streamsup.WriteTurn makes

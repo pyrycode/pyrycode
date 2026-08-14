@@ -32,12 +32,12 @@ package realclaude
 // MatchCount is at least 2 and the same composition lands on Step 7
 // (trailOutcomeMatchedUnattributed). That move is the increment, not an
 // inconsistency with the blocker. The FINDING arm is unchanged, because Step 2
-// (trail_run_outcome_test.go:1037) outranks Step 7.
+// (`trailClassifyRun`) outranks Step 7.
 //
 // # The staged command must lead a process group of its own
 //
 // The rig offers two subject stagings and only one is usable here. The flip
-// test's subject (trail_run_rig_test.go:280) sets no SysProcAttr, so it inherits
+// test's subject (`TestTrailRigFlipsAcrossOneSubjectLifetime`) sets no SysProcAttr, so it inherits
 // the test process's group — and the pinned group would then BE
 // syscall.Getpgrp(), which is exactly what trailRigHeldPGID() (:119) returns. A
 // synthetic stderr naming the pinned group would classify as
@@ -170,7 +170,7 @@ const (
 // read off the ambient process table, and a ps column is how an operator's
 // CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY reaches an artifact destined for
 // a public issue. The type is the enforcement, in finAttributeFanOut's own
-// []int shape (finding_attribution_fanout_test.go:196-203): nothing here is a
+// []int shape (`finAttributeFanOut`): nothing here is a
 // value from which a command string is reachable.
 type finStageSubject struct {
 	// Needles is this run's argv needle set — one t.TempDir()-derived FIFO path.

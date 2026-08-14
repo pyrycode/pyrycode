@@ -55,7 +55,7 @@ package realclaude
 // staged, so the gate reads a string the model chose. BOTH OPERANDS COUNT, not
 // only the issued one: the staged command looks rig-authored and therefore safe,
 // but the rig builds it around a t.TempDir() path and a binary resolved by
-// exec.LookPath (trail_run_rig_test.go:509-559), so on a live run it embeds an
+// exec.LookPath (`TestTrailRigCarriesMoreThanOneMatchedRow`), so on a live run it embeds an
 // operator filesystem path — the same leak class pinStateColumns
 // (`pinStateColumns`) refuses a command column for. These records
 // are pasted into public issues, so no Detail here quotes either one, and
@@ -276,7 +276,7 @@ func finOutcomeStagingGate(s finOutcomeStaging) finOutcomeResult {
 	// BELOW and the sentence has no interpolation site for one — the only verbs it
 	// carries take outcome values. The issued command is verbatim model output; the
 	// staged one embeds a t.TempDir() path and an exec.LookPath result
-	// (trail_run_rig_test.go:509-559), which is the same operator-filesystem-path
+	// (`TestTrailRigCarriesMoreThanOneMatchedRow`), which is the same operator-filesystem-path
 	// leak class pinStateColumns refuses a command column for. The rule covers both
 	// operands, so a Detail naming "which operand differed" is also out — it is one
 	// edit away from naming its bytes.
@@ -679,7 +679,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // reachMaxCommandBytes, so a Detail that did wrongly interpolate a command would
 // be truncated before a needle sitting past the cap, and this test would pass
 // against a leaking implementation. trailNeedle is placed past the cap
-// deliberately in trailPaddedTrailer (result_trailer_observation_test.go:327-338)
+// deliberately in trailPaddedTrailer
 // for the opposite kind of test; here that placement would be the defect. These
 // mirror the ~73-byte planted strings at trail_run_outcome_test.go:2308-2309, :2348-2351.
 const (
